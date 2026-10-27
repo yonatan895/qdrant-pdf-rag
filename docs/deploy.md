@@ -1066,15 +1066,13 @@ bytes. Combined tag+digest refs are invalid — digest-only form is the pin.
   part of the handoff. The explicit PENDING state still skips the member and
   makes `AGENT_ROUTE=true` fail closed. A tag bump for `ose-oauth-proxy`
   must change all three sites: `images.txt`, `deploy.sh`, `load.sh`.
-- OpenObserve OSS v1.0.4 (`docker.io/openobserve/openobserve`,
-  `sha256:d4a878fa...54ba`, amd64 manifest list) and otelcol-contrib 0.160.0
-  (`docker.io/otel/opentelemetry-collector-contrib`, `sha256:799dc6cf...2ad6`)
-  are pinned and bundled by [ADR-0006](adr/0006-openobserve-traces-metrics-backend.md)
-  (#956); the [qualification record](records/2026-10-23-openobserve-oss-qualification.md)
-  names both digests. Neither pin changes what deploys until the chart backend
-  selection (#957) lands. OpenObserve is AGPL-3.0, otelcol-contrib Apache-2.0
-  ([licensing](licensing.md)). A bump of either changes `images.txt`, the
+- OpenObserve OSS and otelcol-contrib are pinned and bundled by
+  [ADR-0006](adr/0006-openobserve-traces-metrics-backend.md) (#956). Their
+  digests live in [`images.txt`](../images.txt), the single constant owner;
+  never copy them into prose. A bump of either changes `images.txt`, the
   `licenses/inventory.json` bind, `load.sh` and `image_identity.sh` together.
+  OpenObserve is AGPL-3.0, otelcol-contrib Apache-2.0
+  ([licensing](licensing.md)).
 - `METRICS_ENABLED=true` additionally renders/applies
   the first-party chart ServiceMonitor so the OpenShift UWM stack scrapes
   `/metrics` (prerequisite and sizing in `docs/install_and_ops.md`).
@@ -1608,7 +1606,6 @@ PrometheusRule (it would depend on user-workload monitoring, which ADR-0006 repl
   `kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes` above 0.70 (the margin
   between the 30% budget and a full volume), routed to the site's on-call destination. This is a
   required item on the site-check list below the ADR-0006 open checks (#807).
-The smoke trace check is a later step of #956.
 
 <a id="docs-front-end"></a>
 ## Docs front end: Open WebUI (ADR-0007, #1074)
@@ -1620,14 +1617,13 @@ identifiers stay `mainframe_rag`, `mainframe-rag` and the Pipe/model ID `mainfra
 WebUI's own branding stays unmodified (ADR-0007 L1) and the console keeps its title.
 
 Open WebUI is the main docs platform and is **on by default** (maintainer decision 2026-10-26,
-ADR-0008); the console stays the frozen fallback. It is a front end for the docs corpus. It is a
+ADR-0008); the console stays the frozen fallback. It is a front end for the docs corpus and a
 client of the agent: its only model is the repository docs Pipe (#1072) over `/v1/chat`. It
-holds no gateway key and no model connection, and it does no retrieval of its own. The console
-stays the supported fallback and is untouched. Production use waits for the #1073 trial to
-qualify the image and the settings below, and for the image pin (below). The environment
-variable names, the uvicorn TLS arguments, the Functions API used by the Pipe installer and the
-chat table layout used by the purge are those of Open WebUI v0.12.3, **pending #1073
-qualification**, and are re-qualified on every pin import.
+holds no gateway key and no model connection, and it does no retrieval of its own. The image pin
+is recorded in `images.txt`; the 2026-10-24 Kind trials are the dated qualification record, and
+every pin import re-runs the ADR-0007 conditions (ADR-0008 item 2). The environment variable
+names, uvicorn TLS arguments, Functions API used by the Pipe installer and chat table layout
+used by the purge are those of the pinned v0.12.3 build.
 
 **Enabling it at a site (default).** A site that does nothing gets Open WebUI, so the deploy
 refuses until the site supplies every required input. Both layers refuse before any cluster change:
@@ -1659,58 +1655,48 @@ directly need the same choice. The image pin must also be recorded and bundled (
 an enabled deploy can pass.
 
 **What `OPENWEBUI_ENABLED=true` (`openwebui.enabled`) renders.** With it off, the render is
-byte-identical to a release without it (tested).
-- `Deployment/rag-openwebui`: one replica, `Recreate`, one uvicorn worker, SQLite on the kept RWO
-  claim `rag-openwebui-data` (`OPENWEBUI_STORAGE_SIZE`, default 10Gi, on `STORAGE_CLASS`; NFS is
-  refused). It runs under `restricted-v2` with a platform-assigned UID: non-root, `drop: [ALL]`,
-  seccomp `RuntimeDefault`, no privilege escalation, no fixed IDs and no `anyuid`. The read-only
-  root filesystem is not claimed; it is a #1073 trial item. The pod serves TLS on 8443 from the
-  service-serving certificate (`rag-openwebui-tls`); there is no plain HTTP port.
-- The chat-purge sidecar (same image, read-only root, no credentials) enforces the retention
-  window (below).
-- `Service/rag-openwebui` (ClusterIP, 8443) and `Route/rag-openwebui`: reencrypt, HTTP
-  redirected, on `OPENWEBUI_HOST`, with the namespace service CA as the destination CA. Users
-  authenticate in Open WebUI through OIDC, so there is no oauth-proxy (ADR-0007 R3). The Route
-  exposure preflight treats `rag-openwebui` as a protected Service. It refuses any other Route
-  in front of it, whether the front end is on or off. It retires an owned Route that differs from
-  the contract before the release, and it verifies the live Route after the release, deleting
-  the Route and failing on a mismatch.
-- `NetworkPolicy/rag-openwebui`. Ingress is allowed from the OpenShift router to 8443 only.
-  Egress is allowed to the agent pods on 8080, to cluster DNS (`openshift-dns`, `kube-system`),
-  and to `OPENWEBUI_IDP_EGRESS_CIDRS` on `OPENWEBUI_IDP_EGRESS_PORT`, and to nothing else. This
-  policy is the zero-egress control; the offline settings are not (the IdP rule carries the server-side
-  OIDC token exchange). The chart also sets `OLLAMA_BASE_URL=http://127.0.0.1:9`: v0.12.3 otherwise
-  probes `host.docker.internal:11434/12434` on first start even with `ENABLE_OLLAMA_API=false` (#1073
-  trial). The policy needs an enforcing CNI, and the site provides that evidence.
-- `ConfigMap/rag-openwebui-pipe`: the repository Pipe, its installer and the purge script, each
-  annotated with its sha256.
-- IdP CA (optional, `OPENWEBUI_IDP_CA_FILE` / `openwebui.oidc.caBundle`): when the IdP's TLS
-  certificate comes from an enterprise CA (usual for AD FS), the PEM file becomes
-  `ConfigMap/rag-openwebui-idp-ca`. A `ca-trust` init step writes OpenSSL's system bundle, the
-  certifi bundle and the IdP CA into one file on an emptyDir. The app mounts it read-only through
-  `SSL_CERT_FILE` (httpx for sign-in, aiohttp for token refresh) and `REQUESTS_CA_BUNDLE`. The
-  public stores stay trusted, and a changed CA rolls the pod. Without it, sign-in fails at the
-  server-side discovery call. A public-CA IdP needs nothing.
-  - Mapping loads every certificate with OpenSSL. It refuses an unreadable or blank file, any
-    key or other text, and a corrupted body, such as one with a line dropped, that is still
-    valid base64.
-  - The chart refuses a value that is not only certificate blocks, with fixed text. It never
-    prints the value.
-  - The init step (`files/openwebui/ca_trust.py`) loads every certificate again. If one does not
-    load, the step exits non-zero with fixed text and the pod stays not Ready, so a bad bundle
-    can never give a Ready pod whose sign-ins fail.
-- Environment, by ADR-0007 condition:
-  - Offline (R2): `OFFLINE_MODE`, no version check, no community sharing, no telemetry, no pip or
-    model downloads.
-  - No vector store (V1): the slim image with no vector DB URL, retrieval bypassed; uploads,
-    knowledge, memories, notes, channels, web search, code execution and the interpreter off.
-  - Answers only through the agent (V2): no OpenAI or Ollama connections, no direct connections
-    or tool servers, task generation off, built-in ratings off.
-  - Chat history (S2, S3): no admin chat access or admin export.
-  - Logs (S4): metadata-only audit.
-  - Identity (R3): OIDC only; no login form, signup, password or initial-admin signup, no token
-    exchange; 8-hour sessions.
-  - `ENABLE_PERSISTENT_CONFIG=false`, so admin-UI edits cannot override this environment.
+byte-identical to a release without it (tested). The chart owns the objects
+(`Deployment/rag-openwebui`, the chat-purge sidecar, `Service`, reencrypt
+`Route`, `NetworkPolicy/rag-openwebui`, `ConfigMap/rag-openwebui-pipe`, the
+optional IdP CA ConfigMap); [ADR-0007](adr/0007-open-webui-docs-front-end.md)
+owns the condition each one must satisfy. Operationally:
+
+- One replica, `Recreate`, one uvicorn worker, SQLite on the kept RWO claim
+  `rag-openwebui-data` (`OPENWEBUI_STORAGE_SIZE`, default 10Gi, on
+  `STORAGE_CLASS`; NFS is refused). It runs under `restricted-v2` with a
+  platform-assigned UID: non-root, `drop: [ALL]`, seccomp `RuntimeDefault`, no
+  privilege escalation, no fixed IDs and no `anyuid` (ADR-0007 R1). TLS on 8443
+  from the service-serving certificate (`rag-openwebui-tls`); there is no plain
+  HTTP port. The read-only root filesystem is not claimed; it is a #1073 trial
+  item.
+- Ingress is the OpenShift router to 8443 only. Egress is the agent pods on
+  8080, cluster DNS (`openshift-dns`, `kube-system`) and
+  `OPENWEBUI_IDP_EGRESS_CIDRS` on `OPENWEBUI_IDP_EGRESS_PORT`, and nothing
+  else. That policy is the zero-egress control; the offline settings are not
+  (the IdP rule carries the server-side OIDC token exchange). It needs an
+  enforcing CNI, and the site provides that evidence.
+- The Route exposure preflight treats `rag-openwebui` as a protected Service
+  (reencrypt, HTTP redirected, on `OPENWEBUI_HOST`; users authenticate in Open
+  WebUI through OIDC, so there is no oauth-proxy, ADR-0007 R3). It refuses any
+  other Route in front of it, whether the front end is on or off; it retires an
+  owned Route that differs from the contract before the release, and it verifies
+  the live Route after the release, deleting the Route and failing on a mismatch.
+- Environment pins (offline; no vector store or uploads; answers only through
+  the agent; bounded chat history; metadata-only logs; OIDC identity only;
+  `ENABLE_PERSISTENT_CONFIG=false`) are the
+  [ADR-0007 conditions](adr/0007-open-webui-docs-front-end.md#conditions-each-is-a-check-one-failure-blocks-enablement),
+  rendered by the chart. Do not restate or relax them at a site.
+- IdP CA (optional, `OPENWEBUI_IDP_CA_FILE` / `openwebui.oidc.caBundle`): when
+  the IdP's TLS certificate comes from an enterprise CA (usual for AD FS), the
+  PEM file becomes `ConfigMap/rag-openwebui-idp-ca`. A `ca-trust` init step
+  writes OpenSSL's system bundle, the certifi bundle and the IdP CA into one
+  file on an emptyDir, mounted read-only through `SSL_CERT_FILE` (httpx for
+  sign-in, aiohttp for token refresh) and `REQUESTS_CA_BUNDLE`; a changed CA
+  rolls the pod. Without it, sign-in fails at the server-side discovery call.
+  A public-CA IdP needs nothing. Mapping and the init step both refuse an
+  unreadable, blank, non-certificate or corrupted bundle with fixed text and
+  never print the value, so a bad bundle can never give a Ready pod whose
+  sign-ins fail.
 
 **What the identity team registers.** One confidential OIDC client on the organisation's IdP
 (AD FS, or Keycloak in front of it):

@@ -98,22 +98,16 @@ for text/compare and is refused for HTML directory preparation. With a distinct 
 output aliases retain the existing writer behavior. Missing/corrupt inputs
 fail before an existing output is replaced.
 
-The #508 compatibility delegates are retired. Known callers and Task dispatch
-use these successors; old script commands/imports, including `_AnswerCapture`,
-are deliberately removed. Direct module commands require a prepared editable or
-wheel installation. The eight module Tasks (answers, chat, and six report
-operations) bind `PYTHONPATH=src` at the checkout root, selecting this checkout's
-canonical modules even with a foreign editable installation or inherited
-`PYTHONPATH`. Dependencies still require preparation; help names follow the module.
-
-| Retired module | Successor |
-|---|---|
-| `scripts.venue` | `mainframe_rag.eval.datasets` |
-| `scripts.bootstrap_ci` | `mainframe_rag.eval.statistics` |
-| `scripts.harness_l1` | `mainframe_rag.eval.retrieval` and `eval.datasets.GoldenEntry` |
-| `scripts.eval_answers` | `mainframe_rag.eval.answers`; CLI: `python -m mainframe_rag.eval.answers` |
-| `scripts.eval_chat` | `mainframe_rag.eval.chat`; CLI: `python -m mainframe_rag.eval.chat` |
-| `scripts.render_report` | `mainframe_rag.eval.reports`; CLI: `python -m mainframe_rag.eval.reports` |
+The #508 compatibility delegates are retired: `scripts/venue`,
+`scripts/bootstrap_ci`, `scripts/harness_l1`, `scripts/eval_answers`,
+`scripts/eval_chat` and `scripts/render_report`. Known callers and Task
+dispatch use the package owners above; old script commands/imports, including
+`_AnswerCapture`, are deliberately removed. Direct module commands require a
+prepared editable or wheel installation. The eight module Tasks (answers, chat,
+and six report operations) bind `PYTHONPATH=src` at the checkout root, selecting
+this checkout's canonical modules even with a foreign editable installation or
+inherited `PYTHONPATH`. Dependencies still require preparation; help names
+follow the module.
 
 Retained retrieval/harness/load scripts own operational composition and no
 longer provide compatibility-only helper exports. Import measurement and
@@ -161,17 +155,15 @@ separate passes would clobber each other's pages), then `run_ingest
 --reingest` with a fresh `--progress` file (`--reingest` bypasses
 inventory and Qdrant sha skips; doc_ids are stable across chunking
 changes, so delete-first is unnecessary). `paraphrase-manuals` is the
-`paraphrase.jsonl` venue (14 docs + generic-distractor), same rebuild.
-Both re-ingested 2026-09-10 under current rules (post-#216); `mainframe_manuals`
-was rebuilt in one pass during the 2026-09-12 re-freeze: 214 pts
-(166 narrative / 48 message, 82 docs) and 21 pts (16 narrative / 5 message).
-`real_manuals` (435k pts, 452 real books) is NOT managed here: never
-delete, re-ingest, or gate against it from dev workflows. Its sampled
-mix is ~95% narrative / ~2% message / ~3% syntax / ~0% table — and the
-dev venues hold no syntax/table chunks at all, so the #216 per-type BM25
-boost (default 1.0) was unmeasurable outside the real corpus; its ON
-decision has since been measured OFF on real-corpus record-replay pools
-(see `retrieval.md` §4 for the verdict and reopen gate).
+`paraphrase.jsonl` venue, same rebuild. Point counts and class mixes follow
+the current entries and chunking rules; do not copy them between sessions.
+`real_manuals` (the preserved real-corpus collection) is NOT managed here:
+never delete, re-ingest, or gate against it from dev workflows. Its sampled
+mix is mostly narrative, with little message/syntax/table — and the dev
+venues hold no syntax/table chunks at all, so the #216 per-type BM25 boost
+(default 1.0) was unmeasurable outside the real corpus; its ON decision has
+since been measured OFF on real-corpus record-replay pools (see `retrieval.md`
+§4 for the verdict and reopen gate).
 
 <a id="retrieval-eval"></a>
 ## 2. Retrieval eval (`eval_retrieval.py`)
@@ -870,7 +862,7 @@ PR. L2/L4 standing red on known product debt is an RC debt signal, not a
 broken target.
 
 Historical command spellings below are preserved as executed; use the
-[current Task migration map](task-runner.md#inventory) for new runs.
+[older command names](task-runner.md#inventory) for new runs.
 
 **Dated record.** Each battery run appends a row here in the same PR or
 RC checklist that runs it (`$BUNDLE_DIR` reports are local). Run

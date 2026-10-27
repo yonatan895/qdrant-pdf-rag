@@ -83,39 +83,23 @@ Fresh-machine heavylift to budget for: the venv install, the BM25 download above
 
 ### 3.2 Code Quality & Unit Tests
 
-Run static analysis, type checking, and unit test suites:
-
-```bash
-# Run linters (ruff), type checking (mypy), and unit tests (pytest)
-sh scripts/tools/run-task.sh qa:check
-
-# Or run individual verification steps:
-sh scripts/tools/run-task.sh qa:unit        # Fast unit tests (mocked clients, synthetic data)
-sh scripts/tools/run-task.sh qa:lint        # Ruff linting
-sh scripts/tools/run-task.sh qa:typecheck   # Mypy static typing
-```
+`sh scripts/tools/run-task.sh qa:check` runs Ruff, mypy and the unit suite in
+that order and stops at the first failure. Run one step alone with `qa:lint`,
+`qa:typecheck` or `qa:unit`; pass focused paths after `--` (for example
+`qa:unit -- tests/test_agent_context.py -q`). CI alone runs the full unit
+suite; test design is owned by [testing.md](testing.md#evidence-design).
 
 ### 3.3 Integration Simulation Tier
 
-The simulation tier spins up an ephemeral Docker container running the pinned unprivileged Qdrant image (`docker.io/qdrant/qdrant:v1.19.2-unprivileged`), parses runtime-generated synthetic PDFs, ingests them, and exercises the agent API against a deterministic mock LLM server:
-
-```bash
-# Run simulation suite
-sh scripts/tools/run-task.sh qa:sim
-
-# Optional: Run a persistent local Qdrant container on port 6333
-sh scripts/tools/run-task.sh local:qdrant:up
-
-# Teardown local Qdrant container
-sh scripts/tools/run-task.sh local:qdrant:down
-```
-
-**Load tier** (`sh scripts/tools/run-task.sh qa:load`, `tests/test_load_tier.py`) runs the same composition — runtime PDFs, hash-mode ingest into the pinned Qdrant image, a real uvicorn agent (`LLM_STREAM=true`) plus the deterministic mock LLM — and asserts absolute contracts under concurrency instead of correctness: zero request errors and zero missing `Server-Timing` headers on `/v1/search` and `/v1/answer`, per-stream SSE integrity on `/v1/answer?stream=true` (token deltas, exactly one `final` with citations, no `error` event), citation parity across stream/search/JSON shapes, fixed error envelopes with no leaked internals, and determinism after load. The chaos leg runs the same streams against an abort-storm mock (`MOCK_ERROR_RATE`): every stream must classify as complete XOR aborted, aborted streams carry `event: error` with no `final`, and each leaves exactly one `stream_truncated` alert. The TTFT leg runs against a paced mock (`MOCK_TTFT_MS`): agent `ttft_ms` never precedes the model's first byte. Never cross-environment latency comparisons. Knobs (CI-sane defaults): `LOAD_SEARCH_CONCURRENCY` / `LOAD_SEARCH_DURATION_S` / `LOAD_ANSWER_CONCURRENCY` / `LOAD_ANSWER_DURATION_S` / `LOAD_STREAMS` / `LOAD_STREAM_WORKERS`; `QDRANT_SIM_URL` reuses a running server.
-
-```bash
-# Run load tier (fail-closed: no skips; docker/startup/zero-request failures raise)
-sh scripts/tools/run-task.sh qa:load
-```
+`sh scripts/tools/run-task.sh qa:sim` spins up the pinned unprivileged Qdrant
+container, parses runtime-generated synthetic PDFs, ingests them and exercises
+the agent API against the deterministic mock LLM. `sh scripts/tools/run-task.sh qa:load`
+runs the same composition under concurrency and asserts absolute contracts (no
+errors, SSE integrity, citation parity, fixed envelopes, determinism, abort
+survival, TTFT floor); its obligations and knobs are owned by
+[eval.md §8](eval.md#benchmarks) and its verification weight by
+[live-stack.md §0](live-stack.md#verification-minimums). A persistent local
+Qdrant on 6333 is `local:qdrant:up` / `local:qdrant:down`.
 
 ### 3.4 Retrieval Evaluation Gates & Quality Tiers
 
@@ -230,29 +214,13 @@ PYTHONPATH=. .venv/bin/python scripts/query_demo.py --answer --query "IEA500I" -
 
 #### Local Development Environment Defaults
 
-When running local tooling (`sh scripts/tools/run-task.sh local:ask`, `sh scripts/tools/run-task.sh local:query`), the following defaults are automatically applied if unset in the environment:
-
-| Variable | Local Dev Default | Air-Gap / Prod Rule |
-|---|---|---|
-| **`QDRANT_URL`** | `http://localhost:6333` | Internal OpenShift service DNS (e.g. `http://qdrant:6333`) |
-| **`QDRANT_COLLECTION`** | `mainframe_manuals` (or CLI `COLLECTION=...`) | `mainframe_manuals` |
-| **`EMBED_MODE`** | `"hash"` (auto-set if `EMBED_BASE_URL` is unset) | `"vllm"` (mandatory; prod fails closed on hash mode) |
-| **`ALLOW_HASH_MODE`** | `"true"` (auto-set for local test utilities) | `false` (fails closed to prevent hash retrieval in prod) |
-| **`LLM_BASE_URL`** | Source the real gateway's `GATEWAY_ENV_FILE` (`http://localhost:4000/v1`) | Platform gateway endpoint from `airgap.env` |
-| **`LLM_MODEL_REASONING`** | Auto-resolved from `/v1/models` on local server | Dedicated reasoning model specified in `airgap.env` |
-| **`LLM_REASONING_EFFORT_SIMPLE`** | `"low"` (local 8 GB lane pin) | `"medium"` (default, #917) |
-| **`LLM_REASONING_EFFORT_COMPLEX`** | `"high"` (local 8 GB lane pin) | `"medium"` (default, #917) |
-| **`LLM_REASONING_EFFORTS`** | `"low,medium,high"` (local 8 GB lane pin) | `"low,medium,xhigh"` (default; the Qwen3.8 template's efforts, #748) |
-| **`LLM_TEMPERATURE`** | `0.2` | `0.2` (deterministic, grounded technical reasoning) |
-| **`PROMPT_MAX_CONTEXT_CHARS`** | `8000` (local 8 GB lane pin) | `32000` (default; no-tokenizer fallback, #777) |
-| **`PROMPT_MAX_CONTEXT_CHARS_COMPLEX`** | `4500` (local 8 GB lane pin: ~2.6k tokens of reasoning headroom in a 4096 window) | `32000` (default, #777) |
-| **`LLM_MAX_MODEL_LEN`** | `4096` (local 8 GB lane pin, unless the caller declares a window) | `32768` (default; must not exceed the served `--max-model-len`, #777) |
-| **`RERANK_ENABLED`** | `false` | `false` (cross-encoder rerank ships default-off; see §3.11) |
-| **`RERANK_BASE_URL`** | Gateway handoff URL | Platform gateway scoring/rerank leg (required when `RERANK_ENABLED=true`) |
-| **`RERANK_MODEL`** | `BAAI/bge-reranker-v2-m3` | Must match the served reranker model |
-| **`LLM_STREAM`** | `true` via `sh scripts/tools/run-task.sh local:agent` | `false` (production default; enable only where TTFT metrics are wanted) |
-| **`UI_ENABLED`** | `"true"` via `sh scripts/tools/run-task.sh local:stack`; unset via `sh scripts/tools/run-task.sh local:agent` (fail-closed 404) | `"true"` from the production chart (console served; only the external Route is OAuth-protected) |
-| **`CHAT_CONDENSE_ENABLED`** | `false` (default) | `false` (enabling is a dedicated default-flip PR; `sh scripts/tools/run-task.sh eval:chat` is the evidence) |
+Local query/answer tooling sets its own defaults only when inputs are unset:
+`QDRANT_URL=http://localhost:6333`, collection `mainframe_manuals`, and hash
+embedding with `ALLOW_HASH_MODE=true` unless a model endpoint is configured.
+Explicit environment and CLI values always win. Production settings and their
+defaults are owned by the [agent Settings catalog](agent.md#7-settings-catalog);
+operator keys by [`airgap.env.example`](../airgap.env.example); local 8 GB lane
+pins by `scripts/local_lane_budget.sh` (§3.6).
 
 #### REPL Controls & Options
 * **Interactive Mode Switch (`:mode`)**: Type `:mode` inside the REPL to toggle dynamically between `search` (pure vector/BM25 retrieval preview) and `answer` (retrieval + LLM reasoning generation).
@@ -562,15 +530,14 @@ secret CI may label a package `signed: ephemeral`; reject it for promotion.
 `REDHAT_REGISTRY_USER` / `REDHAT_REGISTRY_PASSWORD` are the approved Red Hat
 registry service-account credentials. Do not paste them into issue/PR text.
 
-This generates `dist/qdrant-pdf-rag-<sha>.tar` and its digest `dist/qdrant-pdf-rag-<sha>.tar.sha256`, containing:
-1. Complete Git repository bundle (`repo.bundle`).
-2. App container images (`qdrant-pdf-rag-agent`, `qdrant-pdf-rag-ingest`), with per-image digests bound in `MANIFEST.txt` and re-verified on load. Every image member is a compressed `oci-archive` holding the registry's own blobs (`image_format: oci-archive`, [deploy](deploy.md#bundle-image-format)).
-3. Vendored third-party Qdrant unprivileged image, OpenObserve OSS v1.1.2 image and otelcol-contrib 0.160.0 image (tag + digest pinned in `images.txt`; no Jaeger image).
-4. Vendored Helm chart (`charts/qdrant-1.19.2.tgz`).
-5. Self-contained extraction bootstrap script (`bootstrap.sh`).
-6. Manifest (`MANIFEST.txt`), Packing Record (`PACKING_RECORD.txt`), digest enumeration (`sbom.json`), third-party notices and license review status (`THIRD-PARTY-NOTICES.txt`, see [licensing](licensing.md); declared licenses only, not a legal approval), offline signature (`SHA256SUMS.sig` + `sneakernet-signing.pub`), and member `SHA256SUMS`.
-7. The console oauth-proxy sidecar image (`oauth-proxy-image.tar`) — pinned in `images.txt`; connected packaging needs Red Hat registry authentication (see §4.4.2).
-8. The pinned host runner (`task_linux_amd64.tar.gz`), `task-pin.txt` and `task-LICENSE`, all covered by member checksums. Packaging reuses `.tools/cache` from the installer or `AIRGAP_TASK_ARCHIVE=/absolute/path/task_linux_amd64.tar.gz`; otherwise the connected pack fetches the exact pinned archive.
+This generates `dist/qdrant-pdf-rag-<sha>.tar` and its digest
+`dist/qdrant-pdf-rag-<sha>.tar.sha256`. The bundle holds the git bundle, the app
+images, the vendored Qdrant/OpenObserve/otelcol images (and the oauth-proxy
+sidecar when its pin is recorded), the Helm chart, `bootstrap.sh`, the signed
+manifests/SBOM/notices, and the pinned host runner. Pack reuses the installer's
+`.tools/cache`, or an explicit `AIRGAP_TASK_ARCHIVE=<absolute path>`, for that
+runner archive. [Deploy §4](deploy.md#4-signing-and-provenance)
+owns the member contract and provenance rules; do not restate them here.
 
 ### 4.2 Transfer & Automated Bootstrap
 
@@ -599,21 +566,20 @@ sh bootstrap.sh
 cd qdrant-pdf-rag
 ```
 
-The `bootstrap.sh` script automatically:
-- Verifies the bundle signature (`SNEAKERNET_TRUSTED_PUB` when provided) and then all member checksums in `SHA256SUMS`.
-- Clones the Git repository from `repo.bundle` and checks its full HEAD against the manifest. An existing workspace must already match that SHA; otherwise use a fresh `AIRGAP_WORKSPACE` or deliberately check out the approved bundle SHA before retrying.
-- Populates `./dist` with image archives and manifests, including `oauth-proxy-image.tar` when the bundle contains it.
-- Verifies the bundled Task pin against the checkout, verifies installer integrity, then installs `.tools/bin/task` from the signed bundle archive without network access or preinstalled Make/Task/Go/application Python.
-- Initializes `airgap.env` from `airgap.env.example` only when absent; reruns preserve operator configuration and retained artifacts.
-- Artifacts are staged in `dist/.bootstrap-staging`, verified there, then moved into `./dist` (signature, checksum list and `MANIFEST.txt` last). A failed copy or pre-promotion verification preserves existing bytes. A crash during promotion may replace members before acceptance metadata moves: `dist/` may be partial and must not be used. The next run refuses a leftover stage. Remove only that directory (`rm -rf <workspace>/dist/.bootstrap-staging`) and reinstall the complete verified bundle; signature/member verification must pass before load. Recovery preserves `airgap.env` and unrelated operator files. A rerun never advances an existing workspace to the new release — check out the approved bundle SHA deliberately (or use a fresh `AIRGAP_WORKSPACE`) first.
-- Load/deploy/ingest/validate launched directly, outside bootstrap, verify `dist/MANIFEST.txt` against its signed `SHA256SUMS`/`SHA256SUMS.sig` and refuse a claimed release when the signature or MANIFEST checksum fails, the checkout's identity is unresolved, tracked files differ from the release, any tracked file is hidden from `git diff` by an assume-unchanged/skip-worktree/sparse flag, or `MANIFEST.txt` is missing next to bundle evidence (`dist/SHA256SUMS`, or a `../SHA256SUMS` that names `MANIFEST.txt`); setting `IMAGE_SHA` never bypasses this, and bootstrap applies the same flag check to an existing workspace. Dry-run and connected development without a MANIFEST still run and print "not release-verified".
+The `bootstrap.sh` script verifies the bundle signature and every member
+checksum, clones `repo.bundle`, verifies HEAD against the manifest, installs the
+bundled pinned Task without network access or preinstalled Make/Task, seeds
+`airgap.env` only when absent, and stages `dist/` before promotion. The trust
+chain, staging/interruption recovery, refusal messages and the executing-checkout
+guard are owned by [deploy §4](deploy.md#4-signing-and-provenance); read them
+before a recovery attempt. A rerun never advances an existing workspace to a new
+release: check out the approved bundle SHA deliberately (or use a fresh
+`AIRGAP_WORKSPACE`) first.
 
 After bootstrap use `sh scripts/tools/run-task.sh --list` for discovery.
-For rollback, use the previous approved bundle and its own bootstrap/command
+Rollback uses the previous approved bundle and its own bootstrap/command
 contract in a separate workspace; an older bundle may still use Make. Never
-combine its assets with a newer checkout. Bundles packed before #1066 (such as
-`d53595e`) carry `docker-archive` image members; a newer `load.sh` refuses them
-with a fixed message, and their own `load.sh` loads them.
+combine its assets with a newer checkout ([format change](deploy.md#bundle-image-format)).
 
 ### 4.3 Configure Environment & Pre-Flight Validation
 
@@ -621,69 +587,18 @@ Edit `airgap.env` to configure your cluster environment:
 
 > [!NOTE]
 > Environment precedence (explicit env beats file, `AIRGAP_ENV` path beats
-> local `./airgap.env`) lives in `deploy.md` §2 — one rule, one owner. Two
-> re-run notes: `VAR=x sh scripts/tools/run-task.sh airgap:validate` overrides a stale key, but a bare
+> local `./airgap.env`) lives in [deploy.md §2](deploy.md#2-environment-precedence).
+> Two re-run notes: `VAR=x sh scripts/tools/run-task.sh airgap:validate` overrides a stale key, but a bare
 > `sh scripts/tools/run-task.sh airgap:validate` reuses whatever the file still holds — re-run
 > `sh scripts/tools/run-task.sh airgap:validate` after editing `airgap.env` before touching the cluster.
 
-```ini
-# Internal image registry accessible to cluster nodes
-INTERNAL_REGISTRY=registry.internal.enterprise:5000/mainframe-rag
-
-# Target namespace
-NAMESPACE=mainframe-rag
-
-# Persistent storage class (Must be RWO Block, e.g. ocs-storagecluster-ceph-rbd)
-STORAGE_CLASS=gp3-csi
-
-# Caller-provisioned, populated corpus claim mounted read-only by ingest.
-CORPUS_PVC=manuals-corpus
-RERANK_ENABLED=false
-INSECURE_REGISTRY=false
-
-# Collection distribution policy (issue #360): the checked-in production
-# preset scripts/airgap/collection-policy.env supplies 6 shards / RF 3 /
-# W 2 when these are unset. A one-node rehearsal must select 1/1/1
-# explicitly (never infer a downgrade). Values here win over the preset.
-# QDRANT_SHARD_NUMBER=6
-# QDRANT_REPLICATION_FACTOR=3
-# QDRANT_WRITE_CONSISTENCY_FACTOR=2
-
-# Shared authenticated LiteLLM API base; replace this example URL.
-GATEWAY_BASE_URL=https://sample-api/v1
-EMBED_MODEL=embedding-v1
-DENSE_DIM=REPLACE_WITH_PLATFORM_DIMENSION
-EMBED_MODEL_REVISION=REPLACE_WITH_PLATFORM_EMBED_REVISION
-LLM_MODEL_REASONING=code
-# Optional EMBED_BASE_URL/LLM_BASE_URL/RERANK_BASE_URL overrides win over shared.
-
-# One operator-created Secret, one data-key name. No key value in this file.
-GATEWAY_API_KEY_SECRET=gateway-api-keys
-GATEWAY_API_KEY_SECRET_KEY=api-key
-GATEWAY_CA_CONFIGMAP=gateway-ca
-
-# Optional pull secret name (if registry requires credentials)
-PULL_SECRET=internal-registry-pull-secret
-
-# Optional: external OAuth-proxied console Route (ADR-0004). Requires the
-# oauth-proxy digest recorded in images.txt, a repack, and Secret
-# rag-agent-oauth-cookie (see §4.4.2). Without it the console is still served
-# in-cluster at /ui on the ClusterIP 8080 port.
-#AGENT_ROUTE=true
-
-# Default ON (issue #373): the agent's unauthenticated 8080 is reachable only
-# from this namespace, monitoring and the namespaces listed here; other
-# namespaces calling rag-agent:8080 (for example an MCP server) are denied.
-# AGENT_NETWORK_POLICY=false renders no policy. See deploy.md#agent-networkpolicy.
-#AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES=mcp
-
-# Optional, default OFF (issue #804, ADR-0005): the answer-feedback service.
-# Needs the Secret below and AGENT_NETWORK_POLICY=true (the default). See §4.4.3.
-#FEEDBACK_ENABLED=true
-#FEEDBACK_SECRET=rag-feedback-token
-#FEEDBACK_STORAGE_SIZE=10Gi
-#FEEDBACK_RETENTION_DAYS=180
-```
+Every operator key, with its placeholder and constraints, is catalogued in
+[`airgap.env.example`](../airgap.env.example): registry, namespace, storage
+classes, sizing, image roles, model endpoints and budgets, request bounds,
+tracing, console, ingress NetworkPolicy, feedback, Open WebUI, ingest and
+collection policy. Bootstrap seeds `airgap.env` from it; fill the site values
+there and never commit that file. Propagation and validation are owned by the
+[configuration contract](deploy.md#configuration-contract).
 
 #### Platform model endpoints (reasoning / embed / optional rerank)
 

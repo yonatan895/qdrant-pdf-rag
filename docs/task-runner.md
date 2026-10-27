@@ -1,7 +1,7 @@
 # Repository Task runner
 
-This file owns command discovery, installation, input handling and the #402
-migration map. [Live-stack](live-stack.md#verification-minimums) alone owns
+This file owns command discovery, installation and input handling.
+[Live-stack](live-stack.md#verification-minimums) alone owns
 required verification; [testing](testing.md#evidence-design) owns test design.
 
 <a id="scope"></a>
@@ -283,66 +283,18 @@ Verification never uses preparation stamps. No `sources:`/`method:` fingerprints
 run during discovery, and there are no remote or optional includes.
 
 <a id="inventory"></a>
-## Older command reference
-
-This map translates older run records; it does not rewrite what those records
-executed. Prefix current tasks with `sh scripts/tools/run-task.sh`. Task
-`desc`/`summary` remains the current input/default catalog.
-
-| Former Make target(s) | Current Task command(s), in matching order | Retained owner |
-|---|---|---|
-| `help` (default) | `--list`, `<task> --summary` | root `Taskfile.yml` |
-| `venv` / `.venv` | `dev:setup` | Explicit owned venv and complete dev/build/runtime hash locks |
-| `agent-doctor`, `check-context` | `dev:doctor`, `qa:context` | `agent_doctor.py`, `check_agent_context.py` |
-| `lint`, `typecheck`, `test`, `check` | `qa:lint`, `qa:typecheck`, `qa:unit`, `qa:check` | Ruff, mypy, pytest; root aliases retained |
-| `wheelhouse`, `bm25-weights` | `artifacts:wheelhouse`, `artifacts:bm25` | artifact preparation and BM25 fetcher |
-| `chart`, `pull-chart`, `helm-template`, `helm-lint`, `build-images` | `artifacts:chart-check`, `artifacts:chart-fetch`, `artifacts:helm-render`, `artifacts:helm-lint`, `artifacts:images` | Helm, Docker and artifact owners |
-| `sim`, `loadtest-mock` | `qa:sim`, `qa:load`, `qa:ha` (new multi-peer lane) | existing suites/scripts; `qa:ha` is the issue #360 three-peer fixture |
-| `sim-qdrant`, `sim-clean` | `local:qdrant:up`, `local:qdrant:down` | `sim_qdrant.sh`, shared Qdrant helpers |
-| (new, #805) | `feedback:export`, `feedback:import`, `feedback:report` | `mainframe_rag.feedback.exchange` against a local store file (in-cluster use is the `oc exec` runbook); `mainframe_rag.feedback.report` reads an export file only |
-| `eval`, `eval-baseline`, `eval-draft`, `eval-holdout`, `eval-paraphrase` | `eval:retrieval`, `eval:baseline`, `eval:draft`, `eval:holdout`, `eval:paraphrase` | retrieval scripts, mode-keyed baselines |
-| `verify-golden`, `gate-l1`, `capture-pool`, `eval-answers`, `eval-chat` | `eval:verify-golden`, `eval:gate-l1`, `eval:capture-pool`, `eval:answers`, `eval:chat` | existing evaluation scripts |
-| `harness-gate`, `harness-baseline`, `harness-l2`, `harness-l3`, `harness-l3-baseline`, `harness-l4`, `harness-l4-record` | `eval:harness:gate`, `eval:harness:baseline`, `eval:harness:l2`, `eval:harness:l3`, `eval:harness:l3-baseline`, `eval:harness:l4`, `eval:harness:l4-record` | harness scripts and separate tier baselines |
-| `eval-report`, `eval-html`, `eval-compare` | `eval:report`, `eval:html`, `eval:compare` | `mainframe_rag.eval.reports` |
-| `bench`, `bench-baseline`, `bench-report`, `bench-html`, `bench-compare`, `loadtest` | `eval:bench`, `eval:bench-baseline`, `eval:bench-report`, `eval:bench-html`, `eval:bench-compare`, `eval:load` | benchmark/load/report scripts |
-| `query-demo`, `ask`, `run-agent` | `local:query`, `local:ask`, `local:agent` | query script and agent |
-| `local-vllm`, `local-vllm-embed`, `local-vllm-rerank`, `local-stack` | `local:llm`, `local:embed`, `local:rerank`, `local:stack` | existing launchers/supervisor |
-| `local-gateway`, `local-gateway-stop`, `local-jaeger`, `local-jaeger-stop` | `local:gateway:up`, `local:gateway:down`, `local:openobserve:up`, `local:openobserve:down` | existing component owners |
-| `airgap-pack`, `airgap-validate`, `airgap-load`, `airgap-deploy`, `airgap-ingest`, `airgap-smoke`, `airgap-pipeline`, `airgap-dryrun` | `airgap:pack`, `airgap:validate`, `airgap:load`, `airgap:deploy`, `airgap:ingest`, `airgap:smoke`, `airgap:pipeline`, `airgap:dryrun` | `scripts/airgap/` stages/pipeline |
-| `e2e-demo-pdfs`, `clean` | `dev:demo-pdfs`, `dev:clean` | existing synthetic-document and cleanup owners |
-
-The local-stack supervisor invokes `sim_qdrant.sh` directly. CI, operator
-messages, active runbooks and context owners select Task or their existing
-Python/script owner; none requires Task → Make delegation. Dated evidence and
-old signed bundles retain their original command spelling. #371 continues to
-own the full Python lock; #376 owns broader distribution inventory.
-
 <a id="shim"></a>
 <a id="shim-exit"></a>
-## Compatibility window and removal milestone
+## Older command names
 
-#402 increment C made Task the canonical documented interface and supplied the
-offline handoff. Increment D (this change) removes the Make adapter: the root
-`Makefile` shim is deleted and no runtime Make dependency or Task → Make
-delegation remains in supported workflows. The inventory table above stays as
-the concise old → new command reference for readers of older records; dated
-evidence and old signed bundles retain their original command spelling and
-their own bundled interface, independent of new releases.
-
-D-gate record: every in-repository executable consumer had moved to
-`sh scripts/tools/run-task.sh` or its documented direct script owner, the
-signed offline bootstrap works without Make, and the e2e airgap-acceptance and
-kind-live lanes assert the Task bundle members explicitly. Required
-published-artifact/topology evidence is recorded per release, not certified by
-documentation alone.
-
-Approved interface differences from old recipes: explicit setup separate from
-verification; content-aware completion stamps; literal free-text forwarding;
-explicit-empty simulation container/port fail closed; optional empty environment
-inputs retain script defaults; stdlib Qdrant pin lookup uses `python3`; discovery
-is a task list with per-command summaries. No model/baseline/schema/default or
-operational permission change is authorized by the runner migration.
-
+Task is the canonical documented interface. #402 increments C/D supplied the
+offline handoff and removed the Make adapter: no runtime Make dependency or
+Task → Make delegation remains in supported workflows. Old Make targets map to
+same-or-named Task commands (`lint`/`test`/`check` → `qa:lint`/`qa:unit`/
+`qa:check`, `sim`/`loadtest-mock` → `qa:sim`/`qa:load`, dated `airgap-*` and
+`eval-*` → `airgap:*` and `eval:*`); `--list` and `<task> --summary` are the
+catalogue, not a hand-copied table. Dated evidence and old signed bundles
+retain their original command spelling and their own bundled interface.
 
 ### Retained local Helm acceptance and maintenance
 
