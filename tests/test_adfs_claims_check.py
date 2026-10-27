@@ -1015,36 +1015,31 @@ def test_role_list_mode_near_miss_hints_fail_and_name_only_the_configured_role(
 
 @pytest.mark.parametrize(
     ("size", "warn"),
-    [
-        (100, None),
-        (chk.ID_TOKEN_WARN_BYTES, None),
-        (chk.ID_TOKEN_WARN_BYTES + 1, "may fail"),
-        (chk.ID_TOKEN_MAX_BYTES, "may fail"),
-        (chk.ID_TOKEN_MAX_BYTES + 1, "will fail"),
-    ],
+    [(100, False), (chk.ID_TOKEN_WARN_BYTES, False), (chk.ID_TOKEN_WARN_BYTES + 1, True)],
 )
 def test_id_token_size_lines(size, warn):
     lines = chk.id_token_size_lines(size)
     assert lines[0] == f"ID token size: {size} bytes"
-    if warn is None:
+    if not warn:
         assert len(lines) == 1
     else:
-        assert len(lines) == 2 and lines[1].startswith("WARN:") and warn in lines[1]
-        assert "502" in lines[1] and "4096" in lines[1]
+        assert len(lines) == 2 and lines[1].startswith("WARN:")
+        assert "sign-out" in lines[1] and "id_token_hint" in lines[1] and "16384" in lines[1]
 
 
-def test_id_token_size_thresholds_stay_below_the_proxy_buffer():
-    # The pod proxy reads the sign-in response header into one 4 KiB buffer; the
-    # Open WebUI callback adds the other cookies and headers (about 1 KB).
-    assert chk.ID_TOKEN_WARN_BYTES <= 4096 - 1024 < chk.ID_TOKEN_MAX_BYTES < 4096
+def test_id_token_size_threshold_leaves_room_in_the_idp_request_limit():
+    # The sign-out URL carries the whole token; the IdP's own cookies share the
+    # 16384-byte http.sys default with it.
+    assert chk.ID_TOKEN_WARN_BYTES <= 16384 // 2
 
 
 def test_large_id_token_warns_without_failing_and_prints_no_values(tmp_path, capsys):
-    groups = [PRIMARY, DOCS_USERS] + [f"{OTHER}-{i:04d}" for i in range(200)]
+    groups = [PRIMARY, DOCS_USERS] + [f"{OTHER}-{i:04d}" for i in range(400)]
     rc, token = _decode(tmp_path, {"groups": groups, "upn": UPN, "name": "n"})
     out = capsys.readouterr().out
-    assert len(token) > chk.ID_TOKEN_MAX_BYTES
-    assert rc == 0 and f"ID token size: {len(token)} bytes" in out and "will fail with 502" in out
+    assert len(token) > chk.ID_TOKEN_WARN_BYTES
+    assert rc == 0 and f"ID token size: {len(token)} bytes" in out
+    assert "WARN: the ID token is above 8000 bytes: sign-out sends it" in out
     assert OTHER not in out and PRIMARY not in out
 
 

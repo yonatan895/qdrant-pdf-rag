@@ -46,20 +46,18 @@ from typing import Any
 DEFAULT_SCOPES = "openid profile email allatclaims"
 MAX_BODY = 1_000_000
 
-# ID token size (#1070). Open WebUI v0.12.3 sets the raw ID token as the
-# ``oauth_id_token`` cookie on the sign-in callback (utils/oauth.py,
-# ENABLE_OAUTH_ID_TOKEN_COOKIE defaults to true; the chart does not change it).
-# The pod's allow-list proxy (nginx 1.30.6, files/openwebui/proxy.nginx.conf)
-# reads each upstream response header block into proxy_buffer_size, which
-# defaults to one 4 KiB page: a probe of that image and config returned 502
-# "upstream sent too big header" once the block passed 4096 bytes. That
-# callback block also carries the session token, the session id and the
-# session-middleware cookie, the redirect and the standard headers (about 1 KB by
-# source reading), so above ID_TOKEN_WARN_BYTES the sign-in may fail with 502, and
-# above ID_TOKEN_MAX_BYTES it cannot fit at all. Browsers also cap a cookie's
-# name plus value at 4096 bytes (RFC 6265 section 6.1 minimum).
-ID_TOKEN_WARN_BYTES = 2500
-ID_TOKEN_MAX_BYTES = 3800
+# ID token size (#1070). The chart sets ENABLE_OAUTH_ID_TOKEN_COOKIE=false, so the
+# sign-in callback no longer carries the token as a cookie; before that, the pod's
+# allow-list proxy (nginx default proxy_buffer_size, one 4 KiB page) answered 502
+# once the callback headers passed 4096 bytes. Open WebUI v0.12.3 keeps the token
+# in its database (models/oauth_sessions.py), with no size limit found. The step
+# that still carries the whole token is sign-out: routers/auths.py signout sends
+# the browser to the IdP's end_session_endpoint with it as id_token_hint in the
+# URL. AD FS runs on Windows http.sys, whose request line and headers are limited
+# to 16384 bytes by default (MaxRequestBytes and MaxFieldLength in Microsoft's
+# http.sys registry documentation; not verified here), shared with the IdP's own
+# cookies. Above ID_TOKEN_WARN_BYTES, confirm sign-out on the test client.
+ID_TOKEN_WARN_BYTES = 8000
 
 # Mirrors scripts/airgap/model_config.py and the chart (values.schema.json,
 # templates/_helpers.tpl): comma-separated names without spaces; never * or the
@@ -354,17 +352,11 @@ def analyse_role_lists(
 
 def id_token_size_lines(size: int) -> list[str]:
     lines = [f"ID token size: {size} bytes"]
-    if size > ID_TOKEN_MAX_BYTES:
+    if size > ID_TOKEN_WARN_BYTES:
         lines.append(
-            f"WARN: the ID token is above {ID_TOKEN_MAX_BYTES} bytes: it cannot fit the "
-            "Open WebUI sign-in response at the pod proxy (4096-byte header buffer); "
-            "sign-in will fail with 502"
-        )
-    elif size > ID_TOKEN_WARN_BYTES:
-        lines.append(
-            f"WARN: the ID token is above {ID_TOKEN_WARN_BYTES} bytes: with the other "
-            "sign-in cookies it may pass the pod proxy's 4096-byte header buffer and "
-            "sign-in may fail with 502"
+            f"WARN: the ID token is above {ID_TOKEN_WARN_BYTES} bytes: sign-out sends it to "
+            "the IdP in the URL (id_token_hint) and may pass the IdP web server's request "
+            "limit (16384 bytes by default on http.sys); confirm sign-out on the test client"
         )
     return lines
 

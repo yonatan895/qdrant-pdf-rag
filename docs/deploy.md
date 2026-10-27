@@ -1709,7 +1709,7 @@ byte-identical to a release without it (tested).
   - Chat history (S2, S3): no admin chat access or admin export.
   - Logs (S4): metadata-only audit.
   - Identity (R3): OIDC only; no login form, signup, password or initial-admin signup, no token
-    exchange; 8-hour sessions.
+    exchange; 8-hour sessions; no ID-token cookie (`ENABLE_OAUTH_ID_TOKEN_COOKIE=false`, below).
   - `ENABLE_PERSISTENT_CONFIG=false`, so admin-UI edits cannot override this environment.
 
 **What the identity team registers.** One confidential OIDC client on the organisation's IdP
@@ -1821,13 +1821,25 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
   no configured role and is refused (403), so the guarantee above still holds without a
   baseline. The chart's refusal of `*` and `signed-in` stays. A group literally named `*` cannot
   be configured, and a claim value `*` matches nothing (only a configured `*` is a wildcard).
-- **Token size.** Every group of the user is in the ID token. Open WebUI v0.12.3 sets the raw ID
-  token as the `oauth_id_token` cookie on the sign-in callback. The pod's allow-list proxy reads
-  that response header into nginx's default `proxy_buffer_size` of one 4 KiB page; above
-  4096 bytes the sign-in fails with HTTP 502 (measured on the pinned nginx image and the chart's
-  config). The other callback headers take about 1 KB, so keep the ID token at or below 2500
-  bytes (the claims check warns above that, and says the sign-in will fail above 3800). A user in
-  many groups needs a narrower group rule from the identity team.
+- **Token size.** Every group of the user is in the ID token. By default Open WebUI v0.12.3
+  also sets the raw ID token as the `oauth_id_token` browser cookie on the sign-in callback
+  (`utils/oauth.py` `handle_callback`). The pod's allow-list proxy reads that response header into
+  nginx's default `proxy_buffer_size` of one 4 KiB page, so a large token failed the sign-in with
+  HTTP 502 (measured on the pinned nginx image and the chart's config). Nothing reads the cookie
+  back, so the chart sets `ENABLE_OAUTH_ID_TOKEN_COOKIE=false` (maintainer decision). The callback
+  headers are then about 800 bytes whatever the token size, and Open WebUI keeps the token in its
+  database (`models/oauth_sessions.py`). One step still carries the whole token: sign-out (below)
+  puts it in the IdP logout URL. AD FS runs on Windows http.sys, which by default limits the
+  request line and headers to 16384 bytes (Microsoft's http.sys registry documentation; not
+  verified here). The claims check warns above 8000 bytes; above that, confirm sign-out on the
+  test client.
+- **Sign-out.** Open WebUI v0.12.3 (`routers/auths.py` `signout`) deletes its session cookies and,
+  for an OIDC session, sends the browser to the IdP's `end_session_endpoint` from discovery with
+  `id_token_hint` taken from the server-side OAuth session (not from a cookie). Whether AD FS then
+  ends its own SSO session is AD FS behaviour *(confirm on the test client)*. The chart has no
+  Redis, and v0.12.3 revokes session tokens only through Redis (`utils/auth.py`
+  `invalidate_token`). Sign-out therefore removes the browser's Rosetta session, but a copied
+  session token stays valid until it expires (8 hours).
 - **Logs.** A refused sign-in makes Open WebUI log a warning that lists the user's roles claim
   values, that is, all their group names (v0.12.3 `get_user_role`). This is identity metadata in
   the pod log, not chat content.
@@ -2205,7 +2217,7 @@ It fails when a configured role differs from a claim value only by letter case, 
 prefix or a removed backslash, or when the configured names are bare and the token's are
 domain-qualified (or the reverse); it names only the configured role. It warns on bare
 configured names, and when a bare name occurs in the token under more than one domain prefix
-(the count only). It warns when the ID token is above 2500 bytes (see "Token size" above).
+(the count only). It warns when the ID token is above 8000 bytes (see "Token size" above).
 
 **Paste mode (the default recommendation when the localhost redirect is not registered).**
 It needs only the real redirect URI and works before Open WebUI exists:
