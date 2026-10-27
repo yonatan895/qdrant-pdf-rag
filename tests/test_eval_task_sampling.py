@@ -23,6 +23,8 @@ def sampling_workspace(tmp_path):
 import importlib.util, json, os, sys
 from pathlib import Path
 from types import SimpleNamespace
+# Exercise the candidate tree even when the interpreter's editable install points elsewhere.
+sys.path.insert(0, str(Path('src').resolve()))
 from mainframe_rag import config, manifest
 from mainframe_rag.eval import answers, answer_tier, chat
 from mainframe_rag.agent import answer
