@@ -86,10 +86,13 @@ class _Clock:
 
 
 @pytest.mark.parametrize("fake,transient", [
-    (lambda: TokenizerPostFake(count=0, status_code=404), False),
+    (lambda status=status: TokenizerPostFake(count=0, status_code=status), False)
+    for status in (404, 405, 501)
+] + [
     (lambda: TokenizerPostFake(count=0, raises=RuntimeError("network down")), True),
     (lambda: TokenizerPostFake(count=None, extra={"unexpected": "shape"}), False),
-], ids=["non-200", "transport-error", "malformed-200-body"])
+], ids=["unserved-404", "unserved-405", "unserved-501",
+        "transport-error", "malformed-200-body"])
 def test_failed_tokenize_downgrades_with_one_warning(fake, transient, caplog):
     """A non-200 (e.g. LiteLLM without /tokenize), transport error or 200
     without a usable count must warn once, answer from the estimator, leave
@@ -209,18 +212,6 @@ def test_confirmation_belongs_to_the_counting_thread():
         assert tok.remote_confirmed is False  # this thread's last count was estimated
         assert tok.count_tokens("synthetic text") == 9
         assert tok.remote_confirmed is True
-
-
-@pytest.mark.parametrize("status", [404, 405, 501])
-def test_unserved_endpoint_stays_pinned_after_the_window(status):
-    """A gateway that does not serve /tokenize costs one call per process."""
-    client = TokenizerPostFake(count=0, status_code=status)
-    clock = _Clock()
-    tok = VllmTokenizer("http://litellm:4000/v1", "m", client=client, clock=clock)
-    for _ in range(3):
-        tok.count_tokens("synthetic text")
-        clock.now += TOKENIZE_RETRY_AFTER_S * 2
-    assert len(client.calls) == 1
 
 
 @pytest.mark.parametrize("count", ["tokens", "messages"])
