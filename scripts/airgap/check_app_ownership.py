@@ -8,7 +8,22 @@ The deployer must serialize app operations in its owned namespace.
 Only the fixed first-party inventory can be adopted from the old renderer.
 """
 import json
+import re
 import sys
+
+# Only identities that look like Kubernetes ones are named in a refusal;
+# anything else (and every value, annotation or label) stays out of output.
+_IDENTITY = re.compile(r'[A-Za-z0-9][A-Za-z0-9./-]{0,252}')
+
+
+class Refused(ValueError):
+    """A refusal naming the object it judged: apiVersion, kind, name only."""
+
+    def __init__(self, reason, item):
+        meta = item.get('metadata') if isinstance(item.get('metadata'), dict) else {}
+        parts = [item.get('apiVersion'), item.get('kind'), meta.get('name')]
+        shown = [p if isinstance(p, str) and _IDENTITY.fullmatch(p) else '<invalid>' for p in parts]
+        super().__init__(f'{reason}: {shown[0]} {shown[1]}/{shown[2]}')
 
 ALLOWED = {
     ('apps/v1', 'Deployment', 'rag-agent'),
@@ -44,6 +59,9 @@ ALLOWED = {
     ('apps/v1', 'Deployment', 'rag-openwebui'),
     ('v1', 'Service', 'rag-openwebui'),
     ('v1', 'ConfigMap', 'rag-openwebui-pipe'),
+    # Always rendered with Open WebUI, and with OPENWEBUI_IDP_CA_FILE (#1134).
+    ('v1', 'ConfigMap', 'rag-openwebui-proxy'),
+    ('v1', 'ConfigMap', 'rag-openwebui-idp-ca'),
     ('v1', 'PersistentVolumeClaim', 'rag-openwebui-data'),
     ('networking.k8s.io/v1', 'NetworkPolicy', 'rag-openwebui'),
     ('route.openshift.io/v1', 'Route', 'rag-openwebui'),
@@ -62,23 +80,23 @@ def check(document, namespace, disabled=False):
         meta = item.get('metadata', {})
         if ((item.get('apiVersion'), item.get('kind'), meta.get('name')) not in ALLOWED
                 or meta.get('namespace') != namespace):
-            raise ValueError('unexpected application resource inventory')
+            raise Refused('unexpected application resource inventory', item)
         if disabled and (item.get('kind'), meta.get('name')) not in {
             ('Deployment', 'jaeger'), ('Service', 'jaeger'),
             ('ConfigMap', 'jaeger-config'), ('ServiceAccount', 'rag-agent'),
             ('Route', 'rag-agent'), ('ServiceMonitor', 'rag-agent'),
         }:
-            raise ValueError('unexpected disabled application resource')
+            raise Refused('unexpected disabled application resource', item)
         annotations = meta.get('annotations', {})
         labels = meta.get('labels', {})
         if annotations.get('meta.helm.sh/release-name', 'mainframe-rag') != 'mainframe-rag':
-            raise ValueError('application resource belongs to another Helm release')
+            raise Refused('application resource belongs to another Helm release', item)
         if annotations.get('meta.helm.sh/release-namespace', namespace) != namespace:
-            raise ValueError('application resource belongs to another Helm namespace')
+            raise Refused('application resource belongs to another Helm namespace', item)
         if labels.get('app.kubernetes.io/managed-by', 'Helm') != 'Helm':
-            raise ValueError('application resource has another deployment manager')
+            raise Refused('application resource has another deployment manager', item)
         if meta.get('ownerReferences'):
-            raise ValueError('application resource has a controller owner')
+            raise Refused('application resource has a controller owner', item)
 
 
 if __name__ == '__main__':
@@ -98,5 +116,8 @@ if __name__ == '__main__':
                               'namespace': item['metadata']['namespace']}}
                 for item in items
             ]}, sys.stdout)
+    except Refused as exc:
+        sys.exit(f'FAIL: application ownership preflight refused ({exc}); '
+                 'inspect resource ownership before retrying')
     except (ValueError, KeyError, TypeError, IndexError, AttributeError):
         sys.exit('FAIL: application ownership preflight refused; inspect resource ownership before retrying')
