@@ -12,6 +12,24 @@ from unittest.mock import patch
 
 from scripts import agent_doctor as doctor
 
+# Fix commands a refusal must name (#1118 C7), written out independently of the
+# doctor's constants: a weaker model in the gap copies them literally.
+TASK_CONNECTED = 'connected fix: sh scripts/tools/install-task.sh;'
+TASK_AIRGAP = 'air-gap fix: sh scripts/tools/install-task.sh --archive /absolute/path/to/bundle/task_linux_amd64.tar.gz'
+HELM_CONNECTED = 'connected fix: sh scripts/tools/install-helm.sh;'
+HELM_AIRGAP = 'air-gap fix: sh scripts/tools/install-helm.sh --archive /absolute/path/to/helm-v4.3.0-linux-amd64.tar.gz'
+HELM_PATH = 'then select it: export PATH="$PWD/.tools/bin:$PATH"'
+VENV_CONNECTED = 'connected fix: sh scripts/tools/run-task.sh dev:setup PY=python3.14;'
+VENV_AIRGAP = ('air-gap fix: python3.14 scripts/prepare_python.py --venv .venv '
+               '--wheelhouse /absolute/path/to/approved/dev-wheels')
+RECREATE_CONNECTED = 'connected fix: rm -rf .venv && sh scripts/tools/run-task.sh dev:setup PY=python3.14;'
+RECREATE_AIRGAP = ('air-gap fix: rm -rf .venv && python3.14 scripts/prepare_python.py --venv .venv '
+                   '--wheelhouse /absolute/path/to/approved/dev-wheels')
+PREPARED_CONNECTED = ('connected fix: INTERPRETER scripts/prepare_python.py --python INTERPRETER '
+                      '--wheelhouse .tools/python-wheels/dev --connected;')
+PREPARED_AIRGAP = ('air-gap fix: INTERPRETER scripts/prepare_python.py --python INTERPRETER '
+                   '--wheelhouse /absolute/path/to/approved/dev-wheels')
+
 
 class DoctorTests(TestCase):
     def setUp(self):
@@ -207,6 +225,154 @@ class DoctorTests(TestCase):
         self.assertTrue(any(f.status == 'unable to verify' for f in doctor.diagnose(self.root)))
         (self.root/'pyproject.toml').write_text('[project]\nrequires-python="~=3.14"')
         self.assertTrue(any('unsupported requirement' in f.detail for f in doctor.diagnose(self.root)))
+
+    # Refusal fix commands (#1118 C7): every non-ready finding names its fix.
+    def finding(self, subject, *args, **kwargs):
+        found = [f for f in doctor.diagnose(self.root, *args, **kwargs)
+                 if f.subject == subject and f.status != 'ready']
+        self.assertEqual(len(found), 1, found)
+        return found[0].detail
+
+    def assertFix(self, detail, *commands):
+        for command in commands:
+            self.assertIn(command, detail)
+
+    def test_ready_findings_name_no_fix_and_refusals_point_at_the_checkout_root(self):
+        findings = doctor.diagnose(self.root, 'deploy')
+        self.assertTrue(all(f.status == 'ready' and 'fix:' not in f.detail for f in findings), findings)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(doctor.main(['--root', str(self.root)]), 0)
+        self.assertNotIn('Run each fix', output.getvalue())
+        (self.root/'.tools/bin/task').unlink()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(doctor.main(['--root', str(self.root)]), 2)
+        self.assertIn('Run each fix from the checkout root, then rerun this check.', output.getvalue())
+
+    def test_task_refusals_name_the_installer_for_both_hosts(self):
+        local = self.root/'.tools/bin/task'
+        local.write_text('corrupt executable')
+        self.assertFix(doctor.inspect_task(self.root).detail, TASK_CONNECTED, TASK_AIRGAP)
+        local.unlink()
+        detail = doctor.inspect_task(self.root).detail
+        self.assertTrue(detail.startswith('pinned .tools/bin/task absent; '), detail)
+        self.assertFix(detail, TASK_CONNECTED, TASK_AIRGAP)
+        (self.root/'scripts/tools/task-pin.txt').unlink()
+        self.assertFix(doctor.inspect_task(self.root).detail, 'fix: git checkout -- scripts/tools/task-pin.txt')
+
+    def test_task_executable_unreadable_names_the_installer(self):
+        with patch.object(doctor.hashlib, 'file_digest', side_effect=PermissionError('SECRET')):
+            finding = doctor.inspect_task(self.root)
+        self.assertEqual(finding.status, 'unable to verify')
+        self.assertFix(finding.detail, TASK_CONNECTED, TASK_AIRGAP)
+        self.assertNotIn('SECRET', finding.detail)
+
+    def test_task_archive_refusals_name_the_installer_that_caches_it(self):
+        archive = self.root/'.tools/cache/task_linux_amd64.tar.gz'
+        archive.write_bytes(b'tampered')
+        self.assertFix(doctor.inspect_task(self.root).detail, TASK_CONNECTED, TASK_AIRGAP)
+        archive.unlink()
+        self.assertFix(doctor.inspect_task(self.root).detail, TASK_CONNECTED, TASK_AIRGAP)
+
+    def test_helm_refusals_name_the_pinned_installer_and_path_selection(self):
+        (self.root/'bin/helm').write_text('foreign-or-tampered-binary')
+        self.assertFix(doctor.inspect_helm(self.root).detail, HELM_CONNECTED, HELM_AIRGAP, HELM_PATH)
+        self.which.side_effect = lambda _: None
+        self.assertFix(doctor.inspect_helm(self.root).detail, HELM_CONNECTED, HELM_AIRGAP, HELM_PATH)
+        (self.root/'scripts/tools/helm-pin.txt').unlink()
+        self.assertFix(doctor.inspect_helm(self.root).detail, 'fix: git checkout -- scripts/tools/helm-pin.txt')
+
+    def test_helm_unreadable_names_the_installer(self):
+        with patch.object(doctor.hashlib, 'file_digest', side_effect=PermissionError('SECRET')):
+            detail = doctor.inspect_helm(self.root).detail
+        self.assertFix(detail, HELM_CONNECTED, HELM_AIRGAP, HELM_PATH)
+        self.assertNotIn('SECRET', detail)
+
+    def test_tracked_input_refusals_restore_the_tracked_file(self):
+        (self.root/'airgap.env.example').unlink()
+        self.assertFix(self.finding('airgap.env.example', 'deploy'), 'fix: git checkout -- airgap.env.example')
+        (self.root/'images.txt').write_text('docker.io/qdrant/qdrant:v1.20.0-unprivileged sha256:example\n')
+        self.assertFix(self.finding('Qdrant pin'),
+                       'fix: git checkout -- images.txt requirements.dev.lock.txt locks/cp314-linux-x86_64.json')
+        self.assertFix(self.finding('Qdrant chart'), 'fix: git checkout -- charts/qdrant-1.20.0.tgz')
+        with patch.object(doctor, 'load_dependency_lock', return_value=(None, {})):
+            self.assertFix(self.finding('requirements.lock.txt'),
+                           'fix: git checkout -- requirements.dev.lock.txt locks/cp314-linux-x86_64.json')
+        (self.root/'images.txt').unlink()
+        self.assertFix(self.finding('tracked configuration'), 'fix: git checkout -- pyproject.toml images.txt '
+                       'requirements.dev.lock.txt locks/cp314-linux-x86_64.json')
+        (self.root/'pyproject.toml').write_text('[project]\nrequires-python="~=3.14"')
+        self.assertFix(self.finding('Python requirement'), 'requires-python must read >=MAJOR.MINOR',
+                       'fix: git checkout -- pyproject.toml')
+
+    def test_missing_cli_refusals_name_the_check_command(self):
+        self.which.side_effect = lambda name: (str(self.root/'bin/helm') if name == 'helm'
+                                               else None if name in ('oc', 'kubectl', 'skopeo') else '/tools/'+name)
+        self.assertFix(self.finding('oc or kubectl', 'deploy'), 'then check: command -v oc')
+        self.assertFix(self.finding('skopeo', 'deploy'),
+                       'fix: no repository installer; install skopeo with the host package manager, '
+                       'then check: command -v skopeo')
+
+    def test_local_venv_refusals_name_setup_for_both_hosts(self):
+        # Task targets select the venv as --python .venv/bin/python: same fix.
+        for python in (None, self.root/'.venv/bin/python'):
+            with self.subTest(python=python):
+                self.runtime['version'] = [3, 13, 9]
+                self.assertFix(self.finding('development environment', python=python),
+                               RECREATE_CONNECTED, RECREATE_AIRGAP)
+                self.runtime['version'] = [3, 14, 5]
+                self.inventory_probe.return_value = False
+                self.assertFix(self.finding('complete development inventory', python=python),
+                               RECREATE_CONNECTED, RECREATE_AIRGAP)
+                self.inventory_probe.return_value = True
+                self.runtime['packages']['qdrant-client'] = '1.18.0'
+                self.assertFix(self.finding('qdrant-client', python=python), RECREATE_CONNECTED, RECREATE_AIRGAP)
+                del self.runtime['packages']['qdrant-client']
+                self.assertFix(self.finding('qdrant-client', python=python), RECREATE_CONNECTED, RECREATE_AIRGAP)
+                self.runtime['packages']['qdrant-client'] = '1.19.0'
+        self.probe.side_effect = lambda python, _: None if python == self.root/'.venv/bin/python' else self.runtime
+        self.assertFix(self.finding('development environment'), RECREATE_CONNECTED, RECREATE_AIRGAP)
+        self.probe.side_effect = lambda *_: self.runtime
+        (self.root/'.venv/bin/python').unlink()
+        detail = self.finding('development environment')
+        self.assertFix(detail, VENV_CONNECTED, VENV_AIRGAP)
+        self.assertNotIn('rm -rf', detail)
+
+    def test_prepared_interpreter_refusals_name_prepare_python(self):
+        python = self.root/'ci-python'
+        self.assertFix(self.finding('development environment', python=python), PREPARED_CONNECTED, PREPARED_AIRGAP)
+        python.write_text('fixture')
+        self.inventory_probe.return_value = False
+        self.assertFix(self.finding('complete development inventory', python=python),
+                       PREPARED_CONNECTED, PREPARED_AIRGAP)
+
+    def test_checker_runtime_refusal_names_a_gil_interpreter(self):
+        self.probe.side_effect = lambda python, _: (dict(self.runtime, jit_enabled=True)
+                                                   if python == Path(doctor.sys.executable) else self.runtime)
+        self.assertFix(self.finding('checker runtime'),
+                       'fix: env -u PYTHON_JIT python3.14 scripts/agent_doctor.py')
+
+    def test_simulation_preparation_refusals_name_their_tasks(self):
+        self.which.side_effect = lambda name: str(self.root/'bin/helm') if name == 'helm' else '/tools/'+name
+        self.assertFix(self.finding('prepared Qdrant image', 'sim'),
+                       'connected fix: sh scripts/tools/run-task.sh artifacts:qdrant;',
+                       'air gap: no supported preparation')
+        self.assertFix(self.finding('prepared BM25 cache', 'sim'),
+                       'connected fix: sh scripts/tools/run-task.sh artifacts:bm25',
+                       'air-gap fix: export SIM_BM25_CACHE_DIR=/absolute/path/to/offline-prepared/bm25-weights',
+                       'python3 scripts/fetch_bm25_weights.py --out "$SIM_BM25_CACHE_DIR" '
+                       '--verify-manifest bm25-weights.sha256 --verify-only')
+
+    def test_docker_probe_refusals_name_the_check_command(self):
+        with patch.object(doctor.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)):
+            self.assertFix(self.finding('local Docker probe', 'unit', True),
+                           'then check: docker --host unix:///var/run/docker.sock version')
+        with patch.object(doctor.subprocess, 'run', side_effect=subprocess.TimeoutExpired('docker', 5)):
+            self.assertFix(self.finding('local Docker probe', 'unit', True),
+                           'then check: docker --host unix:///var/run/docker.sock version')
+        self.which.side_effect = lambda name: str(self.root/'bin/helm') if name == 'helm' else None if name == 'docker' else '/tools/'+name
+        self.assertFix(self.finding('local Docker probe', 'unit', True), 'then check: command -v docker')
 
 
 class HelmPreparationTests(TestCase):

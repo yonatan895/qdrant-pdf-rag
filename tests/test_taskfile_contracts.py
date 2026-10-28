@@ -377,6 +377,130 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertIn("absent", proc.stderr)
 
+    def test_controlled_runner_refusals_name_their_fix(self):
+        # C7 (#1118): each refusal keeps exit 2 and names the command that
+        # fixes it, for the connected host and the air gap where they differ.
+        # Expected text is literal here, independent of run-task.sh.
+        task_fix = ("connected fix: sh scripts/tools/install-task.sh; air-gap fix: sh scripts/tools/install-task.sh"
+                    " --archive /absolute/path/to/bundle/task_linux_amd64.tar.gz")
+        root_hint = "run-task: run the fix from the checkout root, then retry"
+        self.prepare_controlled_runner()
+
+        def refused(*args, expected, extra_env=None, script=None):
+            if script is None:
+                proc = self.run_controlled(*args, extra_env=extra_env)
+            else:
+                proc = subprocess.run(["sh", str(script), *args], cwd=script.parents[2],
+                                      env={**os.environ, **(extra_env or {})}, capture_output=True,
+                                      text=True, timeout=30, check=False)
+            self.assertEqual(proc.returncode, 2, proc.stderr)
+            self.assertIn(expected, proc.stderr)
+            self.assertIn(root_hint, proc.stderr)
+            self.assertNotIn("PRIVATE-SENTINEL", proc.stdout + proc.stderr)
+            self.assertNotIn(str(self.root), proc.stderr, "real paths never appear in a refusal")
+            return proc
+
+        hint = ("unsupported runner override; fix: drop it and pass task arguments after --, e.g. "
+                "sh scripts/tools/run-task.sh qa:unit -- tests/test_agent_doctor.py -q")
+        for args in (("--taskfile=PRIVATE-SENTINEL",), ("TASK_PRIVATE=PRIVATE-SENTINEL",)):
+            refused(*args, expected=hint)
+        home = self.root / "home"
+        (home / "xdg/task").mkdir(parents=True)
+        clean = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "xdg")}
+        for path, shown in ((home / ".taskrc.yml", "$HOME/.taskrc.yml"),
+                            (home / "xdg/task/taskrc.yaml", "$XDG_CONFIG_HOME/task/taskrc.yaml"),
+                            (self.root / "scripts/tools/.taskrc.yaml", "scripts/tools/.taskrc.yaml"),
+                            (self.root / "scripts/.taskrc.yml", "scripts/.taskrc.yml"),
+                            (self.root / ".taskrc.yml", ".taskrc.yml")):
+            with self.subTest(config=shown):
+                path.write_text("PRIVATE-SENTINEL [invalid config")
+                refused("--list", extra_env=clean, expected=(
+                    f'inherited Task configuration {shown} is unsupported and was not read; '
+                    f'fix: mv "{shown}" "{shown}.disabled"'))
+                path.unlink()
+        # Above the checkout the file is shown checkout-relative, as ../ segments.
+        nested = self.root / "outer/checkout"
+        (nested / "scripts/tools").mkdir(parents=True)
+        (nested / ".tools/bin").mkdir(parents=True)
+        shutil.copy(self.root / "scripts/tools/run-task.sh", nested / "scripts/tools")
+        shutil.copy(self.root / "scripts/tools/task-pin.txt", nested / "scripts/tools")
+        (nested / ".tools/bin/task").symlink_to(self.task_bin)
+        for path, shown in ((self.root / "outer/.taskrc.yml", "../.taskrc.yml"),
+                            (self.root / ".taskrc.yaml", "../../.taskrc.yaml")):
+            with self.subTest(config=shown):
+                path.write_text("PRIVATE-SENTINEL")
+                refused("--list", extra_env=clean, script=nested / "scripts/tools/run-task.sh",
+                        expected=f'fix: mv "{shown}" "{shown}.disabled"')
+                path.unlink()
+        dotenv = self.root / "scripts/tools/.env"
+        dotenv.write_text("TOKEN=PRIVATE-SENTINEL")
+        refused("--list", extra_env=clean,
+                expected="fix: mv scripts/tools/.env scripts/tools/.env.disabled")
+        dotenv.unlink()
+        # A non-x86_64 platform is refused before any other check.
+        fake = self.root / "fakebin"
+        fake.mkdir()
+        (fake / "uname").write_text('#!/bin/sh\ncase "$1" in -s) echo Darwin;; *) echo arm64;; esac\n')
+        (fake / "uname").chmod(0o755)
+        refused("--list", extra_env={**clean, "PATH": f"{fake}:{os.environ['PATH']}"},
+                expected="fix: run from a Linux x86_64 host or WSL2 (uname -sm must print: Linux x86_64)")
+        pin = self.root / "scripts/tools/task-pin.txt"
+        good_pin = pin.read_text()
+        pin.write_text(f"version: v{PIN_VERSION}\n")
+        refused("--list", extra_env=clean,
+                expected="Task binary digest is missing from the pin; fix: git checkout -- scripts/tools/task-pin.txt")
+        pin.write_text(good_pin)
+        installed = self.root / ".tools/bin/task"
+        installed.unlink()
+        installed.write_text("#!/bin/sh\ntouch SHOULD-NOT-RUN\n")
+        installed.chmod(0o755)
+        refused("--list", extra_env=clean, expected="Task binary checksum mismatch; reinstall from the pinned archive: "
+                + task_fix)
+        self.assertFalse((self.root / "SHOULD-NOT-RUN").exists())
+        installed.unlink()
+        refused("--list", extra_env=clean, expected="pinned .tools/bin/task absent; " + task_fix)
+
+    def test_refusal_fix_commands_exist(self):
+        # Every command a run-task or doctor refusal names must be real: the
+        # task in the pinned runner's list, the script on disk and each flag
+        # accepted by that script.
+        import ast
+        launcher = (REPO / "scripts/tools/run-task.sh").read_text(encoding="utf-8")
+        fixes = [m.group(1).replace('\\"', '"')
+                 for m in re.finditer(r'(?:fail |TASK_FIX=)"((?:[^"\\]|\\.)*)"', launcher)]
+        # The doctor's messages are its string literals (implicit concatenation
+        # folds into one constant; f-string fields become X).
+        for node in ast.walk(ast.parse((REPO / "scripts/agent_doctor.py").read_text(encoding="utf-8"))):
+            if isinstance(node, ast.JoinedStr):
+                fixes.append("".join(v.value if isinstance(v, ast.Constant) else "X" for v in node.values))
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                fixes.append(node.value)
+        fixes = [fix for fix in fixes if "fix" in fix]
+        self.assertGreater(len(fixes), 25)
+        listed = self.run_task("--list-all")
+        self.assertEqual(listed.returncode, 0, listed.stdout)
+        tasks = set(re.findall(r"^\* ([\w:-]+):", listed.stdout, re.MULTILINE))
+        named_tasks, named_scripts = set(), set()
+        for fix in fixes:
+            named_tasks.update(re.findall(r"sh scripts/tools/run-task\.sh ([a-z][\w:-]*)", fix))
+            for script, args in re.findall(r"(scripts/[\w/.-]+\.(?:py|sh))((?: [^;&()]*)?)", fix):
+                named_scripts.add(script)
+                source = (REPO / script).read_text(encoding="utf-8")
+                for flag in re.findall(r"(?<!\S)(--[a-z][a-z-]*)", args):
+                    self.assertTrue(f'"{flag}"' in source or f"{flag})" in source or f"'{flag}'" in source,
+                                    f"{script} does not accept {flag}")
+        self.assertEqual(named_tasks - tasks, set())
+        self.assertTrue({"dev:setup", "artifacts:qdrant", "artifacts:bm25", "qa:unit"} <= named_tasks, named_tasks)
+        self.assertTrue({"scripts/tools/install-task.sh", "scripts/tools/install-helm.sh",
+                         "scripts/prepare_python.py", "scripts/fetch_bm25_weights.py"} <= named_scripts,
+                        named_scripts)
+        for script in named_scripts:
+            self.assertTrue((REPO / script).is_file(), script)
+        for tracked in ("scripts/tools/task-pin.txt", "scripts/tools/helm-pin.txt", "pyproject.toml", "images.txt",
+                        "requirements.dev.lock.txt", "locks/cp314-linux-x86_64.json", "charts/qdrant-1.19.2.tgz"):
+            self.assertTrue((REPO / tracked).is_file(), tracked)
+        self.assertIn('<a id="scope"></a>', (REPO / "docs/task-runner.md").read_text(encoding="utf-8"))
+
     def test_multi_family_selection_does_not_leak_eval_defaults(self):
         self.make_venv_fake()
         self.make_airgap_fixtures({"EMBED_MODE": "vllm"})
