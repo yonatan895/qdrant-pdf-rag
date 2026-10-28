@@ -831,3 +831,34 @@ def test_lane_paces_only_the_operator_lane_within_the_charts_agent_deadline():
     paced = next(s for s in job["steps"] if s.get("name", "").startswith("Open WebUI under a slow model"))
     assert "acceptance.sh operator paced" in paced["run"]
     assert paced["if"] == OPERATOR_IF and paced["shell"] == GATED
+
+
+def _forward_shell(tmp_path, kubectl_body, script):
+    """acceptance.sh's forward helpers under dash (CI's sh), with a fake kubectl."""
+    text = (DIR / "acceptance.sh").read_text()
+    helpers = text[text.index('PF_PIDS=""\n'):text.index("\nrun() {")]
+    fake = tmp_path / "kubectl"
+    fake.write_text("#!/bin/sh\n" + kubectl_body)
+    fake.chmod(0o755)
+    (tmp_path / "logs").mkdir()
+    prelude = (f'KUBECTL={fake}; KIND_NAME=t; STATE={tmp_path}\n'
+               'die() { echo "ERROR: $*" >&2; exit 1; }\n')
+    shell = shutil.which("dash") or "sh"
+    return subprocess.run([shell, "-c", prelude + helpers + "\n" + script], capture_output=True, text=True,
+                          check=False, timeout=30)
+
+
+def test_stopping_the_forwards_ends_kubectl_itself_so_the_next_phase_can_bind(tmp_path):
+    pids = tmp_path / "pids"
+    proc = _forward_shell(tmp_path, f'echo $$ >> {pids}\nexec sleep 300\n',
+                          "forward ns a 1 2; forward ns b 3 4; sleep 0.5; forwards_alive; stop_forwards")
+    assert proc.returncode == 0, proc.stderr
+    started = pids.read_text().split()
+    assert len(started) == 2
+    for pid in started:
+        assert not Path(f"/proc/{pid}").exists(), "a port-forward outlived stop_forwards"
+
+
+def test_a_forward_that_exits_is_reported_at_once(tmp_path):
+    proc = _forward_shell(tmp_path, "exit 1\n", "forward ns a 1 2; sleep 0.5; forwards_alive; echo unreachable")
+    assert proc.returncode != 0 and "a port-forward exited" in proc.stderr and "unreachable" not in proc.stdout

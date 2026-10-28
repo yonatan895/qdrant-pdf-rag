@@ -109,13 +109,24 @@ deploy() {
 }
 
 PF_PIDS=""
-stop_forwards() {
+stop_forwards() {  # end every forward and wait for it, so the next phase can bind the same ports
     for p in $PF_PIDS; do kill "$p" 2>/dev/null || true; done
+    for p in $PF_PIDS; do wait "$p" 2>/dev/null || true; done
 }
 
 forward() {  # forward NAMESPACE SERVICE LOCAL REMOTE
-    k -n "$1" port-forward --address 127.0.0.1 "svc/$2" "$3:$4" > "$STATE/logs/forward-$2.log" 2>&1 &
+    # kubectl itself, not the k() function: a backgrounded function is a subshell under dash, and
+    # killing it left kubectl running and holding the port, so a later phase's forward could not
+    # bind and the old one died with the router pod it pointed at (#1118, run 40772148925).
+    "$KUBECTL" --context "kind-$KIND_NAME" -n "$1" port-forward --address 127.0.0.1 "svc/$2" "$3:$4" \
+        > "$STATE/logs/forward-$2.log" 2>&1 &
     PF_PIDS="$PF_PIDS $!"
+}
+
+forwards_alive() {  # a forward that exited (port in use, no pod) is reported, not waited out
+    for p in $PF_PIDS; do
+        kill -0 "$p" 2>/dev/null || die "a port-forward exited; see $STATE/logs/forward-*.log"
+    done
 }
 
 run() {
@@ -125,6 +136,7 @@ run() {
     forward owui-idp dex "$DEX_PORT" "$DEX_PORT"
     i=0
     until $PYH health "$STATE" >/dev/null 2>&1; do
+        forwards_alive
         i=$((i + 1)); [ "$i" -lt 60 ] || { $PYH health "$STATE" || true; die "Open WebUI or the test IdP is not reachable through the port-forwards"; }
         sleep 2
     done
@@ -144,6 +156,7 @@ require_workspace() {
 wait_health() {
     i=0
     until $PYH health "$STATE" >/dev/null 2>&1; do
+        forwards_alive
         i=$((i + 1)); [ "$i" -lt 60 ] || { $PYH health "$STATE" || true; die "Open WebUI or the test IdP is not reachable through the port-forwards"; }
         sleep 2
     done
