@@ -228,8 +228,10 @@ tasks:
       (`tests/test_ha_cluster.py`, run via `task qa:ha`) is excluded so the
       three-container placement/fault lane is not paid on every sim run. A skip
       fails the run (missing or corrupt local weights fail before collection). Needs the prepared approved local Docker image and verified BM25
-      cache; no GPU or live gateway. The authorization tests need local Docker
-      even when QDRANT_SIM_URL supplies the other simulation server.
+      cache; no GPU or live gateway. The authorization tests and the real-nginx
+      proxy battery need local Docker even when QDRANT_SIM_URL supplies the other
+      simulation server; the battery also needs the images.txt nginx-unprivileged
+      digest prepared explicitly (`docker pull`); it never pulls and fails without it.
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - .venv/bin/python scripts/agent_doctor.py --profile sim --python .venv/bin/python
