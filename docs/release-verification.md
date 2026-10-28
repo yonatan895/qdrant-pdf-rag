@@ -21,7 +21,7 @@ initialize every result as `NOT RUN`.
 
 | Lane | Required real components and coverage |
 |---|---|
-| Required GitHub jobs | Fresh bootstrap of the published bundle, real application containers, registry, gateway/database and Kubernetes; deterministic computation and the gateway fault contracts (upstream, malformed, dimension, timeout, truncated stream, credentials) |
+| Required GitHub jobs | Fresh bootstrap of the published bundle, real application containers, registry, gateway/database and Kubernetes; deterministic computation and the gateway fault contracts (upstream, malformed, dimension, timeout, truncated stream, credentials); Open WebUI on through the operator `airgap:pipeline` (`kind-openwebui-operator`) |
 | Disposable local Kind | The same product images and pipeline, both real GPU models behind the authenticated TLS gateway, Qdrant, ingest, OpenObserve; citations, follow-up chat, all streams, lifecycle and recovery |
 
 **Not checked before transfer.** OpenShift-specific behavior (`restricted-v2`
@@ -491,7 +491,11 @@ and the ingest Job strategic merge patch `$KIND_STATE/ingest-sizing.json`:
 {"spec":{"template":{"spec":{"containers":[{"name":"ingest","resources":{"requests":{"cpu":"500m","memory":"1Gi"},"limits":{"cpu":"2","memory":"2Gi"}}}]}}}}
 ```
 
-Create the env file. No key values go in it:
+Create the env file. No key values go in it. This lab has no IdP, so it opts
+out of Open WebUI (`kind-openwebui-operator` above proves it with stand-in
+models only; real-model Open WebUI is not yet in this lane), selects the
+one-node 1/1/1 collection policy, and pins a non-root id for the bundled
+OpenObserve (OpenShift assigns one):
 
 ```sh
 cat > "$KIND_STATE/airgap.env" <<EOF
@@ -518,6 +522,11 @@ QDRANT_EXTRA_VALUES=$KIND_STATE/qdrant-sizing.yaml
 INGEST_EXTRA_PATCH=$KIND_STATE/ingest-sizing.json
 INSECURE_REGISTRY=false
 SKOPEO_ARGS='--dest-cert-dir /certs'
+OPENWEBUI_ENABLED=false
+QDRANT_SHARD_NUMBER=1
+QDRANT_REPLICATION_FACTOR=1
+QDRANT_WRITE_CONSISTENCY_FACTOR=1
+OPENOBSERVE_RUN_AS_ID=10001
 EOF
 export AIRGAP_ENV="$KIND_STATE/airgap.env"
 export SNEAKERNET_TRUSTED_PUB=/absolute/path/to/independently-trusted/signing.pub
@@ -525,11 +534,14 @@ export SNEAKERNET_TRUSTED_PUB=/absolute/path/to/independently-trusted/signing.pu
 
 Run pipeline commands in a clean operator shell: environment values override
 `AIRGAP_ENV`, and the host gateway handoff sets localhost URLs and plaintext keys
-that must not override the pod URLs and Secret references:
+that must not override the pod URLs and Secret references. The two sizing
+overrides above are CI-rehearsal inputs, accepted only with `CI_REHEARSAL=1` in
+the process environment (this disposable lab only, never the air gap):
 
 ```sh
 unset LLM_BASE_URL EMBED_BASE_URL RERANK_BASE_URL CONTEXT_LLM_BASE_URL
 unset LLM_API_KEY EMBED_API_KEY RERANK_API_KEY CONTEXT_LLM_API_KEY
+export CI_REHEARSAL=1
 sh scripts/tools/run-task.sh airgap:validate
 sh scripts/tools/run-task.sh airgap:load
 ```
