@@ -23,6 +23,8 @@
   const REASONING_KEY = "mainframe_rag_reasoning_effort";
   const MAX_SAVED_SESSIONS = 30;
   const STORE_LOCK = "mainframe-rag-store";
+  const REVISION_MARK = "mainframe-rag-store-revision:";
+  const STALE_WAIT_MS = 3000;
   const sharedLocks = navigator.locks && window.isSecureContext;
   const PROVISIONAL_LABEL = "Provisional — still generating, not verified";
   const ERROR_TEXT = "The reasoning agent could not complete this request. Check the agent logs and retry.";
@@ -45,19 +47,22 @@
     return { sessions: {}, active: null };
   }
 
-  function loadStore() {
-    if (!storageOk) return memory;
+  /* The persisted store, or null when the key is absent or unreadable. */
+  function readStored() {
     try {
       const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (!raw) return emptyStore();
+      if (!raw) return null;
       const parsed = JSON.parse(raw);
-      if (!parsed || typeof parsed !== "object" || typeof parsed.sessions !== "object") {
-        return emptyStore();
-      }
+      if (!parsed || typeof parsed !== "object" || typeof parsed.sessions !== "object") return null;
       return parsed;
     } catch (err) {
-      return emptyStore();
+      return null;
     }
+  }
+
+  function loadStore() {
+    if (!storageOk) return memory;
+    return readStored() || emptyStore();
   }
 
   function saveStore(store) {
@@ -100,18 +105,94 @@
     return id;
   }
 
+  /* Store revision. Each locked write bumps `store.revision` (absent = 0).
+   * Chrome refreshes another tab's localStorage copy asynchronously, so the
+   * stored revision can be as stale as the state. The writer therefore also
+   * holds a lock named after its revision: the lock manager orders that name
+   * before the store lock's release, so the next holder sees the newest
+   * revision there and re-reads until its copy catches up. A copy still
+   * behind after STALE_WAIT_MS fails closed: no write, a re-render and a
+   * fixed notice. An absent store (site data cleared) proceeds. */
+  let knownRevision = 0;
+  let releaseMark = null;
+  let staleNoticeShown = false;
+  const STALE_TEXT = "Another tab changed your saved incidents; nothing was changed here. Try again.";
+  const UNSAVED_TEXT =
+    "This answer was not saved because another tab changed your saved incidents. " +
+    "Copy it now if you need it; it disappears on your next change or when you leave this incident.";
+  class StaleStoreError extends Error {}
+
+  function revisionOf(store) {
+    return Number.isSafeInteger(store.revision) && store.revision > 0 ? store.revision : 0;
+  }
+
+  function markRevision(revision) {
+    return new Promise((marked) => {
+      navigator.locks.request(REVISION_MARK + revision, { mode: "shared" }, () => new Promise((release) => {
+        if (releaseMark) releaseMark();
+        releaseMark = release;
+        marked();
+      }));
+    });
+  }
+
+  async function freshStore() {
+    let marks;
+    try {
+      marks = (await navigator.locks.query()).held
+        .filter((lock) => lock.name.startsWith(REVISION_MARK))
+        .map((lock) => Number(lock.name.slice(REVISION_MARK.length)) || 0);
+    } catch (err) {
+      throw new StaleStoreError();
+    }
+    const want = Math.max(knownRevision, ...marks);
+    const deadline = Date.now() + STALE_WAIT_MS;
+    let store = loadStore();
+    while (storageOk && revisionOf(store) < want && Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 10));
+      store = loadStore();
+    }
+    if (storageOk && revisionOf(store) < want && readStored()) throw new StaleStoreError();
+    return { store, want };
+  }
+
+  /* Callers whose follow-up must not stop on a refused write. */
+  function ignoreStale(err) {
+    if (!(err instanceof StaleStoreError)) throw err;
+  }
+
   /* The origin-wide Web Lock encloses both the fresh read and the write.
    * A tab without Web Locks uses its own memory store, so it cannot race a
    * shared read-modify-write. Every incident mutation uses this owner. */
   async function mutate(fn) {
-    const apply = () => {
-      const store = loadStore();
+    const apply = async () => {
+      const { store, want } = sharedLocks ? await freshStore() : { store: loadStore(), want: 0 };
       const before = JSON.stringify(store);
       const result = fn(store);
-      if (JSON.stringify(store) !== before) saveStore(store);
+      if (JSON.stringify(store) !== before) {
+        store.revision = Math.max(revisionOf(store), want) + 1;
+        saveStore(store);
+        if (sharedLocks && storageOk) await markRevision(store.revision);
+        unsaved = null;
+        if (staleNoticeShown) {
+          staleNoticeShown = false;
+          composerNotice("");
+        }
+      }
+      knownRevision = Math.max(knownRevision, revisionOf(store));
       return result;
     };
-    return sharedLocks ? navigator.locks.request(STORE_LOCK, apply) : apply();
+    try {
+      return await (sharedLocks ? navigator.locks.request(STORE_LOCK, apply) : apply());
+    } catch (err) {
+      if (err instanceof StaleStoreError) {
+        renderMessages();
+        renderSessions();
+        staleNoticeShown = true;
+        composerNotice(STALE_TEXT);
+      }
+      throw err;
+    }
   }
 
   /* Resolve this tab's current incident id inside `store`. `claim` also
@@ -1065,6 +1146,8 @@
    * (switching away and back, a cross-tab refresh) keeps the stream visible
    * instead of orphaning it. */
   let inflight = null;
+  // A finished answer whose save was refused (stale copy): shown, never stored.
+  let unsaved = null;
   let renaming = false;
 
   function orphanNote() {
@@ -1097,9 +1180,11 @@
     }
     session.turns.forEach((turn) => messagesEl.appendChild(renderTurn(turn)));
     const streamingHere = inflight && inflight.sid === current.id;
+    const unsavedHere = unsaved && unsaved.sid === current.id;
     const last = session.turns[session.turns.length - 1];
-    if (last && last.role === "user" && !streamingHere) messagesEl.appendChild(orphanNote());
+    if (last && last.role === "user" && !streamingHere && !unsavedHere) messagesEl.appendChild(orphanNote());
     if (streamingHere) messagesEl.appendChild(inflight.article);
+    if (unsavedHere) messagesEl.appendChild(unsaved.article);
     stick = true;
     messagesEl.scrollIntoView({ block: "end" });
     pruneDrafts(loadStore());
@@ -1171,6 +1256,7 @@
   }
 
   async function openSession(id) {
+    if (id !== currentId) unsaved = null;
     currentId = id;
     await mutate((store) => {
       if (store.sessions[id]) store.active = id;
@@ -1483,13 +1569,23 @@
     // may have created, renamed, deleted or switched incidents (here or in
     // another tab) while this turn streamed. A deleted incident stays
     // deleted: the finished turn is dropped, never resurrected.
-    const kept = await mutate((store) => {
-      const live = store.sessions[sid];
-      if (!live) return false;
-      live.turns.push(assistantTurn);
-      live.updated_at = Date.now();
-      return true;
-    });
+    let kept;
+    try {
+      kept = await mutate((store) => {
+        const live = store.sessions[sid];
+        if (!live) return false;
+        live.turns.push(assistantTurn);
+        live.updated_at = Date.now();
+        return true;
+      });
+    } catch (err) {
+      ignoreStale(err);
+      unsaved = { sid: sid, article: article };
+      article.setAttribute("data-state", "unsaved");
+      renderMessages();
+      composerNotice(UNSAVED_TEXT);
+      return;
+    }
     if (!kept) {
       article.remove();
       announce("The incident was deleted while the answer was generating; the answer was discarded.");
@@ -1740,7 +1836,7 @@
       formEl.removeAttribute("hx-swap");
       formEl.addEventListener("submit", onSubmit);
     }
-    await mutate((store) => resolveSession(store, true));
+    await mutate((store) => resolveSession(store, true)).catch(ignoreStale);
     syncStorageNotice();
     renderMessages();
     renderSessions();
@@ -1753,7 +1849,7 @@
     window.addEventListener("storage", async (event) => {
       if (event.key !== null && event.key !== STORAGE_KEY) return;
       if (renaming) return;
-      await mutate((store) => resolveSession(store));
+      await mutate((store) => resolveSession(store)).catch(ignoreStale);
       renderMessages();
       renderSessions();
     });

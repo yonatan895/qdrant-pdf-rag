@@ -1090,6 +1090,247 @@ def test_web_locks_serialize_cross_tab_writes_against_the_stream(console, page, 
     wait_state(page, "complete", 2 if action == "rename" else 1)
 
 
+_STALE_VIEW = """
+const real = Storage.prototype.getItem;
+const frozen = real.call(localStorage, 'mainframe_rag_sessions');
+window.__realStore = () => JSON.parse(real.call(localStorage, 'mainframe_rag_sessions'));
+window.__stale = true;
+Storage.prototype.getItem = function(key) {
+  return window.__stale && key === 'mainframe_rag_sessions' ? frozen : real.call(this, key);
+};
+"""
+# Every Date.now() call jumps 4 s, so a bounded wait ends at its next check.
+_EXPIRE_WAITS = "const now = Date.now; let skew = 0; Date.now = () => now() + (skew += 4000); window.__now = now;"
+_MARKS = """
+const done = arguments[arguments.length - 1], without = arguments[0], until = Date.now() + 5000;
+const poll = () => navigator.locks.query().then(s => {
+  const marks = s.held.map(l => l.name).filter(n => n.startsWith('mainframe-rag-store-revision:')).sort();
+  if (without && marks.includes(without) && Date.now() < until) setTimeout(poll, 20); else done(marks);
+});
+poll();
+"""
+STALE_TEXT = "Another tab changed your saved incidents; nothing was changed here. Try again."
+
+
+def _legacy_store_in_two_tabs(console, page) -> tuple[str, str]:
+    """Both tabs show a store written without a revision (revision 0)."""
+    legacy = {
+        "sessions": {
+            "inc-kept": {"title": "Kept incident", "updated_at": 2, "turns": []},
+            "inc-doomed": {"title": "Doomed incident", "updated_at": 1, "turns": []},
+        },
+        "active": "inc-kept",
+    }
+    page.eval("localStorage.setItem(arguments[0], arguments[1])", STORE_KEY, json.dumps(legacy))
+    page.reload()
+    page.wait("return document.querySelectorAll('.row').length==2", what="tab A restores the legacy store")
+    assert "revision" not in store(page)
+    tab_a = page.handle()
+    tab_b = page.new_tab()
+    page.switch(tab_b)
+    page.get(console.url)
+    page.wait("return document.querySelectorAll('.row').length==2", what="tab B restores the legacy store")
+    return tab_a, tab_b
+
+
+def _b_deletes_doomed(page) -> dict:
+    page.eval("document.querySelector('[data-session-id=\"inc-doomed\"] .del').click()")
+    page.wait("return document.querySelectorAll('.row').length==1", what="tab B deletes")
+    deleted = store(page)
+    assert deleted["revision"] == 1, "a store without a revision is revision 0"
+    assert set(deleted["sessions"]) == {"inc-kept"}
+    return deleted
+
+
+def _composer_notice(b: Browser) -> str:
+    return b.eval("var n=document.getElementById('composer-notice');return n.hidden?'':n.textContent")
+
+
+def test_a_stale_tab_view_waits_for_the_newest_revision_before_writing(console, page):
+    """Chrome refreshes another tab's localStorage copy asynchronously. Tab A's
+    view is frozen at the pre-delete store while tab B deletes an incident
+    under the lock; A's next write must wait for the newer revision and apply
+    to it, never write back the deleted incident."""
+    tab_a, tab_b = _legacy_store_in_two_tabs(console, page)
+    page.switch(tab_a)
+    page.eval(_STALE_VIEW)
+    page.switch(tab_b)
+    deleted = _b_deletes_doomed(page)
+
+    page.switch(tab_a)
+    page.eval("document.getElementById('new-session-btn').click()")
+    page.eval_async("setTimeout(arguments[arguments.length-1], 500)")
+    assert page.eval("return window.__realStore()") == deleted, "A wrote from its stale view"
+    page.eval("window.__stale = false")
+    page.wait("return window.__realStore().revision > arguments[0]", deleted["revision"], what="A's write")
+    data = store(page)
+    assert "inc-doomed" not in data["sessions"], "the deleted incident came back"
+    assert sorted(s["title"] for s in data["sessions"].values()) == ["Kept incident", "New Incident"]
+    send(page, "Next ordinary question")
+    wait_state(page, "complete")
+    assert store(page)["revision"] > data["revision"]
+    assert _composer_notice(page) == ""
+
+
+@pytest.mark.parametrize("cause", ["copy_still_stale", "lock_query_fails"])
+def test_an_unverifiable_copy_fails_closed_with_a_notice_and_the_next_action_works(console, page, cause):
+    """A copy still behind the newest revision mark after the bounded wait, or
+    a failing navigator.locks.query(), refuses the write: the other tab's
+    delete survives, a fixed notice is shown, and nothing crashes."""
+    tab_a, tab_b = _legacy_store_in_two_tabs(console, page)
+    page.switch(tab_a)
+    if cause == "copy_still_stale":
+        page.eval(_STALE_VIEW)
+        page.eval(_EXPIRE_WAITS)
+    else:
+        page.eval("window.__realStore = () => JSON.parse(localStorage.getItem('mainframe_rag_sessions'));"
+                  "navigator.locks.query = () => Promise.reject(new Error('unavailable'));")
+    page.switch(tab_b)
+    deleted = _b_deletes_doomed(page)
+
+    page.switch(tab_a)
+    page.eval("document.getElementById('new-session-btn').click()")
+    page.wait("return document.getElementById('composer-notice').textContent===arguments[0]", STALE_TEXT,
+              what="the fixed stale-copy notice")
+    page.eval_async("setTimeout(arguments[arguments.length-1], 300)")
+    assert page.eval("return window.__realStore()") == deleted, "a refused write reached storage"
+    assert _composer_notice(page) == STALE_TEXT
+    assert page.eval("return !!document.getElementById('message') && !!document.querySelector('.row')")
+
+    if cause == "copy_still_stale":
+        page.eval("Date.now = window.__now; window.__stale = false")
+    else:
+        page.eval("delete navigator.locks.query")
+    page.eval("document.getElementById('new-session-btn').click()")
+    page.wait("return window.__realStore().revision > arguments[0]", deleted["revision"], what="the next write")
+    data = store(page)
+    assert "inc-doomed" not in data["sessions"], "the deleted incident came back"
+    assert sorted(s["title"] for s in data["sessions"].values()) == ["Kept incident", "New Incident"]
+    page.wait("return document.getElementById('composer-notice').hidden", what="the notice clears")
+    send(page, "Next ordinary question")
+    wait_state(page, "complete")
+    assert store(page)["revision"] > data["revision"]
+
+
+UNSAVED_TEXT = (
+    "This answer was not saved because another tab changed your saved incidents. "
+    "Copy it now if you need it; it disappears on your next change or when you leave this incident."
+)
+
+
+@pytest.mark.parametrize("next_action", ["send", "switch"])
+def test_a_refused_completion_stays_visible_unsaved_until_the_next_change(console, page, next_action):
+    """The completion save is refused (stale copy): the finished answer stays
+    on screen as `unsaved` with its own notice and a working Copy, is never
+    stored, survives a re-render, and goes on the next send or incident switch."""
+    tab_a = page.handle()
+    console.llm.queue(("token", "Unsaved answer text. "), ("gate", "unsaved"), ("done",))
+    send(page, "Question whose answer is refused")
+    page.wait("return !!document.querySelector('[data-state=streaming] .md p')")
+    tab_b = page.new_tab()
+    page.switch(tab_b)
+    page.get(console.url)
+    page.wait("return document.querySelectorAll('.turn-user').length==1", what="tab B restores")
+
+    page.switch(tab_a)
+    page.eval(_STALE_VIEW)
+    page.eval(_EXPIRE_WAITS)
+    page.eval(
+        "window.__unhandled = []; window.addEventListener('unhandledrejection', e => window.__unhandled.push(String(e.reason)));"
+        "window.__copied = null; Object.defineProperty(navigator, 'clipboard',"
+        " {value: {writeText: t => { window.__copied = t; return Promise.resolve(); }}});"
+    )
+    page.switch(tab_b)
+    page.click("#new-session-btn")
+    page.wait("return document.querySelectorAll('.row').length==2", what="tab B writes")
+
+    page.switch(tab_a)
+    console.llm.release("unsaved")
+    page.wait("return !!document.querySelector('.turn-assistant[data-state=unsaved]')", what="the unsaved answer")
+    page.wait("return document.getElementById('composer-notice').textContent===arguments[0]", UNSAVED_TEXT)
+    assert "Unsaved answer text" not in json.dumps(page.eval("return window.__realStore()"))
+    page.eval("Date.now = window.__now; window.__stale = false")
+    assert "Unsaved answer text" not in json.dumps(store(page)), "a refused completion reached storage"
+    page.eval("document.querySelector('.turn-assistant[data-state=unsaved] .copy-turn').click()")
+    page.wait("return document.querySelector('.turn-assistant[data-state=unsaved] .copy-turn').textContent=='Copied'")
+    assert "Unsaved answer text" in page.eval("return window.__copied")
+
+    page.switch(tab_b)  # a storage-event re-render in A keeps the unsaved answer
+    page.eval("document.querySelector('.row .ren').click()")
+    page.wait("return !!document.querySelector('input.rename')")
+    page.eval("document.querySelector('input.rename').value='Renamed by B'")
+    page.keys("ENTER")
+    page.switch(tab_a)
+    page.wait("return document.body.innerText.includes('Renamed by B')", what="A re-renders after B's rename")
+    assert page.eval("return document.querySelectorAll('.turn-assistant[data-state=unsaved]').length") == 1
+    assert page.eval("return document.querySelectorAll('.orphan-note').length") == 0, "shown as unanswered"
+
+    if next_action == "send":
+        send(page, "Next ordinary question")
+        wait_state(page, "complete")
+        users = [t["content"] for s in store(page)["sessions"].values() for t in s["turns"] if t["role"] == "user"]
+        assert users[-2:] == ["Question whose answer is refused", "Next ordinary question"]
+    else:
+        page.eval("document.querySelector('.row:not(.active) .open').click()")
+        page.wait("return document.querySelectorAll('.turn').length==0", what="the other incident opens")
+        page.eval("document.querySelector('.row:not(.active) .open').click()")
+        page.wait("return document.querySelectorAll('.turn-user').length==1", what="back to the first incident")
+    assert page.eval("return document.querySelectorAll('[data-state=unsaved]').length") == 0
+    assert _composer_notice(page) == ""
+    assert "Unsaved answer text" not in json.dumps(store(page))
+    assert page.eval("return window.__unhandled") == []
+
+
+def test_an_absent_store_after_the_wait_is_written_not_refused(console, page):
+    """Site data cleared in another tab leaves the key absent while that tab
+    still holds the newest mark: the next write proceeds after the wait."""
+    tab_a = page.handle()
+    send(page, "Before the clear")
+    wait_state(page, "complete")
+    tab_b = page.new_tab()
+    page.switch(tab_b)
+    page.get(console.url)
+    page.wait("return document.querySelectorAll('#messages .turn').length==2", what="tab B restores")
+    page.click("#new-session-btn")
+    page.wait("return document.querySelectorAll('.row').length==2", what="tab B writes and holds its mark")
+    newest = store(page)["revision"]
+
+    page.switch(tab_a)
+    page.eval(_EXPIRE_WAITS)
+    page.switch(tab_b)
+    page.eval("localStorage.clear()")
+    page.switch(tab_a)
+    page.wait("var r=localStorage.getItem(arguments[0]);return !!r && JSON.parse(r).revision > arguments[1]",
+              STORE_KEY, newest, what="A writes over the absent store")
+    page.eval("Date.now = window.__now")
+    assert "Before the clear" not in json.dumps(store(page))
+    assert _composer_notice(page) == ""
+    send(page, "After the clear")
+    wait_state(page, "complete")
+    users = [t["content"] for s in store(page)["sessions"].values() for t in s["turns"] if t["role"] == "user"]
+    assert users == ["After the clear"]
+
+
+def test_a_revision_mark_is_released_when_its_tab_closes(console, page):
+    tab_a = page.handle()
+    before = page.eval_async(_MARKS)
+    tab_b = page.new_tab()
+    page.switch(tab_b)
+    page.get(console.url)
+    page.wait("return !!document.querySelector('#messages .empty-state')")
+    page.click("#new-session-btn")
+    page.wait("return document.querySelectorAll('.row').length==2", what="tab B writes")
+    page.switch(tab_a)
+    with_b = page.eval_async(_MARKS)
+    (b_mark,) = set(with_b) - set(before)
+    page.switch(tab_b)
+    page.close_tab()
+    page.switch(tab_a)
+    after = page.eval_async(_MARKS, b_mark)
+    assert b_mark not in after
+    assert len(before) == len(after) == 1, "each open tab that wrote holds exactly one mark"
+
+
 def test_missing_web_locks_uses_visible_tab_memory_fallback(console, browser):
     browser.init_script("Object.defineProperty(navigator, 'locks', {value: undefined});")
     browser.get(console.url)

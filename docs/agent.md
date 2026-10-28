@@ -244,16 +244,12 @@ finished OpenObserve roots, exact JSON log joins and the next ordinary request.
 
 ### Console browser contract: retention and accessibility (#372)
 
-The console's conversation state is browser-owned (ADR-0004); this section is
-the contract owner for what that state is, how long it lives and how it is
-cleared. Executed by `tests/console_browser_contracts.py` (real Chrome, shipped
-`console.js`, scripted gateway-shaped LLM; `pytest -m browser`, skips without
-an offline Chrome for Testing + matching chromedriver via
-`CONSOLE_BROWSER_CHROME`/`CONSOLE_BROWSER_CHROMEDRIVER` or the selenium-manager
-cache; nothing is downloaded; CI: `browser.yml`). Hermetic structure pins live in
-`tests/test_webui.py`.
+The console's conversation state is browser-owned (ADR-0004); this section owns
+what it is, how long it lives and how it is cleared. Executed by `tests/console_browser_contracts.py` (real Chrome, shipped
+`console.js`; `pytest -m browser`; its docstring owns runtime discovery and
+skips; CI: `browser.yml`). Hermetic structure pins live in `tests/test_webui.py`.
 
-Retention policy as shipped (no default changed by #372):
+Retention policy as shipped:
 
 - **Where:** only `localStorage` key `mainframe_rag_sessions` (plus the
   cosmetic theme/reasoning keys). Turns include operator text, attached incident
@@ -265,19 +261,16 @@ Retention policy as shipped (no default changed by #372):
   every finalized console answer, the question and answer text** (with
   citations and telemetry) as a quality record in the protected feedback
   store until purged under its configured retention window
-  (`FEEDBACK_RETENTION_DAYS`, default 180 days; an explicit purge,
-  scheduled in-process by the feedback service, #804), and a sent rating (rating, reason codes, comment) joins
-  it. Clearing the
-  browser's incidents does not remove those records; retention and purge are
-  the store's (ADR-0005). See [Answer feedback](#answer-feedback).
+  (`FEEDBACK_RETENTION_DAYS`, default 180 days, #804), and a sent rating
+  (rating, reason codes, comment) joins it. Clearing the browser does not remove them (ADR-0005; see
+  [Answer feedback](#answer-feedback)).
 - **How long:** until the operator clears it, capped at 30 incidents (oldest
   idle incident evicted first; the incidents open in this tab are protected).
-  There is no time-based expiry, no logout/user-switch clearing and no account
-  isolation: the key is global per browser origin profile. A cache-control
-  header does not change that.
+  No expiry or account isolation: the key is per browser origin profile,
+  regardless of cache-control.
 - **How cleared:** per incident (delete) or all incidents (`Clear all saved
   incidents`, two-step confirm; other tabs follow through the `storage` event;
-  an in-flight answer for an erased incident is discarded, never resurrected).
+  in-flight answers are discarded).
   Browser "clear site data" also clears everything.
 - **Storage unavailable/full or shared writes unsupported:** the console keeps
   the conversation in memory for the tab and shows a persistent notice that it
@@ -286,21 +279,26 @@ Retention policy as shipped (no default changed by #372):
 - **Export:** operator-initiated Markdown download of the open incident; it
   leaves browser control and carries a handling banner. Incomplete turns export
   with their non-accepted verification state.
-- **Open decisions (site owner, with #373):** time-based expiry, clearing on
-  logout/user switch, and per-user keys require an authenticated identity the
-  console does not have and a dedicated approved concern; they are not
-  implemented here.
+- **Open decisions (site owner, with #373):** time-based expiry, logout/user-switch
+  clearing and per-user keys need an authenticated identity and a dedicated
+  approved concern.
 
 State contract: one origin-wide Web Lock encloses each persisted read/modify/write,
-including rename, delete, new incident and clear-all. Reads used to render do
-not write shared state. A separate incident lock is held from saving the user
-turn through saving its assistant result. A second tab sending to that incident
-gets a visible refusal and keeps its unsent question; it can send after the
-first turn finishes. Other incidents remain usable. Completion reads the latest
-store under the write lock, preserves renames and discards deleted incidents.
-Barrier-controlled browser tests exercise both contenders observing the same
-version before mutation and prove their locked writes serialize. A
-streaming turn is labelled provisional until the final frame; failed, stopped or
+including rename, delete, new incident and clear-all. Render reads never write.
+An incident lock is held from saving the user turn through its assistant
+result; a second tab sending there is visibly refused, keeps its question, and
+can send afterwards. Other incidents remain usable. Completion
+re-reads under the write lock, preserving renames and discarding deleted
+incidents. Chrome updates other tabs' copies late, so each write bumps a store
+revision (absent: 0) and holds a lock naming it; the next holder waits up to
+3 s for it. A copy still behind is not written; the tab re-renders with a fixed
+retry notice. A refused answer save stays visible, unsaved, with its own notice
+until the next change or switch. An absent store (site data cleared) is
+written. Accepted gap: a tab closed milliseconds after writing drops its lock
+before other copies catch up. Browser tests prove contenders read one version
+and serialize locked writes; a frozen copy
+waits, refuses, or writes an absent store. A streaming turn is
+labelled provisional until the final frame; failed, stopped or
 EOF-without-final output is stored and restored as `generation_incomplete`, is
 qualified when reused as model context, and an unanswered question is shown as
 such after reload.
