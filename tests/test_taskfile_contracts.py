@@ -487,11 +487,44 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("qa:check", extra_env=self.recorder_env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         staged = [c["argv"] for c in self.calls() if c["argv"][:1] == ["-m"]]
+        scripts = ["scripts/eval_retrieval.py", "scripts/review_tooling.py",
+                   "scripts/ci_evidence.py", "scripts/acceptance_evidence.py"]
         self.assertEqual(staged, [
-            ["-m", "ruff", "check", "src", "tests"],
+            ["-m", "ruff", "check", "src", "tests", *scripts],
             ["-m", "mypy", "src"],
+            ["-m", "mypy", "--follow-imports=silent", *scripts],
             ["-m", "pytest", "tests", "-v"],
         ])
+
+    @staticmethod
+    def ci_lint_commands() -> list[list[str]]:
+        """The ruff/mypy argv of CI's lint_and_types lane, read from ci.yml itself."""
+        text = (REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        step = re.search(r"--lane lint_and_types .*? -- bash -e -c '\n(.*?)\n\s*'\n", text, re.DOTALL)
+        assert step, "ci.yml lint_and_types evidence step not found"
+        commands = [line.split() for line in step.group(1).splitlines() if line.strip()]
+        assert commands and all(argv[0] in ("ruff", "mypy") for argv in commands), commands
+        return commands
+
+    def test_lint_and_typecheck_cover_exactly_ci_lint_scope(self):
+        # C4 (#1118): a local green must mean CI's lint lane is green too. The
+        # expectation is CI's own command list, so a scope change on either
+        # side without the other fails here.
+        self.make_recorder(self.root / ".venv/bin/python")
+        local = []
+        for task_name in ("qa:lint", "qa:typecheck"):
+            self.reset_log()
+            proc = self.run_task(task_name, extra_env=self.recorder_env)
+            self.assertEqual(proc.returncode, 0, proc.stdout)
+            local += [c["argv"][1:] for c in self.calls() if c["argv"][:1] == ["-m"]]
+        self.assertEqual(local, self.ci_lint_commands())
+        # The scope list is Taskfile-level: neither a CLI assignment nor the
+        # environment can narrow it into a false green.
+        self.reset_log()
+        proc = self.run_task("qa:lint", "CI_LINT_SCRIPTS=", extra_env={
+            **self.recorder_env, "CI_LINT_SCRIPTS": "scripts/none.py"})
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual([c["argv"][1:] for c in self.calls()], [self.ci_lint_commands()[0]])
 
     def test_lint_failure_stops_check_before_typecheck(self):
         self.make_recorder(self.root / ".venv/bin/python", fail_on=("ruff",))
