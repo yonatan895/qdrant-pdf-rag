@@ -24,7 +24,7 @@ GITHUB = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
 REQUIRED_JOBS = {'hygiene', 'lint', 'test', 'hazards', 'sim', 'gate-l1'}
 # Integration-marked files that drive a local Docker daemon; the offline GitLab
 # runner only has the mirrored Qdrant service, so the sim lane omits them.
-DOCKER_ONLY_SIM_FILES = {'tests/test_qdrant_auth.py'}
+DOCKER_ONLY_SIM_FILES = {'tests/test_qdrant_auth.py', 'tests/test_openwebui_proxy_nginx.py'}
 # Selection-narrowing or evidence-changing pytest options: the unit lane must
 # run the complete eligible suite exactly as pyproject defines it.
 NARROWING_FLAGS = ('-k', '-m', '-o', '-p', '--ignore', '--ignore-glob', '--deselect', '--lf',
