@@ -159,8 +159,17 @@ else
     }
     # Flag first, then check after assigning each $!: cancellation during
     # child setup must not lose ownership of a just-created process.
-    trap 'cancelled=143' TERM
-    trap 'cancelled=130' INT
+    # The handler also stops the owned observers: a signal whose trap runs
+    # after the last check but before `wait` would otherwise block until the
+    # Job wait ends (up to INGEST_TIMEOUT), losing the operator's Ctrl-C.
+    interrupt_ingest_observers() {
+        for observer_pid in "$WAIT_PID" "$LOGS_PID"; do
+            [ -n "$observer_pid" ] || continue
+            kill "$observer_pid" 2>/dev/null || true
+        done
+    }
+    trap 'cancelled=143; interrupt_ingest_observers' TERM
+    trap 'cancelled=130; interrupt_ingest_observers' INT
     trap stop_ingest_observers 0
     # Follow each pod once, including a replacement after a Job retry. The
     # Job wait remains authoritative; this is only a log overlay.
@@ -170,7 +179,9 @@ else
         stopping=false
         stream_pid=""
         pod_rows_file=""
-        trap 'stopping=true' TERM INT
+        # Same lost-wakeup guard as the parent: a stop that lands between a
+        # check and `wait` also ends the blocking stream.
+        trap 'stopping=true; if [ -n "$stream_pid" ]; then kill "$stream_pid" 2>/dev/null || true; fi' TERM INT
         trap 'trap "" TERM INT; if [ -n "$stream_pid" ]; then kill "$stream_pid" 2>/dev/null || true; wait "$stream_pid" 2>/dev/null || true; fi; if [ -n "$pod_rows_file" ]; then rm -f "$pod_rows_file"; fi' 0
         pod_rows_file=$(mktemp)
         followed_pods=" "

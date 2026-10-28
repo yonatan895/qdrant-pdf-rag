@@ -27,7 +27,8 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 if [ -z "$ARCHIVE" ]; then
     ARCHIVE="$TMP/oras.tgz"
-    curl -fsSL --retry 3 -o "$ARCHIVE" "$origin"
+    # Bounded transport retries with backoff; a checksum mismatch below is fatal.
+    curl -fsSL --retry 3 --retry-all-errors -o "$ARCHIVE" "$origin"
 fi
 observed=$(sha256sum "$ARCHIVE")
 [ "${observed%% *}" = "$archive_sha" ] || fail 'archive checksum mismatch'

@@ -449,7 +449,7 @@ jobs:
       - name: Install checksum-pinned Helm
         run: |
           export PATH="/usr/local/bin:$PATH"
-          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          curl -fsSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
           echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/helm-unpack"
           tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
@@ -462,16 +462,40 @@ jobs:
           KUBECTL_VERSION=v1.33.12
           # sha256 recorded in-repo (AGENTS.md §6): dl.k8s.io checksum file.
           KUBECTL_SHA256=fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
-          curl -fsSL -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          curl -fsSL --retry 3 --retry-all-errors -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
           echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum -c -
           sudo install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl
           /usr/local/bin/kubectl version --client=true
 
       - name: Download sneakernet bundle (this is what the operator receives)
+        continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0 (verified via API: v4 tag; fetches nothing at runtime — artifact bytes only)
         with:
           name: sneakernet-bundle-${{ env.SHA }}
           path: gapbox/
+      - name: Verify the bundle arrived (bounded re-download)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_ARTIFACT: sneakernet-bundle-${{ env.SHA }}
+        run: |
+          # download-artifact has gone green with no file (3 of about 450 Kind
+          # lane runs, #1118). Only absent files are downloaded again; present
+          # files are checksum-verified here and a mismatch is fatal.
+          for attempt in 1 2 3; do
+            if [ -s "gapbox/qdrant-pdf-rag-${SHA}.tar" ] && [ -s "gapbox/qdrant-pdf-rag-${SHA}.tar.sha256" ]; then
+              (cd gapbox && sha256sum -c "qdrant-pdf-rag-${SHA}.tar.sha256")
+              echo "sneakernet bundle verified after download attempt $attempt"
+              exit 0
+            fi
+            [ "$attempt" -lt 3 ] || break
+            echo "::warning::sneakernet bundle missing after download attempt $attempt; downloading it again"
+            rm -rf gapbox
+            sleep $((attempt * 15))
+            timeout 1200 gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+              --name "$BUNDLE_ARTIFACT" --dir gapbox || true
+          done
+          echo "::error::sneakernet bundle missing after 3 download attempts"
+          exit 1
 
       - name: Black-box handoff (verify, unpack, bootstrap, runbook)
         env:
@@ -586,7 +610,7 @@ jobs:
       - name: Install checksum-pinned Helm
         run: |
           export PATH="/usr/local/bin:$PATH"
-          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          curl -fsSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
           echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/helm-unpack"
           tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
@@ -599,7 +623,7 @@ jobs:
           KUBECTL_VERSION=v1.33.12
           # sha256 recorded in-repo (AGENTS.md §6): dl.k8s.io checksum file.
           KUBECTL_SHA256=fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
-          curl -fsSL -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          curl -fsSL --retry 3 --retry-all-errors -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
           echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum -c -
           sudo install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl
           /usr/local/bin/kubectl version --client=true
@@ -617,16 +641,40 @@ jobs:
           KIND_VERSION=v0.32.0
           # sha256 recorded in-repo (AGENTS.md §6): kind-linux-amd64 release asset digest.
           KIND_SHA256=50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
-          curl -fsSL -o /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          curl -fsSL --retry 3 --retry-all-errors -o /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
           echo "${KIND_SHA256}  /tmp/kind" | sha256sum -c -
           sudo install -o root -g root -m 0755 /tmp/kind /usr/local/bin/kind
           /usr/local/bin/kind version
 
       - name: Download sneakernet bundle (this is what the operator receives)
+        continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0 (verified via API: v4 tag; fetches nothing at runtime — artifact bytes only)
         with:
           name: sneakernet-bundle-${{ env.SHA }}
           path: gapbox/
+      - name: Verify the bundle arrived (bounded re-download)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_ARTIFACT: sneakernet-bundle-${{ env.SHA }}
+        run: |
+          # download-artifact has gone green with no file (3 of about 450 Kind
+          # lane runs, #1118). Only absent files are downloaded again; present
+          # files are checksum-verified here and a mismatch is fatal.
+          for attempt in 1 2 3; do
+            if [ -s "gapbox/qdrant-pdf-rag-${SHA}.tar" ] && [ -s "gapbox/qdrant-pdf-rag-${SHA}.tar.sha256" ]; then
+              (cd gapbox && sha256sum -c "qdrant-pdf-rag-${SHA}.tar.sha256")
+              echo "sneakernet bundle verified after download attempt $attempt"
+              exit 0
+            fi
+            [ "$attempt" -lt 3 ] || break
+            echo "::warning::sneakernet bundle missing after download attempt $attempt; downloading it again"
+            rm -rf gapbox
+            sleep $((attempt * 15))
+            timeout 1200 gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+              --name "$BUNDLE_ARTIFACT" --dir gapbox || true
+          done
+          echo "::error::sneakernet bundle missing after 3 download attempts"
+          exit 1
 
       # Rehearsal infrastructure only (test TLS, registry/gateway stand-ins, the
       # egress gate and probe): none of this is shipped to the operator, whose
@@ -697,7 +745,7 @@ jobs:
           # namespace/deployment names as kind's built-in provisioner, so
           # this upgrades it in place and adds the `local-path`
           # StorageClass — no duplicate provisioner, no ambient defaults.
-          curl -fsSL -o "$RUNNER_TEMP/local-path.yaml" https://raw.githubusercontent.com/rancher/local-path-provisioner/49b2be8e26d6d34c9afaa21fa33108d2e82f8955/deploy/local-path-storage.yaml
+          curl -fsSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/local-path.yaml" https://raw.githubusercontent.com/rancher/local-path-provisioner/49b2be8e26d6d34c9afaa21fa33108d2e82f8955/deploy/local-path-storage.yaml
           echo "9781b39c24f3f651bd6d6e41b561e04e4904bbdb6d4f8c7a6009df3a702dcd65  $RUNNER_TEMP/local-path.yaml" | sha256sum -c -
           # The verified manifest names an untagged busybox helper (latest). Pin it by
           # digest (#1118): busybox 1.38.0, what latest resolved to on 2026-10-27.
@@ -1374,7 +1422,7 @@ jobs:
       - name: Install checksum-pinned Helm
         run: |
           export PATH="/usr/local/bin:$PATH"
-          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          curl -fsSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
           echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/helm-unpack"
           tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
@@ -1387,7 +1435,7 @@ jobs:
           KUBECTL_VERSION=v1.33.12
           # sha256 recorded in-repo (AGENTS.md §6): dl.k8s.io checksum file.
           KUBECTL_SHA256=fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
-          curl -fsSL -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          curl -fsSL --retry 3 --retry-all-errors -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
           echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum -c -
           sudo install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl
           /usr/local/bin/kubectl version --client=true
@@ -1647,10 +1695,34 @@ jobs:
       AGENT_IMAGE: ${{ needs.build.outputs.agent_image }}
       INGEST_IMAGE: ${{ needs.build.outputs.ingest_image }}
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0; artifact bytes only
+      - continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0; artifact bytes only
         with:
           name: sneakernet-bundle-${{ env.SHA }}
           path: gapbox/
+      - name: Verify the bundle arrived (bounded re-download)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_ARTIFACT: sneakernet-bundle-${{ env.SHA }}
+        run: |
+          # download-artifact has gone green with no file (3 of about 450 Kind
+          # lane runs, #1118). Only absent files are downloaded again; present
+          # files are checksum-verified here and a mismatch is fatal.
+          for attempt in 1 2 3; do
+            if [ -s "gapbox/qdrant-pdf-rag-${SHA}.tar" ] && [ -s "gapbox/qdrant-pdf-rag-${SHA}.tar.sha256" ]; then
+              (cd gapbox && sha256sum -c "qdrant-pdf-rag-${SHA}.tar.sha256")
+              echo "sneakernet bundle verified after download attempt $attempt"
+              exit 0
+            fi
+            [ "$attempt" -lt 3 ] || break
+            echo "::warning::sneakernet bundle missing after download attempt $attempt; downloading it again"
+            rm -rf gapbox
+            sleep $((attempt * 15))
+            timeout 1200 gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+              --name "$BUNDLE_ARTIFACT" --dir gapbox || true
+          done
+          echo "::error::sneakernet bundle missing after 3 download attempts"
+          exit 1
       - name: Fresh published-bundle bootstrap
         run: |
           export PATH="/usr/local/bin:$PATH"
@@ -1664,7 +1736,7 @@ jobs:
       - name: Install checksum-pinned Helm
         run: |
           export PATH="/usr/local/bin:$PATH"
-          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          curl -fsSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
           echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/helm-unpack"
           tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
@@ -1673,7 +1745,7 @@ jobs:
       - name: Install checksum-pinned OpenShift client
         run: |
           export PATH="/usr/local/bin:$PATH"
-          curl -fsSL -o "$RUNNER_TEMP/oc.tgz" https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.22.7/openshift-client-linux.tar.gz
+          curl -fsSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/oc.tgz" https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.22.7/openshift-client-linux.tar.gz
           echo "3d02d45ae5037a723afbbdda1063c08d4788a9b9ace6c6f44aa329764ee648a1  $RUNNER_TEMP/oc.tgz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/oc-unpack"
           tar xzf "$RUNNER_TEMP/oc.tgz" -C "$RUNNER_TEMP/oc-unpack" oc kubectl

@@ -190,8 +190,10 @@ def normalize_native(
 ) -> dict[str, Any]:
     """Reject stale/misattributed receipts before returning a native lane result.
 
-    run must be the latest selected run; job comes from that run's *attempt*
-    endpoint. Hashes identify the approved producer code, not artifact claims.
+    run is the attempt of the latest selected run that executed job: the
+    latest attempt, or the earlier attempt whose record a failed-jobs rerun
+    carried forward unchanged. job comes from that attempt's jobs endpoint.
+    Hashes identify the approved producer code, not artifact claims.
     Selection, API pagination, actor authorization and rechecking currentness
     immediately before publication remain the caller's responsibilities.
     """

@@ -32,6 +32,7 @@ import uuid
 import warnings
 import xml.etree.ElementTree as ET
 import zipfile
+from typing import ClassVar
 from unittest.mock import patch
 
 import yaml
@@ -3802,6 +3803,255 @@ class TestEvalRetrievalProducer(unittest.TestCase):
             result = collect_native(API(), pr, root)
             self.assertEqual(result["lane_statuses"].get("gate_l1"), "success")
             self.assertEqual(result["lane_statuses"].get("eval_retrieval"), "success")
+
+
+class TestRerunAttemptEvidence(unittest.TestCase):
+    """A failed-jobs rerun keeps earlier successes; each job binds its own attempt (#1118).
+
+    GitHub lists every job in a rerun attempt (observed on run 40115760188):
+    a job that was not rerun appears under a new id and the new attempt
+    number with its original timestamps, and its evidence artifact carries the
+    attempt that actually ran it.
+    """
+
+    LANES: ClassVar[dict[str, str]] = {"gate-l1": "gate_l1", "eval-retrieval": "eval_retrieval"}
+    RESULTS: ClassVar[dict[str, dict]] = {"gate_l1": {"verdict": "pass"}, "eval_retrieval": {"n": 121, "failures": 0}}
+
+    def scenario(self, root):
+        base = approved_repository(root)
+        candidate = {"repository": "synthetic/repository", "repository_id": 42, "number": 3,
+                     "head_sha": "a" * 40, "base_sha": base, "execution_sha": "c" * 40,
+                     "head_repository_id": 84}
+        identity = {"event": "pull_request", "path": ".github/workflows/ci.yml", "head_sha": "a" * 40,
+                    "repository": {"id": 42, "full_name": "synthetic/repository"},
+                    "head_repository": {"id": 84}, "actor": {"id": 7}, "created_at": "2026-10-26T12:00:05Z"}
+        runs = {1: {**identity, "id": 123, "run_attempt": 1, "status": "completed",
+                    "triggering_actor": {"login": "first"}, "run_started_at": "2026-10-26T12:00:05Z"},
+                2: {**identity, "id": 123, "run_attempt": 2, "status": "completed",
+                    "triggering_actor": {"login": "rerunner"}, "run_started_at": "2026-10-26T13:00:00Z"}}
+
+        def job(job_id, attempt, name, conclusion, started, completed):
+            return {"id": job_id, "run_id": 123, "run_attempt": attempt, "head_sha": "a" * 40, "name": name,
+                    "status": "completed", "conclusion": conclusion,
+                    "started_at": started, "completed_at": completed}
+        # Attempt 1: gate-l1 passed, eval-retrieval failed. Attempt 2 ("re-run
+        # failed jobs"): gate-l1 is a carried copy, eval-retrieval ran again.
+        jobs = {1: [job(501, 1, "gate-l1", "success", "2026-10-26T12:01:00Z", "2026-10-26T12:05:00Z"),
+                    job(502, 1, "eval-retrieval", "failure", "2026-10-26T12:01:00Z", "2026-10-26T12:06:00Z")],
+                2: [job(601, 2, "gate-l1", "success", "2026-10-26T12:01:00Z", "2026-10-26T12:05:00Z"),
+                    job(602, 2, "eval-retrieval", "success", "2026-10-26T13:00:10Z", "2026-10-26T13:04:00Z")]}
+        commit = {"sha": "c" * 40, "parents": [{"sha": base}, {"sha": "a" * 40}],
+                  "commit": {"tree": {"sha": "1" * 40}, "committer": {"date": "2026-10-26T12:00:00Z"}}}
+        pr = {"number": 3, "user": {"id": 99}, "state": "open", "mergeable": True, "draft": True,
+              "merge_commit_sha": "c" * 40, "changed_files": 1,
+              "head": {"sha": "a" * 40, "repo": {"id": 84}},
+              "base": {"sha": base, "ref": "main",
+                       "repo": {"id": 42, "full_name": "synthetic/repository", "default_branch": "main"}}}
+        test = self
+
+        class API:
+            repository = "synthetic/repository"
+            prefix = "repos/synthetic/repository/"
+
+            def __init__(self):
+                self.runs, self.jobs, self.commit, self.pr = runs, jobs, commit, pr
+                self.live = base
+                self.artifacts, self.archives, self.seen, self.writes = [], {}, [], []
+
+            def evidence(self, name, attempt, **receipt_changes):
+                """Upload one job's receipt under the artifact name of `attempt`."""
+                lane = test.LANES[name]
+                receipt, raw = TestEvalRetrievalProducer()._eval_receipt(
+                    candidate, hashlib.sha256(b"approved policy").hexdigest(),
+                    hashlib.sha256(b"approved producer").hexdigest(), test.RESULTS[lane])
+                receipt.update(job_key=name, job_name=name, lane=lane, run_attempt=attempt,
+                               triggering_actor=self.runs[attempt]["triggering_actor"]["login"])
+                receipt.update(receipt_changes)
+                blob, digest = pack_archive(receipt, **{"results.json": raw})
+                artifact_id = 700 + len(self.artifacts)
+                self.archives[artifact_id] = blob
+                self.artifacts.append({"id": artifact_id, "expired": False,
+                                       "name": f"evidence-{name}-attempt-{attempt}",
+                                       "size_in_bytes": len(blob), "digest": digest,
+                                       "workflow_run": {"id": 123, "repository_id": 42,
+                                                        "head_repository_id": 84, "head_sha": "a" * 40}})
+
+            def get(self, endpoint):
+                self.seen.append(endpoint)
+                latest = max(self.runs)
+                if endpoint.endswith("git/ref/heads/main"):
+                    return {"ref": "refs/heads/main", "object": {"type": "commit", "sha": self.live}}
+                if endpoint.endswith("pulls/3"):
+                    return self.pr
+                if "/pulls/3/files?" in endpoint:
+                    return [{"filename": "src/mainframe_rag/retrieve/query.py", "status": "modified"}]
+                if "actions/workflows/verifier-update.yml/runs?" in endpoint:
+                    return {"total_count": 0, "workflow_runs": []}
+                if "actions/runs?" in endpoint:
+                    return {"total_count": 1, "workflow_runs": [self.runs[latest]]}
+                for attempt in self.runs:
+                    if f"actions/runs/123/attempts/{attempt}/jobs?" in endpoint:
+                        return {"total_count": len(self.jobs[attempt]), "jobs": self.jobs[attempt]}
+                    if endpoint.endswith(f"actions/runs/123/attempts/{attempt}"):
+                        return self.runs[attempt]
+                if "actions/runs/123/artifacts?" in endpoint:
+                    return {"total_count": len(self.artifacts), "artifacts": self.artifacts}
+                if endpoint.endswith("actions/runs/123"):
+                    return self.runs[latest]
+                if "/commits/" in endpoint:
+                    return self.commit
+                raise AssertionError("unexpected endpoint " + endpoint)
+
+            def raw(self, endpoint):
+                return self.archives[int(endpoint.rstrip("/").rsplit("/", 2)[-2])]
+
+            def blob(self, sha, path):
+                if path == "scripts/ci_evidence.py":
+                    return b"approved producer"
+                if path == "scripts/review_tooling.py":
+                    return b"approved policy"
+                return (root / path).read_bytes()
+
+            def write(self, endpoint, payload, *, method):
+                self.writes.append((endpoint, method, payload))
+                return {"id": 55}
+
+        return API(), pr
+
+    def records(self, result):
+        return {record["job"]: record for record in result["native"] if record["job"] in self.LANES}
+
+    def test_rerun_of_one_failed_job_keeps_earlier_successes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            api, pr = self.scenario(pathlib.Path(directory))
+            api.evidence("gate-l1", 1)
+            api.evidence("eval-retrieval", 2)
+            result = collect_native(api, pr, pathlib.Path(directory))
+            self.assertEqual((result["lane_statuses"].get("gate_l1"), result["lane_statuses"].get("eval_retrieval")),
+                             ("success", "success"))
+            records = self.records(result)
+            # Each job is bound to the attempt that ran it: its job id, its
+            # attempt and its own artifact, never the carried copy's.
+            self.assertEqual((records["gate-l1"]["run_attempt"], records["gate-l1"]["job_id"],
+                              records["gate-l1"]["artifact_id"]), (1, 501, 700))
+            self.assertEqual((records["eval-retrieval"]["run_attempt"], records["eval-retrieval"]["job_id"],
+                              records["eval-retrieval"]["artifact_id"]), (2, 602, 701))
+            self.assertEqual(result["runs"]["ci.yml"], {"run_id": 123, "run_attempt": 2, "status": "completed"})
+            # The recheck still pins the run's latest attempt.
+            recheck_current(api, {"candidate": result["candidate"], "runs": result["runs"]})
+            # While the rerun attempt is still active nothing passes yet.
+            api.runs[2] = {**api.runs[2], "status": "in_progress"}
+            pending = collect_native(api, pr, pathlib.Path(directory))
+            self.assertEqual({r["status"] for r in self.records(pending).values()}, {"pending"})
+            self.assertNotIn("gate_l1", pending["lane_statuses"])
+
+    def test_job_whose_latest_record_failed_is_refused(self):
+        for case in ("not rerun", "rerun failed again"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                api, pr = self.scenario(pathlib.Path(directory))
+                api.evidence("gate-l1", 1)
+                api.evidence("eval-retrieval", 2)
+                if case == "not rerun":
+                    # Only eval-retrieval was rerun; gate-l1 failed in attempt 1 and
+                    # its carried copy still says so. A valid older receipt does not help.
+                    for attempt in (1, 2):
+                        api.jobs[attempt][0]["conclusion"] = "failure"
+                else:
+                    # gate-l1 passed in attempt 1, was rerun in attempt 2 and failed.
+                    api.jobs[2][0].update(conclusion="failure", started_at="2026-10-26T13:00:10Z",
+                                          completed_at="2026-10-26T13:02:00Z")
+                result = collect_native(api, pr, pathlib.Path(directory))
+                self.assertEqual(result["lane_statuses"].get("gate_l1"), "failure")
+                self.assertEqual(result["lane_statuses"].get("eval_retrieval"), "success")
+
+    def test_artifact_from_another_attempt_than_the_job_is_refused(self):
+        cases = {
+            # The rerun job's artifact is missing; an earlier attempt's is present.
+            "rerun job, older artifact": (("gate-l1", 1, {}), ("eval-retrieval", 1, {})),
+            # The carried job ran in attempt 1, but only an attempt-2 artifact exists.
+            "carried job, newer artifact": (("gate-l1", 2, {}), ("eval-retrieval", 2, {})),
+            # The artifact name matches the job's attempt, its receipt names another.
+            "renamed receipt": (("gate-l1", 1, {"run_attempt": 2}), ("eval-retrieval", 2, {"run_attempt": 1})),
+        }
+        expected = {"rerun job, older artifact": {"gate-l1": "success", "eval-retrieval": "missing"},
+                    "carried job, newer artifact": {"gate-l1": "missing", "eval-retrieval": "success"},
+                    "renamed receipt": {"gate-l1": "unverified", "eval-retrieval": "unverified"}}
+        for case, uploads in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                api, pr = self.scenario(pathlib.Path(directory))
+                for name, attempt, changes in uploads:
+                    api.evidence(name, attempt, **changes)
+                result = collect_native(api, pr, pathlib.Path(directory))
+                self.assertEqual({job: record["status"] for job, record in self.records(result).items()},
+                                 expected[case])
+
+    def test_attempt_from_another_run_or_commit_is_refused(self):
+        def attempt_run(api, **changes):
+            api.runs[1] = {**api.runs[1], **changes}
+
+        def earlier_job(api, **changes):
+            api.jobs[1][0].update(changes)
+
+        faults = {
+            "attempt names another run": lambda api: attempt_run(api, id=124),
+            "attempt is another attempt": lambda api: attempt_run(api, run_attempt=3),
+            "attempt for another head": lambda api: attempt_run(api, head_sha="e" * 40),
+            "attempt from another workflow": lambda api: attempt_run(api, path=".github/workflows/e2e.yml"),
+            "attempt from a fork": lambda api: attempt_run(api, head_repository={"id": 85}),
+            "attempt still running": lambda api: attempt_run(api, status="in_progress"),
+            "earlier job in another run": lambda api: earlier_job(api, run_id=124),
+            "earlier job for another head": lambda api: earlier_job(api, head_sha="e" * 40),
+            "copy differs from the earlier job": lambda api: earlier_job(api, completed_at="2026-10-26T12:04:00Z"),
+            "copy has no earlier job": lambda api: earlier_job(api, name="renamed"),
+        }
+        for fault, apply in faults.items():
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                api, pr = self.scenario(pathlib.Path(directory))
+                api.evidence("gate-l1", 1)
+                api.evidence("eval-retrieval", 2)
+                apply(api)
+                result = collect_native(api, pr, pathlib.Path(directory))
+                self.assertEqual(self.records(result)["gate-l1"]["status"], "unverified")
+                self.assertEqual(result["lane_statuses"].get("gate_l1"), "unverified")
+        receipts = {"receipt from another run": {"run_id": 124},
+                    "receipt for another execution": {"execution_sha": "f" * 40},
+                    "receipt for another head": {"head_sha": "e" * 40}}
+        for fault, changes in receipts.items():
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                api, pr = self.scenario(pathlib.Path(directory))
+                api.evidence("gate-l1", 1, **changes)
+                api.evidence("eval-retrieval", 2)
+                result = collect_native(api, pr, pathlib.Path(directory))
+                self.assertEqual(result["lane_statuses"].get("gate_l1"), "unverified")
+
+    def test_stale_base_names_the_base_the_live_tip_and_the_fix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            api, pr = self.scenario(pathlib.Path(directory))
+            api.evidence("gate-l1", 1)
+            api.evidence("eval-retrieval", 2)
+            api.live = "d" * 40
+            result = publish_acceptance(api, 3, pathlib.Path(directory))
+            self.assertEqual(result["error"], "candidate_base_not_current")
+            endpoint, method, payload = api.writes[-1]
+            self.assertEqual((endpoint, method, payload["conclusion"]),
+                             (api.prefix + "check-runs/55", "PATCH", "failure"))
+            summary = payload["output"]["summary"]
+            self.assertIn(f"`{pr['base']['sha']}`", summary)
+            self.assertIn("`" + "d" * 40 + "`", summary)
+            self.assertIn("update the branch", summary)
+            self.assertNotIn("unavailable or changed", summary)
+            with patch("scripts.acceptance.GitHub", return_value=api), \
+                 contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(main(["--repository", "synthetic/repository", "--pr", "3",
+                                       "--approved-root", directory]), 1)
+            printed = json.loads(out.getvalue())
+            self.assertEqual((printed["error"], printed["base_sha"], printed["live_base_sha"]),
+                             ("candidate_base_not_current", pr["base"]["sha"], "d" * 40))
+            # Any other refusal keeps the generic fixed message.
+            api.live = pr["base"]["sha"]
+            api.pr = {**pr, "mergeable": False}
+            result = publish_acceptance(api, 3, pathlib.Path(directory))
+            self.assertEqual(result["error"], "acceptance_evidence_unavailable_or_changed")
 
 
 if __name__ == "__main__":

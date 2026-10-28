@@ -335,7 +335,22 @@ class Browser:
             if last:
                 return last
             time.sleep(0.05)
-        raise AssertionError(f"timed out waiting for: {what or condition_js} (last={last!r})")
+        raise AssertionError(f"timed out waiting for: {what or condition_js} (last={last!r}; page={self._ui_snapshot()})")
+
+    def _ui_snapshot(self) -> Any:
+        """Bounded page state for a timed-out wait (#1118 A4): which tab, its
+        visibility, the live status line and each assistant turn's state.
+        Synthetic test content only; never asserts."""
+        try:
+            return self.eval(
+                "var s=document.getElementById('console-status');"
+                "return {url: location.pathname, visibility: document.visibilityState,"
+                " status: s ? s.textContent.slice(0, 160) : null,"
+                " turns: Array.from(document.querySelectorAll('.turn-assistant')).map(function(t){"
+                "return t.getAttribute('data-state');})};"
+            )
+        except Exception as exc:  # noqa: BLE001 - a diagnostic must not mask the timeout
+            return f"unavailable ({type(exc).__name__})"
 
     def init_script(self, source: str) -> None:
         """Run `source` in every new document before page scripts (CDP)."""
