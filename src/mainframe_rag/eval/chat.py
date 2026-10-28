@@ -40,7 +40,7 @@ import time
 from pathlib import Path
 
 from mainframe_rag.agent.answer import HttpxLLMClient, condense_query
-from mainframe_rag.config import load_settings
+from mainframe_rag.config import load_settings, qdrant_pool_limits
 from mainframe_rag.eval.datasets import (
     DatasetError,
     GoldenEntry,
@@ -141,6 +141,7 @@ def evaluate_sessions(entries: list[GoldenEntry], settings) -> dict:
         url=settings.qdrant_url,
         api_key=settings.qdrant_api_key,
         timeout=settings.qdrant_timeout_s,
+        limits=qdrant_pool_limits(settings.qdrant_url),
     )
     embedder = build_embedder(settings)
     reranker = build_reranker(settings)

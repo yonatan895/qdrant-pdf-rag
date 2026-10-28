@@ -12,6 +12,7 @@ import contextlib
 import os
 from pathlib import Path
 from typing import Literal, get_args
+from urllib.parse import urlsplit
 
 import httpx2
 from opentelemetry import propagate
@@ -32,6 +33,26 @@ HASH_EMBED_DIM = 256
 # in-cluster Service costs one TCP handshake.
 QDRANT_SERVER_KEEPALIVE_S = 5.0
 QDRANT_CLIENT_KEEPALIVE_EXPIRY_S = 2.0
+
+
+def qdrant_pool_limits(url: str) -> httpx2.Limits:
+    """Connection limits for a sync Qdrant client (ingest, eval; #1131).
+
+    The counts are what qdrant-client picks when given no `limits`: no
+    keep-alive on loopback, httpx's defaults (100 / 20) elsewhere. Only the
+    idle expiry changes, to QDRANT_CLIENT_KEEPALIVE_EXPIRY_S. The agent
+    builds its own limits from Settings with the same expiry."""
+    if urlsplit(url).hostname in ("localhost", "127.0.0.1"):
+        return httpx2.Limits(
+            max_connections=None,
+            max_keepalive_connections=0,
+            keepalive_expiry=QDRANT_CLIENT_KEEPALIVE_EXPIRY_S,
+        )
+    return httpx2.Limits(
+        max_connections=100,
+        max_keepalive_connections=20,
+        keepalive_expiry=QDRANT_CLIENT_KEEPALIVE_EXPIRY_S,
+    )
 
 # Reasoning-effort vocabulary in ascending order (#707). Values are forwarded
 # verbatim; LLM_REASONING_EFFORTS declares the subset the served template accepts.
