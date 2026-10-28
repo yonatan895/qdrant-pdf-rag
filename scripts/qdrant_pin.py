@@ -9,7 +9,13 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+# A pull is a network fetch: retry a failed pull a bounded number of times.
+# The identity check after a successful pull is fatal and never retried.
+PREPARE_ATTEMPTS = 3
+PREPARE_BACKOFF_SECONDS = 10
 
 
 def _qdrant_rows(images_txt: Path) -> list[list[str]]:
@@ -75,6 +81,25 @@ def prepared_image(reference: str) -> str:
         raise ValueError('approved Qdrant image inspection unavailable') from exc
 
 
+def prepare_image(reference: str) -> str:
+    """Pull the approved digest with bounded retries, then verify its identity.
+
+    Only a failed pull is retried. A pull that exceeds its timeout stays fatal
+    so the total time is bounded, and an identity mismatch after a successful
+    pull raises at once: it is never retried into acceptance.
+    """
+    for attempt in range(1, PREPARE_ATTEMPTS + 1):
+        result = subprocess.run(['docker', 'pull', reference], check=False, timeout=900,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if not result.returncode:
+            return prepared_image(reference)
+        if attempt < PREPARE_ATTEMPTS:
+            print(f'Qdrant image pull attempt {attempt} of {PREPARE_ATTEMPTS} failed; retrying',
+                  file=sys.stderr)
+            time.sleep(PREPARE_BACKOFF_SECONDS * attempt)
+    raise ValueError('explicit approved Qdrant image preparation failed')
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     choice = parser.add_mutually_exclusive_group()
@@ -86,12 +111,8 @@ def main() -> int:
     try:
         if args.prepare or args.prepared or args.digest:
             reference = qdrant_digest_pin(images_txt)
-            if args.prepare:
-                result = subprocess.run(['docker', 'pull', reference], check=False, timeout=900,
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if result.returncode:
-                    raise ValueError('explicit approved Qdrant image preparation failed')
-            print(reference if args.digest else prepared_image(reference))
+            print(reference if args.digest else
+                  prepare_image(reference) if args.prepare else prepared_image(reference))
         else:
             print(qdrant_image_pin(images_txt))
     except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
