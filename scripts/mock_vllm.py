@@ -28,6 +28,17 @@ byte-identical server):
 Scope: chat only. Embeddings, /tokenize, /healthz and /models stay instant
 and infallible so eval/sim determinism never depends on load noise.
 
+Slow-model stand-in for the Open WebUI operator lane (#1118; default off):
+    MOCK_PACED_MARKER     a word (8-64 letters/digits); only a chat request whose
+                          last user message contains it is paced, so every other
+                          request in the same lane stays instant and byte-identical
+    MOCK_PACED_TTFT_MS    a streamed reply sends its headers at once (as vLLM
+                          does), then is silent this long before the first chunk
+                          (a reasoning model thinking); non-stream sleeps it too
+    MOCK_PACED_STREAM_MS  the chunks after the first are spread evenly over this
+                          long (non-stream adds it to its single sleep)
+The reply body is that of an unpaced request.
+
 Rerank stand-in (issue #815, CI gateway lane only): POST .../score (vLLM
 `text_1`/`text_2` shape) and POST .../rerank (Cohere/TEI `query`/`documents`
 shape). Its one opinion is positional: candidate i of n scores (i+1)/n, so
@@ -82,6 +93,14 @@ if TTFT_MS < 0 or TOKEN_INTERVAL_MS < 0 or JITTER_MS < 0 or not 0.0 <= ERROR_RAT
     raise ValueError(
         "mock realism knobs must satisfy TTFT/INTERVAL/JITTER >= 0 and 0 <= ERROR_RATE <= 1"
     )
+
+PACED_MARKER = os.environ.get("MOCK_PACED_MARKER", "")
+PACED_TTFT_MS = float(os.environ.get("MOCK_PACED_TTFT_MS", "0"))
+PACED_STREAM_MS = float(os.environ.get("MOCK_PACED_STREAM_MS", "0"))
+if PACED_MARKER and not re.fullmatch(r"[A-Za-z0-9]{8,64}", PACED_MARKER):
+    raise ValueError("MOCK_PACED_MARKER must be 8-64 letters or digits")
+if not all(math.isfinite(v) and v >= 0 for v in (PACED_TTFT_MS, PACED_STREAM_MS)):
+    raise ValueError("MOCK_PACED_TTFT_MS and MOCK_PACED_STREAM_MS must be finite and >= 0")
 
 # Seeded draws (jitter + failure decisions) under one lock: same seed from a
 # fresh process replays the same timing noise and failure pattern. Jitter and
@@ -198,6 +217,16 @@ def _chat_content(messages: list) -> str:
     )
 
 
+def _paced(messages: list) -> bool:
+    """The slow-model stand-in applies: a marker is configured and the last user message carries it."""
+    if not PACED_MARKER:
+        return False
+    for msg in reversed(messages):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            return PACED_MARKER in str(msg.get("content") or "")
+    return False
+
+
 def _first_line(lines: list[str], limit: int = 160) -> str:
     for line in lines:
         stripped = line.strip()
@@ -238,7 +267,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in ("/healthz", "/health"):
             self._send(200, {"status": "ok", "chat_fault": CHAT_FAULT,
                              "embed_fault": EMBED_FAULT, "ttft_ms": TTFT_MS,
-                             "rerank_fault": RERANK_FAULT})
+                             "rerank_fault": RERANK_FAULT, "paced_marker": PACED_MARKER,
+                             "paced_ttft_ms": PACED_TTFT_MS, "paced_stream_ms": PACED_STREAM_MS})
         elif self.path == "/stats":
             with _rerank_stats_lock:
                 snapshot = {route: dict(counts) for route, counts in _rerank_stats.items()}
@@ -299,13 +329,19 @@ class Handler(BaseHTTPRequestHandler):
             "reasoning_tokens": 10,
             "total_tokens": prompt_tokens + completion_tokens + 10,
         }
+        paced = _paced(messages)
         if req.get("stream"):
-            ttft_ms = _pace(TTFT_MS)  # first-byte latency, before any chunk
+            ttft_ms = 0.0 if paced else _pace(TTFT_MS)  # first-byte latency, before any chunk
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("X-Mock-Ttft-Ms", f"{ttft_ms:.1f}")
             self.end_headers()
+            if paced:
+                # Headers out, then silence: what every hop downstream sees while a
+                # reasoning model thinks before its first token.
+                self.wfile.flush()
+                time.sleep(PACED_TTFT_MS / 1000.0)
             abort = CHAT_FAULT == "truncated" or _should_fail()
             # Stream-only completion-shape faults (issue #365): the upstream
             # attempt fails but still terminates with [DONE], the exact
@@ -317,9 +353,13 @@ class Handler(BaseHTTPRequestHandler):
             # gone; reassembly is still byte-exact). Pieces keep their
             # whitespace so concatenation == content.
             pieces = re.findall(r"\S+\s*|\s+", content) or [""]
+            paced_gap_s = PACED_STREAM_MS / 1000.0 / max(len(pieces) - 1, 1)
             for i, piece in enumerate(pieces):
                 if i > 0:
-                    _pace(TOKEN_INTERVAL_MS)
+                    if paced:
+                        time.sleep(paced_gap_s)
+                    else:
+                        _pace(TOKEN_INTERVAL_MS)
                 delta: dict[str, str] = {"content": piece}
                 if i == 0:
                     delta["role"] = "assistant"
@@ -354,7 +394,11 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             return
 
-        slept_ms = _pace(TTFT_MS)
+        if paced:
+            slept_ms = PACED_TTFT_MS + PACED_STREAM_MS
+            time.sleep(slept_ms / 1000.0)
+        else:
+            slept_ms = _pace(TTFT_MS)
         pace_headers = {"X-Mock-Sleep-Ms": f"{slept_ms:.1f}"}
         if _should_fail():
             self._send(500, _INJECTED_FAILURE, headers=pace_headers)

@@ -363,11 +363,36 @@ def _release_gate_recipe(pipe_tree):
     return state / "airgap.env", exports
 
 
+def _release_gate_owui_site_env(state):
+    """The doc's Open WebUI site-key block, run as written from a checkout (the
+    bootstrapped one in the lab; this repository here) with the doc's variables.
+    Returns the script's private state directory."""
+    import re
+    import subprocess
+
+    doc = (REPO / "docs/release-verification.md").read_text()
+    setup = re.search(r'^(export APP_NS=.*\nOWUI=".*")$', doc, re.MULTILINE)
+    block = re.search(r"Append the `OPENWEBUI_\*` site keys.*?```sh\n(.*?)```", doc, re.DOTALL)
+    assert setup and block, "Open WebUI site-key blocks moved"
+    r = subprocess.run(["sh", "-ec", setup.group(1) + "\n" + block.group(1)], cwd=REPO, capture_output=True,
+                       text=True, check=False,
+                       env={"PATH": "/usr/bin:/bin", "KIND_STATE": str(state), "KIND_NAME": "rag-live-release",
+                            "KIND_NAMESPACE": "rag-kind-gate"})
+    assert r.returncode == 0, r.stderr
+    owui_state = state / "owui-acceptance"
+    # `$OWUI prepare` writes the test IdP's CA here before the first deploy reads it.
+    (owui_state / "pki").mkdir(parents=True)
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+                    "-days", "1", "-subj", "/CN=gate test CA", "-keyout", str(owui_state / "pki" / "ca.key"),
+                    "-out", str(owui_state / "pki" / "ca.crt")], capture_output=True, check=True)
+    return owui_state
+
+
 def test_release_gate_kind_recipe_runs_as_documented(pipe_tree):
     """#1118 B5: the documented gate recipe passes the operator pipeline with
     nothing added. It once stopped at stage 1 (Open WebUI is on by default and
-    the lab has no IdP) and at stage 3 (its Kind sizing overlay needs the
-    process-environment CI_REHEARSAL=1)."""
+    the lab had no IdP; the lab now adds the test IdP's site keys) and at stage
+    3 (its Kind sizing overlay needs the process-environment CI_REHEARSAL=1)."""
     import yaml
 
     from tests.test_airgap_ingest_sh import PATCHING_KUBECTL
@@ -378,14 +403,23 @@ def test_release_gate_kind_recipe_runs_as_documented(pipe_tree):
         write_stub(pipe_tree / "bin" / name, PATCHING_KUBECTL)
     airgap_env, exports = _release_gate_recipe(pipe_tree)
     assert exports.get("CI_REHEARSAL") == "1"
+    owui_state = _release_gate_owui_site_env(airgap_env.parent)
+    assert "OPENWEBUI_ENABLED=false" not in airgap_env.read_text()
+    # A live deploy reads the namespace service CA `$OWUI prepare` created; a dry run takes the fixture.
+    route_ca = {"ROUTE_DESTINATION_CA_FILE": str(REPO / "charts/mainframe-rag/ci/openwebui-route-ca.pem")}
     r = _run_task(pipe_tree, task, "airgap:pipeline", "AIRGAP_DRYRUN=1",
-                  extra_env={"AIRGAP_ENV": str(airgap_env), **exports})
+                  extra_env={"AIRGAP_ENV": str(airgap_env), **exports, **route_ca})
     assert r.returncode == 0, r.stdout + r.stderr
     assert "PIPELINE DRY-RUN COMPLETE: rendering passed; live acceptance NOT RUN" in r.stdout
     # Stored render, not just the banner: the one-peer lab gets the 1/1/1
     # policy over the checked-in 6/3/2 preset, and a non-root OpenObserve.
     values = yaml.safe_load((pipe_tree / "dist/mainframe-rag-release-values.yaml").read_text())
-    assert values["openwebui"]["enabled"] is False
+    assert values["openwebui"]["enabled"] is True
+    assert values["openwebui"]["host"] == "owui.localhost"
+    assert values["openwebui"]["oidc"]["caBundle"] == (owui_state / "pki" / "ca.crt").read_text()
+    docs = [d for d in yaml.safe_load_all((pipe_tree / "dist/agent-rendered.yaml").read_text()) if d]
+    assert {("Deployment", "rag-openwebui"), ("Route", "rag-openwebui")} <= {
+        (d["kind"], d["metadata"]["name"]) for d in docs}
     assert values["openobserve"]["runAsId"] == 10001
     job = yaml.safe_load((pipe_tree / "dist/ingest-rendered.yaml").read_text())
     (container,) = [c for c in job["spec"]["template"]["spec"]["containers"] if c["name"] == "ingest"]
@@ -397,9 +431,74 @@ def test_release_gate_kind_recipe_runs_as_documented(pipe_tree):
 
     # The opt-in is load-bearing: without it the same recipe is refused.
     refused = _run_task(pipe_tree, task, "airgap:pipeline", "AIRGAP_DRYRUN=1",
-                        extra_env={"AIRGAP_ENV": str(airgap_env)})
+                        extra_env={"AIRGAP_ENV": str(airgap_env), **route_ca})
     assert refused.returncode != 0
     assert "QDRANT_EXTRA_VALUES is a CI-rehearsal override" in refused.stderr
+
+
+def _operator_lane():
+    import yaml
+
+    job = yaml.safe_load((REPO / ".github/workflows/e2e.yml").read_text())["jobs"]["kind-live-rehearsal"]
+    return job, [s for s in job["steps"] if s.get("if") == "matrix.lane == 'openwebui-operator'"]
+
+
+def test_release_gate_open_webui_pass_is_the_ci_operator_lane_with_real_models():
+    """#1118: the lab's Open WebUI steps are kind-openwebui-operator's, so CI runs
+    them every time: the same script subcommands in the same order (the mock-only
+    `paced` phase aside), the same deploy-log assertions, the same flag edits."""
+    import re
+
+    doc = (REPO / "docs/release-verification.md").read_text()
+    _job, steps = _operator_lane()
+    ci = "\n".join(s["run"] for s in steps)
+    ci_order = re.findall(r"(?:acceptance\.sh operator|\$OWUI) ([a-z-]+)", ci)
+    assert "paced" in ci_order
+    doc_order = re.findall(r"^(?:SKOPEO_NATIVE=0 )?\$OWUI ([a-z-]+)", doc, re.MULTILINE)
+    assert doc_order == [c for c in ci_order if c != "paced"]
+    assert re.search(r'^OWUI="sh scripts/openwebui/acceptance\.sh operator"$', doc, re.MULTILINE)
+    for marker in re.findall(r"grep -q '([^']+)'", ci):
+        assert f"grep -q '{marker}'" in doc, marker
+    for flag in re.findall(r"sed -i '(s\|\^OPENWEBUI_ENABLED=[^']+)'", ci):
+        assert f"sed -i '{flag}' \"$AIRGAP_ENV\"" in doc, flag
+    # The lab's runs are read like CI's: the deploy logs the greps read are the ones tee writes.
+    for log in ("pipeline-first-pass", "deploy-second-pass", "deploy-off", "deploy-on"):
+        assert f'| tee "$OWUI_STATE/logs/{log}.log"' in doc, log
+
+
+def test_release_gate_kind_cluster_matches_the_operator_lane(tmp_path):
+    """The doc's cluster config, executed, serves the alpha admission API the UID stand-in
+    needs, as the operator lane's does, on the lane's own node image and tool pins."""
+    import json
+    import re
+    import subprocess
+    import sys
+
+    doc = (REPO / "docs/release-verification.md").read_text()
+    job, _steps = _operator_lane()
+    code = re.search(r"python3 - <<'PY'\n(import json, os\nfrom pathlib import Path\nroot = .*?)\nPY\n", doc, re.DOTALL)
+    assert code, "Kind config block moved"
+    r = subprocess.run([sys.executable, "-", ], input=code.group(1), text=True, capture_output=True, check=False,
+                       env={"KIND_STATE": str(tmp_path), "PATH": "/usr/bin:/bin"})
+    assert r.returncode == 0, r.stderr
+    lab = json.loads((tmp_path / "kind-config.json").read_text())
+    create = next(s for s in job["steps"] if s.get("name") == "Start authenticated TLS registry + Kind")
+    ci_code = create["run"].split("<<'PY_KIND'\n", 1)[1].split("\nPY_KIND", 1)[0]
+    subprocess.run([sys.executable, "-", str(tmp_path / "ci.json"), "/trust", "openwebui-operator"],
+                   input=ci_code, text=True, check=True)
+    ci = json.loads((tmp_path / "ci.json").read_text())
+    for key in ("featureGates", "runtimeConfig"):
+        assert lab[key] == ci[key], key
+    assert [n["role"] for n in lab["nodes"]] == [n["role"] for n in ci["nodes"]] == ["control-plane"]
+    node = re.search(r'--image "(kindest/node:[^"]+)"', create["run"]).group(1)
+    assert doc.count(f"--image {node}") == 1 and f"`{node}`" in doc
+    workflow = (REPO / ".github/workflows/e2e.yml").read_text()
+    kind = re.search(r"KIND_VERSION=v([0-9.]+)", workflow).group(1)
+    kubectl = re.search(r"KUBECTL_VERSION=v([0-9.]+)", workflow).group(1)
+    assert f"Kind {kind}, kubectl {kubectl}, Helm 4.3.0" in " ".join(doc.split())
+    # The pinned Skopeo the doc pulls for `$OWUI images` is the image its registry adapter runs.
+    pin = re.search(r"^SKOPEO_IMAGE=(\S+)$", (REPO / "scripts/openwebui/pins.txt").read_text(), re.MULTILINE).group(1)
+    assert pin in doc
 
 
 RECORDING_KUBECTL = f"""#!{__import__("sys").executable}

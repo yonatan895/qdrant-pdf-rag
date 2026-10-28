@@ -179,13 +179,78 @@ def check_groups(user_groups: dict[str, list[str]], expected: dict[str, str]) ->
     return _v("group-claim", not missing, missing=missing)
 
 
+TIMING_KEYS = ("path", "reply", "headers_s", "first_content_s", "last_content_s", "end_s", "max_gap_s",
+               "saved_content_s", "done_s")
+
+
 def check_answer(chat: dict, name: str = "answer-citations") -> Verdict:
-    """One saved turn: finished, non-empty, with source events (citations as source chips)."""
+    """One saved turn: finished, non-empty, with source events (citations as source chips).
+    The client's timings ride along (seconds; with real models they are the measured
+    first-token and answer times the release record compares with the CI envelope)."""
     ok = (bool(chat.get("done")) and chat.get("content_chars", 0) > 0 and chat.get("source_chips", 0) > 0
           and chat.get("source_documents", 0) > 0)
     return _v(name, ok, done=bool(chat.get("done")), content_chars=chat.get("content_chars", 0),
               status_events=chat.get("status_events", 0), source_chips=chat.get("source_chips", 0),
-              source_documents=chat.get("source_documents", 0))
+              source_documents=chat.get("source_documents", 0),
+              **{k: chat[k] for k in TIMING_KEYS if k in chat})
+
+
+# ------------------------------------------------------------------ slow model (#1118)
+# The largest library default idle limit any hop on the path would fall back to if its
+# setting were lost: nginx proxy_read_timeout (60 s; the OpenShift router's default
+# server timeout is 30 s, httpx's 5 s). The paced stand-in must stay silent well past it.
+DEFAULT_IDLE_S = 60
+# Retrieval, prompt building and scheduling must fit between the paced answer and the
+# agent's total request deadline, or the stand-in would test the deadline instead.
+DEADLINE_MARGIN_S = 20
+
+
+def check_paced_config(state: dict, deadline_s: float) -> Verdict:
+    """The slow-model stand-in's settings (mock /healthz) against the agent's request deadline:
+    a first token after twice the largest default idle limit, a stream longer than it, and the
+    whole paced answer inside the deadline with a margin."""
+    ttft_s = float(state.get("paced_ttft_ms") or 0) / 1000
+    stream_s = float(state.get("paced_stream_ms") or 0) / 1000
+    ok = (bool(state.get("paced_marker")) and ttft_s >= 2 * DEFAULT_IDLE_S and stream_s >= DEFAULT_IDLE_S
+          and deadline_s > 0 and ttft_s + stream_s + DEADLINE_MARGIN_S <= deadline_s)
+    return _v("paced-stand-in", ok, marker_set=bool(state.get("paced_marker")), ttft_s=ttft_s,
+              stream_s=stream_s, agent_deadline_s=deadline_s)
+
+
+def check_paced_chat(result: dict, ttft_s: float, stream_s: float) -> Verdict:
+    """One answer from the paced stand-in through the router stand-in, the allow-list
+    proxy, Open WebUI, the Pipe, the agent and the gateway: complete, cited, and timed
+    so the slow first token and the long stream really happened on this path.
+
+    ui-task    (the browser's path) the saved message: sources, first content no
+               earlier than the first token, done no earlier than the whole answer;
+    api-chat   (a saved chat over the API) the same saved message, and the one
+               request that carried it stayed silent at least the first-token wait
+               and lasted the whole answer;
+    api-stream (OpenAI-compatible, no saved chat) the SSE reply: content, a cited
+               line, finish stop and [DONE]; silent at least the first-token wait;
+               last content no earlier than the whole answer."""
+    path, total = result.get("path"), ttft_s + stream_s
+
+    def at_least(key: str, bound: float) -> bool:
+        value = result.get(key)
+        return isinstance(value, (int, float)) and value >= bound
+
+    ok = result.get("completion_status") == 200 and ttft_s > 0
+    if path == "ui-task":
+        ok = ok and check_answer(result).ok and at_least("saved_content_s", ttft_s) and at_least("done_s", total)
+    elif path == "api-chat":
+        ok = ok and check_answer(result).ok and at_least("max_gap_s", ttft_s) and at_least("end_s", total)
+    elif path == "api-stream":
+        ok = (ok and result.get("content_chars", 0) > 0 and result.get("cited_lines", 0) > 0
+              and result.get("finish") == "stop" and result.get("done_frame") is True
+              and at_least("first_content_s", ttft_s) and at_least("max_gap_s", ttft_s)
+              and at_least("last_content_s", total))
+    else:
+        ok = False
+    keep = (*TIMING_KEYS, "completion_status", "done", "content_chars", "source_chips", "source_documents",
+            "cited_lines", "finish", "done_frame")
+    return _v(f"paced-{path}", ok, ttft_s=ttft_s, stream_s=stream_s, **{k: result[k] for k in keep if k in result})
 
 
 BLOCKED_OK = ("proxy-403", "sidecar-nul-400")

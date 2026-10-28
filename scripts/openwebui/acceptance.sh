@@ -22,6 +22,9 @@
 #   ... operator record    before the K1 rollback: the chats and the claim
 #   ... operator off       after OPENWEBUI_ENABLED=false + airgap:deploy: objects gone, claim kept
 #   ... operator on        after OPENWEBUI_ENABLED=true + airgap:deploy: same claim, chats, Pipe
+#   ... operator paced     CI stand-in models only: one marked question on the browser, API-chat
+#                          and API-stream paths at once against the slow-model stand-in
+#                          (scripts/mock_vllm.py MOCK_PACED_*): complete, cited, and timed
 #
 #   OWUI_WORKSPACE  (operator mode) the bootstrapped workspace the deploy runs from; its
 #                   chart's docs_pipe.py is the Pipe the checks compare against
@@ -274,6 +277,7 @@ operator() {
         record) prepare_state; require_workspace; start_forwards; phase record ;;
         off) prepare_state; require_workspace; phase rollback-off ;;
         on) prepare_state; require_workspace; admit_route; start_forwards; phase rollback-on ;;
+        paced) prepare_state; require_workspace; start_forwards; phase paced ;;
         *) sed -n '2,/^set -eu/p' "$0" | sed '$d' >&2; exit 2 ;;
     esac
 }

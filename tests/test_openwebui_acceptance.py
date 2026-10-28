@@ -602,7 +602,7 @@ def test_operator_lane_runs_the_site_commands_behind_the_gate_and_never_applies_
             assert i < boundary and "shell" not in step
         else:
             assert i > boundary and step["shell"] == GATED, step["name"]
-    assert order == ["images", "site-env", "prepare", "admin", "run", "record", "off", "on"]
+    assert order == ["images", "site-env", "prepare", "admin", "run", "paced", "record", "off", "on"]
     pipeline = next(s for _, s in own if "airgap:pipeline" in s["run"])
     assert names.index(pipeline["name"]) > names.index(next(s["name"] for _, s in own if "operator prepare" in s["run"]))
     # The chart-objects lane's deploy never runs in the operator lane, nor does the --skip-load pipeline.
@@ -629,3 +629,205 @@ def test_only_the_operator_lane_cluster_serves_the_alpha_admission_api(tmp_path)
             assert [n["role"] for n in config["nodes"]] == ["control-plane"]  # acceptance.sh's NODE
         else:
             assert "featureGates" not in config and "runtimeConfig" not in config, lane
+
+
+
+# ------------------------------------------------------------------ slow model (#1118)
+PACED = {"paced_marker": "ZQPACEDSTANDIN", "paced_ttft_ms": 150000.0, "paced_stream_ms": 90000.0}
+
+
+def test_paced_config_needs_a_marker_a_long_silence_a_long_stream_and_room_under_the_deadline():
+    assert checks.check_paced_config(PACED, 270).ok
+    for bad, deadline in (({**PACED, "paced_marker": ""}, 270), ({**PACED, "paced_ttft_ms": 119000.0}, 270),
+                          ({**PACED, "paced_stream_ms": 59000.0}, 270), (PACED, 0), (PACED, 259), ({}, 270)):
+        assert not checks.check_paced_config(bad, deadline).ok, (bad, deadline)
+
+
+def _paced(path, **over):
+    base = {"path": path, "completion_status": 200, **GOOD_ANSWER, "max_gap_s": 240.5, "end_s": 241.0,
+            "saved_content_s": 160.0, "done_s": 243.0}
+    if path == "api-stream":
+        base = {"path": path, "completion_status": 200, "reply": "sse", "content_chars": 300, "cited_lines": 1,
+                "finish": "stop", "done_frame": True, "first_content_s": 170.2, "last_content_s": 240.4,
+                "max_gap_s": 170.0, "end_s": 240.5}
+    return {**base, **over}
+
+
+@pytest.mark.parametrize("path,bad", [
+    ("ui-task", {"source_chips": 0}), ("ui-task", {"saved_content_s": 140.0}), ("ui-task", {"done_s": 235.0}),
+    ("ui-task", {"done": False}), ("ui-task", {"completion_status": 500}),
+    ("api-chat", {"max_gap_s": 3.0}), ("api-chat", {"end_s": 200.0}), ("api-chat", {"source_documents": 0}),
+    ("api-stream", {"cited_lines": 0}), ("api-stream", {"finish": None}), ("api-stream", {"done_frame": False}),
+    ("api-stream", {"first_content_s": 20.0}), ("api-stream", {"max_gap_s": 10.0}),
+    ("api-stream", {"last_content_s": 230.0}), ("api-stream", {"content_chars": 0}),
+])
+def test_a_paced_answer_must_complete_cited_and_take_the_paced_time(path, bad):
+    good = checks.check_paced_chat(_paced(path), 150.0, 90.0)
+    assert good.ok and good.name == f"paced-{path}", good.detail
+    assert not checks.check_paced_chat(_paced(path, **bad), 150.0, 90.0).ok
+    assert not checks.check_paced_chat(_paced(path), 0.0, 90.0).ok
+    assert not checks.check_paced_chat(_paced("other"), 150.0, 90.0).ok
+
+
+def test_answer_verdicts_carry_the_client_timings_and_never_text():
+    verdict = checks.check_answer({**GOOD_ANSWER, "path": "api-chat", "end_s": 12.5, "max_gap_s": 12.4,
+                                   "done_s": 14.0, "content": "never copied"})
+    assert verdict.detail["end_s"] == 12.5 and verdict.detail["path"] == "api-chat"
+    assert "content" not in verdict.detail
+
+
+def _mock(tag, env):
+    import threading
+    from http.server import ThreadingHTTPServer
+    keys = ("MOCK_PACED_MARKER", "MOCK_PACED_TTFT_MS", "MOCK_PACED_STREAM_MS")
+    saved = {k: os.environ.pop(k, None) for k in keys}
+    os.environ.update(env)
+    try:
+        spec = importlib.util.spec_from_file_location(f"mock_vllm_paced_{tag}", ROOT / "scripts" / "mock_vllm.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        for k in keys:
+            os.environ.pop(k, None)
+            if saved[k] is not None:
+                os.environ[k] = saved[k]
+    server = ThreadingHTTPServer(("127.0.0.1", 0), module.Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+
+def _stream(url, question):
+    import http.client
+    import time
+    host, port = url.removeprefix("http://").split(":")
+    body = json.dumps({"model": "mock-reasoning", "stream": True, "messages": [
+        {"role": "system", "content": "x"},
+        {"role": "user", "content": f"{question}\n[1] SA22-0000-00 outline, p. 3\nIEA500I means a test."}]})
+    t0 = time.monotonic()
+    conn = http.client.HTTPConnection(host, int(port), timeout=10)
+    conn.request("POST", "/v1/chat/completions", body=body, headers={"Content-Type": "application/json"})
+    resp = conn.getresponse()
+    headers_s = time.monotonic() - t0
+    first = None
+    data = b""
+    while line := resp.readline():
+        if first is None and line.startswith(b"data: {"):
+            first = time.monotonic() - t0
+        data += line
+    return headers_s, first, time.monotonic() - t0, data
+
+
+def test_slow_model_stand_in_paces_only_the_marked_question_and_keeps_the_reply_body():
+    import urllib.request
+
+    paced, paced_url = _mock("on", {"MOCK_PACED_MARKER": "ZQTESTMARK1", "MOCK_PACED_TTFT_MS": "600",
+                                    "MOCK_PACED_STREAM_MS": "600"})
+    plain, plain_url = _mock("off", {})
+    try:
+        headers_s, first, total, body = _stream(paced_url, "What is IEA500I? ZQTESTMARK1")
+        # Headers first, then the silent first-token wait, then a stream spread over its time.
+        assert headers_s < 0.4 and first >= 0.6 and total >= 1.2, (headers_s, first, total)
+        assert body == _stream(plain_url, "What is IEA500I? ZQTESTMARK1")[3]  # same bytes as unpaced
+        quick = _stream(paced_url, "What is IEA500I?")  # no marker: instant
+        assert quick[2] < 0.5 and quick[3] == _stream(plain_url, "What is IEA500I?")[3]
+        health = json.loads(urllib.request.urlopen(paced_url + "/healthz", timeout=5).read())
+        assert {k: health[k] for k in PACED} == {"paced_marker": "ZQTESTMARK1", "paced_ttft_ms": 600.0,
+                                                 "paced_stream_ms": 600.0}
+        off = json.loads(urllib.request.urlopen(plain_url + "/healthz", timeout=5).read())
+        assert not checks.check_paced_config(off, 270).ok  # the default is off
+    finally:
+        for server in (paced, plain):
+            server.shutdown()
+            server.server_close()
+
+
+@pytest.mark.parametrize("env", [{"MOCK_PACED_MARKER": "short"}, {"MOCK_PACED_MARKER": "has space 12"},
+                                 {"MOCK_PACED_TTFT_MS": "-1"}, {"MOCK_PACED_STREAM_MS": "inf"}])
+def test_slow_model_stand_in_refuses_a_bad_setting(env):
+    with pytest.raises(ValueError):
+        _mock("bad", env)
+
+
+def _timed_client(tmp_path, monkeypatch, handler_body):
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # http.server API name
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            handler_body(self)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setattr(client, "OWUI_URL", f"http://127.0.0.1:{server.server_address[1]}")
+    session = object.__new__(client.Session)
+    session.state, session.ctx = str(tmp_path), None
+    (tmp_path / "sessions").mkdir()
+    (tmp_path / "sessions" / "docs-user.token").write_text("t")
+    return server, session
+
+
+def test_client_times_an_sse_reply_and_counts_its_cited_lines_without_keeping_text(tmp_path, monkeypatch):
+    import time
+
+    def sse(h):
+        h.send_response(200)
+        h.send_header("Content-Type", "text/event-stream")
+        h.end_headers()
+        h.wfile.flush()
+        time.sleep(0.5)
+        for text in ("The answer ", "SECRETWORD.\n\n**Citations:**\n- Manual A, p. 3\n- Manual B, p. 4"):
+            h.wfile.write(b"data: " + json.dumps({"choices": [{"delta": {"content": text}}]}).encode() + b"\n\n")
+            h.wfile.flush()
+            time.sleep(0.3)
+        h.wfile.write(b'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}\n\ndata: [DONE]\n\n')
+
+    server, session = _timed_client(tmp_path, monkeypatch, sse)
+    try:
+        result = session.stream_completion("docs-user", "m", "q")
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert result["reply"] == "sse" and result["completion_status"] == 200
+    assert result["cited_lines"] == 2 and result["finish"] == "stop" and result["done_frame"] is True
+    assert result["first_content_s"] >= 0.5 and result["max_gap_s"] >= 0.5 and result["last_content_s"] >= 0.8
+    assert "SECRETWORD" not in json.dumps(result)
+
+
+def test_client_times_a_json_reply_as_one_silence(tmp_path, monkeypatch):
+    import time
+
+    def late_json(h):
+        time.sleep(0.6)
+        data = b'{"choices": []}'
+        h.send_response(200)
+        h.send_header("Content-Type", "application/json")
+        h.send_header("Content-Length", str(len(data)))
+        h.end_headers()
+        h.wfile.write(data)
+
+    server, session = _timed_client(tmp_path, monkeypatch, late_json)
+    try:
+        status, timing = session._post_timed("docs-user", "/api/chat/completions", {}, 10)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert status == 200 and timing["reply"] == "json"
+    assert timing["max_gap_s"] >= 0.6 and timing["end_s"] >= 0.6 and timing["first_content_s"] is None
+
+
+def test_lane_paces_only_the_operator_lane_within_the_charts_agent_deadline():
+    job = _kind_job()
+    step = next(s for s in job["steps"] if s.get("name", "").startswith("Deploy mock vLLM"))
+    env = dict(re.findall(r'\{name: (MOCK_PACED_\w+), value: "([^"]*)"\}', step["run"]))
+    assert env["MOCK_PACED_MARKER"] == "${{ matrix.lane == 'openwebui-operator' && 'ZQPACEDSTANDIN' || '' }}"
+    deadline = yaml.safe_load((ROOT / "charts" / "mainframe-rag" / "values.yaml").read_text())["requestDeadlineSeconds"]
+    state = {"paced_marker": "ZQPACEDSTANDIN", "paced_ttft_ms": float(env["MOCK_PACED_TTFT_MS"]),
+             "paced_stream_ms": float(env["MOCK_PACED_STREAM_MS"])}
+    assert checks.check_paced_config(state, deadline).ok
+    paced = next(s for s in job["steps"] if s.get("name", "").startswith("Open WebUI under a slow model"))
+    assert "acceptance.sh operator paced" in paced["run"]
+    assert paced["if"] == OPERATOR_IF and paced["shell"] == GATED

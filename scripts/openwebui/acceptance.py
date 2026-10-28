@@ -3,7 +3,9 @@
     python3 -I acceptance.py STATE_DIR [PHASE]   (via acceptance.sh run, or acceptance.sh operator ...)
 
 PHASE is `checks` (default: the full check list) or, in the operator-deploy lane (#1118 B3),
-`first-pass` (before the admin API key), `record`, `rollback-off` and `rollback-on` (K1).
+`first-pass` (before the admin API key), `record`, `rollback-off` and `rollback-on` (K1), and
+`paced`: one question on the three Open WebUI paths at once against the slow-model stand-in
+(scripts/mock_vllm.py MOCK_PACED_*; CI stand-in models only).
 
 Everything here is collection: kubectl calls into the Open WebUI pod, HTTP
 calls through the router stand-in as the signed-in test users, and reads of
@@ -24,6 +26,7 @@ import subprocess
 import sys
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -97,6 +100,31 @@ def claim_uid() -> str:
     """The uid of the kept claim, so a recreated claim of the same name never passes as kept."""
     proc = kc("get", "pvc", "rag-openwebui-data", "--ignore-not-found", "-o", "jsonpath={.metadata.uid}")
     return proc.stdout.decode().strip() if proc.returncode == 0 else ""
+
+
+def mock_health() -> dict:
+    """The model stand-in's own /healthz, read inside its pod: the settings it actually runs with."""
+    code = ("import json, urllib.request as u\n"
+            "print(json.dumps(json.load(u.urlopen('http://127.0.0.1:8000/healthz', timeout=10))))\n")
+    proc = kc("exec", "deploy/vllm-mock", "--", "python3", "-c", code)
+    try:
+        state = json.loads(proc.stdout.decode())
+    except ValueError:
+        return {}
+    return state if proc.returncode == 0 and isinstance(state, dict) else {}
+
+
+def agent_deadline_s() -> float:
+    """REQUEST_DEADLINE_S of the deployed agent container (0: none, as Settings defaults)."""
+    doc = json.loads(kc_out("get", "deploy", "rag-agent", "-o", "json"))
+    for container in doc["spec"]["template"]["spec"]["containers"]:
+        for env in container.get("env") or []:
+            if env.get("name") == "REQUEST_DEADLINE_S":
+                try:
+                    return float(env.get("value") or 0)
+                except ValueError:
+                    return 0.0
+    return 0.0
 
 
 def logs_of(*target: str, ns: str | None = NS) -> str:
@@ -412,11 +440,42 @@ class Acceptance:
         self.add(checks.check_rollback_on(before, after, self.repo_sha(), next_chat.ok))
         return checks.overall(self.verdicts)
 
+    # -------------------------------------------------------------- slow model (#1118)
+    def paced(self) -> bool:
+        """The slow-model stand-in: a first token after a long silence, then a long stream.
+        The same marked question goes down the browser's path, the API path for a saved
+        chat and the OpenAI-compatible stream at once, so the phase takes one answer's time."""
+        state = mock_health()
+        config = checks.check_paced_config(state, agent_deadline_s())
+        self.add(config)
+        if not config.ok:
+            return False
+        ttft_s, stream_s = config.detail["ttft_s"], config.detail["stream_s"]
+        if not self.s.login("docs-user").get("signed_in"):
+            raise RuntimeError("docs-user sign-in failed")
+        question = f"{self.question(self.canary1 + 'p')} {state['paced_marker']}"
+        runs = {
+            "ui-task": lambda: self.s.chat("docs-user", client.DOCS_MODEL, question,
+                                           session_id="paced-" + secrets.token_hex(8)),
+            "api-chat": lambda: self.s.chat("docs-user", client.DOCS_MODEL, question),
+            "api-stream": lambda: self.s.stream_completion("docs-user", client.DOCS_MODEL, question),
+        }
+        with ThreadPoolExecutor(len(runs)) as pool:
+            futures = {path: pool.submit(run) for path, run in runs.items()}
+        for path, future in futures.items():
+            try:
+                result = future.result()
+            except Exception as exc:  # noqa: BLE001 - the class only, never the text
+                self.add(checks.Verdict(f"paced-{path}", False, {"error": type(exc).__name__}))
+                continue
+            self.add(checks.check_paced_chat({"path": path, **result}, ttft_s, stream_s))
+        return checks.overall(self.verdicts)
+
 
 def main(argv: list[str]) -> int:
     run = Acceptance(argv[0])
     phases = {"checks": run.run, "first-pass": run.first_pass, "record": run.record,
-              "rollback-off": run.rollback_off, "rollback-on": run.rollback_on}
+              "rollback-off": run.rollback_off, "rollback-on": run.rollback_on, "paced": run.paced}
     phase = argv[1] if len(argv) > 1 else "checks"
     if phase not in phases:
         print(f"unknown phase {phase!r}; one of {', '.join(phases)}", file=sys.stderr)

@@ -31,7 +31,7 @@ browser captures out of Git. Link protected evidence using local artifact names.
 | CI bundle integrity and fresh bootstrap | NOT RUN | |
 | CI full pipeline | NOT RUN | |
 | CI gateway/fault contracts | NOT RUN | |
-| CI Open WebUI operator lane (`kind-openwebui-operator`, stand-in models) | NOT RUN | |
+| CI Open WebUI operator lane (`kind-openwebui-operator`, stand-in models, including the slow-model `paced` phase) | NOT RUN | |
 | CI three-worker Kind lifecycle | NOT RUN | |
 
 Both lanes run on the same bundle. A skip is not a pass. OpenShift-specific
@@ -59,6 +59,8 @@ successful agent check cannot conceal an ingest failure.
 | Isolated synthetic snapshot restore and query equivalence | NOT RUN | |
 | Explicitly cited synthetic answer and follow-up | NOT RUN | |
 | Answer / both chat aliases / UI stream completion | NOT RUN | |
+| Open WebUI with the real models: first pass without a Pipe, second deploy installs it, the 20 checks, K1 off and on | NOT RUN | |
+| Open WebUI real answer times inside the CI envelope (no answer verdict `end_s` / `done_s` above 240 s) | NOT RUN | |
 | Search and answer/chat traces | NOT RUN | |
 | Missing/wrong keys, bad CA, hostname mismatch, upstream errors and timeouts | NOT RUN | |
 | Wrong embedding dimension, malformed replies, truncated streams fail closed | NOT RUN | |
