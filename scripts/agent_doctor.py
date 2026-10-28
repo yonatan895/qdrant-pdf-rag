@@ -58,6 +58,14 @@ PREPARED_PYTHON_FIX = ("connected fix: INTERPRETER scripts/prepare_python.py --p
                        " --python INTERPRETER --wheelhouse /absolute/path/to/approved/dev-wheels"
                        " (INTERPRETER is the --python value given to this check)")
 DOCKER_FIX = "fix: start the local Docker daemon, then check: docker --host unix:///var/run/docker.sock version"
+# A --python that is not this checkout's .venv: never name a fix that would
+# delete or rebuild an environment the check did not inspect.
+ABSENT_PYTHON_FIX = ("fix: point --python at an existing interpreter, or omit --python to check this"
+                     " checkout's .venv (" + VENV_CREATE + ")")
+SELECT_PYTHON_FIX = ("fix: give --python a CPython 3.14 GIL interpreter (python3.14, not python3.14t), or omit"
+                     " --python to check this checkout's .venv")
+FOREIGN_VENV_FIX = ("fix: that is another checkout's .venv, which carries that checkout's source; omit --python"
+                    " to check this checkout's .venv (" + VENV_CREATE + ")")
 CHECKER_FIX = "fix: env -u PYTHON_JIT python3.14 scripts/agent_doctor.py (a CPython 3.14 GIL build, not python3.14t)"
 TRACKED_PINS = "pyproject.toml images.txt requirements.dev.lock.txt locks/cp314-linux-x86_64.json"
 
@@ -256,27 +264,34 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False,
     interpreters = [("checker runtime", Path(sys.executable))]
     development = python.absolute() if python is not None else root/".venv/bin/python"
     # Task targets pass --python .venv/bin/python: that is still the local venv.
-    local_venv = development.parts[-3:] == (".venv", "bin", "python")
+    # Compare the directory holding .venv by real path, so a symlinked .venv or
+    # checkout stays local and another checkout's .venv does not.
+    venv_shaped = development.parts[-3:] == (".venv", "bin", "python")
+    local_venv = venv_shaped and os.path.realpath(development.parents[2]) == os.path.realpath(root)
     if development.is_file():
         interpreters.append(("development environment", development))
     else:
         add("missing prerequisite", "development environment",
             "selected development interpreter absent; no environment created",
-            VENV_CREATE if local_venv else PREPARED_PYTHON_FIX)
+            VENV_CREATE if local_venv else ABSENT_PYTHON_FIX)
     for label, interpreter in interpreters:
-        fix = (CHECKER_FIX if label == "checker runtime"
-               else VENV_RECREATE if local_venv else PREPARED_PYTHON_FIX)
+        # Version/GIL/JIT problems need another interpreter; inventory problems
+        # are fixed by preparing the selected one.
+        compat_fix, fix = ((CHECKER_FIX, CHECKER_FIX) if label == "checker runtime"
+                           else (VENV_RECREATE, VENV_RECREATE) if local_venv
+                           else (FOREIGN_VENV_FIX, FOREIGN_VENV_FIX) if venv_shaped
+                           else (SELECT_PYTHON_FIX, PREPARED_PYTHON_FIX))
         packages = sorted(set(pins) | {"pytest", "ruff", "mypy"}) if label == "development environment" else []
         runtime = inspect_runtime(interpreter, packages)
         if runtime is None:
-            add("unable to verify", label, "bounded interpreter/metadata probe unavailable", fix)
+            add("unable to verify", label, "bounded interpreter/metadata probe unavailable", compat_fix)
             continue
         compatible = (runtime.get("implementation") == "CPython"
                       and tuple(runtime["version"][:2]) == (3, 14)
                       and (3, 14) >= minimum_version
                       and not runtime["gil_disabled"] and not runtime["jit_enabled"])
         add("ready" if compatible else "missing prerequisite", label,
-            "CPython 3.14 GIL with experimental JIT disabled required", fix)
+            "CPython 3.14 GIL with experimental JIT disabled required", compat_fix)
         if label == "development environment":
             verified = inspect_locked_environment(root, interpreter)
             add("ready" if verified else "missing prerequisite", "complete development inventory",
