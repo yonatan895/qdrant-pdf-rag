@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 
 import httpx2
 
@@ -70,17 +71,42 @@ def check_stream(text: str, *, openai: bool, failure: bool) -> None:
         assert final['citations'] and not final['citations_inferred']
 
 
+# The step that failed, as a fixed id (#1118 A4): the failure line names the
+# interface without echoing response bodies.
+STEP = ['start']
+HEALTH_FIELDS = ('status', 'qdrant', 'embed', 'representation', 'rerank')
+
+
+def step(name: str) -> None:
+    STEP[0] = name
+
+
+def readiness(fields) -> dict:
+    """Only the agent's own readiness vocabulary: booleans, null, short enums."""
+    if not isinstance(fields, dict):
+        return {}
+    return {key: value for key in HEALTH_FIELDS if key in fields
+            and (isinstance(value := fields[key], (bool, type(None)))
+                 or isinstance(value, str) and re.fullmatch(r'[a-z_]{1,40}', value))}
+
+
 def run(client, *, failure: bool, streams_only: bool) -> None:
     query = 'Explain the IEA500I operator message.'
     messages = [{'role': 'user', 'content': query}]
     if not failure:
+        step('healthz')
         health = client.get('/healthz')
-        assert health.status_code == 200 and health.json()['status'] == 'ok'
+        fields = health.json()
+        if health.status_code != 200 or fields['status'] != 'ok':
+            step('healthz ' + json.dumps({'http': health.status_code, **readiness(fields)}, sort_keys=True))
+            raise AssertionError('healthz not ok')
+        step('ui')
         assert client.get('/ui').status_code == 200
     for path in ['/v1/answer', '/v1/chat', '/v1/chat/completions', '/ui/chat/stream']:
         chat = path != '/v1/answer'
         body = {'messages': messages} if chat else {'query': query}
         if path != '/ui/chat/stream' and not streams_only:
+            step(path + ' json')
             response = client.post(path, json=body)
             payload = response.json()
             if failure:
@@ -93,6 +119,7 @@ def run(client, *, failure: bool, streams_only: bool) -> None:
                 if chat:
                     choice = payload['choices'][0]
                     assert choice['finish_reason'] == 'stop' and choice['message']['content']
+                    step(path + ' followup')
                     followup = client.post(path, json={'messages': messages + [
                         {'role': 'assistant', 'content': choice['message']['content']},
                         {'role': 'user', 'content': 'What should the operator do about IEA500I?'}]})
@@ -101,6 +128,7 @@ def run(client, *, failure: bool, streams_only: bool) -> None:
                     assert payload['answer']
         if path != '/ui/chat/stream':
             body['stream'] = True
+        step(path + ' stream')
         response = client.post(path, json=body)
         assert response.status_code == 200
         assert response.headers['content-type'].startswith('text/event-stream')
@@ -117,8 +145,8 @@ def main() -> int:
         with httpx2.Client(base_url='http://localhost:8080',
                            timeout=load_settings().answer_timeout_s) as client:
             run(client, failure=args.expect_failure, streams_only=args.streams_only)
-    except (AssertionError, ValueError, KeyError, TypeError, httpx2.HTTPError):
-        print('APPLICATION CONTRACT FAILED')
+    except (AssertionError, ValueError, KeyError, TypeError, httpx2.HTTPError) as exc:
+        print(f'APPLICATION CONTRACT FAILED at {STEP[0]} ({type(exc).__name__})')
         return 1
     print('APPLICATION CONTRACT PASSED')
     return 0

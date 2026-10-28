@@ -339,15 +339,28 @@ def _run_trail(state):
     return f"run trail {state}: {json.dumps(summary, sort_keys=True, default=str)} events={events[-30:]}"
 
 
+def _print_refusal_cause(exc):
+    """Default test sink (#1118 A4): the exception behind a fixed refusal line,
+    printed to the test's captured stdout (shown only for failing tests)."""
+    print(f"refusal cause: {type(exc).__name__}: {exc}"
+          + (f" <- {type(exc.__cause__).__name__}: {exc.__cause__}" if exc.__cause__ else ""))
+
+
 def _controller_call(argv, *, source_root=None):
     previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
     previous_umask = os.umask(0o077)
+    # A test that installs its own sink keeps it; otherwise the cause is shown.
+    default_sink = controller.refusal_cause_sink is None
+    if default_sink:
+        controller.refusal_cause_sink = _print_refusal_cause
     try:
         result = controller.main(argv, bootstrap=False, source_root=source_root)
         if argv[:1] == ["run"] and result != 0:
             print(_run_trail(argv[argv.index("--state") + 1]))  # shown only for failing tests
         return result
     finally:
+        if default_sink:
+            controller.refusal_cause_sink = None
         os.umask(previous_umask)
         for sig, handler in previous.items():
             signal.signal(sig, handler)
@@ -401,8 +414,16 @@ def _run_fake(state, workload=("/bin/true",)):
 
 def _run_direct(command, state, *workload, timeout=15, cwd=None):
     """The real `scripts/colab.py` in a child process: the executable boundary."""
-    return subprocess.run([*command, "run", "--state", str(state), "--approve-cu", "20", *workload],
-                          capture_output=True, text=True, timeout=timeout, check=False, cwd=cwd)
+    try:
+        return subprocess.run([*command, "run", "--state", str(state), "--approve-cu", "20", *workload],
+                              capture_output=True, text=True, timeout=timeout, check=False, cwd=cwd)
+    except subprocess.TimeoutExpired as exc:
+        # A stalled child must still name its stage (#1118 A4): keep the
+        # partial output and the run trail before the basetemp is rotated.
+        def text(value):
+            return value.decode(errors="replace") if isinstance(value, bytes) else value or ""
+        pytest.fail(f"colab run timed out after {timeout}s\nstdout:\n{text(exc.stdout)}\n"
+                    f"stderr:\n{text(exc.stderr)}\n{_run_trail(state)}", pytrace=False)
 
 
 def _manifest(state):
@@ -790,8 +811,25 @@ time.sleep(float(os.environ.get('FAKE_NATIVE_WORKLOAD_SECONDS','0')))
     return source
 
 
+def _distinct_local_ports(count):
+    """Pick `count` loopback ports in one allocation (#1118 A4): every socket
+    stays bound until all are chosen, so the kernel cannot hand back a port
+    this allocation just released (the controller refuses duplicate ports)."""
+    with contextlib.ExitStack() as stack:
+        sockets = [stack.enter_context(socket.socket()) for _ in range(count)]
+        for sock in sockets:
+            sock.bind(("127.0.0.1", 0))
+        return tuple(sock.getsockname()[1] for sock in sockets)
+
+
 @pytest.fixture
-def lab(tmp_path, monkeypatch, request):
+def local_ports():
+    """The reasoning, embedding and Qdrant forward ports of one test."""
+    return _distinct_local_ports(3)
+
+
+@pytest.fixture
+def lab(tmp_path, monkeypatch, request, local_ports):
     source = _execution_fixture(tmp_path, production="storage_lab" in request.fixturenames)
     binaries = tmp_path / "bin"
     binaries.mkdir()
@@ -805,11 +843,7 @@ def lab(tmp_path, monkeypatch, request):
     monkeypatch.delenv("PG_NET", raising=False)
     monkeypatch.setenv("GATEWAY_DRYRUN", "0")
     monkeypatch.setenv("FAKE_COLAB_SOURCE_ROOT", str(source))
-    with socket.socket() as first, socket.socket() as second:
-        first.bind(("127.0.0.1", 0))
-        second.bind(("127.0.0.1", 0))
-        reasoning_port = str(first.getsockname()[1])
-        embedding_port = str(second.getsockname()[1])
+    reasoning_port, embedding_port = (str(port) for port in local_ports[:2])
     state = tmp_path / "private-run"
     command = [sys.executable, str(ROOT / "scripts/colab.py")]
     profile = getattr(request, "param", "COLAB_CPU_TRANSPORT")
@@ -855,7 +889,7 @@ def lab(tmp_path, monkeypatch, request):
 
 
 @pytest.fixture
-def storage_lab(lab, retained, original_inputs, monkeypatch):
+def storage_lab(lab, retained, original_inputs, monkeypatch, local_ports):
     root, base, command = lab
     original = _manifest(base)
     source = Path(original["origin"]["source_root"])
@@ -915,9 +949,7 @@ def storage_lab(lab, retained, original_inputs, monkeypatch):
     (root / "events.jsonl").write_text("")
     kubeconfig = root / "original-kubeconfig"
     kubeconfig.write_text("original fake Kubernetes client input\n")
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        port = listener.getsockname()[1]
+    port = local_ports[2]
     state = _prepare_new(base, root / "retained-qdrant-run", profile="COLAB_G4_BF16", extra=[
         "--dataset", "production", "--corpus", config["corpus"], "--golden", config["golden"],
         "--inventory", config["inventory"], "--data-state", config["data_state"],

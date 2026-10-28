@@ -340,7 +340,9 @@ if 'pvc' in a:
  print('persistentvolumeclaim/ingest-work')
 elif 'wait' in a or os.environ['CANCEL_STAGE'] in a:
  name='wait' if 'wait' in a else 'observer'
- Path(name+'-pid').write_text(str(os.getpid()))
+ # Publish the pid atomically: the test reads the file as soon as it exists.
+ Path(name+'-pid.tmp').write_text(str(os.getpid()))
+ os.replace(name+'-pid.tmp', name+'-pid')
  time.sleep(60)
 elif 'pods' in a:
  print('ingest-first Running')

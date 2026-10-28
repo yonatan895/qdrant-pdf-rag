@@ -26,8 +26,24 @@ from tests.helpers_airgap import copy_chart, install_rendering_helm, make_bin_tr
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(scope="session")
+def resident_kubectl():
+    """The checker bounds each `kubectl patch --local` decode at 30 s as a hang
+    guard. On a hosted runner the first exec of the image's preinstalled
+    kubectl reads the binary from a cold disk: in each unit shard exactly the
+    first gateway-check call took 2.6-13.8 s and once over 30 s (#1118 A4),
+    while every later call stayed under 1 s. That cold read is not checker
+    behavior, so read the binary through once, outside the guard."""
+    kubectl = shutil.which("kubectl")
+    if kubectl:
+        with open(kubectl, "rb") as binary:
+            while binary.read(1 << 20):
+                pass
+    return kubectl
+
+
 @pytest.fixture
-def gateway_rendered(tmp_path):
+def gateway_rendered(tmp_path, resident_kubectl):
 
     make_bin_tree(tmp_path, ["common.sh", "validate.sh", "deploy.sh", "ingest.sh",
                             "smoke.sh", "pipeline.sh", "map_values.py"])
@@ -135,6 +151,33 @@ def test_gateway_check_identifies_each_wrong_or_missing_reference(gateway_render
     diagnostic = (gateway_rendered / "diagnostics/gateway.json").read_text()
     assert "private-key-sentinel" not in diagnostic + result.stdout + result.stderr
     assert json.loads(diagnostic)["passed"] is False
+
+
+def test_gateway_check_names_a_stalled_decoder_apart_from_malformed_input(gateway_rendered, monkeypatch, capsys):
+    """#1118 A4: a decode that exceeds its bound reports that, with a fixed
+    message, instead of the catch-all malformed-input line."""
+    spec = importlib.util.spec_from_file_location("check_gateway_rendering_a4",
+                                                  ROOT / "scripts/ci/check_gateway_rendering.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def stalled(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output="private-key-sentinel")
+
+    monkeypatch.setattr(module.subprocess, "run", stalled)
+    diagnostics = gateway_rendered / "diagnostics/stalled.json"
+    assert module.main([
+        "--env-file", str(gateway_rendered / "airgap.env"),
+        "--agent-render", str(gateway_rendered / "dist/agent-rendered.yaml"),
+        "--ingest-render", str(gateway_rendered / "dist/ingest-rendered.yaml"),
+        "--shared-url", "https://test-gateway:4000/v1", "--secret-name", "test-gateway-keys",
+        "--secret-key", "api-key", "--embed-model", "mock-embed", "--reasoning-model", "mock-reasoning",
+        "--context-model", "", "--diagnostics", str(diagnostics),
+    ]) == 1
+    stderr = capsys.readouterr().err
+    assert stderr == "FAIL: agent render: kubectl decode exceeded its 30 s bound\n"
+    assert json.loads(diagnostics.read_text())["errors"] == ["agent render: kubectl decode exceeded its 30 s bound"]
+    assert "private-key-sentinel" not in stderr + diagnostics.read_text()
 
 
 @pytest.mark.parametrize("resource,key", [("agent", "LLM_BASE_URL"), ("ingest", "CONTEXT_LLM_BASE_URL")])

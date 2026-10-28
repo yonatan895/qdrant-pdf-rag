@@ -99,3 +99,19 @@ def test_checker_reaches_all_http_paths(failure, streams_only):
 def test_expected_failure_rejects_false_success():
     with pytest.raises(AssertionError):
         contracts.run(AppClient(failure=True, false_success=True), failure=True, streams_only=False)
+
+
+def test_failed_readiness_names_its_step_and_components_without_echoing_text():
+    """#1118 A4: a degraded /healthz names the failing step and the agent's own
+    readiness components; free text from the response is never echoed."""
+    class Degraded(AppClient):
+        def get(self, path):
+            return httpx2.Response(503, json={'status': 'degraded', 'qdrant': True, 'embed': True,
+                                              'representation': 'unknown', 'rerank': None,
+                                              'detail': 'private sentinel text'})
+
+    with pytest.raises(AssertionError):
+        contracts.run(Degraded(), failure=False, streams_only=False)
+    assert contracts.STEP[0] == ('healthz {"embed": true, "http": 503, "qdrant": true, '
+                                 '"representation": "unknown", "rerank": null, "status": "degraded"}')
+    assert contracts.readiness({'status': 'Free text with spaces', 'qdrant': 'Yes!'}) == {}
