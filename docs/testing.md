@@ -18,8 +18,8 @@ Jump list: [hermetic](#unit-tests-are-hermetic) ·
 Read sections relevant to the actual impact, including affected unchanged
 consumers and interaction tests; unrelated expensive tiers are not useful.
 
-`pytest` is the gate. `sh scripts/tools/run-task.sh qa:check` runs `ruff check`, `mypy src`, and the
-unit suite. Ruff runs its default rule set plus the B, SIM and RET families (`extend-select` in `pyproject.toml`).
+`pytest` is the gate. `sh scripts/tools/run-task.sh qa:check` runs CI's lint scope (`ruff check` and both
+`mypy` passes, listed under CI claims below) and the unit suite. Ruff runs its default rule set plus the B, SIM and RET families (`extend-select` in `pyproject.toml`).
 Modules listed in the `[[tool.mypy.overrides]]` block of `pyproject.toml` are held `--strict` clean; add a module there when it goes clean.
 Tests generate original PDFs at runtime
 (`scripts/make_synthetic_pdf.py`). No binary fixtures in git.

@@ -26,9 +26,10 @@ No task name prints the list. Discovery and summaries install nothing, read no
 private operator configuration and launch no service.
 
 The launcher refuses inherited/local `.taskrc.yml` / `.taskrc.yaml` and XDG Task
-configuration before executing Task, without reading or editing it. It clears
-Task runner controls/experiments that could change dispatch. Use a host without
-those files, or the documented owner scripts. It accepts discovery/summary/JSON/help/version,
+configuration before executing Task, without reading or editing it; the refusal
+names the file (as `$HOME/…`, `$XDG_CONFIG_HOME/…` or checkout-relative) and the
+`mv` that sets it aside. It clears Task runner controls/experiments that could
+change dispatch. It accepts discovery/summary/JSON/help/version,
 `--exit-code`, command preview (`--dry`) and focused arguments after `--`;
 path/global/remote/parallel/force runner options are unsupported and fail closed.
 Raw `task` can be used for development after explicitly adding the pinned
@@ -144,8 +145,10 @@ These checks establish prerequisites, not application acceptance or an untested
 internal registry/runner's identity. GitLab's service provisioning stays runner
 owned; its internal mirror must serve the approved repository digest used by the gate-L1 service reference.
 
-Discovery, doctor and verification never provision tools; missing or foreign
-workspace binaries fail with remediation.
+Discovery, doctor and verification never provision tools. Every refusal of the
+controlled entry and every non-ready doctor finding names its fix command, run
+from the checkout root, with separate connected and air-gap forms where they
+differ; tests assert each one and that its task, script and flags exist.
 
 <a id="inputs"></a>
 ## Variables, arguments, cwd and exit codes

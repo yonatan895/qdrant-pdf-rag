@@ -9,6 +9,14 @@
 # repository root, including invocation from documented subdirectories.
 version: '3'
 
+# CI's lint_and_types lane (.github/workflows/ci.yml; mirrored by .gitlab-ci.yml)
+# lints and type-checks these scripts besides src and tests. qa:lint and
+# qa:typecheck use this one list so local runs cover exactly CI's scope; a
+# Taskfile-level var is not overridable from the CLI or the environment.
+# tests/test_taskfile_contracts.py fails when it and CI drift apart.
+vars:
+  CI_LINT_SCRIPTS: scripts/eval_retrieval.py scripts/review_tooling.py scripts/ci_evidence.py scripts/acceptance_evidence.py
+
 tasks:
   prerequisites:
     desc: Verify the prepared unit environment without installing anything
@@ -22,25 +30,27 @@ tasks:
       - '.venv/bin/python scripts/agent_doctor.py --python .venv/bin/python'
 
   lint:
-    desc: Run ruff lint over src and tests
+    desc: Run ruff lint over CI's lint scope (src, tests and the CI scripts)
     summary: |
-      Runs `.venv/bin/python -m ruff check src tests` (same tool and scope as
-      the retired `make lint`). Fails closed when `.venv/bin/python` is absent — run
+      Runs `.venv/bin/python -m ruff check src tests <CI_LINT_SCRIPTS>`, the
+      same tool and scope as CI's lint_and_types lane. Fails closed when `.venv/bin/python` is absent — run
       `task dev:setup` explicitly. Never creates or mutates the environment.
       No network, Docker, model or credentials required.
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - '.venv/bin/python -m ruff check src tests'
+      - '.venv/bin/python -m ruff check src tests {{.CI_LINT_SCRIPTS}}'
 
   typecheck:
-    desc: Run mypy typecheck over src
+    desc: Run mypy typecheck over CI's scope (src, then the CI scripts)
     summary: |
-      Runs `.venv/bin/python -m mypy src` (same tool and scope as
-      the retired `make typecheck`). Fails closed when `.venv/bin/python` is absent — run
+      Runs `.venv/bin/python -m mypy src`, then
+      `.venv/bin/python -m mypy --follow-imports=silent <CI_LINT_SCRIPTS>`, the
+      same two passes as CI's lint_and_types lane. Fails closed when `.venv/bin/python` is absent — run
       `task dev:setup` explicitly. Never creates or mutates the environment.
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - '.venv/bin/python -m mypy src'
+      - '.venv/bin/python -m mypy --follow-imports=silent {{.CI_LINT_SCRIPTS}}'
 
   unit:
     desc: Run the unit test suite (integration deselected by pyproject)
