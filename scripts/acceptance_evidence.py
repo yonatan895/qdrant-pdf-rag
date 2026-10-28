@@ -266,6 +266,8 @@ def normalize_native(
                     'test_live_agent_contract_and_fresh_trace',
                     'test_live_agent_fixed_overlong_envelope',
                     'test_live_agent_stream_final_matches_buffered',
+                    # A live answer made only of citations is refused (#576).
+                    'test_live_citation_only_generation_is_not_accepted',
                     'test_live_agent_disconnect_closes_upstream_then_next_request',
                 ):
                     members = groups.get(('tests.live_agent_probes', name), [])
