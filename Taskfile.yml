@@ -58,12 +58,12 @@ tasks:
     silent: true
 
   lint:
-    desc: Alias for qa:lint (ruff over src and tests)
+    desc: Alias for qa:lint (ruff over CI's lint scope)
     cmds:
       - task: qa:lint
 
   typecheck:
-    desc: Alias for qa:typecheck (mypy over src)
+    desc: Alias for qa:typecheck (mypy over CI's type scope)
     cmds:
       - task: qa:typecheck
 
