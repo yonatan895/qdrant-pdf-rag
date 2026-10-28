@@ -10,7 +10,7 @@
 # or xfailed test (scripts/check_junit_clean.py). If you change one CI, change
 # the other in the same PR (AGENTS.md); tests/test_ci_gitlab_parity.py pins the
 # correspondence and the failure propagation. Intentional differences: GitLab
-# runs the complete unit suite in one job (GitHub partitions it into four
+# runs the complete unit suite in one job (GitHub partitions it into
 # shards), runs every lane on every pipeline, including tag pipelines (issue
 # #808; no review_tooling lane selection), and runs the simulation tier
 # against the mirrored Qdrant service without tests/test_qdrant_auth.py, which
@@ -148,7 +148,7 @@ test:
     # pytest's exit status alone lets skipped/xfailed tests pass; GitHub rejects
     # them per shard, so this job rejects them for the complete suite.
     - python scripts/check_junit_clean.py unit-junit.xml
-  # GitHub partitions the same eligible suite across four VMs. This offline
+  # GitHub partitions the same eligible suite across VMs. This offline
   # job keeps the complete suite (the union of those shards); no internal
   # runner-capacity change is needed. Tests generate synthetic PDFs at runtime;
   # the only artifact is the JUnit report (test ids and outcomes, no corpus).
