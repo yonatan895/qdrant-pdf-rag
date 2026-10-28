@@ -477,7 +477,8 @@ class TaskContractsTests(unittest.TestCase):
                 fixes.append(node.value)
         fixes = [fix for fix in fixes if "fix" in fix]
         self.assertGreater(len(fixes), 25)
-        listed = self.run_task("--list-all")
+        # Under CI=true the pinned runner colours its list unless told not to.
+        listed = self.run_task("--list-all", "--color=false", extra_env={"CI": "true"})
         self.assertEqual(listed.returncode, 0, listed.stdout)
         tasks = set(re.findall(r"^\* ([\w:-]+):", listed.stdout, re.MULTILINE))
         named_tasks, named_scripts = set(), set()

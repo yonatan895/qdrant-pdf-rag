@@ -341,11 +341,56 @@ class DoctorTests(TestCase):
 
     def test_prepared_interpreter_refusals_name_prepare_python(self):
         python = self.root/'ci-python'
-        self.assertFix(self.finding('development environment', python=python), PREPARED_CONNECTED, PREPARED_AIRGAP)
+        detail = self.finding('development environment', python=python)
+        self.assertFix(detail, 'fix: point --python at an existing interpreter, or omit --python')
+        self.assertNotIn('rm -rf', detail)
         python.write_text('fixture')
         self.inventory_probe.return_value = False
         self.assertFix(self.finding('complete development inventory', python=python),
                        PREPARED_CONNECTED, PREPARED_AIRGAP)
+
+    def test_interpreter_outside_the_checkout_never_gets_a_local_venv_fix(self):
+        # Review B2 (#1139): a path ending in .venv/bin/python is not this
+        # checkout's venv unless the directory holding .venv is this checkout.
+        other = TemporaryDirectory()
+        self.addCleanup(other.cleanup)
+        foreign = Path(other.name)/'other-checkout/.venv/bin/python'
+        detail = self.finding('development environment', python=foreign)
+        self.assertFix(detail, 'fix: point --python at an existing interpreter, or omit --python')
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text('fixture')
+        self.runtime['version'] = [3, 13, 9]
+        self.inventory_probe.return_value = False
+        for subject in ('development environment', 'complete development inventory'):
+            with self.subTest(case='another checkout venv', subject=subject):
+                detail = self.finding(subject, python=foreign)
+                self.assertFix(detail, "fix: that is another checkout's .venv", 'omit --python')
+                self.assertNotIn('rm -rf', detail)
+                self.assertNotIn('--python INTERPRETER', detail)
+        # A wrong-version interpreter outside the checkout needs a different
+        # interpreter: preparing it cannot change its version.
+        outside = Path(other.name)/'python3.13'
+        outside.write_text('fixture')
+        detail = self.finding('development environment', python=outside)
+        self.assertFix(detail, 'fix: give --python a CPython 3.14 GIL interpreter (python3.14, not python3.14t)')
+        self.assertNotIn('rm -rf', detail)
+        self.assertNotIn('prepare_python.py', detail)
+        self.runtime['version'] = [3, 14, 5]
+        self.assertFix(self.finding('complete development inventory', python=outside),
+                       PREPARED_CONNECTED, PREPARED_AIRGAP)
+
+    def test_symlinked_venv_or_checkout_stays_local(self):
+        self.runtime['version'] = [3, 13, 9]
+        link = Path(self.temp.name + '-link')
+        link.symlink_to(self.root)
+        self.addCleanup(link.unlink)
+        target = self.root/'shared-venv'
+        (self.root/'.venv').rename(target)
+        (self.root/'.venv').symlink_to(target)
+        for python in (self.root/'.venv/bin/python', link/'.venv/bin/python'):
+            with self.subTest(python=python):
+                self.assertFix(self.finding('development environment', python=python),
+                               RECREATE_CONNECTED, RECREATE_AIRGAP)
 
     def test_checker_runtime_refusal_names_a_gil_interpreter(self):
         self.probe.side_effect = lambda python, _: (dict(self.runtime, jit_enabled=True)
