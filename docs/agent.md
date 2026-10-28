@@ -988,7 +988,7 @@ readers:
 | Setting | Default | Read by |
 |---|---|---|
 | `qdrant_url` / `qdrant_api_key` / `qdrant_collection` / `qdrant_snapshots_dir` | `http://localhost:6333` / unset / `mainframe_manuals` / `/qdrant/snapshots` | lifespan, healthz readyZ, retrieve calls, manifests, harness snapshot restore |
-| `qdrant_timeout_s` / `qdrant_ingest_timeout_s` | 30 / 120 | query path / ingest path (split: different call shapes); the agent's client requests `Accept-Encoding: identity`, since gzip-chunked Qdrant responses stalled payload reads ~40 ms each |
+| `qdrant_timeout_s` / `qdrant_ingest_timeout_s` | 30 / 120 | query path / ingest path (split: different call shapes); the agent's client requests `Accept-Encoding: identity`, since gzip-chunked Qdrant responses stalled payload reads ~40 ms each; its pool expires idle connections after `QDRANT_CLIENT_KEEPALIVE_EXPIRY_S` (2.0 s), below Qdrant's 5 s keep-alive close, and the `/healthz` readyz probe (shared pool) sends `Connection: close`, so neither reuses a socket the server closed (#1128) |
 | `embed_mode` | `vllm` (normalized lower/strip) | lifespan fail-fast, embedder dispatch, ingest |
 | `embed_base_url` / `embed_model` / `dense_dim` / `embed_api_key` | unset / unset / 4096 (Qwen3-Embedding-8B, #777) / unset (endpoint and model required in vLLM; key unset = keyless) | endpoint+model validation, healthz ping, dim check, `Authorization` on embed calls |
 | `embed_timeout_s` | 60.0 | both HTTP pools |
@@ -1009,7 +1009,7 @@ readers:
 | `llm_stream` | `false` | TTFT measurement and streaming recovery policy for server-side reasoning calls (the wire is a stream either way, #868) |
 | `request_max_concurrent` / `request_queue_max` / `request_queue_wait_s` / `request_deadline_s` | 0 (unlimited) / 0 / 5.0 (used only with a queue) / 0.0 (no deadline); the chart ships 4 / 4 / 30 / 270 (#843) | request admission and total deadline (§6a); issue #374; the library default is off, the supported deployment ships admission on and the site overrides by the sizing rule |
 | `embed_max_input_chars` | 0 (unbounded) | refuse an over-bound dense embed input before the call, query path and ingest (§6a, `docs/ingest.md` §7) |
-| `http_connect_retries` / `http_max_connections` / `http_max_keepalive_connections` | 2 (connect-only) / 200 / 100 | both pools, embed/context clients |
+| `http_connect_retries` / `http_max_connections` / `http_max_keepalive_connections` | 2 (connect-only) / 200 / 100 | both pools, embed/context clients; the Qdrant pool's counts |
 | `health_qdrant_timeout_s` / `health_embed_timeout_s` | 5.0 / 10.0 | healthz only |
 | `health_rerank_timeout_s` / `health_rerank_ttl_s` | 5.0 / 15.0 (ttl 0 = probe every scrape) | healthz rerank probe bound and outcome cache; only when `rerank_enabled` |
 | `evidence_max_bytes` / `evidence_timeout_s` | 65536 (1024–1048576) / 10.0 | exact-evidence read: server cap on one whole chunk; total storage deadline of one read or one source-listing page |

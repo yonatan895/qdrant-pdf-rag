@@ -103,7 +103,13 @@ from mainframe_rag.agent.sse import (
 )
 from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.agent.zowe_mcp import build_zowe_mcp, probe_zowe_mcp
-from mainframe_rag.config import ReasoningEffort, Settings, bearer_auth_headers, load_settings
+from mainframe_rag.config import (
+    QDRANT_CLIENT_KEEPALIVE_EXPIRY_S,
+    ReasoningEffort,
+    Settings,
+    bearer_auth_headers,
+    load_settings,
+)
 from mainframe_rag.feedback.client import FeedbackClient
 from mainframe_rag.feedback.store import AnswerRecord
 from mainframe_rag.feedback.store import Endpoint as FeedbackEndpoint
@@ -878,11 +884,16 @@ async def lifespan(_app: FastAPI):
         # body written after its headers, and the agent then waited out a
         # ~40 ms delayed-ACK stall on most payload-carrying reads (search p50
         # 47 -> 4 ms in the bench harness with identity).
+        # Own limits: idle connections expire before Qdrant closes them (#1128).
         qdrant_client_inst = qdrant_client.AsyncQdrantClient(
             url=settings.qdrant_url,
             api_key=settings.qdrant_api_key,
             timeout=settings.qdrant_timeout_s,
-            limits=http_limits,
+            limits=httpx2.Limits(
+                max_keepalive_connections=settings.http_max_keepalive_connections,
+                max_connections=settings.http_max_connections,
+                keepalive_expiry=QDRANT_CLIENT_KEEPALIVE_EXPIRY_S,
+            ),
             headers={"Accept-Encoding": "identity"},
         )
         owned.push_async_callback(_close_client, qdrant_client_inst)
@@ -1410,8 +1421,14 @@ async def evaluate_healthz() -> tuple[HealthzResponse, int]:
         # The pooled async client from lifespan only — no sync-call fallback.
         # A blocking GET on the event loop would stall every in-flight
         # request; if the pool is missing that is a startup bug, not
-        # something to paper over (review S2).
-        resp = await http.get(f"{base}/readyz", timeout=settings.health_qdrant_timeout_s)
+        # something to paper over (review S2). The shared pool keeps the 5 s
+        # default expiry, so this probe never leaves a Qdrant connection idle
+        # in it: each scrape opens its own and closes it (#1128).
+        resp = await http.get(
+            f"{base}/readyz",
+            timeout=settings.health_qdrant_timeout_s,
+            headers={"Connection": "close"},
+        )
         qdrant_ok = resp.status_code == 200 and resp.text.strip().lower() == "all shards are ready"
         if not qdrant_ok:
             # Upstream response bodies stay out of logs and client bodies
