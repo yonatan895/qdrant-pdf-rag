@@ -79,7 +79,36 @@ Every rule in `checks.py` has a counterexample in
 | blocked paths | the allow-list paths answer the proxy's 403 `denied`; an allowed path still answers 200 |
 | console alongside | `/ui` and `/healthz` of the agent answer before and after the Open WebUI restart |
 
-Not proven here: the real IdP, Route and SCC (stand-ins, see the hands-on
+<a id="operator-lane"></a>
+**Operator-deploy lane** (`openwebui-operator`, #1118 B3, same job and triggers). The lane above
+adds the chart's Open WebUI objects itself (`helm template --show-only` plus `kubectl apply`).
+This one runs the site's own commands on the bootstrapped bundle, with Open WebUI on and the
+`OPENWEBUI_*` keys in `airgap.env` (`acceptance.sh operator site-env`); the Open WebUI and
+proxy images come from the bundle through `airgap:load`. It follows the
+[site procedure](deploy.md#docs-front-end):
+- **Platform stand-ins** (`acceptance.sh operator prepare`, `scripts/openwebui/kind-platform.yaml`):
+  the `route.openshift.io/v1` Route CRD, the namespace service CA (`openshift-service-ca.crt`),
+  the serving-certificate Secret `rag-openwebui-tls` signed by that CA, and restricted-v2's UID
+  assignment as a MutatingAdmissionPolicy on the Open WebUI pod (the lane's Kind cluster enables
+  the alpha API). Then the test IdP and the operator Secret (step 2). These are rehearsal
+  infrastructure; no product manifest or script has a Kind path.
+- **First pass:** `sh scripts/tools/run-task.sh airgap:pipeline` (step 3). Deploy must verify the
+  Route and print `docs Pipe NOT installed`.
+- **Second pass** (`acceptance.sh operator admin`, step 4): the router stand-in is configured from
+  the stored Route (host, destination CA, timeout). The lane proves that no Function exists yet
+  (`pipe-absent-before-key`). It signs in as the IdP admin, adds the API key to the Secret as
+  `admin-api-key`, and re-runs `airgap:deploy`. The installer then adds the Pipe.
+- **Checks** (`acceptance.sh operator run`, step 5): groups and the model grant, then the same
+  checks as the lane above, run against the objects the operator deploy created.
+- **Rollback K1:** `operator record` stores the chats and the claim uid. `OPENWEBUI_ENABLED=false`
+  plus `airgap:deploy` is followed by `operator off`: no Open WebUI object or pod remains, the
+  claim is the same object, and the console answers. Then `OPENWEBUI_ENABLED=true` plus
+  `airgap:deploy` (the Pipe is reinstalled from the kept key) is followed by `operator on`: the
+  same claim, every recorded chat, the grant, the repository Pipe, and an answered next chat.
+Evidence: `diagnostics/openwebui/` (`checks.json`, `first-pass.json`, `rollback-*.json`, and the
+operator's deploy logs).
+
+Not proven here: the real IdP, router, service CA operator and SCC (stand-ins, see the hands-on
 record), model quality (mock models), the node-level pre-NAT flow audit of the
 2026-10-24 trial (the DNS and socket checks replace it in CI), and anything
 about the site's CNI beyond Kind's NetworkPolicy engine. A failed lane is a
@@ -90,7 +119,7 @@ that Containerfile and pushes `ghcr.io/<owner>/qdrant-pdf-rag-openwebui` with th
 sets the `v0.12.3-slim` tag only if it does not exist yet (never moves it), and
 writes the manifest digest, the tag outcome and a rebuild-reproducibility probe to the job summary; the `images.txt` pin is a separate PR. Every other e2e job that runs
 the operator flow sets `OPENWEBUI_ENABLED=false` (the front end is default-on
-and fails closed without site inputs); only the `openwebui` lane deploys it.
+and fails closed without site inputs); only the `openwebui` and `openwebui-operator` lanes deploy it.
 
 <a id="gate-map"></a>
 ### ADR-0007 gate to evidence map

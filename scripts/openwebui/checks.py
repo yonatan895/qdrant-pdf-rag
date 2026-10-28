@@ -286,5 +286,47 @@ def check_console(ui_status: int, ui_content_type: str, healthz_status: int) -> 
     return _v("console-alongside", ok, ui_status=ui_status, healthz_status=healthz_status)
 
 
+# ------------------------------------------------------------------ operator lane (#1118 B3)
+# The objects the chart renders for Open WebUI. After the K1 rollback (OPENWEBUI_ENABLED=false and
+# airgap:deploy, docs/deploy.md) none may remain; the claim rag-openwebui-data is kept.
+OPENWEBUI_OBJECTS = (
+    "deployment.apps/rag-openwebui", "service/rag-openwebui", "route.route.openshift.io/rag-openwebui",
+    "networkpolicy.networking.k8s.io/rag-openwebui", "configmap/rag-openwebui-pipe",
+    "configmap/rag-openwebui-proxy", "configmap/rag-openwebui-idp-ca",
+)
+
+
+def check_pipe_absent_before_key(function_sha256: str | None, admin_role: str | None) -> Verdict:
+    """Site procedure step 3: a deploy before the Secret has admin-api-key installs no Function, so its
+    'docs Pipe NOT installed' notice is true, and the IdP admin role reaches Open WebUI (step 4 can run)."""
+    ok = function_sha256 is None and admin_role == "admin"
+    return _v("pipe-absent-before-key", ok, function_installed=function_sha256 is not None,
+              admin_signed_in=admin_role == "admin")
+
+
+def check_rollback_recorded(chat_ids: list[str], claim_uid: str) -> Verdict:
+    """Before K1: there are chats to lose and a claim to keep, so the rollback checks can fail."""
+    return _v("rollback-recorded", bool(chat_ids) and bool(claim_uid), chats=len(chat_ids), claim=bool(claim_uid))
+
+
+def check_rollback_off(remaining: list[str], claim_before: str, claim_after: str, pods: int, console_ok: bool) -> Verdict:
+    """K1 off: no Open WebUI object or pod remains, the claim is the same object, the console still answers."""
+    kept = bool(claim_before) and claim_after == claim_before
+    ok = not remaining and kept and pods == 0 and console_ok
+    return _v("rollback-off", ok, remaining=sorted(remaining), claim_kept=kept, pods=pods, console_ok=console_ok)
+
+
+def check_rollback_on(before: dict, after: dict, repo_sha256: str, next_chat_ok: bool) -> Verdict:
+    """K1 on again: the same claim, every recorded chat, the grant and the repository Pipe are back,
+    and the next ordinary chat answers."""
+    lost = sorted(set(before["chat_ids"]) - set(after["chat_ids"]))
+    kept = bool(before["claim_uid"]) and after["claim_uid"] == before["claim_uid"]
+    ok = (bool(before["chat_ids"]) and not lost and kept and after["function_sha256"] == repo_sha256
+          and after["models"] == [DOCS_MODEL] and next_chat_ok)
+    return _v("rollback-on", ok, chats_before=len(before["chat_ids"]), chats_lost=len(lost), claim_kept=kept,
+              pipe_is_repository=after["function_sha256"] == repo_sha256,
+              docs_only=after["models"] == [DOCS_MODEL], next_chat_answered=next_chat_ok)
+
+
 def overall(verdicts: list[Verdict]) -> bool:
     return bool(verdicts) and all(v.ok for v in verdicts)

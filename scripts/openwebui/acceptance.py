@@ -1,6 +1,9 @@
 """Open WebUI acceptance executor (#1070, #1073): runs the checks against a live Kind deployment.
 
-    python3 -I acceptance.py STATE_DIR        (via acceptance.sh run)
+    python3 -I acceptance.py STATE_DIR [PHASE]   (via acceptance.sh run, or acceptance.sh operator ...)
+
+PHASE is `checks` (default: the full check list) or, in the operator-deploy lane (#1118 B3),
+`first-pass` (before the admin API key), `record`, `rollback-off` and `rollback-on` (K1).
 
 Everything here is collection: kubectl calls into the Open WebUI pod, HTTP
 calls through the router stand-in as the signed-in test users, and reads of
@@ -88,6 +91,12 @@ def py_exec(container: str, code: str, *args: str) -> subprocess.CompletedProces
 
 def agent_exec(code: str) -> subprocess.CompletedProcess:
     return kc("exec", "-i", "deploy/rag-agent", "--", "python3", "-", stdin=code.encode())
+
+
+def claim_uid() -> str:
+    """The uid of the kept claim, so a recreated claim of the same name never passes as kept."""
+    proc = kc("get", "pvc", "rag-openwebui-data", "--ignore-not-found", "-o", "jsonpath={.metadata.uid}")
+    return proc.stdout.decode().strip() if proc.returncode == 0 else ""
 
 
 def logs_of(*target: str, ns: str | None = NS) -> str:
@@ -199,7 +208,7 @@ class Acceptance:
     def data_dir_after_use(self) -> None:
         self.add(checks.check_data_dir(self.inspect()))
 
-    def console(self, label: str) -> None:
+    def console(self, label: str) -> checks.Verdict:
         code = ("import urllib.request as u\n"
                 "r = u.urlopen('http://localhost:8080/ui', timeout=15)\n"
                 "h = u.urlopen('http://localhost:8080/healthz', timeout=15)\n"
@@ -211,11 +220,12 @@ class Acceptance:
         except ValueError:
             parts = []
         if proc.returncode != 0 or len(parts) != 3:
-            self.add(checks.Verdict(f"console-alongside:{label}", False, {"reason": "console request failed"}))
-            return
-        verdict = checks.check_console(int(parts[0]), str(parts[1]), int(parts[2]))
-        verdict.name = f"console-alongside:{label}"
+            verdict = checks.Verdict(f"console-alongside:{label}", False, {"reason": "console request failed"})
+        else:
+            verdict = checks.check_console(int(parts[0]), str(parts[1]), int(parts[2]))
+            verdict.name = f"console-alongside:{label}"
         self.add(verdict)
+        return verdict
 
     def network_policies(self) -> None:
         """Only the chart's policy may select the Open WebUI pod for egress (a lane policy would be unioned in)."""
@@ -250,8 +260,7 @@ class Acceptance:
             "models": [client.DOCS_MODEL],
             "pod_uid": pod_info()["uid"],
         }
-        repo_sha = read_text(os.path.join(self.state, "render", "pipe.sha256")).strip()
-        self.add(checks.check_function_hash(before["function_sha256"], repo_sha))
+        self.add(checks.check_function_hash(before["function_sha256"], self.repo_sha()))
         original = self.s.admin_config_value(EDIT_KEY)
         edit_status = self.s.admin_config_set(EDIT_KEY, EDIT_VALUE)
         edited = self.s.admin_config_value(EDIT_KEY) if edit_status == 200 else original
@@ -353,11 +362,67 @@ class Acceptance:
     def _first_answer(self) -> checks.Verdict:
         return checks.check_answer(self.ask(self.canary1))
 
+    # -------------------------------------------------------------- operator lane (#1118 B3)
+    def repo_sha(self) -> str:
+        return read_text(os.path.join(self.state, "render", "pipe.sha256")).strip()
+
+    def first_pass(self) -> bool:
+        """After the first airgap:deploy, before the Secret holds admin-api-key."""
+        login = self.s.login(client.ADMIN)
+        role = self.s.whoami(client.ADMIN).get("role") if login.get("signed_in") else None
+        self.add(checks.check_pipe_absent_before_key(self.s.function_sha256(), role))
+        return checks.overall(self.verdicts)
+
+    def record(self) -> bool:
+        """Before the rollback: the docs user's chats and the claim, kept for rollback-on."""
+        self.s.login("docs-user")
+        before = {"chat_ids": self.s.chat_ids("docs-user"), "claim_uid": claim_uid()}
+        client._private_write(os.path.join(self.state, "rollback-before.json"), json.dumps(before))
+        self.add(checks.check_rollback_recorded(before["chat_ids"], before["claim_uid"]))
+        return checks.overall(self.verdicts)
+
+    def rollback_off(self) -> bool:
+        """After OPENWEBUI_ENABLED=false and airgap:deploy: Helm removed the objects, kept the claim."""
+        before = json.loads(read_text(os.path.join(self.state, "rollback-before.json")))
+        deadline = time.monotonic() + 180  # a removed Deployment's pod terminates after the deploy returns
+        while True:
+            pods = json.loads(kc_out("get", "pod", "-l", "app=rag-openwebui", "-o", "json"))["items"]
+            if not pods or time.monotonic() > deadline:
+                break
+            time.sleep(5)
+        remaining = []
+        for obj in checks.OPENWEBUI_OBJECTS:
+            proc = kc("get", obj, "--ignore-not-found", "-o", "name")
+            if proc.returncode != 0 or proc.stdout.strip():
+                remaining.append(obj)  # an unreadable object counts as present (fail closed)
+        console = self.console("rollback-off")
+        self.add(checks.check_rollback_off(remaining, before["claim_uid"], claim_uid(), len(pods), console.ok))
+        return checks.overall(self.verdicts)
+
+    def rollback_on(self) -> bool:
+        """After OPENWEBUI_ENABLED=true and airgap:deploy again: the next ordinary use on the kept claim."""
+        before = json.loads(read_text(os.path.join(self.state, "rollback-before.json")))
+        self.wait_ready()
+        self.s.login("docs-user")
+        after = {"chat_ids": self.s.chat_ids("docs-user"), "claim_uid": claim_uid(),
+                 "function_sha256": self.s.function_sha256(),
+                 "models": self.s.whoami("docs-user").get("models", [])}
+        next_chat = checks.check_answer(self.ask(self.canary1 + "k"), name="rollback-next-chat")
+        self.add(next_chat)
+        self.add(checks.check_rollback_on(before, after, self.repo_sha(), next_chat.ok))
+        return checks.overall(self.verdicts)
+
 
 def main(argv: list[str]) -> int:
     run = Acceptance(argv[0])
+    phases = {"checks": run.run, "first-pass": run.first_pass, "record": run.record,
+              "rollback-off": run.rollback_off, "rollback-on": run.rollback_on}
+    phase = argv[1] if len(argv) > 1 else "checks"
+    if phase not in phases:
+        print(f"unknown phase {phase!r}; one of {', '.join(phases)}", file=sys.stderr)
+        return 2
     try:
-        ok = run.run()
+        ok = phases[phase]()
     except Exception as exc:  # noqa: BLE001 - report the class, never the text (it may carry upstream bytes)
         frame = traceback.extract_tb(exc.__traceback__)[-1]
         run.verdicts.append(checks.Verdict("executor", False, {

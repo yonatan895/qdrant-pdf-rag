@@ -202,12 +202,40 @@ route_timeout() {
 }
 
 render_support() {  # render_support OUT NODE_IP DEX_CONFIG_SHA  (Dex, router stand-in, kubelet-probe policy)
+    # ROUTE_TIMEOUT (seconds), when set, is the timeout of the stored Route (operator lane); else values.yaml's.
     sed -e "s#@NODE_IP@#$2#g" -e "s#@APP_NS@#$APP_NS#g" \
         -e "s#@DEX_UID@#$(uid_for dex)#g" -e "s#@ROUTER_UID@#$(uid_for router)#g" \
         -e "s#@NGINX_IMAGE@#$NGINX_IMAGE#g" -e "s#@DEX_IMAGE@#$DEX_IMAGE#g" \
         -e "s#@DEX_CONFIG_SHA@#$3#g" -e "s#@DEX_PORT@#$DEX_PORT#g" \
-        -e "s#@OWUI_HOST@#$OWUI_HOST#g" -e "s#@ROUTE_TIMEOUT@#$(route_timeout)#g" \
+        -e "s#@OWUI_HOST@#$OWUI_HOST#g" -e "s#@ROUTE_TIMEOUT@#${ROUTE_TIMEOUT:-$(route_timeout)}#g" \
         "$HERE/kind-support.yaml" > "$1"
+}
+
+route_for_router() {  # route_for_router ROUTE_JSON HOST CA_OUT: check the stored Route, write its CA, print its timeout
+    # Operator lane: the router stand-in is configured from the Route the operator deploy stored.
+    "${PY:-python3}" -I - "$1" "$2" "$3" <<'EOF'
+import json, re, sys
+route = json.load(open(sys.argv[1]))
+spec, ann = route["spec"], route["metadata"].get("annotations") or {}
+tls = spec.get("tls") or {}
+problems = []
+if spec.get("host") != sys.argv[2]:
+    problems.append("host")
+if (spec.get("to") or {}).get("name") != "rag-openwebui" or (spec.get("port") or {}).get("targetPort") != "https":
+    problems.append("backend")
+if tls.get("termination") != "reencrypt":
+    problems.append("termination")
+ca = tls.get("destinationCACertificate") or ""
+if "-----BEGIN CERTIFICATE-----" not in ca:
+    problems.append("destinationCACertificate")
+m = re.fullmatch(r"([0-9]+)s", ann.get("haproxy.router.openshift.io/timeout", ""))
+if not m:
+    problems.append("timeout")
+if problems:
+    sys.exit("the router stand-in cannot serve Route rag-openwebui: " + ", ".join(problems))
+open(sys.argv[3], "w").write(ca)
+print(m.group(1))
+EOF
 }
 
 check_render() {  # check_render DIR SUPPORT_OBJECTS: parse the files, assert the objects and the Pipe hash
@@ -256,6 +284,19 @@ apply_stack() {  # the Secrets and objects both entry points create in the clust
 
 # The digest-pinned image runs the hashing (never pulled behind a closed boundary: --pull=never).
 bcrypt_hashes() {  # passwords of the client.py users -> bcrypt hashes in STATE/hashes.txt, from the image's own module
+    if [ "${OWUI_HASHER:-image}" = htpasswd ]; then
+        # Operator lane: the Open WebUI image reaches the cluster only from the bundle, so the host has no
+        # copy to hash with. htpasswd reads each password on stdin (never argv) and writes bcrypt cost 10;
+        # its $2y$ prefix is the same algorithm as the $2b$ the image's module writes, which Dex gets.
+        $PYH users "$STATE" | while read -r u; do
+            htpasswd -niBC 10 "$u" < "$STATE/$u.password" | sed -n 's/^[^:]*:[$]2y[$]/$2b$/p'
+        done > "$STATE/hashes.txt"
+        chmod 600 "$STATE/hashes.txt"
+        [ "$(grep -c '^[$]2b[$]10[$]' "$STATE/hashes.txt")" = "$($PYH users "$STATE" | wc -l)" ] ||
+            die "htpasswd did not write one bcrypt hash per user"
+        ( umask 077; $PYH dex-config "$STATE" "$STATE/hashes.txt" > "$STATE/dex-config.yaml" )
+        return 0
+    fi
     if [ "${OWUI_BUILD:-0}" = 1 ]; then BCRYPT_IMAGE=$OWUI_IMAGE; else BCRYPT_IMAGE=$(owui_pinned) || die "images.txt does not pin the Open WebUI image"; fi
     $PYH users "$STATE" | while read -r u; do cat "$STATE/$u.password"; done \
         | docker run --rm -i --pull=never --network none --entrypoint python3 "$BCRYPT_IMAGE" -c '
