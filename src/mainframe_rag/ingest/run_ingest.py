@@ -42,7 +42,7 @@ from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 from qdrant_client.http.exceptions import UnexpectedResponse
 
-from mainframe_rag.config import Settings, load_settings
+from mainframe_rag.config import Settings, load_settings, qdrant_pool_limits
 from mainframe_rag.ingest.bounds import require_document_within, require_embed_inputs_within
 from mainframe_rag.ingest.build import (
     BuildBinding,
@@ -586,6 +586,7 @@ def _get_qdrant(settings: Settings) -> QdrantPoints:
             url=settings.qdrant_url,
             api_key=settings.qdrant_api_key,
             timeout=settings.qdrant_ingest_timeout_s,
+            limits=qdrant_pool_limits(settings.qdrant_url),
         )
     return _worker_qdrant
 
@@ -638,6 +639,7 @@ def _placement_clients(
             api_key=settings.qdrant_api_key,
             timeout=settings.qdrant_ingest_timeout_s,
             prefer_grpc=False,
+            limits=qdrant_pool_limits(endpoint),
         )
         for endpoint in endpoints
     }
