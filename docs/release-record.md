@@ -31,6 +31,7 @@ browser captures out of Git. Link protected evidence using local artifact names.
 | CI bundle integrity and fresh bootstrap | NOT RUN | |
 | CI full pipeline | NOT RUN | |
 | CI gateway/fault contracts | NOT RUN | |
+| CI Open WebUI operator lane (`kind-openwebui-operator`, stand-in models) | NOT RUN | |
 | CI three-worker Kind lifecycle | NOT RUN | |
 
 Both lanes run on the same bundle. A skip is not a pass. OpenShift-specific

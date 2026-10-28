@@ -338,3 +338,118 @@ def test_operator_path_without_site_inputs_still_refuses_with_the_opt_out(pipe_t
     assert "opt out with OPENWEBUI_ENABLED=false" in r.stderr
     assert "STAGE 3/5" not in r.stdout
     assert not helm_log.exists() or "upgrade" not in helm_log.read_text().split()
+
+
+def _release_gate_recipe(pipe_tree):
+    """The disposable-Kind release gate as docs/release-verification.md writes it:
+    the airgap.env heredoc, both sizing files and the operator shell's exports,
+    with the doc's shell variables bound to throwaway values."""
+    import re
+
+    doc = (REPO / "docs/release-verification.md").read_text()
+    state = pipe_tree / "kind-state"
+    state.mkdir()
+    qdrant = re.search(r"`\$KIND_STATE/qdrant-sizing\.yaml`.*?```yaml\n(.*?)```", doc, re.DOTALL)
+    ingest = re.search(r"`\$KIND_STATE/ingest-sizing\.json`:\n\n```json\n(.*?)```", doc, re.DOTALL)
+    env = re.search(r'cat > "\$KIND_STATE/airgap\.env" <<EOF\n(.*?)\nEOF\n', doc, re.DOTALL)
+    shell = re.search(r"in a clean operator shell.*?```sh\n(.*?)```", doc, re.DOTALL)
+    assert qdrant and ingest and env and shell, "release gate recipe blocks moved"
+    (state / "qdrant-sizing.yaml").write_text(qdrant.group(1))
+    (state / "ingest-sizing.json").write_text(ingest.group(1))
+    text = (env.group(1).replace("$KIND_NAMESPACE", "rag-kind-gate")
+            .replace("$IMAGE_SHA", IMAGE_SHA).replace("$KIND_STATE", str(state)))
+    (state / "airgap.env").write_text(text + "\n")
+    exports = dict(re.findall(r"^export (\w+)=(\S+)$", shell.group(1), re.MULTILINE))
+    return state / "airgap.env", exports
+
+
+def test_release_gate_kind_recipe_runs_as_documented(pipe_tree):
+    """#1118 B5: the documented gate recipe passes the operator pipeline with
+    nothing added. It once stopped at stage 1 (Open WebUI is on by default and
+    the lab has no IdP) and at stage 3 (its Kind sizing overlay needs the
+    process-environment CI_REHEARSAL=1)."""
+    import yaml
+
+    from tests.test_airgap_ingest_sh import PATCHING_KUBECTL
+
+    task = _task_tree(pipe_tree)
+    # The ingest stage applies the documented sizing patch client-side.
+    for name in ("kubectl", "oc"):
+        write_stub(pipe_tree / "bin" / name, PATCHING_KUBECTL)
+    airgap_env, exports = _release_gate_recipe(pipe_tree)
+    assert exports.get("CI_REHEARSAL") == "1"
+    r = _run_task(pipe_tree, task, "airgap:pipeline", "AIRGAP_DRYRUN=1",
+                  extra_env={"AIRGAP_ENV": str(airgap_env), **exports})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "PIPELINE DRY-RUN COMPLETE: rendering passed; live acceptance NOT RUN" in r.stdout
+    # Stored render, not just the banner: the one-peer lab gets the 1/1/1
+    # policy over the checked-in 6/3/2 preset, and a non-root OpenObserve.
+    values = yaml.safe_load((pipe_tree / "dist/mainframe-rag-release-values.yaml").read_text())
+    assert values["openwebui"]["enabled"] is False
+    assert values["openobserve"]["runAsId"] == 10001
+    job = yaml.safe_load((pipe_tree / "dist/ingest-rendered.yaml").read_text())
+    (container,) = [c for c in job["spec"]["template"]["spec"]["containers"] if c["name"] == "ingest"]
+    env = {e["name"]: e.get("value") for e in container["env"]}
+    for key in ("QDRANT_SHARD_NUMBER", "QDRANT_REPLICATION_FACTOR", "QDRANT_WRITE_CONSISTENCY_FACTOR"):
+        assert env[key] == "1", key
+    # The documented sizing patch reached the Job.
+    assert container["resources"]["limits"] == {"cpu": "2", "memory": "2Gi"}
+
+    # The opt-in is load-bearing: without it the same recipe is refused.
+    refused = _run_task(pipe_tree, task, "airgap:pipeline", "AIRGAP_DRYRUN=1",
+                        extra_env={"AIRGAP_ENV": str(airgap_env)})
+    assert refused.returncode != 0
+    assert "QDRANT_EXTRA_VALUES is a CI-rehearsal override" in refused.stderr
+
+
+RECORDING_KUBECTL = f"""#!{__import__("sys").executable}
+import json, os, sys
+args = sys.argv[1:]
+out = os.environ["SECRET_CAPTURE"]
+if "create" in args and "secret" in args:
+    name = args[args.index("generic") + 1]
+    data = {{}}
+    for arg in args:
+        if arg.startswith("--from-file="):
+            key, path = arg[len("--from-file="):].split("=", 1)
+            data[key] = open(path, encoding="utf-8").read()
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump({{"name": name, "namespace": args[args.index("-n") + 1], "data": data}}, f)
+"""
+
+
+def test_release_gate_kind_recipe_creates_a_valid_openobserve_secret(pipe_tree):
+    """#1118 B5 review B1: tracing is on by default with the bundled OpenObserve,
+    and a live deploy refuses before any change without Secret
+    openobserve-credentials (four keys) or with a weak root password. The
+    doc's own block, run as written, must produce a Secret that passes."""
+    import base64
+    import re
+    import subprocess
+
+    doc = (REPO / "docs/release-verification.md").read_text()
+    block = re.search(r"create its\ncredentials Secret too.*?```sh\n(.*?)```", doc, re.DOTALL)
+    assert block, "OpenObserve credentials block moved"
+    write_stub(pipe_tree / "bin" / "kubectl", RECORDING_KUBECTL)
+    capture = pipe_tree / "secret.json"
+    state = pipe_tree / "kind-state"
+    state.mkdir()
+    r = subprocess.run(["sh", "-ec", block.group(1)], capture_output=True, text=True, check=False,
+                       env={"PATH": f"{pipe_tree / 'bin'}:/usr/bin:/bin", "KIND_STATE": str(state),
+                            "KIND_NAMESPACE": "rag-kind-gate", "SECRET_CAPTURE": str(capture)})
+    assert r.returncode == 0, r.stderr
+    secret = __import__("json").loads(capture.read_text())
+    assert (secret["name"], secret["namespace"]) == ("openobserve-credentials", "rag-kind-gate")
+    data = secret["data"]
+    assert sorted(data) == ["metrics-auth", "otlp-headers", "root-user-email", "root-user-password"]
+    assert all(data.values())
+    # deploy.sh's rule: 8-128 characters with lower, upper, digit and special.
+    password = data["root-user-password"]
+    assert 8 <= len(password) <= 128
+    for cls in ("[a-z]", "[A-Z]", "[0-9]", "[^A-Za-z0-9]"):
+        assert re.search(cls, password), cls
+    token = base64.b64encode(f"{data['root-user-email']}:{password}".encode()).decode()
+    assert data["otlp-headers"] == f"Authorization=Basic {token}"
+    assert data["metrics-auth"] == f"Basic {token}"
+    # Values never reach output.
+    assert password not in r.stdout + r.stderr
