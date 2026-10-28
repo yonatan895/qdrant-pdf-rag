@@ -364,7 +364,12 @@ Compatibility and lifecycle decisions under #448:
 - `check_app_ownership.py` accepts only the fixed first-party resource inventory
   in the selected namespace. Existing unmanaged Kustomize resources can be
   adopted with Helm's `--take-ownership`; another release, namespace, deployment
-  manager or controller owner fails preflight. Operators must serialize
+  manager or controller owner fails preflight. The refusal names the object it
+  judged (apiVersion, kind, name; never values), for example
+  `refused (application resource belongs to another Helm release: v1 ConfigMap/rag-openwebui-proxy)`.
+  Every object the chart renders must be in that inventory, or the deploy after
+  the one that created it is refused; a test feeds the full render back as the
+  live inventory (#1134). Operators must serialize
   deployment operations in that namespace; this read-before-write check is
   not a distributed lock. Adoption changes management metadata, not authorization.
   Application installs/upgrades explicitly use `--server-side=false` to preserve

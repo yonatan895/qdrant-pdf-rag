@@ -2426,3 +2426,82 @@ def test_layout_preflight_refuses_a_release_without_its_statefulset(tree):
     assert result.returncode != 0
     assert "E_LAYOUT_UNVERIFIED" in result.stderr and "StatefulSet was not found" in result.stderr
     assert _mutations(tree) == []
+
+
+# ------------------------------- next-deploy adoption of the whole render (#1134)
+
+def _rendered_inventory(tree):
+    """Every object the last deploy rendered, as the next deploy's Helm-owned
+    live inventory (what kubectl get -f returns after the first release)."""
+    import yaml
+
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    objects = [(d["apiVersion"], d["kind"], d["metadata"]["name"])
+               for d in yaml.safe_load_all(rendered) if d]
+    return _live_inventory(tree, objects, **HELM_OWNED), objects
+
+
+def _idp_ca(tree):
+    """A real self-signed CA certificate (map_values loads every PEM block)."""
+    key, crt = tree[0] / "idp-ca.key", tree[0] / "idp-ca.pem"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                    "-subj", "/CN=idp-ca", "-keyout", str(key), "-out", str(crt)],
+                   check=True, capture_output=True)
+    return str(crt)
+
+
+def test_next_deploy_adopts_every_object_the_full_render_created(tree):
+    """#1134: the deploy after the first release reads back every object that
+    release rendered. With Open WebUI (IdP CA set), feedback and metrics on,
+    the preflight must adopt the whole render. A chart object missing from
+    check_app_ownership.ALLOWED refused every second deploy at the site."""
+    extra = (("OPENWEBUI_IDP_CA_FILE", _idp_ca(tree)), *FEEDBACK_ENV, ("METRICS_ENABLED", "true"))
+    first = _owui_deploy(tree, *extra)
+    assert first.returncode == 0, first.stderr
+    inventory, objects = _rendered_inventory(tree)
+    for name in ("rag-openwebui-proxy", "rag-openwebui-idp-ca", "rag-openwebui-pipe"):
+        assert ("v1", "ConfigMap", name) in objects, name
+    second = _owui_deploy(tree, *extra, ("OWNERSHIP_FILE", inventory))
+    assert second.returncode == 0, second.stderr
+    assert "ownership preflight refused" not in second.stderr
+    assert _helm_log(tree).count("upgrade") >= 2
+
+
+@pytest.mark.parametrize("name", ["rag-openwebui-proxy", "rag-openwebui-idp-ca"])
+def test_foreign_open_webui_configmaps_are_refused_and_named(tree, name):
+    inventory = _live_inventory(tree, [("v1", "ConfigMap", name)],
+                                annotations={"meta.helm.sh/release-name": "other"})
+    r = _owui_deploy(tree, ("OWNERSHIP_FILE", inventory))
+    assert r.returncode != 0
+    assert (f"ownership preflight refused (application resource belongs to another Helm "
+            f"release: v1 ConfigMap/{name})") in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_ownership_refusal_names_only_a_valid_identity_and_never_values():
+    """The refusal names apiVersion, kind and name when they look like
+    Kubernetes identities; anything else prints <invalid>, and annotation,
+    label and data values never reach the output."""
+    import sys
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "airgap" / "check_app_ownership.py"
+
+    def refuse(item):
+        r = subprocess.run([sys.executable, str(script), "ns"], input=json.dumps(item),
+                           capture_output=True, text=True, check=False)
+        assert r.returncode != 0
+        return r.stderr
+
+    unlisted = refuse({"apiVersion": "v1", "kind": "ConfigMap",
+                       "metadata": {"name": "site-config", "namespace": "ns"},
+                       "data": {"token": "data-value-xyz"}})
+    assert "(unexpected application resource inventory: v1 ConfigMap/site-config)" in unlisted
+    assert "data-value-xyz" not in unlisted
+    foreign = refuse({"apiVersion": "v1", "kind": "ConfigMap",
+                      "metadata": {"name": "rag-openwebui-proxy", "namespace": "ns",
+                                   "annotations": {"meta.helm.sh/release-name": "annotation-xyz"}}})
+    assert "v1 ConfigMap/rag-openwebui-proxy" in foreign and "annotation-xyz" not in foreign
+    forged = refuse({"apiVersion": "v1", "kind": "ConfigMap",
+                     "metadata": {"name": "x\nFAIL: forged line", "namespace": "ns"}})
+    assert "v1 ConfigMap/<invalid>" in forged and "forged line" not in forged
