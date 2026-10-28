@@ -566,6 +566,7 @@ def evaluate(golden: list[GoldenEntry], settings) -> dict:
     import httpx2
     from qdrant_client import QdrantClient
 
+    from mainframe_rag.config import qdrant_pool_limits
     from mainframe_rag.ingest.embed import build_embedder
     from mainframe_rag.retrieve.query import search as retrieve_search
 
@@ -573,6 +574,7 @@ def evaluate(golden: list[GoldenEntry], settings) -> dict:
         url=settings.qdrant_url,
         api_key=settings.qdrant_api_key,
         timeout=settings.qdrant_timeout_s,
+        limits=qdrant_pool_limits(settings.qdrant_url),
     )
     embedder = build_embedder(settings)
     # Representation gate (issues #124, #391): the agent serves only a

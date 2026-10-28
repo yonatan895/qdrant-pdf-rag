@@ -6,6 +6,8 @@ aggregation only. The live tier runs via `sh scripts/tools/run-task.sh eval:chat
 
 from __future__ import annotations
 
+import httpx2
+
 from mainframe_rag.eval.chat import (
     DEFAULT_FOLLOW_UP,
     arm_entry,
@@ -79,7 +81,14 @@ def test_evaluate_sessions_preserves_both_arms_and_condensation_accounting(monke
 
     class Storage:
         def __init__(self, **kwargs):
-            assert kwargs == {"url": "http://synthetic.invalid", "api_key": None, "timeout": 9}
+            assert kwargs == {
+                "url": "http://synthetic.invalid",
+                "api_key": None,
+                "timeout": 9,
+                "limits": httpx2.Limits(
+                    max_connections=100, max_keepalive_connections=20, keepalive_expiry=2.0
+                ),
+            }
 
         def close(self):
             events.append(("close", "storage"))
