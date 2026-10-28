@@ -10,11 +10,11 @@
 # or xfailed test (scripts/check_junit_clean.py). If you change one CI, change
 # the other in the same PR (AGENTS.md); tests/test_ci_gitlab_parity.py pins the
 # correspondence and the failure propagation. Intentional differences: GitLab
-# runs the complete unit suite in one job (GitHub partitions it into four
+# runs the complete unit suite in one job (GitHub partitions it into
 # shards), runs every lane on every pipeline, including tag pipelines (issue
 # #808; no review_tooling lane selection), and runs the simulation tier
-# against the mirrored Qdrant service without tests/test_qdrant_auth.py, which
-# drives a local Docker daemon.
+# against the mirrored Qdrant service without tests/test_qdrant_auth.py and
+# tests/test_openwebui_proxy_nginx.py, which drive a local Docker daemon.
 #
 # GitHub product CI ignores markdown-only changes; agent-context.yml checks
 # relevant docs/instructions separately. GitLab keeps local hygiene/context checks
@@ -148,7 +148,7 @@ test:
     # pytest's exit status alone lets skipped/xfailed tests pass; GitHub rejects
     # them per shard, so this job rejects them for the complete suite.
     - python scripts/check_junit_clean.py unit-junit.xml
-  # GitHub partitions the same eligible suite across four VMs. This offline
+  # GitHub partitions the same eligible suite across VMs. This offline
   # job keeps the complete suite (the union of those shards); no internal
   # runner-capacity change is needed. Tests generate synthetic PDFs at runtime;
   # the only artifact is the JUnit report (test ids and outcomes, no corpus).
@@ -173,8 +173,9 @@ hazards:
 
 # Simulation tier (issue #370): real ingest into a real Qdrant. GitHub starts the
 # approved image with local Docker; offline GitLab reuses the same digest as a
-# mirrored service (as gate-l1 does). tests/test_qdrant_auth.py is excluded
-# because it drives a local Docker daemon, which this runner does not provide.
+# mirrored service (as gate-l1 does). tests/test_qdrant_auth.py and
+# tests/test_openwebui_proxy_nginx.py (real pinned nginx, #1118 A5) are excluded
+# because they drive a local Docker daemon, which this runner does not provide.
 # Fail-closed like GitHub: any skipped/xfailed test, zero executed tests or a
 # missing BM25 cache fails the job.
 sim:
@@ -197,7 +198,7 @@ sim:
     - python scripts/fetch_bm25_weights.py --out "$SIM_BM25_CACHE_DIR" --verify-manifest bm25-weights.sha256 --verify-only
     - python scripts/agent_doctor.py --python "$(command -v python)"
     - rm -f sim-junit.xml
-    - pytest -m integration --ignore=tests/test_load_tier.py --ignore=tests/test_ha_cluster.py --ignore=tests/test_qdrant_auth.py -v -rs --junitxml=sim-junit.xml
+    - pytest -m integration --ignore=tests/test_load_tier.py --ignore=tests/test_ha_cluster.py --ignore=tests/test_qdrant_auth.py --ignore=tests/test_openwebui_proxy_nginx.py -v -rs --junitxml=sim-junit.xml
     - python scripts/check_junit_clean.py sim-junit.xml
   artifacts:
     when: always

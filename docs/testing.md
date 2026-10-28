@@ -31,18 +31,20 @@ disabled on short docs on purpose.
 
 ## Unit tests are hermetic
 
-GitHub CI runs the unit suite on four separate runner VMs. The opt-in
-`tests.ci_shard` pytest plugin sorts the selected node IDs after ordinary
-`-m`/`-k` filtering and assigns round-robin cases to shards 1 through 4. Their
+GitHub CI splits the unit suite across the `unit` job matrix in
+`.github/workflows/ci.yml`, which owns the shard count. The opt-in
+`tests.ci_shard` pytest plugin partitions the node IDs left after ordinary
+`-m`/`-k` filtering. Their
 disjoint union is the original selected suite, including parametrized cases;
-new tests join automatically. All four shards must pass the aggregate `test`
-status, and one failure does not cancel the other shard. Each runner prints
+new tests join automatically. Every shard must pass the aggregate `test`
+status, and one failure does not cancel the others. Each runner prints
 its slowest 20 durations for checking balance. Equal test counts do not
-guarantee equal duration; measure all four jobs before claiming a speedup.
+guarantee equal duration; measure every shard job before claiming a speedup.
 
-Reproduce a GitHub shard with
-`sh scripts/tools/run-task.sh qa:unit -- -p tests.ci_shard --unit-shards=4 --unit-shard=1`
-(or `2`, `3`, `4`). Invalid shard numbers and empty selections fail through pytest.
+Reproduce CI shard N with that job's three `--unit-*` flags:
+`sh scripts/tools/run-task.sh qa:unit -- -p tests.ci_shard --unit-shards=8 --unit-shard=N --unit-durations=tests/unit-durations.json`.
+Without `--unit-durations` the plugin uses round-robin, a different partition.
+Invalid shard numbers and empty selections fail through pytest.
 Without the option, local and air-gapped GitLab runs retain the full suite.
 
 GitHub CI balances shards by recorded duration (`--unit-durations
@@ -148,9 +150,7 @@ Collection-dimension logic: missing, matching, and mismatched (named `dense` dic
 ## Tiers
 
 Required tier selection and commands are maintained only in
-[live-stack](live-stack.md#verification-minimums) across the 7 risk categories
-(`prose-only`, `test/tool-only`, `publication/retirement lifecycle`, `extraction/ranking`,
-`HTTP/lifecycle`, `packaging/deploy`, `release promotion`). The sections below describe
+[live-stack](live-stack.md#verification-minimums), one row per change category. The sections below describe
 how those instruments work and what their results can establish.
 
 <a id="local-verification"></a>
@@ -305,7 +305,7 @@ The canonical 5-stage deployment pipeline (`airgap:validate` -> `airgap:load` ->
 <a id="simulation-tier"></a>
 ### Simulation tier (marker `integration`, `sh scripts/tools/run-task.sh qa:sim`)
 
-Real PDFs → real ingest into a docker Qdrant (`images.txt` pin, or `QDRANT_SIM_URL`) → agent endpoints over the real app. `scripts/mock_vllm.py` is the only stand-in. No retrieval/LLM code is monkeypatched. Docker-only, loopback-only, corpus generated at runtime. Plain `pytest` deselects it (`-m 'not integration'`). The sim lane excludes both `tests/test_load_tier.py` and `tests/test_ha_cluster.py` (`--ignore` in the Task command and the CI `sim` job); those files run only in the load lane and the `qa:ha` lane respectively, so the three lanes cover every `integration`-marked node with no overlap. The review selector adds the `simulation` lane when `tests/helpers_ingest_crash_worker.py`, `tests/helpers_publication_lifecycle.py` or `tests/helpers_builder.py` change (`SIMULATION_TEST_INPUTS`), because the sim tier is a consumer the unit suites do not fully cover. CI `sim` job is **fail-closed**: missing docker, any skipped test, or zero passes fails the job. Fetched BM25 weights verify against `bm25-weights.sha256`. Synthetic documents must differ in **body text**, not just metadata. Never pin top-1 across potentially equal-text chunks; assert scoping + presence + within-run determinism.
+Real PDFs → real ingest into a docker Qdrant (`images.txt` pin, or `QDRANT_SIM_URL`) → agent endpoints over the real app. `scripts/mock_vllm.py` is the only stand-in. No retrieval/LLM code is monkeypatched. Docker-only, loopback-only, corpus generated at runtime. Plain `pytest` deselects it (`-m 'not integration'`). The sim lane excludes both `tests/test_load_tier.py` and `tests/test_ha_cluster.py` (`--ignore` in the Task command and the CI `sim` job); those files run only in the load lane and the `qa:ha` lane respectively, so the three lanes cover every `integration`-marked node with no overlap. The review selector adds the `simulation` lane when `tests/helpers_ingest_crash_worker.py`, `tests/helpers_publication_lifecycle.py` or `tests/helpers_builder.py` change (`SIMULATION_TEST_INPUTS`), because the sim tier is a consumer the unit suites do not fully cover. The unit tier never pulls an image (#1118 A5): the real-nginx proxy battery `tests/test_openwebui_proxy_nginx.py` is sim-tier, the CI `sim` job prepares the `images.txt` nginx digest explicitly, the fixture starts it with `--pull=never` and fails without it, and that file and `proxy.nginx.conf` are also `SIMULATION_TEST_INPUTS`. CI `sim` job is **fail-closed**: missing docker, any skipped test, or zero passes fails the job. Fetched BM25 weights verify against `bm25-weights.sha256`. Synthetic documents must differ in **body text**, not just metadata. Never pin top-1 across potentially equal-text chunks; assert scoping + presence + within-run determinism.
 
 <a id="load-tier"></a>
 ### Load tier (marker `integration`, `sh scripts/tools/run-task.sh qa:load`, PR-gated by `.github/workflows/load.yml` on agent/retrieve/ingest/mock paths; nightly on main, not per push)
@@ -376,10 +376,7 @@ gate-l1/L1 checks stay the PR gate.
 
 **Policy authority:** #411 (Increment A), #397 (15 September 2026); broader
 consolidation is #388, and general CI enforcement is #370. Required commands and
-merge evidence remain in [live-stack](live-stack.md#verification-minimums)
-structured across the 7 risk categories (`prose-only`, `test/tool-only`,
-`publication/retirement lifecycle`, `extraction/ranking`, `HTTP/lifecycle`,
-`packaging/deploy`, `release promotion`).
+merge evidence remain in [live-stack](live-stack.md#verification-minimums).
 
 **CI claims discipline:** A documented merge obligation is not automatically
 enforced CI: do not claim checks are automated in CI unless implemented. Under Increment B
@@ -402,6 +399,9 @@ surfaces (Containerfiles, first-party Helm templates, `pyproject.toml`, lockfile
 empty diffs fail
 closed to `full`, so an ambiguous executable change is never reviewed as docs-only. The profile
 selects the reviewer environment and the acceptance lanes; it does not waive any required evidence.
+Without a PR (for example in the offline GitLab mirror), preview it with
+`python3 scripts/review_tooling.py profile --files <changed paths> --out <file outside the repo>`:
+it prints the profile, and the manifest lists `required_lanes`.
 
 **Resource boundaries & invariant protection:** Prose/docs and test/tooling PRs
 must respect their resource boundary and avoid starting heavy services (GPU, Qdrant,
@@ -639,10 +639,10 @@ pass. This narrow catalogue establishes sensitivity to the named historical
 counterexamples, not immunity to all faults or a global coverage percentage.
 
 Offline GitLab runs the complete unit suite in one job (the union of GitHub's
-four shards) and the sim tier against the mirrored Qdrant service
+shards) and the sim tier against the mirrored Qdrant service
 (`CI_BM25_CACHE_DIR` supplies the verified BM25 cache). Both reject skipped and
 xfailed tests through their JUnit report, and sim omits only
-`tests/test_qdrant_auth.py`, which needs a local Docker daemon. GitLab has no
+`tests/test_qdrant_auth.py` and `tests/test_openwebui_proxy_nginx.py`, which need a local Docker daemon. GitLab has no
 lane selection: every lane runs on every pipeline.
 
 The GitHub `hazards` job and offline GitLab `hazards` job run the full catalogue
@@ -711,7 +711,7 @@ to merge.
 <a id="unit-coverage"></a>
 ### Required unit collection and shard union (#482 R488-1)
 
-Native unit receipts use `ci_evidence.py --unit-shards=4 --unit-shard=1` (through `4`), not an arbitrary
+Native unit receipts use `ci_evidence.py` with the `unit` job's shard flags, not an arbitrary
 pytest command. `unit_evidence.run_shard` starts an independent collect-only
 pytest process over `tests`, then a fresh execution process. Both explicitly
 load pinned pytest/AnyIO plus `tests.ci_shard`; ambient `PYTEST_ADDOPTS` and
@@ -719,14 +719,13 @@ load pinned pytest/AnyIO plus `tests.ci_shard`; ambient `PYTEST_ADDOPTS` and
 registrations are rejected. Local opt-in sharding without evidence keeps its
 existing selection behavior and does not qualify as native coverage evidence.
 
-The producer and approved-main consumer also support an explicit
-`--unit-shards=4` layout. The rollout first merges this compatibility support
-while GitHub still runs two jobs, then activates four in a separate PR.
-The consumer derives the expected job names and total from the independently
-approved `ci.yml` bytes, never a receipt-supplied count. Only the literal,
-complete two- or four-job matrices are supported; missing, duplicated, mixed
-or partial shards cannot qualify. Local opt-in sharding defaults to two;
-ordinary unsharded local/GitLab execution is unchanged.
+The producer and approved-main consumer support the layouts that
+`unit_producers` in `scripts/acceptance_evidence.py` accepts. The consumer
+derives the expected job names and total from the independently approved
+`ci.yml` bytes, never a receipt-supplied count. Only a literal, complete
+matrix qualifies; missing, duplicated, mixed or partial shards cannot. Local
+opt-in sharding defaults to two shards; ordinary unsharded local/GitLab
+execution is unchanged.
 
 Shard assignment has two rules, both accepted by the consumer. The original
 rule is `sorted(eligible)[shard - 1::shards]` (a proof without a `rule` key).

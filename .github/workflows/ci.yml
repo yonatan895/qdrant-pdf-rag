@@ -206,6 +206,13 @@ jobs:
         timeout-minutes: 4
       - name: Prepare approved Qdrant image explicitly
         run: python scripts/qdrant_pin.py --prepare
+      # tests/test_openwebui_proxy_nginx.py starts it with --pull=never and fails when it is missing (#1118 A5).
+      - name: Prepare the pinned allow-list proxy image explicitly (images.txt nginx-unprivileged digest)
+        run: |
+          row=$(awk '$1 ~ /^docker\.io\/nginxinc\/nginx-unprivileged:/ {print $1 " " $2; exit}' images.txt)
+          ref=${row%% *}; digest=${row#* }
+          case "$digest" in sha256:????????????????????????????????????????????????????????????????) ;; *) echo "no nginx-unprivileged digest in images.txt" >&2; exit 1 ;; esac
+          docker pull -q "${ref%:*}@$digest"
       - run: sh scripts/tools/install-task.sh
       - run: sh scripts/tools/install-helm.sh
       - run: echo "$GITHUB_WORKSPACE/.tools/bin" >> "$GITHUB_PATH"

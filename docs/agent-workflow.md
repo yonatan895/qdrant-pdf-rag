@@ -304,12 +304,13 @@ and hazard results must bind that tested execution. Maintainer verifier decision
 accept a regenerated test merge by this same rule (#753).
 ZIP members are read in memory; they are never extracted, imported, or executed.
 
-The approved base supplies policy, producer and workflow bytes, Task dispatch
+The approved base supplies the Verifier-owned bytes (`verification_inputs` in
+`scripts/acceptance.py`): policy, producer and workflow bytes, Task dispatch
 (the root Taskfile, included modules, wrapper and binary pin), and the critical
 hazard runner/catalogue. Unit coverage additionally binds the pytest selector,
 root configuration/conftest and locked preparation inputs. Each shard retains an
 independent full collection and actual executed node IDs; the consumer compares
-raw JUnit identities and proves the two shards form a disjoint complete union.
+raw JUnit identities and proves the shards form a disjoint complete union.
 New tests change the expected set through actual collection, not a count update.
 See [the unit coverage contract](testing.md#unit-coverage).
 Their candidate bytes are read independently from the commit API; receipt-supplied hashes alone
@@ -328,7 +329,7 @@ substitute for the maintainer's review and merge decision.
 <a id="verifier-update-decision"></a>
 ### Approving verifier implementation updates
 
-A PR that changes a protected verifier or native producer workflow needs a
+A PR that changes a Verifier-owned path needs a
 separate trust decision. Marking it ready does not grant that trust. After
 reviewing the actual changes, **only the human maintainer yonatan895** runs
 Actions → **Verifier update decision** → Run workflow, selects **main**, enters
@@ -393,11 +394,11 @@ selection policy; the approved input map separately identifies execution bytes.
 The proposed selection rules take effect only after maintainer adoption into
 main. Implementation decisions exclude hazard-catalogue changes; incompatible
 evidence schemas still fail. Forks cannot use this path.
-Normal PRs with unchanged verifier inputs require no manual decision.
+Normal PRs with unchanged Verifier-owned paths need no decision.
 
 For unit-layout changes, merge approved-main compatibility support before
 activating a different producer matrix. The consumer supports only the complete
-two- and four-job layouts read from independently approved workflow bytes, and
+layouts `unit_producers` accepts, read from independently approved workflow bytes, and
 checks every shard's exact execution plus the complete disjoint union. An exact
 verifier decision authorizes producer bytes, not a smaller receipt-declared
 coverage obligation. Refresh activation PRs after the compatibility merge and

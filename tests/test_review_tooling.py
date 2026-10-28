@@ -226,6 +226,20 @@ class TestProfileClassification(unittest.TestCase):
         # A helper with no simulation consumer stays offline.
         self.assertNotIn("simulation", self._required(["tests/helpers_helm.py"])[1])
 
+    def test_real_nginx_proxy_inputs_select_the_simulation_lane(self):
+        """#1118 A5: the real-nginx battery runs only in the sim lane, so its own file and the
+        config it runs must select `simulation` even though a chart change alone is `deploy`."""
+        for path in ("tests/test_openwebui_proxy_nginx.py",
+                     "charts/mainframe-rag/files/openwebui/proxy.nginx.conf"):
+            with self.subTest(path=path):
+                self.assertTrue((pathlib.Path(__file__).resolve().parents[1] / path).is_file())
+                _, lanes = self._required([path])
+                self.assertIn("simulation", lanes)
+        # Another chart helper keeps the deploy profile without the sim lane.
+        decision, lanes = self._required(["charts/mainframe-rag/files/openwebui/ca_trust.py"])
+        self.assertEqual(decision.profile, ProfileName.DEPLOY)
+        self.assertNotIn("simulation", lanes)
+
     def test_site_only_changes_are_docs_like_and_offline(self):
         for paths in (["site/index.html"], ["site/js/app.js", "site/data/x.json", "site/css/a.css"]):
             with self.subTest(paths=paths):
@@ -1607,10 +1621,11 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             "test_live_agent_contract_and_fresh_trace",
             "test_live_agent_fixed_overlong_envelope",
             "test_live_agent_stream_final_matches_buffered",
+            "test_live_citation_only_generation_is_not_accepted",
             "test_live_agent_disconnect_closes_upstream_then_next_request",
         ]
-        for variant in ("complete", "missing", "duplicate", "wrong-module", "unrelated",
-                          "parametrized", "parametrized-duplicate", "mixed-duplicate"):
+        for variant in ("complete", "missing", "missing-citation-only", "duplicate", "wrong-module",
+                        "unrelated", "parametrized", "parametrized-duplicate", "mixed-duplicate"):
             with self.subTest(variant=variant):
                 args, receipt, _ = self.fixture()
                 args["producer"] = next(p for p in PRODUCERS if p.lane == "agent_probes")
@@ -1626,6 +1641,8 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                 module = "tests.live_agent_probes"
                 if variant == "missing":
                     selected.pop()
+                elif variant == "missing-citation-only":
+                    selected.remove("test_live_citation_only_generation_is_not_accepted")
                 elif variant == "duplicate":
                     selected.append(names[0])
                 elif variant == "wrong-module":
@@ -1647,7 +1664,7 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                 ) + "</testsuite>").encode()
                 receipt["tests"] = junit_bytes(xml)
                 args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
-                expected = {"complete": 4, "parametrized": 6}.get(variant)
+                expected = {"complete": 5, "parametrized": 7}.get(variant)
                 if expected is not None:
                     self.assertEqual(normalize_native(**args)["tests"]["executed"], expected)
                 else:

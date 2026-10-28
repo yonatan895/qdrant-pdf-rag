@@ -3,10 +3,20 @@
 Runs charts/mainframe-rag/files/openwebui/proxy.nginx.conf, unchanged, in the
 image pinned in images.txt (digest, no tag), in front of a stub upstream that
 shares the container network namespace on 127.0.0.1:8080, exactly as the sidecar
-shares the pod's. Skipped when Docker or the pinned image is unavailable (the CI
-unit lane may lack both); run it locally under the heavy lock:
+shares the pod's.
 
-  flock ~/.cache/agent-tmp/mainframe-rag-heavy.lock mfr-pytest <worktree> tests/test_openwebui_proxy_nginx.py
+Marker ``integration`` (#1118 A5): the unit tier never pulls an image, so this
+file runs in the GitHub ``sim`` lane, which prepares the pinned digest explicitly
+before collection. The fixture never pulls: it requires the prepared image by
+digest, starts it by immutable ID with ``--pull=never``, and fails (never skips)
+when Docker, openssl or the prepared image is missing. Offline GitLab has no
+local Docker daemon, so its sim job omits this file (as it omits
+tests/test_qdrant_auth.py). The unit tier keeps the hermetic config contracts in
+tests/test_helm_chart_contracts.py. Locally, prepare once and run it under the
+heavy lock:
+
+  docker pull docker.io/nginxinc/nginx-unprivileged@<images.txt digest>
+  flock ~/.cache/agent-tmp/mainframe-rag-heavy.lock mfr-pytest <worktree> -m integration tests/test_openwebui_proxy_nginx.py
 
 It proves the decision is made on nginx's decoded, normalised $uri for every
 spelling that uvicorn would route to a blocked handler, and that the request
@@ -14,6 +24,7 @@ line is forwarded to the upstream byte for byte.
 """
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import socket
@@ -24,6 +35,8 @@ import uuid
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.integration
 
 REPO = Path(__file__).resolve().parents[1]
 CONF = REPO / "charts" / "mainframe-rag" / "files" / "openwebui" / "proxy.nginx.conf"
@@ -60,19 +73,34 @@ def _docker(*args: str, check: bool = True, timeout: int = 120) -> subprocess.Co
     return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout, check=check)
 
 
+def _prepared_image(reference: str) -> str:
+    """The immutable ID of the explicitly prepared pinned image; never pulls.
+
+    Presence of a tag is not identity: inspect by the approved repository digest
+    and require that digest in the daemon record, then launch the ID itself.
+    """
+    probe = _docker("image", "inspect", reference, check=False, timeout=30)
+    if probe.returncode != 0:
+        pytest.fail(f"the pinned nginx image is not prepared; prepare it explicitly: docker pull {reference}")
+    records = json.loads(probe.stdout)
+    assert isinstance(records, list) and len(records) == 1, "invalid image inspection"
+    image_id = records[0].get("Id", "")
+    digests = [d.removeprefix("docker.io/") for d in records[0].get("RepoDigests") or [] if isinstance(d, str)]
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", image_id), "invalid image ID"
+    assert reference.removeprefix("docker.io/") in digests, "the local nginx image is not the pinned digest"
+    return image_id
+
+
 @pytest.fixture(scope="module")
 def proxy(tmp_path_factory):
-    if shutil.which("docker") is None or shutil.which("openssl") is None:
-        pytest.skip("docker and openssl are required")
+    for tool in ("docker", "openssl"):
+        if shutil.which(tool) is None:
+            pytest.fail(f"{tool} is required by the real-nginx proxy tier")
     try:
         _docker("info", timeout=20)
     except (subprocess.SubprocessError, OSError):
-        pytest.skip("the Docker daemon is not reachable")
-    image = _pinned_image()
-    if _docker("image", "inspect", image, check=False).returncode != 0:
-        pulled = _docker("pull", "-q", image, check=False, timeout=300)
-        if pulled.returncode != 0:
-            pytest.skip("the pinned nginx image is neither present nor pullable")
+        pytest.fail("the Docker daemon is not reachable")
+    image = _prepared_image(_pinned_image())
     work = tmp_path_factory.mktemp("nginx")
     tls = work / "tls"
     tls.mkdir()
@@ -90,10 +118,10 @@ def proxy(tmp_path_factory):
     tag = uuid.uuid4().hex[:8]
     upstream, front = f"owui-stub-{tag}", f"owui-proxy-{tag}"
     try:
-        _docker("run", "-d", "--name", upstream, "--read-only", "--tmpfs", "/tmp", "--cap-drop", "ALL",
+        _docker("run", "--pull=never", "-d", "--name", upstream, "--read-only", "--tmpfs", "/tmp", "--cap-drop", "ALL",
                 "-p", "127.0.0.1::8443", "-v", f"{stub}:/etc/nginx/stub.conf:ro", image,
                 "nginx", "-c", "/etc/nginx/stub.conf", "-g", "daemon off;")
-        _docker("run", "-d", "--name", front, "--network", f"container:{upstream}", "--read-only",
+        _docker("run", "--pull=never", "-d", "--name", front, "--network", f"container:{upstream}", "--read-only",
                 "--tmpfs", "/tmp", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                 "-v", f"{conf}:/etc/nginx/proxy/nginx.conf:ro", "-v", f"{tls}:/etc/tls/private:ro", image,
                 "nginx", "-c", "/etc/nginx/proxy/nginx.conf", "-g", "daemon off;")
