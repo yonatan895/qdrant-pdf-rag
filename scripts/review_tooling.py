@@ -171,10 +171,15 @@ POLICY_DOCUMENTS = {"docs/agent-workflow.md", "docs/live-stack.md", "docs/testin
 # Helpers whose only (or additional) consumer is the simulation tier: the
 # subprocess crash worker CLI, the publication-lifecycle builders and the
 # builder seam are imported or spawned by tests/test_integration_sim.py (#1033).
+# The real-nginx proxy battery and the config it runs unchanged are sim-tier
+# only since the unit tier stopped pulling images (#1118 A5); a chart-only
+# change selects `deploy`, which has no simulation lane of its own.
 SIMULATION_TEST_INPUTS = [
     "tests/helpers_ingest_crash_worker.py",
     "tests/helpers_publication_lifecycle.py",
     "tests/helpers_builder.py",
+    "tests/test_openwebui_proxy_nginx.py",
+    "charts/mainframe-rag/files/openwebui/proxy.nginx.conf",
 ]
 SHARED_TEST_INPUTS = {"tests/conftest.py", "tests/fakes.py", "tests/ci_shard.py", "tests/__init__.py"}
 
