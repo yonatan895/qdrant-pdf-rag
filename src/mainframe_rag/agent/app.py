@@ -1421,8 +1421,14 @@ async def evaluate_healthz() -> tuple[HealthzResponse, int]:
         # The pooled async client from lifespan only — no sync-call fallback.
         # A blocking GET on the event loop would stall every in-flight
         # request; if the pool is missing that is a startup bug, not
-        # something to paper over (review S2).
-        resp = await http.get(f"{base}/readyz", timeout=settings.health_qdrant_timeout_s)
+        # something to paper over (review S2). The shared pool keeps the 5 s
+        # default expiry, so this probe never leaves a Qdrant connection idle
+        # in it: each scrape opens its own and closes it (#1128).
+        resp = await http.get(
+            f"{base}/readyz",
+            timeout=settings.health_qdrant_timeout_s,
+            headers={"Connection": "close"},
+        )
         qdrant_ok = resp.status_code == 200 and resp.text.strip().lower() == "all shards are ready"
         if not qdrant_ok:
             # Upstream response bodies stay out of logs and client bodies

@@ -295,6 +295,50 @@ def test_agent_qdrant_pool_drops_idle_connections_before_the_server_does(monkeyp
     assert after and after.isdisjoint(first | within)  # fresh connection after it
 
 
+def test_healthz_qdrant_probe_never_reuses_a_pooled_connection(monkeypatch):
+    """#1128: the /readyz probe rides the shared pool, whose expiry stays at
+    the 5 s default. It must close its connection after each scrape, so a
+    later scrape never reuses one Qdrant may have closed."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    probes: list[tuple[int, str | None]] = []
+
+    class Qdrant(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"  # keep-alive, like Qdrant
+
+        def do_GET(self):
+            if self.path == "/readyz":
+                probes.append((self.client_address[1], self.headers.get("Connection")))
+                body = b"all shards are ready"
+            else:
+                body = b'{"result":{"collections":[]},"status":"ok","time":0}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Qdrant)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("QDRANT_URL", f"http://127.0.0.1:{server.server_address[1]}")
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+    try:
+        with TestClient(app_mod.app) as client:
+            for _ in range(3):
+                client.get("/healthz")
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert len(probes) == 3
+    assert len({port for port, _ in probes}) == 3  # a fresh connection per scrape
+    assert {header for _, header in probes} == {"close"}
+
+
 def test_connect_retries_setting_is_bounded():
     from pydantic import ValidationError
 
