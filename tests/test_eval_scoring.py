@@ -369,7 +369,10 @@ def test_measurement_preserves_calls_errors_and_next_run(monkeypatch, failure):
 
     monkeypatch.setattr(query, "search", search)
     report = evaluate(entries, settings)
-    assert constructors == [{"url": "http://unused.invalid", "api_key": None, "timeout": 17}]
+    limits = httpx2.Limits(max_connections=100, max_keepalive_connections=20, keepalive_expiry=2.0)
+    assert constructors == [
+        {"url": "http://unused.invalid", "api_key": None, "timeout": 17, "limits": limits}
+    ]
     # The serving gate's verdict binds the run to the validated physical.
     assert generations == [(client, settings)]
     assert calls == [((client, embedder, "original__gen1", entry.query),
