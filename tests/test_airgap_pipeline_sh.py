@@ -400,3 +400,56 @@ def test_release_gate_kind_recipe_runs_as_documented(pipe_tree):
                         extra_env={"AIRGAP_ENV": str(airgap_env)})
     assert refused.returncode != 0
     assert "QDRANT_EXTRA_VALUES is a CI-rehearsal override" in refused.stderr
+
+
+RECORDING_KUBECTL = f"""#!{__import__("sys").executable}
+import json, os, sys
+args = sys.argv[1:]
+out = os.environ["SECRET_CAPTURE"]
+if "create" in args and "secret" in args:
+    name = args[args.index("generic") + 1]
+    data = {{}}
+    for arg in args:
+        if arg.startswith("--from-file="):
+            key, path = arg[len("--from-file="):].split("=", 1)
+            data[key] = open(path, encoding="utf-8").read()
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump({{"name": name, "namespace": args[args.index("-n") + 1], "data": data}}, f)
+"""
+
+
+def test_release_gate_kind_recipe_creates_a_valid_openobserve_secret(pipe_tree):
+    """#1118 B5 review B1: tracing is on by default with the bundled OpenObserve,
+    and a live deploy refuses before any change without Secret
+    openobserve-credentials (four keys) or with a weak root password. The
+    doc's own block, run as written, must produce a Secret that passes."""
+    import base64
+    import re
+    import subprocess
+
+    doc = (REPO / "docs/release-verification.md").read_text()
+    block = re.search(r"create its\ncredentials Secret too.*?```sh\n(.*?)```", doc, re.DOTALL)
+    assert block, "OpenObserve credentials block moved"
+    write_stub(pipe_tree / "bin" / "kubectl", RECORDING_KUBECTL)
+    capture = pipe_tree / "secret.json"
+    state = pipe_tree / "kind-state"
+    state.mkdir()
+    r = subprocess.run(["sh", "-ec", block.group(1)], capture_output=True, text=True, check=False,
+                       env={"PATH": f"{pipe_tree / 'bin'}:/usr/bin:/bin", "KIND_STATE": str(state),
+                            "KIND_NAMESPACE": "rag-kind-gate", "SECRET_CAPTURE": str(capture)})
+    assert r.returncode == 0, r.stderr
+    secret = __import__("json").loads(capture.read_text())
+    assert (secret["name"], secret["namespace"]) == ("openobserve-credentials", "rag-kind-gate")
+    data = secret["data"]
+    assert sorted(data) == ["metrics-auth", "otlp-headers", "root-user-email", "root-user-password"]
+    assert all(data.values())
+    # deploy.sh's rule: 8-128 characters with lower, upper, digit and special.
+    password = data["root-user-password"]
+    assert 8 <= len(password) <= 128
+    for cls in ("[a-z]", "[A-Z]", "[0-9]", "[^A-Za-z0-9]"):
+        assert re.search(cls, password), cls
+    token = base64.b64encode(f"{data['root-user-email']}:{password}".encode()).decode()
+    assert data["otlp-headers"] == f"Authorization=Basic {token}"
+    assert data["metrics-auth"] == f"Basic {token}"
+    # Values never reach output.
+    assert password not in r.stdout + r.stderr

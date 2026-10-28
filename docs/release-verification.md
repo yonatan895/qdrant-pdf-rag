@@ -473,6 +473,26 @@ kubectl -n "$KIND_NAMESPACE" create secret generic rag-kind-gateway-keys \
   --from-file="$KIND_STATE/secret-inputs/context-llm-api-key"
 ```
 
+Tracing is on by default with the bundled OpenObserve, so create its
+credentials Secret too (`deploy.sh` checks its four keys and the password
+rule before any change). Values go through files in a private directory:
+
+```sh
+OO="$KIND_STATE/openobserve-inputs"
+mkdir -p "$OO" && chmod 700 "$OO"
+printf 'gate@openobserve.invalid' > "$OO/root-user-email"
+{ od -An -N24 -tx1 /dev/urandom | tr -d ' \n'; printf 'Aa1!'; } > "$OO/root-user-password"
+OO_B64="$(printf '%s:%s' "$(cat "$OO/root-user-email")" "$(cat "$OO/root-user-password")" | base64 | tr -d '\n')"
+printf 'Authorization=Basic %s' "$OO_B64" > "$OO/otlp-headers"
+printf 'Basic %s' "$OO_B64" > "$OO/metrics-auth"
+unset OO_B64
+kubectl -n "$KIND_NAMESPACE" create secret generic openobserve-credentials \
+  --from-file=root-user-email="$OO/root-user-email" \
+  --from-file=root-user-password="$OO/root-user-password" \
+  --from-file=otlp-headers="$OO/otlp-headers" \
+  --from-file=metrics-auth="$OO/metrics-auth"
+```
+
 No OAuth cookie or Route is needed in Kind. Save the sizing files: Qdrant
 `$KIND_STATE/qdrant-sizing.yaml` (the volume group is a Kind-only override;
 OpenShift keeps project-assigned identities and must not receive this fixed ID):
