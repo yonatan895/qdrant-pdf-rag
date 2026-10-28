@@ -288,7 +288,7 @@ the run id and GHCR tags in the PR.
 ### Native transport and lifecycle probes
 
 `agent-probes.yml` explicitly prepares pinned Qdrant and OpenObserve images before
-running the five tests in `tests/live_agent_probes.py`. With the approved dev
+running `tests/live_agent_probes.py`. With the approved dev
 wheelhouse, Task/Helm tools and those images already prepared, the local entry is
 `ALLOW_HASH_MODE=1 sh scripts/tools/run-task.sh qa:unit -- -m integration tests/live_agent_probes.py -v`.
 Verification uses `--pull=never`, original synthetic PDFs, actual agent HTTP and
@@ -297,7 +297,7 @@ this proves application transport, citation labeling and cleanup, not semantic
 model quality. A waiting upstream must observe the actual downstream disconnect,
 and the next ordinary answer must succeed. The dedicated filename avoids adding
 these service prerequisites to ordinary unit/simulation collection. Native
-acceptance validates the five named test records in addition to normal provenance
+acceptance validates the witness records named in `scripts/acceptance_evidence.py` in addition to normal provenance
 and failure/skip checks. Semantic evaluation still needs an approved venue.
 
 ### Rung 6 probes (exact)

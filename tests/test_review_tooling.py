@@ -1621,10 +1621,11 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             "test_live_agent_contract_and_fresh_trace",
             "test_live_agent_fixed_overlong_envelope",
             "test_live_agent_stream_final_matches_buffered",
+            "test_live_citation_only_generation_is_not_accepted",
             "test_live_agent_disconnect_closes_upstream_then_next_request",
         ]
-        for variant in ("complete", "missing", "duplicate", "wrong-module", "unrelated",
-                          "parametrized", "parametrized-duplicate", "mixed-duplicate"):
+        for variant in ("complete", "missing", "missing-citation-only", "duplicate", "wrong-module",
+                        "unrelated", "parametrized", "parametrized-duplicate", "mixed-duplicate"):
             with self.subTest(variant=variant):
                 args, receipt, _ = self.fixture()
                 args["producer"] = next(p for p in PRODUCERS if p.lane == "agent_probes")
@@ -1640,6 +1641,8 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                 module = "tests.live_agent_probes"
                 if variant == "missing":
                     selected.pop()
+                elif variant == "missing-citation-only":
+                    selected.remove("test_live_citation_only_generation_is_not_accepted")
                 elif variant == "duplicate":
                     selected.append(names[0])
                 elif variant == "wrong-module":
@@ -1661,7 +1664,7 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                 ) + "</testsuite>").encode()
                 receipt["tests"] = junit_bytes(xml)
                 args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
-                expected = {"complete": 4, "parametrized": 6}.get(variant)
+                expected = {"complete": 5, "parametrized": 7}.get(variant)
                 if expected is not None:
                     self.assertEqual(normalize_native(**args)["tests"]["executed"], expected)
                 else:
