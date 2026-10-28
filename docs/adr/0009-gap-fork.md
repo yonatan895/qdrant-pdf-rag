@@ -8,13 +8,14 @@
   - "the air-gapped environment is production" (maintainer clarification, 2026-10-27);
   - the namespace answer (open question 1) in [comment 6451566378](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6451566378);
   - the extension-surface decision (open question 2) in [comment 6451605866](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6451605866);
-  - the F9 + F5 amendment (§2, §3, §8), decided 2026-10-28: the bastion
+  - the F9 + F5 amendment (§2, §3, §8), decided 2026-10-28 and 29: the bastion
     toolchain ([6479973901](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6479973901)),
     the namespace teardown ([6480141704](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480141704)),
     the operator workstation facts ([6480253256](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480253256)),
     the [plan](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480613459)
     and its decisions D-1 to D-10 ([6480982316](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480982316),
-    [6481285738](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6481285738)).
+    [6481285738](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6481285738), [6481464776](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6481464776)),
+    and the review blockers B1 to B3 ([6481952257](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6481952257)).
     This record writes them D-1 to D-10, apart from the earlier D2 to D4.
 
   This record replaces the AGENTS.md rule "Keep one public GitHub /
@@ -81,9 +82,10 @@
   the connected CI and Kind lanes may use it. Nobody in the gap uses it, and
   gap rehearsals use signed gap releases instead (§5).
 - **Credentials.** The dev pod and the runner jobs hold no production
-  credentials and no RBAC. The bastion holds only the operator's session
-  token, for one session (§2, §8). So even an unverified checkout in the gap
-  cannot change the live release.
+  credentials and no RBAC, and job code never sees the runner manager's
+  (§2). The bastion holds the operator's session token and the registry
+  robot auth, memory-only and for one session (§8). So even an unverified
+  checkout in the gap cannot change the live release.
 - **Outbound.** Nothing in this ADR moves code out of the gap. An upstream
   defect found there leaves only as the organisation permits, at most as a
   description without site data.
@@ -103,79 +105,76 @@
     fresh install starts with every rule below in place, so F9 and F5 land
     before it.
 - **Identities (F9).** Each pod role has its own ServiceAccount. The
-  bastion, dev and runner-job pods have no token automount, and their egress
-  is limited to the listed destinations:
+  **F9-defined pods** (bastion, dev and runner job) have no RBAC and no
+  token automount, and their egress is limited to the listed destinations:
 
-  | Role | ServiceAccount | RBAC | Egress |
-  |---|---|---|---|
-  | bastion | its own | none; it acts with the operator's session token (§8) | API server, site registry, DNS |
-  | dev | its own | none | GitLab, DNS |
-  | runner job | `mfr-runner-job` | none | GitLab, DNS |
-  | runner manager | created by the site's GitLab Runner Operator | the operator's Role, recorded trust (below) | set by the operator |
+  | Role | ServiceAccount | Egress |
+  |---|---|---|
+  | bastion | its own; acts with the operator's session credentials (§8) | `kubernetes.default.svc` at the API server addresses in site config (D-3), site registry, DNS |
+  | dev | its own | GitLab, DNS |
+  | runner job | `mfr-runner-job` | GitLab, DNS |
+  | runner manager | created by the site's GitLab Runner Operator | set by the operator |
 
-  The release-build and signing jobs (F6) need their own identity, not
-  `mfr-runner-job`, because only the signing job reads the signing key.
-- **Labels.** The pods that F9 defines carry only the
-  `workspace.mainframe-rag.io/role` key (`bastion`, `dev`, `runner`). They
-  never carry `app` or `app.kubernetes.io/*`. Chart NetworkPolicies,
-  Services and the vendored Qdrant chart select on those keys, so such a
-  label could admit a workspace pod to production peers or make it a
-  Service backend.
-- **Egress-side enforcement.** Each workspace pod is selected by a
+  The F6 build and sign jobs use their own identity, never `mfr-runner-job`.
+- **Labels.** F9-defined pods carry only the
+  `workspace.mainframe-rag.io/role` key (`bastion`, `dev`, `runner`), never
+  `app` or `app.kubernetes.io/*`. Chart NetworkPolicies, Services and the
+  vendored Qdrant chart select on those keys, so such a label could admit a
+  workspace pod to production peers or make it a Service backend.
+- **Egress-side enforcement.** Each F9-defined pod is selected by a
   default-deny policy plus its egress allow-list. Production cannot be
   guarded on the ingress side: the chart's agent policy admits every
   same-namespace pod (`podSelector: {}`), Qdrant has no policy, and policies
-  only add allowances. The Kind rehearsal's default-deny would widen
-  workspace pods if it selected them, so the workspace Kind lane uses its own
-  namespace or an exclusion.
-- **Production authority.** Of the pods that F9 defines, only the bastion
+  only add allowances.
+- **Production authority.** Of the F9-defined pods, only the bastion
   reaches the API server and the registry. Operator scripts reach the
   service through `$KC exec`, so the bastion needs nothing else. Dev and
   runner-job pods have no route to either, so the network enforces "only the
-  bastion holds production authority". The runner manager also reaches the
-  API server, under the trust below.
+  bastion holds production authority". No F9-defined pod can read the
+  production Secrets (the Qdrant writer and admin keys, the gateway keys,
+  the OIDC client secret, the gap signing key) or write any production
+  workload object.
 - **Runner manager (D-1).** CI runs in this namespace through the site's
   GitLab Runner Operator, with the Kubernetes executor and `concurrent = 2`.
-  - Each job runs in a fresh pod under `mfr-runner-job`. GitLab `services:`,
-    such as the `sim` Qdrant, run as containers inside the job pod. Job code
-    never sees the manager's credentials.
-  - The manager's operator-created Role grants namespace-wide `pods/exec`,
-    `pods/attach` and Secret access. A Role cannot narrow these to names
-    generated at run time, so the manager could exec into the agent or read
-    its keys. This is recorded as **accepted trust** in the vendor component.
-  - The platform team is asked for a ValidatingAdmissionPolicy that refuses
-    the manager ServiceAccount `pods/exec` and `pods/attach` on any pod not
-    named `runner-*`, and Secret `get`, `list` and `watch` outside `runner-*`
-    names.
-- **Secrets.** No workspace pod can read the production Secrets: the
-  Qdrant writer and admin keys, the gateway keys, the OIDC client secret and
-  the gap signing key. Workspace pods mount exactly two Secrets:
-  - `mfr-dev-gitlab`, mounted only into the dev pod (D-4). It holds a GitLab
-    project access token: a bot identity with the Developer role, so it
-    cannot approve, merge to protected `main` or change approval rules. Its
-    scopes are `read_repository` and `write_repository`, never `api`. It
-    expires after about 90 days and is rotated. The platform team is asked
-    whether etcd encryption at rest is enabled.
-  - the operator's runner token Secret, held by the runner manager.
-- **Write RBAC.** No workspace identity has write RBAC on production
-  Deployments, StatefulSets, PVCs or any other production workload object.
+  Each job runs in a fresh pod under `mfr-runner-job`; GitLab `services:`,
+  such as the `sim` Qdrant, run as containers inside it. Job code never sees
+  the manager's credentials.
+  - **Accepted trust** in the vendor component
+    ([B1 decision](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6481952257)):
+    the manager's operator-created Role lets it read every Secret in the
+    namespace, production keys included, create and delete pods, and exec
+    into or attach to them. A Role cannot narrow these to names generated at
+    run time.
+  - The platform team is asked for a ValidatingAdmissionPolicy on the
+    manager ServiceAccount that denies CONNECT `pods/exec` and `pods/attach`
+    to any pod whose name does not start with `runner-`, and CREATE `pods`
+    unless `serviceAccountName` is `mfr-runner-job` with no Secret volume,
+    `secretKeyRef` or `envFrom` outside `runner-*` names, no `hostPath` and
+    no privileged container. Admission never sees `get`, `list` or `watch`,
+    so no policy can narrow the manager's Secret reads.
+- **Secrets.** Only the dev pod mounts a Secret: `mfr-dev-gitlab` (D-4), a
+  GitLab project access token. It is a bot identity with the Developer role,
+  so it cannot approve, merge to protected `main` or change approval rules.
+  Its scopes are `read_repository` and `write_repository`, never `api`; it
+  expires after about 90 days and is rotated. The runner manager holds the
+  operator's runner token Secret. The bastion mounts none (§8). The platform
+  team is asked whether etcd encryption at rest is enabled.
 - **Resources (D-5).** The namespace quota is enforced on both requests and
-  limits, so every workspace container sets both, with small caps.
-  - The platform quota request covers production at site sizing, the
-    workspace pods, two concurrent runner jobs and rollout surge. Its
-    figures are recorded privately.
-  - The fresh install sets site sizing as R2 values (`QDRANT_*`,
-    `INGEST_*`).
-  - Runner jobs never run alongside an ingest Job.
+  limits, so every workspace container sets both, with small caps. The
+  platform quota request (figures recorded privately) covers production at
+  site sizing, set as R2 `QDRANT_*`/`INGEST_*` values at the fresh install,
+  plus the workspace pods, two concurrent runner jobs and rollout surge.
+  Runner jobs never run alongside an ingest Job.
 - **The isolation proof** (`scripts/devkit/isolation_proof.py`, recorded in
   `gap/records/`) holds:
   - each ServiceAccount's `can-i` list, as verbs and resources only,
-    including the manager Role's exact verbs and resources;
+    including the manager Role's verbs and resources;
   - a negative matrix of what each identity is refused;
-  - every pod in the namespace classified by its labels, and the
-    workspace-mounted Secrets checked against the two allowed;
-  - live network probes from each workspace role, with a negative control
-    that shows the probe reaches a target once the policy is absent.
+  - every pod in the namespace classified by its labels, and mounted
+    Secrets checked against the two allowed;
+  - live network probes from each F9-defined role, including the API server
+    addresses (D-3), with a negative control that shows the probe reaches a
+    target once the policy is absent.
 - **Test data.** Tests and development never write to the production
   collection or alias. The dev pod's Qdrant is a localhost sidecar, and a CI
   job's is the `sim` service inside its job pod. Rehearsals use a
@@ -501,43 +500,48 @@ refreshed with each kit (Q9).
   It runs under `restricted-v2` with an arbitrary non-root UID. The
   checkout's own source is used in place, so development installs and
   builds nothing.
-- **The bastion** runs the operator path, which is Linux-only (`sh`, Task,
-  `python3`, Helm 4, `skopeo`). It is a pod on this image under its own
-  ServiceAccount with no RBAC (D-2), created from
-  `deploy/workspace/bastion.template.yaml`.
-  - It deploys with the operator's short-lived `oc login` token (D-3): `oc
-    whoami -t | oc exec -i … mfr-session-login` delivers the token on stdin
-    into a memory-only kubeconfig, and `oc logout` revokes it.
-  - The dev pod and the runner jobs never hold that token or the registry
-    credentials.
-- **The Windows operator path** pushes the first image, since the site
-  registry has none that carries `oc` and `skopeo`. The literal runbook
-  (`docs/runbooks/devkit-windows.md`) runs five steps:
-  1. `Get-FileHash` checks the kit;
-  2. `tar` extracts it;
-  3. `oras.exe copy --from-oci-layout` pushes the image (the OCI layout is
-     NTFS-safe; `oc image mirror --from-dir` is falsified on Linux);
-  4. `oc process --local | oc apply` creates the bastion;
-  5. `oc cp` copies the kit in, then the operator runs session login.
+- **The bastion** runs the Linux-only operator path. It is a pod on this
+  image under its own ServiceAccount, with no RBAC (D-2) and no Secret
+  mount. At session start the operator's own `oc` on Windows pipes in two
+  credentials
+  ([B3](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6481952257)):
+  - the short-lived `oc login` token (D-3), `oc whoami -t | oc exec -i
+    mfr-bastion -- mfr-session-login`, into a kubeconfig that targets
+    `kubernetes.default.svc` with the CA from the `kube-root-ca.crt`
+    ConfigMap;
+  - the existing registry robot auth, `oc get secret <robot> -o jsonpath=… |
+    oc exec -i mfr-bastion -- mfr-session-login --registry`, into
+    `/run/mfr-session/auth.json`.
 
-  - **Fallback:** if Windows cannot push, start a pod from the previous
-    release's agent image, which is already in the site registry. `oc cp` a
-    static Linux `oras` and the archive into it, and push from inside.
-  - **Proven where** (per the [plan](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480613459)):
-    Linux CI proves `bsdtar` extraction, the push with digest readback, the
-    `oc` falsification, CRLF handling and the isolation Kind lane. A
-    GitHub-hosted `windows-2025` job (D-6) runs the runbook block literally in
-    PowerShell 5.1 against a scratch GHCR package, and compares `oc.exe
-    process --local` and the piped token bytes with Linux. Recorded site
-    steps in `gap/records/` cover what only the site shows: endpoint policy
-    on `oras.exe`, registry reach and CA trust, the push identity, multi-GB
-    `oc cp`, `restricted-v2` admission, real probe enforcement, `oc create
-    token` and the namespace quota.
+  Both live only in the memory-only `/run/mfr-session/`. `oc logout`
+  revokes the token; logout or pod deletion removes both.
+- **The Windows operator path** pushes the first image, since no site image
+  carries `oc` and `skopeo`. The literal runbook
+  (`docs/runbooks/devkit-windows.md`) runs the
+  [plan's](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480613459)
+  five steps, pushing with `oras.exe copy --from-oci-layout` and creating
+  the bastion with `oc process --local | oc apply`.
+  - **Trust anchor** ([B2](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6481952257)).
+    The kit and the release bundle each ship a `.sha256` file that the
+    runbook compares with `Get-FileHash`, which catches corruption and the
+    wrong version. Against tampering, the connected side publishes both
+    SHA-256 fingerprints on GitHub (the release comment or record). The
+    operator carries the first 16 hex characters of each by a route separate
+    from the transfer and checks them by eye on Windows. Both checks pass
+    before any push and before any token reaches a pod. A verifier inside
+    the kit cannot vouch for itself, so the bastion's signature checks come
+    after the anchor and are trusted only because of it.
+  - **Fallback:** if Windows cannot push, `oc cp` a static Linux `oras` and
+    the archive into a pod from the previous release's agent image, already
+    in the site registry, and push from inside.
+  - **Proof** splits as the plan lists: Linux CI, a GitHub-hosted
+    `windows-2025` job (D-6) and recorded site steps.
 - **Kit key (Q3).** `scripts/devkit_key.py` computes one SHA-256 over a
   fixed, ordered list of pin files that upstream owns and protects:
   `requirements.dev.lock.txt`, `locks/cp314-linux-x86_64.json`,
   `scripts/tools/task-pin.txt`, `scripts/tools/helm-pin.txt`,
-  `scripts/tools/oc-pin.txt`, `images/devkit-packages.txt` and
+  `scripts/tools/oc-pin.txt` (the version the platform team names, D-6b),
+  `images/devkit-packages.txt` and
   `images/Containerfile.devkit`. `scripts/tools/devkit-pin.txt` records the
   key and the image digest.
   - The image is pinned by manifest digest.
@@ -560,19 +564,19 @@ refreshed with each kit (Q9).
     digests, the upstream commit it was built from and the snapshot time;
   - `sbom.json`, the third-party notices and the licence check;
   - `SHA256SUMS`, signed with the connected release key (Q4);
-  - a verify/install script, run in the bastion: signature, inventory, and
-    the digest read back from the registry and from the pod's `imageID`;
+  - a verify/install script, run in the bastion after the trust anchor:
+    signature, inventory, and the digest read back from the registry and
+    from the pod's `imageID`;
   - the GitHub issue snapshot.
 - **Cadence (D-9).** A release ships a new kit only when the key changes, and
   the release MANIFEST names the key in a `devkit_key:` field. Kit v1 has no
   gap-release build inputs; F6 adds them under a new key. The first kit
-  rides with the signed release candidate.
-- **Storage (D-10).** The bastion `/work` PVC is 30 GiB: two retained
-  releases, an unpack, the kit and the `skopeo` temporary directory. The dev
-  PVC is 20 GiB.
-- **Fresh-install prerequisite.** The kit and the §2 isolation come before
-  the fresh install. The order is F9 and F5, then the signed release
-  candidate carrying the kit, then rehearsal Phase 2 (the fresh install).
+  rides with the signed release candidate, before the fresh install. A
+  re-sign under the same key is
+  allowed when only the issue snapshot changes: the MANIFEST records the new
+  snapshot time, and the image digest is unchanged.
+- **Storage (D-10).** The bastion `/work` PVC is 30 GiB and the dev PVC
+  20 GiB.
 - **`agent_doctor` refuses a kit/lock mismatch** with a fixed message that
   names the kit to request (`mfr-devkit-<key>`). Outside a kit image,
   connected development keeps today's checks.
@@ -638,11 +642,11 @@ The names the gap builds on are a **public API**, limited to this list:
   interpreter the gap lacks, and it is a build without an issue.
 - **No stability promise for extension points** (open question 2). Imports
   would find breaking renames only when a gap patch or site config fails.
-- **A runner manager in a separate CI namespace, or run by the platform**
-  (plan D-1, where the separate namespace was recommended). Rejected for CI
-  in the same namespace, accepting the manager's Role as recorded trust (§2).
-- **The dev pod's GitLab credential as an in-memory cache only** (plan D-4).
-  Rejected for a scoped project access token in a dedicated Secret (§2).
+- **A runner manager in a separate CI namespace, or platform-run** (plan
+  D-1). Rejected for CI in the same namespace with the manager as accepted
+  trust (§2).
+- **An in-memory-only GitLab credential** (plan D-4). Rejected for a scoped
+  project access token Secret (§2).
 
 ## Consequences
 
@@ -683,11 +687,11 @@ The names the gap builds on are a **public API**, limited to this list:
 | F2 | Two trust anchors (upstream and gap) and the MANIFEST `origin:` field | No |
 | F3 | Done in this PR: `tests/test_hygiene.py` fails on GitHub Actions when `gap/` or `.gitlab/` exists | No |
 | F4 | The CODEOWNERS generator, its equality test and the GitLab hygiene check | No |
-| F5 | The dev kit (§8), in plan PR-2, PR-4 and PR-5. PR-2: the image, kit key, factory build and session login. PR-4: the kit pack, verify/install script, issue snapshot, `prepare_python.py --kit` and the Windows path with its Linux and `windows-2025` proofs. PR-5: the kit pin, the `agent_doctor` refusal, the `.gitlab-ci.yml` default image and the owner documents | `agent_doctor.py` and `prepare_python.py`: yes. `devkit_key.py`: recommended for `UNIT_INPUTS`. The factory workflow is separate from `e2e.yml` and not an acceptance producer: no |
+| F5 | The dev kit (§8), as [plan](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480613459) PR-2, PR-4 (with `prepare_python.py --kit`) and PR-5 | `agent_doctor.py` and `prepare_python.py`: yes. `devkit_key.py`: recommended for `UNIT_INPUTS`. The factory workflow is separate from `e2e.yml` and not an acceptance producer: no |
 | F6 | The gap release pipeline: protected-tag build and sign jobs, the unprivileged in-namespace build, the gap pack (`origin: gap`), the key-generation runbook and the release record template | Pack and taskfiles: yes |
 | F7 | `scripts/gap/import_release.sh` from §4, with its throwaway-repo tests. §4 then becomes a link | No |
 | F8 | The owner-document updates listed under Consequences | No |
-| F9 | Isolation in the shared namespace (§2), plan PR-3: the `deploy/workspace/` ServiceAccounts, pods and egress policies, `scripts/devkit/isolation_proof.py`, and a `workspace-isolation` Kind lane with a negative control. Lands before the fresh install | Lane taskfile: yes. Manifests and proof: no |
+| F9 | Isolation in the shared namespace (§2), as plan PR-3, before the fresh install | Lane taskfile: yes. Manifests and proof: no |
 | F10 | Done with §9: the surface snapshot, its test, the release notes file and the release-procedure step | No |
 
 ## Open questions for the maintainer
@@ -698,11 +702,4 @@ The names the gap builds on are a **public API**, limited to this list:
    checks must a gap release pass? It has no connected lanes.
 4. **The build mechanism** for the unprivileged in-namespace image build
    (F6).
-5. **F9 + F5 decisions D-1 to D-10.** Closed: D-2, D-3 and D-6 to D-10 in
-   [comment 6480982316](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480982316), and D-1 (revised to the site's
-   runner operator), D-4 and D-5 in
-   [comment 6481285738](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6481285738). Still open from the
-   [plan](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480613459): whether the bastion targets
-   `kubernetes.default.svc` or the external API URL (D-3), which `oc` client
-   version to pin (D-6b), and whether a snapshot-only re-sign under the same
-   key is allowed (D-9).
+5. **F9 + F5 decisions D-1 to D-10.** Closed (status block).
