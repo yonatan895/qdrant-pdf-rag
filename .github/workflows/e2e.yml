@@ -586,7 +586,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [pipeline, gateway-chat-upstream, gateway-chat-malformed, gateway-chat-truncated, gateway-embed-upstream, gateway-embed-malformed, gateway-embed-dimension, gateway-auth, lifecycle-chart, lifecycle, shared-gateway, rerank, observability, openwebui]
+        lane: [pipeline, gateway-chat-upstream, gateway-chat-malformed, gateway-chat-truncated, gateway-embed-upstream, gateway-embed-malformed, gateway-embed-dimension, gateway-auth, lifecycle-chart, lifecycle, shared-gateway, rerank, observability, openwebui, openwebui-operator]
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
@@ -596,9 +596,11 @@ jobs:
       group: kind-${{ matrix.lane }}-${{ github.ref || github.run_id }}
       cancel-in-progress: false
     env:
-      # Open WebUI is default-on (ADR-0008) and fails closed without site inputs; this job
-      # does not deploy it (the kind `openwebui` lane does, via scripts/openwebui/acceptance.sh).
-      OPENWEBUI_ENABLED: "false"
+      # Open WebUI is default-on (ADR-0008) and fails closed without site inputs, so these
+      # lanes opt out (the `openwebui` lane adds the chart's objects itself, via
+      # scripts/openwebui/acceptance.sh). The `openwebui-operator` lane (#1118 B3) gets an
+      # empty value, which common.sh treats as unset: its airgap.env decides, as at a site.
+      OPENWEBUI_ENABLED: ${{ matrix.lane != 'openwebui-operator' && 'false' || '' }}
       SHARE: "false"
       SHA: ${{ needs.build.outputs.sha }}
     steps:
@@ -731,6 +733,12 @@ jobs:
           config = {'kind': 'Cluster', 'apiVersion': 'kind.x-k8s.io/v1alpha4',
                     'nodes': [{'role': role, 'extraMounts': [{'hostPath': sys.argv[2],
                               'containerPath': '/etc/containerd/certs.d', 'readOnly': True}]} for role in roles]}
+          if sys.argv[3] == 'openwebui-operator':
+              # The restricted-v2 UID stand-in (scripts/openwebui/kind-platform.yaml) is a
+              # MutatingAdmissionPolicy: alpha in Kubernetes 1.33, so this lane's API server
+              # serves it. Rehearsal cluster only; the site's SCC does this on OpenShift.
+              config['featureGates'] = {'MutatingAdmissionPolicy': True}
+              config['runtimeConfig'] = {'admissionregistration.k8s.io/v1alpha1': 'true'}
           Path(sys.argv[1]).write_text(json.dumps(config))
           PY_KIND
           /usr/local/bin/kind create cluster --name gapbox --config "$RUNNER_TEMP/kind-config.yaml" \
@@ -794,6 +802,24 @@ jobs:
         run: |
           export PATH="/usr/local/bin:$PATH"
           sh rehearsal-infra/scripts/openwebui/acceptance.sh images
+
+      # Operator-deploy lane (#1118 B3): only the stand-ins' images come from the public
+      # network (test IdP, router stand-in); Open WebUI and its proxy arrive from the bundle
+      # through airgap:load. The chart renders https://<OPENWEBUI_HOST> with no port, so the
+      # browser stand-in reaches the router stand-in on 127.0.0.1:443: allow binding it.
+      - name: Open WebUI operator lane stand-in images (public images, before the boundary)
+        if: matrix.lane == 'openwebui-operator'
+        env:
+          KIND_NAME: gapbox
+          APP_NS: ${{ env.NS }}
+          OWUI_STATE: ${{ runner.temp }}/owui-acceptance
+          KIND_BIN: /usr/local/bin/kind
+          KUBECTL: /usr/local/bin/kubectl
+          HELM: /usr/local/bin/helm
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          sudo sysctl -w net.ipv4.ip_unprivileged_port_start=443
+          sh rehearsal-infra/scripts/openwebui/acceptance.sh operator images
 
       # Close the boundary: from here the shipped operator flow runs under a
       # kernel-enforced block. Outside it: the GitHub runner agent, the Docker
@@ -949,6 +975,28 @@ jobs:
           EOF
           fi
           grep -E "^(INTERNAL_REGISTRY|NAMESPACE|STORAGE_CLASS|IMAGE_SHA|EMBED_MODEL|EMBED_MODEL_REVISION|DENSE_DIM|EMBED_BASE_URL|CORPUS_PVC|INSECURE_REGISTRY)" airgap.env
+
+      # The site's Open WebUI inputs (airgap.env.example keys) for the stand-in IdP, then the
+      # OpenShift platform stand-ins (Route API, namespace service CA, serving certificate,
+      # restricted-v2 UID: scripts/openwebui/kind-platform.yaml), the test IdP and the
+      # operator Secret (site procedure step 2). Rehearsal infrastructure only: the chart
+      # objects come from the operator's own airgap:pipeline below.
+      - name: Open WebUI site inputs and platform stand-ins (operator lane)
+        if: matrix.lane == 'openwebui-operator'
+        env:
+          KIND_NAME: gapbox
+          APP_NS: ${{ env.NS }}
+          OWUI_STATE: ${{ runner.temp }}/owui-acceptance
+          OWUI_WORKSPACE: ${{ github.workspace }}/gapbox/qdrant-pdf-rag
+          KIND_BIN: /usr/local/bin/kind
+          KUBECTL: /usr/local/bin/kubectl
+          HELM: /usr/local/bin/helm
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          sh rehearsal-infra/scripts/openwebui/acceptance.sh operator site-env >> gapbox/qdrant-pdf-rag/airgap.env
+          grep -qx 'OPENWEBUI_ENABLED=true' gapbox/qdrant-pdf-rag/airgap.env
+          sh rehearsal-infra/scripts/openwebui/acceptance.sh operator prepare
 
       - name: Write Kind-scale Qdrant overrides (runner quota only; git prod values untouched)
         run: |
@@ -1164,6 +1212,7 @@ jobs:
           /usr/local/bin/kubectl label namespace "$NS" pod-security.kubernetes.io/enforce=restricted --overwrite
 
       - name: airgap-pipeline LIVE (deploy, ingest, smoke; registry pre-loaded)
+        if: matrix.lane != 'openwebui-operator'
         env:
           IMAGE_SHA: ${{ env.SHA }}
           QDRANT_STORAGE_SIZE: 1Gi
@@ -1177,6 +1226,28 @@ jobs:
           # step above (mock and corpus-gen pods pulled them); skip the
           # second push — same flag an operator re-running pipeline uses.
           sh scripts/airgap/pipeline.sh --skip-load
+
+      # The site's literal command with Open WebUI on (#1118 B3): validate, load (the
+      # registry already holds the images; the re-push is the operator's re-run), deploy
+      # (Route-exposure preflight, service CA, chart release, Route verified, running
+      # digests), ingest, smoke. The Secret has no admin-api-key yet: site procedure step 3.
+      - name: airgap:pipeline LIVE with Open WebUI on (operator lane, first pass)
+        if: matrix.lane == 'openwebui-operator'
+        env:
+          IMAGE_SHA: ${{ env.SHA }}
+          QDRANT_STORAGE_SIZE: 1Gi
+          INGEST_WORK_SIZE: 2Gi
+          INGEST_TIMEOUT: "900"
+          OWUI_STATE: ${{ runner.temp }}/owui-acceptance
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          set -o pipefail
+          cd gapbox/qdrant-pdf-rag
+          sh scripts/tools/run-task.sh airgap:pipeline 2>&1 | tee "$OWUI_STATE/logs/pipeline-first-pass.log"
+          grep -q '==> Open WebUI front end on: ' "$OWUI_STATE/logs/pipeline-first-pass.log"
+          grep -q '==> Route rag-openwebui verified: ' "$OWUI_STATE/logs/pipeline-first-pass.log"
+          grep -q 'docs Pipe NOT installed' "$OWUI_STATE/logs/pipeline-first-pass.log"
 
       - name: Application pod egress is blocked (agent pod, real sockets)
         shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
@@ -1227,6 +1298,85 @@ jobs:
           /usr/local/bin/kubectl -n "$NS" exec deploy/rag-agent -- \
             python3 /app/scripts/smoke_search.py \
               --url http://localhost:8080 --query "torque the widget screws" --expect "torque"
+
+      # Site procedure steps 4 and 5 on the operator deploy (#1118 B3): the first admin signs in
+      # through the router stand-in (configured from the stored Route) and the test IdP, the
+      # lane proves no Pipe is installed yet, puts the API key into the Secret as
+      # admin-api-key, and the operator re-runs airgap:deploy, whose installer adds the Pipe.
+      - name: Open WebUI first admin and the second airgap:deploy (operator lane, two-pass Pipe)
+        if: matrix.lane == 'openwebui-operator'
+        env:
+          KIND_NAME: gapbox
+          APP_NS: ${{ env.NS }}
+          OWUI_STATE: ${{ runner.temp }}/owui-acceptance
+          OWUI_WORKSPACE: ${{ github.workspace }}/gapbox/qdrant-pdf-rag
+          IMAGE_SHA: ${{ env.SHA }}
+          QDRANT_STORAGE_SIZE: 1Gi
+          KIND_BIN: /usr/local/bin/kind
+          KUBECTL: /usr/local/bin/kubectl
+          HELM: /usr/local/bin/helm
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          set -o pipefail
+          sh rehearsal-infra/scripts/openwebui/acceptance.sh operator admin
+          (cd gapbox/qdrant-pdf-rag && sh scripts/tools/run-task.sh airgap:deploy) 2>&1 | tee "$OWUI_STATE/logs/deploy-second-pass.log"
+          if grep -q 'docs Pipe NOT installed' "$OWUI_STATE/logs/deploy-second-pass.log"; then
+            echo "::error::the second airgap:deploy did not install the docs Pipe"
+            exit 1
+          fi
+
+      # The same checks as the `openwebui` lane, on the objects the operator deploy made.
+      - name: Open WebUI acceptance on the operator deploy (ADR-0007 conditions, by execution)
+        if: matrix.lane == 'openwebui-operator'
+        env:
+          KIND_NAME: gapbox
+          APP_NS: ${{ env.NS }}
+          OWUI_STATE: ${{ runner.temp }}/owui-acceptance
+          OWUI_WORKSPACE: ${{ github.workspace }}/gapbox/qdrant-pdf-rag
+          KIND_BIN: /usr/local/bin/kind
+          KUBECTL: /usr/local/bin/kubectl
+          HELM: /usr/local/bin/helm
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          sh rehearsal-infra/scripts/openwebui/acceptance.sh operator run
+
+      # Rollback K1 (docs/deploy.md), then the next ordinary operation: OPENWEBUI_ENABLED=false
+      # and airgap:deploy remove every Open WebUI object and keep the claim; true and
+      # airgap:deploy again bring back the same claim, its chats, the grant and the Pipe.
+      - name: Open WebUI rollback off then on (operator lane, K1)
+        if: matrix.lane == 'openwebui-operator'
+        env:
+          KIND_NAME: gapbox
+          APP_NS: ${{ env.NS }}
+          OWUI_STATE: ${{ runner.temp }}/owui-acceptance
+          OWUI_WORKSPACE: ${{ github.workspace }}/gapbox/qdrant-pdf-rag
+          IMAGE_SHA: ${{ env.SHA }}
+          QDRANT_STORAGE_SIZE: 1Gi
+          KIND_BIN: /usr/local/bin/kind
+          KUBECTL: /usr/local/bin/kubectl
+          HELM: /usr/local/bin/helm
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          set -o pipefail
+          OWUI="sh rehearsal-infra/scripts/openwebui/acceptance.sh operator"
+          ENV_FILE=gapbox/qdrant-pdf-rag/airgap.env
+          $OWUI record
+          sed -i 's|^OPENWEBUI_ENABLED=.*|OPENWEBUI_ENABLED=false|' "$ENV_FILE"
+          grep -qx 'OPENWEBUI_ENABLED=false' "$ENV_FILE"
+          (cd gapbox/qdrant-pdf-rag && sh scripts/tools/run-task.sh airgap:deploy) 2>&1 | tee "$OWUI_STATE/logs/deploy-off.log"
+          grep -q '==> Open WebUI front end off ' "$OWUI_STATE/logs/deploy-off.log"
+          $OWUI off
+          sed -i 's|^OPENWEBUI_ENABLED=.*|OPENWEBUI_ENABLED=true|' "$ENV_FILE"
+          grep -qx 'OPENWEBUI_ENABLED=true' "$ENV_FILE"
+          (cd gapbox/qdrant-pdf-rag && sh scripts/tools/run-task.sh airgap:deploy) 2>&1 | tee "$OWUI_STATE/logs/deploy-on.log"
+          if grep -q 'docs Pipe NOT installed' "$OWUI_STATE/logs/deploy-on.log"; then
+            echo "::error::airgap:deploy after the rollback did not install the docs Pipe"
+            exit 1
+          fi
+          $OWUI on
 
       # The front end next to the agent this lane just deployed (mock reasoning and
       # embedding models behind the test gateway; no hash mode, no GPU). The chart's
@@ -1324,14 +1474,18 @@ jobs:
           /usr/local/bin/kubectl -n "$NS" logs job/ingest --tail=100 || true
 
       - name: Open WebUI acceptance evidence (no passwords, keys or certificates)
-        if: always() && matrix.lane == 'openwebui'
+        if: always() && (matrix.lane == 'openwebui' || matrix.lane == 'openwebui-operator')
         env:
           OWUI_STATE: ${{ runner.temp }}/owui-acceptance
         shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
           mkdir -p diagnostics/openwebui
-          for f in logs/acceptance.json logs/apply-openwebui.log logs/apply-support.log images.txt node-images.txt render/openwebui.yaml render/pipe.sha256; do
+          # Operator lane: the phase verdicts (logs/*.json) and the operator's deploy output.
+          for f in logs/acceptance.json logs/checks.json logs/first-pass.json logs/record.json logs/rollback-off.json \
+            logs/rollback-on.json logs/apply-openwebui.log logs/apply-support.log logs/apply-platform.log \
+            logs/pipeline-first-pass.log logs/deploy-second-pass.log logs/deploy-off.log logs/deploy-on.log \
+            images.txt node-images.txt render/openwebui.yaml render/platform.yaml render/pipe.sha256; do
             test ! -f "$OWUI_STATE/$f" || cp "$OWUI_STATE/$f" "diagnostics/openwebui/$(basename "$f")"
           done
           /usr/local/bin/kubectl -n "$NS" get pods,pvc,svc,networkpolicy -o wide > diagnostics/openwebui/workloads.txt 2>&1 || true

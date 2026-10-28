@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 DIR = ROOT / "scripts" / "openwebui"
@@ -361,3 +364,268 @@ def test_the_lane_image_is_the_images_txt_row_and_fails_closed_while_pending(tmp
         assert proc.returncode != 0
     else:
         assert proc.stdout.strip() == f"{row[0].split(':')[0]}@{row[1]}"
+
+
+# ------------------------------------------------------------------ operator-deploy lane (#1118 B3)
+def test_first_pass_proves_no_pipe_yet_and_an_admin_for_step_four():
+    assert checks.check_pipe_absent_before_key(None, "admin").ok
+    assert not checks.check_pipe_absent_before_key("a" * 64, "admin").ok  # the deploy's notice would be false
+    assert not checks.check_pipe_absent_before_key(None, "user").ok  # the IdP admin role did not arrive
+    assert not checks.check_pipe_absent_before_key(None, None).ok  # the admin could not sign in
+
+
+def test_rollback_off_needs_every_object_gone_the_same_claim_and_the_console():
+    assert checks.check_rollback_recorded(["a"], "pvc-1").ok
+    assert not checks.check_rollback_recorded([], "pvc-1").ok  # nothing to lose: the later check could not fail
+    assert not checks.check_rollback_recorded(["a"], "").ok
+    assert checks.check_rollback_off([], "pvc-1", "pvc-1", 0, True).ok
+    assert not checks.check_rollback_off(["route.route.openshift.io/rag-openwebui"], "pvc-1", "pvc-1", 0, True).ok
+    assert not checks.check_rollback_off([], "pvc-1", "pvc-2", 0, True).ok  # recreated under the same name
+    assert not checks.check_rollback_off([], "pvc-1", "", 0, True).ok  # deleted
+    assert not checks.check_rollback_off([], "", "", 0, True).ok
+    assert not checks.check_rollback_off([], "pvc-1", "pvc-1", 1, True).ok  # a pod still runs
+    assert not checks.check_rollback_off([], "pvc-1", "pvc-1", 0, False).ok  # the console broke
+
+
+def test_rollback_on_needs_the_kept_claim_its_chats_the_grant_the_pipe_and_a_next_chat():
+    sha = "a" * 64
+    before = {"chat_ids": ["a", "b"], "claim_uid": "pvc-1"}
+    after = {"chat_ids": ["a", "b", "c"], "claim_uid": "pvc-1", "function_sha256": sha, "models": [checks.DOCS_MODEL]}
+    assert checks.check_rollback_on(before, after, sha, True).ok
+    for bad in ({"chat_ids": ["a"]}, {"claim_uid": "pvc-2"}, {"function_sha256": None},
+                {"function_sha256": "b" * 64}, {"models": []}):
+        assert not checks.check_rollback_on(before, {**after, **bad}, sha, True).ok, bad
+    assert not checks.check_rollback_on(before, after, sha, False).ok
+    assert not checks.check_rollback_on({**before, "chat_ids": []}, after, sha, True).ok
+
+
+def test_rollback_off_list_is_every_chart_open_webui_object_but_the_kept_claim():
+    rendered = set()
+    for path in (ROOT / "charts" / "mainframe-rag" / "templates").glob("openwebui-*.yaml"):
+        text = path.read_text()
+        kind = re.search(r"^kind: (\w+)$", text, re.MULTILINE).group(1)
+        name = re.search(r"^  name: (\S+)$", text, re.MULTILINE).group(1)
+        rendered.add((kind, name))
+    plural = {"Deployment": "deployment.apps", "Service": "service", "Route": "route.route.openshift.io",
+              "NetworkPolicy": "networkpolicy.networking.k8s.io", "ConfigMap": "configmap",
+              "PersistentVolumeClaim": "persistentvolumeclaim"}
+    expected = {f"{plural[k]}/{n}" for k, n in rendered} - {"persistentvolumeclaim/rag-openwebui-data"}
+    assert ("PersistentVolumeClaim", "rag-openwebui-data") in rendered
+    assert set(checks.OPENWEBUI_OBJECTS) == expected
+
+
+def _platform(ns="ns1"):
+    text = (DIR / "kind-platform.yaml").read_text().replace("@OWUI_UID@", str(UID)).replace("@APP_NS@", ns)
+    return [d for d in yaml.safe_load_all(text) if d]
+
+
+def test_platform_stand_ins_are_the_route_api_and_the_uid_assignment_for_the_front_end_only():
+    docs = {d["kind"]: d for d in _platform()}
+    assert sorted(docs) == ["CustomResourceDefinition", "MutatingAdmissionPolicy", "MutatingAdmissionPolicyBinding"]
+    crd = docs["CustomResourceDefinition"]["spec"]
+    assert docs["CustomResourceDefinition"]["metadata"]["name"] == "routes.route.openshift.io"
+    assert crd["group"] == "route.openshift.io" and crd["names"]["kind"] == "Route" and crd["scope"] == "Namespaced"
+    assert [(v["name"], v["served"], v["storage"]) for v in crd["versions"]] == [("v1", True, True)]
+    tls = crd["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]["tls"]["properties"]
+    assert "reencrypt" in tls["termination"]["enum"]
+    policy = docs["MutatingAdmissionPolicy"]["spec"]
+    assert policy["matchConstraints"]["resourceRules"] == [
+        {"apiGroups": [""], "apiVersions": ["v1"], "operations": ["CREATE"], "resources": ["pods"]}]
+    assert [c["expression"] for c in policy["matchConditions"]] == [(
+        "has(object.metadata.labels) && 'app' in object.metadata.labels"
+        " && object.metadata.labels['app'] == 'rag-openwebui'")]
+    expr = policy["mutations"][0]["applyConfiguration"]["expression"]
+    assert f"runAsUser: {UID}" in expr and "runAsGroup: 0" in expr and f"fsGroup: {UID}" in expr
+    assert UID >= checks.UID_RANGE_START
+    binding = docs["MutatingAdmissionPolicyBinding"]["spec"]
+    assert binding["policyName"] == docs["MutatingAdmissionPolicy"]["metadata"]["name"]
+    assert binding["matchResources"]["namespaceSelector"] == {"matchLabels": {"kubernetes.io/metadata.name": "ns1"}}
+
+
+def test_platform_stand_ins_never_reach_a_product_path():
+    product = [*(ROOT / "charts").rglob("*"), *(ROOT / "scripts" / "airgap").rglob("*"), ROOT / "images.txt",
+               ROOT / "airgap.env.example"]
+    for path in product:
+        if path.is_file() and path.suffix not in (".tgz",):
+            text = path.read_text(errors="replace")
+            assert "kind-platform" not in text and "rehearsal-stand-in" not in text, path
+
+
+def _shell(script, tmp_path, env=None):
+    return subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False,
+                          env={**os.environ, **(env or {})}, cwd=tmp_path)
+
+
+HTPASSWD_STUB = """#!/bin/sh
+# stub: argv is recorded, the password must arrive on stdin
+echo "$*" >> "$ARGV_LOG"
+pw=$(cat)
+[ -n "$pw" ] || exit 9
+[ "${STUB_EMPTY:-0}" = 1 ] && exit 0
+printf '%s:$2y$10$%s\\n' "$3" "$(printf %s "$pw" | sha256sum | cut -c1-53)"
+"""
+
+
+def test_operator_hasher_reads_each_password_on_stdin_and_gives_dex_one_2b_hash_per_user(tmp_path):
+    stub = tmp_path / "bin" / "htpasswd"
+    stub.parent.mkdir()
+    stub.write_text(HTPASSWD_STUB)
+    stub.chmod(0o755)
+    state = tmp_path / "state"
+    script = f"""
+set -eu
+HERE={DIR}; REPO={ROOT}; STATE={state}; PYH="python3 -I {DIR}/client.py"
+die() {{ echo "$*" >&2; exit 1; }}
+. $HERE/lib.sh
+$PYH secrets "$STATE" >/dev/null
+OWUI_HASHER=htpasswd bcrypt_hashes
+"""
+    env = {"PATH": f"{stub.parent}:{os.environ['PATH']}", "ARGV_LOG": str(tmp_path / "argv.log")}
+    proc = _shell(script, tmp_path, env)
+    assert proc.returncode == 0, proc.stderr
+    hashes = (state / "hashes.txt").read_text().split()
+    assert len(hashes) == len(client.USERS) and all(h.startswith("$2b$10$") for h in hashes)
+    assert (state / "dex-config.yaml").read_text().count("$2b$10$") == len(client.USERS)
+    argv = (tmp_path / "argv.log").read_text()
+    for user in client.USERS:
+        assert (state / f"{user}.password").read_text().strip() not in argv  # never on argv
+    assert argv.splitlines() == [f"-niBC 10 {u}" for u in client.USERS]
+    env["STUB_EMPTY"] = "1"
+    bad = _shell(script, tmp_path, env)
+    assert bad.returncode != 0 and "one bcrypt hash per user" in bad.stderr
+
+
+def _acceptance(tmp_path, *args, env=None):
+    base = {"KIND_NAME": "b3-none", "APP_NS": "ns1", "OWUI_STATE": str(tmp_path / "state"),
+            "KUBECTL": str(tmp_path / "no-kubectl")}
+    return subprocess.run(["sh", str(DIR / "acceptance.sh"), *args], capture_output=True, text=True, check=False,
+                          env={**os.environ, **base, **(env or {})})
+
+
+def test_site_env_is_a_complete_site_configuration_the_product_validator_accepts(tmp_path):
+    proc = _acceptance(tmp_path, "operator", "site-env")
+    assert proc.returncode == 0, proc.stderr
+    values = dict(line.split("=", 1) for line in proc.stdout.splitlines())
+    spec = importlib.util.spec_from_file_location("b3_model_config", ROOT / "scripts" / "airgap" / "model_config.py")
+    model_config = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(model_config)
+    config = model_config.openwebui_config(values)
+    assert config["enabled"] is True and config["host"] == "owui.localhost"
+    # The chart's redirect (https://HOST/oauth/oidc/callback, no port) is the one the test IdP allows.
+    assert f"https://{config['host']}" == client.OWUI_URL
+    assert config["oidc"]["providerUrl"] == client.DEX_ISSUER + "/.well-known/openid-configuration"
+    roles = set(config["oidc"]["allowedRoles"].split(",")) | set(config["oidc"]["adminRoles"].split(","))
+    assert client.USERS["other-user"][0] not in roles  # the revocation check keeps its counterexample
+    assert config["oidc"]["adminRoles"] == client.USERS[client.ADMIN][0]
+    example = (ROOT / "airgap.env.example").read_text()
+    assert all(f"# {key}=" in example for key in values), "every key is a documented operator key"
+    assert values["OPENWEBUI_IDP_CA_FILE"] == str(tmp_path / "state" / "pki" / "ca.crt")
+
+
+def test_operator_mode_refuses_a_port_the_chart_cannot_render_and_a_missing_workspace(tmp_path):
+    proc = _acceptance(tmp_path, "operator", "prepare", env={"OWUI_WORKSPACE": str(ROOT), "OWUI_PORT": "8443"})
+    assert proc.returncode != 0 and "OWUI_PORT=443" in proc.stderr
+    proc = _acceptance(tmp_path, "operator", "prepare", env={"OWUI_WORKSPACE": str(tmp_path)})
+    assert proc.returncode != 0 and "no chart Pipe" in proc.stderr
+    assert _acceptance(tmp_path, "operator", "bogus").returncode == 2
+
+
+def _route_json(tmp_path, *sets):
+    proc = subprocess.run(["helm", "template", "rag", str(ROOT / "charts" / "mainframe-rag"), "--namespace", "ns1",
+                           "-f", str(ROOT / "charts" / "mainframe-rag" / "ci" / "openwebui-site-values.yaml"),
+                           "--set", "openwebui.host=owui.localhost", *sets,
+                           "--show-only", "templates/openwebui-route.yaml"],
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr
+    path = tmp_path / "route.json"
+    path.write_text(json.dumps(yaml.safe_load(proc.stdout)))
+    return path
+
+
+def _router(tmp_path, route):
+    out = tmp_path / "ca.crt"
+    script = f'HERE={DIR}; . {DIR}/lib.sh; route_for_router {route} owui.localhost {out}'
+    return _shell(script, tmp_path), out
+
+
+def test_router_stand_in_takes_host_ca_and_timeout_from_the_charts_route(tmp_path):
+    proc, out = _router(tmp_path, _route_json(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "300"
+    assert "FAKE-TEST-CA-NOT-A-CERTIFICATE" in out.read_text()
+    proc, _ = _router(tmp_path, _route_json(tmp_path, "--set", "route.timeoutSeconds=120"))
+    assert proc.stdout.strip() == "120"
+
+
+def test_router_stand_in_refuses_a_route_it_would_serve_differently(tmp_path):
+    good = json.loads(_route_json(tmp_path).read_text())
+    for mutate in (lambda r: r["spec"].__setitem__("host", "other.localhost"),
+                   lambda r: r["spec"]["tls"].__setitem__("termination", "edge"),
+                   lambda r: r["spec"]["to"].__setitem__("name", "rag-agent"),
+                   lambda r: r["spec"]["tls"].pop("destinationCACertificate"),
+                   lambda r: r["metadata"]["annotations"].clear()):
+        route = json.loads(json.dumps(good))
+        mutate(route)
+        path = tmp_path / "bad.json"
+        path.write_text(json.dumps(route))
+        (tmp_path / "ca.crt").unlink(missing_ok=True)
+        proc, out = _router(tmp_path, path)
+        assert proc.returncode != 0 and "cannot serve Route rag-openwebui" in proc.stderr
+        assert not out.exists()
+
+
+def _kind_job():
+    return yaml.safe_load((ROOT / ".github" / "workflows" / "e2e.yml").read_text())["jobs"]["kind-live-rehearsal"]
+
+
+GATED = "sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}"
+OPERATOR_IF = "matrix.lane == 'openwebui-operator'"
+
+
+def test_operator_lane_runs_the_site_commands_behind_the_gate_and_never_applies_chart_objects():
+    job = _kind_job()
+    assert "openwebui-operator" in job["strategy"]["matrix"]["lane"]
+    # Empty is unset for common.sh: the lane's airgap.env decides; every other lane opts out.
+    assert job["env"]["OPENWEBUI_ENABLED"] == "${{ matrix.lane != 'openwebui-operator' && 'false' || '' }}"
+    steps = job["steps"]
+    names = [s.get("name", "") for s in steps]
+    boundary = names.index("Close the network boundary (block public egress, prove it)")
+    own = [(i, s) for i, s in enumerate(steps) if s.get("if") == OPERATOR_IF]
+    text = "\n".join(s["run"] for _, s in own)
+    assert "acceptance.sh deploy" not in text and "helm " not in text and "kubectl apply" not in text
+    assert text.count("sh scripts/tools/run-task.sh airgap:pipeline") == 1
+    assert text.count("sh scripts/tools/run-task.sh airgap:deploy") == 3
+    order = []
+    for i, step in own:
+        order += re.findall(r"(?:acceptance\.sh operator|\$OWUI) ([a-z-]+)", step["run"])
+        if "operator images" in step["run"]:
+            assert i < boundary and "shell" not in step
+        else:
+            assert i > boundary and step["shell"] == GATED, step["name"]
+    assert order == ["images", "site-env", "prepare", "admin", "run", "record", "off", "on"]
+    pipeline = next(s for _, s in own if "airgap:pipeline" in s["run"])
+    assert names.index(pipeline["name"]) > names.index(next(s["name"] for _, s in own if "operator prepare" in s["run"]))
+    # The chart-objects lane's deploy never runs in the operator lane, nor does the --skip-load pipeline.
+    for step in steps:
+        if "acceptance.sh deploy" in step.get("run", ""):
+            assert step.get("if") == "matrix.lane == 'openwebui'", step["name"]
+    skip_load = next(s for s in steps if s.get("name", "").startswith("airgap-pipeline LIVE"))
+    assert "pipeline.sh --skip-load" in skip_load["run"] and skip_load["if"] == "matrix.lane != 'openwebui-operator'"
+
+
+def test_only_the_operator_lane_cluster_serves_the_alpha_admission_api(tmp_path):
+    job = _kind_job()
+    step = next(s for s in job["steps"] if s.get("name") == "Start authenticated TLS registry + Kind")
+    code = step["run"].split("<<'PY_KIND'\n", 1)[1].split("\nPY_KIND", 1)[0]
+    for lane in job["strategy"]["matrix"]["lane"]:
+        out = tmp_path / f"{lane}.json"
+        proc = subprocess.run([sys.executable, "-", str(out), "/trust", lane], input=code, text=True,
+                              capture_output=True, check=False)
+        assert proc.returncode == 0, proc.stderr
+        config = json.loads(out.read_text())
+        if lane == "openwebui-operator":
+            assert config["featureGates"] == {"MutatingAdmissionPolicy": True}
+            assert config["runtimeConfig"] == {"admissionregistration.k8s.io/v1alpha1": "true"}
+            assert [n["role"] for n in config["nodes"]] == ["control-plane"]  # acceptance.sh's NODE
+        else:
+            assert "featureGates" not in config and "runtimeConfig" not in config, lane

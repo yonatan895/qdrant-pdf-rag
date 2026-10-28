@@ -1,0 +1,95 @@
+# OpenShift platform stand-ins for the operator-deploy lane (#1118 B3, #1074).
+# Rehearsal infrastructure only: never referenced by the production chart, the
+# air-gap manifests or any operator script. On OpenShift the platform provides
+# these; on Kind `acceptance.sh operator prepare` applies this file, so the
+# operator's own airgap:pipeline/airgap:deploy run unchanged:
+#
+#   Route API          the route.openshift.io/v1 CRD the Route-exposure preflight
+#                      discovers and the chart's Route is stored in. No router
+#                      reads it: the lane's router stand-in is configured from the
+#                      stored Route (acceptance.sh operator admit).
+#   restricted-v2 UID  a MutatingAdmissionPolicy that assigns the pod a namespace-
+#                      range UID in group 0 at admission, as the SCC does. Only the
+#                      Open WebUI pod is mutated (the pod the UID check judges);
+#                      the Deployment the chart rendered is never changed.
+#
+# The namespace service CA (ConfigMap openshift-service-ca.crt) and the serving
+# certificate Secret (rag-openwebui-tls) hold certificates, so the script
+# creates them at run time from the run's name-constrained CA (lib.sh pki).
+# Needs the Kind cluster to serve admissionregistration.k8s.io/v1alpha1 with
+# the MutatingAdmissionPolicy feature gate (Kubernetes 1.33; e2e.yml enables
+# both for this lane only). @PLACEHOLDERS@ are rendered by the script.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: routes.route.openshift.io
+  labels: {mainframe-rag/rehearsal-stand-in: route-api}
+spec:
+  group: route.openshift.io
+  scope: Namespaced
+  names: {plural: routes, singular: route, kind: Route, listKind: RouteList}
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources: {status: {}}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [to]
+              x-kubernetes-preserve-unknown-fields: true
+              properties:
+                host: {type: string}
+                to:
+                  type: object
+                  required: [name]
+                  x-kubernetes-preserve-unknown-fields: true
+                  properties:
+                    kind: {type: string}
+                    name: {type: string}
+                tls:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  properties:
+                    termination: {type: string, enum: [edge, passthrough, reencrypt]}
+                    insecureEdgeTerminationPolicy: {type: string, enum: ["", Allow, None, Redirect]}
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: admissionregistration.k8s.io/v1alpha1
+kind: MutatingAdmissionPolicy
+metadata:
+  name: rehearsal-restricted-v2-uid
+  labels: {mainframe-rag/rehearsal-stand-in: restricted-v2}
+spec:
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE]
+        resources: [pods]
+  matchConditions:
+    - name: open-webui-pod
+      expression: "has(object.metadata.labels) && 'app' in object.metadata.labels && object.metadata.labels['app'] == 'rag-openwebui'"
+  failurePolicy: Fail
+  reinvocationPolicy: Never
+  mutations:
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: >-
+          Object{spec: Object.spec{securityContext: Object.spec.securityContext{runAsUser: @OWUI_UID@, runAsGroup: 0, fsGroup: @OWUI_UID@}}}
+---
+apiVersion: admissionregistration.k8s.io/v1alpha1
+kind: MutatingAdmissionPolicyBinding
+metadata:
+  name: rehearsal-restricted-v2-uid
+  labels: {mainframe-rag/rehearsal-stand-in: restricted-v2}
+spec:
+  policyName: rehearsal-restricted-v2-uid
+  matchResources:
+    namespaceSelector:
+      matchLabels: {kubernetes.io/metadata.name: "@APP_NS@"}
