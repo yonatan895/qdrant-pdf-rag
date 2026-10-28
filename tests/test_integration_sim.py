@@ -255,6 +255,35 @@ _MESSAGE_CITE = (
 )
 
 
+def test_pinned_qdrant_outlives_the_agent_pool_keepalive(qdrant_url):
+    """#1128: measure, on the wire, when the pinned server closes an idle
+    keep-alive connection. The agent pool's expiry must stay clear below it,
+    and the documented server timeout must still match the pin."""
+    import re
+    import socket
+    import time
+    from urllib.parse import urlsplit
+
+    from mainframe_rag.config import QDRANT_CLIENT_KEEPALIVE_EXPIRY_S, QDRANT_SERVER_KEEPALIVE_S
+
+    parts = urlsplit(qdrant_url)
+    with socket.create_connection((parts.hostname, parts.port), timeout=15) as sock:
+        sock.sendall(b"GET /readyz HTTP/1.1\r\nHost: qdrant\r\n\r\n")
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            buf += sock.recv(4096)
+        head, _, body = buf.partition(b"\r\n\r\n")
+        assert head.startswith(b"HTTP/1.1 200")
+        length = re.search(rb"(?im)^content-length:\s*(\d+)", head)
+        assert length, "readyz must be length-delimited for the idle measurement"
+        while len(body) < int(length.group(1)):
+            body += sock.recv(4096)
+        idle_from = time.monotonic()
+        assert sock.recv(1) == b""  # blocks until the server closes the connection
+        idle_close = time.monotonic() - idle_from
+    assert QDRANT_CLIENT_KEEPALIVE_EXPIRY_S + 1.0 < idle_close <= QDRANT_SERVER_KEEPALIVE_S + 1.0
+
+
 def test_fresh_binding_then_native_publication_and_next_ingest_on_real_server(
         qdrant_url, original_inputs, tmp_path, monkeypatch):
     """Logical storage boundary only: original fixtures and deterministic HTTP embeddings."""

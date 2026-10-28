@@ -22,6 +22,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # vLLM team's DENSE_DIM; prod always overrides via embed_mode=vllm + DENSE_DIM.
 HASH_EMBED_DIM = 256
 
+# Qdrant closes an idle HTTP keep-alive connection after
+# service.http_keep_alive_timeout_sec: 5 s by default in the pinned server
+# (src/settings.rs default_http_keep_alive_timeout_sec, v1.19.2), and the
+# charts do not override it. Closes were measured at 4.5-5.0 s. The agent's
+# Qdrant pool drops idle connections well before that, so a request never
+# reuses a socket the server may already have closed (#1128). The margin
+# covers the early close plus scheduling delay; a reconnect on the
+# in-cluster Service costs one TCP handshake.
+QDRANT_SERVER_KEEPALIVE_S = 5.0
+QDRANT_CLIENT_KEEPALIVE_EXPIRY_S = 2.0
+
 # Reasoning-effort vocabulary in ascending order (#707). Values are forwarded
 # verbatim; LLM_REASONING_EFFORTS declares the subset the served template accepts.
 ReasoningEffort = Literal["low", "medium", "high", "xhigh"]

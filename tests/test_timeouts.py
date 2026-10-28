@@ -220,6 +220,81 @@ def test_agent_qdrant_client_requests_uncompressed_responses(monkeypatch):
     assert seen and set(seen) == {"identity"}
 
 
+def test_agent_qdrant_pool_drops_idle_connections_before_the_server_does(monkeypatch):
+    """#1128: Qdrant closes an idle keep-alive connection after ~4.5-5 s.
+    The lifespan's Qdrant client must expire idle connections first: reused
+    within the expiry, never reused after it."""
+    import asyncio
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from qdrant_client.async_qdrant_client import AsyncQdrantClient as RealAsyncQdrantClient
+
+    from mainframe_rag.config import QDRANT_CLIENT_KEEPALIVE_EXPIRY_S, QDRANT_SERVER_KEEPALIVE_S
+
+    assert QDRANT_CLIENT_KEEPALIVE_EXPIRY_S + 1.0 < QDRANT_SERVER_KEEPALIVE_S
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+
+    captured: dict = {}
+
+    class SpyAsyncQdrantClient:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("qdrant_client.AsyncQdrantClient", SpyAsyncQdrantClient)
+    with TestClient(app_mod.app):
+        pass
+    assert captured["limits"].keepalive_expiry == QDRANT_CLIENT_KEEPALIVE_EXPIRY_S
+
+    peers: list[int] = []
+
+    class Recorder(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"  # keep-alive, like Qdrant
+
+        def do_GET(self):
+            peers.append(self.client_address[1])
+            body = b'{"result":{"collections":[]},"status":"ok","time":0}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Recorder)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        kw = {**captured, "url": f"http://127.0.0.1:{server.server_address[1]}"}
+
+        async def phases() -> list[set[int]]:
+            client = RealAsyncQdrantClient(**kw)
+            seen: list[set[int]] = []
+            try:
+                for idle in (0.0, 0.2, QDRANT_CLIENT_KEEPALIVE_EXPIRY_S + 0.5):
+                    await asyncio.sleep(idle)  # the pool sits idle
+                    start = len(peers)
+                    await client.get_collections()
+                    seen.append(set(peers[start:]))
+            finally:
+                await client.close()
+            return seen
+
+        first, within, after = asyncio.run(phases())
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert within and within <= first  # reused inside the expiry
+    assert after and after.isdisjoint(first | within)  # fresh connection after it
+
+
 def test_connect_retries_setting_is_bounded():
     from pydantic import ValidationError
 
