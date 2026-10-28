@@ -81,6 +81,7 @@ def test_zero_chunk_document_fails_identically_in_dry_and_real_runs(tmp_path, mo
 def test_worker_qdrant_client_is_built_once_from_ingest_settings(monkeypatch):
     """Each spawned ingest worker opens one Qdrant client with the writer URL,
     key and ingest timeout, then reuses it for every document it processes."""
+    import httpx2
     import qdrant_client
 
     from mainframe_rag.config import Settings
@@ -93,7 +94,11 @@ def test_worker_qdrant_client_is_built_once_from_ingest_settings(monkeypatch):
                         qdrant_ingest_timeout_s=42)
     first = run_ingest._get_qdrant(settings)
     assert run_ingest._get_qdrant(settings) is first
-    assert built == [{"url": "http://writer:6333", "api_key": "writer-key", "timeout": 42}]
+    # Idle connections expire before Qdrant closes them (#1131).
+    limits = httpx2.Limits(max_connections=100, max_keepalive_connections=20, keepalive_expiry=2.0)
+    assert built == [
+        {"url": "http://writer:6333", "api_key": "writer-key", "timeout": 42, "limits": limits}
+    ]
 
 
 def test_resolve_workers_is_a_cap(tmp_path):
