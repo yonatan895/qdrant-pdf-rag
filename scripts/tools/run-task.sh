@@ -8,42 +8,57 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 PIN="$ROOT/scripts/tools/task-pin.txt"
 TASK_EXE="$ROOT/.tools/bin/task"
-fail() { echo "run-task: $1" >&2; exit 2; }
+fail() { echo "run-task: $1" >&2; echo "run-task: run the fix from the checkout root, then retry" >&2; exit 2; }
+# Each refusal names its fix, run from the checkout root, for the connected
+# host and the air gap where they differ. Messages are fixed text: never an
+# argument, environment value or configuration content.
+TASK_FIX="connected fix: sh scripts/tools/install-task.sh; air-gap fix: sh scripts/tools/install-task.sh --archive /absolute/path/to/bundle/task_linux_amd64.tar.gz (the verified bundle's copy)"
 
 case "$(uname -s)/$(uname -m)" in
     Linux/x86_64) ;;
-    *) fail "unsupported platform; the Task pin supports linux-amd64 only";;
+    *) fail "unsupported platform; the Task pin supports linux-amd64 only; fix: run from a Linux x86_64 host or WSL2 (uname -sm must print: Linux x86_64)";;
 esac
-[ -x "$TASK_EXE" ] || fail "pinned .tools/bin/task absent; run install-task.sh on a connected host or bootstrap the signed bundle offline"
+[ -x "$TASK_EXE" ] || fail "pinned .tools/bin/task absent; $TASK_FIX"
 expected=$(sed -n 's/^binary-sha256: *//p' "$PIN")
-[ "${#expected}" = 64 ] || fail "Task binary digest is missing from the pin"
+[ "${#expected}" = 64 ] || fail "Task binary digest is missing from the pin; fix: git checkout -- scripts/tools/task-pin.txt"
 observed=$(sha256sum "$TASK_EXE")
-[ "${observed%% *}" = "$expected" ] || fail "Task binary checksum mismatch; reinstall from the pinned archive"
+[ "${observed%% *}" = "$expected" ] || fail "Task binary checksum mismatch; reinstall from the pinned archive: $TASK_FIX"
 
 # Do not read, print, edit or merge private runner configuration. The pinned
 # runner has no switch disabling its taskrc search. Reject instead of silently
-# accepting options inherited from outside the reviewed repository.
+# accepting options inherited from outside the reviewed repository. The
+# refusal names the file by a shape built only from fixed tokens ($HOME,
+# $XDG_CONFIG_HOME, checkout-relative or ../ segments), never the real path.
+refuse_config() {
+    fail "inherited Task configuration $1 is unsupported and was not read; fix: mv \"$1\" \"$1.disabled\""
+}
 check_config_dir() {
     for name in .taskrc.yml .taskrc.yaml; do
-        [ ! -e "$1/$name" ] && [ ! -L "$1/$name" ] ||
-            fail "inherited Task configuration is unsupported; use a clean runner environment or the direct owner scripts"
+        [ ! -e "$1/$name" ] && [ ! -L "$1/$name" ] || refuse_config "$2$name"
     done
 }
-scan="$ROOT/scripts/tools"
-while :; do
-    check_config_dir "$scan"
-    [ "$scan" != / ] || break
-    scan=$(dirname -- "$scan")
-done
-if [ -n "${HOME:-}" ]; then check_config_dir "$HOME"; fi
+# $HOME first: it is usually also a parent of the checkout.
+if [ -n "${HOME:-}" ]; then check_config_dir "$HOME" '$HOME/'; fi
 if [ -n "${XDG_CONFIG_HOME:-}" ]; then
     for name in taskrc.yml taskrc.yaml; do
         [ ! -e "$XDG_CONFIG_HOME/task/$name" ] && [ ! -L "$XDG_CONFIG_HOME/task/$name" ] ||
-            fail "inherited Task configuration is unsupported; use a clean runner environment or the direct owner scripts"
+            refuse_config '$XDG_CONFIG_HOME/task/'"$name"
     done
 fi
+scan="$ROOT/scripts/tools"
+shown=scripts/tools/
+while :; do
+    check_config_dir "$scan" "$shown"
+    [ "$scan" != / ] || break
+    scan=$(dirname -- "$scan")
+    case "$shown" in
+        scripts/tools/) shown=scripts/;;
+        scripts/) shown=;;
+        *) shown="../$shown";;
+    esac
+done
 [ ! -e "$ROOT/scripts/tools/.env" ] && [ ! -L "$ROOT/scripts/tools/.env" ] ||
-    fail "runner initialization directory must contain no .env file"
+    fail "runner initialization directory must contain no .env file; fix: mv scripts/tools/.env scripts/tools/.env.disabled"
 
 # A finite set of runner options keeps path/global/remote/parallel overrides
 # out of controlled calls. Everything after -- belongs to the selected owner.
@@ -52,7 +67,7 @@ for arg do
         --) break;;
         --list|-l|--list-all|-a|--json|-j|--no-status|--nested|--summary|--help|-h|--version|--exit-code|-x|--dry|-n|--silent|-s|--color=false|--color=true) ;;
         -*|TASK_*=*|CLI_*=*|ROOT_DIR=*|TASKFILE_DIR=*|TASKFILE=*)
-            fail "unsupported runner override; see docs/task-runner.md";;
+            fail "unsupported runner override; fix: drop it and pass task arguments after --, e.g. sh scripts/tools/run-task.sh qa:unit -- tests/test_agent_doctor.py -q (allowed runner options: docs/task-runner.md#scope)";;
     esac
 done
 

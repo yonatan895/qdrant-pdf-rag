@@ -42,6 +42,37 @@ print(json.dumps(dict(implementation=platform.python_implementation(),
     jit_enabled=bool(getattr(sys, "_jit", None) and sys._jit.is_enabled()), packages=versions)))
 '''
 
+# Every non-ready finding names the command that fixes it, run from the
+# checkout root, for the connected host and the air gap where they differ.
+# Fixes are fixed text (or tracked-pin fields of a validated shape): never
+# environment values, private configuration or subprocess output.
+TASK_FIX = ("connected fix: sh scripts/tools/install-task.sh; air-gap fix: sh scripts/tools/install-task.sh"
+            " --archive /absolute/path/to/bundle/task_linux_amd64.tar.gz (the verified bundle's copy)")
+VENV_CREATE = ("connected fix: sh scripts/tools/run-task.sh dev:setup PY=python3.14; air-gap fix: python3.14"
+               " scripts/prepare_python.py --venv .venv --wheelhouse /absolute/path/to/approved/dev-wheels")
+VENV_RECREATE = ("connected fix: rm -rf .venv && sh scripts/tools/run-task.sh dev:setup PY=python3.14;"
+                 " air-gap fix: rm -rf .venv && python3.14 scripts/prepare_python.py --venv .venv"
+                 " --wheelhouse /absolute/path/to/approved/dev-wheels")
+PREPARED_PYTHON_FIX = ("connected fix: INTERPRETER scripts/prepare_python.py --python INTERPRETER --wheelhouse"
+                       " .tools/python-wheels/dev --connected; air-gap fix: INTERPRETER scripts/prepare_python.py"
+                       " --python INTERPRETER --wheelhouse /absolute/path/to/approved/dev-wheels"
+                       " (INTERPRETER is the --python value given to this check)")
+DOCKER_FIX = "fix: start the local Docker daemon, then check: docker --host unix:///var/run/docker.sock version"
+CHECKER_FIX = "fix: env -u PYTHON_JIT python3.14 scripts/agent_doctor.py (a CPython 3.14 GIL build, not python3.14t)"
+TRACKED_PINS = "pyproject.toml images.txt requirements.dev.lock.txt locks/cp314-linux-x86_64.json"
+
+
+def helm_fix(version: str) -> str:
+    asset = (f"helm-{version}-linux-amd64.tar.gz" if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", version)
+             else "helm-VERSION-linux-amd64.tar.gz")
+    return ("connected fix: sh scripts/tools/install-helm.sh; air-gap fix: sh scripts/tools/install-helm.sh"
+            f" --archive /absolute/path/to/{asset} (an approved transferred copy);"
+            ' then select it: export PATH="$PWD/.tools/bin:$PATH"')
+
+
+def tool_fix(name: str) -> str:
+    return f"fix: no repository installer; install {name} with the host package manager, then check: command -v {name}"
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -64,18 +95,19 @@ def inspect_task(root: Path) -> Finding:
                 or not re.fullmatch(r"[a-f0-9]{64}", expected)):
             raise ValueError("invalid pin")
     except (OSError, UnicodeError, KeyError, ValueError):
-        return Finding("unable to verify", "Task runner", "Task pin record unreadable or incomplete")
+        return Finding("unable to verify", "Task runner", "Task pin record unreadable or incomplete;"
+                       " fix: git checkout -- scripts/tools/task-pin.txt")
     if not local.is_file() or not os.access(local, os.X_OK):
         return Finding("missing prerequisite", "Task runner",
-                       "pinned .tools/bin/task absent; use the connected installer or signed offline bootstrap")
+                       "pinned .tools/bin/task absent; " + TASK_FIX)
     try:
         with local.open("rb") as stream:
             observed = hashlib.file_digest(stream, "sha256").hexdigest()
     except OSError:
-        return Finding("unable to verify", "Task runner", "Task executable unreadable")
+        return Finding("unable to verify", "Task runner", "Task executable unreadable; reinstall it: " + TASK_FIX)
     if observed != expected:
         return Finding("missing prerequisite", "Task runner",
-                       "Task binary checksum mismatch; reinstall from the pinned archive")
+                       "Task binary checksum mismatch; reinstall from the pinned archive: " + TASK_FIX)
     # Artifact tests package the actual transferred archive, not a stand-in.
     # A verified executable alone cannot establish that prerequisite.
     archive = root / ".tools/cache" / asset
@@ -84,10 +116,10 @@ def inspect_task(root: Path) -> Finding:
             archive_observed = hashlib.file_digest(stream, "sha256").hexdigest()
     except OSError:
         return Finding("missing prerequisite", "Task archive",
-                       "cached pinned Task archive unavailable; run explicit install-task.sh preparation")
+                       "cached pinned Task archive unavailable; the installer caches it: " + TASK_FIX)
     if archive_observed != archive_expected:
         return Finding("missing prerequisite", "Task archive",
-                       "cached Task archive checksum mismatch; rerun explicit preparation")
+                       "cached Task archive checksum mismatch; the installer replaces it: " + TASK_FIX)
     return Finding("ready", "Task runner",
                    f"pinned go-task {version} executable and archive checksums verified")
 
@@ -102,19 +134,20 @@ def inspect_helm(root: Path) -> Finding:
         if not re.fullmatch(r"[a-f0-9]{64}", expected):
             raise ValueError("invalid pin")
     except (OSError, UnicodeError, KeyError, ValueError):
-        return Finding("unable to verify", "Helm", "Helm pin unreadable or incomplete")
+        return Finding("unable to verify", "Helm", "Helm pin unreadable or incomplete;"
+                       " fix: git checkout -- scripts/tools/helm-pin.txt")
     executable = shutil.which("helm")
     if executable is None:
         return Finding("missing prerequisite", "Helm",
-                       "pinned Helm absent; explicitly prepare it with scripts/tools/install-helm.sh")
+                       "pinned Helm absent; " + helm_fix(version))
     try:
         with Path(executable).open("rb") as stream:
             observed = hashlib.file_digest(stream, "sha256").hexdigest()
     except OSError:
-        return Finding("unable to verify", "Helm", "selected Helm executable unreadable")
+        return Finding("unable to verify", "Helm", "selected Helm executable unreadable; " + helm_fix(version))
     if observed != expected:
         return Finding("missing prerequisite", "Helm",
-                       "selected Helm checksum differs from the pin; prepare the pinned tool and select its PATH")
+                       "selected Helm checksum differs from the pin; " + helm_fix(version))
     return Finding("ready", "Helm", f"pinned Helm {version} executable checksum verified")
 
 
@@ -158,7 +191,9 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False,
              python: Path | None = None) -> list[Finding]:
     results: list[Finding] = []
 
-    def add(status: str, subject: str, detail: str) -> None:
+    def add(status: str, subject: str, detail: str, fix: str = "") -> None:
+        if status != "ready" and fix:
+            detail = f"{detail}; {fix}"
         results.append(Finding(status, subject, detail))
 
     required = ["pyproject.toml", "requirements.lock.txt", "requirements.dev.lock.txt",
@@ -169,19 +204,23 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False,
                      "charts/mainframe-rag/Chart.yaml",
                      "charts/mainframe-rag/values.schema.json"]
     for name in required:
-        add("ready" if (root/name).is_file() else "missing prerequisite", name, "tracked input presence")
+        add("ready" if (root/name).is_file() else "missing prerequisite", name, "tracked input presence",
+            f"fix: git checkout -- {name}")
     try:
         project = tomllib.loads((root/"pyproject.toml").read_text(encoding="utf-8"))
         requirement = project["project"]["requires-python"]
         minimum = re.fullmatch(r">=(\d+)\.(\d+)", requirement)
         if not minimum:
-            add("unable to verify", "Python requirement", "unsupported requirement syntax; inspect pyproject.toml")
+            add("unable to verify", "Python requirement",
+                "unsupported requirement syntax; requires-python must read >=MAJOR.MINOR",
+                "fix: git checkout -- pyproject.toml")
             return results
         minimum_version = tuple(map(int, minimum.groups()))
         _, locked = load_dependency_lock(root, "dev")
         pins = {name: entry["version"] for name, entry in locked.items()}
         if not pins or "qdrant-client" not in pins:
-            add("missing prerequisite", "requirements.lock.txt", "expected dependency pins absent")
+            add("missing prerequisite", "requirements.lock.txt", "expected dependency pins absent",
+                "fix: git checkout -- requirements.dev.lock.txt locks/cp314-linux-x86_64.json")
             return results
         image = qdrant_image_pin(root/"images.txt")
         expected = pins["qdrant-client"]
@@ -189,12 +228,15 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False,
         # chart tracks the server patch version.
         tag = re.fullmatch(r".*:v(\d+\.\d+)\.(\d+)-unprivileged", image)
         matches = bool(tag) and tag.group(1) == ".".join(expected.split(".")[:2])
-        add("ready" if matches else "missing prerequisite", "Qdrant pin", "server/client version agreement")
+        add("ready" if matches else "missing prerequisite", "Qdrant pin", "server/client version agreement",
+            "fix: git checkout -- images.txt requirements.dev.lock.txt locks/cp314-linux-x86_64.json")
         server = f"{tag.group(1)}.{tag.group(2)}" if tag else expected
         chart = root/"charts"/f"qdrant-{server}.tgz"
-        add("ready" if chart.is_file() else "missing prerequisite", "Qdrant chart", "chart matching locked client")
+        add("ready" if chart.is_file() else "missing prerequisite", "Qdrant chart", "chart matching locked client",
+            f"fix: git checkout -- charts/qdrant-{server}.tgz")
     except (OSError, UnicodeError, ValueError, KeyError, TypeError):
-        add("unable to verify", "tracked configuration", "missing, unreadable or unsupported pin/config input")
+        add("unable to verify", "tracked configuration", "missing, unreadable or unsupported pin/config input",
+            "fix: git checkout -- " + TRACKED_PINS)
         return results
 
     tools = ["git"]  # Unit/deploy contracts execute the real chart renderer.
@@ -203,42 +245,50 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False,
     if profile == "deploy":
         tools += ["skopeo", "tar", "openssl", "sha256sum"]
         cli = shutil.which("oc") or shutil.which("kubectl")
-        add("ready" if cli else "missing prerequisite", "oc or kubectl", "CLI presence only; no cluster contact")
+        add("ready" if cli else "missing prerequisite", "oc or kubectl", "CLI presence only; no cluster contact",
+            tool_fix("oc"))
     for name in tools:
-        add("ready" if shutil.which(name) else "missing prerequisite", name, "CLI presence only")
+        add("ready" if shutil.which(name) else "missing prerequisite", name, "CLI presence only", tool_fix(name))
 
     results.append(inspect_task(root))
     results.append(inspect_helm(root))
 
     interpreters = [("checker runtime", Path(sys.executable))]
     development = python.absolute() if python is not None else root/".venv/bin/python"
+    # Task targets pass --python .venv/bin/python: that is still the local venv.
+    local_venv = development.parts[-3:] == (".venv", "bin", "python")
     if development.is_file():
         interpreters.append(("development environment", development))
     else:
-        add("missing prerequisite", "development environment", "selected development interpreter absent; no environment created")
+        add("missing prerequisite", "development environment",
+            "selected development interpreter absent; no environment created",
+            VENV_CREATE if local_venv else PREPARED_PYTHON_FIX)
     for label, interpreter in interpreters:
+        fix = (CHECKER_FIX if label == "checker runtime"
+               else VENV_RECREATE if local_venv else PREPARED_PYTHON_FIX)
         packages = sorted(set(pins) | {"pytest", "ruff", "mypy"}) if label == "development environment" else []
         runtime = inspect_runtime(interpreter, packages)
         if runtime is None:
-            add("unable to verify", label, "bounded interpreter/metadata probe unavailable")
+            add("unable to verify", label, "bounded interpreter/metadata probe unavailable", fix)
             continue
         compatible = (runtime.get("implementation") == "CPython"
                       and tuple(runtime["version"][:2]) == (3, 14)
                       and (3, 14) >= minimum_version
                       and not runtime["gil_disabled"] and not runtime["jit_enabled"])
         add("ready" if compatible else "missing prerequisite", label,
-            "CPython 3.14 GIL with experimental JIT disabled required")
+            "CPython 3.14 GIL with experimental JIT disabled required", fix)
         if label == "development environment":
             verified = inspect_locked_environment(root, interpreter)
             add("ready" if verified else "missing prerequisite", "complete development inventory",
                 "full lock and editable source identity verified" if verified else
-                "installed inventory or editable source differs from the selected lock/worktree")
+                "installed inventory or editable source differs from the selected lock/worktree", fix)
         for package in packages:
             installed = runtime["packages"].get(package)
             if not installed:
-                add("missing prerequisite", package, "not installed in development environment")
+                add("missing prerequisite", package, "not installed in development environment", fix)
             elif package in pins and installed != pins[package]:
-                add("missing prerequisite", package, "installed version differs from requirements.dev.lock.txt")
+                add("missing prerequisite", package, "installed version differs from requirements.dev.lock.txt",
+                    fix)
             else:
                 add("ready", package, "development package present; locked version checked where specified")
 
@@ -258,7 +308,9 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False,
             add("ready", "prepared Qdrant image", image_id)
         except (OSError, ValueError):
             add("missing prerequisite", "prepared Qdrant image",
-                "approved digest unavailable in selected daemon; explicitly run artifacts:qdrant")
+                "approved digest unavailable in selected daemon",
+                "connected fix: sh scripts/tools/run-task.sh artifacts:qdrant; air gap: no supported"
+                " preparation (a docker load lacks the digest identity), run this profile on a connected host")
     if profile == "sim":
         try:
             try:
@@ -270,12 +322,17 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False,
             add("ready", "prepared BM25 cache", "selected snapshot and file hashes verified")
         except (OSError, ValueError, SystemExit):
             add("missing prerequisite", "prepared BM25 cache",
-                "selected cache missing, ambiguous or corrupt; explicitly run artifacts:bm25")
+                "selected cache missing, ambiguous or corrupt",
+                "connected fix: sh scripts/tools/run-task.sh artifacts:bm25 (writes the default"
+                " bundles/bm25-weights; unset SIM_BM25_CACHE_DIR or point it there); air-gap fix:"
+                " export SIM_BM25_CACHE_DIR=/absolute/path/to/offline-prepared/bm25-weights, verified by"
+                ' python3 scripts/fetch_bm25_weights.py --out "$SIM_BM25_CACHE_DIR"'
+                " --verify-manifest bm25-weights.sha256 --verify-only")
 
     if probe_docker:
         docker = shutil.which("docker")
         if not docker:
-            add("missing prerequisite", "local Docker probe", "docker CLI absent")
+            add("missing prerequisite", "local Docker probe", "docker CLI absent", tool_fix("docker"))
         else:
             try:
                 result = subprocess.run(
@@ -284,9 +341,10 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False,
                     timeout=PROBE_TIMEOUT_S, check=False,
                 )
                 add("ready" if result.returncode == 0 else "unable to verify", "local Docker probe",
-                    "explicit local socket read only; remote contexts are not contacted")
+                    "explicit local socket read only; remote contexts are not contacted", DOCKER_FIX)
             except (OSError, subprocess.TimeoutExpired):
-                add("unable to verify", "local Docker probe", "local socket unavailable or bounded probe timed out")
+                add("unable to verify", "local Docker probe", "local socket unavailable or bounded probe timed out",
+                    DOCKER_FIX)
     return results
 
 
@@ -304,8 +362,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     for finding in findings:
         print(f"{finding.status}: {finding.subject}: {finding.detail}")
+    ready = all(f.status == "ready" for f in findings)
+    if not ready:
+        print("Run each fix from the checkout root, then rerun this check.")
     print("Prerequisites only; no application, test or production acceptance is established.")
-    return 0 if all(f.status == "ready" for f in findings) else 2
+    return 0 if ready else 2
 
 
 if __name__ == "__main__":
