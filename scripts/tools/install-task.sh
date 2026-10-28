@@ -28,7 +28,9 @@ if [ -z "$ARCHIVE" ]; then
     command -v curl >/dev/null 2>&1 || task_fail "curl is required for connected installation; use --archive for offline installation"
     ARCHIVE="$TMP/$TASK_ASSET"
     echo "install-task: downloading $TASK_ORIGIN"
-    curl -fsSL -o "$ARCHIVE" "$TASK_ORIGIN"
+    # Bounded transport retries with backoff; the checksum check below runs on the
+    # downloaded bytes and a mismatch is fatal, never retried.
+    curl -fsSL --retry 3 --retry-all-errors -o "$ARCHIVE" "$TASK_ORIGIN"
 fi
 task_extract_verified "$ARCHIVE" "$TMP"
 GOT="$("$TMP/task" --version)"

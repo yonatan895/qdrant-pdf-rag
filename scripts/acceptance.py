@@ -94,13 +94,37 @@ def candidate_identity(pr: dict[str, Any], repository: str) -> dict[str, Any]:
     return result
 
 
+class StaleBase(ValueError):
+    """The candidate's recorded base is behind the live default-branch tip.
+
+    It is still a ValueError, so every existing refusal path keeps refusing;
+    the publisher only names the case and its fix instead of a generic one.
+    """
+
+    def __init__(self, branch: str, base_sha: str, live_sha: str):
+        super().__init__('candidate base is not the live default-branch tip')
+        self.branch, self.base_sha, self.live_sha = branch, base_sha, live_sha
+
+    def report(self) -> str:
+        return ('## Candidate Technical Verification\n\n'
+                f'- **Base SHA**: `{self.base_sha}`\n'
+                f'- **Live `{self.branch}` tip**: `{self.live_sha}`\n'
+                '- **Technical Verification**: `incomplete`\n\n'
+                f'The candidate was built on a base that is no longer the tip of `{self.branch}`, '
+                'so its evidence cannot be current. Fix: update the branch (merge or rebase onto '
+                f'the live `{self.branch}` tip) and let the native workflows run on the new merge.')
+
+
 def require_current_base(api: GitHub, pr: dict[str, Any], candidate: dict[str, Any]) -> None:
     """PR merge metadata may lag a default-branch push; read the live ref too."""
     branch = pr['base']['ref']
     require(isinstance(branch, str) and bool(branch))
     ref = api.get(api.prefix + 'git/ref/heads/' + quote(branch, safe='/'))
     require(ref['ref'] == 'refs/heads/' + branch and ref['object']['type'] == 'commit')
-    require(ref['object']['sha'] == candidate['base_sha'])
+    live = ref['object']['sha']
+    require(isinstance(live, str) and re.fullmatch('[a-f0-9]{40}', live) is not None)
+    if live != candidate['base_sha']:
+        raise StaleBase(branch, candidate['base_sha'], live)
 
 
 # GitHub's nonterminal run states. A queued workflow has not produced its jobs
@@ -217,6 +241,74 @@ def verification_inputs(root: Path) -> dict[str, str]:
     return {path: hashlib.sha256((root / path).read_bytes()).hexdigest() for path in paths}
 
 
+# A job copied unchanged into a later attempt keeps these fields. "Re-run failed
+# jobs" lists every job in the new attempt, under a new job id and that attempt
+# number, but only the rerun jobs execute and upload evidence there.
+CARRIED_JOB_FIELDS = ('name', 'head_sha', 'status', 'conclusion', 'started_at', 'completed_at')
+
+
+class RunAttempts:
+    """Read one run's attempts lazily; every attempt must belong to that run."""
+
+    def __init__(self, api: GitHub, run: dict[str, Any]):
+        require(type(run['id']) is int and type(run['run_attempt']) is int and run['run_attempt'] >= 1)
+        self.api, self.run = api, run
+        self._jobs: dict[int, list[dict[str, Any]]] = {}
+        self._runs: dict[int, dict[str, Any]] = {run['run_attempt']: run}
+
+    def jobs(self, attempt: int) -> list[dict[str, Any]]:
+        if attempt not in self._jobs:
+            self._jobs[attempt] = paginate(
+                self.api.get, self.api.prefix + f"actions/runs/{self.run['id']}/attempts/{attempt}/jobs", 'jobs')
+        return self._jobs[attempt]
+
+    def attempt_run(self, attempt: int) -> dict[str, Any]:
+        """An earlier attempt of the same run, for the same head and workflow."""
+        if attempt not in self._runs:
+            value = self.api.get(self.api.prefix + f"actions/runs/{self.run['id']}/attempts/{attempt}")
+            require(value['id'] == self.run['id'] and value['run_attempt'] == attempt)
+            require(all(value[key] == self.run[key] for key in ('event', 'path', 'head_sha')))
+            require(value['repository']['id'] == self.run['repository']['id'])
+            require(value['repository']['full_name'] == self.run['repository']['full_name'])
+            require(value['head_repository']['id'] == self.run['head_repository']['id'])
+            require(value['status'] == 'completed')
+            self._runs[attempt] = value
+        return self._runs[attempt]
+
+    def named(self, attempt: int, name: str) -> dict[str, Any] | None:
+        selected = [job for job in self.jobs(attempt) if job['name'] == name]
+        if not selected:
+            return None
+        require(len(selected) == 1)
+        job = selected[0]
+        require(job['run_id'] == self.run['id'] and job['run_attempt'] == attempt)
+        return job
+
+    def execution(self, name: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Return (attempt run, job) for the attempt that executed the latest record.
+
+        The latest attempt's record decides the job's state. When that record is
+        a carried copy (it started before its attempt did), the attempt that
+        actually ran it supplies the job, the run identity and the evidence
+        artifact. The copy must match that record exactly; anything else refuses.
+        Missing timestamps never move evidence to an earlier attempt.
+        """
+        attempt = self.run['run_attempt']
+        job = self.named(attempt, name)
+        owner = self.run
+        while job is not None and attempt > 1 and job['status'] == 'completed':
+            started, began = job.get('started_at'), owner.get('run_started_at')
+            if not started or not began or timestamp(started) >= timestamp(began):
+                break
+            previous = self.named(attempt - 1, name)
+            require(previous is not None)
+            assert previous is not None
+            require(all(previous.get(key) == job.get(key) for key in CARRIED_JOB_FIELDS))
+            attempt -= 1
+            job, owner = previous, self.attempt_run(attempt)
+        return owner, job
+
+
 def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict[str, Any]:
     """Collect the latest run/attempt, never fall back to an older green result.
 
@@ -227,9 +319,11 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
     head and test merge is still active; completed misses stay missing.
     """
     candidate = candidate_identity(pr, api.repository)
+    # The live ref first: a base behind the tip is named as such (StaleBase)
+    # rather than reported as an approved-root mismatch.
+    require_current_base(api, pr, candidate)
     root_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=approved_root, text=True).strip()
     require(root_sha == candidate['base_sha'])
-    require_current_base(api, pr, candidate)
     require(not subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'],
                                         cwd=approved_root, text=True).strip())
     policy_digest = hashlib.sha256((approved_root / 'scripts/review_tooling.py').read_bytes()).hexdigest()
@@ -268,7 +362,8 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
     producers: tuple[NativeProducer, ...] = PRODUCERS
     for workflow, run in latest.items():
         run = api.get(api.prefix + f"actions/runs/{run['id']}")
-        jobs = paginate(api.get, api.prefix + f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs", 'jobs')
+        attempts = RunAttempts(api, run)
+        attempts.jobs(run['run_attempt'])
         artifacts = paginate(api.get, api.prefix + f"actions/runs/{run['id']}/artifacts", 'artifacts')
         snapshots[workflow] = {'run_id': run['id'], 'run_attempt': run['run_attempt'], 'status': run['status']}
         current = current_native_run(candidate, workflow, run, execution_time)
@@ -283,13 +378,14 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
         for producer in (definition for definition in producers if definition.workflow == workflow):
             record: dict[str, Any] = {'lane': producer.lane, 'job': producer.job, 'status': 'missing'}
             try:
-                selected_jobs = [j for j in jobs if j['name'] == producer.job]
-                if not selected_jobs:
+                # The job's latest record decides; its evidence comes from the
+                # attempt that executed it, which a failed-jobs rerun may not be.
+                owner, selected = attempts.execution(producer.job)
+                if selected is None:
                     record['status'] = 'pending' if pending else ('missing' if current else 'stale')
                     native.append(record)
                     continue
-                require(len(selected_jobs) == 1)
-                job = selected_jobs[0]
+                job = selected
                 if job['status'] != 'completed':
                     record['status'] = 'pending' if pending else ('missing' if current else 'stale')
                     native.append(record)
@@ -305,7 +401,7 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
                     native.append(record)
                     continue
                 selected_artifacts = [a for a in artifacts if a['name'] ==
-                                      f"evidence-{producer.artifact}-attempt-{run['run_attempt']}"]
+                                      f"evidence-{producer.artifact}-attempt-{owner['run_attempt']}"]
                 if not selected_artifacts:
                     # The job is complete: a missing artifact is final, even if
                     # sibling jobs keep the parent run active.
@@ -333,7 +429,8 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
                 # job against a completed-status copy so a corrupt/forged
                 # artifact fails now instead of hiding as pending.
                 active_run = run['status'] in ACTIVE_RUN_STATUSES
-                normalization_run = {**run, 'status': 'completed'} if active_run else run
+                normalization_run = ({**owner, 'status': 'completed'}
+                                     if owner['status'] in ACTIVE_RUN_STATUSES else owner)
                 result = normalize_native(candidate=candidate, producer=producer, run=normalization_run, job=job,
                                           artifact=artifact, execution_commit=tested_commit,
                                           candidate_commit=execution_commit, archive=archive,
@@ -572,6 +669,9 @@ def publish_acceptance(api: GitHub, number: int, approved_root: Path, *,
                             else 'verifier_policy_change_not_supported'),
                   'markdown_report': ('Verifier files differ from approved main: ' + ', '.join(exc.paths)
                                       + '.\n\n' + guidance)}
+    except StaleBase as exc:
+        result = {'all_prerequisites_met': False, 'verification_status': 'incomplete',
+                  'error': 'candidate_base_not_current', 'markdown_report': exc.report()}
     except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError, zipfile.BadZipFile):
         result = {'all_prerequisites_met': False, 'verification_status': 'incomplete',
                   'error': 'acceptance_evidence_unavailable_or_changed'}
@@ -654,6 +754,13 @@ def main(argv: list[str] | None = None) -> int:
                 result = collect_acceptance(api, number, args.approved_root.resolve())
                 recheck_current(api, result)
             results.append(result)
+    except StaleBase as exc:
+        # Commit IDs and the fixed fix are not diagnostics; nothing remote is echoed.
+        print(json.dumps({'schema_version': 2, 'all_prerequisites_met': False,
+                          'verification_status': 'incomplete', 'error': 'candidate_base_not_current',
+                          'base_sha': exc.base_sha, 'live_base_sha': exc.live_sha,
+                          'fix': 'update the branch onto the live default-branch tip'}))
+        return 1
     except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError, zipfile.BadZipFile):
         # Never print API errors, remote bodies or authentication diagnostics.
         print(json.dumps({'schema_version': 2, 'all_prerequisites_met': False,

@@ -221,3 +221,32 @@ def test_acknowledged_write_rejoin_refuses_permanent_loss_or_corruption(
     if corruption:
         assert "wrong-content" in str(failure.value)
     assert "u2" in state.closed
+
+
+@pytest.mark.parametrize("pull_failures,identity_matches,expected_rc,expected_pulls", [
+    (2, True, 0, 3),    # transient pull failures, then the approved digest
+    (3, True, 1, 3),    # bounded: three attempts, then refuse
+    (0, False, 1, 1),   # identity mismatch after a pull is fatal, never retried
+])
+def test_prepare_retries_failed_pulls_and_never_retries_an_identity_mismatch(
+        monkeypatch, capsys, pull_failures, identity_matches, expected_rc, expected_pulls):
+    reference = qdrant_pin.qdrant_digest_pin(qdrant_pin.Path(qdrant_pin.__file__).resolve().parents[1] / "images.txt")
+    digests = [reference.removeprefix("docker.io/") if identity_matches else "qdrant/qdrant@sha256:" + "f" * 64]
+    calls = []
+    sleeps = []
+
+    def docker(cmd, **kwargs):
+        calls.append(cmd[:2])
+        if cmd[:2] == ["docker", "pull"]:
+            failed = sum(1 for call in calls if call == ["docker", "pull"]) <= pull_failures
+            return SimpleNamespace(returncode=1 if failed else 0, stdout="")
+        return SimpleNamespace(returncode=0, stdout=json.dumps([{"Id": "sha256:" + "b" * 64, "RepoDigests": digests}]))
+
+    monkeypatch.setattr(qdrant_pin.subprocess, "run", docker)
+    monkeypatch.setattr(qdrant_pin.time, "sleep", sleeps.append)
+    monkeypatch.setattr(qdrant_pin.sys, "argv", ["qdrant_pin.py", "--prepare"])
+    assert qdrant_pin.main() == expected_rc
+    assert calls.count(["docker", "pull"]) == expected_pulls
+    assert sleeps == [qdrant_pin.PREPARE_BACKOFF_SECONDS * n for n in range(1, min(pull_failures, 2) + 1)]
+    out = capsys.readouterr()
+    assert out.out == ("sha256:" + "b" * 64 + "\n" if expected_rc == 0 else "")
