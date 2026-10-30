@@ -697,7 +697,7 @@ behavioral kills. Hash-valid empty/partial/duplicate/surviving reports are negat
 cases. The consumer independently reads candidate Task dispatch and challenge
 policy bytes; a candidate cannot replace those inputs and merely claim their
 approved hashes. Changes to verifier implementation inputs require the maintainer's
-[exact-candidate decision](agent-workflow.md#verifier-update-decision).
+[exact-candidate decision](acceptance.md#verifier-update-decision).
 Tests must cover actual producer-to-consumer decision artifacts, exact SHA/hash
 binding, native workflow/job/attempt/actor provenance, revocation and newer failed
 or pending decisions, plus a second currentness check before publication. An

@@ -13,7 +13,7 @@ when the document is a skill. Apply these repository-specific interpretations:
   stay word-neutral unless an incident requires more).
 - Instruction chains have hard byte budgets checked by
   `sh scripts/tools/run-task.sh qa:context`; see the
-  [context check format](../../../docs/agent-workflow.md#context-check-format).
+  [context check format](../../../docs/agent-maintenance.md#context-check-format).
   Run it after every instruction or skill edit.
 - Vendored upstream skills stay verbatim under `.agents/vendor/`. Put local
   adaptations in the repository-owned entry point and keep one source of truth:

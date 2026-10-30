@@ -610,7 +610,7 @@ def publish_acceptance(api: GitHub, number: int, approved_root: Path, *,
     and non-passing; completed misses, failures and stale runs complete as
     failure. Authentication determines the check's App source. Ordinary Actions tokens
     provide an advisory result; required enforcement needs the maintainer's
-    dedicated App and repository rules, as documented in agent-workflow.md.
+    dedicated App and repository rules, as documented in docs/acceptance.md.
     """
     import zipfile
 

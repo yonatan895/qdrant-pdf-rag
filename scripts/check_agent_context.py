@@ -11,6 +11,7 @@ from urllib.parse import unquote, urlsplit
 
 ROOT_BUDGET = 8192
 CHAIN_BUDGET = 24576
+ENTRY_BUDGET = 32768
 REQUIRED = (
     "AGENTS.md", "docs/agent-workflow.md", ".github/ISSUE_TEMPLATE/task.yml",
     ".github/pull_request_template.md", ".github/ISSUE_TEMPLATE/tracker.yml",
@@ -21,7 +22,7 @@ REQUIRED = (
     "taskfiles/airgap.yml",
     "scripts/tools/install-task.sh", "scripts/tools/task-pin.txt",
     "scripts/tools/run-task.sh", "scripts/tools/task-artifact.sh",
-    "docs/task-runner.md",
+    "docs/task-runner.md", "docs/agent-maintenance.md", "docs/acceptance.md",
 )
 SKILLS = Path(".agents/skills")
 PROVENANCE = Path(".agents/qdrant-skills-provenance.md")
@@ -157,7 +158,14 @@ def check(root: Path, client_limit: int | None = None) -> tuple[list[str], list[
         errors.append(f"AGENTS.md: root budget requires 1..{ROOT_BUDGET} bytes; got {size}")
     workflow = root / "docs/agent-workflow.md"
     content = read(workflow)
-    for name in REQUIRED[:5]:
+    entry_size = size + len(content.encode("utf-8"))
+    notes.append(f"entry path: {entry_size}/{ENTRY_BUDGET} UTF-8 bytes")
+    if entry_size > ENTRY_BUDGET:
+        errors.append(f"AGENTS.md + docs/agent-workflow.md: entry path budget requires "
+                      f"1..{ENTRY_BUDGET} bytes; got {entry_size}")
+    # The moved acceptance/maintenance reference stays link-checked: it used to
+    # live in docs/agent-workflow.md, which the entry check already covered.
+    for name in (*REQUIRED[:5], "docs/acceptance.md", "docs/agent-maintenance.md"):
         links(root / name, read(root / name))
 
     try:
@@ -180,10 +188,11 @@ def check(root: Path, client_limit: int | None = None) -> tuple[list[str], list[
         errors.append(f"docs/agent-workflow.md: {exc}")
 
     covered: set[Path] = set()
+    maintenance = read(root / "docs/agent-maintenance.md")
     try:
-        chains = table(content, "instruction-chains")
+        chains = table(maintenance, "instruction-chains")
         for line, cells in chains:
-            label = f"docs/agent-workflow.md:{line} instruction-chains"
+            label = f"docs/agent-maintenance.md:{line} instruction-chains"
             if len(cells) != 2:
                 errors.append(f"{label}: expected invocation directory and chain links")
                 continue
@@ -214,7 +223,7 @@ def check(root: Path, client_limit: int | None = None) -> tuple[list[str], list[
             if client_limit is not None and total >= client_limit:
                 errors.append(f"{label}: {total} bytes must be below effective client limit {client_limit}")
     except ValueError as exc:
-        errors.append(f"docs/agent-workflow.md: {exc}")
+        errors.append(f"docs/agent-maintenance.md: {exc}")
 
     if (root/SKILLS).exists():
         allowed: set[str] = set()
