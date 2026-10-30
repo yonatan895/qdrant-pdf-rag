@@ -24,8 +24,8 @@ needs_shm = pytest.mark.skipif(not os.path.isdir("/dev/shm"), reason="needs /dev
 
 @pytest.fixture
 def sess(tmp_path):
-    d = Path(tempfile.mkdtemp(dir="/dev/shm", prefix="mfr-sess-test-"))
-    d.chmod(0o700)
+    root = Path(tempfile.mkdtemp(dir="/dev/shm", prefix="mfr-sess-test-"))
+    d = root / "private"
     ca = tmp_path / "ca.crt"
     ca.write_text(PEM)
     bindir = tmp_path / "bin"
@@ -36,13 +36,18 @@ def sess(tmp_path):
     stub.chmod(0o755)
     env = {
         "PATH": f"{bindir}:/usr/bin:/bin",
-        "MFR_SESSION_DIR": str(d),
+        "MFR_SESSION_DIR": str(root),
         "MFR_KUBE_CA": str(ca),
         "MFR_NAMESPACE": "mfr-prod",
         "OC_LOG": str(log),
     }
-    yield type("S", (), {"dir": d, "env": env, "ca": ca, "log": log, "tmp": tmp_path})
-    shutil.rmtree(d, ignore_errors=True)
+    yield type("S", (), {"root": root, "dir": d, "env": env, "ca": ca, "log": log, "tmp": tmp_path})
+    root.chmod(0o700)
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def files(s):
+    return sorted(p.name for p in s.dir.iterdir()) if s.dir.exists() else []
 
 
 def run(script, s, data=b"", args=(), **env):
@@ -124,7 +129,7 @@ def test_malformed_token_refused_without_echo_or_files(sess, payload):
     assert r.stderr.startswith(b"mfr-session:")
     if len(payload) > 1:
         assert payload not in r.stdout + r.stderr
-    assert list(sess.dir.iterdir()) == []
+    assert files(sess) == []
 
 
 @needs_shm
@@ -147,7 +152,7 @@ def test_kubeconfig_shape_and_env_file(sess):
     assert f"export KUBECONFIG={sess.dir}/kubeconfig\n" in envtxt
     assert f"export REGISTRY_AUTH_FILE={sess.dir}/auth.json\n" in envtxt
     assert TOKEN not in envtxt
-    assert sorted(p.name for p in sess.dir.iterdir()) == ["env", "kubeconfig"]
+    assert files(sess) == ["env", "kubeconfig"]
 
 
 @needs_shm
@@ -168,47 +173,83 @@ def test_relogin_replaces_kubeconfig(sess):
 
 def test_not_tmpfs_refused(sess):
     d = Path(tempfile.mkdtemp(dir=Path.home() / ".cache", prefix="mfr-sess-disk-"))
-    d.chmod(0o700)
     try:
-        _not_tmpfs(sess, d)
+        r = login(sess, TOKEN.encode(), MFR_SESSION_DIR=str(d))
+        assert r.returncode == 2
+        assert b"memory filesystem" in r.stderr
+        assert list(d.iterdir()) == []
+        no_leak(r, TOKEN)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
 
-def _not_tmpfs(sess, d):
-    r = login(sess, TOKEN.encode(), MFR_SESSION_DIR=str(d))
+@needs_shm
+@pytest.mark.parametrize("mode", [0o755, 0o777, 0o2777, 0o2770])
+def test_mount_root_owner_and_mode_are_the_platforms(sess, mode):
+    # emptyDir with fsGroup is root-owned 2777; setgid parent must not break login.
+    sess.root.chmod(mode)
+    r = login(sess, TOKEN.encode())
+    assert r.returncode == 0, r.stderr
+    st = sess.dir.stat()
+    assert stat.S_IMODE(st.st_mode) == 0o700
+    assert not st.st_mode & stat.S_ISGID
+    for name in ("kubeconfig", "env"):
+        assert stat.S_IMODE((sess.dir / name).stat().st_mode) == 0o600
+
+
+@needs_shm
+def test_setgid_parent_private_dir_is_exactly_0700(sess):
+    sess.root.chmod(0o2777)
+    assert login(sess, TOKEN.encode()).returncode == 0
+    assert oct(sess.dir.stat().st_mode & 0o7777) == "0o700"
+
+
+@needs_shm
+def test_private_wrong_mode_refused(sess):
+    sess.dir.mkdir(mode=0o700)
+    sess.dir.chmod(0o755)
+    r = login(sess, TOKEN.encode())
     assert r.returncode == 2
-    assert b"memory filesystem" in r.stderr
-    assert list(d.iterdir()) == []
+    assert b"0700" in r.stderr
+    assert files(sess) == []
     no_leak(r, TOKEN)
 
 
 @needs_shm
-@pytest.mark.parametrize("mode", [0o755, 0o770, 0o600, 0o777])
-def test_wrong_mode_refused(sess, mode):
-    sess.dir.chmod(mode)
+def test_private_preexisting_setgid_refused(sess):
+    sess.dir.mkdir(mode=0o700)
+    sess.dir.chmod(0o2700)
+    assert login(sess, TOKEN.encode()).returncode == 2
+
+
+@needs_shm
+def test_private_symlink_refused(sess, tmp_path):
+    target = tmp_path / "elsewhere"
+    target.mkdir(mode=0o700)
+    sess.dir.symlink_to(target)
     r = login(sess, TOKEN.encode())
-    sess.dir.chmod(0o700)
     assert r.returncode == 2
-    assert b"0700" in r.stderr
+    assert list(target.iterdir()) == []
 
 
-def test_missing_dir_refused(sess):
+def test_missing_mount_refused(sess):
     r = login(sess, TOKEN.encode(), MFR_SESSION_DIR="/dev/shm/mfr-does-not-exist")
     assert r.returncode == 2
     assert r.stderr.startswith(b"mfr-session:")
 
 
 @needs_shm
-def test_symlinked_dir_refused(sess, tmp_path):
+def test_symlinked_mount_refused(sess, tmp_path):
     link = tmp_path / "link"
-    link.symlink_to(sess.dir)
+    link.symlink_to(sess.root)
     r = login(sess, TOKEN.encode(), MFR_SESSION_DIR=str(link))
     assert r.returncode == 2
+    assert files(sess) == []
 
 
-@pytest.mark.skipif(os.getuid() != 0 or not shutil.which("chown"), reason="needs root to chown")
-def test_wrong_owner_refused(sess):
+@pytest.mark.skipif(os.getuid() != 0, reason="needs root to chown")
+def test_private_wrong_owner_refused(sess):
+    sess.dir.mkdir(mode=0o700)
     os.chown(sess.dir, 12345, 12345)
     r = login(sess, TOKEN.encode())
     assert r.returncode == 2
@@ -222,7 +263,7 @@ def test_missing_or_invalid_ca_refused(sess):
     sess.ca.write_text("not a certificate")
     r = login(sess, TOKEN.encode())
     assert r.returncode == 2
-    assert list(sess.dir.iterdir()) == []
+    assert files(sess) == []
     no_leak(r, TOKEN)
 
 
@@ -230,7 +271,7 @@ def test_missing_or_invalid_ca_refused(sess):
 def test_default_ca_path_is_the_configmap_mount(sess):
     r = login(sess, TOKEN.encode(), MFR_KUBE_CA=None)
     assert r.returncode == 2  # /etc/mfr/kube-root-ca/ca.crt absent on the test host
-    assert list(sess.dir.iterdir()) == []
+    assert files(sess) == []
 
 
 @needs_shm
@@ -241,7 +282,7 @@ def test_namespace_required_dns_label(sess, ns):
     r = login(sess, TOKEN.encode(), MFR_NAMESPACE=ns)
     assert r.returncode == 2
     assert b"MFR_NAMESPACE" in r.stderr
-    assert list(sess.dir.iterdir()) == []
+    assert files(sess) == []
 
 
 @needs_shm
@@ -274,7 +315,7 @@ def test_registry_invalid_refused(sess, payload):
     r = run(LOGIN, sess, payload, args=["--registry"])
     assert r.returncode == 2
     assert r.stderr.startswith(b"mfr-session:")
-    assert list(sess.dir.iterdir()) == []
+    assert files(sess) == []
 
 
 @needs_shm
@@ -309,7 +350,7 @@ def test_logout_revokes_then_removes(sess):
     run(LOGIN, sess, json.dumps(DOCKERCFG).encode(), args=["--registry"])
     r = run(LOGOUT, sess)
     assert r.returncode == 0
-    assert list(sess.dir.iterdir()) == []
+    assert files(sess) == []
     assert sess.log.read_text().split() == ["logout", "--kubeconfig", f"{sess.dir}/kubeconfig"]
     no_leak(r, TOKEN)
 
@@ -320,7 +361,7 @@ def test_logout_failure_still_removes_and_exits_1(sess):
     run(LOGIN, sess, json.dumps(DOCKERCFG).encode(), args=["--registry"])
     r = run(LOGOUT, sess, OC_RC="1")
     assert r.returncode == 1
-    assert list(sess.dir.iterdir()) == []
+    assert files(sess) == []
     assert b"may not be revoked" in r.stderr and b"oc logout" in r.stderr
     no_leak(r, TOKEN)
 
@@ -330,7 +371,7 @@ def test_logout_without_oc_binary_fails_closed(sess):
     login(sess, TOKEN.encode())
     r = run(LOGOUT, sess, PATH="/nonexistent")
     assert r.returncode == 1
-    assert list(sess.dir.iterdir()) == []
+    assert files(sess) == []
 
 
 @needs_shm
@@ -341,7 +382,28 @@ def test_logout_idempotent_and_skips_oc_when_nothing_present(sess):
     run(LOGIN, sess, json.dumps(DOCKERCFG).encode(), args=["--registry"])
     assert run(LOGOUT, sess).returncode == 0  # auth only: no oc call, file removed
     assert not sess.log.exists()
-    assert list(sess.dir.iterdir()) == []
+    assert files(sess) == []
+
+
+@needs_shm
+def test_logout_removes_temp_files_and_private_dir(sess):
+    login(sess, TOKEN.encode())
+    (sess.dir / ".kubeconfig.tmp.123").write_text(TOKEN)
+    (sess.dir / "stray").write_text("x")
+    assert run(LOGOUT, sess).returncode == 0
+    assert not sess.dir.exists()
+    assert sess.root.exists()
+
+
+@needs_shm
+def test_logout_removes_private_symlink_without_following(sess, tmp_path):
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / "keep").write_text("k")
+    sess.dir.symlink_to(target)
+    assert run(LOGOUT, sess).returncode == 0
+    assert (target / "keep").exists()
+    assert not sess.dir.is_symlink()
 
 
 def test_logout_with_missing_dir_is_ok(sess):

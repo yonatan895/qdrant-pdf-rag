@@ -6,15 +6,16 @@ Messages are fixed and never include credential bytes or command output.
 """
 
 import os
+import shutil
+import stat
 import subprocess
 import sys
 
 DEFAULT_DIR = "/run/mfr-session"
-FILES = ("kubeconfig", "auth.json", "env")
 
 
 def main() -> int:
-    directory = os.environ.get("MFR_SESSION_DIR") or DEFAULT_DIR
+    directory = os.path.join(os.environ.get("MFR_SESSION_DIR") or DEFAULT_DIR, "private")
     kubeconfig = os.path.join(directory, "kubeconfig")
     revoked = True
     if os.path.lexists(kubeconfig):
@@ -33,13 +34,15 @@ def main() -> int:
         except OSError, subprocess.SubprocessError:
             revoked = False
     leftover = False
-    for name in FILES:
-        try:
-            os.unlink(os.path.join(directory, name))
-        except FileNotFoundError:
-            pass
-        except OSError:
-            leftover = True
+    try:
+        if stat.S_ISDIR(os.lstat(directory).st_mode):
+            shutil.rmtree(directory)
+        else:
+            os.unlink(directory)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        leftover = True
     if leftover:
         print(
             "mfr-session: could not remove all session files; delete the bastion pod",
