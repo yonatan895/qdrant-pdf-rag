@@ -11,7 +11,8 @@ Every category is derived from its owner, never from a hand list:
   every optional block, plus the Qdrant `--set-string` paths of deploy.sh and
   model_config.py --qdrant-sizing;
 - script_flags: the flags in the top-level argument loop of each script an
-  airgap task runs, plus the inputs of the ADR-0009 import script;
+  airgap task runs, plus the inputs of the release import script
+  (scripts/gap/import_release.sh, its INPUTS line);
 - gap_paths: the site-layer table of ADR-0009 §3;
 - bundle_layout: the tarball and member names and MANIFEST fields of pack.sh.
 
@@ -41,6 +42,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SNAPSHOT = Path("tests/fixtures/extension-surface.json")
 RELEASE_NOTES = Path("docs/release-notes.md")
 ADR = Path("docs/adr/0009-gap-fork.md")
+IMPORT_SCRIPT = Path("scripts/gap/import_release.sh")
 EXAMPLE = Path("airgap.env.example")
 MODEL_CONFIG = Path("scripts/airgap/model_config.py")
 PACK = Path("scripts/airgap/pack.sh")
@@ -51,7 +53,7 @@ ROUTE_CA = Path("charts/mainframe-rag/ci/openwebui-route-ca.pem")
 IDP_CA = Path("tests/fixtures/extension-surface-idp-ca.pem")  # A loadable certificate; no key exists.
 # The files the derivation reads (tests copy exactly these).
 INPUTS = (EXAMPLE, Path("scripts/__init__.py"), Path("scripts/airgap"), Path("Taskfile.yml"),
-          Path("taskfiles"), ADR, ROUTE_CA, IDP_CA, RELEASE_NOTES, SNAPSHOT)
+          Path("taskfiles"), ADR, IMPORT_SCRIPT, ROUTE_CA, IDP_CA, RELEASE_NOTES, SNAPSHOT)
 CATEGORIES = ("airgap_env_keys", "retired_env_keys", "task_names", "chart_values",
               "script_flags", "gap_paths", "bundle_layout")
 REFRESH = ".venv/bin/python scripts/extension_surface.py --write"
@@ -126,6 +128,7 @@ def env_keys(root: Path) -> list[str]:
 # Shell: a quoted string, a refusing command, and the commands a stub may run.
 _QUOTED = re.compile(r'"(?:\\.|[^"\\])*"|\'[^\']*\'')
 _SHELL_REFUSES = re.compile(r"\bdie\b|\bexit [1-9]|\bfalse\b")
+_IMPORT_REFUSES = re.compile(r"\bdie\b|\bstop\b|\bexit [1-9]|\bfalse\b")  # The import script's stop().
 _STUB_COMMAND = re.compile(r"(?:echo|printf|die)\b[^|&<>]*(?:>&2)?|exit [1-9][0-9]*|false")
 
 
@@ -172,7 +175,8 @@ def _stub(text: str) -> str | None:
 def _refusals(path: str, text: str) -> list[str]:
     """The messages of each executable refusal in an owner file: a `raise` or
     `die(...)`/`exit(...)` call in Python (comments, docstrings and bare strings
-    are not code), or a shell line that dies or exits non-zero (comments removed)."""
+    are not code), or a shell line that dies or exits non-zero (comments removed;
+    in the import script, `stop` too)."""
     if path.endswith(".py"):
         messages = []
         for node in ast.walk(ast.parse(text)):
@@ -187,7 +191,8 @@ def _refusals(path: str, text: str) -> list[str]:
                 messages.append("\n".join(c.value for c in ast.walk(target)
                                           if isinstance(c, ast.Constant) and isinstance(c.value, str)))
         return messages
-    return [strings for code, strings in _shell_lines(text) if _SHELL_REFUSES.search(code)]
+    refuses = _IMPORT_REFUSES if path == IMPORT_SCRIPT.as_posix() else _SHELL_REFUSES
+    return [strings for code, strings in _shell_lines(text) if refuses.search(code)]
 
 
 class Surface(dict[str, list[str]]):
@@ -257,11 +262,6 @@ def chart_values(root: Path) -> list[str]:
     return sorted([f"mainframe-rag:{path}" for path in app] + [f"qdrant:{path}" for path in qdrant])
 
 
-def _import_script(root: Path) -> str:
-    adr = (root / ADR).read_text(encoding="utf-8")
-    return adr[adr.index("<!-- import-script:start -->"):adr.index("<!-- import-script:end -->")]
-
-
 def script_flags(root: Path, stubs: dict[tuple[str, str], tuple[str, str]]) -> list[str]:
     tasks = (root / AIRGAP_TASKS).read_text(encoding="utf-8")
     items: list[str] = []
@@ -279,9 +279,10 @@ def script_flags(root: Path, stubs: dict[tuple[str, str], tuple[str, str]]) -> l
                 stubs[("script_flags", f"{script} {flag}")] = (owner, "\n".join(m or "" for m in refusals))
             else:
                 items.append(f"{script} {flag}")
-    adr = (root / ADR).read_text(encoding="utf-8")
-    procedure = adr[adr.index("## 4. Release import procedure"):adr.index("<!-- import-script:start -->")]
-    items.extend(f"import-script {name}" for name in re.findall(r"(?m)^export ([A-Z_]+)=", procedure))
+    inputs = re.search(r'(?m)^ *INPUTS="([A-Z_ ]+)"$', (root / IMPORT_SCRIPT).read_text(encoding="utf-8"))
+    if not inputs:
+        raise ValueError(f"{IMPORT_SCRIPT} no longer has its INPUTS line")
+    items.extend(f"import-script {name}" for name in inputs[1].split())
     return sorted(items)
 
 
@@ -351,8 +352,8 @@ def _owners(category: str, item: str) -> tuple[str, ...]:
         return (MAP_VALUES.as_posix(),) if scope == "mainframe-rag:" else (DEPLOY.as_posix(),)
     if category == "bundle_layout":  # The packer, and the bundle's readers.
         return tuple(f"scripts/airgap/{name}" for name in ("pack.sh", "bootstrap.sh", "load.sh", "common.sh"))
-    if category == "gap_paths" or scope == "import-script ":
-        return (ADR.as_posix(),)
+    if category == "gap_paths" or scope == "import-script ":  # The import script reads gap/.
+        return (IMPORT_SCRIPT.as_posix(),)
     return ()
 
 
@@ -385,7 +386,7 @@ def migration_problem(root: Path, note: re.Match[str], current: Surface) -> str 
         return None
     if evidence not in _owners(category, note["item"]):
         return f"a {category} refusal is in one of: " + ", ".join(f"`{o}`" for o in _owners(category, note["item"]))
-    text = _import_script(root) if evidence == ADR.as_posix() else (root / evidence).read_text(encoding="utf-8")
+    text = (root / evidence).read_text(encoding="utf-8")
     for message in _refusals(evidence, text):
         if token(old, message) and token(new, message):
             return None

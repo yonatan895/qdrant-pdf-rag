@@ -13,7 +13,14 @@ import shutil
 
 import pytest
 
-from tests.helpers_airgap import REPO, copy_chart, install_rendering_helm, make_bin_tree, write_stub
+from tests.helpers_airgap import (
+    REPO,
+    connected_checkout,
+    copy_chart,
+    install_rendering_helm,
+    make_bin_tree,
+    write_stub,
+)
 
 IMAGE_SHA = "e" * 40
 
@@ -64,6 +71,7 @@ def _run_pipeline(pipe_tree, *args, extra_env=None):
     if extra_env:
         for k, v in extra_env.items():
             env[k] = v
+    connected_checkout(env, set(extra_env or {}))
     return _sp.run(
         ["sh", str(pipe_tree / "scripts" / "airgap" / "pipeline.sh"), *args],
         capture_output=True,
@@ -332,7 +340,9 @@ def test_operator_path_without_site_inputs_still_refuses_with_the_opt_out(pipe_t
         # so the run reaches the site-input check that this test is about.
         write_stub(pipe_tree / "bin" / "kubectl", "#!/bin/sh\ncase \"$*\" in *openshift-service-ca.crt*)\n"
                    "printf -- '-----BEGIN CERTIFICATE-----\\nX\\n-----END CERTIFICATE-----\\n' ;; esac\nexit 0\n")
-        r = _run_task(pipe_tree, task, "airgap:deploy", extra_env=operator)
+        # A plain tree, not a signed release: the connected opt-out (#1118 F1),
+        # carried through Task as ambient environment.
+        r = _run_task(pipe_tree, task, "airgap:deploy", extra_env=connected_checkout(operator))
     assert r.returncode != 0
     assert "Open WebUI is enabled by default (ADR-0008) but required inputs are missing" in r.stderr
     assert "opt out with OPENWEBUI_ENABLED=false" in r.stderr

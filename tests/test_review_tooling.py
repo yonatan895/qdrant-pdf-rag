@@ -1128,13 +1128,13 @@ class TestTaskCiConsumers(unittest.TestCase):
             tool.write_text('printf "%s\\n" "$@" > archive-args\nexit "${INSTALL_STATUS:-0}"\n')
             helm_tool = root / "scripts/tools/install-helm.sh"
             helm_tool.write_text('printf "%s\\n" "$@" > helm-args\nexit "${HELM_INSTALL_STATUS:-0}"\n')
+            # One `python` stub: `python -m pytest ...` is the unit shard, any
+            # other call is the prerequisite doctor.
             doctor = root / "python"
-            doctor.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > doctor-args\nexit "${DOCTOR_STATUS:-0}"\n')
+            doctor.write_text('#!/bin/sh\nif [ "$1" = -m ]; then shift 2; printf "%s\\n" "$*" > tests-ran; exit 0; fi\n'
+                              'printf "%s\\n" "$@" > doctor-args\nexit "${DOCTOR_STATUS:-0}"\n')
             doctor.chmod(0o755)
-            test = root / "pytest"
-            test.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > tests-ran\n')
-            test.chmod(0o755)
-            env = {**os.environ, "PATH": f"{root}:{os.environ['PATH']}"}
+            env = {**os.environ, "PATH": f"{root}:{os.environ['PATH']}", "CI_NODE_INDEX": "2", "CI_NODE_TOTAL": "4"}
             env.pop("CI_TASK_ARCHIVE", None)
             missing = subprocess.run(["sh", "-eu", "-c", script], cwd=root, env=env,
                                      capture_output=True, text=True, check=False)
@@ -1168,7 +1168,9 @@ class TestTaskCiConsumers(unittest.TestCase):
                 self.assertEqual((root / "doctor-args").exists(), task_status == helm_status == 0)
                 if task_status == 0:
                     self.assertEqual((root / "helm-args").read_text(), f"--archive\n{helm_archive}\n")
-            self.assertEqual((root / "tests-ran").read_text(), "-q --junitxml=unit-junit.xml\n")
+            self.assertEqual((root / "tests-ran").read_text(),
+                             "-q -p tests.ci_shard --unit-shard=2 --unit-shards=4 "
+                             "--unit-durations=tests/unit-durations.json --junitxml=unit-junit.xml\n")
             self.assertEqual((root / "doctor-args").read_text(),
                              f"scripts/agent_doctor.py\n--python\n{root / 'python'}\n")
             self.assertEqual(shlex.split(commands[1]),

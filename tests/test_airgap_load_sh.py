@@ -20,6 +20,8 @@ from tests.helpers_airgap import (
     REPO,
     gen_other_pub,
     make_bin_tree,
+    release_anchor,
+    release_key,
     run_sh,
     sha256_bytes,
     sign_sums,
@@ -194,10 +196,9 @@ def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False, o
 
 
 def _sign_artifacts(artdir: Path) -> None:
-    """Throwaway keypair + offline signature, mirroring pack.sh output."""
-    from tests.helpers_airgap import gen_sign_keypair
-
-    gen_sign_keypair(artdir)
+    """The throwaway release key + offline signature, mirroring pack.sh output.
+    One key per process, so release_anchor() is its trust anchor (#1118 F1)."""
+    shutil.copy(release_key(), artdir / "signing.key")
     sign_sums(artdir)
 
 
@@ -228,6 +229,9 @@ def _run_load(tree, *extra_env, cwd=None):
         "SKOPEO_STATE": str(tmp_path / "skopeo-state"),
         "IMAGE_SHA": IMAGE_SHA,
         "INTERNAL_REGISTRY": "reg.internal:5000",
+        # The release trust anchor (#1118 F1): every fixture bundle is signed
+        # by release_key(), so a load is a verified signed release.
+        "SNEAKERNET_TRUSTED_PUB": str(release_anchor()),
     }
     for k, v in extra_env:
         env[k] = v
@@ -269,7 +273,7 @@ def test_load_succeeds_from_the_parent_dir_and_an_explicit_bundle_dir(load_tree)
         shutil.copy(REPO / "scripts" / "airgap" / f, subdir / "scripts" / "airgap" / f)
     env = {"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin", "SKOPEO_LOG": str(skopeo_log),
            "SKOPEO_STATE": str(tmp_path / "skopeo-state"), "IMAGE_SHA": IMAGE_SHA,
-           "INTERNAL_REGISTRY": "reg.internal:5000"}
+           "INTERNAL_REGISTRY": "reg.internal:5000", "SNEAKERNET_TRUSTED_PUB": str(release_anchor())}
     r = subprocess.run(["sh", str(subdir / "scripts" / "airgap" / "load.sh")], capture_output=True,
                        text=True, env=env, cwd=subdir, check=False)
     assert r.returncode == 0, r.stderr

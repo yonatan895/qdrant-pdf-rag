@@ -417,6 +417,7 @@ jobs:
             dist/qdrant-pdf-rag-*.tar.sha256
             dist/PACKING_RECORD.txt
             dist/MANIFEST.txt
+            dist/sneakernet-signing.pub
           compression-level: 0
           retention-days: 90
 
@@ -893,6 +894,12 @@ jobs:
           export PATH="/usr/local/bin:$PATH"
           cd gapbox
           sha256sum -c "qdrant-pdf-rag-${SHA}.tar.sha256"
+          # Release trust anchor (#1118 F1): the packing job's public key, delivered
+          # beside the tarball as an operator receives it out of band, kept outside
+          # the unpack directory. Load, deploy, ingest and validate require it.
+          install -m 0444 sneakernet-signing.pub "$RUNNER_TEMP/release-trust-anchor.pub"
+          export SNEAKERNET_TRUSTED_PUB="$RUNNER_TEMP/release-trust-anchor.pub"
+          echo "SNEAKERNET_TRUSTED_PUB=$SNEAKERNET_TRUSTED_PUB" >> "$GITHUB_ENV"
           tar xf "qdrant-pdf-rag-${SHA}.tar"
           AIRGAP_WORKSPACE=qdrant-pdf-rag sh bootstrap.sh
           test -f qdrant-pdf-rag/dist/SHA256SUMS
@@ -1907,6 +1914,12 @@ jobs:
           export PATH="/usr/local/bin:$PATH"
           cd gapbox
           sha256sum -c "qdrant-pdf-rag-${SHA}.tar.sha256"
+          # Release trust anchor (#1118 F1): the packing job's public key, delivered
+          # beside the tarball as an operator receives it out of band, kept outside
+          # the unpack directory. Load, deploy, ingest and validate require it.
+          install -m 0444 sneakernet-signing.pub "$RUNNER_TEMP/release-trust-anchor.pub"
+          export SNEAKERNET_TRUSTED_PUB="$RUNNER_TEMP/release-trust-anchor.pub"
+          echo "SNEAKERNET_TRUSTED_PUB=$SNEAKERNET_TRUSTED_PUB" >> "$GITHUB_ENV"
           tar xf "qdrant-pdf-rag-${SHA}.tar"
           AIRGAP_WORKSPACE=qdrant-pdf-rag sh bootstrap.sh
           test "$(git -C qdrant-pdf-rag rev-parse HEAD)" = "$SHA"
