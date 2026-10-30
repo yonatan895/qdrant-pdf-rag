@@ -23,6 +23,10 @@ on:
       - images/devkit-packages.txt
       - images/Containerfile.devkit
       - images/devkit/**
+      - scripts/dependency_lock.py
+      - scripts/tools/install-task.sh
+      - scripts/tools/task-artifact.sh
+      - scripts/tools/install-helm.sh
       - scripts/devkit_key.py
       - .github/workflows/devkit.yml
   push:
@@ -36,6 +40,10 @@ on:
       - images/devkit-packages.txt
       - images/Containerfile.devkit
       - images/devkit/**
+      - scripts/dependency_lock.py
+      - scripts/tools/install-task.sh
+      - scripts/tools/task-artifact.sh
+      - scripts/tools/install-helm.sh
       - scripts/devkit_key.py
       - .github/workflows/devkit.yml
   workflow_dispatch:

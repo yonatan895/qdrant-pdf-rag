@@ -20,6 +20,10 @@ FIXED = (
     "scripts/tools/oc-pin.txt",
     "images/devkit-packages.txt",
     "images/Containerfile.devkit",
+    "scripts/dependency_lock.py",
+    "scripts/tools/install-task.sh",
+    "scripts/tools/task-artifact.sh",
+    "scripts/tools/install-helm.sh",
 )
 PIN_OK = "# comment\nkey: " + "a" * 64 + "\ndigest: sha256:PENDING\n"
 
@@ -74,6 +78,22 @@ def test_every_image_input_change_changes_the_key(tmp_path, change):
     else:
         path.rename(path.with_name("mfr-z"))
     assert devkit_key.key(root) != before
+
+
+def test_every_build_script_the_recipe_runs_is_a_key_input():
+    """A script whose output lands in the image must change the key (maintainer decision, #1145)."""
+    recipe = (REPO / "images/Containerfile.devkit").read_text()
+    mounted_files = {s for s in re.findall(r"--mount=type=bind,source=([^,\s]+)", recipe)
+                     if (REPO / s).is_file()}
+    run_scripts = {"scripts/tools/" + name for name in re.findall(r'sh "\$pins/([\w.-]+)"', recipe)}
+    sourced = set()
+    for script in run_scripts:
+        for name in re.findall(r'^\. "\$ROOT/(scripts/tools/[\w.-]+)"', (REPO / script).read_text(), re.MULTILINE):
+            sourced.add(name)
+    assert mounted_files == {"scripts/dependency_lock.py"}
+    assert run_scripts == {"scripts/tools/install-task.sh", "scripts/tools/install-helm.sh"}
+    assert sourced == {"scripts/tools/task-artifact.sh"}
+    assert mounted_files | run_scripts | sourced <= set(devkit_key.INPUTS)
 
 
 def test_helper_bytecode_left_by_tests_is_not_a_key_input(tmp_path):

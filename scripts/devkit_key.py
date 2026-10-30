@@ -2,8 +2,9 @@
 """Dev kit key (#1118, ADR-0009 §8): one SHA-256 over the dev workspace image's inputs.
 
 The key names the dev workspace image (`qdrant-pdf-rag-devkit:<key>`) and its kit
-(`mfr-devkit-<key>`). It covers a fixed, ordered list of upstream-owned pin files plus
-every file under images/devkit/ in sorted order, because the image copies them. Each
+(`mfr-devkit-<key>`). It covers a fixed, ordered list of upstream-owned pin files, the
+build scripts the recipe runs (their output lands in the image), and every file under
+images/devkit/ in sorted order, because the image copies them. Each
 file contributes its repository path and its bytes, both length-prefixed, after a
 versioned domain prefix, so no two different input sets frame to the same stream.
 
@@ -32,6 +33,12 @@ INPUTS = (
     'scripts/tools/oc-pin.txt',
     'images/devkit-packages.txt',
     'images/Containerfile.devkit',
+    # Bind-mounted build scripts whose output lands in the image (maintainer decision,
+    # #1145): a change to any of them changes the key.
+    'scripts/dependency_lock.py',
+    'scripts/tools/install-task.sh',
+    'scripts/tools/task-artifact.sh',
+    'scripts/tools/install-helm.sh',
 )
 IMAGE_TREE = 'images/devkit'
 KEY = re.compile(r'[0-9a-f]{64}')
