@@ -50,14 +50,14 @@ def selected_jobs(manifest: dict) -> tuple[list[str], list[str], str]:
             and isinstance(paths, list) and all(isinstance(path, str) for path in paths)):
         raise ValueError('manifest has no lane or path list')
     every = sorted(set(LANE_JOBS.values()))
+    no_job = sorted(lane for lane in lanes if lane not in LANE_JOBS)
     unknown = sorted(set(lanes) - set(ALL_KNOWN_LANES))
     if unknown:
-        return every, [], 'unknown lane ' + ', '.join(unknown)
+        return every, no_job, 'unknown lane ' + ', '.join(unknown)
     touched = sorted(PIPELINE_INPUTS.intersection(paths))
     if touched:
-        return every, [], 'pipeline input changed: ' + ', '.join(touched)
+        return every, no_job, 'pipeline input changed: ' + ', '.join(touched)
     jobs = sorted(set(ALWAYS) | {LANE_JOBS[lane] for lane in lanes if lane in LANE_JOBS})
-    no_job = sorted(lane for lane in lanes if lane not in LANE_JOBS)
     return jobs, no_job, 'classifier profile ' + str(manifest.get('profile', 'unknown'))
 
 

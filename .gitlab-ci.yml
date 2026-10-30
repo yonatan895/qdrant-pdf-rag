@@ -38,6 +38,9 @@
 #   load, HA, HTTP probes, semantic eval) is not run by any GitLab pipeline.
 #   A branch with an open merge request runs no branch pipeline: its merge
 #   request pipeline is the only one, on `gate`.
+#   Set the variables below as project variables: a variable given only to one
+#   pipeline (schedule, "Run pipeline", API) is not forwarded to the child
+#   pipeline that runs a branch pipeline's lanes.
 #   Every job is interruptible and a newer commit on the same ref cancels the
 #   older pipeline (workflow:auto_cancel, GitLab >= 16.10, with "Auto-cancel
 #   redundant pipelines" left on in Settings > CI/CD). Tag pipelines set

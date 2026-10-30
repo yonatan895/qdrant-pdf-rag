@@ -172,9 +172,27 @@ def keys_anywhere(node, key):
     return isinstance(node, list) and any(keys_anywhere(v, key) for v in node)
 
 
+# Rule forms the evaluator models. Anything else (changes:, exists:, manual or
+# delayed `when`) could gate or defer a lane outside this test's model.
+WORKFLOW_RULE_KEYS = {'if', 'when', 'variables', 'auto_cancel'}
+JOB_RULE_KEYS = {'if', 'when'}
+
+
+def rule_shape_violations(doc):
+    found = []
+    for rule in doc['workflow']['rules']:
+        if set(rule) - WORKFLOW_RULE_KEYS or rule.get('when', 'always') not in ('always', 'never'):
+            found.append(f'workflow rule {rule} is outside the modelled forms')
+    for name, node in doc.items():
+        for rule in (node.get('rules') or []) if isinstance(node, dict) and name != 'workflow' else []:
+            if set(rule) - JOB_RULE_KEYS or rule.get('when', 'on_success') not in ('on_success', 'never'):
+                found.append(f'{name}: rule {rule} can defer, gate or skip a lane silently')
+    return found
+
+
 def pipeline_violations(doc):
     """Pipeline shape (GH#1118 F11): which jobs run where, on which runner tag."""
-    found = []
+    found = rule_shape_violations(doc)
     for label, variables in GATE_SCENARIOS.items():
         run = pipeline(doc, variables)
         if run is None:
@@ -228,17 +246,13 @@ def pipeline_violations(doc):
             found.append(f'{name}: trigger job is not interruptible')
         if resolved.get('interruptible', True) is not True:
             found.append(f'{name}: not interruptible')
-    if select_script(doc) != SELECT_SCRIPT or doc['select'].get('variables', {}).get('GIT_DEPTH') != '0':
+    if lines(doc['select']) != SELECT_SCRIPT or doc['select'].get('variables', {}).get('GIT_DEPTH') != '0':
         found.append('select: must classify the full branch diff with review_tooling.py and the generator')
     if 'lanes.yml' not in doc['select'].get('artifacts', {}).get('paths', []):
         found.append('select: child configuration not retained')
     if doc['lanes'].get('trigger') != LANES_TRIGGER or doc['lanes'].get('needs') != ['select']:
         found.append('lanes: child pipeline must come from select, mirror its status and forward no YAML variables')
     return found
-
-
-def select_script(doc):
-    return lines(doc.get('select', {}))
 
 
 def violations(doc):
@@ -451,6 +465,12 @@ NEGATIVE_CONTROLS = {
         {'if': '$CI_COMMIT_BRANCH'}),
     'tag pipelines lose the lanes': lambda d: d['.gate-pipeline']['rules'].pop(),
     'lane job with its own rules': lambda d: d['sim'].update(rules=[{'if': '$CI_COMMIT_TAG'}]),
+    'manual lanes in tag pipelines': lambda d: d['.gate-pipeline']['rules'][-1].update(when='manual'),
+    'merge request lanes gated on changed paths': lambda d: d['.gate-pipeline']['rules'][0].update(
+        changes=['src/**/*']),
+    'delayed merge request lanes': lambda d: d['.gate-pipeline']['rules'][0].update(when='delayed'),
+    'manual selector': lambda d: d['.wip-pipeline']['rules'][-1].update(when='manual'),
+    'workflow rule gated on changed paths': lambda d: d['workflow']['rules'][-1].update(changes=['src/**/*']),
     'selector runs inside the child pipeline': lambda d: d['.wip-pipeline']['rules'].pop(0),
     'selector diff is only the newest push': lambda d: d['select']['script'].__setitem__(
         1, 'BASE_SHA="$CI_COMMIT_BEFORE_SHA"'),
@@ -695,11 +715,13 @@ def test_every_job_is_interruptible_and_nothing_cancels_a_tag_pipeline():
         assert job.get('interruptible', GITLAB['default']['interruptible']) is True, name
         if 'trigger' in job:  # default keywords are not relied on for a trigger job
             assert GITLAB[name]['interruptible'] is True
-    assert GITLAB['workflow']['auto_cancel'] == {'on_new_commit': 'interruptible'}
     assert pipeline(GITLAB, TAG)['auto_cancel'] == {'on_new_commit': 'none'}
-    for variables in (MR, BRANCH, CHILD):
-        assert pipeline(GITLAB, variables)['auto_cancel'] == {'on_new_commit': 'interruptible'}
     assert not keys_anywhere(GITLAB, 'allow_failure')
+
+
+@pytest.mark.parametrize('variables', [MR, BRANCH, CHILD], ids=['merge request', 'branch', 'child'])
+def test_a_newer_commit_cancels_older_merge_request_and_branch_pipelines(variables):
+    assert pipeline(GITLAB, variables)['auto_cancel'] == {'on_new_commit': 'interruptible'}
 
 
 # ---- the select job, run for real on synthetic histories ---------------------
@@ -769,7 +791,8 @@ def run_select(tmp_path, commits):
     ('storage then prose', [{'src/mainframe_rag/ingest/chunker.py': 'x = 1\n'}, {'README.md': 'y\n'}],
      REQUIRED_JOBS, {'ha', 'load'}),
     ('unmapped path fails closed', [{'unmapped/thing.bin': 'x\n'}], REQUIRED_JOBS, {'ha', 'load'}),
-    ('GitLab pipeline definition', [{'.gitlab-ci.yml': '# changed\n'}], REQUIRED_JOBS, set()),
+    ('GitLab pipeline definition', [{'.gitlab-ci.yml': '# changed\n', 'pyproject.toml': '\n'}],
+     REQUIRED_JOBS, {'packaging'}),
     ('no change against the default branch', [], REQUIRED_JOBS, {'ha', 'load'}),
 ])
 def test_select_job_child_pipeline_runs_exactly_the_classified_lanes(tmp_path, label, commits, expected,
@@ -804,16 +827,17 @@ def test_generator_refuses_an_unreadable_manifest(tmp_path, raw):
 
 # ---- unit shards: GitLab's parallel index reaches the shard plugin -----------
 
-def test_each_parallel_job_runs_its_own_shard_of_four(tmp_path):
-    seen = []
-    for index in range(1, UNIT_SHARDS + 1):
-        proc, log = run_job(tmp_path, 'test', start='rm -f unit-junit.xml', JUNIT_BODY=JUNIT['clean'],
-                            CI_NODE_INDEX=str(index), CI_NODE_TOTAL=str(UNIT_SHARDS))
-        assert proc.returncode == 0, proc.stderr
-        argv = shlex.split(next(l for l in log.splitlines() if l.startswith('pytest ')))
-        seen.append([a for a in argv if a.startswith('--unit-')])
-    assert seen == [[f'--unit-shard={i}', '--unit-shards=4', '--unit-durations=tests/unit-durations.json']
-                    for i in range(1, UNIT_SHARDS + 1)]
+@pytest.mark.parametrize('index', range(1, UNIT_SHARDS + 1))
+def test_each_parallel_job_runs_its_own_shard_of_four(tmp_path, index):
+    proc, log = run_job(tmp_path, 'test', start='rm -f unit-junit.xml', JUNIT_BODY=JUNIT['clean'],
+                        CI_NODE_INDEX=str(index), CI_NODE_TOTAL=str(UNIT_SHARDS))
+    assert proc.returncode == 0, proc.stderr
+    argv = shlex.split(next(l for l in log.splitlines() if l.startswith('pytest ')))
+    assert [a for a in argv if a.startswith('--unit-')] == [
+        f'--unit-shard={index}', '--unit-shards=4', '--unit-durations=tests/unit-durations.json']
+
+
+def test_a_job_without_parallel_variables_cannot_pass_as_a_shard(tmp_path):
     # Without GitLab's parallel variables the shard options are empty and the
     # real plugin refuses them, so a job that lost `parallel` cannot pass as a shard.
     unset = UNIT_LINE.replace('$CI_NODE_INDEX', '').replace('$CI_NODE_TOTAL', '')
