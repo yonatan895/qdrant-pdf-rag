@@ -117,14 +117,7 @@ if args[:2] == ["auth", "can-i"]:
         if table is None:
             fail()
         print(table, end=""); sys.exit(0)
-    verb, res = args[2], args[3]
-    sub = opt("--subresource")
-    target = f"{res}/{sub}" if sub else res
-    if sa is None:
-        yes = scen.get("operator_can", True)
-    else:
-        yes = f"{sa}|{ns}|{verb}|{target}" in scen.get("allow", [])
-    print("yes" if yes else "no"); sys.exit(0 if yes else 1)
+    fail("single can-i questions are answered by the sh wrapper")
 if args[0] == "create":
     obj = json.loads(sys.stdin.read())
     if obj["metadata"]["name"].startswith(tuple(scen.get("fail_create", []))):
@@ -134,8 +127,14 @@ if args[0] == "create":
     state.setdefault("created", []).append(obj); save()
     print(f"{obj['kind'].lower()}/{obj['metadata']['name']}"); sys.exit(0)
 if args[0] == "delete":
-    if scen.get("fail_delete"):
+    if scen.get("fail_delete") or ns in scen.get("fail_delete_ns", []):
         fail()
+    after = scen.get("fail_delete_ns_after", {})
+    if ns in after:
+        count = state.setdefault("deletes", {}).get(ns, 0)
+        state["deletes"][ns] = count + 1; save()
+        if count >= after[ns]:
+            fail()
     wanted = {kinds(k) for k in args[1].split(",")}
     sel = opt("-l")
     keep, gone = [], []
@@ -153,6 +152,10 @@ if args[0] == "logs":
         "manager" if labels.get(scen["mgr_key"]) == scen["mgr_value"] else "control")
     if ident in scen.get("logs_fail", []):
         fail()
+    if scen.get("sigterm_on_logs"):
+        import signal, time
+        os.kill(os.getppid(), signal.SIGTERM)
+        time.sleep(10)
     targets = json.loads(pod["spec"]["containers"][0]["command"][-1])
     net = scen["network"].get(ident, {})
     res = [{"id": t["id"], "status": net.get(t["class"], "timeout")} for t in targets]
@@ -185,6 +188,32 @@ if args[0] == "get":
     if what == "networkpolicies":
         out({"items": scen["policies"][ns]})
 fail("unexpected call")
+'''
+
+
+# Single `can-i VERB RESOURCE` questions are answered in sh from the allow file,
+# keyed sa|namespace|verb|resource[/subresource] (operator|namespace for the
+# operator's own question); everything else goes to the Python stub above.
+FAST_CAN_I = r'''#!/bin/sh
+if [ "$1" = auth ] && [ "$2" = can-i ] && [ "$3" != --list ]; then
+  verb=$3 res=$4 ns= sub= as= prev=
+  shift 4
+  for a in "$@"; do
+    case "$a" in
+      --subresource=*) sub=${a#--subresource=} ;;
+      --as=*) as=${a#--as=} ;;
+    esac
+    [ "$prev" = -n ] && ns=$a
+    prev=$a
+  done
+  target=$res
+  [ -n "$sub" ] && target=$res/$sub
+  if [ -z "$as" ]; then key="operator|$ns"; else key="${as##*:}|$ns|$verb|$target"; fi
+  if grep -qxF "$key" "$STUB_ALLOW"; then echo yes; exit 0; fi
+  echo no
+  exit 1
+fi
+exec "@PY@" -IS "@STUB@" "$@"
 '''
 
 
@@ -314,9 +343,12 @@ class Cluster:
         self.root = root
         self.bin = root / "bin"
         self.bin.mkdir()
+        (root / "oc.py").write_text(STUB)
         stub = self.bin / "oc"
-        stub.write_text(f"#!{sys.executable} -IS\n{STUB}")
+        stub.write_text(FAST_CAN_I.replace("@PY@", sys.executable)
+                        .replace("@STUB@", str(root / "oc.py")))
         stub.chmod(0o755)
+        self.allow = root / "allow.txt"
         self.state = root / "state.json"
         self.log = root / "calls.log"
         self.scenario_path = root / "scenario.json"
@@ -331,6 +363,7 @@ class Cluster:
         monkeypatch.setenv("STUB_SCENARIO", str(self.scenario_path))
         monkeypatch.setenv("STUB_STATE", str(self.state))
         monkeypatch.setenv("STUB_LOG", str(self.log))
+        monkeypatch.setenv("STUB_ALLOW", str(self.allow))
 
     def argv(self, *extra: str) -> list[str]:
         argv = ["--contract", str(CONTRACT), "--param-file", str(self.params),
@@ -339,8 +372,14 @@ class Cluster:
             argv += ["--runner-config", str(path)]
         return argv + list(extra)
 
-    def run(self, *extra: str) -> tuple[int, dict[str, Any]]:
+    def write_scenario(self) -> None:
         self.scenario_path.write_text(json.dumps(self.scenario))
+        operator = [f"operator|{ns}" for ns in (PROD, CI)] if self.scenario.get(
+            "operator_can", True) else []
+        self.allow.write_text("".join(f"{k}\n" for k in self.scenario["allow"] + operator))
+
+    def run(self, *extra: str) -> tuple[int, dict[str, Any]]:
+        self.write_scenario()
         code = proof.main(self.argv(*extra))
         return code, json.loads(self.output.read_text())
 
@@ -390,20 +429,28 @@ def test_clean_workspace_is_proven_with_probes_and_leaves_nothing(cluster: Clust
 
 def test_static_run_is_not_reported_as_the_full_proof(cluster: Cluster) -> None:
     code, record = cluster.run()
-    assert (code, record["verdict"]) == (0, "proven-static-only")
+    assert (code, record["verdict"], record["findings"]) == (2, "static-only", [])
     assert record["checks"]["probes"] == {"status": "not-run"}
     assert not [c for c in cluster.calls() if c[0] == "logs"]
 
 
 def test_manager_rules_and_extra_secrets_are_listed_not_judged(cluster: Cluster) -> None:
     code, record = cluster.run()
-    assert code == 0
+    assert (code, record["verdict"], record["findings"]) == (2, "static-only", [])
     (manager,) = record["checks"]["rbac"]["manager"]
     assert manager["service_account"] == "gitlab-runner-sa" and manager["judged"] is False
     assert "get secrets" in manager["rules"][CI]
     row = next(r for r in record["checks"]["pods"] if r["class"] == "manager")
-    assert {(s["name"], s["expected"]) for s in row["secret_refs"]} == {
-        (TOKEN, True), (PULL, True), ("gitlab-runner-operator-cfg", False)}
+    assert {(s["name"], s["via"], s["status"]) for s in row["secret_refs"]} == {
+        (TOKEN, "volume", "expected"), (PULL, "imagePullSecrets", "expected"),
+        ("gitlab-runner-operator-cfg", "volume", "operator-added")}
+
+
+def test_manager_mounting_the_pull_only_secret_is_a_violation(cluster: Cluster) -> None:
+    cluster.scenario["pods"][CI][2]["spec"]["volumes"].append(secret_volume(PULL))
+    code, record = cluster.run()
+    assert code == 1
+    assert reasons(record, "pods") == [f"{CI}/gitlab-runner-mgr-0: secret-not-allowed: {PULL} via volume"]
 
 
 # --------------------------------------------------------------------------- step 1, 2
@@ -450,7 +497,7 @@ def test_refused_operator_control_makes_the_matrix_inconclusive(cluster: Cluster
 
 def test_bastion_pull_secret_and_own_dockercfg_pass(cluster: Cluster) -> None:
     code, record = cluster.run()
-    assert code == 0
+    assert (code, record["verdict"], record["findings"]) == (2, "static-only", [])
     row = next(r for r in record["checks"]["pods"] if r["class"] == "bastion")
     assert row["secret_refs"] == [
         {"name": "mfr-bastion-dockercfg-k2x9q", "via": "imagePullSecrets", "allowed": True},
@@ -590,7 +637,7 @@ def test_runner_config_from_processed_template_json(cluster: Cluster) -> None:
     ]}
     cluster.runner[0].write_text(json.dumps(listing))
     code, record = cluster.run()
-    assert code == 0
+    assert (code, record["verdict"], record["findings"]) == (2, "static-only", [])
     assert [r["file"] for r in record["checks"]["runner_config"]] == ["gate.toml", "wip.toml"]
 
 
@@ -616,7 +663,7 @@ def test_runner_jobs_labelled_as_another_role_are_a_violation(cluster: Cluster) 
 
 def test_both_rendered_examples_pass_unchanged(cluster: Cluster) -> None:
     code, record = cluster.run()
-    assert code == 0
+    assert (code, record["verdict"], record["findings"]) == (2, "static-only", [])
     rows = record["checks"]["runner_config"]
     assert [(r["file"], r["name"]) for r in rows] == [("gate.toml", "mfr-gate"),
                                                        ("wip.toml", "mfr-wip")]
@@ -655,8 +702,8 @@ def test_allowed_namespaces_listing_ci_is_a_violation(cluster: Cluster) -> None:
 
 def test_other_allowed_namespaces_are_listed_and_pass(cluster: Cluster) -> None:
     cluster.scenario["policies"][PROD][0] = agent_policy(["mfr-tools"])
-    code, _ = cluster.run()
-    assert code == 0
+    code, record = cluster.run()
+    assert (code, record["verdict"], record["findings"]) == (2, "static-only", [])
 
 
 @pytest.mark.parametrize("policies, reason", [
@@ -798,10 +845,12 @@ def test_cleanup_after_an_error_then_the_next_run_succeeds(cluster: Cluster) -> 
     cluster.scenario["logs_fail"] = ["runner"]
     code, record = cluster.run("--probe")
     assert (code, record["verdict"]) == (2, "error")
-    assert record["error"] == {"code": "kube-call-failed", "detail": "probe logs",
-                               "message": proof.MESSAGES["kube-call-failed"]}
+    assert (record["error"]["code"], record["error"]["detail"]) == ("kube-call-failed",
+                                                                    "probe logs")
     assert cluster.objects() == []
-    assert record["cleanup"]["deleted"][CI] >= 3  # baseline SA, dev, runner, manager probes
+    # The CI baseline ServiceAccount and the dev, runner and manager probe pods.
+    assert record["cleanup"]["deleted"] == {PROD: 3, CI: 4}
+    assert CANARY not in cluster.output.read_text()
     cluster.scenario["logs_fail"] = []
     code, record = cluster.run("--probe")
     assert (code, record["verdict"]) == (0, "proven")
@@ -828,8 +877,8 @@ def test_leftovers_of_an_interrupted_run_are_removed_first(cluster: Cluster) -> 
 
 
 def test_failed_cleanup_is_reported_not_hidden(cluster: Cluster) -> None:
-    code, _ = cluster.run()
-    assert code == 0
+    code, record = cluster.run()
+    assert (code, record["verdict"], record["findings"]) == (2, "static-only", [])
     cluster.scenario["fail_delete"] = True
     code, record = cluster.run()
     assert (code, record["error"]["code"]) == (2, "kube-call-failed")
@@ -854,7 +903,7 @@ def test_record_never_carries_secret_data_or_env_values(cluster: Cluster) -> Non
 
 
 def test_cli_exit_codes_and_fixed_messages(cluster: Cluster, tmp_path: Path) -> None:
-    cluster.scenario_path.write_text(json.dumps(cluster.scenario))
+    cluster.write_scenario()
     ok = subprocess.run([sys.executable, str(SCRIPT), *cluster.argv("--probe")],
                         capture_output=True, text=True, check=False)
     assert (ok.returncode, ok.stdout.strip()) == (
@@ -891,7 +940,7 @@ def test_malformed_contract_is_refused(cluster: Cluster, tmp_path: Path, edit) -
     path.write_text(json.dumps(contract))
     argv = cluster.argv()
     argv[argv.index(str(CONTRACT))] = str(path)
-    cluster.scenario_path.write_text(json.dumps(cluster.scenario))
+    cluster.write_scenario()
     assert proof.main(argv) == 2
     assert json.loads(cluster.output.read_text())["error"]["code"] == "contract-unreadable"
 
@@ -905,5 +954,118 @@ def test_roles_come_from_the_contract_not_the_script(cluster: Cluster, tmp_path:
     dev["spec"]["volumes"].append(secret_volume("rag-qdrant-keys"))
     argv = cluster.argv()
     argv[argv.index(str(CONTRACT))] = str(path)
-    cluster.scenario_path.write_text(json.dumps(cluster.scenario))
-    assert proof.main(argv) == 0
+    cluster.write_scenario()
+    assert proof.main(argv) == 2
+    record = json.loads(cluster.output.read_text())
+    assert (record["verdict"], record["findings"]) == ("static-only", [])
+
+
+# --------------------------------------------------------------------------- review round 1
+
+
+def test_group_grant_hidden_in_the_baseline_is_still_refused(cluster: Cluster) -> None:
+    # A RoleBinding to system:serviceaccounts:<ci> reaches the fresh baseline SA too, so
+    # the listing comparison cannot see it; the negative matrix asks outright.
+    grant = "jobs.batch   []   []   [create]\n"
+    for key in ("baseline", "mfr-runner-job"):
+        cluster.scenario["can_i_list"][key] = BASELINE_TABLE + grant
+    cluster.scenario["allow"] = [f"mfr-runner-job|{CI}|create|jobs.batch"]
+    code, record = cluster.run()
+    assert code == 1
+    assert not reasons(record, "rbac")
+    assert reasons(record, "negative-matrix") == [f"runner in {CI}: allowed: create jobs.batch"]
+
+
+@pytest.mark.parametrize("verb, target", [
+    ("create", "pods/portforward"), ("patch", "pods/ephemeralcontainers"),
+    ("create", "serviceaccounts/token"), ("get", "services/proxy"),
+    ("impersonate", "serviceaccounts"),
+])
+def test_other_paths_to_a_pod_or_identity_are_refused(cluster: Cluster, verb, target) -> None:
+    cluster.scenario["allow"] = [f"mfr-dev|{PROD}|{verb}|{target}"]
+    code, record = cluster.run()
+    assert code == 1
+    assert reasons(record, "negative-matrix") == [f"dev in {PROD}: allowed: {verb} {target}"]
+
+
+def test_overwrite_max_allowed_keys_are_overrides_too(cluster: Cluster) -> None:
+    cluster.runner[1].write_text(runner_toml("wip", extra='    cpu_limit_overwrite_max_allowed = "8"'))
+    code, record = cluster.run()
+    assert code == 1
+    assert reasons(record, "runner-config") == ["wip.toml#0: failed: no_overwrite_allowed_key"]
+
+
+def test_wide_api_server_cidr_is_not_covered_by_the_service_path(cluster: Cluster) -> None:
+    cluster.params.write_text(cluster.params.read_text().replace(
+        '[{"ipBlock":{"cidr":"10.0.0.5/32"}},{"ipBlock":{"cidr":"10.0.0.6/32"}}]',
+        '[{"ipBlock":{"cidr":"10.0.0.0/29"}}]'))
+    code, record = cluster.run("--probe")
+    assert (code, record["verdict"]) == (2, "inconclusive")
+    assert reasons(record, "probes", "inconclusive") == ["api_server: no-probe-target"]
+
+
+def test_failed_delete_in_one_namespace_still_cleans_the_other(cluster: Cluster) -> None:
+    cluster.scenario["fail_delete_ns"] = [PROD]
+    code, record = cluster.run("--probe")
+    assert (code, record["error"]["code"]) == (2, "kube-call-failed")  # the start-up sweep
+    assert record["cleanup"] == {"status": "failed"}
+    assert [o["metadata"]["namespace"] for o in cluster.objects()] == []
+    assert CANARY not in cluster.output.read_text()
+
+
+def test_failed_delete_after_probes_leaves_nothing_in_the_other_namespace(cluster: Cluster) -> None:
+    cluster.scenario["fail_delete_ns_after"] = {PROD: 1}  # the start-up sweep succeeds
+    code, record = cluster.run("--probe")
+    assert (code, record["error"]["code"]) == (2, "cleanup-failed")
+    assert {o["metadata"]["namespace"] for o in cluster.objects()} == {PROD}
+    cluster.scenario.pop("fail_delete_ns_after")
+    code, record = cluster.run("--probe")
+    assert (code, record["verdict"], record["leftovers_removed"]) == (0, "proven", {PROD: 3, CI: 0})
+    assert cluster.objects() == []
+
+
+def test_malformed_policies_section_is_a_contract_error(cluster: Cluster, tmp_path: Path) -> None:
+    contract = json.loads(CONTRACT.read_text())
+    contract["policies"]["staging"] = contract["policies"]["ci"]
+    path = tmp_path / "contract.json"
+    path.write_text(json.dumps(contract))
+    argv = cluster.argv()
+    argv[argv.index(str(CONTRACT))] = str(path)
+    cluster.write_scenario()
+    assert proof.main(argv) == 2
+    record = json.loads(cluster.output.read_text())
+    assert record["error"]["code"] == "contract-unreadable"
+    assert cluster.objects() == []
+
+
+def test_unexpected_exception_still_writes_the_record_and_cleans_up(cluster: Cluster,
+                                                                    monkeypatch) -> None:
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError(CANARY)
+
+    monkeypatch.setattr(proof, "check_agent_policy", boom)
+    code, record = cluster.run("--probe")
+    assert (code, record["verdict"], record["error"]["code"]) == (2, "error", "internal")
+    assert CANARY not in cluster.output.read_text()
+    assert cluster.objects() == []
+
+
+def test_sigterm_removes_probe_objects_and_the_next_run_works(cluster: Cluster) -> None:
+    cluster.scenario["sigterm_on_logs"] = True
+    cluster.write_scenario()
+    proc = subprocess.run([sys.executable, str(SCRIPT), *cluster.argv("--probe")],
+                          capture_output=True, text=True, check=False, timeout=120)
+    record = json.loads(cluster.output.read_text())
+    assert (proc.returncode, record["error"]["code"]) == (2, "interrupted")
+    assert cluster.objects() == []
+    assert CANARY not in proc.stdout + proc.stderr + cluster.output.read_text()
+    cluster.scenario.pop("sigterm_on_logs")
+    code, record = cluster.run("--probe")
+    assert (code, record["verdict"]) == (0, "proven")
+
+
+def test_unknown_probe_status_is_refused(cluster: Cluster) -> None:
+    cluster.scenario["network"]["dev"]["gitlab"] = "connected; " + CANARY
+    code, record = cluster.run("--probe")
+    assert (code, record["error"]["code"]) == (2, "probe-failed")
+    assert CANARY not in cluster.output.read_text()

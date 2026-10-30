@@ -4,19 +4,23 @@
 Runs on the bastion as the operator (namespace admin in both namespaces) and
 talks to the cluster only through `oc` (or `--kubectl kubectl`). It reads the
 workspace contract (deploy/workspace/contract.json) for roles, ServiceAccounts,
-allowed Secrets and egress classes, and the template parameter file for the
-site values, and never hard-codes either. It checks:
+allowed Secrets, egress classes and policy names, and a parameter file for the
+site values. Only ADR rules and chart facts are constants here: the negative
+matrix, the runner rules, the agent Service and the Qdrant ports. It checks:
 
 1. `auth can-i --list` for every contract ServiceAccount, impersonated in both
    namespaces. An F9 ServiceAccount may hold nothing beyond the baseline of a
    freshly created ServiceAccount with no bindings (the negative control). The
    runner manager's ServiceAccount is listed, not judged.
 2. A fixed negative matrix: each F9 ServiceAccount is refused secret reads, pod
-   create/exec/attach, workload writes and RoleBinding create in both
-   namespaces. The operator's own `get secrets` answer is the positive control.
-3. Every pod in both namespaces, classified by its labels, with its Secret
-   references checked against the contract's allowed sets.
-4. The rendered runner configuration: no `*_overwrite_allowed` key, nothing
+   create/exec/attach/port-forward/proxy, workload writes, token requests,
+   impersonation and RBAC writes in both namespaces. Asked outright, it also
+   catches a grant to a ServiceAccount group, which the baseline absorbs. The
+   operator's own `get secrets` answer is the positive control.
+3. Every pod in both namespaces, classified by its labels; workspace and
+   manager pods' Secret references are checked against the contract's
+   mounted and image-pull sets, and the contract's egress policies must exist.
+4. The rendered runner configuration: no `*_overwrite_(max_)allowed` key, nothing
    privileged, the contract ServiceAccount and the CI namespace, and requests
    and limits for build, helper and service containers.
 5. The production agent's ingress NetworkPolicies admit nothing from the CI
@@ -28,9 +32,10 @@ site values, and never hard-codes either. It checks:
 
 The record carries verbs, resources, object names and outcomes only: never a
 Secret value, a token, an env value or manual text. Exit codes: 0 proven,
-1 violation found, 2 usage or environment error, or an inconclusive proof.
-Run one proof at a time: each run first removes any probe objects an earlier,
-interrupted run left behind.
+1 violation found, 2 usage or environment error, an inconclusive proof, or a
+run without --probe (never the full proof). Run one proof at a time: probe
+objects are removed on every exit, SIGTERM and SIGHUP included; after a
+SIGKILL the next run removes what the killed run left.
 
 Standard library only (Python 3.14).
 """
@@ -44,6 +49,7 @@ import json
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -76,10 +82,13 @@ MESSAGES = {
     "runner-config-unreadable": "a runner configuration file could not be read or parsed",
     "probe-failed": "a probe pod did not complete",
     "cleanup-failed": "probe objects could not be removed",
+    "interrupted": "the proof was interrupted; probe objects were removed",
+    "internal": "the proof stopped on an unexpected error",
     "output-unwritable": "the record could not be written",
 }
 
-# Negative matrix (step 2): (verb, resource, subresource). WebSocket exec and
+# Negative matrix (step 2): (verb, resource, subresource), asked of every F9
+# ServiceAccount in both namespaces; each must be refused. WebSocket exec and
 # attach upgrade a GET, so `get` on the subresources is asked as well.
 NEGATIVE_MATRIX: tuple[tuple[str, str, str], ...] = (
     ("get", "secrets", ""),
@@ -97,11 +106,31 @@ NEGATIVE_MATRIX: tuple[tuple[str, str, str], ...] = (
     ("update", "statefulsets.apps", ""),
     ("patch", "statefulsets.apps", ""),
     ("create", "rolebindings.rbac.authorization.k8s.io", ""),
+    # Every other way to run code, reach a pod or borrow an identity: a grant
+    # to a ServiceAccount group lands in the baseline too, so these are asked
+    # outright rather than compared with it.
+    ("create", "jobs.batch", ""),
+    ("create", "cronjobs.batch", ""),
+    ("create", "replicasets.apps", ""),
+    ("create", "daemonsets.apps", ""),
+    ("create", "replicationcontrollers", ""),
+    ("create", "deploymentconfigs.apps.openshift.io", ""),
+    ("patch", "pods", "ephemeralcontainers"),
+    ("update", "pods", "ephemeralcontainers"),
+    ("create", "pods", "portforward"),
+    ("get", "pods", "portforward"),
+    ("get", "pods", "proxy"),
+    ("create", "pods", "proxy"),
+    ("get", "services", "proxy"),
+    ("create", "services", "proxy"),
+    ("create", "serviceaccounts", "token"),
+    ("impersonate", "serviceaccounts", ""),
+    ("create", "roles.rbac.authorization.k8s.io", ""),
 )
 
 # Runner configuration rules (ADR-0009 section 2): no job override setting,
 # nothing privileged, requests and limits for build, helper and service containers.
-OVERWRITE_SUFFIX = "_overwrite_allowed"
+OVERWRITE_KEY = re.compile(r"_overwrite_(max_)?allowed$")
 RUNNER_FALSE_KEYS = ("privileged", "allow_privilege_escalation")
 RUNNER_RESOURCE_KEYS = tuple(
     f"{prefix}{resource}_{bound}"
@@ -121,6 +150,7 @@ KUBE_SERVICE_CLASS = "api_server"
 
 REACHED = frozenset({"connected", "resolved"})
 BLOCKED = frozenset({"timeout", "unreachable", "unresolved"})
+PROBE_STATUSES = REACHED | BLOCKED | {"refused", "dns-error", "no-address", "error"}
 
 DIGEST_IMAGE = re.compile(r"^(?P<host>[A-Za-z0-9.-]+(?::\d+)?)/[^@\s]+@sha256:[0-9a-f]{64}$")
 CANI_ROW = re.compile(
@@ -183,7 +213,7 @@ class Role:
     pull_patterns: tuple[re.Pattern[str], ...]  # injected <sa>-dockercfg-<suffix> names
     egress: frozenset[str]
     selector: tuple[str, str] | None  # (label key, value) for the manager
-    extra_secrets_listed: bool
+    operator_secrets_listed: bool
     template_pods: bool  # False: its pods are created by another component
 
 
@@ -330,7 +360,7 @@ def load_contract(path: Path, params: Params) -> Contract:
             pull_patterns=patterns,
             egress=frozenset(_require(spec.get("egress", []), list)),
             selector=selector,
-            extra_secrets_listed="operator_added_secrets" in spec,
+            operator_secrets_listed="operator_added_secrets" in spec,
             template_pods=bool(_require(spec.get("pods", []), list)),
         )
     return Contract(
@@ -671,13 +701,21 @@ def classify_pods(contract: Contract, pods: Mapping[str, list[dict[str, Any]]],
                 row["class"] = manager.name
                 sa = str(spec.get("serviceAccountName") or "default")
                 manager_sas.add(sa)
-                expected = manager.mounted | manager.image_pull
                 row["service_account"] = sa
-                row["secret_refs"] = [{"name": n, "via": v, "expected": n in expected}
-                                      for n, v in refs]
-                for n, _ in refs:
-                    if n not in expected and not manager.extra_secrets_listed:
-                        findings.violation("pods", subject, f"secret-not-allowed: {n}")
+                row["secret_refs"] = []
+                for n, v in refs:
+                    pull = v == "imagePullSecrets"
+                    if n in (manager.image_pull if pull else manager.mounted):
+                        status = "expected"
+                    elif n in manager.image_pull | manager.mounted:
+                        status = "wrong-kind"
+                        findings.violation("pods", subject, f"secret-not-allowed: {n} via {v}")
+                    elif manager.operator_secrets_listed:
+                        status = "operator-added"
+                    else:
+                        status = "not-allowed"
+                        findings.violation("pods", subject, f"secret-not-allowed: {n} via {v}")
+                    row["secret_refs"].append({"name": n, "via": v, "status": status})
             elif ns == contract.prod:
                 row["class"] = "release"
                 owners = meta.get("ownerReferences") or []
@@ -723,16 +761,16 @@ def check_f9_pod(contract: Contract, role: Role, subject: str, labels: Mapping[s
 # --------------------------------------------------------------------------- step 4
 
 
-def _find_keys(node: Any, suffix: str, path: str = "") -> Iterator[str]:
+def _find_keys(node: Any, pattern: re.Pattern[str], path: str = "") -> Iterator[str]:
     if isinstance(node, dict):
         for key, value in node.items():
             here = f"{path}.{key}" if path else str(key)
-            if str(key).endswith(suffix):
+            if pattern.search(str(key)):
                 yield here
-            yield from _find_keys(value, suffix, here)
+            yield from _find_keys(value, pattern, here)
     elif isinstance(node, list):
         for index, item in enumerate(node):
-            yield from _find_keys(item, suffix, f"{path}[{index}]")
+            yield from _find_keys(item, pattern, f"{path}[{index}]")
 
 
 def _toml_documents(path: Path) -> list[dict[str, Any]]:
@@ -768,7 +806,7 @@ def check_runner_config(contract: Contract, params: Params, paths: list[Path],
     rows = []
     for path in paths:
         for doc in _toml_documents(path):
-            overwrite = list(_find_keys(doc, OVERWRITE_SUFFIX))
+            overwrite = list(_find_keys(doc, OVERWRITE_KEY))
             placeholders = "${" in json.dumps(doc)
             if placeholders:
                 findings.inconclusive("runner-config", path.name, "unrendered-placeholder")
@@ -854,7 +892,10 @@ def check_egress_policies(contract: Contract, policies: Mapping[str, list[dict[s
                           findings: Findings) -> list[dict[str, Any]]:
     """The contract's default-deny and allow egress policies exist, the deny unaltered."""
     rows = []
-    for ns_key, spec in _require(contract.raw.get("policies"), dict).items():
+    policy_specs = _require(contract.raw.get("policies"), dict)
+    if not set(policy_specs) <= {"prod", "ci"}:
+        raise ProofError("contract-unreadable")
+    for ns_key, spec in policy_specs.items():
         ns = contract.namespace(ns_key)
         by_name = {str((p.get("metadata") or {}).get("name", "")): p for p in policies[ns]}
         deny = _require(spec.get("default_deny"), dict)
@@ -1024,7 +1065,7 @@ def probe_targets(kube: Kube, contract: Contract, params: Params, agent_service:
         for host in dict.fromkeys(hosts):
             for port in cls.tcp_ports:
                 add(cls_name, "tcp", host, port)
-    present = {t["class"] for t in targets}
+    present = {t["class"] for t in targets if t["kind"] != "kube_service"}
     for cls_name in ("prod_qdrant", "prod_agent", *classes):
         if cls_name not in present:
             findings.inconclusive("probes", cls_name, "no-probe-target")
@@ -1082,7 +1123,7 @@ def read_probe(kube: Kube, name: str, namespace: str, ids: set[str]) -> dict[str
                 out = {str(r["id"]): str(r["status"]) for r in results}
             except (ValueError, KeyError, TypeError) as exc:
                 raise ProofError("probe-failed", name) from exc
-            if set(out) != ids:
+            if set(out) != ids or not set(out.values()) <= PROBE_STATUSES:
                 raise ProofError("probe-failed", name)
             return out
     raise ProofError("probe-failed", name)
@@ -1151,21 +1192,33 @@ def run_probes(kube: Kube, contract: Contract, params: Params, run_id: str,
 
 
 def sweep(kube: Kube, namespaces: Iterable[str], selector: str) -> dict[str, int]:
-    removed = {}
+    """Delete probe objects in every namespace; one failure does not skip the rest."""
+    removed: dict[str, int] = {}
+    failed: ProofError | None = None
     for ns in namespaces:
-        proc = kube.run(["delete", "pods,serviceaccounts", "-l", selector, "-n", ns,
-                         "--ignore-not-found", "--wait=true", "-o", "name"], "delete probe objects")
+        try:
+            proc = kube.run(["delete", "pods,serviceaccounts", "-l", selector, "-n", ns,
+                             "--ignore-not-found", "--wait=true", "-o", "name"],
+                            "delete probe objects")
+        except ProofError as exc:
+            failed = failed or exc
+            continue
         removed[ns] = sum(1 for line in proc.stdout.splitlines() if line.strip())
+    if failed is not None:
+        raise failed
     return removed
 
 
 def cleanup(kube: Kube, contract: Contract, run_id: str) -> dict[str, Any]:
     namespaces = (contract.prod, contract.ci)
-    deleted = sweep(kube, namespaces, f"{PROOF_LABEL}={run_id}")
+    selector = f"{PROOF_LABEL}={run_id}"
+    try:
+        deleted = sweep(kube, namespaces, selector)
+    except ProofError as exc:
+        raise ProofError("cleanup-failed", exc.detail) from exc
     remaining = {}
     for ns in namespaces:
-        remaining[ns] = len(kube.items(["get", "pods,serviceaccounts", "-l",
-                                        f"{PROOF_LABEL}={run_id}", "-n", ns],
+        remaining[ns] = len(kube.items(["get", "pods,serviceaccounts", "-l", selector, "-n", ns],
                                        "verify cleanup"))
     if any(remaining.values()):
         raise ProofError("cleanup-failed")
@@ -1179,7 +1232,8 @@ def verdict_of(findings: Findings, error: ProofError | None, probed: bool) -> tu
         return "error", EXIT_ERROR
     if findings.count("inconclusive"):
         return "inconclusive", EXIT_ERROR
-    return ("proven", EXIT_PROVEN) if probed else ("proven-static-only", EXIT_PROVEN)
+    # Without the live probes the proof is incomplete: never exit 0 for it.
+    return ("proven", EXIT_PROVEN) if probed else ("static-only", EXIT_ERROR)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1228,6 +1282,11 @@ def main(argv: list[str] | None = None) -> int:
     contract: Contract | None = None
     run_id = secrets.token_hex(4)
     record["run_id"] = run_id
+
+    def interrupt(signum: int, frame: object) -> None:
+        raise ProofError("interrupted")
+
+    previous = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGTERM, signal.SIGHUP)}
     try:
         values = read_param_file(args.param_file)
         for item in args.param:
@@ -1265,13 +1324,21 @@ def main(argv: list[str] | None = None) -> int:
             checks["probes"] = {"status": "not-run"}
     except ProofError as exc:
         error = exc
+    except KeyboardInterrupt:
+        error = ProofError("interrupted")
+    except Exception:  # noqa: BLE001 - the record still gets written, with no exception text
+        error = ProofError("internal")
     finally:
-        if kube is not None and contract is not None:
-            try:
-                record["cleanup"] = cleanup(kube, contract, run_id)
-            except ProofError as exc:
-                record["cleanup"] = {"status": "failed"}
-                error = error or exc
+        try:
+            if kube is not None and contract is not None:
+                try:
+                    record["cleanup"] = cleanup(kube, contract, run_id)
+                except ProofError as exc:
+                    record["cleanup"] = {"status": "failed"}
+                    error = error or exc
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
     verdict, code = verdict_of(findings, error, bool(args.probe))
     record["verdict"] = verdict
     record["findings"] = findings.items

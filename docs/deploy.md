@@ -2218,9 +2218,10 @@ python3 -I scripts/devkit/isolation_proof.py \
 The JSON record goes with the dated `gap/records/` entry for the proof.
 
 It records `can-i` lists against the baseline of a freshly created ServiceAccount, a
-negative matrix (secrets, pod create/exec/attach, workload writes, RoleBindings, in both
-namespaces) with the operator's own `get secrets` as positive control, every pod's class
-and Secret references (mounted and image-pull references checked separately; an
+negative matrix asked outright in both namespaces (secrets, pod create, exec, attach,
+port-forward and proxy, workload writes, token requests, impersonation, RBAC writes),
+which also catches grants to a ServiceAccount group, with the operator's own `get secrets`
+as positive control, every pod's class, the workspace and manager pods' Secret references (mounted and image-pull references checked separately; an
 injected `<serviceaccount>-dockercfg-<suffix>` only as the pod's own pull Secret), the
 runner configuration checks, the contract's egress policies, the agent ingress policies and,
 with `--probe`, TCP and DNS outcomes from probe pods carrying each role's labels. A probe
@@ -2229,8 +2230,9 @@ result counts only for a target the control reached. A CIDR wider than one addre
 probed; give such a class a `--probe-host CLASS=HOST`. The record holds verbs, resources,
 object names and outcomes, never a Secret value, token or env value.
 
-Exit 0 means proven (`proven-static-only` without `--probe`, which is not the full proof),
-1 a violation, 2 a usage or environment error or an inconclusive result. Run one proof at
-a time: each run first deletes probe objects (label `isolation-proof.mainframe-rag.io/run`)
-that an interrupted run left, and removes its own on every exit.
+Exit 0 means proven, 1 a violation, 2 a usage or environment error, an inconclusive
+result, or a run without `--probe` (verdict `static-only`, never the full proof). Run one
+proof at a time: each run first deletes probe objects (label
+`isolation-proof.mainframe-rag.io/run`) that an earlier run left, and removes its own on
+every exit, SIGTERM and SIGHUP included; only a SIGKILL leaves them for the next run.
 Tests: `tests/test_isolation_proof.py` (a stub `oc`, canary leak assertions).
