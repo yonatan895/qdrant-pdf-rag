@@ -14,8 +14,10 @@
 #   CI_NAMESPACE          the CI namespace
 #   PULL_SECRET           the pull-only registry robot Secret (never the push robot)
 #   REGISTRY_PATH         the site registry path that job and service images come from
-#   DEVKIT_IMAGE          the default job image, by digest
-#   RUNNER_HELPER_IMAGE   the runner helper image in the site registry, by digest
+#   DEVKIT_REPOSITORY, DEVKIT_DIGEST
+#                         the default job image, rendered <repository>@<digest>
+#   RUNNER_HELPER_REPOSITORY, RUNNER_HELPER_DIGEST
+#                         the runner helper image in the site registry, likewise
 #   JOB_*, HELPER_*, SERVICE_*  requests and limits (about 1 CPU per slot)
 #
 # Jobs may override nothing: no job override setting is present.
@@ -29,8 +31,8 @@ concurrent = 1
     namespace = "${CI_NAMESPACE}"
     service_account = "mfr-runner-job"
     automount_service_account_token = false
-    image = "${DEVKIT_IMAGE}"
-    helper_image = "${RUNNER_HELPER_IMAGE}"
+    image = "${DEVKIT_REPOSITORY}@${DEVKIT_DIGEST}"
+    helper_image = "${RUNNER_HELPER_REPOSITORY}@${RUNNER_HELPER_DIGEST}"
     image_pull_secrets = ["${PULL_SECRET}"]
     pull_policy = ["if-not-present"]
     allowed_images = ["${REGISTRY_PATH}/**/*"]

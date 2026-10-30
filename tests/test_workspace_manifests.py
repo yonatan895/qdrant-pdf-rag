@@ -104,7 +104,8 @@ def _peers(*cidrs: str) -> str:
 
 
 COMMON_PARAMS = {
-    "DEVKIT_IMAGE": f"{REGISTRY_PATH}/devkit@{DIGEST}",
+    "DEVKIT_REPOSITORY": f"{REGISTRY_PATH}/devkit",
+    "DEVKIT_DIGEST": DIGEST,
     "STORAGE_CLASS": "block-rwo",
     "API_SERVER_CIDRS": _peers("10.0.0.10/32", "10.0.0.11/32"),
     "GITLAB_CIDRS": _peers("10.2.0.7/32"),
@@ -113,12 +114,15 @@ PARAMS: dict[str, dict[str, str]] = {
     "prod": {
         **COMMON_PARAMS,
         "PROD_NAMESPACE": "site-rag",
+        "PULL_SECRET": "mfr-prod-pull",
         "REGISTRY_CIDRS": _peers("10.1.0.5/32"),
     },
     "ci": {
         **COMMON_PARAMS,
         "CI_NAMESPACE": "site-rag-ci",
-        "QDRANT_IMAGE": f"{REGISTRY_PATH}/qdrant@{DIGEST}",
+        "PULL_SECRET": "mfr-ci-pull",
+        "QDRANT_REPOSITORY": f"{REGISTRY_PATH}/qdrant",
+        "QDRANT_DIGEST": DIGEST,
         "LITELLM_CIDRS": _peers("10.3.0.9/32", "10.3.1.0/24"),
         "LITELLM_PORT": "4000",
         "MANAGER_POD_LABEL_KEY": "runner.site.example/manager",
@@ -187,9 +191,25 @@ def secret_references(spec: Obj) -> set[tuple[str, str]]:
     return refs
 
 
-def allowed_secrets(role: str, params: dict[str, str]) -> set[str]:
-    spec = CONTRACT["roles"][role]
-    return set(spec["secrets"]) | {params[p] for p in spec["secret_parameters"]}
+def allowed_image_pull_names(role: str, params: dict[str, str]) -> set[str]:
+    allowed = CONTRACT["roles"][role]["allowed_secret_refs"]
+    return {params[p] for p in allowed["image_pull_parameters"]}
+
+
+def secret_ref_violations(spec: Obj, role: str, params: dict[str, str]) -> list[str]:
+    """Mounts (volumes, env, envFrom) must equal the contract; image pulls are a subset."""
+    allowed = CONTRACT["roles"][role]["allowed_secret_refs"]
+    refs = secret_references(spec)
+    mounted = {name for kind, name in refs if kind != "imagePullSecrets"}
+    pulls = {name for kind, name in refs if kind == "imagePullSecrets"}
+    out = []
+    want = set(allowed["mounted"]) | {params[p] for p in allowed["mounted_parameters"]}
+    if mounted != want:
+        out.append(f"mounted secret references {sorted(mounted)}")
+    for name in sorted(pulls - allowed_image_pull_names(role, params)):
+        if not any(re.fullmatch(pattern, name) for pattern in allowed["image_pull_patterns"]):
+            out.append(f"image pull secret {name} is not allowed")
+    return out
 
 
 def pod_violations(pod: Obj, role: str, params: dict[str, str]) -> list[str]:
@@ -203,11 +223,7 @@ def pod_violations(pod: Obj, role: str, params: dict[str, str]) -> list[str]:
         out.append(f"serviceAccountName {spec.get('serviceAccountName')}")
     if spec.get("automountServiceAccountToken") is not False:
         out.append("pod automountServiceAccountToken is not false")
-    refs = secret_references(spec)
-    if {name for _, name in refs} != allowed_secrets(role, params):
-        out.append(f"secret references {sorted(refs)}")
-    if not {kind for kind, _ in refs} <= set(contract["secret_reference_kinds"]):
-        out.append(f"secret reference kinds {sorted(refs)}")
+    out.extend(secret_ref_violations(spec, role, params))
     for volume in spec.get("volumes") or []:
         if "hostPath" in volume:
             out.append(f"hostPath volume {volume['name']}")
@@ -419,11 +435,31 @@ def test_contract_records_the_approved_identities_and_policies():
         "runner": ["dns", "gitlab"],
         "manager": ["api_server", "dns", "gitlab"],
     }
-    assert {r: (s["secrets"], s["secret_parameters"]) for r, s in roles.items()} == {
-        "bastion": ([], []),
-        "dev": (["mfr-dev-gitlab", "mfr-dev-litellm"], []),
-        "runner": ([], ["PULL_SECRET"]),
-        "manager": ([], ["RUNNER_TOKEN_SECRET", "PULL_SECRET"]),
+    assert {r: s["allowed_secret_refs"] for r, s in roles.items()} == {
+        "bastion": {
+            "mounted": [],
+            "mounted_parameters": [],
+            "image_pull_parameters": ["PULL_SECRET"],
+            "image_pull_patterns": ["^mfr-bastion-dockercfg-[a-z0-9]{5}$"],
+        },
+        "dev": {
+            "mounted": ["mfr-dev-gitlab", "mfr-dev-litellm"],
+            "mounted_parameters": [],
+            "image_pull_parameters": ["PULL_SECRET"],
+            "image_pull_patterns": ["^mfr-dev-dockercfg-[a-z0-9]{5}$"],
+        },
+        "runner": {
+            "mounted": [],
+            "mounted_parameters": [],
+            "image_pull_parameters": ["PULL_SECRET"],
+            "image_pull_patterns": ["^mfr-runner-job-dockercfg-[a-z0-9]{5}$"],
+        },
+        "manager": {
+            "mounted": [],
+            "mounted_parameters": ["RUNNER_TOKEN_SECRET"],
+            "image_pull_parameters": ["PULL_SECRET"],
+            "image_pull_patterns": [],
+        },
     }
     for role in ("bastion", "dev", "runner"):
         assert roles[role]["rbac"] == "none"
@@ -585,36 +621,54 @@ def test_bastion_has_the_ca_namespace_and_work_claim():
     assert container["command"], "a long-running command keeps `oc exec` available"
 
 
-@pytest.mark.parametrize("namespace_key", NAMESPACES)
-def test_devkit_image_parameter_is_required_and_documents_the_digest_form(namespace_key):
+IMAGES = [("prod", "DEVKIT", "bastion"), ("ci", "DEVKIT", "dev"), ("ci", "QDRANT", "qdrant")]
+
+
+@pytest.mark.parametrize(("namespace_key", "prefix", "container"), IMAGES)
+def test_image_parameters_are_required_with_no_default(namespace_key, prefix, container):
     # A Template cannot refuse a value (a parameter's `from` only feeds
-    # `generate`), so the parameter is required with no default, its
-    # description names the digest form, and the pod check is the refusal.
+    # `generate`), so the image always renders as <repository>@<digest>:
+    # a tag in either parameter yields a reference that is not runnable.
     template = load_template(namespace_key)
-    parameter = next(p for p in template["parameters"] if p["name"] == "DEVKIT_IMAGE")
-    assert parameter.get("required") is True and "value" not in parameter
-    assert "@sha256:" in parameter["description"]
+    parameters = {p["name"]: p for p in template["parameters"]}
+    for name in (f"{prefix}_REPOSITORY", f"{prefix}_DIGEST"):
+        assert parameters[name].get("required") is True and "value" not in parameters[name]
+    pod = _of_kind(rendered(namespace_key), "Pod")[0]
+    [image] = [c["image"] for c in pod["spec"]["containers"] if c["name"] == container]
+    params = PARAMS[namespace_key]
+    assert image == f"{params[f'{prefix}_REPOSITORY']}@{params[f'{prefix}_DIGEST']}"
 
 
-@pytest.mark.parametrize("namespace_key", NAMESPACES)
+@pytest.mark.parametrize(("namespace_key", "prefix", "container"), IMAGES)
 @pytest.mark.parametrize(
-    "bad",
+    ("field", "bad"),
     [
-        pytest.param(f"{REGISTRY_PATH}/devkit:latest", id="tag"),
-        pytest.param(f"{REGISTRY_PATH}/devkit:v1@{DIGEST}", id="tag-and-digest"),
-        pytest.param(f"{REGISTRY_PATH}/devkit@sha256:{'0' * 63}", id="short-digest"),
-        pytest.param(f"{REGISTRY_PATH}/devkit@sha256:{'A' * 64}", id="uppercase-digest"),
-        pytest.param(f"devkit@{DIGEST}", id="no-registry"),
+        pytest.param("DIGEST", "latest", id="tag-as-digest"),
+        pytest.param("DIGEST", "0123456789abcdef" * 4, id="digest-without-algorithm"),
+        pytest.param("DIGEST", "sha256:" + "0" * 63, id="short-digest"),
+        pytest.param("DIGEST", "sha256:" + "A" * 64, id="uppercase-digest"),
+        pytest.param("REPOSITORY", f"{REGISTRY_PATH}/devkit:v1", id="repository-with-tag"),
+        pytest.param("REPOSITORY", f"{REGISTRY_PATH}/devkit@{DIGEST}", id="repository-with-digest"),
+        pytest.param("REPOSITORY", "devkit", id="repository-without-registry"),
     ],
 )
-def test_devkit_image_is_refused_unless_digest_pinned(namespace_key, bad):
-    objects = rendered(namespace_key, DEVKIT_IMAGE=bad)
-    pod = _of_kind(objects, "Pod")[0]
+def test_image_is_refused_unless_repository_at_digest(namespace_key, prefix, container, field, bad):
+    params = {**PARAMS[namespace_key], f"{prefix}_{field}": bad}
+    pod = _of_kind(render(load_template(namespace_key), params), "Pod")[0]
+    image = f"{params[f'{prefix}_REPOSITORY']}@{params[f'{prefix}_DIGEST']}"
     role = pod["metadata"]["labels"][LABEL_KEY]
-    violations = pod_violations(pod, role, PARAMS[namespace_key])
-    assert violations == [
-        f"{pod['spec']['containers'][0]['name']}: image {bad!r} is not digest-pinned"
+    assert pod_violations(pod, role, params) == [
+        f"{container}: image {image!r} is not digest-pinned"
     ]
+
+
+@pytest.mark.parametrize("namespace_key", NAMESPACES)
+def test_pods_pull_with_the_pull_secret_as_a_kubelet_credential_only(namespace_key):
+    params = PARAMS[namespace_key]
+    for pod in _of_kind(rendered(namespace_key), "Pod"):
+        assert pod["spec"]["imagePullSecrets"] == [{"name": params["PULL_SECRET"]}]
+        mounted = {n for k, n in secret_references(pod["spec"]) if k != "imagePullSecrets"}
+        assert params["PULL_SECRET"] not in mounted
 
 
 def test_dev_pod_mounts_its_two_secrets_read_only_beside_a_localhost_qdrant():
@@ -647,8 +701,10 @@ RUNNER_PARAMS = {
     "CI_NAMESPACE": PARAMS["ci"]["CI_NAMESPACE"],
     "PULL_SECRET": "mfr-ci-pull",
     "REGISTRY_PATH": REGISTRY_PATH,
-    "DEVKIT_IMAGE": f"{REGISTRY_PATH}/devkit@{DIGEST}",
-    "RUNNER_HELPER_IMAGE": f"{REGISTRY_PATH}/gitlab-runner-helper@{DIGEST}",
+    "DEVKIT_REPOSITORY": f"{REGISTRY_PATH}/devkit",
+    "DEVKIT_DIGEST": DIGEST,
+    "RUNNER_HELPER_REPOSITORY": f"{REGISTRY_PATH}/gitlab-runner-helper",
+    "RUNNER_HELPER_DIGEST": DIGEST,
     **{
         f"{part}_{resource}_{bound}": "1" if resource == "CPU" else "2Gi"
         for part in ("JOB", "HELPER", "SERVICE")
@@ -696,7 +752,7 @@ def runner_violations(config: Obj, registration: str, params: dict[str, str]) ->
         out.append("privileged or privilege escalation not false")
     if k8s.get("pod_labels") != {LABEL_KEY: "runner"}:
         out.append(f"pod_labels {k8s.get('pod_labels')}")
-    if set(k8s.get("image_pull_secrets") or []) != allowed_secrets("runner", params):
+    if set(k8s.get("image_pull_secrets") or []) != allowed_image_pull_names("runner", params):
         out.append(f"image_pull_secrets {k8s.get('image_pull_secrets')}")
     for field in ("allowed_images", "allowed_services"):
         allowed = k8s.get(field) or []
@@ -759,7 +815,7 @@ def _mutated_bastion_violations(mutate: Any) -> list[str]:
         ),
         (
             lambda p: p["spec"]["volumes"].append({"name": "k", "secret": {"secretName": "x"}}),
-            "secret references",
+            "mounted secret references",
         ),
         (
             lambda p: (
@@ -767,9 +823,28 @@ def _mutated_bastion_violations(mutate: Any) -> list[str]:
                 .setdefault("envFrom", [])
                 .append({"secretRef": {"name": "rag-qdrant-apikey"}})
             ),
-            "secret references",
+            "mounted secret references",
         ),
-        (lambda p: p["spec"].update({"imagePullSecrets": [{"name": "push"}]}), "secret references"),
+        (
+            lambda p: p["spec"]["volumes"].append(
+                {"name": "pull", "secret": {"secretName": "mfr-prod-pull"}}
+            ),
+            "mounted secret references",
+        ),
+        (
+            lambda p: p["spec"]["imagePullSecrets"].append({"name": "push"}),
+            "image pull secret push is not allowed",
+        ),
+        (
+            lambda p: p["spec"]["imagePullSecrets"].append({"name": "mfr-dev-dockercfg-x7k2p"}),
+            "image pull secret mfr-dev-dockercfg-x7k2p is not allowed",
+        ),
+        (
+            lambda p: p["spec"]["volumes"].append(
+                {"name": "cfg", "secret": {"secretName": "mfr-bastion-dockercfg-x7k2p"}}
+            ),
+            "mounted secret references",
+        ),
         (lambda p: p["spec"].pop("automountServiceAccountToken"), "automountServiceAccountToken"),
         (lambda p: p["spec"].update({"serviceAccountName": "default"}), "serviceAccountName"),
         (
@@ -791,6 +866,12 @@ def _mutated_bastion_violations(mutate: Any) -> list[str]:
 def test_pod_check_catches_a_mutated_bastion(mutate, expected):
     violations = _mutated_bastion_violations(mutate)
     assert any(expected in v for v in violations), violations
+
+
+def test_injected_dockercfg_pull_secret_of_the_own_service_account_is_allowed():
+    pod = _bastion()
+    pod["spec"]["imagePullSecrets"].append({"name": "mfr-bastion-dockercfg-x7k2p"})
+    assert pod_violations(pod, "bastion", PARAMS["prod"]) == []
 
 
 def test_service_account_check_catches_a_dropped_automount_false():

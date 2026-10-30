@@ -204,7 +204,12 @@
 
   The runner manager holds the operator's runner token Secret. Job pods
   pull with a pull-only registry robot in the CI namespace, never the
-  production push robot. The platform team is asked whether etcd encryption
+  production push robot.
+  Pull credentials are `imagePullSecrets`: kubelet credentials the
+  containers never see, not Secret mounts. The bastion names the existing
+  production pull robot; the dev pod and job pods name the CI pull-only
+  robot. A `<serviceaccount>-dockercfg-<suffix>` Secret that OpenShift
+  injects is allowed there too, never as a mount. The platform team is asked whether etcd encryption
   at rest is enabled.
 - **The coding model's key (maintainer decision 2026-10-30).** The gap's
   coding agents call the product's LiteLLM endpoint with their **own key**,
