@@ -176,9 +176,10 @@ def test_pack_sha_mismatch_fails_closed(pack_tree):
     assert "airgap.env" in r.stderr
 
 
-@pytest.mark.parametrize("role", ["agent", "ingest"])
+@pytest.mark.parametrize("role", ["agent", "ingest", "devkit"])
 def test_pack_refuses_a_containerfile_base_digest_off_the_pin(pack_tree, role):
-    """#1030: the shipped Containerfile FROM must equal images.txt and the lock."""
+    """#1030: the shipped Containerfile FROM must equal images.txt and the lock.
+    The dev workspace image (#1118) is covered too: its recipe ships in the repo."""
     root, skopeo_log, _head, _key = pack_tree
     containerfile = root / "images" / f"Containerfile.{role}"
     good = containerfile.read_text()

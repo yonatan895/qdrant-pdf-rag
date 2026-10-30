@@ -1,0 +1,13 @@
+# Dev workspace image pin (#1118, ADR-0009 §8).
+#
+# key:    python3 scripts/devkit_key.py over the kit inputs (the image's pin files,
+#         its recipe and images/devkit/). It names the image tag and the kit,
+#         ghcr.io/<owner>/qdrant-pdf-rag-devkit:<key> and mfr-devkit-<key>.tar.
+# digest: the registry manifest digest that .github/workflows/devkit.yml pushed for
+#         that key, copied from its job summary by a dedicated pin PR. While it is
+#         sha256:PENDING no kit exists for the key, and kit packing refuses it.
+#
+# `python3 scripts/devkit_key.py --check` refuses a stale key. Only kit packing and
+# the release gate run it (D-8); a dependency PR does not have to re-pin.
+key: 0000000000000000000000000000000000000000000000000000000000000000
+digest: sha256:PENDING

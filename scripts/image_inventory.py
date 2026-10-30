@@ -152,8 +152,9 @@ FROM_LINE = re.compile(r'^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?\s*$', r
 
 
 # Named build contexts the release build supplies (docker build --build-context);
-# they are directories, not registry images.
-BUILD_CONTEXTS = frozenset({'wheelhouse', 'bm25'})
+# they are directories, not registry images. devkit-tools holds the pinned Task,
+# Helm and oc archives of the dev workspace image (#1118, .github/workflows/devkit.yml).
+BUILD_CONTEXTS = frozenset({'wheelhouse', 'bm25', 'devkit-tools'})
 
 # `COPY --from=X`, `ADD --from=X` and `RUN --mount=...,from=X`: X must be an earlier
 # stage alias; anything else is an unpinned external image (#1030).

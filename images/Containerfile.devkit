@@ -1,0 +1,95 @@
+# Dev workspace image (#1118, ADR-0009 §8): one image for the bastion, the dev pod
+# and the GitLab runner jobs. Built only by the connected factory
+# (.github/workflows/devkit.yml); the air gap verifies and copies it, never builds it.
+#
+# Contents, each verified against its pin during the build:
+#   - the pinned UBI Python 3.14 (GIL) base, the same digest as the app images;
+#   - the exact RPM set in images/devkit-packages.txt (skopeo, git-core, openssl, tar,
+#     gzip and their dependencies), from the UBI repositories only;
+#   - the hash-locked dev wheels (requirements.dev.lock.txt) installed into the base
+#     environment, plus the verified dev wheelhouse at /opt/devkit/wheelhouse;
+#   - Task, Helm 4 and oc/kubectl from scripts/tools/*-pin.txt;
+#   - the session helpers from images/devkit/bin/.
+# The project itself is not installed: a checkout's source is used in place
+# (PYTHONPATH=<checkout>/src), so development installs and builds nothing.
+#
+# Named build contexts (scripts/image_inventory.py BUILD_CONTEXTS):
+#   wheelhouse    the dev wheelhouse (dependency_lock.py prepare --profile dev)
+#   devkit-tools  the Task, Helm and oc archives named by their pins' asset: lines
+# Build scripts and pins are bind-mounted, never copied, so the image bytes depend only
+# on the kit key inputs (scripts/devkit_key.py) and the named contexts they pin.
+#
+# Runs under OpenShift restricted-v2 as an arbitrary UID in group 0: HOME and /work
+# are group-writable (g=u); the installed environment is not.
+FROM registry.access.redhat.com/ubi9/python-314-minimal@sha256:638914ba78de063c53cb179342518a0b39abe910cc7d36d8a434b7c4d4fa81fd AS rpms
+
+USER root
+COPY images/devkit-packages.txt /opt/devkit/devkit-packages.txt
+# Install exactly the listed NEVRAs. Fail when the added set differs from the list (a
+# dependency drifted) or when any base RPM was upgraded or removed.
+RUN set -eu; \
+    q='%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n'; \
+    rpm -qa --qf "$q" | LC_ALL=C sort > /tmp/rpm-base; \
+    grep -v -e '^#' -e '^$' /opt/devkit/devkit-packages.txt > /tmp/rpm-want; \
+    LC_ALL=C sort -c -u /tmp/rpm-want; \
+    microdnf --disablerepo='*' --enablerepo=ubi-9-baseos-rpms --enablerepo=ubi-9-appstream-rpms \
+        install -y --nodocs --setopt=install_weak_deps=0 $(cat /tmp/rpm-want); \
+    microdnf clean all; \
+    rpm -qa --qf "$q" | LC_ALL=C sort > /tmp/rpm-now; \
+    if [ -n "$(LC_ALL=C comm -23 /tmp/rpm-base /tmp/rpm-now)" ]; then \
+        echo 'devkit: a base RPM was upgraded or removed; see images/devkit-packages.txt' >&2; exit 1; fi; \
+    if [ "$(LC_ALL=C comm -13 /tmp/rpm-base /tmp/rpm-now)" != "$(cat /tmp/rpm-want)" ]; then \
+        echo 'devkit: the resolved RPM set differs from images/devkit-packages.txt; re-resolve it in a pin PR' >&2; \
+        LC_ALL=C comm -13 /tmp/rpm-base /tmp/rpm-now | LC_ALL=C comm -3 /tmp/rpm-want - >&2; exit 1; fi; \
+    rm -f /tmp/rpm-base /tmp/rpm-want /tmp/rpm-now
+
+# Verify each tool archive and binary against its pin, then stage it in /out.
+FROM rpms AS tools
+RUN --mount=type=bind,source=scripts/tools,target=/opt/devkit-build/scripts/tools \
+    --mount=type=bind,from=devkit-tools,target=/devkit-tools \
+    set -eu; \
+    pins=/opt/devkit-build/scripts/tools; \
+    mkdir -p /out; \
+    sh "$pins/install-task.sh" --bin-dir /out \
+        --archive "/devkit-tools/$(sed -n 's/^asset: *//p' "$pins/task-pin.txt")"; \
+    sh "$pins/install-helm.sh" --bin-dir /out \
+        --archive "/devkit-tools/$(sed -n 's/^asset: *//p' "$pins/helm-pin.txt")"; \
+    oc_asset=$(sed -n 's/^asset: *//p' "$pins/oc-pin.txt"); \
+    oc_sha=$(sed -n 's/^sha256: *//p' "$pins/oc-pin.txt"); \
+    oc_binary=$(sed -n 's/^binary-sha256: *//p' "$pins/oc-pin.txt"); \
+    oc_version=$(sed -n 's/^version: *//p' "$pins/oc-pin.txt"); \
+    [ "${#oc_sha}" = 64 ] && [ "${#oc_binary}" = 64 ] && [ -n "$oc_asset" ] && [ -n "$oc_version" ]; \
+    printf '%s  %s\n' "$oc_sha" "/devkit-tools/$oc_asset" | sha256sum -c - >/dev/null; \
+    mkdir /tmp/oc; \
+    tar xzf "/devkit-tools/$oc_asset" -C /tmp/oc oc; \
+    printf '%s  %s\n' "$oc_binary" /tmp/oc/oc | sha256sum -c - >/dev/null; \
+    [ "$(/tmp/oc/oc version --client | sed -n 's/^Client Version: *//p')" = "$oc_version" ]; \
+    install -m 0755 /tmp/oc/oc /out/oc; \
+    ln -s oc /out/kubectl
+
+FROM rpms
+USER root
+COPY --from=tools /out/ /usr/local/bin/
+COPY requirements.dev.lock.txt /opt/devkit/locks/requirements.dev.lock.txt
+COPY locks/cp314-linux-x86_64.json /opt/devkit/locks/locks/cp314-linux-x86_64.json
+COPY --from=wheelhouse / /opt/devkit/wheelhouse/
+# The agent image's idiom with the dev profile: verify the wheelhouse, install offline
+# with hashes, then record the installed receipt, which must equal the dev lock.
+RUN --mount=type=bind,source=scripts/dependency_lock.py,target=/opt/devkit-build/dependency_lock.py \
+    python3 /opt/devkit-build/dependency_lock.py --root /opt/devkit/locks wheelhouse --profile dev --directory /opt/devkit/wheelhouse >/dev/null \
+    && PIP_CONFIG_FILE=/dev/null python3 -m pip --isolated install --no-index --no-cache-dir --only-binary=:all: --require-hashes --find-links /opt/devkit/wheelhouse -r /opt/devkit/locks/requirements.dev.lock.txt \
+    && python3 -m pip check \
+    && python3 /opt/devkit-build/dependency_lock.py --root /opt/devkit/locks installed --profile dev --output /opt/devkit/installed-inventory.json \
+    && rm -rf /root/.cache \
+    && chmod -R go-w /opt/app-root/bin /opt/app-root/lib
+
+COPY --chmod=0755 images/devkit/bin/ /usr/local/bin/
+
+RUN mkdir -p /work \
+    && chown 1001:0 /work /opt/app-root/src \
+    && chmod g=u /work /opt/app-root/src
+
+ENV PYTHONDONTWRITEBYTECODE=1
+USER 1001
+WORKDIR /work
+CMD ["sleep", "infinity"]

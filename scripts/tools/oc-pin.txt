@@ -1,0 +1,34 @@
+# OpenShift client (oc, with kubectl) pin for the dev workspace image (#1118, ADR-0009 §8, D-6b).
+#
+# The cluster runs OpenShift 4.20 (Kubernetes 1.33). Maintainer decision 2026-10-30:
+# the current 4.20.z stable client, the rhel9 build to match the UBI9 base. A client
+# within one minor of the cluster is supported, so a z-stream bump is a routine
+# dedicated pin PR. Linux x86_64 only.
+#
+# Verification performed 2026-10-30 on the connected host:
+#   curl -fsSL -O https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/4.20.42/sha256sum.txt
+#   curl -fsSL -O https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/4.20.42/sha256sum.txt.gpg
+#   curl -fsSL -O https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/4.20.42/openshift-client-linux-amd64-rhel9-4.20.42.tar.gz
+#   sha256sum.txt.gpg is an inline-signed copy of sha256sum.txt. gpgv reports a good
+#   signature by RSA key 199E2F91FD431D51, and its signed content is byte-identical to
+#   sha256sum.txt. The archive sha256 below matches that release's sha256sum.txt line.
+#   Signing key: "Red Hat, Inc. (release key 2) <security@redhat.com>", fingerprint
+#   567E 347A D004 4ADE 55BA 8A5F 199E 2F91 FD43 1D51. The same fingerprint came from two
+#   sources: https://access.redhat.com/security/data/fd431d51.txt and
+#   /etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release in the pinned UBI base image.
+#   tar lists README.md, oc and kubectl, where kubectl is a hardlink to oc; the
+#   binary digest below is oc's.
+#
+# The factory verifies the archive digest before the build; the build re-verifies
+# both digests and the client version before installing (images/Containerfile.devkit).
+
+version: 4.20.42
+asset: openshift-client-linux-amd64-rhel9-4.20.42.tar.gz
+sha256: b64aa5d214513e82275d60121f38933ef0241681dfc31122dd663d86dffbbe38
+binary-sha256: abc0991824eb1525930133b4d7417fc8fe3a330a050d8468d678ffe87dbfdadf
+origin: https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/4.20.42/openshift-client-linux-amd64-rhel9-4.20.42.tar.gz
+checksum-manifest: https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/4.20.42/sha256sum.txt
+checksum-signature: https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/4.20.42/sha256sum.txt.gpg
+signing-key: 567E347AD0044ADE55BA8A5F199E2F91FD431D51
+license: Apache-2.0
+platforms: linux-amd64 only
