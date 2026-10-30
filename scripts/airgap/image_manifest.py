@@ -11,6 +11,10 @@ version, an `index.json` naming exactly one single-image manifest, and every
 manifest, config and layer blob present once with the size and sha256 its
 descriptor names. The manifest bytes are the registry's (pack copies with
 `--preserve-digests`), so the archive digest is the platform manifest digest.
+
+The dev kit (#1118) ships its image as an OCI layout directory instead (the
+transfer rule forbids archives): `read_layout` runs the same reader over the
+directory's regular files and refuses links and other special files.
 """
 from __future__ import annotations
 
@@ -127,10 +131,11 @@ def _blob(archive: tarfile.TarFile, members: dict[str, tarfile.TarInfo],
         raise BlobMismatch("archive blob is unreadable")
     sha = hashlib.sha256()
     kept = bytearray()
-    while block := stream.read(1024 * 1024):
-        sha.update(block)
-        if keep:
-            kept += block
+    with stream:
+        while block := stream.read(1024 * 1024):
+            sha.update(block)
+            if keep:
+                kept += block
     if "sha256:" + sha.hexdigest() != digest:
         raise BlobMismatch("archive blob does not match its digest")
     return bytes(kept)
@@ -143,7 +148,8 @@ def _small(archive: tarfile.TarFile, members: dict[str, tarfile.TarInfo], name: 
     stream = archive.extractfile(item)
     if stream is None:
         raise ArchiveError(f"archive has no usable {name}")
-    return json.loads(stream.read())
+    with stream:
+        return json.loads(stream.read())
 
 
 def _check_media_types(entry_type: str, manifest: dict) -> None:
@@ -189,6 +195,38 @@ def read_archive(archive: tarfile.TarFile) -> OciImage:
     return OciImage(manifest_raw, config_raw, tuple(layers), members)
 
 
+class _LayoutDirectory:
+    """A directory OCI layout behind the TarFile methods `read_archive` uses."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def getmembers(self) -> list[tarfile.TarInfo]:
+        if self.root.is_symlink() or not self.root.is_dir():
+            raise ArchiveError("OCI layout is not a directory")
+        items = []
+        for path in sorted(self.root.rglob("*")):
+            info = tarfile.TarInfo(path.relative_to(self.root).as_posix())
+            if path.is_symlink():
+                raise ArchiveError("OCI layout holds a link")
+            if path.is_dir():
+                info.type = tarfile.DIRTYPE
+            elif path.is_file():
+                info.size = path.stat().st_size
+            else:
+                raise ArchiveError("OCI layout holds a special file")
+            items.append(info)
+        return items
+
+    def extractfile(self, item: tarfile.TarInfo) -> IO[bytes]:
+        return (self.root / item.name).open("rb")
+
+
+def read_layout(directory: Path) -> OciImage:
+    """Verify one OCI layout directory exactly as `read_archive` verifies an archive."""
+    return read_archive(_LayoutDirectory(directory))  # type: ignore[arg-type]
+
+
 def open_blob(archive: tarfile.TarFile, image: OciImage, digest: str) -> IO[bytes]:
     stream = archive.extractfile(image.blobs["blobs/sha256/" + digest[7:]])
     if stream is None:
@@ -204,6 +242,11 @@ def main(argv: list[str]) -> int:
             # Verified manifest bytes go to argv[2]; stdout is their digest.
             with tarfile.open(argv[1], "r:") as archive:
                 image = read_archive(archive)
+            Path(argv[2]).write_bytes(image.manifest_raw)
+            print(image.digest)
+        elif len(argv) == 3 and argv[0] == "layout":
+            # The directory form of "archive" (#1118 dev kit).
+            image = read_layout(Path(argv[1]))
             Path(argv[2]).write_bytes(image.manifest_raw)
             print(image.digest)
         elif len(argv) == 3 and argv[0] == "registry":

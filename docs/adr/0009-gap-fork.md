@@ -600,16 +600,20 @@ refreshed with each kit (Q9).
   - **Trust anchor** ([B2](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6481952257)).
     The kit and the release bundle each ship a `.sha256` file that the
     runbook compares with `Get-FileHash`, which catches corruption and the
-    wrong version. Against tampering, the connected side publishes both
+    wrong version. For the kit it is `SHA256SUMS.sha256`, the fingerprint
+    of the signed `SHA256SUMS`; the runbook then checks every member
+    against `SHA256SUMS`. Against tampering, the connected side publishes both
     SHA-256 fingerprints on GitHub (the release comment or record). The
     operator carries the first 16 hex characters of each by a route separate
     from the transfer and checks them by eye on Windows. Both checks pass
     before any push and before any token reaches a pod. A verifier inside
     the kit cannot vouch for itself, so the bastion's signature checks come
     after the anchor and are trusted only because of it.
-  - **Fallback:** if Windows cannot push, `oc cp` a static Linux `oras` and
-    the archive into a pod from the previous release's agent image, already
-    in the site registry, and push from inside.
+  - **Fallback:** if Windows cannot push, stream the kit's static Linux
+    `oras` and its image layout into a pod from the previous release's agent
+    image, already in the site registry, and push from inside. That image
+    has no `tar`, so the runbook streams each file through `oc exec -i … dd`
+    instead of `oc cp`.
   - **Proof** splits as the plan lists: Linux CI, a GitHub-hosted
     `windows-2025` job (D-6) and recorded site steps.
 - **Kit key (Q3).** `scripts/devkit_key.py` computes one SHA-256 over a
@@ -631,19 +635,31 @@ refreshed with each kit (Q9).
   it builds product images. The gap only verifies the kit and copies the
   image into the site registry. Gap releases (§5) are the only builds
   in the gap, and each one needs an approved issue.
-- **The kit** is a signed tarball, separate from the release bundle,
-  `mfr-devkit-<key>.tar`. It holds:
+- **The kit** is a signed directory of plain files, separate from the
+  release bundle: `mfr-devkit-<key>/`, packed by `scripts/devkit/pack.sh`.
+  The site transfer rule forbids top-level archives and links are unsafe,
+  so the kit, like the release bundle's loose signed members, has no
+  top-level `.tar` and no links; the image is an OCI layout directory whose
+  `blobs/sha256/<hex>` names are NTFS-safe. It holds:
   - the image as an OCI layout, with the dev wheels inside it only: a
     `prepare_python.py --kit` mode (D-7) keeps them from shipping twice;
-  - a pinned `oras.exe`, the bastion template and the Windows runbook;
+  - a pinned `oras.exe` (`scripts/tools/oras-windows-pin.txt`, shipped as
+    the extracted binary) and the static Linux `oras` for the fallback, the
+    bastion template and the Windows runbook;
   - `MANIFEST.txt`, recording the key, the image digest, the pin-file
     digests, the upstream commit it was built from and the snapshot time;
   - `sbom.json`, the third-party notices and the licence check;
-  - `SHA256SUMS`, signed with the connected release key (Q4);
-  - a verify/install script, run in the bastion after the trust anchor:
-    signature, inventory, and the digest read back from the registry and
-    from the pod's `imageID`;
-  - the GitHub issue snapshot.
+  - `SHA256SUMS`, signed with the connected release key (Q4), and
+    `SHA256SUMS.sha256`;
+  - a verify/install script (`scripts/devkit/install.sh`), run in the
+    bastion after the trust anchor: the signature against
+    `SNEAKERNET_TRUSTED_PUB` (required, and never the kit's own key file),
+    every member, an inventory equal to `SHA256SUMS`, the MANIFEST against
+    the members, then a skopeo copy and the digest read back from the
+    registry and from the pod's `imageID`;
+  - the GitHub issue snapshot (`issues.json`: the issues listed in
+    `scripts/devkit/snapshot-issues.txt` with all their comments; a
+    credential-shaped string refuses the pack).
 - **Cadence (D-9).** A release ships a new kit only when the key changes, and
   the release MANIFEST names the key in a `devkit_key:` field. Kit v1 has no
   gap-release build inputs; F6 adds them under a new key. The first kit
