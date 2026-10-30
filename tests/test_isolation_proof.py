@@ -37,7 +37,8 @@ DIGEST = "0" * 64
 PARAMS = {
     "PROD_NAMESPACE": PROD,
     "CI_NAMESPACE": CI,
-    "DEVKIT_IMAGE": f"registry.site.example/mfr/devkit@sha256:{DIGEST}",
+    "DEVKIT_REPOSITORY": "registry.site.example/mfr/devkit",
+    "DEVKIT_DIGEST": f"sha256:{DIGEST}",
     "PULL_SECRET": PULL,
     "RUNNER_TOKEN_SECRET": TOKEN,
     "MANAGER_POD_LABEL_KEY": MGR_KEY,
@@ -209,15 +210,17 @@ def secret_volume(name: str) -> dict[str, Any]:
 def clean_scenario() -> dict[str, Any]:
     pods = {
         PROD: [
-            pod(PROD, "mfr-bastion-0", {ROLE: "bastion"}, "mfr-bastion"),
+            pod(PROD, "mfr-bastion-0", {ROLE: "bastion"}, "mfr-bastion",
+                pull=[PULL, "mfr-bastion-dockercfg-k2x9q"]),
             pod(PROD, "rag-agent-1", {"app": "rag-agent"}, "rag-agent",
                 volumes=[secret_volume("rag-qdrant-keys")]),
         ],
         CI: [
             pod(CI, "mfr-dev-0", {ROLE: "dev"}, "mfr-dev",
-                volumes=[secret_volume("mfr-dev-gitlab"), secret_volume("mfr-dev-litellm")]),
+                volumes=[secret_volume("mfr-dev-gitlab"), secret_volume("mfr-dev-litellm")],
+                pull=[PULL, "mfr-dev-dockercfg-7h2mz"]),
             pod(CI, "runner-abc-project-1", {ROLE: "runner", "pod": "runner-abc"},
-                "mfr-runner-job", pull=[PULL]),
+                "mfr-runner-job", pull=[PULL, "mfr-runner-job-dockercfg-a1b2c"]),
             pod(CI, "gitlab-runner-mgr-0", {MGR_KEY: MGR_VALUE}, "gitlab-runner-sa",
                 volumes=[secret_volume(TOKEN), secret_volume("gitlab-runner-operator-cfg")],
                 pull=[PULL]),
@@ -290,8 +293,9 @@ def workspace_policies(ns: str) -> list[dict[str, Any]]:
 
 
 RENDER = {"CI_NAMESPACE": CI, "PULL_SECRET": PULL, "REGISTRY_PATH": PARAMS["REGISTRY_PATH"],
-          "DEVKIT_IMAGE": PARAMS["DEVKIT_IMAGE"],
-          "RUNNER_HELPER_IMAGE": f"registry.site.example/mfr/helper@sha256:{DIGEST}"}
+          "DEVKIT_REPOSITORY": PARAMS["DEVKIT_REPOSITORY"], "DEVKIT_DIGEST": PARAMS["DEVKIT_DIGEST"],
+          "RUNNER_HELPER_REPOSITORY": "registry.site.example/mfr/helper",
+          "RUNNER_HELPER_DIGEST": f"sha256:{DIGEST}"}
 
 
 def runner_toml(name: str = "gate", extra: str = "", drop: str = "") -> str:
@@ -444,6 +448,51 @@ def test_refused_operator_control_makes_the_matrix_inconclusive(cluster: Cluster
 # --------------------------------------------------------------------------- step 3
 
 
+def test_bastion_pull_secret_and_own_dockercfg_pass(cluster: Cluster) -> None:
+    code, record = cluster.run()
+    assert code == 0
+    row = next(r for r in record["checks"]["pods"] if r["class"] == "bastion")
+    assert row["secret_refs"] == [
+        {"name": "mfr-bastion-dockercfg-k2x9q", "via": "imagePullSecrets", "allowed": True},
+        {"name": PULL, "via": "imagePullSecrets", "allowed": True}]
+
+
+@pytest.mark.parametrize("index, mutate, reason", [
+    # A foreign ServiceAccount's injected pull Secret.
+    (1, lambda p: p["spec"]["imagePullSecrets"].append({"name": "mfr-dev-dockercfg-7h2mz"}),
+     "secret-not-allowed: mfr-dev-dockercfg-7h2mz via imagePullSecrets"),
+    # The pod's own injected pull Secret, mounted where a container can read it.
+    (1, lambda p: p["spec"]["volumes"].append(secret_volume("mfr-runner-job-dockercfg-a1b2c")),
+     "secret-not-allowed: mfr-runner-job-dockercfg-a1b2c via volume"),
+    # The pull-only robot as a mount on the dev pod.
+    (0, lambda p: p["spec"]["volumes"].append(secret_volume(PULL)),
+     f"secret-not-allowed: {PULL} via volume"),
+    # A mounted Secret offered as a pull credential is not a pull credential.
+    (0, lambda p: p["spec"]["imagePullSecrets"].append({"name": "mfr-dev-gitlab"}),
+     "secret-not-allowed: mfr-dev-gitlab via imagePullSecrets"),
+])
+def test_image_pull_and_mounted_secrets_are_checked_separately(cluster: Cluster, index, mutate,
+                                                                reason) -> None:
+    target = cluster.scenario["pods"][CI][index]
+    mutate(target)
+    code, record = cluster.run()
+    assert code == 1
+    assert reasons(record, "pods") == [f"{CI}/{target['metadata']['name']}: {reason}"]
+
+
+def test_injected_pull_secret_is_bound_to_the_pod_service_account(cluster: Cluster) -> None:
+    # A runner pod under the dev SA: its own SA's dockercfg would match the injected
+    # pattern, but not the runner role's; the SA itself is also refused.
+    runner = cluster.scenario["pods"][CI][1]
+    runner["spec"]["serviceAccountName"] = "mfr-dev"
+    runner["spec"]["imagePullSecrets"] = [{"name": PULL}, {"name": "mfr-dev-dockercfg-7h2mz"}]
+    code, record = cluster.run()
+    assert code == 1
+    assert sorted(reasons(record, "pods")) == [
+        f"{CI}/runner-abc-project-1: secret-not-allowed: mfr-dev-dockercfg-7h2mz via imagePullSecrets",
+        f"{CI}/runner-abc-project-1: service-account: mfr-dev"]
+
+
 def test_dev_pod_with_a_third_secret_is_a_violation(cluster: Cluster) -> None:
     dev = cluster.scenario["pods"][CI][0]
     dev["spec"]["containers"][0]["env"].append(
@@ -467,7 +516,8 @@ def test_dev_pod_with_a_third_secret_is_a_violation(cluster: Cluster) -> None:
     (lambda p: p["spec"]["volumes"].append({"name": "c", "csi": {
         "driver": "x", "nodePublishSecretRef": {"name": "csi-creds"}}}),
      "secret-not-allowed: csi-creds via volume"),
-    (lambda p: p["spec"].update(serviceAccountName="default"), "service-account: default"),
+    (lambda p: p["spec"].update(serviceAccountName="default", imagePullSecrets=[{"name": PULL}]),
+     "service-account: default"),
 ])
 def test_runner_pod_secret_references_are_checked_exactly(cluster: Cluster, mutate, reason) -> None:
     mutate(cluster.scenario["pods"][CI][1])
@@ -706,7 +756,7 @@ def test_probe_pods_carry_role_labels_and_never_the_manager_sa(cluster: Cluster)
         spec = body["spec"]
         (container,) = spec["containers"]
         assert spec["automountServiceAccountToken"] is False
-        assert container["image"] == PARAMS["DEVKIT_IMAGE"]
+        assert container["image"] == f"{PARAMS['DEVKIT_REPOSITORY']}@{PARAMS['DEVKIT_DIGEST']}"
         assert container["securityContext"]["capabilities"] == {"drop": ["ALL"]}
         assert set(container["resources"]["limits"]) == {"cpu", "memory", "ephemeral-storage"}
         assert container["resources"]["requests"] == container["resources"]["limits"]
@@ -848,7 +898,7 @@ def test_malformed_contract_is_refused(cluster: Cluster, tmp_path: Path, edit) -
 
 def test_roles_come_from_the_contract_not_the_script(cluster: Cluster, tmp_path: Path) -> None:
     contract = json.loads(CONTRACT.read_text())
-    contract["roles"]["dev"]["secrets"].append("rag-qdrant-keys")
+    contract["roles"]["dev"]["allowed_secret_refs"]["mounted"].append("rag-qdrant-keys")
     path = tmp_path / "contract.json"
     path.write_text(json.dumps(contract))
     dev = cluster.scenario["pods"][CI][0]

@@ -127,7 +127,7 @@ CANI_ROW = re.compile(
     r"^(?P<res>\S*)\s*(?P<urls>\[[^\]]*\])\s+(?P<names>\[[^\]]*\])\s+(?P<verbs>\[[^\]]*\])\s*$"
 )
 
-# Runs inside each probe pod (python3 in DEVKIT_IMAGE). It prints one marker
+# Runs inside each probe pod (python3 in the devkit image). It prints one marker
 # line of target ids and outcome classes; no payload is read or printed.
 PROBE_PROGRAM = r"""
 import errno, json, os, socket, sys
@@ -178,8 +178,9 @@ class Role:
     namespace: str  # resolved namespace name
     f9: bool
     service_account: str | None
-    secrets: frozenset[str]  # resolved Secret names
-    ref_kinds: frozenset[str] | None  # None: any reference kind
+    mounted: frozenset[str]  # Secret names a container may read (volume, env)
+    image_pull: frozenset[str]  # Secret names allowed only in imagePullSecrets
+    pull_patterns: tuple[re.Pattern[str], ...]  # injected <sa>-dockercfg-<suffix> names
     egress: frozenset[str]
     selector: tuple[str, str] | None  # (label key, value) for the manager
     extra_secrets_listed: bool
@@ -270,6 +271,14 @@ def _require(obj: Any, kind: type) -> Any:
     return obj
 
 
+def _secret_names(refs: Mapping[str, Any], kind: str, params: Params) -> frozenset[str]:
+    """Literal names under `kind` plus the values of `<kind>_parameters`."""
+    found = {str(_require(n, str)) for n in _require(refs.get(kind, []), list)}
+    found |= {params.get(_require(p, str)) for p in _require(refs.get(f"{kind}_parameters", []),
+                                                            list)}
+    return frozenset(found)
+
+
 def load_contract(path: Path, params: Params) -> Contract:
     """The workspace contract (deploy/workspace/contract.json), resolved against params."""
     try:
@@ -305,18 +314,20 @@ def load_contract(path: Path, params: Params) -> Contract:
         if not isinstance(f9, bool) or (f9 and not isinstance(sa, str)) or (
                 not f9 and selector is None):
             raise ProofError("contract-unreadable")
-        names = {str(_require(n, str)) for n in _require(spec.get("secrets", []), list)}
-        names |= {params.get(_require(p, str))
-                  for p in _require(spec.get("secret_parameters", []), list)}
-        kinds = {str(_require(k, str)) for k in _require(spec.get("secret_reference_kinds", []),
-                                                         list)}
+        refs = _require(spec.get("allowed_secret_refs"), dict)
+        try:
+            patterns = tuple(re.compile(_require(p, str))
+                             for p in _require(refs.get("image_pull_patterns", []), list))
+        except re.error as exc:
+            raise ProofError("contract-unreadable") from exc
         roles[name] = Role(
             name=name,
             namespace=ns_names[ns_key],
             f9=f9,
             service_account=sa if isinstance(sa, str) else None,
-            secrets=frozenset(names),
-            ref_kinds=None if "any" in kinds else frozenset(kinds),
+            mounted=_secret_names(refs, "mounted", params),
+            image_pull=_secret_names(refs, "image_pull", params),
+            pull_patterns=patterns,
             egress=frozenset(_require(spec.get("egress", []), list)),
             selector=selector,
             extra_secrets_listed="operator_added_secrets" in spec,
@@ -384,10 +395,25 @@ def egress_classes(contract: Contract, params: Params) -> dict[str, EgressClass]
     return out
 
 
-def check_image(params: Params) -> str:
-    image = params.get("DEVKIT_IMAGE")
+def injected_pull_pattern(contract: Contract, service_account: str) -> re.Pattern[str]:
+    """The contract's `<serviceaccount>-dockercfg-<suffix>` pattern, bound to one SA."""
+    template = str(_require(_require(contract.raw.get("secret_refs"), dict)
+                            .get("injected_image_pull_pattern"), str))
+    head, sep, tail = template.partition("{service_account}")
+    if not sep:
+        raise ProofError("contract-unreadable")
+    return re.compile(head + re.escape(service_account) + tail)
+
+
+def probe_image(contract: Contract, params: Params) -> str:
+    """DEVKIT_REPOSITORY@DEVKIT_DIGEST, by the parameter names the contract gives."""
+    names = _require(_require(contract.raw.get("bastion_pod"), dict).get("image_parameters"),
+                     dict)
+    repo_param = str(_require(names.get("repository"), str))
+    digest_param = str(_require(names.get("digest"), str))
+    image = f"{params.get(repo_param)}@{params.get(digest_param)}"
     if not DIGEST_IMAGE.match(image):
-        raise ProofError("param-invalid", "DEVKIT_IMAGE")
+        raise ProofError("param-invalid", f"{repo_param}@{digest_param}")
     return image
 
 
@@ -579,9 +605,9 @@ def _walk_secret_keys(node: Any) -> Iterator[str]:
 def secret_refs(spec: Mapping[str, Any]) -> tuple[list[tuple[str, str]], bool]:
     """(Secret name, reference kind) pairs, and whether a token is projected.
 
-    Kinds use the contract's vocabulary: `volume` (including projected
-    sources and any volume plugin's Secret reference), `env` (env and
-    envFrom) and `imagePullSecrets`.
+    Kinds: `volume` (including projected sources and any volume plugin's
+    Secret reference) and `env` (env and envFrom) are the contract's
+    "mounted" references; `imagePullSecrets` is its "image_pull" kind.
     """
     refs: set[tuple[str, str]] = set()
     token = False
@@ -645,7 +671,7 @@ def classify_pods(contract: Contract, pods: Mapping[str, list[dict[str, Any]]],
                 row["class"] = manager.name
                 sa = str(spec.get("serviceAccountName") or "default")
                 manager_sas.add(sa)
-                expected = manager.secrets
+                expected = manager.mounted | manager.image_pull
                 row["service_account"] = sa
                 row["secret_refs"] = [{"name": n, "via": v, "expected": n in expected}
                                       for n, v in refs]
@@ -678,9 +704,15 @@ def check_f9_pod(contract: Contract, role: Role, subject: str, labels: Mapping[s
         findings.violation("pods", subject, f"service-account: {sa}")
     if token:
         findings.violation("pods", subject, "service-account-token-mounted")
+    own_pull = injected_pull_pattern(contract, sa)
     checked = []
     for name, via in refs:
-        ok = name in role.secrets and (role.ref_kinds is None or via in role.ref_kinds)
+        if via == "imagePullSecrets":
+            ok = name in role.image_pull or (
+                own_pull.fullmatch(name) is not None
+                and any(p.fullmatch(name) for p in role.pull_patterns))
+        else:
+            ok = name in role.mounted
         checked.append({"name": name, "via": via, "allowed": ok})
         if not ok:
             findings.violation("pods", subject, f"secret-not-allowed: {name} via {via}")
@@ -754,7 +786,7 @@ def check_runner_config(contract: Contract, params: Params, paths: list[Path],
                     "namespace": kube.get("namespace") == role.namespace,
                     "service_account": kube.get("service_account") == role.service_account,
                     "image_pull_secrets": sorted(kube.get("image_pull_secrets") or [])
-                    == sorted(role.secrets),
+                    == sorted(role.image_pull),
                     "pod_labels_role_only": labels == {contract.role_label_key: role.name},
                 }
                 for key in RUNNER_FALSE_KEYS:
@@ -1058,7 +1090,7 @@ def read_probe(kube: Kube, name: str, namespace: str, ids: set[str]) -> dict[str
 
 def run_probes(kube: Kube, contract: Contract, params: Params, run_id: str,
                args: argparse.Namespace, findings: Findings) -> dict[str, Any]:
-    image = check_image(params)
+    image = probe_image(contract, params)
     extra: dict[str, list[str]] = {}
     for item in args.probe_host:
         cls, _, host = item.partition("=")

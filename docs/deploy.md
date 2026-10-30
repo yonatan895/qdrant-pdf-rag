@@ -2203,7 +2203,10 @@ Tests: `tests/test_adfs_claims_check.py` (a fake TLS AD FS, canary leak assertio
 namespaces. It is standard library only, runs on the bastion as the operator (namespace
 admin in both namespaces) and reaches the cluster only through `oc` (`--kubectl` picks
 another client). Roles, ServiceAccounts, allowed Secrets and egress classes come from
-`deploy/workspace/contract.json`; site values come from the template parameter file.
+`deploy/workspace/contract.json`; site values come from a parameter file (`KEY=VALUE`
+lines, `--param` overrides): the two templates' parameters plus the runner configuration's
+`PULL_SECRET` and `REGISTRY_PATH`, and `RUNNER_TOKEN_SECRET`. Probe pods run
+`DEVKIT_REPOSITORY@DEVKIT_DIGEST`.
 
 ```sh
 python3 -I scripts/devkit/isolation_proof.py \
@@ -2217,7 +2220,9 @@ The JSON record goes with the dated `gap/records/` entry for the proof.
 It records `can-i` lists against the baseline of a freshly created ServiceAccount, a
 negative matrix (secrets, pod create/exec/attach, workload writes, RoleBindings, in both
 namespaces) with the operator's own `get secrets` as positive control, every pod's class
-and Secret references, the runner configuration checks, the agent ingress policies and,
+and Secret references (mounted and image-pull references checked separately; an
+injected `<serviceaccount>-dockercfg-<suffix>` only as the pod's own pull Secret), the
+runner configuration checks, the contract's egress policies, the agent ingress policies and,
 with `--probe`, TCP and DNS outcomes from probe pods carrying each role's labels. A probe
 pod in the production namespace that no policy selects is the negative control: a blocked
 result counts only for a target the control reached. A CIDR wider than one address is not
