@@ -19,6 +19,8 @@ Export the five inputs, then run the script from the fork clone:
   export R=/abs/path/releases/$SHA                  # outside FORK; ends in /$SHA
   sh "$FORK/scripts/gap/import_release.sh"
 
+Paths are absolute and hold no backslash.
+
 Steps: 0 reset, 1 verify the bundle, 2 find the last import, 3 fetch and
 check the release, then branch import/<SHA> from origin/main, 4 set aside the
 ledgered gap patches, 5 merge, 6 re-apply the gap patches in ledger order,
@@ -63,6 +65,7 @@ main() {
         fi
         case "$name:$value" in
             SHA:*) ;;
+            *\\*) stop "$name must not contain a backslash (the release bootstrap cannot handle one); use another path and rerun" ;;
             *:/*) ;;
             *) stop "$name must be an absolute path; fix it and rerun" ;;
         esac
@@ -134,7 +137,7 @@ main() {
     fi
     if in_progress; then
         if [ "$on_branch" = 1 ] && [ "$finished" = 0 ]; then
-            echo "Aborting the unfinished import's merge, revert or cherry-pick"
+            printf '%s\n' "Aborting the unfinished import's merge, revert or cherry-pick"
             if git rev-parse -q --verify MERGE_HEAD >/dev/null; then git merge --abort; fi
             if git rev-parse -q --verify REVERT_HEAD >/dev/null; then git revert --abort; fi
             if git rev-parse -q --verify CHERRY_PICK_HEAD >/dev/null; then git cherry-pick --abort; fi
@@ -145,7 +148,7 @@ main() {
     fi
     if [ -n "$(git status --porcelain)" ] && [ "$on_branch" = 1 ] && [ "$finished" = 0 ] \
             && [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-        echo "Discarding the unfinished import's uncommitted changes:"
+        printf '%s\n' "Discarding the unfinished import's uncommitted changes:"
         git status --porcelain --untracked-files=no
         git reset -q --hard HEAD
     fi
@@ -155,7 +158,7 @@ main() {
     fi
     if [ "$finished" = 1 ] && [ "$mark_base" = "$BASE" ] && [ -f "$R/reapplied.txt" ] \
             && [ -f "$R/issue-notes.txt" ] && [ -f "$R/env-keys.diff" ] && [ -f "$R/release-notes.diff" ]; then
-        echo "$BRANCH is already imported and unchanged since IMPORT READY; nothing changed"
+        printf '%s\n' "$BRANCH is already imported and unchanged since IMPORT READY; nothing changed"
         summary
         exit 0
     fi
@@ -174,10 +177,13 @@ main() {
         stop "the tarball does not match $BUNDLE.sha256; copy the tarball again and rerun"
     fi
     mkdir -p "$R"
-    tar -xf "$BUNDLE" -C "$R" || stop "cannot unpack $BUNDLE; copy the tarball again and rerun"
+    # cd, not tar -C: GNU tar unquotes backslashes in the -C argument.
+    (cd "$R" && tar -xf "$BUNDLE") || stop "cannot unpack $BUNDLE; copy the tarball again and rerun"
     : > "$R/empty.env"
-    if ! env AIRGAP_ENV="$R/empty.env" AIRGAP_DRYRUN=0 sh -c '. "$1" && check_manifest_chain "$2"' \
-            "$SELF" "$COMMON" "$R/MANIFEST.txt"; then
+    # common.sh cds to this checkout; the chain is checked from inside R with
+    # a relative name (sha256sum escapes a path that holds a backslash).
+    if ! env AIRGAP_ENV="$R/empty.env" AIRGAP_DRYRUN=0 sh -c '. "$1" && cd "$2" && check_manifest_chain MANIFEST.txt' \
+            "$SELF" "$COMMON" "$R"; then
         stop "the bundle is not signed by SNEAKERNET_TRUSTED_PUB (FAIL line above); do not import it: ask for a correctly signed bundle"
     fi
     (cd "$R" && sha256sum --quiet -c SHA256SUMS) \
@@ -296,16 +302,17 @@ q() {
     printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
+# printf, not echo: dash's echo expands backslashes in paths.
 stop() {
     STOPPED=1
-    echo "STOP: $*"
+    printf '%s\n' "STOP: $*"
     exit 1
 }
 
 on_exit() {
     rc=$?
     if [ "$rc" -ne 0 ] && [ "$STOPPED" = 0 ]; then
-        echo "STOP: step $STEP failed (exit $rc); rerun the same command to reset and resume; if it stops here again, open GitLab issue \"Release import ${SHA:-<SHA>} stopped\" with the last 20 lines of this output"
+        printf '%s\n' "STOP: step $STEP failed (exit $rc); rerun the same command to reset and resume; if it stops here again, open GitLab issue \"Release import ${SHA:-<SHA>} stopped\" with the last 20 lines of this output"
     fi
 }
 
@@ -320,17 +327,17 @@ in_progress() {
 }
 
 summary() {
-    echo "Gap patches ($R/reapplied.txt):"
+    printf '%s\n' "Gap patches ($R/reapplied.txt):"
     sed 's/^/  /' "$R/reapplied.txt"
     if [ -s "$R/issue-notes.txt" ]; then
-        echo "Comment on or reopen each GitLab issue below with its note ($R/issue-notes.txt):"
+        printf '%s\n' "Comment on or reopen each GitLab issue below with its note ($R/issue-notes.txt):"
         sed 's/^/  /' "$R/issue-notes.txt"
     fi
-    echo "Key changes for gap/config/: $R/env-keys.diff"
-    echo "Release notes for the extension surface: $R/release-notes.diff"
-    echo "Next: finish the follow-ups in ADR-0009 §4, then push with:"
-    echo "  $PUSH"
-    echo "IMPORT READY $SHA"
+    printf '%s\n' "Key changes for gap/config/: $R/env-keys.diff"
+    printf '%s\n' "Release notes for the extension surface: $R/release-notes.diff"
+    printf '%s\n' "Next: finish the follow-ups in ADR-0009 §4, then push with:"
+    printf '%s\n' "  $PUSH"
+    printf '%s\n' "IMPORT READY $SHA"
 }
 
 main "$@"; exit "$?"

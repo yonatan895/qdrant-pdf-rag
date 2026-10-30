@@ -297,9 +297,12 @@ and `tests/test_gap_import_release.py` runs it on throwaway repositories.
 This section keeps the decision and the stop semantics.
 
 The gap maintainer creates the fork once:
-1. Verify the first upstream release as step 1 below does: check the
-   tarball's `.sha256`, unpack it, and run `sh bootstrap.sh` in it with
-   `SNEAKERNET_TRUSTED_PUB` set.
+1. Verify the first upstream release: check the tarball's `.sha256`,
+   unpack it, and run its `sh bootstrap.sh` with `SNEAKERNET_TRUSTED_PUB`
+   set. Bootstrap checks the signature against the anchor, every member
+   checksum and `repo.bundle` HEAD against the MANIFEST sha. No fork
+   checkout exists yet, so this runs the bundle's own code; every later
+   import verifies with the fork's code first (step 1 below).
 2. Push its history to the empty GitLab project.
 3. Commit `gap/README.md` and a `gap/patches.md` that holds only its title
    line, with the trailer `Upstream-Release: <SHA>`.

@@ -384,6 +384,19 @@ def test_unexpected_merge_conflict_stops_and_a_rerun_resets_to_the_same_stop(wor
     assert "Aborting the unfinished import's merge, revert or cherry-pick" in again.stdout
 
 
+def test_an_unledgered_change_on_top_of_a_patch_stops_the_set_aside(world):
+    world.create_fork(world.r1)
+    p71 = world.patch(71, {"README.md": with_line(world.read("README.md"), 6, "gap 71")},
+                      "GL#71\n\nGap-Patch: GL#71\n")
+    world.stray({"README.md": with_line(world.read("README.md"), 6, "unledgered on top")})
+    r2 = world.release({"src/app.py": world.up_text("src/app.py") + "more\n"}, "Release 2")
+
+    result = world.run(r2)
+
+    assert_one_stop(result, f"STOP: cannot set aside gap patch {p71}; an unledgered change overlaps it: rerun resets, "
+                            f'then open GitLab issue "Release import {r2} stopped" with the last 20 lines of this output')
+
+
 def test_a_stray_change_outside_the_site_layer_is_caught_by_step_7(world):
     world.create_fork(world.r1)
     world.patch(31, {"src/app.py": with_line(world.read("src/app.py"), 7, "gap 31")}, "GL#31\n\nGap-Patch: GL#31\n")
@@ -418,6 +431,15 @@ REFUSALS = {
     "not-descendant": "STOP: {sha} does not descend from the last import {prev}; import the releases in order, "
                       "or ask the gap maintainer",
     "tracks-gap": "STOP: the release tracks gap/ or .gitlab/; do not import it: report it upstream",
+    "ledger-duplicate": "STOP: gap/patches.md lists gap patch {dup} twice; fix the ledger on main through an MR, "
+                        "then rerun",
+    "ledger-unknown": "STOP: gap/patches.md names {dup}, which is not a commit on origin/main; fix the ledger on main "
+                      "through an MR, then rerun",
+    "in-progress": "STOP: a merge, revert, cherry-pick or rebase is in progress in FORK outside an unfinished import; "
+                   "finish or abort it (git status shows which), then rerun",
+    "backslash": "STOP: R must not contain a backslash (the release bootstrap cannot handle one); use another path "
+                 "and rerun",
+    "r-inside-fork": "STOP: R must be outside FORK; choose R outside the clone and rerun",
     "ledger-heading": 'STOP: gap/patches.md line 4 is not a ledger heading "## GL#NNN <full commit sha>"; '
                       "fix the ledger on main through an MR, then rerun",
     "dirty": "STOP: {fork} has local changes (listed above); commit or remove them, or ask the gap maintainer, "
@@ -432,7 +454,7 @@ REFUSALS = {
 @pytest.mark.parametrize("case", sorted(REFUSALS))
 def test_refusals_change_nothing(world, case, tmp_path):
     extra: dict[str, str | None] = {}
-    prev = world.r1
+    prev, dup = world.r1, ""
     if case == "older":
         r2 = world.release({"README.md": "two\n"}, "Release 2")
         world.create_fork(r2)
@@ -467,6 +489,27 @@ def test_refusals_change_nothing(world, case, tmp_path):
         world.commit(world.fork, {"gap/patches.md": TITLE + "## Notes\n"}, "A section the ledger format lacks")
         world.git(world.fork, "push", "-q", "origin", "main")
         sha = world.release({"README.md": "two\n"}, "Release 2")
+    elif case in ("ledger-duplicate", "ledger-unknown"):
+        dup = world.patch(61, {"src/app.py": "gap\n"}, "GL#61\n\nGap-Patch: GL#61\n")
+        if case == "ledger-unknown":
+            dup = "1" * 40
+        world.commit(world.fork, {"gap/patches.md": world.read("gap/patches.md") + f"## GL#62 {dup}\n"}, "Ledger")
+        world.git(world.fork, "push", "-q", "origin", "main")
+        sha = world.release({"README.md": "two\n"}, "Release 2")
+    elif case == "in-progress":
+        sha = world.release({"README.md": "two\n"}, "Release 2")
+        world.git(world.fork, "switch", "-q", "-c", "topic")
+        world.commit(world.fork, {"README.md": "topic\n"}, "Topic")
+        world.git(world.fork, "switch", "-q", "main")
+        world.commit(world.fork, {"README.md": "main\n"}, "Main")
+        subprocess.run(["git", "merge", "topic"], cwd=world.fork, env=world.env(), capture_output=True, check=False)
+        assert (world.fork / ".git" / "MERGE_HEAD").is_file()
+    elif case == "backslash":
+        sha = world.release({"README.md": "two\n"}, "Release 2")
+        extra["R"] = str(world.root / "back\\slash" / sha)
+    elif case == "r-inside-fork":
+        sha = world.release({"README.md": "two\n"}, "Release 2")
+        extra["R"] = str(world.fork / "releases" / sha)
     elif case == "dirty":
         sha = world.release({"README.md": "two\n"}, "Release 2")
         (world.fork / "README.md").write_text("operator edit\n")
@@ -482,7 +525,7 @@ def test_refusals_change_nothing(world, case, tmp_path):
 
     result = world.run(sha, extra=extra)
 
-    assert_one_stop(result, REFUSALS[case].format(sha=sha, prev=prev, fork=world.fork))
+    assert_one_stop(result, REFUSALS[case].format(sha=sha, prev=prev, fork=world.fork, dup=dup))
     if case != "r-holds-fork":  # That case runs on a second clone.
         assert world.refs(world.fork) == fork_refs
         assert world.git(world.fork, "status", "--porcelain") == status
@@ -519,6 +562,24 @@ def test_a_rerun_after_success_changes_nothing(world):
     assert_ready(world, again, r2)
     assert f"import/{r2} is already imported and unchanged since IMPORT READY; nothing changed" in again.stdout
     assert _snapshot(world, r2) == before
+
+    # origin/main moved after IMPORT READY: the untouched branch is rebuilt on it.
+    other = world.root / "maintainer"
+    world.git(world.root, "clone", "-q", str(world.bare), str(other))
+    moved = world.commit(other, {"gap/records/2026-10-30-note.md": "note\n"}, "Record")
+    world.git(other, "push", "-q", "origin", "main")
+    rebuilt = world.run(r2)
+    tip = assert_ready(world, rebuilt, r2)
+    assert world.git(world.fork, "merge-base", tip, moved).strip() == moved
+
+    # A follow-up commit after IMPORT READY (§4: keys in gap/config/) is never
+    # reset away: a rerun stops and keeps it.
+    keys = world.commit(world.fork, {"gap/config/airgap.env": "NEW_SITE_KEY=x\n"}, "Apply key changes")
+    after_follow_up = world.run(r2)
+    assert_one_stop(after_follow_up, (
+        f"STOP: import/{r2} changed after IMPORT READY; push it as it is with: "
+        f"git -C '{world.fork}' push origin 'import/{r2}', and fix forward on its MR, or ask the gap maintainer"))
+    assert world.git(world.fork, "rev-parse", f"import/{r2}").strip() == keys
 
 
 CRASH = """#!/bin/sh

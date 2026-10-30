@@ -127,7 +127,8 @@ def env_keys(root: Path) -> list[str]:
 
 # Shell: a quoted string, a refusing command, and the commands a stub may run.
 _QUOTED = re.compile(r'"(?:\\.|[^"\\])*"|\'[^\']*\'')
-_SHELL_REFUSES = re.compile(r"\bdie\b|\bstop\b|\bexit [1-9]|\bfalse\b")  # stop: import_release.sh
+_SHELL_REFUSES = re.compile(r"\bdie\b|\bexit [1-9]|\bfalse\b")
+_IMPORT_REFUSES = re.compile(r"\bdie\b|\bstop\b|\bexit [1-9]|\bfalse\b")  # The import script's stop().
 _STUB_COMMAND = re.compile(r"(?:echo|printf|die)\b[^|&<>]*(?:>&2)?|exit [1-9][0-9]*|false")
 
 
@@ -174,7 +175,8 @@ def _stub(text: str) -> str | None:
 def _refusals(path: str, text: str) -> list[str]:
     """The messages of each executable refusal in an owner file: a `raise` or
     `die(...)`/`exit(...)` call in Python (comments, docstrings and bare strings
-    are not code), or a shell line that dies, stops or exits non-zero (comments removed)."""
+    are not code), or a shell line that dies or exits non-zero (comments removed;
+    in the import script, `stop` too)."""
     if path.endswith(".py"):
         messages = []
         for node in ast.walk(ast.parse(text)):
@@ -189,7 +191,8 @@ def _refusals(path: str, text: str) -> list[str]:
                 messages.append("\n".join(c.value for c in ast.walk(target)
                                           if isinstance(c, ast.Constant) and isinstance(c.value, str)))
         return messages
-    return [strings for code, strings in _shell_lines(text) if _SHELL_REFUSES.search(code)]
+    refuses = _IMPORT_REFUSES if path == IMPORT_SCRIPT.as_posix() else _SHELL_REFUSES
+    return [strings for code, strings in _shell_lines(text) if refuses.search(code)]
 
 
 class Surface(dict[str, list[str]]):
@@ -278,7 +281,7 @@ def script_flags(root: Path, stubs: dict[tuple[str, str], tuple[str, str]]) -> l
                 items.append(f"{script} {flag}")
     inputs = re.search(r'(?m)^ *INPUTS="([A-Z_ ]+)"$', (root / IMPORT_SCRIPT).read_text(encoding="utf-8"))
     if not inputs:
-        raise ValueError("scripts/gap/import_release.sh no longer has its INPUTS line")
+        raise ValueError(f"{IMPORT_SCRIPT} no longer has its INPUTS line")
     items.extend(f"import-script {name}" for name in inputs[1].split())
     return sorted(items)
 
