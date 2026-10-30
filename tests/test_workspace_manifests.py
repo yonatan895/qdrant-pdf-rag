@@ -162,6 +162,10 @@ def forbidden_label_violations(obj: Obj) -> list[str]:
     return [f"{obj['kind']}/{obj['metadata']['name']}: forbidden label {k}" for k in bad]
 
 
+def _containers(spec: Obj) -> list[Obj]:
+    return list(spec.get("containers") or []) + list(spec.get("initContainers") or [])
+
+
 def secret_references(spec: Obj) -> set[tuple[str, str]]:
     refs: set[tuple[str, str]] = set()
     for volume in spec.get("volumes") or []:
@@ -170,7 +174,7 @@ def secret_references(spec: Obj) -> set[tuple[str, str]]:
         for source in (volume.get("projected") or {}).get("sources") or []:
             if "secret" in source:
                 refs.add(("volume", source["secret"]["name"]))
-    for container in (spec.get("containers") or []) + (spec.get("initContainers") or []):
+    for container in _containers(spec):
         for env in container.get("env") or []:
             key_ref = (env.get("valueFrom") or {}).get("secretKeyRef")
             if key_ref:
@@ -186,10 +190,6 @@ def secret_references(spec: Obj) -> set[tuple[str, str]]:
 def allowed_secrets(role: str, params: dict[str, str]) -> set[str]:
     spec = CONTRACT["roles"][role]
     return set(spec["secrets"]) | {params[p] for p in spec["secret_parameters"]}
-
-
-def _containers(spec: Obj) -> list[Obj]:
-    return list(spec.get("containers") or []) + list(spec.get("initContainers") or [])
 
 
 def pod_violations(pod: Obj, role: str, params: dict[str, str]) -> list[str]:
@@ -303,7 +303,11 @@ def allow_policy_violations(policy: Obj, role: str, params: dict[str, str]) -> l
             continue
         matched.append(classes[0])
         if CONTRACT["egress_classes"][classes[0]]["peer_kind"] == "ipBlock":
-            for peer in rule["to"] if isinstance(rule["to"], list) else [rule["to"]]:
+            if not isinstance(rule.get("to"), list) or not rule["to"]:
+                # An empty or absent `to` allows every destination.
+                out.append(f"{classes[0]}: no peers, which allows every destination")
+                continue
+            for peer in rule["to"]:
                 if (
                     not isinstance(peer, dict)
                     or set(peer) != {"ipBlock"}
@@ -517,11 +521,6 @@ def test_network_policies_match_the_contract(namespace_key):
         assert allow_policy_violations(policies[name], role, params) == []
 
 
-def test_prod_policies_select_only_the_bastion():
-    for policy in _of_kind(rendered("prod"), "NetworkPolicy"):
-        assert policy["spec"]["podSelector"] == {"matchLabels": {LABEL_KEY: "bastion"}}
-
-
 @pytest.mark.parametrize("namespace_key", NAMESPACES)
 def test_dns_is_reachable_on_53_and_5353_from_every_role(namespace_key):
     objects = rendered(namespace_key)
@@ -587,26 +586,35 @@ def test_bastion_has_the_ca_namespace_and_work_claim():
 
 
 @pytest.mark.parametrize("namespace_key", NAMESPACES)
-def test_devkit_image_must_be_digest_pinned(namespace_key):
+def test_devkit_image_parameter_is_required_and_documents_the_digest_form(namespace_key):
     # A Template cannot refuse a value (a parameter's `from` only feeds
     # `generate`), so the parameter is required with no default, its
-    # description names the digest form, and this check is the refusal.
+    # description names the digest form, and the pod check is the refusal.
     template = load_template(namespace_key)
     parameter = next(p for p in template["parameters"] if p["name"] == "DEVKIT_IMAGE")
     assert parameter.get("required") is True and "value" not in parameter
     assert "@sha256:" in parameter["description"]
-    for bad in (
-        f"{REGISTRY_PATH}/devkit:latest",
-        f"{REGISTRY_PATH}/devkit@sha256:{'0' * 63}",
-        f"devkit@{DIGEST}",
-        f"{REGISTRY_PATH}/devkit:v1@sha256:{'A' * 64}",
-    ):
-        objects = rendered(namespace_key, DEVKIT_IMAGE=bad)
-        pod = _of_kind(objects, "Pod")[0]
-        role = pod["metadata"]["labels"][LABEL_KEY]
-        assert any(
-            "not digest-pinned" in v for v in pod_violations(pod, role, PARAMS[namespace_key])
-        )
+
+
+@pytest.mark.parametrize("namespace_key", NAMESPACES)
+@pytest.mark.parametrize(
+    "bad",
+    [
+        pytest.param(f"{REGISTRY_PATH}/devkit:latest", id="tag"),
+        pytest.param(f"{REGISTRY_PATH}/devkit:v1@{DIGEST}", id="tag-and-digest"),
+        pytest.param(f"{REGISTRY_PATH}/devkit@sha256:{'0' * 63}", id="short-digest"),
+        pytest.param(f"{REGISTRY_PATH}/devkit@sha256:{'A' * 64}", id="uppercase-digest"),
+        pytest.param(f"devkit@{DIGEST}", id="no-registry"),
+    ],
+)
+def test_devkit_image_is_refused_unless_digest_pinned(namespace_key, bad):
+    objects = rendered(namespace_key, DEVKIT_IMAGE=bad)
+    pod = _of_kind(objects, "Pod")[0]
+    role = pod["metadata"]["labels"][LABEL_KEY]
+    violations = pod_violations(pod, role, PARAMS[namespace_key])
+    assert violations == [
+        f"{pod['spec']['containers'][0]['name']}: image {bad!r} is not digest-pinned"
+    ]
 
 
 def test_dev_pod_mounts_its_two_secrets_read_only_beside_a_localhost_qdrant():
@@ -682,6 +690,8 @@ def runner_violations(config: Obj, registration: str, params: dict[str, str]) ->
         out.append(f"namespace {k8s.get('namespace')}")
     if k8s.get("service_account") != runner_role["service_account"]:
         out.append(f"service_account {k8s.get('service_account')}")
+    if k8s.get("automount_service_account_token") is not False:
+        out.append("automount_service_account_token is not false")
     if k8s.get("privileged") is not False or k8s.get("allow_privilege_escalation") is not False:
         out.append("privileged or privilege escalation not false")
     if k8s.get("pod_labels") != {LABEL_KEY: "runner"}:
@@ -823,6 +833,21 @@ def test_policy_checks_catch_widened_egress_and_selectors():
     )
 
 
+@pytest.mark.parametrize(("namespace_key", "role"), [("prod", "bastion"), ("ci", "runner")])
+def test_policy_check_catches_an_empty_peer_list(namespace_key, role):
+    # `oc process` renders `-p GITLAB_CIDRS=[]` as `to: []`, which allows
+    # every destination on that port.
+    params = {**PARAMS[namespace_key], "GITLAB_CIDRS": "[]"}
+    policy = _named(
+        render(load_template(namespace_key), params),
+        "NetworkPolicy",
+        CONTRACT["roles"][role]["allow_policy"],
+    )
+    assert "gitlab: no peers, which allows every destination" in allow_policy_violations(
+        policy, role, params
+    )
+
+
 @pytest.mark.parametrize(
     ("line", "expected"),
     [
@@ -830,12 +855,14 @@ def test_policy_checks_catch_widened_egress_and_selectors():
         ('    namespace_overwrite_allowed = "ci-.*"', "override key"),
         ('    cpu_limit_overwrite_max_allowed = "8"', "override key"),
         ("    privileged = true", "privileged"),
+        ("    automount_service_account_token = true", "automount_service_account_token"),
     ],
 )
-def test_runner_check_catches_an_override_or_privilege(line, expected):
+def test_runner_check_catches_an_override_privilege_or_token(line, expected):
     text = _runner_text("gate")
-    if line.strip().startswith("privileged"):
-        text = text.replace("    privileged = false", line)
+    key = line.split("=")[0]
+    if key.strip() in ("privileged", "automount_service_account_token"):
+        text = re.sub(rf"(?m)^{re.escape(key)}= false$", line, text)
     else:
         text = text.replace("    privileged = false", "    privileged = false\n" + line)
     config = render_runner(text, RUNNER_PARAMS)
