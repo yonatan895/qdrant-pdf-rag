@@ -6,6 +6,7 @@ import http.server
 import io
 import json
 import re
+import shutil
 import sys
 import tarfile
 import threading
@@ -531,6 +532,69 @@ def test_preparation_uses_verified_pip_and_no_isolated_build_resolution(locked, 
     assert project[-2:] == ['-e', str(root)]
     assert {'--no-deps', '--no-build-isolation', '--no-index'} <= set(project)
     assert calls[-1][0][-3:] == ['--profile', 'dev', '--project']
+
+
+def _kit_image(root: Path, wheels: Path, *, dev_lock: bytes | None = None) -> Path:
+    """The dev kit image's /opt/devkit layout: its two lock files and its wheelhouse."""
+    kit = root / "kit-image"
+    for name in prepare_python.KIT_LOCK_FILES:
+        (kit / "locks" / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(root / name, kit / "locks" / name)
+    if dev_lock is not None:
+        (kit / "locks/requirements.dev.lock.txt").write_bytes(dev_lock)
+    shutil.copytree(wheels, kit / "wheelhouse")
+    return kit
+
+
+def test_kit_mode_prepares_offline_from_the_kit_image_wheelhouse(locked, monkeypatch):
+    root, _, wheels = locked
+    kit = _kit_image(root, wheels)
+    python = root / "python"
+    python.touch()
+    calls = []
+    monkeypatch.setattr(prepare_python.subprocess, "run", lambda *a, **kw: calls.append(a[0]))
+    monkeypatch.setattr(locks.urllib.request, "urlopen", lambda *a, **kw: pytest.fail("network used"))
+    assert prepare_python.main(["--root", str(root), "--kit", str(kit), "--python", str(python)]) == 0
+    install = calls[1]
+    assert install[install.index("--find-links") + 1] == str((kit / "wheelhouse").absolute())
+    assert str((kit / "wheelhouse").absolute() / "pip-26.2.2-py3-none-any.whl") in install
+    assert {"--no-index", "--require-hashes", "--only-binary=:all:"} <= set(install)
+    assert calls[2][-2:] == ["-e", str(root)]
+
+
+def test_kit_mode_refuses_an_image_built_for_another_dev_lock_naming_the_kit(tmp_path, capsys):
+    root = Path(__file__).resolve().parents[1]
+    kit = tmp_path / "kit-image"
+    for name in prepare_python.KIT_LOCK_FILES:
+        (kit / "locks" / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(root / name, kit / "locks" / name)
+    (kit / "locks/requirements.dev.lock.txt").write_bytes(b"# another dev lock\n")
+    (kit / "wheelhouse").mkdir()
+    from scripts.devkit_key import key
+    with pytest.raises(locks.LockError, match=f"another dev lock; request mfr-devkit-{key(root)}$"):
+        prepare_python.kit_wheelhouse(root, kit)
+
+
+@pytest.mark.parametrize("damage", ["dev-lock", "tampered-wheel", "connected", "unreadable-wheel"])
+def test_kit_mode_fails_closed_before_any_process(locked, monkeypatch, capsys, damage):
+    root, _, wheels = locked
+    kit = _kit_image(root, wheels, dev_lock=b"# another dev lock\n" if damage == "dev-lock" else None)
+    if damage == "tampered-wheel":
+        (kit / "wheelhouse/example-1.0-py3-none-any.whl").write_bytes(b"corrupt")
+    if damage == "unreadable-wheel":
+        # The factory image's wheels were root-only (0600) under an arbitrary UID (#1118).
+        monkeypatch.setattr(prepare_python.os, "access", lambda path, mode: not str(path).endswith(".whl"))
+    monkeypatch.setattr(prepare_python.subprocess, "run", lambda *a, **kw: pytest.fail("process started"))
+    monkeypatch.setattr(locks.urllib.request, "urlopen", lambda *a, **kw: pytest.fail("network used"))
+    extra = ["--connected"] if damage == "connected" else []
+    environment = root / "new-venv"
+    assert prepare_python.main(["--root", str(root), "--kit", str(kit), "--venv", str(environment), *extra]) == 2
+    expected = {"dev-lock": "this dev kit image was built for another dev lock; request",
+                "tampered-wheel": "checksum",
+                "connected": "--kit is offline only",
+                "unreadable-wheel": "the dev kit image's wheels are not readable by this user"}[damage]
+    assert expected in capsys.readouterr().err
+    assert not environment.exists()
 
 
 @pytest.mark.parametrize("compressed", [False, True])
