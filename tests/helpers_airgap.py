@@ -160,21 +160,58 @@ exec {shlex.quote(real)} "$@"
 _MANIFEST_KEY: Path | None = None
 
 
-def write_signed_manifest(dist: Path, content: str) -> None:
-    """Write dist/MANIFEST.txt plus a real signature chain for it: SHA256SUMS
-    listing exactly MANIFEST.txt, SHA256SUMS.sig and sneakernet-signing.pub
-    (throwaway RSA key, reused per process). The guard verifies this chain
-    before trusting the MANIFEST (issue #414)."""
+def release_key() -> Path:
+    """The throwaway release signing key, one per test process."""
     global _MANIFEST_KEY
     if _MANIFEST_KEY is None:
         import tempfile
 
         _MANIFEST_KEY = gen_sign_keypair(Path(tempfile.mkdtemp(prefix="manifest-key-")))
+    return _MANIFEST_KEY
+
+
+def release_anchor() -> Path:
+    """The release trust anchor for release_key(): its public key in a file of
+    its own, outside any bundle (what an operator obtains out of band and
+    exports as SNEAKERNET_TRUSTED_PUB, #1118 F1)."""
+    key = release_key()
+    anchor = key.parent / "trusted-release-signing.pub"
+    if not anchor.exists():
+        subprocess.run(["openssl", "pkey", "-in", str(key), "-pubout", "-out", str(anchor)],
+                       check=True, capture_output=True)
+    return anchor
+
+
+def write_signed_manifest(dist: Path, content: str) -> None:
+    """Write dist/MANIFEST.txt plus a real signature chain for it: SHA256SUMS
+    listing exactly MANIFEST.txt, SHA256SUMS.sig and sneakernet-signing.pub
+    (throwaway RSA key, reused per process). The guard verifies this chain
+    before trusting the MANIFEST (issue #414)."""
+    key = release_key()
     dist.mkdir(parents=True, exist_ok=True)
     (dist / "MANIFEST.txt").write_text(content)
     (dist / "SHA256SUMS").write_text(f"{sha256_bytes(content.encode())}  MANIFEST.txt\n")
     (dist / "sneakernet-signing.pub").unlink(missing_ok=True)
-    sign_sums(dist, _MANIFEST_KEY)
+    sign_sums(dist, key)
+
+
+def connected_checkout(env: dict, explicit=()) -> dict:
+    """Give a live (non-dry-run) fixture the connected opt-out (#1118 F1).
+
+    These hermetic trees are plain copies, not verified signed releases, so a
+    live run of load/deploy/ingest/validate would be refused before the
+    behavior under test. They take AIRGAP_UNVERIFIED_CHECKOUT=1 with
+    CI_REHEARSAL=1, which keeps the pre-F1 guard rules (no-MANIFEST notice,
+    trust on first use). Dry-run gets nothing; a key the caller names in
+    `explicit` (set or removed) keeps the caller's choice. The verified-release
+    path and the opt-out itself are tested in tests/test_airgap_validate_sh.py
+    (checkout_guard tests)."""
+    dryrun = env.get("AIRGAP_DRYRUN", "").lower() in ("1", "true", "yes")
+    if not dryrun:
+        for key in ("AIRGAP_UNVERIFIED_CHECKOUT", "CI_REHEARSAL"):
+            if key not in explicit:
+                env[key] = "1"
+    return env
 
 
 def run_sh(script: Path, env: dict, cwd: Path):

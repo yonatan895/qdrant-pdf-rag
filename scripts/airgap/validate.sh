@@ -100,9 +100,9 @@ if [ -n "$MANIFEST" ]; then
 else
     echo "    Notice: no MANIFEST.txt found in ./dist or ../ (using env IMAGE_SHA=$IMAGE_SHA)"
 fi
-# The executing checkout itself must resolve to the packed SHA when one is
-# reachable (issue #414): overriding IMAGE_SHA alone never changes which
-# code executes. No MANIFEST means connected-development notice path above.
+# The executing checkout must be a verified signed release (issue #414,
+# #1118 F1): overriding IMAGE_SHA alone never changes which code executes.
+# No MANIFEST is refused outside dry-run unless the connected opt-out is set.
 check_checkout_sha
 
 # Issue #373: the console Route is only ever offered behind the oauth-proxy

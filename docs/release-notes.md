@@ -30,4 +30,17 @@ newest last; never rewrite a published entry.
 
 ## Entries
 
-None yet.
+## 2026-10-30 GH#1118 Deploy refuses an unverified checkout
+
+Outside dry-run, `airgap:load`, `airgap:deploy`, `airgap:ingest` and
+`airgap:validate` (and so `airgap:pipeline`) now run only from a verified
+signed release: the checkout `bootstrap.sh` made from the signed bundle, with
+`SNEAKERNET_TRUSTED_PUB` set to the release signing public key obtained out of
+band. A plain clone, a missing anchor, a signature the anchor does not verify,
+HEAD other than the MANIFEST sha, or a tracked or hidden change is refused
+with a fixed message. Dry-run is unchanged. Operators export
+`SNEAKERNET_TRUSTED_PUB` for every stage, not only `bootstrap.sh`. Connected
+developers and the connected CI and Kind lanes that run these stages from a
+plain checkout set `AIRGAP_UNVERIFIED_CHECKOUT=1` together with
+`CI_REHEARSAL=1` in the process environment (never in `airgap.env`, never in
+the air gap). See [deploy §4](deploy.md#4-signing-and-provenance).

@@ -114,10 +114,9 @@ def test_bootstrap_refuses_a_damaged_or_untrusted_bundle(bundle_dir, tamper, nee
     assert not (bundle_dir / "qdrant-pdf-rag").exists()
 
 
-def test_signed_handoff_executes_workflow_with_shipped_model_modes(bundle_dir):
-    """Run the workflow body with synthetic signed images and relocated CI tools."""
-    import yaml
-
+def _synthetic_gapbox(bundle_dir):
+    """A gapbox/ as the bundle artifact delivers it: a synthetic signed bundle
+    tarball of a real source commit, its digest, and relocated CI tools."""
     from tests.helpers_airgap import install_rendering_helm, write_stub
 
     source = bundle_dir.parent / "src_repo"
@@ -151,6 +150,14 @@ def test_signed_handoff_executes_workflow_with_shipped_model_modes(bundle_dir):
     for name in ("skopeo", "kubectl", "oc"):
         write_stub(tools / "bin" / name, "#!/bin/sh\nexit 0\n")
     install_rendering_helm(tools)
+    return gapbox, candidate_sha, tools
+
+
+def test_signed_handoff_executes_workflow_with_shipped_model_modes(bundle_dir):
+    """Run the workflow body with synthetic signed images and relocated CI tools."""
+    import yaml
+
+    gapbox, candidate_sha, tools = _synthetic_gapbox(bundle_dir)
     workflow = yaml.safe_load((REPO / ".github/workflows/e2e.yml").read_text())
     command = next(step["run"] for step in workflow["jobs"]["airgap-acceptance"]["steps"]
                    if step.get("name", "").startswith("Black-box handoff"))
@@ -334,16 +341,20 @@ def test_bootstrapped_workspace_passes_then_refuses_in_the_real_guard(bundle_dir
     """The dist/ chain bootstrap leaves is exactly what the downstream guard
     verifies (real signature, real clone): pass when clean, refuse once the
     committed MANIFEST is altered or a tracked edit hides behind an index
-    flag (issue #414)."""
+    flag (issue #414). The anchor is the packer's public key, derived from its
+    private key outside the bundle (#1118 F1)."""
     assert _bootstrap(bundle_dir).returncode == 0
     workspace = bundle_dir / "operator workspace"
+    anchor = bundle_dir.parent / "trusted-release-signing.pub"
+    subprocess.run(["openssl", "pkey", "-in", str(bundle_dir / "signing.key"), "-pubout", "-out", str(anchor)],
+                   check=True, capture_output=True)
 
     def guard():
         return subprocess.run(
             ["sh", "-c", f'. "{REPO}/scripts/airgap/common.sh"; cd "$1" || exit 9; MANIFEST=dist/MANIFEST.txt; check_checkout_sha',
              "guard", str(workspace)],
             cwd=workspace, capture_output=True, text=True, check=False,
-            env={"PATH": "/usr/bin:/bin", "HOME": str(bundle_dir)},
+            env={"PATH": "/usr/bin:/bin", "HOME": str(bundle_dir), "SNEAKERNET_TRUSTED_PUB": str(anchor)},
         )
 
     ok = guard()

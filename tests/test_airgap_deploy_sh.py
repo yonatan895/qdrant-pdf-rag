@@ -20,9 +20,11 @@ from tests.helpers_airgap import (
     assert_no_placeholders,
     assert_pull_secret_wired,
     b64,
+    connected_checkout,
     copy_chart,
     install_rendering_helm,
     make_bin_tree,
+    release_anchor,
     rendered_env,
     run_sh,
     set_oauth_proxy_pin,
@@ -182,9 +184,12 @@ def _run(tree, *extra_env):
         "OPENWEBUI_ENABLED": "false",  # default-on (ADR-0008): fixtures opt out explicitly
         "SKOPEO_REGISTRY": str(tmp_path / "registry"),
         "PODS_FILE": str(tmp_path / "pods.json"),
+        # The release trust anchor of write_signed_manifest's key (#1118 F1).
+        "SNEAKERNET_TRUSTED_PUB": str(release_anchor()),
     }
     for k, v in extra_env:
         env[k] = v
+    connected_checkout(env, {k for k, _ in extra_env})
     return run_sh(tmp_path / "scripts" / "airgap" / "deploy.sh", env, tmp_path)
 
 
@@ -530,16 +535,23 @@ def _values(tree, text):
     return str(path)
 
 
+# The release path is a verified signed release with neither opt-out nor
+# CI_REHEARSAL in the process environment (#1118 F1).
+_RELEASE_PATH = (("AIRGAP_UNVERIFIED_CHECKOUT", ""), ("CI_REHEARSAL", ""))
+
+
 def test_extra_values_are_refused_without_ci_rehearsal(tree):
-    r = _run(tree, ("QDRANT_EXTRA_VALUES", _values(tree, "resources: {}\n")))
+    _release(tree)
+    r = _run(tree, ("QDRANT_EXTRA_VALUES", _values(tree, "resources: {}\n")), *_RELEASE_PATH)
     assert r.returncode != 0
     assert "QDRANT_EXTRA_VALUES is a CI-rehearsal override" in r.stderr
     assert "upgrade" not in _helm_log(tree)
 
 
 def test_ci_rehearsal_cannot_come_from_the_operator_file(tree):
+    _release(tree)
     (tree[0] / "airgap.env").write_text("CI_REHEARSAL=1\n")
-    r = _run(tree, ("QDRANT_EXTRA_VALUES", _values(tree, "resources: {}\n")))
+    r = _run(tree, ("QDRANT_EXTRA_VALUES", _values(tree, "resources: {}\n")), *_RELEASE_PATH)
     assert r.returncode != 0
     assert "CI-rehearsal override" in r.stderr
     assert "upgrade" not in _helm_log(tree)
@@ -1400,6 +1412,7 @@ def test_openwebui_domain_qualified_roles_reach_the_pod_verbatim(tree, source):
                "EMBED_MODEL_REVISION": "rev-1", "EMBED_BASE_URL": "http://vllm:8000/v1",
                "SKOPEO_REGISTRY": str(root / "registry"), "PODS_FILE": str(root / "pods.json"),
                "AIRGAP_ENV": str(env_file), **dict(base)}
+        connected_checkout(env)  # a plain tree: the opt-out rides through Task (#1118 F1)
         # Task CLI variables (no shell between the caller and Task).
         result = subprocess.run(
             ["sh", str(tools / "run-task.sh"), "airgap:deploy",
@@ -2269,7 +2282,8 @@ def test_overlay_outside_ci_names_the_sizing_keys_to_use(tree):
     """The free-form overlay stays CI-only; a site is told which keys replace it."""
     vals = tree[0] / "vals.yaml"
     vals.write_text("resources: {}\n")
-    r = _run(tree, ("QDRANT_EXTRA_VALUES", str(vals)))
+    _release(tree)
+    r = _run(tree, ("QDRANT_EXTRA_VALUES", str(vals)), *_RELEASE_PATH)
     assert r.returncode != 0
     assert "QDRANT_EXTRA_VALUES is a CI-rehearsal override" in r.stderr
     for key in QDRANT_SIZING:
