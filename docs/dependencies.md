@@ -57,6 +57,14 @@ separate runtime and dev directories. Missing/corrupt/incompatible/unselected
 wheels fail verification before installation. Connected acquisition is an
 explicit `--connected` operation and verifies downloads before replacement.
 
+In the air gap the dev wheels ship once, inside the dev kit image (ADR-0009 §8,
+D-7): `prepare_python.py --kit --venv .venv` prepares offline from that image's
+`/opt/devkit/wheelhouse`. It first requires the image's two lock files
+(`/opt/devkit/locks/`) to equal the checkout's `requirements.dev.lock.txt` and
+`locks/cp314-linux-x86_64.json`; otherwise it refuses and names the kit to
+request (`mfr-devkit-<key>`). `--kit` never acquires, so it refuses `--connected`
+and `--internal-index`, and it refuses wheels the pod's user cannot read.
+
 GitHub uses the same helper and manifest. GitLab accepts `PIP_FIND_LINKS` as a
 local complete dev wheelhouse, or explicitly selects `--internal-index` using
 an internal HTTPS `PIP_INDEX_URL`. The latter requires pip 26.2.2 already in

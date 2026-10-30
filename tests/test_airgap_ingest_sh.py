@@ -17,6 +17,7 @@ from tests.helpers_airgap import (
     STUB_TOOL,
     assert_no_placeholders,
     assert_pull_secret_wired,
+    connected_checkout,
     install_rendering_helm,
     make_bin_tree,
     rendered_container,
@@ -78,6 +79,7 @@ def _run_ingest(tree, *extra_env, policy: tuple[str, str, str] | None = ("1", "1
         ) = policy
     for k, v in extra_env:
         env[k] = v
+    connected_checkout(env, {k for k, _ in extra_env})
     return runner(tmp_path / "scripts" / "airgap" / "ingest.sh", env, tmp_path)
 
 

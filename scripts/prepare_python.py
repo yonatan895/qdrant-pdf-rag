@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import importlib.metadata
 import os
 import subprocess
@@ -16,6 +17,11 @@ except ModuleNotFoundError:
     import dependency_lock as _local_locks
 
     locks = _local_locks
+
+# Dev workspace image layout (images/Containerfile.devkit): the verified dev
+# wheelhouse and the two lock files the image was built from (#1118, D-7).
+KIT_ROOT = Path("/opt/devkit")
+KIT_LOCK_FILES = ("requirements.dev.lock.txt", "locks/cp314-linux-x86_64.json")
 
 # Run verified pip wheel code using the target interpreter. The wheelhouse
 # must be completely verified before this command or any environment mutation.
@@ -48,6 +54,42 @@ def acquire_internal(root: Path, wheelhouse: Path) -> None:
                     "-r", str(root / "requirements.dev.lock.txt")],
                    env=env, check=True, capture_output=True)
     locks.verify_wheelhouse(root, "dev", wheelhouse)
+
+
+def _kit_name(root: Path) -> str:
+    """The kit this checkout needs. Imported only for this message, so ordinary
+    preparation never depends on scripts/devkit_key.py."""
+    fallback = "the kit `python3 scripts/devkit_key.py` names for this checkout"
+    try:
+        kit_key = importlib.import_module("scripts.devkit_key" if locks.__name__.startswith("scripts.")
+                                          else "devkit_key")
+    except ImportError:
+        return fallback
+    try:
+        return f"mfr-devkit-{kit_key.key(root)}"
+    except (kit_key.DevkitKeyError, OSError):
+        return fallback
+
+
+def kit_wheelhouse(root: Path, kit: Path) -> Path:
+    """The dev kit image's wheelhouse, only when the image carries this checkout's dev lock.
+
+    In the gap the dev wheels ship once, inside the kit image (#1118, D-7). A
+    checkout whose dev lock differs needs the kit built for it, named by its key.
+    """
+    for name in KIT_LOCK_FILES:
+        shipped, wanted = kit / "locks" / name, root / name
+        if (shipped.is_symlink() or not shipped.is_file() or not wanted.is_file()
+                or shipped.read_bytes() != wanted.read_bytes()):
+            raise locks.LockError(f"this dev kit image was built for another dev lock; request {_kit_name(root)}")
+    wheelhouse = kit / "wheelhouse"
+    if wheelhouse.is_symlink() or not wheelhouse.is_dir():
+        raise locks.LockError("the dev kit image has no wheelhouse; request the kit for this checkout")
+    # Pods run as an arbitrary UID (restricted-v2): a root-only wheel is a kit defect.
+    if not all(os.access(wheel, os.R_OK) for wheel in wheelhouse.glob("*.whl")):
+        raise locks.LockError("the dev kit image's wheels are not readable by this user; "
+                              "request a kit whose image installs them world-readable")
+    return wheelhouse
 
 
 def prepare(root: Path, wheelhouse: Path, python: Path | None, venv: Path | None,
@@ -93,7 +135,10 @@ def prepare(root: Path, wheelhouse: Path, python: Path | None, venv: Path | None
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=locks.ROOT)
-    parser.add_argument("--wheelhouse", type=Path, required=True)
+    wheels = parser.add_mutually_exclusive_group(required=True)
+    wheels.add_argument("--wheelhouse", type=Path)
+    wheels.add_argument("--kit", type=Path, nargs="?", const=KIT_ROOT, metavar="DIR",
+                        help=f"offline, from the dev kit image's own wheelhouse (default {KIT_ROOT})")
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--python", type=Path, help="explicit prepared CI interpreter")
     target.add_argument("--venv", type=Path, help="local environment directory owned by this setup")
@@ -106,9 +151,14 @@ def main(argv: list[str] | None = None) -> int:
         locks.download_workers(args.download_workers)
         if not args.connected and args.download_workers != 1:
             raise locks.LockError("parallel acquisition requires explicit connected preparation")
+        wheelhouse = args.wheelhouse
+        if args.kit is not None:
+            if args.connected or args.internal_index:
+                raise locks.LockError("--kit is offline only: the kit image already holds the verified wheels")
+            wheelhouse = kit_wheelhouse(args.root, args.kit)
         if args.internal_index:
-            acquire_internal(args.root, args.wheelhouse)
-        prepare(args.root, args.wheelhouse, args.python, args.venv, args.connected,
+            acquire_internal(args.root, wheelhouse)
+        prepare(args.root, wheelhouse, args.python, args.venv, args.connected,
                 download_workers=args.download_workers)
         return 0
     except locks.LockError as exc:

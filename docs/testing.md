@@ -638,12 +638,17 @@ instead of weakening the catalogue. An interrupted/incomplete report is not a
 pass. This narrow catalogue establishes sensitivity to the named historical
 counterexamples, not immunity to all faults or a global coverage percentage.
 
-Offline GitLab runs the complete unit suite in one job (the union of GitHub's
-shards) and the sim tier against the mirrored Qdrant service
-(`CI_BM25_CACHE_DIR` supplies the verified BM25 cache). Both reject skipped and
-xfailed tests through their JUnit report, and sim omits only
-`tests/test_qdrant_auth.py` and `tests/test_openwebui_proxy_nginx.py`, which need a local Docker daemon. GitLab has no
-lane selection: every lane runs on every pipeline.
+Offline GitLab runs the unit suite as four `parallel` jobs: tests/ci_shard.py
+splits the eligible collection with the same duration-balanced layout GitHub
+uses for its eight shards, and `tests/test_ci_gitlab_parity.py` proves on a
+real collection that the four shards are disjoint and complete. It runs the sim
+tier against the mirrored Qdrant service (`CI_BM25_CACHE_DIR` supplies the
+verified BM25 cache). Every shard and sim reject skipped and xfailed tests
+through their JUnit report, and sim omits only `tests/test_qdrant_auth.py` and
+`tests/test_openwebui_proxy_nginx.py`, which need a local Docker daemon. Merge
+request and tag pipelines run every lane; branch pipelines run the lanes the
+`scripts/review_tooling.py` classifier selects, as a child pipeline
+(`scripts/gitlab_lanes.py`).
 
 The GitHub `hazards` job and offline GitLab `hazards` job run the full catalogue
 and retain its synthetic evidence. The scheduled acceptance consumer requires it

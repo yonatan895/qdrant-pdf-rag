@@ -245,6 +245,22 @@ def test_a_stub_that_does_not_name_the_replacement_is_refused(tree):
     assert_refused(tree, "script_flags", "pipeline.sh --skip-load")
 
 
+# The import script owns its inputs (ADR-0009 §9, F7): a rename refuses the old
+# name in the script itself.
+def test_an_import_input_rename_needs_a_refusal_in_the_import_script(tree):
+    script = tree / surface.IMPORT_SCRIPT
+    edit(script, 'INPUTS="SHA BUNDLE SNEAKERNET_TRUSTED_PUB FORK R"',
+         'INPUTS="SHA BUNDLE SNEAKERNET_TRUSTED_PUB FORK RELEASE_DIR"')
+    note(tree, "- removed `script_flags:import-script R`; replaced by `RELEASE_DIR`; "
+               f"migration: refusal in `{surface.IMPORT_SCRIPT}`")
+
+    assert_refused(tree, "script_flags", "import-script R")
+
+    edit(script, "    for name in $INPUTS; do\n",
+         '    [ -z "${R:-}" ] || stop "R was renamed: use RELEASE_DIR"\n    for name in $INPUTS; do\n')
+    assert_refreshes(tree, "script_flags", "import-script R")
+
+
 # B2: deploy.sh values with list indices and the null form are part of the surface.
 def test_renaming_an_indexed_qdrant_value_is_a_removal(tree):
     edit(tree / surface.DEPLOY, '"imagePullSecrets[0].name=$PULL_SECRET"', '"imagePullSecrets[0].ref=$PULL_SECRET"')
