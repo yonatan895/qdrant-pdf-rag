@@ -227,7 +227,10 @@ def test_factory_least_permissions_pinned_actions_and_buildkit():
     buildkit = workflow["env"]["BUILDKIT_IMAGE"]
     assert re.fullmatch(r"moby/buildkit:v[\d.]+@sha256:[0-9a-f]{64}", buildkit) and buildkit in e2e
     push = next(step["run"] for step in publish["steps"] if "push-by-digest=true" in step.get("run", ""))
-    assert "rewrite-timestamp=true" in push and "imagetools create -t \"$IMAGE:$KEY\"" in push
-    assert push.index("imagetools inspect \"$IMAGE:$KEY\"") < push.index("imagetools create")
+    assert "rewrite-timestamp=true" in push
+    # The tag must name the pushed manifest, not a new index wrapping it, and is read back.
+    assert "imagetools create --prefer-index=false -t \"$IMAGE:$KEY\" \"$IMAGE@$DIGEST\"" in push
+    assert '[ "$PINNED" = "$DIGEST" ] || {' in push
+    assert push.index("imagetools inspect \"$IMAGE:$KEY\"") < push.index("imagetools create --prefer-index")
     # Only a registry "not found" may create the tag; any other inspect failure refuses.
     assert "grep -qi 'not found'" in push and "refusing to tag" in push

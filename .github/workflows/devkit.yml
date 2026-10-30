@@ -168,7 +168,9 @@ jobs:
             TAGSTATE="left alone: :$KEY exists at $PINNED"
             [ "$PINNED" = "$DIGEST" ] && TAGSTATE="left alone: :$KEY already points at this digest"
           elif printf '%s' "$INSPECT" | grep -qi 'not found'; then
-            docker buildx imagetools create -t "$IMAGE:$KEY" "$IMAGE@$DIGEST"
+            # --prefer-index=false: tag the pushed manifest itself; the default wraps it in a
+            # new index, so the tag would name a different digest than the one pushed.
+            docker buildx imagetools create --prefer-index=false -t "$IMAGE:$KEY" "$IMAGE@$DIGEST"
             PINNED="$(docker buildx imagetools inspect "$IMAGE:$KEY" --format '{{json .Manifest.Digest}}' | tr -d '"')"
             [ "$PINNED" = "$DIGEST" ] || { echo "key tag readback differs from the pushed digest" >&2; exit 1; }
             TAGSTATE="set: :$KEY did not exist"
