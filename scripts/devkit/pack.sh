@@ -160,6 +160,18 @@ tar -xzf "$ORAS_LINUX_SOURCE" -C "$STAGE/oras-linux" oras || die "$ORAS_LINUX_AS
     die "the Linux oras does not match the binary-sha256 in scripts/tools/oras-pin.txt"
 cp "$STAGE/oras-linux/oras" "$KIT/oras"
 
+echo "==> Anchor bootstrap (ADR-0009 §8 verbatim; the runbook's copy must be identical)"
+# The fenced block after a marker line, exactly.
+fenced_after() {
+    awk -v m="$1" '$0 == m { f = 1; next } f == 1 && $0 == "```powershell" { f = 2; next } f == 2 && $0 == "```" { exit } f == 2 { print }' "$2"
+}
+fenced_after '<!-- devkit-anchor-bootstrap -->' "$REPO_ROOT/docs/adr/0009-gap-fork.md" > "$STAGE/bootstrap.txt"
+fenced_after '<!-- devkit-runbook: step 1 -->' "$REPO_ROOT/docs/runbooks/devkit-windows.md" > "$STAGE/runbook-step1.txt"
+[ "$(wc -l < "$STAGE/bootstrap.txt" | tr -d ' ')" = 3 ] ||
+    die "ADR-0009 §8 holds no three-line anchor bootstrap after <!-- devkit-anchor-bootstrap -->"
+cmp -s "$STAGE/bootstrap.txt" "$STAGE/runbook-step1.txt" ||
+    die "docs/runbooks/devkit-windows.md step 1 differs from the anchor bootstrap in ADR-0009 §8: copy the ADR text verbatim"
+
 echo "==> Bastion template, Windows runbook, installer"
 cp "$REPO_ROOT/deploy/workspace/bastion.template.yaml" "$KIT/bastion.template.yaml"
 cp "$REPO_ROOT/docs/runbooks/devkit-windows.md" "$KIT/devkit-windows.md"
@@ -291,12 +303,17 @@ FINGERPRINT=$(sha256sum "$KIT/SHA256SUMS" | awk '{print $1}')
 printf '%s  SHA256SUMS\n' "$FINGERPRINT" > "$KIT/SHA256SUMS.sha256"
 
 mv "$KIT" "$OUT"
-trap - EXIT
-rm -rf "$STAGE"
 ANCHOR=$(printf '%s' "$FINGERPRINT" | cut -c1-16)
 SIZE=$(du -sk "$OUT" | awk '{print $1}')
+BOOTSTRAP=$(cat "$STAGE/bootstrap.txt")
 echo ""
 echo "Packed: dist/$KIT_NAME ($SIZE KiB, $(wc -l < "$OUT/SHA256SUMS" | tr -d ' ') members)"
 echo "Fingerprint (sha256 of SHA256SUMS): $FINGERPRINT"
 echo "Trust anchor (publish on GitHub, carry separately): $ANCHOR"
+echo "Anchor bootstrap (publish verbatim with the anchor; the operator sets \$Kit and \$Anchor, then pastes):"
+echo "----- anchor bootstrap -----"
+printf '%s\n' "$BOOTSTRAP"
+echo "----- end anchor bootstrap -----"
+trap - EXIT
+rm -rf "$STAGE"
 next_step "publish the fingerprint with the release record, then transfer the dist/$KIT_NAME directory as plain files and follow its devkit-windows.md"

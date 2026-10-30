@@ -96,6 +96,15 @@ printf '%s\n' "$STUB_POD_IMAGE_ID"
 '''
 
 
+def fenced_after(marker: str, path: Path) -> str:
+    """The ```powershell block that follows a marker line, as its exact text."""
+    lines = path.read_text(encoding="utf-8").split("\n")
+    start = lines.index(marker)
+    assert lines[start + 1] == "```powershell"
+    end = lines.index("```", start + 2)
+    return "".join(line + "\n" for line in lines[start + 2:end])
+
+
 def oci_layout(directory: Path, marker: bytes) -> str:
     """Write a real one-image OCI layout directory; return its manifest digest."""
     blobs = directory / "blobs" / "sha256"
@@ -209,7 +218,7 @@ def pack_tree(tmp_path, github):
         shutil.copy(REPO / "scripts/devkit" / name, tree / "scripts/devkit" / name)
     for relative in ("scripts/devkit_key.py", "scripts/dependency_lock.py", "requirements.lock.txt",
                      "requirements.dev.lock.txt", "images.txt", "deploy/workspace/bastion.template.yaml",
-                     "docs/runbooks/devkit-windows.md", "scripts/tools/task-pin.txt",
+                     "docs/runbooks/devkit-windows.md", "docs/adr/0009-gap-fork.md", "scripts/tools/task-pin.txt",
                      "scripts/tools/helm-pin.txt", "scripts/tools/oc-pin.txt", "scripts/tools/install-task.sh",
                      "scripts/tools/task-artifact.sh", "scripts/tools/install-helm.sh"):
         (tree / relative).parent.mkdir(parents=True, exist_ok=True)
@@ -322,6 +331,8 @@ def test_pack_writes_a_signed_plain_file_kit_whose_manifest_binds_the_pins(packe
     fingerprint = hashlib.sha256((kit / "SHA256SUMS").read_bytes()).hexdigest()
     assert (kit / "SHA256SUMS.sha256").read_text() == f"{fingerprint}  SHA256SUMS\n"
     assert f"Trust anchor (publish on GitHub, carry separately): {fingerprint[:16]}" in stdout
+    printed = stdout.split("----- anchor bootstrap -----\n", 1)[1].split("----- end anchor bootstrap -----", 1)[0]
+    assert printed == fenced_after("<!-- devkit-anchor-bootstrap -->", tree / "docs/adr/0009-gap-fork.md")
     # MANIFEST: key, digest, commit, snapshot and every kit key input's digest.
     fields = _manifest(kit)
     assert fields["key"] == expected_key
@@ -589,3 +600,21 @@ def test_install_refuses_a_kit_path_skopeo_would_read_as_another_layout(packed):
     assert done.returncode != 0
     assert "the kit path contains ':'" in done.stderr
     assert not Path(ctx["env"]["STUB_REGISTRY"]).exists()
+
+
+def test_the_runbook_anchor_bootstrap_is_the_adr_text_byte_for_byte():
+    """The kit carries a convenience copy; ADR-0009 §8 holds the published one."""
+    published = fenced_after("<!-- devkit-anchor-bootstrap -->", REPO / "docs/adr/0009-gap-fork.md")
+    in_kit = fenced_after("<!-- devkit-runbook: step 1 -->", REPO / "docs/runbooks/devkit-windows.md")
+    assert in_kit.encode("utf-8") == published.encode("utf-8")
+    assert published.count("\n") == 3
+
+
+def test_pack_refuses_a_runbook_whose_bootstrap_drifted_from_the_adr(pack_tree):
+    runbook = pack_tree["tree"] / "docs/runbooks/devkit-windows.md"
+    runbook.write_text(runbook.read_text().replace("if($e){\"FAIL:", "if($false){\"FAIL:", 1))
+    _git(pack_tree["tree"], "commit", "-q", "-am", "drift")
+    done = run_pack(pack_tree)
+    assert done.returncode != 0
+    assert "step 1 differs from the anchor bootstrap in ADR-0009" in done.stderr
+    assert not list((pack_tree["tree"] / "dist").glob("mfr-devkit-*"))

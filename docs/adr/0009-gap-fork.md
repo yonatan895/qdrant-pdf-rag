@@ -608,7 +608,13 @@ refreshed with each kit (Q9).
     from the transfer and checks them by eye on Windows. Both checks pass
     before any push and before any token reaches a pod. A verifier inside
     the kit cannot vouch for itself, so the bastion's signature checks come
-    after the anchor and are trusted only because of it.
+    after the anchor and are trusted only because of it. For the same
+    reason the Windows check is the **anchor bootstrap** below, published
+    with the anchor and never taken from the kit: it compares the
+    fingerprint of `SHA256SUMS` with the anchor, then every file in the kit
+    directory with `SHA256SUMS`, refusing extra, missing, changed and linked
+    files. The runbook's step 1 is a convenience copy that a test keeps
+    byte-identical, and every runbook command then runs by absolute path.
   - **Fallback:** if Windows cannot push, stream the kit's static Linux
     `oras` and its image layout into a pod from the previous release's agent
     image, already in the site registry, and push from inside. That image
@@ -672,6 +678,22 @@ refreshed with each kit (Q9).
 - **`agent_doctor` refuses a kit/lock mismatch** with a fixed message that
   names the kit to request (`mfr-devkit-<key>`). Outside a kit image,
   connected development keeps today's checks.
+
+### The anchor bootstrap (verbatim)
+
+`scripts/devkit/pack.sh` prints this text with the anchor, and the release
+record publishes both. The operator types `$Kit` (the kit directory) and
+`$Anchor` (the 16 hex carried separately), then pastes these three lines into
+Windows PowerShell 5.1 and continues only on the `PASS:` line. This copy is
+authoritative; the copy in `docs/runbooks/devkit-windows.md` must be
+byte-identical (`tests/test_devkit_kit.py`).
+
+<!-- devkit-anchor-bootstrap -->
+```powershell
+$r=Get-Item -LiteralPath $Kit -Force;$f=Join-Path $r.FullName 'SHA256SUMS';$w=New-Object 'Collections.Generic.Dictionary[string,string]';$e=$null;if($r.Attributes -match 'ReparsePoint'){$e='the kit directory (link)'}elseif(-not(Test-Path -LiteralPath $f -PathType Leaf)){$e='SHA256SUMS (missing)'}elseif((Get-FileHash -Algorithm SHA256 -LiteralPath $f).Hash.Substring(0,16) -ne "$Anchor".Trim()){$e='SHA256SUMS (fingerprint is not the anchor)'}else{foreach($l in [IO.File]::ReadAllLines($f)){$p=$l -split '  ',2;if($p.Count -ne 2 -or $p[0] -cnotmatch '^[0-9a-f]{64}$' -or $w.ContainsKey($p[1])){$e='SHA256SUMS (malformed)';break};$w[$p[1]]=$p[0]}}
+if(-not $e){$b=$r.FullName.TrimEnd('\','/').Length+1;foreach($i in Get-ChildItem -LiteralPath $r.FullName -Recurse -Force){$n=$i.FullName.Substring($b).Replace('\','/');if($i.Attributes -match 'ReparsePoint'){$e="$n (link)";break};if($i.PSIsContainer -or $n -cin 'SHA256SUMS','SHA256SUMS.sig','SHA256SUMS.sha256'){continue};if(-not $w.ContainsKey($n)){$e="$n (not in SHA256SUMS)";break};if((Get-FileHash -Algorithm SHA256 -LiteralPath $i.FullName).Hash -ne $w[$n]){$e="$n (differs)";break};[void]$w.Remove($n)};if(-not $e -and $w.Count){$e="$(@($w.Keys)[0]) (missing)"}}
+if($e){"FAIL: $e. Do not use this kit: transfer it again, and report it if this repeats."}else{'PASS: the kit matches the anchor and SHA256SUMS exactly.'}
+```
 
 ## 9. Extension surface (open question 2, decided)
 
