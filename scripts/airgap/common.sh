@@ -555,22 +555,27 @@ check_checkout_sha() {
         echo "Notice: no packed MANIFEST — checkout not release-verified (AIRGAP_UNVERIFIED_CHECKOUT=1, connected rehearsal only)" >&2; return 0
     fi
     check_manifest_chain "$MANIFEST" "$_checkout_mode"
+    # Every git read below runs with GIT_NO_REPLACE_OBJECTS=1, for that command
+    # only: a refs/replace/ entry would otherwise substitute an edited commit
+    # for the release sha, so HEAD names the release while `git diff HEAD`
+    # compares the edited tree (#1149 N1). Grafts (.git/info/grafts) rewrite
+    # parents only, never a commit's tree, so they cannot hide a change here.
     packed_sha=$(awk '/^sha: /{print $2}' "$MANIFEST")
     [ -n "$packed_sha" ] || \
         die "packed MANIFEST names no sha — cannot establish the release; use the signed bundle's MANIFEST.txt"
-    checkout_sha=$(git rev-parse HEAD 2>/dev/null) || checkout_sha=""
+    checkout_sha=$(GIT_NO_REPLACE_OBJECTS=1 git rev-parse HEAD 2>/dev/null) || checkout_sha=""
     [ -n "$checkout_sha" ] || \
         die "executing checkout identity cannot be resolved (no usable git checkout here) while a packed MANIFEST names a sha — run from the approved bundle checkout; overriding IMAGE_SHA alone never changes which code executes"
     [ "$checkout_sha" = "$packed_sha" ] || \
         die "executing checkout HEAD does not match the packed MANIFEST sha — run from the approved bundle checkout (git rev-parse HEAD and the MANIFEST sha: line must agree); overriding IMAGE_SHA alone never changes which code executes"
     _diff_rc=0
-    git diff --quiet HEAD -- >/dev/null 2>&1 || _diff_rc=$?
+    GIT_NO_REPLACE_OBJECTS=1 git diff --quiet HEAD -- >/dev/null 2>&1 || _diff_rc=$?
     [ "$_diff_rc" -eq 0 ] || \
         die "executing checkout has tracked changes against the packed MANIFEST sha — restore them (git diff HEAD lists them; operator settings belong in the untracked airgap.env) before running a release"
     # `git diff` trusts the index: assume-unchanged / skip-worktree files are
     # never compared. Tags: H = normal; lowercase = assume-unchanged; S/s =
     # skip-worktree. Anything but a plain "H " (or an unreadable index) fails.
-    _flags=$(git ls-files -v -- ':/' 2>/dev/null) || \
+    _flags=$(GIT_NO_REPLACE_OBJECTS=1 git ls-files -v -- ':/' 2>/dev/null) || \
         die "executing checkout index cannot be read — cannot prove no tracked file is hidden from the change check"
     printf '%s\n' "$_flags" | awk 'NF && substr($0, 1, 2) != "H " { bad=1 } END { exit bad }' || \
         die "executing checkout hides tracked files from change detection (assume-unchanged, skip-worktree or sparse checkout) — clear the flags (git update-index --no-assume-unchanged / --no-skip-worktree; git ls-files -v marks them) before running a release"

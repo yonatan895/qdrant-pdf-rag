@@ -805,6 +805,53 @@ def test_checkout_guard_refuses_sparse_checkout(approved):
     assert "hides tracked files" in r.stderr
 
 
+def _edited_commit(approved):
+    """A commit object whose tree holds an edited chart, the release commit as
+    its parent, with the edit left staged and in the worktree (no ref moves)."""
+    (approved / "charts" / "values.yaml").write_text("replicas: 9\n")
+    _git(approved, "add", "charts/values.yaml")
+    tree = _git(approved, "write-tree")
+    return _git(approved, "commit-tree", tree, "-p", "HEAD", "-m", "hidden edit")
+
+
+def test_checkout_guard_refuses_a_replace_ref_that_hides_an_edit(approved):
+    """#1149 N1: `git replace <release> <edited>` makes HEAD name the release
+    sha while `git diff HEAD` compares the edited tree, so a plain git read
+    sees a clean checkout. The guard reads git without replace objects and
+    refuses; once the replace ref and the edit are gone the next ordinary
+    verified run passes."""
+    release = _git(approved, "rev-parse", "HEAD")
+    _git(approved, "replace", release, _edited_commit(approved))
+    assert _git(approved, "rev-parse", "HEAD") == release
+    assert _git(approved, "diff", "HEAD", "--name-only") == ""  # the evasion is real
+    r = _approved_run(approved)
+    assert r.returncode == 1
+    assert r.stderr == _TRACKED_CHANGE
+    _git(approved, "replace", "-d", release)
+    _git(approved, "reset", "-q", "--hard", release)
+    assert _git(approved, "for-each-ref", "refs/replace/") == ""
+    again = _approved_run(approved)
+    assert again.returncode == 0, again.stderr
+    assert again.stderr == ""
+
+
+def test_checkout_guard_grafts_cannot_hide_an_edit(approved):
+    """A grafts file (.git/info/grafts, still honored by git) rewrites a
+    commit's parents, never its tree: an edit stays a tracked change, and a
+    clean checkout under a graft still verifies (#1149 N1)."""
+    release = _git(approved, "rev-parse", "HEAD")
+    edited = _edited_commit(approved)
+    (approved / ".git" / "info").mkdir(exist_ok=True)
+    (approved / ".git" / "info" / "grafts").write_text(f"{release} {edited}\n")
+    r = _approved_run(approved)
+    assert r.returncode == 1
+    assert r.stderr == _TRACKED_CHANGE
+    _git(approved, "reset", "-q", "--hard", release)
+    again = _approved_run(approved)
+    assert again.returncode == 0, again.stderr
+    assert again.stderr == ""
+
+
 def test_checkout_guard_parent_bundle_layout_is_verified(tmp_path):
     """The documented unpack-next-to-the-clone layout: ../MANIFEST.txt is
     trusted only through ../SHA256SUMS(.sig) like dist/ is; a ../SHA256SUMS that
