@@ -39,14 +39,15 @@ parameters:
     description: >-
       JSON list of NetworkPolicy ipBlock peers for the API server endpoints
       (runner manager only), e.g. [{"ipBlock":{"cidr":"10.0.0.10/32"}}].
+      Never empty: an empty `to` list allows every destination.
     required: true
   - name: API_SERVER_PORT
     value: "6443"
   - name: GITLAB_CIDRS
-    description: JSON list of ipBlock peers for GitLab (TCP 443).
+    description: JSON list of ipBlock peers for GitLab (TCP 443); never empty.
     required: true
   - name: LITELLM_CIDRS
-    description: JSON list of ipBlock peers for the LiteLLM endpoint (dev pod only).
+    description: JSON list of ipBlock peers for the LiteLLM endpoint (dev pod only); never empty.
     required: true
   - name: LITELLM_PORT
     description: The LiteLLM endpoint port.
@@ -245,7 +246,7 @@ objects:
           env:
             # The localhost sidecar; never the production collection.
             - name: QDRANT_URL
-              value: http://127.0.0.1:6333
+              value: "http://127.0.0.1:6333"
           securityContext:
             runAsNonRoot: true
             allowPrivilegeEscalation: false
@@ -277,11 +278,11 @@ objects:
           env:
             # Bind to the pod's loopback only: the sidecar serves this pod.
             - name: QDRANT__SERVICE__HOST
-              value: 127.0.0.1
+              value: "127.0.0.1"
             - name: QDRANT__TELEMETRY_DISABLED
               value: "true"
             - name: QDRANT_INIT_FILE_PATH
-              value: /qdrant/init/.qdrant-initialized
+              value: "/qdrant/init/.qdrant-initialized"
           securityContext:
             runAsNonRoot: true
             readOnlyRootFilesystem: true

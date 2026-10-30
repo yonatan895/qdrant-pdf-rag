@@ -27,6 +27,7 @@ concurrent = 3
   [runners.kubernetes]
     namespace = "${CI_NAMESPACE}"
     service_account = "mfr-runner-job"
+    automount_service_account_token = false
     image = "${DEVKIT_IMAGE}"
     helper_image = "${RUNNER_HELPER_IMAGE}"
     image_pull_secrets = ["${PULL_SECRET}"]
