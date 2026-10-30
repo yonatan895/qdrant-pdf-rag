@@ -116,11 +116,13 @@
     before it.
 - **Identities (F9).** Each pod role has its own ServiceAccount. The
   **F9-defined pods** (bastion, dev and runner job) have no RBAC and no
-  token automount, and their egress is limited to the listed destinations:
+  token automount, and their egress is limited to the listed destinations.
+  Their manifests and the contract the isolation proof reads are in
+  [`deploy/workspace/`](../../deploy/workspace/contract.json):
 
   | Role | Namespace | ServiceAccount | Egress |
   |---|---|---|---|
-  | bastion | production | its own; acts with the operator's session credentials (§8) | `kubernetes.default.svc` at the API server addresses in site config (D-3), site registry, DNS |
+  | bastion | production | its own; acts with the operator's session credentials (§8) | `kubernetes.default.svc` at the API server addresses in site config (D-3), site registry, GitLab read-only for F6 ([6525955227](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6525955227)), DNS |
   | dev | CI | its own | GitLab, the LiteLLM endpoint (with the dev key, below), DNS |
   | runner job | CI | `mfr-runner-job` | GitLab, DNS |
   | runner manager | CI | created by the site's GitLab Runner Operator | `kubernetes.default.svc` at the API server addresses in site config, GitLab, DNS |
@@ -143,8 +145,8 @@
   never lists the CI namespace there.
 - **Production authority.** Of the F9-defined pods, only the bastion
   reaches the API server and the registry. Operator scripts reach the
-  service through `$KC exec`, so the bastion needs nothing else. Dev and
-  runner-job pods have no route to either, so the network enforces "only the
+  service through `$KC exec`, so the bastion needs nothing else to deploy.
+  Dev and runner-job pods have no route to either, so the network enforces "only the
   bastion holds production authority". No F9-defined pod can read a
   production Secret (the Qdrant writer and admin keys, the gateway keys,
   the OIDC client secret, the gap signing key) or write any production
@@ -578,9 +580,11 @@ refreshed with each kit (Q9).
     ConfigMap;
   - the existing registry robot auth, `oc get secret <robot> -o jsonpath=… |
     oc exec -i mfr-bastion -- mfr-session-login --registry`, into
-    `/run/mfr-session/auth.json`.
+    `/run/mfr-session/private/auth.json`.
 
-  Both live only in the memory-only `/run/mfr-session/`. `oc logout`
+  Both live only in `/run/mfr-session/private/`
+  ([#1144](https://github.com/yonatan895/qdrant-pdf-rag/pull/1144)), inside
+  the memory-only `/run/mfr-session/`. `oc logout`
   revokes the token; logout or pod deletion removes both.
 - **The Windows operator path** pushes the first image, since no site image
   carries `oc` and `skopeo`. The literal runbook
