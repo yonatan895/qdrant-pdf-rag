@@ -1,0 +1,347 @@
+# F9 objects for the CI namespace (ADR-0009 section 2, GH#1118): one
+# default-deny egress policy over every pod, an allow policy per role (dev,
+# runner job, runner manager), the mfr-dev and mfr-runner-job
+# ServiceAccounts, and the dev pod with its claim. The roles, names and
+# egress classes are recorded in contract.json.
+#
+# Render and apply (a parameter file avoids PowerShell quoting of the JSON lists):
+#   oc process --local -f ci-namespace.template.yaml --param-file=ci.env | oc apply -f -
+#
+# Create the Secrets mfr-dev-gitlab and mfr-dev-litellm first; the dev pod
+# does not start without them. Images are always <repository>@<digest>, so a
+# tag cannot yield a runnable reference. PULL_SECRET (the pull-only robot) is
+# a kubelet pull credential the containers never see. The runner manager and its Runner resources
+# come from the site's GitLab Runner Operator, configured from
+# runner-gate.example.toml and runner-wip.example.toml. A Pod is immutable:
+# to change the dev pod, delete it and apply again (/work is kept).
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: mfr-ci-namespace
+  annotations:
+    description: F9 CI namespace policies, ServiceAccounts and the dev pod.
+parameters:
+  - name: CI_NAMESPACE
+    description: The CI namespace (runner manager, runner job pods, dev pod).
+    required: true
+  - name: DEVKIT_REPOSITORY
+    description: >-
+      The dev kit image repository in the site registry, <registry>/<path>,
+      with no tag or digest.
+    required: true
+  - name: DEVKIT_DIGEST
+    description: >-
+      The dev kit image manifest digest, sha256:<64 hex>, from the verified kit
+      MANIFEST. The image renders as DEVKIT_REPOSITORY@DEVKIT_DIGEST, so a tag
+      here never yields a runnable reference.
+    required: true
+  - name: QDRANT_REPOSITORY
+    description: >-
+      The Qdrant image repository in the site registry, with no tag or digest.
+      It serves the dev pod's localhost sidecar only.
+    required: true
+  - name: QDRANT_DIGEST
+    description: >-
+      The release's pinned Qdrant manifest digest (images.txt), sha256:<64 hex>,
+      as present in the site registry.
+    required: true
+  - name: PULL_SECRET
+    description: The CI namespace's pull-only robot Secret (kubelet image pulls only).
+    required: true
+  - name: STORAGE_CLASS
+    description: RWO block storage class for the dev /work claim; never NFS.
+    required: true
+  - name: API_SERVER_CIDRS
+    description: >-
+      JSON list of NetworkPolicy ipBlock peers for the API server endpoints
+      (runner manager only), e.g. [{"ipBlock":{"cidr":"10.0.0.10/32"}}].
+      Never empty: an empty `to` list allows every destination.
+    required: true
+  - name: API_SERVER_PORT
+    value: "6443"
+  - name: GITLAB_CIDRS
+    description: JSON list of ipBlock peers for GitLab (TCP 443); never empty.
+    required: true
+  - name: LITELLM_CIDRS
+    description: JSON list of ipBlock peers for the LiteLLM endpoint (dev pod only); never empty.
+    required: true
+  - name: LITELLM_PORT
+    description: The LiteLLM endpoint port.
+    required: true
+  - name: MANAGER_POD_LABEL_KEY
+    description: A label key the site's Runner Operator sets on the runner manager pod.
+    required: true
+  - name: MANAGER_POD_LABEL_VALUE
+    description: The value of MANAGER_POD_LABEL_KEY on the runner manager pod.
+    required: true
+  - name: DEV_CPU_REQUEST
+    value: 500m
+  - name: DEV_CPU_LIMIT
+    value: "2"
+  - name: DEV_MEMORY_REQUEST
+    value: 1Gi
+  - name: DEV_MEMORY_LIMIT
+    value: 4Gi
+  - name: DEV_EPHEMERAL_STORAGE_REQUEST
+    value: 1Gi
+  - name: DEV_EPHEMERAL_STORAGE_LIMIT
+    value: 4Gi
+  - name: QDRANT_CPU_REQUEST
+    value: 100m
+  - name: QDRANT_CPU_LIMIT
+    value: "1"
+  - name: QDRANT_MEMORY_REQUEST
+    value: 256Mi
+  - name: QDRANT_MEMORY_LIMIT
+    value: 2Gi
+  - name: QDRANT_EPHEMERAL_STORAGE_REQUEST
+    value: 1Gi
+  - name: QDRANT_EPHEMERAL_STORAGE_LIMIT
+    description: Bounds the sidecar's storage emptyDir as well.
+    value: 6Gi
+objects:
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: mfr-ci-default-deny-egress
+      namespace: ${CI_NAMESPACE}
+    spec:
+      podSelector: {}
+      policyTypes: [Egress]
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: mfr-dev-egress
+      namespace: ${CI_NAMESPACE}
+      labels:
+        workspace.mainframe-rag.io/role: dev
+    spec:
+      podSelector:
+        matchLabels:
+          workspace.mainframe-rag.io/role: dev
+      policyTypes: [Egress]
+      egress:
+        - to: "${{GITLAB_CIDRS}}"
+          ports:
+            - protocol: TCP
+              port: 443
+        - to: "${{LITELLM_CIDRS}}"
+          ports:
+            - protocol: TCP
+              port: "${{LITELLM_PORT}}"
+        - to:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: openshift-dns
+          ports:
+            - protocol: UDP
+              port: 53
+            - protocol: TCP
+              port: 53
+            - protocol: UDP
+              port: 5353
+            - protocol: TCP
+              port: 5353
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: mfr-runner-egress
+      namespace: ${CI_NAMESPACE}
+      labels:
+        workspace.mainframe-rag.io/role: runner
+    spec:
+      podSelector:
+        matchLabels:
+          workspace.mainframe-rag.io/role: runner
+      policyTypes: [Egress]
+      egress:
+        - to: "${{GITLAB_CIDRS}}"
+          ports:
+            - protocol: TCP
+              port: 443
+        - to:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: openshift-dns
+          ports:
+            - protocol: UDP
+              port: 53
+            - protocol: TCP
+              port: 53
+            - protocol: UDP
+              port: 5353
+            - protocol: TCP
+              port: 5353
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: mfr-manager-egress
+      namespace: ${CI_NAMESPACE}
+    spec:
+      # The operator owns the manager pod's labels; match one it sets.
+      podSelector:
+        matchExpressions:
+          - key: ${MANAGER_POD_LABEL_KEY}
+            operator: In
+            values: ["${MANAGER_POD_LABEL_VALUE}"]
+      policyTypes: [Egress]
+      egress:
+        - to: "${{API_SERVER_CIDRS}}"
+          ports:
+            - protocol: TCP
+              port: "${{API_SERVER_PORT}}"
+        - to: "${{GITLAB_CIDRS}}"
+          ports:
+            - protocol: TCP
+              port: 443
+        - to:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: openshift-dns
+          ports:
+            - protocol: UDP
+              port: 53
+            - protocol: TCP
+              port: 53
+            - protocol: UDP
+              port: 5353
+            - protocol: TCP
+              port: 5353
+  - apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: mfr-dev
+      namespace: ${CI_NAMESPACE}
+      labels:
+        workspace.mainframe-rag.io/role: dev
+    automountServiceAccountToken: false
+  - apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: mfr-runner-job
+      namespace: ${CI_NAMESPACE}
+      labels:
+        workspace.mainframe-rag.io/role: runner
+    automountServiceAccountToken: false
+  - apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: mfr-dev-work
+      namespace: ${CI_NAMESPACE}
+      labels:
+        workspace.mainframe-rag.io/role: dev
+    spec:
+      accessModes: [ReadWriteOnce]
+      storageClassName: ${STORAGE_CLASS}
+      resources:
+        requests:
+          storage: 20Gi
+  - apiVersion: v1
+    kind: Pod
+    metadata:
+      name: mfr-dev
+      namespace: ${CI_NAMESPACE}
+      labels:
+        workspace.mainframe-rag.io/role: dev
+    spec:
+      serviceAccountName: mfr-dev
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      imagePullSecrets:
+        - name: ${PULL_SECRET}
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dev
+          image: ${DEVKIT_REPOSITORY}@${DEVKIT_DIGEST}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done"]
+          env:
+            # The localhost sidecar; never the production collection.
+            - name: QDRANT_URL
+              value: "http://127.0.0.1:6333"
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: ${DEV_CPU_REQUEST}
+              memory: ${DEV_MEMORY_REQUEST}
+              ephemeral-storage: ${DEV_EPHEMERAL_STORAGE_REQUEST}
+            limits:
+              cpu: ${DEV_CPU_LIMIT}
+              memory: ${DEV_MEMORY_LIMIT}
+              ephemeral-storage: ${DEV_EPHEMERAL_STORAGE_LIMIT}
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: dev-gitlab
+              mountPath: /etc/mfr/dev-gitlab
+              readOnly: true
+            - name: dev-litellm
+              mountPath: /etc/mfr/dev-litellm
+              readOnly: true
+        - name: qdrant
+          image: ${QDRANT_REPOSITORY}@${QDRANT_DIGEST}
+          imagePullPolicy: IfNotPresent
+          env:
+            # Bind to the pod's loopback only: the sidecar serves this pod.
+            - name: QDRANT__SERVICE__HOST
+              value: "127.0.0.1"
+            - name: QDRANT__TELEMETRY_DISABLED
+              value: "true"
+            - name: QDRANT_INIT_FILE_PATH
+              value: "/qdrant/init/.qdrant-initialized"
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: ${QDRANT_CPU_REQUEST}
+              memory: ${QDRANT_MEMORY_REQUEST}
+              ephemeral-storage: ${QDRANT_EPHEMERAL_STORAGE_REQUEST}
+            limits:
+              cpu: ${QDRANT_CPU_LIMIT}
+              memory: ${QDRANT_MEMORY_LIMIT}
+              ephemeral-storage: ${QDRANT_EPHEMERAL_STORAGE_LIMIT}
+          volumeMounts:
+            - name: qdrant-storage
+              mountPath: /qdrant/storage
+            - name: qdrant-snapshots
+              mountPath: /qdrant/snapshots
+            - name: qdrant-init
+              mountPath: /qdrant/init
+      volumes:
+        - name: work
+          persistentVolumeClaim:
+            claimName: mfr-dev-work
+        - name: dev-gitlab
+          secret:
+            secretName: mfr-dev-gitlab
+            defaultMode: 0440
+        - name: dev-litellm
+          secret:
+            secretName: mfr-dev-litellm
+            defaultMode: 0440
+        - name: qdrant-storage
+          emptyDir:
+            sizeLimit: 4Gi
+        - name: qdrant-snapshots
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: qdrant-init
+          emptyDir:
+            sizeLimit: 1Mi

@@ -2,7 +2,7 @@
 #
 # key:    python3 scripts/devkit_key.py over the kit inputs (the image's pin files,
 #         its recipe, the build scripts it runs and images/devkit/). It names the image tag and the kit,
-#         ghcr.io/<owner>/qdrant-pdf-rag-devkit:<key> and mfr-devkit-<key>.tar.
+#         ghcr.io/<owner>/qdrant-pdf-rag-devkit:<key> and the kit directory mfr-devkit-<key>/.
 # digest: the registry manifest digest that .github/workflows/devkit.yml pushed for
 #         that key, copied from its job summary by a dedicated pin PR. While it is
 #         sha256:PENDING no kit exists for the key, and kit packing refuses it.

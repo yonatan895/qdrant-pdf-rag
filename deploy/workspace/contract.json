@@ -1,0 +1,304 @@
+{
+  "_comment": "F9 workspace isolation contract (ADR-0009 sections 2 and 8, GH#1118). The templates in this directory and the isolation proof both read it; tests/test_workspace_manifests.py checks the templates against it.",
+  "schema_version": 1,
+  "label_key": "workspace.mainframe-rag.io/role",
+  "forbidden_label_keys": [
+    "app"
+  ],
+  "forbidden_label_prefixes": [
+    "app.kubernetes.io/"
+  ],
+  "namespaces": {
+    "prod": {
+      "parameter": "PROD_NAMESPACE",
+      "template": "deploy/workspace/bastion.template.yaml"
+    },
+    "ci": {
+      "parameter": "CI_NAMESPACE",
+      "template": "deploy/workspace/ci-namespace.template.yaml"
+    }
+  },
+  "egress_classes": {
+    "api_server": {
+      "peers_parameter": "API_SERVER_CIDRS",
+      "peer_kind": "ipBlock",
+      "ports": [
+        {
+          "protocol": "TCP",
+          "port_parameter": "API_SERVER_PORT",
+          "default": 6443
+        }
+      ]
+    },
+    "registry": {
+      "peers_parameter": "REGISTRY_CIDRS",
+      "peer_kind": "ipBlock",
+      "ports": [
+        {
+          "protocol": "TCP",
+          "port": 443
+        }
+      ]
+    },
+    "gitlab": {
+      "peers_parameter": "GITLAB_CIDRS",
+      "peer_kind": "ipBlock",
+      "ports": [
+        {
+          "protocol": "TCP",
+          "port": 443
+        }
+      ]
+    },
+    "litellm": {
+      "peers_parameter": "LITELLM_CIDRS",
+      "peer_kind": "ipBlock",
+      "ports": [
+        {
+          "protocol": "TCP",
+          "port_parameter": "LITELLM_PORT"
+        }
+      ]
+    },
+    "dns": {
+      "peer_kind": "namespaceSelector",
+      "namespace_selector": {
+        "matchLabels": {
+          "kubernetes.io/metadata.name": "openshift-dns"
+        }
+      },
+      "ports": [
+        {
+          "protocol": "UDP",
+          "port": 53
+        },
+        {
+          "protocol": "TCP",
+          "port": 53
+        },
+        {
+          "protocol": "UDP",
+          "port": 5353
+        },
+        {
+          "protocol": "TCP",
+          "port": 5353
+        }
+      ]
+    }
+  },
+  "secret_refs": {
+    "_comment": "Per role: 'mounted' covers Secret volumes (and projected sources), env secretKeyRef and envFrom secretRef, the only references a container can read. 'image_pull' covers pod imagePullSecrets, kubelet credentials the containers never see. A *_parameters entry names a template or runner parameter whose value is the Secret name.",
+    "injected_image_pull_pattern": "^{service_account}-dockercfg-[a-z0-9]{5}$",
+    "injected_image_pull_note": "OpenShift may add <serviceaccount>-dockercfg-<suffix> to a pod's imagePullSecrets; it is allowed only under image_pull, never as a mount."
+  },
+  "roles": {
+    "bastion": {
+      "namespace": "prod",
+      "f9_defined": true,
+      "pods": [
+        "mfr-bastion"
+      ],
+      "service_account": "mfr-bastion",
+      "service_account_owner": "template",
+      "rbac": "none",
+      "automount_service_account_token": false,
+      "allowed_secret_refs": {
+        "mounted": [],
+        "mounted_parameters": [],
+        "image_pull_parameters": [
+          "PULL_SECRET"
+        ],
+        "image_pull_patterns": [
+          "^mfr-bastion-dockercfg-[a-z0-9]{5}$"
+        ]
+      },
+      "egress": [
+        "api_server",
+        "registry",
+        "gitlab",
+        "dns"
+      ],
+      "allow_policy": "mfr-bastion-egress"
+    },
+    "dev": {
+      "namespace": "ci",
+      "f9_defined": true,
+      "pods": [
+        "mfr-dev"
+      ],
+      "service_account": "mfr-dev",
+      "service_account_owner": "template",
+      "rbac": "none",
+      "automount_service_account_token": false,
+      "allowed_secret_refs": {
+        "mounted": [
+          "mfr-dev-gitlab",
+          "mfr-dev-litellm"
+        ],
+        "mounted_parameters": [],
+        "image_pull_parameters": [
+          "PULL_SECRET"
+        ],
+        "image_pull_patterns": [
+          "^mfr-dev-dockercfg-[a-z0-9]{5}$"
+        ]
+      },
+      "egress": [
+        "gitlab",
+        "litellm",
+        "dns"
+      ],
+      "allow_policy": "mfr-dev-egress"
+    },
+    "runner": {
+      "namespace": "ci",
+      "f9_defined": true,
+      "pods": [],
+      "pods_created_by": "the runner manager, one per job, from runner-gate.example.toml and runner-wip.example.toml",
+      "service_account": "mfr-runner-job",
+      "service_account_owner": "template",
+      "rbac": "none",
+      "automount_service_account_token": false,
+      "allowed_secret_refs": {
+        "mounted": [],
+        "mounted_parameters": [],
+        "image_pull_parameters": [
+          "PULL_SECRET"
+        ],
+        "image_pull_patterns": [
+          "^mfr-runner-job-dockercfg-[a-z0-9]{5}$"
+        ]
+      },
+      "egress": [
+        "gitlab",
+        "dns"
+      ],
+      "allow_policy": "mfr-runner-egress"
+    },
+    "manager": {
+      "namespace": "ci",
+      "f9_defined": false,
+      "pods": [],
+      "pods_created_by": "the site GitLab Runner Operator",
+      "service_account": null,
+      "service_account_owner": "gitlab-runner-operator",
+      "rbac": "operator-role",
+      "automount_service_account_token": "operator-default",
+      "allowed_secret_refs": {
+        "mounted": [],
+        "mounted_parameters": [
+          "RUNNER_TOKEN_SECRET"
+        ],
+        "image_pull_parameters": [
+          "PULL_SECRET"
+        ],
+        "image_pull_patterns": []
+      },
+      "operator_added_secrets": "listed by the isolation proof (the manager's ServiceAccount name, and so its dockercfg Secret, is the operator's)",
+      "pod_selector_parameters": {
+        "key": "MANAGER_POD_LABEL_KEY",
+        "value": "MANAGER_POD_LABEL_VALUE"
+      },
+      "egress": [
+        "api_server",
+        "gitlab",
+        "dns"
+      ],
+      "allow_policy": "mfr-manager-egress"
+    }
+  },
+  "policies": {
+    "prod": {
+      "default_deny": {
+        "name": "mfr-bastion-default-deny-egress",
+        "pod_selector": {
+          "matchLabels": {
+            "workspace.mainframe-rag.io/role": "bastion"
+          }
+        },
+        "policy_types": [
+          "Egress"
+        ]
+      },
+      "allow": [
+        "mfr-bastion-egress"
+      ]
+    },
+    "ci": {
+      "default_deny": {
+        "name": "mfr-ci-default-deny-egress",
+        "pod_selector": {},
+        "policy_types": [
+          "Egress"
+        ]
+      },
+      "allow": [
+        "mfr-dev-egress",
+        "mfr-runner-egress",
+        "mfr-manager-egress"
+      ]
+    }
+  },
+  "bastion_pod": {
+    "image_parameters": {
+      "repository": "DEVKIT_REPOSITORY",
+      "digest": "DEVKIT_DIGEST"
+    },
+    "image_form": "${DEVKIT_REPOSITORY}@${DEVKIT_DIGEST}: <registry>/<path>@sha256:<64 lowercase hex>",
+    "work_claim": {
+      "name": "mfr-bastion-work",
+      "mount_path": "/work",
+      "size": "30Gi",
+      "access_modes": [
+        "ReadWriteOnce"
+      ]
+    },
+    "session": {
+      "mount_path": "/run/mfr-session",
+      "medium": "Memory",
+      "credentials_dir": "/run/mfr-session/private"
+    },
+    "kube_root_ca": {
+      "config_map": "kube-root-ca.crt",
+      "key": "ca.crt",
+      "mount_path": "/etc/mfr/kube-root-ca"
+    },
+    "namespace_env": "MFR_NAMESPACE"
+  },
+  "dev_pod": {
+    "image_parameters": {
+      "repository": "DEVKIT_REPOSITORY",
+      "digest": "DEVKIT_DIGEST"
+    },
+    "qdrant_image_parameters": {
+      "repository": "QDRANT_REPOSITORY",
+      "digest": "QDRANT_DIGEST"
+    },
+    "work_claim": {
+      "name": "mfr-dev-work",
+      "mount_path": "/work",
+      "size": "20Gi",
+      "access_modes": [
+        "ReadWriteOnce"
+      ]
+    }
+  },
+  "runner_registrations": {
+    "gate": {
+      "config": "deploy/workspace/runner-gate.example.toml",
+      "concurrent": 1,
+      "pipelines": [
+        "merge_request",
+        "tag"
+      ]
+    },
+    "wip": {
+      "config": "deploy/workspace/runner-wip.example.toml",
+      "concurrent": 3,
+      "pipelines": [
+        "branch"
+      ]
+    }
+  }
+}

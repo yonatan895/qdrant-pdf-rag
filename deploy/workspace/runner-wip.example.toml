@@ -1,0 +1,63 @@
+# GitLab Runner configuration for the `wip` registration (ADR-0009 section 2,
+# GH#1118): three slots for branch pipelines. The `gate` registration
+# (runner-gate.example.toml) differs only in name, concurrent and limit.
+#
+# Delivery: replace every ${NAME} below, store the result as the `config.toml`
+# key of a ConfigMap in the CI namespace, and name that ConfigMap in the
+# Runner resource's `config` field. Set the Runner resource's `concurrent` to
+# the same value as here; `limit` holds the slot count for this registration
+# either way. Create the runner in GitLab with the tag `wip`, untagged jobs
+# refused.
+#
+# Placeholders:
+#   CI_NAMESPACE          the CI namespace
+#   PULL_SECRET           the pull-only registry robot Secret (never the push robot)
+#   REGISTRY_PATH         the site registry path that job and service images come from
+#   DEVKIT_REPOSITORY, DEVKIT_DIGEST
+#                         the default job image, rendered <repository>@<digest>
+#   RUNNER_HELPER_REPOSITORY, RUNNER_HELPER_DIGEST
+#                         the runner helper image in the site registry, likewise
+#   JOB_*, HELPER_*, SERVICE_*  requests and limits (about 1 CPU per slot)
+#
+# Jobs may override nothing: no job override setting is present.
+concurrent = 3
+
+[[runners]]
+  name = "mfr-wip"
+  executor = "kubernetes"
+  limit = 3
+  [runners.kubernetes]
+    namespace = "${CI_NAMESPACE}"
+    service_account = "mfr-runner-job"
+    automount_service_account_token = false
+    image = "${DEVKIT_REPOSITORY}@${DEVKIT_DIGEST}"
+    helper_image = "${RUNNER_HELPER_REPOSITORY}@${RUNNER_HELPER_DIGEST}"
+    image_pull_secrets = ["${PULL_SECRET}"]
+    pull_policy = ["if-not-present"]
+    allowed_images = ["${REGISTRY_PATH}/**/*"]
+    allowed_services = ["${REGISTRY_PATH}/**/*"]
+    privileged = false
+    allow_privilege_escalation = false
+    cap_drop = ["ALL"]
+    cpu_request = "${JOB_CPU_REQUEST}"
+    cpu_limit = "${JOB_CPU_LIMIT}"
+    memory_request = "${JOB_MEMORY_REQUEST}"
+    memory_limit = "${JOB_MEMORY_LIMIT}"
+    ephemeral_storage_request = "${JOB_EPHEMERAL_STORAGE_REQUEST}"
+    ephemeral_storage_limit = "${JOB_EPHEMERAL_STORAGE_LIMIT}"
+    helper_cpu_request = "${HELPER_CPU_REQUEST}"
+    helper_cpu_limit = "${HELPER_CPU_LIMIT}"
+    helper_memory_request = "${HELPER_MEMORY_REQUEST}"
+    helper_memory_limit = "${HELPER_MEMORY_LIMIT}"
+    helper_ephemeral_storage_request = "${HELPER_EPHEMERAL_STORAGE_REQUEST}"
+    helper_ephemeral_storage_limit = "${HELPER_EPHEMERAL_STORAGE_LIMIT}"
+    service_cpu_request = "${SERVICE_CPU_REQUEST}"
+    service_cpu_limit = "${SERVICE_CPU_LIMIT}"
+    service_memory_request = "${SERVICE_MEMORY_REQUEST}"
+    service_memory_limit = "${SERVICE_MEMORY_LIMIT}"
+    service_ephemeral_storage_request = "${SERVICE_EPHEMERAL_STORAGE_REQUEST}"
+    service_ephemeral_storage_limit = "${SERVICE_EPHEMERAL_STORAGE_LIMIT}"
+    [runners.kubernetes.pod_labels]
+      "workspace.mainframe-rag.io/role" = "runner"
+    [runners.kubernetes.pod_security_context]
+      run_as_non_root = true

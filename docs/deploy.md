@@ -1183,7 +1183,7 @@ and CI tooling have different owners and pull credentials.
 | Open WebUI front end (default on, ADR-0007/ADR-0008, #1074) | `qdrant-pdf-rag-openwebui:v0.12.3-slim` | as the agent; absent while `images.txt` says `sha256:PENDING` (the factory records the pushed manifest digest of the image built from `images/openwebui/Containerfile`, the recipe the `scripts/openwebui/` dev environment and acceptance lane also build); the upstream `open-webui/open-webui:v0.12.3-slim` line is factory build provenance, never pushed | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `openwebui`) when `openwebui.enabled` |
 | Open WebUI allow-list proxy (ADR-0007 E1, **Verifier-owned** where the workflow builds or mirrors images) | `nginxinc/nginx-unprivileged:1.30.6-alpine` | pinned by digest in `images.txt`; bundled as `openwebui-proxy-image.tar` exactly when the Open WebUI member is | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `proxy`) when `openwebui.enabled` |
 | CI job image | `ci/python:3.14`, or a complete `CI_PYTHON_IMAGE` | mirrored UBI Python 3.14 (GIL) with git, pip, tar, sha256sum | platform or factory mirror, not this repository | GitLab runner |
-| Dev workspace image (ADR-0009 §8, #1118) | `qdrant-pdf-rag-devkit:<kit key>` | manifest digest in `scripts/tools/devkit-pin.txt` (`sha256:PENDING` until the factory pushes); built from `images/Containerfile.devkit` by `.github/workflows/devkit.yml`; carried by the separate dev kit, never a release-bundle member or an `images.txt` line | the dev kit install (follow-up) | bastion, dev pod and runner jobs (follow-up) |
+| Dev workspace image (ADR-0009 §8, #1118) | `qdrant-pdf-rag-devkit:<kit key>` | manifest digest in `scripts/tools/devkit-pin.txt` (`sha256:PENDING` until the factory pushes); built from `images/Containerfile.devkit` by `.github/workflows/devkit.yml`; carried by the separate dev kit, never a release-bundle member or an `images.txt` line | the dev kit install (follow-up) | bastion, dev pod and runner jobs, from the templates and runner configurations in `deploy/workspace/` (contract: `deploy/workspace/contract.json`) |
 | CI Qdrant service | `qdrant/qdrant@sha256:<images.txt digest>` | the `images.txt` manifest digest, so a tag is never enough | registry-to-registry copy that preserves the digest | GitLab runner (`sim`, `gate-l1`) |
 
 The CI Qdrant service is a different role from the runtime Qdrant image. `load.sh`
@@ -2227,3 +2227,76 @@ Register that second redirect URI on the **test** client only, next to
 `https://<host>/oauth/oidc/callback`, and remove it when the check is done; the production
 client keeps only the HTTPS callback.
 Tests: `tests/test_adfs_claims_check.py` (a fake TLS AD FS, canary leak assertions).
+
+<a id="workspace-isolation-proof"></a>
+## Workspace isolation proof (bastion, ADR-0009 §2)
+
+`scripts/devkit/isolation_proof.py` proves the F9 isolation of the production and CI
+namespaces. It is standard library only, runs on the bastion as the operator (namespace
+admin in both namespaces) and reaches the cluster only through `oc` (`--kubectl` picks
+another client). Roles, ServiceAccounts, allowed Secrets and egress classes come from
+`deploy/workspace/contract.json`; site values come from a parameter file (`KEY=VALUE`
+lines, `--param` overrides): the two templates' parameters plus the runner configuration's
+`PULL_SECRET` and `REGISTRY_PATH`, and `RUNNER_TOKEN_SECRET`. Probe pods run
+`DEVKIT_REPOSITORY@DEVKIT_DIGEST`.
+
+```sh
+python3 -I scripts/devkit/isolation_proof.py \
+  --contract deploy/workspace/contract.json --param-file <workspace.params> \
+  --runner-config <gate config.toml> --runner-config <wip config.toml> \
+  --probe --output <record.json>
+```
+
+The JSON record goes with the dated `gap/records/` entry for the proof.
+
+It records:
+
+- each F9 ServiceAccount's `can-i --list` in both namespaces against a fixed, versioned
+  baseline in the script (`BASELINE_VERSION`: the Kubernetes and OpenShift self-review,
+  discovery and default `system:authenticated` rules). Any other rule is a violation,
+  whichever binding or group granted it; a site whose defaults differ fails closed until
+  a reviewed PR changes the baseline;
+- a negative matrix asked outright of each F9 ServiceAccount in both namespaces: secret
+  read and write, configmap writes, pod create, patch, update, delete, exec, attach,
+  port-forward, proxy and ephemeral containers, service proxy, workload creates
+  (deployments, statefulsets, jobs, cronjobs, replica and daemon sets, replication
+  controllers, DeploymentConfigs), NetworkPolicy writes, `runners.apps.gitlab.com`, token
+  requests, impersonation, and Role and RoleBinding writes. The operator's own
+  `get secrets` is the positive control;
+- every pod's class, and the workspace and manager pods' Secret references, mounted and
+  image-pull checked separately: an injected `<serviceaccount>-dockercfg-<suffix>` only as
+  the pod's own pull Secret, and GitLab Runner's own labels and per-job pull Secrets
+  (`runner-<token>-project-<id>-concurrent-<n>...`, same prefix as the pod, image pull
+  only) on runner job pods only; the manager label selector must match no workspace pod
+  and no runner `pod_labels`;
+- the runner configuration against an allow-list: every key of the file, of each
+  `[[runners]]` entry and of `[runners.kubernetes]` (with `pod_security_context`) must be
+  listed and hold an allowed value, so volumes, `pod_spec` patches, annotations, node
+  selectors, `*_overwrite_*` and any unknown key are refused;
+- the egress policies: in the CI namespace exactly the contract's policies, each equal to
+  its rendered form, and nothing else; in the production namespace every policy that
+  selects the bastion (its contract labels or a live bastion pod's) must be one of its
+  contract policies;
+- on every egress rule that selects a workspace or manager pod: no empty `to`, no
+  `0.0.0.0/0` or `::/0`, no empty `namespaceSelector`, and no ipBlock over the pod or
+  Service network. The networks come from `network.config.openshift.io/cluster`; when the
+  operator cannot read it, pass them with `--cluster-network CIDR`, or the check stays
+  `unchecked` and the result inconclusive;
+- the agent ingress policies;
+- with `--probe`, TCP and DNS outcomes from probe pods carrying exactly the labels of a
+  live pod of each role (for runner jobs without a live job: the role label, the runner
+  configuration's `pod_labels` and GitLab Runner's default labels). The run is marked by
+  an annotation, never a label. A probe
+  pod in the production namespace that no policy selects is the negative control: a
+  blocked result counts only for a target the control reached. A CIDR wider than one
+  address is not probed; give such a class a `--probe-host CLASS=HOST`.
+
+The record holds verbs, resources, object names and outcomes, never a Secret value, token
+or env value.
+
+Exit 0 means proven, 1 a violation, 2 a usage or environment error, an inconclusive
+result, or a run without `--probe` (verdict `static-only`, never the full proof). Run one
+proof at a time: each run first deletes probe objects (label
+`isolation-proof.mainframe-rag.io/run`, an annotation on `mfr-proof-*` pods) that an earlier run left, and removes its own on
+every exit, SIGTERM and SIGHUP included; only a SIGKILL leaves them for the next run.
+Tests: `tests/test_isolation_proof.py` (a stub `oc`, canary leak assertions).

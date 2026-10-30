@@ -1,0 +1,215 @@
+# F9 bastion for the production namespace (ADR-0009 sections 2 and 8, GH#1118).
+# The roles, names and egress classes are recorded in contract.json.
+#
+# Render and apply from the operator's Windows `oc` (a parameter file avoids
+# PowerShell quoting of the JSON lists):
+#   oc process --local -f bastion.template.yaml --param-file=bastion.env | oc apply -f -
+#
+# The policies come first in the rendered List, so the pod never starts
+# without its egress policy. A Pod is immutable: to change it, delete the pod
+# (the memory-only session directory goes with it) and apply again.
+#
+# The bastion has no RBAC, no Secret mount and no token: the operator pipes
+# session credentials into /run/mfr-session/private/ (mfr-session-login).
+# The image is always <repository>@<digest>, so a tag cannot yield a runnable
+# reference. PULL_SECRET is a kubelet pull credential (imagePullSecrets) that
+# the container never sees; no Secret is mounted.
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: mfr-bastion
+  annotations:
+    description: F9 bastion pod, its ServiceAccount, /work claim and egress policies (production namespace).
+parameters:
+  - name: PROD_NAMESPACE
+    description: The production namespace (the live release and the bastion).
+    required: true
+  - name: DEVKIT_REPOSITORY
+    description: >-
+      The dev kit image repository in the site registry, <registry>/<path>,
+      with no tag or digest.
+    required: true
+  - name: DEVKIT_DIGEST
+    description: >-
+      The dev kit image manifest digest, sha256:<64 hex>, from the verified kit
+      MANIFEST. The image renders as DEVKIT_REPOSITORY@DEVKIT_DIGEST, so a tag
+      here never yields a runnable reference.
+    required: true
+  - name: PULL_SECRET
+    description: The existing production pull robot Secret (kubelet image pulls only).
+    required: true
+  - name: STORAGE_CLASS
+    description: RWO block storage class for /work (the site's STORAGE_CLASS); never NFS.
+    required: true
+  - name: API_SERVER_CIDRS
+    description: >-
+      JSON list of NetworkPolicy ipBlock peers for the API server endpoints
+      behind kubernetes.default.svc, e.g. [{"ipBlock":{"cidr":"10.0.0.10/32"}}].
+      Never empty: an empty `to` list allows every destination.
+    required: true
+  - name: API_SERVER_PORT
+    description: API server endpoint port (after the Service translation).
+    value: "6443"
+  - name: REGISTRY_CIDRS
+    description: JSON list of ipBlock peers for the site registry (TCP 443); never empty.
+    required: true
+  - name: GITLAB_CIDRS
+    description: JSON list of ipBlock peers for GitLab (TCP 443; read-only fetch of release tags, F6); never empty.
+    required: true
+  - name: BASTION_CPU_REQUEST
+    value: 250m
+  - name: BASTION_CPU_LIMIT
+    description: Raise for an F6 release build session, within the production quota.
+    value: "2"
+  - name: BASTION_MEMORY_REQUEST
+    value: 512Mi
+  - name: BASTION_MEMORY_LIMIT
+    description: Includes the memory-only session directory. Raise for an F6 release build.
+    value: 4Gi
+  - name: BASTION_EPHEMERAL_STORAGE_REQUEST
+    value: 1Gi
+  - name: BASTION_EPHEMERAL_STORAGE_LIMIT
+    value: 8Gi
+objects:
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: mfr-bastion-default-deny-egress
+      namespace: ${PROD_NAMESPACE}
+      labels:
+        workspace.mainframe-rag.io/role: bastion
+    spec:
+      podSelector:
+        matchLabels:
+          workspace.mainframe-rag.io/role: bastion
+      policyTypes: [Egress]
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: mfr-bastion-egress
+      namespace: ${PROD_NAMESPACE}
+      labels:
+        workspace.mainframe-rag.io/role: bastion
+    spec:
+      podSelector:
+        matchLabels:
+          workspace.mainframe-rag.io/role: bastion
+      policyTypes: [Egress]
+      egress:
+        - to: "${{API_SERVER_CIDRS}}"
+          ports:
+            - protocol: TCP
+              port: "${{API_SERVER_PORT}}"
+        - to: "${{REGISTRY_CIDRS}}"
+          ports:
+            - protocol: TCP
+              port: 443
+        - to: "${{GITLAB_CIDRS}}"
+          ports:
+            - protocol: TCP
+              port: 443
+        - to:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: openshift-dns
+          ports:
+            - protocol: UDP
+              port: 53
+            - protocol: TCP
+              port: 53
+            - protocol: UDP
+              port: 5353
+            - protocol: TCP
+              port: 5353
+  - apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: mfr-bastion
+      namespace: ${PROD_NAMESPACE}
+      labels:
+        workspace.mainframe-rag.io/role: bastion
+    automountServiceAccountToken: false
+  - apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: mfr-bastion-work
+      namespace: ${PROD_NAMESPACE}
+      labels:
+        workspace.mainframe-rag.io/role: bastion
+    spec:
+      accessModes: [ReadWriteOnce]
+      storageClassName: ${STORAGE_CLASS}
+      resources:
+        requests:
+          storage: 30Gi
+  - apiVersion: v1
+    kind: Pod
+    metadata:
+      name: mfr-bastion
+      namespace: ${PROD_NAMESPACE}
+      labels:
+        workspace.mainframe-rag.io/role: bastion
+    spec:
+      serviceAccountName: mfr-bastion
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      imagePullSecrets:
+        - name: ${PULL_SECRET}
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bastion
+          image: ${DEVKIT_REPOSITORY}@${DEVKIT_DIGEST}
+          imagePullPolicy: IfNotPresent
+          # Long-running so `oc exec` works; the shell reaps orphaned exec
+          # children and exits promptly on TERM.
+          command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done"]
+          env:
+            - name: MFR_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: ${BASTION_CPU_REQUEST}
+              memory: ${BASTION_MEMORY_REQUEST}
+              ephemeral-storage: ${BASTION_EPHEMERAL_STORAGE_REQUEST}
+            limits:
+              cpu: ${BASTION_CPU_LIMIT}
+              memory: ${BASTION_MEMORY_LIMIT}
+              ephemeral-storage: ${BASTION_EPHEMERAL_STORAGE_LIMIT}
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            # Memory-only session directory: credentials live in its
+            # private/ subdirectory (#1144) and leave with the pod.
+            - name: session
+              mountPath: /run/mfr-session
+            - name: kube-root-ca
+              mountPath: /etc/mfr/kube-root-ca
+              readOnly: true
+      volumes:
+        - name: work
+          persistentVolumeClaim:
+            claimName: mfr-bastion-work
+        - name: session
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: kube-root-ca
+          configMap:
+            name: kube-root-ca.crt
+            items:
+              - key: ca.crt
+                path: ca.crt

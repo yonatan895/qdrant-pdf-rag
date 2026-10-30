@@ -1,0 +1,468 @@
+# Dev kit transport proofs (#1118, ADR-0009 §8, D-6). Not an acceptance producer
+# (scripts/acceptance.py PRODUCERS) and never touches the real devkit package.
+#
+#   linux     packs a small synthetic kit with the real scripts/devkit/pack.sh (the
+#             pin is rewritten in the runner's checkout only, never pushed), pushes
+#             it with the kit's Linux oras to a TLS+auth registry:2 and reads the
+#             digest back, then runs the kit's install.sh against the same registry
+#   windows   runs the published anchor bootstrap literally in Windows PowerShell
+#             5.1 against the kit and tampered copies (extra oc.cmd, edited runbook,
+#             re-hashed sums, swapped blob, link, wrong anchor), then the runbook's
+#             blocks from the kit's own devkit-windows.md with oc.cmd/oc.bat planted
+#             in the kit (they must never run):
+#             oras.exe push to the scratch GHCR package with readback, the pinned
+#             oc.exe render through the PowerShell pipe compared with the Linux
+#             render, and the bytes a PowerShell pipe hands `oc exec -i`. A native
+#             stand-in oc.exe records the exact argv and stdin; `oc process` runs
+#             the real oc.exe
+#   session   feeds those piped bytes to the real mfr-session-login on Linux
+name: devkit-proof
+
+on:
+  pull_request:
+    paths:
+      - scripts/devkit/**
+      - scripts/airgap/image_manifest.py
+      - scripts/tools/oras-pin.txt
+      - scripts/tools/oras-windows-pin.txt
+      - docs/runbooks/devkit-windows.md
+      - docs/adr/0009-gap-fork.md
+      - deploy/workspace/bastion.template.yaml
+      - images/devkit/bin/**
+      - .github/workflows/devkit-proof.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: devkit-proof-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY_IMAGE: registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+  # The Windows build of the scripts/tools/oc-pin.txt version, from the same
+  # release sha256sum.txt that pin verifies (openshift-client-windows-4.20.42.zip).
+  OC_WINDOWS_ZIP: https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/4.20.42/openshift-client-windows-4.20.42.zip
+  OC_WINDOWS_ZIP_SHA256: a0abb6b3acee6d189a60a53d4d6186262dd61d8ff9860b5dc7940cb84e581c7e
+  OC_WINDOWS_BINARY_SHA256: c130a758d94142459cf97a2434447bd3e6438dc0a0579c25f61e0f99f7ea8353
+
+jobs:
+  linux:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.14.8"
+      - name: Pack a synthetic kit with the real pack.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          OUT="$RUNNER_TEMP/proof"
+          mkdir -p "$OUT/kit"
+          # A small deterministic one-layer image as an OCI layout directory.
+          python - "$RUNNER_TEMP/layout" > "$RUNNER_TEMP/digest" <<'PY'
+          import gzip, hashlib, io, json, sys, tarfile
+          from pathlib import Path
+          root = Path(sys.argv[1]); blobs = root / "blobs/sha256"; blobs.mkdir(parents=True)
+          def put(data, media):
+              digest = hashlib.sha256(data).hexdigest(); (blobs / digest).write_bytes(data)
+              return {"mediaType": media, "digest": "sha256:" + digest, "size": len(data)}
+          raw = io.BytesIO()
+          with tarfile.open(fileobj=raw, mode="w", format=tarfile.PAX_FORMAT) as tar:
+              data = b"devkit transport proof\n"; info = tarfile.TarInfo("opt/devkit/proof.txt"); info.size = len(data)
+              tar.addfile(info, io.BytesIO(data))
+          layer = raw.getvalue()
+          config = json.dumps({"architecture": "amd64", "os": "linux", "rootfs": {"type": "layers",
+                               "diff_ids": ["sha256:" + hashlib.sha256(layer).hexdigest()]}}).encode()
+          manifest = json.dumps({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                                 "config": put(config, "application/vnd.oci.image.config.v1+json"),
+                                 "layers": [put(gzip.compress(layer, mtime=0), "application/vnd.oci.image.layer.v1.tar+gzip")]},
+                                separators=(",", ":")).encode()
+          entry = put(manifest, "application/vnd.oci.image.manifest.v1+json")
+          (root / "index.json").write_text(json.dumps({"schemaVersion": 2, "manifests": [entry]}))
+          (root / "oci-layout").write_text('{"imageLayoutVersion":"1.0.0"}')
+          print(entry["digest"])
+          PY
+          DIGEST="$(cat "$RUNNER_TEMP/digest")"
+          # Runner-local pin for the synthetic image; this commit is never pushed.
+          sed -i "s/^digest: .*/digest: $DIGEST/" scripts/tools/devkit-pin.txt
+          git -c user.name=devkit-proof -c user.email=devkit-proof@invalid commit -q -m "devkit-proof: synthetic pin" scripts/tools/devkit-pin.txt
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$RUNNER_TEMP/signing.key"
+          umask 022
+          openssl pkey -in "$RUNNER_TEMP/signing.key" -pubout -out "$OUT/release-signing.pub"
+          SNEAKERNET_SIGNING_KEY="$RUNNER_TEMP/signing.key" sh scripts/devkit/pack.sh --reuse-image "$RUNNER_TEMP/layout" | tee "$RUNNER_TEMP/pack.log"
+          sed -n 's/^Trust anchor (publish on GitHub, carry separately): //p' "$RUNNER_TEMP/pack.log" > "$OUT/anchor.txt"
+          # The anchor bootstrap exactly as pack.sh prints it for the release record.
+          sed -n '/^----- anchor bootstrap -----$/,/^----- end anchor bootstrap -----$/p' "$RUNNER_TEMP/pack.log" | sed '1d;$d' > "$OUT/bootstrap.ps1"
+          [ "$(wc -l < "$OUT/bootstrap.ps1")" = 3 ]
+          KIT="$(ls -d dist/mfr-devkit-*)"
+          mv "$KIT" "$OUT/kit/"
+          KIT="$OUT/kit/$(basename "$KIT")"
+          [ "$(awk '$1 == "image_digest:" {print $2}' "$KIT/MANIFEST.txt")" = "$DIGEST" ]
+          echo "KIT=$KIT" >> "$GITHUB_ENV"
+          echo "DIGEST=$DIGEST" >> "$GITHUB_ENV"
+          echo "KEY=$(awk '$1 == "key:" {print $2}' "$KIT/MANIFEST.txt")" >> "$GITHUB_ENV"
+      - name: Push with the kit's oras to a TLS+auth registry:2 and read the digest back
+        run: |
+          set -eu
+          TLS="$RUNNER_TEMP/tls"
+          mkdir -p "$TLS/certs"
+          cd "$TLS"
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt -days 1 -subj /CN=devkit-proof-ca 2>/dev/null
+          openssl req -newkey rsa:2048 -nodes -keyout tls.key -out tls.csr -subj /CN=devkit-registry 2>/dev/null
+          printf 'subjectAltName=DNS:devkit-registry\n' > ext
+          openssl x509 -req -in tls.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out tls.crt -days 1 -extfile ext 2>/dev/null
+          cp ca.crt certs/ca.crt
+          (umask 077; openssl rand -hex 24 > password)
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq apache2-utils skopeo >/dev/null
+          htpasswd -iBc htpasswd proof < password
+          echo '127.0.0.1 devkit-registry' | sudo tee -a /etc/hosts >/dev/null
+          docker run -d --name devkit-registry -p 127.0.0.1:5000:5000 \
+            -v "$TLS/tls.crt:/tls/tls.crt:ro" -v "$TLS/tls.key:/tls/tls.key:ro" -v "$TLS/htpasswd:/auth/htpasswd:ro" \
+            -e REGISTRY_HTTP_TLS_CERTIFICATE=/tls/tls.crt -e REGISTRY_HTTP_TLS_KEY=/tls/tls.key \
+            -e REGISTRY_AUTH=htpasswd -e REGISTRY_AUTH_HTPASSWD_REALM=proof -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
+            "$REGISTRY_IMAGE" >/dev/null
+          for attempt in $(seq 1 20); do
+            [ "$(curl -sS --cacert ca.crt -o /dev/null -w '%{http_code}' https://devkit-registry:5000/v2/ || true)" = 401 ] && break
+            [ "$attempt" != 20 ] || exit 1
+            sleep 1
+          done
+          SESSION="$RUNNER_TEMP/session"
+          mkdir -p "$SESSION/private"
+          chmod 0700 "$SESSION/private"
+          printf '{"auths":{"devkit-registry:5000":{"auth":"%s"}}}\n' "$(printf 'proof:%s' "$(cat password)" | base64 -w0)" > "$SESSION/private/auth.json"
+          REPO=devkit-registry:5000/mf/qdrant-pdf-rag-devkit
+          cd "$KIT"
+          ./oras cp --from-oci-layout "image@$DIGEST" "$REPO:$KEY" --to-registry-config "$SESSION/private/auth.json" --to-ca-file "$TLS/ca.crt" --no-tty
+          READBACK="$(./oras resolve --registry-config "$SESSION/private/auth.json" --ca-file "$TLS/ca.crt" "$REPO:$KEY")"
+          echo "oras push $DIGEST, registry readback $READBACK"
+          [ "$READBACK" = "$DIGEST" ]
+          # The kit's own installer over the same registry: signature, inventory,
+          # skopeo copy, readback by digest and by tag. A second run must pass too.
+          for run in 1 2; do
+            MFR_SESSION_DIR="$SESSION" SNEAKERNET_TRUSTED_PUB="$RUNNER_TEMP/proof/release-signing.pub" \
+              sh "$KIT/install.sh" --registry "$REPO" --registry-ca-dir "$TLS/certs"
+          done
+      - name: Render the bastion with the pinned Linux oc
+        run: |
+          set -eu
+          PIN=scripts/tools/oc-pin.txt
+          curl -fsSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/oc.tgz" "$(sed -n 's/^origin: *//p' "$PIN")"
+          printf '%s  %s\n' "$(sed -n 's/^sha256: *//p' "$PIN")" "$RUNNER_TEMP/oc.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/oc.tgz" -C "$RUNNER_TEMP" oc
+          printf '%s  %s\n' "$(sed -n 's/^binary-sha256: *//p' "$PIN")" "$RUNNER_TEMP/oc" | sha256sum -c -
+          cat > "$RUNNER_TEMP/proof/bastion.env" <<EOF
+          PROD_NAMESPACE=rag-prod
+          DEVKIT_REPOSITORY=quay.example/mf/qdrant-pdf-rag-devkit
+          DEVKIT_DIGEST=$DIGEST
+          PULL_SECRET=builder-quay-mf-dev
+          STORAGE_CLASS=ocs-block
+          API_SERVER_CIDRS=[{"ipBlock":{"cidr":"10.0.0.10/32"}}]
+          REGISTRY_CIDRS=[{"ipBlock":{"cidr":"10.0.1.0/24"}}]
+          GITLAB_CIDRS=[{"ipBlock":{"cidr":"10.0.2.5/32"}}]
+          EOF
+          "$RUNNER_TEMP/oc" process --local -f "$KIT/bastion.template.yaml" --param-file "$RUNNER_TEMP/proof/bastion.env" > "$RUNNER_TEMP/proof/linux-render.json"
+      - uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: devkit-proof-kit
+          path: ${{ runner.temp }}/proof
+          retention-days: 3
+
+  windows:
+    needs: linux
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: devkit-proof-kit
+          path: ${{ runner.temp }}/proof
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.14.8"
+      - name: Fetch the pinned oc.exe
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'oc.zip'
+          Invoke-WebRequest -UseBasicParsing -Uri $env:OC_WINDOWS_ZIP -OutFile $zip
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash -ne $env:OC_WINDOWS_ZIP_SHA256) { throw 'oc.exe archive differs from its pin' }
+          Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'oc')
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $env:RUNNER_TEMP 'oc\oc.exe')).Hash -ne $env:OC_WINDOWS_BINARY_SHA256) { throw 'oc.exe differs from its pin' }
+      - name: Run the published anchor bootstrap and the runbook blocks literally in Windows PowerShell 5.1
+        shell: powershell
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+          SCRATCH_OWNER: ${{ github.repository_owner }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion.Major -ne 5) { throw "not Windows PowerShell 5.1: $($PSVersionTable.PSVersion)" }
+          "Windows PowerShell $($PSVersionTable.PSVersion); `$OutputEncoding $($OutputEncoding.WebName); console output $([Console]::OutputEncoding.WebName)"
+          $Proof = Join-Path $env:RUNNER_TEMP 'proof'
+          $KitDir = (Get-ChildItem -LiteralPath (Join-Path $Proof 'kit') -Directory | Select-Object -First 1).FullName
+          $name = Split-Path -Leaf $KitDir
+          $RealAnchor = (Get-Content -LiteralPath (Join-Path $Proof 'anchor.txt') -TotalCount 1).Trim()
+          $Out = Join-Path $env:RUNNER_TEMP 'runbook-out'
+          New-Item -ItemType Directory -Force -Path $Out | Out-Null
+
+          # The published anchor bootstrap (pack.sh output, as the release record carries it)
+          # and the runbook blocks, read from the copy inside the kit.
+          $Published = [IO.File]::ReadAllText((Join-Path $Proof 'bootstrap.ps1'))
+          $md = [IO.File]::ReadAllText((Join-Path $KitDir 'devkit-windows.md'))
+          $blocks = @{}
+          foreach ($m in [regex]::Matches($md, '(?s)<!-- devkit-runbook: ([a-z0-9 ]+) -->\r?\n```powershell\r?\n(.*?)\r?\n```')) { $blocks[$m.Groups[1].Value] = $m.Groups[2].Value }
+          foreach ($b in 'step 1', 'values', 'step 2', 'step 3', 'step 4', 'step 5', 'fallback') { if (-not $blocks.ContainsKey($b)) { throw "runbook block missing: $b" } }
+          if ($blocks['step 1'] -cne $Published.TrimEnd("`n")) { throw 'the kit runbook step 1 differs from the published anchor bootstrap' }
+
+          # A native stand-in oc.exe: it records its exact argv and stdin bytes, and runs the
+          # pinned oc.exe for `oc process`. If any planted file ran instead, it would leave a marker.
+          $NativeBin = Join-Path $env:RUNNER_TEMP 'native-oc'
+          New-Item -ItemType Directory -Force -Path $NativeBin | Out-Null
+          [IO.File]::WriteAllText((Join-Path $NativeBin 'oc.cs'), @'
+          using System; using System.Diagnostics; using System.IO; using System.Text;
+          static class Program {
+              static string Out(string name) { return Path.Combine(Environment.GetEnvironmentVariable("CI_OC_OUT"), name); }
+              static byte[] Stdin() { MemoryStream m = new MemoryStream(); Console.OpenStandardInput().CopyTo(m); return m.ToArray(); }
+              static void Save(string name, byte[] data) { Directory.CreateDirectory(Path.GetDirectoryName(Out(name))); File.WriteAllBytes(Out(name), data); }
+              static bool Has(string[] a, string v) { return Array.IndexOf(a, v) >= 0; }
+              static string Quote(string s) {
+                  if (s.Length > 0 && s.IndexOfAny(new char[] { ' ', '\t', '"' }) < 0) return s;
+                  StringBuilder b = new StringBuilder("\""); int slashes = 0;
+                  foreach (char c in s) { if (c == '\\') { slashes++; continue; } b.Append('\\', c == '"' ? slashes * 2 + 1 : slashes); slashes = 0; b.Append(c); }
+                  b.Append('\\', slashes * 2); b.Append('"'); return b.ToString();
+              }
+              static void Say(string text) { byte[] t = Encoding.ASCII.GetBytes(text + "\n"); Stream o = Console.OpenStandardOutput(); o.Write(t, 0, t.Length); o.Flush(); }
+              static int Main(string[] a) {
+                  File.AppendAllText(Out("argv.log"), string.Join("\u001f", a) + "\n");
+                  string verb = a.Length > 0 ? a[0] : "";
+                  if (verb == "process") {
+                      string[] q = new string[a.Length]; for (int i = 0; i < a.Length; i++) q[i] = Quote(a[i]);
+                      ProcessStartInfo psi = new ProcessStartInfo(Environment.GetEnvironmentVariable("CI_REAL_OC"), string.Join(" ", q));
+                      psi.UseShellExecute = false; psi.RedirectStandardOutput = true;
+                      Process p = Process.Start(psi); Stream o = Console.OpenStandardOutput(); p.StandardOutput.BaseStream.CopyTo(o); o.Flush(); p.WaitForExit(); return p.ExitCode;
+                  }
+                  if (verb == "get") { Say(Environment.GetEnvironmentVariable("CI_AUTH_B64")); return 0; }
+                  if (verb == "whoami") { Say("sha256~" + new string('Q', 43)); return 0; }
+                  if (verb == "apply") { Save("apply-stdin.bin", Stdin()); return 0; }
+                  if (verb == "run") { if (File.Exists(Out("pod.state"))) return 1; File.WriteAllText(Out("pod.state"), "running"); return 0; }
+                  if (verb == "delete") { File.Delete(Out("pod.state")); return 0; }
+                  if (verb == "exec") {
+                      if (Has(a, "mfr-session-login")) { Save(Has(a, "--registry") ? "session-registry.bin" : "session-token.bin", Stdin()); return 0; }
+                      if (Has(a, "resolve")) { Say(Environment.GetEnvironmentVariable("CI_DIGEST")); return 0; }
+                      foreach (string arg in a) {
+                          if (!arg.StartsWith("of=/tmp/kit/")) continue;
+                          if (Environment.GetEnvironmentVariable("CI_FAIL_DD") == "1") return 1;
+                          Save(Path.Combine("fallback", arg.Substring(12).Replace('/', '\\')), Stdin()); return 0;
+                      }
+                      if (Has(a, "-i")) Stdin();
+                  }
+                  return 0;
+              }
+          }
+          '@)
+          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /out:"$NativeBin\oc.exe" "$NativeBin\oc.cs"
+          if ($LASTEXITCODE -ne 0) { throw 'the stand-in oc.exe did not compile' }
+          $env:PATH = "$NativeBin;$env:PATH"
+          $env:CI_OC_OUT = $Out
+          $env:CI_REAL_OC = Join-Path $env:RUNNER_TEMP 'oc\oc.exe'
+          $env:CI_DIGEST = ((Select-String -LiteralPath (Join-Path $KitDir 'MANIFEST.txt') -Pattern '^image_digest: ').Line -split ' ')[1]
+          $env:CI_AUTH_B64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(
+              '{"auths":{"ghcr.io":{"auth":"' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("$($env:GHCR_USER):$($env:GHCR_TOKEN)")) + '"}}}'))
+          function Assert-Stop($name, $pattern) {
+              try { Invoke-Expression $blocks[$name]; $ok = $true } catch { $ok = $false; $message = $_.Exception.Message }
+              if ($ok -or $message -notmatch $pattern) { throw "$name did not stop with '$pattern' (got '$message')" }
+              "== runbook $name refused as expected: $message"
+          }
+
+          # B2: the published bootstrap, pasted literally, against a good kit and tampered copies.
+          $Variants = Join-Path $env:RUNNER_TEMP 'variants'
+          $cases = [ordered]@{
+              'good'           = '^PASS: the kit matches the anchor and SHA256SUMS exactly\.$'
+              'extra-oc-cmd'   = '^FAIL: oc\.cmd \(not in SHA256SUMS\)\. '
+              'runbook-edited' = '^FAIL: devkit-windows\.md \(differs\)\. '
+              'sums-rehashed'  = '^FAIL: SHA256SUMS \(fingerprint is not the anchor\)\. '
+              'blob-swapped'   = '^FAIL: image/blobs/sha256/[0-9a-f]{64} \(differs\)\. '
+              'linked-member'  = '^FAIL: oras\.exe \(link\)\. '
+              'wrong-anchor'   = '^FAIL: SHA256SUMS \(fingerprint is not the anchor\)\. '
+          }
+          foreach ($case in $cases.Keys) {
+              $Kit = Join-Path (Join-Path $Variants $case) $name
+              New-Item -ItemType Directory -Force -Path (Split-Path $Kit) | Out-Null
+              Copy-Item -LiteralPath $KitDir -Destination $Kit -Recurse
+              $Anchor = $RealAnchor
+              if ($case -eq 'extra-oc-cmd') { [IO.File]::WriteAllText((Join-Path $Kit 'oc.cmd'), "@echo planted`r`n") }
+              if ($case -in 'runbook-edited', 'sums-rehashed') { [IO.File]::AppendAllText((Join-Path $Kit 'devkit-windows.md'), "`ntampered`n") }
+              if ($case -eq 'sums-rehashed') {
+                  $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Kit 'devkit-windows.md')).Hash.ToLowerInvariant()
+                  $sums = [IO.File]::ReadAllText((Join-Path $Kit 'SHA256SUMS')) -replace '(?m)^[0-9a-f]{64}  devkit-windows\.md$', "$hash  devkit-windows.md"
+                  [IO.File]::WriteAllText((Join-Path $Kit 'SHA256SUMS'), $sums)
+              }
+              if ($case -eq 'blob-swapped') {
+                  $blobs = @(Get-ChildItem -LiteralPath (Join-Path $Kit 'image\blobs\sha256') -File | Sort-Object Length)
+                  Copy-Item -LiteralPath $blobs[0].FullName -Destination $blobs[-1].FullName -Force
+              }
+              if ($case -eq 'linked-member') {
+                  Remove-Item -LiteralPath (Join-Path $Kit 'oras.exe')
+                  New-Item -ItemType SymbolicLink -Path (Join-Path $Kit 'oras.exe') -Target (Join-Path $KitDir 'oras.exe') | Out-Null
+              }
+              if ($case -eq 'wrong-anchor') { $Anchor = '0000000000000000' }
+              $line = @(Invoke-Expression $Published)[-1]
+              if ($line -cnotmatch $cases[$case]) { throw "bootstrap case $case printed: $line" }
+              "bootstrap ${case}: $line"
+          }
+
+          # The values block refuses an oc.exe that resolves inside the kit.
+          $Kit = Join-Path (Join-Path $Variants 'good') $name
+          Copy-Item -LiteralPath "$NativeBin\oc.exe" -Destination (Join-Path $Kit 'oc.exe')
+          $savedPath = $env:PATH
+          $env:PATH = "$Kit;$env:PATH"
+          Assert-Stop 'values' '^STOP: oc\.exe resolves inside the kit directory'
+          $env:PATH = $savedPath
+
+          # B1: the runbook on the real kit, with oc.cmd, oc.bat, cmd.cmd and cmd.bat planted in it
+          # after verification and the console sitting in the kit directory. None may run.
+          $Kit = $KitDir; $Anchor = $RealAnchor
+          $line = @(Invoke-Expression $blocks['step 1'])[-1]
+          if ($line -cnotmatch '^PASS: ') { throw "step 1 on the real kit printed: $line" }
+          "== runbook step 1 (convenience copy) on the real kit: $line"
+          $planted = Join-Path $env:RUNNER_TEMP 'planted-ran.txt'
+          foreach ($bad in 'oc.cmd', 'oc.bat', 'cmd.cmd', 'cmd.bat') { [IO.File]::WriteAllText((Join-Path $Kit $bad), "@echo %0 >> `"$planted`"`r`n@exit /b 0`r`n") }
+          Set-Location -LiteralPath $Kit
+          "== runbook values"
+          Invoke-Expression $blocks['values']
+          $runbookNames = [regex]::Matches($blocks['values'], '(?m)^\$(\w+)\s*=') | ForEach-Object { $_.Groups[1].Value } | Sort-Object
+          if (($runbookNames -join ',') -ne ((@('TrustedPub', 'Registry', 'Robot', 'ParamFile', 'RegistryAuth', 'OrasCaFile', 'InstallArgs', 'Oc', 'Oras') | Sort-Object) -join ',')) { throw "the values block names $($runbookNames -join ',')" }
+          if ($Oc -ne "$NativeBin\oc.exe") { throw "values resolved oc.exe to $Oc" }
+          if ($env:NoDefaultCurrentDirectoryInExePath -ne '1') { throw 'values did not set NoDefaultCurrentDirectoryInExePath' }
+          # CI values for the operator's edits.
+          $TrustedPub = Join-Path $Proof 'release-signing.pub'
+          $Registry = "ghcr.io/$($env:SCRATCH_OWNER.ToLowerInvariant())/qdrant-pdf-rag-devkit-scratch"
+          $Robot = 'ci-robot'
+          $ParamFile = Join-Path $env:RUNNER_TEMP 'bastion.env'
+          $RegistryAuth = "$env:TEMP\mfr-devkit-registry-auth.json"
+          if ($Registry -notmatch '/qdrant-pdf-rag-devkit-scratch$') { throw 'the proof pushes only to the scratch package' }
+
+          "== runbook step 2"
+          Invoke-Expression $blocks['step 2']
+          if (Test-Path -LiteralPath $RegistryAuth) { throw 'step 2 left the registry credential on disk' }
+
+          # Step 3: UTF-16 and BOM parameter files are refused, by the step and by oc.exe itself.
+          $lines = Get-Content -LiteralPath (Join-Path $Proof 'bastion.env')
+          $lines | Out-File -LiteralPath $ParamFile
+          Assert-Stop 'step 3' '^STOP: the parameter file is UTF-16 or starts with a BOM'
+          $ErrorActionPreference = 'Continue'
+          $refusal = & $env:CI_REAL_OC process --local -f (Join-Path $Kit 'bastion.template.yaml') --param-file $ParamFile 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          if ($code -eq 0) { throw 'oc.exe accepted a UTF-16 parameter file' }
+          "oc.exe refuses the UTF-16 parameter file Out-File writes (exit $code): $($refusal.Trim())"
+          [IO.File]::WriteAllText($ParamFile, ([char]0xFEFF + ($lines -join "`r`n") + "`r`n"), (New-Object Text.UTF8Encoding $false))
+          Assert-Stop 'step 3' '^STOP: the parameter file is UTF-16 or starts with a BOM'
+          [IO.File]::WriteAllLines($ParamFile, [string[]]$lines)
+          "== runbook step 3"
+          Invoke-Expression $blocks['step 3']
+          "== runbook step 4"
+          Invoke-Expression $blocks['step 4']
+          $env:CI_AUTH_B64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"auths":{"quay.example":{"auth":"ZmFrZTpmYWtl"}}}'))
+          "== runbook step 5"
+          Invoke-Expression $blocks['step 5']
+
+          # The fallback: a stream failure stops and deletes the pod; a leftover pod is removed
+          # first; a rerun after success converges; the streamed bytes equal the kit files.
+          $PreviousAgentImage = 'quay.example/mf/qdrant-pdf-rag-agent@sha256:' + ('a' * 64)
+          $env:CI_FAIL_DD = '1'
+          Assert-Stop 'fallback' '^STOP: streaming oras into the pod failed'
+          if (Test-Path -LiteralPath (Join-Path $Out 'pod.state')) { throw 'a failed fallback left the push pod running' }
+          Remove-Item Env:\CI_FAIL_DD
+          Set-Content -LiteralPath (Join-Path $Out 'pod.state') -Value 'left by an earlier attempt'
+          "== runbook fallback"
+          Invoke-Expression $blocks['fallback']
+          if (Test-Path -LiteralPath (Join-Path $Out 'pod.state')) { throw 'the fallback left the push pod running' }
+          "== runbook fallback (rerun)"
+          Invoke-Expression $blocks['fallback']
+          Set-Location -LiteralPath $env:RUNNER_TEMP
+
+          if (Test-Path -LiteralPath $planted) { throw "a planted file ran: $(Get-Content -LiteralPath $planted)" }
+          "planted oc.cmd, oc.bat, cmd.cmd and cmd.bat in the kit directory never ran"
+          foreach ($bad in 'oc.cmd', 'oc.bat', 'cmd.cmd', 'cmd.bat') { Remove-Item -LiteralPath (Join-Path $Kit $bad) }
+
+          # The exact native argv each step handed oc.exe.
+          $argv = [IO.File]::ReadAllLines((Join-Path $Out 'argv.log'))
+          $sep = [string][char]0x1f
+          foreach ($want in @(
+              @('exec', 'mfr-bastion', '--', 'sh', '-c', "rm -rf /work/kits/$name && mkdir -p /work/kits /work/trust"),
+              @('cp', $name, "mfr-bastion:/work/kits/$name"),
+              @('cp', 'release-signing.pub', 'mfr-bastion:/work/trust/release-signing.pub'),
+              @('exec', '-i', 'mfr-bastion', '--', 'mfr-session-login'),
+              @('exec', '-i', 'mfr-bastion', '--', 'mfr-session-login', '--registry'),
+              @('exec', 'mfr-bastion', '--', 'env', 'SNEAKERNET_TRUSTED_PUB=/work/trust/release-signing.pub', 'sh', "/work/kits/$name/install.sh", '--registry', $Registry, '--verify-pod', 'mfr-bastion'),
+              @('exec', '-i', 'mfr-devkit-push', '--', 'dd', 'of=/tmp/kit/oras', 'bs=1M', 'status=none'),
+              @('exec', 'mfr-devkit-push', '--', 'sh', '-c', 'cd /tmp/kit && sha256sum -c --ignore-missing --quiet SHA256SUMS && chmod 0755 oras'))) {
+              if ($argv -cnotcontains ($want -join $sep)) { throw "oc.exe never received the argv: $($want -join ' | ')" }
+          }
+          "oc.exe received the exact argv for steps 4, 5 and the fallback"
+
+          & python -c "import sys; from pathlib import Path; out, kit = Path(sys.argv[1]) / 'fallback', Path(sys.argv[2]); names = sorted(p.relative_to(out).as_posix() for p in out.rglob('*') if p.is_file()); want = sorted(['oras', 'SHA256SUMS'] + [p.relative_to(kit).as_posix() for p in (kit / 'image').rglob('*') if p.is_file()]); assert names == want, (names, want); bad = [(n, (out / n).stat().st_size, (kit / n).stat().st_size, (out / n).read_bytes()[:4]) for n in names if (out / n).read_bytes() != (kit / n).read_bytes()]; assert not bad, bad; print('fallback: Start-Process stdin delivered', len(names), 'kit files byte-for-byte')" $Out $Kit
+          if ($LASTEXITCODE -ne 0) { throw 'the fallback streamed bytes differ from the kit' }
+
+          # What `oc apply -f -` received through the native pipe equals the Linux render.
+          & python -c "import json,sys; a=open(sys.argv[1],'rb').read(); b=open(sys.argv[2],'rb').read(); assert json.loads(a)==json.loads(b), 'renders differ'; print('render: Windows pipe equals the Linux render as JSON; bytes equal:', a==b, '; Windows CRLF lines:', a.count(b'\r\n'))" (Join-Path $Out 'apply-stdin.bin') (Join-Path $Proof 'linux-render.json')
+          if ($LASTEXITCODE -ne 0) { throw 'the Windows render differs from the Linux render' }
+          Copy-Item -LiteralPath (Join-Path $Proof 'linux-render.json') -Destination $Out
+          Remove-Item -LiteralPath (Join-Path $Out 'argv.log')
+      - uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: devkit-proof-runbook-out
+          path: ${{ runner.temp }}/runbook-out
+          retention-days: 3
+
+  session:
+    needs: windows
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.14.8"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: devkit-proof-runbook-out
+          path: ${{ runner.temp }}/out
+      - name: Feed the PowerShell-piped bytes to the real mfr-session-login
+        run: |
+          set -eu
+          OUT="$RUNNER_TEMP/out"
+          od -c "$OUT/session-token.bin" | tail -3
+          SESSION=/dev/shm/mfr-devkit-proof
+          mkdir -p "$SESSION"
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout "$RUNNER_TEMP/ca.key" -out "$RUNNER_TEMP/ca.crt" -days 1 -subj /CN=proof 2>/dev/null
+          MFR_SESSION_DIR="$SESSION" MFR_NAMESPACE=rag-prod MFR_KUBE_CA="$RUNNER_TEMP/ca.crt" \
+            python images/devkit/bin/mfr-session-login < "$OUT/session-token.bin"
+          MFR_SESSION_DIR="$SESSION" python images/devkit/bin/mfr-session-login --registry < "$OUT/session-registry.bin"
+          python - "$SESSION/private" <<'PY'
+          import json, sys
+          from pathlib import Path
+          private = Path(sys.argv[1])
+          token = json.loads((private / "kubeconfig").read_text())["users"][0]["user"]["token"]
+          assert token == "sha256~" + "Q" * 43, "the token arrived altered"
+          auth = json.loads((private / "auth.json").read_text())
+          assert auth == {"auths": {"quay.example": {"auth": "ZmFrZTpmYWtl"}}}, "the registry auth arrived altered"
+          print("mfr-session-login accepted both PowerShell-piped credentials unchanged")
+          PY
+          rm -rf "$SESSION"

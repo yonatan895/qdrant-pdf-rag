@@ -123,11 +123,13 @@
     before it.
 - **Identities (F9).** Each pod role has its own ServiceAccount. The
   **F9-defined pods** (bastion, dev and runner job) have no RBAC and no
-  token automount, and their egress is limited to the listed destinations:
+  token automount, and their egress is limited to the listed destinations.
+  Their manifests and the contract the isolation proof reads are in
+  [`deploy/workspace/`](../../deploy/workspace/contract.json):
 
   | Role | Namespace | ServiceAccount | Egress |
   |---|---|---|---|
-  | bastion | production | its own; acts with the operator's session credentials (§8) | `kubernetes.default.svc` at the API server addresses in site config (D-3), site registry, DNS |
+  | bastion | production | its own; acts with the operator's session credentials (§8) | `kubernetes.default.svc` at the API server addresses in site config (D-3), site registry, GitLab read-only for F6 ([6525955227](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6525955227)), DNS |
   | dev | CI | its own | GitLab, the LiteLLM endpoint (with the dev key, below), DNS |
   | runner job | CI | `mfr-runner-job` | GitLab, DNS |
   | runner manager | CI | created by the site's GitLab Runner Operator | `kubernetes.default.svc` at the API server addresses in site config, GitLab, DNS |
@@ -150,8 +152,8 @@
   never lists the CI namespace there.
 - **Production authority.** Of the F9-defined pods, only the bastion
   reaches the API server and the registry. Operator scripts reach the
-  service through `$KC exec`, so the bastion needs nothing else. Dev and
-  runner-job pods have no route to either, so the network enforces "only the
+  service through `$KC exec`, so the bastion needs nothing else to deploy.
+  Dev and runner-job pods have no route to either, so the network enforces "only the
   bastion holds production authority". No F9-defined pod can read a
   production Secret (the Qdrant writer and admin keys, the gateway keys,
   the OIDC client secret, the gap signing key) or write any production
@@ -209,7 +211,12 @@
 
   The runner manager holds the operator's runner token Secret. Job pods
   pull with a pull-only registry robot in the CI namespace, never the
-  production push robot. The platform team is asked whether etcd encryption
+  production push robot.
+  Pull credentials are `imagePullSecrets`: kubelet credentials the
+  containers never see, not Secret mounts. The bastion names the existing
+  production pull robot; the dev pod and job pods name the CI pull-only
+  robot. A `<serviceaccount>-dockercfg-<suffix>` Secret that OpenShift
+  injects is allowed there too, never as a mount. The platform team is asked whether etcd encryption
   at rest is enabled.
 - **The coding model's key (maintainer decision 2026-10-30).** The gap's
   coding agents call the product's LiteLLM endpoint with their **own key**,
@@ -538,9 +545,11 @@ refreshed with each kit (Q9).
     ConfigMap;
   - the existing registry robot auth, `oc get secret <robot> -o jsonpath=… |
     oc exec -i mfr-bastion -- mfr-session-login --registry`, into
-    `/run/mfr-session/auth.json`.
+    `/run/mfr-session/private/auth.json`.
 
-  Both live only in the memory-only `/run/mfr-session/`. `oc logout`
+  Both live only in `/run/mfr-session/private/`
+  ([#1144](https://github.com/yonatan895/qdrant-pdf-rag/pull/1144)), inside
+  the memory-only `/run/mfr-session/`. `oc logout`
   revokes the token; logout or pod deletion removes both.
 - **The Windows operator path** pushes the first image, since no site image
   carries `oc` and `skopeo`. The literal runbook
@@ -551,16 +560,26 @@ refreshed with each kit (Q9).
   - **Trust anchor** ([B2](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6481952257)).
     The kit and the release bundle each ship a `.sha256` file that the
     runbook compares with `Get-FileHash`, which catches corruption and the
-    wrong version. Against tampering, the connected side publishes both
+    wrong version. For the kit it is `SHA256SUMS.sha256`, the fingerprint
+    of the signed `SHA256SUMS`; the runbook then checks every member
+    against `SHA256SUMS`. Against tampering, the connected side publishes both
     SHA-256 fingerprints on GitHub (the release comment or record). The
     operator carries the first 16 hex characters of each by a route separate
     from the transfer and checks them by eye on Windows. Both checks pass
     before any push and before any token reaches a pod. A verifier inside
     the kit cannot vouch for itself, so the bastion's signature checks come
-    after the anchor and are trusted only because of it.
-  - **Fallback:** if Windows cannot push, `oc cp` a static Linux `oras` and
-    the archive into a pod from the previous release's agent image, already
-    in the site registry, and push from inside.
+    after the anchor and are trusted only because of it. For the same
+    reason the Windows check is the **anchor bootstrap** below, published
+    with the anchor and never taken from the kit: it compares the
+    fingerprint of `SHA256SUMS` with the anchor, then every file in the kit
+    directory with `SHA256SUMS`, refusing extra, missing, changed and linked
+    files. The runbook's step 1 is a convenience copy that a test keeps
+    byte-identical, and every runbook command then runs by absolute path.
+  - **Fallback:** if Windows cannot push, stream the kit's static Linux
+    `oras` and its image layout into a pod from the previous release's agent
+    image, already in the site registry, and push from inside. That image
+    has no `tar`, so the runbook streams each file through `oc exec -i … dd`
+    instead of `oc cp`.
   - **Proof** splits as the plan lists: Linux CI, a GitHub-hosted
     `windows-2025` job (D-6) and recorded site steps.
 - **Kit key (Q3).** `scripts/devkit_key.py` computes one SHA-256 over a
@@ -582,19 +601,31 @@ refreshed with each kit (Q9).
   it builds product images. The gap only verifies the kit and copies the
   image into the site registry. Gap releases (§5) are the only builds
   in the gap, and each one needs an approved issue.
-- **The kit** is a signed tarball, separate from the release bundle,
-  `mfr-devkit-<key>.tar`. It holds:
+- **The kit** is a signed directory of plain files, separate from the
+  release bundle: `mfr-devkit-<key>/`, packed by `scripts/devkit/pack.sh`.
+  The site transfer rule forbids top-level archives and links are unsafe,
+  so the kit, like the release bundle's loose signed members, has no
+  top-level `.tar` and no links; the image is an OCI layout directory whose
+  `blobs/sha256/<hex>` names are NTFS-safe. It holds:
   - the image as an OCI layout, with the dev wheels inside it only: a
     `prepare_python.py --kit` mode (D-7) keeps them from shipping twice;
-  - a pinned `oras.exe`, the bastion template and the Windows runbook;
+  - a pinned `oras.exe` (`scripts/tools/oras-windows-pin.txt`, shipped as
+    the extracted binary) and the static Linux `oras` for the fallback, the
+    bastion template and the Windows runbook;
   - `MANIFEST.txt`, recording the key, the image digest, the pin-file
     digests, the upstream commit it was built from and the snapshot time;
   - `sbom.json`, the third-party notices and the licence check;
-  - `SHA256SUMS`, signed with the connected release key (Q4);
-  - a verify/install script, run in the bastion after the trust anchor:
-    signature, inventory, and the digest read back from the registry and
-    from the pod's `imageID`;
-  - the GitHub issue snapshot.
+  - `SHA256SUMS`, signed with the connected release key (Q4), and
+    `SHA256SUMS.sha256`;
+  - a verify/install script (`scripts/devkit/install.sh`), run in the
+    bastion after the trust anchor: the signature against
+    `SNEAKERNET_TRUSTED_PUB` (required, and never the kit's own key file),
+    every member, an inventory equal to `SHA256SUMS`, the MANIFEST against
+    the members, then a skopeo copy and the digest read back from the
+    registry and from the pod's `imageID`;
+  - the GitHub issue snapshot (`issues.json`: the issues listed in
+    `scripts/devkit/snapshot-issues.txt` with all their comments; a
+    credential-shaped string refuses the pack).
 - **Cadence (D-9).** A release ships a new kit only when the key changes, and
   the release MANIFEST names the key in a `devkit_key:` field. Kit v1 has no
   gap-release build inputs; F6 adds them under a new key. The first kit
@@ -607,6 +638,22 @@ refreshed with each kit (Q9).
 - **`agent_doctor` refuses a kit/lock mismatch** with a fixed message that
   names the kit to request (`mfr-devkit-<key>`). Outside a kit image,
   connected development keeps today's checks.
+
+### The anchor bootstrap (verbatim)
+
+`scripts/devkit/pack.sh` prints this text with the anchor, and the release
+record publishes both. The operator types `$Kit` (the kit directory) and
+`$Anchor` (the 16 hex carried separately), then pastes these three lines into
+Windows PowerShell 5.1 and continues only on the `PASS:` line. This copy is
+authoritative; the copy in `docs/runbooks/devkit-windows.md` must be
+byte-identical (`tests/test_devkit_kit.py`).
+
+<!-- devkit-anchor-bootstrap -->
+```powershell
+$r=Get-Item -LiteralPath $Kit -Force;$f=Join-Path $r.FullName 'SHA256SUMS';$w=New-Object 'Collections.Generic.Dictionary[string,string]';$e=$null;if($r.Attributes -match 'ReparsePoint'){$e='the kit directory (link)'}elseif(-not(Test-Path -LiteralPath $f -PathType Leaf)){$e='SHA256SUMS (missing)'}elseif((Get-FileHash -Algorithm SHA256 -LiteralPath $f).Hash.Substring(0,16) -ne "$Anchor".Trim()){$e='SHA256SUMS (fingerprint is not the anchor)'}else{foreach($l in [IO.File]::ReadAllLines($f)){$p=$l -split '  ',2;if($p.Count -ne 2 -or $p[0] -cnotmatch '^[0-9a-f]{64}$' -or $w.ContainsKey($p[1])){$e='SHA256SUMS (malformed)';break};$w[$p[1]]=$p[0]}}
+if(-not $e){$b=$r.FullName.TrimEnd('\','/').Length+1;foreach($i in Get-ChildItem -LiteralPath $r.FullName -Recurse -Force){$n=$i.FullName.Substring($b).Replace('\','/');if($i.Attributes -match 'ReparsePoint'){$e="$n (link)";break};if($i.PSIsContainer -or $n -cin 'SHA256SUMS','SHA256SUMS.sig','SHA256SUMS.sha256'){continue};if(-not $w.ContainsKey($n)){$e="$n (not in SHA256SUMS)";break};if((Get-FileHash -Algorithm SHA256 -LiteralPath $i.FullName).Hash -ne $w[$n]){$e="$n (differs)";break};[void]$w.Remove($n)};if(-not $e -and $w.Count){$e="$(@($w.Keys)[0]) (missing)"}}
+if($e){"FAIL: $e. Do not use this kit: transfer it again, and report it if this repeats."}else{'PASS: the kit matches the anchor and SHA256SUMS exactly.'}
+```
 
 ## 9. Extension surface (open question 2, decided)
 
