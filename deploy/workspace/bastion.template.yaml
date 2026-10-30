@@ -11,8 +11,9 @@
 #
 # The bastion has no RBAC, no Secret mount and no token: the operator pipes
 # session credentials into /run/mfr-session/private/ (mfr-session-login).
-# It references no pull Secret (contract.json), so DEVKIT_IMAGE must pull
-# through the cluster's global pull configuration or anonymously.
+# The image is always <repository>@<digest>, so a tag cannot yield a runnable
+# reference. PULL_SECRET is a kubelet pull credential (imagePullSecrets) that
+# the container never sees; no Secret is mounted.
 apiVersion: template.openshift.io/v1
 kind: Template
 metadata:
@@ -23,11 +24,19 @@ parameters:
   - name: PROD_NAMESPACE
     description: The production namespace (the live release and the bastion).
     required: true
-  - name: DEVKIT_IMAGE
+  - name: DEVKIT_REPOSITORY
     description: >-
-      The dev kit image by manifest digest, <registry>/<path>@sha256:<64 hex>,
-      as recorded in the verified kit MANIFEST. A tag is never acceptable;
-      the template cannot refuse one, so take the value from the MANIFEST.
+      The dev kit image repository in the site registry, <registry>/<path>,
+      with no tag or digest.
+    required: true
+  - name: DEVKIT_DIGEST
+    description: >-
+      The dev kit image manifest digest, sha256:<64 hex>, from the verified kit
+      MANIFEST. The image renders as DEVKIT_REPOSITORY@DEVKIT_DIGEST, so a tag
+      here never yields a runnable reference.
+    required: true
+  - name: PULL_SECRET
+    description: The existing production pull robot Secret (kubelet image pulls only).
     required: true
   - name: STORAGE_CLASS
     description: RWO block storage class for /work (the site's STORAGE_CLASS); never NFS.
@@ -144,7 +153,8 @@ objects:
       serviceAccountName: mfr-bastion
       automountServiceAccountToken: false
       enableServiceLinks: false
-      imagePullSecrets: []
+      imagePullSecrets:
+        - name: ${PULL_SECRET}
       restartPolicy: Always
       terminationGracePeriodSeconds: 10
       securityContext:
@@ -153,7 +163,7 @@ objects:
           type: RuntimeDefault
       containers:
         - name: bastion
-          image: ${DEVKIT_IMAGE}
+          image: ${DEVKIT_REPOSITORY}@${DEVKIT_DIGEST}
           imagePullPolicy: IfNotPresent
           # Long-running so `oc exec` works; the shell reaps orphaned exec
           # children and exits promptly on TERM.

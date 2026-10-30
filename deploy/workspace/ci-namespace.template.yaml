@@ -8,7 +8,9 @@
 #   oc process --local -f ci-namespace.template.yaml --param-file=ci.env | oc apply -f -
 #
 # Create the Secrets mfr-dev-gitlab and mfr-dev-litellm first; the dev pod
-# does not start without them. The runner manager and its Runner resources
+# does not start without them. Images are always <repository>@<digest>, so a
+# tag cannot yield a runnable reference. PULL_SECRET (the pull-only robot) is
+# a kubelet pull credential the containers never see. The runner manager and its Runner resources
 # come from the site's GitLab Runner Operator, configured from
 # runner-gate.example.toml and runner-wip.example.toml. A Pod is immutable:
 # to change the dev pod, delete it and apply again (/work is kept).
@@ -22,15 +24,29 @@ parameters:
   - name: CI_NAMESPACE
     description: The CI namespace (runner manager, runner job pods, dev pod).
     required: true
-  - name: DEVKIT_IMAGE
+  - name: DEVKIT_REPOSITORY
     description: >-
-      The dev kit image by manifest digest, <registry>/<path>@sha256:<64 hex>,
-      as recorded in the verified kit MANIFEST. A tag is never acceptable.
+      The dev kit image repository in the site registry, <registry>/<path>,
+      with no tag or digest.
     required: true
-  - name: QDRANT_IMAGE
+  - name: DEVKIT_DIGEST
     description: >-
-      The release's pinned Qdrant image by manifest digest (images.txt), from
-      the site registry. It serves the dev pod's localhost sidecar only.
+      The dev kit image manifest digest, sha256:<64 hex>, from the verified kit
+      MANIFEST. The image renders as DEVKIT_REPOSITORY@DEVKIT_DIGEST, so a tag
+      here never yields a runnable reference.
+    required: true
+  - name: QDRANT_REPOSITORY
+    description: >-
+      The Qdrant image repository in the site registry, with no tag or digest.
+      It serves the dev pod's localhost sidecar only.
+    required: true
+  - name: QDRANT_DIGEST
+    description: >-
+      The release's pinned Qdrant manifest digest (images.txt), sha256:<64 hex>,
+      as present in the site registry.
+    required: true
+  - name: PULL_SECRET
+    description: The CI namespace's pull-only robot Secret (kubelet image pulls only).
     required: true
   - name: STORAGE_CLASS
     description: RWO block storage class for the dev /work claim; never NFS.
@@ -231,7 +247,8 @@ objects:
       serviceAccountName: mfr-dev
       automountServiceAccountToken: false
       enableServiceLinks: false
-      imagePullSecrets: []
+      imagePullSecrets:
+        - name: ${PULL_SECRET}
       restartPolicy: Always
       terminationGracePeriodSeconds: 10
       securityContext:
@@ -240,7 +257,7 @@ objects:
           type: RuntimeDefault
       containers:
         - name: dev
-          image: ${DEVKIT_IMAGE}
+          image: ${DEVKIT_REPOSITORY}@${DEVKIT_DIGEST}
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done"]
           env:
@@ -273,7 +290,7 @@ objects:
               mountPath: /etc/mfr/dev-litellm
               readOnly: true
         - name: qdrant
-          image: ${QDRANT_IMAGE}
+          image: ${QDRANT_REPOSITORY}@${QDRANT_DIGEST}
           imagePullPolicy: IfNotPresent
           env:
             # Bind to the pod's loopback only: the sidecar serves this pod.
