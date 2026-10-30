@@ -450,8 +450,11 @@ has_bundle_evidence() {
 # Release trust anchors (#1118 F1): the variables that may name a release
 # signing public key obtained out of band. A verified release needs its
 # SHA256SUMS signature to verify against one of them. F2 adds the gap release
-# key as a second name here; nothing else changes. Names, not paths: a path
-# may hold spaces and is never printed.
+# key as a second name here. It must also teach load.sh (check_trusted_pub)
+# and bootstrap.sh's inline twin, which pin SNEAKERNET_TRUSTED_PUB alone, and
+# register the new key where operator keys are listed (OPERATOR_ENV_KEYS, the
+# airgap taskfile, airgap.env.example and the §9 snapshot).
+# Names, not paths: a path may hold spaces and is never printed here.
 RELEASE_TRUST_ANCHOR_VARS="SNEAKERNET_TRUSTED_PUB"
 
 # $1 = bundle directory (SHA256SUMS, SHA256SUMS.sig, sneakernet-signing.pub).

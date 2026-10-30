@@ -592,7 +592,8 @@ checksums **after**.
   tarball. Without a pinned pubkey, verification is TOFU: it binds members
   together but proves nothing about *which* key signed. The executing-checkout
   guard below therefore requires `SNEAKERNET_TRUSTED_PUB` outside dry-run
-  (#1118 F1), so load, deploy, ingest and validate never run on TOFU alone.
+  (#1118 F1), so load, deploy, ingest and validate never run on TOFU alone
+  outside the connected opt-out described there.
 - Load re-verifies the signature, then checksums, then the `IMAGE_SHA`
   against the manifest, then all six base image digests (plus the
   oauth-proxy digest when the bundle carries it) — and pushes under fixed
