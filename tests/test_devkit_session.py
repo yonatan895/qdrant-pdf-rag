@@ -1,6 +1,9 @@
 """Bastion session login/logout helpers (ADR-0009 section 8): real subprocess runs."""
 
 import base64
+import importlib.machinery
+import importlib.util
+import io
 import json
 import os
 import shutil
@@ -247,13 +250,22 @@ def test_symlinked_mount_refused(sess, tmp_path):
     assert files(sess) == []
 
 
-@pytest.mark.skipif(os.getuid() != 0, reason="needs root to chown")
-def test_private_wrong_owner_refused(sess):
+def test_private_wrong_owner_refused(sess, monkeypatch, capsys):
+    # The dir is ours; pretend to be another uid so the real owner check fires.
     sess.dir.mkdir(mode=0o700)
-    os.chown(sess.dir, 12345, 12345)
-    r = login(sess, TOKEN.encode())
-    assert r.returncode == 2
-    assert b"owned by this user" in r.stderr
+    loader = importlib.machinery.SourceFileLoader("mfr_session_login_under_test", str(LOGIN))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    for k, v in sess.env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(os, "getuid", lambda: os.stat(sess.dir).st_uid + 1)
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(TOKEN.encode())))
+    assert mod.main([]) == 2
+    err = capsys.readouterr().err
+    assert "owned by this user" in err
+    assert TOKEN not in err
+    assert files(sess) == []
 
 
 @needs_shm
