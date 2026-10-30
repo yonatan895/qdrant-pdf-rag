@@ -148,6 +148,9 @@ def write_git_identity_stub(tree: Path, sha: str) -> None:
 
     real = shutil.which("git")
     write_stub(tree / "bin" / "git", f"""#!/bin/sh
+# The guard pins its reads with `-C <root> --work-tree=<root>` (#1149 N1).
+[ "$1" = -C ] && shift 2
+case "$1" in --work-tree=*) shift ;; esac
 case "$1" in
     rev-parse) [ "$2" = HEAD ] && {{ echo {shlex.quote(sha)}; exit 0; }} ;;
     diff) exit 0 ;;

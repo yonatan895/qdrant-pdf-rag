@@ -223,7 +223,7 @@ def test_live_lane_bootstrap_exports_the_release_trust_anchor(bundle_dir, job, s
     checkout = gapbox / "qdrant-pdf-rag"
     guard = subprocess.run(
         ["sh", "-c", f'. "{REPO}/scripts/airgap/common.sh"; cd "$1" || exit 9; MANIFEST=dist/MANIFEST.txt; check_checkout_sha',
-         "guard", str(checkout)],
+         str(checkout / "scripts" / "airgap" / "guard"), str(checkout)],
         cwd=checkout, capture_output=True, text=True, check=False,
         env={"PATH": "/usr/bin:/bin", "HOME": str(bundle_dir), "SNEAKERNET_TRUSTED_PUB": anchor},
     )
@@ -411,9 +411,11 @@ def test_bootstrapped_workspace_passes_then_refuses_in_the_real_guard(bundle_dir
                    check=True, capture_output=True)
 
     def guard():
+        # $0 inside the workspace: common.sh pins the guard to that checkout.
+        (workspace / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
         return subprocess.run(
             ["sh", "-c", f'. "{REPO}/scripts/airgap/common.sh"; cd "$1" || exit 9; MANIFEST=dist/MANIFEST.txt; check_checkout_sha',
-             "guard", str(workspace)],
+             str(workspace / "scripts" / "airgap" / "guard"), str(workspace)],
             cwd=workspace, capture_output=True, text=True, check=False,
             env={"PATH": "/usr/bin:/bin", "HOME": str(bundle_dir), "SNEAKERNET_TRUSTED_PUB": str(anchor)},
         )

@@ -513,6 +513,21 @@ check_manifest_chain() {
     unset _chain_dir _chain_f _chain_want _chain_have
 }
 
+# The release guard's git reads (#1149 N1), for that command only: the
+# repository and work tree are pinned to the executing checkout ($REPO_ROOT,
+# also overriding a core.worktree setting), and the caller's variables that
+# would redirect git are removed (repository, work tree, index, object store,
+# namespace, config). GIT_NO_REPLACE_OBJECTS=1 ignores refs/replace/, which
+# would substitute an edited commit for the release sha. The rest of the stage
+# keeps its environment.
+_guard_git() {
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+        -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_COMMON_DIR -u GIT_NAMESPACE \
+        -u GIT_CONFIG -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT \
+        -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_SYSTEM -u GIT_CONFIG_NOSYSTEM \
+        GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" --work-tree="$REPO_ROOT" "$@"
+}
+
 # Executing-checkout identity for deploy/ingest/validate/load (issue #414,
 # #1118 F1). Outside dry-run the checkout must be a verified signed release:
 # a packed MANIFEST whose SHA256SUMS signature verifies against a configured
@@ -555,27 +570,25 @@ check_checkout_sha() {
         echo "Notice: no packed MANIFEST — checkout not release-verified (AIRGAP_UNVERIFIED_CHECKOUT=1, connected rehearsal only)" >&2; return 0
     fi
     check_manifest_chain "$MANIFEST" "$_checkout_mode"
-    # Every git read below runs with GIT_NO_REPLACE_OBJECTS=1, for that command
-    # only: a refs/replace/ entry would otherwise substitute an edited commit
-    # for the release sha, so HEAD names the release while `git diff HEAD`
-    # compares the edited tree (#1149 N1). Grafts (.git/info/grafts) rewrite
-    # parents only, never a commit's tree, so they cannot hide a change here.
+    # Every git read below goes through _guard_git (#1149 N1). Grafts
+    # (.git/info/grafts) rewrite parents only, never a commit's tree, so they
+    # cannot hide a change here.
     packed_sha=$(awk '/^sha: /{print $2}' "$MANIFEST")
     [ -n "$packed_sha" ] || \
         die "packed MANIFEST names no sha — cannot establish the release; use the signed bundle's MANIFEST.txt"
-    checkout_sha=$(GIT_NO_REPLACE_OBJECTS=1 git rev-parse HEAD 2>/dev/null) || checkout_sha=""
+    checkout_sha=$(_guard_git rev-parse HEAD 2>/dev/null) || checkout_sha=""
     [ -n "$checkout_sha" ] || \
         die "executing checkout identity cannot be resolved (no usable git checkout here) while a packed MANIFEST names a sha — run from the approved bundle checkout; overriding IMAGE_SHA alone never changes which code executes"
     [ "$checkout_sha" = "$packed_sha" ] || \
         die "executing checkout HEAD does not match the packed MANIFEST sha — run from the approved bundle checkout (git rev-parse HEAD and the MANIFEST sha: line must agree); overriding IMAGE_SHA alone never changes which code executes"
     _diff_rc=0
-    GIT_NO_REPLACE_OBJECTS=1 git diff --quiet HEAD -- >/dev/null 2>&1 || _diff_rc=$?
+    _guard_git diff --quiet HEAD -- >/dev/null 2>&1 || _diff_rc=$?
     [ "$_diff_rc" -eq 0 ] || \
         die "executing checkout has tracked changes against the packed MANIFEST sha — restore them (git diff HEAD lists them; operator settings belong in the untracked airgap.env) before running a release"
     # `git diff` trusts the index: assume-unchanged / skip-worktree files are
     # never compared. Tags: H = normal; lowercase = assume-unchanged; S/s =
     # skip-worktree. Anything but a plain "H " (or an unreadable index) fails.
-    _flags=$(GIT_NO_REPLACE_OBJECTS=1 git ls-files -v -- ':/' 2>/dev/null) || \
+    _flags=$(_guard_git ls-files -v -- ':/' 2>/dev/null) || \
         die "executing checkout index cannot be read — cannot prove no tracked file is hidden from the change check"
     printf '%s\n' "$_flags" | awk 'NF && substr($0, 1, 2) != "H " { bad=1 } END { exit bad }' || \
         die "executing checkout hides tracked files from change detection (assume-unchanged, skip-worktree or sparse checkout) — clear the flags (git update-index --no-assume-unchanged / --no-skip-worktree; git ls-files -v marks them) before running a release"

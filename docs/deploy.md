@@ -642,7 +642,11 @@ checksums **after**.
      flagged assume-unchanged or skip-worktree (`git ls-files -v` tag other
      than `H`; sparse checkout sets skip-worktree) is refused, with or
      without an edit. An unreadable index is refused. Clear the flags with
-     `git update-index --no-assume-unchanged/--no-skip-worktree`.
+     `git update-index --no-assume-unchanged/--no-skip-worktree`. The guard's
+     git reads are pinned to the executing checkout and ignore replace refs
+     and the caller's `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, object
+     store, namespace and config variables (#1149 N1); the rest of the stage
+     keeps its environment.
   Refusals are fixed messages naming neither files nor contents; `git diff
   HEAD` lists edits. Untracked files (`airgap.env`, `dist/`, generated
   output) stay allowed, so site values belong in the untracked `airgap.env`.

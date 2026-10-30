@@ -852,6 +852,81 @@ def test_checkout_guard_grafts_cannot_hide_an_edit(approved):
     assert again.stderr == ""
 
 
+def _restore_release(approved, release):
+    _git(approved, "reset", "-q", "--hard", release)
+    again = _approved_run(approved)
+    assert again.returncode == 0, again.stderr
+    assert again.stderr == ""
+
+
+def test_checkout_guard_ignores_a_git_dir_pointing_at_a_clean_clone(approved):
+    """#1149 N1: GIT_DIR/GIT_WORK_TREE naming a pristine clone of the release
+    would make git judge that clone, not the edited checkout that executes."""
+    release = _git(approved, "rev-parse", "HEAD")
+    clone = approved.parent / f"{approved.name}-pristine"
+    _git(approved.parent, "clone", "-q", str(approved), str(clone))
+    (approved / "charts" / "values.yaml").write_text("replicas: 9\n")
+    redirect = {"GIT_DIR": str(clone / ".git"), "GIT_WORK_TREE": str(clone)}
+    r = _guard_run(approved, "dist/MANIFEST.txt", redirect)
+    assert r.returncode == 1
+    assert r.stderr == _TRACKED_CHANGE
+    _restore_release(approved, release)
+
+
+def test_checkout_guard_ignores_an_index_file_that_hides_an_edit(approved):
+    """#1149 N1: GIT_INDEX_FILE naming an index whose entry carries the release
+    blob with the edited file's stat data makes `git diff HEAD` trust it."""
+    import hashlib
+    import subprocess
+
+    release = _git(approved, "rev-parse", "HEAD")
+    path = approved / "charts" / "values.yaml"
+    release_blob = _git(approved, "rev-parse", "HEAD:charts/values.yaml")
+    path.write_text("replicas: 9\n")  # same size as the release content
+    past = path.stat().st_mtime - 3600
+    os.utime(path, (past, past))  # not racy against the index written next
+    forged = approved.parent / f"{approved.name}-index"
+    env = {**os.environ, "GIT_INDEX_FILE": str(forged)}
+    subprocess.run(["git", "read-tree", "HEAD"], cwd=approved, env=env, check=True)
+    subprocess.run(["git", "add", "charts/values.yaml"], cwd=approved, env=env, check=True)
+    edited_blob = _git(approved, "hash-object", "charts/values.yaml")
+    data = bytearray(forged.read_bytes())
+    at = data.index(bytes.fromhex(edited_blob))
+    data[at:at + 20] = bytes.fromhex(release_blob)
+    data[-20:] = hashlib.sha1(bytes(data[:-20])).digest()
+    forged.write_bytes(bytes(data))
+    hidden = subprocess.run(["git", "diff", "--quiet", "HEAD", "--"], cwd=approved, env=env, check=False)
+    assert hidden.returncode == 0  # the evasion is real
+    r = _guard_run(approved, "dist/MANIFEST.txt", {"GIT_INDEX_FILE": str(forged)})
+    assert r.returncode == 1
+    assert r.stderr == _TRACKED_CHANGE
+    _restore_release(approved, release)
+
+
+def test_checkout_guard_ignores_an_object_directory_that_forges_the_release(approved):
+    """#1149 N1: GIT_OBJECT_DIRECTORY naming a store whose object for the
+    release sha holds an edited commit (git does not rehash on read) makes HEAD
+    resolve to the edited tree."""
+    import subprocess
+
+    release = _git(approved, "rev-parse", "HEAD")
+    edited = _edited_commit(approved)  # the edit stays staged and in the worktree
+    forged = approved.parent / f"{approved.name}-objects"
+    shutil.copytree(approved / ".git" / "objects", forged)
+    source = forged / edited[:2] / edited[2:]
+    target = forged / release[:2] / release[2:]
+    target.chmod(0o644)
+    target.write_bytes(source.read_bytes())
+    env = {"GIT_OBJECT_DIRECTORY": str(forged)}
+    hidden = subprocess.run(["git", "diff", "--quiet", "HEAD", "--"], cwd=approved,
+                            env={**os.environ, **env}, check=False)
+    assert hidden.returncode == 0  # the evasion is real
+    r = _guard_run(approved, "dist/MANIFEST.txt", env)
+    assert r.returncode == 1
+    assert r.stderr == _TRACKED_CHANGE
+    _restore_release(approved, release)
+
+
 def test_checkout_guard_parent_bundle_layout_is_verified(tmp_path):
     """The documented unpack-next-to-the-clone layout: ../MANIFEST.txt is
     trusted only through ../SHA256SUMS(.sig) like dist/ is; a ../SHA256SUMS that
