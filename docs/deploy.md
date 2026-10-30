@@ -1209,8 +1209,8 @@ containers, a writable host or cluster access.
 
 | Area | Requirement | Used by |
 |---|---|---|
-| GitLab | Release version recorded; protected tags; `CI_COMMIT_TAG` and `CI_COMMIT_REF_PROTECTED`; variables expanded in `image`, `services` and `tags` | tag pipelines |
-| Runner | Tag `CI_RUNNER_TAG` (default `airgap`); linux-amd64; an executor that starts job and service images from the approved registry with a service alias; reads `CI_TASK_ARCHIVE`, `CI_HELM_ARCHIVE` and `CI_BM25_CACHE_DIR` from the runner; no route to PyPI, Docker Hub or GitHub | all GitLab jobs |
+| GitLab | Release version recorded, 16.10 or later (`workflow:auto_cancel`); protected tags; `CI_COMMIT_TAG` and `CI_COMMIT_REF_PROTECTED`; variables expanded in `image`, `services` and `tags`; `CI_OPEN_MERGE_REQUESTS`; dynamic child pipelines (`trigger:include:artifact`) | all pipelines |
+| Runner | Tags `gate` (merge request and tag pipelines) and `wip` (branch pipelines), or one tag for all from the project variable `CI_RUNNER_TAG`; linux-amd64; an executor that starts job and service images from the approved registry with a service alias; reads `CI_TASK_ARCHIVE`, `CI_HELM_ARCHIVE` and `CI_BM25_CACHE_DIR` from the runner; no route to PyPI, Docker Hub or GitHub | all GitLab jobs |
 | Python packages | `PIP_FIND_LINKS` wheelhouse or `PIP_INDEX_URL` internal index, never a public index | `.py-base` |
 | Quay | Release version recorded; Docker v2 API reachable by `skopeo`; a push identity for the five runtime paths; pull access for cluster and runner; organization layout may differ from upstream paths | `load.sh`, runner |
 | OpenShift | Namespace-scoped deployer; `restricted-v2` SCC with no `anyuid`; RWO block storage for Qdrant (NFS only for the read-only corpus); ClusterIP-only Qdrant; Route only with OAuth | deploy, ingest |
@@ -1247,9 +1247,13 @@ default per-leg data keys. The API key value never enters Helm values or `airgap
 
 GitHub runs unit, sim, gates, bench, load, the path-filtered multi-peer HA
 lane (issue #360: three-peer placement/peer-loss fixture), connected E2E,
-and the dry-run gate; air-gap GitLab runs hygiene, lint/types, the full
-pytest suite, hazards, the sim tier and gate-l1 only (no e2e, load, deploy,
-multi-peer docker, GHCR, or PDFs/tokens/hostnames in file). GitLab unit/sim
+and the dry-run gate; air-gap GitLab runs hygiene, lint/types, the unit suite
+in four shards, hazards, the sim tier and gate-l1 only (no e2e, load, deploy,
+multi-peer docker, GHCR, or PDFs/tokens/hostnames in file). Merge request and
+tag pipelines run every GitLab lane on the `gate` runner tag; branch pipelines
+run on `wip` and select lanes with the fail-closed classifier through a child
+pipeline; a newer commit cancels the older pipeline on the same ref, never a
+tag pipeline (ADR-0009 section 2). GitLab unit/sim
 reports reject any skipped or xfailed test (`scripts/check_junit_clean.py`);
 `tests/test_ci_gitlab_parity.py` pins the correspondence and failure propagation. Job meaning stays aligned across the two files; only e2e-scale jobs
 live in `.github/workflows/e2e.yml`.
@@ -2087,9 +2091,11 @@ Known metadata/publication gaps remain #391; broader CI enforcement remains #370
 ## CI and reviewer maintenance policy
 
 Keep root `.gitlab-ci.yml` and GitHub `ci.yml`; shared product hygiene/test meaning
-changes together. GitLab runs merge-request, branch and protected-tag pipelines with
-the same jobs, uses images from the operator-set CI_APPROVED_REGISTRY (never the
-GitLab registry; CI_PYTHON_IMAGE overrides the job image), CI_RUNNER_TAG and internal
+changes together. GitLab merge-request and protected-tag pipelines run every lane
+(#808); branch pipelines run the lanes `scripts/review_tooling.py` selects, as a
+child pipeline. GitLab uses images from the operator-set CI_APPROVED_REGISTRY (never the
+GitLab registry; CI_PYTHON_IMAGE overrides the job image), the `gate`/`wip` runner tags
+(CI_RUNNER_TAG overrides both) and internal
 PIP_INDEX_URL or PIP_FIND_LINKS, failing closed without a package source. No
 public network, GHCR, deploy/pack/image-build or opencode reviewer in GitLab.
 Issue #397 authorizes the offline context check in hygiene and a small GitHub
