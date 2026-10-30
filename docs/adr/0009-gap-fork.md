@@ -259,7 +259,7 @@
 | Path | Holds |
 |---|---|
 | `gap/README.md` | The gap entry point, read after AGENTS.md. It names the gap maintainer group and the named approvers, restates these rules and says where site inputs live. Never name it `AGENTS.md`: the context check would require it in the upstream chain table |
-| `gap/patches.md` | The gap-patch ledger. A `# Gap patches` title line, then one section per patch: a heading `## GL#NNN <full commit sha>`, then one `- path: <path>` line per upstream-owned path the patch changes. Other lines are free text. Sections are in application order: a new patch is appended at the end |
+| `gap/patches.md` | The gap-patch ledger. A `# Gap patches` title line, then one section per patch: a heading `## GL#NNN <full commit sha>`, then one `- path: <path>` line per upstream-owned path the patch changes. Every `## ` line is such a heading; the import refuses any other. Other lines are free text. Sections are in application order: a new patch is appended at the end |
 | `gap/config/` | The site's non-secret configuration (Q2), such as its `airgap.env` without secret values. Secrets stay in Kubernetes Secrets or the site's secret store and are referenced by name only. Site values for the `deploy/workspace/` manifests go in `gap/config/workspace.env`. Rehearsal-only overrides (`CI_REHEARSAL` keys) never go here |
 | `gap/records/` | Dated site records, `YYYY-MM-DD-<slug>.md`: imports, gap releases, go-live checks, isolation proofs, incidents. Gap records never go in `docs/records/` |
 | `gap/runbooks/` | Site procedures that upstream cannot know |
@@ -291,8 +291,15 @@ install needs them on day one.
 
 ## 4. Release import procedure
 
+The procedure is [`scripts/gap/import_release.sh`](../../scripts/gap/import_release.sh)
+(follow-up F7); `sh scripts/gap/import_release.sh --help` prints its usage,
+and `tests/test_gap_import_release.py` runs it on throwaway repositories.
+This section keeps the decision and the stop semantics.
+
 The gap maintainer creates the fork once:
-1. Bootstrap the first upstream release as in step 1 of the script below.
+1. Verify the first upstream release as step 1 below does: check the
+   tarball's `.sha256`, unpack it, and run `sh bootstrap.sh` in it with
+   `SNEAKERNET_TRUSTED_PUB` set.
 2. Push its history to the empty GitLab project.
 3. Commit `gap/README.md` and a `gap/patches.md` that holds only its title
    line, with the trailer `Upstream-Release: <SHA>`.
@@ -300,23 +307,8 @@ The gap maintainer creates the fork once:
 
 Agents never push `main`.
 
-**Every later import.** Export the five inputs. Save the script below as
-`$HOME/import-release.sh` and run `sh -eu "$HOME/import-release.sh"`. Until
-follow-up F7 ships it as `scripts/gap/import_release.sh`, this block is the
-script.
-
-- **Success:** it ends with `IMPORT READY <SHA>`. Then push the branch and
-  open the MR (below).
-- **Failure:** the script stops at a `STOP:` line or at a failing command.
-  Open or update a GitLab issue titled `Release import <SHA> stopped`, with
-  the last 20 lines of output.
-- **Rerun:** after any stop, rerun the same command. The script resets its
-  own state first: it aborts an unfinished merge, revert or cherry-pick,
-  deletes the local `import/<SHA>` branch and removes `$R`.
-- **Never** rerun after the branch has been pushed. Fix forward with new
-  commits on the MR branch instead. Never use `git rebase`, `--force`,
-  `-X ours`, `-X theirs` or `--squash`, and never edit an upstream-owned path
-  to make a check pass.
+**Every later import.** Export the five inputs, then run the script from
+the fork clone:
 
 ```sh
 export SHA=<40-hex sha from the tarball name qdrant-pdf-rag-<SHA>.tar>
@@ -324,99 +316,52 @@ export BUNDLE=/abs/path/qdrant-pdf-rag-$SHA.tar
 export SNEAKERNET_TRUSTED_PUB=/abs/path/trusted-release-signing.pub
 export FORK=/abs/path/gitlab-clone
 export R=/abs/path/releases/$SHA
+sh "$FORK/scripts/gap/import_release.sh"
 ```
 
-<!-- import-script:start -->
-```sh
-# Any failure, including one with no STOP line of its own, ends with a STOP line.
-trap 'rc=$?; [ "$rc" -eq 0 ] || echo "STOP: the import failed (exit $rc); rerun to reset, then report if it stops again"' EXIT
+The script runs these steps. Each refusal is a fixed `STOP:` line in it.
 
-# 0. Reset: safe on every run, and the way to resume after any stop.
-cd "$FORK"
-if git rev-parse -q --verify MERGE_HEAD >/dev/null; then git merge --abort; fi
-if git rev-parse -q --verify REVERT_HEAD >/dev/null; then git revert --abort; fi
-if git rev-parse -q --verify CHERRY_PICK_HEAD >/dev/null; then git cherry-pick --abort; fi
-if [ -n "$(git status --porcelain)" ]; then echo "STOP: $FORK has local changes; ask the gap maintainer"; false; fi
-git fetch origin
-git switch --detach origin/main
-if git rev-parse -q --verify "refs/heads/import/$SHA" >/dev/null; then git branch -D "import/$SHA"; fi
-rm -rf "$R"
+0. **Reset.** It is safe on every run and is how to resume after any stop.
+   It aborts the unfinished import's merge, revert or cherry-pick, discards
+   that import's uncommitted changes, deletes the local `import/<SHA>`
+   branch and removes `$R`. Any other local change or operation in progress
+   stops it instead.
+1. **Verify the bundle** with the fork's own code: the `SHA256SUMS`
+   signature against the trust anchor, every member checksum, and
+   `repo.bundle` HEAD equal to the MANIFEST sha. The trust anchor is
+   required; there is no trust on first use. Then the verified bundle's
+   `bootstrap.sh` runs into `$R/release`.
+2. **Find the last import** from the newest `Upstream-Release:` trailer on
+   `origin/main`.
+3. **Refuse** a release that is already imported or older, one that does
+   not descend from the last import, and one that tracks `gap/` or
+   `.gitlab/`. Then branch `import/<SHA>` from `origin/main`.
+4. **Set aside** every ledgered gap patch: revert them newest first (the
+   ledger lists them in application order), then empty the ledger.
+5. **Merge** with a merge commit that carries `Upstream-Release: <SHA>`.
+   With every gap patch set aside, any conflict is unexpected and stops the
+   import.
+6. **Re-apply** every patch in ledger order. One that conflicts or is now
+   empty stays set aside: its ledger section is dropped, and
+   `$R/issue-notes.txt` holds the note for its GL# issue (below).
+7. **Prove the upstream tree:** outside the site layer the fork equals the
+   release except exactly the paths the ledger lists. Then it writes
+   `$R/env-keys.diff` and `$R/release-notes.diff`.
 
-# 1. Verify the bundle: signature against the trust anchor, every member
-#    checksum, and repo.bundle HEAD equal to the MANIFEST sha.
-cd "$(dirname "$BUNDLE")"
-sha256sum -c "$(basename "$BUNDLE").sha256"
-mkdir -p "$R"
-cd "$R"
-tar -xf "$BUNDLE"
-AIRGAP_WORKSPACE=release sh bootstrap.sh
-if [ "$(sed -n 's/^sha: *//p' "$R/MANIFEST.txt")" != "$SHA" ]; then echo "STOP: MANIFEST sha is not $SHA"; false; fi
-
-# 2. Branch from the fork's main and find the last imported release.
-cd "$FORK"
-git switch -c "import/$SHA" origin/main
-PREV=$(git log -1 --format=%B --grep='^Upstream-Release: ' HEAD | sed -n 's/^Upstream-Release: //p')
-if [ -z "$PREV" ]; then echo "STOP: no Upstream-Release trailer; the fork was never created"; false; fi
-
-# 3. Fetch the release and refuse what the procedure cannot handle.
-git fetch "$R/repo.bundle" HEAD
-if [ "$(git rev-parse FETCH_HEAD)" != "$SHA" ]; then echo "STOP: bundle HEAD is not $SHA"; false; fi
-if git merge-base --is-ancestor "$SHA" HEAD; then echo "STOP: $SHA is already imported"; false; fi
-if ! git merge-base --is-ancestor "$PREV" "$SHA"; then echo "STOP: $SHA does not descend from the last import $PREV"; false; fi
-if [ -n "$(git ls-tree -r --name-only "$SHA" -- gap .gitlab)" ]; then echo "STOP: the release tracks gap/ or .gitlab/"; false; fi
-
-# 4. Set aside every ledgered gap patch: revert them newest first (the
-#    ledger lists them in application order), then empty the ledger.
-: > "$R/all.txt"
-if [ -f gap/patches.md ]; then
-  cp gap/patches.md "$R/patches.before"
-  awk '/^## GL#/ {print $2, $3}' gap/patches.md > "$R/all.txt"
-fi
-for c in $(tac "$R/all.txt" | awk '{print $2}'); do
-  if ! git revert --no-edit "$c"; then echo "STOP: cannot set aside gap patch $c; an unledgered change overlaps it"; false; fi
-done
-if [ -s "$R/all.txt" ]; then
-  awk '/^## / {exit} {print}' "$R/patches.before" > gap/patches.md
-  git commit -am "Set aside gap patches before importing $SHA"
-fi
-
-# 5. Merge. With every gap patch set aside, any conflict is unexpected.
-if ! git merge --no-ff --no-commit "$SHA"; then
-  echo "STOP: conflict in: $(git diff --name-only --diff-filter=U | tr '\n' ' ')"; false
-fi
-git commit -m "Import upstream release $SHA" -m "Upstream-Release: $SHA"
-
-# 6. Re-apply every patch in ledger order. One that conflicts or is now
-#    empty stays set aside; its GL# issue gets a note (see below).
-: > "$R/reapplied.txt"
-for c in $(awk '{print $2}' "$R/all.txt"); do
-  i=$(awk -v c="$c" '$2 == c {print $1}' "$R/all.txt")
-  if git cherry-pick "$c"; then
-    echo "reapplied $i $c $(git rev-parse HEAD)" >> "$R/reapplied.txt"
-  else
-    git cherry-pick --abort
-    echo "set-aside $i $c" >> "$R/reapplied.txt"
-  fi
-done
-if grep -q '^reapplied ' "$R/reapplied.txt"; then
-  awk 'FILENAME==ARGV[1] {if ($1 == "reapplied") new[$3]=$4; next}
-       /^## / {on=($3 in new); if (on) print $1, $2, new[$3]; next}
-       on' "$R/reapplied.txt" "$R/patches.before" >> gap/patches.md
-  git commit -am "Re-apply gap patches after importing $SHA"
-fi
-
-# 7. Prove the upstream tree: outside the site layer the fork equals the
-#    release except the paths the ledger lists.
-git diff --name-only "$SHA" HEAD -- . ':(exclude)gap' ':(exclude).gitlab' | sort -u > "$R/drift.txt"
-if [ -f gap/patches.md ]; then sed -n 's/^- path: //p' gap/patches.md; fi | sort -u > "$R/patches.txt"
-if ! cmp -s "$R/drift.txt" "$R/patches.txt"; then
-  echo "STOP: upstream-owned paths differ from the ledger:"; diff "$R/patches.txt" "$R/drift.txt" || true; false
-fi
-git diff "$PREV" "$SHA" -- airgap.env.example > "$R/env-keys.diff"
-git diff "$PREV" "$SHA" -- docs/release-notes.md > "$R/release-notes.diff"
-echo "IMPORT READY $SHA"
-```
-<!-- import-script:end -->
+- **Success:** it ends with `IMPORT READY <SHA>` and prints the push
+  command. It never pushes.
+- **Failure:** any failure, including one with no STOP line of its own,
+  ends with one `STOP:` line that names the cause and the next action. When
+  the action is a report, open or update a GitLab issue titled
+  `Release import <SHA> stopped`, with the last 20 lines of output.
+- **Rerun:** after any stop, rerun the same command. Step 0 resets, and the
+  run ends as an uninterrupted run would. After success, a rerun changes
+  nothing. Commits added to `import/<SHA>` after `IMPORT READY` stop a
+  rerun; they are never deleted.
+- **Never** rerun after the branch has been pushed; the script refuses.
+  Fix forward with new commits on the MR branch instead. Never use
+  `git rebase`, `--force`, `-X ours`, `-X theirs` or `--squash`, and never
+  edit an upstream-owned path to make a check pass.
 
 After `IMPORT READY`:
 
@@ -429,11 +374,12 @@ After `IMPORT READY`:
      `gap/config/` in their own commit.
    - **Extension surface.** `$R/release-notes.diff` lists each removed or
      renamed name and its migration (§9). Update every gap-owned use of it.
-   - **Set-aside patches.** For each `set-aside GL#NNN <sha>` line in
-     `$R/reapplied.txt`, reopen or comment on that GitLab issue: "not
-     re-applied on upstream release <SHA>; rework or retire". A rework is a
-     new gap patch.
-2. Push the branch with `git push origin "import/$SHA"`.
+   - **Set-aside patches.** For each line of `$R/issue-notes.txt` (the
+     `set-aside` lines of `$R/reapplied.txt`), reopen or comment on that
+     GitLab issue with its note: "not re-applied on upstream release <SHA>;
+     rework or retire". A rework is a new gap patch.
+2. Push the branch with the command the script printed
+   (`git -C "$FORK" push origin "import/$SHA"`).
 3. Open a draft MR named `Import upstream release <SHA>`. Its body gives
    `SHA`, `PREV`, `$R/reapplied.txt` and the follow-up commits.
 4. Ordinary approvals and the second approver (§6) apply. The gap maintainer
@@ -656,9 +602,9 @@ The names the gap builds on are a **public API**, limited to this list:
 |---|---|
 | `airgap.env` keys | Every key `airgap.env.example` assigns or shows commented out, plus `RETIRED_KEYS` |
 | Chart values that site config sets | The value paths `map_values.py` writes when every optional block is selected, plus the Qdrant paths `deploy.sh` sets |
-| Task names and operator script flags | Every task `task --list` shows (all tasks are in scope); the flags each `airgap:` task's script parses; the §4 import script's inputs |
+| Task names and operator script flags | Every task `task --list` shows (all tasks are in scope); the flags each `airgap:` task's script parses; the import script's `INPUTS` (§4) |
 | `gap/` paths | The §3 table |
-| Release bundle layout | The tarball, member and MANIFEST field names `pack.sh` writes, which include everything the §4 import script reads |
+| Release bundle layout | The tarball, member and MANIFEST field names `pack.sh` writes, which include everything the import script (§4) reads |
 
 - **Change rule.** Removing or renaming an item ships only with both:
   - a migration path: the old name keeps working, or it is refused with a
@@ -765,7 +711,7 @@ The names the gap builds on are a **public API**, limited to this list:
 | F4 | The CODEOWNERS generator, its equality test and the GitLab hygiene check | No |
 | F5 | The dev kit (§8), as [plan](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480613459) PR-2, PR-4 (with `prepare_python.py --kit`) and PR-5 (with `scripts/gap/ci_status.py`) | `agent_doctor.py` and `prepare_python.py`: yes. `devkit_key.py`: recommended for `UNIT_INPUTS`. The factory workflow is separate from `e2e.yml` and not an acceptance producer: no |
 | F6 | The gap release pipeline: protected-tag build and sign jobs, the unprivileged in-namespace build, the gap pack (`origin: gap`), the key-generation runbook and the release record template | Pack and taskfiles: yes |
-| F7 | `scripts/gap/import_release.sh` from §4, with its throwaway-repo tests. §4 then becomes a link | No |
+| F7 | Done: `scripts/gap/import_release.sh` from §4, with its throwaway-repo tests. §4 links to it | No |
 | F8 | The owner-document updates listed under Consequences | No |
 | F9 | Isolation of the production and CI namespaces (§2), as plan PR-3, before the fresh install, including the runner registrations and their configuration | Lane taskfile: yes. Manifests and proof: no |
 | F10 | Done with §9: the surface snapshot, its test, the release notes file and the release-procedure step | No |
