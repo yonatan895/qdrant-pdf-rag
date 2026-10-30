@@ -20,7 +20,7 @@ from packaging.requirements import Requirement
 from packaging.version import Version
 from scripts import dependency_lock as locks
 from scripts import prepare_python
-from scripts.image_inventory import inventory, verify_sbom
+from scripts.image_inventory import check_containerfile_bases, inventory, verify_sbom
 
 from tests.helpers_image_inventory import (
     DOCKER_MANIFEST,
@@ -825,3 +825,32 @@ def test_task_wheelhouse_reaches_real_preparation_owner_with_literal_path():
         assert case.run_task('artifacts:wheelhouse', f'BUNDLE_DIR={literal}').returncode == 0
     finally:
         case.doCleanups()
+
+
+def _containerfile_tree(tmp_path: Path) -> Path:
+    """The real images.txt, lock and Containerfiles: the inputs the base check reads."""
+    repo = Path(__file__).resolve().parents[1]
+    (tmp_path / "locks").mkdir()
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images.txt").write_bytes((repo / "images.txt").read_bytes())
+    (tmp_path / locks.MANIFEST).write_bytes((repo / locks.MANIFEST).read_bytes())
+    for path in (repo / "images").glob("Containerfile.*"):
+        (tmp_path / "images" / path.name).write_bytes(path.read_bytes())
+    return tmp_path
+
+
+def test_containerfile_check_admits_the_devkit_tool_context_and_no_lookalike(tmp_path):
+    """#1118: the dev workspace image reads its pinned tool archives from a named build
+    context. The base check admits that name, and a lookalike, which BuildKit would
+    resolve as a Docker Hub image, stays refused."""
+    root = _containerfile_tree(tmp_path)
+    devkit = root / "images" / "Containerfile.devkit"
+    recipe = devkit.read_text()
+    assert "from=devkit-tools," in recipe and "COPY --from=wheelhouse /*.whl " in recipe
+    check_containerfile_bases(root)
+    devkit.write_text(recipe.replace("from=devkit-tools,", "from=devkit-tool,"))
+    with pytest.raises(locks.LockError, match="non-stage image"):
+        check_containerfile_bases(root)
+    devkit.write_text(recipe.replace(locks.BASE_IMAGE.rpartition("@")[2], "sha256:" + "0" * 64, 1))
+    with pytest.raises(locks.LockError, match="base digest differs"):
+        check_containerfile_bases(root)

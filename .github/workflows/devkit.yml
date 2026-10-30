@@ -1,0 +1,196 @@
+# Dev workspace image factory (#1118, ADR-0009 §8, plan item A3). Builds
+# images/Containerfile.devkit with BuildKit pinned by digest, from inputs acquired
+# here and verified by hash before the build (the build re-verifies them).
+#
+#   pull_request (key inputs changed)   build and smoke-test; nothing is pushed
+#   push to main (same paths), dispatch push ghcr.io/<owner>/qdrant-pdf-rag-devkit
+#                                       by digest; the :<kit key> tag is set once
+#                                       and never moved
+#
+# The job summary carries the key and the manifest digest for a later pin PR
+# (scripts/tools/devkit-pin.txt); this workflow never edits the pin. It is not an
+# acceptance producer (scripts/acceptance.py PRODUCERS) and runs apart from e2e.yml.
+name: devkit
+
+on:
+  pull_request:
+    paths:
+      - requirements.dev.lock.txt
+      - locks/cp314-linux-x86_64.json
+      - scripts/tools/task-pin.txt
+      - scripts/tools/helm-pin.txt
+      - scripts/tools/oc-pin.txt
+      - images/devkit-packages.txt
+      - images/Containerfile.devkit
+      - images/devkit/**
+      - scripts/dependency_lock.py
+      - scripts/tools/install-task.sh
+      - scripts/tools/task-artifact.sh
+      - scripts/tools/install-helm.sh
+      - scripts/devkit_key.py
+      - .github/workflows/devkit.yml
+  push:
+    branches: [main]
+    paths:
+      - requirements.dev.lock.txt
+      - locks/cp314-linux-x86_64.json
+      - scripts/tools/task-pin.txt
+      - scripts/tools/helm-pin.txt
+      - scripts/tools/oc-pin.txt
+      - images/devkit-packages.txt
+      - images/Containerfile.devkit
+      - images/devkit/**
+      - scripts/dependency_lock.py
+      - scripts/tools/install-task.sh
+      - scripts/tools/task-artifact.sh
+      - scripts/tools/install-helm.sh
+      - scripts/devkit_key.py
+      - .github/workflows/devkit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: devkit-${{ github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # BuildKit by digest (#1118): v0.33.1, the same pin as e2e.yml's Open WebUI build.
+  BUILDKIT_IMAGE: moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+  # The arbitrary non-root UID in group 0 that OpenShift restricted-v2 assigns.
+  SMOKE_USER: "1000770000:0"
+  # Connected acquisition, verified by hash before the build (the build re-verifies).
+  ACQUIRE: |
+    python scripts/dependency_lock.py prepare --profile dev --directory "$RUNNER_TEMP/devkit/wheelhouse" --download-workers 8 >/dev/null
+    mkdir -p "$RUNNER_TEMP/devkit/tools"
+    for tool in task helm oc; do
+      pin="scripts/tools/$tool-pin.txt"
+      asset=$(sed -n 's/^asset: *//p' "$pin"); origin=$(sed -n 's/^origin: *//p' "$pin"); sha=$(sed -n 's/^sha256: *//p' "$pin")
+      case "$origin" in https://*/"$asset") ;; *) echo "$pin: origin does not name its asset" >&2; exit 1 ;; esac
+      curl -fsSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/devkit/tools/$asset" "$origin"
+      printf '%s  %s\n' "$sha" "$RUNNER_TEMP/devkit/tools/$asset" | sha256sum -c -
+    done
+  # Runs inside the image as SMOKE_USER; $1 is the oc pin version.
+  SMOKE: |
+    [ "$(oc version --client | sed -n 's/^Client Version: *//p')" = "$1" ]
+    kubectl version --client | grep -q '^Client Version: v1\.33\.'
+    skopeo --version; task --version; helm version --short
+    python3 -m pip check
+    pytest --version; ruff --version; mypy --version; python3 -c 'import hypothesis'
+    rpm -qa --qf '%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n' | LC_ALL=C sort > /tmp/rpm-now
+    missing=$(grep -v -e '^#' -e '^$' /opt/devkit/devkit-packages.txt | LC_ALL=C comm -13 /tmp/rpm-now -)
+    [ -z "$missing" ]
+    command -v mfr-session-login mfr-session-logout
+    touch "$HOME/.devkit-probe" /work/.devkit-probe
+    if touch /opt/app-root/lib/.devkit-probe 2>/dev/null; then exit 1; fi
+
+jobs:
+  build:
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.14.8"
+      - name: Acquire the dev wheelhouse and tool archives, verified by hash
+        run: sh -euc "$ACQUIRE"
+      - name: Build the image without pushing it
+        run: |
+          python -c 'from scripts.devkit_key import ROOT, inputs; print("\0".join(inputs(ROOT)), end="")' > "$RUNNER_TEMP/devkit-inputs"
+          SOURCE_DATE_EPOCH="$(xargs -0 git log -1 --format=%ct -- < "$RUNNER_TEMP/devkit-inputs")"
+          export SOURCE_DATE_EPOCH
+          docker buildx create --name devkit --driver docker-container --use --driver-opt image="$BUILDKIT_IMAGE" >/dev/null
+          docker buildx build --builder devkit -f images/Containerfile.devkit --provenance=false --sbom=false \
+            --build-context wheelhouse="$RUNNER_TEMP/devkit/wheelhouse" --build-context devkit-tools="$RUNNER_TEMP/devkit/tools" \
+            --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" --output "type=docker,name=devkit:ci,rewrite-timestamp=true" .
+      - name: Smoke-test the image as an arbitrary UID
+        run: |
+          docker run --rm --user "$SMOKE_USER" devkit:ci sh -euc "$SMOKE" sh "$(sed -n 's/^version: *//p' scripts/tools/oc-pin.txt)"
+
+  publish:
+    # Only main publishes: a tag is set once, so a branch build must never claim a key.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    concurrency:
+      group: devkit-publish
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.14.8"
+      - name: Acquire the dev wheelhouse and tool archives, verified by hash
+        run: sh -euc "$ACQUIRE"
+      - name: Build, push by digest, read back, smoke-test, then set the key tag once
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OWNER_LC="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr 'A-Z' 'a-z')"
+          IMAGE="ghcr.io/${OWNER_LC}/qdrant-pdf-rag-devkit"
+          KEY="$(python scripts/devkit_key.py)"
+          printf '%s\n' "$KEY" | grep -Eqx '[0-9a-f]{64}' || { echo "no kit key" >&2; exit 1; }
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          # Rebuilds of the same inputs aim at the same digest: the timestamp is the last commit
+          # time of any kit key input, and BuildKit rewrites layer timestamps to it.
+          python -c 'from scripts.devkit_key import ROOT, inputs; print("\0".join(inputs(ROOT)), end="")' > "$RUNNER_TEMP/devkit-inputs"
+          SOURCE_DATE_EPOCH="$(xargs -0 git log -1 --format=%ct -- < "$RUNNER_TEMP/devkit-inputs")"
+          export SOURCE_DATE_EPOCH
+          docker buildx create --name devkit --driver docker-container --use --driver-opt image="$BUILDKIT_IMAGE" >/dev/null
+          build() {
+            docker buildx build --builder devkit -f images/Containerfile.devkit --provenance=false --sbom=false \
+              --build-context wheelhouse="$RUNNER_TEMP/devkit/wheelhouse" --build-context devkit-tools="$RUNNER_TEMP/devkit/tools" \
+              --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" "$@" .
+          }
+          # Push by digest only: no tag is written by the push itself.
+          build --metadata-file "$RUNNER_TEMP/devkit-metadata.json" \
+            --output "type=image,name=$IMAGE,push-by-digest=true,push=true,rewrite-timestamp=true"
+          DIGEST="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["containerimage.digest"])' "$RUNNER_TEMP/devkit-metadata.json")"
+          printf '%s\n' "$DIGEST" | grep -Eqx 'sha256:[0-9a-f]{64}' || { echo "no manifest digest" >&2; exit 1; }
+          # Record the key and digest before anything later can fail.
+          echo "### Dev workspace image" >> "$GITHUB_STEP_SUMMARY"
+          echo "- kit key \`$KEY\`; pushed by digest \`$IMAGE@$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
+          READBACK="$(docker buildx imagetools inspect "$IMAGE@$DIGEST" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          [ "$READBACK" = "$DIGEST" ] || { echo "registry readback differs from the pushed digest" >&2; exit 1; }
+          docker pull -q "$IMAGE@$DIGEST" >/dev/null
+          docker run --rm --user "$SMOKE_USER" "$IMAGE@$DIGEST" sh -euc "$SMOKE" sh "$(sed -n 's/^version: *//p' scripts/tools/oc-pin.txt)"
+          # The key tag is set only when the registry says it does not exist. An existing tag is
+          # left alone whatever it points at (a moving tag is a supply-chain trap; the maintainer
+          # decides), and any other inspect failure stops the job rather than risk overwriting it.
+          if INSPECT="$(docker buildx imagetools inspect "$IMAGE:$KEY" --format '{{json .Manifest.Digest}}' 2>&1)"; then
+            PINNED="$(printf '%s' "$INSPECT" | tr -d '"')"
+            TAGSTATE="left alone: :$KEY exists at $PINNED"
+            [ "$PINNED" = "$DIGEST" ] && TAGSTATE="left alone: :$KEY already points at this digest"
+          elif printf '%s' "$INSPECT" | grep -qi 'not found'; then
+            # --prefer-index=false: tag the pushed manifest itself; the default wraps it in a
+            # new index, so the tag would name a different digest than the one pushed.
+            docker buildx imagetools create --prefer-index=false -t "$IMAGE:$KEY" "$IMAGE@$DIGEST"
+            PINNED="$(docker buildx imagetools inspect "$IMAGE:$KEY" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+            [ "$PINNED" = "$DIGEST" ] || { echo "key tag readback differs from the pushed digest" >&2; exit 1; }
+            TAGSTATE="set: :$KEY did not exist"
+          else
+            echo "cannot tell whether :$KEY exists; refusing to tag" >&2; exit 1
+          fi
+          echo "- for the scripts/tools/devkit-pin.txt pin PR: \`key: $KEY\`, \`digest: $PINNED\` (key tag $TAGSTATE)" >> "$GITHUB_STEP_SUMMARY"
+          # Reproducibility probe: an uncached second build of the same inputs. A cached
+          # rebuild would reuse the first build's layers and prove nothing.
+          REPRO="no (digest differs on rebuild)"
+          build --no-cache --output "type=oci,dest=$RUNNER_TEMP/devkit-rebuild.tar,rewrite-timestamp=true"
+          REBUILT="$(tar -xOf "$RUNNER_TEMP/devkit-rebuild.tar" index.json | python -c 'import json,sys; print(json.load(sys.stdin)["manifests"][0]["digest"])')"
+          [ "$REBUILT" = "$DIGEST" ] && REPRO="yes"
+          echo "- registry readback matches; smoke-tested as UID $SMOKE_USER; SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" >> "$GITHUB_STEP_SUMMARY"
+          echo "- uncached rebuild reproduces the digest: $REPRO (rebuild digest \`$REBUILT\`)" >> "$GITHUB_STEP_SUMMARY"
