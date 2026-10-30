@@ -16,7 +16,10 @@
     and its decisions D-1 to D-10 ([6480982316](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480982316),
     [6481285738](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6481285738), [6481464776](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6481464776)),
     and the review blockers B1 to B3 ([6481952257](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6481952257)).
-    This record writes them D-1 to D-10, apart from the earlier D2 to D4.
+    This record writes them D-1 to D-10, apart from the earlier D2 to D4;
+  - the CI namespace, agent iteration and coding-model key decisions of
+    2026-10-30 ([6524485455](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6524485455)),
+    which revise D-1, D-4 and D-5 and replace B1.
 
   This record replaces the AGENTS.md rule "Keep one public GitHub /
   air-gapped GitLab history". Accepting it changes no product default,
@@ -26,9 +29,9 @@
   - Releases reach the gap as signed bundles, and practically nothing leaves
     it. A single shared history cannot exist, because commits made in the gap
     never return.
-  - The air-gapped environment **is** production. Dev pods, GitLab runners
-    and gap builds run alongside the live service, in one shared
-    non-production namespace (§2).
+  - The air-gapped environment **is** production. The live service runs in
+    a non-production namespace on the site cluster. Dev pods and GitLab
+    runners run on the same cluster in a separate CI namespace (§2).
   - Development continues there with less capable models, which have
     first-hand production context but no internet and no GitHub.
   - The gap cannot build a unit-test environment from what is transferred
@@ -81,9 +84,10 @@
   disposable lab, never in the air gap". Only connected-side developers and
   the connected CI and Kind lanes may use it. Nobody in the gap uses it, and
   gap rehearsals use signed gap releases instead (§5).
-- **Credentials.** The dev pod and the runner jobs hold no production
-  credentials and no RBAC, and job code never sees the runner manager's
-  (§2). The bastion holds the operator's session token and the registry
+- **Credentials.** The dev pod and the runner jobs run in the CI namespace
+  with no RBAC, and job code never sees the runner manager's credentials
+  (§2). The dev pod's LiteLLM key is its own, never a production serving
+  key. The bastion holds the operator's session token and the registry
   robot auth, memory-only and for one session (§8). So even an unverified
   checkout in the gap cannot change the live release.
 - **Outbound.** Nothing in this ADR moves code out of the gap. An upstream
@@ -92,15 +96,18 @@
 
 ## 2. Isolation of development from the live release
 
-- **Namespaces (open question 1, answered).** Today everything, the live
-  service included, runs in one non-production namespace. Once it has been
-  stable for a period, the service moves to the production cluster with a
-  production IdP client.
-  - The move is a planned fresh install, not an in-place upgrade: the
+- **Namespaces (open question 1, answered; CI namespace decided
+  2026-10-30).** Two namespaces share the site cluster:
+  - The **production namespace** holds the live release and the bastion.
+    Today it is non-production. Once it has been stable for a period, the
+    service moves to the production cluster with a production IdP client.
+    The move is a planned fresh install, not an in-place upgrade: the
     identical signed release is promoted there (§5 step 6) with a new IdP
-    client.
-  - After the move, the shared namespace stays as the dev, CI and
-    gap-release rehearsal namespace, the preferred isolation.
+    client. After the move, the old namespace stays as the gap-release
+    rehearsal namespace.
+  - The **CI namespace** holds the GitLab runner manager, its job pods and
+    the dev pod. The platform team creates it. Nothing in it holds
+    production deploy authority.
   - The namespace in use on 2026-10-28 is torn down, not remediated. The
     fresh install starts with every rule below in place, so F9 and F5 land
     before it.
@@ -108,12 +115,12 @@
   **F9-defined pods** (bastion, dev and runner job) have no RBAC and no
   token automount, and their egress is limited to the listed destinations:
 
-  | Role | ServiceAccount | Egress |
-  |---|---|---|
-  | bastion | its own; acts with the operator's session credentials (§8) | `kubernetes.default.svc` at the API server addresses in site config (D-3), site registry, DNS |
-  | dev | its own | GitLab, DNS |
-  | runner job | `mfr-runner-job` | GitLab, DNS |
-  | runner manager | created by the site's GitLab Runner Operator | set by the operator |
+  | Role | Namespace | ServiceAccount | Egress |
+  |---|---|---|---|
+  | bastion | production | its own; acts with the operator's session credentials (§8) | `kubernetes.default.svc` at the API server addresses in site config (D-3), site registry, DNS |
+  | dev | CI | its own | GitLab, the LiteLLM endpoint (with the dev key, below), DNS |
+  | runner job | CI | `mfr-runner-job` | GitLab, DNS |
+  | runner manager | CI | created by the site's GitLab Runner Operator | set by the operator |
 
   The F6 build and sign jobs use their own identity, never `mfr-runner-job`.
 - **Labels.** F9-defined pods carry only the
@@ -123,58 +130,105 @@
   workspace pod to production peers or make it a Service backend.
 - **Egress-side enforcement.** Each F9-defined pod is selected by a
   default-deny policy plus its egress allow-list. Production cannot be
-  guarded on the ingress side: the chart's agent policy admits every
-  same-namespace pod (`podSelector: {}`), Qdrant has no policy, and policies
-  only add allowances.
+  guarded on the ingress side: Qdrant has no policy, and policies only add
+  allowances. So the CI pods' default-deny egress, not anything in the
+  production namespace, keeps them off Qdrant and the agent.
 - **Production authority.** Of the F9-defined pods, only the bastion
   reaches the API server and the registry. Operator scripts reach the
   service through `$KC exec`, so the bastion needs nothing else. Dev and
   runner-job pods have no route to either, so the network enforces "only the
-  bastion holds production authority". No F9-defined pod can read the
-  production Secrets (the Qdrant writer and admin keys, the gateway keys,
+  bastion holds production authority". No F9-defined pod can read a
+  production Secret (the Qdrant writer and admin keys, the gateway keys,
   the OIDC client secret, the gap signing key) or write any production
   workload object.
-- **Runner manager (D-1).** CI runs in this namespace through the site's
-  GitLab Runner Operator, with the Kubernetes executor and `concurrent = 2`.
+- **Runner manager (D-1, revised 2026-10-30).** CI runs in the CI namespace
+  through the site's GitLab Runner Operator, with the Kubernetes executor.
   Each job runs in a fresh pod under `mfr-runner-job`; GitLab `services:`,
   such as the `sim` Qdrant, run as containers inside it. Job code never sees
   the manager's credentials.
-  - **Accepted trust** in the vendor component
-    ([B1 decision](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6481952257)):
-    the manager's operator-created Role lets it read every Secret in the
-    namespace, production keys included, create and delete pods, and exec
-    into or attach to them. A Role cannot narrow these to names generated at
-    run time.
-  - The platform team is asked for a ValidatingAdmissionPolicy on the
-    manager ServiceAccount that denies CONNECT `pods/exec` and `pods/attach`
-    to any pod whose name does not start with `runner-`, and CREATE `pods`
-    unless `serviceAccountName` is `mfr-runner-job` with no Secret volume,
-    `secretKeyRef` or `envFrom` outside `runner-*` names, no `hostPath` and
-    no privileged container. Admission never sees `get`, `list` or `watch`,
-    so no policy can narrow the manager's Secret reads.
-- **Secrets.** Only the dev pod mounts a Secret: `mfr-dev-gitlab` (D-4), a
-  GitLab project access token. It is a bot identity with the Developer role,
-  so it cannot approve, merge to protected `main` or change approval rules.
-  Its scopes are `read_repository` and `write_repository`, never `api`; it
-  expires after about 90 days and is rotated. The runner manager holds the
-  operator's runner token Secret. The bastion mounts none (§8). The platform
-  team is asked whether etcd encryption at rest is enabled.
-- **Resources (D-5).** The namespace quota is enforced on both requests and
-  limits, so every workspace container sets both, with small caps. The
-  platform quota request (figures recorded privately) covers production at
-  site sizing, set as R2 `QDRANT_*`/`INGEST_*` values at the fresh install,
-  plus the workspace pods, two concurrent runner jobs and rollout surge.
-  Runner jobs never run alongside an ingest Job.
+  - The manager's operator-created Role lets it read every Secret in the CI
+    namespace, create and delete pods there, and exec into or attach to
+    them. A Role cannot narrow these to names generated at run time.
+  - The namespace boundary confines it. The manager can read the CI
+    namespace's Secrets (the runner token, `mfr-dev-gitlab`,
+    `mfr-dev-litellm` and the pull-only registry robot), never a production
+    Secret. This replaces the
+    [B1](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6481952257)
+    accepted trust in production Secrets, and the request for a platform
+    ValidatingAdmissionPolicy is withdrawn.
+  - The runner configuration allows no job overrides. It has no
+    `*_overwrite_allowed` setting (ServiceAccount, namespace, annotations,
+    helper image), restricts `allowed_images` and `allowed_services` to the
+    site registry, runs no privileged container, and sets requests and
+    limits on every container (build, helper and services).
+- **CI capacity and agent iteration (2026-10-30).** Gap agents reach the CI
+  namespace only through GitLab: they push a branch and read the result.
+  The dev pod has no RBAC there, because creating a pod would let it mount
+  any Secret in the namespace.
+  - There are four job slots of about 1 CPU each, since pytest runs on one
+    core. They form two runner registrations: `gate`, one slot for merge
+    request and tag pipelines, and `wip`, three slots for branch pipelines.
+    Agent work never queues ahead of a merge gate.
+  - The unit job is sharded (`parallel: 4`). Jobs are `interruptible`, and
+    redundant pipelines are cancelled automatically, so only a branch's
+    newest commit holds slots.
+  - Branch pipelines select lanes with the fail-closed classifier in
+    `scripts/review_tooling.py`, as GitHub does. Merge request and tag
+    pipelines still run every lane
+    ([GH#808](https://github.com/yonatan895/qdrant-pdf-rag/issues/808)).
+  - `scripts/gap/ci_status.py` (standard library, `read_api`) waits on a
+    commit's pipeline and prints each job's status and the failing test ids
+    from its JUnit report.
+- **Secrets.** No F9-defined pod in the production namespace mounts a
+  Secret; the bastion's credentials are session-piped (§8). In the CI
+  namespace the dev pod mounts two:
+  - `mfr-dev-gitlab` (D-4, amended 2026-10-30), a GitLab project access
+    token. It is a bot identity with the Developer role, so it cannot
+    approve, merge to protected `main` or change approval rules. Its scopes
+    are `read_repository`, `write_repository` and `read_api`, never `api`.
+    `read_api` reads pipelines, job logs and test reports. The token expires
+    after about 90 days and is rotated.
+  - `mfr-dev-litellm`, the coding agents' own LiteLLM key (below).
+
+  The runner manager holds the operator's runner token Secret. Job pods
+  pull with a pull-only registry robot in the CI namespace, never the
+  production push robot. The platform team is asked whether etcd encryption
+  at rest is enabled.
+- **The coding model's key (maintainer decision 2026-10-30).** The gap's
+  coding agents call the product's LiteLLM endpoint with their **own key**,
+  which the platform team issues separately from the product's serving keys.
+  It lives in `mfr-dev-litellm` in the CI namespace, and the dev pod's egress
+  allows the LiteLLM endpoint. The dev key has its own rate limit, budget,
+  attribution in LiteLLM logs and spend, and rotation, so a runaway agent
+  loop or a leak from the dev pod never touches production serving. The
+  runner manager can read it, like every CI namespace Secret, and runner
+  jobs never receive it.
+- **Resources (D-5, revised 2026-10-30).** Both namespaces enforce quota on
+  requests and limits, so every workspace container sets both, with small
+  caps.
+  - The production request covers production at site sizing (set as R2
+    `QDRANT_*`/`INGEST_*` values at the fresh install), the bastion and
+    rollout surge.
+  - The CI request covers the manager, the four job slots and the dev pod
+    with its PVC (§8). Its figures are a draft estimate, still to be
+    measured on the real jobs.
+  - Both sets of figures are recorded privately. CI no longer shares a
+    quota with production, so the rule that runner jobs never run alongside
+    an ingest Job is retired.
 - **The isolation proof** (`scripts/devkit/isolation_proof.py`, recorded in
-  `gap/records/`) holds:
+  `gap/records/`) covers both namespaces. It holds:
   - each ServiceAccount's `can-i` list, as verbs and resources only,
     including the manager Role's verbs and resources;
   - a negative matrix of what each identity is refused;
-  - every pod in the namespace classified by its labels, and mounted
-    Secrets checked against the two allowed;
+  - every pod classified by its labels, with mounted Secrets checked
+    against the allowed list above: none on F9-defined pods in the
+    production namespace; in the CI namespace, the dev pod's two, the
+    manager's runner token and the pull robot;
+  - the rendered runner configuration, showing that it allows no override;
   - live network probes from each F9-defined role, including the API server
-    addresses (D-3), with a negative control that shows the probe reaches a
-    target once the policy is absent.
+    addresses (D-3), probes from the CI namespace to production Qdrant and
+    the agent, and a negative control that shows the probe reaches a target
+    once the policy is absent.
 - **Test data.** Tests and development never write to the production
   collection or alias. The dev pod's Qdrant is a localhost sidecar, and a CI
   job's is the `sim` service inside its job pod. Rehearsals use a
@@ -412,8 +466,8 @@ stays, and it is the gate.
    marked run with its evidence, or NOT RUN. A NOT RUN required check blocks
    promotion, as AGENTS.md requires.
 5. **Rehearse.** Bootstrap the tarball into a fresh workspace. Deploy it
-   either to the non-production namespace or to a non-production release
-   name in the shared namespace, with its own Qdrant instance and PVCs and
+   either to a rehearsal namespace or to a non-production release name in
+   the production namespace, with its own Qdrant instance and PVCs and
    never the production collection or alias. Pass the
    [go-live checks](../install_and_ops.md#site-openshift-acceptance) there
    and record them.
@@ -575,8 +629,8 @@ refreshed with each kit (Q9).
   re-sign under the same key is
   allowed when only the issue snapshot changes: the MANIFEST records the new
   snapshot time, and the image digest is unchanged.
-- **Storage (D-10).** The bastion `/work` PVC is 30 GiB and the dev PVC
-  20 GiB.
+- **Storage (D-10).** The bastion `/work` PVC is 30 GiB, in the
+  production namespace. The dev PVC is 20 GiB, in the CI namespace.
 - **`agent_doctor` refuses a kit/lock mismatch** with a fixed message that
   names the kit to request (`mfr-devkit-<key>`). Outside a kit image,
   connected development keeps today's checks.
@@ -642,9 +696,17 @@ The names the gap builds on are a **public API**, limited to this list:
   interpreter the gap lacks, and it is a build without an issue.
 - **No stability promise for extension points** (open question 2). Imports
   would find breaking renames only when a gap patch or site config fails.
-- **A runner manager in a separate CI namespace, or platform-run** (plan
-  D-1). Rejected for CI in the same namespace with the manager as accepted
-  trust (§2).
+- **CI in the production namespace, with the runner manager as accepted
+  trust** (D-1 as decided on 2026-10-28, review B1). Replaced on 2026-10-30
+  by the CI namespace (§2). RBAC cannot narrow the manager's Secret reads
+  and admission never sees them, so the manager could have read every
+  production Secret.
+- **A platform-run runner manager** (plan D-1). Not pursued: the CI
+  namespace confines the manager without a platform-run service.
+- **The product's LiteLLM key for the coding agents.** Rejected on
+  2026-10-30. A copy in the CI namespace would share the product's rate
+  limit and budget, hide coding traffic in its logs and spend, and make a
+  dev pod leak a production rotation.
 - **An in-memory-only GitLab credential** (plan D-4). Rejected for a scoped
   project access token Secret (§2).
 
@@ -659,7 +721,7 @@ The names the gap builds on are a **public API**, limited to this list:
   The file stays under 8192 bytes. The MR and gap-maintainer reading is in
   §6, because the root file has no room for it.
 - **Trade-off.** Gap development has first-hand production context, but
-  weaker models do it, next to the live service. Its learning does not flow
+  weaker models do it, on the live service's cluster. Its learning does not flow
   back upstream. Every import reverts and re-applies every gap patch, so each
   patch adds two commits per import, and a patch the release breaks stays
   set aside until its issue is reworked.
@@ -667,7 +729,8 @@ The names the gap builds on are a **public API**, limited to this list:
 - **Owner documents** change in the follow-up PRs:
   - [deployment policy](../deploy.md#deployment-policy) and
     [CI policy](../deploy.md#ci-policy): the CI job image becomes this
-    repository's dev kit image, and verified-release enforcement is added;
+    repository's dev kit image, CI runs in its own namespace, and
+    verified-release enforcement is added;
   - the live-stack GitLab job map;
   - the [task-runner](../task-runner.md#installation) gap workstation
     recipe;
@@ -687,12 +750,13 @@ The names the gap builds on are a **public API**, limited to this list:
 | F2 | Two trust anchors (upstream and gap) and the MANIFEST `origin:` field | No |
 | F3 | Done in this PR: `tests/test_hygiene.py` fails on GitHub Actions when `gap/` or `.gitlab/` exists | No |
 | F4 | The CODEOWNERS generator, its equality test and the GitLab hygiene check | No |
-| F5 | The dev kit (§8), as [plan](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480613459) PR-2, PR-4 (with `prepare_python.py --kit`) and PR-5 | `agent_doctor.py` and `prepare_python.py`: yes. `devkit_key.py`: recommended for `UNIT_INPUTS`. The factory workflow is separate from `e2e.yml` and not an acceptance producer: no |
+| F5 | The dev kit (§8), as [plan](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480613459) PR-2, PR-4 (with `prepare_python.py --kit`) and PR-5 (with `scripts/gap/ci_status.py`) | `agent_doctor.py` and `prepare_python.py`: yes. `devkit_key.py`: recommended for `UNIT_INPUTS`. The factory workflow is separate from `e2e.yml` and not an acceptance producer: no |
 | F6 | The gap release pipeline: protected-tag build and sign jobs, the unprivileged in-namespace build, the gap pack (`origin: gap`), the key-generation runbook and the release record template | Pack and taskfiles: yes |
 | F7 | `scripts/gap/import_release.sh` from §4, with its throwaway-repo tests. §4 then becomes a link | No |
 | F8 | The owner-document updates listed under Consequences | No |
-| F9 | Isolation in the shared namespace (§2), as plan PR-3, before the fresh install | Lane taskfile: yes. Manifests and proof: no |
+| F9 | Isolation of the production and CI namespaces (§2), as plan PR-3, before the fresh install, including the runner registrations and their configuration | Lane taskfile: yes. Manifests and proof: no |
 | F10 | Done with §9: the surface snapshot, its test, the release notes file and the release-procedure step | No |
+| F11 | GitLab CI iteration (§2): the sharded unit job, `interruptible` jobs, the `gate` and `wip` runner tags, and lane selection on branch pipelines, with the GitHub/GitLab parity test | No |
 
 ## Open questions for the maintainer
 
