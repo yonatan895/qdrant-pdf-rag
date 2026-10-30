@@ -2,8 +2,13 @@
 
 Hermetic: both CI definitions are parsed, the GitLab job scripts are executed
 under `sh -e` with stub tools, and every static rule has negative controls
-(mutated copies of the real definition must be rejected). A real GitLab
-pipeline run is still required to prove runner, image and service behavior.
+(mutated copies of the real definition must be rejected). Pipeline shape
+(GH#1118 F11) is evaluated from the real workflow and job rules: merge request
+and tag pipelines run every lane on `gate`, branch pipelines run the lane
+selector on `wip` and its child pipeline. The select job runs for real against
+synthetic git histories, and the unit shards are checked against a real
+collection. A real GitLab pipeline run is still required to prove runner,
+image, service, child-pipeline and auto-cancel behavior.
 """
 import copy
 import os
@@ -17,25 +22,58 @@ from pathlib import Path
 
 import pytest
 import yaml
+from scripts.gitlab_lanes import LANE_JOBS, child_config, selected_jobs
 
 ROOT = Path(__file__).resolve().parents[1]
 GITLAB = yaml.safe_load((ROOT / '.gitlab-ci.yml').read_text())
 GITHUB = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
 REQUIRED_JOBS = {'hygiene', 'lint', 'test', 'hazards', 'sim', 'gate-l1'}
+SELECTION_JOBS = {'select', 'lanes'}
+UNIT_SHARDS = 4
+# The only selection options the unit lane may pass: the shard plugin with
+# GitLab's parallel index/total and the GitHub durations file.
+UNIT_SHARD_ARGS = ['-p', 'tests.ci_shard', '--unit-shard=$CI_NODE_INDEX', '--unit-shards=$CI_NODE_TOTAL',
+                   '--unit-durations=tests/unit-durations.json']
+SELECT_SCRIPT = [
+    'git fetch --no-tags origin "+refs/heads/${CI_DEFAULT_BRANCH}:refs/remotes/origin/${CI_DEFAULT_BRANCH}"',
+    'BASE_SHA="$(git merge-base "refs/remotes/origin/${CI_DEFAULT_BRANCH}" "$CI_COMMIT_SHA")"',
+    'python scripts/review_tooling.py profile --base "$BASE_SHA" --head "$CI_COMMIT_SHA" --out lanes-manifest.json',
+    'python scripts/gitlab_lanes.py --manifest lanes-manifest.json --out lanes.yml',
+]
+LANES_TRIGGER = {'include': [{'artifact': 'lanes.yml', 'job': 'select'}], 'strategy': 'depend',
+                 'forward': {'yaml_variables': False}}
 # Integration-marked files that drive a local Docker daemon; the offline GitLab
 # runner only has the mirrored Qdrant service, so the sim lane omits them.
 DOCKER_ONLY_SIM_FILES = {'tests/test_qdrant_auth.py', 'tests/test_openwebui_proxy_nginx.py'}
 # Selection-narrowing or evidence-changing pytest options: the unit lane must
-# run the complete eligible suite exactly as pyproject defines it.
+# run the complete eligible suite exactly as pyproject defines it (sharding
+# aside, see UNIT_SHARD_ARGS).
 NARROWING_FLAGS = ('-k', '-m', '-o', '-p', '--ignore', '--ignore-glob', '--deselect', '--lf',
-                   '--ff', '--co', '--collect-only', '--unit-shard', '--unit-shards',
+                   '--ff', '--co', '--collect-only', '--unit-shard', '--unit-shards', '--unit-durations',
                    '--pyargs', '--continue-on-collection-errors')
 MASKS = (r'\|\|\s*(true|:|exit\s+0)\b', r';\s*(true|:)\s*$', r'\bset\s+\+e\b', r'\bexit\s+0\b')
 
 
 def jobs(doc):
     return {k: v for k, v in doc.items()
-            if isinstance(v, dict) and k not in ('workflow', 'default', 'variables')}
+            if isinstance(v, dict) and not k.startswith('.') and k not in ('workflow', 'default', 'variables')}
+
+
+def merge(base, over):
+    """GitLab's merge for `extends` and `include`: hashes deep-merge, the later side wins."""
+    out = dict(base)
+    for key, value in over.items():
+        out[key] = merge(out[key], value) if isinstance(value, dict) and isinstance(out.get(key), dict) else value
+    return out
+
+
+def resolve(doc, name):
+    job = doc[name]
+    parents = job.get('extends', [])
+    out = {}
+    for parent in [parents] if isinstance(parents, str) else parents:
+        out = merge(out, resolve(doc, parent))
+    return merge(out, {k: v for k, v in job.items() if k != 'extends'})
 
 
 def lines(job, key='script'):
@@ -43,7 +81,7 @@ def lines(job, key='script'):
 
 
 def pytest_line(job):
-    found = [s for s in lines(job) if s.startswith('pytest ')]
+    found = [s for s in lines(job) if s.startswith(('pytest ', 'python -m pytest '))]
     return found[0] if len(found) == 1 else None
 
 
@@ -59,25 +97,62 @@ def ignores(command):
     return {t.split('=', 1)[1] for t in shlex.split(command) if t.startswith('--ignore=')}
 
 
-SCENARIOS = {
-    'merge request': {'CI_PIPELINE_SOURCE': 'merge_request_event'},
-    'branch': {'CI_PIPELINE_SOURCE': 'push', 'CI_COMMIT_BRANCH': 'main'},
-    'tag': {'CI_PIPELINE_SOURCE': 'push', 'CI_COMMIT_TAG': 'v1.2.3'},
+def expression_matches(expression, variables):
+    """The rule expression forms this file may use: `$V`, `$V == "x"`, `$V != "x"`, joined by &&."""
+    for clause in (c.strip() for c in expression.split('&&')):
+        compare = re.fullmatch(r'\$(\w+) (==|!=) "([^"]*)"', clause)
+        bare = re.fullmatch(r'\$(\w+)', clause)
+        assert compare or bare, f'unsupported rule expression {expression!r}'
+        if compare:
+            matched = (variables.get(compare.group(1)) == compare.group(3)) == (compare.group(2) == '==')
+        else:
+            matched = bool(variables.get(bare.group(1)))
+        if not matched:
+            return False
+    return True
+
+
+def first_rule(rules, variables):
+    return next((r for r in rules if 'if' not in r or expression_matches(r['if'], variables)), None)
+
+
+def pipeline(doc, variables):
+    """The pipeline GitLab creates for these predefined variables, or None when none is."""
+    rule = first_rule(doc['workflow']['rules'], variables)
+    if rule is None or rule.get('when') == 'never':
+        return None
+    scope = {**variables, **rule.get('variables', {})}
+    names = set()
+    for name in jobs(doc):
+        job_rules = resolve(doc, name).get('rules')
+        matched = {} if job_rules is None else first_rule(job_rules, scope)
+        if matched is not None and matched.get('when', 'on_success') != 'never':
+            names.add(name)
+    return {'variables': rule.get('variables', {}), 'jobs': names,
+            'auto_cancel': {**doc['workflow'].get('auto_cancel', {}), **rule.get('auto_cancel', {})}}
+
+
+def child_doc(doc, config):
+    """The child pipeline configuration: the included file, then the generated keys over it."""
+    assert config['include'] == [{'local': '.gitlab-ci.yml'}]
+    return merge(doc, {k: v for k, v in config.items() if k != 'include'})
+
+
+MR = {'CI_PIPELINE_SOURCE': 'merge_request_event', 'CI_MERGE_REQUEST_IID': '3'}
+TAG = {'CI_PIPELINE_SOURCE': 'push', 'CI_COMMIT_TAG': 'v1.2.3'}
+BRANCH = {'CI_PIPELINE_SOURCE': 'push', 'CI_COMMIT_BRANCH': 'feature'}
+CHILD = {'CI_PIPELINE_SOURCE': 'parent_pipeline', 'CI_COMMIT_BRANCH': 'feature'}
+GATE_SCENARIOS = {'merge request': MR, 'tag': TAG}
+WIP_SCENARIOS = {
+    'branch': BRANCH,
+    'default branch': {'CI_PIPELINE_SOURCE': 'push', 'CI_COMMIT_BRANCH': 'main'},
+    'scheduled': {'CI_PIPELINE_SOURCE': 'schedule', 'CI_COMMIT_BRANCH': 'main'},
 }
-
-
-def admits(doc, variables):
-    """Evaluate the workflow rules for the two expression forms the file may use."""
-    for rule in doc['workflow']['rules']:
-        expression = rule['if'].strip()
-        equal = re.fullmatch(r'\$(\w+) == "([^"]*)"', expression)
-        bare = re.fullmatch(r'\$(\w+)', expression)
-        assert equal or bare, f'unsupported workflow expression {expression!r}'
-        matched = variables.get(equal.group(1)) == equal.group(2) if equal \
-            else bool(variables.get(bare.group(1)))
-        if matched:
-            return rule.get('when', 'always') != 'never'
-    return False
+NOT_ADMITTED = {
+    # The merge request pipeline is the only one for a branch with an open MR.
+    'branch with an open merge request': {**BRANCH, 'CI_OPEN_MERGE_REQUESTS': 'group/project!3'},
+    'api call without a ref': {'CI_PIPELINE_SOURCE': 'api'},
+}
 
 
 def image_references(doc):
@@ -91,13 +166,85 @@ def image_references(doc):
     return refs
 
 
+def keys_anywhere(node, key):
+    if isinstance(node, dict):
+        return (key in node) or any(keys_anywhere(v, key) for v in node.values())
+    return isinstance(node, list) and any(keys_anywhere(v, key) for v in node)
+
+
+def pipeline_violations(doc):
+    """Pipeline shape (GH#1118 F11): which jobs run where, on which runner tag."""
+    found = []
+    for label, variables in GATE_SCENARIOS.items():
+        run = pipeline(doc, variables)
+        if run is None:
+            found.append(f'{label} pipelines are not admitted')
+            continue
+        if run['jobs'] != REQUIRED_JOBS:
+            found.append(f'{label} pipelines must run every lane directly, ran {sorted(run["jobs"])}')
+        if run['variables'].get('CI_RUNNER_TAG') != 'gate':
+            found.append(f'{label} pipelines must run on the gate runner tag')
+    for label, variables in WIP_SCENARIOS.items():
+        run = pipeline(doc, variables)
+        if run is None:
+            found.append(f'{label} pipelines are not admitted')
+            continue
+        if run['jobs'] != SELECTION_JOBS:
+            found.append(f'{label} pipelines must run only the lane selector, ran {sorted(run["jobs"])}')
+        if run['variables'].get('CI_RUNNER_TAG') != 'wip':
+            found.append(f'{label} pipelines must run on the wip runner tag')
+    for label, variables in NOT_ADMITTED.items():
+        if pipeline(doc, variables) is not None:
+            found.append(f'{label}: a pipeline is created')
+    tag = pipeline(doc, TAG)
+    if tag and tag['auto_cancel'].get('on_new_commit') != 'none':
+        found.append('tag pipelines can be auto-cancelled')
+    for label, variables in {'merge request': MR, 'branch': BRANCH, 'child': CHILD}.items():
+        run = pipeline(doc, variables)
+        if run and run['auto_cancel'].get('on_new_commit') != 'interruptible':
+            found.append(f'{label} pipelines are not auto-cancelled by a newer commit')
+    if set(LANE_JOBS.values()) != REQUIRED_JOBS:
+        found.append('the lane generator does not map every lane job')
+    unselected = pipeline(doc, CHILD)
+    if unselected is None or unselected['jobs']:
+        found.append('a child pipeline must run exactly the generated selection')
+    # A merge request opened while the parent ran must not strand its trigger job.
+    if pipeline(doc, {**CHILD, 'CI_OPEN_MERGE_REQUESTS': 'group/project!3'}) is None:
+        found.append('a child pipeline is refused once a merge request is open')
+    full = pipeline(child_doc(doc, child_config(sorted(REQUIRED_JOBS))), CHILD)
+    if full is None or full['jobs'] != REQUIRED_JOBS or full['variables'].get('CI_RUNNER_TAG') != 'wip':
+        found.append('a full selection does not run every lane on wip in the child pipeline')
+    if doc['default'].get('tags') != ['$CI_RUNNER_TAG']:
+        found.append('default runner tag is not the workflow-selected CI_RUNNER_TAG')
+    if doc['default'].get('interruptible') is not True:
+        found.append('jobs are not interruptible by default')
+    for name, job in jobs(doc).items():
+        resolved = resolve(doc, name)
+        if 'tags' in resolved:
+            found.append(f'{name}: overrides the runner tag')
+        if 'rules' in job:
+            found.append(f'{name}: rules must come from .gate-pipeline or .wip-pipeline')
+        if 'trigger' in resolved and resolved.get('interruptible') is not True:
+            found.append(f'{name}: trigger job is not interruptible')
+        if resolved.get('interruptible', True) is not True:
+            found.append(f'{name}: not interruptible')
+    if select_script(doc) != SELECT_SCRIPT or doc['select'].get('variables', {}).get('GIT_DEPTH') != '0':
+        found.append('select: must classify the full branch diff with review_tooling.py and the generator')
+    if 'lanes.yml' not in doc['select'].get('artifacts', {}).get('paths', []):
+        found.append('select: child configuration not retained')
+    if doc['lanes'].get('trigger') != LANES_TRIGGER or doc['lanes'].get('needs') != ['select']:
+        found.append('lanes: child pipeline must come from select, mirror its status and forward no YAML variables')
+    return found
+
+
+def select_script(doc):
+    return lines(doc.get('select', {}))
+
+
 def violations(doc):
     """Every rule the GitLab definition must satisfy; empty means conforming."""
     found = []
     all_jobs = jobs(doc)
-    for label, variables in SCENARIOS.items():
-        if not admits(doc, variables):
-            found.append(f'{label} pipelines are not admitted')
     for label, ref in image_references(doc).items():
         if 'CI_REGISTRY' in ref:
             found.append(f'{label}: derived from the GitLab registry, not the approved registry')
@@ -105,13 +252,13 @@ def violations(doc):
         found.append('CI_PYTHON_IMAGE default is not derived from CI_APPROVED_REGISTRY')
     if 'CI_APPROVED_REGISTRY' in doc['variables']:
         found.append('CI_APPROVED_REGISTRY must be operator-set, with no default')
-    for missing in sorted(REQUIRED_JOBS - set(all_jobs)):
+    for missing in sorted((REQUIRED_JOBS | SELECTION_JOBS) - set(all_jobs)):
         found.append(f'missing job {missing}')
-    for name, job in all_jobs.items():
-        if 'allow_failure' in job:
-            found.append(f'{name}: allow_failure can turn a failure green')
-        if job.get('when', 'on_success') != 'on_success' or 'rules' in job or 'only' in job \
-                or 'except' in job:
+    if keys_anywhere(doc, 'allow_failure'):
+        found.append('allow_failure can turn a failure green')
+    for name in all_jobs:
+        job = resolve(doc, name)
+        if job.get('when', 'on_success') != 'on_success' or 'only' in job or 'except' in job:
             found.append(f'{name}: conditional job can be skipped silently')
         for key in ('script', 'before_script', 'after_script'):
             for step in lines(job, key):
@@ -121,9 +268,10 @@ def violations(doc):
                     found.append(f'{name}: masked exit status in {key}')
     if found:
         return found
+    found += pipeline_violations(doc)
     if not doc['stages'].index('hygiene') < doc['stages'].index('test'):
         found.append('stage order')
-    if all_jobs['lint'].get('stage') != 'hygiene' or 'allow_failure' in all_jobs['lint']:
+    if all_jobs['lint'].get('stage') != 'hygiene':
         found.append('lint must be a hygiene-stage gate')
     expected = tool_lines(github_step('lint', 'ruff check')['run'])
     if lines(all_jobs['lint']) != expected:
@@ -152,8 +300,16 @@ def violations(doc):
             found.append(f'{name}: report must be retained on failure')
         if '-rs' not in command.split() and name == 'sim':
             found.append('sim: skip reasons must be reported')
-    test_flags = [t for t in shlex.split(pytest_line(all_jobs['test']) or '')
-                  if any(t == f or t.startswith(f + '=') for f in NARROWING_FLAGS)]
+    unit = shlex.split(pytest_line(all_jobs['test']) or '')
+    unit = unit[3:] if unit[:3] == ['python', '-m', 'pytest'] else unit[1:]
+    shard_args = [t for t in unit if t in ('-p', 'tests.ci_shard') or t.startswith('--unit-')]
+    if shard_args != UNIT_SHARD_ARGS or all_jobs['test'].get('parallel') != UNIT_SHARDS:
+        found.append(f'test: must run shard $CI_NODE_INDEX of parallel: {UNIT_SHARDS} with the GitHub layout')
+    github_unit = github_step('unit', '--unit-shards=')['run']
+    if '--unit-durations tests/unit-durations.json' not in github_unit:
+        found.append('test: GitHub no longer balances shards with tests/unit-durations.json')
+    rest = [t for t in unit if t not in shard_args]
+    test_flags = [t for t in rest if any(t == f or t.startswith(f + '=') for f in NARROWING_FLAGS)]
     if test_flags:
         found.append(f'test: selection narrowed by {test_flags}')
     if not any(s.startswith('python scripts/agent_doctor.py --python') for s in lines(all_jobs['test'])):
@@ -196,7 +352,6 @@ def mutated(mutator):
     mutator(doc)
     return doc
 
-
 def test_current_gitlab_definition_conforms():
     assert violations(GITLAB) == []
 
@@ -227,20 +382,37 @@ def extend(job, prefix, suffix):
     job['script'][index] += suffix
 
 
+UNIT_LINE = pytest_line(GITLAB['test'])
+
+
+def workflow_rule(doc, needle):
+    return next(r for r in doc['workflow']['rules'] if r['if'] == needle)
+
+
+def set_unit_line(doc, line):
+    doc['test']['script'][doc['test']['script'].index(UNIT_LINE)] = line
+
+
 NEGATIVE_CONTROLS = {
     'allow_failure on unit lane': lambda d: d['test'].update(allow_failure=True),
+    'allow_failure on the child trigger': lambda d: d['lanes'].update(allow_failure=True),
+    'allow_failure in a template': lambda d: d['.py-base'].update(allow_failure=True),
     'manual unit lane': lambda d: d['test'].update(when='manual'),
-    'pytest status masked': lambda d: d['test']['script'].__setitem__(
-        d['test']['script'].index('pytest -q --junitxml=unit-junit.xml'),
-        'pytest -q --junitxml=unit-junit.xml || true'),
+    'pytest status masked': lambda d: set_unit_line(d, UNIT_LINE + ' || true'),
     'skip gate removed from unit': lambda d: d['test']['script'].remove(
         'python scripts/check_junit_clean.py unit-junit.xml'),
     'skip gate before pytest': lambda d: d['test']['script'].insert(
         0, d['test']['script'].pop()),
     'report not retained': lambda d: d['test'].pop('artifacts'),
-    'unit selection narrowed by -k': lambda d: d['test']['script'].__setitem__(
-        d['test']['script'].index('pytest -q --junitxml=unit-junit.xml'),
-        'pytest -q --junitxml=unit-junit.xml -k "not slow"'),
+    'unit selection narrowed by -k': lambda d: set_unit_line(d, UNIT_LINE + ' -k "not slow"'),
+    'unit not sharded': lambda d: d['test'].pop('parallel'),
+    'unit sharded into 8 jobs': lambda d: d['test'].update(parallel=8),
+    'every shard runs shard 1': lambda d: set_unit_line(
+        d, UNIT_LINE.replace('--unit-shard="$CI_NODE_INDEX"', '--unit-shard=1')),
+    'shard plugin not loaded': lambda d: set_unit_line(d, UNIT_LINE.replace('-p tests.ci_shard ', '')),
+    'round-robin instead of the durations layout': lambda d: set_unit_line(
+        d, UNIT_LINE.replace(' --unit-durations=tests/unit-durations.json', '')),
+    'extra plugin in the unit lane': lambda d: set_unit_line(d, UNIT_LINE + ' -p no:randomly'),
     'doctor removed': lambda d: d['test']['script'].remove(
         'python scripts/agent_doctor.py --python "$(command -v python)"'),
     'runner contracts allowed to skip': lambda d: d['test']['variables'].clear(),
@@ -257,8 +429,39 @@ NEGATIVE_CONTROLS = {
         CI_PYTHON_IMAGE='registry.example.invalid/ci/python:3.14'),
     'approved registry given a default': lambda d: d['variables'].update(
         CI_APPROVED_REGISTRY='$CI_REGISTRY/ci'),
-    'tag pipelines not admitted': lambda d: d['workflow']['rules'].pop(),
-    'branch pipelines not admitted': lambda d: d['workflow']['rules'].pop(1),
+    'tag pipelines not admitted': lambda d: d['workflow']['rules'].remove(
+        workflow_rule(d, '$CI_COMMIT_TAG')),
+    'branch pipelines not admitted': lambda d: d['workflow']['rules'].pop(),
+    'child pipeline not admitted': lambda d: d['workflow']['rules'].pop(0),
+    'open merge request runs a duplicate branch pipeline': lambda d: d['workflow']['rules'].remove(
+        workflow_rule(d, '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS')),
+    'merge request pipelines on wip': lambda d: workflow_rule(
+        d, '$CI_PIPELINE_SOURCE == "merge_request_event"')['variables'].update(CI_RUNNER_TAG='wip'),
+    'tag pipelines on wip': lambda d: workflow_rule(d, '$CI_COMMIT_TAG')['variables'].update(
+        CI_RUNNER_TAG='wip'),
+    'branch pipelines on gate': lambda d: d['workflow']['rules'][-1]['variables'].update(CI_RUNNER_TAG='gate'),
+    'child pipelines on gate': lambda d: d['workflow']['rules'][0]['variables'].update(CI_RUNNER_TAG='gate'),
+    'a job pins its own runner tag': lambda d: d['sim'].update(tags=['wip']),
+    'no auto-cancel on a newer commit': lambda d: d['workflow'].pop('auto_cancel'),
+    'tag pipelines can be auto-cancelled': lambda d: workflow_rule(d, '$CI_COMMIT_TAG').pop('auto_cancel'),
+    'jobs not interruptible by default': lambda d: d['default'].pop('interruptible'),
+    'one job not interruptible': lambda d: d['sim'].update(interruptible=False),
+    'child trigger not interruptible': lambda d: d['lanes'].pop('interruptible'),
+    'lane jobs run in branch pipelines': lambda d: d['.gate-pipeline']['rules'].append(
+        {'if': '$CI_COMMIT_BRANCH'}),
+    'tag pipelines lose the lanes': lambda d: d['.gate-pipeline']['rules'].pop(),
+    'lane job with its own rules': lambda d: d['sim'].update(rules=[{'if': '$CI_COMMIT_TAG'}]),
+    'selector runs inside the child pipeline': lambda d: d['.wip-pipeline']['rules'].pop(0),
+    'selector diff is only the newest push': lambda d: d['select']['script'].__setitem__(
+        1, 'BASE_SHA="$CI_COMMIT_BEFORE_SHA"'),
+    'selector bypasses the classifier': lambda d: d['select']['script'].__setitem__(
+        2, 'python scripts/review_tooling.py profile --files README.md --out lanes-manifest.json'),
+    'selector on a shallow clone': lambda d: d['select'].pop('variables'),
+    'child status not mirrored': lambda d: d['lanes']['trigger'].pop('strategy'),
+    'YAML variables forwarded to the child': lambda d: d['lanes']['trigger'].update(
+        forward={'yaml_variables': True}),
+    'child configuration not from select': lambda d: d['lanes']['trigger'].update(
+        include=[{'local': '.gitlab-ci.yml'}]),
     'tag guard removed': lambda d: d['hygiene']['script'].remove(tag_guard(d)),
     'tag guard ignores protection': lambda d: d['hygiene']['script'].__setitem__(
         d['hygiene']['script'].index(tag_guard(d)), tag_guard(d).replace('CI_COMMIT_REF_PROTECTED', 'X')),
@@ -277,6 +480,7 @@ def test_static_rules_reject_each_weakened_definition(name):
 # ---- behavior: execute the real job scripts with stub tools -----------------
 
 STUB_PYTHON = '''#!/bin/sh
+if [ "$1" = -m ] && [ "$2" = pytest ]; then shift 2; exec pytest "$@"; fi
 printf '%s\\n' "$*" >> "$STUB_LOG"
 case "$*" in
   *check_junit_clean*) exec "$REAL_PYTHON" "$@" ;;
@@ -453,20 +657,214 @@ def test_junit_gate_uses_the_github_evidence_counting_rule():
         assert clean is (kind == 'clean'), kind
 
 
+# ---- pipeline shape: gate, wip and lane selection (#808, GH#1118 F11) -------
+
+@pytest.mark.parametrize('label', sorted(GATE_SCENARIOS))
+def test_merge_request_and_tag_pipelines_run_every_lane_directly_on_gate(label):
+    run = pipeline(GITLAB, GATE_SCENARIOS[label])
+    assert run is not None
+    assert run['jobs'] == REQUIRED_JOBS  # no selector, no child: #808 holds for the gate
+    assert run['variables'] == {'CI_RUNNER_TAG': 'gate'}
+    assert GITLAB['default']['tags'] == ['$CI_RUNNER_TAG']
+    assert resolve(GITLAB, 'test')['parallel'] == UNIT_SHARDS
+
+
+@pytest.mark.parametrize('label', sorted(WIP_SCENARIOS))
+def test_branch_pipelines_run_the_selector_and_its_child_on_wip(label):
+    run = pipeline(GITLAB, WIP_SCENARIOS[label])
+    assert run is not None
+    assert run['jobs'] == SELECTION_JOBS
+    assert run['variables'] == {'CI_RUNNER_TAG': 'wip'}
+    lanes = resolve(GITLAB, 'lanes')
+    assert lanes['trigger']['include'] == [{'artifact': 'lanes.yml', 'job': 'select'}]
+    assert lanes['trigger']['strategy'] == 'depend' and lanes['needs'] == ['select']
+    child = pipeline(GITLAB, {**WIP_SCENARIOS[label], 'CI_PIPELINE_SOURCE': 'parent_pipeline'})
+    assert child is not None and child['variables'] == {'CI_RUNNER_TAG': 'wip'}
+    assert child['jobs'] == set()  # nothing runs in a child unless the generator selects it
+
+
+@pytest.mark.parametrize('label', sorted(NOT_ADMITTED))
+def test_no_duplicate_or_refless_pipeline_is_created(label):
+    assert pipeline(GITLAB, NOT_ADMITTED[label]) is None
+
+
+def test_every_job_is_interruptible_and_nothing_cancels_a_tag_pipeline():
+    assert GITLAB['default']['interruptible'] is True
+    for name in jobs(GITLAB):
+        job = resolve(GITLAB, name)
+        assert job.get('interruptible', GITLAB['default']['interruptible']) is True, name
+        if 'trigger' in job:  # default keywords are not relied on for a trigger job
+            assert GITLAB[name]['interruptible'] is True
+    assert GITLAB['workflow']['auto_cancel'] == {'on_new_commit': 'interruptible'}
+    assert pipeline(GITLAB, TAG)['auto_cancel'] == {'on_new_commit': 'none'}
+    for variables in (MR, BRANCH, CHILD):
+        assert pipeline(GITLAB, variables)['auto_cancel'] == {'on_new_commit': 'interruptible'}
+    assert not keys_anywhere(GITLAB, 'allow_failure')
+
+
+# ---- the select job, run for real on synthetic histories ---------------------
+
+SELECT_INPUTS = ('scripts/__init__.py', 'scripts/review_tooling.py', 'scripts/gitlab_lanes.py',
+                 'src/mainframe_rag/ingest/rules_version.py')
+GIT_ENV = {'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_AUTHOR_NAME': 'ci',
+           'GIT_AUTHOR_EMAIL': 'ci@example.invalid', 'GIT_COMMITTER_NAME': 'ci',
+           'GIT_COMMITTER_EMAIL': 'ci@example.invalid'}
+
+
+def git(cwd, *args):
+    return subprocess.run(['git', *args], cwd=cwd, check=True, capture_output=True, text=True,
+                          env={**os.environ, **GIT_ENV}).stdout.strip()
+
+
+def python_on_path(tmp_path):
+    """A `python` that is this interpreter, as the job image's python is."""
+    bin_dir = tmp_path / 'pybin'
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / 'python').write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+    (bin_dir / 'python').chmod(0o755)
+    return bin_dir
+
+
+def run_select(tmp_path, commits):
+    """Push `main`, branch off it, commit `commits`, then run the real select job in a fresh clone."""
+    seed = tmp_path / 'seed'
+    seed.mkdir()
+    git(seed, 'init', '-q', '-b', 'main')
+    for name in (*SELECT_INPUTS, '.gitlab-ci.yml'):
+        (seed / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(ROOT / name, seed / name)
+    (seed / 'README.md').write_text('seed\n')
+    git(seed, 'add', '.')
+    git(seed, 'commit', '-q', '-m', 'seed')
+    git(tmp_path, 'clone', '-q', '--bare', str(seed), 'origin.git')
+    work = tmp_path / 'work'
+    git(tmp_path, 'clone', '-q', '--branch', 'main', str(tmp_path / 'origin.git'), 'work')
+    git(work, 'checkout', '-q', '-b', 'feature')
+    for files in commits:
+        for name, text in files.items():
+            (work / name).parent.mkdir(parents=True, exist_ok=True)
+            (work / name).write_text(text)
+        git(work, 'add', '.')
+        git(work, 'commit', '-q', '-m', 'change')
+    # GitLab checks out the pipeline SHA detached, with only that ref fetched.
+    git(work, 'checkout', '-q', '--detach')
+    git(work, 'update-ref', '-d', 'refs/remotes/origin/main')
+    git(work, 'branch', '-q', '-D', 'main')
+    env = {**os.environ, **GIT_ENV, 'PATH': f'{python_on_path(tmp_path)}:{os.environ["PATH"]}',
+           'CI_DEFAULT_BRANCH': 'main', 'CI_COMMIT_SHA': git(work, 'rev-parse', 'HEAD'),
+           'PYTHONPATH': ''}
+    env.pop('GITHUB_OUTPUT', None)
+    proc = subprocess.run(['sh', '-e', '-c', '\n'.join(lines(GITLAB['select']))], cwd=work, env=env,
+                          check=False, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    config = yaml.safe_load((work / 'lanes.yml').read_text())
+    return pipeline(child_doc(GITLAB, config), CHILD), proc.stdout
+
+
+@pytest.mark.parametrize('label, commits, expected, not_run', [
+    ('prose only', [{'docs/notes.md': 'x\n'}], {'hygiene'}, set()),
+    ('tests only', [{'tests/test_config.py': 'x = 1\n'}], {'hygiene', 'lint', 'test', 'hazards'}, set()),
+    # The base is the merge base, not the previous push: a docs push after a
+    # storage change (whose pipeline was auto-cancelled) still selects sim.
+    ('storage then prose', [{'src/mainframe_rag/ingest/chunker.py': 'x = 1\n'}, {'README.md': 'y\n'}],
+     REQUIRED_JOBS, {'ha', 'load'}),
+    ('unmapped path fails closed', [{'unmapped/thing.bin': 'x\n'}], REQUIRED_JOBS, {'ha', 'load'}),
+    ('GitLab pipeline definition', [{'.gitlab-ci.yml': '# changed\n'}], REQUIRED_JOBS, set()),
+    ('no change against the default branch', [], REQUIRED_JOBS, {'ha', 'load'}),
+])
+def test_select_job_child_pipeline_runs_exactly_the_classified_lanes(tmp_path, label, commits, expected,
+                                                                     not_run):
+    child, output = run_select(tmp_path, commits)
+    assert child is not None and child['variables'] == {'CI_RUNNER_TAG': 'wip'}
+    assert child['jobs'] == expected, output
+    if not_run:  # lanes with no GitLab job are named, never counted as run
+        reported = next(l for l in output.splitlines() if l.startswith('NOT RUN (no GitLab job): '))
+        assert not_run <= set(reported.split(': ', 1)[1].split()), output
+
+
+@pytest.mark.parametrize('manifest, expected', [
+    ({'required_lanes': ['context_check', 'packaging'], 'changed_paths': ['charts/x.yaml']}, {'hygiene'}),
+    ({'required_lanes': ['context_check', 'new_lane'], 'changed_paths': ['a.py']}, REQUIRED_JOBS),
+    ({'required_lanes': [], 'changed_paths': ['scripts/check_junit_clean.py']}, REQUIRED_JOBS),
+])
+def test_generator_fails_closed_on_unknown_lanes_and_pipeline_inputs(manifest, expected):
+    assert set(selected_jobs(manifest)[0]) == expected
+
+
+@pytest.mark.parametrize('raw', ['not json', '[]', '{"required_lanes": "unit_tests", "changed_paths": []}',
+                                 '{"changed_paths": []}'])
+def test_generator_refuses_an_unreadable_manifest(tmp_path, raw):
+    (tmp_path / 'manifest.json').write_text(raw)
+    proc = subprocess.run([sys.executable, str(ROOT / 'scripts/gitlab_lanes.py'), '--manifest',
+                           str(tmp_path / 'manifest.json'), '--out', str(tmp_path / 'lanes.yml')],
+                          check=False, capture_output=True, text=True)
+    assert proc.returncode == 2 and 'cannot select lanes' in proc.stderr
+    assert not (tmp_path / 'lanes.yml').exists()
+
+
+# ---- unit shards: GitLab's parallel index reaches the shard plugin -----------
+
+def test_each_parallel_job_runs_its_own_shard_of_four(tmp_path):
+    seen = []
+    for index in range(1, UNIT_SHARDS + 1):
+        proc, log = run_job(tmp_path, 'test', start='rm -f unit-junit.xml', JUNIT_BODY=JUNIT['clean'],
+                            CI_NODE_INDEX=str(index), CI_NODE_TOTAL=str(UNIT_SHARDS))
+        assert proc.returncode == 0, proc.stderr
+        argv = shlex.split(next(l for l in log.splitlines() if l.startswith('pytest ')))
+        seen.append([a for a in argv if a.startswith('--unit-')])
+    assert seen == [[f'--unit-shard={i}', '--unit-shards=4', '--unit-durations=tests/unit-durations.json']
+                    for i in range(1, UNIT_SHARDS + 1)]
+    # Without GitLab's parallel variables the shard options are empty and the
+    # real plugin refuses them, so a job that lost `parallel` cannot pass as a shard.
+    unset = UNIT_LINE.replace('$CI_NODE_INDEX', '').replace('$CI_NODE_TOTAL', '')
+    proc = subprocess.run(['sh', '-e', '-c', unset.replace('--junitxml=unit-junit.xml', '--collect-only')],
+                          cwd=ROOT, check=False, capture_output=True, text=True,
+                          env={**os.environ, 'PATH': f'{python_on_path(tmp_path)}:{os.environ["PATH"]}'})
+    assert proc.returncode == 4 and 'unit-shard' in proc.stderr, proc.stdout + proc.stderr
+
+
+COLLECTOR = """import os
+
+
+def pytest_collection_finish(session):
+    with open(os.environ['COLLECTED_OUT'], 'w', encoding='utf-8') as handle:
+        handle.write('\\n'.join(item.nodeid for item in session.items))
+"""
+
+
+def collect(tmp_path, command, label, **env):
+    out = tmp_path / f'{label}.txt'
+    clean = {k: v for k, v in os.environ.items()
+             if k not in ('PYTEST_ADDOPTS', 'PYTEST_PLUGINS', 'PYTEST_DISABLE_PLUGIN_AUTOLOAD', 'CI_NODE_INDEX',
+                          'CI_NODE_TOTAL')}
+    proc = subprocess.run(['sh', '-e', '-c', command], cwd=ROOT, check=False, capture_output=True, text=True,
+                          env={**clean, 'PATH': f'{python_on_path(tmp_path)}:{os.environ["PATH"]}',
+                               'PYTHONPATH': str(tmp_path), 'COLLECTED_OUT': str(out), **env})
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    return out.read_text(encoding='utf-8').splitlines()
+
+
+def test_four_shards_are_a_disjoint_complete_partition_of_the_real_collection(tmp_path):
+    from scripts.unit_evidence import select_nodes
+    (tmp_path / 'unit_collector.py').write_text(COLLECTOR)
+    collect_only = UNIT_LINE.replace('--junitxml=unit-junit.xml',
+                                     '--collect-only -p no:cacheprovider -p unit_collector')
+    assert collect_only != UNIT_LINE
+    unsharded = re.sub(r' --unit-[a-z-]+=\S+', '', collect_only)
+    full = collect(tmp_path, unsharded, 'full')
+    assert len(full) == len(set(full)) > 100
+    assert 'tests/test_ci_gitlab_parity.py::' + sys._getframe().f_code.co_name in full
+    shards = [collect(tmp_path, collect_only, f'shard-{index}', CI_NODE_INDEX=str(index),
+                      CI_NODE_TOTAL=str(UNIT_SHARDS)) for index in range(1, UNIT_SHARDS + 1)]
+    assert all(shards)
+    assert sum(len(shard) for shard in shards) == len(full)  # disjoint ...
+    assert set().union(*map(set, shards)) == set(full)       # ... and complete
+    durations = (ROOT / 'tests/unit-durations.json').read_text(encoding='utf-8')
+    for index, shard in enumerate(shards, start=1):  # the layout GitHub's producer computes for 4
+        assert sorted(shard) == select_nodes(full, index, UNIT_SHARDS, durations)
+
+
 # ---- release pipelines from immutable tags and approved-registry images (#808) --
-
-def test_every_ref_kind_runs_the_same_jobs_and_nothing_else_is_admitted():
-    for label, variables in SCENARIOS.items():
-        assert admits(GITLAB, variables), label
-    # A pipeline with no MR, branch or tag ref (for example a schedule-less API
-    # trigger without a ref) is not admitted by accident.
-    assert not admits(GITLAB, {'CI_PIPELINE_SOURCE': 'api'})
-    # Tag pipelines are not a reduced lane: no job is rule-gated per ref, so the
-    # job set a tag runs is the full set a merge request runs.
-    assert not [name for name, job in jobs(GITLAB).items()
-                if {'rules', 'only', 'except'} & set(job)]
-    assert set(jobs(GITLAB)) >= REQUIRED_JOBS
-
 
 @pytest.mark.parametrize('env, passes', [
     ({}, True),                                                   # branch / MR pipeline

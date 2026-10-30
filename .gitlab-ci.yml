@@ -10,22 +10,38 @@
 # or xfailed test (scripts/check_junit_clean.py). If you change one CI, change
 # the other in the same PR (AGENTS.md); tests/test_ci_gitlab_parity.py pins the
 # correspondence and the failure propagation. Intentional differences: GitLab
-# runs the complete unit suite in one job (GitHub partitions it into
-# shards), runs every lane on every pipeline, including tag pipelines (issue
-# #808; no review_tooling lane selection), and runs the simulation tier
-# against the mirrored Qdrant service without tests/test_qdrant_auth.py and
+# shards the unit suite into 4 jobs (`parallel: 4`, GitHub uses 8) with the
+# same tests/ci_shard.py layout for that count; branch pipelines select lanes
+# through a dynamic child pipeline (below); jobs run on the `gate` and `wip`
+# runner tags (ADR-0009 section 2); and the simulation tier runs against the
+# mirrored Qdrant service without tests/test_qdrant_auth.py and
 # tests/test_openwebui_proxy_nginx.py, which drive a local Docker daemon.
 #
 # GitHub product CI ignores markdown-only changes; agent-context.yml checks
 # relevant docs/instructions separately. GitLab keeps local hygiene/context checks
-# on every MR; no deployment or external access is added.
+# on every pipeline; no deployment or external access is added.
 #
-# Pipelines run for merge requests, branches and tags (issue #808). A tag
-# pipeline runs exactly the same jobs as a branch pipeline: nothing is rule-gated
-# per ref. A release is built from an immutable tag, so the hygiene job refuses
-# a tag pipeline whose ref is not protected (protect the release tag pattern in
-# Settings > Repository > Protected tags, with creation limited to release
-# owners; a protected tag cannot be moved or deleted by developers).
+# Pipelines (issue #808, ADR-0009 section 2, GH#1118 F11):
+#   merge request and tag pipelines run every lane (hygiene, lint, test x4,
+#   hazards, sim, gate-l1) directly, on the runner tag `gate` (one slot). A
+#   release is built from an immutable tag, so the hygiene job refuses a tag
+#   pipeline whose ref is not protected (protect the release tag pattern in
+#   Settings > Repository > Protected tags, with creation limited to release
+#   owners; a protected tag cannot be moved or deleted by developers).
+#   branch pipelines run on `wip` (three slots). The `select` job runs the
+#   fail-closed classifier `scripts/review_tooling.py profile` on the branch's
+#   diff from its merge base with the default branch, as GitHub does;
+#   scripts/gitlab_lanes.py turns its lanes into a child pipeline that holds
+#   hygiene plus exactly the selected lane jobs, and `lanes` runs it. An
+#   unmapped or unreadable change, or a change to this file, the generator or
+#   the JUnit gate, selects every lane. A lane with no job here (packaging,
+#   load, HA, HTTP probes, semantic eval) is not run by any GitLab pipeline.
+#   A branch with an open merge request runs no branch pipeline: its merge
+#   request pipeline is the only one, on `gate`.
+#   Every job is interruptible and a newer commit on the same ref cancels the
+#   older pipeline (workflow:auto_cancel, GitLab >= 16.10, with "Auto-cancel
+#   redundant pipelines" left on in Settings > CI/CD). Tag pipelines set
+#   auto_cancel none: nothing cancels a release pipeline.
 #
 # GitLab admin setup (Settings > CI/CD > Variables) — names only, no secrets:
 #   CI_APPROVED_REGISTRY (required) operator-approved registry path that holds every
@@ -48,7 +64,12 @@
 #   CI_BM25_CACHE_DIR (required for sim) offline-prepared Qdrant/bm25 cache on the
 #                                   runner, verified against bm25-weights.sha256
 #                                   (artifacts:bm25 output); no download fallback.
-#   CI_RUNNER_TAG   (optional)      runner tag, default "airgap"
+#   CI_RUNNER_TAG   (optional)      one runner tag for every pipeline. Unset, merge
+#                                   request and tag pipelines use `gate` and branch
+#                                   pipelines `wip` (the two runner registrations
+#                                   of ADR-0009 section 2). A project variable wins
+#                                   over both: set it only on a single-runner site,
+#                                   where it gives up the gate/wip split.
 #   PIP_FIND_LINKS  (recommended)   path to a wheelhouse directory on the runner
 #                                   (e.g. /wheelhouse) built from requirements.dev.lock.txt
 #   PIP_INDEX_URL   (alternative)   internal HTTPS PyPI-compatible index; prepared
@@ -68,10 +89,30 @@
 # ==============================================================================
 
 workflow:
+  # GitLab >= 16.10. Cancels only interruptible jobs of an older pipeline on
+  # the same ref; every job here is interruptible, and a branch pipeline's
+  # child pipeline is cancelled with it.
+  auto_cancel:
+    on_new_commit: interruptible
+  # First match wins. CI_RUNNER_TAG set here is a YAML variable, so a project
+  # CI_RUNNER_TAG overrides it (see the admin setup above).
   rules:
+    - if: '$CI_PIPELINE_SOURCE == "parent_pipeline"'
+      variables:
+        CI_RUNNER_TAG: "wip"
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    - if: '$CI_COMMIT_BRANCH'
+      variables:
+        CI_RUNNER_TAG: "gate"
     - if: '$CI_COMMIT_TAG'
+      variables:
+        CI_RUNNER_TAG: "gate"
+      auto_cancel:
+        on_new_commit: none
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+      variables:
+        CI_RUNNER_TAG: "wip"
 
 stages: [hygiene, test]
 
@@ -80,15 +121,63 @@ variables:
   # setup above). A project-level CI_PYTHON_IMAGE overrides this derived default
   # (YAML vars have the lowest precedence in GitLab).
   CI_PYTHON_IMAGE: "$CI_APPROVED_REGISTRY/ci/python:3.14"
-  CI_RUNNER_TAG: "airgap"
 
 default:
   image: $CI_PYTHON_IMAGE
-  # Variable expansion in tags: requires GitLab >= 14.1 (standard support at
-  # time of writing). If jobs queue forever on the air-gap runner, the tag did
-  # not expand: pin the literal runner tag here as a documented fallback
-  # (e.g. tags: [airgap]). Do not hardcode an internal hostname anywhere.
+  interruptible: true
+  # Variable expansion in tags: requires GitLab >= 14.1. If jobs queue forever,
+  # the tag did not expand: set the project variable CI_RUNNER_TAG to the
+  # literal runner tag. Do not hardcode an internal hostname anywhere.
   tags: [$CI_RUNNER_TAG]
+
+# The lane jobs below run directly in merge request and tag pipelines. A
+# branch pipeline's child includes this file and re-enables only its selected
+# lanes by replacing their rules (scripts/gitlab_lanes.py).
+.gate-pipeline:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_TAG'
+
+# Branch pipelines only; never inside the child pipeline that includes this file.
+.wip-pipeline:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "parent_pipeline"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+# Lane selection (branch pipelines). The merge base with the default branch
+# makes the diff cumulative, so a cancelled earlier push never drops a change
+# from selection. review_tooling.py is standard library only: no install.
+select:
+  extends: .wip-pipeline
+  stage: hygiene
+  variables:
+    GIT_DEPTH: "0"
+  script:
+    - git fetch --no-tags origin "+refs/heads/${CI_DEFAULT_BRANCH}:refs/remotes/origin/${CI_DEFAULT_BRANCH}"
+    - BASE_SHA="$(git merge-base "refs/remotes/origin/${CI_DEFAULT_BRANCH}" "$CI_COMMIT_SHA")"
+    - python scripts/review_tooling.py profile --base "$BASE_SHA" --head "$CI_COMMIT_SHA" --out lanes-manifest.json
+    - python scripts/gitlab_lanes.py --manifest lanes-manifest.json --out lanes.yml
+  artifacts:
+    when: always
+    paths: [lanes-manifest.json, lanes.yml]
+
+# The child pipeline mirrors its status here (strategy: depend), so a failed
+# lane fails the branch pipeline. YAML variables are not forwarded: the child
+# reads this file's defaults and the project variables itself, so a project
+# CI_PYTHON_IMAGE is never shadowed by a forwarded default.
+lanes:
+  extends: .wip-pipeline
+  stage: test
+  needs: [select]
+  interruptible: true
+  trigger:
+    include:
+      - artifact: lanes.yml
+        job: select
+    strategy: depend
+    forward:
+      yaml_variables: false
 
 # Shared install: wheelhouse first, then internal index, else fail closed.
 # Never install from the default (public) index: the container must not be
@@ -109,6 +198,7 @@ default:
       fi
 
 hygiene:
+  extends: .gate-pipeline
   stage: hygiene
   script:
     - python3 scripts/check_agent_context.py
@@ -131,9 +221,16 @@ hygiene:
         exit 1
       fi
 
+# Unit suite in 4 shards (ADR-0009 section 2). tests/ci_shard.py partitions
+# the eligible collection with the duration-balanced layout GitHub uses
+# (scripts/unit_evidence.py select_nodes; GitHub runs it with 8). Each shard is
+# its own job with its own clean-JUnit gate, and any failing shard fails the
+# pipeline. `python -m pytest` puts the checkout on sys.path for the plugin,
+# as GitHub's shard producer does.
 test:
-  extends: .py-base
+  extends: [.py-base, .gate-pipeline]
   stage: test
+  parallel: 4
   variables:
     TASK_CONTRACTS_REQUIRE_RUNNER: "1"
   script:
@@ -144,14 +241,12 @@ test:
     - export PATH="$CI_PROJECT_DIR/.tools/bin:$PATH"
     - python scripts/agent_doctor.py --python "$(command -v python)"
     - rm -f unit-junit.xml
-    - pytest -q --junitxml=unit-junit.xml
+    - python -m pytest -q -p tests.ci_shard --unit-shard="$CI_NODE_INDEX" --unit-shards="$CI_NODE_TOTAL" --unit-durations=tests/unit-durations.json --junitxml=unit-junit.xml
     # pytest's exit status alone lets skipped/xfailed tests pass; GitHub rejects
-    # them per shard, so this job rejects them for the complete suite.
+    # them per shard, and so does each shard here.
     - python scripts/check_junit_clean.py unit-junit.xml
-  # GitHub partitions the same eligible suite across VMs. This offline
-  # job keeps the complete suite (the union of those shards); no internal
-  # runner-capacity change is needed. Tests generate synthetic PDFs at runtime;
-  # the only artifact is the JUnit report (test ids and outcomes, no corpus).
+  # Tests generate synthetic PDFs at runtime; the only artifact is the JUnit
+  # report (test ids and outcomes, no corpus).
   artifacts:
     when: always
     paths: [unit-junit.xml]
@@ -159,7 +254,7 @@ test:
       junit: unit-junit.xml
 
 hazards:
-  extends: .py-base
+  extends: [.py-base, .gate-pipeline]
   stage: test
   script:
     - ': "${CI_TASK_ARCHIVE:?mount the approved pinned Task archive on the runner}"'
@@ -179,7 +274,7 @@ hazards:
 # Fail-closed like GitHub: any skipped/xfailed test, zero executed tests or a
 # missing BM25 cache fails the job.
 sim:
-  extends: .py-base
+  extends: [.py-base, .gate-pipeline]
   stage: test
   services:
     - name: ${CI_APPROVED_REGISTRY}/qdrant/qdrant@sha256:efb96a9425a90d2d5a1a0a474156280df1892dcdf1af3e8515bd2589b1bfd88b
@@ -207,7 +302,7 @@ sim:
       junit: sim-junit.xml
 
 gate-l1:
-  extends: .py-base
+  extends: [.py-base, .gate-pipeline]
   stage: test
   services:
     # Mirror the existing approved images.txt bytes; a mutable tag is insufficient.
@@ -245,7 +340,7 @@ gate-l1:
 # commands, in the same order, as the GitHub `lint` job (pinned by
 # tests/test_ci_gitlab_parity.py). The ruleset itself is not changed here.
 lint:
-  extends: .py-base
+  extends: [.py-base, .gate-pipeline]
   stage: hygiene
   script:
     - ruff check src tests scripts/eval_retrieval.py scripts/review_tooling.py scripts/ci_evidence.py scripts/acceptance_evidence.py
