@@ -2195,3 +2195,37 @@ Register that second redirect URI on the **test** client only, next to
 `https://<host>/oauth/oidc/callback`, and remove it when the check is done; the production
 client keeps only the HTTPS callback.
 Tests: `tests/test_adfs_claims_check.py` (a fake TLS AD FS, canary leak assertions).
+
+<a id="workspace-isolation-proof"></a>
+## Workspace isolation proof (bastion, ADR-0009 §2)
+
+`scripts/devkit/isolation_proof.py` proves the F9 isolation of the production and CI
+namespaces. It is standard library only, runs on the bastion as the operator (namespace
+admin in both namespaces) and reaches the cluster only through `oc` (`--kubectl` picks
+another client). Roles, ServiceAccounts, allowed Secrets and egress classes come from
+`deploy/workspace/contract.json`; site values come from the template parameter file.
+
+```sh
+python3 -I scripts/devkit/isolation_proof.py \
+  --contract deploy/workspace/contract.json --param-file <workspace.params> \
+  --runner-config <gate config.toml> --runner-config <wip config.toml> \
+  --probe --output <record.json>
+```
+
+The JSON record goes with the dated `gap/records/` entry for the proof.
+
+It records `can-i` lists against the baseline of a freshly created ServiceAccount, a
+negative matrix (secrets, pod create/exec/attach, workload writes, RoleBindings, in both
+namespaces) with the operator's own `get secrets` as positive control, every pod's class
+and Secret references, the runner configuration checks, the agent ingress policies and,
+with `--probe`, TCP and DNS outcomes from probe pods carrying each role's labels. A probe
+pod in the production namespace that no policy selects is the negative control: a blocked
+result counts only for a target the control reached. A CIDR wider than one address is not
+probed; give such a class a `--probe-host CLASS=HOST`. The record holds verbs, resources,
+object names and outcomes, never a Secret value, token or env value.
+
+Exit 0 means proven (`proven-static-only` without `--probe`, which is not the full proof),
+1 a violation, 2 a usage or environment error or an inconclusive result. Run one proof at
+a time: each run first deletes probe objects (label `isolation-proof.mainframe-rag.io/run`)
+that an interrupted run left, and removes its own on every exit.
+Tests: `tests/test_isolation_proof.py` (a stub `oc`, canary leak assertions).
