@@ -96,7 +96,8 @@ jobs:
         run: sh -euc "$ACQUIRE"
       - name: Build the image without pushing it
         run: |
-          SOURCE_DATE_EPOCH="$(python -c 'from scripts.devkit_key import ROOT, inputs; print("\0".join(inputs(ROOT)), end="")' | xargs -0 git log -1 --format=%ct --)"
+          python -c 'from scripts.devkit_key import ROOT, inputs; print("\0".join(inputs(ROOT)), end="")' > "$RUNNER_TEMP/devkit-inputs"
+          SOURCE_DATE_EPOCH="$(xargs -0 git log -1 --format=%ct -- < "$RUNNER_TEMP/devkit-inputs")"
           export SOURCE_DATE_EPOCH
           docker buildx create --name devkit --driver docker-container --use --driver-opt image="$BUILDKIT_IMAGE" >/dev/null
           docker buildx build --builder devkit -f images/Containerfile.devkit --provenance=false --sbom=false \
@@ -134,11 +135,12 @@ jobs:
           OWNER_LC="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr 'A-Z' 'a-z')"
           IMAGE="ghcr.io/${OWNER_LC}/qdrant-pdf-rag-devkit"
           KEY="$(python scripts/devkit_key.py)"
-          case "$KEY" in ????????????????????????????????????????????????????????????????) ;; *) echo "no kit key" >&2; exit 1 ;; esac
+          printf '%s\n' "$KEY" | grep -Eqx '[0-9a-f]{64}' || { echo "no kit key" >&2; exit 1; }
           echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           # Rebuilds of the same inputs aim at the same digest: the timestamp is the last commit
           # time of any kit key input, and BuildKit rewrites layer timestamps to it.
-          SOURCE_DATE_EPOCH="$(python -c 'from scripts.devkit_key import ROOT, inputs; print("\0".join(inputs(ROOT)), end="")' | xargs -0 git log -1 --format=%ct --)"
+          python -c 'from scripts.devkit_key import ROOT, inputs; print("\0".join(inputs(ROOT)), end="")' > "$RUNNER_TEMP/devkit-inputs"
+          SOURCE_DATE_EPOCH="$(xargs -0 git log -1 --format=%ct -- < "$RUNNER_TEMP/devkit-inputs")"
           export SOURCE_DATE_EPOCH
           docker buildx create --name devkit --driver docker-container --use --driver-opt image="$BUILDKIT_IMAGE" >/dev/null
           build() {
@@ -150,34 +152,35 @@ jobs:
           build --metadata-file "$RUNNER_TEMP/devkit-metadata.json" \
             --output "type=image,name=$IMAGE,push-by-digest=true,push=true,rewrite-timestamp=true"
           DIGEST="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["containerimage.digest"])' "$RUNNER_TEMP/devkit-metadata.json")"
-          case "$DIGEST" in sha256:????????????????????????????????????????????????????????????????) ;; *) echo "no manifest digest" >&2; exit 1 ;; esac
+          printf '%s\n' "$DIGEST" | grep -Eqx 'sha256:[0-9a-f]{64}' || { echo "no manifest digest" >&2; exit 1; }
+          # Record the key and digest before anything later can fail.
+          echo "### Dev workspace image" >> "$GITHUB_STEP_SUMMARY"
+          echo "- kit key \`$KEY\`; pushed by digest \`$IMAGE@$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
           READBACK="$(docker buildx imagetools inspect "$IMAGE@$DIGEST" --format '{{json .Manifest.Digest}}' | tr -d '"')"
           [ "$READBACK" = "$DIGEST" ] || { echo "registry readback differs from the pushed digest" >&2; exit 1; }
           docker pull -q "$IMAGE@$DIGEST" >/dev/null
           docker run --rm --user "$SMOKE_USER" "$IMAGE@$DIGEST" sh -euc "$SMOKE" sh "$(sed -n 's/^version: *//p' scripts/tools/oc-pin.txt)"
-          # The key tag is set only when it does not exist yet. An existing tag is left alone
-          # whatever it points at (a moving tag is a supply-chain trap); the maintainer decides.
-          if docker buildx imagetools inspect "$IMAGE:$KEY" >/dev/null 2>&1; then
-            PINNED="$(docker buildx imagetools inspect "$IMAGE:$KEY" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          # The key tag is set only when the registry says it does not exist. An existing tag is
+          # left alone whatever it points at (a moving tag is a supply-chain trap; the maintainer
+          # decides), and any other inspect failure stops the job rather than risk overwriting it.
+          if INSPECT="$(docker buildx imagetools inspect "$IMAGE:$KEY" --format '{{json .Manifest.Digest}}' 2>&1)"; then
+            PINNED="$(printf '%s' "$INSPECT" | tr -d '"')"
             TAGSTATE="left alone: :$KEY exists at $PINNED"
             [ "$PINNED" = "$DIGEST" ] && TAGSTATE="left alone: :$KEY already points at this digest"
-          else
+          elif printf '%s' "$INSPECT" | grep -qi 'not found'; then
             docker buildx imagetools create -t "$IMAGE:$KEY" "$IMAGE@$DIGEST"
-            PINNED="$DIGEST"
+            PINNED="$(docker buildx imagetools inspect "$IMAGE:$KEY" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+            [ "$PINNED" = "$DIGEST" ] || { echo "key tag readback differs from the pushed digest" >&2; exit 1; }
             TAGSTATE="set: :$KEY did not exist"
+          else
+            echo "cannot tell whether :$KEY exists; refusing to tag" >&2; exit 1
           fi
+          echo "- for the scripts/tools/devkit-pin.txt pin PR: \`key: $KEY\`, \`digest: $PINNED\` (key tag $TAGSTATE)" >> "$GITHUB_STEP_SUMMARY"
           # Reproducibility probe: an uncached second build of the same inputs. A cached
           # rebuild would reuse the first build's layers and prove nothing.
           REPRO="no (digest differs on rebuild)"
           build --no-cache --output "type=oci,dest=$RUNNER_TEMP/devkit-rebuild.tar,rewrite-timestamp=true"
           REBUILT="$(tar -xOf "$RUNNER_TEMP/devkit-rebuild.tar" index.json | python -c 'import json,sys; print(json.load(sys.stdin)["manifests"][0]["digest"])')"
           [ "$REBUILT" = "$DIGEST" ] && REPRO="yes"
-          {
-            echo "### Dev workspace image"
-            echo ""
-            echo "- kit key: \`$KEY\`"
-            echo "- pushed: \`$IMAGE@$DIGEST\` (registry readback matches; smoke-tested as UID $SMOKE_USER)"
-            echo "- key tag: $TAGSTATE"
-            echo "- for the scripts/tools/devkit-pin.txt pin PR: \`key: $KEY\`, \`digest: $PINNED\`"
-            echo "- SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH, uncached rebuild reproduces the digest: $REPRO (rebuild digest \`$REBUILT\`)"
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "- registry readback matches; smoke-tested as UID $SMOKE_USER; SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" >> "$GITHUB_STEP_SUMMARY"
+          echo "- uncached rebuild reproduces the digest: $REPRO (rebuild digest \`$REBUILT\`)" >> "$GITHUB_STEP_SUMMARY"

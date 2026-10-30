@@ -16,8 +16,10 @@
 # Named build contexts (scripts/image_inventory.py BUILD_CONTEXTS):
 #   wheelhouse    the dev wheelhouse (dependency_lock.py prepare --profile dev)
 #   devkit-tools  the Task, Helm and oc archives named by their pins' asset: lines
-# Build scripts and pins are bind-mounted, never copied, so the image bytes depend only
-# on the kit key inputs (scripts/devkit_key.py) and the named contexts they pin.
+# Build scripts and pins are bind-mounted, never copied into the image. The kit key
+# (scripts/devkit_key.py) covers the pins and this recipe; the bind-mounted verifiers
+# (scripts/tools/install-*.sh, task-artifact.sh, scripts/dependency_lock.py) are not
+# key inputs, though dependency_lock.py writes /opt/devkit/installed-inventory.json.
 #
 # Runs under OpenShift restricted-v2 as an arbitrary UID in group 0: HOME and /work
 # are group-writable (g=u); the installed environment is not.
@@ -58,7 +60,8 @@ RUN --mount=type=bind,source=scripts/tools,target=/opt/devkit-build/scripts/tool
     oc_sha=$(sed -n 's/^sha256: *//p' "$pins/oc-pin.txt"); \
     oc_binary=$(sed -n 's/^binary-sha256: *//p' "$pins/oc-pin.txt"); \
     oc_version=$(sed -n 's/^version: *//p' "$pins/oc-pin.txt"); \
-    [ "${#oc_sha}" = 64 ] && [ "${#oc_binary}" = 64 ] && [ -n "$oc_asset" ] && [ -n "$oc_version" ]; \
+    [ "${#oc_sha}" = 64 ] || exit 1; [ "${#oc_binary}" = 64 ] || exit 1; \
+    [ -n "$oc_asset" ] || exit 1; [ -n "$oc_version" ] || exit 1; \
     printf '%s  %s\n' "$oc_sha" "/devkit-tools/$oc_asset" | sha256sum -c - >/dev/null; \
     mkdir /tmp/oc; \
     tar xzf "/devkit-tools/$oc_asset" -C /tmp/oc oc; \
@@ -72,7 +75,8 @@ USER root
 COPY --from=tools /out/ /usr/local/bin/
 COPY requirements.dev.lock.txt /opt/devkit/locks/requirements.dev.lock.txt
 COPY locks/cp314-linux-x86_64.json /opt/devkit/locks/locks/cp314-linux-x86_64.json
-COPY --from=wheelhouse / /opt/devkit/wheelhouse/
+# Wheels only: the context's .task-complete marker records the factory host, not the kit.
+COPY --from=wheelhouse /*.whl /opt/devkit/wheelhouse/
 # The agent image's idiom with the dev profile: verify the wheelhouse, install offline
 # with hashes, then record the installed receipt, which must equal the dev lock.
 RUN --mount=type=bind,source=scripts/dependency_lock.py,target=/opt/devkit-build/dependency_lock.py \

@@ -846,7 +846,7 @@ def test_containerfile_check_admits_the_devkit_tool_context_and_no_lookalike(tmp
     root = _containerfile_tree(tmp_path)
     devkit = root / "images" / "Containerfile.devkit"
     recipe = devkit.read_text()
-    assert "from=devkit-tools," in recipe and "COPY --from=wheelhouse " in recipe
+    assert "from=devkit-tools," in recipe and "COPY --from=wheelhouse /*.whl " in recipe
     check_containerfile_bases(root)
     devkit.write_text(recipe.replace("from=devkit-tools,", "from=devkit-tool,"))
     with pytest.raises(locks.LockError, match="non-stage image"):

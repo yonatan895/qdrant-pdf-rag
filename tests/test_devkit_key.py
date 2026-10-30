@@ -229,3 +229,5 @@ def test_factory_least_permissions_pinned_actions_and_buildkit():
     push = next(step["run"] for step in publish["steps"] if "push-by-digest=true" in step.get("run", ""))
     assert "rewrite-timestamp=true" in push and "imagetools create -t \"$IMAGE:$KEY\"" in push
     assert push.index("imagetools inspect \"$IMAGE:$KEY\"") < push.index("imagetools create")
+    # Only a registry "not found" may create the tag; any other inspect failure refuses.
+    assert "grep -qi 'not found'" in push and "refusing to tag" in push
