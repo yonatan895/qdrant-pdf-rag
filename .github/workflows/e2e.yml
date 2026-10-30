@@ -1073,6 +1073,12 @@ jobs:
                     env:
                       - {name: MOCK_DIM, value: "1024"}
                       - {name: PORT, value: "8000"}
+                      # Slow-model stand-in (#1118): only a chat whose question carries the
+                      # marker is paced (headers, 150 s silent, then a 90 s stream), and only
+                      # the operator lane sets a marker. acceptance.sh operator paced uses it.
+                      - {name: MOCK_PACED_MARKER, value: "${{ matrix.lane == 'openwebui-operator' && 'ZQPACEDSTANDIN' || '' }}"}
+                      - {name: MOCK_PACED_TTFT_MS, value: "150000"}
+                      - {name: MOCK_PACED_STREAM_MS, value: "90000"}
                     ports: [{containerPort: 8000}]
                     readinessProbe:
                       httpGet: {path: /healthz, port: 8000}
@@ -1342,6 +1348,25 @@ jobs:
           export PATH="/usr/local/bin:$PATH"
           sh rehearsal-infra/scripts/openwebui/acceptance.sh operator run
 
+      # A slow reasoning model through the whole user-facing path (#1118): router stand-in,
+      # allow-list proxy, Open WebUI, Pipe, agent, gateway. The mock paces only the marked
+      # question (MOCK_PACED_* above); the browser path, the API path for a saved chat and
+      # the API stream run it at once, and each must finish with its citation.
+      - name: Open WebUI under a slow model (operator lane, paced stand-in)
+        if: matrix.lane == 'openwebui-operator'
+        env:
+          KIND_NAME: gapbox
+          APP_NS: ${{ env.NS }}
+          OWUI_STATE: ${{ runner.temp }}/owui-acceptance
+          OWUI_WORKSPACE: ${{ github.workspace }}/gapbox/qdrant-pdf-rag
+          KIND_BIN: /usr/local/bin/kind
+          KUBECTL: /usr/local/bin/kubectl
+          HELM: /usr/local/bin/helm
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          sh rehearsal-infra/scripts/openwebui/acceptance.sh operator paced
+
       # Rollback K1 (docs/deploy.md), then the next ordinary operation: OPENWEBUI_ENABLED=false
       # and airgap:deploy remove every Open WebUI object and keep the claim; true and
       # airgap:deploy again bring back the same claim, its chats, the grant and the Pipe.
@@ -1483,7 +1508,7 @@ jobs:
           mkdir -p diagnostics/openwebui
           # Operator lane: the phase verdicts (logs/*.json) and the operator's deploy output.
           for f in logs/acceptance.json logs/checks.json logs/first-pass.json logs/record.json logs/rollback-off.json \
-            logs/rollback-on.json logs/apply-openwebui.log logs/apply-support.log logs/apply-platform.log \
+            logs/rollback-on.json logs/paced.json logs/apply-openwebui.log logs/apply-support.log logs/apply-platform.log \
             logs/pipeline-first-pass.log logs/deploy-second-pass.log logs/deploy-off.log logs/deploy-on.log \
             images.txt node-images.txt render/openwebui.yaml render/platform.yaml render/pipe.sha256; do
             test ! -f "$OWUI_STATE/$f" || cp "$OWUI_STATE/$f" "diagnostics/openwebui/$(basename "$f")"

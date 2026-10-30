@@ -105,11 +105,43 @@ proxy images come from the bundle through `airgap:load`. It follows the
   claim is the same object, and the console answers. Then `OPENWEBUI_ENABLED=true` plus
   `airgap:deploy` (the Pipe is reinstalled from the kept key) is followed by `operator on`: the
   same claim, every recorded chat, the grant, the repository Pipe, and an answered next chat.
-Evidence: `diagnostics/openwebui/` (`checks.json`, `first-pass.json`, `rollback-*.json`, and the
-operator's deploy logs).
+- <a id="slow-model"></a>**Slow model** (`acceptance.sh operator paced`, #1118, CI stand-ins only;
+  it runs between `run` and `record`): the mock model paces only a question that carries the
+  lane's marker (`MOCK_PACED_*` in `scripts/mock_vllm.py`, set on the lane's mock Deployment). It
+  sends its headers, stays silent 150 s, as a reasoning model does while it thinks, then streams
+  for 90 s. One such question goes down three paths at once, each through the router stand-in,
+  the allow-list proxy, Open WebUI, the Pipe, the agent and the gateway:
+  - the browser's path (a socket session): Open WebUI answers at once and saves the message from
+    a background task;
+  - the API path for a saved chat: one request stays silent until the answer is complete
+    (v0.12.3 replies with JSON at the end);
+  - the OpenAI-compatible stream: no saved chat, SSE.
+
+  Each must finish with its citation (source chips; on the stream, a line under the Pipe's
+  Citations header plus finish `stop` and `[DONE]`). The client's timings must show that the
+  silence and the stream really happened. `paced-stand-in` checks that the settings exceed twice
+  the largest default idle limit (60 s) and stay 20 s inside the agent's deadline. The limits on
+  the path, as measured for #1118:
+
+  | Hop | Limit | Where |
+  |---|---|---|
+  | Router (Route) | 300 s idle (HAProxy `timeout`; the stand-in nginx reads it from the stored Route) | `templates/openwebui-route.yaml:18`, `values.yaml` `route.timeoutSeconds` |
+  | Allow-list proxy | 600 s read and send idle | `files/openwebui/proxy.nginx.conf:85-86` |
+  | Open WebUI v0.12.3 | none on a Function's stream; `AIOHTTP_CLIENT_TIMEOUT` serves the disabled OpenAI/Ollama connections; the socket pings every 25 s | image `open_webui/env.py:519-529,614-618` |
+  | docs Pipe to agent | 300 s per read (`TIMEOUT_S`), 10 s connect | `files/openwebui/docs_pipe.py:472,535` |
+  | Agent request | 270 s total (`REQUEST_DEADLINE_S`): the binding limit; past it the stream ends with a fixed error frame | `values.yaml:19`, `agent/app.py:494,514` |
+  | Agent to gateway | 300 s per read (`answer_timeout_s`) | `config.py:236`, `agent/answer.py:1812` |
+  | Gateway (pinned LiteLLM) | 6000 s (`REQUEST_TIMEOUT` default); the site's gateway is the platform's | image `litellm/constants.py:444,452` |
+
+  The agent sends nothing between its headers and the first token, so every hop above it sees the
+  model's whole first-token silence (the API path for a saved chat sees the whole answer). Real
+  models' timing is measured in the [release gate](release-verification.md#openwebui-pass), not here.
+Evidence: `diagnostics/openwebui/` (`checks.json`, `first-pass.json`, `paced.json`,
+`rollback-*.json`, and the operator's deploy logs).
 
 Not proven here: the real IdP, router, service CA operator and SCC (stand-ins, see the hands-on
-record), model quality (mock models), the node-level pre-NAT flow audit of the
+record), model quality and real model timing (mock models), the browser's socket transport
+(the checks read the saved message), the node-level pre-NAT flow audit of the
 2026-10-24 trial (the DNS and socket checks replace it in CI), and anything
 about the site's CNI beyond Kind's NetworkPolicy engine. A failed lane is a
 product defect or a lane defect; do not weaken a rule in `checks.py` to pass.

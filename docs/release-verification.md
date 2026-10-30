@@ -21,8 +21,22 @@ initialize every result as `NOT RUN`.
 
 | Lane | Required real components and coverage |
 |---|---|
-| Required GitHub jobs | Fresh bootstrap of the published bundle, real application containers, registry, gateway/database and Kubernetes; deterministic computation and the gateway fault contracts (upstream, malformed, dimension, timeout, truncated stream, credentials); Open WebUI on through the operator `airgap:pipeline` (`kind-openwebui-operator`) |
-| Disposable local Kind | The same product images and pipeline, both real GPU models behind the authenticated TLS gateway, Qdrant, ingest, OpenObserve; citations, follow-up chat, all streams, lifecycle and recovery |
+| Required GitHub jobs | Fresh bootstrap of the published bundle, real application containers, registry, gateway/database and Kubernetes; deterministic computation and the gateway fault contracts (upstream, malformed, dimension, timeout, truncated stream, credentials); Open WebUI on through the operator `airgap:pipeline` with OpenShift and IdP stand-ins (`kind-openwebui-operator`): the 20 checks, the two-pass Pipe install, the K1 rollback, and a [slow-model stand-in](openwebui-dev.md#slow-model) answering with its citation on the browser, API-chat and API-stream paths |
+| Disposable local Kind | The same product images and pipeline, both real GPU models behind the authenticated TLS gateway, Qdrant, ingest, OpenObserve, and Open WebUI on through the same operator stand-ins and scripts as `kind-openwebui-operator` (its 20 checks, two-pass Pipe and K1 rollback, [below](#openwebui-pass)) answered by the real models; citations, follow-up chat, all streams, lifecycle and recovery |
+
+**What each lane proves for Open WebUI.** The GitHub lane proves the wiring and the
+time limits of the user-facing path (router stand-in, allow-list proxy, Open WebUI,
+docs Pipe, agent, gateway) with stand-in models. Its paced stand-in sends a first
+token 150 s after the request and ends the stream at 240 s. No idle or total limit
+on that path cuts such an answer; the agent's 270 s request deadline is the binding
+limit ([inventory](openwebui-dev.md#slow-model)). It proves nothing about real
+model behavior or answer quality. The Kind lane runs the same scripts and checks
+with the real models answering. Each answer verdict records its measured seconds
+(`end_s`, `done_s`). An answer that ends later than 240 s is outside what CI
+proved, and its row fails. Neither lane exercises the browser's socket transport
+(the checks read the saved message), OpenShift's HAProxy router (the stand-in is
+nginx with the stored Route's timeout) or the site IdP. Site OpenShift acceptance
+covers those.
 
 **Not checked before transfer.** OpenShift-specific behavior (`restricted-v2`
 SCC admission and assigned identities, the OAuth console Route, Service CA and
@@ -315,12 +329,14 @@ the base64-encoded `kind-loader:password` credential.
 <a id="kind-cluster"></a>
 ## 4. Disposable Kind cluster
 
-Use the checksum-pinned Kind, kubectl and Helm versions from
-[the passing workflow](../.github/workflows/e2e.yml): Kind 0.33.0, kubectl 1.37.0,
-Helm 4.3.0 and node image
-`kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5`.
-Install them in a task-local `KIND_BIN`, leaving existing developer binaries
-alone, and verify their in-repository SHA256 values before invoking them:
+Use the checksum-pinned Kind, kubectl and Helm versions of the
+`kind-live-rehearsal` job in [the passing workflow](../.github/workflows/e2e.yml):
+Kind 0.32.0, kubectl 1.33.12, Helm 4.3.0 and node image
+`kindest/node:v1.33.12@sha256:3f5c8443c620245e4d355cfe09e96a91ead32ceaa569d3f1ca9edf0cb2fe2ff4`.
+The Open WebUI pass needs this node: its UID stand-in is a Kubernetes 1.33 alpha
+API (`kind-openwebui-operator` enables the same feature gate). Install them in a
+task-local `KIND_BIN`, leaving existing developer binaries alone, and verify
+their in-repository SHA256 values before invoking them:
 
 ```sh
 umask 077
@@ -380,7 +396,8 @@ export REGISTRY_AUTH_FILE="$KIND_STATE/registry-auth.json"
 Keep `INSECURE_REGISTRY=false` and `SKOPEO_ARGS='--dest-cert-dir /certs'`. When a
 host path contains a colon, use Docker's `--mount type=bind,src=...,dst=...,readonly`
 instead of the colon-delimited `-v` form. Create the cluster with node trust for
-the registry:
+the registry and, as `kind-openwebui-operator` does, the alpha
+`MutatingAdmissionPolicy` API for the restricted-v2 UID stand-in:
 
 ```sh
 mkdir -p "$KIND_STATE/node-trust/rag-kind.test:5000"
@@ -398,12 +415,14 @@ root = Path(os.environ['KIND_STATE'])
 config = {'kind':'Cluster', 'apiVersion':'kind.x-k8s.io/v1alpha4',
           'nodes':[{'role':'control-plane', 'extraMounts':[
               {'hostPath':str(root/'node-trust'),
-               'containerPath':'/etc/containerd/certs.d', 'readOnly':True}]}]}
+               'containerPath':'/etc/containerd/certs.d', 'readOnly':True}]}],
+          'featureGates':{'MutatingAdmissionPolicy':True},
+          'runtimeConfig':{'admissionregistration.k8s.io/v1alpha1':'true'}}
 (root/'kind-config.json').write_text(json.dumps(config))
 PY
 "$KIND_BIN/kind" create cluster --name "$KIND_NAME" \
   --config "$KIND_STATE/kind-config.json" --kubeconfig "$KUBECONFIG" \
-  --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+  --image kindest/node:v1.33.12@sha256:3f5c8443c620245e4d355cfe09e96a91ead32ceaa569d3f1ca9edf0cb2fe2ff4
 chmod 600 "$KUBECONFIG"
 kubectl get nodes
 kubectl get storageclass standard
@@ -493,8 +512,29 @@ kubectl -n "$KIND_NAMESPACE" create secret generic openobserve-credentials \
   --from-file=metrics-auth="$OO/metrics-auth"
 ```
 
-No OAuth cookie or Route is needed in Kind. Save the sizing files: Qdrant
-`$KIND_STATE/qdrant-sizing.yaml` (the volume group is a Kind-only override;
+<a id="openwebui-stand-ins"></a>
+Open WebUI runs with the same stand-ins and script as `kind-openwebui-operator`,
+from the bootstrapped checkout, with private state in `$OWUI_STATE`. The script
+touches only the named cluster. The chart renders `https://owui.localhost` with
+no port, so the router stand-in is forwarded on loopback port 443; ports 443 and
+5556 on 127.0.0.1 must be free. Record the current unprivileged-port floor, allow
+443 for the rehearsal, and copy the test IdP and router images into the node. The
+Open WebUI and proxy images arrive later from the bundle through `airgap:load`:
+
+```sh
+export APP_NS="$KIND_NAMESPACE" OWUI_STATE="$KIND_STATE/owui-acceptance"
+OWUI="sh scripts/openwebui/acceptance.sh operator"
+sysctl -n net.ipv4.ip_unprivileged_port_start > "$KIND_STATE/unprivileged-port-start.before"
+sudo sysctl -w net.ipv4.ip_unprivileged_port_start=443
+docker pull "$(sed -n 's/^SKOPEO_IMAGE=//p' scripts/openwebui/pins.txt)"
+SKOPEO_NATIVE=0 $OWUI images
+```
+
+`SKOPEO_NATIVE=0` makes the script use its pinned Skopeo image with its own
+state mount, not the registry adapter above.
+
+No console OAuth cookie or agent Route is needed in Kind. Save the sizing files:
+Qdrant `$KIND_STATE/qdrant-sizing.yaml` (the volume group is a Kind-only override;
 OpenShift keeps project-assigned identities and must not receive this fixed ID):
 
 ```yaml
@@ -511,11 +551,10 @@ and the ingest Job strategic merge patch `$KIND_STATE/ingest-sizing.json`:
 {"spec":{"template":{"spec":{"containers":[{"name":"ingest","resources":{"requests":{"cpu":"500m","memory":"1Gi"},"limits":{"cpu":"2","memory":"2Gi"}}}]}}}}
 ```
 
-Create the env file. No key values go in it. This lab has no IdP, so it opts
-out of Open WebUI (`kind-openwebui-operator` above proves it with stand-in
-models only; real-model Open WebUI is not yet in this lane), selects the
-one-node 1/1/1 collection policy, and pins a non-root id for the bundled
-OpenObserve (OpenShift assigns one):
+Create the env file. No key values go in it. It selects the one-node 1/1/1
+collection policy and pins a non-root id for the bundled OpenObserve (OpenShift
+assigns one). Open WebUI stays on, its default; the next block adds its site
+keys for the test IdP:
 
 ```sh
 cat > "$KIND_STATE/airgap.env" <<EOF
@@ -542,7 +581,6 @@ QDRANT_EXTRA_VALUES=$KIND_STATE/qdrant-sizing.yaml
 INGEST_EXTRA_PATCH=$KIND_STATE/ingest-sizing.json
 INSECURE_REGISTRY=false
 SKOPEO_ARGS='--dest-cert-dir /certs'
-OPENWEBUI_ENABLED=false
 QDRANT_SHARD_NUMBER=1
 QDRANT_REPLICATION_FACTOR=1
 QDRANT_WRITE_CONSISTENCY_FACTOR=1
@@ -550,6 +588,23 @@ OPENOBSERVE_RUN_AS_ID=10001
 EOF
 export AIRGAP_ENV="$KIND_STATE/airgap.env"
 export SNEAKERNET_TRUSTED_PUB=/absolute/path/to/independently-trusted/signing.pub
+```
+
+Append the `OPENWEBUI_*` site keys the script prints for its test IdP (the
+`airgap.env.example` keys, as `kind-openwebui-operator` writes them):
+
+```sh
+$OWUI site-env >> "$KIND_STATE/airgap.env"
+grep -qx 'OPENWEBUI_ENABLED=true' "$KIND_STATE/airgap.env"
+```
+
+Then apply the OpenShift stand-ins (Route API, namespace service CA, serving
+certificate, restricted-v2 UID), the test IdP and the operator Secret, as site
+procedure step 2 ([deploy.md](deploy.md#docs-front-end)) does on OpenShift:
+
+```sh
+export OWUI_WORKSPACE="$PWD"
+$OWUI prepare
 ```
 
 Run pipeline commands in a clean operator shell: environment values override
@@ -666,10 +721,15 @@ Then run the full pipeline and the application contracts. Run the gateway probe
 to completion before starting the contract client: with one active reasoning
 sequence an overlapping diagnostic can queue behind a long answer and hit its
 unchanged timeout. Retain such failures and rerun under single-user conditions;
-do not increase deadlines.
+do not increase deadlines. The first pass verifies the Open WebUI Route and
+installs no Pipe yet (site step 3):
 
 ```sh
-sh scripts/tools/run-task.sh airgap:pipeline
+set -o pipefail
+sh scripts/tools/run-task.sh airgap:pipeline 2>&1 | tee "$OWUI_STATE/logs/pipeline-first-pass.log"
+grep -q '==> Open WebUI front end on: ' "$OWUI_STATE/logs/pipeline-first-pass.log"
+grep -q '==> Route rag-openwebui verified: ' "$OWUI_STATE/logs/pipeline-first-pass.log"
+grep -q 'docs Pipe NOT installed' "$OWUI_STATE/logs/pipeline-first-pass.log"
 kubectl -n "$KIND_NAMESPACE" exec deploy/rag-agent -- \
   python3 /app/scripts/probe_gateway.py --require-reasoning --stream
 kubectl -n "$KIND_NAMESPACE" exec -i deploy/rag-agent -- python3 - \
@@ -680,6 +740,42 @@ Save stage exit statuses. Empty search or skipped ingest/tracing is a failed
 release check even if the script exits successfully. Do not run the
 fault-injection helper against the real model deployment; CI supplies that
 coverage against the same bundle.
+
+<a id="openwebui-pass"></a>
+### Open WebUI with the real models
+
+The steps and checks of `kind-openwebui-operator`, in its order, with the real
+models answering. `admin` serves the stored Route from the router stand-in, proves
+no Pipe exists yet, signs in as the IdP admin and adds its API key to the Secret
+as `admin-api-key` (site step 4). The second deploy installs the Pipe. `run`
+grants the model to the groups (site step 5) and runs the 20 checks:
+
+```sh
+$OWUI admin
+sh scripts/tools/run-task.sh airgap:deploy 2>&1 | tee "$OWUI_STATE/logs/deploy-second-pass.log"
+! grep -q 'docs Pipe NOT installed' "$OWUI_STATE/logs/deploy-second-pass.log"
+$OWUI run
+```
+
+Rollback K1 by one flag, then the next ordinary use on the kept claim:
+
+```sh
+$OWUI record
+sed -i 's|^OPENWEBUI_ENABLED=.*|OPENWEBUI_ENABLED=false|' "$AIRGAP_ENV"
+sh scripts/tools/run-task.sh airgap:deploy 2>&1 | tee "$OWUI_STATE/logs/deploy-off.log"
+grep -q '==> Open WebUI front end off ' "$OWUI_STATE/logs/deploy-off.log"
+$OWUI off
+sed -i 's|^OPENWEBUI_ENABLED=.*|OPENWEBUI_ENABLED=true|' "$AIRGAP_ENV"
+sh scripts/tools/run-task.sh airgap:deploy 2>&1 | tee "$OWUI_STATE/logs/deploy-on.log"
+! grep -q 'docs Pipe NOT installed' "$OWUI_STATE/logs/deploy-on.log"
+$OWUI on
+```
+
+Each step prints its verdicts and keeps them in `$OWUI_STATE/logs/*.json` (ids,
+counts and seconds, never text, passwords or keys). Every verdict must be
+`"ok": true`. The CI-only `paced` phase is not run here: it needs the mock model's
+pacing. The real models' timing is read from the answer verdicts instead (see
+[the gate](#gate)).
 
 <a id="kind-acceptance"></a>
 ## 6. Acceptance
@@ -696,6 +792,7 @@ coverage against the same bundle.
 | Streams | `/v1/answer`: exactly one successful terminal `final`, no `error`. `/v1/chat` and `/v1/chat/completions`: successful finish chunk plus `[DONE]`, no error frame. `/ui`: terminal completion and cleared busy state. |
 | Tracing | Search and answer/chat traces appear in OpenObserve with retrieval and reasoning children where applicable. |
 | TLS, credentials, long input | The controls below pass from both the agent and ingest images. |
+| Open WebUI (real models) | [The pass above](#openwebui-pass): `first-pass`, `checks` (20 verdicts), `record`, `rollback-off` and `rollback-on` all `ok`. No answer verdict has `end_s` or `done_s` above 240 s, the end of the CI envelope. |
 
 For persistence and redeployment run
 `sh scripts/ci/check_lifecycle.sh "$KIND_NAMESPACE"` and then the pipeline again,
@@ -803,6 +900,7 @@ cluster and its two added network connections:
 "$KIND_BIN/kind" delete cluster --name "$KIND_NAME" --kubeconfig "$KUBECONFIG"
 docker network disconnect kind rag-kind-registry
 docker network disconnect kind rag-kind-gateway-tls
+sudo sysctl -w net.ipv4.ip_unprivileged_port_start="$(cat "$KIND_STATE/unprivileged-port-start.before")"
 ```
 
 The TLS services keep their original connections and loopback ports, and the

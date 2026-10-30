@@ -213,7 +213,71 @@ class Session:
         return self.api(ADMIN, "POST", "/api/v1/auths/admin/config", cfg)[0]
 
     # ------------------------------------------------------------ chat
-    def chat(self, user: str, model: str, text: str) -> dict:
+    def _post_timed(self, user: str, path: str, body: dict, timeout: float) -> tuple[int, dict]:
+        """POST and read the reply as it arrives, timing it in seconds from the request:
+        the headers, the first and last content delta of an SSE reply, the end, and the
+        longest silence the connection saw (no byte between two reads). Open WebUI
+        v0.12.3 answers a saved chat without a socket session with one JSON reply at the
+        end (the connection is silent for the whole answer), a request without a chat
+        with SSE, and a browser request (session_id) at once with the task ids. Of an SSE
+        reply only counts are kept: content characters, cited lines under the Pipe's
+        Citations header, the finish and [DONE]; never the text."""
+        req = urllib.request.Request(OWUI_URL + path, data=json.dumps(body).encode(), method="POST",
+                                     headers=self._headers(user))
+        req.add_header("Content-Type", "application/json")
+        t0 = last = time.monotonic()
+        timing: dict[str, Any] = {"reply": "json", "first_content_s": None, "last_content_s": None, "max_gap_s": 0.0}
+        parts: list[str] = []
+        finish = None
+        done_frame = False
+
+        def mark() -> float:
+            nonlocal last
+            now = time.monotonic()
+            timing["max_gap_s"] = round(max(timing["max_gap_s"], now - last), 1)
+            last = now
+            return round(now - t0, 1)
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=self.ctx) as resp:
+                status = resp.status
+                timing["headers_s"] = mark()
+                if resp.headers.get_content_type() == "text/event-stream":
+                    timing["reply"] = "sse"
+                    while line := resp.readline():
+                        at = mark()
+                        done_frame = done_frame or line.strip() == b"data: [DONE]"
+                        content, reason = _sse_frame(line)
+                        finish = reason or finish
+                        if content:
+                            parts.append(content)
+                            if timing["first_content_s"] is None:
+                                timing["first_content_s"] = at
+                            timing["last_content_s"] = at
+                    text = "".join(parts)
+                    timing.update(content_chars=len(text), cited_lines=_cited_lines(text),
+                                  finish=finish, done_frame=done_frame)
+                else:
+                    resp.read()
+                timing["end_s"] = mark()
+        except urllib.error.HTTPError as exc:
+            exc.read()
+            status = exc.code
+            timing["end_s"] = mark()
+        return status, timing
+
+    def stream_completion(self, user: str, model: str, text: str) -> dict:
+        """The OpenAI-compatible API path: one request, no saved chat, the answer streamed (SSE)."""
+        status, timing = self._post_timed(user, "/api/chat/completions", {
+            "model": model, "stream": True, "messages": [{"role": "user", "content": text}]}, timeout=360)
+        return {"path": "api-stream", "completion_status": status, **timing}
+
+    def chat(self, user: str, model: str, text: str, session_id: str | None = None) -> dict:
+        """One saved turn. Without session_id this is the API path for a saved chat: Open
+        WebUI answers on this request when the turn is complete. With one it is the
+        browser's path: Open WebUI answers the request at once and runs the turn as a
+        background task that saves the message as it streams (the browser also gets socket
+        events, which this client does not read)."""
         uid, aid = str(uuid.uuid4()), str(uuid.uuid4())
         now = int(time.time())
         umsg = {"id": uid, "parentId": None, "childrenIds": [aid], "role": "user", "content": text,
@@ -227,24 +291,61 @@ class Session:
         if status != 200:
             return {"chat_create": status}
         chat_id = created["id"]
-        status, _resp = self.api(user, "POST", "/api/chat/completions", {
+        t0 = time.monotonic()
+        status, timing = self._post_timed(user, "/api/chat/completions", {
             "model": model, "stream": True, "messages": [{"role": "user", "content": text}],
-            "chat_id": chat_id, "id": aid, "parent_id": uid, "session_id": None,
+            "chat_id": chat_id, "id": aid, "parent_id": uid, "session_id": session_id,
             "features": {}, "params": {}, "background_tasks": {}}, timeout=360)
         message, stored = {}, {}
+        saved_content_s = done_s = None
         deadline = time.monotonic() + 420
         while time.monotonic() < deadline:
             _status, stored = self.api(user, "GET", f"/api/v1/chats/{chat_id}")
             message = (((stored or {}).get("chat") or {}).get("history") or {}).get("messages", {}).get(aid, {})
+            if message.get("content") and saved_content_s is None:
+                saved_content_s = round(time.monotonic() - t0, 1)
             if message.get("done"):
+                done_s = round(time.monotonic() - t0, 1)
                 break
             time.sleep(3)
         sources = message.get("sources") or []
-        return {"chat_id": chat_id, "completion_status": status, "done": message.get("done"),
+        # The saved message decides content and sources; the reply contributes only its timing.
+        # Timings are seconds from the completion request; saved_content_s and done_s are
+        # polled every 3 s, so each is at most 3 s late.
+        return {**timing, "chat_id": chat_id, "completion_status": status, "done": message.get("done"),
                 "content_chars": len(message.get("content") or ""),
                 "status_events": len(message.get("statusHistory") or []),
                 "source_chips": len(sources),
-                "source_documents": sum(len(s.get("document") or []) for s in sources)}
+                "source_documents": sum(len(s.get("document") or []) for s in sources),
+                "path": "ui-task" if session_id else "api-chat",
+                "saved_content_s": saved_content_s, "done_s": done_s}
+
+
+def _sse_frame(line: bytes) -> tuple[str, str | None]:
+    """(content delta, finish reason) of one SSE `data:` line; ("", None) for anything else."""
+    if not line.startswith(b"data:"):
+        return "", None
+    try:
+        frame = json.loads(line[5:])
+    except ValueError:
+        return "", None
+    choices = frame.get("choices") if isinstance(frame, dict) else None
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return "", None
+    delta = choices[0].get("delta")
+    content = delta.get("content") if isinstance(delta, dict) else None
+    reason = choices[0].get("finish_reason")
+    return (content if isinstance(content, str) else ""), (reason if isinstance(reason, str) else None)
+
+
+def _cited_lines(text: str) -> int:
+    """Bullet lines under the last `**Citations:**` header (the Pipe's rendering of the agent's
+    validated list), counted, never returned."""
+    lines = text.splitlines()
+    starts = [i for i, line in enumerate(lines) if line.strip() == "**Citations:**"]
+    if not starts:
+        return 0
+    return sum(1 for line in lines[starts[-1] + 1:] if line.startswith("- ") and line[2:].strip())
 
 
 def cmd_secrets(state: str) -> None:

@@ -22,6 +22,9 @@
 #   ... operator record    before the K1 rollback: the chats and the claim
 #   ... operator off       after OPENWEBUI_ENABLED=false + airgap:deploy: objects gone, claim kept
 #   ... operator on        after OPENWEBUI_ENABLED=true + airgap:deploy: same claim, chats, Pipe
+#   ... operator paced     CI stand-in models only: one marked question on the browser, API-chat
+#                          and API-stream paths at once against the slow-model stand-in
+#                          (scripts/mock_vllm.py MOCK_PACED_*): complete, cited, and timed
 #
 #   OWUI_WORKSPACE  (operator mode) the bootstrapped workspace the deploy runs from; its
 #                   chart's docs_pipe.py is the Pipe the checks compare against
@@ -106,13 +109,24 @@ deploy() {
 }
 
 PF_PIDS=""
-stop_forwards() {
+stop_forwards() {  # end every forward and wait for it, so the next phase can bind the same ports
     for p in $PF_PIDS; do kill "$p" 2>/dev/null || true; done
+    for p in $PF_PIDS; do wait "$p" 2>/dev/null || true; done
 }
 
 forward() {  # forward NAMESPACE SERVICE LOCAL REMOTE
-    k -n "$1" port-forward --address 127.0.0.1 "svc/$2" "$3:$4" > "$STATE/logs/forward-$2.log" 2>&1 &
+    # kubectl itself, not the k() function: a backgrounded function is a subshell under dash, and
+    # killing it left kubectl running and holding the port, so a later phase's forward could not
+    # bind and the old one died with the router pod it pointed at (#1118, run 40772148925).
+    "$KUBECTL" --context "kind-$KIND_NAME" -n "$1" port-forward --address 127.0.0.1 "svc/$2" "$3:$4" \
+        > "$STATE/logs/forward-$2.log" 2>&1 &
     PF_PIDS="$PF_PIDS $!"
+}
+
+forwards_alive() {  # a forward that exited (port in use, no pod) is reported, not waited out
+    for p in $PF_PIDS; do
+        kill -0 "$p" 2>/dev/null || die "a port-forward exited; see $STATE/logs/forward-*.log"
+    done
 }
 
 run() {
@@ -122,6 +136,7 @@ run() {
     forward owui-idp dex "$DEX_PORT" "$DEX_PORT"
     i=0
     until $PYH health "$STATE" >/dev/null 2>&1; do
+        forwards_alive
         i=$((i + 1)); [ "$i" -lt 60 ] || { $PYH health "$STATE" || true; die "Open WebUI or the test IdP is not reachable through the port-forwards"; }
         sleep 2
     done
@@ -141,6 +156,7 @@ require_workspace() {
 wait_health() {
     i=0
     until $PYH health "$STATE" >/dev/null 2>&1; do
+        forwards_alive
         i=$((i + 1)); [ "$i" -lt 60 ] || { $PYH health "$STATE" || true; die "Open WebUI or the test IdP is not reachable through the port-forwards"; }
         sleep 2
     done
@@ -274,6 +290,7 @@ operator() {
         record) prepare_state; require_workspace; start_forwards; phase record ;;
         off) prepare_state; require_workspace; phase rollback-off ;;
         on) prepare_state; require_workspace; admit_route; start_forwards; phase rollback-on ;;
+        paced) prepare_state; require_workspace; start_forwards; phase paced ;;
         *) sed -n '2,/^set -eu/p' "$0" | sed '$d' >&2; exit 2 ;;
     esac
 }
