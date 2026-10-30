@@ -76,6 +76,17 @@ def test_every_image_input_change_changes_the_key(tmp_path, change):
     assert devkit_key.key(root) != before
 
 
+def test_helper_bytecode_left_by_tests_is_not_a_key_input(tmp_path):
+    """Importing a helper in a test writes images/devkit/bin/__pycache__; the key ignores it."""
+    root = _tree(tmp_path)
+    before = devkit_key.key(root)
+    (root / "images/devkit/bin/__pycache__").mkdir()
+    (root / "images/devkit/bin/__pycache__/mfr-a.cpython-314.pyc").write_bytes(b"\x00bytecode")
+    assert devkit_key.key(root) == before
+    ignore = (REPO / ".dockerignore").read_text().splitlines()
+    assert "**/__pycache__" in ignore and "**/*.py[cod]" in ignore
+
+
 def test_moving_bytes_between_a_path_and_its_content_changes_the_key(tmp_path):
     """Unframed concatenation would collide: name "bin/x" + "yz" vs name "bin/xy" + "z"."""
     first = _tree(tmp_path / "first")

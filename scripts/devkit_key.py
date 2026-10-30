@@ -44,13 +44,17 @@ class DevkitKeyError(Exception):
 
 
 def inputs(root: Path) -> list[str]:
-    """The fixed inputs, then every file under images/devkit/ by sorted path."""
+    """The fixed inputs, then every file under images/devkit/ by sorted path, minus __pycache__."""
     tree = root / IMAGE_TREE
     if tree.is_symlink():
         raise DevkitKeyError(f'{IMAGE_TREE} must be a directory, not a symlink')
     extra: list[str] = []
     if tree.exists():
         for path in tree.rglob('*'):
+            # Bytecode that running the helpers' tests leaves behind is not an input
+            # (.dockerignore keeps it out of the build context too).
+            if '__pycache__' in path.relative_to(tree).parts:
+                continue
             if path.is_symlink() or not (path.is_dir() or path.is_file()):
                 raise DevkitKeyError(f'{IMAGE_TREE} may hold only regular files and directories')
             if path.is_file():
