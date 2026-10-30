@@ -1,0 +1,8 @@
+# GitHub issues the dev kit carries offline (#1118, ADR-0009 §8 "The kit").
+# scripts/devkit/issue_snapshot.py fetches each issue and all its comments, in
+# this order, from the public repository. One issue number per line.
+#
+# Changing this list changes only the snapshot, never the kit key: a kit that
+# differs only in its snapshot is re-signed under the same key (D-9).
+1118  # tracker: the gap fork plan, the F-items and every maintainer decision
+588   # parking lot: recorded non-blocking findings

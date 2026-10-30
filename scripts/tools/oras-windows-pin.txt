@@ -1,0 +1,20 @@
+# ORAS CLI for the Windows operator path (#1118, ADR-0009 §8): the dev kit ships
+# oras.exe so the operator's Windows machine can push the first dev workspace
+# image (`oras.exe copy --from-oci-layout`). Windows x86_64 only; the Linux pin
+# for the release archive stays scripts/tools/oras-pin.txt (same version).
+#
+# Verification performed 2026-10-30 on the connected host:
+#   the archive sha256 below equals its line in the release's
+#   oras_1.3.4_checksums.txt and the GitHub release asset digest;
+#   the binary and licence digests were measured from that verified zip.
+# scripts/devkit/pack.sh re-verifies the archive, extracts oras.exe and LICENSE
+# (the kit ships the extracted binary, never the zip) and verifies both digests.
+version: v1.3.4
+asset: oras_1.3.4_windows_amd64.zip
+sha256: ffdb6aa40267686b5d507da1f21a57fc502a9a7c86b90c54557d335644c99dbd
+binary: oras.exe
+binary-sha256: 12fe8fdc1c06b509f7938d72944627afffecdccacaaa05673bb709c524d6daee
+license-sha256: eccb04b94c71454ea03f00ecb518b997952c4f2f23aca50baab98230f5c8dc00
+origin: https://github.com/oras-project/oras/releases/download/v1.3.4/oras_1.3.4_windows_amd64.zip
+license: Apache-2.0
+platforms: windows-amd64 only
