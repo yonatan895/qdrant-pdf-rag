@@ -182,6 +182,9 @@ if args[0] == "get":
     if what == "service":
         svc = next((s for s in scen["services"] if s["metadata"]["name"] == rest[0]), None)
         out(svc) if svc else fail()
+    if what == "network.config.openshift.io":
+        cfg = scen.get("network_config")
+        out({"status": cfg}) if cfg is not None else fail()
     if what in ("namespace", "project"):
         labels = scen.get("namespace_labels")
         out({"metadata": {"name": rest[0], "labels": labels}}) if labels is not None else fail()
@@ -248,7 +251,7 @@ def clean_scenario() -> dict[str, Any]:
             pod(CI, "mfr-dev-0", {ROLE: "dev"}, "mfr-dev",
                 volumes=[secret_volume("mfr-dev-gitlab"), secret_volume("mfr-dev-litellm")],
                 pull=[PULL, "mfr-dev-dockercfg-7h2mz"]),
-            pod(CI, "runner-abc-project-1", {ROLE: "runner", "pod": "runner-abc"},
+            pod(CI, "runner-abc123-project-5-concurrent-0-xk2p9", {ROLE: "runner", "pod": "runner-abc"},
                 "mfr-runner-job", pull=[PULL, "mfr-runner-job-dockercfg-a1b2c"]),
             pod(CI, "gitlab-runner-mgr-0", {MGR_KEY: MGR_VALUE}, "gitlab-runner-sa",
                 volumes=[secret_volume(TOKEN), secret_volume("gitlab-runner-operator-cfg")],
@@ -283,6 +286,8 @@ def clean_scenario() -> dict[str, Any]:
              "spec": {"clusterIP": "None", "ports": [{"port": 6333}]}},
         ],
         "namespace_labels": {"kubernetes.io/metadata.name": CI},
+        "network_config": {"clusterNetwork": [{"cidr": "10.128.0.0/14", "hostPrefix": 23}],
+                           "serviceNetwork": ["172.30.0.0/16"]},
         "policies": {PROD: [agent_policy([]), *workspace_policies(PROD)],
                      CI: workspace_policies(CI)},
         "network": network,
@@ -315,9 +320,22 @@ def workspace_policies(ns: str) -> list[dict[str, Any]]:
     deny = spec["default_deny"]
     out = [{"metadata": {"name": deny["name"]},
             "spec": {"podSelector": deny["pod_selector"], "policyTypes": deny["policy_types"]}}]
-    for name in spec["allow"]:
-        out.append({"metadata": {"name": name},
-                    "spec": {"podSelector": {}, "policyTypes": ["Egress"], "egress": [{}]}})
+    for role, body in contract["roles"].items():
+        if body["namespace"] != key:
+            continue
+        selector = ({"matchExpressions": [{"key": MGR_KEY, "operator": "In",
+                                           "values": [MGR_VALUE]}]}
+                    if "pod_selector_parameters" in body else {"matchLabels": {ROLE: role}})
+        out.append({"metadata": {"name": body["allow_policy"]}, "spec": {
+            "podSelector": selector, "policyTypes": ["Egress"],
+            "egress": [
+                {"to": [{"ipBlock": {"cidr": "10.0.2.20/32"}}],
+                 "ports": [{"protocol": "TCP", "port": 443}]},
+                {"to": [{"namespaceSelector": {"matchLabels": {
+                    "kubernetes.io/metadata.name": "openshift-dns"}}}],
+                 "ports": [{"protocol": "UDP", "port": 53}]},
+            ]}})
+    assert [p["metadata"]["name"] for p in out[1:]] == spec["allow"]
     return out
 
 
@@ -418,7 +436,7 @@ def test_clean_workspace_is_proven_with_probes_and_leaves_nothing(cluster: Clust
     assert len(created) == 2 + 5  # two baseline SAs, four role probes and the control
     classes = {r["name"]: r["class"] for r in record["checks"]["pods"]}
     assert classes == {"mfr-bastion-0": "bastion", "rag-agent-1": "release",
-                       "mfr-dev-0": "dev", "runner-abc-project-1": "runner",
+                       "mfr-dev-0": "dev", "runner-abc123-project-5-concurrent-0-xk2p9": "runner",
                        "gitlab-runner-mgr-0": "manager"}
     probes = record["checks"]["probes"]
     assert {r["verdict"] for r in probes["results"]} == {"ok"}
@@ -536,8 +554,8 @@ def test_injected_pull_secret_is_bound_to_the_pod_service_account(cluster: Clust
     code, record = cluster.run()
     assert code == 1
     assert sorted(reasons(record, "pods")) == [
-        f"{CI}/runner-abc-project-1: secret-not-allowed: mfr-dev-dockercfg-7h2mz via imagePullSecrets",
-        f"{CI}/runner-abc-project-1: service-account: mfr-dev"]
+        f"{CI}/runner-abc123-project-5-concurrent-0-xk2p9: secret-not-allowed: mfr-dev-dockercfg-7h2mz via imagePullSecrets",
+        f"{CI}/runner-abc123-project-5-concurrent-0-xk2p9: service-account: mfr-dev"]
 
 
 def test_dev_pod_with_a_third_secret_is_a_violation(cluster: Cluster) -> None:
@@ -570,7 +588,7 @@ def test_runner_pod_secret_references_are_checked_exactly(cluster: Cluster, muta
     mutate(cluster.scenario["pods"][CI][1])
     code, record = cluster.run()
     assert code == 1
-    assert reasons(record, "pods") == [f"{CI}/runner-abc-project-1: {reason}"]
+    assert reasons(record, "pods") == [f"{CI}/runner-abc123-project-5-concurrent-0-xk2p9: {reason}"]
 
 
 @pytest.mark.parametrize("label", ["app", "app.kubernetes.io/name"])
@@ -578,7 +596,7 @@ def test_app_label_on_a_runner_pod_is_a_violation(cluster: Cluster, label: str) 
     cluster.scenario["pods"][CI][1]["metadata"]["labels"][label] = "rag-agent"
     code, record = cluster.run()
     assert code == 1
-    assert reasons(record, "pods") == [f"{CI}/runner-abc-project-1: forbidden-label: {label}"]
+    assert reasons(record, "pods") == [f"{CI}/runner-abc123-project-5-concurrent-0-xk2p9: forbidden-label: {label}"]
 
 
 def test_pods_outside_the_classes_are_violations(cluster: Cluster) -> None:
@@ -589,7 +607,7 @@ def test_pods_outside_the_classes_are_violations(cluster: Cluster) -> None:
     code, record = cluster.run()
     assert code == 1
     assert sorted(reasons(record, "pods")) == [
-        f"{CI}/both: unexpected-role-label",
+        f"{CI}/both: manager-selector-matches-workspace-pod",
         f"{CI}/debug-shell: unclassified-pod",
         f"{PROD}/stray-dev: unexpected-role-label"]
 
@@ -668,7 +686,7 @@ def test_both_rendered_examples_pass_unchanged(cluster: Cluster) -> None:
     assert [(r["file"], r["name"]) for r in rows] == [("gate.toml", "mfr-gate"),
                                                        ("wip.toml", "mfr-wip")]
     assert all(all(r["checks"].values()) for r in rows)
-    assert len(rows[0]["checks"]) == 5 + 2 + 18 + 2
+    assert len(rows[0]["checks"]) == 6 + 2 + 18 + 2
 
 
 @pytest.mark.parametrize("ns, index, change, reason", [
@@ -1069,3 +1087,119 @@ def test_unknown_probe_status_is_refused(cluster: Cluster) -> None:
     code, record = cluster.run("--probe")
     assert (code, record["error"]["code"]) == (2, "probe-failed")
     assert CANARY not in cluster.output.read_text()
+
+
+# --------------------------------------------------------------------------- #1147 review F1, PL-2, PL-5
+
+
+def _dev_allow(cluster: Cluster) -> dict[str, Any]:
+    return next(p for p in cluster.scenario["policies"][CI]
+                if p["metadata"]["name"] == "mfr-dev-egress")
+
+
+@pytest.mark.parametrize("to, reason", [
+    ([], "rule 0: no-peers"),
+    (None, "rule 0: no-peers"),
+    ([{"ipBlock": {"cidr": "0.0.0.0/0"}}], "rule 0: ipblock-any 0.0.0.0/0"),
+    ([{"ipBlock": {"cidr": "::/0"}}], "rule 0: ipblock-any ::/0"),
+    ([{"ipBlock": {"cidr": "10.130.0.0/16"}}], "rule 0: ipblock-cluster-network 10.130.0.0/16"),
+    ([{"ipBlock": {"cidr": "172.30.5.5/32"}}], "rule 0: ipblock-cluster-network 172.30.5.5/32"),
+    ([{"namespaceSelector": {}}], "rule 0: every-namespace"),
+])
+def test_open_egress_rule_on_a_workspace_pod_is_a_violation(cluster: Cluster, to, reason) -> None:
+    rule = _dev_allow(cluster)["spec"]["egress"][0]
+    if to is None:
+        rule.pop("to")
+    else:
+        rule["to"] = to
+    code, record = cluster.run()
+    assert code == 1
+    assert reasons(record, "open-egress") == [f"{CI}/mfr-dev-egress: {reason}"]
+
+
+def test_excepted_cluster_network_and_unrelated_policies_pass(cluster: Cluster) -> None:
+    _dev_allow(cluster)["spec"]["egress"][0]["to"] = [
+        {"ipBlock": {"cidr": "10.0.0.0/8", "except": ["10.128.0.0/14"]}}]
+    cluster.scenario["network_config"]["serviceNetwork"] = []
+    cluster.scenario["policies"][PROD].append(
+        {"metadata": {"name": "other-app"}, "spec": {
+            "podSelector": {"matchLabels": {"app": "other"}}, "policyTypes": ["Egress"],
+            "egress": [{}]}})
+    code, record = cluster.run()
+    assert (code, record["verdict"], record["findings"]) == (2, "static-only", [])
+    assert record["checks"]["open_egress"]["cluster_network_check"] == "checked"
+
+
+def test_unreadable_cluster_network_is_unchecked_not_passed(cluster: Cluster) -> None:
+    cluster.scenario["network_config"] = None
+    code, record = cluster.run("--probe")
+    assert (code, record["verdict"]) == (2, "inconclusive")
+    assert record["checks"]["open_egress"]["cluster_network_check"] == "unchecked"
+    assert reasons(record, "open-egress", "inconclusive") == ["cluster network: unchecked"]
+    _dev_allow(cluster)["spec"]["egress"][0]["to"] = [{"ipBlock": {"cidr": "10.128.4.0/24"}}]
+    code, record = cluster.run("--probe", "--cluster-network", "10.128.0.0/14")
+    assert code == 1
+    assert reasons(record, "open-egress") == [
+        f"{CI}/mfr-dev-egress: rule 0: ipblock-cluster-network 10.128.4.0/24"]
+
+
+def test_manager_selector_overlapping_runner_jobs_is_refused(cluster: Cluster) -> None:
+    cluster.runner[0].write_text(runner_toml().replace(
+        f'"{ROLE}" = "runner"', f'"{ROLE}" = "runner"\n      "{MGR_KEY}" = "{MGR_VALUE}"'))
+    cluster.scenario["pods"][CI][1]["metadata"]["labels"][MGR_KEY] = MGR_VALUE
+    code, record = cluster.run()
+    assert code == 1
+    assert reasons(record, "runner-config") == [
+        "gate.toml#0: failed: pod_labels_role_only",
+        "gate.toml#0: failed: pod_labels_outside_manager_selector"]
+    assert reasons(record, "pods") == [
+        f"{CI}/runner-abc123-project-5-concurrent-0-xk2p9: manager-selector-matches-workspace-pod"]
+
+
+def test_runner_added_labels_pass_only_on_runner_pods(cluster: Cluster) -> None:
+    runner = cluster.scenario["pods"][CI][1]
+    runner["metadata"]["labels"].update({"project.runner.gitlab.com/id": "5",
+                                         "job.runner.gitlab.com/id": "77"})
+    code, record = cluster.run()
+    assert (code, record["findings"]) == (2, [])
+    row = next(r for r in record["checks"]["pods"] if r["class"] == "runner")
+    assert row["runner_added_labels"] == ["job.runner.gitlab.com/id", "pod",
+                                          "project.runner.gitlab.com/id"]
+    cluster.scenario["pods"][CI][0]["metadata"]["labels"]["job.runner.gitlab.com/id"] = "77"
+    code, record = cluster.run()
+    assert code == 1
+    assert reasons(record, "pods") == [f"{CI}/mfr-dev-0: unexpected-label: job.runner.gitlab.com/id"]
+
+
+JOB_SECRET = "runner-abc123-project-5-concurrent-0k9x2q"
+
+
+def test_per_job_pull_secret_passes_as_image_pull_on_its_runner_pod(cluster: Cluster) -> None:
+    cluster.scenario["pods"][CI][1]["spec"]["imagePullSecrets"].append({"name": JOB_SECRET})
+    code, record = cluster.run()
+    assert (code, record["findings"]) == (2, [])
+
+
+@pytest.mark.parametrize("index, mutate, reason", [
+    (1, lambda p: p["spec"]["volumes"].append(secret_volume(JOB_SECRET)),
+     f"secret-not-allowed: {JOB_SECRET} via volume"),
+    (1, lambda p: p["spec"]["imagePullSecrets"].append(
+        {"name": "runner-zzz999-project-5-concurrent-0k9x2q"}),
+     "secret-not-allowed: runner-zzz999-project-5-concurrent-0k9x2q via imagePullSecrets"),
+    (0, lambda p: p["spec"]["imagePullSecrets"].append({"name": JOB_SECRET}),
+     f"secret-not-allowed: {JOB_SECRET} via imagePullSecrets"),
+])
+def test_per_job_pull_secret_elsewhere_is_a_violation(cluster: Cluster, index, mutate,
+                                                      reason) -> None:
+    target = cluster.scenario["pods"][CI][index]
+    mutate(target)
+    code, record = cluster.run()
+    assert code == 1
+    assert reasons(record, "pods") == [f"{CI}/{target['metadata']['name']}: {reason}"]
+
+
+def test_ephemeral_container_on_the_bastion_is_a_violation(cluster: Cluster) -> None:
+    cluster.scenario["pods"][PROD][0]["spec"]["ephemeralContainers"] = [{"name": "debug"}]
+    code, record = cluster.run()
+    assert code == 1
+    assert reasons(record, "pods") == [f"{PROD}/mfr-bastion-0: ephemeral-container"]

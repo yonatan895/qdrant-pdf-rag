@@ -2217,18 +2217,33 @@ python3 -I scripts/devkit/isolation_proof.py \
 
 The JSON record goes with the dated `gap/records/` entry for the proof.
 
-It records `can-i` lists against the baseline of a freshly created ServiceAccount, a
-negative matrix asked outright in both namespaces (secrets, pod create, exec, attach,
-port-forward and proxy, workload writes, token requests, impersonation, RBAC writes),
-which also catches grants to a ServiceAccount group, with the operator's own `get secrets`
-as positive control, every pod's class, the workspace and manager pods' Secret references (mounted and image-pull references checked separately; an
-injected `<serviceaccount>-dockercfg-<suffix>` only as the pod's own pull Secret), the
-runner configuration checks, the contract's egress policies, the agent ingress policies and,
-with `--probe`, TCP and DNS outcomes from probe pods carrying each role's labels. A probe
-pod in the production namespace that no policy selects is the negative control: a blocked
-result counts only for a target the control reached. A CIDR wider than one address is not
-probed; give such a class a `--probe-host CLASS=HOST`. The record holds verbs, resources,
-object names and outcomes, never a Secret value, token or env value.
+It records:
+
+- `can-i` lists against the baseline of a freshly created ServiceAccount, and a negative
+  matrix asked outright in both namespaces (secrets, pod create, exec, attach, port-forward
+  and proxy, workload writes, token requests, impersonation, RBAC writes), which also
+  catches grants to a ServiceAccount group; the operator's own `get secrets` is the
+  positive control;
+- every pod's class, and the workspace and manager pods' Secret references, mounted and
+  image-pull checked separately: an injected `<serviceaccount>-dockercfg-<suffix>` only as
+  the pod's own pull Secret, and GitLab Runner's own labels and per-job pull Secrets
+  (`runner-<token>-project-<id>-concurrent-<n>...`, same prefix as the pod, image pull
+  only) on runner job pods only; the manager label selector must match no workspace pod
+  and no runner `pod_labels`;
+- the runner configuration checks, and the contract's egress policies;
+- on every egress rule that selects a workspace or manager pod: no empty `to`, no
+  `0.0.0.0/0` or `::/0`, no empty `namespaceSelector`, and no ipBlock over the pod or
+  Service network. The networks come from `network.config.openshift.io/cluster`; when the
+  operator cannot read it, pass them with `--cluster-network CIDR`, or the check stays
+  `unchecked` and the result inconclusive;
+- the agent ingress policies;
+- with `--probe`, TCP and DNS outcomes from probe pods carrying each role's labels. A probe
+  pod in the production namespace that no policy selects is the negative control: a
+  blocked result counts only for a target the control reached. A CIDR wider than one
+  address is not probed; give such a class a `--probe-host CLASS=HOST`.
+
+The record holds verbs, resources, object names and outcomes, never a Secret value, token
+or env value.
 
 Exit 0 means proven, 1 a violation, 2 a usage or environment error, an inconclusive
 result, or a run without `--probe` (verdict `static-only`, never the full proof). Run one

@@ -20,6 +20,9 @@ matrix, the runner rules, the agent Service and the Qdrant ports. It checks:
 3. Every pod in both namespaces, classified by its labels; workspace and
    manager pods' Secret references are checked against the contract's
    mounted and image-pull sets, and the contract's egress policies must exist.
+   No egress rule selecting a workspace or manager pod may be open (no peers,
+   0.0.0.0/0, ::/0, every namespace, or the pod/Service network), and the
+   manager selector must match no workspace pod.
 4. The rendered runner configuration: no `*_overwrite_(max_)allowed` key, nothing
    privileged, the contract ServiceAccount and the CI namespace, and requests
    and limits for build, helper and service containers.
@@ -138,6 +141,11 @@ RUNNER_RESOURCE_KEYS = tuple(
     for resource in ("cpu", "memory", "ephemeral_storage")
     for bound in ("request", "limit")
 )
+
+# GitLab Runner's Kubernetes executor names a job pod, and any per-job pull
+# Secret it creates, from one prefix: runner-<token>-project-<id>-concurrent-<n>.
+RUNNER_JOB_NAME = re.compile(r"^(runner-[a-z0-9]+-project-[0-9]+-concurrent-[0-9]+)")
+RUNNER_JOB_SECRET = re.compile(r"runner-[a-z0-9]+-project-[0-9]+-concurrent-[0-9]+[a-z0-9-]*")
 
 # Production targets every workspace probe must be refused (the chart's
 # Qdrant ports and agent HTTP port; the agent Service name is a chart fact).
@@ -690,7 +698,13 @@ def classify_pods(contract: Contract, pods: Mapping[str, list[dict[str, Any]]],
             row: dict[str, Any] = {"namespace": ns, "name": name}
             role = contract.roles.get(role_value) if role_value is not None else None
             if role_value is not None:
-                if role is None or not role.f9 or role.namespace != ns or manager is not None:
+                if manager is not None:
+                    # The manager's allow-list includes the API server.
+                    row["class"] = "unexpected"
+                    findings.violation("pods", subject, "manager-selector-matches-workspace-pod")
+                    rows.append(row)
+                    continue
+                if role is None or not role.f9 or role.namespace != ns:
                     row["class"] = "unexpected"
                     findings.violation("pods", subject, "unexpected-role-label")
                     rows.append(row)
@@ -727,9 +741,16 @@ def classify_pods(contract: Contract, pods: Mapping[str, list[dict[str, Any]]],
     return rows, manager_sas
 
 
+def runner_job_pull_prefix(pod_name: str) -> str | None:
+    """The GitLab Runner job name prefix a per-job pull Secret shares with its pod."""
+    match = RUNNER_JOB_NAME.match(pod_name)
+    return match[1] if match else None
+
+
 def check_f9_pod(contract: Contract, role: Role, subject: str, labels: Mapping[str, str],
                  spec: Mapping[str, Any], refs: list[tuple[str, str]], token: bool,
                  row: dict[str, Any], findings: Findings) -> None:
+    runner = role.name == runner_job_role(contract).name
     bad_labels = sorted(
         k for k in labels
         if k in contract.forbidden_label_keys
@@ -737,24 +758,36 @@ def check_f9_pod(contract: Contract, role: Role, subject: str, labels: Mapping[s
     )
     for label in bad_labels:
         findings.violation("pods", subject, f"forbidden-label: {label}")
+    # Template pods carry only the role label; GitLab Runner adds its own to job pods.
+    extra_labels = sorted(set(labels) - {contract.role_label_key} - set(bad_labels))
+    if not runner:
+        for label in extra_labels:
+            findings.violation("pods", subject, f"unexpected-label: {label}")
+    if spec.get("ephemeralContainers"):
+        findings.violation("pods", subject, "ephemeral-container")
     sa = str(spec.get("serviceAccountName") or "default")
     if sa != role.service_account:
         findings.violation("pods", subject, f"service-account: {sa}")
     if token:
         findings.violation("pods", subject, "service-account-token-mounted")
     own_pull = injected_pull_pattern(contract, sa)
+    pod_name = subject.split("/", 1)[1]
+    job_prefix = runner_job_pull_prefix(pod_name) if runner else None
     checked = []
     for name, via in refs:
         if via == "imagePullSecrets":
             ok = name in role.image_pull or (
                 own_pull.fullmatch(name) is not None
-                and any(p.fullmatch(name) for p in role.pull_patterns))
+                and any(p.fullmatch(name) for p in role.pull_patterns)
+            ) or (job_prefix is not None and RUNNER_JOB_SECRET.fullmatch(name) is not None
+                  and name.startswith(job_prefix) and name != pod_name)
         else:
             ok = name in role.mounted
         checked.append({"name": name, "via": via, "allowed": ok})
         if not ok:
             findings.violation("pods", subject, f"secret-not-allowed: {name} via {via}")
     row.update({"service_account": sa, "forbidden_labels": bad_labels,
+                "runner_added_labels": extra_labels if runner else [],
                 "token_mounted": token, "secret_refs": checked})
 
 
@@ -826,6 +859,10 @@ def check_runner_config(contract: Contract, params: Params, paths: list[Path],
                     "image_pull_secrets": sorted(kube.get("image_pull_secrets") or [])
                     == sorted(role.image_pull),
                     "pod_labels_role_only": labels == {contract.role_label_key: role.name},
+                    # The manager's allow-list includes the API server.
+                    "pod_labels_outside_manager_selector": not any(
+                        r.selector and labels.get(r.selector[0]) == r.selector[1]
+                        for r in contract.roles.values() if not r.f9),
                 }
                 for key in RUNNER_FALSE_KEYS:
                     checks[f"{key}_false"] = kube.get(key) is False
@@ -918,6 +955,106 @@ def check_egress_policies(contract: Contract, policies: Mapping[str, list[dict[s
         others = sorted(set(by_name) - set(expected))
         rows.append({"namespace": ns, "other_policies": others})
     return rows
+
+
+def workspace_label_sets(contract: Contract, ns: str,
+                         pods: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Label sets of workspace and manager pods in `ns`: the contract's, and live ones."""
+    sets: list[dict[str, str]] = []
+    selectors = [r.selector for r in contract.roles.values()
+                 if not r.f9 and r.selector and r.namespace == ns]
+    for role in contract.roles.values():
+        if role.f9 and role.namespace == ns:
+            sets.append({contract.role_label_key: role.name})
+    sets.extend({key: value} for key, value in selectors)
+    for pod in pods:
+        labels = (pod.get("metadata") or {}).get("labels") or {}
+        if (labels.get(contract.role_label_key) in contract.roles
+                or any(labels.get(k) == v for k, v in selectors)):
+            sets.append(dict(labels))
+    return sets
+
+
+def cluster_networks(kube: Kube, given: list[str]) -> list[str] | None:
+    """Pod and Service networks: --cluster-network values, else the cluster's config."""
+    if given:
+        return given
+    config = kube.try_json(["get", "network.config.openshift.io", "cluster"])
+    if config is None:
+        return None
+    status = config.get("status") or {}
+    nets = [str(n.get("cidr")) for n in status.get("clusterNetwork") or [] if n.get("cidr")]
+    nets += [str(n) for n in status.get("serviceNetwork") or []]
+    return nets or None
+
+
+def _covers_network(block: Mapping[str, Any], networks: list[ipaddress.IPv4Network
+                                                             | ipaddress.IPv6Network]) -> bool:
+    try:
+        cidr = ipaddress.ip_network(str(block.get("cidr")), strict=False)
+        excepts = [ipaddress.ip_network(str(e), strict=False) for e in block.get("except") or []]
+    except ValueError:
+        return True  # an unparseable block is never accepted
+    for net in networks:
+        if cidr.version != net.version or not cidr.overlaps(net):
+            continue
+        if not any(e.version == net.version and e.supernet_of(net) for e in excepts):  # type: ignore[arg-type]
+            return True
+    return False
+
+
+def check_open_egress(contract: Contract, policies: Mapping[str, list[dict[str, Any]]],
+                      pods: Mapping[str, list[dict[str, Any]]], networks: list[str] | None,
+                      findings: Findings) -> dict[str, Any]:
+    """No egress rule selecting a workspace or manager pod opens more than its peers.
+
+    A Template cannot validate its parameters: an empty or absent `to`, an
+    ipBlock of 0.0.0.0/0 or ::/0, an empty namespaceSelector, or an ipBlock
+    over the pod or Service network all render and apply cleanly.
+    """
+    parsed: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for net in networks or []:
+        try:
+            parsed.append(ipaddress.ip_network(net, strict=False))
+        except ValueError as exc:
+            raise ProofError("param-invalid", "cluster-network") from exc
+    rows = []
+    for ns in (contract.prod, contract.ci):
+        label_sets = workspace_label_sets(contract, ns, pods[ns])
+        for policy in policies[ns]:
+            name = str((policy.get("metadata") or {}).get("name", ""))
+            spec = policy.get("spec") or {}
+            if "Egress" not in (spec.get("policyTypes") or []):
+                continue
+            selector = spec.get("podSelector") or {}
+            if not any(selector_matches(selector, labels) for labels in label_sets):
+                continue
+            subject = f"{ns}/{name}"
+            reasons = []
+            for index, rule in enumerate(spec.get("egress") or []):
+                peers = rule.get("to")
+                if not peers:
+                    reasons.append(f"rule {index}: no-peers")
+                    continue
+                for peer in peers:
+                    block = peer.get("ipBlock")
+                    ns_sel = peer.get("namespaceSelector")
+                    if block is not None:
+                        cidr = str(block.get("cidr"))
+                        if cidr in ("0.0.0.0/0", "::/0"):
+                            reasons.append(f"rule {index}: ipblock-any {cidr}")
+                        elif parsed and _covers_network(block, parsed):
+                            reasons.append(f"rule {index}: ipblock-cluster-network {cidr}")
+                    elif ns_sel is not None and not _selector_keys(ns_sel):
+                        reasons.append(f"rule {index}: every-namespace")
+            for reason in reasons:
+                findings.violation("open-egress", subject, reason)
+            rows.append({"namespace": ns, "name": name, "open_rules": reasons})
+    if networks is None:
+        findings.inconclusive("open-egress", "cluster network", "unchecked")
+    return {"policies": rows,
+            "cluster_network_check": "checked" if networks is not None else "unchecked",
+            "cluster_networks": list(networks or [])}
 
 
 def check_agent_policy(kube: Kube, contract: Contract, agent_service: str,
@@ -1253,6 +1390,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="the release's agent Service (default: rag-agent)")
     parser.add_argument("--output", type=Path, help="write the JSON record here")
     parser.add_argument("--probe", action="store_true", help="run the live network probes")
+    parser.add_argument("--cluster-network", action="append", default=[], metavar="CIDR",
+                        help="a pod or Service network CIDR, when the operator cannot read "
+                             "network.config.openshift.io/cluster")
     parser.add_argument("--probe-host", action="append", default=[], metavar="CLASS=HOST",
                         help="an extra probe address for an egress class")
     parser.add_argument("--probe-timeout", type=float, default=180.0)
@@ -1315,6 +1455,8 @@ def main(argv: list[str] | None = None) -> int:
         policies = {ns: kube.items(["get", "networkpolicies", "-n", ns], "get networkpolicies")
                     for ns in (contract.prod, contract.ci)}
         checks["egress_policies"] = check_egress_policies(contract, policies, findings)
+        checks["open_egress"] = check_open_egress(
+            contract, policies, pods, cluster_networks(kube, args.cluster_network), findings)
         checks["agent_policy"] = check_agent_policy(kube, contract, args.agent_service,
                                                     pods[contract.prod], policies[contract.prod],
                                                     findings)
