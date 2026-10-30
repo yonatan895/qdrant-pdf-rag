@@ -91,6 +91,7 @@ names and read back from the registry. The robot credential is written to
         if ($LASTEXITCODE -ne 0 -or $readback -ne $digest) { throw "STOP: the registry reads back '$readback', not $digest. Do not create the bastion; report it." }
     } finally {
         Remove-Item -LiteralPath $RegistryAuth -ErrorAction SilentlyContinue
+        Remove-Variable -Name b64 -ErrorAction SilentlyContinue
     }
     "Pushed ${Registry}:$key = $digest"
 }
@@ -140,6 +141,7 @@ a pod name.
 . {
     $ErrorActionPreference = 'Stop'
     $name = Split-Path -Leaf $Kit
+    if ($name -notmatch '^mfr-devkit-[0-9a-f]{64}$') { throw 'STOP: $Kit must name the kit directory itself, mfr-devkit-<key>, with no trailing backslash.' }
     oc wait --for=condition=Ready pod/mfr-bastion --timeout=600s
     if ($LASTEXITCODE -ne 0) { throw 'STOP: the bastion is not Ready. Run oc describe pod mfr-bastion and fix the event it shows (image pull, quota, admission).' }
     oc exec mfr-bastion -- sh -c "rm -rf /work/kits/$name && mkdir -p /work/kits /work/trust"
@@ -201,26 +203,33 @@ bytes unchanged, and `sha256sum -c` checks them inside the pod.
     Set-Location -LiteralPath $Kit
     $key = ((Select-String -LiteralPath .\MANIFEST.txt -Pattern '^key: ').Line -split ' ')[1]
     $digest = ((Select-String -LiteralPath .\MANIFEST.txt -Pattern '^image_digest: ').Line -split ' ')[1]
+    # A pod left by an earlier attempt is removed first, so the block can run again.
+    oc delete pod mfr-devkit-push --ignore-not-found --wait=true
+    if ($LASTEXITCODE -ne 0) { throw 'STOP: cannot remove an earlier mfr-devkit-push pod. Check your oc login.' }
     oc run mfr-devkit-push --image=$PreviousAgentImage --restart=Never --command -- sleep 7200
     if ($LASTEXITCODE -ne 0) { throw 'STOP: cannot start the push pod. Check $PreviousAgentImage and the namespace quota.' }
-    oc wait --for=condition=Ready pod/mfr-devkit-push --timeout=600s
-    if ($LASTEXITCODE -ne 0) { throw 'STOP: the push pod is not Ready. Run oc describe pod mfr-devkit-push.' }
-    oc exec mfr-devkit-push -- mkdir -p /tmp/kit/image/blobs/sha256
-    $files = @('oras', 'SHA256SUMS') + (Get-ChildItem -LiteralPath .\image -Recurse -File | ForEach-Object { 'image/' + $_.FullName.Substring((Join-Path $Kit 'image').Length + 1).Replace('\', '/') })
-    foreach ($rel in $files) {
-        cmd /c "oc exec -i mfr-devkit-push -- dd of=/tmp/kit/$rel bs=1M status=none < $($rel.Replace('/', '\'))"
-        if ($LASTEXITCODE -ne 0) { throw "STOP: streaming $rel into the pod failed. Run this block again." }
+    try {
+        oc wait --for=condition=Ready pod/mfr-devkit-push --timeout=600s
+        if ($LASTEXITCODE -ne 0) { throw 'STOP: the push pod is not Ready. Run oc describe pod mfr-devkit-push, fix the event, then run this block again.' }
+        oc exec mfr-devkit-push -- mkdir -p /tmp/kit/image/blobs/sha256
+        $files = @('oras', 'SHA256SUMS') + (Get-ChildItem -LiteralPath .\image -Recurse -File | ForEach-Object { 'image/' + $_.FullName.Substring((Join-Path $Kit 'image').Length + 1).Replace('\', '/') })
+        foreach ($rel in $files) {
+            cmd /c "oc exec -i mfr-devkit-push -- dd of=/tmp/kit/$rel bs=1M status=none < $($rel.Replace('/', '\'))"
+            if ($LASTEXITCODE -ne 0) { throw "STOP: streaming $rel into the pod failed. Run this block again." }
+        }
+        oc exec mfr-devkit-push -- sh -c 'cd /tmp/kit && sha256sum -c --ignore-missing --quiet SHA256SUMS && chmod 0755 oras'
+        if ($LASTEXITCODE -ne 0) { throw 'STOP: a streamed file differs inside the pod. Run this block again.' }
+        oc get secret $Robot -o 'jsonpath={.data.\.dockerconfigjson}' | oc exec -i mfr-devkit-push -- sh -c 'base64 -d > /tmp/auth.json'
+        if ($LASTEXITCODE -ne 0) { throw 'STOP: cannot hand the robot credential to the pod. Check $Robot, then run this block again.' }
+        oc exec mfr-devkit-push -- /tmp/kit/oras cp --from-oci-layout "/tmp/kit/image@$digest" "${Registry}:$key" --to-registry-config /tmp/auth.json
+        if ($LASTEXITCODE -ne 0) { throw 'STOP: the push from the pod failed; its error names the cause. Run this block again once it is fixed.' }
+        $readback = oc exec mfr-devkit-push -- /tmp/kit/oras resolve --registry-config /tmp/auth.json "${Registry}:$key"
+        if ($readback -ne $digest) { throw "STOP: the registry reads back '$readback', not $digest. Do not create the bastion; report it." }
+        "Pushed ${Registry}:$key = $digest from the fallback pod"
+    } finally {
+        # Every outcome deletes the pod, and with it the copied robot credential.
+        oc delete pod mfr-devkit-push --ignore-not-found --wait=false
     }
-    oc exec mfr-devkit-push -- sh -c 'cd /tmp/kit && sha256sum -c --ignore-missing --quiet SHA256SUMS && chmod 0755 oras'
-    if ($LASTEXITCODE -ne 0) { throw 'STOP: a streamed file differs inside the pod. Delete the pod (oc delete pod mfr-devkit-push) and run this block again.' }
-    $b64 = oc get secret $Robot -o 'jsonpath={.data.\.dockerconfigjson}'
-    $b64 | oc exec -i mfr-devkit-push -- sh -c 'base64 -d > /tmp/auth.json'
-    oc exec mfr-devkit-push -- /tmp/kit/oras cp --from-oci-layout "/tmp/kit/image@$digest" "${Registry}:$key" --to-registry-config /tmp/auth.json
-    if ($LASTEXITCODE -ne 0) { throw 'STOP: the push from the pod failed; its error names the cause.' }
-    $readback = oc exec mfr-devkit-push -- /tmp/kit/oras resolve --registry-config /tmp/auth.json "${Registry}:$key"
-    oc delete pod mfr-devkit-push --wait=false
-    if ($readback -ne $digest) { throw "STOP: the registry reads back '$readback', not $digest. Do not create the bastion; report it." }
-    "Pushed ${Registry}:$key = $digest from the fallback pod"
 }
 ```
 

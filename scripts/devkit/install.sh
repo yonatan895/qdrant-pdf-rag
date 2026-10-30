@@ -39,6 +39,9 @@ while [ $# -gt 0 ]; do
         *) die "unsupported argument (usage: sh install.sh --registry <registry>/<path> [--verify-pod <pod>] [--registry-ca-dir DIR] [--kit DIR])" ;;
     esac
 done
+case "$KIT" in
+    *:*) die "the kit path contains ':', which skopeo reads as a reference separator: move the kit to a path without ':'" ;;
+esac
 printf '%s\n' "$REPOSITORY" | grep -Eqx '[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+' ||
     die "--registry must be <registry>/<path> with no scheme, tag or digest (for example quay.example/mf/qdrant-pdf-rag-devkit)"
 

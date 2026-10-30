@@ -238,12 +238,40 @@ jobs:
           # records are exactly what PowerShell 5.1 hands `oc exec -i`.
           $env:CI_AUTH_B64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(
               '{"auths":{"ghcr.io":{"auth":"' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("$($env:GHCR_USER):$($env:GHCR_TOKEN)")) + '"}}}'))
+          # A native `oc` for the fallback's `cmd /c` streaming: cmd.exe cannot see the
+          # PowerShell function, so this records the argv and the redirected stdin bytes.
+          $NativeBin = Join-Path $env:RUNNER_TEMP 'native-oc'
+          New-Item -ItemType Directory -Force -Path $NativeBin | Out-Null
+          [IO.File]::WriteAllText((Join-Path $NativeBin 'oc_record.py'), @'
+          import os, sys
+          from pathlib import Path
+          args = sys.argv[1:]
+          out = Path(os.environ['CI_FALLBACK_OUT'])
+          out.mkdir(parents=True, exist_ok=True)
+          with open(out / 'argv.log', 'a', encoding='utf-8') as log:
+              log.write(' '.join(args) + '\n')
+          targets = [a[len('of=/tmp/kit/'):] for a in args if a.startswith('of=/tmp/kit/')]
+          if targets:
+              if os.environ.get('CI_FAIL_DD'):
+                  sys.exit(1)
+              path = out / 'streamed' / targets[0]
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_bytes(sys.stdin.buffer.read())
+          '@)
+          [IO.File]::WriteAllText((Join-Path $NativeBin 'oc.cmd'), "@`"$((Get-Command python).Source)`" `"%~dp0oc_record.py`" %*`r`n")
+          $env:PATH = "$NativeBin;$env:PATH"
+          $env:CI_FALLBACK_OUT = Join-Path $Out 'fallback'
+          $global:CiPushPod = $false
           function oc {
               $a = $args
               $in = @($input)
               Add-Content -LiteralPath $Log -Value ('oc ' + ($a -join ' '))
               $global:LASTEXITCODE = 0
               if ($a[0] -eq 'process') { & $OcExe @a; return }
+              # The fallback's pod: `run` fails while one exists, as AlreadyExists does.
+              if ($a[0] -eq 'run') { if ($global:CiPushPod) { $global:LASTEXITCODE = 1 } else { $global:CiPushPod = $true }; return }
+              if ($a[0] -eq 'delete') { $global:CiPushPod = $false; return }
+              if ($a[0] -eq 'exec' -and ($a -contains 'resolve')) { $env:CI_DIGEST; return }
               if ($a[0] -eq 'get') { & python -c "import os;print(os.environ['CI_AUTH_B64'])"; return }
               if ($a[0] -eq 'whoami') { & python -c "print('sha256~' + 'Q' * 43)"; return }
               if ($a[0] -eq 'apply') { $in | & python $Dump (Join-Path $Out 'apply-stdin.bin'); return }
@@ -294,6 +322,23 @@ jobs:
           foreach ($want in "oc cp $name mfr-bastion:/work/kits/$name", 'oc cp release-signing.pub mfr-bastion:/work/trust/release-signing.pub') {
               if (-not (Select-String -LiteralPath $Log -SimpleMatch $want -Quiet)) { throw "step 4 did not run: $want" }
           }
+
+          # The fallback: a stream failure stops and deletes the pod; a pod left by an
+          # earlier attempt is removed first; a rerun after success converges; and the
+          # bytes cmd.exe redirected into `oc exec -i` equal the kit files.
+          $PreviousAgentImage = 'quay.example/mf/qdrant-pdf-rag-agent@sha256:' + ('a' * 64)
+          $env:CI_DIGEST = ((Select-String -LiteralPath (Join-Path $Kit 'MANIFEST.txt') -Pattern '^image_digest: ').Line -split ' ')[1]
+          $env:CI_FAIL_DD = '1'
+          Assert-Stop 'fallback' '^STOP: streaming oras into the pod failed'
+          if ($global:CiPushPod) { throw 'a failed fallback left the push pod running' }
+          Remove-Item Env:\CI_FAIL_DD
+          $global:CiPushPod = $true
+          Invoke-Step 'fallback'
+          if ($global:CiPushPod) { throw 'the fallback left the push pod running' }
+          Invoke-Step 'fallback'
+          if (-not (Select-String -LiteralPath (Join-Path $env:CI_FALLBACK_OUT 'argv.log') -SimpleMatch 'exec -i mfr-devkit-push -- dd of=/tmp/kit/oras bs=1M status=none' -Quiet)) { throw 'cmd.exe passed another argv to oc' }
+          & python -c "import sys; from pathlib import Path; out, kit = Path(sys.argv[1]) / 'streamed', Path(sys.argv[2]); names = sorted(p.relative_to(out).as_posix() for p in out.rglob('*') if p.is_file()); want = sorted(['oras', 'SHA256SUMS'] + [p.relative_to(kit).as_posix() for p in (kit / 'image').rglob('*') if p.is_file()]); assert names == want, (names, want); assert all((out / n).read_bytes() == (kit / n).read_bytes() for n in names); print('fallback: cmd.exe redirection delivered', len(names), 'kit files byte-for-byte')" $env:CI_FALLBACK_OUT $Kit
+          if ($LASTEXITCODE -ne 0) { throw 'the fallback streamed bytes differ from the kit' }
 
           # What `oc apply -f -` received through the pipe equals the Linux render.
           & python -c "import json,sys; a=open(sys.argv[1],'rb').read(); b=open(sys.argv[2],'rb').read(); assert json.loads(a)==json.loads(b), 'renders differ'; print('render: Windows pipe equals the Linux render as JSON; bytes equal:', a==b, '; Windows CRLF lines:', a.count(b'\r\n'))" (Join-Path $Out 'apply-stdin.bin') (Join-Path $Proof 'linux-render.json')

@@ -577,3 +577,15 @@ def test_layout_reader_refuses_links_and_blobs_that_differ(tmp_path):
     with pytest.raises(image_manifest.BlobMismatch):
         image_manifest.read_layout(changed)
     assert os.path.isdir(good)
+
+
+def test_install_refuses_a_kit_path_skopeo_would_read_as_another_layout(packed):
+    """skopeo splits `oci:<path>` at ':' and would open a directory other than the verified one."""
+    ctx, kit, _ = packed
+    moved = ctx["tmp"] / "kits/a:b" / kit.name
+    moved.parent.mkdir(parents=True)
+    kit.rename(moved)
+    done = run_install(ctx, moved)
+    assert done.returncode != 0
+    assert "the kit path contains ':'" in done.stderr
+    assert not Path(ctx["env"]["STUB_REGISTRY"]).exists()
