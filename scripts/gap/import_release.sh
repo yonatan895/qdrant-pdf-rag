@@ -168,33 +168,57 @@ main() {
     rm -rf "$R"
 
     STEP="1 (verify the bundle)"
-    # Signature against the trust anchor, every member checksum, and
-    # repo.bundle HEAD equal to the MANIFEST sha, all by this checkout's code
-    # before the bundle's own bootstrap.sh runs.
+    # The signature covers only what SHA256SUMS lists, so nothing else in the
+    # tarball is trusted: members are listed before anything is unpacked, the
+    # signed files are verified before the rest is unpacked, and the bundle
+    # goes to its own fresh directory. Everything the script writes lives in
+    # R itself or in a mktemp directory, never at a path the bundle supplied.
     [ -f "$BUNDLE.sha256" ] || stop "$BUNDLE.sha256 is missing; copy it next to the tarball and rerun"
     if ! awk -v name="qdrant-pdf-rag-$SHA.tar" 'NF != 2 || $2 != name { bad=1 } END { exit bad || NR != 1 }' "$BUNDLE.sha256" \
             || ! (cd "$(dirname -- "$BUNDLE")" && sha256sum --quiet -c "qdrant-pdf-rag-$SHA.tar.sha256"); then
         stop "the tarball does not match $BUNDLE.sha256; copy the tarball again and rerun"
     fi
     mkdir -p "$R"
+    WORK=$(mktemp -d "$R/work.XXXXXX")
+    UNPACKED="$R/bundle"
+    mkdir "$UNPACKED"
+    if ! tar -tvf "$BUNDLE" > "$WORK/types" || ! tar -tf "$BUNDLE" > "$WORK/members"; then
+        stop "cannot list $BUNDLE; copy the tarball again and rerun"
+    fi
+    if [ -n "$(awk 'substr($0, 1, 1) != "-"' "$WORK/types")" ]; then
+        stop "the tarball holds a member that is not a regular file (a link, directory or device); do not import it: ask for a new bundle"
+    fi
+    if [ -n "$(awk '$0 !~ /^[A-Za-z0-9._-]+$/ || $0 == "." || $0 == ".." || seen[$0]++' "$WORK/members")" ]; then
+        stop "the tarball holds a member that is not a plain file name (a path, .. or an unusual character) or holds one name twice; do not import it: ask for a new bundle"
+    fi
+    for signed in SHA256SUMS SHA256SUMS.sig sneakernet-signing.pub MANIFEST.txt; do
+        grep -qxF "$signed" "$WORK/members" || stop "the tarball has no $signed; do not import it: ask for a new bundle"
+    done
     # cd, not tar -C: GNU tar unquotes backslashes in the -C argument.
-    (cd "$R" && tar -xf "$BUNDLE") || stop "cannot unpack $BUNDLE; copy the tarball again and rerun"
-    : > "$R/empty.env"
-    # common.sh cds to this checkout; the chain is checked from inside R with
-    # a relative name (sha256sum escapes a path that holds a backslash).
-    if ! env AIRGAP_ENV="$R/empty.env" AIRGAP_DRYRUN=0 sh -c '. "$1" && cd "$2" && check_manifest_chain MANIFEST.txt' \
-            "$SELF" "$COMMON" "$R"; then
+    (cd "$UNPACKED" && tar -xf "$BUNDLE" SHA256SUMS SHA256SUMS.sig sneakernet-signing.pub MANIFEST.txt) \
+        || stop "cannot unpack $BUNDLE; copy the tarball again and rerun"
+    : > "$WORK/empty.env"
+    # common.sh cds to this checkout; the chain is checked from the bundle
+    # directory with a relative name (sha256sum escapes some path characters).
+    if ! env AIRGAP_ENV="$WORK/empty.env" AIRGAP_DRYRUN=0 sh -c '. "$1" && cd "$2" && check_manifest_chain MANIFEST.txt' \
+            "$SELF" "$COMMON" "$UNPACKED"; then
         stop "the bundle is not signed by SNEAKERNET_TRUSTED_PUB (FAIL line above); do not import it: ask for a correctly signed bundle"
     fi
-    (cd "$R" && sha256sum --quiet -c SHA256SUMS) \
+    if [ -n "$(awk 'NR == FNR { listed[$2] = 1; next }
+                    !($0 in listed) && $0 != "SHA256SUMS" && $0 != "SHA256SUMS.sig"' \
+                    "$UNPACKED/SHA256SUMS" "$WORK/members")" ]; then
+        stop "the tarball holds a member that the signed SHA256SUMS does not list; do not import it: ask for a new bundle"
+    fi
+    (cd "$UNPACKED" && tar -xf "$BUNDLE") || stop "cannot unpack $BUNDLE; copy the tarball again and rerun"
+    (cd "$UNPACKED" && sha256sum --quiet -c SHA256SUMS) \
         || stop "a bundle member does not match the signed SHA256SUMS; do not import it: copy the tarball again or ask for a new bundle"
-    if [ "$(sed -n 's/^sha: *//p' "$R/MANIFEST.txt")" != "$SHA" ]; then
+    if [ "$(sed -n 's/^sha: *//p' "$UNPACKED/MANIFEST.txt")" != "$SHA" ]; then
         stop "MANIFEST sha is not $SHA; check SHA against the tarball name and rerun"
     fi
-    if [ "$(git bundle list-heads "$R/repo.bundle" HEAD | awk '{print $1}')" != "$SHA" ]; then
+    if [ "$(git bundle list-heads "$UNPACKED/repo.bundle" HEAD | awk '{print $1}')" != "$SHA" ]; then
         stop "repo.bundle HEAD is not the MANIFEST sha $SHA; do not import it: ask for a new bundle"
     fi
-    (cd "$R" && AIRGAP_WORKSPACE=release sh bootstrap.sh) \
+    (cd "$UNPACKED" && AIRGAP_WORKSPACE=release sh bootstrap.sh) \
         || stop "the release bootstrap refused the bundle (FAIL line above); do not import it: ask for a new bundle"
 
     STEP="2 (find the last import)"
@@ -209,7 +233,7 @@ main() {
     STEP="3 (fetch and check the release, then branch)"
     # Step 0 already refused a release that origin/main contains (the same
     # release or an older one). The branch comes last, so a refusal leaves none.
-    git fetch -q "$R/repo.bundle" HEAD
+    git fetch -q "$UNPACKED/repo.bundle" HEAD
     if [ "$(git rev-parse FETCH_HEAD)" != "$SHA" ]; then
         stop "bundle HEAD is not $SHA; do not import it: ask for a new bundle"
     fi
@@ -221,18 +245,18 @@ main() {
     fi
     # The ledger as origin/main has it, checked before the branch exists.
     LEDGER=gap/patches.md
-    : > "$R/all.txt"
+    : > "$WORK/all.txt"
     if git cat-file -e "$BASE:$LEDGER" 2>/dev/null; then
-        git show "$BASE:$LEDGER" > "$R/patches.before"
+        git show "$BASE:$LEDGER" > "$WORK/patches.before"
         bad=$(awk '/^## / {
                 if (!(NF == 3 && $2 ~ /^GL#[0-9]+$/ && length($3) == 40 && $3 !~ /[^0-9a-f]/ \
                       && $0 == "## " $2 " " $3)) { print NR; exit }
-            }' "$R/patches.before")
+            }' "$WORK/patches.before")
         [ -z "$bad" ] || stop "$LEDGER line $bad is not a ledger heading \"## GL#NNN <full commit sha>\"; fix the ledger on main through an MR, then rerun"
-        awk '/^## / { print $2, $3 }' "$R/patches.before" > "$R/all.txt"
-        twice=$(awk 'seen[$2]++ { print $2; exit }' "$R/all.txt")
+        awk '/^## / { print $2, $3 }' "$WORK/patches.before" > "$WORK/all.txt"
+        twice=$(awk 'seen[$2]++ { print $2; exit }' "$WORK/all.txt")
         [ -z "$twice" ] || stop "$LEDGER lists gap patch $twice twice; fix the ledger on main through an MR, then rerun"
-        for c in $(awk '{ print $2 }' "$R/all.txt"); do
+        for c in $(awk '{ print $2 }' "$WORK/all.txt"); do
             git merge-base --is-ancestor "$c" "$BASE" 2>/dev/null \
                 || stop "$LEDGER names $c, which is not a commit on origin/main; fix the ledger on main through an MR, then rerun"
         done
@@ -240,13 +264,13 @@ main() {
     git switch -q --no-track -c "$BRANCH" "$BASE"
 
     STEP="4 (set aside the gap patches)"
-    for c in $(awk '{ line[NR] = $2 } END { for (i = NR; i > 0; i--) print line[i] }' "$R/all.txt"); do
+    for c in $(awk '{ line[NR] = $2 } END { for (i = NR; i > 0; i--) print line[i] }' "$WORK/all.txt"); do
         if ! git revert --no-edit "$c"; then
             stop "cannot set aside gap patch $c; an unledgered change overlaps it: rerun resets, then $REPORT"
         fi
     done
-    if [ -s "$R/all.txt" ]; then
-        awk '/^## / { exit } { print }' "$R/patches.before" > "$LEDGER"
+    if [ -s "$WORK/all.txt" ]; then
+        awk '/^## / { exit } { print }' "$WORK/patches.before" > "$LEDGER"
         git add -- "$LEDGER"
         git commit -q -m "Set aside gap patches before importing $SHA"
     fi
@@ -260,8 +284,8 @@ main() {
     STEP="6 (re-apply the gap patches)"
     : > "$R/reapplied.txt"
     : > "$R/issue-notes.txt"
-    for c in $(awk '{ print $2 }' "$R/all.txt"); do
-        i=$(awk -v c="$c" '$2 == c { print $1 }' "$R/all.txt")
+    for c in $(awk '{ print $2 }' "$WORK/all.txt"); do
+        i=$(awk -v c="$c" '$2 == c { print $1 }' "$WORK/all.txt")
         if git cherry-pick "$c"; then
             echo "reapplied $i $c $(git rev-parse HEAD)" >> "$R/reapplied.txt"
         elif git rev-parse -q --verify CHERRY_PICK_HEAD >/dev/null; then
@@ -275,7 +299,7 @@ main() {
     if grep -q '^reapplied ' "$R/reapplied.txt"; then
         awk 'FILENAME == ARGV[1] { if ($1 == "reapplied") new[$3] = $4; next }
              /^## / { on = ($3 in new); if (on) print $1, $2, new[$3]; next }
-             on' "$R/reapplied.txt" "$R/patches.before" >> "$LEDGER"
+             on' "$R/reapplied.txt" "$WORK/patches.before" >> "$LEDGER"
         git add -- "$LEDGER"
         git commit -q -m "Re-apply gap patches after importing $SHA"
     fi
@@ -283,11 +307,11 @@ main() {
     STEP="7 (prove the upstream tree)"
     # Outside the site layer the fork equals the release except the paths the
     # ledger lists. --no-renames lists both sides of a rename; -z keeps paths raw.
-    git diff --no-renames -z --name-only "$SHA" HEAD -- . ':(exclude)gap' ':(exclude).gitlab' > "$R/drift.z"
-    tr '\0' '\n' < "$R/drift.z" | sort -u > "$R/drift.txt"
-    if [ -f "$LEDGER" ]; then sed -n 's/^- path: //p' "$LEDGER"; fi | sort -u > "$R/patches.txt"
-    if ! cmp -s "$R/drift.txt" "$R/patches.txt"; then
-        diff "$R/patches.txt" "$R/drift.txt" || true
+    git diff --no-renames -z --name-only "$SHA" HEAD -- . ':(exclude)gap' ':(exclude).gitlab' > "$WORK/drift.z"
+    tr '\0' '\n' < "$WORK/drift.z" | sort -u > "$WORK/drift.txt"
+    if [ -f "$LEDGER" ]; then sed -n 's/^- path: //p' "$LEDGER"; fi | sort -u > "$WORK/patches.txt"
+    if ! cmp -s "$WORK/drift.txt" "$WORK/patches.txt"; then
+        diff "$WORK/patches.txt" "$WORK/drift.txt" || true
         stop "upstream-owned paths differ from the ledger (above: < ledgered only, > changed only); ledger the change or revert it on main through an MR, then rerun"
     fi
     git diff "$PREV" "$SHA" -- airgap.env.example > "$R/env-keys.diff"

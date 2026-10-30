@@ -332,8 +332,12 @@ The script runs these steps. Each refusal is a fixed `STOP:` line in it.
 1. **Verify the bundle** with the fork's own code: the `SHA256SUMS`
    signature against the trust anchor, every member checksum, and
    `repo.bundle` HEAD equal to the MANIFEST sha. The trust anchor is
-   required; there is no trust on first use. Then the verified bundle's
-   `bootstrap.sh` runs into `$R/release`.
+   required; there is no trust on first use. The signature covers only the
+   listed members, so the tarball may hold nothing else: a link, a path, a
+   repeated name or an unlisted member stops the import before that member
+   is unpacked. The bundle unpacks into `$R/bundle`, never over a file the
+   script writes. Then the verified bundle's `bootstrap.sh` runs into
+   `$R/bundle/release`.
 2. **Find the last import** from the newest `Upstream-Release:` trailer on
    `origin/main`.
 3. **Refuse** a release that is already imported or older, one that does

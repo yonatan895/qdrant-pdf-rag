@@ -10,10 +10,12 @@ the ledger and the commit messages are compared byte for byte.
 
 from __future__ import annotations
 
+import io
 import os
 import shlex
 import shutil
 import subprocess
+import tarfile
 from functools import cache
 from pathlib import Path
 
@@ -125,7 +127,8 @@ class World:
         self.bundle(sha, **bundle)
         return sha
 
-    def bundle(self, sha: str, *, name_sha: str | None = None, key: Path | None = None, tamper=None) -> Path:
+    def bundle(self, sha: str, *, name_sha: str | None = None, key: Path | None = None, tamper=None,
+               append=None) -> Path:
         """A signed tarball whose repo.bundle HEAD is upstream HEAD and whose
         MANIFEST and file name say name_sha (default: sha)."""
         name_sha = name_sha or sha
@@ -155,6 +158,10 @@ class World:
         tarball = self.bundles / f"qdrant-pdf-rag-{name_sha}.tar"
         subprocess.run(["tar", "-cf", str(tarball), "-C", str(stage), *files, "SHA256SUMS", "SHA256SUMS.sig"],
                        check=True, capture_output=True)
+        if append:  # Members the signature does not cover.
+            with tarfile.open(tarball, "a") as archive:
+                for info, data in append(self):
+                    archive.addfile(info, data)
         Path(f"{tarball}.sha256").write_text(f"{sha256_bytes(tarball.read_bytes())}  {tarball.name}\n")
         return tarball
 
@@ -530,6 +537,72 @@ def test_refusals_change_nothing(world, case, tmp_path):
         assert world.refs(world.fork) == fork_refs
         assert world.git(world.fork, "status", "--porcelain") == status
     assert world.refs(world.bare) == bare_refs
+
+
+# -- members the signature does not cover ---------------------------------------
+
+def _member(name: str, kind: bytes = tarfile.REGTYPE, link: str = "", data: bytes = b"planted\n"):
+    info = tarfile.TarInfo(name)
+    info.type, info.linkname = kind, link
+    if kind == tarfile.REGTYPE:
+        info.size = len(data)
+        return info, io.BytesIO(data)
+    return info, None
+
+
+NOT_REGULAR = ("STOP: the tarball holds a member that is not a regular file (a link, directory or device); "
+               "do not import it: ask for a new bundle")
+NOT_PLAIN = ("STOP: the tarball holds a member that is not a plain file name (a path, .. or an unusual character) "
+             "or holds one name twice; do not import it: ask for a new bundle")
+UNLISTED = ("STOP: the tarball holds a member that the signed SHA256SUMS does not list; do not import it: "
+            "ask for a new bundle")
+HOSTILE = {
+    # The review's T1: a wrongly signed bundle aims a scratch name at a file outside R.
+    "symlink-wrong-key": (True, lambda w: [_member("empty.env", tarfile.SYMTYPE, str(w.root / "victim.txt"))],
+                          NOT_REGULAR),
+    # The review's T1b: a correctly signed bundle aims another scratch name at it.
+    "symlink-signed": (False, lambda w: [_member("patches.before", tarfile.SYMTYPE, str(w.root / "victim.txt"))],
+                       NOT_REGULAR),
+    "hardlink": (False, lambda w: [_member("reapplied.txt", tarfile.LNKTYPE, str(w.root / "victim.txt"))],
+                 NOT_REGULAR),
+    "directory": (False, lambda w: [_member("release", tarfile.DIRTYPE)], NOT_REGULAR),
+    "dotdot": (False, lambda w: [_member("../../escaped.txt")], NOT_PLAIN),
+    "absolute": (False, lambda w: [_member(str(w.root / "escaped.txt"))], NOT_PLAIN),
+    "repeated-name": (False, lambda w: [_member("sbom.json", data=b"{}\n")], NOT_PLAIN),
+    "unlisted": (False, lambda w: [_member("notes.txt")], UNLISTED),
+}
+
+
+def _outside(world: World, sha: str) -> dict[str, tuple[bytes, int]]:
+    """Every file under the world root except the run's own: R, the fork's
+    git directory (step 0 fetches) and TMPDIR."""
+    skip = (world.releases / sha, world.fork / ".git", world.root / "tmp")
+    return {str(p): (p.read_bytes(), p.stat().st_mtime_ns) for p in sorted(world.root.rglob("*"))
+            if p.is_file() and not p.is_symlink() and not any(p.is_relative_to(s) for s in skip)}
+
+
+@pytest.mark.parametrize("case", sorted(HOSTILE))
+def test_unsigned_members_are_refused_before_use_and_the_next_signed_import_passes(world, case):
+    world.create_fork(world.r1)
+    world.patch(81, {"src/app.py": with_line(world.read("src/app.py"), 4, "gap 81")}, "GL#81\n\nGap-Patch: GL#81\n")
+    (world.root / "victim.txt").write_text("keep\n")
+    wrong_key, members, expected = HOSTILE[case]
+    key = gen_sign_keypair(world.root / "home", "other.key") if wrong_key else None
+    r2 = world.release({"README.md": world.up_text("README.md") + "more\n"}, "Release 2", key=key, append=members)
+    before = _outside(world, r2)
+    fork_refs = world.refs(world.fork)
+
+    result = world.run(r2)
+
+    assert_one_stop(result, expected)
+    assert (world.root / "victim.txt").read_text() == "keep\n"
+    assert not (world.releases / "escaped.txt").exists() and not (world.root / "escaped.txt").exists()
+    assert _outside(world, r2) == before
+    assert world.refs(world.fork) == fork_refs
+
+    world.bundle(r2)  # The same release, packed and signed as pack.sh does.
+    assert_ready(world, world.run(r2), r2)
+    assert (world.root / "victim.txt").read_text() == "keep\n"
 
 
 # -- idempotence -----------------------------------------------------------------
