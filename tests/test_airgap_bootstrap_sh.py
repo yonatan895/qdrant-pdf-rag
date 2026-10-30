@@ -182,6 +182,67 @@ def test_signed_handoff_executes_workflow_with_shipped_model_modes(bundle_dir):
     assert values["pullSecret"]["name"] == "acceptance-pull"
 
 
+@pytest.mark.parametrize(("job", "step_name"), [
+    ("kind-live-rehearsal", "Black-box handoff (verify, unpack, bootstrap) with public egress blocked"),
+    ("airgap-rehearsal", "Fresh published-bundle bootstrap"),
+])
+def test_live_lane_bootstrap_exports_the_release_trust_anchor(bundle_dir, job, step_name):
+    """#1118 F1: the live bundle lanes run validate/load/deploy/ingest outside
+    dry-run, so their bootstrap step keeps the packing job's public key (which
+    the bundle artifact carries beside the tarball) outside the unpack
+    directory and exports it for every later step. Executed as written: the
+    exported anchor makes the real guard pass in the bootstrapped checkout,
+    and a foreign key in the artifact stops bootstrap before any clone."""
+    import yaml
+
+    workflow = yaml.safe_load((REPO / ".github/workflows/e2e.yml").read_text())
+    upload = next(step for step in workflow["jobs"]["airgap-package"]["steps"]
+                  if step.get("name") == "Upload sneakernet bundle artifact")
+    assert "dist/sneakernet-signing.pub" in upload["with"]["path"].split()
+    command = next(step["run"] for step in workflow["jobs"][job]["steps"] if step.get("name") == step_name)
+    assert command.index("SNEAKERNET_TRUSTED_PUB") < command.index("tar xf")
+    gapbox, candidate_sha, tools = _synthetic_gapbox(bundle_dir)
+    packer_pub = gapbox / "sneakernet-signing.pub"  # what the artifact delivers beside the tarball
+    subprocess.run(["openssl", "pkey", "-in", str(bundle_dir / "signing.key"), "-pubout", "-out", str(packer_pub)],
+                   check=True, capture_output=True)
+    runner_temp = bundle_dir.parent / "runner-temp"
+    runner_temp.mkdir()
+    github_env = bundle_dir.parent / "github-env"
+    github_env.write_text("")
+    command = command.replace('export PATH="/usr/local/bin:$PATH"', 'export PATH="$HANDOFF_TOOLS:$PATH"')
+    env = {"PATH": f"{tools / 'bin'}:" + os.environ["PATH"], "HANDOFF_TOOLS": str(tools / "bin"),
+           "SHA": candidate_sha, "IMAGE_SHA": candidate_sha, "RUNNER_TEMP": str(runner_temp),
+           "GITHUB_ENV": str(github_env), "GITHUB_WORKSPACE": str(bundle_dir.parent)}
+    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", command], cwd=bundle_dir.parent, env=env,
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    exported = dict(line.split("=", 1) for line in github_env.read_text().splitlines())
+    anchor = exported["SNEAKERNET_TRUSTED_PUB"]
+    assert anchor == str(runner_temp / "release-trust-anchor.pub")
+    assert (runner_temp / "release-trust-anchor.pub").read_bytes() == packer_pub.read_bytes()
+    checkout = gapbox / "qdrant-pdf-rag"
+    guard = subprocess.run(
+        ["sh", "-c", f'. "{REPO}/scripts/airgap/common.sh"; cd "$1" || exit 9; MANIFEST=dist/MANIFEST.txt; check_checkout_sha',
+         "guard", str(checkout)],
+        cwd=checkout, capture_output=True, text=True, check=False,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(bundle_dir), "SNEAKERNET_TRUSTED_PUB": anchor},
+    )
+    assert guard.returncode == 0, guard.stderr
+    assert guard.stderr == ""
+    # A foreign key beside the tarball: bootstrap (pinned by the same export) refuses.
+    shutil.rmtree(checkout)
+    for path in gapbox.iterdir():
+        if path.name not in (f"qdrant-pdf-rag-{candidate_sha}.tar", f"qdrant-pdf-rag-{candidate_sha}.tar.sha256"):
+            path.unlink() if path.is_file() else shutil.rmtree(path)
+    (runner_temp / "release-trust-anchor.pub").unlink()
+    shutil.copy(gen_other_pub(bundle_dir.parent, "foreign"), packer_pub)
+    refused = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", command], cwd=bundle_dir.parent, env=env,
+                             capture_output=True, text=True, check=False)
+    assert refused.returncode != 0
+    assert "does not match SNEAKERNET_TRUSTED_PUB" in refused.stdout + refused.stderr
+    assert not checkout.exists()
+
+
 def _offline_env(bundle_dir):
     # Deliberately omit Make, Task, Go, Python, curl and all app tools.
     bin_dir = bundle_dir / "bin"
