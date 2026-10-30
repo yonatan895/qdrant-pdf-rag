@@ -16,6 +16,8 @@ from typing import Any
 
 import pytest
 
+from tests.test_workspace_manifests import load_template, render
+
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts/devkit/isolation_proof.py"
 CONTRACT = REPO / "deploy/workspace/contract.json"
@@ -48,6 +50,9 @@ PARAMS = {
     "GITLAB_CIDRS": '[{"ipBlock":{"cidr":"10.0.2.20/32"}}]',
     "LITELLM_CIDRS": '[{"ipBlock":{"cidr":"10.0.3.30/32"}}]',
     "REGISTRY_PATH": "registry.site.example/mfr",
+    "STORAGE_CLASS": "block-rwo",
+    "QDRANT_REPOSITORY": "registry.site.example/mfr/qdrant",
+    "QDRANT_DIGEST": f"sha256:{DIGEST}",
     "LITELLM_PORT": "4000",
 }
 # The contract's egress allow-lists, per probe identity (the control reaches all).
@@ -129,17 +134,15 @@ if args[0] == "create":
 if args[0] == "delete":
     if scen.get("fail_delete") or ns in scen.get("fail_delete_ns", []):
         fail()
-    after = scen.get("fail_delete_ns_after", {})
-    if ns in after:
-        count = state.setdefault("deletes", {}).get(ns, 0)
-        state["deletes"][ns] = count + 1; save()
-        if count >= after[ns]:
-            fail()
-    wanted = {kinds(k) for k in args[1].split(",")}
-    sel = opt("-l")
+    assert args[1] == "pod", args
+    names = set()
+    for a in args[2:]:
+        if a == "-n" or a.startswith("-"):
+            break
+        names.add(a)
     keep, gone = [], []
     for obj in state["objects"]:
-        hit = obj["kind"] in wanted and obj["metadata"]["namespace"] == ns and matches(obj, sel)
+        hit = obj["metadata"]["namespace"] == ns and obj["metadata"]["name"] in names
         (gone if hit else keep).append(obj)
     state["objects"] = keep; save()
     for obj in gone:
@@ -288,8 +291,8 @@ def clean_scenario() -> dict[str, Any]:
         "namespace_labels": {"kubernetes.io/metadata.name": CI},
         "network_config": {"clusterNetwork": [{"cidr": "10.128.0.0/14", "hostPrefix": 23}],
                            "serviceNetwork": ["172.30.0.0/16"]},
-        "policies": {PROD: [agent_policy([]), *workspace_policies(PROD)],
-                     CI: workspace_policies(CI)},
+        "policies": {PROD: [agent_policy([]), *workspace_policies(PARAMS)[PROD]],
+                     CI: workspace_policies(PARAMS)[CI]},
         "network": network,
     }
 
@@ -312,31 +315,20 @@ def agent_policy(allowed_namespaces: list[str]) -> dict[str, Any]:
                      "policyTypes": ["Ingress"], "ingress": ingress}}
 
 
-def workspace_policies(ns: str) -> list[dict[str, Any]]:
-    """The F9 egress policies as the contract names them (bodies minimal)."""
-    contract = json.loads(CONTRACT.read_text())
-    key = "prod" if ns == PROD else "ci"
-    spec = contract["policies"][key]
-    deny = spec["default_deny"]
-    out = [{"metadata": {"name": deny["name"]},
-            "spec": {"podSelector": deny["pod_selector"], "policyTypes": deny["policy_types"]}}]
-    for role, body in contract["roles"].items():
-        if body["namespace"] != key:
-            continue
-        selector = ({"matchExpressions": [{"key": MGR_KEY, "operator": "In",
-                                           "values": [MGR_VALUE]}]}
-                    if "pod_selector_parameters" in body else {"matchLabels": {ROLE: role}})
-        out.append({"metadata": {"name": body["allow_policy"]}, "spec": {
-            "podSelector": selector, "policyTypes": ["Egress"],
-            "egress": [
-                {"to": [{"ipBlock": {"cidr": "10.0.2.20/32"}}],
-                 "ports": [{"protocol": "TCP", "port": 443}]},
-                {"to": [{"namespaceSelector": {"matchLabels": {
-                    "kubernetes.io/metadata.name": "openshift-dns"}}}],
-                 "ports": [{"protocol": "UDP", "port": 53}]},
-            ]}})
-    assert [p["metadata"]["name"] for p in out[1:]] == spec["allow"]
+def workspace_policies(params: dict[str, str]) -> dict[str, list[dict[str, Any]]]:
+    """The NetworkPolicies the PR-3a templates render (its faithful oc-process renderer)."""
+    out = {}
+    for key, ns in (("prod", PROD), ("ci", CI)):
+        template = load_template(key)
+        declared = {p["name"] for p in template.get("parameters", [])}
+        objects = render(template, {k: v for k, v in params.items() if k in declared})
+        out[ns] = [o for o in objects if o["kind"] == "NetworkPolicy"]
     return out
+
+
+CONTRACT_POLICIES = {n for ns in ("prod", "ci") for n in (
+    [json.loads(CONTRACT.read_text())["policies"][ns]["default_deny"]["name"]]
+    + json.loads(CONTRACT.read_text())["policies"][ns]["allow"])}
 
 
 RENDER = {"CI_NAMESPACE": CI, "PULL_SECRET": PULL, "REGISTRY_PATH": PARAMS["REGISTRY_PATH"],
@@ -372,6 +364,7 @@ class Cluster:
         self.scenario_path = root / "scenario.json"
         self.scenario = clean_scenario()
         self.params = root / "params.env"
+        self.param_values = dict(PARAMS)
         self.params.write_text("".join(f"{k}={v}\n" for k, v in PARAMS.items()))
         self.runner = [root / "gate.toml", root / "wip.toml"]
         self.runner[0].write_text(runner_toml("gate"))
@@ -389,6 +382,16 @@ class Cluster:
         for path in self.runner:
             argv += ["--runner-config", str(path)]
         return argv + list(extra)
+
+    def set_param(self, key: str, value: str) -> None:
+        """Change a site value; the live workspace policies are rendered from it again."""
+        self.param_values[key] = value
+        self.params.write_text("".join(f"{k}={v}\n" for k, v in self.param_values.items()))
+        rendered = workspace_policies(self.param_values)
+        for ns in (PROD, CI):
+            kept = [p for p in self.scenario["policies"][ns]
+                    if p["metadata"]["name"] not in CONTRACT_POLICIES]
+            self.scenario["policies"][ns] = kept + rendered[ns]
 
     def write_scenario(self) -> None:
         self.scenario_path.write_text(json.dumps(self.scenario))
@@ -433,7 +436,7 @@ def test_clean_workspace_is_proven_with_probes_and_leaves_nothing(cluster: Clust
     assert record["cleanup"]["remaining"] == {PROD: 0, CI: 0}
     # Baseline ServiceAccounts were really created (negative control) and removed.
     created = [c for c in cluster.calls() if c[0] == "create"]
-    assert len(created) == 2 + 5  # two baseline SAs, four role probes and the control
+    assert len(created) == 5  # four role probes and the control
     classes = {r["name"]: r["class"] for r in record["checks"]["pods"]}
     assert classes == {"mfr-bastion-0": "bastion", "rag-agent-1": "release",
                        "mfr-dev-0": "dev", "runner-abc123-project-5-concurrent-0-xk2p9": "runner",
@@ -494,11 +497,12 @@ def test_exec_subresource_refusal_is_asked_in_both_namespaces(cluster: Cluster) 
     assert asked == {(r, ns) for r in ("bastion", "dev", "runner") for ns in (PROD, CI)}
 
 
-def test_empty_listing_is_inconclusive_never_a_pass(cluster: Cluster) -> None:
+def test_listing_without_self_review_is_inconclusive_never_a_pass(cluster: Cluster) -> None:
     cluster.scenario["can_i_list"]["mfr-bastion"] = "Resources  Non-Resource URLs\n"
     code, record = cluster.run()
     assert (code, record["verdict"]) == (2, "inconclusive")
-    assert f"bastion in {PROD}: empty-listing" in reasons(record, "rbac", "inconclusive")
+    assert f"bastion in {PROD}: listing-without-self-review" in reasons(record, "rbac",
+                                                                       "inconclusive")
 
 
 def test_refused_operator_control_makes_the_matrix_inconclusive(cluster: Cluster) -> None:
@@ -635,7 +639,8 @@ def test_runner_config_must_allow_no_override(cluster: Cluster, extra, drop, fai
     cluster.runner[1].write_text(runner_toml("wip", extra=extra, drop=drop))
     code, record = cluster.run()
     assert code == 1
-    assert reasons(record, "runner-config") == [f"wip.toml#0: failed: {failed}"]
+    assert [r for r in reasons(record, "runner-config") if ": failed: " in r] == [
+        f"wip.toml#0: failed: {failed}"]
 
 
 def test_overwrite_key_anywhere_in_the_document_is_found(cluster: Cluster) -> None:
@@ -685,24 +690,35 @@ def test_both_rendered_examples_pass_unchanged(cluster: Cluster) -> None:
     rows = record["checks"]["runner_config"]
     assert [(r["file"], r["name"]) for r in rows] == [("gate.toml", "mfr-gate"),
                                                        ("wip.toml", "mfr-wip")]
-    assert all(all(r["checks"].values()) for r in rows)
-    assert len(rows[0]["checks"]) == 6 + 2 + 18 + 2
+    assert all(all(r["checks"].values()) and r["refused_keys"] == [] for r in rows)
 
 
-@pytest.mark.parametrize("ns, index, change, reason", [
-    (CI, 0, lambda p: p["spec"].update(podSelector={"matchLabels": {ROLE: "dev"}}),
-     "default-deny-altered"),
-    (CI, 0, lambda p: p["spec"].update(egress=[{}]), "default-deny-altered"),
-    (PROD, 1, lambda p: p["metadata"].update(name="renamed"), "missing"),
-    (CI, 2, lambda p: p["metadata"].update(name="renamed"), "missing"),
+def _policy(cluster: Cluster, ns: str, name: str) -> dict[str, Any]:
+    return next(p for p in cluster.scenario["policies"][ns] if p["metadata"]["name"] == name)
+
+
+@pytest.mark.parametrize("ns, name, change, expected", [
+    (CI, "mfr-ci-default-deny-egress",
+     lambda p: p["spec"].update(podSelector={"matchLabels": {ROLE: "dev"}}),
+     ["differs-from-contract"]),
+    (CI, "mfr-ci-default-deny-egress", lambda p: p["spec"].update(egress=[{}]),
+     ["differs-from-contract"]),
+    (CI, "mfr-runner-egress", lambda p: p["spec"]["egress"].append(
+        {"to": [{"ipBlock": {"cidr": "10.9.9.9/32"}}]}), ["differs-from-contract"]),
+    (CI, "mfr-manager-egress", lambda p: p["spec"].update(
+        podSelector={"matchLabels": {MGR_KEY: MGR_VALUE}}), ["differs-from-contract"]),
+    (PROD, "mfr-bastion-egress", lambda p: p["metadata"].update(name="renamed"),
+     ["missing", "renamed: policy-outside-contract"]),
+    (CI, "mfr-dev-egress", lambda p: p["metadata"].update(name="renamed"),
+     ["missing", "renamed: policy-outside-contract"]),
 ])
-def test_contract_egress_policies_must_exist(cluster: Cluster, ns, index, change, reason) -> None:
-    policy = cluster.scenario["policies"][ns][index]
-    name = policy["metadata"]["name"]
-    change(policy)
+def test_contract_egress_policies_must_equal_the_contract(cluster: Cluster, ns, name, change,
+                                                          expected) -> None:
+    change(_policy(cluster, ns, name))
     code, record = cluster.run()
     assert code == 1
-    assert reasons(record, "egress-policies") == [f"{ns}/{name}: {reason}"]
+    want = [f"{ns}/{name}: {e}" if ":" not in e else f"{ns}/{e}" for e in expected]
+    assert reasons(record, "egress-policies") == want
 
 
 # --------------------------------------------------------------------------- step 5
@@ -732,7 +748,7 @@ def test_other_allowed_namespaces_are_listed_and_pass(cluster: Cluster) -> None:
         {"from": [{"namespaceSelector": {}}]}]}}], "all-ns: admits-ci-namespace"),
 ])
 def test_agent_ingress_that_admits_ci_is_a_violation(cluster: Cluster, policies, reason) -> None:
-    cluster.scenario["policies"][PROD] = policies + workspace_policies(PROD)
+    cluster.scenario["policies"][PROD] = policies + workspace_policies(PARAMS)[PROD]
     code, record = cluster.run()
     assert code == 1
     assert reasons(record, "agent-policy") == [reason]
@@ -792,8 +808,7 @@ def test_refused_connection_on_a_denied_target_is_inconclusive(cluster: Cluster)
 
 
 def test_wide_cidr_needs_an_explicit_probe_host(cluster: Cluster) -> None:
-    cluster.params.write_text(cluster.params.read_text().replace(
-        "10.0.2.20/32", "10.0.2.0/28"))
+    cluster.set_param("GITLAB_CIDRS", '[{"ipBlock":{"cidr":"10.0.2.0/28"}}]')
     code, record = cluster.run("--probe")
     assert (code, record["verdict"]) == (2, "inconclusive")
     assert reasons(record, "probes", "inconclusive") == ["gitlab: no-probe-target"]
@@ -804,28 +819,44 @@ def test_wide_cidr_needs_an_explicit_probe_host(cluster: Cluster) -> None:
     assert targets == {"gitlab.site.example"}
 
 
-def test_probe_pods_carry_role_labels_and_never_the_manager_sa(cluster: Cluster) -> None:
+def test_probe_pods_carry_the_live_pods_labels_and_never_the_manager_sa(cluster: Cluster) -> None:
+    manager = cluster.scenario["pods"][CI][2]
+    manager["metadata"]["labels"]["operator.gitlab.com/instance"] = "mfr"
     code, record = cluster.run("--probe")
     assert code == 0
     pods = {o["metadata"]["name"].split("-")[2]: o for o in cluster.created() if o["kind"] == "Pod"}
-    run = {proof.PROOF_LABEL: record["run_id"]}
     assert {k: (p["metadata"]["namespace"], p["metadata"]["labels"],
                 p["spec"].get("serviceAccountName")) for k, p in pods.items()} == {
-        "bastion": (PROD, {ROLE: "bastion", **run}, "mfr-bastion"),
-        "dev": (CI, {ROLE: "dev", **run}, "mfr-dev"),
-        "runner": (CI, {ROLE: "runner", **run}, "mfr-runner-job"),
-        "manager": (CI, {MGR_KEY: MGR_VALUE, **run}, None),
-        "control": (PROD, run, None),
+        "bastion": (PROD, {ROLE: "bastion"}, "mfr-bastion"),
+        "dev": (CI, {ROLE: "dev"}, "mfr-dev"),
+        # Copied whole from the live job pod, runner-added labels included.
+        "runner": (CI, {ROLE: "runner", "pod": "runner-abc"}, "mfr-runner-job"),
+        "manager": (CI, {MGR_KEY: MGR_VALUE, "operator.gitlab.com/instance": "mfr"}, None),
+        "control": (PROD, {}, None),
     }
     for body in pods.values():
         spec = body["spec"]
         (container,) = spec["containers"]
+        assert body["metadata"]["annotations"] == {proof.PROOF_ANNOTATION: record["run_id"]}
         assert spec["automountServiceAccountToken"] is False
         assert container["image"] == f"{PARAMS['DEVKIT_REPOSITORY']}@{PARAMS['DEVKIT_DIGEST']}"
         assert container["securityContext"]["capabilities"] == {"drop": ["ALL"]}
         assert set(container["resources"]["limits"]) == {"cpu", "memory", "ephemeral-storage"}
         assert container["resources"]["requests"] == container["resources"]["limits"]
         assert "volumes" not in spec and "imagePullSecrets" not in spec
+
+
+def test_runner_probe_without_a_live_job_carries_the_runner_default_labels(
+        cluster: Cluster) -> None:
+    cluster.scenario["pods"][CI].pop(1)
+    code, record = cluster.run("--probe")
+    assert code == 0
+    runner = next(o for o in cluster.created() if o["metadata"]["name"].startswith(
+        "mfr-proof-runner-"))
+    labels = runner["metadata"]["labels"]
+    assert labels[ROLE] == "runner"
+    assert labels["pod"] == f"runner-proof{record['run_id']}-project-0-concurrent-0"
+    assert set(proof.RUNNER_DEFAULT_LABEL_KEYS) <= set(labels)
 
 
 def test_probe_program_classifies_real_sockets(tmp_path: Path) -> None:
@@ -866,8 +897,8 @@ def test_cleanup_after_an_error_then_the_next_run_succeeds(cluster: Cluster) -> 
     assert (record["error"]["code"], record["error"]["detail"]) == ("kube-call-failed",
                                                                     "probe logs")
     assert cluster.objects() == []
-    # The CI baseline ServiceAccount and the dev, runner and manager probe pods.
-    assert record["cleanup"]["deleted"] == {PROD: 3, CI: 4}
+    # The dev, runner and manager probe pods.
+    assert record["cleanup"]["deleted"] == {PROD: 2, CI: 3}
     assert CANARY not in cluster.output.read_text()
     cluster.scenario["logs_fail"] = []
     code, record = cluster.run("--probe")
@@ -879,27 +910,23 @@ def test_cleanup_after_an_error_then_the_next_run_succeeds(cluster: Cluster) -> 
 def test_leftovers_of_an_interrupted_run_are_removed_first(cluster: Cluster) -> None:
     stale = {"apiVersion": "v1", "kind": "Pod",
              "metadata": {"name": "mfr-proof-dev-dead", "namespace": CI,
-                          "labels": {ROLE: "dev", proof.PROOF_LABEL: "dead"}},
+                          "labels": {ROLE: "dev"}, "annotations": {proof.PROOF_ANNOTATION: "dead"}},
              "spec": {"containers": [{"name": "probe"}]}}
-    stale_sa = {"apiVersion": "v1", "kind": "ServiceAccount",
-                "metadata": {"name": "mfr-proof-baseline-dead", "namespace": PROD,
-                             "labels": {proof.PROOF_LABEL: "dead"}}}
     unrelated = {"apiVersion": "v1", "kind": "ServiceAccount",
-                 "metadata": {"name": "keep-me", "namespace": CI, "labels": {"x": "y"}}}
-    cluster.state.write_text(json.dumps({"objects": [stale, stale_sa, unrelated]}))
+                 "metadata": {"name": "mfr-proof-keep", "namespace": CI,
+                              "annotations": {proof.PROOF_ANNOTATION: "dead"}}}
+    cluster.state.write_text(json.dumps({"objects": [stale, unrelated]}))
     code, record = cluster.run("--probe")
     assert (code, record["verdict"]) == (0, "proven")
-    assert record["leftovers_removed"] == {PROD: 1, CI: 1}
-    assert [o["metadata"]["name"] for o in cluster.objects()] == ["keep-me"]
+    assert record["leftovers_removed"] == {PROD: 0, CI: 1}
+    assert [o["metadata"]["name"] for o in cluster.objects()] == ["mfr-proof-keep"]
     assert "mfr-proof-dev-dead" not in {r["name"] for r in record["checks"]["pods"]}
 
 
 def test_failed_cleanup_is_reported_not_hidden(cluster: Cluster) -> None:
-    code, record = cluster.run()
-    assert (code, record["verdict"], record["findings"]) == (2, "static-only", [])
     cluster.scenario["fail_delete"] = True
-    code, record = cluster.run()
-    assert (code, record["error"]["code"]) == (2, "kube-call-failed")
+    code, record = cluster.run("--probe")
+    assert (code, record["error"]["code"]) == (2, "cleanup-failed")
     assert record["cleanup"] == {"status": "failed"}
 
 
@@ -981,17 +1008,28 @@ def test_roles_come_from_the_contract_not_the_script(cluster: Cluster, tmp_path:
 # --------------------------------------------------------------------------- review round 1
 
 
-def test_group_grant_hidden_in_the_baseline_is_still_refused(cluster: Cluster) -> None:
-    # A RoleBinding to system:serviceaccounts:<ci> reaches the fresh baseline SA too, so
-    # the listing comparison cannot see it; the negative matrix asks outright.
-    grant = "jobs.batch   []   []   [create]\n"
-    for key in ("baseline", "mfr-runner-job"):
-        cluster.scenario["can_i_list"][key] = BASELINE_TABLE + grant
-    cluster.scenario["allow"] = [f"mfr-runner-job|{CI}|create|jobs.batch"]
+@pytest.mark.parametrize("row, verb, target", [
+    ("secrets   []   []   [get]\n", "get", "secrets"),
+    ("pods   []   []   [patch]\n", "patch", "pods"),
+    ("networkpolicies.networking.k8s.io   []   []   [create]\n", "create",
+     "networkpolicies.networking.k8s.io"),
+])
+def test_group_grant_beyond_the_fixed_baseline_is_caught(cluster: Cluster, row, verb,
+                                                         target) -> None:
+    # A RoleBinding to system:serviceaccounts:<ci> shows on every CI ServiceAccount;
+    # the fixed baseline does not absorb it, and the matrix asks it outright.
+    for sa in ("mfr-dev", "mfr-runner-job"):
+        cluster.scenario["can_i_list"][sa] = BASELINE_TABLE + row
+    cluster.scenario["allow"] = [f"{sa}|{CI}|{verb}|{target}" for sa in ("mfr-dev",
+                                                                          "mfr-runner-job")]
     code, record = cluster.run()
     assert code == 1
-    assert not reasons(record, "rbac")
-    assert reasons(record, "negative-matrix") == [f"runner in {CI}: allowed: create jobs.batch"]
+    rule = f"{verb} {target}"
+    assert sorted(set(reasons(record, "rbac"))) == sorted(
+        f"{r} in {ns}: beyond-baseline: {rule}" for r in ("dev", "runner") for ns in (PROD, CI))
+    assert sorted(reasons(record, "negative-matrix")) == sorted(
+        f"{r} in {CI}: allowed: {verb} {target}" for r in ("dev", "runner"))
+    assert record["checks"]["rbac"]["baseline_version"] == proof.BASELINE_VERSION
 
 
 @pytest.mark.parametrize("verb, target", [
@@ -1010,13 +1048,13 @@ def test_overwrite_max_allowed_keys_are_overrides_too(cluster: Cluster) -> None:
     cluster.runner[1].write_text(runner_toml("wip", extra='    cpu_limit_overwrite_max_allowed = "8"'))
     code, record = cluster.run()
     assert code == 1
-    assert reasons(record, "runner-config") == ["wip.toml#0: failed: no_overwrite_allowed_key"]
+    assert reasons(record, "runner-config") == [
+        "wip.toml#0: refused-key: runners.kubernetes.cpu_limit_overwrite_max_allowed",
+        "wip.toml#0: failed: no_overwrite_allowed_key"]
 
 
 def test_wide_api_server_cidr_is_not_covered_by_the_service_path(cluster: Cluster) -> None:
-    cluster.params.write_text(cluster.params.read_text().replace(
-        '[{"ipBlock":{"cidr":"10.0.0.5/32"}},{"ipBlock":{"cidr":"10.0.0.6/32"}}]',
-        '[{"ipBlock":{"cidr":"10.0.0.0/29"}}]'))
+    cluster.set_param("API_SERVER_CIDRS", '[{"ipBlock":{"cidr":"10.0.0.0/29"}}]')
     code, record = cluster.run("--probe")
     assert (code, record["verdict"]) == (2, "inconclusive")
     assert reasons(record, "probes", "inconclusive") == ["api_server: no-probe-target"]
@@ -1025,21 +1063,17 @@ def test_wide_api_server_cidr_is_not_covered_by_the_service_path(cluster: Cluste
 def test_failed_delete_in_one_namespace_still_cleans_the_other(cluster: Cluster) -> None:
     cluster.scenario["fail_delete_ns"] = [PROD]
     code, record = cluster.run("--probe")
-    assert (code, record["error"]["code"]) == (2, "kube-call-failed")  # the start-up sweep
-    assert record["cleanup"] == {"status": "failed"}
-    assert [o["metadata"]["namespace"] for o in cluster.objects()] == []
-    assert CANARY not in cluster.output.read_text()
-
-
-def test_failed_delete_after_probes_leaves_nothing_in_the_other_namespace(cluster: Cluster) -> None:
-    cluster.scenario["fail_delete_ns_after"] = {PROD: 1}  # the start-up sweep succeeds
-    code, record = cluster.run("--probe")
     assert (code, record["error"]["code"]) == (2, "cleanup-failed")
+    assert record["cleanup"] == {"status": "failed"}
     assert {o["metadata"]["namespace"] for o in cluster.objects()} == {PROD}
-    cluster.scenario.pop("fail_delete_ns_after")
+    assert CANARY not in cluster.output.read_text()
+    cluster.scenario.pop("fail_delete_ns")
     code, record = cluster.run("--probe")
-    assert (code, record["verdict"], record["leftovers_removed"]) == (0, "proven", {PROD: 3, CI: 0})
+    assert (code, record["verdict"], record["leftovers_removed"]) == (0, "proven", {PROD: 2, CI: 0})
     assert cluster.objects() == []
+
+
+
 
 
 def test_malformed_policies_section_is_a_contract_error(cluster: Cluster, tmp_path: Path) -> None:
@@ -1118,8 +1152,8 @@ def test_open_egress_rule_on_a_workspace_pod_is_a_violation(cluster: Cluster, to
 
 
 def test_excepted_cluster_network_and_unrelated_policies_pass(cluster: Cluster) -> None:
-    _dev_allow(cluster)["spec"]["egress"][0]["to"] = [
-        {"ipBlock": {"cidr": "10.0.0.0/8", "except": ["10.128.0.0/14"]}}]
+    cluster.set_param("GITLAB_CIDRS",
+                      '[{"ipBlock":{"cidr":"10.0.0.0/8","except":["10.128.0.0/14"]}}]')
     cluster.scenario["network_config"]["serviceNetwork"] = []
     cluster.scenario["policies"][PROD].append(
         {"metadata": {"name": "other-app"}, "spec": {
@@ -1203,3 +1237,102 @@ def test_ephemeral_container_on_the_bastion_is_a_violation(cluster: Cluster) -> 
     code, record = cluster.run()
     assert code == 1
     assert reasons(record, "pods") == [f"{PROD}/mfr-bastion-0: ephemeral-container"]
+
+
+# --------------------------------------------------------------------------- #1148 review B1, B2
+
+
+@pytest.mark.parametrize("addition, refused", [
+    (('    [[runners.kubernetes.volumes.secret]]\n      name = "mfr-dev-litellm"\n'
+      '      mount_path = "/k"\n'), "runners.kubernetes.volumes"),
+    (('    [[runners.kubernetes.volumes.host_path]]\n      name = "h"\n'
+      '      mount_path = "/h"\n      host_path = "/"\n'), "runners.kubernetes.volumes"),
+    (('    [[runners.kubernetes.pod_spec]]\n      name = "sa"\n      patch_type = "merge"\n'
+      '      patch = \'{"serviceAccountName": "mfr-dev"}\'\n'), "runners.kubernetes.pod_spec"),
+    ('    [runners.kubernetes.pod_annotations]\n      "x" = "y"\n',
+     "runners.kubernetes.pod_annotations"),
+    ('    [runners.kubernetes.node_selector]\n      "x" = "y"\n',
+     "runners.kubernetes.node_selector"),
+    ('    [runners.kubernetes.pod_security_context]\n      run_as_user = 0\n', None),
+])
+def test_runner_config_keys_outside_the_allow_list_are_refused(cluster: Cluster, addition,
+                                                               refused) -> None:
+    text = runner_toml()
+    if refused is None:  # a nested key inside an allowed table
+        text = text.replace("      run_as_non_root = true\n",
+                            "      run_as_non_root = true\n      run_as_user = 0\n")
+        refused = "runners.kubernetes.pod_security_context.run_as_user"
+    else:
+        text += addition
+    cluster.runner[0].write_text(text)
+    code, record = cluster.run()
+    assert code == 1
+    assert f"gate.toml#0: refused-key: {refused}" in reasons(record, "runner-config")
+
+
+@pytest.mark.parametrize("where, line, refused", [
+    ("kubernetes", "    future_knob = true", "runners.kubernetes.future_knob"),
+    ("runner", '  environment = ["X=1"]', "runners.environment"),
+    ("runner", '  pre_build_script = "true"', "runners.pre_build_script"),
+    ("top", 'listen_address = ":9252"', "listen_address"),
+])
+def test_unknown_runner_keys_fail_closed(cluster: Cluster, where, line, refused) -> None:
+    text = runner_toml()
+    if where == "kubernetes":
+        text = text.replace("  [runners.kubernetes]\n", f"  [runners.kubernetes]\n{line}\n", 1)
+    elif where == "runner":
+        text = text.replace('  executor = "kubernetes"\n', f'  executor = "kubernetes"\n{line}\n')
+    else:
+        text = f"{line}\n{text}"
+    cluster.runner[0].write_text(text)
+    code, record = cluster.run()
+    assert code == 1
+    assert reasons(record, "runner-config") == [f"gate.toml#0: refused-key: {refused}"]
+
+
+@pytest.mark.parametrize("change, failed", [
+    (("image = ", 'image = "docker.io/library/python:3"'), "images_pinned_in_site_registry"),
+    (('cap_drop = ["ALL"]', 'cap_drop = []'), "cap_drop_all"),
+    (("run_as_non_root = true", "run_as_non_root = false"), "pod_security_context"),
+    (('executor = "kubernetes"', 'executor = "shell"'), "executor_kubernetes"),
+    (("automount_service_account_token = false", "automount_service_account_token = true"),
+     "automount_service_account_token_false"),
+])
+def test_allowed_runner_keys_need_allowed_values(cluster: Cluster, change, failed) -> None:
+    old, new = change
+    lines = [new if line.strip().startswith(old) else line
+             for line in runner_toml().splitlines()]
+    cluster.runner[0].write_text("\n".join(lines) + "\n")
+    code, record = cluster.run()
+    assert code == 1
+    assert reasons(record, "runner-config") == [f"gate.toml#0: failed: {failed}"]
+
+
+@pytest.mark.parametrize("ns, selector", [
+    # The review's case: job pods selected by a label GitLab Runner adds.
+    (CI, {"matchLabels": {"pod": "runner-abc"}}),
+    # A dev selector that excludes anything carrying an extra label.
+    (CI, {"matchLabels": {ROLE: "dev"},
+          "matchExpressions": [{"key": "isolation-proof", "operator": "DoesNotExist"}]}),
+    # Not selecting the workspace at all still counts in CI.
+    (CI, {"matchLabels": {"app": "unrelated"}}),
+    (PROD, {"matchExpressions": [{"key": ROLE, "operator": "Exists"}]}),
+    (PROD, {"matchExpressions": [{"key": "app", "operator": "NotIn", "values": ["rag-agent"]}]}),
+    (PROD, {"matchExpressions": [{"key": "app", "operator": "DoesNotExist"}]}),
+])
+def test_policy_outside_the_contract_is_refused(cluster: Cluster, ns, selector) -> None:
+    cluster.scenario["policies"][ns].append({"metadata": {"name": "extra"}, "spec": {
+        "podSelector": selector, "policyTypes": ["Egress"],
+        "egress": [{"to": [{"namespaceSelector": {"matchLabels": {
+            "kubernetes.io/metadata.name": PROD}}}]}]}})
+    code, record = cluster.run()
+    assert code == 1
+    assert reasons(record, "egress-policies") == [f"{ns}/extra: policy-outside-contract"]
+
+
+def test_release_policy_that_does_not_select_the_bastion_is_ignored(cluster: Cluster) -> None:
+    cluster.scenario["policies"][PROD].append({"metadata": {"name": "release"}, "spec": {
+        "podSelector": {"matchExpressions": [{"key": ROLE, "operator": "DoesNotExist"}]},
+        "policyTypes": ["Egress"], "egress": [{}]}})
+    code, record = cluster.run()
+    assert (code, record["findings"]) == (2, [])

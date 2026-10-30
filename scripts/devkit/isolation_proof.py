@@ -9,21 +9,23 @@ site values. Only ADR rules and chart facts are constants here: the negative
 matrix, the runner rules, the agent Service and the Qdrant ports. It checks:
 
 1. `auth can-i --list` for every contract ServiceAccount, impersonated in both
-   namespaces. An F9 ServiceAccount may hold nothing beyond the baseline of a
-   freshly created ServiceAccount with no bindings (the negative control). The
-   runner manager's ServiceAccount is listed, not judged.
+   namespaces. An F9 ServiceAccount may hold nothing beyond the fixed,
+   versioned EXPECTED_BASELINE, whichever group granted it. The runner
+   manager's ServiceAccount is listed, not judged.
 2. A fixed negative matrix: each F9 ServiceAccount is refused secret reads, pod
    create/exec/attach/port-forward/proxy, workload writes, token requests,
    impersonation and RBAC writes in both namespaces. Asked outright, it also
-   catches a grant to a ServiceAccount group, which the baseline absorbs. The
-   operator's own `get secrets` answer is the positive control.
+   catches a grant to a ServiceAccount group. The operator's own
+   `get secrets` answer is the positive control.
 3. Every pod in both namespaces, classified by its labels; workspace and
    manager pods' Secret references are checked against the contract's
-   mounted and image-pull sets, and the contract's egress policies must exist.
+   mounted and image-pull sets. CI holds exactly the contract's egress
+   policies; in PROD every policy selecting the bastion is a contract one.
    No egress rule selecting a workspace or manager pod may be open (no peers,
    0.0.0.0/0, ::/0, every namespace, or the pod/Service network), and the
    manager selector must match no workspace pod.
-4. The rendered runner configuration: no `*_overwrite_(max_)allowed` key, nothing
+4. The rendered runner configuration, against an allow-list of keys and
+   values: no `*_overwrite_(max_)allowed` key, nothing
    privileged, the contract ServiceAccount and the CI namespace, and requests
    and limits for build, helper and service containers.
 5. The production agent's ingress NetworkPolicies admit nothing from the CI
@@ -68,7 +70,8 @@ EXIT_ERROR = 2
 
 RECORD_SCHEMA = "mfr-isolation-proof/v1"
 CONTRACT_SCHEMA_VERSION = 1
-PROOF_LABEL = "isolation-proof.mainframe-rag.io/run"
+PROOF_ANNOTATION = "isolation-proof.mainframe-rag.io/run"
+PROBE_NAME_PREFIX = "mfr-proof-"
 PROBE_MARKER = "MFR-PROBE "
 CALL_TIMEOUT_S = 60
 
@@ -89,6 +92,50 @@ MESSAGES = {
     "internal": "the proof stopped on an unexpected error",
     "output-unwritable": "the record could not be written",
 }
+
+# The expected `can-i --list` of an identity with no bindings of its own
+# (step 1), as `verb resource` / `verb /url` strings. Sources:
+# - Kubernetes 1.33 bootstrap ClusterRoles bound to system:authenticated:
+#   system:basic-user (self reviews), system:discovery and
+#   system:public-info-viewer (discovery and health URLs).
+# - OpenShift 4.20 defaults for system:authenticated: basic-user,
+#   self-access-reviewer, cluster-status, system:oauth-token-deleter,
+#   system:webhook, system:scope-impersonation and
+#   system:openshift:public-info-viewer; and the per-namespace
+#   system:image-pullers RoleBinding for system:serviceaccounts:<ns>.
+# A site whose defaults differ fails closed: the extra rule is reported, and
+# the baseline changes only in a reviewed PR that bumps BASELINE_VERSION.
+BASELINE_VERSION = "k8s-1.33+openshift-4.20/v1"
+BASELINE_CONTROL_RULE = "create selfsubjectaccessreviews.authorization.k8s.io"
+EXPECTED_BASELINE = frozenset({
+    "create selfsubjectaccessreviews.authorization.k8s.io",
+    "create selfsubjectrulesreviews.authorization.k8s.io",
+    "create selfsubjectreviews.authentication.k8s.io",
+    "create selfsubjectaccessreviews.authorization.openshift.io",
+    "create selfsubjectrulesreviews.authorization.openshift.io",
+    "get users.user.openshift.io names=~",
+    "list projectrequests.project.openshift.io",
+    "list projects.project.openshift.io",
+    "watch projects.project.openshift.io",
+    "get clusterroles.rbac.authorization.k8s.io",
+    "list clusterroles.rbac.authorization.k8s.io",
+    "get clusterroles.authorization.openshift.io",
+    "list clusterroles.authorization.openshift.io",
+    "get storageclasses.storage.k8s.io",
+    "list storageclasses.storage.k8s.io",
+    "get useroauthaccesstokens.oauth.openshift.io",
+    "list useroauthaccesstokens.oauth.openshift.io",
+    "watch useroauthaccesstokens.oauth.openshift.io",
+    "delete useroauthaccesstokens.oauth.openshift.io",
+    "create buildconfigs.build.openshift.io/webhooks",
+    "impersonate userextras.authentication.k8s.io/scopes.authorization.openshift.io",
+    "get imagestreams.image.openshift.io/layers",
+    *(f"get {url}" for url in (
+        "/api", "/api/*", "/apis", "/apis/*", "/healthz", "/healthz/*", "/livez",
+        "/livez/*", "/readyz", "/readyz/*", "/openapi", "/openapi/*", "/version",
+        "/version/", "/version/*", "/.well-known", "/.well-known/*",
+        "/.well-known/oauth-authorization-server")),
+})
 
 # Negative matrix (step 2): (verb, resource, subresource), asked of every F9
 # ServiceAccount in both namespaces; each must be refused. WebSocket exec and
@@ -129,12 +176,25 @@ NEGATIVE_MATRIX: tuple[tuple[str, str, str], ...] = (
     ("create", "serviceaccounts", "token"),
     ("impersonate", "serviceaccounts", ""),
     ("create", "roles.rbac.authorization.k8s.io", ""),
+    ("update", "roles.rbac.authorization.k8s.io", ""),
+    ("update", "rolebindings.rbac.authorization.k8s.io", ""),
+    ("patch", "pods", ""),
+    ("update", "pods", ""),
+    ("delete", "pods", ""),
+    *(("create", r, "") for r in ("configmaps", "secrets")),
+    *(("update", r, "") for r in ("configmaps", "secrets")),
+    *(("patch", r, "") for r in ("configmaps", "secrets")),
+    *((v, "networkpolicies.networking.k8s.io", "")
+      for v in ("create", "update", "patch", "delete")),
+    *((v, "runners.apps.gitlab.com", "")
+      for v in ("get", "list", "watch", "create", "update", "patch", "delete")),
 )
 
 # Runner configuration rules (ADR-0009 section 2): no job override setting,
 # nothing privileged, requests and limits for build, helper and service containers.
 OVERWRITE_KEY = re.compile(r"_overwrite_(max_)?allowed$")
-RUNNER_FALSE_KEYS = ("privileged", "allow_privilege_escalation")
+RUNNER_FALSE_KEYS = ("privileged", "allow_privilege_escalation",
+                     "automount_service_account_token")
 RUNNER_RESOURCE_KEYS = tuple(
     f"{prefix}{resource}_{bound}"
     for prefix in ("", "helper_", "service_")
@@ -142,10 +202,41 @@ RUNNER_RESOURCE_KEYS = tuple(
     for bound in ("request", "limit")
 )
 
+# The runner configuration is checked against an allow-list (fail closed):
+# any key not listed here, at any level that can shape the job pod, is
+# refused (volumes, host_path, pod_spec patches, annotations, node
+# selectors, *_overwrite_* and any key a later GitLab Runner adds).
+RUNNER_TOP_KEYS = frozenset({"concurrent", "check_interval", "log_level", "log_format",
+                             "shutdown_timeout", "runners"})
+RUNNER_ENTRY_KEYS = frozenset({"name", "url", "token", "executor", "limit",
+                               "request_concurrency", "output_limit", "kubernetes"})
+RUNNER_KUBERNETES_KEYS = frozenset({
+    "namespace", "service_account", "image", "helper_image", "image_pull_secrets",
+    "pull_policy", "allowed_images", "allowed_services", "privileged",
+    "allow_privilege_escalation", "automount_service_account_token", "cap_drop", "pod_labels",
+    "pod_security_context",
+    *RUNNER_RESOURCE_KEYS,
+})
+RUNNER_POD_SECURITY_KEYS = frozenset({"run_as_non_root"})
+RUNNER_PULL_POLICIES = frozenset({"if-not-present", "always", "never"})
+
 # GitLab Runner's Kubernetes executor names a job pod, and any per-job pull
 # Secret it creates, from one prefix: runner-<token>-project-<id>-concurrent-<n>.
 RUNNER_JOB_NAME = re.compile(r"^(runner-[a-z0-9]+-project-[0-9]+-concurrent-[0-9]+)")
 RUNNER_JOB_SECRET = re.compile(r"runner-[a-z0-9]+-project-[0-9]+-concurrent-[0-9]+[a-z0-9-]*")
+
+# Labels GitLab Runner's Kubernetes executor adds to every job pod besides
+# `pod` and the configured pod_labels; a runner probe without a live job pod
+# carries them (with placeholder values) so a policy keyed on them applies.
+RUNNER_DEFAULT_LABEL_KEYS = (
+    "manager.runner.gitlab.com/name", "manager.runner.gitlab.com/id-short",
+    "project.runner.gitlab.com/id", "project.runner.gitlab.com/name",
+    "project.runner.gitlab.com/namespace", "project.runner.gitlab.com/namespace-id",
+    "project.runner.gitlab.com/root-namespace", "job.runner.gitlab.com/id",
+    "job.runner.gitlab.com/name", "job.runner.gitlab.com/ref",
+    "job.runner.gitlab.com/sha", "job.runner.gitlab.com/before_sha",
+    "job.runner.gitlab.com/timeout",
+)
 
 # Production targets every workspace probe must be refused (the chart's
 # Qdrant ports and agent HTTP port; the agent Service name is a chart fact).
@@ -552,34 +643,27 @@ def can_i(kube: Kube, verb: str, resource: str, subresource: str, namespace: str
 # --------------------------------------------------------------------------- step 1, 2
 
 
-def baseline_sa_name(run_id: str) -> str:
-    return f"mfr-proof-baseline-{run_id}"
-
-
-def check_rbac(kube: Kube, contract: Contract, run_id: str, manager_sas: Iterable[str],
+def check_rbac(kube: Kube, contract: Contract, manager_sas: Iterable[str],
                findings: Findings) -> dict[str, Any]:
+    """Each F9 ServiceAccount's `can-i --list` against the fixed expected baseline.
+
+    A fresh ServiceAccount is no baseline: a grant to `system:serviceaccounts`
+    or `system:serviceaccounts:<ns>` applies to it as well. Every rule outside
+    EXPECTED_BASELINE is a violation, whichever binding or group granted it.
+    """
     namespaces = (contract.prod, contract.ci)
-    baseline: dict[str, dict[str, list[str]]] = {}
-    for home in namespaces:
-        name = baseline_sa_name(run_id)
-        kube.create({"apiVersion": "v1", "kind": "ServiceAccount",
-                     "metadata": {"name": name, "labels": {PROOF_LABEL: run_id}}},
-                    home, "create baseline serviceaccount")
-        baseline[home] = {ns: can_i_list(kube, sa_user(home, name), ns) for ns in namespaces}
-        for ns, rules in baseline[home].items():
-            if not rules:
-                findings.inconclusive("rbac", f"baseline {home} in {ns}", "empty-listing")
     accounts = []
     for role in contract.roles.values():
         if not role.f9 or role.service_account is None:
             continue
         user = sa_user(role.namespace, role.service_account)
         listed = {ns: can_i_list(kube, user, ns) for ns in namespaces}
-        excess = {ns: sorted(set(rules) - set(baseline[role.namespace][ns]))
-                  for ns, rules in listed.items()}
+        excess = {ns: sorted(set(rules) - EXPECTED_BASELINE) for ns, rules in listed.items()}
         for ns, rules in listed.items():
-            if not rules:
-                findings.inconclusive("rbac", f"{role.name} in {ns}", "empty-listing")
+            # Every authenticated identity holds the self-review rule: an
+            # answer without it is a broken listing, not a clean one.
+            if BASELINE_CONTROL_RULE not in rules:
+                findings.inconclusive("rbac", f"{role.name} in {ns}", "listing-without-self-review")
             for rule in excess[ns]:
                 findings.violation("rbac", f"{role.name} in {ns}", f"beyond-baseline: {rule}")
         accounts.append({"role": role.name, "namespace": role.namespace,
@@ -595,7 +679,8 @@ def check_rbac(kube: Kube, contract: Contract, run_id: str, manager_sas: Iterabl
                             "rules": {ns: can_i_list(kube, sa_user(role.namespace, sa), ns)
                                       for ns in namespaces},
                             "judged": False})
-    return {"baseline": baseline, "service_accounts": accounts, "manager": manager}
+    return {"baseline_version": BASELINE_VERSION, "service_accounts": accounts,
+            "manager": manager}
 
 
 def check_negative_matrix(kube: Kube, contract: Contract, findings: Findings) -> dict[str, Any]:
@@ -833,7 +918,11 @@ def _toml_documents(path: Path) -> list[dict[str, Any]]:
 
 def check_runner_config(contract: Contract, params: Params, paths: list[Path],
                         findings: Findings) -> list[dict[str, Any]]:
-    """ADR-0009 section 2 runner rules, with names from the contract's runner job role."""
+    """ADR-0009 section 2 runner rules, with names from the contract's runner job role.
+
+    Every key must be on the allow-list and every listed key must hold an
+    allowed value; nothing else in the file may shape a job pod.
+    """
     role = runner_job_role(contract)
     prefix = params.get("REGISTRY_PATH").rstrip("/") + "/"
     rows = []
@@ -851,8 +940,30 @@ def check_runner_config(contract: Contract, params: Params, paths: list[Path],
                 if not isinstance(kube, dict):
                     findings.violation("runner-config", subject, "no-kubernetes-section")
                     continue
+                refused = sorted(
+                    [k for k in doc if k not in RUNNER_TOP_KEYS]
+                    + [f"runners.{k}" for k in runner if k not in RUNNER_ENTRY_KEYS]
+                    + [f"runners.kubernetes.{k}" for k in kube
+                       if k not in RUNNER_KUBERNETES_KEYS])
+                security = kube.get("pod_security_context", {})
+                if isinstance(security, dict):
+                    refused += [f"runners.kubernetes.pod_security_context.{k}"
+                                for k in security if k not in RUNNER_POD_SECURITY_KEYS]
+                for key in refused:
+                    findings.violation("runner-config", subject, f"refused-key: {key}")
                 labels = kube.get("pod_labels") or {}
+                pull_policy = kube.get("pull_policy", [])
+                pull_policy = [pull_policy] if isinstance(pull_policy, str) else pull_policy
                 checks: dict[str, bool] = {
+                    "executor_kubernetes": runner.get("executor") == "kubernetes",
+                    "images_pinned_in_site_registry": all(
+                        isinstance(kube.get(k), str) and kube[k].startswith(prefix)
+                        and "@sha256:" in kube[k] for k in ("image", "helper_image")),
+                    "pull_policy": isinstance(pull_policy, list)
+                    and set(pull_policy) <= RUNNER_PULL_POLICIES,
+                    "cap_drop_all": "ALL" in (kube.get("cap_drop") or []),
+                    "pod_security_context": isinstance(security, dict)
+                    and security.get("run_as_non_root", True) is True,
                     "no_overwrite_allowed_key": not overwrite,
                     "namespace": kube.get("namespace") == role.namespace,
                     "service_account": kube.get("service_account") == role.service_account,
@@ -878,7 +989,9 @@ def check_runner_config(contract: Contract, params: Params, paths: list[Path],
                         findings.violation("runner-config", subject, f"failed: {name}")
                 rows.append({"file": path.name, "index": index,
                              "name": str(runner.get("name", "")),
-                             "overwrite_keys": overwrite, "checks": checks})
+                             "overwrite_keys": overwrite, "refused_keys": refused,
+                             "pod_labels": dict(labels) if isinstance(labels, dict) else {},
+                             "checks": checks})
     if not rows:
         findings.inconclusive("runner-config", "runner configuration", "no-runner-entries")
     return rows
@@ -925,35 +1038,111 @@ def _port_admits(ports: list[dict[str, Any]] | None, port: int, port_names: set[
     return False
 
 
-def check_egress_policies(contract: Contract, policies: Mapping[str, list[dict[str, Any]]],
+def role_pod_selector(contract: Contract, role: Role) -> dict[str, Any]:
+    """The podSelector the workspace templates render for a role's allow policy."""
+    if role.selector:
+        return {"matchExpressions": [{"key": role.selector[0], "operator": "In",
+                                      "values": [role.selector[1]]}]}
+    return {"matchLabels": {contract.role_label_key: role.name}}
+
+
+def expected_egress_rule(spec: Mapping[str, Any], params: Params) -> dict[str, Any]:
+    """One egress class as the templates render it: its peers and its ports."""
+    ports = []
+    for port in _require(spec.get("ports", []), list):
+        if "port_parameter" in port:
+            value = params.optional(port["port_parameter"]) or str(port.get("default", ""))
+            if not value.isdigit():
+                raise ProofError("param-missing" if not value else "param-invalid",
+                                 port["port_parameter"])
+            number = int(value)
+        else:
+            number = int(_require(port.get("port"), int))
+        ports.append({"protocol": port.get("protocol"), "port": number})
+    if spec.get("peer_kind") == "ipBlock":
+        parameter = str(_require(spec.get("peers_parameter"), str))
+        try:
+            peers = json.loads(params.get(parameter))
+        except ValueError as exc:
+            raise ProofError("param-invalid", parameter) from exc
+    else:
+        peers = [{"namespaceSelector": spec.get("namespace_selector")}]
+    return {"to": peers, "ports": ports}
+
+
+def _canonical(value: Any) -> str:
+    return json.dumps(value, sort_keys=True)
+
+
+def check_egress_policies(contract: Contract, params: Params,
+                          policies: Mapping[str, list[dict[str, Any]]],
+                          pods: Mapping[str, list[dict[str, Any]]],
                           findings: Findings) -> list[dict[str, Any]]:
-    """The contract's default-deny and allow egress policies exist, the deny unaltered."""
-    rows = []
+    """The egress policies equal the contract's, exactly.
+
+    CI: the namespace holds exactly the contract's policies, so every egress
+    path of every CI pod comes from the contract, whatever an extra policy
+    would select. PROD: every policy that selects the bastion (its contract
+    label set or a live bastion pod's labels) is one of the bastion's
+    contract policies; release policies that do not select it are ignored.
+    Each contract policy must equal its rendered form.
+    """
     policy_specs = _require(contract.raw.get("policies"), dict)
-    if not set(policy_specs) <= {"prod", "ci"}:
+    if set(policy_specs) != {"prod", "ci"}:
         raise ProofError("contract-unreadable")
+    classes = _require(contract.raw.get("egress_classes"), dict)
+    rows = []
     for ns_key, spec in policy_specs.items():
         ns = contract.namespace(ns_key)
         by_name = {str((p.get("metadata") or {}).get("name", "")): p for p in policies[ns]}
         deny = _require(spec.get("default_deny"), dict)
-        expected = [str(deny.get("name"))] + [str(n) for n in spec.get("allow", [])]
-        for name in expected:
-            present = name in by_name
-            row: dict[str, Any] = {"namespace": ns, "name": name, "present": present}
-            if not present:
+        allow_names = [str(n) for n in _require(spec.get("allow", []), list)]
+        roles = {r.name: r for r in contract.roles.values() if r.namespace == ns}
+        allow_role = {}
+        for role_name, body in _require(contract.raw.get("roles"), dict).items():
+            if role_name in roles and body.get("allow_policy") in allow_names:
+                allow_role[str(body["allow_policy"])] = roles[role_name]
+        if set(allow_role) != set(allow_names):
+            raise ProofError("contract-unreadable")
+        expected: dict[str, dict[str, Any]] = {str(deny.get("name")): {
+            "podSelector": deny.get("pod_selector"),
+            "policyTypes": deny.get("policy_types"),
+            "egress": []}}
+        for name, role in allow_role.items():
+            expected[name] = {
+                "podSelector": role_pod_selector(contract, role),
+                "policyTypes": ["Egress"],
+                "egress": [expected_egress_rule(_require(classes.get(c), dict), params)
+                           for c in sorted(role.egress)]}
+        for name, want in expected.items():
+            row: dict[str, Any] = {"namespace": ns, "name": name, "present": name in by_name}
+            if name not in by_name:
                 findings.violation("egress-policies", f"{ns}/{name}", "missing")
-            elif name == deny.get("name"):
+            else:
                 body = by_name[name].get("spec") or {}
-                intact = ((body.get("podSelector") or {}) == deny.get("pod_selector")
-                          and sorted(body.get("policyTypes") or []) == sorted(
-                              deny.get("policy_types") or [])
-                          and not body.get("egress"))
-                row["default_deny_intact"] = intact
-                if not intact:
-                    findings.violation("egress-policies", f"{ns}/{name}", "default-deny-altered")
+                have = {"podSelector": body.get("podSelector") or {},
+                        "policyTypes": body.get("policyTypes") or [],
+                        "egress": sorted(_canonical(r) for r in body.get("egress") or [])}
+                want_c = {"podSelector": want["podSelector"] or {},
+                          "policyTypes": want["policyTypes"] or [],
+                          "egress": sorted(_canonical(r) for r in want["egress"])}
+                extra_keys = set(body) - {"podSelector", "policyTypes", "egress"}
+                matches = _canonical(have) == _canonical(want_c) and not extra_keys
+                row["matches_contract"] = matches
+                if not matches:
+                    findings.violation("egress-policies", f"{ns}/{name}", "differs-from-contract")
             rows.append(row)
-        others = sorted(set(by_name) - set(expected))
-        rows.append({"namespace": ns, "other_policies": others})
+        if ns_key == "ci":
+            extra = sorted(set(by_name) - set(expected))
+        else:
+            bastion_sets = workspace_label_sets(contract, ns, pods[ns])
+            extra = sorted(
+                name for name, p in by_name.items() if name not in expected
+                and any(selector_matches((p.get("spec") or {}).get("podSelector") or {}, labels)
+                        for labels in bastion_sets))
+        for name in extra:
+            findings.violation("egress-policies", f"{ns}/{name}", "policy-outside-contract")
+        rows.append({"namespace": ns, "outside_contract": extra})
     return rows
 
 
@@ -1136,16 +1325,35 @@ class Identity:
     allowed: frozenset[str] | None  # None: the negative control, expected to reach all
 
 
-def probe_identities(contract: Contract) -> list[Identity]:
+def runner_default_labels(run_id: str) -> dict[str, str]:
+    """The labels GitLab Runner's Kubernetes executor puts on every job pod."""
+    job = f"runner-proof{run_id}-project-0-concurrent-0"
+    return {"pod": job, **{key: "0" for key in RUNNER_DEFAULT_LABEL_KEYS}}
+
+
+def probe_identities(contract: Contract, live: Mapping[str, dict[str, str]],
+                     runner_labels: Mapping[str, str]) -> list[Identity]:
+    """One probe identity per role, labelled as the real pods are.
+
+    `live` maps a role to the labels of one of its live pods, which the probe
+    copies whole, so a policy keyed on any of them applies to the probe. With
+    no live pod the contract's label set is used; runner jobs also get the
+    labels GitLab Runner adds and the runner configuration's pod_labels.
+    """
     out = []
+    runner = runner_job_role(contract).name
     for role in contract.roles.values():
         if role.f9:
-            out.append(Identity(role.name, role.namespace, {contract.role_label_key: role.name},
+            labels = {contract.role_label_key: role.name}
+            if role.name == runner:
+                labels = {**dict(runner_labels), **labels}
+            labels = dict(live.get(role.name, labels))
+            out.append(Identity(role.name, role.namespace, labels,
                                 role.service_account, role.egress))
         elif role.selector:
             # The manager's own ServiceAccount is never borrowed.
-            out.append(Identity(role.name, role.namespace, {role.selector[0]: role.selector[1]},
-                                None, role.egress))
+            labels = dict(live.get(role.name, {role.selector[0]: role.selector[1]}))
+            out.append(Identity(role.name, role.namespace, labels, None, role.egress))
     out.append(Identity("control", contract.prod, {}, None, None))
     return out
 
@@ -1234,8 +1442,11 @@ def probe_pod(identity: Identity, run_id: str, image: str, targets: list[dict[st
     if identity.service_account:
         spec["serviceAccountName"] = identity.service_account
     return {"apiVersion": "v1", "kind": "Pod",
-            "metadata": {"name": f"mfr-proof-{identity.name}-{run_id}",
-                         "labels": {**identity.labels, PROOF_LABEL: run_id}},
+            # No proof label: the probe carries exactly the identity's labels, so
+            # no selector can tell it from the real pod. The run is an annotation.
+            "metadata": {"name": f"{PROBE_NAME_PREFIX}{identity.name}-{run_id}",
+                         "labels": dict(identity.labels),
+                         "annotations": {PROOF_ANNOTATION: run_id}},
             "spec": spec}
 
 
@@ -1266,8 +1477,27 @@ def read_probe(kube: Kube, name: str, namespace: str, ids: set[str]) -> dict[str
     raise ProofError("probe-failed", name)
 
 
+def live_role_labels(contract: Contract,
+                     pods: Mapping[str, list[dict[str, Any]]]) -> dict[str, dict[str, str]]:
+    """The full labels of one live pod per role (F9 role label or manager selector)."""
+    out: dict[str, dict[str, str]] = {}
+    for ns, items in pods.items():
+        for pod in items:
+            labels = dict((pod.get("metadata") or {}).get("labels") or {})
+            role = contract.roles.get(labels.get(contract.role_label_key, ""))
+            if role is not None and role.f9 and role.namespace == ns:
+                out.setdefault(role.name, labels)
+                continue
+            for r in contract.roles.values():
+                if (not r.f9 and r.selector and r.namespace == ns
+                        and labels.get(r.selector[0]) == r.selector[1]):
+                    out.setdefault(r.name, labels)
+    return out
+
+
 def run_probes(kube: Kube, contract: Contract, params: Params, run_id: str,
-               args: argparse.Namespace, findings: Findings) -> dict[str, Any]:
+               args: argparse.Namespace, live: Mapping[str, dict[str, str]],
+               runner_labels: Mapping[str, str], findings: Findings) -> dict[str, Any]:
     image = probe_image(contract, params)
     extra: dict[str, list[str]] = {}
     for item in args.probe_host:
@@ -1277,7 +1507,7 @@ def run_probes(kube: Kube, contract: Contract, params: Params, run_id: str,
                             args.probe_connect_timeout, findings)
     resources = {"cpu": args.probe_cpu, "memory": args.probe_memory,
                  "ephemeral-storage": args.probe_ephemeral_storage}
-    identities = probe_identities(contract)
+    identities = probe_identities(contract, live, runner_labels)
     pods = []
     for identity in identities:
         pod = probe_pod(identity, run_id, image, targets, resources, int(args.probe_timeout))
@@ -1328,19 +1558,32 @@ def run_probes(kube: Kube, contract: Contract, params: Params, run_id: str,
 # --------------------------------------------------------------------------- lifecycle
 
 
-def sweep(kube: Kube, namespaces: Iterable[str], selector: str) -> dict[str, int]:
-    """Delete probe objects in every namespace; one failure does not skip the rest."""
+def proof_pods(kube: Kube, namespace: str, run_id: str | None) -> list[str]:
+    """Probe pods by name prefix and run annotation (any run when run_id is None)."""
+    names = []
+    for pod in kube.items(["get", "pods", "-n", namespace], "list probe pods"):
+        meta = pod.get("metadata") or {}
+        name = str(meta.get("name", ""))
+        run = (meta.get("annotations") or {}).get(PROOF_ANNOTATION)
+        if run is not None and name.startswith(PROBE_NAME_PREFIX) and run_id in (None, run):
+            names.append(name)
+    return names
+
+
+def sweep(kube: Kube, namespaces: Iterable[str], run_id: str | None) -> dict[str, int]:
+    """Delete probe pods in every namespace; one failure does not skip the rest."""
     removed: dict[str, int] = {}
     failed: ProofError | None = None
     for ns in namespaces:
         try:
-            proc = kube.run(["delete", "pods,serviceaccounts", "-l", selector, "-n", ns,
-                             "--ignore-not-found", "--wait=true", "-o", "name"],
-                            "delete probe objects")
+            names = proof_pods(kube, ns, run_id)
+            if names:
+                kube.run(["delete", "pod", *names, "-n", ns, "--ignore-not-found",
+                          "--wait=true"], "delete probe pods")
         except ProofError as exc:
             failed = failed or exc
             continue
-        removed[ns] = sum(1 for line in proc.stdout.splitlines() if line.strip())
+        removed[ns] = len(names)
     if failed is not None:
         raise failed
     return removed
@@ -1348,15 +1591,11 @@ def sweep(kube: Kube, namespaces: Iterable[str], selector: str) -> dict[str, int
 
 def cleanup(kube: Kube, contract: Contract, run_id: str) -> dict[str, Any]:
     namespaces = (contract.prod, contract.ci)
-    selector = f"{PROOF_LABEL}={run_id}"
     try:
-        deleted = sweep(kube, namespaces, selector)
+        deleted = sweep(kube, namespaces, run_id)
+        remaining = {ns: len(proof_pods(kube, ns, run_id)) for ns in namespaces}
     except ProofError as exc:
         raise ProofError("cleanup-failed", exc.detail) from exc
-    remaining = {}
-    for ns in namespaces:
-        remaining[ns] = len(kube.items(["get", "pods,serviceaccounts", "-l", selector, "-n", ns],
-                                       "verify cleanup"))
     if any(remaining.values()):
         raise ProofError("cleanup-failed")
     return {"deleted": deleted, "remaining": remaining}
@@ -1444,24 +1683,30 @@ def main(argv: list[str] | None = None) -> int:
         checks["runner_config"] = check_runner_config(contract, params, args.runner_config,
                                                      findings)
         kube = Kube(args.kubectl)
-        record["leftovers_removed"] = sweep(kube, (contract.prod, contract.ci), PROOF_LABEL)
+        record["leftovers_removed"] = sweep(kube, (contract.prod, contract.ci), None)
         pods = {ns: kube.items(["get", "pods", "-n", ns], "get pods")
                 for ns in (contract.prod, contract.ci)}
         checks["pods"], manager_sas = classify_pods(contract, pods, findings)
         if not manager_sas:
             findings.inconclusive("pods", contract.ci, "no-runner-manager-pod")
-        checks["rbac"] = check_rbac(kube, contract, run_id, manager_sas, findings)
+        checks["rbac"] = check_rbac(kube, contract, manager_sas, findings)
         checks["negative_matrix"] = check_negative_matrix(kube, contract, findings)
         policies = {ns: kube.items(["get", "networkpolicies", "-n", ns], "get networkpolicies")
                     for ns in (contract.prod, contract.ci)}
-        checks["egress_policies"] = check_egress_policies(contract, policies, findings)
+        checks["egress_policies"] = check_egress_policies(contract, params, policies, pods,
+                                                          findings)
         checks["open_egress"] = check_open_egress(
             contract, policies, pods, cluster_networks(kube, args.cluster_network), findings)
         checks["agent_policy"] = check_agent_policy(kube, contract, args.agent_service,
                                                     pods[contract.prod], policies[contract.prod],
                                                     findings)
         if args.probe:
-            checks["probes"] = run_probes(kube, contract, params, run_id, args, findings)
+            runner_labels = runner_default_labels(run_id)
+            for row in checks["runner_config"]:
+                runner_labels.update(row.get("pod_labels") or {})
+            checks["probes"] = run_probes(kube, contract, params, run_id, args,
+                                          live_role_labels(contract, pods), runner_labels,
+                                          findings)
         else:
             checks["probes"] = {"status": "not-run"}
     except ProofError as exc:
