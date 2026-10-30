@@ -20,6 +20,7 @@ from tests.helpers_airgap import (
     RETIRED_ENV_KEYS,
     RETIRED_ENV_VALUES,
     STUB_TOOL,
+    connected_checkout,
     copy_chart,
     make_bin_tree,
     retired_keys_listed,
@@ -84,6 +85,7 @@ def _run(tree, extra_env=None):
                 env.pop(k, None)
             else:
                 env[k] = v
+    connected_checkout(env, set(extra_env or {}))
     return run_sh(tree / "scripts" / "airgap" / "validate.sh", env, tree)
 
 
@@ -483,6 +485,39 @@ def test_validate_live_matching_checkout_passes_manifest_section(tree):
     assert "Verified matching MANIFEST" in r.stdout
 
 
+# The connected opt-out (#1118 F1): accepted only with CI_REHEARSAL=1.
+_OPT_OUT = {"AIRGAP_UNVERIFIED_CHECKOUT": "1", "CI_REHEARSAL": "1"}
+
+# Fixed refusal messages of the verified-release guard (#1118 F1), whole.
+_NO_MANIFEST = ("FAIL: checkout is not a verified signed release (no packed MANIFEST) — run from the "
+                "checkout that bootstrap.sh creates from the signed bundle, with SNEAKERNET_TRUSTED_PUB set; "
+                "only a connected developer or CI lane may set AIRGAP_UNVERIFIED_CHECKOUT=1 with "
+                "CI_REHEARSAL=1 instead\n")
+_NO_ANCHOR = ("FAIL: no release trust anchor is configured — set SNEAKERNET_TRUSTED_PUB to the release "
+              "signing public key obtained out of band (docs/release-verification.md); trust on first use "
+              "never establishes a release\n")
+_OPT_OUT_REFUSED = ("FAIL: AIRGAP_UNVERIFIED_CHECKOUT=1 is refused without CI_REHEARSAL=1 in the process "
+                    "environment — the unverified-checkout opt-out is for connected development and the "
+                    "connected CI and Kind lanes only, never the air gap; run from a verified signed release "
+                    "instead\n")
+_UNREADABLE_ANCHOR = ("FAIL: release trust anchor SNEAKERNET_TRUSTED_PUB is not a readable file — point it "
+                      "at the release signing public key obtained out of band (docs/release-verification.md)\n")
+_BAD_SIGNATURE = ("FAIL: SHA256SUMS signature verification failed for the packed MANIFEST — do not trust "
+                  "this bundle; rerun bootstrap.sh from the signed bundle\n")
+_FOREIGN_KEY = ("FAIL: bundle pubkey does not match any configured release trust anchor "
+                "(SNEAKERNET_TRUSTED_PUB) — untrusted bundle; use the signed release bundle or fix the anchor\n")
+_HEAD_DIFFERS = ("FAIL: executing checkout HEAD does not match the packed MANIFEST sha — run from the approved "
+                 "bundle checkout (git rev-parse HEAD and the MANIFEST sha: line must agree); overriding "
+                 "IMAGE_SHA alone never changes which code executes\n")
+_TRACKED_CHANGE = ("FAIL: executing checkout has tracked changes against the packed MANIFEST sha — restore "
+                   "them (git diff HEAD lists them; operator settings belong in the untracked airgap.env) "
+                   "before running a release\n")
+_HIDDEN_CHANGE = ("FAIL: executing checkout hides tracked files from change detection (assume-unchanged, "
+                  "skip-worktree or sparse checkout) — clear the flags (git update-index "
+                  "--no-assume-unchanged / --no-skip-worktree; git ls-files -v marks them) before running "
+                  "a release\n")
+
+
 def _guard_probe(tree):
     probe = tree / "scripts" / "airgap" / "probe-guard.sh"
     probe.write_text(
@@ -494,11 +529,19 @@ def _guard_probe(tree):
 
 
 def _guard_run(tree, manifest_rel, extra_env=None):
+    """Run the real guard. The release trust anchor (#1118 F1) is configured
+    unless the caller overrides it; a None value removes a key."""
     import subprocess
 
-    env = {"PATH": "/usr/bin:/bin", "GUARD_MANIFEST": manifest_rel}
-    if extra_env:
-        env.update(extra_env)
+    from tests.helpers_airgap import release_anchor
+
+    env = {"PATH": "/usr/bin:/bin", "GUARD_MANIFEST": manifest_rel,
+           "SNEAKERNET_TRUSTED_PUB": str(release_anchor())}
+    for key, value in (extra_env or {}).items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
     return subprocess.run(
         ["sh", str(_guard_probe(tree))], capture_output=True, text=True,
         env=env, cwd=tree, check=False,
@@ -528,9 +571,11 @@ def test_checkout_guard_dryrun_keeps_the_notice_with_a_mismatched_checkout(tree)
     r = _guard_run(tree, "dist/MANIFEST.txt", {"AIRGAP_DRYRUN": "1"})
     assert r.returncode == 0, r.stderr
     assert "not release-verified" in r.stderr
-    # Connected development: no reachable MANIFEST and no bundle evidence.
+    # Connected development (no reachable MANIFEST, no bundle evidence) needs
+    # the explicit opt-out since #1118 F1; the plain run is refused.
     shutil.rmtree(tree / "dist")
-    dev = _guard_run(tree, "dist/MANIFEST.txt")
+    assert _guard_run(tree, "dist/MANIFEST.txt").returncode != 0
+    dev = _guard_run(tree, "dist/MANIFEST.txt", _OPT_OUT)
     assert dev.returncode == 0
     assert "not release-verified" in dev.stderr
 
@@ -555,16 +600,18 @@ def test_checkout_guard_refuses_release_evidence_without_manifest(tree):
     missing dist/MANIFEST.txt must not downgrade the run to the connected
     development notice: removing one file plus overriding IMAGE_SHA would
     bypass identity (issue #414). Without any bundle evidence the notice
-    path stays (approved connected development)."""
+    path stays only under the connected opt-out (#1118 F1), and the opt-out
+    never waives bundle evidence."""
     (tree / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
     shutil.copy(REPO / "scripts" / "airgap" / "common.sh", tree / "scripts" / "airgap" / "common.sh")
     (tree / "dist").mkdir(exist_ok=True)
-    dev = _guard_run(tree, "dist/MANIFEST.txt")
+    dev = _guard_run(tree, "dist/MANIFEST.txt", _OPT_OUT)
     assert dev.returncode == 0 and "not release-verified" in dev.stderr
     (tree / "dist" / "SHA256SUMS").write_text("")
-    r = _guard_run(tree, "dist/MANIFEST.txt")
-    assert r.returncode != 0
-    assert "bundle evidence" in r.stderr
+    for extra in (None, _OPT_OUT):
+        r = _guard_run(tree, "dist/MANIFEST.txt", extra)
+        assert r.returncode != 0
+        assert "bundle evidence" in r.stderr
     dry = _guard_run(tree, "dist/MANIFEST.txt", {"AIRGAP_DRYRUN": "1"})
     assert dry.returncode == 0
 
@@ -721,7 +768,7 @@ def test_checkout_guard_trusted_pub_pins_the_key(approved):
     other = gen_other_pub(approved.parent, "guard-other")
     r = _guard_run(approved, "dist/MANIFEST.txt", {"SNEAKERNET_TRUSTED_PUB": str(other)})
     assert r.returncode != 0
-    assert "does not match SNEAKERNET_TRUSTED_PUB" in r.stderr
+    assert "does not match any configured release trust anchor (SNEAKERNET_TRUSTED_PUB)" in r.stderr
 
 
 def test_checkout_guard_refuses_index_flags_that_hide_edits(approved):
@@ -758,12 +805,135 @@ def test_checkout_guard_refuses_sparse_checkout(approved):
     assert "hides tracked files" in r.stderr
 
 
+def _edited_commit(approved):
+    """A commit object whose tree holds an edited chart, the release commit as
+    its parent, with the edit left staged and in the worktree (no ref moves)."""
+    (approved / "charts" / "values.yaml").write_text("replicas: 9\n")
+    _git(approved, "add", "charts/values.yaml")
+    tree = _git(approved, "write-tree")
+    return _git(approved, "commit-tree", tree, "-p", "HEAD", "-m", "hidden edit")
+
+
+def test_checkout_guard_refuses_a_replace_ref_that_hides_an_edit(approved):
+    """#1149 N1: `git replace <release> <edited>` makes HEAD name the release
+    sha while `git diff HEAD` compares the edited tree, so a plain git read
+    sees a clean checkout. The guard reads git without replace objects and
+    refuses; once the replace ref and the edit are gone the next ordinary
+    verified run passes."""
+    release = _git(approved, "rev-parse", "HEAD")
+    _git(approved, "replace", release, _edited_commit(approved))
+    assert _git(approved, "rev-parse", "HEAD") == release
+    assert _git(approved, "diff", "HEAD", "--name-only") == ""  # the evasion is real
+    r = _approved_run(approved)
+    assert r.returncode == 1
+    assert r.stderr == _TRACKED_CHANGE
+    _git(approved, "replace", "-d", release)
+    _git(approved, "reset", "-q", "--hard", release)
+    assert _git(approved, "for-each-ref", "refs/replace/") == ""
+    again = _approved_run(approved)
+    assert again.returncode == 0, again.stderr
+    assert again.stderr == ""
+
+
+def test_checkout_guard_grafts_cannot_hide_an_edit(approved):
+    """A grafts file (.git/info/grafts, still honored by git) rewrites a
+    commit's parents, never its tree: an edit stays a tracked change, and a
+    clean checkout under a graft still verifies (#1149 N1)."""
+    release = _git(approved, "rev-parse", "HEAD")
+    edited = _edited_commit(approved)
+    (approved / ".git" / "info").mkdir(exist_ok=True)
+    (approved / ".git" / "info" / "grafts").write_text(f"{release} {edited}\n")
+    r = _approved_run(approved)
+    assert r.returncode == 1
+    assert r.stderr == _TRACKED_CHANGE
+    _git(approved, "reset", "-q", "--hard", release)
+    again = _approved_run(approved)
+    assert again.returncode == 0, again.stderr
+    assert again.stderr == ""
+
+
+def _restore_release(approved, release):
+    _git(approved, "reset", "-q", "--hard", release)
+    again = _approved_run(approved)
+    assert again.returncode == 0, again.stderr
+    assert again.stderr == ""
+
+
+def test_checkout_guard_ignores_a_git_dir_pointing_at_a_clean_clone(approved):
+    """#1149 N1: GIT_DIR/GIT_WORK_TREE naming a pristine clone of the release
+    would make git judge that clone, not the edited checkout that executes."""
+    release = _git(approved, "rev-parse", "HEAD")
+    clone = approved.parent / f"{approved.name}-pristine"
+    _git(approved.parent, "clone", "-q", str(approved), str(clone))
+    (approved / "charts" / "values.yaml").write_text("replicas: 9\n")
+    redirect = {"GIT_DIR": str(clone / ".git"), "GIT_WORK_TREE": str(clone)}
+    r = _guard_run(approved, "dist/MANIFEST.txt", redirect)
+    assert r.returncode == 1
+    assert r.stderr == _TRACKED_CHANGE
+    _restore_release(approved, release)
+
+
+def test_checkout_guard_ignores_an_index_file_that_hides_an_edit(approved):
+    """#1149 N1: GIT_INDEX_FILE naming an index whose entry carries the release
+    blob with the edited file's stat data makes `git diff HEAD` trust it."""
+    import hashlib
+    import subprocess
+
+    release = _git(approved, "rev-parse", "HEAD")
+    path = approved / "charts" / "values.yaml"
+    release_blob = _git(approved, "rev-parse", "HEAD:charts/values.yaml")
+    path.write_text("replicas: 9\n")  # same size as the release content
+    past = path.stat().st_mtime - 3600
+    os.utime(path, (past, past))  # not racy against the index written next
+    forged = approved.parent / f"{approved.name}-index"
+    env = {**os.environ, "GIT_INDEX_FILE": str(forged)}
+    subprocess.run(["git", "read-tree", "HEAD"], cwd=approved, env=env, check=True)
+    subprocess.run(["git", "add", "charts/values.yaml"], cwd=approved, env=env, check=True)
+    edited_blob = _git(approved, "hash-object", "charts/values.yaml")
+    data = bytearray(forged.read_bytes())
+    at = data.index(bytes.fromhex(edited_blob))
+    data[at:at + 20] = bytes.fromhex(release_blob)
+    data[-20:] = hashlib.sha1(bytes(data[:-20])).digest()
+    forged.write_bytes(bytes(data))
+    hidden = subprocess.run(["git", "diff", "--quiet", "HEAD", "--"], cwd=approved, env=env, check=False)
+    assert hidden.returncode == 0  # the evasion is real
+    r = _guard_run(approved, "dist/MANIFEST.txt", {"GIT_INDEX_FILE": str(forged)})
+    assert r.returncode == 1
+    assert r.stderr == _TRACKED_CHANGE
+    _restore_release(approved, release)
+
+
+def test_checkout_guard_ignores_an_object_directory_that_forges_the_release(approved):
+    """#1149 N1: GIT_OBJECT_DIRECTORY naming a store whose object for the
+    release sha holds an edited commit (git does not rehash on read) makes HEAD
+    resolve to the edited tree."""
+    import subprocess
+
+    release = _git(approved, "rev-parse", "HEAD")
+    edited = _edited_commit(approved)  # the edit stays staged and in the worktree
+    forged = approved.parent / f"{approved.name}-objects"
+    shutil.copytree(approved / ".git" / "objects", forged)
+    source = forged / edited[:2] / edited[2:]
+    target = forged / release[:2] / release[2:]
+    target.chmod(0o644)
+    target.write_bytes(source.read_bytes())
+    env = {"GIT_OBJECT_DIRECTORY": str(forged)}
+    hidden = subprocess.run(["git", "diff", "--quiet", "HEAD", "--"], cwd=approved,
+                            env={**os.environ, **env}, check=False)
+    assert hidden.returncode == 0  # the evasion is real
+    r = _guard_run(approved, "dist/MANIFEST.txt", env)
+    assert r.returncode == 1
+    assert r.stderr == _TRACKED_CHANGE
+    _restore_release(approved, release)
+
+
 def test_checkout_guard_parent_bundle_layout_is_verified(tmp_path):
     """The documented unpack-next-to-the-clone layout: ../MANIFEST.txt is
     trusted only through ../SHA256SUMS(.sig) like dist/ is; a ../SHA256SUMS that
     names MANIFEST.txt (every packed bundle's list does) is bundle evidence even
     with MANIFEST.txt removed, while an unrelated one in the parent (a downloads
-    folder) is not, so connected development there keeps the notice."""
+    folder) is not, so connected development there (under the opt-out) keeps
+    the notice."""
     (tmp_path / "ws").mkdir()
     ws = _make_approved(tmp_path / "ws")
     bundle = tmp_path
@@ -778,13 +948,171 @@ def test_checkout_guard_parent_bundle_layout_is_verified(tmp_path):
     assert "does not match its signed checksum entry" in bad.stderr
     # The parent list is only evidence when it is bundle-shaped.
     (bundle / "SHA256SUMS").write_text(f"{'0' * 64}  some-iso.img\n")
-    stray = _guard_run(ws, "dist/MANIFEST.txt")
+    stray = _guard_run(ws, "dist/MANIFEST.txt", _OPT_OUT)
     assert stray.returncode == 0, stray.stderr
     assert "not release-verified" in stray.stderr
     (bundle / "SHA256SUMS").write_text(f"{'0' * 64}  MANIFEST.txt\n")
     r = _guard_run(ws, "dist/MANIFEST.txt")
     assert r.returncode != 0
     assert "bundle evidence" in r.stderr
+
+
+def test_checkout_guard_verified_release_passes_and_so_does_the_next_run(approved):
+    """#1118 F1: a signed MANIFEST verified against the configured anchor (a
+    file of its own, not the bundled key), HEAD equal to its sha and a clean
+    tree pass silently; the next ordinary run passes the same way and the
+    guard changed nothing in the checkout."""
+    first = _approved_run(approved)
+    assert first.returncode == 0, first.stderr
+    assert first.stdout == first.stderr == ""
+    status = _git(approved, "status", "--porcelain", "--ignored")
+    again = _approved_run(approved)
+    assert again.returncode == 0, again.stderr
+    assert again.stdout == again.stderr == ""
+    assert _git(approved, "status", "--porcelain", "--ignored") == status
+
+
+def _resign_with_other_key(approved, *, bundle_pub):
+    """A SHA256SUMS signature by a key the anchor does not name. With
+    bundle_pub the bundled key is replaced to match (a consistent foreign
+    bundle); without it the bundled key stays the anchor's (a bad signature)."""
+    import subprocess
+
+    from tests.helpers_airgap import gen_sign_keypair
+
+    dist = approved / "dist"
+    other = gen_sign_keypair(approved, "foreign.key")
+    if bundle_pub:
+        subprocess.run(["openssl", "pkey", "-in", str(other), "-pubout", "-out", str(dist / "sneakernet-signing.pub")],
+                       check=True, capture_output=True)
+    subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(other), "-out", str(dist / "SHA256SUMS.sig"),
+                    str(dist / "SHA256SUMS")], check=True, capture_output=True)
+
+
+def _commit_on_top(approved):
+    (approved / "charts" / "values.yaml").write_text("replicas: 2\n")
+    _git(approved, "commit", "-qam", "unreleased change")
+
+
+@pytest.mark.parametrize(("case", "needle"), [
+    ("no-manifest", _NO_MANIFEST),
+    ("no-anchor", _NO_ANCHOR),
+    ("unreadable-anchor", _UNREADABLE_ANCHOR),
+    ("bad-signature", _BAD_SIGNATURE),
+    ("foreign-key", _FOREIGN_KEY),
+    ("head-differs", _HEAD_DIFFERS),
+    ("tracked-change", _TRACKED_CHANGE),
+    ("hidden-change", _HIDDEN_CHANGE),
+], ids=["no-manifest", "no-anchor", "unreadable-anchor", "bad-signature", "foreign-key", "head-differs",
+        "tracked-change", "hidden-change"])
+def test_checkout_guard_refuses_what_is_not_a_verified_signed_release(approved, case, needle):
+    """#1118 F1: each way a checkout falls short of a verified signed release
+    is refused outside dry-run with its own fixed message (the whole stderr:
+    no path, sha or content), and the same checkout still previews."""
+    extra = {}
+    if case == "no-manifest":
+        shutil.rmtree(approved / "dist")
+    elif case == "no-anchor":
+        extra = {"SNEAKERNET_TRUSTED_PUB": None}
+    elif case == "unreadable-anchor":
+        extra = {"SNEAKERNET_TRUSTED_PUB": str(approved / "missing anchor.pub")}
+    elif case in ("bad-signature", "foreign-key"):
+        _resign_with_other_key(approved, bundle_pub=case == "foreign-key")
+    elif case == "head-differs":
+        _commit_on_top(approved)
+    elif case == "tracked-change":
+        (approved / "charts" / "values.yaml").write_text("replicas: 9\n")
+    else:
+        _git(approved, "update-index", "--assume-unchanged", "charts/values.yaml")
+    r = _guard_run(approved, "dist/MANIFEST.txt", extra)
+    assert r.returncode == 1
+    assert r.stderr == needle
+    assert r.stdout == ""
+    dry = _guard_run(approved, "dist/MANIFEST.txt", {"AIRGAP_DRYRUN": "1", **extra})
+    assert dry.returncode == 0, dry.stderr
+    assert dry.stderr == "Notice: dry-run — checkout not release-verified\n"
+
+
+def test_checkout_guard_next_run_passes_once_the_anchor_is_set(approved):
+    """Lifecycle (#1118 F1): the missing-anchor refusal changes nothing, and
+    the next ordinary run with the anchor exported passes."""
+    refused = _guard_run(approved, "dist/MANIFEST.txt", {"SNEAKERNET_TRUSTED_PUB": None})
+    assert refused.stderr == _NO_ANCHOR
+    again = _approved_run(approved)
+    assert again.returncode == 0, again.stderr
+    assert again.stderr == ""
+
+
+@pytest.mark.parametrize("ci_rehearsal", [None, "", "0", "true"])
+def test_checkout_guard_opt_out_requires_ci_rehearsal(approved, ci_rehearsal):
+    """#1118 F1: AIRGAP_UNVERIFIED_CHECKOUT=1 without CI_REHEARSAL=1 is refused
+    with a fixed message, even on a checkout that would verify, and dry-run is
+    unchanged."""
+    extra = {"AIRGAP_UNVERIFIED_CHECKOUT": "1", "CI_REHEARSAL": ci_rehearsal}
+    r = _guard_run(approved, "dist/MANIFEST.txt", extra)
+    assert r.returncode == 1
+    assert r.stderr == _OPT_OUT_REFUSED
+    dry = _guard_run(approved, "dist/MANIFEST.txt", {"AIRGAP_DRYRUN": "1", **extra})
+    assert dry.returncode == 0
+    assert "not release-verified" in dry.stderr
+
+
+def test_checkout_guard_opt_out_keeps_the_pre_f1_rules(approved):
+    """#1118 F1: with CI_REHEARSAL=1 the opt-out runs a plain tree with the
+    notice and verifies a MANIFEST on first use without an anchor, but still
+    refuses a checkout whose HEAD differs from a present MANIFEST, and a
+    configured anchor still pins the key."""
+    from tests.helpers_airgap import gen_other_pub
+
+    tofu = _guard_run(approved, "dist/MANIFEST.txt", {**_OPT_OUT, "SNEAKERNET_TRUSTED_PUB": None})
+    assert tofu.returncode == 0, tofu.stderr
+    assert tofu.stderr == ""
+    pinned = _guard_run(approved, "dist/MANIFEST.txt",
+                        {**_OPT_OUT, "SNEAKERNET_TRUSTED_PUB": str(gen_other_pub(approved, "opt-out-other"))})
+    assert pinned.returncode != 0
+    assert "does not match SNEAKERNET_TRUSTED_PUB" in pinned.stderr
+    _commit_on_top(approved)
+    moved = _guard_run(approved, "dist/MANIFEST.txt", {**_OPT_OUT, "SNEAKERNET_TRUSTED_PUB": None})
+    assert moved.returncode != 0
+    assert "HEAD does not match the packed MANIFEST sha" in moved.stderr
+    shutil.rmtree(approved / "dist")
+    dev = _guard_run(approved, "dist/MANIFEST.txt", {**_OPT_OUT, "SNEAKERNET_TRUSTED_PUB": None})
+    assert dev.returncode == 0, dev.stderr
+    assert dev.stderr == ("Notice: no packed MANIFEST — checkout not release-verified "
+                          "(AIRGAP_UNVERIFIED_CHECKOUT=1, connected rehearsal only)\n")
+
+
+def test_checkout_guard_opt_out_is_process_environment_only(approved):
+    """#1118 F1: the operator file travels to the air gap, so it can neither
+    opt out nor supply CI_REHEARSAL; a plain tree stays refused."""
+    shutil.rmtree(approved / "dist")
+    (approved / "airgap.env").write_text("AIRGAP_UNVERIFIED_CHECKOUT=1\nexport CI_REHEARSAL=1\n")
+    r = _guard_run(approved, "dist/MANIFEST.txt")
+    assert r.returncode == 1
+    assert r.stderr == _NO_MANIFEST
+    # The caller's process environment still decides: the file cannot clear it.
+    (approved / "airgap.env").write_text("AIRGAP_UNVERIFIED_CHECKOUT=\nCI_REHEARSAL=0\n")
+    ok = _guard_run(approved, "dist/MANIFEST.txt", _OPT_OUT)
+    assert ok.returncode == 0, ok.stderr
+
+
+def test_checkout_guard_opt_out_refuses_an_unknown_value(approved):
+    r = _guard_run(approved, "dist/MANIFEST.txt", {**_OPT_OUT, "AIRGAP_UNVERIFIED_CHECKOUT": "true"})
+    assert r.returncode == 1
+    assert r.stderr == ("FAIL: AIRGAP_UNVERIFIED_CHECKOUT must be 1 (connected opt-out, with CI_REHEARSAL=1) "
+                        "or unset; refusing to guess\n")
+
+
+def test_validate_live_refuses_a_plain_checkout_and_passes_with_the_opt_out(tree):
+    """#1118 F1 through a real launch path: live validate from a plain tree
+    stops at the guard; the connected opt-out runs it to completion."""
+    plain = _run(tree, {"AIRGAP_DRYRUN": "0", "AIRGAP_UNVERIFIED_CHECKOUT": None, "CI_REHEARSAL": None})
+    assert plain.returncode == 1
+    assert _NO_MANIFEST in plain.stderr
+    assert "SUCCESS" not in plain.stdout
+    opted = _run(tree, {"AIRGAP_DRYRUN": "0", **_OPT_OUT})
+    assert opted.returncode == 0, opted.stderr
+    assert "not release-verified" in opted.stderr
 
 
 def test_checkout_guard_wired_into_all_launch_paths():

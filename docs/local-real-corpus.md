@@ -130,8 +130,10 @@ does not reserve host RAM. The [dated audit](deployment-audit-2026-09-20.md)
 records the failed six-worker memory trial; neither a historical one-worker
 figure nor a brief healthy sample establishes full-run fit.
 
-From the exact release checkout with protected `AIRGAP_ENV`, explicit kubeconfig
-and Helm 4 on PATH:
+From the exact release checkout with protected `AIRGAP_ENV`, the release trust
+anchor `SNEAKERNET_TRUSTED_PUB` exported (live stages refuse without it,
+[deploy §4](deploy.md#4-signing-and-provenance)), explicit kubeconfig and Helm 4
+on PATH:
 
 ```sh
 sh scripts/tools/run-task.sh airgap:validate

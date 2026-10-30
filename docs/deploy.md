@@ -194,7 +194,8 @@ Deploy reads every deployed registry image before mutation, including
 Deploy and pack require exactly one `charts/qdrant-*.tgz`. For live deploy
 with a reachable packed `MANIFEST.txt`, its archive sha256 must match
 `chart_sha256`; mismatch/missing fields fail closed before release commands.
-Dry-run or no-MANIFEST runs report "not release-verified".
+Dry-run, and a no-MANIFEST run under the connected opt-out (see the
+executing-checkout guard below), report "not release-verified".
 `airgap.env` remains the only operator configuration owner. After `common.sh`
 resolves precedence and validates inputs, `map_app_values` exports the declared
 non-secret inputs to the deterministic serializer in `map_values.py`.
@@ -589,7 +590,10 @@ checksums **after**.
   out of band (load/bootstrap refuse mismatches byte-for-byte), the
   published key fingerprint in `PACKING_RECORD.txt`, HTTPS download of the
   tarball. Without a pinned pubkey, verification is TOFU: it binds members
-  together but proves nothing about *which* key signed.
+  together but proves nothing about *which* key signed. The executing-checkout
+  guard below therefore requires `SNEAKERNET_TRUSTED_PUB` outside dry-run
+  (#1118 F1), so load, deploy, ingest and validate never run on TOFU alone
+  outside the connected opt-out described there.
 - Load re-verifies the signature, then checksums, then the `IMAGE_SHA`
   against the manifest, then all six base image digests (plus the
   oauth-proxy digest when the bundle carries it) — and pushes under fixed
@@ -618,13 +622,19 @@ checksums **after**.
   archive's image config before any push. Deploy and ingest repeat the registry
   read-back and render by digest (see the image identity section below).
 - Executing-checkout guard (`common.sh::check_checkout_sha`, run by load,
-  deploy, ingest and validate). With a packed MANIFEST reachable:
+  deploy, ingest and validate). Outside dry-run the checkout must be a
+  verified signed release (#1118 F1, ADR-0009 §1): a packed MANIFEST must be
+  reachable, and:
   1. *MANIFEST authenticity.* The guard never reads a bare file. `SHA256SUMS`,
      `SHA256SUMS.sig` and `sneakernet-signing.pub` must sit next to it, the
-     signature over `SHA256SUMS` must verify (`SNEAKERNET_TRUSTED_PUB` pins
-     the key when set; otherwise TOFU, as in load), and `SHA256SUMS` must list
-     `MANIFEST.txt` exactly once with the file's real sha256. Image archives
-     stay load.sh's `sha256sum -c`; only this MANIFEST link is rechecked.
+     bundled key must equal a configured release trust anchor byte-for-byte,
+     the signature over `SHA256SUMS` must verify with that anchor, and
+     `SHA256SUMS` must list `MANIFEST.txt` exactly once with the file's real
+     sha256. The anchor is `SNEAKERNET_TRUSTED_PUB` and it is required; the
+     guard reads anchors from the variable-name list
+     `RELEASE_TRUST_ANCHOR_VARS` so a second (gap) key can join it. Image
+     archives stay load.sh's `sha256sum -c`; only this MANIFEST link is
+     rechecked.
   2. *Identity.* HEAD must equal the packed SHA and no tracked file may differ
      from it, staged or unstaged (scripts, charts, Taskfile — the whole
      tracked tree).
@@ -632,7 +642,11 @@ checksums **after**.
      flagged assume-unchanged or skip-worktree (`git ls-files -v` tag other
      than `H`; sparse checkout sets skip-worktree) is refused, with or
      without an edit. An unreadable index is refused. Clear the flags with
-     `git update-index --no-assume-unchanged/--no-skip-worktree`.
+     `git update-index --no-assume-unchanged/--no-skip-worktree`. The guard's
+     git reads are pinned to the executing checkout and ignore replace refs
+     and the caller's `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, object
+     store, namespace and config variables (#1149 N1); the rest of the stage
+     keeps its environment.
   Refusals are fixed messages naming neither files nor contents; `git diff
   HEAD` lists edits. Untracked files (`airgap.env`, `dist/`, generated
   output) stay allowed, so site values belong in the untracked `airgap.env`.
@@ -647,19 +661,31 @@ checksums **after**.
   that names `MANIFEST.txt` (the documented unpack-next-to-the-clone layout
   that `find_manifest` and load.sh search; every packed bundle's list names
   it). An unrelated `../SHA256SUMS` that does not name `MANIFEST.txt` is not
-  evidence, so connected development in a directory beside such a file is not
-  refused. Counting evidence can only make the guard refuse, never pass.
-  Only dry-run and connected development (no MANIFEST and no bundle evidence)
-  still run, printing "not release-verified" on stderr — never a
-  release-verified result. `bootstrap.sh` applies the same tracked-change and
+  evidence, so connected development (under the opt-out below) in a directory
+  beside such a file is not refused. Counting evidence can only make the guard refuse, never pass.
+  A missing MANIFEST and a missing anchor are refused too, each with a
+  fixed message naming the fix. Only dry-run still runs,
+  printing "not release-verified" on stderr — never a release-verified
+  result.
+  *Connected opt-out.* `AIRGAP_UNVERIFIED_CHECKOUT=1` restores the pre-F1
+  rules for connected developers and the connected CI and Kind lanes: no
+  MANIFEST runs with the "not release-verified" notice, and without an anchor
+  the signature check is TOFU (a configured anchor still pins the key); a
+  reachable MANIFEST is still checked against HEAD and the tree. It is read
+  from the process environment only (an `airgap.env` assignment is ignored)
+  and is refused with a fixed message unless `CI_REHEARSAL=1` is in the
+  process environment too; any value other than `1` or unset is refused.
+  Never use it in the air gap: gap rehearsals use signed gap releases.
+  `bootstrap.sh` applies the same tracked-change and
   index-flag refusals to an existing workspace before copying artifacts into
-  `dist/`. Not covered: the guard is not tamper-proofing against an actor who
-  can rewrite the whole bundle directory *and* its pubkey while
-  `SNEAKERNET_TRUSTED_PUB` is unset (TOFU), nor against edits to files the
-  checkout does not track (`airgap.env` is operator config by design).
+  `dist/`. Not covered: edits to files the checkout does not track
+  (`airgap.env` is operator config by design), and an anchor file that is
+  itself replaced on the bastion.
 - `bootstrap.sh` cannot source `common.sh` (no clone exists yet), so it
   carries an inline twin of the trust check (bundle signature honoring
-  `SNEAKERNET_TRUSTED_PUB`, then `SHA256SUMS`). It clones into
+  `SNEAKERNET_TRUSTED_PUB`, then `SHA256SUMS`). There the anchor stays
+  optional, since bootstrap only creates the workspace; every later live
+  stage requires it (guard above). It clones into
   `AIRGAP_WORKSPACE` (default `qdrant-pdf-rag`), skips the clone when a
   repo already exists, copies (not links) the archives into `dist/`, and
   seeds `airgap.env` from the example only when absent — never overwriting

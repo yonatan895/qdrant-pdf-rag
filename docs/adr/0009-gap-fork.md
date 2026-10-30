@@ -61,16 +61,20 @@
   the [release gate](../release-verification.md) accepted, and the bundle's
   `repo.bundle` HEAD is the release commit. A **gap release** (§5) is the
   only other source of production code.
-- **Current behavior** of `check_checkout_sha` in `scripts/airgap/common.sh`,
-  which load, deploy, ingest and validate call:
-  - With a packed MANIFEST, it verifies the MANIFEST chain and requires HEAD
-    to equal the MANIFEST sha with no tracked or hidden changes.
-  - Under `AIRGAP_DRYRUN=1`, or when there is no MANIFEST and no bundle
-    evidence, it prints `Notice: ... not release-verified` and returns 0.
-  - The trust anchor `SNEAKERNET_TRUSTED_PUB` is optional; without it the
-    signature check is trust on first use.
-  - So today a plain clone of the fork passes with a Notice, and only
-    convention keeps gap code out of production.
+- **Current behavior** (F1 is done) of `check_checkout_sha` in
+  `scripts/airgap/common.sh`, which load, deploy, ingest and validate call
+  (the pipeline runs all four):
+  - Outside dry-run it refuses, with a fixed message, any checkout that is
+    not a verified signed release as the decision below defines it. No
+    MANIFEST, no configured trust anchor, a signature that does not verify
+    against the anchor, HEAD other than the MANIFEST sha, and a tracked or
+    hidden change are each refused.
+  - The trust anchor `SNEAKERNET_TRUSTED_PUB` is required. The guard reads
+    its anchors from a list of variable names (`RELEASE_TRUST_ANCHOR_VARS`),
+    so F2 adds the gap release key as a second name.
+  - Under `AIRGAP_DRYRUN=1` it still prints `Notice: dry-run — checkout not
+    release-verified` and returns 0.
+  - So a plain clone of the fork runs nothing live in the gap.
 - **Decision (follow-up F1):** outside dry-run, load, deploy, ingest and
   validate refuse, with a fixed message, any checkout that is not a verified
   signed release. A verified signed release means three things:
@@ -78,10 +82,13 @@
     trust anchor, either the upstream release key or the gap release key;
   - HEAD equals the MANIFEST sha;
   - there is no tracked or hidden change.
-- **The dev-only opt-out** is one explicit variable (proposed
-  `AIRGAP_UNVERIFIED_CHECKOUT=1`). It is accepted only together with the
-  existing `CI_REHEARSAL=1` marker, which already means "only in a
-  disposable lab, never in the air gap". Only connected-side developers and
+- **The dev-only opt-out** is one explicit variable,
+  `AIRGAP_UNVERIFIED_CHECKOUT=1`, read from the process environment only
+  (never `airgap.env`). It keeps the pre-F1 rules: no MANIFEST runs with a
+  notice, and without an anchor the signature check is trust on first use.
+  It is accepted only together with the existing `CI_REHEARSAL=1` marker,
+  which already means "only in a disposable lab, never in the air gap". It
+  is refused with a fixed message otherwise. Only connected-side developers and
   the connected CI and Kind lanes may use it. Nobody in the gap uses it, and
   gap rehearsals use signed gap releases instead (§5).
 - **Credentials.** The dev pod and the runner jobs run in the CI namespace
@@ -759,7 +766,7 @@ The names the gap builds on are a **public API**, limited to this list:
 
 | Item | Scope | Verifier-owned |
 |---|---|---|
-| F1 | Outside dry-run, load, deploy, ingest and validate refuse a checkout that is not a verified signed release. The trust anchor is required. The opt-out needs `CI_REHEARSAL=1`. Tests go in the air-gap shell suites, and the connected lanes set the opt-out | Lanes and taskfiles: yes |
+| F1 | Done: outside dry-run, load, deploy, ingest and validate refuse a checkout that is not a verified signed release. The trust anchor is required. The opt-out needs `CI_REHEARSAL=1`. Tests go in the air-gap shell suites. The live bundle lanes export the packing job's key as the anchor; hermetic fixtures from plain trees set the opt-out | Lanes and taskfiles: yes |
 | F2 | Two trust anchors (upstream and gap) and the MANIFEST `origin:` field | No |
 | F3 | Done in this PR: `tests/test_hygiene.py` fails on GitHub Actions when `gap/` or `.gitlab/` exists | No |
 | F4 | The CODEOWNERS generator, its equality test and the GitLab hygiene check | No |
