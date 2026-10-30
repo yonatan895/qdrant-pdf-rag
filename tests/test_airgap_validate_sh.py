@@ -881,7 +881,8 @@ def _commit_on_top(approved):
     ("head-differs", _HEAD_DIFFERS),
     ("tracked-change", _TRACKED_CHANGE),
     ("hidden-change", _HIDDEN_CHANGE),
-])
+], ids=["no-manifest", "no-anchor", "unreadable-anchor", "bad-signature", "foreign-key", "head-differs",
+        "tracked-change", "hidden-change"])
 def test_checkout_guard_refuses_what_is_not_a_verified_signed_release(approved, case, needle):
     """#1118 F1: each way a checkout falls short of a verified signed release
     is refused outside dry-run with its own fixed message (the whole stderr:
