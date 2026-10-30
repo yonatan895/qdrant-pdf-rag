@@ -107,7 +107,10 @@
     rehearsal namespace.
   - The **CI namespace** holds the GitLab runner manager, its job pods and
     the dev pod. The platform team creates it. Nothing in it holds
-    production deploy authority.
+    production deploy authority, and the gap release signing key and any
+    image push credential never enter it: the runner manager can read every
+    Secret there and exec into every pod. The F6 build and sign jobs
+    therefore run outside the CI namespace (open question 4).
   - The namespace in use on 2026-10-28 is torn down, not remediated. The
     fresh install starts with every rule below in place, so F9 and F5 land
     before it.
@@ -120,7 +123,7 @@
   | bastion | production | its own; acts with the operator's session credentials (§8) | `kubernetes.default.svc` at the API server addresses in site config (D-3), site registry, DNS |
   | dev | CI | its own | GitLab, the LiteLLM endpoint (with the dev key, below), DNS |
   | runner job | CI | `mfr-runner-job` | GitLab, DNS |
-  | runner manager | CI | created by the site's GitLab Runner Operator | set by the operator |
+  | runner manager | CI | created by the site's GitLab Runner Operator | `kubernetes.default.svc` at the API server addresses in site config, GitLab, DNS |
 
   The F6 build and sign jobs use their own identity, never `mfr-runner-job`.
 - **Labels.** F9-defined pods carry only the
@@ -128,11 +131,16 @@
   `app` or `app.kubernetes.io/*`. Chart NetworkPolicies, Services and the
   vendored Qdrant chart select on those keys, so such a label could admit a
   workspace pod to production peers or make it a Service backend.
-- **Egress-side enforcement.** Each F9-defined pod is selected by a
-  default-deny policy plus its egress allow-list. Production cannot be
-  guarded on the ingress side: Qdrant has no policy, and policies only add
-  allowances. So the CI pods' default-deny egress, not anything in the
-  production namespace, keeps them off Qdrant and the agent.
+- **Egress-side enforcement.** Each F9-defined pod in the production
+  namespace is selected by a default-deny policy plus its egress
+  allow-list. In the CI namespace, one default-deny egress policy selects
+  every pod (`podSelector: {}`), the runner manager included, and each role
+  gets its allow-list from the table. Production Qdrant has no
+  NetworkPolicy, so this egress policy is what keeps CI pods off it (its
+  API keys still guard the data). The agent is also guarded on the ingress
+  side: the chart's agent policy admits only pods of its own namespace,
+  unless `networkPolicy.allowedNamespaces` lists another. The site config
+  never lists the CI namespace there.
 - **Production authority.** Of the F9-defined pods, only the bastion
   reaches the API server and the registry. Operator scripts reach the
   service through `$KC exec`, so the bastion needs nothing else. Dev and
@@ -168,7 +176,9 @@
   - There are four job slots of about 1 CPU each, since pytest runs on one
     core. They form two runner registrations: `gate`, one slot for merge
     request and tag pipelines, and `wip`, three slots for branch pipelines.
-    Agent work never queues ahead of a merge gate.
+    Agent work never queues ahead of a merge gate. Tag pipelines on `gate`
+    run only the verification lanes; the F6 build and sign jobs do not run
+    on these runners.
   - The unit job is sharded (`parallel: 4`). Jobs are `interruptible`, and
     redundant pipelines are cancelled automatically, so only a branch's
     newest commit holds slots.
@@ -225,10 +235,13 @@
     production namespace; in the CI namespace, the dev pod's two, the
     manager's runner token and the pull robot;
   - the rendered runner configuration, showing that it allows no override;
-  - live network probes from each F9-defined role, including the API server
-    addresses (D-3), probes from the CI namespace to production Qdrant and
-    the agent, and a negative control that shows the probe reaches a target
-    once the policy is absent.
+  - live network probes from each F9-defined role and from a probe pod
+    carrying the runner manager's labels, including the API server addresses
+    (D-3), probes from the CI namespace to production Qdrant and the agent,
+    and a negative control that shows the probe reaches a target once the
+    policy is absent;
+  - the production release's `networkPolicy.allowedNamespaces`, showing it
+    does not list the CI namespace.
 - **Test data.** Tests and development never write to the production
   collection or alias. The dev pod's Qdrant is a localhost sidecar, and a CI
   job's is the `sim` service inside its job pod. Rehearsals use a
@@ -765,5 +778,7 @@ The names the gap builds on are a **public API**, limited to this list:
 3. **The gap release gate.** Which [release-gate](../release-verification.md)
    checks must a gap release pass? It has no connected lanes.
 4. **The build mechanism** for the unprivileged in-namespace image build
-   (F6).
+   (F6), and where its build and sign jobs run. They cannot run in the CI
+   namespace, because the signing key and the push credential never enter
+   it (§2).
 5. **F9 + F5 decisions D-1 to D-10.** Closed (status block).
