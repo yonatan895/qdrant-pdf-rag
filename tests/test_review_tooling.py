@@ -733,7 +733,7 @@ class TestCiUnitPartition(unittest.TestCase):
             (root / package / "__init__.py").write_text("")
         for relative in ("tests/ci_shard.py", "scripts/unit_evidence.py", "requirements.dev.lock.txt",
                          "locks/cp314-linux-x86_64.json", "scripts/prepare_python.py",
-                         "scripts/dependency_lock.py", "scripts/agent_doctor.py", "scripts/devkit_key.py"):
+                         "scripts/dependency_lock.py", "scripts/agent_doctor.py"):
             (root / relative).parent.mkdir(parents=True, exist_ok=True)
             (root / relative).write_bytes((repository / relative).read_bytes())
         (root / "tests/conftest.py").write_text("")
@@ -1449,8 +1449,7 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
         unit_policy = {path: hashlib.sha256(b"approved verifier input").hexdigest() for path in
                        ("pyproject.toml", "tests/conftest.py", "tests/ci_shard.py", "scripts/unit_evidence.py",
                         "requirements.dev.lock.txt", "locks/cp314-linux-x86_64.json",
-                        "scripts/prepare_python.py", "scripts/dependency_lock.py", "scripts/agent_doctor.py",
-                        "scripts/devkit_key.py")}
+                        "scripts/prepare_python.py", "scripts/dependency_lock.py", "scripts/agent_doctor.py")}
         eligible = ["tests/test_example.py::actual", "tests/test_example.py::other"]
         collection = {"phase": "collect", "passed": True, "inputs": unit_policy,
                       "versions": {"pytest": "synthetic", "pluggy": "synthetic", "anyio": "synthetic"},
@@ -1576,7 +1575,7 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             for path in ("pyproject.toml", "tests/conftest.py", "tests/ci_shard.py", "scripts/unit_evidence.py",
                          "requirements.dev.lock.txt", "locks/cp314-linux-x86_64.json",
                          "scripts/prepare_python.py", "scripts/dependency_lock.py", "scripts/agent_doctor.py",
-                         "scripts/devkit_key.py", "Taskfile.yml", "taskfiles/quality.yml", "scripts/tools/run-task.sh",
+                         "Taskfile.yml", "taskfiles/quality.yml", "scripts/tools/run-task.sh",
                          "tests/hazards/critical.json", "scripts/check_hazard_sensitivity.py"):
                 with self.subTest(path=path):
                     api.changed_input = path

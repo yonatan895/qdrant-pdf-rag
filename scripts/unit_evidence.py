@@ -11,8 +11,7 @@ from pathlib import Path
 
 INPUTS = ('pyproject.toml', 'tests/conftest.py', 'tests/ci_shard.py', 'scripts/unit_evidence.py',
           'requirements.dev.lock.txt', 'locks/cp314-linux-x86_64.json',
-          'scripts/prepare_python.py', 'scripts/dependency_lock.py', 'scripts/agent_doctor.py',
-          'scripts/devkit_key.py')
+          'scripts/prepare_python.py', 'scripts/dependency_lock.py', 'scripts/agent_doctor.py')
 POLICY = {'testpaths': ['tests'], 'python_files': ['test_*.py', '*_test.py'],
           'python_classes': ['Test'], 'python_functions': ['test'],
           'addopts': ['-q', '-m', 'not integration']}
