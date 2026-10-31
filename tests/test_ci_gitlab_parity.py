@@ -130,13 +130,21 @@ def ignores(command):
 
 
 def expression_matches(expression, variables):
-    """The rule expression forms this file may use: `$V`, `$V == "x"`, `$V != "x"`, joined by &&."""
+    """The rule expression forms this file may use, joined by &&: `$V`, `$V == "x"`, `$V != "x"`,
+    `$V == null` (unset) and `$V =~ /re/` or `/re/i` (RE2; an unset variable never matches)."""
     for clause in (c.strip() for c in expression.split('&&')):
-        compare = re.fullmatch(r'\$(\w+) (==|!=) "([^"]*)"', clause)
+        compare = re.fullmatch(r'\$(\w+) (==|!=) (?:"([^"]*)"|(null))', clause)
+        regex = re.fullmatch(r'\$(\w+) =~ /(.+)/(i?)', clause)
         bare = re.fullmatch(r'\$(\w+)', clause)
-        assert compare or bare, f'unsupported rule expression {expression!r}'
+        assert compare or regex or bare, f'unsupported rule expression {expression!r}'
         if compare:
-            matched = (variables.get(compare.group(1)) == compare.group(3)) == (compare.group(2) == '==')
+            value = variables.get(compare.group(1))
+            equal = value is None if compare.group(4) else value == compare.group(3)
+            matched = equal == (compare.group(2) == '==')
+        elif regex:
+            value = variables.get(regex.group(1))
+            flags = re.IGNORECASE if regex.group(3) else 0
+            matched = value is not None and re.search(regex.group(2), value, flags) is not None
         else:
             matched = bool(variables.get(bare.group(1)))
         if not matched:
@@ -170,18 +178,28 @@ def child_doc(doc, config):
     return merge(doc, {k: v for k, v in config.items() if k != 'include'})
 
 
+# GitLab 17.0 is the floor (the site's minor is not disclosed): a draft is read
+# from the title, as GitLab's own Gitlab::Regex.merge_request_draft reads it;
+# CI_MERGE_REQUEST_DRAFT (17.10) is never consulted.
 MR = {'CI_PIPELINE_SOURCE': 'merge_request_event', 'CI_MERGE_REQUEST_IID': '3',
-      'CI_MERGE_REQUEST_DRAFT': 'false'}
-DRAFT_MR = {**MR, 'CI_MERGE_REQUEST_DRAFT': 'true'}
+      'CI_MERGE_REQUEST_TITLE': 'Add a feature'}
+DRAFT_MR = {**MR, 'CI_MERGE_REQUEST_TITLE': 'Draft: Add a feature'}
+DRAFT_TITLES = ('Draft: Add a feature', '[Draft] Add a feature', '(Draft) Add a feature',
+                     'draft: Add a feature', 'DRAFT:Add a feature', '[DRAFT] x')
+READY_TITLES = ('Add a feature', 'Fix Draft: parsing', 'Drafts: retention', 'Draft Add a feature',
+                     ' Draft: leading space', 'Draft- x', '{Draft} x')
 TAG = {'CI_PIPELINE_SOURCE': 'push', 'CI_COMMIT_TAG': 'v1.2.3'}
 BRANCH = {'CI_PIPELINE_SOURCE': 'push', 'CI_COMMIT_BRANCH': 'feature'}
 CHILD = {'CI_PIPELINE_SOURCE': 'parent_pipeline', 'CI_COMMIT_BRANCH': 'feature'}
-# A GitLab before 17.10 does not set CI_MERGE_REQUEST_DRAFT: drafts fall back to the gate.
-UNSET_DRAFT_MR = {k: v for k, v in DRAFT_MR.items() if k != 'CI_MERGE_REQUEST_DRAFT'}
+# Doubt fails toward the gate: a ready title or no title. A 17.10 draft variable
+# alone moves nothing.
 GATE_SCENARIOS = {'merge request': MR, 'tag': TAG,
-                  'merge request without CI_MERGE_REQUEST_DRAFT': UNSET_DRAFT_MR}
+                  'merge request without a title': {k: v for k, v in MR.items() if k != 'CI_MERGE_REQUEST_TITLE'},
+                  'CI_MERGE_REQUEST_DRAFT true with a ready title': {**MR, 'CI_MERGE_REQUEST_DRAFT': 'true'},
+                  **{f'merge request titled {t!r}': {**MR, 'CI_MERGE_REQUEST_TITLE': t} for t in READY_TITLES}}
 # Draft merge requests: every lane, no selection (#808), but on wip (ADR-0009 section 2).
-DRAFT_SCENARIOS = {'draft merge request': DRAFT_MR}
+DRAFT_SCENARIOS = {f'draft merge request titled {t!r}': {**MR, 'CI_MERGE_REQUEST_TITLE': t}
+                   for t in DRAFT_TITLES}
 WIP_SCENARIOS = {
     'branch': BRANCH,
     'default branch': {'CI_PIPELINE_SOURCE': 'push', 'CI_COMMIT_BRANCH': 'main'},
@@ -279,9 +297,15 @@ def rule_shape_violations(doc):
     return found
 
 
+# Above the GitLab 17.0 floor (docs/deploy.md#7-ci-inventory): never read.
+ABOVE_FLOOR = ('CI_MERGE_REQUEST_DRAFT',)
+
+
 def pipeline_violations(doc):
     """Pipeline shape (GH#1118 F11): which jobs run where, on which runner tag."""
     found = rule_shape_violations(doc)
+    text = yaml.safe_dump(doc)
+    found += [f'{name} needs GitLab above the 17.0 floor' for name in ABOVE_FLOOR if name in text]
     for label, variables in GATE_SCENARIOS.items():
         run = pipeline(doc, variables)
         if run is None:
@@ -566,7 +590,8 @@ def workflow_rule(doc, needle):
     return next(r for r in doc['workflow']['rules'] if r['if'] == needle)
 
 
-DRAFT_RULE = '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_DRAFT == "true"'
+DRAFT_RULE = ('$CI_PIPELINE_SOURCE == "merge_request_event"'
+              ' && $CI_MERGE_REQUEST_TITLE =~ /^(\\[draft\\]|\\(draft\\)|draft:)/i')
 
 
 def set_unit_line(doc, line):
@@ -641,13 +666,27 @@ NEGATIVE_CONTROLS = {
     'every merge request on wip': lambda d: workflow_rule(d, DRAFT_RULE).update(
         {'if': '$CI_PIPELINE_SOURCE == "merge_request_event"'}),
     'draft rule matches a ready merge request': lambda d: workflow_rule(d, DRAFT_RULE).update(
-        {'if': '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_DRAFT'}),
+        {'if': '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TITLE'}),
+    'draft rule needs GitLab 17.10': lambda d: workflow_rule(d, DRAFT_RULE).update(
+        {'if': '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_DRAFT == "true"'}),
+    'draft rule also reads the 17.10 variable': lambda d: d['workflow']['rules'].insert(1, {
+        'if': '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_DRAFT == "true"',
+        'variables': {'CI_RUNNER_TAG': 'wip'}}),
     'draft merge requests run no lanes': lambda d: d['.gate-pipeline']['rules'].insert(
-        0, {'if': '$CI_MERGE_REQUEST_DRAFT == "true"', 'when': 'never'}),
+        0, {'if': '$CI_MERGE_REQUEST_TITLE =~ /^draft:/i', 'when': 'never'}),
     'draft merge requests run the selector': lambda d: d['.wip-pipeline']['rules'].append(
-        {'if': '$CI_MERGE_REQUEST_DRAFT == "true"'}),
+        {'if': '$CI_MERGE_REQUEST_TITLE =~ /^draft:/i'}),
     'draft merge request pipelines never auto-cancelled': lambda d: workflow_rule(d, DRAFT_RULE).update(
         auto_cancel={'on_new_commit': 'none'}),
+    'draft title regex unanchored': lambda d: workflow_rule(d, DRAFT_RULE).update(
+        {'if': DRAFT_RULE.replace('/^(', '/(')}),
+    'draft title regex case-sensitive': lambda d: workflow_rule(d, DRAFT_RULE).update({'if': DRAFT_RULE[:-1]}),
+    'draft title regex without the colon': lambda d: workflow_rule(d, DRAFT_RULE).update(
+        {'if': DRAFT_RULE.replace('draft:)', 'draft)')}),
+    'draft title regex misses a GitLab prefix': lambda d: workflow_rule(d, DRAFT_RULE).update(
+        {'if': DRAFT_RULE.replace('|\\(draft\\)', '')}),
+    'draft rule after the ready merge request rule': lambda d: d['workflow']['rules'].insert(
+        3, d['workflow']['rules'].pop(d['workflow']['rules'].index(workflow_rule(d, DRAFT_RULE)))),
     'tag pipelines on wip': lambda d: workflow_rule(d, '$CI_COMMIT_TAG')['variables'].update(
         CI_RUNNER_TAG='wip'),
     'branch pipelines on gate': lambda d: d['workflow']['rules'][-1]['variables'].update(CI_RUNNER_TAG='gate'),
@@ -972,10 +1011,11 @@ def test_merge_request_and_tag_pipelines_run_every_lane_directly_on_gate(label):
     assert resolve(GITLAB, 'test')['parallel'] == UNIT_SHARDS
 
 
-def test_a_draft_merge_request_runs_every_lane_directly_on_wip():
+@pytest.mark.parametrize('label', sorted(DRAFT_SCENARIOS))
+def test_a_draft_merge_request_runs_every_lane_directly_on_wip(label):
     # Marking a merge request ready starts no new pipeline, so a draft pipeline
     # may be the one a merge rests on: no selection (#808), but off the gate slot.
-    run = pipeline(GITLAB, DRAFT_MR)
+    run = pipeline(GITLAB, DRAFT_SCENARIOS[label])
     assert run is not None
     assert run['jobs'] == REQUIRED_JOBS and not run['jobs'] & SELECTION_JOBS
     assert run['variables'] == {'CI_RUNNER_TAG': 'wip'}
@@ -984,11 +1024,15 @@ def test_a_draft_merge_request_runs_every_lane_directly_on_wip():
 
 
 def test_only_a_draft_merge_request_leaves_the_gate():
+    # The 17.10 variable is never read: only the title moves a pipeline off the gate.
+    assert pipeline(GITLAB, {**MR, 'CI_MERGE_REQUEST_DRAFT': 'true'})['variables'] == {'CI_RUNNER_TAG': 'gate'}
     assert pipeline(GITLAB, {**DRAFT_MR, 'CI_MERGE_REQUEST_DRAFT': 'false'})['variables'] == {
-        'CI_RUNNER_TAG': 'gate'}
-    assert pipeline(GITLAB, UNSET_DRAFT_MR)['variables'] == {'CI_RUNNER_TAG': 'gate'}
-    # A tag never matches the draft rule, even if a draft variable leaked into its scope.
-    tag = pipeline(GITLAB, {**TAG, 'CI_MERGE_REQUEST_DRAFT': 'true'})
+        'CI_RUNNER_TAG': 'wip'}
+    for title in READY_TITLES:
+        assert pipeline(GITLAB, {**MR, 'CI_MERGE_REQUEST_TITLE': title})['variables'] == {
+            'CI_RUNNER_TAG': 'gate'}, title
+    # A tag never matches a draft rule, even if draft variables leaked into its scope.
+    tag = pipeline(GITLAB, {**TAG, 'CI_MERGE_REQUEST_DRAFT': 'true', 'CI_MERGE_REQUEST_TITLE': 'Draft: x'})
     assert tag['variables'] == {'CI_RUNNER_TAG': 'gate'} and tag['jobs'] == REQUIRED_JOBS
     assert tag['auto_cancel'] == {'on_new_commit': 'none'}
 

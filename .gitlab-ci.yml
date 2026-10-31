@@ -32,16 +32,17 @@
 # Pipelines (issue #808, ADR-0009 section 2, GH#1118 F11):
 #   merge request and tag pipelines run every lane (hygiene, lint, test x4,
 #   hazards, sim, gate-l1) directly, on the runner tag `gate` (one slot),
-#   except that a draft merge request pipeline ($CI_MERGE_REQUEST_DRAFT ==
-#   "true") runs on `wip`, so agent work never queues ahead of a merge gate.
+#   except that a draft merge request pipeline runs on `wip`, so agent work
+#   never queues ahead of a merge gate.
 #   A draft still runs every lane with no selection: marking a merge request
 #   ready does not start a new pipeline, so the draft's pipeline may be the
 #   one a merge rests on, and #808 forbids a partial one.
-#   CI_MERGE_REQUEST_DRAFT needs GitLab >= 17.10 (GitLab's predefined-variable
-#   reference); the 16.10 minimum stated for auto_cancel below does not cover
-#   it. On an older GitLab the variable is unset, so every merge request
-#   pipeline, draft or ready, runs on `gate`: it fails toward the gate, never
-#   toward fewer lanes, and only the queue split is lost.
+#   A draft is a title GitLab itself reads as one: "Draft:", "[Draft]" or
+#   "(Draft)" at its start, in any case (Gitlab::Regex.merge_request_draft;
+#   GitLab derives draft status from the title). This works on GitLab 17.0 or
+#   later; CI_MERGE_REQUEST_DRAFT is not used. A missing or any other title
+#   keeps the pipeline on `gate`: doubt fails toward the gate, never toward
+#   fewer lanes.
 #   A release is built from an immutable tag, so the hygiene job refuses a tag
 #   pipeline whose ref is not protected (protect the release tag pattern in
 #   Settings > Repository > Protected tags, with creation limited to release
@@ -60,7 +61,7 @@
 #   pipeline (schedule, "Run pipeline", API) is not forwarded to the child
 #   pipeline that runs a branch pipeline's lanes.
 #   Every job is interruptible and a newer commit on the same ref cancels the
-#   older pipeline (workflow:auto_cancel, GitLab >= 16.10, with "Auto-cancel
+#   older pipeline (workflow:auto_cancel, GitLab 17.0 or later, with "Auto-cancel
 #   redundant pipelines" left on in Settings > CI/CD). Tag pipelines set
 #   auto_cancel none: nothing cancels a release pipeline.
 #
@@ -117,7 +118,7 @@
 # ==============================================================================
 
 workflow:
-  # GitLab >= 16.10. Cancels only interruptible jobs of an older pipeline on
+  # GitLab 17.0 or later. Cancels only interruptible jobs of an older pipeline on
   # the same ref; every job here is interruptible, and a branch pipeline's
   # child pipeline is cancelled with it.
   auto_cancel:
@@ -128,8 +129,8 @@ workflow:
     - if: '$CI_PIPELINE_SOURCE == "parent_pipeline"'
       variables:
         CI_RUNNER_TAG: "wip"
-    # Draft merge requests: every lane, on wip (GitLab >= 17.10; see above).
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_DRAFT == "true"'
+    # Draft merge requests: every lane, on wip (see above).
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TITLE =~ /^(\[draft\]|\(draft\)|draft:)/i'
       variables:
         CI_RUNNER_TAG: "wip"
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
