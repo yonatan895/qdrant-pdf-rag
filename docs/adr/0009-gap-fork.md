@@ -345,7 +345,8 @@ The script runs these steps. Each refusal is a fixed `STOP:` line in it.
    It never discards work that exists nowhere else. Every stop check runs
    first and changes nothing: a pushed branch, commits after `IMPORT READY`,
    an untracked file, a rebase or `git am` in progress, a name clash for a
-   kept branch, and any local change or operation in progress outside the
+   kept branch, a detached `HEAD` on a commit no branch, tag or remote branch
+   contains (keep it with `git branch <name> HEAD`), and any local change or operation in progress outside the
    unfinished import (on another branch, say). Only then does it set
    aside the unfinished import's uncommitted tracked changes with
    `git stash push -m "import_release <SHA> <UTC timestamp>"`, print that

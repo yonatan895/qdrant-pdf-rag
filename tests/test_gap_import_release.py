@@ -910,6 +910,43 @@ def test_a_kept_branch_name_clash_stops_before_anything_is_set_aside(tmp_path, k
     assert world.git(world.fork, "stash", "list", "--format=%gs").startswith(f"On import/{r2}: import_release {r2} ")
 
 
+DETACHED = ("STOP: HEAD in FORK is detached at commit {sha}, which no branch, tag or remote branch contains; "
+            "keep it with: git -C {fork} branch <name> HEAD, then rerun")
+
+
+def test_a_detached_head_on_an_unreferenced_commit_stops_until_a_branch_keeps_it(tmp_path, keys):
+    """#1165 independent review B1: step 0 switches away from HEAD. A detached
+    HEAD on a commit no ref contains would then be reachable only from the
+    HEAD reflog, so step 0 stops first, changing nothing. Once a branch keeps
+    the commit, the rerun converges to the uninterrupted result."""
+    _, r2, straight_tip = _straight(tmp_path, keys)
+    world = World(tmp_path / "w", keys)
+    assert _patched_world(world) == r2
+    world.git(world.fork, "switch", "-q", "--detach", "origin/main")
+    orphan = world.commit(world.fork, {"src/app.py": world.read("src/app.py") + "detached work\n"}, "Detached")
+    refs, status = world.refs(world.fork), world.git(world.fork, "status", "--porcelain")
+
+    stopped = world.run(r2)
+
+    assert_one_stop(stopped, DETACHED.format(sha=orphan, fork="'" + str(world.fork).replace("'", "'\\''") + "'"))
+    assert world.refs(world.fork) == refs
+    assert world.git(world.fork, "status", "--porcelain") == status
+    assert world.git(world.fork, "rev-parse", "HEAD").strip() == orphan
+
+    world.git(world.fork, "branch", "keep", "HEAD")  # The fix the STOP names.
+    assert assert_ready(world, world.run(r2), r2) == straight_tip
+    assert world.git(world.fork, "rev-parse", "refs/heads/keep").strip() == orphan
+
+
+def test_a_detached_head_on_a_referenced_commit_proceeds(tmp_path, keys):
+    _, r2, straight_tip = _straight(tmp_path, keys)
+    world = World(tmp_path / "w", keys)
+    assert _patched_world(world) == r2
+    world.git(world.fork, "switch", "-q", "--detach", "origin/main")
+
+    assert assert_ready(world, world.run(r2), r2) == straight_tip
+
+
 # The documented heading is "## GL#NNN <full commit sha>"; each of these only
 # looks like one. CRLF and a lowercase gl# were refused before.
 NEAR_MISS = {
