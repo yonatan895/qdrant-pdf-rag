@@ -140,6 +140,12 @@ main() {
     fi
     # Every stop check runs before anything is set aside, so a stop changes
     # nothing. Only the unfinished import's own checkout is ever set aside.
+    # A detached HEAD holding commits no ref contains would be left behind,
+    # reachable only from the HEAD reflog, when step 0 switches away.
+    lost=$(git rev-list -n 1 HEAD --not --branches --remotes --tags)
+    if [ -n "$lost" ]; then
+        stop "HEAD in FORK is detached at commit $lost, which no branch, tag or remote branch contains; keep it with: git -C $(q "$FORK") branch <name> HEAD, then rerun"
+    fi
     unfinished=0
     if [ "$on_branch" = 1 ] && [ "$finished" = 0 ]; then unfinished=1; fi
     if in_progress && [ "$unfinished" = 0 ]; then
