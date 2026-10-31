@@ -23,8 +23,18 @@
 #
 # Pipelines (issue #808, ADR-0009 section 2, GH#1118 F11):
 #   merge request and tag pipelines run every lane (hygiene, lint, test x4,
-#   hazards, sim, gate-l1) directly, on the runner tag `gate` (one slot). A
-#   release is built from an immutable tag, so the hygiene job refuses a tag
+#   hazards, sim, gate-l1) directly, on the runner tag `gate` (one slot),
+#   except that a draft merge request pipeline ($CI_MERGE_REQUEST_DRAFT ==
+#   "true") runs on `wip`, so agent work never queues ahead of a merge gate.
+#   A draft still runs every lane with no selection: marking a merge request
+#   ready does not start a new pipeline, so the draft's pipeline may be the
+#   one a merge rests on, and #808 forbids a partial one.
+#   CI_MERGE_REQUEST_DRAFT needs GitLab >= 17.10 (GitLab's predefined-variable
+#   reference); the 16.10 minimum stated for auto_cancel below does not cover
+#   it. On an older GitLab the variable is unset, so every merge request
+#   pipeline, draft or ready, runs on `gate`: it fails toward the gate, never
+#   toward fewer lanes, and only the queue split is lost.
+#   A release is built from an immutable tag, so the hygiene job refuses a tag
 #   pipeline whose ref is not protected (protect the release tag pattern in
 #   Settings > Repository > Protected tags, with creation limited to release
 #   owners; a protected tag cannot be moved or deleted by developers).
@@ -37,7 +47,7 @@
 #   the JUnit gate, selects every lane. A lane with no job here (packaging,
 #   load, HA, HTTP probes, semantic eval) is not run by any GitLab pipeline.
 #   A branch with an open merge request runs no branch pipeline: its merge
-#   request pipeline is the only one, on `gate`.
+#   request pipeline is the only one, on `gate`, or on `wip` while a draft.
 #   Set the variables below as project variables: a variable given only to one
 #   pipeline (schedule, "Run pipeline", API) is not forwarded to the child
 #   pipeline that runs a branch pipeline's lanes.
@@ -67,9 +77,10 @@
 #   CI_BM25_CACHE_DIR (required for sim) offline-prepared Qdrant/bm25 cache on the
 #                                   runner, verified against bm25-weights.sha256
 #                                   (artifacts:bm25 output); no download fallback.
-#   CI_RUNNER_TAG   (optional)      one runner tag for every pipeline. Unset, merge
-#                                   request and tag pipelines use `gate` and branch
-#                                   pipelines `wip` (the two runner registrations
+#   CI_RUNNER_TAG   (optional)      one runner tag for every pipeline. Unset, ready
+#                                   merge request and tag pipelines use `gate`, and
+#                                   draft merge request and branch pipelines `wip`
+#                                   (the two runner registrations
 #                                   of ADR-0009 section 2). A project variable wins
 #                                   over both: set it only on a single-runner site,
 #                                   where it gives up the gate/wip split.
@@ -101,6 +112,10 @@ workflow:
   # CI_RUNNER_TAG overrides it (see the admin setup above).
   rules:
     - if: '$CI_PIPELINE_SOURCE == "parent_pipeline"'
+      variables:
+        CI_RUNNER_TAG: "wip"
+    # Draft merge requests: every lane, on wip (GitLab >= 17.10; see above).
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_DRAFT == "true"'
       variables:
         CI_RUNNER_TAG: "wip"
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'

@@ -63,7 +63,8 @@
   only other source of production code.
 - **Current behavior** (F1 is done) of `check_checkout_sha` in
   `scripts/airgap/common.sh`, which load, deploy, ingest and validate call
-  (the pipeline runs all four):
+  (the pipeline runs all four), and so does `retire_legacy.sh`, the other
+  writer-key entry point (#1118 item e):
   - Outside dry-run it refuses, with a fixed message, any checkout that is
     not a verified signed release as the decision below defines it. No
     MANIFEST, no configured trust anchor, a signature that does not verify
@@ -183,8 +184,10 @@
   The dev pod has no RBAC there, because creating a pod would let it mount
   any Secret in the namespace.
   - There are four job slots of about 1 CPU each, since pytest runs on one
-    core. They form two runner registrations: `gate`, one slot for merge
-    request and tag pipelines, and `wip`, three slots for branch pipelines.
+    core. They form two runner registrations: `gate`, one slot for ready
+    merge request and tag pipelines, and `wip`, three slots for branch and
+    draft merge request pipelines. A draft still runs every lane (GitLab
+    >= 17.10; older versions keep drafts on `gate`).
     Agent work never queues ahead of a merge gate. Tag pipelines on `gate`
     run only the verification lanes; the F6 build and sign jobs do not run
     on these runners.
@@ -525,15 +528,18 @@ refreshed with each kit (Q9).
   check) serves the bastion, the dev pod and the runner jobs. It is
   UBI-based and holds:
   - the CPython 3.14 GIL build, the pinned Task and Helm 4;
-  - the hash-locked dev wheels from `requirements.dev.lock.txt`;
+  - the dev environment installed from the hash-locked `requirements.dev.lock.txt`
+    wheels, which are bind-mounted for the install only (D-7);
   - `oc` and `skopeo`, plus git-core, openssl, sha256sum, tar and gawk, from
     an exact RPM NEVRA list, so drift fails the build. GPL-licensed RPMs are
     accepted;
   - the session login helpers (`mfr-session-login` and its logout).
 
   It runs under `restricted-v2` with an arbitrary non-root UID. The
-  checkout's own source is used in place, so development installs and
-  builds nothing.
+  checkout's own source is used in place, so development installs no
+  dependency and builds no image. `prepare_python.py --kit --venv DIR` gives
+  the checkout a venv layered over that environment, with only the checkout
+  installed editable.
 - **The bastion** runs the Linux-only operator path. It is a pod on this
   image under its own ServiceAccount, with no RBAC (D-2) and no Secret
   mount. At session start the operator's own `oc` on Windows pipes in two
@@ -607,8 +613,8 @@ refreshed with each kit (Q9).
   so the kit, like the release bundle's loose signed members, has no
   top-level `.tar` and no links; the image is an OCI layout directory whose
   `blobs/sha256/<hex>` names are NTFS-safe. It holds:
-  - the image as an OCI layout, with the dev wheels inside it only: a
-    `prepare_python.py --kit` mode (D-7) keeps them from shipping twice;
+  - the image as an OCI layout. The dev wheels ship only as its installed
+    environment, with no wheelhouse (D-7, option B, 2026-10-31);
   - a pinned `oras.exe` (`scripts/tools/oras-windows-pin.txt`, shipped as
     the extracted binary) and the static Linux `oras` for the fallback, the
     bastion template and the Windows runbook;
@@ -766,7 +772,7 @@ The names the gap builds on are a **public API**, limited to this list:
 
 | Item | Scope | Verifier-owned |
 |---|---|---|
-| F1 | Done: outside dry-run, load, deploy, ingest and validate refuse a checkout that is not a verified signed release. The trust anchor is required. The opt-out needs `CI_REHEARSAL=1`. Tests go in the air-gap shell suites. The live bundle lanes export the packing job's key as the anchor; hermetic fixtures from plain trees set the opt-out | Lanes and taskfiles: yes |
+| F1 | Done: outside dry-run, load, deploy, ingest, validate and retire-legacy refuse a checkout that is not a verified signed release. The trust anchor is required. The opt-out needs `CI_REHEARSAL=1`. Tests go in the air-gap shell suites. The live bundle lanes export the packing job's key as the anchor; hermetic fixtures from plain trees set the opt-out | Lanes and taskfiles: yes |
 | F2 | Two trust anchors (upstream and gap) and the MANIFEST `origin:` field | No |
 | F3 | Done in this PR: `tests/test_hygiene.py` fails on GitHub Actions when `gap/` or `.gitlab/` exists | No |
 | F4 | The CODEOWNERS generator, its equality test and the GitLab hygiene check | No |

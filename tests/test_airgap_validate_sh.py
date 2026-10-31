@@ -1116,9 +1116,9 @@ def test_validate_live_refuses_a_plain_checkout_and_passes_with_the_opt_out(tree
 
 
 def test_checkout_guard_wired_into_all_launch_paths():
-    """deploy/ingest/validate/load each invoke the shared checkout guard
-    next to their manifest cross-check (issue #414)."""
-    for name in ("deploy.sh", "ingest.sh", "validate.sh", "load.sh"):
+    """deploy/ingest/validate/load and the writer-key retire_legacy.sh each
+    invoke the shared checkout guard (issue #414, #1118 item e)."""
+    for name in ("deploy.sh", "ingest.sh", "validate.sh", "load.sh", "retire_legacy.sh"):
         text = (REPO / "scripts" / "airgap" / name).read_text()
         assert "check_checkout_sha" in text, name
 

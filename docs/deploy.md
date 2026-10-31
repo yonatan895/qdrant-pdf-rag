@@ -592,8 +592,8 @@ checksums **after**.
   tarball. Without a pinned pubkey, verification is TOFU: it binds members
   together but proves nothing about *which* key signed. The executing-checkout
   guard below therefore requires `SNEAKERNET_TRUSTED_PUB` outside dry-run
-  (#1118 F1), so load, deploy, ingest and validate never run on TOFU alone
-  outside the connected opt-out described there.
+  (#1118 F1), so load, deploy, ingest, validate and retire-legacy never run
+  on TOFU alone outside the connected opt-out described there.
 - Load re-verifies the signature, then checksums, then the `IMAGE_SHA`
   against the manifest, then all six base image digests (plus the
   oauth-proxy digest when the bundle carries it) — and pushes under fixed
@@ -622,7 +622,8 @@ checksums **after**.
   archive's image config before any push. Deploy and ingest repeat the registry
   read-back and render by digest (see the image identity section below).
 - Executing-checkout guard (`common.sh::check_checkout_sha`, run by load,
-  deploy, ingest and validate). Outside dry-run the checkout must be a
+  deploy, ingest, validate and `retire_legacy.sh`, before any cluster or
+  Qdrant contact). Outside dry-run the checkout must be a
   verified signed release (#1118 F1, ADR-0009 §1): a packed MANIFEST must be
   reachable, and:
   1. *MANIFEST authenticity.* The guard never reads a bare file. `SHA256SUMS`,
@@ -1210,7 +1211,7 @@ containers, a writable host or cluster access.
 | Area | Requirement | Used by |
 |---|---|---|
 | GitLab | Release version recorded, 16.10 or later (`workflow:auto_cancel`); protected tags; `CI_COMMIT_TAG` and `CI_COMMIT_REF_PROTECTED`; variables expanded in `image`, `services` and `tags`; `CI_OPEN_MERGE_REQUESTS`; dynamic child pipelines (`trigger:include:artifact`) | all pipelines |
-| Runner | Tags `gate` (merge request and tag pipelines) and `wip` (branch pipelines), or one tag for all from the project variable `CI_RUNNER_TAG`; linux-amd64; an executor that starts job and service images from the approved registry with a service alias; reads `CI_TASK_ARCHIVE`, `CI_HELM_ARCHIVE` and `CI_BM25_CACHE_DIR` from the runner; no route to PyPI, Docker Hub or GitHub | all GitLab jobs |
+| Runner | Tags `gate` (ready merge request and tag pipelines) and `wip` (branch and draft merge request pipelines), or one tag for all from the project variable `CI_RUNNER_TAG`; linux-amd64; an executor that starts job and service images from the approved registry with a service alias; reads `CI_TASK_ARCHIVE`, `CI_HELM_ARCHIVE` and `CI_BM25_CACHE_DIR` from the runner; no route to PyPI, Docker Hub or GitHub | all GitLab jobs |
 | Python packages | `PIP_FIND_LINKS` wheelhouse or `PIP_INDEX_URL` internal index, never a public index | `.py-base` |
 | Quay | Release version recorded; Docker v2 API reachable by `skopeo`; a push identity for the five runtime paths; pull access for cluster and runner; organization layout may differ from upstream paths | `load.sh`, runner |
 | OpenShift | Namespace-scoped deployer; `restricted-v2` SCC with no `anyuid`; RWO block storage for Qdrant (NFS only for the read-only corpus); ClusterIP-only Qdrant; Route only with OAuth | deploy, ingest |
@@ -1250,7 +1251,8 @@ lane (issue #360: three-peer placement/peer-loss fixture), connected E2E,
 and the dry-run gate; air-gap GitLab runs hygiene, lint/types, the unit suite
 in four shards, hazards, the sim tier and gate-l1 only (no e2e, load, deploy,
 multi-peer docker, GHCR, or PDFs/tokens/hostnames in file). Merge request and
-tag pipelines run every GitLab lane on the `gate` runner tag; branch pipelines
+tag pipelines run every GitLab lane on the `gate` runner tag, a draft merge
+request every lane on `wip` (GitLab >= 17.10); branch pipelines
 run on `wip` and select lanes with the fail-closed classifier through a child
 pipeline; a newer commit cancels the older pipeline on the same ref, never a
 tag pipeline (ADR-0009 section 2). GitLab unit/sim
@@ -2253,7 +2255,9 @@ It records:
 
 - each F9 ServiceAccount's `can-i --list` in both namespaces against a fixed, versioned
   baseline in the script (`BASELINE_VERSION`: the Kubernetes and OpenShift self-review,
-  discovery and default `system:authenticated` rules). Any other rule is a violation,
+  discovery and default `system:authenticated` rules, and the `get` on the four OIDC
+  issuer discovery URLs that `system:service-account-issuer-discovery` grants every
+  ServiceAccount). Any other rule is a violation,
   whichever binding or group granted it; a site whose defaults differ fails closed until
   a reviewed PR changes the baseline;
 - a negative matrix asked outright of each F9 ServiceAccount in both namespaces: secret
@@ -2283,12 +2287,20 @@ It records:
   operator cannot read it, pass them with `--cluster-network CIDR`, or the check stays
   `unchecked` and the result inconclusive;
 - the agent ingress policies;
-- with `--probe`, TCP and DNS outcomes from probe pods carrying exactly the labels of a
-  live pod of each role (for runner jobs without a live job: the role label, the runner
-  configuration's `pod_labels` and GitLab Runner's default labels). The run is marked by
-  an annotation, never a label. A probe
+- with `--probe`, TCP and DNS outcomes from probe pods carrying the labels of a live pod
+  of each role (for runner jobs without a live job: the role label, the runner
+  configuration's `pod_labels` and GitLab Runner's default labels), minus the keys a
+  workload controller owns (`pod-template-hash`, `controller-revision-hash`,
+  `statefulset.kubernetes.io/pod-name`, `apps.kubernetes.io/pod-index`, `job-name`,
+  `controller-uid`, `batch.kubernetes.io/*`). Each probe pod's controller reference
+  (`blockOwnerDeletion: false`) is the run's `mfr-proof-owner-<run>` ConfigMap in its
+  namespace, so no ReplicaSet, StatefulSet or Job adopts it and then deletes it or the
+  real pod; the operator therefore needs configmap create and delete in both namespaces.
+  The run is marked by an annotation, never a label. A probe
   pod in the production namespace that no policy selects is the negative control: a
-  blocked result counts only for a target the control reached. A CIDR wider than one
+  blocked result counts only for a target the control reached. A DNS probe that comes back
+  `unresolved` is looked up once more after `DNS_RETRY_DELAY_S` (2 s) and the result is
+  marked `retried`; no other outcome is retried. A CIDR wider than one
   address is not probed; give such a class a `--probe-host CLASS=HOST`.
 
 The record holds verbs, resources, object names and outcomes, never a Secret value, token
@@ -2296,9 +2308,11 @@ or env value.
 
 Exit 0 means proven, 1 a violation, 2 a usage or environment error, an inconclusive
 result, or a run without `--probe` (verdict `static-only`, never the full proof). Run one
-proof at a time: each run first deletes probe objects (label
-`isolation-proof.mainframe-rag.io/run`, an annotation on `mfr-proof-*` pods) that an earlier run left, and removes its own on
-every exit, SIGTERM and SIGHUP included; only a SIGKILL leaves them for the next run.
+proof at a time: each run first deletes probe objects (`mfr-proof-*` pods and
+`mfr-proof-owner-*` ConfigMaps with the annotation `isolation-proof.mainframe-rag.io/run`)
+that an earlier run left, and removes its own on every exit, SIGTERM and SIGHUP included;
+only a SIGKILL leaves them for the next run, and deleting a leftover owner ConfigMap also
+garbage-collects its probe pods.
 Tests: `tests/test_isolation_proof.py` (a stub `oc`, canary leak assertions).
 
 **Kind lane** (`kind-workspace-isolation`, [workflow](../.github/workflows/workspace-isolation.yml),

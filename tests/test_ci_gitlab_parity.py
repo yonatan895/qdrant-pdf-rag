@@ -3,9 +3,10 @@
 Hermetic: both CI definitions are parsed, the GitLab job scripts are executed
 under `sh -e` with stub tools, and every static rule has negative controls
 (mutated copies of the real definition must be rejected). Pipeline shape
-(GH#1118 F11) is evaluated from the real workflow and job rules: merge request
-and tag pipelines run every lane on `gate`, branch pipelines run the lane
-selector on `wip` and its child pipeline. The select job runs for real against
+(GH#1118 F11) is evaluated from the real workflow and job rules: ready merge
+request and tag pipelines run every lane on `gate`, draft merge request
+pipelines run every lane on `wip`, branch pipelines run the lane selector on
+`wip` and its child pipeline. The select job runs for real against
 synthetic git histories, and the unit shards are checked against a real
 collection. A real GitLab pipeline run is still required to prove runner,
 image, service, child-pipeline and auto-cancel behavior.
@@ -138,11 +139,18 @@ def child_doc(doc, config):
     return merge(doc, {k: v for k, v in config.items() if k != 'include'})
 
 
-MR = {'CI_PIPELINE_SOURCE': 'merge_request_event', 'CI_MERGE_REQUEST_IID': '3'}
+MR = {'CI_PIPELINE_SOURCE': 'merge_request_event', 'CI_MERGE_REQUEST_IID': '3',
+      'CI_MERGE_REQUEST_DRAFT': 'false'}
+DRAFT_MR = {**MR, 'CI_MERGE_REQUEST_DRAFT': 'true'}
 TAG = {'CI_PIPELINE_SOURCE': 'push', 'CI_COMMIT_TAG': 'v1.2.3'}
 BRANCH = {'CI_PIPELINE_SOURCE': 'push', 'CI_COMMIT_BRANCH': 'feature'}
 CHILD = {'CI_PIPELINE_SOURCE': 'parent_pipeline', 'CI_COMMIT_BRANCH': 'feature'}
-GATE_SCENARIOS = {'merge request': MR, 'tag': TAG}
+# A GitLab before 17.10 does not set CI_MERGE_REQUEST_DRAFT: drafts fall back to the gate.
+UNSET_DRAFT_MR = {k: v for k, v in DRAFT_MR.items() if k != 'CI_MERGE_REQUEST_DRAFT'}
+GATE_SCENARIOS = {'merge request': MR, 'tag': TAG,
+                  'merge request without CI_MERGE_REQUEST_DRAFT': UNSET_DRAFT_MR}
+# Draft merge requests: every lane, no selection (#808), but on wip (ADR-0009 section 2).
+DRAFT_SCENARIOS = {'draft merge request': DRAFT_MR}
 WIP_SCENARIOS = {
     'branch': BRANCH,
     'default branch': {'CI_PIPELINE_SOURCE': 'push', 'CI_COMMIT_BRANCH': 'main'},
@@ -202,6 +210,15 @@ def pipeline_violations(doc):
             found.append(f'{label} pipelines must run every lane directly, ran {sorted(run["jobs"])}')
         if run['variables'].get('CI_RUNNER_TAG') != 'gate':
             found.append(f'{label} pipelines must run on the gate runner tag')
+    for label, variables in DRAFT_SCENARIOS.items():
+        run = pipeline(doc, variables)
+        if run is None:
+            found.append(f'{label} pipelines are not admitted')
+            continue
+        if run['jobs'] != REQUIRED_JOBS:
+            found.append(f'{label} pipelines must run every lane directly, ran {sorted(run["jobs"])}')
+        if run['variables'].get('CI_RUNNER_TAG') != 'wip':
+            found.append(f'{label} pipelines must run on the wip runner tag')
     for label, variables in WIP_SCENARIOS.items():
         run = pipeline(doc, variables)
         if run is None:
@@ -217,7 +234,8 @@ def pipeline_violations(doc):
     tag = pipeline(doc, TAG)
     if tag and tag['auto_cancel'].get('on_new_commit') != 'none':
         found.append('tag pipelines can be auto-cancelled')
-    for label, variables in {'merge request': MR, 'branch': BRANCH, 'child': CHILD}.items():
+    for label, variables in {'merge request': MR, 'draft merge request': DRAFT_MR,
+                             'branch': BRANCH, 'child': CHILD}.items():
         run = pipeline(doc, variables)
         if run and run['auto_cancel'].get('on_new_commit') != 'interruptible':
             found.append(f'{label} pipelines are not auto-cancelled by a newer commit')
@@ -403,6 +421,9 @@ def workflow_rule(doc, needle):
     return next(r for r in doc['workflow']['rules'] if r['if'] == needle)
 
 
+DRAFT_RULE = '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_DRAFT == "true"'
+
+
 def set_unit_line(doc, line):
     doc['test']['script'][doc['test']['script'].index(UNIT_LINE)] = line
 
@@ -451,6 +472,19 @@ NEGATIVE_CONTROLS = {
         workflow_rule(d, '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS')),
     'merge request pipelines on wip': lambda d: workflow_rule(
         d, '$CI_PIPELINE_SOURCE == "merge_request_event"')['variables'].update(CI_RUNNER_TAG='wip'),
+    'draft merge requests on gate': lambda d: workflow_rule(d, DRAFT_RULE)['variables'].update(
+        CI_RUNNER_TAG='gate'),
+    'draft merge request rule removed': lambda d: d['workflow']['rules'].remove(workflow_rule(d, DRAFT_RULE)),
+    'every merge request on wip': lambda d: workflow_rule(d, DRAFT_RULE).update(
+        {'if': '$CI_PIPELINE_SOURCE == "merge_request_event"'}),
+    'draft rule matches a ready merge request': lambda d: workflow_rule(d, DRAFT_RULE).update(
+        {'if': '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_DRAFT'}),
+    'draft merge requests run no lanes': lambda d: d['.gate-pipeline']['rules'].insert(
+        0, {'if': '$CI_MERGE_REQUEST_DRAFT == "true"', 'when': 'never'}),
+    'draft merge requests run the selector': lambda d: d['.wip-pipeline']['rules'].append(
+        {'if': '$CI_MERGE_REQUEST_DRAFT == "true"'}),
+    'draft merge request pipelines never auto-cancelled': lambda d: workflow_rule(d, DRAFT_RULE).update(
+        auto_cancel={'on_new_commit': 'none'}),
     'tag pipelines on wip': lambda d: workflow_rule(d, '$CI_COMMIT_TAG')['variables'].update(
         CI_RUNNER_TAG='wip'),
     'branch pipelines on gate': lambda d: d['workflow']['rules'][-1]['variables'].update(CI_RUNNER_TAG='gate'),
@@ -689,6 +723,27 @@ def test_merge_request_and_tag_pipelines_run_every_lane_directly_on_gate(label):
     assert resolve(GITLAB, 'test')['parallel'] == UNIT_SHARDS
 
 
+def test_a_draft_merge_request_runs_every_lane_directly_on_wip():
+    # Marking a merge request ready starts no new pipeline, so a draft pipeline
+    # may be the one a merge rests on: no selection (#808), but off the gate slot.
+    run = pipeline(GITLAB, DRAFT_MR)
+    assert run is not None
+    assert run['jobs'] == REQUIRED_JOBS and not run['jobs'] & SELECTION_JOBS
+    assert run['variables'] == {'CI_RUNNER_TAG': 'wip'}
+    assert run['auto_cancel'] == {'on_new_commit': 'interruptible'}
+    assert resolve(GITLAB, 'test')['parallel'] == UNIT_SHARDS
+
+
+def test_only_a_draft_merge_request_leaves_the_gate():
+    assert pipeline(GITLAB, {**DRAFT_MR, 'CI_MERGE_REQUEST_DRAFT': 'false'})['variables'] == {
+        'CI_RUNNER_TAG': 'gate'}
+    assert pipeline(GITLAB, UNSET_DRAFT_MR)['variables'] == {'CI_RUNNER_TAG': 'gate'}
+    # A tag never matches the draft rule, even if a draft variable leaked into its scope.
+    tag = pipeline(GITLAB, {**TAG, 'CI_MERGE_REQUEST_DRAFT': 'true'})
+    assert tag['variables'] == {'CI_RUNNER_TAG': 'gate'} and tag['jobs'] == REQUIRED_JOBS
+    assert tag['auto_cancel'] == {'on_new_commit': 'none'}
+
+
 @pytest.mark.parametrize('label', sorted(WIP_SCENARIOS))
 def test_branch_pipelines_run_the_selector_and_its_child_on_wip(label):
     run = pipeline(GITLAB, WIP_SCENARIOS[label])
@@ -719,7 +774,8 @@ def test_every_job_is_interruptible_and_nothing_cancels_a_tag_pipeline():
     assert not keys_anywhere(GITLAB, 'allow_failure')
 
 
-@pytest.mark.parametrize('variables', [MR, BRANCH, CHILD], ids=['merge request', 'branch', 'child'])
+@pytest.mark.parametrize('variables', [MR, DRAFT_MR, BRANCH, CHILD],
+                         ids=['merge request', 'draft merge request', 'branch', 'child'])
 def test_a_newer_commit_cancels_older_merge_request_and_branch_pipelines(variables):
     assert pipeline(GITLAB, variables)['auto_cancel'] == {'on_new_commit': 'interruptible'}
 
