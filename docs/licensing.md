@@ -13,13 +13,17 @@ on 2026-10-26 the maintainer recorded `pymupdf` as an owner decision, an explici
 exception to waiting for qualified legal confirmation (withdrawn if confirmation is
 refused or the use changes). No entry is unresolved. The maintainer recorded the per-release approval for the
 first fresh-install release candidate on 2026-10-31 (#1118), bound to scope digest
-`07bbf2cf…`; any later dependency, pin or notice change voids it, and
+`07bbf2cf…`. Adding the [reference docs](#reference-docs) (#1174) changed the scope;
+the approval is now recorded under the maintainer's 2026-10-31 blanket licence
+approval of every #1174 doc set
+([#1174 comment](https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543)),
+bound to scope digest `4fad8d20…`. Any later dependency, pin or notice change voids it, and
 `check --release` then fails until a new approval is recorded.
 Source of authority: #376 and its triage comments (19 and 24 September, 1 October
 2026): close on a documented owner disposition, never on CI alone.
 Decision owners: `licenses/inventory.json` (the record),
 `scripts/license_inventory.py` (check and notices), `scripts/airgap/pack.sh`
-(bundle member), `scripts/devkit/pack.sh` (the [dev kit](#dev-kit) gate), and this
+(bundle member), `scripts/airgap/reference-docs.json` (the reference doc set pins), `scripts/devkit/pack.sh` (the [dev kit](#dev-kit) gate), and this
 file (obligations, options).
 
 ## Responsibility boundaries
@@ -27,7 +31,7 @@ file (obligations, options).
 | Category | What it is | Who is responsible |
 |---|---|---|
 | Public code | This repository, Apache-2.0 per `pyproject.toml` and `LICENSE`. Its license does not cover dependencies. | Maintainer |
-| Transferred artifacts | Both app images (wheels, base layers, htmx, BM25 weights), Qdrant/OpenObserve/otelcol-contrib/oauth-proxy images, the optional Open WebUI image once its pin is recorded (#1074), vendored chart, Task binary, repo bundle. Only these are what a release gives to the enterprise. | Release owner; obligations below |
+| Transferred artifacts | Both app images (wheels, base layers, htmx, BM25 weights), Qdrant/OpenObserve/otelcol-contrib/oauth-proxy images, the optional Open WebUI image once its pin is recorded (#1074), vendored chart, Task binary, repo bundle, the reference docs member (#1174). Only these are what a release gives to the enterprise. | Release owner; obligations below |
 | Local model simulation | Weights a developer downloads for local gateway/embed runs. Not in any image, chart or bundle. | Each developer or CI owner, per upstream model license |
 | Platform model service | Production reasoning/embed/rerank models behind the gateway. This repo consumes HTTP endpoints; it does not redistribute weights. | Platform team and its consumption agreement |
 | Protected corpus | Vendor manuals/runbooks. Never in git or a bundle. Rights to hold and process them are a separate corpus-governance decision. | Corpus owner; protected records |
@@ -35,7 +39,8 @@ file (obligations, options).
 ## What is recorded and how it is derived
 
 `licenses/inventory.json` holds one record per locked runtime wheel (66) and per
-non-Python component (17, including the three non-distributed boundaries above).
+non-Python component (21, including the three non-distributed boundaries above),
+plus one `reference-docs` record per upstream doc set (38; [below](#reference-docs)).
 
 - **Python wheels** are derived offline from the exact locked wheel bytes (66,
   METADATA `License-Expression`, `License` field or classifier, plus license-file
@@ -152,6 +157,39 @@ different evidence fields and moves the kit digest. A
 changed tag drops that RPM's decision fields. A new restricted record is seeded
 `pending-owner-decision`, never approved.
 
+<a id="reference-docs"></a>
+## Reference docs (#1174)
+
+The bundle member `reference-docs.tar.gz` ([deploy](deploy.md#reference-docs))
+carries 38 upstream doc sets pinned in `scripts/airgap/reference-docs.json`. Each set
+has one component record, kind `reference-docs`, id `docs:<set>`, bound by
+`bind.reference_docs` to the manifest row's `url`, archive `sha256` and
+`license_files`, with `license_spdx` equal to the row's `license`. `check` fails when
+a manifest row has no record, a record names a set the manifest lacks, or the
+archive, licence files or licence differ; the records are in the scope digest, so a
+re-pin voids the release approval. Every record is `approved` under the maintainer's
+blanket licence approval of 2026-10-31
+([#1174 comment](https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543)),
+which names the Open WebUI licence, the AGPL-3.0 PyMuPDF and OpenObserve docs and
+the CC-BY-4.0 attribution for opentelemetry.io and Kubernetes. Classes: 31
+permissive, 3 `unknown` (the CC-BY-4.0 sets: Kubernetes, opentelemetry.io and Helm;
+the checker does not class CC-BY), 2 network-copyleft (PyMuPDF, OpenObserve), 1
+weak-copyleft (Hypothesis, MPL-2.0), 1 proprietary (`LicenseRef-Open-WebUI-License`).
+Every record carries an obligation.
+
+What the member does for those obligations: each set's licence and notice files ship
+unmodified beside its docs (`reference-docs/sets/<set>/`, named in `INDEX.md` and in
+the notices); the docs are an unmodified subset of the pinned source; the CC-BY-4.0
+attribution (work, authors, source URL and commit, licence, "unmodified subset") is in
+the record's obligation, the notices and `INDEX.md`.
+
+The maintainer dropped the three upstream manuals that publish no licence (Qdrant
+`qdrant/landing_page`, `open-webui/docs`, `openobserve/openobserve-docs`; decision
+recorded on #1174). A set without an upstream licence cannot be expressed in the
+manifest: `reference_docs.py` refuses `NOASSERTION` or an empty licence-file list.
+`INDEX.md` points readers to the Qdrant API specs, the vendored Qdrant skills and the
+Open WebUI and OpenObserve READMEs instead.
+
 ## Docs-only tooling (not in the inventory)
 
 The Sphinx API reference (#889) is built from `site-src/reference/requirements.docs.lock.txt`
@@ -179,7 +217,7 @@ owner: these are maintainer dispositions, not legal approvals.
 | OpenObserve OSS v1.1.2 image | `approved` (ADR-0006, #956): AGPL-3.0 (`network-copyleft`) accepted for the unmodified upstream binary run as a separate service; it is transferred unchanged with the source reference upstream v1.1.2, and any modification or Enterprise-feature change needs a new decision. Layer inventory is follow-up #371. |
 | otelcol-contrib 0.160.0 image | `approved` on the upstream Apache-2.0 license; NOTICE content of image layers is not enumerated (#371). |
 | UBI 9 base image | `approved` on the UBI EULA after RPM-list extraction: 116 packages (name, version, license tag) from the rpmdb of the pinned digest in `licenses/ubi9-python-314-minimal.rpms.txt` (hash-bound, rendered into the notices). License tags are declared RPM metadata; any source offer would be a separately approved packaging change. |
-| oauth-proxy image | `approved` to transfer as an **external dependency**: the Red Hat image is shipped unmodified, not built here (`distributed_by_repo` stays true because the bundle carries it). Escalation, if transfer becomes a problem: maintainer, then platform team. |
+| oauth-proxy image | `approved` to transfer as an **external dependency**: the Red Hat image is shipped unmodified, not built here (`distributed_by_repo` stays true because the bundle carries it). Escalation, if transfer becomes a problem: maintainer, then platform team. Licence `MIT AND LicenseRef-Red-Hat-Registry-Terms`: the upstream `openshift/oauth-proxy` LICENSE at release-4.14 is MIT (corrected from Apache-2.0 on 2026-10-31, #1174, under the maintainer's blanket approval); the registry terms still govern the image. |
 | Open WebUI images (optional docs front end, ADR-0007, #1074) | Recorded as a maintainer disposition on 2026-10-24 (relayed by the #1070 coordinator; ADR-0007 L1), status `approved` (ADR-0007 accepted 2026-10-24; ADR-0008 accepted 2026-10-26). `LicenseRef-Open-WebUI-License`: BSD-3-Clause terms plus a branding clause, not OSI-approved (v0.6.6 and later), so the checker classes it `proprietary`. Conditions kept in the record: branding unmodified (no custom name, logo, theme or injected CSS) and at most 100 users; any change needs a new decision. Two records: the derived image (`qdrant-pdf-rag-openwebui`, the bundle member; the factory adds only an ownership/permission layer, #1073) and its upstream slim build base (`open-webui/open-webui`, provenance like the UBI line, shipped only as the derived image's base layers). The upstream base is pinned to the qualified v0.12.3-slim index `sha256:5adfb035…` (#1073 Kind trial); the derived image is pinned to its registry manifest digest `sha256:8417d47dd045…` (#1107 reproducible build, run 40401993947), to which the record is bound; pack skips the member while the pin reads `sha256:PENDING`. The maintainer owns patching: monthly agent-prepared upstream imports, each a dedicated pin-bump PR (ADR-0007 P1). |
 | IBM Plex fonts | `approved`; `OFL-1.1` is a permissive class in the checker. |
 | BM25 weights (`Qdrant/bm25`, rev `22b8d2af71a7`) | `approved`: the Hugging Face model card at that revision declares `license: apache-2.0` (`https://huggingface.co/api/models/Qdrant/bm25/revision/22b8d2af71a76161e18dd432d2cee0eefa66e412`, checked 2026-10-23). Re-check if the revision changes. |
@@ -291,7 +329,9 @@ decision or option B. Not a legal approval.
    required by `bootstrap.sh`, copied to `dist/`): the license/class/status of every
    component and wheel, the open owner decisions, the approval state, and the full
    texts of the project LICENSE, the Qdrant chart LICENSE, htmx, the Qdrant,
-   Matt Pocock and pstack skills licenses and notices, and Task (`task-LICENSE`). It is
+   Matt Pocock and pstack skills licenses and notices, and Task (`task-LICENSE`), and for
+   each reference doc set its source archive and where its licence texts sit in
+   `reference-docs.tar.gz` (the texts themselves ship there). It is
    deterministic and readable without any tool beyond a text viewer.
 4. Python license texts travel inside each image (`<dist>.dist-info`), not in the
    notices file. Pack-time verification of license files inside the actual image

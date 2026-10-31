@@ -22,7 +22,13 @@ from pathlib import Path
 
 import pytest
 
-from tests.helpers_airgap import REPO, gen_sign_keypair, sha256_bytes, sign_sums
+from tests.helpers_airgap import (
+    REPO,
+    gen_sign_keypair,
+    reference_docs_member,
+    sha256_bytes,
+    sign_sums,
+)
 from tests.helpers_task_artifact import copy_task_tools, task_manifest, task_members
 
 SCRIPT = "scripts/gap/import_release.sh"
@@ -142,6 +148,7 @@ class World:
         files = {
             "bootstrap.sh": (REPO / "scripts/airgap/bootstrap.sh").read_bytes(),
             "repo.bundle": (stage / "repo.bundle").read_bytes(),
+            "reference-docs.tar.gz": reference_docs_member(),
             "qdrant-image.tar": b"qdrant", "openobserve-image.tar": b"openobserve", "otelcol-image.tar": b"otelcol",
             f"app-ingest-{name_sha}.tar": b"ingest", f"app-agent-{name_sha}.tar": b"agent",
             "MANIFEST.txt": (f"sha: {name_sha}\n" + task_manifest()).encode(),

@@ -3,8 +3,9 @@
 
 ``licenses/inventory.json`` records the license basis of everything this
 repository ships: every locked runtime wheel, the pinned images, vendored chart,
-JS and Task tool, BM25 weights and Qdrant skills. The check keeps that record
-reconciled with the real pins (``locks/``, ``images.txt``, vendored bytes) so a
+JS and Task tool, BM25 weights, Qdrant skills and every offline reference doc
+set (GH#1174). The check keeps that record reconciled with the real pins
+(``locks/``, ``images.txt``, vendored bytes, ``scripts/airgap/reference-docs.json``) so a
 new or changed dependency, image digest or notice file cannot reach a bundle
 unrecorded, and so unresolved owner decisions stay visible.
 
@@ -47,6 +48,10 @@ except ModuleNotFoundError:
     locks = _local_locks
 
 INVENTORY = "licenses/inventory.json"
+# GH#1174: the pinned doc sets of the bundle's reference-docs member. Every set
+# needs exactly one component record bound to the same archive and licence.
+REFERENCE_DOCS = "scripts/airgap/reference-docs.json"
+REFERENCE_DOCS_BIND = ("url", "sha256", "license_files")
 SCHEMA_VERSION = 1
 
 # Ordered least to most restrictive. "election-required" is a dual license whose
@@ -416,11 +421,47 @@ def check_wheel_entry(root: Path, entry: dict, lock: dict, problems: list[str], 
                 problems.append(f"{label}: {key} differs from artifact metadata; license change needs review")
 
 
+def reference_doc_sets(root: Path, problems: list[str]) -> dict[str, dict]:
+    try:
+        data = json.loads((root / REFERENCE_DOCS).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        problems.append("reference docs manifest is missing or not valid JSON")
+        return {}
+    rows = data.get("sets") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        problems.append("reference docs manifest has no sets list")
+        return {}
+    sets: dict[str, dict] = {}
+    for row in rows:
+        ident = row.get("id") if isinstance(row, dict) else None
+        if not isinstance(ident, str) or ident in sets:
+            problems.append("reference docs manifest has a missing or duplicate set id")
+            continue
+        sets[ident] = row
+    return sets
+
+
+def check_reference_docs(entry: dict, label: str, sets: dict[str, dict], bound: set[str], problems: list[str]) -> None:
+    pin = (entry.get("bind") or {}).get("reference_docs")
+    if not isinstance(pin, dict):
+        problems.append(f"{label}: reference-docs record has no bind.reference_docs")
+        return
+    row = sets.get(str(pin.get("set")))
+    if row is None:
+        problems.append(f"{label}: bound reference docs set is not in {REFERENCE_DOCS}")
+        return
+    bound.add(row["id"])
+    if any(pin.get(key) != row.get(key) for key in REFERENCE_DOCS_BIND) or entry.get("license_spdx") != row.get("license"):
+        problems.append(f"{label}: reference docs archive, licence files or licence differ from the record; re-review the doc set")
+
+
 def check_components(root: Path, inventory: dict, problems: list[str], unresolved: list[str]) -> None:
     seen_ids: set[str] = set()
     bound_files: set[str] = set()
     bound_images: set[str] = set()
+    bound_docs: set[str] = set()
     pins = images_txt(root, problems)
+    doc_sets = reference_doc_sets(root, problems)
     for entry in inventory["components"]:
         cid = entry.get("id")
         if not isinstance(cid, str) or cid in seen_ids:
@@ -432,6 +473,8 @@ def check_components(root: Path, inventory: dict, problems: list[str], unresolve
             problems.append(f"{label}: distributed_by_repo must be true or false")
         check_policy(entry, label, problems, unresolved)
         bind = entry.get("bind") or {}
+        if entry.get("kind") == "reference-docs" or "reference_docs" in bind:
+            check_reference_docs(entry, label, doc_sets, bound_docs, problems)
         ref = bind.get("images_txt")
         if ref is not None:
             bound_images.add(ref)
@@ -458,6 +501,8 @@ def check_components(root: Path, inventory: dict, problems: list[str], unresolve
             match = re.search(r"(?m)^license-sha256:\s*([0-9a-f]{64})\s*$", text)
             if not match or match[1] != bind["pin_license_sha256"]:
                 problems.append(f"{label}: pinned license digest differs from the record")
+    for ident in sorted(set(doc_sets) - bound_docs):
+        problems.append(f"reference docs set {ident}: no license record")
     for ref in sorted(set(pins) - bound_images):
         problems.append(f"image {ref.split('/')[-1]}: images.txt entry has no license record")
     for chart in sorted(root.glob("charts/*.tgz")):
@@ -807,6 +852,11 @@ def render_notices(root: Path, inventory: dict, bundle_dir: Path | None) -> str:
         lines.append(f"    license: {entry['license_spdx']}  class: {entry['class']}  basis: {entry['spdx_basis']}")
         if entry.get("obligation"):
             lines.append(f"    obligation: {entry['obligation']}")
+        docs = (entry.get("bind") or {}).get("reference_docs")
+        if docs:
+            texts = ", ".join(f"reference-docs/sets/{docs['set']}/{name}" for name in docs["license_files"])
+            lines.append(f"    source: {docs['url']} (sha256 {docs['sha256']})")
+            lines.append(f"    licence texts: {texts} in reference-docs.tar.gz")
     lines += ["", "PYTHON DISTRIBUTIONS (locked runtime wheelhouse, installed in both application images)", "-" * 78,
               "License texts for these ship inside each image under <distribution>.dist-info.", ""]
     for entry in inventory["python"]:

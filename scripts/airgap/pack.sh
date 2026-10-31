@@ -134,7 +134,7 @@ task_extract_verified "$TASK_SOURCE" "$TASK_TMP"
 [ "$TASK_SOURCE" -ef "$DIST/$TASK_ASSET" ] || cp "$TASK_SOURCE" "$DIST/$TASK_ASSET"
 cp "$TASK_PIN" "$DIST/task-pin.txt"
 cp "$TASK_TMP/LICENSE" "$DIST/task-LICENSE"
-rm -f "$DIST"/repo.bundle "$DIST"/qdrant-image.tar \
+rm -f "$DIST"/repo.bundle "$DIST"/reference-docs.tar.gz "$DIST"/qdrant-image.tar \
       "$DIST"/openobserve-image.tar "$DIST"/otelcol-image.tar "$DIST"/app-*.tar \
       "$DIST"/MANIFEST.txt "$DIST"/THIRD-PARTY-NOTICES.txt "$DIST"/SHA256SUMS "$OUT_TARBALL" "$OUT_TARBALL.sha256"
 # shellcheck disable=SC2086
@@ -146,6 +146,27 @@ echo "==> Git bundle of the checked-out commit"
 # air-gap side falls back to a default branch instead of the packed SHA.
 git bundle create "$DIST/repo.bundle" HEAD --all
 git bundle verify "$DIST/repo.bundle" >/dev/null
+
+echo "==> Reference docs (pinned upstream doc sets + project docs; GH#1174)"
+# Every set in reference-docs.json is read from AIRGAP_REFDOCS_CACHE (archives
+# named by sha256; no download at all when it is set, like AIRGAP_TASK_ARCHIVE)
+# or from .tools/cache/reference-docs, else downloaded from its pinned URL; each
+# archive must equal its pinned sha256, and only the kept subset plus its licence
+# files is copied. Nothing is built or rendered. The project docs come from the
+# packed commit itself.
+REFDOCS_CACHE=${AIRGAP_REFDOCS_CACHE:-$REPO_ROOT/.tools/cache/reference-docs}
+if [ -n "${AIRGAP_REFDOCS_CACHE:-}" ] && [ ! -d "$AIRGAP_REFDOCS_CACHE" ]; then
+    die "AIRGAP_REFDOCS_CACHE is not a directory: $AIRGAP_REFDOCS_CACHE"
+fi
+git archive --format=tar -o "$TASK_TMP/project-docs.tar" HEAD -- README.md AGENTS.md LICENSE docs \
+    ':(glob).agents/skills/qdrant-*/**' .agents/qdrant-skills-provenance.md LICENSE.qdrant-skills NOTICE.qdrant-skills \
+    || die "cannot archive the project docs of the packed commit"
+python3 "$REPO_ROOT/scripts/airgap/reference_docs.py" build --manifest "$REPO_ROOT/scripts/airgap/reference-docs.json" \
+    --project-tar "$TASK_TMP/project-docs.tar" --cache "$REFDOCS_CACHE" ${AIRGAP_REFDOCS_CACHE:+--offline} --work "$TASK_TMP" \
+    --source-sha "$IMAGE_SHA" --mtime "$(git log -1 --format=%ct HEAD)" --output "$DIST/reference-docs.tar.gz" \
+    || die "reference docs could not be packed: a pinned doc set is missing, differs from its sha256 or holds an unsafe entry (FAIL line above)"
+REFDOCS_SHA256=$(sha256sum "$DIST/reference-docs.tar.gz" | awk '{print $1}')
+REFDOCS_SETS=$(python3 "$REPO_ROOT/scripts/airgap/reference_docs.py" check --manifest "$REPO_ROOT/scripts/airgap/reference-docs.json" | sed -n 's/.*sets=//p')
 
 echo "==> Pulling images (fail closed on missing tags)"
 extra_args="${SKOPEO_ARGS:-}"
@@ -275,6 +296,9 @@ CHART_SHA256=$(sha256sum charts/qdrant-*.tgz | awk '{print $1}')
     fi
     echo "chart: $CHART_VERSION"
     echo "chart_sha256: $CHART_SHA256"
+    echo "reference_docs: reference-docs.tar.gz"
+    echo "reference_docs_sha256: $REFDOCS_SHA256"
+    echo "reference_docs_sets: $REFDOCS_SETS"
     echo "ingest: $INGEST_IMAGE"
     echo "ingest_digest: $INGEST_DIGEST"
     echo "ingest_config_digest: $INGEST_CONFIG_DIGEST"
@@ -301,7 +325,7 @@ export OPENOBSERVE_REF OPENOBSERVE_DIGEST OTELCOL_REF OTELCOL_DIGEST
 export INGEST_IMAGE INGEST_DIGEST AGENT_IMAGE AGENT_DIGEST UBI_REF UBI_DIGEST
 export OAUTH_PROXY_REF OAUTH_DIGEST CHART_VERSION CHART_SHA256 DIST REPO_ROOT
 export OPENWEBUI_REF OPENWEBUI_DIGEST OPENWEBUI_PROXY_REF OPENWEBUI_PROXY_DIGEST
-export TASK_VERSION TASK_ASSET TASK_SHA256 TASK_BINARY_SHA256 TASK_LICENSE_SHA256 TASK_ORIGIN
+export TASK_VERSION TASK_ASSET TASK_SHA256 TASK_BINARY_SHA256 TASK_LICENSE_SHA256 TASK_ORIGIN REFDOCS_SHA256
 python3 - <<'PYEOF'
 import json
 import os
@@ -341,6 +365,11 @@ sbom = {
     "base_image": {"ref": os.environ["UBI_REF"], "digest": os.environ["UBI_DIGEST"]},
     "chart": os.environ["CHART_VERSION"],
     "chart_sha256": os.environ["CHART_SHA256"],
+    "reference_docs": {
+        "member": "reference-docs.tar.gz", "sha256": os.environ["REFDOCS_SHA256"],
+        "sets": [{key: doc[key] for key in ("id", "component", "version", "source", "url", "sha256", "license")}
+                 for doc in json.loads((root / "scripts/airgap/reference-docs.json").read_text(encoding="utf-8"))["sets"]],
+    },
     "wheels": wheels,
     "installed_python": installed,
     "inventory_scope": "Locked Python distributions and explicit inherited pip; base OS, chart, JS and knowledge-asset rights/inventories have separate owners. Not a vulnerability or license approval.",
@@ -411,6 +440,7 @@ chmod +x "$DIST/bootstrap.sh"
     echo "  - Ingest Image:        $INGEST_IMAGE"
     echo "  - Agent Image:         $AGENT_IMAGE"
     echo "  - Helm Chart:          $CHART_VERSION"
+    echo "  - Reference docs:      reference-docs.tar.gz ($REFDOCS_SETS upstream doc sets + project docs; INDEX.md inside)"
     echo "  - Sparse Weights:      FastEmbed Qdrant/bm25 (baked in images)"
     echo "  - Third-party notices: THIRD-PARTY-NOTICES.txt ($LICENSE_STATUS)"
     echo "                           Declared licenses only; not a legal approval. Unresolved owner decisions are listed in that file."
@@ -435,7 +465,7 @@ openssl pkey -in "$SNEAKERNET_SIGNING_KEY" -pubout -out "$DIST/sneakernet-signin
 (
     cd "$DIST"
     # shellcheck disable=SC2086
-    sha256sum bootstrap.sh repo.bundle "$TASK_ASSET" task-pin.txt task-LICENSE qdrant-image.tar \
+    sha256sum bootstrap.sh repo.bundle reference-docs.tar.gz "$TASK_ASSET" task-pin.txt task-LICENSE qdrant-image.tar \
               openobserve-image.tar otelcol-image.tar app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR $OPENWEBUI_TAR $OPENWEBUI_PROXY_TAR \
               MANIFEST.txt PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub > SHA256SUMS
 )
@@ -448,7 +478,7 @@ openssl dgst -sha256 -sign "$SNEAKERNET_SIGNING_KEY" \
 
 echo "==> Tarball + tarball digest"
 # shellcheck disable=SC2086
-tar -C "$DIST" -cf "$OUT_TARBALL" bootstrap.sh repo.bundle "$TASK_ASSET" task-pin.txt task-LICENSE qdrant-image.tar \
+tar -C "$DIST" -cf "$OUT_TARBALL" bootstrap.sh repo.bundle reference-docs.tar.gz "$TASK_ASSET" task-pin.txt task-LICENSE qdrant-image.tar \
     openobserve-image.tar otelcol-image.tar app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR $OPENWEBUI_TAR $OPENWEBUI_PROXY_TAR MANIFEST.txt PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub SHA256SUMS SHA256SUMS.sig
 # shellcheck disable=SC2016
 ( cd "$DIST" && sha256sum "$(basename "$OUT_TARBALL")" ) > "$OUT_TARBALL.sha256"
