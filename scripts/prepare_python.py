@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import importlib.machinery
 import importlib.metadata
+import json
 import os
 import site
 import subprocess
 import sys
 import sysconfig
+import tomllib
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -26,7 +29,11 @@ except ModuleNotFoundError:
 KIT_ROOT = Path("/opt/devkit")
 KIT_LOCK_FILES = ("requirements.dev.lock.txt", "locks/cp314-linux-x86_64.json")
 # The kit venv's one layering file: it adds the image environment's site directories.
-KIT_LAYER = "mfr-devkit-environment.pth"
+# site processes .pth files in sorted order, so this name sorts before the checkout's
+# editable .pth (`__editable__.*`): locked distributions precede the checkout's src/.
+KIT_LAYER = "00-mfr-devkit-layer.pth"
+# Run in the kit venv: every importable top-level name and the distributions providing it.
+TOP_LEVEL_NAMES = "import importlib.metadata as m, json; print(json.dumps(m.packages_distributions()))"
 
 # Run verified pip wheel code using the target interpreter. The wheelhouse
 # must be completely verified before this command or any environment mutation.
@@ -109,6 +116,8 @@ def prepare_kit(root: Path, kit: Path, venv: Path) -> None:
     locks.check_target()
     locks.load(root, "dev")
     check_kit(root, kit)
+    if (Path(sysconfig.get_path("purelib")) / KIT_LAYER).exists():
+        raise locks.LockError("--kit is running inside a kit venv; run it with the image's python3")
     if venv.is_symlink():
         raise locks.LockError("refusing to prepare a symlink environment")
     layers, scripts = image_environment()
@@ -139,6 +148,29 @@ def prepare_kit(root: Path, kit: Path, venv: Path) -> None:
     subprocess.run([str(python), "-I", str(root / "scripts/dependency_lock.py"),
                     "--root", str(root), "installed", "--profile", "dev", "--project"],
                    env=env, check=True)
+    provided = json.loads(subprocess.run([str(python), "-I", "-c", TOP_LEVEL_NAMES], env=env, check=True,
+                                         capture_output=True, text=True).stdout)
+    project = locks.canonical(tomllib.loads((root / "pyproject.toml").read_text())["project"]["name"])
+    for name in checkout_top_level(root):
+        if any(locks.canonical(owner) != project for owner in provided.get(name, ())):
+            raise locks.LockError(f"the checkout's src/{name} shadows a locked distribution's "
+                                  f"top-level module {name}; rename it")
+
+
+def checkout_top_level(root: Path) -> list[str]:
+    """Top-level module and package names the checkout's editable src/ path provides."""
+    names = set()
+    source = root / "src"
+    for entry in source.iterdir() if source.is_dir() else ():
+        if entry.name == "__pycache__":
+            continue
+        if entry.is_dir() and entry.name.isidentifier():
+            names.add(entry.name)
+        elif entry.is_file():
+            for suffix in (*importlib.machinery.SOURCE_SUFFIXES, *importlib.machinery.EXTENSION_SUFFIXES):
+                if entry.name.endswith(suffix) and entry.name[:-len(suffix)].isidentifier():
+                    names.add(entry.name[:-len(suffix)])
+    return sorted(names)
 
 
 def prepare(root: Path, wheelhouse: Path, python: Path | None, venv: Path | None,

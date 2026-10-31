@@ -542,7 +542,8 @@ def _kit_image(root: Path, *, dev_lock: bytes | None = None) -> tuple[Path, Path
     interpreter link.
 
     pip sits in a directory the image's own .pth file adds, as a real image's .pth
-    files add theirs: the kit venv must apply them, or pip is missing."""
+    files add theirs: the kit venv must apply them, or pip is missing. The image's
+    `example` is an importable package; the checkout provides only its own package."""
     kit = root / "kit-image/opt/devkit"
     for name in prepare_python.KIT_LOCK_FILES:
         (kit / "locks" / name).parent.mkdir(parents=True, exist_ok=True)
@@ -551,7 +552,9 @@ def _kit_image(root: Path, *, dev_lock: bytes | None = None) -> tuple[Path, Path
         (kit / "locks/requirements.dev.lock.txt").write_bytes(dev_lock)
     site_dir = root / "kit-image/opt/app-root/lib/python3.14/site-packages"
     nested = root / "kit-image/opt/app-root/nested"
-    _dist(site_dir, "example", "1.0")
+    _dist(site_dir, "example", "1.0", top_level="example")
+    (site_dir / "example").mkdir()
+    (site_dir / "example/__init__.py").write_text("")
     _dist(nested, "pip", "26.2.2")
     (site_dir / "nested.pth").write_text(f"{nested}\n")
     scripts = root / "kit-image/opt/app-root/bin"
@@ -561,22 +564,27 @@ def _kit_image(root: Path, *, dev_lock: bytes | None = None) -> tuple[Path, Path
     (scripts / "python3").symlink_to(scripts / "native-tool")
     # The checkout: its pyproject and the verifier the kit runs inside the new venv.
     (root / "pyproject.toml").write_text('[project]\nname = "synthetic-checkout"\nversion = "0.1"\n')
+    (root / "src/synthetic_checkout").mkdir(parents=True)
+    (root / "src/synthetic_checkout/__init__.py").write_text("")
     (root / "scripts").mkdir(exist_ok=True)
     shutil.copy(Path(locks.__file__), root / "scripts/dependency_lock.py")
     return kit, site_dir
 
 
-def _dist(directory: Path, name: str, version: str) -> Path:
+def _dist(directory: Path, name: str, version: str, *, top_level: str | None = None) -> Path:
     info = directory / f"{name.replace('-', '_')}-{version}.dist-info"
     info.mkdir(parents=True)
     (info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n")
+    if top_level is not None:
+        (info / "top_level.txt").write_text(f"{top_level}\n")
     return info
 
 
 def _kit_run(monkeypatch, root: Path, image_site: Path) -> list[list[str]]:
     """Real venv creation and real installed-set verification; pip is the one stand-in
-    (the synthetic image has no runnable pip): its editable install writes the dist-info
-    real pip writes for `-e <checkout>`."""
+    (the synthetic image has no runnable pip): its editable install writes what setuptools
+    writes for `-e <checkout>` with a src/ layout, the dist-info and a static
+    `__editable__.*.pth` naming src/."""
     calls: list[list[str]] = []
     real_run = subprocess.run
 
@@ -585,9 +593,10 @@ def _kit_run(monkeypatch, root: Path, image_site: Path) -> list[list[str]]:
         if argv[2:5] == ["-m", "pip", "--isolated"]:
             if "install" in argv:
                 venv_site = next(Path(argv[0]).parents[1].glob("lib/python*/site-packages"))
-                info = _dist(venv_site, "synthetic-checkout", "0.1")
+                info = _dist(venv_site, "synthetic-checkout", "0.1", top_level="synthetic_checkout")
                 (info / "direct_url.json").write_text(json.dumps(
                     {"url": Path(argv[-1]).as_uri(), "dir_info": {"editable": True}}))
+                (venv_site / "__editable__.synthetic_checkout-0.1.pth").write_text(f"{Path(argv[-1]) / 'src'}\n")
             return subprocess.CompletedProcess(argv, 0)
         return real_run(argv, **kwargs)
 
@@ -608,11 +617,12 @@ def test_kit_mode_layers_a_venv_over_the_image_environment_without_any_wheelhous
     assert prepare_python.main(["--root", str(root), "--kit", str(kit), "--venv", str(venv)]) == 0
     assert not (kit / "wheelhouse").exists() and not list(root.glob("kit-image/**/*.whl"))
     assert calls[0][1:] == ["-m", "venv", "--without-pip", str(venv.absolute())]
-    install, check, verify = calls[1:]
+    install, check, verify, top_level = calls[1:]
     assert install[install.index("install") + 1:] == [
         "--no-index", "--no-cache-dir", "--no-deps", "--no-build-isolation", "-e", str(root)]
     assert check[-1] == "check"
     assert verify[-6:] == ["--root", str(root), "installed", "--profile", "dev", "--project"]
+    assert top_level[-1] == prepare_python.TOP_LEVEL_NAMES
     # The verifier ran for real in the new venv; the same interpreter reports the layered set.
     python = venv / "bin/python"
     probe = "import importlib.metadata as m; print(sorted(d.metadata['Name'] for d in m.distributions()))"
@@ -624,6 +634,45 @@ def test_kit_mode_layers_a_venv_over_the_image_environment_without_any_wheelhous
     assert (bin_dir / "native-tool").readlink() == root / "kit-image/opt/app-root/bin/native-tool"
     assert not (bin_dir / "entry-point").exists()
     assert (bin_dir / "python3").resolve() != (root / "kit-image/opt/app-root/bin/native-tool").resolve()
+    # Import order (#1158 review K1): the layer sorts before the checkout's editable .pth,
+    # so a same-named package added under src/ later still loses to the locked one.
+    assert min(p.name for p in venv.glob("lib/python*/site-packages/*.pth")) == prepare_python.KIT_LAYER
+    (root / "src/example").mkdir()
+    (root / "src/example/__init__.py").write_text("")
+    probe = "import example, synthetic_checkout; print(example.__file__); print(synthetic_checkout.__file__)"
+    found = subprocess.run([str(python), "-I", "-c", probe], capture_output=True, text=True, check=True).stdout.split()
+    assert found == [str(image_site / "example/__init__.py"), str(root / "src/synthetic_checkout/__init__.py")]
+
+
+@pytest.mark.parametrize("shadow", ["example/__init__.py", "example.py"])
+def test_kit_mode_refuses_a_checkout_module_that_shadows_a_locked_distribution(locked, monkeypatch, capsys,
+                                                                                shadow):
+    """#1158 review K1: a top-level src/ name that a locked distribution provides is refused."""
+    root, _, _ = locked
+    kit, image_site = _kit_image(root)
+    (root / "src" / shadow).parent.mkdir(parents=True, exist_ok=True)
+    (root / "src" / shadow).write_text("")
+    _kit_run(monkeypatch, root, image_site)
+    assert prepare_python.main(["--root", str(root), "--kit", str(kit), "--venv", str(root / "kit-venv")]) == 2
+    assert ("prepare-python: the checkout's src/example shadows a locked distribution's top-level module "
+            "example; rename it") in capsys.readouterr().err
+
+
+def test_kit_mode_refuses_to_run_from_inside_a_kit_venv(locked, monkeypatch):
+    """#1158 review K3: --kit run by a kit venv's interpreter names the cause, before any change."""
+    root, _, _ = locked
+    kit, image_site = _kit_image(root)
+    venv = root / "kit-venv"
+    _kit_run(monkeypatch, root, image_site)
+    assert prepare_python.main(["--root", str(root), "--kit", str(kit), "--venv", str(venv)]) == 0
+    shutil.copy(Path(prepare_python.__file__), root / "scripts/prepare_python.py")
+    nested = subprocess.run([str(venv / "bin/python"), str(root / "scripts/prepare_python.py"), "--root", str(root),
+                             "--kit", str(kit), "--venv", str(root / "inner-venv")],
+                            capture_output=True, text=True, cwd=root, check=False)
+    assert nested.returncode == 2
+    assert nested.stderr == ("prepare-python: --kit is running inside a kit venv; "
+                             "run it with the image's python3\n")
+    assert not (root / "inner-venv").exists()
 
 
 @pytest.mark.parametrize("change", ["extra", "missing"])

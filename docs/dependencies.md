@@ -65,11 +65,14 @@ environment (ADR-0009 §8, D-7); the image holds no wheelhouse.
 request (`mfr-devkit-<key>`). It then creates a small venv layered over the
 image's environment. The image's `python3` is itself a venv, so a `.pth` file
 adds its site directories (`--system-site-packages` would add the empty base
-ones) and its native tools are linked, so `python -m ruff` works. Only the
-checkout is installed, editable, with `--no-deps` and no index. The result must
-equal the dev lock plus the checkout exactly (`dependency_lock.py installed
---profile dev --project`). It runs as the pod's arbitrary UID. `--kit` never
-acquires, so it refuses `--connected`, `--internal-index` and `--python`.
+ones) and its native tools are linked, so `python -m ruff` works. That `.pth`
+sorts before the checkout's editable one, so locked distributions precede
+`src/`. Only the checkout is installed, editable, with `--no-deps` and no index.
+The result must equal the dev lock plus the checkout exactly (`dependency_lock.py
+installed --profile dev --project`), and a top-level `src/` name that a locked
+distribution provides is refused. It runs as the pod's arbitrary UID, with the
+image's `python3`, never from inside a kit venv. `--kit` never acquires, so it
+refuses `--connected`, `--internal-index` and `--python`.
 
 GitHub uses the same helper and manifest. GitLab accepts `PIP_FIND_LINKS` as a
 local complete dev wheelhouse, or explicitly selects `--internal-index` using
