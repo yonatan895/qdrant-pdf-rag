@@ -499,6 +499,20 @@ load, deploy, ingest, validate and retire-legacy refuse to run without it,
 and refuse any checkout that is not this verified signed release
 ([deploy §4](deploy.md#4-signing-and-provenance)).
 
+**Where the anchors live (#1118 F2).** On the bastion, keep the release trust
+anchors as plain files in `/work/anchors/`, outside every workspace and bundle
+directory: `upstream.pub` (the upstream release key; `oc cp` it in after the
+Windows anchor check) and, once the gap release key exists, `gap.pub`
+(ADR-0009 §5). Point `SNEAKERNET_TRUSTED_PUB=/work/anchors/upstream.pub` and
+`SNEAKERNET_GAP_TRUSTED_PUB=/work/anchors/gap.pub` at them, in the process
+environment or the workspace `airgap.env`. Each bundle's signed MANIFEST
+declares `origin: upstream` or `origin: gap`, and the live stages and
+`bootstrap.sh` accept only the matching anchor's signature. An anchor that is a
+link, lies inside the checkout or bundle, or holds the same key as the other
+anchor is refused. Each workspace has its own `airgap.env`, so a rollback to a
+release signed by a since-rotated key points that workspace's
+`SNEAKERNET_TRUSTED_PUB` at the old public key.
+
 The `bootstrap.sh` script verifies the bundle signature and every member
 checksum, clones `repo.bundle`, verifies HEAD against the manifest, installs the
 bundled pinned Task without network access or preinstalled Make/Task, seeds
@@ -1263,7 +1277,7 @@ Without an installed console script use `python -m mainframe_rag.ops ...`
 | **Qdrant 401 After Reinstall** | `/v1/search` fails with `401 Invalid API key or JWT` after Qdrant was reinstalled or re-`helm upgrade`d | The chart regenerates the `<release>-apikey` secret on reinstall while running agent pods keep the old key in env. Roll the agent: `kubectl -n <ns> rollout restart deploy/rag-agent` and wait for rollout before smoking again. |
 | **Stale dist/ MANIFEST** | `airgap:validate` / `airgap:deploy` / `airgap:ingest` / `airgap:dryrun` fail with `IMAGE_SHA=<sha> does not match packed MANIFEST sha` | `dist/` is gitignored build output that persists across checkouts — the MANIFEST inside is from an older pack (only `pack` regenerates it; the other steps just read it). Repack at the current HEAD, or clear the stale `dist/` before re-running. |
 | **Checkout/manifest mismatch** | `airgap:validate` / `airgap:deploy` / `airgap:ingest` / `airgap:load` fail with `executing checkout HEAD does not match the packed MANIFEST sha` | The scripts run from a different checkout than the packed bundle (e.g. old code with a new `dist/`, or `IMAGE_SHA` overridden to the new SHA while old code executes). Run from the approved bundle checkout — overriding `IMAGE_SHA` alone never changes which code executes. Skipped only in `AIRGAP_DRYRUN=1` previews. |
-| **Unverified checkout** | `airgap:validate` / `airgap:load` / `airgap:deploy` / `airgap:ingest` / `airgap:retire-legacy` fail with `checkout is not a verified signed release (no packed MANIFEST)` or `no release trust anchor is configured` | Outside dry-run these run only from the checkout `bootstrap.sh` made from the signed bundle, with `SNEAKERNET_TRUSTED_PUB` set to the release key obtained out of band ([deploy §4](deploy.md#4-signing-and-provenance), #1118 F1). Rerun `bootstrap.sh` from the signed bundle and export the anchor. A connected developer or CI lane may instead set `AIRGAP_UNVERIFIED_CHECKOUT=1` with `CI_REHEARSAL=1` in the process environment; never in the air gap. |
+| **Unverified checkout** | `airgap:validate` / `airgap:load` / `airgap:deploy` / `airgap:ingest` / `airgap:retire-legacy` fail with `checkout is not a verified signed release (no packed MANIFEST)`, `no release trust anchor is configured` or `packed MANIFEST declares no release origin` | Outside dry-run these run only from the checkout `bootstrap.sh` made from the signed bundle, with `SNEAKERNET_TRUSTED_PUB` set to the release key obtained out of band ([deploy §4](deploy.md#4-signing-and-provenance), #1118 F1). Rerun `bootstrap.sh` from the signed bundle and export the anchor for the bundle's `origin:` (`SNEAKERNET_TRUSTED_PUB` for upstream, `SNEAKERNET_GAP_TRUSTED_PUB` for gap; plain files in `/work/anchors/`, never inside the checkout or bundle). A connected developer or CI lane may instead set `AIRGAP_UNVERIFIED_CHECKOUT=1` with `CI_REHEARSAL=1` in the process environment; never in the air gap. |
 | **Stale airgap.env IMAGE_SHA** | `airgap:pack` / `airgap:load` fail with `IMAGE_SHA=<sha> is not the checked-out commit` right after checking out a new SHA | `airgap.env` is gitignored local state from a previous rehearsal — its `IMAGE_SHA` no longer matches HEAD. Explicit env beats the file (`IMAGE_SHA=$(git rev-parse HEAD) sh scripts/tools/run-task.sh airgap:pack`), or update the file. |
 | **Stale dist/ tarballs fill disk** | `pack`/`load` fail with no-space errors after several rehearsals | Every pack leaves a ~1.5 GB `qdrant-pdf-rag-<sha>.tar` in gitignored `dist/`; only the MANIFEST-pinned one is live. Delete superseded tarballs (keep the `.tar.sha256` of the live one) — pack never prunes. |
 | **Kind ErrImagePull on localhost:5000** | mock/corpus-gen pods fail with `dial tcp [::1]:5000: connect: connection refused` | The Kind `containerdConfigPatches` in §4.7 must mirror **both** `localhost:5000` and `airgap-registry:5000` to the registry container — one key per naming family used by the manifests. Recreate the cluster with the documented config (containerd mirrors are set at creation). |

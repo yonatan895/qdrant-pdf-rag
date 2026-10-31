@@ -603,7 +603,9 @@ export SNEAKERNET_TRUSTED_PUB=/absolute/path/to/independently-trusted/signing.pu
 Every live stage below needs that anchor: outside dry-run, validate, load,
 deploy, ingest and retire-legacy refuse a checkout that is not a verified signed release
 ([deploy §4](deploy.md#4-signing-and-provenance)). Never set the connected
-opt-out `AIRGAP_UNVERIFIED_CHECKOUT` for this gate.
+opt-out `AIRGAP_UNVERIFIED_CHECKOUT` for this gate, and never set the gap anchor
+`SNEAKERNET_GAP_TRUSTED_PUB`: this gate verifies an upstream release
+(`origin: upstream`), which only the upstream anchor may vouch for.
 
 Append the `OPENWEBUI_*` site keys the script prints for its test IdP (the
 `airgap.env.example` keys, as `kind-openwebui-operator` writes them):

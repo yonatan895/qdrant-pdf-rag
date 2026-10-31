@@ -291,6 +291,10 @@ CHART_SHA256=$(sha256sum charts/qdrant-*.tgz | awk '{print $1}')
     else
         echo "signed: ephemeral"
     fi
+    # Release origin (#1118 F2): the live-stage guard and bootstrap verify the
+    # signature with the trust anchor for this origin only. The gap pack (F6)
+    # writes `origin: gap`.
+    echo "origin: upstream"
 } > "$DIST/MANIFEST.txt"
 cat "$DIST/MANIFEST.txt"
 

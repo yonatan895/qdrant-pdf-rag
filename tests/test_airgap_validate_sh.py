@@ -493,9 +493,9 @@ _NO_MANIFEST = ("FAIL: checkout is not a verified signed release (no packed MANI
                 "checkout that bootstrap.sh creates from the signed bundle, with SNEAKERNET_TRUSTED_PUB set; "
                 "only a connected developer or CI lane may set AIRGAP_UNVERIFIED_CHECKOUT=1 with "
                 "CI_REHEARSAL=1 instead\n")
-_NO_ANCHOR = ("FAIL: no release trust anchor is configured — set SNEAKERNET_TRUSTED_PUB to the release "
-              "signing public key obtained out of band (docs/release-verification.md); trust on first use "
-              "never establishes a release\n")
+_NO_ANCHOR = ("FAIL: no release trust anchor is configured for the bundle's origin (upstream) — set "
+              "SNEAKERNET_TRUSTED_PUB to the upstream release signing public key obtained out of band "
+              "(docs/release-verification.md); trust on first use never establishes a release\n")
 _OPT_OUT_REFUSED = ("FAIL: AIRGAP_UNVERIFIED_CHECKOUT=1 is refused without CI_REHEARSAL=1 in the process "
                     "environment — the unverified-checkout opt-out is for connected development and the "
                     "connected CI and Kind lanes only, never the air gap; run from a verified signed release "
@@ -504,8 +504,9 @@ _UNREADABLE_ANCHOR = ("FAIL: release trust anchor SNEAKERNET_TRUSTED_PUB is not 
                       "at the release signing public key obtained out of band (docs/release-verification.md)\n")
 _BAD_SIGNATURE = ("FAIL: SHA256SUMS signature verification failed for the packed MANIFEST — do not trust "
                   "this bundle; rerun bootstrap.sh from the signed bundle\n")
-_FOREIGN_KEY = ("FAIL: bundle pubkey does not match any configured release trust anchor "
-                "(SNEAKERNET_TRUSTED_PUB) — untrusted bundle; use the signed release bundle or fix the anchor\n")
+_FOREIGN_KEY = ("FAIL: bundle pubkey does not match SNEAKERNET_TRUSTED_PUB, the release trust anchor for "
+                "the bundle's origin (upstream) — untrusted bundle; use the signed release bundle or fix the "
+                "anchor\n")
 _HEAD_DIFFERS = ("FAIL: executing checkout HEAD does not match the packed MANIFEST sha — run from the approved "
                  "bundle checkout (git rev-parse HEAD and the MANIFEST sha: line must agree); overriding "
                  "IMAGE_SHA alone never changes which code executes\n")
@@ -763,12 +764,15 @@ def _signing_key():
 def test_checkout_guard_trusted_pub_pins_the_key(approved):
     from tests.helpers_airgap import gen_other_pub
 
-    pinned = _guard_run(approved, "dist/MANIFEST.txt", {"SNEAKERNET_TRUSTED_PUB": str(approved / "dist" / "sneakernet-signing.pub")})
+    copied = approved.parent / "work-anchors" / "upstream.pub"
+    copied.parent.mkdir()
+    shutil.copy(approved / "dist" / "sneakernet-signing.pub", copied)
+    pinned = _guard_run(approved, "dist/MANIFEST.txt", {"SNEAKERNET_TRUSTED_PUB": str(copied)})
     assert pinned.returncode == 0, pinned.stderr
     other = gen_other_pub(approved.parent, "guard-other")
     r = _guard_run(approved, "dist/MANIFEST.txt", {"SNEAKERNET_TRUSTED_PUB": str(other)})
     assert r.returncode != 0
-    assert "does not match any configured release trust anchor (SNEAKERNET_TRUSTED_PUB)" in r.stderr
+    assert r.stderr == _FOREIGN_KEY
 
 
 def test_checkout_guard_refuses_index_flags_that_hide_edits(approved):
@@ -1068,7 +1072,7 @@ def test_checkout_guard_opt_out_keeps_the_pre_f1_rules(approved):
     assert tofu.returncode == 0, tofu.stderr
     assert tofu.stderr == ""
     pinned = _guard_run(approved, "dist/MANIFEST.txt",
-                        {**_OPT_OUT, "SNEAKERNET_TRUSTED_PUB": str(gen_other_pub(approved, "opt-out-other"))})
+                        {**_OPT_OUT, "SNEAKERNET_TRUSTED_PUB": str(gen_other_pub(approved.parent, "opt-out-other"))})
     assert pinned.returncode != 0
     assert "does not match SNEAKERNET_TRUSTED_PUB" in pinned.stderr
     _commit_on_top(approved)
@@ -1101,6 +1105,273 @@ def test_checkout_guard_opt_out_refuses_an_unknown_value(approved):
     assert r.returncode == 1
     assert r.stderr == ("FAIL: AIRGAP_UNVERIFIED_CHECKOUT must be 1 (connected opt-out, with CI_REHEARSAL=1) "
                         "or unset; refusing to guess\n")
+
+
+# --- #1118 F2: the anchor for the MANIFEST's declared origin ----------------
+
+_UP, _GAP = "SNEAKERNET_TRUSTED_PUB", "SNEAKERNET_GAP_TRUSTED_PUB"
+# The signed origin line each case writes, byte for byte.
+_ORIGIN_LINES = {
+    "upstream": "origin: upstream\n",
+    "gap": "origin: gap\n",
+    "missing": "",
+    "capitalised": "origin: Gap\n",
+    "trailing-space": "origin: gap \n",
+    "unknown": "origin: site\n",
+    "twice": "origin: upstream\norigin: upstream\n",
+}
+_ANCHOR_SETS = ("upstream-only", "gap-only", "both", "both-same-key", "none")
+_NO_ORIGIN = ("FAIL: packed MANIFEST declares no release origin (origin: upstream or origin: gap) — it was "
+              "not packed by a release this checkout's guard knows; use a signed bundle packed by this "
+              "release\n")
+_BAD_ORIGIN = ("FAIL: packed MANIFEST declares its release origin more than once or with an unknown value — "
+               "exactly one line, origin: upstream or origin: gap, is accepted; use the signed bundle's "
+               "MANIFEST.txt\n")
+_SAME_KEY = (f"FAIL: release trust anchors {_UP} and {_GAP} hold the same key — the upstream and gap release "
+             "keys must differ, or a gap release could pass as upstream; fix the anchor files\n")
+
+
+def _no_anchor_for(origin):
+    var = _UP if origin == "upstream" else _GAP
+    return (f"FAIL: no release trust anchor is configured for the bundle's origin ({origin}) — set {var} to "
+            f"the {origin} release signing public key obtained out of band (docs/release-verification.md); "
+            "trust on first use never establishes a release\n")
+
+
+def _mismatch_for(origin):
+    var = _UP if origin == "upstream" else _GAP
+    return (f"FAIL: bundle pubkey does not match {var}, the release trust anchor for the bundle's origin "
+            f"({origin}) — untrusted bundle; use the signed release bundle or fix the anchor\n")
+
+
+def _inside(var):
+    return (f"FAIL: release trust anchor {var} lies inside the executing checkout or the bundle it would "
+            "verify — an anchor never comes from the artifact it vouches for; keep it outside both "
+            "(/work/anchors on the bastion)\n")
+
+
+@pytest.fixture(scope="module")
+def third_key(tmp_path_factory):
+    from tests.helpers_airgap import gen_sign_keypair
+
+    return gen_sign_keypair(tmp_path_factory.mktemp("third-key"))
+
+
+def _signer_key(signer, third_key):
+    from tests.helpers_airgap import gap_release_key, release_key
+
+    return {"upstream": release_key(), "gap": gap_release_key(), "third": third_key}[signer]
+
+
+def _sign_origin(tree, origin_case, key):
+    """Re-pack dist/ for HEAD with this origin line, signed by `key`."""
+    write_signed_manifest(tree / "dist", f"sha: {_git(tree, 'rev-parse', 'HEAD')}\n" + _ORIGIN_LINES[origin_case],
+                          origin=None, key=key)
+
+
+def _anchor_env(anchor_set, scratch):
+    """The two anchor variables for one configuration; files outside every
+    checkout and bundle. both-same-key: the upstream key's bytes in a second
+    file of its own, named as the gap anchor."""
+    from tests.helpers_airgap import gap_release_anchor, release_anchor
+
+    up, gap = str(release_anchor()), str(gap_release_anchor())
+    if anchor_set == "both-same-key":
+        copy = scratch / "same-key" / "gap.pub"
+        copy.parent.mkdir(exist_ok=True)
+        shutil.copy(release_anchor(), copy)
+        gap = str(copy)
+    return {
+        "upstream-only": {_UP: up, _GAP: None},
+        "gap-only": {_UP: None, _GAP: gap},
+        "both": {_UP: up, _GAP: gap},
+        "both-same-key": {_UP: up, _GAP: gap},
+        "none": {_UP: None, _GAP: None},
+    }[anchor_set]
+
+
+def _expected_stderr(origin_case, signer, anchor_set):
+    """The independent oracle: pass ("") only when the origin is exactly
+    upstream or gap, the anchors hold different keys, the anchor for that
+    origin is configured, and the signer is that origin's key. Otherwise the
+    fixed message for the first failing condition in that order."""
+    if origin_case == "missing":
+        return _NO_ORIGIN
+    if origin_case not in ("upstream", "gap"):
+        return _BAD_ORIGIN
+    if anchor_set == "both-same-key":
+        return _SAME_KEY
+    configured = {"upstream-only": {"upstream"}, "gap-only": {"gap"}, "both": {"upstream", "gap"},
+                  "none": set()}[anchor_set]
+    if origin_case not in configured:
+        return _no_anchor_for(origin_case)
+    if signer != origin_case:
+        return _mismatch_for(origin_case)
+    return ""
+
+
+@pytest.mark.parametrize("signer", ["upstream", "gap", "third"])
+@pytest.mark.parametrize("origin_case", sorted(_ORIGIN_LINES))
+def test_checkout_guard_accepts_only_the_anchor_for_the_declared_origin(approved, third_key, origin_case, signer):
+    """#1118 F2 matrix (origin x signer x anchors) through the real guard: a
+    bundle passes only when its signer is the anchor configured for the origin
+    its signed MANIFEST declares. A gap key signing an `upstream` bundle, the
+    upstream key signing a `gap` one, a third key, a missing, repeated or
+    near-miss origin, and two anchors holding one key are each refused with
+    their fixed message (the whole stderr: no path or content). Each refused
+    cell is followed by the next ordinary run of the same checkout, which
+    passes once the bundle and the anchors are right."""
+    _sign_origin(approved, origin_case, _signer_key(signer, third_key))
+    for anchor_set in _ANCHOR_SETS:
+        r = _guard_run(approved, "dist/MANIFEST.txt", _anchor_env(anchor_set, approved.parent))
+        want = _expected_stderr(origin_case, signer, anchor_set)
+        assert r.stderr == want, (anchor_set, r.stderr)
+        assert r.returncode == (0 if want == "" else 1), anchor_set
+        assert r.stdout == ""
+    _sign_origin(approved, "upstream", _signer_key("upstream", third_key))
+    again = _guard_run(approved, "dist/MANIFEST.txt", _anchor_env("both", approved.parent))
+    assert again.returncode == 0, again.stderr
+    assert again.stderr == ""
+
+
+@pytest.mark.parametrize(("case", "fix"), [
+    ("gap-key-signs-upstream", "re-sign with the upstream key"),
+    ("upstream-key-signs-gap", "re-sign with the gap key"),
+    ("same-key-both-roles", "point the gap anchor at the gap key"),
+    ("missing-origin", "re-pack with the origin line"),
+    ("gap-release-without-gap-anchor", "export the gap anchor"),
+], ids=lambda value: value.split()[0])
+def test_checkout_guard_next_run_passes_after_each_origin_refusal(approved, case, fix):
+    """Lifecycle (#1118 F2): each refusal changes nothing in the checkout, and
+    changing only the failing input makes the next ordinary run pass."""
+    from tests.helpers_airgap import (
+        gap_release_anchor,
+        gap_release_key,
+        release_anchor,
+        release_key,
+    )
+
+    both = {_UP: str(release_anchor()), _GAP: str(gap_release_anchor())}
+    env, origin, key = dict(both), "upstream", release_key()
+    if case == "gap-key-signs-upstream":
+        key = gap_release_key()
+    elif case == "upstream-key-signs-gap":
+        origin = "gap"
+    elif case == "same-key-both-roles":
+        env[_GAP] = str(release_anchor())
+    elif case == "missing-origin":
+        origin = "missing"
+    else:
+        origin, key, env = "gap", gap_release_key(), {_UP: str(release_anchor()), _GAP: None}
+    _sign_origin(approved, origin, key)
+    _guard_probe(approved)  # The probe the runs below write, so the snapshot holds it.
+    status = _git(approved, "status", "--porcelain", "--ignored")
+    refused = _guard_run(approved, "dist/MANIFEST.txt", env)
+    assert refused.returncode == 1, fix
+    assert refused.stderr.startswith("FAIL: ")
+    assert _git(approved, "status", "--porcelain", "--ignored") == status
+    if case == "gap-key-signs-upstream":
+        _sign_origin(approved, "upstream", release_key())
+    elif case == "upstream-key-signs-gap":
+        _sign_origin(approved, "gap", gap_release_key())
+    elif case == "same-key-both-roles":
+        env = both
+    elif case == "missing-origin":
+        _sign_origin(approved, "upstream", release_key())
+    else:
+        env = both
+    again = _guard_run(approved, "dist/MANIFEST.txt", env)
+    assert again.returncode == 0, (fix, again.stderr)
+    assert again.stderr == ""
+
+
+@pytest.mark.parametrize("where", ["tracked-file", "untracked-file", "bundle-directory", "link"])
+def test_checkout_guard_refuses_an_anchor_supplied_by_what_it_verifies(approved, where):
+    """#1118 F2 G5: an anchor inside the executing checkout (a tracked file a
+    gap MR could change, or an untracked one), inside the bundle directory, or
+    reached through a link is refused for either variable; the same bytes in
+    a /work-like directory outside both pass on the next run."""
+    from tests.helpers_airgap import gap_release_anchor, gap_release_key, release_anchor
+
+    _sign_origin(approved, "gap", gap_release_key())
+    for var, source in ((_UP, release_anchor()), (_GAP, gap_release_anchor())):
+        if where == "tracked-file":
+            planted = approved / "gap" / "records" / f"{var}.pub"
+            planted.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(source, planted)
+            _git(approved, "add", str(planted.relative_to(approved)))
+            _git(approved, "commit", "-qm", "record the release key")
+            _sign_origin(approved, "gap", gap_release_key())
+        elif where == "untracked-file":
+            planted = approved / f"{var}.pub"
+            shutil.copy(source, planted)
+        elif where == "bundle-directory":
+            planted = approved / "dist" / f"{var}.pub"
+            shutil.copy(source, planted)
+        else:
+            planted = approved.parent / f"{var}-link.pub"
+            planted.symlink_to(source)
+        env = {_UP: str(release_anchor()), _GAP: str(gap_release_anchor()), var: str(planted)}
+        r = _guard_run(approved, "dist/MANIFEST.txt", env)
+        assert r.returncode == 1, (var, r.stderr)
+        if where == "link":
+            assert r.stderr == (f"FAIL: release trust anchor {var} is a link — point it at the plain key file "
+                                "itself, outside the checkout and the bundle (/work/anchors on the bastion)\n")
+        else:
+            assert r.stderr == _inside(var)
+        work = approved.parent / "work" / "anchors"
+        work.mkdir(parents=True, exist_ok=True)
+        shutil.copy(planted, work / f"{var}.pub")
+        ok = _guard_run(approved, "dist/MANIFEST.txt", {**env, var: str(work / f"{var}.pub")})
+        assert ok.returncode == 0, (var, ok.stderr)
+        assert ok.stderr == ""
+
+
+def test_checkout_guard_an_edited_origin_is_refused_as_an_edit_not_an_origin(approved):
+    """#1118 F2: the origin line is authenticated by the signed checksum list.
+    Flipping it after signing, with the signature unchanged, is refused by the
+    MANIFEST checksum check, and the message claims no origin."""
+    from tests.helpers_airgap import gap_release_anchor, release_anchor
+
+    env = {_UP: str(release_anchor()), _GAP: str(gap_release_anchor())}
+    manifest = approved / "dist" / "MANIFEST.txt"
+    manifest.write_text(manifest.read_text().replace("origin: upstream\n", "origin: gap\n"))
+    r = _guard_run(approved, "dist/MANIFEST.txt", env)
+    assert r.returncode == 1
+    assert r.stderr == ("FAIL: packed MANIFEST does not match its signed checksum entry (edited, or not listed "
+                        "exactly once) — rerun bootstrap.sh from the signed bundle\n")
+    assert "origin" not in r.stderr
+
+
+def test_checkout_guard_opt_out_reads_a_missing_origin_as_upstream(approved, third_key):
+    """#1118 F2 under the connected opt-out (D2): a MANIFEST packed before the
+    origin line runs with a notice and is read as upstream, so a configured
+    upstream anchor still pins the key and a gap anchor cannot vouch for it;
+    a repeated or unknown origin is refused as in a verified run. Without
+    CI_REHEARSAL the opt-out itself stays refused."""
+    from tests.helpers_airgap import gap_release_anchor, gap_release_key, release_anchor
+
+    notice = ("Notice: packed MANIFEST declares no release origin — read as upstream "
+              "(AIRGAP_UNVERIFIED_CHECKOUT=1, connected rehearsal only)\n")
+    _sign_origin(approved, "missing", _signer_key("upstream", third_key))
+    tofu = _guard_run(approved, "dist/MANIFEST.txt", {**_OPT_OUT, _UP: None})
+    assert tofu.returncode == 0, tofu.stderr
+    assert tofu.stderr == notice
+    pinned = _guard_run(approved, "dist/MANIFEST.txt", {**_OPT_OUT, _GAP: str(gap_release_anchor())})
+    assert pinned.returncode == 0, pinned.stderr
+    assert pinned.stderr == notice
+    _sign_origin(approved, "missing", gap_release_key())
+    gap_signed = _guard_run(approved, "dist/MANIFEST.txt",
+                            {**_OPT_OUT, _UP: str(release_anchor()), _GAP: str(gap_release_anchor())})
+    assert gap_signed.returncode == 1
+    assert gap_signed.stderr == notice + _mismatch_for("upstream")
+    _sign_origin(approved, "twice", _signer_key("upstream", third_key))
+    twice = _guard_run(approved, "dist/MANIFEST.txt", {**_OPT_OUT, _UP: None})
+    assert twice.returncode == 1
+    assert twice.stderr == _BAD_ORIGIN
+    refused = _guard_run(approved, "dist/MANIFEST.txt", {"AIRGAP_UNVERIFIED_CHECKOUT": "1", _UP: None})
+    assert refused.returncode == 1
+    assert refused.stderr == _OPT_OUT_REFUSED
 
 
 def test_validate_live_refuses_a_plain_checkout_and_passes_with_the_opt_out(tree):

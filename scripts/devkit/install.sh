@@ -66,6 +66,12 @@ TRUSTED=$(CDPATH= cd -- "$(dirname -- "$SNEAKERNET_TRUSTED_PUB")" && pwd -P)/$(b
 case "$TRUSTED" in
     "$KIT"/*) die "SNEAKERNET_TRUSTED_PUB points inside the kit: use the release-signing key you hold from the release bundle, not the kit's own copy" ;;
 esac
+# Kits are built connected and signed by the upstream key only (#1118 F2): an
+# upstream anchor that is the gap release key would let the gap key install one.
+if [ -n "${SNEAKERNET_GAP_TRUSTED_PUB:-}" ] && [ -f "$SNEAKERNET_GAP_TRUSTED_PUB" ] &&
+    cmp -s "$SNEAKERNET_TRUSTED_PUB" "$SNEAKERNET_GAP_TRUSTED_PUB"; then
+    die "SNEAKERNET_TRUSTED_PUB holds the same key as SNEAKERNET_GAP_TRUSTED_PUB: a kit is signed by the upstream release key only; point SNEAKERNET_TRUSTED_PUB at the upstream release-signing key"
+fi
 
 echo "==> 2. Signature over SHA256SUMS"
 for _member in SHA256SUMS SHA256SUMS.sig SHA256SUMS.sha256 sneakernet-signing.pub MANIFEST.txt image_manifest.py; do

@@ -161,10 +161,11 @@ exec {shlex.quote(real)} "$@"
 
 
 _MANIFEST_KEY: Path | None = None
+_GAP_KEY: Path | None = None
 
 
 def release_key() -> Path:
-    """The throwaway release signing key, one per test process."""
+    """The throwaway upstream release signing key, one per test process."""
     global _MANIFEST_KEY
     if _MANIFEST_KEY is None:
         import tempfile
@@ -173,11 +174,18 @@ def release_key() -> Path:
     return _MANIFEST_KEY
 
 
-def release_anchor() -> Path:
-    """The release trust anchor for release_key(): its public key in a file of
-    its own, outside any bundle (what an operator obtains out of band and
-    exports as SNEAKERNET_TRUSTED_PUB, #1118 F1)."""
-    key = release_key()
+def gap_release_key() -> Path:
+    """The throwaway gap release signing key (#1118 F2), one per test process,
+    a different key from release_key()."""
+    global _GAP_KEY
+    if _GAP_KEY is None:
+        import tempfile
+
+        _GAP_KEY = gen_sign_keypair(Path(tempfile.mkdtemp(prefix="gap-key-")))
+    return _GAP_KEY
+
+
+def _anchor_of(key: Path) -> Path:
     anchor = key.parent / "trusted-release-signing.pub"
     if not anchor.exists():
         subprocess.run(["openssl", "pkey", "-in", str(key), "-pubout", "-out", str(anchor)],
@@ -185,12 +193,30 @@ def release_anchor() -> Path:
     return anchor
 
 
-def write_signed_manifest(dist: Path, content: str) -> None:
+def release_anchor() -> Path:
+    """The release trust anchor for release_key(): its public key in a file of
+    its own, outside any bundle (what an operator obtains out of band and
+    exports as SNEAKERNET_TRUSTED_PUB, #1118 F1)."""
+    return _anchor_of(release_key())
+
+
+def gap_release_anchor() -> Path:
+    """The gap trust anchor for gap_release_key(), outside any bundle (what an
+    operator exports as SNEAKERNET_GAP_TRUSTED_PUB, #1118 F2)."""
+    return _anchor_of(gap_release_key())
+
+
+def write_signed_manifest(dist: Path, content: str, *, origin: str | None = "upstream",
+                          key: Path | None = None) -> None:
     """Write dist/MANIFEST.txt plus a real signature chain for it: SHA256SUMS
     listing exactly MANIFEST.txt, SHA256SUMS.sig and sneakernet-signing.pub
     (throwaway RSA key, reused per process). The guard verifies this chain
-    before trusting the MANIFEST (issue #414)."""
-    key = release_key()
+    before trusting the MANIFEST (issue #414). `origin` appends the signed
+    `origin:` line pack.sh writes (#1118 F2; None leaves it out), and `key`
+    signs instead of the upstream release key."""
+    key = key or release_key()
+    if origin is not None:
+        content = content + ("" if content.endswith("\n") or not content else "\n") + f"origin: {origin}\n"
     dist.mkdir(parents=True, exist_ok=True)
     (dist / "MANIFEST.txt").write_text(content)
     (dist / "SHA256SUMS").write_text(f"{sha256_bytes(content.encode())}  MANIFEST.txt\n")
