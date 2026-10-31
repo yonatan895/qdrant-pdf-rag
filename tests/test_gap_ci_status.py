@@ -247,16 +247,39 @@ def test_failing_ids_are_bounded(stub: Stub, token: Path) -> None:
     assert '... 25 more' in result.stdout
 
 
-def test_branch_pipeline_passes_and_reports_not_run_lanes(stub: Stub, token: Path) -> None:
+def test_not_run_lanes_are_passed_unverified_exit_4(stub: Stub, token: Path) -> None:
+    # Maintainer decision (GH#1118, 2026-10-31): a selected lane with no GitLab
+    # job is never a pass; everything that ran passed, so exit 4, not 0 or 1.
     branch_pipeline(stub, child_unit_jobs())
     result = run(stub, token, '--json')
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == 4, result.stdout + result.stderr
     report = json.loads(result.stdout)
-    assert report['verdict'] == 'passed' and report['exit_code'] == 0
-    assert report['not_run'] == ['packaging']
+    assert report['verdict'] == 'passed-unverified' and report['exit_code'] == 4
+    assert report['not_run'] == ['packaging'] and report['problems'] == []
     labels = {j['label']: j['status'] for j in report['jobs']}
     assert labels['lanes > test 3/4'] == 'success'
     assert 'packaging' not in json.dumps(report['jobs'])
+    text = run(stub, token)
+    assert text.returncode == 4
+    assert 'NOT RUN (no GitLab job): packaging' in text.stdout
+    assert text.stdout.rstrip().endswith('VERDICT: PASSED-UNVERIFIED')
+
+
+def test_every_required_lane_verified_is_exit_0(stub: Stub, token: Path) -> None:
+    branch_pipeline(stub, child_unit_jobs(),
+                    required=('context_check', 'lint_and_types', 'unit_tests'))
+    result = run(stub, token, '--json')
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads(result.stdout)
+    assert (report['verdict'], report['exit_code'], report['not_run']) == ('passed', 0, [])
+
+
+def test_failure_wins_over_unverified_lanes(stub: Stub, token: Path) -> None:
+    branch_pipeline(stub, child_unit_jobs(lint='failed'), status='failed')
+    result = run(stub, token, '--json')
+    assert result.returncode == 1, result.stdout + result.stderr
+    report = json.loads(result.stdout)
+    assert report['verdict'] == 'failed' and report['not_run'] == ['packaging']
 
 
 def test_selected_lane_missing_from_child_fails(stub: Stub, token: Path) -> None:
@@ -355,9 +378,52 @@ def test_merged_results_pipeline_found_through_merge_request(stub: Stub, token: 
     stub.ok(f'{API}/pipelines/300', {**pipeline(300, 'merge_request_event'), 'sha': 'f' * 40})
     stub.ok(f'{API}/pipelines/300/jobs', gate_jobs())
     stub.ok(f'{API}/pipelines/300/bridges', [])
+    # The merged results commit has the target head and this commit as parents.
+    stub.ok(f'{API}/repository/commits/{"f" * 40}', {'parent_ids': ['e' * 40, SHA]})
     result = run(stub, token)
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'head pipeline of open merge request !4' in result.stdout
+    # A head pipeline from an earlier MR head (not built on this commit) is not the answer.
+    stub.ok(f'{API}/repository/commits/{"f" * 40}', {'parent_ids': ['e' * 40, 'd' * 40]})
+    stale = run(stub, token)
+    assert stale.returncode == 2, stale.stdout
+    assert 'MR pipeline not created yet' in stale.stdout
+
+
+def open_mr_over_passing_branch_pipeline(stub: Stub, head: dict | None) -> None:
+    """Review B1 (#1168 comment 6545443422): MR !4 is open on this commit."""
+    branch_pipeline(stub, child_unit_jobs(),
+                    required=('context_check', 'lint_and_types', 'unit_tests'))
+    stub.ok(f'{API}/repository/commits/{SHA}/merge_requests',
+            [{'iid': 4, 'state': 'opened', 'sha': SHA, 'project_id': 7}])
+    stub.ok(f'{API}/merge_requests/4', {'iid': 4, 'head_pipeline': head})
+
+
+@pytest.mark.parametrize('head', [None, {'id': 200, 'project_id': 7}],
+                         ids=['no-head-pipeline', 'head-is-branch-pipeline'])
+def test_open_mr_without_mr_pipeline_is_pending_not_branch(stub: Stub, token: Path,
+                                                           head: dict | None) -> None:
+    open_mr_over_passing_branch_pipeline(stub, head)
+    result = run(stub, token)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert 'MR pipeline not created yet: open merge request !4' in result.stdout
+    assert 'VERDICT: PENDING' in result.stdout
+    assert 'using branch pipeline' not in result.stdout
+
+
+def test_open_mr_pipeline_answers_once_created(stub: Stub, token: Path) -> None:
+    open_mr_over_passing_branch_pipeline(stub, None)
+    # The MR pipeline appears on the second poll and fails: its result, not the
+    # passing branch pipeline's, is the answer.
+    stub.ok(f'{API}/pipelines', [pipeline(200, 'push')],
+            [pipeline(200, 'push'), pipeline(250, 'merge_request_event', 'failed')])
+    stub.ok(f'{API}/pipelines/250', pipeline(250, 'merge_request_event', 'failed'))
+    stub.ok(f'{API}/pipelines/250/jobs', gate_jobs(sim='failed'))
+    stub.ok(f'{API}/pipelines/250/bridges', [])
+    result = run(stub, token, '--wait', '--interval', '1', '--timeout', '30')
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert 'waiting: MR pipeline not created yet' in result.stderr
+    assert 'using merge request pipeline 250' in result.stdout
 
 
 def test_pending_then_success_with_wait(stub: Stub, token: Path) -> None:

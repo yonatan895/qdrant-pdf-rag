@@ -10,12 +10,16 @@ docs/task-runner.md#gap-ci-status.
 Fail closed, like the pipeline itself: the verdict is PASSED only when every
 job and every pipeline succeeded, no job sets allow_failure, no pipeline is
 empty and every lane the pipeline must run ran. Lanes the branch selector
-chose that have no GitLab job are reported as NOT RUN, never as passed.
+chose that have no GitLab job are reported as NOT RUN, never as passed: when
+everything that ran passed, the verdict is PASSED-UNVERIFIED (exit 4). While a
+merge request is open on the commit, only its merge request pipeline answers.
 
 Standard library only; the token is read from a file (never argv) and never
 printed. Errors print fixed messages and HTTP status codes, never exception or
-response text, and no job log is read. Exit codes: 0 passed, 1 failed,
-2 pending (at --timeout with --wait), 3 usage, network or auth error.
+response text, and no job log is read. Exit codes: 0 passed (every required
+lane ran and passed), 1 failed, 2 pending (at --timeout with --wait, or no
+pipeline yet), 3 usage, network or auth error, 4 passed-unverified (every job
+that ran passed; selected lanes have no GitLab job).
 """
 
 from __future__ import annotations
@@ -44,7 +48,7 @@ if __package__ in (None, ''):
 
 from scripts.gitlab_lanes import ALWAYS, LANE_JOBS, selected_jobs
 
-EXIT_PASSED, EXIT_FAILED, EXIT_PENDING, EXIT_ERROR = 0, 1, 2, 3
+EXIT_PASSED, EXIT_FAILED, EXIT_PENDING, EXIT_ERROR, EXIT_UNVERIFIED = 0, 1, 2, 3, 4
 # The dev pod mounts Secret mfr-dev-gitlab here (deploy/workspace/ci-namespace.template.yaml).
 TOKEN_FILE = '/etc/mfr/dev-gitlab/token'
 URL_ENV = ('CI_SERVER_URL', 'MFR_GITLAB_URL')
@@ -182,12 +186,26 @@ def kind_of(pipeline: dict) -> str:
     return 'branch'
 
 
-def find_pipeline(api: Api, project: int, sha: str) -> tuple[int, dict, str] | None:
-    """(project id, pipeline, how it was chosen).
+def mr_pipeline_for(api: Api, pipeline: dict, owner: int, sha: str) -> bool:
+    """True when an MR pipeline ran on `sha`, or on a merged results commit whose parent it is."""
+    if pipeline.get('source') != 'merge_request_event':
+        return False
+    if pipeline.get('sha') == sha:
+        return True
+    commit = api.json(f'/projects/{owner}/repository/commits/{clean(pipeline.get("sha"), 40)}')
+    parents = commit.get('parent_ids') if isinstance(commit, dict) else None
+    return isinstance(parents, list) and sha in parents
 
-    The pipeline of an open merge request whose head is this commit comes first;
-    otherwise the commit's newest pipeline, so a closed merge request's older
-    pipeline never hides a newer branch pipeline.
+
+def find_pipeline(api: Api, project: int, sha: str) -> tuple[int, dict, str] | str | None:
+    """(project id, pipeline, how it was chosen); a str is why it must still wait.
+
+    While a merge request containing this commit is open, only a merge request
+    pipeline answers: if GitLab has not created one for this commit yet, wait,
+    never fall back to the branch pipeline (it ran only the selected lanes;
+    the merge request pipeline runs every lane, GH#808). With no open merge
+    request, the commit's newest pipeline answers, so a closed merge request's
+    older pipeline never hides a newer branch pipeline.
     """
     found = [p for p in api.pages(f'/projects/{project}/pipelines',
                                   {'sha': sha, 'order_by': 'id', 'sort': 'desc'})
@@ -198,9 +216,9 @@ def find_pipeline(api: Api, project: int, sha: str) -> tuple[int, dict, str] | N
         if error.code != 404:  # 404: GitLab has not received the commit yet
             raise
         requests = []
-    for request in sorted(requests, key=lambda m: -int(m.get('iid', 0))):
-        if request.get('state') != 'opened' or request.get('sha') != sha:
-            continue
+    open_requests = sorted((m for m in requests if m.get('state') == 'opened'),
+                           key=lambda m: -int(m.get('iid', 0)))
+    for request in open_requests:
         iid = int(request['iid'])
         mine = [p for p in found if p.get('source') == 'merge_request_event'
                 and str(p.get('ref', '')).startswith(f'refs/merge-requests/{iid}/')]
@@ -208,6 +226,8 @@ def find_pipeline(api: Api, project: int, sha: str) -> tuple[int, dict, str] | N
             newest = max(mine, key=lambda p: int(p['id']))
             return project, api.json(f'/projects/{project}/pipelines/{int(newest["id"])}'), \
                 f'the newest pipeline of open merge request !{iid}'
+        if request.get('sha') != sha:
+            continue
         # A merged results pipeline runs on a merge commit, so the sha filter misses it.
         target = int(request.get('project_id', project))
         detail = api.json(f'/projects/{target}/merge_requests/{iid}')
@@ -215,9 +235,13 @@ def find_pipeline(api: Api, project: int, sha: str) -> tuple[int, dict, str] | N
         if isinstance(head, dict) and head.get('id'):
             owner = int(head.get('project_id', target))
             pipeline = api.json(f'/projects/{owner}/pipelines/{int(head["id"])}')
-            if pipeline.get('source') == 'merge_request_event':
+            if mr_pipeline_for(api, pipeline, owner, sha):
                 return owner, pipeline, (f'the head pipeline of open merge request !{iid}'
                                          f' (on commit {clean(pipeline.get("sha"), 40)})')
+    if open_requests:
+        listed = ', '.join(f'!{int(m["iid"])}' for m in open_requests)
+        return (f'MR pipeline not created yet: open merge request {listed} has no merge '
+                'request pipeline for this commit; the branch pipeline is not the merge gate')
     if found:
         newest = max(found, key=lambda p: int(p['id']))
         pipeline = api.json(f'/projects/{project}/pipelines/{int(newest["id"])}')
@@ -375,7 +399,10 @@ def failing_tests(api: Api, row: Row, bound: int) -> None:
 
 
 def verdict(api: Api, pipeline: dict, snap: Snapshot, bound: int) -> tuple[list[str], list[str]]:
-    """(problems, NOT RUN lanes) for a finished pipeline; no problems means PASSED."""
+    """(problems, NOT RUN lanes) for a finished pipeline.
+
+    Problems mean FAILED; else NOT RUN lanes mean PASSED-UNVERIFIED; else PASSED.
+    """
     problems = list(snap.problems)
     for label, _, status, count in snap.pipelines:
         if count == 0:
@@ -428,7 +455,7 @@ def render_text(report: dict) -> str:
                 lines.append(f'    ({job["report"]})')
     if report['not_run']:
         lines.append('NOT RUN (no GitLab job): ' + ' '.join(report['not_run'])
-                     + '. This pipeline does not verify these lanes.')
+                     + '. This pipeline does not verify these lanes (exit 4).')
     if report['problems']:
         lines.append('PROBLEMS:')
         lines.extend(f'  - {problem}' for problem in report['problems'])
@@ -448,7 +475,8 @@ def build_report(sha: str, chosen: tuple[int, dict, str] | None, snap: Snapshot,
              'status': r.status, 'duration': r.duration, 'allow_failure': r.allow_failure,
              'bridge': r.bridge, 'tests': r.tests, 'more': r.more, 'report': r.report}
             for r in snap.rows]
-    code = {'passed': EXIT_PASSED, 'failed': EXIT_FAILED, 'pending': EXIT_PENDING}[result]
+    code = {'passed': EXIT_PASSED, 'failed': EXIT_FAILED, 'pending': EXIT_PENDING,
+            'passed-unverified': EXIT_UNVERIFIED}[result]
     return {'sha': sha, 'pipeline': pipe, 'jobs': jobs, 'not_run': not_run,
             'problems': problems, 'verdict': result, 'exit_code': code}
 
@@ -535,24 +563,26 @@ def run(args: argparse.Namespace) -> dict:
     deadline = time.monotonic() + (args.timeout if args.wait else 0)
     last = ''
     while True:
-        chosen = find_pipeline(api, project['id'], sha)
+        found = find_pipeline(api, project['id'], sha)
+        waiting = found if isinstance(found, str) else 'no pipeline for this commit yet'
+        chosen = found if isinstance(found, tuple) else None
         snap = Snapshot()
         if chosen:
             inspect(api, chosen[0], chosen[1], '', 0, snap)
         if chosen and not snap.pending:
             problems, not_run = verdict(api, chosen[1], snap, args.max_tests)
-            return build_report(sha, chosen, snap, problems, not_run,
-                                'failed' if problems else 'passed')
+            result = 'failed' if problems else 'passed-unverified' if not_run else 'passed'
+            return build_report(sha, chosen, snap, problems, not_run, result)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            note = ['no pipeline for this commit yet' if not chosen
+            note = [waiting if not chosen
                     else 'still running at the end of --timeout' if args.wait
                     else 'still running (pass --wait to wait for it)']
             return build_report(sha, chosen, snap, note, [], 'pending')
         done = sum(r.status in TERMINAL for r in snap.rows)
         state = (f'waiting: pipeline {int(chosen[1]["id"])} '
                  f'{clean(chosen[1].get("status"), 40)}, {done}/{len(snap.rows)} jobs finished'
-                 if chosen else 'waiting: no pipeline for this commit yet')
+                 if chosen else f'waiting: {waiting}')
         if state != last:
             print(state, file=sys.stderr, flush=True)
             last = state
