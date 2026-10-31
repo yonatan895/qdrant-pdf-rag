@@ -86,7 +86,8 @@ not an arbitrary system binary.
   else its branch pipeline, follows the `lanes` bridge into the child
   pipeline, and prints each job and, for a failed test job, the failing test
   ids from its JUnit report, never log text. Export `MFR_GITLAB_URL`
-  (`https://<gitlab host>`) and `MFR_GITLAB_PROJECT` (`<group>/<name>`); the
+  (`https://<gitlab host>`) and `MFR_GITLAB_PROJECT` (`<group>/<name>`);
+  inside a GitLab job `CI_SERVER_URL` and `CI_PROJECT_PATH` win. The
   `read_api` token comes from `/etc/mfr/dev-gitlab/token` (Secret
   `mfr-dev-gitlab`), never argv. Exit 0 passed, 1 failed, 2 still running at
   `--timeout` (default 3600 s), 3 usage, network or auth error; `--json`

@@ -150,6 +150,8 @@ def mr_pipeline(stub: Stub, jobs: list[dict], status: str = 'success') -> None:
     stub.ok(f'{API}/pipelines/100', pipeline(100, 'merge_request_event', status))
     stub.ok(f'{API}/pipelines/100/jobs', jobs)
     stub.ok(f'{API}/pipelines/100/bridges', [])
+    stub.ok(f'{API}/repository/commits/{SHA}/merge_requests',
+            [{'iid': 4, 'state': 'opened', 'sha': SHA, 'project_id': 7}])
 
 
 def branch_pipeline(stub: Stub, child_jobs: list[dict], *, status: str = 'success',
@@ -185,7 +187,8 @@ def test_merge_request_pipeline_passes(stub: Stub, token: Path) -> None:
     mr_pipeline(stub, gate_jobs())
     result = run(stub, token)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert 'using merge request pipeline 100' in result.stdout
+    assert 'using merge request pipeline 100: the newest pipeline of open merge request !4' \
+        in result.stdout
     assert 'VERDICT: PASSED' in result.stdout
     for name in ('hygiene', 'lint', 'test 4/4', 'sim', 'gate-l1'):
         assert name in result.stdout
@@ -221,6 +224,18 @@ def test_branch_pipeline_follows_bridge_and_lists_failing_tests(stub: Stub, toke
     assert storage and all('private-token' not in h for h in storage)
 
 
+def test_unreadable_junit_archive_is_a_fixed_note(stub: Stub, token: Path) -> None:
+    branch_pipeline(stub, child_unit_jobs(**{'test 2/4': 'failed'}), status='failed')
+    data = bytearray(junit_zip('<testcase classname="tests.test_a" name="t"><failure/></testcase>'))
+    central = data.index(b'PK\x01\x02')
+    data[central + 10:central + 12] = (99).to_bytes(2, 'little')  # unsupported compression
+    stub.ok(f'{API}/jobs/2013/artifacts', bytes(data))
+    result = run(stub, token)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert '(JUnit report unreadable)' in result.stdout
+    assert 'unit-junit.xml' not in result.stdout + result.stderr
+
+
 def test_failing_ids_are_bounded(stub: Stub, token: Path) -> None:
     branch_pipeline(stub, child_unit_jobs(**{'test 1/4': 'failed'}), status='failed')
     stub.ok(f'{API}/jobs/2012/artifacts', junit_zip(*[
@@ -250,6 +265,15 @@ def test_selected_lane_missing_from_child_fails(stub: Stub, token: Path) -> None
     result = run(stub, token)
     assert result.returncode == 1
     assert 'job test shard(s) 3 of 4 did not run' in result.stdout
+
+
+def test_manifest_lane_missing_from_lanes_yml_fails(stub: Stub, token: Path) -> None:
+    # The select job's lanes.yml and manifest disagree: hazards was required.
+    branch_pipeline(stub, child_unit_jobs(), required=('context_check', 'lint_and_types',
+                                                       'unit_tests', 'hazards'))
+    result = run(stub, token)
+    assert result.returncode == 1, result.stdout
+    assert 'expected job hazards did not run' in result.stdout
 
 
 def test_unreadable_lane_selection_fails_closed(stub: Stub, token: Path) -> None:
@@ -296,6 +320,33 @@ def test_merge_request_pipeline_missing_lane_fails(stub: Stub, token: Path) -> N
     assert 'expected job gate-l1 did not run' in result.stdout
 
 
+def test_closed_merge_request_pipeline_does_not_hide_newer_branch_pipeline(
+        stub: Stub, token: Path) -> None:
+    stub.ok(f'{API}/pipelines', [pipeline(300, 'push', 'failed'),
+                                 pipeline(100, 'merge_request_event')])
+    stub.ok(f'{API}/repository/commits/{SHA}/merge_requests',
+            [{'iid': 4, 'state': 'closed', 'sha': SHA, 'project_id': 7}])
+    stub.ok(f'{API}/pipelines/300', pipeline(300, 'push', 'failed'))
+    stub.ok(f'{API}/pipelines/300/jobs', [job(3001, 'select', 'hygiene', 'failed')])
+    stub.ok(f'{API}/pipelines/300/bridges', [])
+    result = run(stub, token)
+    assert result.returncode == 1, result.stdout
+    assert 'using branch pipeline 300' in result.stdout
+
+
+def test_tag_pipeline_needs_every_lane(stub: Stub, token: Path) -> None:
+    tag = pipeline(400, 'push', tag=True, ref='v1.0.0')
+    stub.ok(f'{API}/pipelines', [tag])
+    stub.ok(f'{API}/pipelines/400', tag)
+    stub.ok(f'{API}/pipelines/400/jobs', gate_jobs())
+    stub.ok(f'{API}/pipelines/400/bridges', [])
+    result = run(stub, token)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'using tag pipeline 400' in result.stdout
+    stub.ok(f'{API}/pipelines/400/jobs', [j for j in gate_jobs() if j['name'] != 'hazards'])
+    assert run(stub, token).returncode == 1
+
+
 def test_merged_results_pipeline_found_through_merge_request(stub: Stub, token: Path) -> None:
     stub.ok(f'{API}/pipelines', [])
     stub.ok(f'{API}/repository/commits/{SHA}/merge_requests',
@@ -306,7 +357,7 @@ def test_merged_results_pipeline_found_through_merge_request(stub: Stub, token: 
     stub.ok(f'{API}/pipelines/300/bridges', [])
     result = run(stub, token)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert 'head pipeline of merge request !4' in result.stdout
+    assert 'head pipeline of open merge request !4' in result.stdout
 
 
 def test_pending_then_success_with_wait(stub: Stub, token: Path) -> None:
@@ -341,6 +392,7 @@ def test_no_pipeline_yet_is_pending(stub: Stub, token: Path) -> None:
 
 @pytest.mark.parametrize(('status', 'message'), [
     (401, 'GitLab refused the token (HTTP 401): check the token file and its expiry'),
+    (403, 'GitLab denied access (HTTP 403): the token needs read_api on this project'),
     (404, 'GitLab returned HTTP 404: the project, commit or pipeline is not visible'),
     (500, 'GitLab API returned HTTP 500'),
 ])
@@ -402,7 +454,8 @@ def test_malformed_token_file_is_refused(stub: Stub, tmp_path: Path) -> None:
 def test_default_sha_is_checkout_head(stub: Stub, token: Path, tmp_path: Path) -> None:
     repo = tmp_path / 'repo'
     repo.mkdir()
-    git = ['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@invalid']
+    git = ['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@invalid',
+           '-c', 'commit.gpgsign=false']
     subprocess.run([*git, 'init', '-q'], check=True)
     subprocess.run([*git, 'commit', '-q', '--allow-empty', '-m', 'x'], check=True)
     head = subprocess.run([*git, 'rev-parse', 'HEAD'], check=True, capture_output=True,

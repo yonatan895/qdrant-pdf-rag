@@ -183,16 +183,15 @@ def kind_of(pipeline: dict) -> str:
 
 
 def find_pipeline(api: Api, project: int, sha: str) -> tuple[int, dict, str] | None:
-    """(project id, pipeline, how it was chosen): MR pipeline first, else branch or tag."""
+    """(project id, pipeline, how it was chosen).
+
+    The pipeline of an open merge request whose head is this commit comes first;
+    otherwise the commit's newest pipeline, so a closed merge request's older
+    pipeline never hides a newer branch pipeline.
+    """
     found = [p for p in api.pages(f'/projects/{project}/pipelines',
                                   {'sha': sha, 'order_by': 'id', 'sort': 'desc'})
              if p.get('source') != 'parent_pipeline']
-    mr = [p for p in found if p.get('source') == 'merge_request_event']
-    if mr:
-        newest = max(mr, key=lambda p: int(p['id']))
-        return project, api.json(f'/projects/{project}/pipelines/{int(newest["id"])}'), \
-            'the newest merge request pipeline of this commit'
-    # A merged results pipeline runs on a merge commit, so the sha filter misses it.
     try:
         requests = api.pages(f'/projects/{project}/repository/commits/{sha}/merge_requests')
     except HttpStatus as error:
@@ -202,14 +201,22 @@ def find_pipeline(api: Api, project: int, sha: str) -> tuple[int, dict, str] | N
     for request in sorted(requests, key=lambda m: -int(m.get('iid', 0))):
         if request.get('state') != 'opened' or request.get('sha') != sha:
             continue
+        iid = int(request['iid'])
+        mine = [p for p in found if p.get('source') == 'merge_request_event'
+                and str(p.get('ref', '')).startswith(f'refs/merge-requests/{iid}/')]
+        if mine:
+            newest = max(mine, key=lambda p: int(p['id']))
+            return project, api.json(f'/projects/{project}/pipelines/{int(newest["id"])}'), \
+                f'the newest pipeline of open merge request !{iid}'
+        # A merged results pipeline runs on a merge commit, so the sha filter misses it.
         target = int(request.get('project_id', project))
-        detail = api.json(f'/projects/{target}/merge_requests/{int(request["iid"])}')
+        detail = api.json(f'/projects/{target}/merge_requests/{iid}')
         head = detail.get('head_pipeline') if isinstance(detail, dict) else None
         if isinstance(head, dict) and head.get('id'):
             owner = int(head.get('project_id', target))
             pipeline = api.json(f'/projects/{owner}/pipelines/{int(head["id"])}')
             if pipeline.get('source') == 'merge_request_event':
-                return owner, pipeline, (f'the head pipeline of merge request !{int(request["iid"])}'
+                return owner, pipeline, (f'the head pipeline of open merge request !{iid}'
                                          f' (on commit {clean(pipeline.get("sha"), 40)})')
     if found:
         newest = max(found, key=lambda p: int(p['id']))
@@ -293,7 +300,11 @@ def artifact_json(api: Api, project: int, job_id: int, name: str) -> dict:
 
 
 def lane_selection(api: Api, snap: Snapshot) -> tuple[list[str], list[str]]:
-    """(problems, NOT RUN lanes) for a branch pipeline, from the select job's artifacts."""
+    """(problems, NOT RUN lanes) for a branch pipeline, from the select job's artifacts.
+
+    The child must hold every job of lanes.yml and every job the manifest's lanes
+    map to, so a lane dropped between the two is missing, never silently absent.
+    """
     select = [r for r in snap.rows if not r.via and r.name == SELECT_JOB and not r.bridge]
     if not select:
         return [f'expected job {SELECT_JOB} did not run'], []
@@ -303,14 +314,14 @@ def lane_selection(api: Api, snap: Snapshot) -> tuple[list[str], list[str]]:
     try:
         lanes = artifact_json(api, job.project, job.job_id, 'lanes.yml')
         manifest = artifact_json(api, job.project, job.job_id, 'lanes-manifest.json')
-        _, not_run, _ = selected_jobs(manifest)
+        jobs, not_run, _ = selected_jobs(manifest)
     except HttpStatus as error:
         if error.code == 401:
             raise
         return [f'cannot read the lane selection of job {SELECT_JOB} (HTTP {error.code})'], []
-    except (GitLabError, ValueError, TypeError):
+    except Exception:  # noqa: BLE001 - any malformed artifact: fixed message, fail closed
         return [f'cannot read the lane selection of job {SELECT_JOB}'], []
-    expected = {str(k) for k in lanes if k != 'include'}
+    expected = {clean(k) for k in lanes if k != 'include'} | set(jobs)
     child = [r.name for r in snap.rows if r.via == LANES_BRIDGE]
     return missing_jobs(expected, child, f'child pipeline (via {LANES_BRIDGE})'), not_run
 
@@ -353,7 +364,7 @@ def failing_tests(api: Api, row: Row, bound: int) -> None:
                         found.append('FAILED  ' + clean(test_id(case), 400))
                     elif case.find('skipped') is not None:
                         found.append('SKIPPED ' + clean(test_id(case), 400))
-    except (zipfile.BadZipFile, ET.ParseError, ValueError, OSError):
+    except Exception:  # noqa: BLE001 - corrupt, encrypted or unsupported archive
         row.report = 'JUnit report unreadable'
         return
     if not reports:
@@ -558,6 +569,8 @@ def main(argv: list[str] | None = None) -> int:
         message = 'unexpected response from GitLab'
     except KeyboardInterrupt:
         message = 'interrupted'
+    except Exception:  # noqa: BLE001 - never exception text
+        message = 'internal error (details withheld)'
     else:
         print(json.dumps(report, indent=2) if args.json else render_text(report))
         return int(report['exit_code'])
