@@ -18,8 +18,18 @@ matched. Tokens, the client secret, other claim values, group names and user
 identity are never printed. Error text from the network, TLS or the server is
 never printed either; every failure is one fixed line.
 
+Access-token mode (``--access-token``, #1075 T0, #1088 item 1) reports on the
+ACCESS token of the same token response instead: the token Open WebUI forwards to
+the team-tool gateways. It prints one fixed verdict code (ACCESS_VERDICTS), most
+severe first; ``userinfo_audience`` means AD FS issued the token for
+urn:microsoft:userinfo, which every gateway refuses. It prints claim names, the
+aud count with yes/no answers, the group claim's type, count and form, the
+lifetime in seconds and whether a refresh token was issued; it never prints aud,
+iss, sub or group values from the token, only the CONFIGURED gateway audience and
+team group when they match.
+
 The ID token signature is NOT verified: this is a diagnostic of what AD FS
-issues, not an authentication step.
+issues, not an authentication step. The same holds for the access token.
 """
 
 from __future__ import annotations
@@ -32,6 +42,7 @@ import hashlib
 import http.client
 import http.server
 import json
+import math
 import os
 import secrets
 import shlex
@@ -75,8 +86,41 @@ REFUSED_ROLE_VALUES = ("*", "signed-in")
     EXIT_VALIDATE,
     EXIT_CLAIMS,
     EXIT_INTERNAL,
-) = (2, 3, 4, 5, 6, 7, 8, 9)
+    EXIT_ACCESS,
+) = (2, 3, 4, 5, 6, 7, 8, 9, 10)
 SOCKET_TIMEOUT = 3.0  # per accepted callback connection
+
+
+# Access-token mode (#1075 T0). AD FS issues an access token for this resource
+# when the authorize request names no other resource; no gateway accepts it.
+USERINFO_AUDIENCE = "urn:microsoft:userinfo"
+# The gateway library's default algorithm (src/mainframe_rag/mcp/tool_auth.py); ES256
+# needs explicit gateway configuration, so the probe does not count it as ready.
+GATEWAY_ALGS = ("RS256",)
+# The gateway library refuses longer tokens (tool_auth._MAX_TOKEN_CHARS).
+GATEWAY_MAX_TOKEN_CHARS = 32 * 1024
+# Header alg values printed as-is; anything else prints as "other".
+KNOWN_ALGS = GATEWAY_ALGS + ("ES256", "RS384", "RS512", "PS256", "PS384", "ES384", "HS256", "none")
+# Open WebUI v0.12.3 refreshes the access token 5 minutes before it expires.
+MIN_LIFETIME_S = 600
+
+# One verdict per run, most severe first. Codes and text are fixed and stable.
+ACCESS_VERDICTS = {
+    "absent": "the token response carries no access token",
+    "opaque": "the access token is not a JWT; no gateway can verify it",
+    "too_large": "the access token is above the gateways' 32 KiB limit",
+    "userinfo_audience": "the access token is for urn:microsoft:userinfo; every gateway refuses it",
+    "unsupported_alg": "the access token is not signed with RS256 under a key id",
+    "claims_missing": "the access token lacks a usable sub, iss, aud or exp",
+    "issuer_mismatch": "the access token's iss differs from the expected issuer",
+    "expired": "the access token has already expired",
+    "no_groups": "the access token carries no value in the group claim",
+    "team_group_missing": "the access token's group claim lacks the team group",
+    "gateway_audience_missing": "the access token's aud names no configured gateway audience",
+    "audience_unchecked": "no --gateway-audience was given; the token fits a gateway only "
+    "through token exchange",
+    "ok": "the access token meets every gateway expectation",
+}
 
 
 class CheckError(Exception):
@@ -406,6 +450,164 @@ def analyse(
     return lines, failures
 
 
+def _jwt_part(token: str, index: int) -> dict[str, Any] | None:
+    """One decoded JSON object segment of a JWT, or None when it is not one."""
+    parts = token.strip().split(".")
+    if len(parts) != 3 or not parts[index]:
+        return None
+    try:
+        seg = parts[index] + "=" * (-len(parts[index]) % 4)
+        doc = json.loads(base64.urlsafe_b64decode(seg.encode("ascii")))
+    except (ValueError, UnicodeError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _number(value: Any) -> bool:
+    """A finite JSON number (json accepts NaN and Infinity)."""
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+    return ok and math.isfinite(value)
+
+
+def analyse_access_token(
+    token: str | None,
+    *,
+    issuers: list[tuple[str, str]] | None,
+    client_id: str | None,
+    group_claim: str,
+    team_group: str | None,
+    gateway_audiences: list[str],
+    refresh_issued: bool | None,
+    now: float | None,
+) -> tuple[list[str], str]:
+    """Return (report lines, verdict code). Lines carry no value from the token.
+
+    ``issuers`` lists (label, value) pairs the iss may equal; None skips the comparison and ``now`` None the expiry check
+    (offline); ``refresh_issued`` None means the token response is unknown.
+    """
+    if not token:
+        return ["access token: absent"], "absent"
+    header, claims = _jwt_part(token, 0), _jwt_part(token, 1)
+    size = len(token.strip().encode("utf-8"))
+    if header is None or claims is None:
+        return [f"access token: present, format=opaque, size={size} bytes"], "opaque"
+    if size > GATEWAY_MAX_TOKEN_CHARS:
+        return [f"access token: present, format=jwt, size={size} bytes"], "too_large"
+    lines = [f"access token: present, format=jwt, size={size} bytes"]
+    alg, kid = header.get("alg"), header.get("kid")
+    alg_text = alg if isinstance(alg, str) and alg in KNOWN_ALGS else "other"
+    has_kid = isinstance(kid, str) and bool(kid)
+    lines.append(f"access token alg: {alg_text}, key id present: {'yes' if has_kid else 'no'}")
+    lines.append("claim names: " + (", ".join(sorted(claims)) or "(none)"))
+
+    aud = claims.get("aud")
+    raw_auds = [aud] if isinstance(aud, str) else aud if isinstance(aud, list) else []
+    auds = [a for a in raw_auds if isinstance(a, str) and a]
+    aud_ok = bool(auds) and len(auds) == len(raw_auds)  # PyJWT refuses a non-string member
+    userinfo = USERINFO_AUDIENCE in auds
+    lines.append(
+        f"aud: count={len(auds)}, urn:microsoft:userinfo: {'yes' if userinfo else 'no'}, "
+        + "the client ID: "
+        + ("not checked" if client_id is None else "yes" if client_id in auds else "no")
+    )
+    matched_aud = [a for a in gateway_audiences if a in auds]
+    if gateway_audiences:
+        lines.append(
+            "configured gateway audiences matched: " + (", ".join(matched_aud) or "(none)")
+        )
+
+    iss = claims.get("iss")
+    iss_match: bool | None = None
+    if not isinstance(iss, str) or not iss:
+        lines.append("iss: absent")
+    elif issuers is None:
+        lines.append("iss: present (not compared offline without --expect-iss)")
+    else:
+        label = next((name for name, value in issuers if value == iss), None)
+        iss_match = label is not None
+        lines.append(
+            f"iss: equals the {label}; set the gateway issuer to that value"
+            if label
+            else "iss: differs from " + " and ".join(name for name, _ in issuers)
+        )
+    sub_ok = isinstance(claims.get("sub"), str) and bool(claims.get("sub"))
+    lines.append(f"sub: {'present' if sub_ok else 'absent'}")
+    exp, iat = claims.get("exp"), claims.get("iat")
+    iat_ok = "iat" not in claims or _number(iat)  # PyJWT refuses a non-numeric iat
+    if _number(exp) and _number(iat):
+        lifetime = int(exp - iat)
+        lines.append(f"lifetime: {lifetime} s")
+        if lifetime < MIN_LIFETIME_S:
+            lines.append(
+                f"WARN: the lifetime is under {MIN_LIFETIME_S} s; Open WebUI refreshes 300 s "
+                "before expiry"
+            )
+    else:
+        lines.append("lifetime: unknown (exp or iat absent)")
+    if refresh_issued is None:
+        lines.append("refresh token issued: not checked offline")
+    else:
+        lines.append(f"refresh token issued: {'yes' if refresh_issued else 'no'}")
+        if not refresh_issued:
+            lines.append(
+                "WARN: no refresh token; Open WebUI drops the session near expiry and a "
+                "tool call may go out with no token (#1088 item 3)"
+            )
+
+    raw = claims.get(group_claim)
+    groups: list[str] = []
+    if group_claim not in claims:
+        lines.append(f"group claim '{group_claim}': absent")
+    else:
+        kind, count, groups = role_values(raw)
+        if isinstance(raw, str):  # the gateway library takes a string as one group
+            groups, count = [raw] if raw else [], 1 if raw else 0
+        line = f"group claim '{group_claim}': present, type={kind}, count={count}"
+        if groups:
+            line += f", form={value_form(groups)}"
+        lines.append(line)
+    team_ok = team_group is None or team_group in groups
+    if team_group is not None:
+        lines.append(
+            f"configured team group '{team_group}': " + ("present" if team_ok else "absent")
+        )
+        hint = None if team_ok else near_miss(team_group, groups)
+        if hint:
+            lines.append(f"hint: configured team group '{team_group}' is not in the claim; {hint}")
+
+    if userinfo:
+        verdict = "userinfo_audience"
+    elif alg not in GATEWAY_ALGS or not has_kid:
+        verdict = "unsupported_alg"
+    elif not (aud_ok and sub_ok and isinstance(iss, str) and iss and _number(exp) and iat_ok):
+        verdict = "claims_missing"
+    elif iss_match is False:
+        verdict = "issuer_mismatch"
+    elif now is not None and exp <= now:
+        verdict = "expired"
+    elif not groups:
+        verdict = "no_groups"
+    elif not team_ok:
+        verdict = "team_group_missing"
+    elif gateway_audiences and not matched_aud:
+        verdict = "gateway_audience_missing"
+    elif not gateway_audiences:
+        verdict = "audience_unchecked"
+    else:
+        verdict = "ok"
+    return lines, verdict
+
+
+def report_access(lines: list[str], verdict: str) -> None:
+    """Print the access-token report; raise CheckError unless the verdict is ok."""
+    print("note: the access token signature is NOT verified (diagnostic only)")
+    for line in lines:
+        print(line)
+    print(f"access token verdict: {verdict}")
+    if verdict != "ok":
+        raise CheckError(EXIT_ACCESS, ACCESS_VERDICTS[verdict])
+
+
 # ------------------------------------------------------------------ network
 
 
@@ -647,6 +849,26 @@ def run_flow(args: argparse.Namespace) -> dict[str, Any]:
             "code_verifier": verifier,
         },
     )
+    if args.access_token:
+        token = tok.get("access_token")
+        refresh = tok.get("refresh_token")
+        issuers = [
+            (f"discovery {key}", disc[key])
+            for key in ("access_token_issuer", "issuer")
+            if isinstance(disc.get(key), str)
+        ]
+        lines, verdict = analyse_access_token(
+            token if isinstance(token, str) else None,
+            issuers=issuers,
+            client_id=args.client_id,
+            group_claim=args.group_claim,
+            team_group=args.team_group,
+            gateway_audiences=args.gateway_audience,
+            refresh_issued=isinstance(refresh, str) and bool(refresh),
+            now=time.time(),
+        )
+        report_access(lines, verdict)
+        return {}
     id_token = tok.get("id_token")
     if not isinstance(id_token, str) or not id_token:
         raise CheckError(EXIT_TOKEN, "token response carries no id_token")
@@ -792,7 +1014,21 @@ def run_decode_only(args: argparse.Namespace) -> None:
         with open(args.decode_only, encoding="utf-8") as fh:
             token = fh.read()
     except OSError:
-        raise CheckError(EXIT_USAGE, "ID token file is unreadable") from None
+        what = "access token" if args.access_token else "ID token"
+        raise CheckError(EXIT_USAGE, f"{what} file is unreadable") from None
+    if args.access_token:
+        lines, verdict = analyse_access_token(
+            token.strip() or None,
+            issuers=[("--expect-iss value", args.expect_iss)] if args.expect_iss else None,
+            client_id=args.client_id,
+            group_claim=args.group_claim,
+            team_group=args.team_group,
+            gateway_audiences=args.gateway_audience,
+            refresh_issued=None,
+            now=None,
+        )
+        report_access(lines, verdict)
+        return
     claims = decode_jwt_payload(token)
     bad = validate_claims(
         claims, issuer=args.expect_iss, client_id=args.client_id, nonce=None, now=None
@@ -910,12 +1146,45 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--decode-only", metavar="FILE", help="analyse a saved ID token file offline; no network"
     )
     p.add_argument("--expect-iss", help="with --decode-only: expected iss (optional)")
+    p.add_argument(
+        "--access-token",
+        action="store_true",
+        help="report on the access token Open WebUI forwards to the team-tool gateways "
+        "instead of the ID token (with --decode-only: the file holds an access token)",
+    )
+    p.add_argument(
+        "--team-group",
+        help="access-token mode: the team group the gateways allow, e.g. 'DOMAIN\\team' "
+        "(ADFS_TEAM_GROUP)",
+    )
+    p.add_argument(
+        "--gateway-audience",
+        action="append",
+        default=[],
+        help="access-token mode: an audience a gateway accepts (repeatable); the verdict "
+        "needs one of them in aud",
+    )
     return p.parse_args(argv)
 
 
 def resolve_mode(args: argparse.Namespace) -> None:
     """Set ``args.role_lists`` to (allowed, admin) in role-list mode, else None."""
     args.role_lists = None
+    if args.access_token:
+        if args.team_group is None:
+            args.team_group = env("ADFS_TEAM_GROUP")
+        id_flags = (args.allowed_roles, args.admin_roles, args.expect_refused)
+        if any(id_flags) or args.expect_baseline_only:
+            raise CheckError(
+                EXIT_USAGE, "--access-token does not take the ID token role or expect flags"
+            )
+        if args.team_group is not None and not args.team_group:
+            raise CheckError(EXIT_USAGE, "--team-group must not be empty")
+        if any(not a for a in args.gateway_audience):
+            raise CheckError(EXIT_USAGE, "--gateway-audience must not be empty")
+        return
+    if args.team_group or args.gateway_audience:
+        raise CheckError(EXIT_USAGE, "--team-group and --gateway-audience need --access-token")
     if args.allowed_roles is None and args.admin_roles is None:
         if args.expect_refused:
             raise CheckError(EXIT_USAGE, "--expect-refused needs --allowed-roles and --admin-roles")
@@ -960,7 +1229,10 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:  # noqa: BLE001  # never show exception or server text
         print("FAIL: internal error in the check")
         return EXIT_INTERNAL
-    print("RESULT: ok - the ID token meets every expectation")
+    if args.access_token:
+        print("RESULT: ok - the access token meets every gateway expectation")
+    else:
+        print("RESULT: ok - the ID token meets every expectation")
     return 0
 
 

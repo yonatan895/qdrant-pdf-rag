@@ -258,6 +258,8 @@ class FakeAdfs:
             "name": DISPLAY,
         }
         self.aud: Any = CLIENT_ID
+        self.token_extra: dict[str, Any] = {}  # merged into the token response
+        self.discovery_extra: dict[str, Any] = {}
         self.bad_state = False
         self.codes: dict[str, dict[str, str]] = {}
         self.token_requests: list[dict[str, str]] = []
@@ -296,6 +298,7 @@ class FakeAdfs:
                                 "authorization_endpoint": fake.issuer + "/oauth2/authorize",
                                 "token_endpoint": fake.issuer + "/oauth2/token",
                             }
+                            | fake.discovery_extra
                         ).encode(),
                     )
                 elif u.path == "/adfs/oauth2/authorize":
@@ -340,6 +343,7 @@ class FakeAdfs:
                             "token_type": "bearer",
                             "id_token": make_jwt(claims),
                         }
+                        | fake.token_extra
                     ).encode(),
                 )
 
@@ -1253,3 +1257,205 @@ def test_printed_env_lines_survive_sh_sourcing_verbatim(tmp_path, capsys):
         check=True,
     ).stdout
     assert got == f"{allowed}|{admin}|role-groups"
+
+
+# ------------------------------------------------- access-token mode (#1075 T0)
+# The token Open WebUI forwards to the team-tool gateways. AD FS issues it for
+# urn:microsoft:userinfo when the authorize request names no resource; every
+# gateway refuses that. Values below are canaries: none may be printed.
+
+TEAM = "CORP\\team-mainframe"  # configured by the operator: printed when it matches
+GW_AUD = "urn:team-tools:splunk"  # configured: printed when it matches
+AT_SUB = "CANARY-AT-SUB-77"
+AT_ISS = "http://CANARY-ISS.example/adfs/services/trust"
+AT_OTHER_AUD = "CANARY-AUD-other"
+AT_OTHER_GROUP = "CORP\\CANARY-GROUP-other"
+AT_CANARIES = (AT_SUB, AT_ISS, AT_OTHER_AUD, AT_OTHER_GROUP, "CANARY-GROUP", "CANARY-SIGNATURE")
+
+
+def make_access(claims: dict[str, Any] | None = None, header: dict[str, Any] | None = None,
+                drop: tuple[str, ...] = ()) -> str:
+    now = int(time.time())
+    body = {
+        "iss": AT_ISS,
+        "aud": [GW_AUD, AT_OTHER_AUD],
+        "sub": AT_SUB,
+        "iat": now,
+        "exp": now + 3600,
+        "groups": [TEAM, AT_OTHER_GROUP],
+    } | (claims or {})
+    body = {k: v for k, v in body.items() if k not in drop}
+    head = header if header is not None else {"alg": "RS256", "kid": "CANARY-KID"}
+    return f"{b64(head)}.{b64(body)}.{chk.b64url_nopad(b'CANARY-SIGNATURE')}"
+
+
+def assert_no_at_leak(out: str) -> None:
+    for canary in AT_CANARIES:
+        assert canary not in out, f"output leaked {canary[:12]}..."
+    assert not JWT_SHAPE.search(out), "output leaked a JWT"
+
+
+def _access(tmp_path, token: str, *extra: str) -> tuple[int, str]:
+    f = tmp_path / "at.jwt"
+    f.write_text(token)
+    return chk.main(["--decode-only", str(f), "--access-token", *extra]), f.name
+
+
+GOOD_ARGS = ("--team-group", TEAM, "--gateway-audience", GW_AUD, "--expect-iss", AT_ISS)
+
+
+def _verdict(out: str) -> str:
+    lines = [ln for ln in out.splitlines() if ln.startswith("access token verdict: ")]
+    assert len(lines) == 1, out
+    return lines[0].removeprefix("access token verdict: ")
+
+
+def test_access_token_that_a_gateway_accepts_is_ok(tmp_path, capsys):
+    rc, _ = _access(tmp_path, make_access(), *GOOD_ARGS)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert _verdict(out) == "ok"
+    assert "aud: count=2, urn:microsoft:userinfo: no, the client ID: not checked" in out
+    assert f"configured gateway audiences matched: {GW_AUD}" in out
+    assert "group claim 'groups': present, type=list, count=2, form=domain-qualified" in out
+    assert f"configured team group '{TEAM}': present" in out
+    assert "iss: equals the --expect-iss value; set the gateway issuer to that value" in out
+    assert "sub: present" in out
+    assert "lifetime: 3600 s" in out and "refresh token issued: not checked offline" in out
+    assert "access token alg: RS256, key id present: yes" in out
+    assert "claim names: aud, exp, groups, iat, iss, sub" in out
+    assert out.rstrip().endswith("RESULT: ok - the access token meets every gateway expectation")
+    assert_no_at_leak(out)
+
+
+# One case per verdict code; the expected code is written out, not derived.
+VERDICT_CASES = [
+    ("userinfo_audience", make_access({"aud": "urn:microsoft:userinfo"})),
+    ("userinfo_audience", make_access({"aud": ["urn:microsoft:userinfo", GW_AUD]}, drop=("groups",))),
+    ("opaque", "CANARY-GROUP-opaque-reference-token"),
+    ("opaque", "a.b.c"),
+    ("unsupported_alg", make_access(header={"alg": "HS256", "kid": "k"})),
+    ("unsupported_alg", make_access(header={"alg": "RS256"})),
+    ("unsupported_alg", make_access(header={"alg": "ES256", "kid": "k"})),  # gateway default RS256
+    ("too_large", make_access({"groups": [TEAM] + [f"CORP\\CANARY-GROUP-{i:05d}" for i in range(2000)]})),
+    ("issuer_mismatch", make_access({"iss": "http://CANARY-ISS.example/other"})),
+    ("claims_missing", make_access({"aud": [GW_AUD, 5]})),  # PyJWT refuses a non-string member
+    ("claims_missing", make_access({"iat": "yesterday"})),
+    ("claims_missing", make_access({"exp": float("nan")})),
+    ("claims_missing", make_access(drop=("sub",))),
+    ("claims_missing", make_access(drop=("exp",))),
+    ("claims_missing", make_access({"aud": []})),
+    ("no_groups", make_access(drop=("groups",))),
+    ("no_groups", make_access({"groups": []})),
+    ("team_group_missing", make_access({"groups": [AT_OTHER_GROUP]})),
+    ("gateway_audience_missing", make_access({"aud": AT_OTHER_AUD})),
+]
+
+
+@pytest.mark.parametrize(("code", "token"), VERDICT_CASES)
+def test_access_token_verdicts_are_fixed_and_print_no_token_value(tmp_path, capsys, code, token):
+    rc, _ = _access(tmp_path, token, *GOOD_ARGS)
+    out = capsys.readouterr().out
+    assert rc == 10, out
+    assert _verdict(out) == code
+    assert out.rstrip().splitlines()[-1] == f"FAIL: {chk.ACCESS_VERDICTS[code]}"
+    assert_no_at_leak(out)
+    assert "Traceback" not in out
+
+
+def test_every_verdict_code_is_exercised_and_fixed():
+    covered = {code for code, _ in VERDICT_CASES} | {"ok", "absent", "expired", "audience_unchecked"}
+    assert covered == set(chk.ACCESS_VERDICTS)
+    expired = make_access({"exp": int(time.time()) - 5})
+    common = {"issuers": None, "client_id": None, "group_claim": "groups", "team_group": TEAM,
+              "gateway_audiences": [GW_AUD], "refresh_issued": None}
+    assert chk.analyse_access_token(expired, now=time.time(), **common)[1] == "expired"
+    assert chk.analyse_access_token(expired, now=None, **common)[1] == "ok"
+    assert chk.analyse_access_token(None, now=None, **common) == (["access token: absent"], "absent")
+
+
+def test_access_token_group_claim_and_team_group_hints(tmp_path, capsys):
+    rc, _ = _access(tmp_path, make_access({"groups": ["corp\\TEAM-MAINFRAME"]}), *GOOD_ARGS)
+    out = capsys.readouterr().out
+    assert rc == 10 and _verdict(out) == "team_group_missing"
+    assert "equals it ignoring letter case" in out
+    # A single string is one group for the gateway library, not a ','-split list.
+    rc, _ = _access(tmp_path, make_access({"role": TEAM}, drop=("groups",)),
+                    "--group-claim", "role", "--team-group", TEAM, "--gateway-audience", GW_AUD)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "group claim 'role': present, type=string, count=1, form=domain-qualified" in out
+    # Without --gateway-audience the token fits only a token exchange: never "ok".
+    rc, _ = _access(tmp_path, make_access({"aud": AT_OTHER_AUD, "groups": [AT_OTHER_GROUP]}))
+    out = capsys.readouterr().out
+    assert rc == 10 and _verdict(out) == "audience_unchecked", out
+    assert "configured gateway audiences matched" not in out
+    assert "iss: present (not compared offline without --expect-iss)" in out
+    assert_no_at_leak(out)
+
+
+def test_access_token_mode_flag_rules(tmp_path, capsys, monkeypatch):
+    token = make_access()
+    assert _access(tmp_path, token, "--allowed-roles", "a", "--admin-roles", "b")[0] == 2
+    assert _access(tmp_path, token, "--expect-baseline-only")[0] == 2
+    assert _access(tmp_path, token, "--team-group", "")[0] == 2
+    assert _access(tmp_path, token, "--gateway-audience", "")[0] == 2
+    f = tmp_path / "id.jwt"
+    f.write_text(make_jwt({"roles": [BASELINE, GROUP], "upn": UPN, "name": DISPLAY}))
+    assert chk.main(["--decode-only", str(f), "--team-group", TEAM, *UPN_ARG]) == 2
+    assert chk.main(["--decode-only", str(f), "--gateway-audience", GW_AUD, *UPN_ARG]) == 2
+    capsys.readouterr()
+    # ADFS_TEAM_GROUP in the environment is read only in access-token mode.
+    monkeypatch.setenv("ADFS_TEAM_GROUP", "CORP\\nobody")
+    assert chk.main(["--decode-only", str(f), *UPN_ARG]) == 0
+    assert _access(tmp_path, token)[0] == 10
+    assert "configured team group 'CORP\\nobody': absent" in capsys.readouterr().out
+
+
+def test_lifetime_and_refresh_warnings(tmp_path, capsys):
+    now = int(time.time())
+    rc, _ = _access(tmp_path, make_access({"iat": now, "exp": now + 300}), *GOOD_ARGS)
+    out = capsys.readouterr().out
+    assert rc == 0 and "lifetime: 300 s" in out and "WARN: the lifetime is under 600 s" in out
+    lines, _ = chk.analyse_access_token(
+        make_access(), issuers=None, client_id=None, group_claim="groups", team_group=None,
+        gateway_audiences=[], refresh_issued=False, now=None,
+    )
+    assert "refresh token issued: no" in lines
+    assert any(ln.startswith("WARN: no refresh token") for ln in lines)
+
+
+@needs_openssl
+def test_access_token_flow_reports_the_forwarded_token(adfs):
+    """The full flow: the same token response, analysed for its access token."""
+    adfs.discovery_extra = {"access_token_issuer": AT_ISS}
+    adfs.token_extra = {"access_token": make_access(), "refresh_token": "CANARY-REFRESH-TOKEN"}
+    rc, out = run_check(adfs, "--access-token", "--team-group", TEAM, "--gateway-audience", GW_AUD)
+    assert rc == 0, out
+    assert "discovery: ok" in out and "callback: state ok" in out
+    assert "iss: equals the discovery access_token_issuer; set the gateway issuer" in out
+    assert "the client ID: no" in out and "refresh token issued: yes" in out
+    assert _verdict(out) == "ok"
+    assert_no_at_leak(out)
+    assert_no_leak(out)
+    assert "CANARY-REFRESH-TOKEN" not in out
+
+
+@needs_openssl
+@pytest.mark.parametrize(
+    ("token_extra", "code"),
+    [
+        ({}, "opaque"),  # the fake's default access token is a reference string
+        ({"access_token": make_access({"aud": "urn:microsoft:userinfo"})}, "userinfo_audience"),
+        ({"access_token": None}, "absent"),
+    ],
+)
+def test_access_token_flow_refusals(adfs, token_extra, code):
+    adfs.token_extra = token_extra
+    rc, out = run_check(adfs, "--access-token")
+    assert rc == 10, out
+    assert _verdict(out) == code
+    assert "WARN: no refresh token" in out or code in ("opaque", "absent")
+    assert out.rstrip().splitlines()[-1] == f"FAIL: {chk.ACCESS_VERDICTS[code]}"
+    assert_no_at_leak(out)
+    assert_no_leak(out)

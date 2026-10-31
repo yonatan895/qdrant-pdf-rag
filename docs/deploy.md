@@ -2188,7 +2188,7 @@ expectations. It prints claim **names**, the roles claim's JSON type and value *
 token size in bytes, yes/no answers and, in role-list mode, the **configured** roles that
 matched. It never prints tokens, the secret, other claim values or identity, and
 every failure is one fixed line with a distinct exit code (3 TLS, 5 callback, 6 token, 7 ID
-token, 8 claims). The ID token signature is **not** verified; this is a diagnostic only.
+token, 8 claims, 10 access token). The ID token signature is **not** verified; this is a diagnostic only.
 
 Claim names are flags with the chart defaults: `--email-claim` (`email`), `--username-claim`
 (`name`), `--group-claim` (`groups`) and `--roles-claim` (`roles`). When a configured claim is
@@ -2259,6 +2259,54 @@ URL or code.
 Register that second redirect URI on the **test** client only, next to
 `https://<host>/oauth/oidc/callback`, and remove it when the check is done; the production
 client keeps only the HTTPS callback.
+
+**Access-token mode (team tools, #1075; #1088 item 1).** `--access-token` runs the same flow
+(or `--decode-only` on a saved access token) and reports on the **access token** in the token
+response: the token Open WebUI forwards to the team-tool gateways, never the ID token. AD FS
+issues it for `urn:microsoft:userinfo` when the client requests no other resource, and every
+gateway refuses that token. Run it before any gateway work at the site:
+
+```sh
+python3 -I scripts/openwebui/adfs_claims_check.py --paste --access-token \
+  --redirect-uri https://<openwebui-host>/oauth/oidc/callback \
+  --issuer https://<adfs-host>/adfs --client-id <client-id> \
+  --client-secret-file <file> --ca-bundle <ca.pem> \
+  --group-claim groups --team-group 'DOMAIN\team-group' [--gateway-audience <gateway-aud>]
+```
+
+It prints claim names, the JWT `alg` and whether it has a key id, the `aud` count with yes/no
+for `urn:microsoft:userinfo` and for the client ID, which of the discovery `access_token_issuer`
+or `issuer` (or `--expect-iss`) the token's `iss` equals (set the gateway issuer to that one;
+AD FS access tokens usually carry `.../adfs/services/trust`), whether `sub` is present, the lifetime in seconds, whether
+a refresh token was issued, and the group claim's type, count and form. Token values (`aud`,
+`iss`, `sub`, groups) are never printed; only the **configured** team group and gateway
+audiences are named, with present/absent. It then prints one fixed line,
+`access token verdict: <code>`, most severe first, and exits 0 for `ok` and 10 otherwise:
+
+| Verdict | Meaning |
+|---|---|
+| `absent` | the token response carries no access token |
+| `opaque` | not a JWT; no gateway can verify it |
+| `too_large` | above the gateways' 32 KiB token limit (many groups) |
+| `userinfo_audience` | issued for `urn:microsoft:userinfo`; every gateway refuses it |
+| `unsupported_alg` | not RS256 (the gateway default), or no key id |
+| `claims_missing` | no usable `sub`, `iss`, `aud` or `exp`, a non-string `aud` member, or a non-numeric `iat` |
+| `issuer_mismatch` | `iss` equals neither discovery issuer field (or `--expect-iss`) |
+| `expired` | already expired (live flow only) |
+| `no_groups` | the group claim (`--group-claim`, default `groups`) is absent or empty |
+| `team_group_missing` | `--team-group` is not among the groups (a case or domain near miss is hinted) |
+| `gateway_audience_missing` | `aud` names none of the `--gateway-audience` values |
+| `audience_unchecked` | everything else passed, but no `--gateway-audience` was given |
+| `ok` | a gateway configured with this issuer, audience and group can verify it |
+
+`audience_unchecked` (exit 10) means the token can serve only as the subject token of a
+token exchange (#1088 path a), for example when its `aud` is the client ID; extra audiences
+(path b) need `--gateway-audience` and `ok`. It warns
+when the lifetime is under 600 s (Open WebUI refreshes 300 s before expiry) and when no
+refresh token is issued (#1088 item 3). `--team-group` also reads `ADFS_TEAM_GROUP` in this mode
+only. The ID-token role flags and `--expect-*` are refused with `--access-token`. Record the
+verdict code and counts in the site packet, never the token.
+
 Tests: `tests/test_adfs_claims_check.py` (a fake TLS AD FS, canary leak assertions).
 
 <a id="workspace-isolation-proof"></a>
