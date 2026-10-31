@@ -29,8 +29,8 @@ the full unit suite (#796). In the air-gapped GitLab fork, those lanes are the
 [CI inventory](deploy.md#7-ci-inventory) lists the GitLab jobs, and
 `tests/test_ci_gitlab_parity.py` pins each one to its GitHub job. Gap agents
 read pipelines only through GitLab
-([ADR-0009 §2](adr/0009-gap-fork.md#2-isolation-of-development-from-the-live-release)).
-The pipeline reader `scripts/gap/ci_status.py` is not implemented (F5 PR-5).
+([ADR-0009 §2](adr/0009-gap-fork.md#2-isolation-of-development-from-the-live-release)),
+with [`scripts/gap/ci_status.py`](task-runner.md#gap-ci-status).
 
 **Data invariant protection (cross-cutting):** Defaults, UUID5 chunk keys, 4-type `chunk_type` vocabulary (`message`, `syntax`, `table`, `narrative`), residue audit, fail-closed contracts, and production constants require a dedicated approved concern split from features, evaluated against mode-keyed baselines with full A/B evidence. Documentation, tooling, or refactoring PRs cannot silently alter, suppress, or waive data invariants.
 

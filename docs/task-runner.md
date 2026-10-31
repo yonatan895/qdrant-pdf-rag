@@ -86,6 +86,23 @@ not an arbitrary system binary.
   tests and the doctor add `--task-archive <the bundle's
   task_linux_amd64.tar.gz>`, which it checks against the pin and caches in
   `.tools/cache/`.
+- <a id="gap-ci-status"></a>Gap agents read CI with
+  `python3 scripts/gap/ci_status.py --wait` after a push, the GitLab
+  counterpart of `gh run watch`. While a merge request is open on the
+  commit, only its merge request pipeline (every lane) answers; until GitLab
+  creates it the result is pending, never the branch pipeline. With no open
+  merge request it uses the branch pipeline, follows the `lanes` bridge into
+  the child pipeline, and prints each job and, for a failed test job, the
+  failing test ids from its JUnit report, never log text. Export
+  `MFR_GITLAB_URL` (`https://<gitlab host>`) and `MFR_GITLAB_PROJECT`
+  (`<group>/<name>`); inside a GitLab job `CI_SERVER_URL` and
+  `CI_PROJECT_PATH` win. The `read_api` token comes from
+  `/etc/mfr/dev-gitlab/token` (Secret `mfr-dev-gitlab`), never argv. Exit 0
+  passed (every required lane ran and passed), 1 failed, 2 pending (no
+  pipeline yet, or still running at `--timeout`, default 3600 s), 3 usage,
+  network or auth error, 4 `PASSED-UNVERIFIED`: every job that ran passed,
+  but a selected lane has no GitLab job (printed as NOT RUN), so GitLab
+  cannot verify it. A failure wins over exit 4. `--json` prints one object.
 
 Deployment render tests require the existing Helm **4.3.0 linux-amd64** bytes
 recorded in [the Helm pin](../scripts/tools/helm-pin.txt). Prepare them explicitly:
