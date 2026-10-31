@@ -77,14 +77,16 @@ refuses `--connected`, `--internal-index` and `--python`.
 `/opt/devkit/locks/` and reports a mismatch as a `dev kit` finding naming the
 same kit. Outside a kit image it adds no finding.
 
-GitHub uses the same helper and manifest. GitLab accepts `PIP_FIND_LINKS` as a
-local complete dev wheelhouse, or explicitly selects `--internal-index` using
-an internal HTTPS `PIP_INDEX_URL`. The latter requires pip 26.2.2 already in
-the prepared CI image, downloads only hash-approved wheels, ignores inherited
-extra indexes/configuration, and suppresses download diagnostics that could
-contain mirror credentials. Neither mode has a public-index fallback. Internal
-mirror egress policy and trust/CA configuration remain platform responsibilities.
-Private mirror addresses and credentials never belong in git.
+GitHub uses the same helper and manifest. GitLab jobs run on the dev kit image
+and use `--kit`, so they acquire no package; they no longer read
+`PIP_FIND_LINKS` or `PIP_INDEX_URL` (GH#1118 F5). `--internal-index` remains for
+an explicit preparation with an internal HTTPS `PIP_INDEX_URL`: it requires pip
+26.2.2 already in the selected interpreter, downloads only hash-approved wheels,
+ignores inherited extra indexes/configuration, and suppresses download
+diagnostics that could contain mirror credentials. No mode has a public-index
+fallback. Internal mirror egress policy and trust/CA configuration remain
+platform responsibilities. Private mirror addresses and credentials never
+belong in git.
 
 Connected GitHub preparation explicitly selects `--download-workers 8`.
 `dependency_lock.py acquire/prepare` and `prepare_python.py --connected` support

@@ -53,6 +53,18 @@ NARROWING_FLAGS = ('-k', '-m', '-o', '-p', '--ignore', '--ignore-glob', '--desel
                    '--ff', '--co', '--collect-only', '--unit-shard', '--unit-shards', '--unit-durations',
                    '--pyargs', '--continue-on-collection-errors')
 MASKS = (r'\|\|\s*(true|:|exit\s+0)\b', r';\s*(true|:)\s*$', r'\bset\s+\+e\b', r'\bexit\s+0\b')
+# Jobs run on the dev workspace image (ADR-0009 section 8) by the digest its pin
+# records, under the documented Quay role path (docs/deploy.md), and use its
+# installed environment (prepare_python.py --kit) and its Task and Helm
+# (scripts/devkit/link-tools.sh) instead of wheels and archives (GH#1118 F5).
+KIT_PIN = ROOT / 'scripts/tools/devkit-pin.txt'
+KIT_REPOSITORY = '$CI_APPROVED_REGISTRY/qdrant-pdf-rag-devkit'
+KIT_PYTHON = 'python3 scripts/prepare_python.py --kit --venv "$CI_PROJECT_DIR/.venv"'
+KIT_TOOLS = 'sh scripts/devkit/link-tools.sh --task-archive "$CI_TASK_ARCHIVE"'
+TOOL_JOBS = ('test', 'hazards', 'sim')
+# Retired inputs (docs/release-notes.md): no job may read them again.
+RETIRED_INPUTS = ('install-task.sh', 'install-helm.sh', 'CI_HELM_ARCHIVE', 'PIP_FIND_LINKS', 'PIP_INDEX_URL',
+                  '--wheelhouse', '--internal-index')
 
 
 def jobs(doc):
@@ -174,6 +186,56 @@ def image_references(doc):
     return refs
 
 
+def kit_image(pin_text):
+    """The job image a devkit-pin.txt text names; None while it records no digest."""
+    digest = re.search(r'(?m)^digest: (sha256:[0-9a-f]{64})$', pin_text)
+    return f'{KIT_REPOSITORY}@{digest.group(1)}' if digest else None
+
+
+def kit_image_problem(doc, pin_text):
+    if doc['variables']['CI_PYTHON_IMAGE'] != kit_image(pin_text):
+        return ('scripts/tools/devkit-pin.txt and the .gitlab-ci.yml default must name the same published '
+                'kit digest; record both in the pin PR')
+    return None
+
+
+def kit_violations(doc):
+    """Python jobs use the kit's environment and tools, never a wheelhouse or an archive install."""
+    found = []
+    base = '\n'.join(lines(doc['.py-base'], 'before_script'))
+    if KIT_PYTHON not in base or '/opt/devkit/locks' not in base or 'unset BASH_ENV ENV' not in base \
+            or 'export PATH="$CI_PROJECT_DIR/.venv/bin:$PATH"' not in base:
+        found.append('.py-base: Python does not come from the kit (prepare_python.py --kit)')
+    all_jobs = jobs(doc)
+    for name in ('lint', 'test', 'hazards', 'sim', 'gate-l1'):
+        parents = all_jobs[name].get('extends', [])
+        if '.py-base' not in ([parents] if isinstance(parents, str) else parents):
+            found.append(f'{name}: does not run on the kit environment (.py-base)')
+    for name in TOOL_JOBS:
+        body = lines(all_jobs[name])
+        if KIT_TOOLS not in body:
+            found.append(f'{name}: Task and Helm do not come from the kit (link-tools.sh)')
+            continue
+        users = [i for i, s in enumerate(body) if 'agent_doctor' in s or 'run-task.sh' in s
+                 or s.startswith(('pytest ', 'python -m pytest '))]
+        if not users or body.index(KIT_TOOLS) > min(users):
+            found.append(f'{name}: tools used before link-tools.sh verified them')
+    refusal = [s for s in lines(all_jobs['hygiene']) if 'CI_HELM_ARCHIVE' in s]
+    for name, node in doc.items():
+        if not isinstance(node, dict):
+            continue
+        for key in ('script', 'before_script', 'after_script'):
+            for step in lines(node, key):
+                if step in refusal:
+                    continue
+                for retired in RETIRED_INPUTS:
+                    if retired in step:
+                        found.append(f'{name}: reads the retired {retired}')
+    if len(refusal) != 1 or 'exit 1' not in refusal[0]:
+        found.append('hygiene: the retired CI_HELM_ARCHIVE is not refused')
+    return found
+
+
 def keys_anywhere(node, key):
     if isinstance(node, dict):
         return (key in node) or any(keys_anywhere(v, key) for v in node.values())
@@ -284,6 +346,9 @@ def violations(doc):
         found.append('CI_PYTHON_IMAGE default is not derived from CI_APPROVED_REGISTRY')
     if 'CI_APPROVED_REGISTRY' in doc['variables']:
         found.append('CI_APPROVED_REGISTRY must be operator-set, with no default')
+    problem = kit_image_problem(doc, KIT_PIN.read_text())
+    if problem:
+        found.append(problem)
     for missing in sorted((REQUIRED_JOBS | SELECTION_JOBS) - set(all_jobs)):
         found.append(f'missing job {missing}')
     if keys_anywhere(doc, 'allow_failure'):
@@ -301,6 +366,7 @@ def violations(doc):
     if found:
         return found
     found += pipeline_violations(doc)
+    found += kit_violations(doc)
     if not doc['stages'].index('hygiene') < doc['stages'].index('test'):
         found.append('stage order')
     if all_jobs['lint'].get('stage') != 'hygiene':
@@ -452,7 +518,7 @@ NEGATIVE_CONTROLS = {
         'python scripts/agent_doctor.py --python "$(command -v python)"'),
     'runner contracts allowed to skip': lambda d: d['test']['variables'].clear(),
     'ruff scope shrunk': lambda d: d['lint']['script'].__setitem__(0, 'ruff check src tests'),
-    'sim narrowed beyond docker-only': lambda d: extend(d['sim'], 'pytest ',
+    'sim narrowed beyond docker-only': lambda d: extend(d['sim'], 'python -m pytest ',
                                                          ' --ignore=tests/test_mcp_sim.py'),
     'sim service not approved digest': lambda d: d['sim']['services'][0].update(
         name='${CI_APPROVED_REGISTRY}/qdrant/qdrant:latest'),
@@ -464,6 +530,24 @@ NEGATIVE_CONTROLS = {
         CI_PYTHON_IMAGE='registry.example.invalid/ci/python:3.14'),
     'approved registry given a default': lambda d: d['variables'].update(
         CI_APPROVED_REGISTRY='$CI_REGISTRY/ci'),
+    'job image is the pre-kit Python image': lambda d: d['variables'].update(
+        CI_PYTHON_IMAGE='$CI_APPROVED_REGISTRY/ci/python:3.14'),
+    'job image is the kit by a mutable tag': lambda d: d['variables'].update(
+        CI_PYTHON_IMAGE=KIT_REPOSITORY + ':latest'),
+    'Python from a wheelhouse': lambda d: d['.py-base'].update(before_script=[
+        'python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse "$PIP_FIND_LINKS"']),
+    'image activation can reorder PATH in bash children': lambda d: d['.py-base']['before_script'].remove(
+        'unset BASH_ENV ENV'),
+    'Python job outside the kit environment': lambda d: d['gate-l1'].update(extends='.gate-pipeline'),
+    'Helm from an archive': lambda d: d['sim']['script'].insert(
+        1, 'sh scripts/tools/install-helm.sh --archive "$CI_HELM_ARCHIVE"'),
+    'unit tools not from the kit': lambda d: d['test']['script'].remove(KIT_TOOLS),
+    'hazards tools not from the kit': lambda d: replace(
+        d['hazards'], 'sh scripts/devkit/link-tools.sh', 'sh scripts/tools/install-task.sh --archive x'),
+    'tools linked after the doctor': lambda d: d['sim']['script'].append(
+        d['sim']['script'].pop(d['sim']['script'].index(KIT_TOOLS))),
+    'retired Helm archive accepted': lambda d: d['hygiene']['script'].remove(
+        next(s for s in d['hygiene']['script'] if 'CI_HELM_ARCHIVE' in s)),
     'tag pipelines not admitted': lambda d: d['workflow']['rules'].remove(
         workflow_rule(d, '$CI_COMMIT_TAG')),
     'branch pipelines not admitted': lambda d: d['workflow']['rules'].pop(),
@@ -565,8 +649,9 @@ def stage(tmp_path):
         shutil.copy(ROOT / name, tmp_path / name)
     tools = tmp_path / 'scripts/tools'
     tools.mkdir(exist_ok=True)
-    for name in ('install-task.sh', 'install-helm.sh'):
-        (tools / name).write_text('exit 0\n')
+    (tmp_path / 'scripts/devkit').mkdir(exist_ok=True)
+    (tmp_path / 'scripts/devkit/link-tools.sh').write_text(
+        'printf \'link-tools %s\\n\' "$*" >> "$STUB_LOG"\nexit "${LINK_STATUS:-0}"\n')
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir(exist_ok=True)
     (bin_dir / 'python').write_text(STUB_PYTHON)
@@ -595,7 +680,7 @@ def run_job(tmp_path, job, *, start=None, doc=None, **env):
     log.write_text('')
     base = {**os.environ, 'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'STUB_LOG': str(log),
             'REAL_PYTHON': sys.executable, 'CI_PROJECT_DIR': str(tmp_path)}
-    for key in ('CI_TASK_ARCHIVE', 'CI_HELM_ARCHIVE', 'CI_BM25_CACHE_DIR', 'FAIL_ON',
+    for key in ('CI_TASK_ARCHIVE', 'CI_HELM_ARCHIVE', 'CI_BM25_CACHE_DIR', 'FAIL_ON', 'LINK_STATUS',
                 'GITLAB_TOKEN', 'CI_MERGE_REQUEST_IID'):
         base.pop(key, None)
     proc = subprocess.run(['sh', '-e', '-c', '\n'.join(steps)], cwd=tmp_path, check=False,
@@ -646,9 +731,9 @@ def test_stale_report_cannot_satisfy_the_gate(tmp_path):
 
 @pytest.mark.parametrize('failing_env, passes', [
     ({}, True), ({'BM25_STATUS': '3'}, False), ({'DOCTOR_STATUS': '2'}, False),
-    ({'CI_TASK_ARCHIVE': None}, False)])
+    ({'CI_TASK_ARCHIVE': None}, False), ({'LINK_STATUS': '2'}, False)])
 def test_sim_job_prerequisites_fail_before_pytest(tmp_path, failing_env, passes):
-    env = {'CI_TASK_ARCHIVE': str(tmp_path / 'task.tgz'), 'CI_HELM_ARCHIVE': str(tmp_path / 'helm.tgz'),
+    env = {'CI_TASK_ARCHIVE': str(tmp_path / 'task.tgz'),
            'CI_BM25_CACHE_DIR': str(tmp_path / 'bm25'), 'JUNIT_BODY': JUNIT['clean']}
     for key, value in failing_env.items():
         if value is None:
@@ -658,6 +743,8 @@ def test_sim_job_prerequisites_fail_before_pytest(tmp_path, failing_env, passes)
     proc, log = run_job(tmp_path, 'sim', **env)
     assert (proc.returncode == 0) is passes, proc.stdout + proc.stderr
     assert ('pytest ' in log) is passes
+    if 'CI_TASK_ARCHIVE' in env:
+        assert f'link-tools --task-archive {env["CI_TASK_ARCHIVE"]}' in log.splitlines()
     if passes:
         selection = next(l for l in log.splitlines() if l.startswith('pytest '))
         assert '-m integration' in selection and '--junitxml=sim-junit.xml' in selection
@@ -964,7 +1051,7 @@ def test_hygiene_refuses_a_tag_pipeline_unless_the_tag_is_protected(tmp_path, en
 def test_job_and_service_images_come_only_from_the_operator_set_registry():
     references = image_references(GITLAB)
     assert references['default image'] == '$CI_PYTHON_IMAGE'
-    assert references['CI_PYTHON_IMAGE'] == '$CI_APPROVED_REGISTRY/ci/python:3.14'
+    assert references['CI_PYTHON_IMAGE'].startswith(KIT_REPOSITORY + '@sha256:')
     services = {k: v for k, v in references.items() if 'service' in k}
     assert set(services) == {'sim service 0', 'gate-l1 service 0'}
     for ref in services.values():
@@ -987,3 +1074,70 @@ def test_documented_quay_roles_match_the_image_paths_load_sh_pushes():
         assert f'`{path}' in deploy, path
     assert 'CI_APPROVED_REGISTRY' in deploy and 'CI_APPROVED_REGISTRY' in example
     assert 'INTERNAL_REGISTRY' in deploy
+
+
+# ---- the dev kit job image (ADR-0009 section 8, GH#1118 F5) ------------------
+
+def test_the_default_job_image_is_exactly_the_kit_pin():
+    pin = KIT_PIN.read_text()
+    digest = re.search(r'(?m)^digest: (sha256:\S+)$', pin).group(1)
+    assert re.fullmatch(r'sha256:[0-9a-f]{64}', digest), (
+        'scripts/tools/devkit-pin.txt and the .gitlab-ci.yml default must name the same published kit digest; '
+        'record both in the pin PR')
+    assert GITLAB['variables']['CI_PYTHON_IMAGE'] == f'$CI_APPROVED_REGISTRY/qdrant-pdf-rag-devkit@{digest}'
+    assert kit_image_problem(GITLAB, pin) is None
+    # A pin bump without the default, and a default bump without the pin, both fail;
+    # so does a pin that records no pushed digest.
+    assert kit_image_problem(GITLAB, pin.replace(digest, 'sha256:' + 'f' * 64))
+    assert kit_image_problem(GITLAB, pin.replace(digest, 'sha256:PENDING'))
+    other = mutated(lambda d: d['variables'].update(CI_PYTHON_IMAGE=f'{KIT_REPOSITORY}@sha256:{"e" * 64}'))
+    assert kit_image_problem(other, pin)
+    # The repository is the documented Quay role path that scripts/devkit/install.sh writes.
+    assert '| `qdrant-pdf-rag-devkit:<kit key>` |' in (ROOT / 'docs/deploy.md').read_text()
+
+
+def py_base_script(tmp_path, kit_present):
+    """.py-base's kit step, with the image's lock directory relocated under tmp_path."""
+    locks = tmp_path / 'opt/devkit/locks'
+    if kit_present:
+        locks.mkdir(parents=True)
+    step = next(s for s in lines(GITLAB['.py-base'], 'before_script') if KIT_PYTHON in s)
+    return step.replace('/opt/devkit/locks', str(locks))
+
+
+@pytest.mark.parametrize('kit_present, prepare_status, passes', [
+    (True, 0, True), (True, 2, False), (False, 0, False)])
+def test_python_jobs_run_only_on_the_kit_environment(tmp_path, kit_present, prepare_status, passes):
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    (bin_dir / 'python3').write_text('#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$STUB_LOG"\nexit "$PREPARE_STATUS"\n')
+    (bin_dir / 'python3').chmod(0o755)
+    log = tmp_path / 'log'
+    log.write_text('')
+    env = {**{k: v for k, v in os.environ.items() if not k.startswith(('CI_', 'PIP_'))},
+           'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'STUB_LOG': str(log), 'CI_PROJECT_DIR': str(tmp_path),
+           'PREPARE_STATUS': str(prepare_status)}
+    proc = subprocess.run(['sh', '-e', '-c', py_base_script(tmp_path, kit_present)], cwd=tmp_path, check=False,
+                          env=env, capture_output=True, text=True)
+    assert (proc.returncode == 0) is passes, proc.stderr
+    if kit_present:
+        assert log.read_text() == f'scripts/prepare_python.py --kit --venv {tmp_path}/.venv\n'
+    else:
+        # Any other image fails before Python runs, with a fixed message naming the fix.
+        assert log.read_text() == ''
+        assert 'not the dev kit image' in proc.stderr and 'CI_PYTHON_IMAGE unset' in proc.stderr
+
+
+@pytest.mark.parametrize('value, passes', [(None, True), ('', True), ('/runner/helm archive.tgz', False)])
+def test_hygiene_refuses_the_retired_helm_archive_variable(tmp_path, value, passes):
+    step = next(s for s in lines(GITLAB['hygiene']) if 'CI_HELM_ARCHIVE' in s)
+    env = {k: v for k, v in os.environ.items() if not k.startswith('CI_')}
+    if value is not None:
+        env['CI_HELM_ARCHIVE'] = value
+    proc = subprocess.run(['sh', '-e', '-c', step], cwd=tmp_path, check=False, env=env,
+                          capture_output=True, text=True)
+    assert (proc.returncode == 0) is passes, proc.stderr
+    if not passes:
+        # A fixed message naming the replacement; the value itself is never echoed.
+        assert 'CI_HELM_ARCHIVE is retired' in proc.stderr and 'link-tools.sh' in proc.stderr
+        assert value not in proc.stderr

@@ -15,7 +15,7 @@ version: '3'
 # Taskfile-level var is not overridable from the CLI or the environment.
 # tests/test_taskfile_contracts.py fails when it and CI drift apart.
 vars:
-  CI_LINT_SCRIPTS: scripts/eval_retrieval.py scripts/review_tooling.py scripts/ci_evidence.py scripts/acceptance_evidence.py scripts/devkit_key.py scripts/devkit/isolation_proof.py scripts/devkit/issue_snapshot.py scripts/extension_surface.py scripts/gitlab_lanes.py scripts/release_archive.py
+  CI_LINT_SCRIPTS: scripts/eval_retrieval.py scripts/review_tooling.py scripts/ci_evidence.py scripts/acceptance_evidence.py scripts/devkit_key.py scripts/devkit/isolation_proof.py scripts/devkit/issue_snapshot.py scripts/extension_surface.py scripts/gitlab_lanes.py scripts/release_archive.py scripts/gap/ci_status.py
 
 tasks:
   prerequisites:

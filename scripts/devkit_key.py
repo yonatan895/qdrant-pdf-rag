@@ -12,7 +12,10 @@ versioned domain prefix, so no two different input sets frame to the same stream
   python3 scripts/devkit_key.py --check   compare it with scripts/tools/devkit-pin.txt
 
 A stale pin is refused only by kit packing and the release gate (D-8), never by
-ordinary unit CI. Standard library only: agent_doctor will import it.
+ordinary unit CI. Pinning is one step: a change to the kit inputs merges with the pin
+untouched, the devkit factory publishes the image for the new key on main, and one pin
+PR records the key and that digest together. A `sha256:PENDING` digest is refused.
+Standard library only: agent_doctor will import it.
 """
 from __future__ import annotations
 
@@ -42,8 +45,10 @@ INPUTS = (
 )
 IMAGE_TREE = 'images/devkit'
 KEY = re.compile(r'[0-9a-f]{64}')
-DIGEST = re.compile(r'sha256:(?:PENDING|[0-9a-f]{64})')
+DIGEST = re.compile(r'sha256:[0-9a-f]{64}')
 PENDING = 'sha256:PENDING'
+ONE_STEP = ('the digest the devkit factory (.github/workflows/devkit.yml) pushes for it, '
+            'in one pin PR, after the change merges')
 
 
 class DevkitKeyError(Exception):
@@ -88,7 +93,7 @@ def read_pin(root: Path = ROOT) -> tuple[str, str]:
     """Return (key, digest) from devkit-pin.txt; refuse any other shape."""
     malformed = DevkitKeyError(
         f'{PIN} is missing or malformed: it needs exactly one "key: <64 hex>" line and one '
-        f'"digest: {PENDING}" or "digest: sha256:<64 hex>" line')
+        '"digest: sha256:<64 hex>" line')
     try:
         lines = (root / PIN).read_text(encoding='utf-8').splitlines()
     except (OSError, UnicodeDecodeError):
@@ -102,6 +107,9 @@ def read_pin(root: Path = ROOT) -> tuple[str, str]:
             raise malformed
         fields.setdefault(name.strip(), []).append(value.strip())
     keys, digests = fields.get('key', []), fields.get('digest', [])
+    if len(keys) == 1 and KEY.fullmatch(keys[0]) and digests == [PENDING]:
+        raise DevkitKeyError(f'{PIN} records digest: {PENDING}, which is no longer a committed state: '
+                             f'record key: {keys[0]} with {ONE_STEP}')
     if (len(keys) != 1 or len(digests) != 1 or not KEY.fullmatch(keys[0])
             or not DIGEST.fullmatch(digests[0])):
         raise malformed
@@ -113,11 +121,7 @@ def check(root: Path = ROOT) -> str:
     pinned, digest = read_pin(root)
     if pinned != current:
         raise DevkitKeyError(
-            f'{PIN} is stale: the kit inputs changed. Record key: {current} with '
-            f'digest: {PENDING} in a pin PR, then record the digest the devkit '
-            'factory (.github/workflows/devkit.yml) pushes for that key')
-    if digest == PENDING:
-        return f'devkit-key: {PIN} matches key {current}; digest pending (the factory has not pushed it)'
+            f'{PIN} is stale: the kit inputs changed. Record key: {current} with {ONE_STEP}')
     return f'devkit-key: {PIN} matches key {current} at {digest}'
 
 

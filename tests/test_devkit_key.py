@@ -25,7 +25,7 @@ FIXED = (
     "scripts/tools/task-artifact.sh",
     "scripts/tools/install-helm.sh",
 )
-PIN_OK = "# comment\nkey: " + "a" * 64 + "\ndigest: sha256:PENDING\n"
+PIN_OK = "# comment\nkey: " + "a" * 64 + "\ndigest: sha256:" + "c" * 64 + "\n"
 
 
 def _tree(tmp_path: Path) -> Path:
@@ -143,13 +143,14 @@ def test_key_refuses_missing_or_symlinked_inputs_with_a_fixed_message(tmp_path, 
 @pytest.mark.parametrize("text", [
     "",
     "key: " + "a" * 64 + "\n",
-    "digest: sha256:PENDING\n",
-    "key: " + "a" * 63 + "\ndigest: sha256:PENDING\n",
-    "key: " + "A" * 64 + "\ndigest: sha256:PENDING\n",
+    "digest: sha256:" + "c" * 64 + "\n",
+    "key: " + "a" * 63 + "\ndigest: sha256:" + "c" * 64 + "\n",
+    "key: " + "A" * 64 + "\ndigest: sha256:" + "c" * 64 + "\n",
     "key: " + "a" * 64 + "\ndigest: sha256:pending\n",
     "key: " + "a" * 64 + "\ndigest: " + "b" * 64 + "\n",
-    "key: " + "a" * 64 + "\nkey: " + "a" * 64 + "\ndigest: sha256:PENDING\n",
-    "key " + "a" * 64 + "\ndigest: sha256:PENDING\n",
+    "key: " + "a" * 64 + "\nkey: " + "a" * 64 + "\ndigest: sha256:" + "c" * 64 + "\n",
+    "key " + "a" * 64 + "\ndigest: sha256:" + "c" * 64 + "\n",
+    "key: " + "a" * 64 + "\ndigest: sha256:PENDING\ndigest: sha256:PENDING\n",
 ])
 def test_pin_refuses_every_other_shape(tmp_path, text):
     pin = tmp_path / devkit_key.PIN
@@ -159,28 +160,44 @@ def test_pin_refuses_every_other_shape(tmp_path, text):
         devkit_key.read_pin(tmp_path)
 
 
-def test_check_names_the_fix_for_a_stale_pin_and_reports_a_pending_digest(tmp_path, capsys):
+ONE_STEP_FIX = ("the digest the devkit factory (.github/workflows/devkit.yml) pushes for it, "
+                "in one pin PR, after the change merges")
+
+
+def test_check_names_the_one_step_fix_for_a_stale_pin(tmp_path, capsys):
     root = _tree(tmp_path)
     pin = root / devkit_key.PIN
     pin.write_text(PIN_OK)
     assert devkit_key.main(["--root", str(root), "--check"]) == 2
     err = capsys.readouterr().err
     current = devkit_key.key(root)
-    assert "is stale" in err and f"key: {current}" in err and ".github/workflows/devkit.yml" in err
+    assert f"is stale: the kit inputs changed. Record key: {current} with {ONE_STEP_FIX}" in err
+    assert "PENDING" not in err
     pin.write_text(PIN_OK.replace("a" * 64, current))
-    assert devkit_key.main(["--root", str(root), "--check"]) == 0
-    assert "digest pending" in capsys.readouterr().out
-    pin.write_text(PIN_OK.replace("a" * 64, current).replace("PENDING", "c" * 64))
     assert devkit_key.main(["--root", str(root), "--check"]) == 0
     assert "sha256:" + "c" * 64 in capsys.readouterr().out
     assert devkit_key.main(["--root", str(root)]) == 0
     assert capsys.readouterr().out == current + "\n"
 
 
+@pytest.mark.parametrize("fresh", [True, False], ids=["current-key", "stale-key"])
+def test_a_pending_digest_is_refused_with_the_one_step_fix(tmp_path, capsys, fresh):
+    # Pinning is one step: PENDING is no longer a committed state, whatever the key.
+    root = _tree(tmp_path)
+    recorded = devkit_key.key(root) if fresh else "a" * 64
+    (root / devkit_key.PIN).write_text(f"key: {recorded}\ndigest: sha256:PENDING\n")
+    with pytest.raises(devkit_key.DevkitKeyError) as refused:
+        devkit_key.read_pin(root)
+    assert str(refused.value) == (f"{devkit_key.PIN} records digest: sha256:PENDING, which is no longer a "
+                                  f"committed state: record key: {recorded} with {ONE_STEP_FIX}")
+    assert devkit_key.main(["--root", str(root), "--check"]) == 2
+    assert capsys.readouterr().err == f"devkit-key: {refused.value}\n"
+
+
 def test_committed_pin_is_well_formed_but_its_freshness_is_not_a_unit_gate():
     """D-8: a stale pin is refused by kit packing and the release gate, not by unit CI."""
     key, digest = devkit_key.read_pin(REPO)
-    assert re.fullmatch(r"[0-9a-f]{64}", key) and re.fullmatch(r"sha256:(PENDING|[0-9a-f]{64})", digest)
+    assert re.fullmatch(r"[0-9a-f]{64}", key) and re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
     assert re.fullmatch(r"[0-9a-f]{64}", devkit_key.key(REPO))
 
 

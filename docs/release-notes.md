@@ -54,3 +54,26 @@ it from the checkout `bootstrap.sh` made from the signed bundle, with
 `SNEAKERNET_TRUSTED_PUB` exported. The connected opt-out is unchanged:
 `AIRGAP_UNVERIFIED_CHECKOUT=1` only together with `CI_REHEARSAL=1` in the
 process environment, never in the air gap.
+
+## 2026-10-31 GH#1118 GitLab CI runs on the dev kit image
+
+The default `CI_PYTHON_IMAGE` in `.gitlab-ci.yml` is now the dev workspace
+image, `$CI_APPROVED_REGISTRY/qdrant-pdf-rag-devkit` by the digest in
+`scripts/tools/devkit-pin.txt` (ADR-0009 §8). Install the kit image there
+(`scripts/devkit/install.sh --registry <CI_APPROVED_REGISTRY>/qdrant-pdf-rag-devkit`)
+and leave the project variable `CI_PYTHON_IMAGE` unset; a Python job (lint,
+test, hazards, sim, gate-l1) on any other image fails with a fixed message. Jobs use the image's installed dev
+environment and its Task and Helm, so these GitLab CI/CD variables are retired:
+
+- `CI_HELM_ARCHIVE`: the `hygiene` job refuses it with a fixed message naming
+  `scripts/devkit/link-tools.sh`. Delete the project variable. To rerun a
+  pipeline for a ref older than this change, pass it as a variable of that run
+  only.
+- `PIP_FIND_LINKS` and `PIP_INDEX_URL`: no longer read, and not refused, since
+  pip itself honours them and a platform may set them for other projects. No
+  GitLab job installs a package any more.
+
+`CI_TASK_ARCHIVE` is unchanged and still required for `test`, `sim` and
+`hazards`: the image holds the Task binary only, and the artifact tests and the
+doctor read the archive. These variables are not items of the derived
+extension surface, so this entry has no `- removed` line.

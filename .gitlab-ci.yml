@@ -13,8 +13,11 @@
 # shards the unit suite into 4 jobs (`parallel: 4`, GitHub uses 8) with the
 # same tests/ci_shard.py layout for that count; branch pipelines select lanes
 # through a dynamic child pipeline (below); jobs run on the `gate` and `wip`
-# runner tags (ADR-0009 section 2); and the simulation tier runs against the
-# mirrored Qdrant service without tests/test_qdrant_auth.py and
+# runner tags (ADR-0009 section 2); jobs run on the pinned dev workspace image
+# (ADR-0009 section 8) and use its installed dev environment, Task and Helm in
+# place (prepare_python.py --kit, scripts/devkit/link-tools.sh), where GitHub
+# prepares them from wheels and archives; and the simulation tier runs against
+# the mirrored Qdrant service without tests/test_qdrant_auth.py and
 # tests/test_openwebui_proxy_nginx.py, which drive a local Docker daemon.
 #
 # GitHub product CI ignores markdown-only changes; agent-context.yml checks
@@ -63,17 +66,21 @@
 #                                   default: unset, job images do not resolve and
 #                                   every job fails to start. It is deliberately
 #                                   not derived from the GitLab registry.
-#   CI_PYTHON_IMAGE  (optional)     complete mirrored UBI/Python 3.14 image
-#                                   reference (issue #5: 3.14 GIL, no 3.14t) that
-#                                   replaces the default
-#                                   "$CI_APPROVED_REGISTRY/ci/python:3.14"; the
-#                                   image must contain git, python3, pip, tar,
-#                                   sha256sum and install.
-#   CI_TASK_ARCHIVE (required for test) path to the approved pinned linux-amd64
-#                                   Task release archive on the runner, transferred
-#                                   offline (see scripts/tools/task-pin.txt).
-#   CI_HELM_ARCHIVE (required for test) transferred checksum-pinned Helm archive
-#                                   (scripts/tools/helm-pin.txt); no download fallback.
+#   CI_PYTHON_IMAGE  (optional)     leave unset. The default is the dev workspace
+#                                   image (ADR-0009 §8) by the digest in
+#                                   scripts/tools/devkit-pin.txt, at
+#                                   "$CI_APPROVED_REGISTRY/qdrant-pdf-rag-devkit",
+#                                   where scripts/devkit/install.sh puts it; so each
+#                                   branch runs on the kit for its own dev lock. Its
+#                                   installed dev environment, Task and Helm are
+#                                   used in place; a Python job on any other image
+#                                   fails.
+#   CI_TASK_ARCHIVE (required for test, sim, hazards) path on the runner to the
+#                                   approved pinned linux-amd64 Task release archive
+#                                   (scripts/tools/task-pin.txt), for example the
+#                                   release bundle's copy. The kit image holds the
+#                                   Task binary only; the artifact tests and the
+#                                   doctor read this archive.
 #   CI_BM25_CACHE_DIR (required for sim) offline-prepared Qdrant/bm25 cache on the
 #                                   runner, verified against bm25-weights.sha256
 #                                   (artifacts:bm25 output); no download fallback.
@@ -84,13 +91,15 @@
 #                                   of ADR-0009 section 2). A project variable wins
 #                                   over both: set it only on a single-runner site,
 #                                   where it gives up the gate/wip split.
-#   PIP_FIND_LINKS  (recommended)   path to a wheelhouse directory on the runner
-#                                   (e.g. /wheelhouse) built from requirements.dev.lock.txt
-#   PIP_INDEX_URL   (alternative)   internal HTTPS PyPI-compatible index; prepared
-#                                   image must contain lock-qualified pip 26.2.2
+#   Retired (GH#1118 F5, docs/release-notes.md): CI_HELM_ARCHIVE is refused by
+#   hygiene, since Helm comes from the kit image. PIP_FIND_LINKS and PIP_INDEX_URL
+#   are no longer read: no job installs a package (the kit's environment is
+#   already the dev lock, and prepare_python.py --kit installs only the checkout,
+#   with --no-index and every PIP_* variable dropped).
 #
 # Air-gap contract: runners must not reach pypi.org, Docker Hub, or GitHub.
-# If neither PIP_FIND_LINKS nor PIP_INDEX_URL is set, jobs FAIL CLOSED.
+# Jobs FAIL CLOSED on any image other than the dev kit built for the checkout's
+# dev lock, and on Task or Helm bytes other than their pins.
 # Do not put internal registry hostnames, URLs, or tokens in this file or in git.
 #
 # The connected-path E2E (image build to GHCR + lab OpenShift smoke, issue #8)
@@ -137,8 +146,9 @@ stages: [hygiene, test]
 variables:
   # CI_APPROVED_REGISTRY is operator-set and has no default here (see the admin
   # setup above). A project-level CI_PYTHON_IMAGE overrides this derived default
-  # (YAML vars have the lowest precedence in GitLab).
-  CI_PYTHON_IMAGE: "$CI_APPROVED_REGISTRY/ci/python:3.14"
+  # (YAML vars have the lowest precedence in GitLab). The digest is the one in
+  # scripts/tools/devkit-pin.txt; tests/test_ci_gitlab_parity.py keeps them equal.
+  CI_PYTHON_IMAGE: "$CI_APPROVED_REGISTRY/qdrant-pdf-rag-devkit@sha256:7d506221eea02df988d1cf702532016561dc13c09ece8a295054574c40f5b922"
 
 default:
   image: $CI_PYTHON_IMAGE
@@ -197,23 +207,25 @@ lanes:
     forward:
       yaml_variables: false
 
-# Shared install: wheelhouse first, then internal index, else fail closed.
-# Never install from the default (public) index: the container must not be
-# able to reach pypi.org, and if it could, we still refuse to depend on it.
+# Shared Python: the dev kit image (ADR-0009 §8) already holds the dev lock,
+# installed and verified. prepare_python.py --kit refuses an image built for
+# another dev lock, naming the kit to request, then layers a venv with only the
+# checkout installed editable (no index, no wheel, no PIP_* variable).
 .py-base:
   before_script:
     - |
       set -eu
-      if [ -n "${PIP_FIND_LINKS:-}" ]; then
-        python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse "$PIP_FIND_LINKS"
-      elif [ -n "${PIP_INDEX_URL:-}" ]; then
-        python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --internal-index
-      else
-        echo "FAIL: no package source configured." >&2
-        echo "Set PIP_FIND_LINKS (wheelhouse path) or PIP_INDEX_URL (internal mirror)" >&2
-        echo "as project CI/CD variables. This pipeline never installs from pypi.org." >&2
+      if [ ! -d /opt/devkit/locks ]; then
+        echo "FAIL: the job image is not the dev kit image (no /opt/devkit/locks)." >&2
+        echo "Leave the project variable CI_PYTHON_IMAGE unset so jobs run on the kit" >&2
+        echo "that scripts/tools/devkit-pin.txt names (ADR-0009 section 8)." >&2
         exit 1
       fi
+      python3 scripts/prepare_python.py --kit --venv "$CI_PROJECT_DIR/.venv"
+    # The base image's BASH_ENV/ENV source its activate script in every bash
+    # child, which would put the image interpreter back in front of the venv.
+    - unset BASH_ENV ENV
+    - export PATH="$CI_PROJECT_DIR/.venv/bin:$PATH"
 
 hygiene:
   extends: .gate-pipeline
@@ -225,6 +237,15 @@ hygiene:
       if [ -n "${CI_COMMIT_TAG:-}" ] && [ "${CI_COMMIT_REF_PROTECTED:-}" != "true" ]; then
         echo "FAIL: tag ${CI_COMMIT_TAG} is not a protected tag." >&2
         echo "A release pipeline is built only from an immutable (protected) tag." >&2
+        exit 1
+      fi
+    # Retired runner input (GH#1118 F5; docs/release-notes.md): Helm comes from the
+    # dev kit image now, so a leftover value is refused, never silently ignored.
+    - |
+      set -eu
+      if [ -n "${CI_HELM_ARCHIVE:-}" ]; then
+        echo "FAIL: CI_HELM_ARCHIVE is retired: Helm now comes from the dev kit job image" >&2
+        echo "(sh scripts/devkit/link-tools.sh). Delete the CI_HELM_ARCHIVE project variable." >&2
         exit 1
       fi
     - |
@@ -253,9 +274,7 @@ test:
     TASK_CONTRACTS_REQUIRE_RUNNER: "1"
   script:
     - ': "${CI_TASK_ARCHIVE:?mount the approved pinned Task archive on the runner}"'
-    - sh scripts/tools/install-task.sh --archive "$CI_TASK_ARCHIVE"
-    - ': "${CI_HELM_ARCHIVE:?mount the approved pinned Helm archive on the runner}"'
-    - sh scripts/tools/install-helm.sh --archive "$CI_HELM_ARCHIVE"
+    - sh scripts/devkit/link-tools.sh --task-archive "$CI_TASK_ARCHIVE"
     - export PATH="$CI_PROJECT_DIR/.tools/bin:$PATH"
     - python scripts/agent_doctor.py --python "$(command -v python)"
     - rm -f unit-junit.xml
@@ -276,9 +295,7 @@ hazards:
   stage: test
   script:
     - ': "${CI_TASK_ARCHIVE:?mount the approved pinned Task archive on the runner}"'
-    - sh scripts/tools/install-task.sh --archive "$CI_TASK_ARCHIVE"
-    - ': "${CI_HELM_ARCHIVE:?mount the approved pinned Helm archive on the runner}"'
-    - sh scripts/tools/install-helm.sh --archive "$CI_HELM_ARCHIVE"
+    - sh scripts/devkit/link-tools.sh --task-archive "$CI_TASK_ARCHIVE"
     - sh scripts/tools/run-task.sh qa:hazards PY="$(command -v python)" OUT="$CI_PROJECT_DIR/dist/critical-hazards"
   artifacts:
     when: always
@@ -302,16 +319,14 @@ sim:
     TASK_CONTRACTS_REQUIRE_RUNNER: "1"
   script:
     - ': "${CI_TASK_ARCHIVE:?mount the approved pinned Task archive on the runner}"'
-    - sh scripts/tools/install-task.sh --archive "$CI_TASK_ARCHIVE"
-    - ': "${CI_HELM_ARCHIVE:?mount the approved pinned Helm archive on the runner}"'
-    - sh scripts/tools/install-helm.sh --archive "$CI_HELM_ARCHIVE"
+    - sh scripts/devkit/link-tools.sh --task-archive "$CI_TASK_ARCHIVE"
     - export PATH="$CI_PROJECT_DIR/.tools/bin:$PATH"
     - ': "${CI_BM25_CACHE_DIR:?mount the offline-prepared BM25 cache on the runner}"'
     - export SIM_BM25_CACHE_DIR="$CI_BM25_CACHE_DIR"
     - python scripts/fetch_bm25_weights.py --out "$SIM_BM25_CACHE_DIR" --verify-manifest bm25-weights.sha256 --verify-only
     - python scripts/agent_doctor.py --python "$(command -v python)"
     - rm -f sim-junit.xml
-    - pytest -m integration --ignore=tests/test_load_tier.py --ignore=tests/test_ha_cluster.py --ignore=tests/test_qdrant_auth.py --ignore=tests/test_openwebui_proxy_nginx.py -v -rs --junitxml=sim-junit.xml
+    - python -m pytest -m integration --ignore=tests/test_load_tier.py --ignore=tests/test_ha_cluster.py --ignore=tests/test_qdrant_auth.py --ignore=tests/test_openwebui_proxy_nginx.py -v -rs --junitxml=sim-junit.xml
     - python scripts/check_junit_clean.py sim-junit.xml
   artifacts:
     when: always
@@ -361,6 +376,6 @@ lint:
   extends: [.py-base, .gate-pipeline]
   stage: hygiene
   script:
-    - ruff check src tests scripts/eval_retrieval.py scripts/review_tooling.py scripts/ci_evidence.py scripts/acceptance_evidence.py scripts/devkit_key.py scripts/devkit/isolation_proof.py scripts/devkit/issue_snapshot.py scripts/extension_surface.py scripts/gitlab_lanes.py scripts/release_archive.py
+    - ruff check src tests scripts/eval_retrieval.py scripts/review_tooling.py scripts/ci_evidence.py scripts/acceptance_evidence.py scripts/devkit_key.py scripts/devkit/isolation_proof.py scripts/devkit/issue_snapshot.py scripts/extension_surface.py scripts/gitlab_lanes.py scripts/release_archive.py scripts/gap/ci_status.py
     - mypy src
-    - mypy --follow-imports=silent scripts/eval_retrieval.py scripts/review_tooling.py scripts/ci_evidence.py scripts/acceptance_evidence.py scripts/devkit_key.py scripts/devkit/isolation_proof.py scripts/devkit/issue_snapshot.py scripts/extension_surface.py scripts/gitlab_lanes.py scripts/release_archive.py
+    - mypy --follow-imports=silent scripts/eval_retrieval.py scripts/review_tooling.py scripts/ci_evidence.py scripts/acceptance_evidence.py scripts/devkit_key.py scripts/devkit/isolation_proof.py scripts/devkit/issue_snapshot.py scripts/extension_surface.py scripts/gitlab_lanes.py scripts/release_archive.py scripts/gap/ci_status.py
