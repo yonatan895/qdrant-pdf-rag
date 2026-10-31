@@ -2300,3 +2300,17 @@ proof at a time: each run first deletes probe objects (label
 `isolation-proof.mainframe-rag.io/run`, an annotation on `mfr-proof-*` pods) that an earlier run left, and removes its own on
 every exit, SIGTERM and SIGHUP included; only a SIGKILL leaves them for the next run.
 Tests: `tests/test_isolation_proof.py` (a stub `oc`, canary leak assertions).
+
+**Kind lane** (`kind-workspace-isolation`, [workflow](../.github/workflows/workspace-isolation.yml),
+`scripts/ci/workspace_isolation_kind.sh`, task `local:workspace:isolation-kind`). It runs
+the proof with `--probe` against real NetworkPolicies: Kind's default CNI (kindnetd, pinned
+kind v0.32.0) enforces them. The lane renders both templates with the pinned `oc process
+--local` and applies them, with stand-ins for what the site provides: a real Qdrant and an
+agent HTTP stand-in behind the chart's default agent ingress policy, registry, GitLab and
+LiteLLM listeners at their own /32 addresses outside the cluster, CoreDNS moved to an
+`openshift-dns` namespace behind the kube-dns Service, and a runner-manager pod. The
+UBI Python base from `images.txt` stands in for the dev kit image. The proof must report
+`proven`; with `mfr-dev-egress` deleted, and with an extra CI allow policy to production
+Qdrant, it must fail on both the static policy check and the live probe; restored, it must
+report `proven` again. It runs on pull requests that change the proof, the templates, the
+contract or the lane, nightly on main, and on dispatch.
