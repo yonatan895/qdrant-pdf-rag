@@ -68,6 +68,18 @@ not an arbitrary system binary.
   rerunning bootstrap. Reruns preserve operator `airgap.env` and retained
   artifacts. Old approved bundles use their own bundled bootstrap and Make
   contract in a separate workspace; do not mix old assets with a new checkout.
+- Gap development uses no hand-built container. The workstation is the
+  `mfr-dev` pod on the dev workspace image
+  ([ADR-0009 §8](adr/0009-gap-fork.md#8-dev-workspace-image-and-dev-kit-d3)),
+  from `deploy/workspace/ci-namespace.template.yaml`. The image holds CPython
+  3.14 GIL with the dev lock installed and verified (no wheelhouse ships), and
+  the pinned Task, Helm and `oc` in `/usr/local/bin`. The checkout's source
+  runs in place (`PYTHONPATH=<checkout>/src`); nothing is installed or built in
+  the gap. A separate venv layers on the image's installed environment
+  ([`prepare_python.py --kit`](dependencies.md)). `agent_doctor` refuses a
+  checkout whose locks differ from the image's and names the kit to request.
+  Not implemented yet (F5): a documented step that gives a checkout the
+  `.tools/bin/task` that `run-task.sh` requires.
 
 Deployment render tests require the existing Helm **4.3.0 linux-amd64** bytes
 recorded in [the Helm pin](../scripts/tools/helm-pin.txt). Prepare them explicitly:

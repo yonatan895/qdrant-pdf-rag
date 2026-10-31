@@ -918,6 +918,9 @@ to be `PASS`, evidence attributable to this bundle, and named operator sign-off.
 transfer. This is an operator-enforced gate; the pack/load scripts do not read the
 record. Transfer **the identical tested tarball and checksum**, plus its record,
 through the approved channel. Do not rebuild, repack, edit or substitute an image.
+A release that ships a dev kit publishes the record's dev-kit line with the
+record before the kit is transferred
+([record template](release-record.md#sign-off-and-handoff)).
 Recheck the checksum on arrival, then use the bootstrap, validation,
 deployment pipeline, [site OpenShift acceptance](install_and_ops.md#site-openshift-acceptance)
 and production acceptance commands. A bundle or security/configuration fix

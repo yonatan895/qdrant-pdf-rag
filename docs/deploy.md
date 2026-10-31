@@ -1183,8 +1183,8 @@ and CI tooling have different owners and pull credentials.
 | OAuth sidecar (optional) | `openshift4/ose-oauth-proxy:v4.14` | as the agent; absent while `images.txt` says `sha256:PENDING` | `load.sh` | cluster pods |
 | Open WebUI front end (default on, ADR-0007/ADR-0008, #1074) | `qdrant-pdf-rag-openwebui:v0.12.3-slim` | as the agent; absent while `images.txt` says `sha256:PENDING` (the factory records the pushed manifest digest of the image built from `images/openwebui/Containerfile`, the recipe the `scripts/openwebui/` dev environment and acceptance lane also build); the upstream `open-webui/open-webui:v0.12.3-slim` line is factory build provenance, never pushed | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `openwebui`) when `openwebui.enabled` |
 | Open WebUI allow-list proxy (ADR-0007 E1, **Verifier-owned** where the workflow builds or mirrors images) | `nginxinc/nginx-unprivileged:1.30.6-alpine` | pinned by digest in `images.txt`; bundled as `openwebui-proxy-image.tar` exactly when the Open WebUI member is | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `proxy`) when `openwebui.enabled` |
-| CI job image | `ci/python:3.14`, or a complete `CI_PYTHON_IMAGE` | mirrored UBI Python 3.14 (GIL) with git, pip, tar, sha256sum | platform or factory mirror, not this repository | GitLab runner |
-| Dev workspace image (ADR-0009 §8, #1118) | `qdrant-pdf-rag-devkit:<kit key>` | manifest digest in `scripts/tools/devkit-pin.txt` (`sha256:PENDING` until the factory pushes); built from `images/Containerfile.devkit` by `.github/workflows/devkit.yml`; carried by the separate dev kit, never a release-bundle member or an `images.txt` line | the dev kit install (follow-up) | bastion, dev pod and runner jobs, from the templates and runner configurations in `deploy/workspace/` (contract: `deploy/workspace/contract.json`) |
+| CI job image | `ci/python:3.14`, or a complete `CI_PYTHON_IMAGE` | mirrored UBI Python 3.14 (GIL) with git, pip, tar, sha256sum | platform or factory mirror, not this repository | GitLab runner. ADR-0009 §8 replaces it with the dev workspace image (next row); not implemented until F5 PR-5 sets the default `CI_PYTHON_IMAGE` to the kit pin's digest |
+| Dev workspace image (ADR-0009 §8, #1118) | `qdrant-pdf-rag-devkit:<kit key>` | manifest digest in `scripts/tools/devkit-pin.txt` (`sha256:PENDING` until the factory pushes); built from `images/Containerfile.devkit` by `.github/workflows/devkit.yml`; carried by the separate dev kit, never a release-bundle member or an `images.txt` line | the first push from Windows ([`docs/runbooks/devkit-windows.md`](runbooks/devkit-windows.md)), then `scripts/devkit/install.sh` in the bastion | bastion, dev pod and runner jobs, from the templates and runner configurations in `deploy/workspace/` (contract: `deploy/workspace/contract.json`) |
 | CI Qdrant service | `qdrant/qdrant@sha256:<images.txt digest>` | the `images.txt` manifest digest, so a tag is never enough | registry-to-registry copy that preserves the digest | GitLab runner (`sim`, `gate-l1`) |
 
 The CI Qdrant service is a different role from the runtime Qdrant image. `load.sh`
@@ -1568,6 +1568,22 @@ require completed recovery, provenance/count/dimension and vector compatibility
 before an alias. Never mix synthetic cleanup with preserved real-corpus resources.
 Transfer the identical tested bundle; missing/failed release-gate checks block
 promotion. Sizing-only overrides do not establish SCC, residency or distributed HA.
+
+The air-gapped GitLab is a downstream fork ([ADR-0009](adr/0009-gap-fork.md)).
+Production deploys only a verified signed release: outside dry-run, validate,
+load, deploy and ingest refuse any other checkout (the
+[executing-checkout guard](#4-signing-and-provenance), F1). Its connected
+opt-out (`AIRGAP_UNVERIFIED_CHECKOUT=1`, accepted only with `CI_REHEARSAL=1`)
+is never used in the air gap. The dev
+workspace image is built only by the connected factory and reaches the site in
+the separate signed dev kit, never in the release bundle
+([image role](#quay-image-roles); kit licence check:
+[licensing: dev kit](licensing.md#dev-kit)).
+The bastion, dev and runner-job pods run that image from
+[`deploy/workspace/`](../deploy/workspace/contract.json), and the
+[isolation proof](#workspace-isolation-proof) records their
+isolation. Gap releases (F6) are not implemented; the
+[bootstrap guide](install_and_ops.md#gap-fork) says what is decided.
 
 <a id="trace-backend"></a>
 ## Trace and metrics backend: OpenObserve (ADR-0006, #956)
@@ -2100,6 +2116,13 @@ GitLab registry; CI_PYTHON_IMAGE overrides the job image), the `gate`/`wip` runn
 (CI_RUNNER_TAG overrides both) and internal
 PIP_INDEX_URL or PIP_FIND_LINKS, failing closed without a package source. No
 public network, GHCR, deploy/pack/image-build or opencode reviewer in GitLab.
+GitLab CI runs in its own CI namespace through the site's GitLab Runner Operator,
+never in the production namespace, and holds no production deploy authority or
+signing key ([ADR-0009 §2](adr/0009-gap-fork.md#2-isolation-of-development-from-the-live-release)).
+Its runner configurations are `deploy/workspace/runner-{gate,wip}.example.toml`.
+ADR-0009 §8 makes the job image this repository's dev workspace image; that is
+not implemented until F5 PR-5 sets the default `CI_PYTHON_IMAGE` to the
+digest in `scripts/tools/devkit-pin.txt`.
 Issue #397 authorizes the offline context check in hygiene and a small GitHub
 context workflow; #370 owns GitLab/GitHub gate parity, #584 the lint ruleset.
 Coverage ratchets and a real internal-runner pipeline run (#446) are not part of it.

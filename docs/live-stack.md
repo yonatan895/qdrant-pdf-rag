@@ -24,7 +24,13 @@ owns context, conflicts, task/review and handoff formats.
 **Common checks:** a `sh scripts/tools/run-task.sh qa:local` receipt for the
 tested SHA (auto selection, `evidence: true`, [local verification](testing.md#local-verification))
 plus green CI `lint_and_types` and `unit_tests` lanes on that SHA; CI alone runs
-the full unit suite (#796).
+the full unit suite (#796). In the air-gapped GitLab fork, those lanes are the
+`lint` job and the four `test` shards of that commit's pipeline. The
+[CI inventory](deploy.md#7-ci-inventory) lists the GitLab jobs, and
+`tests/test_ci_gitlab_parity.py` pins each one to its GitHub job. Gap agents
+read pipelines only through GitLab
+([ADR-0009 §2](adr/0009-gap-fork.md#2-isolation-of-development-from-the-live-release)).
+The pipeline reader `scripts/gap/ci_status.py` is not implemented (F5 PR-5).
 
 **Data invariant protection (cross-cutting):** Defaults, UUID5 chunk keys, 4-type `chunk_type` vocabulary (`message`, `syntax`, `table`, `narrative`), residue audit, fail-closed contracts, and production constants require a dedicated approved concern split from features, evaluated against mode-keyed baselines with full A/B evidence. Documentation, tooling, or refactoring PRs cannot silently alter, suppress, or waive data invariants.
 

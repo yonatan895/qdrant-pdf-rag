@@ -45,6 +45,11 @@ Mainframe RAG is a citation-first retrieval-augmented generation engine designed
 - **Tools:** `git`, `curl`, POSIX shell, `tar`, `sha256sum`; the pinned Task runner is installed explicitly below.
 
 ### Disconnected / Air-Gapped Bastion
+- **Bastion pod:** from the fresh install on (ADR-0009 §8) the bastion is the
+  `mfr-bastion` pod on the dev workspace image, which carries the tools below
+  at their pins. Create it from the signed dev kit with
+  [`docs/runbooks/devkit-windows.md`](runbooks/devkit-windows.md); see
+  [air-gapped GitLab fork](#gap-fork).
 - **Host runner:** signed bundle bootstrap installs verified Task into `.tools/bin/task`; no Make, preinstalled Task, Go, application Python or internet is needed for bootstrap. Keep `git`, POSIX shell, `tar`, `sha256sum` and `openssl` available for its verification steps.
 - **OpenShift Client:** `oc` (v4.12+) or `kubectl`.
 - **Helm:** checksum-pinned **4.3.0**, as used by [the deployment workflow](../.github/workflows/e2e.yml); the launcher requires Helm 4. Transfer the verified client with the operator tools. Both `charts/mainframe-rag` and `charts/qdrant-1.19.2.tgz` are local; do **not** run `helm repo add` in the air gap.
@@ -1107,6 +1112,40 @@ cluster after retaining diagnostics and synthetic recovery evidence.
 The release gate's real-model Kind lane uses the same original bundle, the two
 current GPU models through the authenticated TLS gateway, and a separate
 real-vector collection; it must pass alongside CI.
+
+<a id="gap-fork"></a>
+### 4.8 Air-gapped GitLab fork (ADR-0009)
+
+The air-gapped GitLab is a downstream fork of this repository.
+[ADR-0009](adr/0009-gap-fork.md) owns the decisions; this section lists what
+exists on `main` and points at it.
+
+- **Dev kit.** The dev workspace image reaches the site in a signed dev kit,
+  separate from the release bundle. The connected side packs it with
+  `scripts/devkit/pack.sh` and publishes its anchor with the release record
+  ([release record](release-record.md#sign-off-and-handoff)). On site, follow
+  [`docs/runbooks/devkit-windows.md`](runbooks/devkit-windows.md): it checks
+  the kit against the anchor on Windows, pushes the image, creates the bastion
+  and runs the kit's verifier (`scripts/devkit/install.sh`) there.
+- **Workspace pods and isolation.** The bastion, dev pod and runner-job
+  manifests are in [`deploy/workspace/`](../deploy/workspace/contract.json).
+  The [isolation proof](deploy.md#workspace-isolation-proof) checks them, and
+  its record goes in `gap/records/`.
+- **Release import** ([ADR-0009 §4](adr/0009-gap-fork.md#4-release-import-procedure)).
+  Run `scripts/gap/import_release.sh` from the fork clone. Its `--help` lists
+  the inputs, and ADR §4 gives the stop and rerun rules and the steps after
+  `IMPORT READY`.
+- **Gap releases** ([ADR-0009 §5](adr/0009-gap-fork.md#5-gap-releases)). Not
+  implemented (F6). Decided so far
+  ([GH#1118 comment 6525955227](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6525955227)):
+  an approved GitLab issue names the commit and the gap maintainer creates a
+  protected tag on it. The release is built, packed and signed in the bastion,
+  never on a GitLab runner. That session holds only the gap signing key and a
+  read-only GitLab token, with no `oc` token, and runs the scripts of the
+  installed signed release. Rehearsal and promotion run in a separate deploy
+  session, without the signing key. The unprivileged image-build mechanism is
+  still open question 4. Until F6 lands, production deploys only upstream
+  signed releases.
 
 ---
 

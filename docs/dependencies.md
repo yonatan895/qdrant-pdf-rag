@@ -73,6 +73,9 @@ installed --profile dev --project`), and a top-level `src/` name that a locked
 distribution provides is refused. It runs as the pod's arbitrary UID, with the
 image's `python3`, never from inside a kit venv. `--kit` never acquires, so it
 refuses `--connected`, `--internal-index` and `--python`.
+`agent_doctor.py` makes the same lock comparison in any image that has
+`/opt/devkit/locks/` and reports a mismatch as a `dev kit` finding naming the
+same kit. Outside a kit image it adds no finding.
 
 GitHub uses the same helper and manifest. GitLab accepts `PIP_FIND_LINKS` as a
 local complete dev wheelhouse, or explicitly selects `--internal-index` using

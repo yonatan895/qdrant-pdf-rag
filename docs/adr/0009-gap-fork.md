@@ -793,7 +793,7 @@ The names the gap builds on are a **public API**, limited to this list:
 | F2 | Two trust anchors (upstream and gap) and the MANIFEST `origin:` field | No |
 | F3 | Done in this PR: `tests/test_hygiene.py` fails on GitHub Actions when `gap/` or `.gitlab/` exists | No |
 | F4 | The CODEOWNERS generator, its equality test and the GitLab hygiene check | No |
-| F5 | The dev kit (§8), as [plan](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480613459) PR-2, PR-4 (with `prepare_python.py --kit`) and PR-5 (with `scripts/gap/ci_status.py`) | `agent_doctor.py` and `prepare_python.py`: yes. `devkit_key.py`: recommended for `UNIT_INPUTS`. The factory workflow is separate from `e2e.yml` and not an acceptance producer: no |
+| F5 | The dev kit (§8), as [plan](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480613459) PR-2, PR-4 (with `prepare_python.py --kit`) and PR-5 (with `scripts/gap/ci_status.py`) | `agent_doctor.py` and `prepare_python.py`: yes. `devkit_key.py` is not a unit-evidence input: both import it only to word the refusal, with a fixed fallback (#1152, #1162). The factory workflow is separate from `e2e.yml` and not an acceptance producer: no |
 | F6 | The gap release pipeline: protected-tag build and sign jobs, the unprivileged in-namespace build, the gap pack (`origin: gap`), the key-generation runbook and the release record template | Pack and taskfiles: yes |
 | F7 | Done: `scripts/gap/import_release.sh` from §4, with its throwaway-repo tests. §4 links to it | No |
 | F8 | The owner-document updates listed under Consequences | No |

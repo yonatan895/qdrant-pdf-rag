@@ -91,6 +91,17 @@ explicitly unresolved and prevent claims of production compatibility.
 - Licensing gate: `python3 scripts/license_inventory.py check --release` result
   (exit code, unresolved count, `release_approval` state) NOT RECORDED; it must pass
   on the packed commit before transfer ([licensing](licensing.md#what-a-release-must-satisfy)).
+- Dev kit, when this release ships one: NOT RECORDED. Copy from the output
+  of `scripts/devkit/pack.sh` the kit name, the fingerprint (the hash in the
+  kit's `SHA256SUMS.sha256`), the 16-hex trust anchor beside it, and the
+  anchor bootstrap text exactly as printed. The authoritative bootstrap is
+  the copy in [ADR-0009 §8](adr/0009-gap-fork.md#the-anchor-bootstrap-verbatim)
+  at the commit the kit was packed from (its MANIFEST `commit:`); if the
+  printed text differs from it, do not publish. Publish all four with
+  this record on GitHub. The operator carries the fingerprint (with its
+  anchor) and the bootstrap by a route separate from the kit transfer, and
+  runs step 1 of [the Windows runbook](runbooks/devkit-windows.md) before any
+  push.
 - Dev kit licence gate (when a kit ships): `python3 scripts/license_inventory.py check --kit`
   result (exit code, `kit_unresolved`, `kit_approval` state) NOT RECORDED, and the kit
   `MANIFEST.txt` line `license_gate: enforced` NOT RECORDED; both are required before
