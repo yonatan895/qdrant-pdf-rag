@@ -1210,7 +1210,7 @@ containers, a writable host or cluster access.
 | Area | Requirement | Used by |
 |---|---|---|
 | GitLab | Release version recorded, 16.10 or later (`workflow:auto_cancel`); protected tags; `CI_COMMIT_TAG` and `CI_COMMIT_REF_PROTECTED`; variables expanded in `image`, `services` and `tags`; `CI_OPEN_MERGE_REQUESTS`; dynamic child pipelines (`trigger:include:artifact`) | all pipelines |
-| Runner | Tags `gate` (merge request and tag pipelines) and `wip` (branch pipelines), or one tag for all from the project variable `CI_RUNNER_TAG`; linux-amd64; an executor that starts job and service images from the approved registry with a service alias; reads `CI_TASK_ARCHIVE`, `CI_HELM_ARCHIVE` and `CI_BM25_CACHE_DIR` from the runner; no route to PyPI, Docker Hub or GitHub | all GitLab jobs |
+| Runner | Tags `gate` (ready merge request and tag pipelines) and `wip` (branch and draft merge request pipelines), or one tag for all from the project variable `CI_RUNNER_TAG`; linux-amd64; an executor that starts job and service images from the approved registry with a service alias; reads `CI_TASK_ARCHIVE`, `CI_HELM_ARCHIVE` and `CI_BM25_CACHE_DIR` from the runner; no route to PyPI, Docker Hub or GitHub | all GitLab jobs |
 | Python packages | `PIP_FIND_LINKS` wheelhouse or `PIP_INDEX_URL` internal index, never a public index | `.py-base` |
 | Quay | Release version recorded; Docker v2 API reachable by `skopeo`; a push identity for the five runtime paths; pull access for cluster and runner; organization layout may differ from upstream paths | `load.sh`, runner |
 | OpenShift | Namespace-scoped deployer; `restricted-v2` SCC with no `anyuid`; RWO block storage for Qdrant (NFS only for the read-only corpus); ClusterIP-only Qdrant; Route only with OAuth | deploy, ingest |
@@ -1250,7 +1250,8 @@ lane (issue #360: three-peer placement/peer-loss fixture), connected E2E,
 and the dry-run gate; air-gap GitLab runs hygiene, lint/types, the unit suite
 in four shards, hazards, the sim tier and gate-l1 only (no e2e, load, deploy,
 multi-peer docker, GHCR, or PDFs/tokens/hostnames in file). Merge request and
-tag pipelines run every GitLab lane on the `gate` runner tag; branch pipelines
+tag pipelines run every GitLab lane on the `gate` runner tag, a draft merge
+request every lane on `wip` (GitLab >= 17.10); branch pipelines
 run on `wip` and select lanes with the fail-closed classifier through a child
 pipeline; a newer commit cancels the older pipeline on the same ref, never a
 tag pipeline (ADR-0009 section 2). GitLab unit/sim

@@ -183,8 +183,10 @@
   The dev pod has no RBAC there, because creating a pod would let it mount
   any Secret in the namespace.
   - There are four job slots of about 1 CPU each, since pytest runs on one
-    core. They form two runner registrations: `gate`, one slot for merge
-    request and tag pipelines, and `wip`, three slots for branch pipelines.
+    core. They form two runner registrations: `gate`, one slot for ready
+    merge request and tag pipelines, and `wip`, three slots for branch and
+    draft merge request pipelines. A draft still runs every lane (GitLab
+    >= 17.10; older versions keep drafts on `gate`).
     Agent work never queues ahead of a merge gate. Tag pipelines on `gate`
     run only the verification lanes; the F6 build and sign jobs do not run
     on these runners.
