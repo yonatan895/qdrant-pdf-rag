@@ -1,8 +1,11 @@
 # Team-tool gateways
 
 Read-only team tools (Splunk, GitLab, mail) reach Open WebUI through small MCP
-servers this repository owns (tracker #1075). Each gateway is its own pinned
-process. This document owns the contracts every gateway shares.
+servers this repository owns (tracker #1075). Each gateway is its own process
+and Deployment on the agent image, offered only through a Team model on the
+docs instance; the Docs model stays tool-free
+([ADR-0010](adr/0010-team-tools-on-open-webui.md)). This document owns the
+contracts every gateway shares.
 
 <a id="caller-verification"></a>
 ## Caller verification (issue #1076)
