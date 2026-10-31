@@ -592,8 +592,8 @@ checksums **after**.
   tarball. Without a pinned pubkey, verification is TOFU: it binds members
   together but proves nothing about *which* key signed. The executing-checkout
   guard below therefore requires `SNEAKERNET_TRUSTED_PUB` outside dry-run
-  (#1118 F1), so load, deploy, ingest and validate never run on TOFU alone
-  outside the connected opt-out described there.
+  (#1118 F1), so load, deploy, ingest, validate and retire-legacy never run
+  on TOFU alone outside the connected opt-out described there.
 - Load re-verifies the signature, then checksums, then the `IMAGE_SHA`
   against the manifest, then all six base image digests (plus the
   oauth-proxy digest when the bundle carries it) — and pushes under fixed
@@ -622,7 +622,8 @@ checksums **after**.
   archive's image config before any push. Deploy and ingest repeat the registry
   read-back and render by digest (see the image identity section below).
 - Executing-checkout guard (`common.sh::check_checkout_sha`, run by load,
-  deploy, ingest and validate). Outside dry-run the checkout must be a
+  deploy, ingest, validate and `retire_legacy.sh`, before any cluster or
+  Qdrant contact). Outside dry-run the checkout must be a
   verified signed release (#1118 F1, ADR-0009 §1): a packed MANIFEST must be
   reachable, and:
   1. *MANIFEST authenticity.* The guard never reads a bare file. `SHA256SUMS`,
@@ -1182,8 +1183,8 @@ and CI tooling have different owners and pull credentials.
 | OAuth sidecar (optional) | `openshift4/ose-oauth-proxy:v4.14` | as the agent; absent while `images.txt` says `sha256:PENDING` | `load.sh` | cluster pods |
 | Open WebUI front end (default on, ADR-0007/ADR-0008, #1074) | `qdrant-pdf-rag-openwebui:v0.12.3-slim` | as the agent; absent while `images.txt` says `sha256:PENDING` (the factory records the pushed manifest digest of the image built from `images/openwebui/Containerfile`, the recipe the `scripts/openwebui/` dev environment and acceptance lane also build); the upstream `open-webui/open-webui:v0.12.3-slim` line is factory build provenance, never pushed | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `openwebui`) when `openwebui.enabled` |
 | Open WebUI allow-list proxy (ADR-0007 E1, **Verifier-owned** where the workflow builds or mirrors images) | `nginxinc/nginx-unprivileged:1.30.6-alpine` | pinned by digest in `images.txt`; bundled as `openwebui-proxy-image.tar` exactly when the Open WebUI member is | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `proxy`) when `openwebui.enabled` |
-| CI job image | `ci/python:3.14`, or a complete `CI_PYTHON_IMAGE` | mirrored UBI Python 3.14 (GIL) with git, pip, tar, sha256sum | platform or factory mirror, not this repository | GitLab runner |
-| Dev workspace image (ADR-0009 §8, #1118) | `qdrant-pdf-rag-devkit:<kit key>` | manifest digest in `scripts/tools/devkit-pin.txt` (`sha256:PENDING` until the factory pushes); built from `images/Containerfile.devkit` by `.github/workflows/devkit.yml`; carried by the separate dev kit, never a release-bundle member or an `images.txt` line | the dev kit install (follow-up) | bastion, dev pod and runner jobs, from the templates and runner configurations in `deploy/workspace/` (contract: `deploy/workspace/contract.json`) |
+| CI job image | `ci/python:3.14`, or a complete `CI_PYTHON_IMAGE` | mirrored UBI Python 3.14 (GIL) with git, pip, tar, sha256sum | platform or factory mirror, not this repository | GitLab runner. ADR-0009 §8 replaces it with the dev workspace image (next row); not implemented until F5 PR-5 sets the default `CI_PYTHON_IMAGE` to the kit pin's digest |
+| Dev workspace image (ADR-0009 §8, #1118) | `qdrant-pdf-rag-devkit:<kit key>` | manifest digest in `scripts/tools/devkit-pin.txt` (`sha256:PENDING` until the factory pushes); built from `images/Containerfile.devkit` by `.github/workflows/devkit.yml`; carried by the separate dev kit, never a release-bundle member or an `images.txt` line | the first push from Windows ([`docs/runbooks/devkit-windows.md`](runbooks/devkit-windows.md)), then `scripts/devkit/install.sh` in the bastion | bastion, dev pod and runner jobs, from the templates and runner configurations in `deploy/workspace/` (contract: `deploy/workspace/contract.json`) |
 | CI Qdrant service | `qdrant/qdrant@sha256:<images.txt digest>` | the `images.txt` manifest digest, so a tag is never enough | registry-to-registry copy that preserves the digest | GitLab runner (`sim`, `gate-l1`) |
 
 The CI Qdrant service is a different role from the runtime Qdrant image. `load.sh`
@@ -1209,8 +1210,8 @@ containers, a writable host or cluster access.
 
 | Area | Requirement | Used by |
 |---|---|---|
-| GitLab | Release version recorded, 16.10 or later (`workflow:auto_cancel`); protected tags; `CI_COMMIT_TAG` and `CI_COMMIT_REF_PROTECTED`; variables expanded in `image`, `services` and `tags`; `CI_OPEN_MERGE_REQUESTS`; dynamic child pipelines (`trigger:include:artifact`) | all pipelines |
-| Runner | Tags `gate` (merge request and tag pipelines) and `wip` (branch pipelines), or one tag for all from the project variable `CI_RUNNER_TAG`; linux-amd64; an executor that starts job and service images from the approved registry with a service alias; reads `CI_TASK_ARCHIVE`, `CI_HELM_ARCHIVE` and `CI_BM25_CACHE_DIR` from the runner; no route to PyPI, Docker Hub or GitHub | all GitLab jobs |
+| GitLab | Release version recorded, 16.10 or later (`workflow:auto_cancel`), 17.10 or later for draft-MR routing to `wip` (`CI_MERGE_REQUEST_DRAFT`; older releases run drafts on `gate`, which is safe but slower); protected tags; `CI_COMMIT_TAG` and `CI_COMMIT_REF_PROTECTED`; variables expanded in `image`, `services` and `tags`; `CI_OPEN_MERGE_REQUESTS`; dynamic child pipelines (`trigger:include:artifact`) | all pipelines |
+| Runner | Tags `gate` (ready merge request and tag pipelines) and `wip` (branch and draft merge request pipelines), or one tag for all from the project variable `CI_RUNNER_TAG`; linux-amd64; an executor that starts job and service images from the approved registry with a service alias; reads `CI_TASK_ARCHIVE`, `CI_HELM_ARCHIVE` and `CI_BM25_CACHE_DIR` from the runner; no route to PyPI, Docker Hub or GitHub | all GitLab jobs |
 | Python packages | `PIP_FIND_LINKS` wheelhouse or `PIP_INDEX_URL` internal index, never a public index | `.py-base` |
 | Quay | Release version recorded; Docker v2 API reachable by `skopeo`; a push identity for the five runtime paths; pull access for cluster and runner; organization layout may differ from upstream paths | `load.sh`, runner |
 | OpenShift | Namespace-scoped deployer; `restricted-v2` SCC with no `anyuid`; RWO block storage for Qdrant (NFS only for the read-only corpus); ClusterIP-only Qdrant; Route only with OAuth | deploy, ingest |
@@ -1250,7 +1251,8 @@ lane (issue #360: three-peer placement/peer-loss fixture), connected E2E,
 and the dry-run gate; air-gap GitLab runs hygiene, lint/types, the unit suite
 in four shards, hazards, the sim tier and gate-l1 only (no e2e, load, deploy,
 multi-peer docker, GHCR, or PDFs/tokens/hostnames in file). Merge request and
-tag pipelines run every GitLab lane on the `gate` runner tag; branch pipelines
+tag pipelines run every GitLab lane on the `gate` runner tag, a draft merge
+request every lane on `wip` (GitLab >= 17.10); branch pipelines
 run on `wip` and select lanes with the fail-closed classifier through a child
 pipeline; a newer commit cancels the older pipeline on the same ref, never a
 tag pipeline (ADR-0009 section 2). GitLab unit/sim
@@ -1566,6 +1568,22 @@ require completed recovery, provenance/count/dimension and vector compatibility
 before an alias. Never mix synthetic cleanup with preserved real-corpus resources.
 Transfer the identical tested bundle; missing/failed release-gate checks block
 promotion. Sizing-only overrides do not establish SCC, residency or distributed HA.
+
+The air-gapped GitLab is a downstream fork ([ADR-0009](adr/0009-gap-fork.md)).
+Production deploys only a verified signed release: outside dry-run, validate,
+load, deploy and ingest refuse any other checkout (the
+[executing-checkout guard](#4-signing-and-provenance), F1). Its connected
+opt-out (`AIRGAP_UNVERIFIED_CHECKOUT=1`, accepted only with `CI_REHEARSAL=1`)
+is never used in the air gap. The dev
+workspace image is built only by the connected factory and reaches the site in
+the separate signed dev kit, never in the release bundle
+([image role](#quay-image-roles); kit licence check:
+[licensing: dev kit](licensing.md#dev-kit)).
+The bastion, dev and runner-job pods run that image from
+[`deploy/workspace/`](../deploy/workspace/contract.json), and the
+[isolation proof](#workspace-isolation-proof) records their
+isolation. Gap releases (F6) are not implemented; the
+[bootstrap guide](install_and_ops.md#gap-fork) says what is decided.
 
 <a id="trace-backend"></a>
 ## Trace and metrics backend: OpenObserve (ADR-0006, #956)
@@ -2098,6 +2116,13 @@ GitLab registry; CI_PYTHON_IMAGE overrides the job image), the `gate`/`wip` runn
 (CI_RUNNER_TAG overrides both) and internal
 PIP_INDEX_URL or PIP_FIND_LINKS, failing closed without a package source. No
 public network, GHCR, deploy/pack/image-build or opencode reviewer in GitLab.
+GitLab CI runs in its own CI namespace through the site's GitLab Runner Operator,
+never in the production namespace, and holds no production deploy authority or
+signing key ([ADR-0009 §2](adr/0009-gap-fork.md#2-isolation-of-development-from-the-live-release)).
+Its runner configurations are `deploy/workspace/runner-{gate,wip}.example.toml`.
+ADR-0009 §8 makes the job image this repository's dev workspace image; that is
+not implemented until F5 PR-5 sets the default `CI_PYTHON_IMAGE` to the
+digest in `scripts/tools/devkit-pin.txt`.
 Issue #397 authorizes the offline context check in hygiene and a small GitHub
 context workflow; #370 owns GitLab/GitHub gate parity, #584 the lint ruleset.
 Coverage ratchets and a real internal-runner pipeline run (#446) are not part of it.
@@ -2253,7 +2278,9 @@ It records:
 
 - each F9 ServiceAccount's `can-i --list` in both namespaces against a fixed, versioned
   baseline in the script (`BASELINE_VERSION`: the Kubernetes and OpenShift self-review,
-  discovery and default `system:authenticated` rules). Any other rule is a violation,
+  discovery and default `system:authenticated` rules, and the `get` on the four OIDC
+  issuer discovery URLs that `system:service-account-issuer-discovery` grants every
+  ServiceAccount). Any other rule is a violation,
   whichever binding or group granted it; a site whose defaults differ fails closed until
   a reviewed PR changes the baseline;
 - a negative matrix asked outright of each F9 ServiceAccount in both namespaces: secret
@@ -2283,12 +2310,20 @@ It records:
   operator cannot read it, pass them with `--cluster-network CIDR`, or the check stays
   `unchecked` and the result inconclusive;
 - the agent ingress policies;
-- with `--probe`, TCP and DNS outcomes from probe pods carrying exactly the labels of a
-  live pod of each role (for runner jobs without a live job: the role label, the runner
-  configuration's `pod_labels` and GitLab Runner's default labels). The run is marked by
-  an annotation, never a label. A probe
+- with `--probe`, TCP and DNS outcomes from probe pods carrying the labels of a live pod
+  of each role (for runner jobs without a live job: the role label, the runner
+  configuration's `pod_labels` and GitLab Runner's default labels), minus the keys a
+  workload controller owns (`pod-template-hash`, `controller-revision-hash`,
+  `statefulset.kubernetes.io/pod-name`, `apps.kubernetes.io/pod-index`, `job-name`,
+  `controller-uid`, `batch.kubernetes.io/*`). Each probe pod's controller reference
+  (`blockOwnerDeletion: false`) is the run's `mfr-proof-owner-<run>` ConfigMap in its
+  namespace, so no ReplicaSet, StatefulSet or Job adopts it and then deletes it or the
+  real pod; the operator therefore needs configmap create and delete in both namespaces.
+  The run is marked by an annotation, never a label. A probe
   pod in the production namespace that no policy selects is the negative control: a
-  blocked result counts only for a target the control reached. A CIDR wider than one
+  blocked result counts only for a target the control reached. A DNS probe that comes back
+  `unresolved` is looked up once more after `DNS_RETRY_DELAY_S` (2 s) and the result is
+  marked `retried`; no other outcome is retried. A CIDR wider than one
   address is not probed; give such a class a `--probe-host CLASS=HOST`.
 
 The record holds verbs, resources, object names and outcomes, never a Secret value, token
@@ -2296,7 +2331,33 @@ or env value.
 
 Exit 0 means proven, 1 a violation, 2 a usage or environment error, an inconclusive
 result, or a run without `--probe` (verdict `static-only`, never the full proof). Run one
-proof at a time: each run first deletes probe objects (label
-`isolation-proof.mainframe-rag.io/run`, an annotation on `mfr-proof-*` pods) that an earlier run left, and removes its own on
-every exit, SIGTERM and SIGHUP included; only a SIGKILL leaves them for the next run.
+proof at a time: each run first deletes probe objects (`mfr-proof-*` pods and
+`mfr-proof-owner-*` ConfigMaps with the annotation `isolation-proof.mainframe-rag.io/run`)
+that an earlier run left, and removes its own on every exit, SIGTERM and SIGHUP included;
+only a SIGKILL leaves them for the next run, and deleting a leftover owner ConfigMap also
+garbage-collects its probe pods.
 Tests: `tests/test_isolation_proof.py` (a stub `oc`, canary leak assertions).
+
+**Kind lane** (`kind-workspace-isolation`, [workflow](../.github/workflows/workspace-isolation.yml),
+`scripts/ci/workspace_isolation_kind.sh`, task `local:workspace:isolation-kind`). It runs
+the proof with `--probe` against real NetworkPolicies: Kind's default CNI (kindnetd, pinned
+kind v0.32.0) enforces them. The lane renders both templates with the pinned `oc process
+--local` and applies them, with stand-ins for what the site provides: a real Qdrant and an
+agent HTTP stand-in behind the chart's default agent ingress policy, registry, GitLab and
+LiteLLM listeners at their own /32 addresses outside the cluster, CoreDNS moved to an
+`openshift-dns` namespace behind the kube-dns Service, a runner-manager pod and a runner
+job pod named and labelled as GitLab Runner makes them. The
+UBI Python base from `images.txt` stands in for the dev kit image. The proof must report
+`proven`; with `mfr-dev-egress` deleted, and with an extra CI allow policy to production
+Qdrant, it must fail on both the static policy check and the live probe; restored, it must
+report `proven` again. It runs on pull requests that change the proof, the templates, the
+contract or the lane, nightly on main, and on dispatch.
+A green lane does not prove what only the site can:
+- OVN-Kubernetes semantics (post-DNAT matching, cross-node paths, a shared VIP for GitLab
+  and the registry);
+- OpenShift DNS (the 5353 path) and `restricted-v2` admission;
+- the real GitLab Runner Operator, its manager labels, and TLS to the real endpoints;
+- drift between the hand-copied agent ingress policy and the chart.
+
+A stand-in that is down answers "refused", which counts as a reach. Those are proven only
+by the recorded site run of `isolation_proof.py --probe` (ADR-0009 §2).

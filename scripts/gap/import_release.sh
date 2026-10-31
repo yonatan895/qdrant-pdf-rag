@@ -29,8 +29,11 @@ ledgered gap patches, 5 merge, 6 re-apply the gap patches in ledger order,
 Success ends with `IMPORT READY <SHA>` and prints the push command; the
 script never pushes. Any failure ends with one `STOP:` line that names the
 cause and the next action. Rerun the same command after any stop: step 0
-aborts the unfinished import and starts again. A rerun after success
-changes nothing. The script refuses to run once import/<SHA> is pushed.
+aborts the unfinished import and starts again. It never discards work: it
+stashes the unfinished import's uncommitted changes, keeps commits someone
+added to import/<SHA> as import/<SHA>-<UTC timestamp>, and prints both
+names. A rerun after success changes nothing. The script refuses to run
+once import/<SHA> is pushed.
 EOF
 }
 
@@ -135,26 +138,59 @@ main() {
         fi
         [ -z "$tip" ] || finished=1
     fi
-    if in_progress; then
-        if [ "$on_branch" = 1 ] && [ "$finished" = 0 ]; then
-            printf '%s\n' "Aborting the unfinished import's merge, revert or cherry-pick"
-            if git rev-parse -q --verify MERGE_HEAD >/dev/null; then git merge --abort; fi
-            if git rev-parse -q --verify REVERT_HEAD >/dev/null; then git revert --abort; fi
-            if git rev-parse -q --verify CHERRY_PICK_HEAD >/dev/null; then git cherry-pick --abort; fi
+    # Every stop check runs before anything is set aside, so a stop changes
+    # nothing. Only the unfinished import's own checkout is ever set aside.
+    # A detached HEAD holding commits no ref contains would be left behind,
+    # reachable only from the HEAD reflog, when step 0 switches away.
+    lost=$(git rev-list -n 1 HEAD --not --branches --remotes --tags)
+    if [ -n "$lost" ]; then
+        stop "HEAD in FORK is detached at commit $lost, which no branch, tag or remote branch contains; keep it with: git -C $(q "$FORK") branch <name> HEAD, then rerun"
+    fi
+    unfinished=0
+    if [ "$on_branch" = 1 ] && [ "$finished" = 0 ]; then unfinished=1; fi
+    if in_progress && [ "$unfinished" = 0 ]; then
+        stop "a merge, revert, cherry-pick or rebase is in progress in FORK outside an unfinished import; finish or abort it (git status shows which), then rerun"
+    fi
+    if [ -n "$(git status --porcelain --untracked-files=all | grep '^??' || true)" ] \
+            || { [ "$unfinished" = 0 ] && [ -n "$(git status --porcelain)" ]; }; then
+        git status --porcelain
+        stop "$FORK has local changes (listed above); commit or remove them, or ask the gap maintainer, then rerun"
+    fi
+    # The script never starts a rebase or git am, so it never sets one aside.
+    if rebase_in_progress; then
+        stop "a rebase or git am is in progress in FORK; finish or abort it (git status shows which), then rerun"
+    fi
+    # One timestamp names whatever this reset keeps (UTC, to the second).
+    KEPT=$(date -u +%Y%m%dT%H%M%SZ)
+    keep=0
+    if [ -n "$tip" ] && ! script_made "$tip"; then
+        keep=1
+        if git rev-parse -q --verify "refs/heads/$BRANCH-$KEPT" >/dev/null; then
+            stop "cannot keep $BRANCH as $BRANCH-$KEPT, which exists; rerun in a second, or ask the gap maintainer"
         fi
+    fi
+    if in_progress; then
+        printf '%s\n' "Aborting the unfinished import's merge, revert or cherry-pick"
+    fi
+    if [ "$unfinished" = 1 ] && [ -n "$(git status --porcelain)" ]; then
+        # git stash refuses unmerged paths: record them as they are first.
+        # The stash also ends a merge in progress. Changes that match HEAD
+        # make no stash: then nothing is printed, never an older stash.
+        before=$(git rev-parse -q --verify refs/stash || true)
+        git add -u
+        git stash push -q -m "import_release $SHA $KEPT"
+        after=$(git rev-parse -q --verify refs/stash || true)
+        if [ -n "$after" ] && [ "$after" != "$before" ]; then
+            printf '%s\n' "Stashed the unfinished import's uncommitted changes as \"import_release $SHA $KEPT\"; restore them with: git -C $(q "$FORK") stash apply $after"
+        fi
+    fi
+    if in_progress; then
+        if git rev-parse -q --verify MERGE_HEAD >/dev/null; then git merge --abort; fi
+        if git rev-parse -q --verify REVERT_HEAD >/dev/null; then git revert --abort; fi
+        if git rev-parse -q --verify CHERRY_PICK_HEAD >/dev/null; then git cherry-pick --abort; fi
         if in_progress; then
             stop "a merge, revert, cherry-pick or rebase is in progress in FORK outside an unfinished import; finish or abort it (git status shows which), then rerun"
         fi
-    fi
-    if [ -n "$(git status --porcelain)" ] && [ "$on_branch" = 1 ] && [ "$finished" = 0 ] \
-            && [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-        printf '%s\n' "Discarding the unfinished import's uncommitted changes:"
-        git status --porcelain --untracked-files=no
-        git reset -q --hard HEAD
-    fi
-    if [ -n "$(git status --porcelain)" ]; then
-        git status --porcelain
-        stop "$FORK has local changes (listed above); commit or remove them, or ask the gap maintainer, then rerun"
     fi
     if [ "$finished" = 1 ] && [ "$mark_base" = "$BASE" ] && [ -f "$R/reapplied.txt" ] \
             && [ -f "$R/issue-notes.txt" ] && [ -f "$R/env-keys.diff" ] && [ -f "$R/release-notes.diff" ]; then
@@ -163,7 +199,16 @@ main() {
         exit 0
     fi
     git switch -q --detach "$BASE"
-    if [ -n "$tip" ]; then git branch -q -D "$BRANCH"; fi
+    if [ -n "$tip" ]; then
+        if [ "$keep" = 0 ]; then
+            git branch -q -D "$BRANCH"
+        else
+            # Commits that someone else added: keep them under a new name.
+            git branch -m "$BRANCH" "$BRANCH-$KEPT" \
+                || stop "cannot keep $BRANCH as $BRANCH-$KEPT; rerun in a second, or ask the gap maintainer"
+            printf '%s\n' "Kept the unfinished import's commits as branch $BRANCH-$KEPT"
+        fi
+    fi
     rm -f "$MARK"
     rm -rf "$R"
 
@@ -248,7 +293,10 @@ main() {
     : > "$WORK/all.txt"
     if git cat-file -e "$BASE:$LEDGER" 2>/dev/null; then
         git show "$BASE:$LEDGER" > "$WORK/patches.before"
-        bad=$(awk '/^## / {
+        # Any line that starts like a heading must be an exact one: a near
+        # miss (##GL#, a leading blank, a tab, ###, CRLF) would otherwise
+        # hide a gap patch from the set-aside.
+        bad=$(awk '/^[[:space:]]*##/ {
                 if (!(NF == 3 && $2 ~ /^GL#[0-9]+$/ && length($3) == 40 && $3 !~ /[^0-9a-f]/ \
                       && $0 == "## " $2 " " $3)) { print NR; exit }
             }' "$WORK/patches.before")
@@ -261,6 +309,10 @@ main() {
                 || stop "$LEDGER names $c, which is not a commit on origin/main; fix the ledger on main through an MR, then rerun"
         done
     fi
+    # Every later ref update on the branch carries this reflog action, so
+    # step 0 of a rerun can tell the script's own commits from anyone else's.
+    GIT_REFLOG_ACTION="import_release $SHA"
+    export GIT_REFLOG_ACTION
     git switch -q --no-track -c "$BRANCH" "$BASE"
 
     STEP="4 (set aside the gap patches)"
@@ -338,6 +390,24 @@ on_exit() {
     if [ "$rc" -ne 0 ] && [ "$STOPPED" = 0 ]; then
         printf '%s\n' "STOP: step $STEP failed (exit $rc); rerun the same command to reset and resume; if it stops here again, open GitLab issue \"Release import ${SHA:-<SHA>} stopped\" with the last 20 lines of this output"
     fi
+}
+
+# True when the import branch tip holds nothing but this script's own work:
+# it is on origin/main already, or the branch's last reflog entry is a step
+# of this script that set exactly that tip. Without a reflog it is false.
+script_made() {
+    if git merge-base --is-ancestor "$1" "$BASE"; then return 0; fi
+    last=$(git reflog show -n 1 --format='%H %gs' "refs/heads/$BRANCH" 2>/dev/null || true)
+    [ "${last%% *}" = "$1" ] || return 1
+    case "${last#* }" in "import_release $SHA: "*) return 0 ;; esac
+    return 1
+}
+
+rebase_in_progress() {
+    for dir in rebase-merge rebase-apply; do
+        if [ -d "$(git rev-parse --git-path "$dir")" ]; then return 0; fi
+    done
+    return 1
 }
 
 in_progress() {

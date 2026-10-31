@@ -45,6 +45,11 @@ Mainframe RAG is a citation-first retrieval-augmented generation engine designed
 - **Tools:** `git`, `curl`, POSIX shell, `tar`, `sha256sum`; the pinned Task runner is installed explicitly below.
 
 ### Disconnected / Air-Gapped Bastion
+- **Bastion pod:** from the fresh install on (ADR-0009 §8) the bastion is the
+  `mfr-bastion` pod on the dev workspace image, which carries the tools below
+  at their pins. Create it from the signed dev kit with
+  [`docs/runbooks/devkit-windows.md`](runbooks/devkit-windows.md); see
+  [air-gapped GitLab fork](#gap-fork).
 - **Host runner:** signed bundle bootstrap installs verified Task into `.tools/bin/task`; no Make, preinstalled Task, Go, application Python or internet is needed for bootstrap. Keep `git`, POSIX shell, `tar`, `sha256sum` and `openssl` available for its verification steps.
 - **OpenShift Client:** `oc` (v4.12+) or `kubectl`.
 - **Helm:** checksum-pinned **4.3.0**, as used by [the deployment workflow](../.github/workflows/e2e.yml); the launcher requires Helm 4. Transfer the verified client with the operator tools. Both `charts/mainframe-rag` and `charts/qdrant-1.19.2.tgz` are local; do **not** run `helm repo add` in the air gap.
@@ -490,8 +495,8 @@ cd qdrant-pdf-rag
 ```
 
 Keep `SNEAKERNET_TRUSTED_PUB` exported for every later stage: outside dry-run,
-load, deploy, ingest and validate refuse to run without it, and refuse any
-checkout that is not this verified signed release
+load, deploy, ingest, validate and retire-legacy refuse to run without it,
+and refuse any checkout that is not this verified signed release
 ([deploy §4](deploy.md#4-signing-and-provenance)).
 
 The `bootstrap.sh` script verifies the bundle signature and every member
@@ -1108,6 +1113,40 @@ The release gate's real-model Kind lane uses the same original bundle, the two
 current GPU models through the authenticated TLS gateway, and a separate
 real-vector collection; it must pass alongside CI.
 
+<a id="gap-fork"></a>
+### 4.8 Air-gapped GitLab fork (ADR-0009)
+
+The air-gapped GitLab is a downstream fork of this repository.
+[ADR-0009](adr/0009-gap-fork.md) owns the decisions; this section lists what
+exists on `main` and points at it.
+
+- **Dev kit.** The dev workspace image reaches the site in a signed dev kit,
+  separate from the release bundle. The connected side packs it with
+  `scripts/devkit/pack.sh` and publishes its anchor with the release record
+  ([release record](release-record.md#sign-off-and-handoff)). On site, follow
+  [`docs/runbooks/devkit-windows.md`](runbooks/devkit-windows.md): it checks
+  the kit against the anchor on Windows, pushes the image, creates the bastion
+  and runs the kit's verifier (`scripts/devkit/install.sh`) there.
+- **Workspace pods and isolation.** The bastion, dev pod and runner-job
+  manifests are in [`deploy/workspace/`](../deploy/workspace/contract.json).
+  The [isolation proof](deploy.md#workspace-isolation-proof) checks them, and
+  its record goes in `gap/records/`.
+- **Release import** ([ADR-0009 §4](adr/0009-gap-fork.md#4-release-import-procedure)).
+  Run `scripts/gap/import_release.sh` from the fork clone. Its `--help` lists
+  the inputs, and ADR §4 gives the stop and rerun rules and the steps after
+  `IMPORT READY`.
+- **Gap releases** ([ADR-0009 §5](adr/0009-gap-fork.md#5-gap-releases)). Not
+  implemented (F6). Decided so far
+  ([GH#1118 comment 6525955227](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6525955227)):
+  an approved GitLab issue names the commit and the gap maintainer creates a
+  protected tag on it. The release is built, packed and signed in the bastion,
+  never on a GitLab runner. That session holds only the gap signing key and a
+  read-only GitLab token, with no `oc` token, and runs the scripts of the
+  installed signed release. Rehearsal and promotion run in a separate deploy
+  session, without the signing key. The unprivileged image-build mechanism is
+  still open question 4. Until F6 lands, production deploys only upstream
+  signed releases.
+
 ---
 
 ## 5. Day-2 Operations & Maintenance
@@ -1224,7 +1263,7 @@ Without an installed console script use `python -m mainframe_rag.ops ...`
 | **Qdrant 401 After Reinstall** | `/v1/search` fails with `401 Invalid API key or JWT` after Qdrant was reinstalled or re-`helm upgrade`d | The chart regenerates the `<release>-apikey` secret on reinstall while running agent pods keep the old key in env. Roll the agent: `kubectl -n <ns> rollout restart deploy/rag-agent` and wait for rollout before smoking again. |
 | **Stale dist/ MANIFEST** | `airgap:validate` / `airgap:deploy` / `airgap:ingest` / `airgap:dryrun` fail with `IMAGE_SHA=<sha> does not match packed MANIFEST sha` | `dist/` is gitignored build output that persists across checkouts — the MANIFEST inside is from an older pack (only `pack` regenerates it; the other steps just read it). Repack at the current HEAD, or clear the stale `dist/` before re-running. |
 | **Checkout/manifest mismatch** | `airgap:validate` / `airgap:deploy` / `airgap:ingest` / `airgap:load` fail with `executing checkout HEAD does not match the packed MANIFEST sha` | The scripts run from a different checkout than the packed bundle (e.g. old code with a new `dist/`, or `IMAGE_SHA` overridden to the new SHA while old code executes). Run from the approved bundle checkout — overriding `IMAGE_SHA` alone never changes which code executes. Skipped only in `AIRGAP_DRYRUN=1` previews. |
-| **Unverified checkout** | `airgap:validate` / `airgap:load` / `airgap:deploy` / `airgap:ingest` fail with `checkout is not a verified signed release (no packed MANIFEST)` or `no release trust anchor is configured` | Outside dry-run these run only from the checkout `bootstrap.sh` made from the signed bundle, with `SNEAKERNET_TRUSTED_PUB` set to the release key obtained out of band ([deploy §4](deploy.md#4-signing-and-provenance), #1118 F1). Rerun `bootstrap.sh` from the signed bundle and export the anchor. A connected developer or CI lane may instead set `AIRGAP_UNVERIFIED_CHECKOUT=1` with `CI_REHEARSAL=1` in the process environment; never in the air gap. |
+| **Unverified checkout** | `airgap:validate` / `airgap:load` / `airgap:deploy` / `airgap:ingest` / `airgap:retire-legacy` fail with `checkout is not a verified signed release (no packed MANIFEST)` or `no release trust anchor is configured` | Outside dry-run these run only from the checkout `bootstrap.sh` made from the signed bundle, with `SNEAKERNET_TRUSTED_PUB` set to the release key obtained out of band ([deploy §4](deploy.md#4-signing-and-provenance), #1118 F1). Rerun `bootstrap.sh` from the signed bundle and export the anchor. A connected developer or CI lane may instead set `AIRGAP_UNVERIFIED_CHECKOUT=1` with `CI_REHEARSAL=1` in the process environment; never in the air gap. |
 | **Stale airgap.env IMAGE_SHA** | `airgap:pack` / `airgap:load` fail with `IMAGE_SHA=<sha> is not the checked-out commit` right after checking out a new SHA | `airgap.env` is gitignored local state from a previous rehearsal — its `IMAGE_SHA` no longer matches HEAD. Explicit env beats the file (`IMAGE_SHA=$(git rev-parse HEAD) sh scripts/tools/run-task.sh airgap:pack`), or update the file. |
 | **Stale dist/ tarballs fill disk** | `pack`/`load` fail with no-space errors after several rehearsals | Every pack leaves a ~1.5 GB `qdrant-pdf-rag-<sha>.tar` in gitignored `dist/`; only the MANIFEST-pinned one is live. Delete superseded tarballs (keep the `.tar.sha256` of the live one) — pack never prunes. |
 | **Kind ErrImagePull on localhost:5000** | mock/corpus-gen pods fail with `dial tcp [::1]:5000: connect: connection refused` | The Kind `containerdConfigPatches` in §4.7 must mirror **both** `localhost:5000` and `airgap-registry:5000` to the registry container — one key per naming family used by the manifests. Recreate the cluster with the documented config (containerd mirrors are set at creation). |
@@ -1498,6 +1537,9 @@ read-only key, and prints only the state code.
 **Two stages, never one command.** `retire_legacy.sh` refuses without
 `--stage copy` or `--stage retire`, so nothing is deleted by accident.
 `sh scripts/tools/run-task.sh airgap:retire-legacy -- <flags>` runs the same script.
+It uses the Qdrant writer key, so outside dry-run it runs only from the
+verified signed release, like deploy
+([deploy §4](deploy.md#4-signing-and-provenance)).
 
 | Stage | When | What it changes | Search |
 |---|---|---|---|

@@ -381,7 +381,7 @@ merge evidence remain in [live-stack](live-stack.md#verification-minimums).
 **CI claims discipline:** A documented merge obligation is not automatically
 enforced CI: do not claim checks are automated in CI unless implemented. Under Increment B
 (#411 / #370), PR CI enforces deterministic lint and type checking (`ci.yml` `lint` job running
-`ruff check src tests scripts/eval_retrieval.py scripts/review_tooling.py scripts/ci_evidence.py scripts/acceptance_evidence.py`, `mypy src`, and `mypy --follow-imports=silent` over the same scripts), safe PR concurrency cancellation, and profile-selected
+`ruff check src tests` plus the `CI_LINT_SCRIPTS` list in `taskfiles/quality.yml`, `mypy src`, and `mypy --follow-imports=silent` over the same scripts), safe PR concurrency cancellation, and profile-selected
 review environments with runtime manifests (`candidate-manifest.json`). The reviewer job gates its
 machine-readable result with `scripts/review_tooling.py validate-review --require-payload
 --check-git`: a missing, malformed, or mis-attributed payload fails the job, while a valid

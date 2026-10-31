@@ -44,3 +44,13 @@ developers and the connected CI and Kind lanes that run these stages from a
 plain checkout set `AIRGAP_UNVERIFIED_CHECKOUT=1` together with
 `CI_REHEARSAL=1` in the process environment (never in `airgap.env`, never in
 the air gap). See [deploy §4](deploy.md#4-signing-and-provenance).
+
+## 2026-10-31 GH#1118 Retire-legacy refuses an unverified checkout
+
+Outside dry-run, `airgap:retire-legacy` (`scripts/airgap/retire_legacy.sh`,
+which uses the Qdrant writer key) now runs the same verified-release guard as
+load, deploy, ingest and validate, before any cluster or Qdrant contact. Run
+it from the checkout `bootstrap.sh` made from the signed bundle, with
+`SNEAKERNET_TRUSTED_PUB` exported. The connected opt-out is unchanged:
+`AIRGAP_UNVERIFIED_CHECKOUT=1` only together with `CI_REHEARSAL=1` in the
+process environment, never in the air gap.

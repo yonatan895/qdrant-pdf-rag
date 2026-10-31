@@ -591,7 +591,7 @@ export SNEAKERNET_TRUSTED_PUB=/absolute/path/to/independently-trusted/signing.pu
 ```
 
 Every live stage below needs that anchor: outside dry-run, validate, load,
-deploy and ingest refuse a checkout that is not a verified signed release
+deploy, ingest and retire-legacy refuse a checkout that is not a verified signed release
 ([deploy §4](deploy.md#4-signing-and-provenance)). Never set the connected
 opt-out `AIRGAP_UNVERIFIED_CHECKOUT` for this gate.
 
@@ -918,6 +918,9 @@ to be `PASS`, evidence attributable to this bundle, and named operator sign-off.
 transfer. This is an operator-enforced gate; the pack/load scripts do not read the
 record. Transfer **the identical tested tarball and checksum**, plus its record,
 through the approved channel. Do not rebuild, repack, edit or substitute an image.
+A release that ships a dev kit publishes the record's dev-kit line with the
+record before the kit is transferred
+([record template](release-record.md#sign-off-and-handoff)).
 Recheck the checksum on arrival, then use the bootstrap, validation,
 deployment pipeline, [site OpenShift acceptance](install_and_ops.md#site-openshift-acceptance)
 and production acceptance commands. A bundle or security/configuration fix

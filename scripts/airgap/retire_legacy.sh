@@ -17,7 +17,8 @@
 # rollback: one atomic alias call mainframe_manuals -> the kept copy. Through
 #   the agent pod, or with --qdrant-url through `port-forward svc/<qdrant>`
 #   when no agent runs (the runbook's rollback path).
-# Uses the writer key (`api-key`), sent on stdin, never printed.
+# Uses the writer key (`api-key`), sent on stdin, never printed. Outside
+# dry-run it runs only from a verified signed release (check_checkout_sha).
 # Runbook: docs/install_and_ops.md#upgrade-from-a-legacy-flat-collection-issue-1070
 
 . "$(dirname -- "$0")/common.sh"
@@ -78,6 +79,12 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     esac
     exit 0
 fi
+# The writer key below retires and re-points collections: like deploy, ingest,
+# validate and load, run only from a verified signed release (#1118 F1, item e),
+# before any cluster or Qdrant contact. Same opt-out rules as the other entry
+# points (AIRGAP_UNVERIFIED_CHECKOUT=1 only with CI_REHEARSAL=1).
+MANIFEST=$(find_manifest)
+check_checkout_sha
 require_kc
 KC=${KC:-$(kc)}
 

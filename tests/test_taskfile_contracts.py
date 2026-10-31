@@ -613,7 +613,10 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout)
         staged = [c["argv"] for c in self.calls() if c["argv"][:1] == ["-m"]]
         scripts = ["scripts/eval_retrieval.py", "scripts/review_tooling.py",
-                   "scripts/ci_evidence.py", "scripts/acceptance_evidence.py"]
+                   "scripts/ci_evidence.py", "scripts/acceptance_evidence.py",
+                   "scripts/devkit_key.py", "scripts/devkit/isolation_proof.py",
+                   "scripts/devkit/issue_snapshot.py", "scripts/extension_surface.py",
+                   "scripts/gitlab_lanes.py", "scripts/release_archive.py"]
         self.assertEqual(staged, [
             ["-m", "ruff", "check", "src", "tests", *scripts],
             ["-m", "mypy", "src"],
