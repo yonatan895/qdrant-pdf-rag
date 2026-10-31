@@ -84,6 +84,7 @@ env:
     command -v mfr-session-login mfr-session-logout
     touch "$HOME/.devkit-probe" /work/.devkit-probe
     if touch /opt/app-root/lib/.devkit-probe 2>/dev/null; then exit 1; fi
+    if [ -e /opt/devkit/wheelhouse ]; then exit 1; fi
 
 jobs:
   build:
@@ -114,6 +115,21 @@ jobs:
       - name: Smoke-test the image as an arbitrary UID
         run: |
           docker run --rm --user "$SMOKE_USER" devkit:ci sh -euc "$SMOKE" sh "$(sed -n 's/^version: *//p' scripts/tools/oc-pin.txt)"
+      - name: No wheel in the image apart from the base image's own ensurepip wheel (D-7)
+        run: |
+          # As root, so no unreadable directory hides a wheel. The base is pinned by digest.
+          found="$(docker run --rm --user 0 --network none devkit:ci find / -xdev -name '*.whl')"
+          [ "$found" = /usr/share/python3.14-wheels/pip-25.2-py3-none-any.whl ] || {
+            printf 'devkit: unexpected wheels in the image:\n%s\n' "$found" >&2; exit 1; }
+      - name: Prepare a kit venv over the image as an arbitrary UID (D-7)
+        run: |
+          cp -a . "$RUNNER_TEMP/checkout" && chmod -R a+rwX "$RUNNER_TEMP/checkout"
+          docker run --rm --user "$SMOKE_USER" --network none -v "$RUNNER_TEMP/checkout:/work/checkout" devkit:ci sh -euc '
+            cd /work/checkout
+            python3 scripts/prepare_python.py --kit --venv /work/kit-venv
+            /work/kit-venv/bin/python -c "import mainframe_rag; assert mainframe_rag.__file__ == \"/work/checkout/src/mainframe_rag/__init__.py\""
+            /work/kit-venv/bin/python -c "import yaml; assert yaml.__file__.startswith(\"/opt/app-root/\")"
+            /work/kit-venv/bin/python -m ruff --version'
 
   publish:
     # Only main publishes: a tag is set once, so a branch build must never claim a key.
