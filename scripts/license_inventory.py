@@ -543,10 +543,15 @@ def run_check(root: Path, inventory: dict, found, release: bool) -> tuple[list[s
 KIT_RPMS = "images/devkit-packages.txt"
 KIT_CONTAINERFILE = "images/Containerfile.devkit"
 # Every tool the kit ships, by pin file: Task, Helm and oc inside the image,
-# oras.exe and the static Linux oras beside it. pack.sh's sbom.json reads this list.
+# oras.exe and the static Linux oras beside it, and the agent tools (#1172) inside the
+# image. A bare name is a file in scripts/tools/; a path is repository-relative (the
+# agent pins live in images/devkit/agents/, a kit key input). pack.sh's sbom.json reads
+# this list.
 KIT_TOOL_PINS = (("go-task/task", "task-pin.txt"), ("helm", "helm-pin.txt"),
                  ("openshift-client", "oc-pin.txt"), ("oras (oras.exe)", "oras-windows-pin.txt"),
-                 ("oras (Linux, fallback push)", "oras-pin.txt"))
+                 ("oras (Linux, fallback push)", "oras-pin.txt"),
+                 ("herdr-core (hc)", "images/devkit/agents/herdr-core-pin.txt"),
+                 ("opencode", "images/devkit/agents/opencode-pin.txt"))
 # Pin fields a kit tool record binds: any change needs a license re-review.
 KIT_TOOL_FIELDS = ("version", "sha256", "license", "license-sha256")
 KIT_FIX = "record it in licenses/inventory.json devkit (docs/licensing.md#dev-kit)"
@@ -592,9 +597,14 @@ def rpm_name(nevra: str) -> tuple[str, str]:
     return name, f"{epoch_version}-{release_arch}"
 
 
+def kit_pin_path(name: str) -> str:
+    """Repository path of a KIT_TOOL_PINS entry: a bare name lives in scripts/tools/."""
+    return name if "/" in name else f"scripts/tools/{name}"
+
+
 def read_pin(root: Path, name: str) -> dict[str, str]:
     fields: dict[str, str] = {}
-    path = root / "scripts/tools" / name
+    path = root / kit_pin_path(name)
     for line in path.read_text(encoding="utf-8").splitlines() if path.is_file() else []:
         key, sep, value = line.partition(":")
         if sep and not line.startswith("#"):
@@ -749,16 +759,22 @@ def check_kit(root: Path, inventory: dict, problems: list[str],
                 continue
             pin = read_pin(root, pin_name)
             if {k: pin.get(k) for k in KIT_TOOL_FIELDS} != {k: bind.get(k) for k in KIT_TOOL_FIELDS}:
-                problems.append(f"{label}: scripts/tools/{pin_name} differs from the record; re-review the tool license")
+                problems.append(f"{label}: {kit_pin_path(pin_name)} differs from the record; re-review the tool license")
             if bind.get("notice_member") and not pin.get("license-sha256"):
                 problems.append(f"{label}: a notice member needs a license-sha256 in its pin")
+            # A licence text the repository holds for the tool must be the pinned one.
+            for item in bind.get("files", []):
+                if not file_matches(root, item.get("path", ""), item.get("sha256", "")):
+                    problems.append(f"{label}: licence file {item.get('path')} is missing or differs from the record")
+                elif item.get("sha256") != pin.get("license-sha256"):
+                    problems.append(f"{label}: licence file {item.get('path')} is not the license-sha256 of its pin")
         else:
             problems.append(f"{label}: kind must be rpm or tool")
     for nevra in sorted(set(rpms) - recorded_rpms):
         problems.append(f"devkit: rpm {nevra}: kit package has no license record; {KIT_FIX}")
     for _, pin_name in KIT_TOOL_PINS:
         if pin_name not in recorded_pins:
-            problems.append(f"devkit: tool scripts/tools/{pin_name}: kit tool has no license record; {KIT_FIX}")
+            problems.append(f"devkit: tool {kit_pin_path(pin_name)}: kit tool has no license record; {KIT_FIX}")
 
 
 def run_kit_check(root: Path, inventory: dict, found) -> tuple[list[str], list[str], str]:
@@ -894,7 +910,8 @@ def render_kit_notices(root: Path, inventory: dict, kit_dir: Path) -> str:
     for entry in components:
         if entry["id"] in shared:
             lines += component_lines(entry)
-    lines += ["", "TOOLS (task, helm and oc in the image under /usr/local/bin; oras.exe and oras beside it)", "-" * 78]
+    lines += ["", ("TOOLS (task, helm, oc, herdr-core/hc and opencode in the image under /usr/local/bin, their "
+                   "licence texts under /usr/share/licenses; oras.exe and oras beside it)"), "-" * 78]
     for entry in components:
         if entry.get("kind") == "tool" and entry["id"] not in shared:
             lines += component_lines(entry)

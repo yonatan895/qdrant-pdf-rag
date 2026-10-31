@@ -233,7 +233,7 @@ def test_rpm_list_is_sorted_unique_nevras_covering_the_requested_tools():
 
 def test_recipe_uses_only_admitted_contexts_and_runs_as_a_non_root_user():
     recipe = (REPO / "images/Containerfile.devkit").read_text()
-    contexts = set(re.findall(r"(?:--from=|\bfrom=)([A-Za-z0-9_.-]+)", recipe)) - {"tools"}
+    contexts = set(re.findall(r"(?:--from=|\bfrom=)([A-Za-z0-9_.-]+)", recipe)) - {"tools", "agent-tools"}
     assert contexts == {"wheelhouse", "devkit-tools"} and contexts <= BUILD_CONTEXTS
     users = re.findall(r"^USER\s+(\S+)", recipe, re.MULTILINE)
     assert users[-1] not in ("root", "0") and "COPY --chmod=0755 images/devkit/bin/ /usr/local/bin/" in recipe

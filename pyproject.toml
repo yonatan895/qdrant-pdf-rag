@@ -73,6 +73,8 @@ src = ["src", "tests"]
 # (PEP 758), which is a SyntaxError before 3.14.
 [tool.ruff.per-file-target-version]
 "scripts/openwebui/adfs_claims_check.py" = "py39"
+# The gap orchestration VM's own python3 (#1172, docs/agents-vm.md).
+"scripts/devkit/agents_vm.py" = "py39"
 
 [tool.ruff.lint]
 # extend-select (not select) keeps the default rule set; see #584.

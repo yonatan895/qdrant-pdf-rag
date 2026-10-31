@@ -1,0 +1,602 @@
+#!/usr/bin/env python3
+"""Gap orchestration VM for the dev kit's agents (#1172; owner doc: docs/agents-vm.md).
+
+Runs on the VM's own python3 (3.9 or later), standard library only. Every value
+comes from the private site env file (default /etc/mfr-agents/site.env), which stays
+outside git: the GitLab, LiteLLM and DNS addresses are site inputs, never repository
+content. The file is read as KEY=VALUE lines and never executed.
+
+  render-fence  --site-env F --out DIR [--uid N]
+        Render the egress fence for the agents user: an nftables table that matches
+        `meta skuid <agents>` (primary layer: it also catches the rootless-Podman
+        network helper, pasta or slirp4netns, which runs as that user) and a systemd
+        drop-in for user-<uid>.slice with IPAddressDeny=any plus IPAddressAllow (second
+        layer). Neither layer accepts loopback wholesale: pasta reaches the VM's own
+        services as that user. Writes DIR/mfr-agents.nft and
+        DIR/user-<uid>.slice.d/50-mfr-agents-egress.conf.
+  install-fence --site-env F [--uid N] [--root DIR] [--remove]
+        As root: render, check with `nft -c`, load the table, install the drop-in and
+        reload systemd. --remove deletes both (the proof's fence-off negative control).
+  proof         --site-env F [--fence-off] [--where host|container|both] [--output FILE]
+        As the agents user: probe GitLab, LiteLLM and DNS (must connect) and every
+        MFR_VM_BLOCKED target (production Qdrant, the agent, the OpenShift API, the
+        internet; must fail) from the host shell and from inside a kit container. With
+        --fence-off (after install-fence --remove) the blocked targets must CONNECT,
+        which proves the probes can see a working path. Exit 0 only on a pass.
+  preflight     --site-env F [--uid N] [--root DIR]
+        Fail clearly unless the agents user has a subuid/subgid range, cgroups v2 with
+        cpu, memory and pids delegated to user@<uid>.service, and linger. start and the
+        container proof run it first.
+  start         --site-env F
+        As the agents user: run the kit image as the long-lived container mfr-agents
+        under rootless Podman with --init, keep-id onto the kit's uid 1000770000:0, and
+        the resource figures of #1172.
+  observe
+        The forced command of a view-only SSH key: `hc attach --observe <terminal>`
+        inside mfr-agents for the terminal named in SSH_ORIGINAL_COMMAND, or `hc ls`.
+
+Messages are fixed text plus labels and states; addresses appear only in the rendered
+files and the proof's --output record, which belong in the private install record.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime
+import hashlib
+import ipaddress
+import json
+import os
+import pwd
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+DEFAULT_SITE_ENV = "/etc/mfr-agents/site.env"
+CONTAINER = "mfr-agents"
+NFT_TABLE = "mfr_agents"
+NFT_FILE = "mfr-agents.nft"
+DROPIN = "50-mfr-agents-egress.conf"
+REQUIRED = ("MFR_VM_AGENTS_USER", "MFR_VM_DNS", "MFR_VM_GITLAB", "MFR_VM_GITLAB_PORTS", "MFR_VM_GITLAB_HOST",
+            "MFR_VM_LITELLM", "MFR_VM_LITELLM_PORTS", "MFR_VM_LITELLM_BASE_URL", "MFR_VM_LLM_MODEL",
+            "MFR_VM_BLOCKED", "MFR_VM_KIT_IMAGE", "MFR_VM_KIT_DIGEST", "MFR_VM_WORK")
+# The negative controls the #1172 design names: each must be refused by the fence. The
+# Podman trial (issuecomment-6548398452) added the host itself: pasta carries container
+# traffic as the agents uid, so a container reaches the host's loopback services and
+# its own addresses unless the fence refuses them too.
+BLOCKED_LABELS = ("qdrant", "agent", "openshift-api", "internet", "host-loopback", "host-address")
+# The kit image runs as an OpenShift-style arbitrary uid in group 0. Rootless Podman's
+# default user namespace cannot map it (it lies outside the subuid range); keep-id maps
+# the agents user to it, so the user's own files are the container user's without :U.
+KIT_UID = 1000770000
+USERNS = f"--userns=keep-id:uid={KIT_UID},gid=0"
+RUN_USER = f"--user={KIT_UID}:0"
+# Controllers the agents user's systemd service must delegate, or --memory, --cpus and
+# the pids limit are silently unenforced.
+DELEGATED = ("cpu", "memory", "pids")
+VOLUME_LABELS = {"Z": ":Z", "z": ":z", "none": ""}
+# Agent overhead for 1 controller plus 3 workers (#1172 trial, issuecomment-6548130709):
+# requests 2 CPU / 2 GiB, limits 4 CPU / 4 GiB. The agents' own tools (pytest, task)
+# come on top of the limits: MFR_VM_TOOL_CPUS and MFR_VM_TOOL_MEMORY_MIB.
+REQUEST_CPUS, REQUEST_MIB, LIMIT_CPUS, LIMIT_MIB = 2, 2048, 4, 4096
+DEFAULT_TOOL_CPUS, DEFAULT_TOOL_MIB = 2, 4096
+USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
+LABEL = re.compile(r"[a-z][a-z0-9-]{0,31}")
+HOSTNAME = re.compile(r"(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}))*")
+TERMINAL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,63}")
+IMAGE_REF = re.compile(r"[a-z0-9][a-z0-9._/:-]{0,254}")
+DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+SECRETS = ("mfr-dev-litellm",)  # the separate dev LiteLLM key (CI namespace decision)
+OPTIONAL_SECRETS = ("mfr-gitlab-credentials",)  # git-credential-store line for the project token
+
+
+class Refused(Exception):
+    """A fixed, operator-facing refusal."""
+
+
+class Site:
+    """The validated site inputs."""
+
+    def __init__(self, values: dict[str, str], source: Path) -> None:
+        self.source = source
+        self.digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        self.user = values["MFR_VM_AGENTS_USER"]
+        if not USER.fullmatch(self.user) or self.user == "root":
+            raise Refused("MFR_VM_AGENTS_USER is not a plain unprivileged user name")
+        self.dns = networks(values, "MFR_VM_DNS")
+        self.gitlab = networks(values, "MFR_VM_GITLAB")
+        self.litellm = networks(values, "MFR_VM_LITELLM")
+        self.gitlab_ports = ports(values, "MFR_VM_GITLAB_PORTS")
+        self.litellm_ports = ports(values, "MFR_VM_LITELLM_PORTS")
+        self.gitlab_host = values["MFR_VM_GITLAB_HOST"]
+        if not HOSTNAME.fullmatch(self.gitlab_host):
+            raise Refused("MFR_VM_GITLAB_HOST is not a host name")
+        self.base_url = values["MFR_VM_LITELLM_BASE_URL"]
+        if not re.fullmatch(r"https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?", self.base_url):
+            raise Refused("MFR_VM_LITELLM_BASE_URL is not an https URL")
+        self.model = values["MFR_VM_LLM_MODEL"]
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", self.model):
+            raise Refused("MFR_VM_LLM_MODEL is not a plain model name")
+        self.blocked = blocked(values["MFR_VM_BLOCKED"])
+        self.image = values["MFR_VM_KIT_IMAGE"]
+        if not IMAGE_REF.fullmatch(self.image) or "@" in self.image:
+            raise Refused("MFR_VM_KIT_IMAGE is not a local image reference (name:tag)")
+        self.image_digest = values["MFR_VM_KIT_DIGEST"]
+        if not DIGEST.fullmatch(self.image_digest):
+            raise Refused("MFR_VM_KIT_DIGEST is not sha256:<64 hex>")
+        self.work = Path(values["MFR_VM_WORK"])
+        if not self.work.is_absolute():
+            raise Refused("MFR_VM_WORK is not an absolute path")
+        self.tool_cpus = count(values, "MFR_VM_TOOL_CPUS", DEFAULT_TOOL_CPUS, 64)
+        self.tool_mib = count(values, "MFR_VM_TOOL_MEMORY_MIB", DEFAULT_TOOL_MIB, 262144)
+        self.ssh_clients = networks(values, "MFR_VM_SSH_CLIENTS", optional=True)
+        label = values.get("MFR_VM_VOLUME_LABEL") or "Z"
+        if label not in VOLUME_LABELS:
+            raise Refused("MFR_VM_VOLUME_LABEL is Z (SELinux private, the default), z (shared) or none")
+        self.volume_suffix = VOLUME_LABELS[label]
+        loopback = self.blocked["host-loopback"][0]
+        if not loopback.is_loopback:
+            raise Refused("the host-loopback negative control must be a loopback address (127.0.0.1)")
+        allowed = self.dns + self.gitlab + self.litellm
+        for label, (address, _) in self.blocked.items():
+            if any(address in net for net in allowed):
+                raise Refused(f"blocked target {label} lies inside an allowed address: "
+                              "its negative control could never fail; fix MFR_VM_BLOCKED or the allow lists")
+
+
+def read_env(path: Path) -> dict[str, str]:
+    """KEY=VALUE lines, optional matching quotes; never executed by a shell."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        raise Refused("the site env file is missing or unreadable") from None
+    values: dict[str, str] = {}
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        key = key.strip()
+        if not sep or not re.fullmatch(r"MFR_VM_[A-Z0-9_]+", key) or key in values:
+            raise Refused(f"site env line {number} is not a single MFR_VM_*=value assignment")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if any(c in value for c in "$`\\;&|<>"):
+            raise Refused(f"site env line {number} holds shell syntax; values are literal")
+        values[key] = value
+    missing = [key for key in REQUIRED if not values.get(key)]
+    if missing:
+        raise Refused("the site env file has no value for " + ", ".join(missing))
+    return values
+
+
+def load_site(path: Path) -> Site:
+    # The site addresses must never be committed: refuse a file inside a git work tree.
+    probe = path.resolve().parent
+    for parent in (probe, *probe.parents):
+        if (parent / ".git").exists():
+            raise Refused("the site env file is inside a git work tree; keep it outside git "
+                          f"(for example {DEFAULT_SITE_ENV})")
+    return Site(read_env(path), path)
+
+
+def networks(values: dict[str, str], key: str, optional: bool = False) -> list:
+    items = values.get(key, "").split()
+    if not items and optional:
+        return []
+    if not items:
+        raise Refused(f"{key} names no address")
+    out = []
+    for item in items:
+        try:
+            net = ipaddress.ip_network(item, strict=False)
+        except ValueError:
+            raise Refused(f"{key} holds a value that is not an IP address or CIDR "
+                          "(the fence filters by address; resolve names at the site)") from None
+        if net.prefixlen < (16 if net.version == 4 else 48):
+            raise Refused(f"{key} holds a range broader than /16 (IPv4) or /48 (IPv6)")
+        out.append(net)
+    return out
+
+
+def ports(values: dict[str, str], key: str) -> list[int]:
+    out = []
+    for item in values[key].split():
+        if not item.isdigit() or not 1 <= int(item) <= 65535:
+            raise Refused(f"{key} holds a value that is not a TCP port")
+        out.append(int(item))
+    return sorted(set(out))
+
+
+def count(values: dict[str, str], key: str, default: int, limit: int) -> int:
+    raw = values.get(key)
+    if raw is None or raw == "":
+        return default
+    if not raw.isdigit() or int(raw) > limit:
+        raise Refused(f"{key} is not a whole number up to {limit}")
+    return int(raw)
+
+
+def blocked(raw: str) -> dict[str, tuple]:
+    out: dict[str, tuple] = {}
+    for item in raw.split():
+        label, sep, target = item.partition("=")
+        host, colon, port = target.rpartition(":")
+        if not sep or not colon or not LABEL.fullmatch(label) or label in out or not port.isdigit():
+            raise Refused("MFR_VM_BLOCKED entries are label=address:port, one label each")
+        try:
+            address = ipaddress.ip_address(host.strip("[]"))
+        except ValueError:
+            raise Refused("MFR_VM_BLOCKED addresses are IP literals") from None
+        if not 1 <= int(port) <= 65535:
+            raise Refused("MFR_VM_BLOCKED holds a port outside 1-65535")
+        out[label] = (address, int(port))
+    missing = [label for label in BLOCKED_LABELS if label not in out]
+    if missing:
+        raise Refused("MFR_VM_BLOCKED has no negative control for " + ", ".join(missing))
+    return out
+
+
+# --- fence -------------------------------------------------------------------
+
+
+def agents_uid(site: Site, uid: int | None) -> int:
+    if uid is not None:
+        return uid
+    try:
+        return pwd.getpwnam(site.user).pw_uid
+    except KeyError:
+        raise Refused("the agents user does not exist on this host; create it first") from None
+
+
+def render_nft(site: Site, uid: int) -> str:
+    if uid == 0:
+        raise Refused("the agents user must not be root")
+    lines = [f"# Egress fence for the agents user (uid {uid}), #1172 primary layer.",
+             f"# Rendered by scripts/devkit/agents_vm.py from a site env file (sha256 {site.digest}).",
+             "# Re-render instead of editing. Loading it replaces the whole table.",
+             f"table inet {NFT_TABLE}", f"delete table inet {NFT_TABLE}", f"table inet {NFT_TABLE} {{"]
+    sets = (("dns", site.dns), ("gitlab", site.gitlab), ("litellm", site.litellm))
+    for name, nets in sets:
+        for family, kind in ((4, "ipv4_addr"), (6, "ipv6_addr")):
+            members = [str(n) for n in nets if n.version == family]
+            if members:
+                lines.append(f"    set {name}{family} {{ type {kind}; flags interval; "
+                             f"elements = {{ {', '.join(members)} }}; }}")
+    lines += ["    chain output {", "        type filter hook output priority filter; policy accept;",
+              f"        meta skuid != {uid} accept",
+              # No blanket loopback accept: pasta reaches the host's local services as
+              # this uid. A local DNS stub (127.0.0.53) passes only through the DNS set.
+              "        ct state established,related accept"]
+
+    def rule(name: str, nets: list, proto: str, port_list: list[int]) -> None:
+        for family, match in ((4, "ip"), (6, "ip6")):
+            if any(n.version == family for n in nets):
+                lines.append(f"        {match} daddr @{name}{family} {proto} dport "
+                             f"{{ {', '.join(str(p) for p in port_list)} }} accept")
+
+    rule("dns", site.dns, "udp", [53])
+    rule("dns", site.dns, "tcp", [53])
+    rule("gitlab", site.gitlab, "tcp", site.gitlab_ports)
+    rule("litellm", site.litellm, "tcp", site.litellm_ports)
+    lines += ['        counter drop comment "mfr-agents egress fence: not GitLab, LiteLLM or DNS"', "    }", "}", ""]
+    return "\n".join(lines)
+
+
+def render_dropin(site: Site, uid: int) -> str:
+    allowed = " ".join(str(n) for n in site.dns + site.gitlab + site.litellm)
+    lines = [f"# Egress fence for the agents user (uid {uid}), #1172 second layer: cgroup/eBPF",
+             "# filtering for every process in the user's slice, Podman's libpod scopes included.",
+             f"# Rendered by scripts/devkit/agents_vm.py from a site env file (sha256 {site.digest}).",
+             "# No localhost entry: host-local services are fenced off too (pasta runs as this user).",
+             "[Slice]", "IPAddressDeny=any", f"IPAddressAllow={allowed}"]
+    if site.ssh_clients:
+        # The filter applies in both directions: let the viewers' SSH sessions in. The
+        # nftables layer still refuses agents-owned connections to these addresses.
+        lines.append("IPAddressAllow=" + " ".join(str(n) for n in site.ssh_clients))
+    return "\n".join(lines) + "\n"
+
+
+def render_fence(site: Site, uid: int, out: Path) -> list[Path]:
+    out.mkdir(parents=True, exist_ok=True)
+    nft = out / NFT_FILE
+    nft.write_text(render_nft(site, uid), encoding="utf-8")
+    dropin = out / f"user-{uid}.slice.d" / DROPIN
+    dropin.parent.mkdir(parents=True, exist_ok=True)
+    dropin.write_text(render_dropin(site, uid), encoding="utf-8")
+    return [nft, dropin]
+
+
+def install_fence(site: Site, uid: int, root: Path, remove: bool) -> None:
+    nft_dir = root / "etc/nftables"
+    dropin_dir = root / f"etc/systemd/system/user-{uid}.slice.d"
+    if remove:
+        subprocess.run(["nft", "delete", "table", "inet", NFT_TABLE], stdin=subprocess.DEVNULL,
+                       capture_output=True, check=False)
+        (nft_dir / NFT_FILE).unlink(missing_ok=True)
+        (dropin_dir / DROPIN).unlink(missing_ok=True)
+    else:
+        nft_dir.mkdir(parents=True, exist_ok=True)
+        dropin_dir.mkdir(parents=True, exist_ok=True)
+        staged = nft_dir / f".{NFT_FILE}.new"
+        staged.write_text(render_nft(site, uid), encoding="utf-8")
+        for argv in (["nft", "-c", "-f", str(staged)], ["nft", "-f", str(staged)]):
+            if subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, check=False).returncode != 0:
+                staged.unlink()
+                raise Refused("nft refused the rendered table; nothing was changed")
+        staged.replace(nft_dir / NFT_FILE)
+        (dropin_dir / DROPIN).write_text(render_dropin(site, uid), encoding="utf-8")
+    if subprocess.run(["systemctl", "daemon-reload"], stdin=subprocess.DEVNULL, capture_output=True,
+                      check=False).returncode != 0:
+        raise Refused("systemctl daemon-reload failed; check the drop-in by hand")
+
+
+# --- proof -------------------------------------------------------------------
+
+# Runs unchanged on the host's python3 and inside the kit image (python3 -I -c).
+# argv[1] is JSON: {"connect": [[label, host, port], ...], "resolve": [label, name]}.
+PROBE = r"""
+import json, socket, sys
+spec = json.loads(sys.argv[1])
+out = {}
+for label, host, port in spec["connect"]:
+    try:
+        socket.create_connection((host, port), timeout=5).close()
+        out[label] = "connected"
+    except OSError as error:
+        out[label] = "failed:" + type(error).__name__
+label, name = spec["resolve"]
+try:
+    socket.getaddrinfo(name, 443, type=socket.SOCK_STREAM)
+    out[label] = "connected"
+except OSError as error:
+    out[label] = "failed:" + type(error).__name__
+print(json.dumps(out, sort_keys=True))
+"""
+
+
+def probe_spec(site: Site, place: str = "host") -> tuple[dict, list[str], list[str]]:
+    """(spec, labels that must connect, labels that must fail with the fence on).
+
+    In a container, 127.0.0.1 is the container's own loopback; the host's loopback is
+    reached through pasta as host.containers.internal, so that is the target there."""
+    connect = []
+    allowed = []
+    for name, nets, port_list in (("gitlab", site.gitlab, site.gitlab_ports),
+                                  ("litellm", site.litellm, site.litellm_ports)):
+        for index, net in enumerate(nets, 1):
+            for port in port_list:
+                # Labels carry no address: they are printed, the addresses are not.
+                label = f"{name}{index}:{port}"
+                connect.append([label, str(net.network_address), port])
+                allowed.append(label)
+    blocked_labels = []
+    for label, (address, port) in sorted(site.blocked.items()):
+        host = "host.containers.internal" if place == "container" and label == "host-loopback" else str(address)
+        connect.append([f"blocked:{label}", host, port])
+        blocked_labels.append(f"blocked:{label}")
+    allowed.append("dns:resolve")
+    return {"connect": connect, "resolve": ["dns:resolve", site.gitlab_host]}, allowed, blocked_labels
+
+
+def verdict(results: dict[str, str], allowed: list[str], blocked_labels: list[str], fence_off: bool) -> list[str]:
+    """Problems with one probe run; empty means it passed."""
+    problems = []
+    missing = [label for label in allowed + blocked_labels if label not in results]
+    if missing:
+        return ["the probe returned no result for " + ", ".join(missing)]
+    for label in allowed:
+        if results[label] != "connected":
+            problems.append(f"{label} must connect but {results[label]} "
+                            "(fence too tight, or a wrong site address)")
+    for label in blocked_labels:
+        if fence_off and results[label] != "connected":
+            problems.append(f"{label} did not connect with the fence off ({results[label]}): this negative "
+                            "control cannot prove the fence; give it a target that answers")
+        if not fence_off and results[label] == "connected":
+            problems.append(f"{label} connected with the fence on: the fence leaks")
+    return problems
+
+
+def run_probe(argv: list[str]) -> dict[str, str]:
+    try:
+        done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300,
+                              check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    try:
+        data = json.loads(done.stdout.strip().splitlines()[-1]) if done.returncode == 0 and done.stdout else {}
+    except ValueError:
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+def proof(site: Site, fence_off: bool, where: str) -> tuple[int, dict]:
+    me = pwd.getpwuid(os.getuid()).pw_name
+    if me != site.user:
+        raise Refused("run the proof as the agents user: the fence matches that uid only")
+    if where in ("container", "both"):
+        preflight(site)
+    places = ("host", "container") if where == "both" else (where,)
+    record = {"issue": "#1172", "mode": "fence-off" if fence_off else "fenced", "user": me,
+              "site_env_sha256": site.digest, "image": site.image, "image_digest": site.image_digest,
+              "time": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "runs": {}}
+    failed = False
+    for place in places:
+        spec, allowed, blocked_labels = probe_spec(site, place)
+        encoded = json.dumps(spec)
+        if place == "host":
+            argv = [sys.executable, "-I", "-c", PROBE, encoded]
+        else:
+            argv = ["podman", "run", "--rm", "--init", "--pull=never", USERNS, RUN_USER, site.image,
+                    "python3", "-I", "-c", PROBE, encoded]
+        results = run_probe(argv)
+        problems = verdict(results, allowed, blocked_labels, fence_off)
+        failed = failed or bool(problems)
+        record["runs"][place] = {"results": results, "problems": problems,
+                                 "verdict": "fail" if problems else "pass"}
+        for label in allowed + blocked_labels:
+            print(f"proof: {place} {label} {results.get(label, 'no-result')}")
+        for problem in problems:
+            print(f"proof: {place} FAIL {problem}")
+        print(f"proof: {place} {'FAIL' if problems else 'PASS'} ({record['mode']})")
+    return (1 if failed else 0), record
+
+
+# --- container -----------------------------------------------------------------
+
+
+def run_args(site: Site) -> list[str]:
+    cpus = LIMIT_CPUS + site.tool_cpus
+    mib = LIMIT_MIB + site.tool_mib
+    argv = ["podman", "run", "-d", "--name", CONTAINER, "--init", "--pull=never",
+            f"--cpus={cpus}", f"--memory={mib}m", f"--memory-swap={mib}m",
+            f"--memory-reservation={REQUEST_MIB}m", f"--cpu-shares={REQUEST_CPUS * 1024}",
+            "--pids-limit=4096", "--cap-drop=all", "--security-opt=no-new-privileges",
+            USERNS, RUN_USER,
+            f"--volume={site.work}:/work{site.volume_suffix}",
+            "--env=HOME=/work/home",
+            # No OpenShift credentials anywhere on this path: the image's oc/kubectl find none.
+            "--env=KUBECONFIG=/dev/null",
+            f"--env=MFR_LLM_BASE_URL={site.base_url}", f"--env=MFR_LLM_MODEL={site.model}"]
+    argv += [f"--secret={name}" for name in SECRETS]
+    return argv
+
+
+def preflight_problems(site: Site, root: Path = Path("/"), uid: int | None = None) -> list[str]:
+    """What rootless Podman needs on the VM before the agents run (Podman trial, #1172)."""
+    if uid is None:
+        uid = agents_uid(site, None)
+    problems = []
+    for name in ("subuid", "subgid"):
+        ranges = []
+        path = root / "etc" / name
+        for line in path.read_text(encoding="utf-8").splitlines() if path.is_file() else []:
+            fields = line.strip().split(":")
+            if len(fields) == 3 and fields[0] in (site.user, str(uid)) and fields[2].isdigit():
+                ranges.append(int(fields[2]))
+        if not ranges or max(ranges) < 65536:
+            problems.append(f"/etc/{name} gives {site.user} no range of at least 65536 ids "
+                            f"(admin: usermod --add-{name}s START-END {site.user})")
+    if not (root / "sys/fs/cgroup/cgroup.controllers").is_file():
+        problems.append("the host does not run cgroups v2; rootless Podman cannot enforce the limits")
+    service = root / f"sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/cgroup.controllers"
+    have = set(service.read_text(encoding="utf-8").split()) if service.is_file() else set()
+    missing = [c for c in DELEGATED if c not in have]
+    if missing:
+        problems.append(f"user@{uid}.service does not delegate {' '.join(missing)}: --memory, --cpus and the pids "
+                        "limit would be silently unenforced (admin: a Delegate=cpu memory pids drop-in for "
+                        "user@.service, then log in again)")
+    if not (root / "var/lib/systemd/linger" / site.user).exists():
+        problems.append(f"linger is off for {site.user}: the container would stop at logout "
+                        f"(admin: loginctl enable-linger {site.user})")
+    return problems
+
+
+def preflight(site: Site, root: Path = Path("/"), uid: int | None = None) -> None:
+    problems = preflight_problems(site, root, uid)
+    if problems:
+        raise Refused("preflight failed: " + "; ".join(problems))
+
+
+def start(site: Site) -> int:
+    preflight(site)
+    if os.environ.get("KUBECONFIG") or (Path.home() / ".kube").exists():
+        raise Refused("this account holds OpenShift credentials (KUBECONFIG or ~/.kube); the agents "
+                      "user must have none (docs/agents-vm.md#accounts)")
+    if shutil.which("podman") is None:
+        raise Refused("podman is not on PATH; the VM runs the kit under rootless Podman")
+
+    def podman(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["podman", *args], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              check=False)
+
+    inspected = podman("image", "inspect", "--format", "{{.Digest}}", site.image)
+    if inspected.returncode != 0 or inspected.stdout.strip() != site.image_digest:
+        raise Refused("MFR_VM_KIT_IMAGE is not loaded at MFR_VM_KIT_DIGEST; load the kit image first "
+                      "(docs/agents-vm.md#load-the-kit-image)")
+    for name in SECRETS:
+        if podman("secret", "exists", name).returncode != 0:
+            raise Refused(f"the Podman secret {name} does not exist; create it from the dev LiteLLM key file")
+    argv = run_args(site)
+    for name in OPTIONAL_SECRETS:
+        if podman("secret", "exists", name).returncode == 0:
+            argv += [f"--secret={name}", "--env=GIT_CONFIG_COUNT=1", "--env=GIT_CONFIG_KEY_0=credential.helper",
+                     f"--env=GIT_CONFIG_VALUE_0=store --file=/run/secrets/{name}"]
+    (site.work / "home").mkdir(parents=True, exist_ok=True)
+    done = subprocess.run([*argv, site.image, "sleep", "infinity"], stdin=subprocess.DEVNULL, check=False)
+    return done.returncode
+
+
+def observe() -> int:
+    """Forced command of a view-only key: never a shell, never typing into a terminal."""
+    requested = os.environ.get("SSH_ORIGINAL_COMMAND", "").strip()
+    if not requested:
+        argv = ["podman", "exec", CONTAINER, "hc", "ls"]
+    elif TERMINAL.fullmatch(requested) and ".." not in requested:
+        argv = ["podman", "exec", "-it", CONTAINER, "hc", "attach", "--observe", requested]
+    else:
+        print("observe: name one terminal (for example w-1) or nothing to list them", file=sys.stderr)
+        return 2
+    # Rootless Podman finds its containers through HOME and XDG_RUNTIME_DIR; keep the
+    # account's own (a short hc HOME elsewhere makes podman exec miss the container).
+    account = pwd.getpwuid(os.getuid())
+    env = dict(os.environ)
+    env.setdefault("HOME", account.pw_dir)
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{account.pw_uid}")
+    os.execvpe(argv[0], argv, env)
+    return 127  # not reached
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name in ("render-fence", "install-fence", "proof", "start", "preflight"):
+        p = sub.add_parser(name)
+        p.add_argument("--site-env", type=Path, default=Path(DEFAULT_SITE_ENV))
+        if name in ("render-fence", "install-fence", "preflight"):
+            p.add_argument("--uid", type=int)
+        if name == "preflight":
+            p.add_argument("--root", type=Path, default=Path("/"))
+        if name == "render-fence":
+            p.add_argument("--out", type=Path, required=True)
+        if name == "install-fence":
+            p.add_argument("--root", type=Path, default=Path("/"))
+            p.add_argument("--remove", action="store_true")
+        if name == "proof":
+            p.add_argument("--fence-off", action="store_true")
+            p.add_argument("--where", choices=("host", "container", "both"), default="both")
+            p.add_argument("--output", type=Path)
+    sub.add_parser("observe")
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "observe":
+            return observe()
+        site = load_site(args.site_env)
+        if args.command == "render-fence":
+            for path in render_fence(site, agents_uid(site, args.uid), args.out):
+                print(f"render-fence: wrote {path}")
+            return 0
+        if args.command == "install-fence":
+            install_fence(site, agents_uid(site, args.uid), args.root, args.remove)
+            print("install-fence: " + ("removed the fence" if args.remove else "loaded the fence"))
+            return 0
+        if args.command == "preflight":
+            preflight(site, args.root, args.uid)
+            print("preflight: subuid/subgid, cgroups v2, delegation of cpu memory pids and linger are in place")
+            return 0
+        if args.command == "proof":
+            rc, record = proof(site, args.fence_off, args.where)
+            if args.output:
+                args.output.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            return rc
+        return start(site)
+    except Refused as error:
+        print(f"agents-vm: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

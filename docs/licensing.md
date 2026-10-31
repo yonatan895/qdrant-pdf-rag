@@ -87,6 +87,7 @@ the `devkit` section of `licenses/inventory.json`, with their own approval, beca
 | Dev-only wheels (17) | `devkit.python`, bound to `requirements.dev.lock.txt` | `generate --kit --wheelhouse` on the factory's dev wheelhouse (`dependency_lock.py prepare --profile dev`; exact locked bytes) |
 | RPMs (26, `images/devkit-packages.txt`) | `devkit.components`, kind `rpm`, bound to the NEVRA | RPM `License` header tag from the pinned image's rpmdb (`devkit.evidence`) |
 | Task, Helm, oc, `oras.exe`, Linux `oras` | `devkit.components`, kind `tool`, bound to the pin's `version`, `sha256`, `license` and `license-sha256` | the pin's `license:` line; `task-LICENSE` and `oras-LICENSE` checked against their pinned digests |
+| herdr-core, OpenCode (#1172, in the image) | `devkit.components`, kind `tool`, bound to `images/devkit/agents/<tool>-pin.txt` the same way, plus the committed licence text (`bind.files`), whose digest must equal the pin's `license-sha256` | herdr-core: Apache-2.0, the archive's `LICENSE` (the build checks it equals the committed copy); OpenCode: MIT, the repository `LICENSE` at tag v2.2.5 (commit `9bbb8ce1`), because the archive has none. The image carries both texts, and herdr's `THIRD-PARTY-NOTICES`, under `/usr/share/licenses/`; the kit notices carry both licence texts |
 | UBI base, project | `devkit.shared`: the release records `image:ubi9-python-314-minimal` and `project:mainframe-rag` | the `FROM` digest of `images/Containerfile.devkit` must equal the shared base record's digest |
 
 RPM tags are free-form. `license_declared` keeps the tag verbatim. `license_spdx`
@@ -109,6 +110,12 @@ each under its RPM `License` tag as recorded, and for an OR tag whichever altern
 applies. The same decision records `devkit.approval` at kit scope digest
 `854999ae9a8ce9d537fcda1d6f2f3fb603d1269c87b12ee9f3544e31757eaf77`; a kit whose digest
 differs (a new RPM, wheel or tool, or a changed tag) needs a new decision.
+The two agent-tool records of #1172 are permissive and `declared`; adding them moved
+the kit scope digest to `5e2ad999863da5b0d09dec9b7432d0eb8057dc28c74245608bc2f9eb0b699850`,
+so `devkit.approval` is stale and `check --kit` refuses a pack until the maintainer
+records a decision for that digest. The maintainer's blanket licence approval for
+#1174 ([comment](https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543))
+names that issue's doc sets, not this digest.
 
 The gate: `pack.sh` runs `license_inventory.py check --kit` before it pulls anything.
 `--kit` is the kit's `check --release`. It fails with fixed `FAIL` lines when:

@@ -10,7 +10,12 @@
 #     environment, with the two lock files at /opt/devkit/locks/. The wheels themselves
 #     are bind-mounted for the install only, so the image holds no wheelhouse (D-7);
 #   - Task, Helm 4 and oc/kubectl from scripts/tools/*-pin.txt;
-#   - the session helpers from images/devkit/bin/.
+#   - the agent tools (#1172): herdr-core (with an `hc` link) and OpenCode from
+#     images/devkit/agents/*-pin.txt, downloaded here on the connected side and verified
+#     by install_agent_tools.py before anything is installed; their licence texts under
+#     /usr/share/licenses/; the hardened offline OpenCode config as the managed file
+#     /etc/opencode/opencode.json (docs/agents-vm.md#required-settings);
+#   - the session and agent helpers from images/devkit/bin/.
 # The project itself is not installed: a checkout's source is used in place
 # (PYTHONPATH=<checkout>/src), or `prepare_python.py --kit --venv DIR` layers a small
 # venv over this environment with only the checkout installed editable.
@@ -18,6 +23,9 @@
 # Named build contexts (scripts/image_inventory.py BUILD_CONTEXTS), both bind-mounted:
 #   wheelhouse    the dev wheelhouse (dependency_lock.py prepare --profile dev)
 #   devkit-tools  the Task, Helm and oc archives named by their pins' asset: lines
+# The agent tools are not a named context: the agent-tools stage downloads each pinned
+# origin itself and refuses it unless every digest matches its pin (images/devkit/ is
+# a kit key input, so a pin change changes the key).
 # Build scripts and pins are bind-mounted, never copied into the image. The kit key
 # (scripts/devkit_key.py) covers the pins, this recipe and the scripts the build runs
 # (scripts/tools/install-task.sh, task-artifact.sh, install-helm.sh and
@@ -72,9 +80,22 @@ RUN --mount=type=bind,source=scripts/tools,target=/opt/devkit-build/scripts/tool
     install -m 0755 /tmp/oc/oc /out/oc; \
     ln -s oc /out/kubectl
 
+# Download and verify herdr-core and OpenCode against images/devkit/agents/*-pin.txt
+# (archive, binary, licence and notices digests, then `--version`), and stage them in
+# /out. Only the verified files leave this stage; the downloads stay behind.
+FROM rpms AS agent-tools
+RUN --mount=type=bind,source=images/devkit/agents,target=/opt/devkit-build/agents \
+    python3 -I /opt/devkit-build/agents/install_agent_tools.py --pins /opt/devkit-build/agents \
+        --bin-dir /out/bin --license-dir /out/licenses
+
 FROM rpms
 USER root
 COPY --from=tools /out/ /usr/local/bin/
+COPY --from=agent-tools /out/bin/ /usr/local/bin/
+COPY --from=agent-tools /out/licenses/ /usr/share/licenses/
+# The hardened offline OpenCode config (#1172) as OpenCode's managed config on Linux:
+# root-owned, highest precedence, so no user or project config overrides it.
+COPY --chmod=0644 images/devkit/agents/opencode.json /etc/opencode/opencode.json
 COPY requirements.dev.lock.txt /opt/devkit/locks/requirements.dev.lock.txt
 COPY locks/cp314-linux-x86_64.json /opt/devkit/locks/locks/cp314-linux-x86_64.json
 # The agent image's idiom with the dev profile: verify the wheelhouse, install offline
@@ -97,6 +118,8 @@ RUN mkdir -p /work \
     && chmod g=u /work /opt/app-root/src
 
 ENV PYTHONDONTWRITEBYTECODE=1
+# OpenCode offline switches for any invocation; mfr-opencode sets them again itself.
+ENV OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1
 USER 1001
 WORKDIR /work
 CMD ["sleep", "infinity"]

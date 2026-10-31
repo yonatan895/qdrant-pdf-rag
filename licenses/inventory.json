@@ -1415,6 +1415,68 @@
         "spdx_basis": "rpm-license-tag",
         "status": "declared",
         "version": "0:2.1.0-25.el9.x86_64"
+      },
+      {
+        "approval_ref": null,
+        "bind": {
+          "files": [
+            {
+              "name": "LICENSE",
+              "notice": true,
+              "path": "images/devkit/agents/herdr-core-LICENSE",
+              "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+            }
+          ],
+          "license": "Apache-2.0",
+          "license-sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "pin": "images/devkit/agents/herdr-core-pin.txt",
+          "sha256": "efbb1382da3d5053cb20c60c166a62ec34e73d8299977fb1f5abed28ddec8d66",
+          "version": "0.1.15"
+        },
+        "class": "permissive",
+        "distributed_by_repo": true,
+        "id": "kit-tool:herdr-core",
+        "kind": "tool",
+        "license_declared": "Apache-2.0 (license: line of images/devkit/agents/herdr-core-pin.txt; LICENSE in the release archive)",
+        "license_spdx": "Apache-2.0",
+        "name": "herdr-core 0.1.15 (linux-amd64 binary in the image, /usr/local/bin/herdr-core with an hc link)",
+        "obligation": "Apache-2.0 section 4: the image carries the archive's LICENSE and THIRD-PARTY-NOTICES under /usr/share/licenses/herdr-core/ (both digests pinned in herdr-core-pin.txt), and the kit notices carry the LICENSE text.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "upstream-project-license",
+        "status": "declared"
+      },
+      {
+        "approval_ref": null,
+        "bind": {
+          "files": [
+            {
+              "name": "LICENSE",
+              "notice": true,
+              "path": "images/devkit/agents/opencode-LICENSE",
+              "sha256": "625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b"
+            }
+          ],
+          "license": "MIT",
+          "license-sha256": "625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b",
+          "pin": "images/devkit/agents/opencode-pin.txt",
+          "sha256": "09f44302c10fd036912f59c81fd1aef5df45dd06f649197f9dfc9bbe2a79614e",
+          "version": "2.2.5"
+        },
+        "class": "permissive",
+        "distributed_by_repo": true,
+        "id": "kit-tool:opencode",
+        "kind": "tool",
+        "license_declared": "MIT (license: line of images/devkit/agents/opencode-pin.txt; repository LICENSE at tag v2.2.5, commit 9bbb8ce1)",
+        "license_spdx": "MIT",
+        "name": "OpenCode 2.2.5 (linux-x64 binary in the image, /usr/local/bin/opencode)",
+        "obligation": "MIT: keep the copyright and permission notice with copies. The release archive holds no licence file; the image carries the tag's LICENSE under /usr/share/licenses/opencode/ and the kit notices carry it (digest pinned in opencode-pin.txt). The single-file binary bundles JavaScript dependencies whose notices it does not enumerate.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "upstream-project-license",
+        "status": "declared"
       }
     ],
     "evidence": {

@@ -266,7 +266,7 @@ root, kit = Path(sys.argv[1]), Path(sys.argv[2])
 image, digest, config, license_status, commit = sys.argv[3:8]
 sys.path.insert(0, str(root / "scripts"))
 from dependency_lock import load
-from license_inventory import KIT_TOOL_PINS, read_pin
+from license_inventory import KIT_TOOL_PINS, kit_pin_path, read_pin
 
 _, wheels = load(root, "dev")
 base = re.search(r"(?m)^FROM\s+(\S+@sha256:[0-9a-f]{64})", (root / "images/Containerfile.devkit").read_text(encoding="utf-8"))[1]
@@ -275,7 +275,7 @@ rpms = [line for line in (root / "images/devkit-packages.txt").read_text(encodin
 tools = []
 for name, pin_file in KIT_TOOL_PINS:
     fields = read_pin(root, pin_file)
-    tools.append({"name": name, "pin": f"scripts/tools/{pin_file}", **{k: fields[k] for k in
+    tools.append({"name": name, "pin": kit_pin_path(pin_file), **{k: fields[k] for k in
                   ("version", "asset", "sha256", "binary-sha256", "origin", "license", "platforms") if k in fields}})
 sbom = {
     "kit_key": kit.name.removeprefix("mfr-devkit-"),

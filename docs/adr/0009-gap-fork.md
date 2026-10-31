@@ -551,7 +551,10 @@ refreshed with each kit (Q9).
   - `oc` and `skopeo`, plus git-core, openssl, sha256sum, tar and gawk, from
     an exact RPM NEVRA list, so drift fails the build. GPL-licensed RPMs are
     accepted;
-  - the session login helpers (`mfr-session-login` and its logout).
+  - the session login helpers (`mfr-session-login` and its logout);
+  - the coding agents' tools (#1172): herdr-core and OpenCode, pinned by sha256 and
+    verified during the connected-side build, with a hardened offline OpenCode
+    config ([agents VM](../agents-vm.md)).
 
   It runs under `restricted-v2` with an arbitrary non-root UID. The
   checkout's own source is used in place, so development installs no

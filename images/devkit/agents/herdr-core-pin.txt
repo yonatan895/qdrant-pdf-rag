@@ -1,0 +1,32 @@
+# herdr-core (hc) pin for the dev workspace image (#1172, ADR-0009 §8).
+#
+# Maintainer decisions 2026-10-31 (#1172 issuecomment-6547202945): checksum-only trust
+# (HTTPS plus the sha256 below; herdr publishes no signature or provenance), and one
+# tested version of this young release line; a change is a dedicated pin-bump PR.
+#
+# Verification performed 2026-10-31 on the connected host (#1172 trial,
+# issuecomment-6546815606 and issuecomment-6548130709):
+#   curl -fsSL -O https://releases.herdr.dev/core/0.1.15/manifest.json
+#   curl -fsSL -O https://releases.herdr.dev/core/0.1.15/herdr-core-linux-x86_64.tar.gz
+#   The archive sha256 equals the manifest's linux-x86_64 entry. tar lists herdr-core,
+#   LICENSE (Apache-2.0) and THIRD-PARTY-NOTICES; their digests are below.
+#
+# The kit build downloads the archive from origin on the connected side only and
+# verifies every digest before it installs anything
+# (images/devkit/agents/install_agent_tools.py, run by images/Containerfile.devkit).
+# The image installs the binary as /usr/local/bin/herdr-core with an `hc` link: the
+# remote-machine probe looks for herdr-core by that name.
+
+version: 0.1.15
+asset: herdr-core-linux-x86_64.tar.gz
+sha256: efbb1382da3d5053cb20c60c166a62ec34e73d8299977fb1f5abed28ddec8d66
+binary: herdr-core
+binary-sha256: b66176f871f8f1e0f34962a5d3d0dcb54f5a19443f601e51a38f167f829d4981
+origin: https://releases.herdr.dev/core/0.1.15/herdr-core-linux-x86_64.tar.gz
+checksum-manifest: https://releases.herdr.dev/core/0.1.15/manifest.json
+license: Apache-2.0
+license-member: LICENSE
+license-sha256: c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4
+notices-member: THIRD-PARTY-NOTICES
+notices-sha256: 3f47db789d2ca84bba20126be453f76e6d06c3901655645a98bb353721b0aa44
+platforms: linux-amd64 only
