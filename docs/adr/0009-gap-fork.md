@@ -341,11 +341,13 @@ The script runs these steps. Each refusal is a fixed `STOP:` line in it.
 0. **Reset.** It is safe on every run and is how to resume after any stop.
    It never discards work that exists nowhere else. Every stop check runs
    first and changes nothing: a pushed branch, commits after `IMPORT READY`,
-   an untracked file, and any local change or operation in progress outside
-   the unfinished import (on another branch, say). Only then does it set
+   an untracked file, a rebase or `git am` in progress, a name clash for a
+   kept branch, and any local change or operation in progress outside the
+   unfinished import (on another branch, say). Only then does it set
    aside the unfinished import's uncommitted tracked changes with
    `git stash push -m "import_release <SHA> <UTC timestamp>"`, print that
-   name and the `git stash apply` command that restores them, abort that
+   name and the `git stash apply` command for that stash (nothing when the
+   changes match `HEAD` and no stash is made), abort that
    import's merge, revert or cherry-pick, and remove `$R`. The local
    `import/<SHA>` branch is deleted only when its tip is the script's own
    work: already on `origin/main`, or set by the script's last step (its
@@ -390,7 +392,10 @@ The script runs these steps. Each refusal is a fixed `STOP:` line in it.
 - **Rerun:** after any stop, rerun the same command. Step 0 resets, and the
   run ends as an uninterrupted run would. After success, a rerun changes
   nothing. Commits added to `import/<SHA>` after `IMPORT READY` stop a
-  rerun; they are never deleted.
+  rerun; they are never deleted. Commits added to an unfinished import are
+  kept as the printed `import/<SHA>-<UTC timestamp>` branch, and its
+  uncommitted changes as the printed stash. An untracked file stops step 0
+  until the operator commits or removes it.
 - **Never** rerun after the branch has been pushed; the script refuses.
   Fix forward with new commits on the MR branch instead. Never use
   `git rebase`, `--force`, `-X ours`, `-X theirs` or `--squash`, and never

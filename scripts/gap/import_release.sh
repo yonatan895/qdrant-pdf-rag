@@ -150,17 +150,33 @@ main() {
         git status --porcelain
         stop "$FORK has local changes (listed above); commit or remove them, or ask the gap maintainer, then rerun"
     fi
+    # The script never starts a rebase or git am, so it never sets one aside.
+    if rebase_in_progress; then
+        stop "a rebase or git am is in progress in FORK; finish or abort it (git status shows which), then rerun"
+    fi
     # One timestamp names whatever this reset keeps (UTC, to the second).
     KEPT=$(date -u +%Y%m%dT%H%M%SZ)
+    keep=0
+    if [ -n "$tip" ] && ! script_made "$tip"; then
+        keep=1
+        if git rev-parse -q --verify "refs/heads/$BRANCH-$KEPT" >/dev/null; then
+            stop "cannot keep $BRANCH as $BRANCH-$KEPT, which exists; rerun in a second, or ask the gap maintainer"
+        fi
+    fi
     if in_progress; then
         printf '%s\n' "Aborting the unfinished import's merge, revert or cherry-pick"
     fi
     if [ "$unfinished" = 1 ] && [ -n "$(git status --porcelain)" ]; then
         # git stash refuses unmerged paths: record them as they are first.
-        # The stash also ends a merge in progress.
+        # The stash also ends a merge in progress. Changes that match HEAD
+        # make no stash: then nothing is printed, never an older stash.
+        before=$(git rev-parse -q --verify refs/stash || true)
         git add -u
         git stash push -q -m "import_release $SHA $KEPT"
-        printf '%s\n' "Stashed the unfinished import's uncommitted changes as \"import_release $SHA $KEPT\"; restore them with: git -C $(q "$FORK") stash apply $(git rev-parse refs/stash)"
+        after=$(git rev-parse -q --verify refs/stash || true)
+        if [ -n "$after" ] && [ "$after" != "$before" ]; then
+            printf '%s\n' "Stashed the unfinished import's uncommitted changes as \"import_release $SHA $KEPT\"; restore them with: git -C $(q "$FORK") stash apply $after"
+        fi
     fi
     if in_progress; then
         if git rev-parse -q --verify MERGE_HEAD >/dev/null; then git merge --abort; fi
@@ -178,7 +194,7 @@ main() {
     fi
     git switch -q --detach "$BASE"
     if [ -n "$tip" ]; then
-        if script_made "$tip"; then
+        if [ "$keep" = 0 ]; then
             git branch -q -D "$BRANCH"
         else
             # Commits that someone else added: keep them under a new name.
@@ -378,6 +394,13 @@ script_made() {
     last=$(git reflog show -n 1 --format='%H %gs' "refs/heads/$BRANCH" 2>/dev/null || true)
     [ "${last%% *}" = "$1" ] || return 1
     case "${last#* }" in "import_release $SHA: "*) return 0 ;; esac
+    return 1
+}
+
+rebase_in_progress() {
+    for dir in rebase-merge rebase-apply; do
+        if [ -d "$(git rev-parse --git-path "$dir")" ]; then return 0; fi
+    done
     return 1
 }
 

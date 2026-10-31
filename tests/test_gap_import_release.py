@@ -821,6 +821,95 @@ def test_commits_added_to_an_unfinished_import_are_kept_under_a_printed_name(tmp
     assert refs == straight.refs(straight.fork)
 
 
+def test_a_rerun_that_makes_no_stash_prints_no_stash_line(tmp_path, keys):
+    """#1165 review B1: a conflict resolved to HEAD leaves status non-empty
+    but nothing to stash. The run must not print a stash line, least of all
+    one naming an older stash."""
+    world = World(tmp_path / "w", keys)
+    world.create_fork(world.r1)
+    world.patch(71, {"README.md": with_line(world.read("README.md"), 6, "gap 71")}, "GL#71\n\nGap-Patch: GL#71\n")
+    world.stray({"README.md": with_line(world.read("README.md"), 6, "unledgered on top")})
+    r2 = world.release({"src/app.py": world.up_text("src/app.py") + "more\n"}, "Release 2")
+    world.run(r2)  # Stops in step 4 with a revert conflict.
+    first = world.run(r2)  # Stashes the conflict state and stops there again.
+    assert len(STASHED.findall(first.stdout)) == 1, first.stdout[-3000:]
+    older = world.git(world.fork, "rev-parse", "refs/stash").strip()
+    world.git(world.fork, "checkout", "--ours", "--", "README.md")  # Resolved to HEAD, not staged.
+    assert world.git(world.fork, "status", "--porcelain") != ""
+
+    again = world.run(r2)
+
+    assert "Stashed" not in again.stdout, again.stdout[-3000:]
+    assert older not in again.stdout
+    assert world.git(world.fork, "stash", "list", "--format=%H") == f"{older}\n"
+
+
+def _operator_commit_on_main(world: World) -> str:
+    world.git(world.fork, "switch", "-q", "-c", "side", "origin/main")
+    side = world.commit(world.fork, {"src/app.py": world.read("src/app.py") + "side tail\n"}, "Side")
+    world.git(world.fork, "switch", "-q", "-")
+    return side
+
+
+def test_a_rebase_or_am_in_progress_stops_before_anything_is_set_aside(tmp_path, keys):
+    """#1165 review B2: the script never starts a rebase or git am, so one in
+    progress on the unfinished import stops step 0 with nothing set aside."""
+    world = World(tmp_path / "w", keys)
+    r2 = _patched_world(world)
+    _crash(world, r2, "cherry-pick", 2, "after")
+    world.git(world.fork, "switch", "-q", f"import/{r2}")
+    side = _operator_commit_on_main(world)
+    (world.root / "side.patch").write_text(world.git(world.fork, "format-patch", "-1", "--stdout", side))
+    am = subprocess.run(["git", "am", "-3", str(world.root / "side.patch")], cwd=world.fork, env=world.env(),
+                        capture_output=True, text=True, check=False)
+    assert am.returncode != 0  # A conflict leaves the am in progress.
+    gitdir = Path(world.git(world.fork, "rev-parse", "--absolute-git-dir").strip())
+    refs, status = world.refs(world.fork), world.git(world.fork, "status", "--porcelain")
+
+    stopped = world.run(r2)
+
+    assert_one_stop(stopped, "STOP: a rebase or git am is in progress in FORK; finish or abort it "
+                             "(git status shows which), then rerun")
+    assert world.refs(world.fork) == refs  # No stash, no deleted or renamed branch.
+    assert world.git(world.fork, "status", "--porcelain") == status
+    assert (gitdir / "rebase-apply").is_dir()
+
+
+FAKE_DATE = """#!/bin/sh
+for a in "$@"; do case "$a" in +%Y%m%dT%H%M%SZ) echo 20261031T000000Z; exit 0 ;; esac; done
+exec date "$@"
+"""
+
+
+def test_a_kept_branch_name_clash_stops_before_anything_is_set_aside(tmp_path, keys):
+    """A kept-branch name that already exists stops step 0 before the stash;
+    the next run (a new second) keeps the commits and converges."""
+    _, r2, straight_tip = _straight(tmp_path, keys)
+    world = World(tmp_path / "w", keys)
+    assert _patched_world(world) == r2
+    _crash(world, r2, "cherry-pick", 2, "after")
+    added = world.commit(world.fork, {"src/app.py": world.read("src/app.py") + "operator fix\n"}, "Operator fix")
+    (world.fork / "README.md").write_text("operator edit\n")
+    world.git(world.fork, "branch", f"import/{r2}-20261031T000000Z", "origin/main")
+    wrap = world.root / "fakedate"
+    wrap.mkdir()
+    (wrap / "date").write_text(FAKE_DATE.replace("exec date", f"exec {shutil.which('date')}"))
+    (wrap / "date").chmod(0o755)
+    refs, status = world.refs(world.fork), world.git(world.fork, "status", "--porcelain")
+
+    stopped = world.run(r2, path_prefix=str(wrap))
+
+    assert_one_stop(stopped, f"STOP: cannot keep import/{r2} as import/{r2}-20261031T000000Z, which exists; "
+                             "rerun in a second, or ask the gap maintainer")
+    assert world.refs(world.fork) == refs
+    assert world.git(world.fork, "status", "--porcelain") == status
+    assert world.git(world.fork, "symbolic-ref", "HEAD").strip() == f"refs/heads/import/{r2}"
+
+    assert assert_ready(world, world.run(r2), r2) == straight_tip
+    assert world.git(world.fork, "branch", "--contains", added, "--format=%(refname:short)").startswith(f"import/{r2}-")
+    assert world.git(world.fork, "stash", "list", "--format=%gs").startswith(f"On import/{r2}: import_release {r2} ")
+
+
 # The documented heading is "## GL#NNN <full commit sha>"; each of these only
 # looks like one. CRLF and a lowercase gl# were refused before.
 NEAR_MISS = {
