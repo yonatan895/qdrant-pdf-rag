@@ -1210,8 +1210,8 @@ containers, a writable host or cluster access.
 
 | Area | Requirement | Used by |
 |---|---|---|
-| GitLab | Release version recorded, 16.10 or later (`workflow:auto_cancel`), 17.10 or later for draft-MR routing to `wip` (`CI_MERGE_REQUEST_DRAFT`; older releases run drafts on `gate`, which is safe but slower); protected tags; `CI_COMMIT_TAG` and `CI_COMMIT_REF_PROTECTED`; variables expanded in `image`, `services` and `tags`; `CI_OPEN_MERGE_REQUESTS`; dynamic child pipelines (`trigger:include:artifact`) | all pipelines |
-| Runner | Tags `gate` (ready merge request and tag pipelines) and `wip` (branch and draft merge request pipelines), or one tag for all from the project variable `CI_RUNNER_TAG`; linux-amd64; an executor that starts job and service images from the approved registry with a service alias; reads `CI_TASK_ARCHIVE` and `CI_BM25_CACHE_DIR` from the runner; no route to PyPI, Docker Hub or GitHub | all GitLab jobs |
+| GitLab | 17.0 or later, with every feature in the [17.0 feature audit](#gitlab-170-feature-audit); the site does not disclose its minor version and nothing here depends on it | all pipelines |
+| Runner | Tags `gate` (ready merge request and tag pipelines) and `wip` (branch and draft merge request pipelines), or one tag for all from the project variable `CI_RUNNER_TAG`; linux-amd64; an executor that starts job and service images from the approved registry with a service alias; reads `CI_TASK_ARCHIVE` and `CI_BM25_CACHE_DIR` from the runner; maximum job timeout at least 40 minutes; no route to PyPI, Docker Hub or GitHub | all GitLab jobs |
 | Python packages | none acquired: the dev kit job image holds the dev lock installed, and `prepare_python.py --kit` installs only the checkout, with no index | `.py-base` |
 | Quay | Release version recorded; Docker v2 API reachable by `skopeo`; a push identity for the five runtime paths; pull access for cluster and runner; organization layout may differ from upstream paths | `load.sh`, runner |
 | OpenShift | Namespace-scoped deployer; `restricted-v2` SCC with no `anyuid`; RWO block storage for Qdrant (NFS only for the read-only corpus); ClusterIP-only Qdrant; Route only with OAuth | deploy, ingest |
@@ -1219,6 +1219,31 @@ containers, a writable host or cluster access.
 
 Site qualification of the actual versions and permissions is #446 packets C/D and
 is not claimed by this table.
+
+<a id="gitlab-170-feature-audit"></a>
+#### GitLab 17.0 feature audit
+
+Every GitLab feature the repository depends on, checked against the GitLab
+docs at tag `v17.0.0-ee` (`gitlab-org/gitlab`, `doc/`). Nothing reads a feature
+introduced after 17.0. `tests/test_ci_gitlab_parity.py` refuses
+`CI_MERGE_REQUEST_DRAFT` (17.10), and #1176 CODEOWNERS uses no `!` exclusion
+(17.10 behind a flag, 17.11 GA).
+
+| Feature | Used by | Version note in the 17.0 docs | 17.0 doc (`doc/` path) |
+|---|---|---|---|
+| `workflow:rules` with `variables`; `rules:if` with `==`, `!=`, `== null`, `=~ /re/i` and `&&` | `.gitlab-ci.yml` | documented, no later note | `ci/yaml/index.md#workflowrules`, `ci/jobs/job_rules.md#compare-a-variable-to-a-regular-expression` |
+| `workflow:auto_cancel:on_new_commit`, `workflow:rules:auto_cancel` | `.gitlab-ci.yml` | GA in 16.10 | `ci/yaml/index.md#workflowauto_cancelon_new_commit` |
+| `interruptible`, also on trigger jobs | every job, `lanes` | trigger jobs from 16.8 | `ci/yaml/index.md#interruptible` |
+| `default` (`image`, `interruptible`, `tags`), `extends`, `stages`, `variables`, `GIT_DEPTH` | `.gitlab-ci.yml` | documented, no later note | `ci/yaml/index.md#default` |
+| `tags`, `image` and `services:name` with CI/CD variables; a literal `services:alias` | all jobs, `sim`, `gate-l1` | documented, no later note | `ci/yaml/index.md#tags`, `#services` |
+| `parallel: N`, `needs`, `timeout`, `artifacts` (`paths`, `when`, `reports:junit`) | `test`, `lanes`, every job | documented, no later note | `ci/yaml/index.md#parallel`, `#timeout`, `#artifactsreportsjunit` |
+| `trigger:include:artifact`, `trigger:strategy: depend`, `trigger:forward:yaml_variables` | `lanes` | `forward` GA in 15.1 | `ci/yaml/index.md#triggerforward`, `ci/pipelines/downstream_pipelines.md` |
+| Draft detection by title (`Draft:`, `[Draft]`, `(Draft)`, any case) through `CI_MERGE_REQUEST_TITLE` | `workflow:rules` | documented, no later note | `user/project/merge_requests/drafts.md`; `app/models/merge_request.rb` `draft?` |
+| Predefined variables: `CI_PIPELINE_SOURCE`, `CI_COMMIT_TAG`, `CI_COMMIT_BRANCH`, `CI_COMMIT_SHA`, `CI_COMMIT_REF_PROTECTED`, `CI_DEFAULT_BRANCH`, `CI_OPEN_MERGE_REQUESTS`, `CI_MERGE_REQUEST_TITLE`, `CI_MERGE_REQUEST_IID`, `CI_MERGE_REQUEST_SOURCE_BRANCH_SHA`, `CI_MERGE_REQUEST_TARGET_BRANCH_SHA`, `CI_MERGE_REQUEST_DIFF_BASE_SHA`, `CI_NODE_INDEX`, `CI_NODE_TOTAL`, `CI_PROJECT_DIR`, `CI_PROJECT_ID`, `CI_PROJECT_PATH`, `CI_PIPELINE_ID`, `CI_JOB_URL`, `CI_API_V4_URL`, `CI_SERVER_URL` | `.gitlab-ci.yml`, `scripts/gap/ci_status.py` | documented, no later note | `ci/variables/predefined_variables.md` |
+| CODEOWNERS: sections, optional `^[Section]`, `[Section][N]`, default section owners, `*` and path entries, user and group owners | `.gitlab/CODEOWNERS` (#1176) | documented, no later note | `user/project/codeowners/reference.md` |
+| REST: `GET /projects/:id`, `/pipelines` (`sha`, `order_by`, `sort`), `/pipelines/:id`, `/pipelines/:id/jobs`, `/pipelines/:id/bridges`, `/repository/commits/:sha`, `/repository/commits/:sha/merge_requests`, `/merge_requests/:iid` (`head_pipeline`), `/jobs/:id/artifacts`, `/jobs/:id/artifacts/*path` | `scripts/gap/ci_status.py` (`read_api`) | documented, no later note | `api/projects.md`, `api/pipelines.md`, `api/jobs.md`, `api/commits.md`, `api/merge_requests.md`, `api/job_artifacts.md` |
+| REST: `POST /projects/:id/merge_requests/:iid/notes` | `gate-l1` (optional `GITLAB_TOKEN`) | documented, no later note | `api/notes.md` |
+| Settings: protected branch with **Require approval from code owners** and approval rules (Premium); merge method **Merge commit**; squash **Do not allow**; **Pipelines must succeed**; protected tags with **Allowed to create**; **Auto-cancel redundant pipelines**; project access token scope `read_api` | ADR-0009 §6, this section | documented, no later note | `user/project/protected_branches.md`, `user/project/merge_requests/methods/index.md`, `user/project/merge_requests/squash_and_merge.md`, `user/project/protected_tags.md`, `ci/pipelines/settings.md`, `user/project/settings/project_access_tokens.md` |
 
 ### Shared LiteLLM configuration
 
@@ -1252,7 +1277,7 @@ and the dry-run gate; air-gap GitLab runs hygiene, lint/types, the unit suite
 in four shards, hazards, the sim tier and gate-l1 only (no e2e, load, deploy,
 multi-peer docker, GHCR, or PDFs/tokens/hostnames in file). Merge request and
 tag pipelines run every GitLab lane on the `gate` runner tag, a draft merge
-request every lane on `wip` (GitLab >= 17.10); branch pipelines
+request (by its title) every lane on `wip`; branch pipelines
 run on `wip` and select lanes with the fail-closed classifier through a child
 pipeline; a newer commit cancels the older pipeline on the same ref, never a
 tag pipeline (ADR-0009 section 2). GitLab unit/sim

@@ -19,6 +19,11 @@
 # prepares them from wheels and archives; and the simulation tier runs against
 # the mirrored Qdrant service without tests/test_qdrant_auth.py and
 # tests/test_openwebui_proxy_nginx.py, which drive a local Docker daemon.
+# Each job's timeout is at most its GitHub counterpart's timeout-minutes scaled
+# by the parallelism GitLab lacks (unit 8 to 4 shards, sim 3 to 1 process,
+# hazards 4 to 1 worker). The runner runs job scripts with bash (errexit,
+# pipefail) and the kit's `sh` is bash in POSIX mode, where GitHub's is dash;
+# the parity test runs the job steps and the scripts they start under both.
 #
 # GitHub product CI ignores markdown-only changes; agent-context.yml checks
 # relevant docs/instructions separately. GitLab keeps local hygiene/context checks
@@ -27,16 +32,17 @@
 # Pipelines (issue #808, ADR-0009 section 2, GH#1118 F11):
 #   merge request and tag pipelines run every lane (hygiene, lint, test x4,
 #   hazards, sim, gate-l1) directly, on the runner tag `gate` (one slot),
-#   except that a draft merge request pipeline ($CI_MERGE_REQUEST_DRAFT ==
-#   "true") runs on `wip`, so agent work never queues ahead of a merge gate.
+#   except that a draft merge request pipeline runs on `wip`, so agent work
+#   never queues ahead of a merge gate.
 #   A draft still runs every lane with no selection: marking a merge request
 #   ready does not start a new pipeline, so the draft's pipeline may be the
 #   one a merge rests on, and #808 forbids a partial one.
-#   CI_MERGE_REQUEST_DRAFT needs GitLab >= 17.10 (GitLab's predefined-variable
-#   reference); the 16.10 minimum stated for auto_cancel below does not cover
-#   it. On an older GitLab the variable is unset, so every merge request
-#   pipeline, draft or ready, runs on `gate`: it fails toward the gate, never
-#   toward fewer lanes, and only the queue split is lost.
+#   A draft is a title GitLab itself reads as one: "Draft:", "[Draft]" or
+#   "(Draft)" at its start, in any case (Gitlab::Regex.merge_request_draft;
+#   GitLab derives draft status from the title). This works on GitLab 17.0 or
+#   later; CI_MERGE_REQUEST_DRAFT is not used. A missing or any other title
+#   keeps the pipeline on `gate`: doubt fails toward the gate, never toward
+#   fewer lanes.
 #   A release is built from an immutable tag, so the hygiene job refuses a tag
 #   pipeline whose ref is not protected (protect the release tag pattern in
 #   Settings > Repository > Protected tags, with creation limited to release
@@ -55,7 +61,7 @@
 #   pipeline (schedule, "Run pipeline", API) is not forwarded to the child
 #   pipeline that runs a branch pipeline's lanes.
 #   Every job is interruptible and a newer commit on the same ref cancels the
-#   older pipeline (workflow:auto_cancel, GitLab >= 16.10, with "Auto-cancel
+#   older pipeline (workflow:auto_cancel, GitLab 17.0 or later, with "Auto-cancel
 #   redundant pipelines" left on in Settings > CI/CD). Tag pipelines set
 #   auto_cancel none: nothing cancels a release pipeline.
 #
@@ -112,7 +118,7 @@
 # ==============================================================================
 
 workflow:
-  # GitLab >= 16.10. Cancels only interruptible jobs of an older pipeline on
+  # GitLab 17.0 or later. Cancels only interruptible jobs of an older pipeline on
   # the same ref; every job here is interruptible, and a branch pipeline's
   # child pipeline is cancelled with it.
   auto_cancel:
@@ -123,8 +129,8 @@ workflow:
     - if: '$CI_PIPELINE_SOURCE == "parent_pipeline"'
       variables:
         CI_RUNNER_TAG: "wip"
-    # Draft merge requests: every lane, on wip (GitLab >= 17.10; see above).
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_DRAFT == "true"'
+    # Draft merge requests: every lane, on wip (see above).
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TITLE =~ /^(\[draft\]|\(draft\)|draft:)/i'
       variables:
         CI_RUNNER_TAG: "wip"
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
@@ -177,6 +183,7 @@ default:
 # makes the diff cumulative, so a cancelled earlier push never drops a change
 # from selection. review_tooling.py is standard library only: no install.
 select:
+  timeout: 5m
   extends: .wip-pipeline
   stage: hygiene
   variables:
@@ -228,6 +235,7 @@ lanes:
     - export PATH="$CI_PROJECT_DIR/.venv/bin:$PATH"
 
 hygiene:
+  timeout: 5m
   extends: .gate-pipeline
   stage: hygiene
   script:
@@ -267,6 +275,7 @@ hygiene:
 # pipeline. `python -m pytest` puts the checkout on sys.path for the plugin,
 # as GitHub's shard producer does.
 test:
+  timeout: 30m
   extends: [.py-base, .gate-pipeline]
   stage: test
   parallel: 4
@@ -278,7 +287,16 @@ test:
     - export PATH="$CI_PROJECT_DIR/.tools/bin:$PATH"
     - python scripts/agent_doctor.py --python "$(command -v python)"
     - rm -f unit-junit.xml
-    - python -m pytest -q -p tests.ci_shard --unit-shard="$CI_NODE_INDEX" --unit-shards="$CI_NODE_TOTAL" --unit-durations=tests/unit-durations.json --junitxml=unit-junit.xml
+    # Plugins as GitHub's unit producer (scripts/unit_evidence.py) loads them. A
+    # project variable outranks a YAML one, so the script turns autoloading off.
+    - |
+      if [ -n "${PYTEST_ADDOPTS:-}" ] || [ -n "${PYTEST_PLUGINS:-}" ]; then
+        echo "FAIL: PYTEST_ADDOPTS or PYTEST_PLUGINS is set; the unit lane takes neither." >&2
+        echo "Delete that project or pipeline variable (GitHub's unit producer refuses both)." >&2
+        exit 1
+      fi
+    - export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+    - python -m pytest -q -p anyio.pytest_plugin -p tests.ci_shard --unit-shard="$CI_NODE_INDEX" --unit-shards="$CI_NODE_TOTAL" --unit-durations=tests/unit-durations.json --junitxml=unit-junit.xml
     # pytest's exit status alone lets skipped/xfailed tests pass; GitHub rejects
     # them per shard, and so does each shard here.
     - python scripts/check_junit_clean.py unit-junit.xml
@@ -291,6 +309,7 @@ test:
       junit: unit-junit.xml
 
 hazards:
+  timeout: 40m
   extends: [.py-base, .gate-pipeline]
   stage: test
   script:
@@ -309,6 +328,7 @@ hazards:
 # Fail-closed like GitHub: any skipped/xfailed test, zero executed tests or a
 # missing BM25 cache fails the job.
 sim:
+  timeout: 40m
   extends: [.py-base, .gate-pipeline]
   stage: test
   services:
@@ -335,6 +355,7 @@ sim:
       junit: sim-junit.xml
 
 gate-l1:
+  timeout: 15m
   extends: [.py-base, .gate-pipeline]
   stage: test
   services:
@@ -373,6 +394,7 @@ gate-l1:
 # commands, in the same order, as the GitHub `lint` job (pinned by
 # tests/test_ci_gitlab_parity.py). The ruleset itself is not changed here.
 lint:
+  timeout: 10m
   extends: [.py-base, .gate-pipeline]
   stage: hygiene
   script:

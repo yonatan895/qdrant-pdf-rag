@@ -1157,7 +1157,7 @@ class TestTaskCiConsumers(unittest.TestCase):
                 self.assertEqual((root / "tests-ran").exists(), expected == 0)
                 self.assertEqual((root / "doctor-args").exists(), link_status == 0)
             self.assertEqual((root / "tests-ran").read_text(),
-                             "-q -p tests.ci_shard --unit-shard=2 --unit-shards=4 "
+                             "-q -p anyio.pytest_plugin -p tests.ci_shard --unit-shard=2 --unit-shards=4 "
                              "--unit-durations=tests/unit-durations.json --junitxml=unit-junit.xml\n")
             self.assertEqual((root / "doctor-args").read_text(),
                              f"scripts/agent_doctor.py\n--python\n{root / 'python'}\n")

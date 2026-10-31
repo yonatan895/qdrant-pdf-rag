@@ -8,10 +8,13 @@ request and tag pipelines run every lane on `gate`, draft merge request
 pipelines run every lane on `wip`, branch pipelines run the lane selector on
 `wip` and its child pipeline. The select job runs for real against
 synthetic git histories, and the unit shards are checked against a real
-collection. A real GitLab pipeline run is still required to prove runner,
+collection. Job steps run under both shells a GitLab job can meet: bash with
+errexit and pipefail (the runner) and dash (GitHub's and Debian's `sh`), with
+`sh` resolving to the same shell. A real GitLab pipeline run is still required to prove runner,
 image, service, child-pipeline and auto-cancel behavior.
 """
 import copy
+import json
 import os
 import re
 import shlex
@@ -33,8 +36,24 @@ SELECTION_JOBS = {'select', 'lanes'}
 UNIT_SHARDS = 4
 # The only selection options the unit lane may pass: the shard plugin with
 # GitLab's parallel index/total and the GitHub durations file.
-UNIT_SHARD_ARGS = ['-p', 'tests.ci_shard', '--unit-shard=$CI_NODE_INDEX', '--unit-shards=$CI_NODE_TOTAL',
+# Plugin loading is GitHub's unit producer's (scripts/unit_evidence.py run_shard):
+# autoloading off, AnyIO and the shard plugin explicit, ambient options refused.
+UNIT_PLUGIN_ARGS = ['-p', 'anyio.pytest_plugin', '-p', 'tests.ci_shard']
+UNIT_SHARD_ARGS = [*UNIT_PLUGIN_ARGS, '--unit-shard=$CI_NODE_INDEX', '--unit-shards=$CI_NODE_TOTAL',
                    '--unit-durations=tests/unit-durations.json']
+AUTOLOAD_OFF = 'export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1'
+# The plugin set GitHub's native unit evidence must record (scripts/unit_evidence.py).
+GITHUB_UNIT_PLUGINS = ['_pytest', 'anyio.pytest_plugin', 'tests/ci_shard.py', 'tests/conftest.py']
+# Job timeouts: each job's GitHub counterpart (workflow, job). A GitLab timeout
+# may not exceed that job's timeout-minutes times the parallelism GitLab lacks.
+TIMEOUT_COUNTERPARTS = {'select': ('ci.yml', 'select'), 'hygiene': ('agent-context.yml', 'check-context'),
+                        'lint': ('ci.yml', 'lint'), 'test': ('ci.yml', 'unit'), 'hazards': ('ci.yml', 'hazards'),
+                        'sim': ('ci.yml', 'sim'), 'gate-l1': ('ci.yml', 'gate-l1')}
+WORKFLOWS = {'ci.yml': GITHUB,
+             'agent-context.yml': yaml.safe_load((ROOT / '.github/workflows/agent-context.yml').read_text())}
+# GitLab's runner runs job scripts with bash under errexit and pipefail; the kit
+# image's `sh` is bash (POSIX mode) and GitHub's is dash. Steps run under both.
+JOB_SHELLS = {'bash': ['-o', 'pipefail', '-e', '-c'], 'dash': ['-e', '-c']}
 SELECT_SCRIPT = [
     'git fetch --no-tags origin "+refs/heads/${CI_DEFAULT_BRANCH}:refs/remotes/origin/${CI_DEFAULT_BRANCH}"',
     'BASE_SHA="$(git merge-base "refs/remotes/origin/${CI_DEFAULT_BRANCH}" "$CI_COMMIT_SHA")"',
@@ -111,13 +130,21 @@ def ignores(command):
 
 
 def expression_matches(expression, variables):
-    """The rule expression forms this file may use: `$V`, `$V == "x"`, `$V != "x"`, joined by &&."""
+    """The rule expression forms this file may use, joined by &&: `$V`, `$V == "x"`, `$V != "x"`,
+    `$V == null` (unset) and `$V =~ /re/` or `/re/i` (RE2; an unset variable never matches)."""
     for clause in (c.strip() for c in expression.split('&&')):
-        compare = re.fullmatch(r'\$(\w+) (==|!=) "([^"]*)"', clause)
+        compare = re.fullmatch(r'\$(\w+) (==|!=) (?:"([^"]*)"|(null))', clause)
+        regex = re.fullmatch(r'\$(\w+) =~ /(.+)/(i?)', clause)
         bare = re.fullmatch(r'\$(\w+)', clause)
-        assert compare or bare, f'unsupported rule expression {expression!r}'
+        assert compare or regex or bare, f'unsupported rule expression {expression!r}'
         if compare:
-            matched = (variables.get(compare.group(1)) == compare.group(3)) == (compare.group(2) == '==')
+            value = variables.get(compare.group(1))
+            equal = value is None if compare.group(4) else value == compare.group(3)
+            matched = equal == (compare.group(2) == '==')
+        elif regex:
+            value = variables.get(regex.group(1))
+            flags = re.IGNORECASE if regex.group(3) else 0
+            matched = value is not None and re.search(regex.group(2), value, flags) is not None
         else:
             matched = bool(variables.get(bare.group(1)))
         if not matched:
@@ -151,18 +178,28 @@ def child_doc(doc, config):
     return merge(doc, {k: v for k, v in config.items() if k != 'include'})
 
 
+# GitLab 17.0 is the floor (the site's minor is not disclosed): a draft is read
+# from the title, as GitLab's own Gitlab::Regex.merge_request_draft reads it;
+# CI_MERGE_REQUEST_DRAFT (17.10) is never consulted.
 MR = {'CI_PIPELINE_SOURCE': 'merge_request_event', 'CI_MERGE_REQUEST_IID': '3',
-      'CI_MERGE_REQUEST_DRAFT': 'false'}
-DRAFT_MR = {**MR, 'CI_MERGE_REQUEST_DRAFT': 'true'}
+      'CI_MERGE_REQUEST_TITLE': 'Add a feature'}
+DRAFT_MR = {**MR, 'CI_MERGE_REQUEST_TITLE': 'Draft: Add a feature'}
+DRAFT_TITLES = ('Draft: Add a feature', '[Draft] Add a feature', '(Draft) Add a feature',
+                     'draft: Add a feature', 'DRAFT:Add a feature', '[DRAFT] x')
+READY_TITLES = ('Add a feature', 'Fix Draft: parsing', 'Drafts: retention', 'Draft Add a feature',
+                     ' Draft: leading space', 'Draft- x', '{Draft} x')
 TAG = {'CI_PIPELINE_SOURCE': 'push', 'CI_COMMIT_TAG': 'v1.2.3'}
 BRANCH = {'CI_PIPELINE_SOURCE': 'push', 'CI_COMMIT_BRANCH': 'feature'}
 CHILD = {'CI_PIPELINE_SOURCE': 'parent_pipeline', 'CI_COMMIT_BRANCH': 'feature'}
-# A GitLab before 17.10 does not set CI_MERGE_REQUEST_DRAFT: drafts fall back to the gate.
-UNSET_DRAFT_MR = {k: v for k, v in DRAFT_MR.items() if k != 'CI_MERGE_REQUEST_DRAFT'}
+# Doubt fails toward the gate: a ready title or no title. A 17.10 draft variable
+# alone moves nothing.
 GATE_SCENARIOS = {'merge request': MR, 'tag': TAG,
-                  'merge request without CI_MERGE_REQUEST_DRAFT': UNSET_DRAFT_MR}
+                  'merge request without a title': {k: v for k, v in MR.items() if k != 'CI_MERGE_REQUEST_TITLE'},
+                  'CI_MERGE_REQUEST_DRAFT true with a ready title': {**MR, 'CI_MERGE_REQUEST_DRAFT': 'true'},
+                  **{f'merge request titled {t!r}': {**MR, 'CI_MERGE_REQUEST_TITLE': t} for t in READY_TITLES}}
 # Draft merge requests: every lane, no selection (#808), but on wip (ADR-0009 section 2).
-DRAFT_SCENARIOS = {'draft merge request': DRAFT_MR}
+DRAFT_SCENARIOS = {f'draft merge request titled {t!r}': {**MR, 'CI_MERGE_REQUEST_TITLE': t}
+                   for t in DRAFT_TITLES}
 WIP_SCENARIOS = {
     'branch': BRANCH,
     'default branch': {'CI_PIPELINE_SOURCE': 'push', 'CI_COMMIT_BRANCH': 'main'},
@@ -260,9 +297,15 @@ def rule_shape_violations(doc):
     return found
 
 
+# Above the GitLab 17.0 floor (docs/deploy.md#7-ci-inventory): never read.
+ABOVE_FLOOR = ('CI_MERGE_REQUEST_DRAFT',)
+
+
 def pipeline_violations(doc):
     """Pipeline shape (GH#1118 F11): which jobs run where, on which runner tag."""
     found = rule_shape_violations(doc)
+    text = yaml.safe_dump(doc)
+    found += [f'{name} needs GitLab above the 17.0 floor' for name in ABOVE_FLOOR if name in text]
     for label, variables in GATE_SCENARIOS.items():
         run = pipeline(doc, variables)
         if run is None:
@@ -398,9 +441,11 @@ def violations(doc):
             found.append(f'{name}: report must be retained on failure')
         if '-rs' not in command.split() and name == 'sim':
             found.append('sim: skip reasons must be reported')
+    found += timeout_violations(doc)
+    found += plugin_violations(doc)
     unit = shlex.split(pytest_line(all_jobs['test']) or '')
     unit = unit[3:] if unit[:3] == ['python', '-m', 'pytest'] else unit[1:]
-    shard_args = [t for t in unit if t in ('-p', 'tests.ci_shard') or t.startswith('--unit-')]
+    shard_args = [t for t in unit if t in UNIT_PLUGIN_ARGS or t.startswith('--unit-')]
     if shard_args != UNIT_SHARD_ARGS or all_jobs['test'].get('parallel') != UNIT_SHARDS:
         found.append(f'test: must run shard $CI_NODE_INDEX of parallel: {UNIT_SHARDS} with the GitHub layout')
     github_unit = github_step('unit', '--unit-shards=')['run']
@@ -438,6 +483,64 @@ def violations(doc):
     for name in ('sim', 'gate-l1'):
         if not any(digest in s.get('name', '') for s in all_jobs[name].get('services', [])):
             found.append(f'{name}: Qdrant service is not the approved digest')
+    return found
+
+
+def timeout_ceiling(name, doc):
+    """Minutes: the GitHub counterpart's timeout-minutes times the parallelism GitLab lacks."""
+    workflow, counterpart = TIMEOUT_COUNTERPARTS[name]
+    github = WORKFLOWS[workflow]['jobs'][counterpart]
+    runs = '\n'.join(step.get('run', '') for step in github['steps'])
+    gitlab = '\n'.join(lines(jobs(doc)[name]))
+    if name == 'test':  # GitHub's matrix shards against GitLab's parallel jobs
+        factor = len(github['strategy']['matrix']['shard']) / jobs(doc)[name].get('parallel', 1)
+    elif name == 'sim':  # sim_parallel.py processes against one serial pytest
+        factor = int(re.search(r'sim_parallel\.py --shards (\d+)', runs).group(1))
+    elif name == 'hazards':  # qa:hazards workers (Task default 1)
+        worker = re.search(r'\bWORKERS=(\d+)', gitlab)
+        factor = int(re.search(r'\bWORKERS=(\d+)', runs).group(1)) / (int(worker.group(1)) if worker else 1)
+    else:
+        factor = 1
+    return github['timeout-minutes'] * factor
+
+
+def timeout_violations(doc):
+    """Every job that can take one has a bounded timeout; GitLab refuses one on a trigger job."""
+    found = []
+    for name in jobs(doc):
+        resolved = resolve(doc, name)
+        if 'trigger' in resolved:
+            if 'timeout' in resolved:
+                found.append(f'{name}: GitLab rejects timeout on a trigger job')
+            continue
+        value = str(resolved.get('timeout', ''))
+        minutes = re.fullmatch(r'([1-9][0-9]*)m', value)
+        if name not in TIMEOUT_COUNTERPARTS:
+            found.append(f'{name}: no GitHub counterpart bounds its timeout')
+        elif not minutes:
+            found.append(f'{name}: needs a timeout in whole minutes (for example 10m), has {value or "none"}')
+        elif int(minutes.group(1)) > timeout_ceiling(name, doc):
+            found.append(f'{name}: timeout {value} exceeds its GitHub-derived ceiling')
+    return found
+
+
+def plugin_violations(doc):
+    """The unit lane loads exactly GitHub's producer plugins; sim autoloads as GitHub's sim does."""
+    found = []
+    body = lines(jobs(doc)['test'])
+    command = pytest_line(jobs(doc)['test'])
+    unit = shlex.split(command or '')
+    if AUTOLOAD_OFF not in body or command is None or body.index(AUTOLOAD_OFF) > body.index(command):
+        found.append(f'test: plugins autoload; GitHub\'s unit producer runs with them off ({AUTOLOAD_OFF})')
+    if [t for t in unit if t in UNIT_PLUGIN_ARGS] != UNIT_PLUGIN_ARGS:
+        found.append(f'test: must load exactly {" ".join(UNIT_PLUGIN_ARGS)}, as GitHub\'s unit producer does')
+    ambient = [i for i, s in enumerate(body) if 'PYTEST_ADDOPTS' in s and 'PYTEST_PLUGINS' in s and 'exit 1' in s]
+    if len(ambient) != 1 or command is None or ambient[0] > body.index(command):
+        found.append('test: ambient PYTEST_ADDOPTS/PYTEST_PLUGINS not refused before pytest')
+    github_sim = yaml.safe_dump(GITHUB['jobs']['sim'])
+    gitlab_sim = yaml.safe_dump(resolve(doc, 'sim'))
+    if ('PYTEST_DISABLE_PLUGIN_AUTOLOAD' in github_sim) != ('PYTEST_DISABLE_PLUGIN_AUTOLOAD' in gitlab_sim):
+        found.append('sim: plugin loading differs from the GitHub sim job')
     return found
 
 
@@ -487,7 +590,8 @@ def workflow_rule(doc, needle):
     return next(r for r in doc['workflow']['rules'] if r['if'] == needle)
 
 
-DRAFT_RULE = '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_DRAFT == "true"'
+DRAFT_RULE = ('$CI_PIPELINE_SOURCE == "merge_request_event"'
+              ' && $CI_MERGE_REQUEST_TITLE =~ /^(\\[draft\\]|\\(draft\\)|draft:)/i')
 
 
 def set_unit_line(doc, line):
@@ -562,13 +666,27 @@ NEGATIVE_CONTROLS = {
     'every merge request on wip': lambda d: workflow_rule(d, DRAFT_RULE).update(
         {'if': '$CI_PIPELINE_SOURCE == "merge_request_event"'}),
     'draft rule matches a ready merge request': lambda d: workflow_rule(d, DRAFT_RULE).update(
-        {'if': '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_DRAFT'}),
+        {'if': '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TITLE'}),
+    'draft rule needs GitLab 17.10': lambda d: workflow_rule(d, DRAFT_RULE).update(
+        {'if': '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_DRAFT == "true"'}),
+    'draft rule also reads the 17.10 variable': lambda d: d['workflow']['rules'].insert(1, {
+        'if': '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_DRAFT == "true"',
+        'variables': {'CI_RUNNER_TAG': 'wip'}}),
     'draft merge requests run no lanes': lambda d: d['.gate-pipeline']['rules'].insert(
-        0, {'if': '$CI_MERGE_REQUEST_DRAFT == "true"', 'when': 'never'}),
+        0, {'if': '$CI_MERGE_REQUEST_TITLE =~ /^draft:/i', 'when': 'never'}),
     'draft merge requests run the selector': lambda d: d['.wip-pipeline']['rules'].append(
-        {'if': '$CI_MERGE_REQUEST_DRAFT == "true"'}),
+        {'if': '$CI_MERGE_REQUEST_TITLE =~ /^draft:/i'}),
     'draft merge request pipelines never auto-cancelled': lambda d: workflow_rule(d, DRAFT_RULE).update(
         auto_cancel={'on_new_commit': 'none'}),
+    'draft title regex unanchored': lambda d: workflow_rule(d, DRAFT_RULE).update(
+        {'if': DRAFT_RULE.replace('/^(', '/(')}),
+    'draft title regex case-sensitive': lambda d: workflow_rule(d, DRAFT_RULE).update({'if': DRAFT_RULE[:-1]}),
+    'draft title regex without the colon': lambda d: workflow_rule(d, DRAFT_RULE).update(
+        {'if': DRAFT_RULE.replace('draft:)', 'draft)')}),
+    'draft title regex misses a GitLab prefix': lambda d: workflow_rule(d, DRAFT_RULE).update(
+        {'if': DRAFT_RULE.replace('|\\(draft\\)', '')}),
+    'draft rule after the ready merge request rule': lambda d: d['workflow']['rules'].insert(
+        3, d['workflow']['rules'].pop(d['workflow']['rules'].index(workflow_rule(d, DRAFT_RULE)))),
     'tag pipelines on wip': lambda d: workflow_rule(d, '$CI_COMMIT_TAG')['variables'].update(
         CI_RUNNER_TAG='wip'),
     'branch pipelines on gate': lambda d: d['workflow']['rules'][-1]['variables'].update(CI_RUNNER_TAG='gate'),
@@ -607,12 +725,58 @@ NEGATIVE_CONTROLS = {
         0, d['gate-l1']['script'][0].replace('--delta eval-delta.md', '')),
     'hazards removed': lambda d: d.pop('hazards'),
 }
+# Each weakening below must be caught by its own rule, not only by another one.
+TIMEOUT_CONTROLS = {
+    'unit job without a timeout': lambda d: d['test'].pop('timeout'),
+    'select job without a timeout': lambda d: d['select'].pop('timeout'),
+    'timeout above the GitHub-derived ceiling': lambda d: d['sim'].update(timeout='61m'),
+    'unit timeout not scaled down with more shards': lambda d: d['test'].update(parallel=8),
+    'hazards timeout not scaled down with more workers': lambda d: replace(
+        d['hazards'], 'sh scripts/tools/run-task.sh qa:hazards', lines(d['hazards'])[-1] + ' WORKERS=8'),
+    'timeout not in whole minutes': lambda d: d['lint'].update(timeout='1h'),
+    'timeout on the trigger job': lambda d: d['lanes'].update(timeout='5m'),
+}
+PLUGIN_CONTROLS = {
+    'unit plugins autoload': lambda d: d['test']['script'].remove(AUTOLOAD_OFF),
+    'unit autoload disabled only by a YAML variable': lambda d: (
+        d['test']['script'].remove(AUTOLOAD_OFF), d['test']['variables'].update(PYTEST_DISABLE_PLUGIN_AUTOLOAD='1')),
+    'unit autoload disabled after pytest': lambda d: d['test']['script'].append(
+        d['test']['script'].pop(d['test']['script'].index(AUTOLOAD_OFF))),
+    'AnyIO plugin not loaded': lambda d: set_unit_line(d, UNIT_LINE.replace('-p anyio.pytest_plugin ', '')),
+    'ambient pytest options accepted': lambda d: d['test']['script'].remove(
+        next(s for s in d['test']['script'] if 'PYTEST_PLUGINS' in s)),
+    'sim plugin loading differs from GitHub': lambda d: d['sim']['variables'].update(
+        PYTEST_DISABLE_PLUGIN_AUTOLOAD='1'),
+}
+NEGATIVE_CONTROLS.update(TIMEOUT_CONTROLS)
+NEGATIVE_CONTROLS.update(PLUGIN_CONTROLS)
 
 
 @pytest.mark.parametrize('name', sorted(NEGATIVE_CONTROLS))
 def test_static_rules_reject_each_weakened_definition(name):
     doc = mutated(lambda d: NEGATIVE_CONTROLS[name](d))
     assert violations(doc), f'{name} was not detected'
+
+
+@pytest.mark.parametrize('rule, name', [*[(timeout_violations, n) for n in sorted(TIMEOUT_CONTROLS)],
+                                        *[(plugin_violations, n) for n in sorted(PLUGIN_CONTROLS)]])
+def test_timeout_and_plugin_rules_each_catch_their_weakening(rule, name):
+    controls = {**TIMEOUT_CONTROLS, **PLUGIN_CONTROLS}
+    assert rule(GITLAB) == []
+    assert rule(mutated(lambda d: controls[name](d))), f'{name} was not detected by {rule.__name__}'
+
+
+def test_timeouts_are_the_scaled_github_ceilings():
+    # Independent expectation: GitHub's timeout-minutes (select 5, check-context 5,
+    # lint 10, unit 15 over 8 shards, hazards 10 with 4 workers, sim 20 over 3
+    # processes, gate-l1 15) scaled to GitLab's 4 shards, 1 worker and 1 process.
+    assert {n: timeout_ceiling(n, GITLAB) for n in TIMEOUT_COUNTERPARTS} == {
+        'select': 5, 'hygiene': 5, 'lint': 10, 'test': 30, 'hazards': 40, 'sim': 60, 'gate-l1': 15}
+    # sim takes 40m, under its 60m ceiling: 60m is GitLab's default project timeout
+    # and would not bound a hung sim holding the single `gate` slot.
+    assert {n: resolve(GITLAB, n)['timeout'] for n in TIMEOUT_COUNTERPARTS} == {
+        'select': '5m', 'hygiene': '5m', 'lint': '10m', 'test': '30m', 'hazards': '40m', 'sim': '40m',
+        'gate-l1': '15m'}
 
 
 # ---- behavior: execute the real job scripts with stub tools -----------------
@@ -662,6 +826,7 @@ def stage(tmp_path):
             'if [ -n "$FAIL_ON" ]; then case "$(basename "$0") $*" in "$FAIL_ON"*) exit 1;; esac; fi\n')
     (bin_dir / 'pytest').write_text(
         '#!/bin/sh\nprintf \'pytest %s\\n\' "$*" >> "$STUB_LOG"\n'
+        'printf \'pytest-env autoload=%s\\n\' "${PYTEST_DISABLE_PLUGIN_AUTOLOAD-unset}" >> "$STUB_LOG"\n'
         'for a in "$@"; do case "$a" in --junitxml=*) out="${a#--junitxml=}";; esac; done\n'
         'if [ "${JUNIT_KIND:-clean}" != none ]; then printf \'%s\' "$JUNIT_BODY" > "$out"; fi\n'
         'exit "${PYTEST_STATUS:-0}"\n')
@@ -670,7 +835,43 @@ def stage(tmp_path):
     return bin_dir
 
 
-def run_job(tmp_path, job, *, start=None, doc=None, **env):
+@pytest.fixture(params=sorted(JOB_SHELLS))
+def shell(request):
+    return request.param
+
+
+def shell_run(tmp_path, shell, script, env, cwd):
+    """Run job steps under `shell` as GitLab's runner would, with `sh` on PATH resolving to it."""
+    path = shutil.which(shell)
+    assert path, f'{shell} is required: GitLab job steps are proven under both bash and dash'
+    sh_dir = tmp_path / f'sh-{shell}'
+    sh_dir.mkdir(exist_ok=True)
+    if not (sh_dir / 'sh').is_symlink():
+        (sh_dir / 'sh').symlink_to(path)
+    env = {**env, 'PATH': f'{sh_dir}:{env.get("PATH", os.environ["PATH"])}'}
+    return subprocess.run([path, *JOB_SHELLS[shell], script], cwd=cwd, check=False, env=env,
+                          capture_output=True, text=True)
+
+
+SHELL_PROBE = """\
+printf 'outer=%s pipefail=%s\\n' "$(basename "$(readlink /proc/$$/exe)")" \\
+    "$(if [ -n "${BASH_VERSION:-}" ] && shopt -oq pipefail; then echo on; else echo off; fi)"
+sh -c 'printf "inner=%s posix=%s\\n" "$(basename "$(readlink /proc/$$/exe)")" \\
+    "$(if [ -n "${BASH_VERSION:-}" ] && shopt -oq posix; then echo on; else echo off; fi)"'
+"""
+
+
+def test_job_steps_and_the_sh_they_start_run_under_the_selected_shell(tmp_path, shell):
+    # Guards the two-shell proof itself: the runner's bash keeps pipefail, the kit's
+    # `sh` is bash in POSIX mode, and the dash case is dash throughout.
+    proc = shell_run(tmp_path, shell, SHELL_PROBE, dict(os.environ), tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    expected = {'bash': 'outer=bash pipefail=on\ninner=bash posix=on\n',
+                'dash': 'outer=dash pipefail=off\ninner=dash posix=off\n'}
+    assert proc.stdout == expected[shell]
+
+
+def run_job(tmp_path, job, *, start=None, doc=None, shell='bash', **env):
     """Run (a tail of) a job's script lines as GitLab would: fail fast, no -u noise."""
     bin_dir = stage(tmp_path)
     steps = lines((doc or GITLAB)[job])
@@ -681,17 +882,17 @@ def run_job(tmp_path, job, *, start=None, doc=None, **env):
     base = {**os.environ, 'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'STUB_LOG': str(log),
             'REAL_PYTHON': sys.executable, 'CI_PROJECT_DIR': str(tmp_path)}
     for key in ('CI_TASK_ARCHIVE', 'CI_HELM_ARCHIVE', 'CI_BM25_CACHE_DIR', 'FAIL_ON', 'LINK_STATUS',
-                'GITLAB_TOKEN', 'CI_MERGE_REQUEST_IID'):
+                'GITLAB_TOKEN', 'CI_MERGE_REQUEST_IID', 'PYTEST_ADDOPTS', 'PYTEST_PLUGINS',
+                'PYTEST_DISABLE_PLUGIN_AUTOLOAD'):
         base.pop(key, None)
-    proc = subprocess.run(['sh', '-e', '-c', '\n'.join(steps)], cwd=tmp_path, check=False,
-                          env={**base, **env}, capture_output=True, text=True)
+    proc = shell_run(tmp_path, shell, '\n'.join(steps), {**base, **env}, tmp_path)
     return proc, log.read_text()
 
 
 @pytest.mark.parametrize('failing, expected_after', [
     ('', 3), ('ruff check', 0), ('mypy src', 1)])
-def test_lint_job_fails_when_any_tool_fails(tmp_path, failing, expected_after):
-    proc, log = run_job(tmp_path, 'lint', FAIL_ON=failing)
+def test_lint_job_fails_when_any_tool_fails(tmp_path, shell, failing, expected_after):
+    proc, log = run_job(tmp_path, 'lint', shell=shell, FAIL_ON=failing)
     assert (proc.returncode == 0) == (failing == ''), proc.stderr
     executed = log.splitlines()
     # Fail fast: nothing after the failing command runs, and it is the last one.
@@ -713,26 +914,26 @@ def test_lint_job_fails_when_any_tool_fails(tmp_path, failing, expected_after):
     *[('sim', 'sim-junit.xml', 'rm -f sim-junit.xml', kind, status, passes) for kind, status, passes in (
         ('clean', 0, True), ('clean', 1, False), ('skipped', 0, False))]])
 def test_unit_and_sim_jobs_reject_every_non_clean_outcome(
-        tmp_path, job, report, tail, kind, pytest_status, passes):
+        tmp_path, shell, job, report, tail, kind, pytest_status, passes):
     body = JUNIT.get(kind, '')
-    proc, log = run_job(tmp_path, job, start=tail, JUNIT_KIND=kind, JUNIT_BODY=body,
+    proc, log = run_job(tmp_path, job, start=tail, shell=shell, JUNIT_KIND=kind, JUNIT_BODY=body,
                         PYTEST_STATUS=str(pytest_status))
     assert (proc.returncode == 0) is passes, proc.stdout + proc.stderr
     if pytest_status:
         assert 'check_junit_clean' not in log  # a failing run stops before the gate
 
 
-def test_stale_report_cannot_satisfy_the_gate(tmp_path):
+def test_stale_report_cannot_satisfy_the_gate(tmp_path, shell):
     # A clean report left by an earlier run must not survive a run that writes none.
     (tmp_path / 'unit-junit.xml').write_text(JUNIT['clean'])
-    proc, _ = run_job(tmp_path, 'test', start='rm -f unit-junit.xml', JUNIT_KIND='none')
+    proc, _ = run_job(tmp_path, 'test', start='rm -f unit-junit.xml', shell=shell, JUNIT_KIND='none')
     assert proc.returncode != 0
 
 
 @pytest.mark.parametrize('failing_env, passes', [
     ({}, True), ({'BM25_STATUS': '3'}, False), ({'DOCTOR_STATUS': '2'}, False),
     ({'CI_TASK_ARCHIVE': None}, False), ({'LINK_STATUS': '2'}, False)])
-def test_sim_job_prerequisites_fail_before_pytest(tmp_path, failing_env, passes):
+def test_sim_job_prerequisites_fail_before_pytest(tmp_path, shell, failing_env, passes):
     env = {'CI_TASK_ARCHIVE': str(tmp_path / 'task.tgz'),
            'CI_BM25_CACHE_DIR': str(tmp_path / 'bm25'), 'JUNIT_BODY': JUNIT['clean']}
     for key, value in failing_env.items():
@@ -740,7 +941,7 @@ def test_sim_job_prerequisites_fail_before_pytest(tmp_path, failing_env, passes)
             env.pop(key)
         else:
             env[key] = value
-    proc, log = run_job(tmp_path, 'sim', **env)
+    proc, log = run_job(tmp_path, 'sim', shell=shell, **env)
     assert (proc.returncode == 0) is passes, proc.stdout + proc.stderr
     assert ('pytest ' in log) is passes
     if 'CI_TASK_ARCHIVE' in env:
@@ -751,9 +952,9 @@ def test_sim_job_prerequisites_fail_before_pytest(tmp_path, failing_env, passes)
 
 
 @pytest.mark.parametrize('status', [0, 1])
-def test_gate_l1_regression_fails_the_job_and_posts_no_note(tmp_path, status):
+def test_gate_l1_regression_fails_the_job_and_posts_no_note(tmp_path, shell, status):
     (tmp_path / 'eval-delta.md').write_text('delta')
-    proc, log = run_job(tmp_path, 'gate-l1', GATE_STATUS=str(status),
+    proc, log = run_job(tmp_path, 'gate-l1', shell=shell, GATE_STATUS=str(status),
                         GITLAB_TOKEN='synthetic' if status else '',
                         CI_MERGE_REQUEST_IID='3' if status else '')
     assert proc.returncode == status, proc.stderr
@@ -810,10 +1011,11 @@ def test_merge_request_and_tag_pipelines_run_every_lane_directly_on_gate(label):
     assert resolve(GITLAB, 'test')['parallel'] == UNIT_SHARDS
 
 
-def test_a_draft_merge_request_runs_every_lane_directly_on_wip():
+@pytest.mark.parametrize('label', sorted(DRAFT_SCENARIOS))
+def test_a_draft_merge_request_runs_every_lane_directly_on_wip(label):
     # Marking a merge request ready starts no new pipeline, so a draft pipeline
     # may be the one a merge rests on: no selection (#808), but off the gate slot.
-    run = pipeline(GITLAB, DRAFT_MR)
+    run = pipeline(GITLAB, DRAFT_SCENARIOS[label])
     assert run is not None
     assert run['jobs'] == REQUIRED_JOBS and not run['jobs'] & SELECTION_JOBS
     assert run['variables'] == {'CI_RUNNER_TAG': 'wip'}
@@ -822,11 +1024,15 @@ def test_a_draft_merge_request_runs_every_lane_directly_on_wip():
 
 
 def test_only_a_draft_merge_request_leaves_the_gate():
+    # The 17.10 variable is never read: only the title moves a pipeline off the gate.
+    assert pipeline(GITLAB, {**MR, 'CI_MERGE_REQUEST_DRAFT': 'true'})['variables'] == {'CI_RUNNER_TAG': 'gate'}
     assert pipeline(GITLAB, {**DRAFT_MR, 'CI_MERGE_REQUEST_DRAFT': 'false'})['variables'] == {
-        'CI_RUNNER_TAG': 'gate'}
-    assert pipeline(GITLAB, UNSET_DRAFT_MR)['variables'] == {'CI_RUNNER_TAG': 'gate'}
-    # A tag never matches the draft rule, even if a draft variable leaked into its scope.
-    tag = pipeline(GITLAB, {**TAG, 'CI_MERGE_REQUEST_DRAFT': 'true'})
+        'CI_RUNNER_TAG': 'wip'}
+    for title in READY_TITLES:
+        assert pipeline(GITLAB, {**MR, 'CI_MERGE_REQUEST_TITLE': title})['variables'] == {
+            'CI_RUNNER_TAG': 'gate'}, title
+    # A tag never matches a draft rule, even if draft variables leaked into its scope.
+    tag = pipeline(GITLAB, {**TAG, 'CI_MERGE_REQUEST_DRAFT': 'true', 'CI_MERGE_REQUEST_TITLE': 'Draft: x'})
     assert tag['variables'] == {'CI_RUNNER_TAG': 'gate'} and tag['jobs'] == REQUIRED_JOBS
     assert tag['auto_cancel'] == {'on_new_commit': 'none'}
 
@@ -890,7 +1096,7 @@ def python_on_path(tmp_path):
     return bin_dir
 
 
-def run_select(tmp_path, commits):
+def run_select(tmp_path, commits, shell='bash'):
     """Push `main`, branch off it, commit `commits`, then run the real select job in a fresh clone."""
     seed = tmp_path / 'seed'
     seed.mkdir()
@@ -919,8 +1125,7 @@ def run_select(tmp_path, commits):
            'CI_DEFAULT_BRANCH': 'main', 'CI_COMMIT_SHA': git(work, 'rev-parse', 'HEAD'),
            'PYTHONPATH': ''}
     env.pop('GITHUB_OUTPUT', None)
-    proc = subprocess.run(['sh', '-e', '-c', '\n'.join(lines(GITLAB['select']))], cwd=work, env=env,
-                          check=False, capture_output=True, text=True)
+    proc = shell_run(tmp_path, shell, '\n'.join(lines(GITLAB['select'])), env, work)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     config = yaml.safe_load((work / 'lanes.yml').read_text())
     return pipeline(child_doc(GITLAB, config), CHILD), proc.stdout
@@ -938,9 +1143,9 @@ def run_select(tmp_path, commits):
      REQUIRED_JOBS, {'packaging'}),
     ('no change against the default branch', [], REQUIRED_JOBS, {'ha', 'load'}),
 ])
-def test_select_job_child_pipeline_runs_exactly_the_classified_lanes(tmp_path, label, commits, expected,
+def test_select_job_child_pipeline_runs_exactly_the_classified_lanes(tmp_path, shell, label, commits, expected,
                                                                      not_run):
-    child, output = run_select(tmp_path, commits)
+    child, output = run_select(tmp_path, commits, shell)
     assert child is not None and child['variables'] == {'CI_RUNNER_TAG': 'wip'}
     assert child['jobs'] == expected, output
     if not_run:  # lanes with no GitLab job are named, never counted as run
@@ -971,8 +1176,8 @@ def test_generator_refuses_an_unreadable_manifest(tmp_path, raw):
 # ---- unit shards: GitLab's parallel index reaches the shard plugin -----------
 
 @pytest.mark.parametrize('index', range(1, UNIT_SHARDS + 1))
-def test_each_parallel_job_runs_its_own_shard_of_four(tmp_path, index):
-    proc, log = run_job(tmp_path, 'test', start='rm -f unit-junit.xml', JUNIT_BODY=JUNIT['clean'],
+def test_each_parallel_job_runs_its_own_shard_of_four(tmp_path, shell, index):
+    proc, log = run_job(tmp_path, 'test', start='rm -f unit-junit.xml', shell=shell, JUNIT_BODY=JUNIT['clean'],
                         CI_NODE_INDEX=str(index), CI_NODE_TOTAL=str(UNIT_SHARDS))
     assert proc.returncode == 0, proc.stderr
     argv = shlex.split(next(l for l in log.splitlines() if l.startswith('pytest ')))
@@ -980,13 +1185,20 @@ def test_each_parallel_job_runs_its_own_shard_of_four(tmp_path, index):
         f'--unit-shard={index}', '--unit-shards=4', '--unit-durations=tests/unit-durations.json']
 
 
+def unit_steps(line):
+    """The test job's steps from its ambient-option refusal through pytest, with `line` as the pytest command."""
+    body = lines(GITLAB['test'])
+    start = next(i for i, s in enumerate(body) if 'PYTEST_PLUGINS' in s)
+    return '\n'.join([*body[start:body.index(UNIT_LINE)], line])
+
+
 def test_a_job_without_parallel_variables_cannot_pass_as_a_shard(tmp_path):
     # Without GitLab's parallel variables the shard options are empty and the
     # real plugin refuses them, so a job that lost `parallel` cannot pass as a shard.
     unset = UNIT_LINE.replace('$CI_NODE_INDEX', '').replace('$CI_NODE_TOTAL', '')
-    proc = subprocess.run(['sh', '-e', '-c', unset.replace('--junitxml=unit-junit.xml', '--collect-only')],
-                          cwd=ROOT, check=False, capture_output=True, text=True,
-                          env={**os.environ, 'PATH': f'{python_on_path(tmp_path)}:{os.environ["PATH"]}'})
+    env = {k: v for k, v in os.environ.items() if not k.startswith(('PYTEST_', 'CI_NODE_'))}
+    proc = shell_run(tmp_path, 'bash', unit_steps(unset.replace('--junitxml=unit-junit.xml', '--collect-only')),
+                     {**env, 'PATH': f'{python_on_path(tmp_path)}:{os.environ["PATH"]}'}, ROOT)
     assert proc.returncode == 4 and 'unit-shard' in proc.stderr, proc.stdout + proc.stderr
 
 
@@ -1004,9 +1216,9 @@ def collect(tmp_path, command, label, **env):
     clean = {k: v for k, v in os.environ.items()
              if k not in ('PYTEST_ADDOPTS', 'PYTEST_PLUGINS', 'PYTEST_DISABLE_PLUGIN_AUTOLOAD', 'CI_NODE_INDEX',
                           'CI_NODE_TOTAL')}
-    proc = subprocess.run(['sh', '-e', '-c', command], cwd=ROOT, check=False, capture_output=True, text=True,
-                          env={**clean, 'PATH': f'{python_on_path(tmp_path)}:{os.environ["PATH"]}',
-                               'PYTHONPATH': str(tmp_path), 'COLLECTED_OUT': str(out), **env})
+    proc = shell_run(tmp_path, 'bash', unit_steps(command),
+                     {**clean, 'PATH': f'{python_on_path(tmp_path)}:{os.environ["PATH"]}',
+                      'PYTHONPATH': str(tmp_path), 'COLLECTED_OUT': str(out), **env}, ROOT)
     assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
     return out.read_text(encoding='utf-8').splitlines()
 
@@ -1031,6 +1243,78 @@ def test_four_shards_are_a_disjoint_complete_partition_of_the_real_collection(tm
         assert sorted(shard) == select_nodes(full, index, UNIT_SHARDS, durations)
 
 
+PLUGIN_PROBE = """import inspect
+import json
+import os
+from pathlib import Path
+
+
+def pytest_collection_finish(session):
+    # The classification tests/ci_shard.py applies to GitHub's native unit evidence.
+    root = Path(str(session.config.rootpath)).resolve()
+    seen = set()
+    for _name, plugin in session.config.pluginmanager.list_name_plugin():
+        if plugin is None:
+            continue
+        module = plugin if inspect.ismodule(plugin) else inspect.getmodule(
+            plugin if inspect.isclass(plugin) else type(plugin))
+        name = getattr(module, '__name__', '')
+        path = getattr(module, '__file__', None)
+        if name == __name__:
+            continue
+        if name == '_pytest' or name.startswith('_pytest.'):
+            seen.add('_pytest')
+        elif path and Path(path).resolve().is_relative_to(root):
+            seen.add(str(Path(path).resolve().relative_to(root)))
+        else:
+            seen.add(name)
+    with open(os.environ['PLUGINS_OUT'], 'w', encoding='utf-8') as handle:
+        json.dump(sorted(seen), handle)
+"""
+
+
+@pytest.mark.parametrize('variant', ['job', 'autoload left on', 'AnyIO not loaded'])
+def test_the_unit_job_loads_exactly_the_github_producer_plugins(tmp_path, shell, variant):
+    # GitHub's native unit evidence must record exactly this set (scripts/unit_evidence.py).
+    assert f"record['plugins'] == {GITHUB_UNIT_PLUGINS!r}" in (ROOT / 'scripts/unit_evidence.py').read_text()
+    (tmp_path / 'plugin_probe.py').write_text(PLUGIN_PROBE)
+    line = UNIT_LINE.replace('--junitxml=unit-junit.xml', '--collect-only -p no:cacheprovider -p plugin_probe')
+    if variant == 'AnyIO not loaded':
+        line = line.replace('-p anyio.pytest_plugin ', '')
+    steps = unit_steps(line)
+    if variant == 'autoload left on':
+        steps = steps.replace(AUTOLOAD_OFF + '\n', '')
+    clean = {k: v for k, v in os.environ.items() if not k.startswith(('PYTEST_', 'CI_NODE_'))}
+    out = tmp_path / 'plugins.json'
+    proc = shell_run(tmp_path, shell, steps, {
+        **clean, 'PATH': f'{python_on_path(tmp_path)}:{os.environ["PATH"]}', 'PYTHONPATH': str(tmp_path),
+        'PLUGINS_OUT': str(out), 'CI_NODE_INDEX': '1', 'CI_NODE_TOTAL': str(UNIT_SHARDS)}, ROOT)
+    if variant == 'autoload left on':
+        # The explicit AnyIO plugin collides with its autoloaded entry point: the job fails, never widens.
+        assert proc.returncode != 0 and 'already registered' in proc.stdout + proc.stderr
+        assert not out.exists()
+        return
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    plugins = json.loads(out.read_text())
+    assert (plugins == GITHUB_UNIT_PLUGINS) is (variant == 'job'), plugins
+
+
+@pytest.mark.parametrize('ambient', [{}, {'PYTEST_ADDOPTS': '-k nothing'}, {'PYTEST_PLUGINS': 'other.plugin'},
+                                     {'PYTEST_DISABLE_PLUGIN_AUTOLOAD': ''}])
+def test_the_unit_job_refuses_ambient_pytest_options_and_keeps_autoload_off(tmp_path, shell, ambient):
+    # A project or pipeline variable outranks the YAML: the script itself refuses and exports.
+    proc, log = run_job(tmp_path, 'test', start='rm -f unit-junit.xml', shell=shell, JUNIT_BODY=JUNIT['clean'],
+                        CI_NODE_INDEX='1', CI_NODE_TOTAL=str(UNIT_SHARDS), **ambient)
+    refused = any(ambient.get(k) for k in ('PYTEST_ADDOPTS', 'PYTEST_PLUGINS'))
+    assert (proc.returncode == 0) is not refused, proc.stdout + proc.stderr
+    assert ('pytest ' in log) is not refused
+    if refused:
+        assert 'PYTEST_ADDOPTS or PYTEST_PLUGINS is set' in proc.stderr
+        assert all(v not in proc.stderr for v in ambient.values())
+    else:
+        assert 'pytest-env autoload=1' in log.splitlines()
+
+
 # ---- release pipelines from immutable tags and approved-registry images (#808) --
 
 @pytest.mark.parametrize('env, passes', [
@@ -1039,10 +1323,9 @@ def test_four_shards_are_a_disjoint_complete_partition_of_the_real_collection(tm
     ({'CI_COMMIT_TAG': 'v1.2.3', 'CI_COMMIT_REF_PROTECTED': 'false'}, False),
     ({'CI_COMMIT_TAG': 'v1.2.3'}, False),                         # protection unknown
 ])
-def test_hygiene_refuses_a_tag_pipeline_unless_the_tag_is_protected(tmp_path, env, passes):
+def test_hygiene_refuses_a_tag_pipeline_unless_the_tag_is_protected(tmp_path, shell, env, passes):
     base = {k: v for k, v in os.environ.items() if not k.startswith('CI_')}
-    proc = subprocess.run(['sh', '-e', '-c', tag_guard(GITLAB)], cwd=tmp_path, check=False,
-                          env={**base, **env}, capture_output=True, text=True)
+    proc = shell_run(tmp_path, shell, tag_guard(GITLAB), {**base, **env}, tmp_path)
     assert (proc.returncode == 0) is passes, proc.stderr
     if not passes:
         assert 'v1.2.3' in proc.stderr and 'protected' in proc.stderr
@@ -1107,7 +1390,7 @@ def py_base_script(tmp_path, kit_present):
 
 @pytest.mark.parametrize('kit_present, prepare_status, passes', [
     (True, 0, True), (True, 2, False), (False, 0, False)])
-def test_python_jobs_run_only_on_the_kit_environment(tmp_path, kit_present, prepare_status, passes):
+def test_python_jobs_run_only_on_the_kit_environment(tmp_path, shell, kit_present, prepare_status, passes):
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
     (bin_dir / 'python3').write_text('#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$STUB_LOG"\nexit "$PREPARE_STATUS"\n')
@@ -1117,8 +1400,7 @@ def test_python_jobs_run_only_on_the_kit_environment(tmp_path, kit_present, prep
     env = {**{k: v for k, v in os.environ.items() if not k.startswith(('CI_', 'PIP_'))},
            'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'STUB_LOG': str(log), 'CI_PROJECT_DIR': str(tmp_path),
            'PREPARE_STATUS': str(prepare_status)}
-    proc = subprocess.run(['sh', '-e', '-c', py_base_script(tmp_path, kit_present)], cwd=tmp_path, check=False,
-                          env=env, capture_output=True, text=True)
+    proc = shell_run(tmp_path, shell, py_base_script(tmp_path, kit_present), env, tmp_path)
     assert (proc.returncode == 0) is passes, proc.stderr
     if kit_present:
         assert log.read_text() == f'scripts/prepare_python.py --kit --venv {tmp_path}/.venv\n'
@@ -1129,13 +1411,12 @@ def test_python_jobs_run_only_on_the_kit_environment(tmp_path, kit_present, prep
 
 
 @pytest.mark.parametrize('value, passes', [(None, True), ('', True), ('/runner/helm archive.tgz', False)])
-def test_hygiene_refuses_the_retired_helm_archive_variable(tmp_path, value, passes):
+def test_hygiene_refuses_the_retired_helm_archive_variable(tmp_path, shell, value, passes):
     step = next(s for s in lines(GITLAB['hygiene']) if 'CI_HELM_ARCHIVE' in s)
     env = {k: v for k, v in os.environ.items() if not k.startswith('CI_')}
     if value is not None:
         env['CI_HELM_ARCHIVE'] = value
-    proc = subprocess.run(['sh', '-e', '-c', step], cwd=tmp_path, check=False, env=env,
-                          capture_output=True, text=True)
+    proc = shell_run(tmp_path, shell, step, env, tmp_path)
     assert (proc.returncode == 0) is passes, proc.stderr
     if not passes:
         # A fixed message naming the replacement; the value itself is never echoed.
