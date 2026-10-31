@@ -77,3 +77,12 @@ environment and its Task and Helm, so these GitLab CI/CD variables are retired:
 `hazards`: the image holds the Task binary only, and the artifact tests and the
 doctor read the archive. These variables are not items of the derived
 extension surface, so this entry has no `- removed` line.
+
+## 2026-10-31 GH#1174 Offline reference docs in the release bundle
+
+The bundle gains the required signed member `reference-docs.tar.gz` and three
+MANIFEST fields (`reference_docs`, `reference_docs_sha256`,
+`reference_docs_sets`). `bootstrap.sh` verifies it and unpacks it to
+`dist/reference-docs/` (start at `INDEX.md`): this repository's docs at the
+release commit and 38 version-matched upstream doc sets. Nothing to do for the
+gap maintainer; `dist/reference-docs/` is untracked, like the other members.

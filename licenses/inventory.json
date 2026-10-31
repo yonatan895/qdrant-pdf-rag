@@ -150,8 +150,8 @@
       "distributed_by_repo": true,
       "id": "image:oauth-proxy",
       "kind": "image",
-      "license_declared": "Apache-2.0 upstream project, pulled from registry.redhat.io under Red Hat registry terms",
-      "license_spdx": "Apache-2.0 AND LicenseRef-Red-Hat-Registry-Terms",
+      "license_declared": "MIT upstream project (openshift/oauth-proxy LICENSE at release-4.14 03840babdd3aaf8524a655e805c4cb0f9ec22526, checked 2026-10-31), pulled from registry.redhat.io under Red Hat registry terms",
+      "license_spdx": "MIT AND LicenseRef-Red-Hat-Registry-Terms",
       "name": "OpenShift oauth-proxy sidecar",
       "obligation": "External dependency: the Red Hat image is transferred unmodified and not built here; image layer licenses are not enumerated (#371).",
       "ships_in": [
@@ -578,6 +578,1192 @@
       ],
       "spdx_basis": "not-verified",
       "status": "excluded"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "qdrant-server",
+          "sha256": "f6ad6d177a4e5dd5667f95e43d22a54eef8b9e243fcaa507803ed2aa0ff4764b",
+          "url": "https://codeload.github.com/qdrant/qdrant/tar.gz/016542aa5deb6c66380bb137badf73d54f742bde"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:qdrant-server",
+      "kind": "reference-docs",
+      "license_declared": "Apache-2.0 (LICENSE at the pinned source)",
+      "license_spdx": "Apache-2.0",
+      "name": "Reference docs: Qdrant server (OpenAPI, gRPC protos, reference config) v1.19.2",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/qdrant-server/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "qdrant-helm",
+          "sha256": "63a238196a5cb86892dd46775ba777425c03195fcec7619f3d65da492799fcfe",
+          "url": "https://codeload.github.com/qdrant/qdrant-helm/tar.gz/770adb526115a4c31955c92b0dfbff0687754b23"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:qdrant-helm",
+      "kind": "reference-docs",
+      "license_declared": "Apache-2.0 (LICENSE at the pinned source)",
+      "license_spdx": "Apache-2.0",
+      "name": "Reference docs: Qdrant Helm chart qdrant-1.19.2",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/qdrant-helm/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE",
+            "LICENSE_NOTICE",
+            "LICENSE_HISTORY"
+          ],
+          "set": "open-webui",
+          "sha256": "80323c7eeb41f816b8dc8969f3ad830cb57d426bbcf842418f87ab6f027b1fd1",
+          "url": "https://codeload.github.com/open-webui/open-webui/tar.gz/91ea4e3421d1d8069f13d4a463fcb5986d94ea60"
+        }
+      },
+      "class": "proprietary",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:open-webui",
+      "kind": "reference-docs",
+      "license_declared": "LicenseRef-Open-WebUI-License (LICENSE, LICENSE_NOTICE, LICENSE_HISTORY at the pinned source)",
+      "license_spdx": "LicenseRef-Open-WebUI-License",
+      "name": "Reference docs: Open WebUI (in-repo docs) v0.12.3",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/open-webui/, with LICENSE, LICENSE_NOTICE, LICENSE_HISTORY beside them. Copyright and branding notices kept unmodified.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "openobserve",
+          "sha256": "64d87bb23044c8dadcce7a1e6c4e4a2a789ad591e5d1916192ec8290f6193e55",
+          "url": "https://codeload.github.com/openobserve/openobserve/tar.gz/d16d693ba99bc20621a58b948ecbcad7ec7fa882"
+        }
+      },
+      "class": "network-copyleft",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:openobserve",
+      "kind": "reference-docs",
+      "license_declared": "AGPL-3.0-only (LICENSE at the pinned source)",
+      "license_spdx": "AGPL-3.0-only",
+      "name": "Reference docs: OpenObserve (in-repo docs) v1.1.2",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/openobserve/, with LICENSE beside them. The AGPL-3.0 text ships as COPYING; the docs are unmodified and their source is the pinned archive.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "otelcol-contrib-prometheus",
+          "sha256": "255fe124dae8a911a5e15644a0ca29a16237c173d8f6a74dd438e8bc4534cc2b",
+          "url": "https://codeload.github.com/open-telemetry/opentelemetry-collector-contrib/tar.gz/982f20b8a8e8a2569fab3e27cf8b008e8a5080c1"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:otelcol-contrib-prometheus",
+      "kind": "reference-docs",
+      "license_declared": "Apache-2.0 (LICENSE at the pinned source)",
+      "license_spdx": "Apache-2.0",
+      "name": "Reference docs: OpenTelemetry Collector contrib: prometheus receiver v0.160.0",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/otelcol-contrib-prometheus/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "otelcol-core",
+          "sha256": "9143b9372e26673a3ad13ab35a583a1d0c02818369f00f77cebe5fe57057e800",
+          "url": "https://codeload.github.com/open-telemetry/opentelemetry-collector/tar.gz/cd3455cf3a7f672208140b1ebb1581c542b2b0ed"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:otelcol-core",
+      "kind": "reference-docs",
+      "license_declared": "Apache-2.0 (LICENSE at the pinned source)",
+      "license_spdx": "Apache-2.0",
+      "name": "Reference docs: OpenTelemetry Collector core (otlphttp exporter, confighttp, configtls) v0.160.0",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/otelcol-core/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE",
+            "LICENSE-CODE"
+          ],
+          "set": "otel-collector-site",
+          "sha256": "706be016626113d4d30580f2e34083b5231a00fa2f85bc8beb3ae7aec6331975",
+          "url": "https://codeload.github.com/open-telemetry/opentelemetry.io/tar.gz/73d90712c63b7f0eab7859993af73e51031ec638"
+        }
+      },
+      "class": "unknown",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:otel-collector-site",
+      "kind": "reference-docs",
+      "license_declared": "CC-BY-4.0 AND Apache-2.0 (LICENSE, LICENSE-CODE at the pinned source)",
+      "license_spdx": "CC-BY-4.0 AND Apache-2.0",
+      "name": "Reference docs: OpenTelemetry Collector user docs (opentelemetry.io) site state declaring collector 0.160.0",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/otel-collector-site/, with LICENSE, LICENSE-CODE beside them. Attribution: OpenTelemetry Collector documentation, (c) OpenTelemetry Authors, https://github.com/open-telemetry/opentelemetry.io at 73d90712c63b7f0eab7859993af73e51031ec638, CC-BY-4.0 (code samples Apache-2.0); unmodified subset of content/en/docs/collector/.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "oauth-proxy",
+          "sha256": "cbac2452ef9aa486ecd99e63cc88f13c0711d1b39044656bd7dcb490273eb59f",
+          "url": "https://codeload.github.com/openshift/oauth-proxy/tar.gz/03840babdd3aaf8524a655e805c4cb0f9ec22526"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:oauth-proxy",
+      "kind": "reference-docs",
+      "license_declared": "MIT (LICENSE at the pinned source)",
+      "license_spdx": "MIT",
+      "name": "Reference docs: OpenShift oauth-proxy release-4.14",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/oauth-proxy/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "nginx-unprivileged",
+          "sha256": "0cbeeca0e386fc1314c25323c365d1b6c20bb13d02816c6c3786734842890391",
+          "url": "https://codeload.github.com/nginxinc/docker-nginx-unprivileged/tar.gz/bb7393196554e11f7ba95452856d8b5faff217bf"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:nginx-unprivileged",
+      "kind": "reference-docs",
+      "license_declared": "Apache-2.0 (LICENSE at the pinned source)",
+      "license_spdx": "Apache-2.0",
+      "name": "Reference docs: nginx-unprivileged image 1.30.6-alpine",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/nginx-unprivileged/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "text/LICENSE"
+          ],
+          "set": "nginx-docs",
+          "sha256": "5984ab11d73b118efa91fe3c165d4082f3f8ac74482149f5fae6f80f4b38c7fe",
+          "url": "https://codeload.github.com/nginx/nginx.org/tar.gz/56cf5a7807bb2baeb2505808ffcf520496239fa6"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:nginx-docs",
+      "kind": "reference-docs",
+      "license_declared": "BSD-2-Clause (text/LICENSE at the pinned source)",
+      "license_spdx": "BSD-2-Clause",
+      "name": "Reference docs: nginx reference documentation (nginx.org) 1.30.6 release commit",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/nginx-docs/, with text/LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "vllm",
+          "sha256": "10bcf5b4179046006cace8977c739d969a77c7da09d441b9b4329370f2a7a029",
+          "url": "https://codeload.github.com/vllm-project/vllm/tar.gz/2cf0a6915ce544dc493a0990f2ea38d81601128a"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:vllm",
+      "kind": "reference-docs",
+      "license_declared": "Apache-2.0 (LICENSE at the pinned source)",
+      "license_spdx": "Apache-2.0",
+      "name": "Reference docs: vLLM v0.28.0",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/vllm/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "litellm",
+          "sha256": "e2ecdedcee334cffd1f8e7f404cc8cc030e049b61a6258ed49638c7f7be8b0e5",
+          "url": "https://codeload.github.com/BerriAI/litellm-docs/tar.gz/6a7fd077b7c17dbbf467181b0179e31e9558a141"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:litellm",
+      "kind": "reference-docs",
+      "license_declared": "MIT (LICENSE at the pinned source)",
+      "license_spdx": "MIT",
+      "name": "Reference docs: LiteLLM gateway documentation docs state of the v1.100.1 image build",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/litellm/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "helm",
+          "sha256": "38cff860975cea695ffa6d351dec9702694a555d741780abcf31647fd61a3bc1",
+          "url": "https://codeload.github.com/helm/helm-www/tar.gz/d1219bdd629216a33c8112704440352714fa40f1"
+        }
+      },
+      "class": "unknown",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:helm",
+      "kind": "reference-docs",
+      "license_declared": "MIT AND CC-BY-4.0 (LICENSE at the pinned source)",
+      "license_spdx": "MIT AND CC-BY-4.0",
+      "name": "Reference docs: Helm v4.3.0",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/helm/, with LICENSE beside them. Attribution: Helm documentation, (c) The Helm Authors, https://github.com/helm/helm-www at d1219bdd629216a33c8112704440352714fa40f1, CC-BY-4.0 (docusaurus.config.js) and MIT (LICENSE); unmodified subset of docs/.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "task",
+          "sha256": "143afc71a47fc1609c3a03f22d30be79e7331228678f84c88a955962cde62976",
+          "url": "https://codeload.github.com/go-task/task/tar.gz/ff3372fc50a47348610d722616f1a073aace0513"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:task",
+      "kind": "reference-docs",
+      "license_declared": "MIT (LICENSE at the pinned source)",
+      "license_spdx": "MIT",
+      "name": "Reference docs: Task (go-task) v3.53.1",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/task/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "kubernetes",
+          "sha256": "2f011dfd06db878ff7491e762e71529aa78a0120c0000d5c398cc7af7ca4afb9",
+          "url": "https://codeload.github.com/kubernetes/website/tar.gz/b9ab6105d0e3b6824dc368d3dd3b101fb4774575"
+        }
+      },
+      "class": "unknown",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:kubernetes",
+      "kind": "reference-docs",
+      "license_declared": "CC-BY-4.0 (LICENSE at the pinned source)",
+      "license_spdx": "CC-BY-4.0",
+      "name": "Reference docs: Kubernetes documentation release-1.33",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/kubernetes/, with LICENSE beside them. Attribution: Kubernetes documentation, (c) The Kubernetes Authors, https://github.com/kubernetes/website at b9ab6105d0e3b6824dc368d3dd3b101fb4774575, CC-BY-4.0; unmodified English subset of content/en/.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "openshift",
+          "sha256": "9f38eb9862d180295ca1c24888f63fe62ff2ec1e6d74ee65a7763f984234d5c5",
+          "url": "https://codeload.github.com/openshift/openshift-docs/tar.gz/78d5d33cfbd393c946a1585be22bee027a309381"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:openshift",
+      "kind": "reference-docs",
+      "license_declared": "Apache-2.0 (LICENSE at the pinned source)",
+      "license_spdx": "Apache-2.0",
+      "name": "Reference docs: OpenShift Container Platform documentation (and oc) 4.20 (enterprise-4.20)",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/openshift/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "skopeo",
+          "sha256": "659d1131174168a537d56cb896f0b933524a5a471707e08123c0447b2d93bfc7",
+          "url": "https://codeload.github.com/containers/skopeo/tar.gz/267465e170820673de25149378284fb352daa65e"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:skopeo",
+      "kind": "reference-docs",
+      "license_declared": "Apache-2.0 (LICENSE at the pinned source)",
+      "license_spdx": "Apache-2.0",
+      "name": "Reference docs: skopeo v1.22.2",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/skopeo/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "herdr-core",
+          "sha256": "4ca16779f53045ebb396f6feaa03608f2664575c18d1d4dfdf1c17f829a9c409",
+          "url": "https://codeload.github.com/herdrdev/herdr-core/tar.gz/9e934dff8513710d3c5111fe28bc5b23564805db"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:herdr-core",
+      "kind": "reference-docs",
+      "license_declared": "Apache-2.0 (LICENSE at the pinned source)",
+      "license_spdx": "Apache-2.0",
+      "name": "Reference docs: herdr-core (hc) v0.1.15",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/herdr-core/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "opencode-v2",
+          "sha256": "d467b24130d5ee87fa388a2fbe22129b4d074348bf923576e6f5ce5acf371f23",
+          "url": "https://codeload.github.com/anomalyco/opencode/tar.gz/9bbb8ce18c80f099e0e448775f59d965ead40a21"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:opencode-v2",
+      "kind": "reference-docs",
+      "license_declared": "MIT (LICENSE at the pinned source)",
+      "license_spdx": "MIT",
+      "name": "Reference docs: OpenCode v2.2.5",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/opencode-v2/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "opencode-v1",
+          "sha256": "f1585ecebdf2dae5b17d3c588741e831326d81e651c04e886b6356e0dce74b8f",
+          "url": "https://codeload.github.com/anomalyco/opencode/tar.gz/810c0eba1a7348036f8bdf61e6632d0c36c6876c"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:opencode-v1",
+      "kind": "reference-docs",
+      "license_declared": "MIT (LICENSE at the pinned source)",
+      "license_spdx": "MIT",
+      "name": "Reference docs: OpenCode (fallback line) v1.19.5",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/opencode-v1/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "license.txt",
+            "copyright.txt"
+          ],
+          "set": "cpython-text",
+          "sha256": "8197babb3e7431bfde0a9cb79673596f7f2302b1b83fa077b5a12d2ec8d10ebf",
+          "url": "https://www.python.org/ftp/python/doc/3.14.8/python-3.14.8-docs-text.tar.bz2"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:cpython-text",
+      "kind": "reference-docs",
+      "license_declared": "PSF-2.0 AND 0BSD (license.txt, copyright.txt at the pinned source)",
+      "license_spdx": "PSF-2.0 AND 0BSD",
+      "name": "Reference docs: CPython documentation (plain text) 3.14.8",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/cpython-text/, with license.txt, copyright.txt beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "license.html",
+            "copyright.html"
+          ],
+          "set": "cpython-html",
+          "sha256": "fbafd71ce0a53fb3fd84cb56ab660e81387a886bd3fada898647a437b942c53d",
+          "url": "https://www.python.org/ftp/python/doc/3.14.8/python-3.14.8-docs-html.tar.bz2"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:cpython-html",
+      "kind": "reference-docs",
+      "license_declared": "PSF-2.0 AND 0BSD (license.html, copyright.html at the pinned source)",
+      "license_spdx": "PSF-2.0 AND 0BSD",
+      "name": "Reference docs: CPython documentation (HTML) 3.14.8",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/cpython-html/, with license.html, copyright.html beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "opentelemetry-python",
+          "sha256": "72400b75bd5d933fae1bdd880535ac1206bdf1870048bc4e40ded19f0dfaba6d",
+          "url": "https://codeload.github.com/open-telemetry/opentelemetry-python/tar.gz/14971cef9c84c2354cbaf6871090896fad0f9a1a"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:opentelemetry-python",
+      "kind": "reference-docs",
+      "license_declared": "Apache-2.0 (LICENSE at the pinned source)",
+      "license_spdx": "Apache-2.0",
+      "name": "Reference docs: opentelemetry-python (api, sdk, exporters) v1.45.1 (exporter-prometheus 0.66b1)",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/opentelemetry-python/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "qdrant-client",
+          "sha256": "2f0d28ef7008f98664ccaf6c3dc842df08342b74cae7bd0aae422bb67b7182fd",
+          "url": "https://codeload.github.com/qdrant/qdrant-client/tar.gz/425840be987cd470d19bbb4e2363e87754fbc914"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:qdrant-client",
+      "kind": "reference-docs",
+      "license_declared": "Apache-2.0 (LICENSE at the pinned source)",
+      "license_spdx": "Apache-2.0",
+      "name": "Reference docs: qdrant-client v1.19.0",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/qdrant-client/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE.md"
+          ],
+          "set": "httpx2",
+          "sha256": "7fe705ce3fba9088b618e17250acefda2d23f6ea3f36335c6cc2aa027259ee1a",
+          "url": "https://codeload.github.com/pydantic/httpx2/tar.gz/71ae23be5448f859c2b4e21d9972ddfa7b8d759d"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:httpx2",
+      "kind": "reference-docs",
+      "license_declared": "BSD-3-Clause (LICENSE.md at the pinned source)",
+      "license_spdx": "BSD-3-Clause",
+      "name": "Reference docs: httpx2 v2.12.0",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/httpx2/, with LICENSE.md beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "pydantic",
+          "sha256": "f9b6b38260056a249f867b7d30034a9f9d315bbb42956344a05d0a416b6e2e00",
+          "url": "https://codeload.github.com/pydantic/pydantic/tar.gz/001dea020e0809844e5b17666432c9135a976f46"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:pydantic",
+      "kind": "reference-docs",
+      "license_declared": "MIT (LICENSE at the pinned source)",
+      "license_spdx": "MIT",
+      "name": "Reference docs: pydantic v2.13.5",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/pydantic/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "pydantic-settings",
+          "sha256": "c603c0d147e354c93aa6017c1b2e555225997246427ba0fcca04940928a214fb",
+          "url": "https://codeload.github.com/pydantic/pydantic-settings/tar.gz/f725ca187bee4212e9ef799eefa3cb25be788462"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:pydantic-settings",
+      "kind": "reference-docs",
+      "license_declared": "MIT (LICENSE at the pinned source)",
+      "license_spdx": "MIT",
+      "name": "Reference docs: pydantic-settings v2.15.0",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/pydantic-settings/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "fastapi",
+          "sha256": "9d3529aebe00208351ebeb4a6f3772e985ed27a0897610c5ce85cdd07f4c4ce1",
+          "url": "https://codeload.github.com/fastapi/fastapi/tar.gz/95f8322ee1dcda7ceace7b1c4f6c9915b36d748f"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:fastapi",
+      "kind": "reference-docs",
+      "license_declared": "MIT (LICENSE at the pinned source)",
+      "license_spdx": "MIT",
+      "name": "Reference docs: FastAPI 0.141.1",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/fastapi/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE.md"
+          ],
+          "set": "starlette",
+          "sha256": "d4e3ac5e546444960c710297a3c9fc3f7ebae1b7e963f3d36173b49da535be9b",
+          "url": "https://files.pythonhosted.org/packages/b5/b4/205b0d5241d934e8add0c38aa924c4f9fb7330834ff11e5444db964ec3f9/starlette-1.6.0.tar.gz"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:starlette",
+      "kind": "reference-docs",
+      "license_declared": "BSD-3-Clause (LICENSE.md at the pinned source)",
+      "license_spdx": "BSD-3-Clause",
+      "name": "Reference docs: Starlette 1.6.0",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/starlette/, with LICENSE.md beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "COPYING"
+          ],
+          "set": "pymupdf",
+          "sha256": "cd400ac13ecd659631ac96e0d7ec52c5a90829ad64cee46b61ddaaaca10770fb",
+          "url": "https://codeload.github.com/pymupdf/PyMuPDF/tar.gz/12786d12b2962a1d77fd13b103162eddf749644c"
+        }
+      },
+      "class": "network-copyleft",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:pymupdf",
+      "kind": "reference-docs",
+      "license_declared": "AGPL-3.0-only (COPYING at the pinned source)",
+      "license_spdx": "AGPL-3.0-only",
+      "name": "Reference docs: PyMuPDF 1.28.2",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/pymupdf/, with COPYING beside them. The AGPL-3.0 text ships as COPYING; the docs are unmodified and their source is the pinned archive.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "pytest",
+          "sha256": "1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313",
+          "url": "https://files.pythonhosted.org/packages/e4/47/b9efed96c114afcfa3c9d3fe98a76a1d14c74a9e266d397cf6eb64be5e01/pytest-9.1.1.tar.gz"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:pytest",
+      "kind": "reference-docs",
+      "license_declared": "MIT (LICENSE at the pinned source)",
+      "license_spdx": "MIT",
+      "name": "Reference docs: pytest 9.1.1",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/pytest/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE.txt",
+            "hypothesis/LICENSE.txt"
+          ],
+          "set": "hypothesis",
+          "sha256": "c87db521ffd2c8a5e3abf2a2407fe6bd1db8ce4c6ef984e8d96135251fbaec70",
+          "url": "https://codeload.github.com/HypothesisWorks/hypothesis/tar.gz/929e5fbdba0aacd87732bbac0db36a1d68db5afe"
+        }
+      },
+      "class": "weak-copyleft",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:hypothesis",
+      "kind": "reference-docs",
+      "license_declared": "MPL-2.0 (LICENSE.txt, hypothesis/LICENSE.txt at the pinned source)",
+      "license_spdx": "MPL-2.0",
+      "name": "Reference docs: Hypothesis 6.155.7",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/hypothesis/, with LICENSE.txt, hypothesis/LICENSE.txt beside them. MPL-2.0 files ship unmodified in source form.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE",
+            "NOTICE"
+          ],
+          "set": "prometheus-client",
+          "sha256": "a275f4c5740801e3ef5b55a8289b81004d13454bf590bf7e1ff8e1cbbeff7821",
+          "url": "https://codeload.github.com/prometheus/client_python/tar.gz/9b6b971f903e7a08f88da5a95048b7a2a28f55a5"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:prometheus-client",
+      "kind": "reference-docs",
+      "license_declared": "Apache-2.0 (LICENSE, NOTICE at the pinned source)",
+      "license_spdx": "Apache-2.0",
+      "name": "Reference docs: prometheus-client (client_python) v0.26.0",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/prometheus-client/, with LICENSE, NOTICE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE.md"
+          ],
+          "set": "uvicorn",
+          "sha256": "2354c5d0c2949f4febad2e06999ed164529c8c4c961f1b8e23d394297c04961c",
+          "url": "https://codeload.github.com/Kludex/uvicorn/tar.gz/8988c23704fc373c9206cca53ec57dd8ad7f44a5"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:uvicorn",
+      "kind": "reference-docs",
+      "license_declared": "BSD-3-Clause (LICENSE.md at the pinned source)",
+      "license_spdx": "BSD-3-Clause",
+      "name": "Reference docs: Uvicorn 0.52.4",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/uvicorn/, with LICENSE.md beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE",
+            "NOTICE"
+          ],
+          "set": "fastembed",
+          "sha256": "7b4fec62e0537fc0933d8ae61d2bdbdce1e3299f6ca7341b694b170685d12270",
+          "url": "https://codeload.github.com/qdrant/fastembed/tar.gz/4305bb4bd1d6155aaa9e21258b6255a81accf110"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:fastembed",
+      "kind": "reference-docs",
+      "license_declared": "Apache-2.0 (LICENSE, NOTICE at the pinned source)",
+      "license_spdx": "Apache-2.0",
+      "name": "Reference docs: FastEmbed v0.9.1",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/fastembed/, with LICENSE, NOTICE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "mypy",
+          "sha256": "77bdaebd452f43fcfc4cc3ba94352a3ea537cd01e3f2d0879f48673d2ec00d6e",
+          "url": "https://files.pythonhosted.org/packages/34/4e/64300736cf0a0373a27b94a91b664ee7382e36f77b0621bae6381da3e180/mypy-2.4.0.tar.gz"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:mypy",
+      "kind": "reference-docs",
+      "license_declared": "MIT (LICENSE at the pinned source)",
+      "license_spdx": "MIT",
+      "name": "Reference docs: mypy 2.4.0",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/mypy/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE"
+          ],
+          "set": "ruff",
+          "sha256": "ae457a9a9c4bd0268a4486a328536bf03d1f010742dfa934bfc18080a2d50fd3",
+          "url": "https://codeload.github.com/astral-sh/ruff/tar.gz/b5dba861cc38e3f7fb4524c9ceba3e01a474ea13"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:ruff",
+      "kind": "reference-docs",
+      "license_declared": "MIT (LICENSE at the pinned source)",
+      "license_spdx": "MIT",
+      "name": "Reference docs: Ruff 0.16.7",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/ruff/, with LICENSE beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+      "bind": {
+        "reference_docs": {
+          "license_files": [
+            "LICENSE.txt"
+          ],
+          "set": "jinja2",
+          "sha256": "0137fb05990d35f1275a587e9aee6d56da821fc83491a0fb838183be43f66d6d",
+          "url": "https://files.pythonhosted.org/packages/df/bf/f7da0350254c0ed7c72f3e33cef02e048281fec7ecec5f032d4aac52226b/jinja2-3.1.6.tar.gz"
+        }
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-31",
+        "disposition": "approved under the maintainer's blanket licence approval of every #1174 doc set (groups A, B and C)",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "docs:jinja2",
+      "kind": "reference-docs",
+      "license_declared": "BSD-3-Clause (LICENSE.txt at the pinned source)",
+      "license_spdx": "BSD-3-Clause",
+      "name": "Reference docs: Jinja2 3.1.6",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/jinja2/, with LICENSE.txt beside them.",
+      "ships_in": [
+        "reference-docs.tar.gz"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "approved"
     }
   ],
   "devkit": {
@@ -3437,8 +4623,8 @@
     }
   ],
   "release_approval": {
-    "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6546411479",
-    "approved_digest": "07bbf2cf62f83e28ecadfda045a83cd0454233579d8b080b55e0fdf0b6d95e18"
+    "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+    "approved_digest": "4fad8d20125903282f8063592627404e16e8c729a88f644b8aa799f5c192839e"
   },
   "schema_version": 1
 }

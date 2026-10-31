@@ -8,17 +8,21 @@ offline signature + member checksums + tarball digest, with the bundle
 clone-traversable (the airgap-package CI check, hermetically).
 """
 
+import gzip
 import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
+from pathlib import PurePosixPath
 
 import pytest
 
 from tests.helpers_airgap import (
+    REFDOCS_FIXTURE_SETS,
     REPO,
     copy_chart,
     copy_license_inputs,
@@ -30,6 +34,10 @@ from tests.helpers_airgap import (
     sha256_bytes,
     skopeo_stub,
     symlink_tools,
+    tar_file,
+    tar_gz,
+    tar_link,
+    write_reference_docs_fixture,
 )
 from tests.helpers_image_inventory import (
     image_files,
@@ -127,9 +135,17 @@ def pack_tree(tmp_path):
     (tmp_path / "charts").mkdir(exist_ok=True)
     copy_chart(tmp_path)
     shutil.copytree(REPO / "images", tmp_path / "images")
+    write_reference_docs_fixture(tmp_path)
+    # Project docs that pack.sh archives from the packed commit (GH#1174).
+    for relative, text in (("AGENTS.md", "# Agents\n"), ("docs/architecture.md", "# Architecture\n"),
+                           ("docs/adr/0001-fixture.md", "# ADR\n"), (".agents/qdrant-skills-provenance.md", "provenance\n"),
+                           (".agents/skills/qdrant-sizing/SKILL.md", "# Sizing\n")):
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_text(text)
 
     # Throwaway git repo so IMAGE_SHA resolves to a real HEAD.
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / ".git/info/exclude").write_text("refdocs-cache/\n")  # the operator's cache, not packed source
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
     (tmp_path / "README.md").write_text("Hello")
@@ -163,6 +179,7 @@ def _run_pack(tree, *extra_env):
         "AIRGAP_APP_REGISTRY": "ghcr.io/pack-test",
         "SNEAKERNET_SIGNING_KEY": str(key),
         "AIRGAP_TASK_ARCHIVE": str(task_archive()),
+        "AIRGAP_REFDOCS_CACHE": str(tmp_path / "refdocs-cache"),
     }
     for k, v in extra_env:
         env[k] = v
@@ -306,6 +323,7 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     for name in (
         "bootstrap.sh",
         "repo.bundle",
+        "reference-docs.tar.gz",
         TASK_ASSET, "task-pin.txt", "task-LICENSE",
         "qdrant-image.tar",
         "openobserve-image.tar",
@@ -335,6 +353,7 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     probe = subprocess.run([str(workspace / ".tools/bin/task"), "probe"], cwd=workspace, env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True, check=False)
     assert probe.returncode == 0, probe.stderr
     assert probe.stdout == "packed-task-ok"
+    assert_reference_docs(tmp_path, head, workspace / "dist" / "reference-docs")
 
     # MANIFEST pins this SHA, the images that were "pulled", and their digests.
     manifest = (dist / "MANIFEST.txt").read_text()
@@ -395,7 +414,7 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     assert "Task host tool:" in (dist / "PACKING_RECORD.txt").read_text()
     with tarfile.open(dist / f"qdrant-pdf-rag-{head}.tar") as archive:
         assert set(archive.getnames()) == {
-            "bootstrap.sh", "repo.bundle", TASK_ASSET, "task-pin.txt", "task-LICENSE",
+            "bootstrap.sh", "repo.bundle", "reference-docs.tar.gz", TASK_ASSET, "task-pin.txt", "task-LICENSE",
             "qdrant-image.tar", "openobserve-image.tar", "otelcol-image.tar", f"app-ingest-{head}.tar", f"app-agent-{head}.tar",
             "MANIFEST.txt", "PACKING_RECORD.txt", "sbom.json", "THIRD-PARTY-NOTICES.txt",
             "sneakernet-signing.pub", "SHA256SUMS", "SHA256SUMS.sig",
@@ -413,6 +432,44 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     assert li.run_check(tmp_path, li.load_inventory(tmp_path), None, False)[2] == "stale"
     assert "Owner approval of this inventory: stale\n" in notices
     assert "Third-party notices: THIRD-PARTY-NOTICES.txt" in (dist / "PACKING_RECORD.txt").read_text()
+    # GH#1174: the reference docs member is signed, bound in MANIFEST and the SBOM, and every
+    # set is in the notices with its licence texts' place in the member.
+    member_sha = sha256_bytes((dist / "reference-docs.tar.gz").read_bytes())
+    assert f"{member_sha}  reference-docs.tar.gz\n" in (dist / "SHA256SUMS").read_text()
+    assert f"reference_docs_sha256: {member_sha}\n" in manifest
+    assert "reference_docs_sets: 2\n" in manifest
+    assert sbom["reference_docs"]["sha256"] == member_sha
+    assert [d["id"] for d in sbom["reference_docs"]["sets"]] == list(REFDOCS_FIXTURE_SETS)
+    assert "docs:demo-guide  [approved]" in notices and "docs:demo-site  [approved]" in notices
+    assert "licence texts: reference-docs/sets/demo-guide/LICENSE in reference-docs.tar.gz" in notices
+    assert "licence texts: reference-docs/sets/demo-site/COPYING in reference-docs.tar.gz" in notices
+    assert "Reference docs:      reference-docs.tar.gz (2 upstream doc sets" in (dist / "PACKING_RECORD.txt").read_text()
+
+
+def assert_reference_docs(tree, head, unpacked):
+    """The bootstrapped reference docs hold exactly the kept subsets, the licence files and
+    the project docs, byte for byte, with an index and a complete checksum list."""
+    expected = {}
+    for ident, spec in REFDOCS_FIXTURE_SETS.items():
+        for name, body in spec["files"].items():
+            if name in spec["license_files"] or any(PurePosixPath(name).full_match(p) for p in spec["include"]):
+                expected[f"sets/{ident}/{name}"] = body
+    for relative in ("README.md", "AGENTS.md", "LICENSE", "LICENSE.qdrant-skills", "NOTICE.qdrant-skills",
+                     "docs/architecture.md", "docs/adr/0001-fixture.md", ".agents/qdrant-skills-provenance.md",
+                     ".agents/skills/qdrant-sizing/SKILL.md"):
+        expected[f"project/{relative}"] = (tree / relative).read_bytes()
+    assert "sets/demo-guide/src/code.py" not in expected and "sets/demo-site/theme/app.js" not in expected
+    found = {p.relative_to(unpacked).as_posix(): p.read_bytes() for p in unpacked.rglob("*") if p.is_file()}
+    index = found.pop("INDEX.md").decode()
+    sums = found.pop("FILES.sha256").decode()
+    assert found == expected
+    listed = dict(reversed(line.split("  ", 1)) for line in sums.splitlines())
+    assert listed == {name: hashlib.sha256(body).hexdigest() for name, body in {**expected, "INDEX.md": index.encode()}.items()}
+    assert f"Packed from commit `{head}`" in index
+    assert "| demo-guide | Fixture demo-guide | 1.0 | fixture/demo-guide@0123abc | MIT | `sets/demo-guide/` | 3 |" in index
+    assert "| demo-site | Fixture demo-site | 1.0 | fixture/demo-site@0123abc | BSD-2-Clause | `sets/demo-site/` | 2 |" in index
+    # The unlicensed upstream manuals are not shipped (maintainer decision on GH#1174); the index says so.
+    assert "OpenObserve (openobserve.ai/docs) are not included: upstream publishes them with no licence." in index
 
 
 def test_pack_bundles_oauth_proxy_once_digest_recorded(pack_tree):
@@ -794,3 +851,140 @@ def test_openwebui_product_image_is_the_pinned_upstream_plus_one_ownership_layer
     # The derived pin is named for the product repository and the same upstream tag.
     derived = next(k for k in pins if k.startswith("ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:"))
     assert derived.partition(":")[2] == upstream.partition(":")[2]
+
+
+# --- reference docs builder (GH#1174): archives are untrusted, pins fail closed -------------
+
+REFDOCS_TOOL = REPO / "scripts" / "airgap" / "reference_docs.py"
+DOC_ROOT = "doc-set-0123abc"
+
+
+def _refdocs_build(tmp_path, entries, *, license_files=("LICENSE",), license="MIT", pin=None, cache=True):
+    """Run the real builder on one original archive; returns (result, output member)."""
+    data = tar_gz(entries)
+    store = tmp_path / "cache"
+    store.mkdir(exist_ok=True)
+    digest = sha256_bytes(data)
+    if cache:
+        (store / digest).write_bytes(data)
+    row = {"id": "doc-set", "component": "Doc set", "version": "1", "source": "fixture/doc-set@0123abc",
+           "url": "https://example.invalid/doc-set.tar.gz", "sha256": pin or digest, "license": license,
+           "license_files": list(license_files), "include": ["docs/**"]}
+    manifest = tmp_path / "reference-docs.json"
+    manifest.write_text(json.dumps({"schema_version": 1, "sets": [row]}))
+    project = tmp_path / "project.tar"  # what `git archive --format=tar` gives: no top-level directory
+    project.write_bytes(gzip.decompress(tar_gz([tar_file("LICENSE", b"project licence\n"), tar_file("docs/a.md", b"a\n")])))
+    out = tmp_path / "reference-docs.tar.gz"
+    result = subprocess.run(
+        [sys.executable, "-I", str(REFDOCS_TOOL), "build", "--manifest", str(manifest), "--project-tar", str(project),
+         "--cache", str(store), "--offline", "--work", str(tmp_path / "work"), "--source-sha", "a" * 40,
+         "--mtime", "1700000000", "--output", str(out)],
+        capture_output=True, text=True, check=False)
+    return result, out
+
+
+GOOD_DOC_ENTRIES = [tar_file(f"{DOC_ROOT}/LICENSE", b"MIT License\n"), tar_file(f"{DOC_ROOT}/docs/index.md", b"# Index\n"),
+                    tar_file(f"{DOC_ROOT}/src/main.go", b"package main\n")]
+
+
+def test_reference_docs_builder_keeps_the_subset_and_licence_only(tmp_path):
+    result, out = _refdocs_build(tmp_path, GOOD_DOC_ENTRIES)
+    assert result.returncode == 0, result.stderr
+    assert "reference-docs: OK sets=1 files=" in result.stdout
+    with tarfile.open(out) as archive:
+        members = archive.getmembers()
+        assert all(m.isreg() and m.mode == 0o644 and m.mtime == 1700000000 for m in members)
+        assert sorted(m.name for m in members) == [
+            "reference-docs/FILES.sha256", "reference-docs/INDEX.md", "reference-docs/project/LICENSE",
+            "reference-docs/project/docs/a.md", "reference-docs/sets/doc-set/LICENSE",
+            "reference-docs/sets/doc-set/docs/index.md"]
+        assert archive.extractfile("reference-docs/sets/doc-set/docs/index.md").read() == b"# Index\n"
+    # Deterministic: the same pins and commit give the same bytes.
+    first = out.read_bytes()
+    out.unlink()
+    again, _ = _refdocs_build(tmp_path, GOOD_DOC_ENTRIES)
+    assert again.returncode == 0 and out.read_bytes() == first
+
+
+@pytest.mark.parametrize(("entries", "needle"), [
+    ([*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/../escape.md", b"x")], "absolute, escapes or is unusual"),
+    ([*GOOD_DOC_ENTRIES, tar_file("/etc/doc.md", b"x")], "absolute, escapes or is unusual"),
+    ([*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/docs/new\nline.md", b"x")], "absolute, escapes or is unusual"),
+    ([*GOOD_DOC_ENTRIES, tar_link(f"{DOC_ROOT}/docs/link.md", "../../../etc/passwd")], "is a link or special file"),
+    ([*GOOD_DOC_ENTRIES, tar_link(f"{DOC_ROOT}/docs/hard.md", f"{DOC_ROOT}/LICENSE", tarfile.LNKTYPE)],
+     "is a link or special file"),
+    ([*GOOD_DOC_ENTRIES, tar_file("second-root/docs/x.md", b"x")], "more than one top-level directory"),
+    ([*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/docs/index.md", b"again")], "holds a member name twice"),
+], ids=["dotdot", "absolute", "newline", "symlink", "hardlink", "second-root", "duplicate"])
+def test_reference_docs_builder_refuses_an_unsafe_archive(tmp_path, entries, needle):
+    result, out = _refdocs_build(tmp_path, entries)
+    assert result.returncode == 1
+    assert "reference-docs: FAIL: set doc-set: " in result.stderr and needle in result.stderr
+    assert not out.exists() and not out.with_name(out.name + ".partial").exists()
+
+
+def test_reference_docs_builder_ignores_a_link_outside_the_kept_subset(tmp_path):
+    result, _ = _refdocs_build(tmp_path, [*GOOD_DOC_ENTRIES, tar_link(f"{DOC_ROOT}/LINK", "LICENSE")])
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(("kwargs", "needle"), [
+    ({"pin": "0" * 64}, "is not in the offline cache"),
+    ({"license_files": ("LICENSE", "NOTICE")}, "licence file NOTICE is missing from the archive"),
+], ids=["sha-mismatch", "missing-licence"])
+def test_reference_docs_builder_fails_closed_on_pin_or_licence_drift(tmp_path, kwargs, needle):
+    result, out = _refdocs_build(tmp_path, GOOD_DOC_ENTRIES, **kwargs)
+    assert result.returncode == 1 and needle in result.stderr
+    assert not out.exists()
+
+
+def test_reference_docs_builder_refuses_a_cached_archive_with_other_bytes(tmp_path):
+    """A cache file named by the pin but holding other bytes is a sha256 mismatch."""
+    _refdocs_build(tmp_path, GOOD_DOC_ENTRIES)
+    (tmp_path / "reference-docs.tar.gz").unlink()
+    pin = next((tmp_path / "cache").iterdir())
+    pin.write_bytes(tar_gz([tar_file(f"{DOC_ROOT}/LICENSE", b"other\n"), tar_file(f"{DOC_ROOT}/docs/x.md", b"x\n")]))
+    result, out = _refdocs_build(tmp_path, GOOD_DOC_ENTRIES, pin=pin.name, cache=False)
+    assert result.returncode == 1
+    assert "cached archive does not match the pinned sha256" in result.stderr
+    assert not out.exists()
+
+
+@pytest.mark.parametrize(("kwargs", "needle"), [
+    ({"license_files": ()}, "a set must name its licence files"),
+    ({"license_files": (), "license": "NOASSERTION"}, "every set needs an upstream redistribution licence"),
+    ({"license": "NOASSERTION"}, "every set needs an upstream redistribution licence"),
+], ids=["no-licence-files", "unlicensed", "unlicensed-with-files"])
+def test_reference_docs_manifest_refuses_a_set_without_a_licence(tmp_path, kwargs, needle):
+    """Maintainer decision (GH#1174): a doc set with no upstream licence is never shipped."""
+    result, out = _refdocs_build(tmp_path, GOOD_DOC_ENTRIES, **kwargs)
+    assert result.returncode == 1
+    assert needle in result.stderr
+    assert not out.exists()
+
+
+def test_pack_refuses_a_tampered_reference_docs_archive_before_pulling_images(pack_tree):
+    root, skopeo_log, _head, _key = pack_tree
+    cached = min((root / "refdocs-cache").iterdir())
+    good = cached.read_bytes()
+    cached.write_bytes(good + b"tampered")
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode != 0
+    assert "cached archive does not match the pinned sha256" in result.stderr
+    assert "reference docs could not be packed" in result.stderr
+    assert not skopeo_log.exists()
+    assert not (root / "dist" / "SHA256SUMS.sig").exists()
+    cached.write_bytes(good)
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode == 0, result.stderr
+
+
+def test_repository_reference_docs_manifest_is_valid():
+    result = subprocess.run([sys.executable, "-I", str(REFDOCS_TOOL), "check", "--manifest",
+                             str(REPO / "scripts/airgap/reference-docs.json")], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "reference-docs: manifest OK sets=38\n"
+    rows = json.loads((REPO / "scripts/airgap/reference-docs.json").read_text())["sets"]
+    sources = " ".join(row["url"] for row in rows)
+    for unlicensed in ("qdrant/landing_page", "open-webui/docs", "openobserve/openobserve-docs"):
+        assert unlicensed not in sources

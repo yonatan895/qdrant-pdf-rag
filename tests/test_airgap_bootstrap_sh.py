@@ -16,9 +16,12 @@ from tests.helpers_airgap import (
     REPO,
     gen_other_pub,
     gen_sign_keypair,
+    reference_docs_member,
     sha256_bytes,
     sign_sums,
     symlink_tools,
+    tar_file,
+    tar_link,
 )
 from tests.helpers_task_artifact import copy_task_tools, task_manifest, task_members
 
@@ -61,6 +64,7 @@ def bundle_dir(tmp_path):
     files = {
         "bootstrap.sh": (extract_dir / "bootstrap.sh").read_bytes(),
         "repo.bundle": (extract_dir / "repo.bundle").read_bytes(),
+        "reference-docs.tar.gz": reference_docs_member(),
         "qdrant-image.tar": b"mock-qdrant",
         "openobserve-image.tar": b"mock-openobserve",
         "otelcol-image.tar": b"mock-otelcol",
@@ -249,7 +253,7 @@ def _offline_env(bundle_dir):
     bin_dir.mkdir(exist_ok=True)
     symlink_tools(bundle_dir, (
         "sh", "sha256sum", "openssl", "cmp", "sed", "awk", "git", "uname",
-        "mkdir", "cp", "chmod", "tar", "gzip", "mktemp", "mv", "rm", "grep", "dirname",
+        "mkdir", "cp", "chmod", "tar", "gzip", "mktemp", "mv", "rm", "grep", "dirname", "find", "sort",
     ))
     return {"PATH": str(bin_dir), "AIRGAP_WORKSPACE": "operator workspace"}
 
@@ -284,6 +288,13 @@ def test_bootstrap_actual_runner_without_build_or_app_tools_and_rerun(bundle_dir
     assert len(list(dist_dir.glob("app-agent-*.tar"))) == 1
     assert (dist_dir / "oauth-proxy-image.tar").is_file()
     assert (dist_dir / "THIRD-PARTY-NOTICES.txt").read_bytes() == b"notices\n"
+    # GH#1174: the signed reference docs member is unpacked beside it, readable without tools.
+    docs = dist_dir / "reference-docs"
+    assert (docs / "sets/demo/docs/guide.md").read_bytes() == b"# Demo guide\n"
+    assert sorted(p.relative_to(docs).as_posix() for p in docs.rglob("*") if p.is_file()) == [
+        "FILES.sha256", "INDEX.md", "project/README.md", "sets/demo/LICENSE", "sets/demo/docs/guide.md"]
+    assert "Reference docs: operator workspace/dist/reference-docs/INDEX.md (4 files)" in first.stdout
+    assert not (dist_dir / ".reference-docs-staging").exists()
     # The dist/ copy stays verifiable: the signature and every member checksum hold there.
     verify = subprocess.run(
         ["sh", "-c", "openssl dgst -sha256 -verify sneakernet-signing.pub -signature SHA256SUMS.sig SHA256SUMS >/dev/null && sha256sum -c SHA256SUMS"],
@@ -641,3 +652,55 @@ def test_interrupted_promotion_warns_of_partial_dist_then_recovers_complete_bund
     assert retained.read_text() == "retain operator evidence"
     assert (workspace / "airgap.env").read_text() == "INTERNAL_REGISTRY=operator-kept\n"
     assert _bootstrap(bundle_dir).returncode == 0
+
+
+def _replace_docs(bundle_dir, data):
+    (bundle_dir / "reference-docs.tar.gz").write_bytes(data)
+    _resign(bundle_dir)  # A validly signed member is still checked before it is unpacked.
+
+
+@pytest.mark.parametrize(("member", "needle"), [
+    (lambda: reference_docs_member(extra=[tar_file("reference-docs/../escaped.md", b"x")]),
+     "a path outside reference-docs/ or a .. component"),
+    (lambda: reference_docs_member(extra=[tar_file("other/top.md", b"x")]),
+     "a path outside reference-docs/ or a .. component"),
+    (lambda: reference_docs_member(extra=[tar_link("reference-docs/sets/demo/link.md", "/etc/passwd")]),
+     "a link, directory or device entry"),
+    (lambda: reference_docs_member(extra=[tar_file("reference-docs/sets/demo/unlisted.md", b"x")]),
+     "the unpacked files differ from the FILES.sha256 list"),
+    (lambda: reference_docs_member(extra=[tar_file("reference-docs/sets/demo/docs/guide.md", b"swapped\n")]),
+     "a file does not match FILES.sha256"),
+], ids=["dotdot", "outside-top", "symlink", "unlisted-file", "changed-file"])
+def test_bootstrap_refuses_an_unsafe_reference_docs_member_and_keeps_the_previous_docs(bundle_dir, member, needle):
+    """GH#1174: the member is signed, yet it is still untrusted: an escaping, linked,
+    unlisted or altered entry is refused, nothing lands outside the staging directory,
+    and the previous release's docs stay in place."""
+    first = _bootstrap(bundle_dir)
+    assert first.returncode == 0, first.stdout + first.stderr
+    docs = bundle_dir / "operator workspace/dist/reference-docs"
+    before = {p.relative_to(docs): p.read_bytes() for p in docs.rglob("*") if p.is_file()}
+    _replace_docs(bundle_dir, member())
+    result = _bootstrap(bundle_dir)
+    assert result.returncode != 0
+    assert "FAIL: reference docs: " in result.stderr and needle in result.stderr
+    assert "SUCCESS" not in result.stdout
+    assert {p.relative_to(docs): p.read_bytes() for p in docs.rglob("*") if p.is_file()} == before
+    assert not (bundle_dir / "operator workspace/dist/escaped.md").exists()
+    assert not (bundle_dir / "operator workspace/dist/.reference-docs-staging").exists()
+    # The next ordinary run from a good bundle unpacks the new docs.
+    _replace_docs(bundle_dir, reference_docs_member({"sets/demo/LICENSE": b"Demo licence text\n",
+                                                     "sets/demo/docs/guide.md": b"# Guide v2\n"}))
+    again = _bootstrap(bundle_dir)
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert (docs / "sets/demo/docs/guide.md").read_bytes() == b"# Guide v2\n"
+    assert not (docs / "project/README.md").exists()
+
+
+def test_bootstrap_requires_the_reference_docs_member(bundle_dir):
+    sums = bundle_dir / "SHA256SUMS"
+    sums.write_text("".join(x for x in sums.read_text().splitlines(keepends=True) if "reference-docs.tar.gz" not in x))
+    sign_sums(bundle_dir)
+    result = _bootstrap(bundle_dir)
+    assert result.returncode != 0
+    assert "exactly the required bundle members" in result.stderr
+    assert not (bundle_dir / "operator workspace").exists()
