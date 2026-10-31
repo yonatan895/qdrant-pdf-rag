@@ -1046,7 +1046,7 @@ def agent_archives(tmp_path):
     archives.mkdir()
     herdr = {"herdr-core": b"#!/bin/sh\necho 'herdr-core 0.1.15'\n", "LICENSE": b"Apache License (test copy)\n",
              "THIRD-PARTY-NOTICES": b"notices (test copy)\n"}
-    opencode = {"opencode": b"#!/bin/sh\necho 2.2.5\n"}
+    opencode = {"opencode": b"#!/bin/sh\necho v2.2.5 >&2\n"}  # a "v" prefix, on stderr
     oc_licence = b"MIT License (test copy)\n"
     _fake_tool_archive(archives / "herdr-core-linux-x86_64.tar.gz", herdr)
     _fake_tool_archive(archives / "opencode-linux-x64.tar.gz", opencode)
@@ -1134,7 +1134,7 @@ HERDR_ASSET, OC_ASSET = "herdr-core-linux-x86_64.tar.gz", "opencode-linux-x64.ta
     # The verified binary does not report the pinned version.
     (lambda c: (_refit_archive(c, OC_ASSET, "opencode-pin.txt", {"opencode": b"#!/bin/sh\necho 2.2.50\n"}),
                 _repin(c, "opencode-pin.txt", "binary-sha256", _sha(b"#!/bin/sh\necho 2.2.50\n"))),
-     "opencode --version does not name the pinned version 2.2.5"),
+     "opencode --version does not name the pinned version 2.2.5 (rc 0)"),
     # A pin whose origin is not https, or does not name its asset, is refused unread.
     (lambda c: _repin(c, "herdr-core-pin.txt", "origin", "http://releases.example/herdr-core-linux-x86_64.tar.gz"),
      "herdr-core-pin.txt origin is not an https URL that names its asset"),

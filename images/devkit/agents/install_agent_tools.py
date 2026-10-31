@@ -87,18 +87,23 @@ class _HttpsOnly(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+# releases.herdr.dev answers 403 to the default Python-urllib agent (seen 2026-10-31).
+USER_AGENT = "mfr-devkit-build/1 (+https://github.com/yonatan895/qdrant-pdf-rag)"
+
+
 def download(origin: str, target: Path) -> None:
     opener = urllib.request.build_opener(_HttpsOnly)
+    request = urllib.request.Request(origin, headers={"User-Agent": USER_AGENT})
     last = "unknown"
     for _ in range(3):
         try:
-            with opener.open(origin, timeout=60) as response, target.open("wb") as out:
+            with opener.open(request, timeout=60) as response, target.open("wb") as out:
                 shutil.copyfileobj(response, out, CHUNK)
             return
         except Refused:
             raise
         except OSError as error:  # URLError, timeouts and resets are OSErrors
-            last = type(error).__name__
+            last = f"{type(error).__name__} {getattr(error, 'code', '')}".strip()
     raise Refused(f"the download of {target.name} failed ({last})")
 
 
@@ -172,8 +177,11 @@ def stage_tool(pins: Path, pin_name: str, installed: str, links: tuple[str, ...]
                               text=True, timeout=60, env=env, cwd=home, check=False)
     except (OSError, subprocess.TimeoutExpired):
         raise Refused(f"{installed} --version did not run") from None
-    if done.returncode != 0 or not re.search(rf"(?<![\w.]){re.escape(pin['version'])}(?![\w.])", done.stdout):
-        raise Refused(f"{installed} --version does not name the pinned version {pin['version']}")
+    # "2.2.5", "v2.2.5" or "herdr-core 0.1.15", on stdout or stderr; never "2.2.50".
+    named = re.search(rf"(?<![\d.]){re.escape(pin['version'])}(?![\d.])", done.stdout + "\n" + done.stderr)
+    if done.returncode != 0 or not named:
+        raise Refused(f"{installed} --version does not name the pinned version {pin['version']} "
+                      f"(rc {done.returncode})")
     for link in links:
         (stage / "bin" / link).symlink_to(installed)
     shutil.rmtree(work)

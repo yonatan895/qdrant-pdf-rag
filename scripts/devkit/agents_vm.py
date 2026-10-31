@@ -420,9 +420,11 @@ def proof(site: Site, fence_off: bool, where: str) -> tuple[int, dict]:
     if where in ("container", "both"):
         preflight(site)
     places = ("host", "container") if where == "both" else (where,)
-    record = {"issue": "#1172", "mode": "fence-off" if fence_off else "fenced", "user": me,
-              "site_env_sha256": site.digest, "image": site.image, "image_digest": site.image_digest,
-              "time": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "runs": {}}
+    runs: dict[str, dict] = {}
+    record: dict[str, object] = {
+        "issue": "#1172", "mode": "fence-off" if fence_off else "fenced", "user": me,
+        "site_env_sha256": site.digest, "image": site.image, "image_digest": site.image_digest,
+        "time": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "runs": runs}
     failed = False
     for place in places:
         spec, allowed, blocked_labels = probe_spec(site, place)
@@ -435,13 +437,13 @@ def proof(site: Site, fence_off: bool, where: str) -> tuple[int, dict]:
         results = run_probe(argv)
         problems = verdict(results, allowed, blocked_labels, fence_off)
         failed = failed or bool(problems)
-        record["runs"][place] = {"results": results, "problems": problems,
+        runs[place] = {"results": results, "problems": problems,
                                  "verdict": "fail" if problems else "pass"}
         for label in allowed + blocked_labels:
             print(f"proof: {place} {label} {results.get(label, 'no-result')}")
         for problem in problems:
             print(f"proof: {place} FAIL {problem}")
-        print(f"proof: {place} {'FAIL' if problems else 'PASS'} ({record['mode']})")
+        print(f"proof: {place} {'FAIL' if problems else 'PASS'} ({'fence-off' if fence_off else 'fenced'})")
     return (1 if failed else 0), record
 
 
