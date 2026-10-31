@@ -2308,7 +2308,8 @@ kind v0.32.0) enforces them. The lane renders both templates with the pinned `oc
 --local` and applies them, with stand-ins for what the site provides: a real Qdrant and an
 agent HTTP stand-in behind the chart's default agent ingress policy, registry, GitLab and
 LiteLLM listeners at their own /32 addresses outside the cluster, CoreDNS moved to an
-`openshift-dns` namespace behind the kube-dns Service, and a runner-manager pod. The
+`openshift-dns` namespace behind the kube-dns Service, a runner-manager pod and a runner
+job pod named and labelled as GitLab Runner makes them. The
 UBI Python base from `images.txt` stands in for the dev kit image. The proof must report
 `proven`; with `mfr-dev-egress` deleted, and with an extra CI allow policy to production
 Qdrant, it must fail on both the static policy check and the live probe; restored, it must

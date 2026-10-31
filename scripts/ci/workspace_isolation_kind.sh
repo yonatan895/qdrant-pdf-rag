@@ -14,7 +14,7 @@
 #   4. the production and CI namespaces: a real Qdrant and an agent stand-in (with the
 #      chart's default agent ingress policy) in production, the Secrets the templates
 #      name, the templates rendered by the real `oc process --local` and applied,
-#      and a runner-manager stand-in pod;
+#      a runner-manager stand-in pod and a runner job stand-in pod;
 #   5. the proof, which must say "proven"; two negative controls (one CI egress
 #      policy deleted, one extra CI allow policy added), each of which must fail
 #      with the expected static finding AND the expected live probe finding; then
@@ -49,6 +49,7 @@ RUNNER_TOKEN=mfr-iso-runner-token
 MGR_KEY=app.kubernetes.io/component
 MGR_VALUE=gitlab-runner-manager
 LITELLM_PORT=4000
+RUNNER_JOB=runner-isolane-project-1-concurrent-0
 LABEL="mfr.isolation-lane=$CLUSTER"
 
 say() { printf '==> %s\n' "$*"; }
@@ -373,6 +374,35 @@ items:
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: {drop: [ALL]}
+  # A runner job stand-in, as GitLab Runner's Kubernetes executor names and labels a
+  # job pod (runner-<token>-project-<id>-concurrent-<n>, its own labels plus the
+  # configuration's pod_labels), so the proof classifies a live runner pod and its
+  # runner probe copies that pod's labels.
+  - apiVersion: v1
+    kind: Pod
+    metadata:
+      name: $RUNNER_JOB
+      namespace: $CI
+      labels:
+        workspace.mainframe-rag.io/role: runner
+        pod: $RUNNER_JOB
+        manager.runner.gitlab.com/name: mfr-gate
+        project.runner.gitlab.com/id: "1"
+        job.runner.gitlab.com/id: "1"
+    spec:
+      serviceAccountName: mfr-runner-job
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      imagePullSecrets: [{name: $PULL}]
+      restartPolicy: Never
+      securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: build
+          image: $DEVKIT_IMAGE
+          command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait \$!; done"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
 EOF
 k apply -f "$STATE/render/manager.yaml"
 
@@ -380,7 +410,7 @@ say "waiting for the production, workspace and manager pods"
 k -n "$PROD" rollout status deployment/rag-qdrant --timeout=300s
 k -n "$PROD" rollout status deployment/rag-agent --timeout=300s
 k -n "$PROD" wait --for=condition=Ready pod/mfr-bastion --timeout=300s
-k -n "$CI" wait --for=condition=Ready pod/mfr-dev pod/mfr-iso-runner-manager --timeout=300s
+k -n "$CI" wait --for=condition=Ready pod/mfr-dev pod/mfr-iso-runner-manager "pod/$RUNNER_JOB" --timeout=300s
 k get pods -n "$PROD" -o wide
 k get pods -n "$CI" -o wide
 
