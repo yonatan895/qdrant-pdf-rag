@@ -845,10 +845,27 @@ def link_tree(tmp_path):
     return tree, image, archive
 
 
-def _link(tree: Path, image: Path, *args: str) -> subprocess.CompletedProcess[str]:
+# GitLab jobs run these scripts with `sh`: bash in POSIX mode in the kit image,
+# dash on GitHub's runners. The tests below that take `shell` run them under both.
+POSIX_SHELLS = ("bash", "dash")
+
+
+def _sh(tree: Path, shell: str) -> str:
+    """A `sh` that is `shell`, as the kit's /bin/sh is bash (POSIX mode) and GitHub's is dash."""
+    target = shutil.which(shell)
+    assert target, f"{shell} is required: link-tools.sh and run-task.sh are proven under bash and dash"
+    link = tree.parent / f"sh-{shell}" / "sh"
+    if not link.is_symlink():
+        link.parent.mkdir(exist_ok=True)
+        link.symlink_to(target)
+    return str(link)
+
+
+def _link(tree: Path, image: Path, *args: str, shell: str | None = None) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "HOME": str(tree.parent)}
     env.pop("XDG_CONFIG_HOME", None)
-    return subprocess.run(["sh", str(tree / "scripts/devkit/link-tools.sh"), "--from", str(image), *args],
+    sh = _sh(tree, shell) if shell else "sh"
+    return subprocess.run([sh, str(tree / "scripts/devkit/link-tools.sh"), "--from", str(image), *args],
                           cwd=tree.parent, env=env, capture_output=True, text=True, check=False)
 
 
@@ -862,11 +879,12 @@ def _state(tree: Path) -> dict[str, tuple[int, int, str]]:
     return out
 
 
-def test_link_tools_gives_run_task_and_the_doctor_the_verified_image_tools(link_tree, monkeypatch):
+@pytest.mark.parametrize("shell", POSIX_SHELLS)
+def test_link_tools_gives_run_task_and_the_doctor_the_verified_image_tools(link_tree, monkeypatch, shell):
     from scripts import agent_doctor
 
     tree, image, archive = link_tree
-    proc = _link(tree, image, "--task-archive", str(archive))
+    proc = _link(tree, image, "--task-archive", str(archive), shell=shell)
     assert proc.returncode == 0, proc.stderr
     for name in ("task", "helm"):
         assert os.readlink(tree / ".tools/bin" / name) == str(image / name)
@@ -874,7 +892,7 @@ def test_link_tools_gives_run_task_and_the_doctor_the_verified_image_tools(link_
     # The consumers accept the result: run-task.sh verifies and runs the linked Task...
     env = {**os.environ, "HOME": str(tree.parent)}
     env.pop("XDG_CONFIG_HOME", None)
-    ran = subprocess.run(["sh", "scripts/tools/run-task.sh", "--list"], cwd=tree, env=env,
+    ran = subprocess.run([_sh(tree, shell), "scripts/tools/run-task.sh", "--list"], cwd=tree, env=env,
                          capture_output=True, text=True, check=False)
     assert ran.returncode == 0, ran.stderr
     assert ran.stdout.startswith("fake-task --offline --dir ") and ran.stdout.rstrip().endswith("--list")
@@ -896,10 +914,11 @@ def test_link_tools_gives_run_task_and_the_doctor_the_verified_image_tools(link_
      "the --task-archive file does not match the sha256 in scripts/tools/task-pin.txt"),
     (lambda image, archive: archive.unlink(), "the --task-archive file is missing"),
 ], ids=["task-digest", "helm-digest", "helm-absent", "task-symlink", "archive-digest", "archive-absent"])
-def test_link_tools_refuses_a_tool_off_its_pin_and_changes_nothing(link_tree, damage, message):
+@pytest.mark.parametrize("shell", POSIX_SHELLS)
+def test_link_tools_refuses_a_tool_off_its_pin_and_changes_nothing(link_tree, damage, message, shell):
     tree, image, archive = link_tree
     damage(image, archive)
-    proc = _link(tree, image, "--task-archive", str(archive))
+    proc = _link(tree, image, "--task-archive", str(archive), shell=shell)
     assert proc.returncode == 2
     assert proc.stderr.startswith(f"link-tools: {message}")
     # Fixed text: never the paths it was given.
@@ -956,11 +975,12 @@ def test_link_tools_never_writes_through_a_shared_tools_link(link_tree, tmp_path
     assert sorted(p.name for p in (shared / "bin").iterdir()) == ["task"]
 
 
-def test_link_tools_rerun_is_a_no_op_and_a_stale_copy_converges(link_tree):
+@pytest.mark.parametrize("shell", POSIX_SHELLS)
+def test_link_tools_rerun_is_a_no_op_and_a_stale_copy_converges(link_tree, shell):
     tree, image, archive = link_tree
-    assert _link(tree, image, "--task-archive", str(archive)).returncode == 0
+    assert _link(tree, image, "--task-archive", str(archive), shell=shell).returncode == 0
     first = _state(tree)
-    again = _link(tree, image, "--task-archive", str(archive))
+    again = _link(tree, image, "--task-archive", str(archive), shell=shell)
     assert again.returncode == 0, again.stderr
     assert _state(tree) == first
     assert "already links the verified image task" in again.stdout
@@ -968,7 +988,7 @@ def test_link_tools_rerun_is_a_no_op_and_a_stale_copy_converges(link_tree):
     # A copy left by an older install (other bytes) is replaced by the verified link.
     (tree / ".tools/bin/task").unlink()
     (tree / ".tools/bin/task").write_bytes(b"#!/bin/sh\necho stale\n")
-    assert _link(tree, image).returncode == 0
+    assert _link(tree, image, shell=shell).returncode == 0
     assert os.readlink(tree / ".tools/bin/task") == str(image / "task")
     assert {k: v for k, v in _state(tree).items() if k != ".tools/bin/task" and k != ".tools/bin"} == \
         {k: v for k, v in first.items() if k != ".tools/bin/task" and k != ".tools/bin"}
