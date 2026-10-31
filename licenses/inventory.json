@@ -580,6 +580,1220 @@
       "status": "excluded"
     }
   ],
+  "devkit": {
+    "approval": {
+      "approval_ref": null,
+      "approved_digest": null
+    },
+    "components": [
+      {
+        "approval_ref": null,
+        "bind": {
+          "license": "MIT \u2014 https://github.com/go-task/task/blob/v3.53.1/LICENSE",
+          "license-sha256": "ae22882adc54d4c2cec2bb1ce5e0b252c7f3344efd55c72144738e8fcc89509b",
+          "pin": "scripts/tools/task-pin.txt",
+          "sha256": "a54a408f6861ff921f6e87774180db31bacd8c1e7c944ca696db9fea49a82fc7",
+          "version": "v3.53.1"
+        },
+        "class": "permissive",
+        "distributed_by_repo": true,
+        "id": "kit-tool:task",
+        "kind": "tool",
+        "license_declared": "MIT \u2014 https://github.com/go-task/task/blob/v3.53.1/LICENSE (license: line of scripts/tools/task-pin.txt)",
+        "license_spdx": "MIT",
+        "name": "go-task/task v3.53.1 (linux-amd64 binary in the image, /usr/local/bin/task)",
+        "obligation": "MIT: keep the copyright and permission notice with copies. The kit does not carry the Task LICENSE text (the release bundle carries it as task-LICENSE, digest pinned in task-pin.txt).",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "upstream-project-license",
+        "status": "declared"
+      },
+      {
+        "approval_ref": null,
+        "bind": {
+          "license": "Apache-2.0",
+          "pin": "scripts/tools/helm-pin.txt",
+          "sha256": "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb",
+          "version": "v4.3.0"
+        },
+        "class": "permissive",
+        "distributed_by_repo": true,
+        "id": "kit-tool:helm",
+        "kind": "tool",
+        "license_declared": "Apache-2.0 (license: line of scripts/tools/helm-pin.txt)",
+        "license_spdx": "Apache-2.0",
+        "name": "Helm v4.3.0 (linux-amd64 binary in the image, /usr/local/bin/helm)",
+        "obligation": "Apache-2.0 section 4: give recipients a copy of the License (the same text as oras-LICENSE in the kit); Helm's own NOTICE, if any, is not carried.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "upstream-project-license",
+        "status": "declared"
+      },
+      {
+        "approval_ref": null,
+        "bind": {
+          "license": "Apache-2.0",
+          "pin": "scripts/tools/oc-pin.txt",
+          "sha256": "b64aa5d214513e82275d60121f38933ef0241681dfc31122dd663d86dffbbe38",
+          "version": "4.20.42"
+        },
+        "class": "permissive",
+        "distributed_by_repo": true,
+        "id": "kit-tool:oc",
+        "kind": "tool",
+        "license_declared": "Apache-2.0 (license: line of scripts/tools/oc-pin.txt)",
+        "license_spdx": "Apache-2.0",
+        "name": "OpenShift client oc 4.20.42 with kubectl (rhel9 linux-amd64 build in the image, /usr/local/bin)",
+        "obligation": "Apache-2.0 section 4: give recipients a copy of the License (the same text as oras-LICENSE in the kit). The release archive holds no license file.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "upstream-project-license",
+        "status": "declared"
+      },
+      {
+        "approval_ref": null,
+        "bind": {
+          "license": "Apache-2.0",
+          "license-sha256": "eccb04b94c71454ea03f00ecb518b997952c4f2f23aca50baab98230f5c8dc00",
+          "notice_member": "oras-LICENSE",
+          "pin": "scripts/tools/oras-windows-pin.txt",
+          "sha256": "ffdb6aa40267686b5d507da1f21a57fc502a9a7c86b90c54557d335644c99dbd",
+          "version": "v1.3.4"
+        },
+        "class": "permissive",
+        "distributed_by_repo": true,
+        "id": "kit-tool:oras-windows",
+        "kind": "tool",
+        "license_declared": "Apache-2.0 (license: line of scripts/tools/oras-windows-pin.txt)",
+        "license_spdx": "Apache-2.0",
+        "name": "ORAS v1.3.4 oras.exe (windows-amd64, kit member)",
+        "obligation": "Apache-2.0 section 4: the kit carries the upstream LICENSE as oras-LICENSE (digest pinned in oras-windows-pin.txt).",
+        "ships_in": [
+          "oras.exe",
+          "oras-LICENSE"
+        ],
+        "spdx_basis": "upstream-project-license",
+        "status": "declared"
+      },
+      {
+        "approval_ref": null,
+        "bind": {
+          "license": "Apache-2.0",
+          "pin": "scripts/tools/oras-pin.txt",
+          "sha256": "f27adb935022d94df8dc77719c322dda592c78a0d57a6f7dcdd8d900b248c454",
+          "version": "v1.3.4"
+        },
+        "class": "permissive",
+        "distributed_by_repo": true,
+        "id": "kit-tool:oras-linux",
+        "kind": "tool",
+        "license_declared": "Apache-2.0 (license: line of scripts/tools/oras-pin.txt)",
+        "license_spdx": "Apache-2.0",
+        "name": "ORAS v1.3.4 static Linux oras (linux-amd64, kit member for the fallback push)",
+        "obligation": "Apache-2.0 section 4: the same ORAS release's license is carried as oras-LICENSE.",
+        "ships_in": [
+          "oras"
+        ],
+        "spdx_basis": "upstream-project-license",
+        "status": "declared"
+      },
+      {
+        "approval_ref": null,
+        "bind": {
+          "nevra": "containers-common-5:5.8-1.el9.x86_64"
+        },
+        "class": "permissive",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:containers-common",
+        "kind": "rpm",
+        "license_declared": "ASL 2.0",
+        "license_spdx": "Apache-2.0",
+        "name": "containers-common",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "declared",
+        "version": "5:5.8-1.el9.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "LGPLv2+"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "cracklib-0:2.9.6-28.el9.x86_64"
+        },
+        "class": "unknown",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:cracklib",
+        "kind": "rpm",
+        "license_declared": "LGPLv2+",
+        "license_spdx": "NOASSERTION",
+        "name": "cracklib",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "0:2.9.6-28.el9.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "LGPLv2+"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "cracklib-dicts-0:2.9.6-28.el9.x86_64"
+        },
+        "class": "unknown",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:cracklib-dicts",
+        "kind": "rpm",
+        "license_declared": "LGPLv2+",
+        "license_spdx": "NOASSERTION",
+        "name": "cracklib-dicts",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "0:2.9.6-28.el9.x86_64"
+      },
+      {
+        "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1118 issuecomment-6480982316 (maintainer decisions 2026-10-28: GPL-licensed RPMs such as git, tar and gawk are acceptable in the workspace image)",
+        "bind": {
+          "nevra": "crun-0:1.27-1.el9_8.x86_64"
+        },
+        "class": "strong-copyleft",
+        "decision": {
+          "date": "2026-10-28",
+          "disposition": "GPL-licensed RPMs are acceptable in the dev workspace image (#1118 maintainer decisions, ADR-0009 section 8)",
+          "owner": "yonatan895"
+        },
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:crun",
+        "kind": "rpm",
+        "license_declared": "GPL-2.0-only",
+        "license_spdx": "GPL-2.0-only",
+        "name": "crun",
+        "obligation": "GPL-2.0 section 3 / GPL-3.0 section 6: object code passes with the Corresponding Source or a written offer. The kit carries neither; whether the transfer triggers it is decision 2 and 3 of docs/licensing.md. Unmodified UBI package; its license text ships in the image under /usr/share/licenses.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "rpm-license-tag",
+        "status": "approved",
+        "version": "0:1.27-1.el9_8.x86_64"
+      },
+      {
+        "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1118 issuecomment-6480982316 (maintainer decisions 2026-10-28: GPL-licensed RPMs such as git, tar and gawk are acceptable in the workspace image)",
+        "bind": {
+          "nevra": "git-core-0:2.52.0-1.el9.x86_64"
+        },
+        "class": "strong-copyleft",
+        "decision": {
+          "date": "2026-10-28",
+          "disposition": "GPL-licensed RPMs are acceptable in the dev workspace image (#1118 maintainer decisions, ADR-0009 section 8)",
+          "owner": "yonatan895"
+        },
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:git-core",
+        "kind": "rpm",
+        "license_declared": "GPLv2",
+        "license_spdx": "GPL-2.0-only",
+        "name": "git-core",
+        "obligation": "GPL-2.0 section 3 / GPL-3.0 section 6: object code passes with the Corresponding Source or a written offer. The kit carries neither; whether the transfer triggers it is decision 2 and 3 of docs/licensing.md. Unmodified UBI package; its license text ships in the image under /usr/share/licenses.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "approved",
+        "version": "0:2.52.0-1.el9.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "GFDL"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "gzip-0:1.12-2.el9_8.x86_64"
+        },
+        "class": "unknown",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:gzip",
+        "kind": "rpm",
+        "license_declared": "GPLv3+ and GFDL",
+        "license_spdx": "GPL-3.0-or-later AND NOASSERTION",
+        "name": "gzip",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses. Its GPL part is covered by the 2026-10-28 maintainer decision (#1118 issuecomment-6480982316); the open question is only the ambiguous term.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "0:1.12-2.el9_8.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "BSD"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "less-0:590-6.el9.x86_64"
+        },
+        "class": "election-required",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:less",
+        "kind": "rpm",
+        "license_declared": "GPLv3+ or BSD",
+        "license_spdx": "GPL-3.0-or-later OR NOASSERTION",
+        "name": "less",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses. Its GPL part is covered by the 2026-10-28 maintainer decision (#1118 issuecomment-6480982316); the open question is only the ambiguous term.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "0:590-6.el9.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "MIT"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "libcbor-0:0.7.0-5.el9.x86_64"
+        },
+        "class": "unknown",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:libcbor",
+        "kind": "rpm",
+        "license_declared": "MIT",
+        "license_spdx": "NOASSERTION",
+        "name": "libcbor",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "0:0.7.0-5.el9.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "BSD",
+          "LGPLv2",
+          "MIT"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "libdb-0:5.3.28-57.el9_6.x86_64"
+        },
+        "class": "unknown",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:libdb",
+        "kind": "rpm",
+        "license_declared": "BSD and LGPLv2 and Sleepycat and MIT",
+        "license_spdx": "NOASSERTION AND NOASSERTION AND Sleepycat AND NOASSERTION",
+        "name": "libdb",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "0:5.3.28-57.el9_6.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "MIT"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "libeconf-0:0.4.1-7.el9_8.x86_64"
+        },
+        "class": "unknown",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:libeconf",
+        "kind": "rpm",
+        "license_declared": "MIT",
+        "license_spdx": "NOASSERTION",
+        "name": "libeconf",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "0:0.4.1-7.el9_8.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "BSD"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "libedit-0:3.1-39.20210216cvs.el9.x86_64"
+        },
+        "class": "unknown",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:libedit",
+        "kind": "rpm",
+        "license_declared": "BSD",
+        "license_spdx": "NOASSERTION",
+        "name": "libedit",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "0:3.1-39.20210216cvs.el9.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "LGPLv2+"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "libfdisk-0:2.37.4-25.el9.x86_64"
+        },
+        "class": "unknown",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:libfdisk",
+        "kind": "rpm",
+        "license_declared": "LGPLv2+",
+        "license_spdx": "NOASSERTION",
+        "name": "libfdisk",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "0:2.37.4-25.el9.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "BSD"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "libfido2-0:1.13.0-2.el9.x86_64"
+        },
+        "class": "unknown",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:libfido2",
+        "kind": "rpm",
+        "license_declared": "BSD",
+        "license_spdx": "NOASSERTION",
+        "name": "libfido2",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "0:1.13.0-2.el9.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "BSD"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "libpwquality-0:1.4.4-8.el9.x86_64"
+        },
+        "class": "election-required",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:libpwquality",
+        "kind": "rpm",
+        "license_declared": "BSD or GPLv2+",
+        "license_spdx": "NOASSERTION OR GPL-2.0-or-later",
+        "name": "libpwquality",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses. Its GPL part is covered by the 2026-10-28 maintainer decision (#1118 issuecomment-6480982316); the open question is only the ambiguous term.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "0:1.4.4-8.el9.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "LGPLv2"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "libseccomp-0:2.5.2-2.el9.x86_64"
+        },
+        "class": "unknown",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:libseccomp",
+        "kind": "rpm",
+        "license_declared": "LGPLv2",
+        "license_spdx": "NOASSERTION",
+        "name": "libseccomp",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "0:2.5.2-2.el9.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "LGPLv2+"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "libutempter-0:1.2.1-6.el9.x86_64"
+        },
+        "class": "unknown",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:libutempter",
+        "kind": "rpm",
+        "license_declared": "LGPLv2+",
+        "license_spdx": "NOASSERTION",
+        "name": "libutempter",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "0:1.2.1-6.el9.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "BSD"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "openssh-0:9.9p1-13.el9_8.x86_64"
+        },
+        "class": "unknown",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:openssh",
+        "kind": "rpm",
+        "license_declared": "BSD",
+        "license_spdx": "NOASSERTION",
+        "name": "openssh",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "0:9.9p1-13.el9_8.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "BSD"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "openssh-clients-0:9.9p1-13.el9_8.x86_64"
+        },
+        "class": "unknown",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:openssh-clients",
+        "kind": "rpm",
+        "license_declared": "BSD",
+        "license_spdx": "NOASSERTION",
+        "name": "openssh-clients",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "0:9.9p1-13.el9_8.x86_64"
+      },
+      {
+        "approval_ref": null,
+        "bind": {
+          "nevra": "openssl-1:3.5.8-2.el9_8.x86_64"
+        },
+        "class": "permissive",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:openssl",
+        "kind": "rpm",
+        "license_declared": "Apache-2.0",
+        "license_spdx": "Apache-2.0",
+        "name": "openssl",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "rpm-license-tag",
+        "status": "declared",
+        "version": "1:3.5.8-2.el9_8.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "BSD"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "pam-0:1.5.1-28.el9_8.1.x86_64"
+        },
+        "class": "unknown",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:pam",
+        "kind": "rpm",
+        "license_declared": "BSD and GPLv2+",
+        "license_spdx": "NOASSERTION AND GPL-2.0-or-later",
+        "name": "pam",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses. Its GPL part is covered by the 2026-10-28 maintainer decision (#1118 issuecomment-6480982316); the open question is only the ambiguous term.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "0:1.5.1-28.el9_8.1.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "BSD"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "shadow-utils-subid-2:4.9-16.el9.x86_64"
+        },
+        "class": "unknown",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:shadow-utils-subid",
+        "kind": "rpm",
+        "license_declared": "BSD and GPLv2+",
+        "license_spdx": "NOASSERTION AND GPL-2.0-or-later",
+        "name": "shadow-utils-subid",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses. Its GPL part is covered by the 2026-10-28 maintainer decision (#1118 issuecomment-6480982316); the open question is only the ambiguous term.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "2:4.9-16.el9.x86_64"
+      },
+      {
+        "approval_ref": null,
+        "bind": {
+          "nevra": "skopeo-2:1.22.2-9.el9_8.x86_64"
+        },
+        "class": "weak-copyleft",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:skopeo",
+        "kind": "rpm",
+        "license_declared": "Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT AND MPL-2.0",
+        "license_spdx": "Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT AND MPL-2.0",
+        "name": "skopeo",
+        "obligation": "MPL-2.0 (part of the declared expression), section 3.2: for an executable form, tell recipients how to obtain the source of the MPL-covered files. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses. No source pointer is carried.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "rpm-license-tag",
+        "status": "declared",
+        "version": "2:1.22.2-9.el9_8.x86_64"
+      },
+      {
+        "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1118 issuecomment-6480982316 (maintainer decisions 2026-10-28: GPL-licensed RPMs such as git, tar and gawk are acceptable in the workspace image)",
+        "bind": {
+          "nevra": "tar-2:1.34-13.el9_8.x86_64"
+        },
+        "class": "strong-copyleft",
+        "decision": {
+          "date": "2026-10-28",
+          "disposition": "GPL-licensed RPMs are acceptable in the dev workspace image (#1118 maintainer decisions, ADR-0009 section 8)",
+          "owner": "yonatan895"
+        },
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:tar",
+        "kind": "rpm",
+        "license_declared": "GPLv3+",
+        "license_spdx": "GPL-3.0-or-later",
+        "name": "tar",
+        "obligation": "GPL-2.0 section 3 / GPL-3.0 section 6: object code passes with the Corresponding Source or a written offer. The kit carries neither; whether the transfer triggers it is decision 2 and 3 of docs/licensing.md. Unmodified UBI package; its license text ships in the image under /usr/share/licenses.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "approved",
+        "version": "2:1.34-13.el9_8.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "LGPLv2+",
+          "BSD with advertising"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "util-linux-0:2.37.4-25.el9.x86_64"
+        },
+        "class": "unknown",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:util-linux",
+        "kind": "rpm",
+        "license_declared": "GPLv2 and GPLv2+ and LGPLv2+ and BSD with advertising and Public Domain",
+        "license_spdx": "GPL-2.0-only AND GPL-2.0-or-later AND NOASSERTION AND NOASSERTION AND LicenseRef-Fedora-Public-Domain",
+        "name": "util-linux",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses. Its GPL part is covered by the 2026-10-28 maintainer decision (#1118 issuecomment-6480982316); the open question is only the ambiguous term.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "0:2.37.4-25.el9.x86_64"
+      },
+      {
+        "ambiguous_terms": [
+          "LGPLv2+",
+          "BSD with advertising"
+        ],
+        "approval_ref": null,
+        "bind": {
+          "nevra": "util-linux-core-0:2.37.4-25.el9.x86_64"
+        },
+        "class": "unknown",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:util-linux-core",
+        "kind": "rpm",
+        "license_declared": "GPLv2 and GPLv2+ and LGPLv2+ and BSD with advertising and Public Domain",
+        "license_spdx": "GPL-2.0-only AND GPL-2.0-or-later AND NOASSERTION AND NOASSERTION AND LicenseRef-Fedora-Public-Domain",
+        "name": "util-linux-core",
+        "obligation": "The RPM License tag uses a Fedora legacy abbreviation that maps to several SPDX identifiers (ambiguous_terms); the exact license and its obligations are an owner decision. Unmodified UBI package; its license texts ship in the image under /usr/share/licenses. Its GPL part is covered by the 2026-10-28 maintainer decision (#1118 issuecomment-6480982316); the open question is only the ambiguous term.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "pending-owner-decision",
+        "version": "0:2.37.4-25.el9.x86_64"
+      },
+      {
+        "approval_ref": null,
+        "bind": {
+          "nevra": "yajl-0:2.1.0-25.el9.x86_64"
+        },
+        "class": "permissive",
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:yajl",
+        "kind": "rpm",
+        "license_declared": "ISC",
+        "license_spdx": "ISC",
+        "name": "yajl",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "rpm-license-tag",
+        "status": "declared",
+        "version": "0:2.1.0-25.el9.x86_64"
+      }
+    ],
+    "evidence": {
+      "rpm_licenses": "RPM License header tags read 2026-10-31 from the rpmdb of the pinned kit image ghcr.io/yonatan895/qdrant-pdf-rag-devkit@sha256:b5c03e1950517c6a8689cc2273350a99ad1643b31f45ca1c00925ec28d470c8c with rpm -qa --qf '%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\\t%{LICENSE}\\n' (docker run --network none); all 26 NEVRAs of images/devkit-packages.txt present, and the other 116 equal licenses/ubi9-python-314-minimal.rpms.txt. Legacy Fedora abbreviations are normalized only where fedora-license-data (commit cbd8b74c) maps them to one SPDX identifier.",
+      "wheels": "generate --kit --wheelhouse against /opt/devkit/wheelhouse copied from the same image: 83 wheels, each the exact locked bytes (name, version, file name and sha256 of requirements.dev.lock.txt)."
+    },
+    "python": [
+      {
+        "approval_ref": null,
+        "binary_wheel": true,
+        "class": "permissive",
+        "declared_source": "License-Expression",
+        "evidence": "wheel-bytes",
+        "license_declared": "MIT",
+        "license_files": [
+          {
+            "name": "licenses/LICENSE",
+            "sha256": "db90b8fd0ae1748117ab467680a5193bfd057a3119846cb53ee3b64f16577b3b"
+          },
+          {
+            "name": "licenses/crates/LICENSE",
+            "sha256": "2597d854122b77ddc71971564ca2350a37608575ce324adc5650a2b2051c8f18"
+          }
+        ],
+        "license_spdx": "MIT",
+        "name": "ast-serialize",
+        "sha256": "a7004ba572f09be34342ccb98dcd4bad5707d3d81adc8cb4c3f685d2a2c51bbc",
+        "spdx_basis": "declared-expression",
+        "status": "declared",
+        "version": "0.11.2",
+        "wheel": "ast_serialize-0.11.2-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+      },
+      {
+        "approval_ref": null,
+        "binary_wheel": true,
+        "class": "permissive",
+        "declared_source": "License",
+        "evidence": "wheel-bytes",
+        "license_declared": "Apache-2.0",
+        "license_files": [
+          {
+            "name": "licenses/LICENSE.txt",
+            "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+          },
+          {
+            "name": "licenses/NOTICE.txt",
+            "sha256": "80e177ab397d5f332954693a52abc1b34b06c5792dd57297608b6d68a2f6af11"
+          }
+        ],
+        "license_spdx": "Apache-2.0",
+        "name": "coverage",
+        "sha256": "35f37886699cb9abd29958247d718628d5bc6f39e623dff66a09e546c42a7e03",
+        "spdx_basis": "normalized-license-field",
+        "status": "declared",
+        "version": "7.16.2",
+        "wheel": "coverage-7.16.2-cp314-cp314-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl"
+      },
+      {
+        "approval_ref": null,
+        "binary_wheel": false,
+        "class": "weak-copyleft",
+        "declared_source": "License-Expression",
+        "evidence": "wheel-bytes",
+        "license_declared": "MPL-2.0",
+        "license_files": [
+          {
+            "name": "licenses/LICENSE.txt",
+            "sha256": "ac89037bac63550644dce8cf32c6765e5fab9dc1a1ce94b89f8a805f341a6750"
+          }
+        ],
+        "license_spdx": "MPL-2.0",
+        "name": "hypothesis",
+        "obligation": "MPL-2.0 file-level copyleft: keep the license text with distributions; source of MPL files must stay available if they are modified. Not modified in this repository; the license file ships in the image's dist-info.",
+        "sha256": "9f634bdb1f9e9b8ab6ba09431cf2deedb750c96978125a6fb3c5a0f6c6db4131",
+        "spdx_basis": "declared-expression",
+        "status": "declared",
+        "version": "6.155.7",
+        "wheel": "hypothesis-6.155.7-py3-none-any.whl"
+      },
+      {
+        "approval_ref": null,
+        "binary_wheel": false,
+        "class": "permissive",
+        "declared_source": "License-Expression",
+        "evidence": "wheel-bytes",
+        "license_declared": "MIT",
+        "license_files": [
+          {
+            "name": "licenses/LICENSE",
+            "sha256": "3409fa91f7ace557894632676656e32264fe5ef7581535725dc9a23774551bd4"
+          }
+        ],
+        "license_spdx": "MIT",
+        "name": "iniconfig",
+        "sha256": "f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12",
+        "spdx_basis": "declared-expression",
+        "status": "declared",
+        "version": "2.3.0",
+        "wheel": "iniconfig-2.3.0-py3-none-any.whl"
+      },
+      {
+        "approval_ref": null,
+        "binary_wheel": true,
+        "class": "permissive",
+        "declared_source": "License-Expression",
+        "evidence": "wheel-bytes",
+        "license_declared": "MIT",
+        "license_files": [
+          {
+            "name": "licenses/LICENSE",
+            "sha256": "88f9e379c684580053c58e75e296ca2eb243b6edcc6e5357f247310e96eeef8a"
+          }
+        ],
+        "license_spdx": "MIT",
+        "name": "librt",
+        "sha256": "ca8052401c55d7511dda6760719fda7618067e83535d7d0010096d216c34b667",
+        "spdx_basis": "declared-expression",
+        "status": "declared",
+        "version": "0.16.0",
+        "wheel": "librt-0.16.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"
+      },
+      {
+        "approval_ref": null,
+        "binary_wheel": true,
+        "class": "permissive",
+        "declared_source": "License-Expression",
+        "evidence": "wheel-bytes",
+        "license_declared": "MIT",
+        "license_files": [
+          {
+            "name": "licenses/LICENSE",
+            "sha256": "fdf1cd17f50e1305ed8cfd37467312d27a984648dba622cef70573b5512e4e1b"
+          },
+          {
+            "name": "licenses/mypy/typeshed/LICENSE",
+            "sha256": "295f8538c94ae5c3043301cf7cff1c852dab6a786a8ddee471e061b40d5ecabe"
+          }
+        ],
+        "license_spdx": "MIT",
+        "name": "mypy",
+        "sha256": "20e9a5cd875837520c43db98dea0b6d0c2197833d95c30127d8f570fb9b1f00b",
+        "spdx_basis": "declared-expression",
+        "status": "declared",
+        "version": "2.4.0",
+        "wheel": "mypy-2.4.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"
+      },
+      {
+        "approval_ref": null,
+        "binary_wheel": false,
+        "class": "permissive",
+        "declared_source": "License-Expression",
+        "evidence": "wheel-bytes",
+        "license_declared": "MIT",
+        "license_files": [
+          {
+            "name": "licenses/LICENSE",
+            "sha256": "a50450da1d53cd777b80ced77c58ff96abe0ccd879706bd142c3ec20e245f0b4"
+          }
+        ],
+        "license_spdx": "MIT",
+        "name": "mypy-extensions",
+        "sha256": "1be4cccdb0f2482337c4743e60421de3a356cd97508abadd57d47403e94f5505",
+        "spdx_basis": "declared-expression",
+        "status": "declared",
+        "version": "1.1.0",
+        "wheel": "mypy_extensions-1.1.0-py3-none-any.whl"
+      },
+      {
+        "approval_ref": null,
+        "binary_wheel": false,
+        "class": "weak-copyleft",
+        "declared_source": "Classifier",
+        "evidence": "wheel-bytes",
+        "license_declared": "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
+        "license_files": [
+          {
+            "name": "licenses/LICENSE",
+            "sha256": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85"
+          }
+        ],
+        "license_spdx": "MPL-2.0",
+        "name": "pathspec",
+        "obligation": "MPL-2.0 file-level copyleft: keep the license text with distributions; source of MPL files must stay available if they are modified. Not modified in this repository; the license file ships in the image's dist-info.",
+        "sha256": "a00ce642f577bf7f473932318056212bc4f8bfdf53128c78bbd5af0b9b20b189",
+        "spdx_basis": "normalized-classifier",
+        "status": "declared",
+        "version": "1.1.1",
+        "wheel": "pathspec-1.1.1-py3-none-any.whl"
+      },
+      {
+        "approval_ref": null,
+        "binary_wheel": false,
+        "class": "permissive",
+        "declared_source": "License-Expression",
+        "evidence": "wheel-bytes",
+        "license_declared": "MIT",
+        "license_files": [
+          {
+            "name": "licenses/AUTHORS.txt",
+            "sha256": "4eb1fb1705e2def898e81bcba19c3aac80620d27ba3569d6a6df7b4629d1b5c2"
+          },
+          {
+            "name": "licenses/LICENSE.txt",
+            "sha256": "634300a669d49aeae65b12c6c48c924c51a4cdf3d1ff086dc3456dc8bcaa2104"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/cachecontrol/LICENSE.txt",
+            "sha256": "86eeee87be2a43f3ff1f56496f451f69243926f025fedbb033666c304c4c161b"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/certifi/LICENSE",
+            "sha256": "e93716da6b9c0d5a4a1df60fe695b370f0695603d21f6f83f053e42cfc10caf7"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/distlib/LICENSE.txt",
+            "sha256": "808e10c8a6ab8deb149ff9b3fb19f447a808094606d712a9ca57fead3552599d"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/distro/LICENSE",
+            "sha256": "cb5e8e7e5f4a3988e1063c142c60dc2df75605f4c46515e776e3aca6df976e14"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/idna/LICENSE.md",
+            "sha256": "1a9a4f0e3d479a27240ddd59a9137a66ab4a0f9dfdc8ca6188cc0bfd85187f04"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/msgpack/COPYING",
+            "sha256": "492dedba85da5872f78e6091bcd1fea474d660d35acb4dee964b8aab3f007427"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/packaging/LICENSE",
+            "sha256": "cad1ef5bd340d73e074ba614d26f7deaca5c7940c3d8c34852e65c4909686c48"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/packaging/LICENSE.APACHE",
+            "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/packaging/LICENSE.BSD",
+            "sha256": "b70e7e9b742f1cc6f948b34c16aa39ffece94196364bc88ff0d2180f0028fac5"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/pkg_resources/LICENSE",
+            "sha256": "86da0f01aeae46348a3c3d465195dc1ceccde79f79e87769a64b8da04b2a4741"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/platformdirs/LICENSE",
+            "sha256": "29e0fd62e929850e86eb28c3fdccf0cefdf4fa94879011cffb3d0d4bed6d4db6"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/pygments/LICENSE",
+            "sha256": "a9d66f1d526df02e29dce73436d34e56e8632f46c275bbdffc70569e882f9f17"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/pyproject_hooks/LICENSE",
+            "sha256": "1b22b049b5267d6dfc23a67bf4a84d8ec04b9fdfb1a51d360e42b4342c8b4154"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/requests/LICENSE",
+            "sha256": "09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/resolvelib/LICENSE",
+            "sha256": "f388fd38cad13112c1dc0f669bbe80e7f84541edbafb72f3030d2ca7642c3c9d"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/rich/LICENSE",
+            "sha256": "deed7c17a4318158190a3ea239cc879a5a50271cebb98ae7025f48fbe58dca15"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/tomli/LICENSE",
+            "sha256": "b80816b0d530b8accb4c2211783790984a6e3b61922c2b5ee92f3372ab2742fe"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/tomli_w/LICENSE",
+            "sha256": "b80816b0d530b8accb4c2211783790984a6e3b61922c2b5ee92f3372ab2742fe"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/truststore/LICENSE",
+            "sha256": "33be7b7e8fa4fd19b1760e1a8ed8a668bdab852c91b692dd41424bcb725a9fca"
+          },
+          {
+            "name": "licenses/src/pip/_vendor/urllib3/LICENSE.txt",
+            "sha256": "130e3a64d5fdd5d096a752694634a7d9df284469de86e5732100268041e3d686"
+          }
+        ],
+        "license_spdx": "MIT",
+        "name": "pip",
+        "sha256": "fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70",
+        "spdx_basis": "declared-expression",
+        "status": "declared",
+        "version": "26.2.2",
+        "wheel": "pip-26.2.2-py3-none-any.whl"
+      },
+      {
+        "approval_ref": null,
+        "binary_wheel": false,
+        "class": "permissive",
+        "declared_source": "License",
+        "evidence": "wheel-bytes",
+        "license_declared": "MIT",
+        "license_files": [
+          {
+            "name": "licenses/LICENSE",
+            "sha256": "d6b65e6c213a5d0b577911d34d6e5949b9f59d76c238c5071a2f3fc16cfb2606"
+          }
+        ],
+        "license_spdx": "MIT",
+        "name": "pluggy",
+        "sha256": "e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746",
+        "spdx_basis": "normalized-license-field",
+        "status": "declared",
+        "version": "1.6.0",
+        "wheel": "pluggy-1.6.0-py3-none-any.whl"
+      },
+      {
+        "approval_ref": null,
+        "binary_wheel": false,
+        "class": "permissive",
+        "declared_source": "License-Expression",
+        "evidence": "wheel-bytes",
+        "license_declared": "BSD-2-Clause",
+        "license_files": [
+          {
+            "name": "licenses/AUTHORS",
+            "sha256": "71a83872ad82f57be692cf827e048e2cd51d45169cfa1ea3f28706d97a872c0f"
+          },
+          {
+            "name": "licenses/LICENSE",
+            "sha256": "a9d66f1d526df02e29dce73436d34e56e8632f46c275bbdffc70569e882f9f17"
+          }
+        ],
+        "license_spdx": "BSD-2-Clause",
+        "name": "pygments",
+        "sha256": "2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9",
+        "spdx_basis": "declared-expression",
+        "status": "declared",
+        "version": "2.21.0",
+        "wheel": "pygments-2.21.0-py3-none-any.whl"
+      },
+      {
+        "approval_ref": null,
+        "binary_wheel": false,
+        "class": "permissive",
+        "declared_source": "License-Expression",
+        "evidence": "wheel-bytes",
+        "license_declared": "MIT",
+        "license_files": [
+          {
+            "name": "licenses/LICENSE",
+            "sha256": "ca836a5f9ecca3b2f350230faa20a48fb8b145653b5568d784862df864706b9b"
+          }
+        ],
+        "license_spdx": "MIT",
+        "name": "pytest",
+        "sha256": "37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c",
+        "spdx_basis": "declared-expression",
+        "status": "declared",
+        "version": "9.1.1",
+        "wheel": "pytest-9.1.1-py3-none-any.whl"
+      },
+      {
+        "approval_ref": null,
+        "binary_wheel": false,
+        "class": "permissive",
+        "declared_source": "License-Expression",
+        "evidence": "wheel-bytes",
+        "license_declared": "MIT",
+        "license_files": [
+          {
+            "name": "licenses/AUTHORS.rst",
+            "sha256": "d7390c793c73c36265497ffac90a886a235c8b50948454c9af98f1aef2a00d2a"
+          },
+          {
+            "name": "licenses/LICENSE",
+            "sha256": "835586ae156766a24e3c103fbc55d9af6b1a16df57ca932c97482a2737fd83d5"
+          }
+        ],
+        "license_spdx": "MIT",
+        "name": "pytest-cov",
+        "sha256": "a0461110b7865f9a271aa1b51e516c9a95de9d696734a2f71e3e78f46e1d4678",
+        "spdx_basis": "declared-expression",
+        "status": "declared",
+        "version": "7.1.0",
+        "wheel": "pytest_cov-7.1.0-py3-none-any.whl"
+      },
+      {
+        "approval_ref": null,
+        "binary_wheel": true,
+        "class": "permissive",
+        "declared_source": "License-Expression",
+        "evidence": "wheel-bytes",
+        "license_declared": "MIT",
+        "license_files": [
+          {
+            "name": "licenses/LICENSE",
+            "sha256": "2597d854122b77ddc71971564ca2350a37608575ce324adc5650a2b2051c8f18"
+          }
+        ],
+        "license_spdx": "MIT",
+        "name": "ruff",
+        "sha256": "9ce7f8f22df67c93ed96c717f9128eadb797144ac2bad475cf536f31d6100c55",
+        "spdx_basis": "declared-expression",
+        "status": "declared",
+        "version": "0.16.7",
+        "wheel": "ruff-0.16.7-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+      },
+      {
+        "approval_ref": null,
+        "binary_wheel": false,
+        "class": "permissive",
+        "declared_source": "License-Expression",
+        "evidence": "wheel-bytes",
+        "license_declared": "MIT",
+        "license_files": [
+          {
+            "name": "licenses/LICENSE",
+            "sha256": "86da0f01aeae46348a3c3d465195dc1ceccde79f79e87769a64b8da04b2a4741"
+          }
+        ],
+        "license_spdx": "MIT",
+        "name": "setuptools",
+        "sha256": "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9",
+        "spdx_basis": "declared-expression",
+        "status": "declared",
+        "version": "84.1.0",
+        "wheel": "setuptools-84.1.0-py3-none-any.whl"
+      },
+      {
+        "approval_ref": null,
+        "binary_wheel": false,
+        "class": "permissive",
+        "declared_source": "License",
+        "evidence": "wheel-bytes",
+        "license_declared": "Apache 2.0",
+        "license_files": [
+          {
+            "name": "LICENSE",
+            "sha256": "1db7cae7fce6452e2e608e401a0f953e0133e4c2d75db69fb8ae851d2086f5b6"
+          }
+        ],
+        "license_spdx": "Apache-2.0",
+        "name": "sortedcontainers",
+        "sha256": "a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0",
+        "spdx_basis": "normalized-license-field",
+        "status": "declared",
+        "version": "2.4.0",
+        "wheel": "sortedcontainers-2.4.0-py2.py3-none-any.whl"
+      },
+      {
+        "approval_ref": null,
+        "binary_wheel": false,
+        "class": "permissive",
+        "declared_source": "License-Expression",
+        "evidence": "wheel-bytes",
+        "license_declared": "MIT",
+        "license_files": [
+          {
+            "name": "licenses/LICENSE.txt",
+            "sha256": "30c23618679108f3e8ea1d2a658c7ca417bdfc891c98ef1a89fa4ff0c9828654"
+          }
+        ],
+        "license_spdx": "MIT",
+        "name": "wheel",
+        "sha256": "3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab",
+        "spdx_basis": "declared-expression",
+        "status": "declared",
+        "version": "0.48.0",
+        "wheel": "wheel-0.48.0-py3-none-any.whl"
+      }
+    ],
+    "shared": [
+      "image:ubi9-python-314-minimal",
+      "project:mainframe-rag"
+    ]
+  },
   "python": [
     {
       "approval_ref": null,

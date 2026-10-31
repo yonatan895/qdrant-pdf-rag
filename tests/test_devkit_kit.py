@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from scripts import license_inventory as li
 
 from tests.helpers_airgap import (
     REPO,
@@ -197,6 +198,37 @@ def _write_oras_archives(tree: Path) -> dict[str, Path]:
     return {"DEVKIT_ORAS_ARCHIVE": win, "DEVKIT_ORAS_LINUX_ARCHIVE": linux}
 
 
+def _inventory(tree: Path) -> dict:
+    return json.loads((tree / "licenses/inventory.json").read_text())
+
+
+def _write_inventory(tree: Path, inventory: dict, *, approve: bool = True) -> None:
+    """Record the tree's inventory; with ``approve`` the kit approval names its current
+    digest (a test stand-in for the owner's record, never the repository's)."""
+    if approve:
+        inventory["devkit"]["approval"] = {"approval_ref": "test-owner-record",
+                                           "approved_digest": li.kit_scope_digest(inventory)}
+    (tree / "licenses/inventory.json").write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n")
+
+
+def _resolve_kit_inventory(tree: Path) -> None:
+    """The fixture's owner: rebind the oras records to the fake pins, resolve every
+    open kit decision and approve the result, so a pack can pass the licence gate."""
+    inventory = _inventory(tree)
+    for entry in inventory["devkit"]["components"]:
+        if entry["kind"] == "tool":
+            pin = li.read_pin(tree, entry["bind"]["pin"].removeprefix("scripts/tools/"))
+            entry["bind"].update({k: pin[k] for k in li.KIT_TOOL_FIELDS if k in pin})
+        if entry["status"] == "pending-owner-decision":
+            entry.update(status="approved", approval_ref="test-owner-record")
+    _write_inventory(tree, inventory)
+
+
+def _commit_inventory(ctx, inventory: dict, *, approve: bool = True) -> None:
+    _write_inventory(ctx["tree"], inventory, approve=approve)
+    _git(ctx["tree"], "commit", "-q", "-am", "inventory")
+
+
 def _git(tree: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=tree, check=True, capture_output=True, text=True).stdout.strip()
 
@@ -228,6 +260,7 @@ def pack_tree(tmp_path, github):
     copy_license_inputs(tree)
     copy_chart(tree)
     archives = _write_oras_archives(tree)
+    _resolve_kit_inventory(tree)
     layout = tmp_path / "registry-layout"
     digest = oci_layout(layout, b"pinned")
     _set_pin(tree, digest)
@@ -361,6 +394,89 @@ def test_pack_writes_a_signed_plain_file_kit_whose_manifest_binds_the_pins(packe
     sbom = json.loads((kit / "sbom.json").read_text())
     assert sbom["image"]["digest"] == ctx["digest"] and sbom["kit_key"] == expected_key
     assert "oras-LICENSE" in (kit / "THIRD-PARTY-NOTICES.txt").read_text()
+    assert fields["license_status"].startswith("OK (") and "kit_unresolved=0 kit_approval=current" in fields["license_status"]
+
+
+def test_kit_notices_name_every_kit_component_and_carry_the_pinned_oras_licence(packed):
+    ctx, kit, _ = packed
+    notices = (kit / "THIRD-PARTY-NOTICES.txt").read_text()
+    inventory = _inventory(ctx["tree"])
+    assert "Owner approval of the kit inventory: current" in notices
+    assert f"Kit scope digest: {li.kit_scope_digest(inventory)}" in notices
+    # Every wheel the dev image installs (the dev lock, independently read), every RPM
+    # NEVRA of the package list, every tool pin and the shared base and project.
+    lock = [line.split(" ", 1)[0] for line in (ctx["tree"] / "requirements.dev.lock.txt").read_text().splitlines()
+            if line and not line.startswith("#")]
+    assert len(lock) == len(inventory["python"]) + len(inventory["devkit"]["python"])
+    for pinned in lock:
+        assert f"\n{pinned}  " in notices, pinned
+    rpms = [line for line in (ctx["tree"] / "images/devkit-packages.txt").read_text().splitlines()
+            if line and not line.startswith("#")]
+    for nevra in rpms:
+        assert f"nevra: {nevra}  RPM License tag: " in notices, nevra
+    for _, pin in li.KIT_TOOL_PINS:
+        assert f"pin: scripts/tools/{pin} " in notices, pin
+    assert "image:ubi9-python-314-minimal" in notices and "project:mainframe-rag" in notices
+    # The texts: the oras licence from the kit, the project LICENSE and the base RPM list.
+    assert f"### kit-tool:oras-windows: oras-LICENSE (kit member)\n{ORAS_LICENSE.decode().rstrip()}" in notices
+    assert "### project:mainframe-rag: LICENSE" in notices
+    assert "### image:ubi9-python-314-minimal: licenses/ubi9-python-314-minimal.rpms.txt" in notices
+
+
+def _drop(group: str, key: str, value: str):
+    def mutate(inventory):
+        records = inventory["devkit"][group]
+        records.remove(next(e for e in records if e[key] == value))
+    return mutate
+
+
+@pytest.mark.parametrize("mutate, message", [
+    (_drop("components", "id", "rpm:git-core"),
+     "devkit: rpm git-core-0:2.52.0-1.el9.x86_64: kit package has no license record"),
+    (_drop("python", "name", "ruff"), "devkit: python:ruff: locked dev package has no kit license record"),
+    (_drop("components", "id", "kit-tool:oc"), "devkit: tool scripts/tools/oc-pin.txt: kit tool has no license record"),
+])
+def test_pack_refuses_a_kit_component_missing_from_the_inventory(pack_tree, mutate, message):
+    """Even with a current kit approval, a component the kit ships without a record refuses."""
+    inventory = _inventory(pack_tree["tree"])
+    mutate(inventory)
+    _commit_inventory(pack_tree, inventory)
+    done = run_pack(pack_tree)
+    assert done.returncode != 0
+    assert message in done.stderr
+    assert "the dev kit licence check failed" in done.stderr
+    assert not list((pack_tree["tree"] / "dist").glob("mfr-devkit-*"))
+    assert not (pack_tree["tmp"] / "skopeo.log").exists()
+
+
+def test_pack_refuses_a_stale_kit_approval(pack_tree):
+    """A record changed after the owner approved the kit digest makes the approval stale."""
+    inventory = _inventory(pack_tree["tree"])
+    openssl = next(e for e in inventory["devkit"]["components"] if e["id"] == "rpm:openssl")
+    # A re-derived RPM header now declares more than the approved record did.
+    openssl.update(license_declared="Apache-2.0 AND MIT", license_spdx="Apache-2.0 AND MIT")
+    _commit_inventory(pack_tree, inventory, approve=False)
+    done = run_pack(pack_tree)
+    assert done.returncode != 0
+    assert "devkit approval: kit dependency or license records changed since the approved digest" in done.stderr
+    assert "kit_approval=stale" in done.stderr
+    assert not list((pack_tree["tree"] / "dist").glob("mfr-devkit-*"))
+    # Re-approving the new digest is the fix the message names; the next pack passes.
+    _commit_inventory(pack_tree, inventory)
+    assert run_pack(pack_tree).returncode == 0
+
+
+def test_pack_refuses_an_unresolved_kit_decision(pack_tree):
+    """A withdrawn decision (status only, so the approved digest stays current) refuses."""
+    inventory = _inventory(pack_tree["tree"])
+    git = next(e for e in inventory["devkit"]["components"] if e["id"] == "rpm:git-core")
+    git.update(status="pending-owner-decision", approval_ref=None)
+    _commit_inventory(pack_tree, inventory, approve=False)
+    done = run_pack(pack_tree)
+    assert done.returncode != 0
+    assert "devkit: rpm:git-core: GPL-2.0-only (strong-copyleft) awaits owner decision" in done.stderr
+    assert "kit_approval=current" in done.stderr
+    assert not list((pack_tree["tree"] / "dist").glob("mfr-devkit-*"))
 
 
 def test_pack_refuses_a_pending_digest_and_writes_no_kit(pack_tree):

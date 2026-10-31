@@ -20,9 +20,12 @@
 #   SHA256SUMS.sha256      the fingerprint the Windows runbook checks with Get-FileHash;
 #                          its first 16 hex are the trust anchor published separately (B2)
 #
-# Refuses a stale kit key or a sha256:PENDING digest (D-8). --reuse-image takes the
-# image/ directory of an earlier kit with the same key instead of pulling: the
-# snapshot-only re-sign (D-9). Its digest must still equal the pin.
+# Refuses a stale kit key or a sha256:PENDING digest (D-8), and runs the kit licence
+# gate (license_inventory.py check --kit, docs/licensing.md#dev-kit) before any pull:
+# an unrecorded kit component, an open owner decision or an absent or stale kit
+# approval refuses the pack. --reuse-image takes the image/ directory of an earlier
+# kit with the same key instead of pulling: the snapshot-only re-sign (D-9). Its
+# digest must still equal the pin.
 
 . "$(dirname -- "$0")/../airgap/common.sh"
 
@@ -30,7 +33,7 @@ REUSE_IMAGE=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --reuse-image) REUSE_IMAGE="${2:-}"; [ -n "$REUSE_IMAGE" ] || die "--reuse-image needs the image/ directory of an earlier kit"; shift 2 ;;
-        -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
         *) die "unsupported argument (usage: sh scripts/devkit/pack.sh [--reuse-image DIR])" ;;
     esac
 done
@@ -57,11 +60,13 @@ DIGEST=$(sed -n 's/^digest: *//p' "$REPO_ROOT/scripts/tools/devkit-pin.txt")
     die "scripts/tools/devkit-pin.txt digest is sha256:PENDING: record the digest .github/workflows/devkit.yml pushed for key $KEY in a pin PR, then pack"
 printf '%s\n' "$DIGEST" | grep -Eqx 'sha256:[0-9a-f]{64}' || die "scripts/tools/devkit-pin.txt digest is malformed"
 
-# The bundle's licence gate, unchanged: an unrecorded dependency or notice change
-# refuses the pack. Its summary line goes into MANIFEST.
-LICENSE_SUMMARY=$(python3 "$REPO_ROOT/scripts/license_inventory.py" --root "$REPO_ROOT" check) || {
+# The kit's licence gate (docs/licensing.md#dev-kit): the bundle's check plus the
+# kit scope. A kit component (dev wheel, RPM, tool pin, base image) without a
+# record, an open owner decision, or an absent or stale kit approval refuses the
+# pack before anything is pulled. Its summary line goes into MANIFEST.
+LICENSE_SUMMARY=$(python3 "$REPO_ROOT/scripts/license_inventory.py" --root "$REPO_ROOT" check --kit) || {
     printf '%s\n' "$LICENSE_SUMMARY" >&2
-    die "license inventory check failed: record the dependency/notice change in licenses/inventory.json (docs/licensing.md)"
+    die "the dev kit licence check failed (its FAIL lines above name each item): record every kit component in the devkit section of licenses/inventory.json, have the owner resolve open decisions, then record devkit.approval with the kit scope digest above (docs/licensing.md#dev-kit)"
 }
 LICENSE_STATUS=$(printf '%s\n' "$LICENSE_SUMMARY" | sed -n '$p' | sed 's/^license-inventory: //')
 
@@ -224,24 +229,15 @@ root, kit = Path(sys.argv[1]), Path(sys.argv[2])
 image, digest, config, license_status, commit = sys.argv[3:8]
 sys.path.insert(0, str(root / "scripts"))
 from dependency_lock import load
-
-def pin(name):
-    fields = {}
-    for line in (root / "scripts/tools" / name).read_text(encoding="utf-8").splitlines():
-        key, sep, value = line.partition(":")
-        if sep and not line.startswith("#"):
-            fields[key.strip()] = value.strip()
-    return fields
+from license_inventory import KIT_TOOL_PINS, read_pin
 
 _, wheels = load(root, "dev")
 base = re.search(r"(?m)^FROM\s+(\S+@sha256:[0-9a-f]{64})", (root / "images/Containerfile.devkit").read_text(encoding="utf-8"))[1]
 rpms = [line for line in (root / "images/devkit-packages.txt").read_text(encoding="utf-8").splitlines()
         if line and not line.startswith("#")]
 tools = []
-for name, pin_file in (("go-task/task", "task-pin.txt"), ("helm", "helm-pin.txt"),
-                       ("openshift-client", "oc-pin.txt"), ("oras (oras.exe)", "oras-windows-pin.txt"),
-                       ("oras (Linux, fallback push)", "oras-pin.txt")):
-    fields = pin(pin_file)
+for name, pin_file in KIT_TOOL_PINS:
+    fields = read_pin(root, pin_file)
     tools.append({"name": name, "pin": f"scripts/tools/{pin_file}", **{k: fields[k] for k in
                   ("version", "asset", "sha256", "binary-sha256", "origin", "license", "platforms") if k in fields}})
 sbom = {
@@ -256,32 +252,13 @@ sbom = {
 }
 (kit / "sbom.json").write_text(json.dumps(sbom, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-lines = [
-    "DEV KIT THIRD-PARTY NOTICES AND LICENSE REVIEW STATUS", "=" * 78, "",
-    "Generated at the packed commit. It lists what the kit ships and where each licence",
-    "text is. It is not a legal approval (docs/licensing.md).", "",
-    f"Repository licence inventory check: {license_status}",
-    "Scope: licenses/inventory.json records the runtime profile and the release bundle.",
-    "The dev wheels, the RPMs and the tool binaries below are not recorded there yet;",
-    "that record is an owner decision. GPL-licensed RPMs are accepted in this image",
-    "(ADR-0009 section 8).", "",
-    "IMAGE", "-" * 78, f"{image}@{digest}",
-    f"  base: {base} (Red Hat UBI EULA plus each packaged component's licence)", "",
-    "TOOLS", "-" * 78,
-]
-for tool in tools:
-    lines.append(f"{tool['name']} {tool.get('version', '')}  {tool.get('license', '')}  (pin {tool['pin']})")
-lines += ["  task, helm and oc are inside the image under /usr/local/bin; oras.exe and oras ship",
-          "  beside the image with their licence text, oras-LICENSE, reproduced below.", "",
-          "RPMS (exact NEVRAs from images/devkit-packages.txt; licence texts in the image under /usr/share/licenses)",
-          "-" * 78, *rpms, "",
-          "PYTHON DISTRIBUTIONS (requirements.dev.lock.txt; licence texts in the image under <dist>.dist-info)",
-          "-" * 78, *[f"{name}=={entry['version']}" for name, entry in sorted(wheels.items())], "",
-          "NOTICE TEXTS", "-" * 78, "", "### oras-LICENSE",
-          (kit / "oras-LICENSE").read_text(encoding="utf-8").rstrip()]
-(kit / "THIRD-PARTY-NOTICES.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 PYEOF
-    die "the SBOM or notices could not be written from the pins"
+    die "the SBOM could not be written from the pins"
+# Every kit component with its licence, decision state and the notice texts held
+# (oras-LICENSE is read from the kit and checked against its pinned digest).
+python3 "$REPO_ROOT/scripts/license_inventory.py" --root "$REPO_ROOT" notices --kit --bundle-dir "$KIT" \
+    --output "$KIT/THIRD-PARTY-NOTICES.txt" >/dev/null ||
+    die "the kit third-party notices could not be rendered from licenses/inventory.json (docs/licensing.md#dev-kit)"
 
 echo "==> Member checksums and signature (the release bundle's mechanism)"
 openssl pkey -in "$SNEAKERNET_SIGNING_KEY" -pubout -out "$KIT/sneakernet-signing.pub"

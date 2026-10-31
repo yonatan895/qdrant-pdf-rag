@@ -17,7 +17,8 @@ Source of authority: #376 and its triage comments (19 and 24 September, 1 Octobe
 2026): close on a documented owner disposition, never on CI alone.
 Decision owners: `licenses/inventory.json` (the record),
 `scripts/license_inventory.py` (check and notices), `scripts/airgap/pack.sh`
-(bundle member), and this file (obligations, options).
+(bundle member), `scripts/devkit/pack.sh` (the [dev kit](#dev-kit) gate), and this
+file (obligations, options).
 
 ## Responsibility boundaries
 
@@ -62,11 +63,74 @@ alternatives differ needs a recorded `elected` value. Runtime wheel result: 63
 permissive, 2 weak-copyleft (`certifi`: MPL-2.0; `tqdm`: MPL-2.0 AND MIT), 1 network-copyleft
 (`pymupdf`, AGPL elected; owner decision 2026-10-26, legal confirmation waived as an explicit exception). 16 wheels are binary; their declared license may not describe native
 libraries vendored inside them (numpy lists 17 license files; most others one; the `cryptography` wheel statically links OpenSSL, under its own Apache-2.0 terms, which its three license files do not enumerate).
-The dev/build profiles are not shipped and are not inventoried;
+The build profile is not shipped and is not inventoried; the dev profile ships only in
+the [dev kit](#dev-kit), which has its own section.
 `check` fails if a locked runtime wheel has no record or a record has no locked wheel,
 so the 66 are exactly the runtime profile of `locks/cp314-linux-x86_64.json`.
 Four wheels (`flatbuffers`, `loguru`, `onnxruntime`, `tokenizers`) ship no license
 file; their upstream texts are bound in `licenses/texts/` and rendered into the notices.
+
+<a id="dev-kit"></a>
+## Dev kit (#1118, ADR-0009 §8)
+
+The signed dev kit (`scripts/devkit/pack.sh`, `mfr-devkit-<key>/`) is a separate
+artifact from the release bundle, packed only when its key changes. Its records are
+the `devkit` section of `licenses/inventory.json`, with their own approval, because
+`check` reconciles `python` with the runtime profile exactly and the release
+`approved_digest` must not move when only the kit changes (or the reverse).
+
+| Kit component | Record | Licence source |
+|---|---|---|
+| Runtime wheels (66) | the release `python` records, reused | as above |
+| Dev-only wheels (17) | `devkit.python`, bound to `requirements.dev.lock.txt` | `generate --kit --wheelhouse` on the image's `/opt/devkit/wheelhouse` (exact locked bytes) |
+| RPMs (26, `images/devkit-packages.txt`) | `devkit.components`, kind `rpm`, bound to the NEVRA | RPM `License` header tag from the pinned image's rpmdb (`devkit.evidence`) |
+| Task, Helm, oc, `oras.exe`, Linux `oras` | `devkit.components`, kind `tool`, bound to the pin's `version`, `sha256`, `license` and `license-sha256` | the pin's `license:` line; `oras-LICENSE` checked against its pinned digest |
+| UBI base, project | `devkit.shared`: the release records `image:ubi9-python-314-minimal` and `project:mainframe-rag` | the `FROM` digest of `images/Containerfile.devkit` must equal the shared base record's digest |
+
+RPM tags are free-form. `license_declared` keeps the tag verbatim. `license_spdx`
+keeps SPDX terms, and maps a Fedora legacy abbreviation only where
+fedora-license-data (commit `cbd8b74c`) gives exactly one identifier (`GPLv2`,
+`GPLv2+`, `GPLv3+`, `ASL 2.0`, `ISC`, `Sleepycat`, `Public Domain`). `BSD`, `MIT`,
+`LGPLv2`, `LGPLv2+`, `GFDL` and `BSD with advertising` each map to several, so they
+become `NOASSERTION` (class `unknown`), are named in `ambiguous_terms`, and stay
+`pending-owner-decision`.
+
+Recorded decisions: `crun`, `git-core` and `tar` (GPL only) are `approved` under the
+maintainer's 2026-10-28 decision that GPL-licensed RPMs are acceptable in the
+workspace image ([#1118 comment](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480982316)).
+An RPM whose tag also has an ambiguous term (`gzip`, `less`, `pam`, `libpwquality`,
+`shadow-utils-subid`, `util-linux`, `util-linux-core`) stays open. That decision
+covers only its GPL part. Nothing else is approved on the owner's behalf.
+
+The gate: `pack.sh` runs `license_inventory.py check --kit` before it pulls anything.
+`--kit` is the kit's `check --release`. A pack is refused with fixed `FAIL` lines
+when:
+- a dev wheel, RPM or tool pin has no record, or a record differs from its pin;
+- any kit-scope record is `pending-owner-decision` or awaits legal confirmation;
+- `devkit.approval` is absent, or its `approved_digest` differs from the kit scope
+  digest, which `check --kit` prints. The digest covers every kit record, shared
+  ones included; decision fields are excluded.
+
+Unlike the release `pack.sh`, which leaves `--release` to the handoff, the kit pack
+needs the owner's kit approval first. Record each decision as for the release.
+Then set `devkit.approval.approval_ref` and `approved_digest` to the printed digest.
+
+The kit's `THIRD-PARTY-NOTICES.txt` comes from `notices --kit`. It lists every
+component: each wheel, each RPM with its NEVRA and verbatim tag, each tool with its
+pin, and the shared base and project, with class, status and approval. It carries
+the project `LICENSE`, the base RPM list, the bound wheel texts and `oras-LICENSE`.
+RPM and wheel licence texts ship in the image (`/usr/share/licenses`,
+`<dist>.dist-info`). Task's MIT text is not in the kit; the release bundle carries
+it as `task-LICENSE`. Helm and oc ship no licence file; their Apache-2.0 text is
+the one in `oras-LICENSE`. No source or written offer is carried for GPL or LGPL
+RPMs; that is decision 3 below.
+
+Refresh after a kit pin change: on the connected side, read the tags with
+`rpm -qa --qf '%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\t%{LICENSE}\n'`
+in the new image and copy out `/opt/devkit/wheelhouse`, or prepare the dev
+wheelhouse. Then run `generate --kit --wheelhouse DIR --rpm-licenses FILE`. A
+changed tag drops that RPM's decision fields. A new restricted record is seeded
+`pending-owner-decision`, never approved.
 
 ## Docs-only tooling (not in the inventory)
 
