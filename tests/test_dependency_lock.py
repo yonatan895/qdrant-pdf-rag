@@ -7,6 +7,7 @@ import io
 import json
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import threading
@@ -534,65 +535,138 @@ def test_preparation_uses_verified_pip_and_no_isolated_build_resolution(locked, 
     assert calls[-1][0][-3:] == ['--profile', 'dev', '--project']
 
 
-def _kit_image(root: Path, wheels: Path, *, dev_lock: bytes | None = None) -> Path:
-    """The dev kit image's /opt/devkit layout: its two lock files and its wheelhouse."""
-    kit = root / "kit-image"
+def _kit_image(root: Path, *, dev_lock: bytes | None = None) -> tuple[Path, Path]:
+    """A synthetic dev kit image: /opt/devkit with its two lock files and no wheelhouse,
+    and the image's installed environment, whose dists equal the dev lock (example, pip),
+    with a scripts directory holding a native tool, a Python entry point and an
+    interpreter link.
+
+    pip sits in a directory the image's own .pth file adds, as a real image's .pth
+    files add theirs: the kit venv must apply them, or pip is missing."""
+    kit = root / "kit-image/opt/devkit"
     for name in prepare_python.KIT_LOCK_FILES:
         (kit / "locks" / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(root / name, kit / "locks" / name)
     if dev_lock is not None:
         (kit / "locks/requirements.dev.lock.txt").write_bytes(dev_lock)
-    shutil.copytree(wheels, kit / "wheelhouse")
-    return kit
+    site_dir = root / "kit-image/opt/app-root/lib/python3.14/site-packages"
+    nested = root / "kit-image/opt/app-root/nested"
+    _dist(site_dir, "example", "1.0")
+    _dist(nested, "pip", "26.2.2")
+    (site_dir / "nested.pth").write_text(f"{nested}\n")
+    scripts = root / "kit-image/opt/app-root/bin"
+    scripts.mkdir(parents=True)
+    (scripts / "native-tool").write_bytes(b"\x7fELF synthetic stand-in")
+    (scripts / "entry-point").write_text("#!/opt/app-root/bin/python3\n")
+    (scripts / "python3").symlink_to(scripts / "native-tool")
+    # The checkout: its pyproject and the verifier the kit runs inside the new venv.
+    (root / "pyproject.toml").write_text('[project]\nname = "synthetic-checkout"\nversion = "0.1"\n')
+    (root / "scripts").mkdir(exist_ok=True)
+    shutil.copy(Path(locks.__file__), root / "scripts/dependency_lock.py")
+    return kit, site_dir
 
 
-def test_kit_mode_prepares_offline_from_the_kit_image_wheelhouse(locked, monkeypatch):
-    root, _, wheels = locked
-    kit = _kit_image(root, wheels)
-    python = root / "python"
-    python.touch()
-    calls = []
-    monkeypatch.setattr(prepare_python.subprocess, "run", lambda *a, **kw: calls.append(a[0]))
+def _dist(directory: Path, name: str, version: str) -> Path:
+    info = directory / f"{name.replace('-', '_')}-{version}.dist-info"
+    info.mkdir(parents=True)
+    (info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n")
+    return info
+
+
+def _kit_run(monkeypatch, root: Path, image_site: Path) -> list[list[str]]:
+    """Real venv creation and real installed-set verification; pip is the one stand-in
+    (the synthetic image has no runnable pip): its editable install writes the dist-info
+    real pip writes for `-e <checkout>`."""
+    calls: list[list[str]] = []
+    real_run = subprocess.run
+
+    def run(argv, **kwargs):
+        calls.append(list(argv))
+        if argv[2:5] == ["-m", "pip", "--isolated"]:
+            if "install" in argv:
+                venv_site = next(Path(argv[0]).parents[1].glob("lib/python*/site-packages"))
+                info = _dist(venv_site, "synthetic-checkout", "0.1")
+                (info / "direct_url.json").write_text(json.dumps(
+                    {"url": Path(argv[-1]).as_uri(), "dir_info": {"editable": True}}))
+            return subprocess.CompletedProcess(argv, 0)
+        return real_run(argv, **kwargs)
+
+    scripts = root / "kit-image/opt/app-root/bin"
+    monkeypatch.setattr(prepare_python, "image_environment", lambda: ([image_site], scripts))
+    monkeypatch.setattr(prepare_python.subprocess, "run", run)
     monkeypatch.setattr(locks.urllib.request, "urlopen", lambda *a, **kw: pytest.fail("network used"))
-    assert prepare_python.main(["--root", str(root), "--kit", str(kit), "--python", str(python)]) == 0
-    install = calls[1]
-    assert install[install.index("--find-links") + 1] == str((kit / "wheelhouse").absolute())
-    assert str((kit / "wheelhouse").absolute() / "pip-26.2.2-py3-none-any.whl") in install
-    assert {"--no-index", "--require-hashes", "--only-binary=:all:"} <= set(install)
-    assert calls[2][-2:] == ["-e", str(root)]
+    return calls
 
 
-def test_kit_mode_refuses_an_image_built_for_another_dev_lock_naming_the_kit(tmp_path, capsys):
+def test_kit_mode_layers_a_venv_over_the_image_environment_without_any_wheelhouse(locked, monkeypatch):
+    """#1118 D-7 option B: the kit venv sees the image's installed environment, adds only
+    the checkout (editable, no deps, no index) and equals the dev lock exactly."""
+    root, _, _ = locked
+    kit, image_site = _kit_image(root)
+    venv = root / "kit-venv"
+    calls = _kit_run(monkeypatch, root, image_site)
+    assert prepare_python.main(["--root", str(root), "--kit", str(kit), "--venv", str(venv)]) == 0
+    assert not (kit / "wheelhouse").exists() and not list(root.glob("kit-image/**/*.whl"))
+    assert calls[0][1:] == ["-m", "venv", "--without-pip", str(venv.absolute())]
+    install, check, verify = calls[1:]
+    assert install[install.index("install") + 1:] == [
+        "--no-index", "--no-cache-dir", "--no-deps", "--no-build-isolation", "-e", str(root)]
+    assert check[-1] == "check"
+    assert verify[-6:] == ["--root", str(root), "installed", "--profile", "dev", "--project"]
+    # The verifier ran for real in the new venv; the same interpreter reports the layered set.
+    python = venv / "bin/python"
+    probe = "import importlib.metadata as m; print(sorted(d.metadata['Name'] for d in m.distributions()))"
+    listed = subprocess.run([str(python), "-I", "-c", probe], capture_output=True, text=True, check=True).stdout
+    assert listed.strip() == "['example', 'pip', 'synthetic-checkout']"
+    # `python -m ruff` finds its binary beside the interpreter: native tools are linked,
+    # Python entry points (the image's python) and the venv's own interpreter are not.
+    bin_dir = venv / "bin"
+    assert (bin_dir / "native-tool").readlink() == root / "kit-image/opt/app-root/bin/native-tool"
+    assert not (bin_dir / "entry-point").exists()
+    assert (bin_dir / "python3").resolve() != (root / "kit-image/opt/app-root/bin/native-tool").resolve()
+
+
+@pytest.mark.parametrize("change", ["extra", "missing"])
+def test_kit_mode_refuses_an_image_environment_that_differs_from_the_dev_lock(locked, monkeypatch, capfd, change):
+    root, _, _ = locked
+    kit, image_site = _kit_image(root)
+    if change == "extra":
+        _dist(image_site, "stray", "1.0")
+    else:
+        shutil.rmtree(image_site / "example-1.0.dist-info")
+    _kit_run(monkeypatch, root, image_site)
+    assert prepare_python.main(["--root", str(root), "--kit", str(kit), "--venv", str(root / "kit-venv")]) == 2
+    err = capfd.readouterr().err
+    assert "installed inventory differs from the selected lock/base/project profile" in err
+    assert "prepare-python: preparation failed; environment is not qualified" in err
+
+
+def test_kit_mode_refuses_an_image_built_for_another_dev_lock_naming_the_kit(tmp_path):
     root = Path(__file__).resolve().parents[1]
     kit = tmp_path / "kit-image"
     for name in prepare_python.KIT_LOCK_FILES:
         (kit / "locks" / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(root / name, kit / "locks" / name)
     (kit / "locks/requirements.dev.lock.txt").write_bytes(b"# another dev lock\n")
-    (kit / "wheelhouse").mkdir()
     from scripts.devkit_key import key
     with pytest.raises(locks.LockError, match=f"another dev lock; request mfr-devkit-{key(root)}$"):
-        prepare_python.kit_wheelhouse(root, kit)
+        prepare_python.check_kit(root, kit)
 
 
-@pytest.mark.parametrize("damage", ["dev-lock", "tampered-wheel", "connected", "unreadable-wheel"])
+@pytest.mark.parametrize("damage", ["dev-lock", "connected", "internal-index", "python-target"])
 def test_kit_mode_fails_closed_before_any_process(locked, monkeypatch, capsys, damage):
-    root, _, wheels = locked
-    kit = _kit_image(root, wheels, dev_lock=b"# another dev lock\n" if damage == "dev-lock" else None)
-    if damage == "tampered-wheel":
-        (kit / "wheelhouse/example-1.0-py3-none-any.whl").write_bytes(b"corrupt")
-    if damage == "unreadable-wheel":
-        # The factory image's wheels were root-only (0600) under an arbitrary UID (#1118).
-        monkeypatch.setattr(prepare_python.os, "access", lambda path, mode: not str(path).endswith(".whl"))
+    root, _, _ = locked
+    kit, _ = _kit_image(root, dev_lock=b"# another dev lock\n" if damage == "dev-lock" else None)
     monkeypatch.setattr(prepare_python.subprocess, "run", lambda *a, **kw: pytest.fail("process started"))
     monkeypatch.setattr(locks.urllib.request, "urlopen", lambda *a, **kw: pytest.fail("network used"))
-    extra = ["--connected"] if damage == "connected" else []
     environment = root / "new-venv"
-    assert prepare_python.main(["--root", str(root), "--kit", str(kit), "--venv", str(environment), *extra]) == 2
+    target = ["--python", sys.executable] if damage == "python-target" else ["--venv", str(environment)]
+    extra = {"connected": ["--connected"], "internal-index": ["--internal-index"]}.get(damage, [])
+    assert prepare_python.main(["--root", str(root), "--kit", str(kit), *target, *extra]) == 2
     expected = {"dev-lock": "this dev kit image was built for another dev lock; request",
-                "tampered-wheel": "checksum",
                 "connected": "--kit is offline only",
-                "unreadable-wheel": "the dev kit image's wheels are not readable by this user"}[damage]
+                "internal-index": "--kit is offline only",
+                "python-target": "--kit prepares its own environment: use --venv"}[damage]
     assert expected in capsys.readouterr().err
     assert not environment.exists()
 
@@ -910,11 +984,14 @@ def test_containerfile_check_admits_the_devkit_tool_context_and_no_lookalike(tmp
     root = _containerfile_tree(tmp_path)
     devkit = root / "images" / "Containerfile.devkit"
     recipe = devkit.read_text()
-    assert "from=devkit-tools," in recipe and "COPY --from=wheelhouse /*.whl " in recipe
+    # The wheelhouse is bind-mounted for the install only, never copied (D-7).
+    assert "from=devkit-tools," in recipe and "--mount=type=bind,from=wheelhouse," in recipe
+    assert "COPY --from=wheelhouse" not in recipe
     check_containerfile_bases(root)
-    devkit.write_text(recipe.replace("from=devkit-tools,", "from=devkit-tool,"))
-    with pytest.raises(locks.LockError, match="non-stage image"):
-        check_containerfile_bases(root)
+    for context in ("devkit-tools", "wheelhouse"):
+        devkit.write_text(recipe.replace(f"from={context},", f"from={context[:-1]},"))
+        with pytest.raises(locks.LockError, match="non-stage image"):
+            check_containerfile_bases(root)
     devkit.write_text(recipe.replace(locks.BASE_IMAGE.rpartition("@")[2], "sha256:" + "0" * 64, 1))
     with pytest.raises(locks.LockError, match="base digest differs"):
         check_containerfile_bases(root)

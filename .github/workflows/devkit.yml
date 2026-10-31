@@ -84,6 +84,7 @@ env:
     command -v mfr-session-login mfr-session-logout
     touch "$HOME/.devkit-probe" /work/.devkit-probe
     if touch /opt/app-root/lib/.devkit-probe 2>/dev/null; then exit 1; fi
+    if [ -e /opt/devkit/wheelhouse ]; then exit 1; fi
 
 jobs:
   build:
@@ -114,6 +115,14 @@ jobs:
       - name: Smoke-test the image as an arbitrary UID
         run: |
           docker run --rm --user "$SMOKE_USER" devkit:ci sh -euc "$SMOKE" sh "$(sed -n 's/^version: *//p' scripts/tools/oc-pin.txt)"
+      - name: Prepare a kit venv over the image as an arbitrary UID (D-7)
+        run: |
+          cp -a . "$RUNNER_TEMP/checkout" && chmod -R a+rwX "$RUNNER_TEMP/checkout"
+          docker run --rm --user "$SMOKE_USER" --network none -v "$RUNNER_TEMP/checkout:/work/checkout" devkit:ci sh -euc '
+            cd /work/checkout
+            python3 scripts/prepare_python.py --kit --venv /work/kit-venv
+            /work/kit-venv/bin/python -c "import mainframe_rag; assert mainframe_rag.__file__ == \"/work/checkout/src/mainframe_rag/__init__.py\""
+            /work/kit-venv/bin/python -m ruff --version'
 
   publish:
     # Only main publishes: a tag is set once, so a branch build must never claim a key.

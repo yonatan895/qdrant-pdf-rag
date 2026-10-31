@@ -57,13 +57,19 @@ separate runtime and dev directories. Missing/corrupt/incompatible/unselected
 wheels fail verification before installation. Connected acquisition is an
 explicit `--connected` operation and verifies downloads before replacement.
 
-In the air gap the dev wheels ship once, inside the dev kit image (ADR-0009 §8,
-D-7): `prepare_python.py --kit --venv .venv` prepares offline from that image's
-`/opt/devkit/wheelhouse`. It first requires the image's two lock files
+In the air gap the dev wheels ship once, as the dev kit image's installed
+environment (ADR-0009 §8, D-7); the image holds no wheelhouse.
+`prepare_python.py --kit --venv .venv` first requires the image's two lock files
 (`/opt/devkit/locks/`) to equal the checkout's `requirements.dev.lock.txt` and
 `locks/cp314-linux-x86_64.json`; otherwise it refuses and names the kit to
-request (`mfr-devkit-<key>`). `--kit` never acquires, so it refuses `--connected`
-and `--internal-index`, and it refuses wheels the pod's user cannot read.
+request (`mfr-devkit-<key>`). It then creates a small venv layered over the
+image's environment. The image's `python3` is itself a venv, so a `.pth` file
+adds its site directories (`--system-site-packages` would add the empty base
+ones) and its native tools are linked, so `python -m ruff` works. Only the
+checkout is installed, editable, with `--no-deps` and no index. The result must
+equal the dev lock plus the checkout exactly (`dependency_lock.py installed
+--profile dev --project`). It runs as the pod's arbitrary UID. `--kit` never
+acquires, so it refuses `--connected`, `--internal-index` and `--python`.
 
 GitHub uses the same helper and manifest. GitLab accepts `PIP_FIND_LINKS` as a
 local complete dev wheelhouse, or explicitly selects `--internal-index` using

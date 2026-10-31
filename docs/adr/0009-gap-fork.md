@@ -525,7 +525,8 @@ refreshed with each kit (Q9).
   check) serves the bastion, the dev pod and the runner jobs. It is
   UBI-based and holds:
   - the CPython 3.14 GIL build, the pinned Task and Helm 4;
-  - the hash-locked dev wheels from `requirements.dev.lock.txt`;
+  - the dev environment installed from the hash-locked `requirements.dev.lock.txt`
+    wheels, which are bind-mounted for the install only (D-7);
   - `oc` and `skopeo`, plus git-core, openssl, sha256sum, tar and gawk, from
     an exact RPM NEVRA list, so drift fails the build. GPL-licensed RPMs are
     accepted;
@@ -533,7 +534,9 @@ refreshed with each kit (Q9).
 
   It runs under `restricted-v2` with an arbitrary non-root UID. The
   checkout's own source is used in place, so development installs and
-  builds nothing.
+  builds nothing. `prepare_python.py --kit --venv DIR` gives the checkout a
+  venv layered over that environment, with only the checkout installed
+  editable.
 - **The bastion** runs the Linux-only operator path. It is a pod on this
   image under its own ServiceAccount, with no RBAC (D-2) and no Secret
   mount. At session start the operator's own `oc` on Windows pipes in two
@@ -607,8 +610,8 @@ refreshed with each kit (Q9).
   so the kit, like the release bundle's loose signed members, has no
   top-level `.tar` and no links; the image is an OCI layout directory whose
   `blobs/sha256/<hex>` names are NTFS-safe. It holds:
-  - the image as an OCI layout, with the dev wheels inside it only: a
-    `prepare_python.py --kit` mode (D-7) keeps them from shipping twice;
+  - the image as an OCI layout. The dev wheels ship only as its installed
+    environment, with no wheelhouse (D-7, option B, 2026-10-31);
   - a pinned `oras.exe` (`scripts/tools/oras-windows-pin.txt`, shipped as
     the extracted binary) and the static Linux `oras` for the fallback, the
     bastion template and the Windows runbook;
