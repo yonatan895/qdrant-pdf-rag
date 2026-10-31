@@ -4,10 +4,12 @@
 #         its recipe, the build scripts it runs and images/devkit/). It names the image tag and the kit,
 #         ghcr.io/<owner>/qdrant-pdf-rag-devkit:<key> and the kit directory mfr-devkit-<key>/.
 # digest: the registry manifest digest that .github/workflows/devkit.yml pushed for
-#         that key, copied from its job summary by a dedicated pin PR. While it is
-#         sha256:PENDING no kit exists for the key, and kit packing refuses it.
+#         that key, copied from its job summary.
 #
-# `python3 scripts/devkit_key.py --check` refuses a stale key. Only kit packing and
-# the release gate run it (D-8); a dependency PR does not have to re-pin.
+# Pinning is one step. A change to the kit inputs merges with this file untouched;
+# the factory then publishes the image for the new key on push to main, and ONE pin
+# PR records the key and its digest together. sha256:PENDING is not a valid state.
+# `python3 scripts/devkit_key.py --check` refuses a stale key or a PENDING digest.
+# Only kit packing and the release gate run it (D-8); unit CI never checks freshness.
 key: 88cf3592671febf6ab57b5f092faac43c523d27722e6effef4d6ad69f2cfbe96
 digest: sha256:7d506221eea02df988d1cf702532016561dc13c09ece8a295054574c40f5b922

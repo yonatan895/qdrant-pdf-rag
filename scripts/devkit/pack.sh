@@ -21,7 +21,7 @@
 #   SHA256SUMS.sha256      the fingerprint the Windows runbook checks with Get-FileHash;
 #                          its first 16 hex are the trust anchor published separately (B2)
 #
-# Refuses a stale kit key or a sha256:PENDING digest (D-8), and runs the kit licence
+# Refuses a stale or unpublished kit pin (D-8, devkit_key.py --check), and runs the kit licence
 # gate (license_inventory.py check --kit, docs/licensing.md#dev-kit) before any pull:
 # an unrecorded kit component, an open owner decision or an absent or stale kit
 # approval refuses the pack, whatever the key (MANIFEST license_gate: enforced). The
@@ -57,13 +57,12 @@ git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "run from a git clone
 check_pack_tree_clean
 COMMIT=$(git rev-parse HEAD)
 
-# D-8: a stale key or a pending digest is refused here, never by ordinary CI.
+# D-8: a stale key or an unpublished (sha256:PENDING) digest is refused here, by
+# devkit_key.py --check, never by ordinary CI.
 python3 "$REPO_ROOT/scripts/devkit_key.py" --check >/dev/null ||
-    die "the dev kit pin is stale (devkit_key.py --check above names the fix); a kit is packed only for the pinned key"
+    die "the dev kit pin is stale or unpublished (devkit_key.py --check above names the fix); a kit is packed only for the pinned, published key"
 KEY=$(sed -n 's/^key: *//p' "$REPO_ROOT/scripts/tools/devkit-pin.txt")
 DIGEST=$(sed -n 's/^digest: *//p' "$REPO_ROOT/scripts/tools/devkit-pin.txt")
-[ "$DIGEST" != "sha256:PENDING" ] ||
-    die "scripts/tools/devkit-pin.txt digest is sha256:PENDING: record the digest .github/workflows/devkit.yml pushed for key $KEY in a pin PR, then pack"
 printf '%s\n' "$DIGEST" | grep -Eqx 'sha256:[0-9a-f]{64}' || die "scripts/tools/devkit-pin.txt digest is malformed"
 
 # The kit's licence gate (docs/licensing.md#dev-kit): the bundle's check plus the

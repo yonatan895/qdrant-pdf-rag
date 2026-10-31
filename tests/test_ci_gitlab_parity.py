@@ -194,7 +194,8 @@ def kit_image(pin_text):
 
 def kit_image_problem(doc, pin_text):
     if doc['variables']['CI_PYTHON_IMAGE'] != kit_image(pin_text):
-        return 'CI_PYTHON_IMAGE default is not the dev kit image by the digest in scripts/tools/devkit-pin.txt'
+        return ('scripts/tools/devkit-pin.txt and the .gitlab-ci.yml default must name the same published '
+                'kit digest; record both in the pin PR')
     return None
 
 
@@ -1080,7 +1081,9 @@ def test_documented_quay_roles_match_the_image_paths_load_sh_pushes():
 def test_the_default_job_image_is_exactly_the_kit_pin():
     pin = KIT_PIN.read_text()
     digest = re.search(r'(?m)^digest: (sha256:\S+)$', pin).group(1)
-    assert re.fullmatch(r'sha256:[0-9a-f]{64}', digest), 'the kit pin records no pushed digest yet'
+    assert re.fullmatch(r'sha256:[0-9a-f]{64}', digest), (
+        'scripts/tools/devkit-pin.txt and the .gitlab-ci.yml default must name the same published kit digest; '
+        'record both in the pin PR')
     assert GITLAB['variables']['CI_PYTHON_IMAGE'] == f'$CI_APPROVED_REGISTRY/qdrant-pdf-rag-devkit@{digest}'
     assert kit_image_problem(GITLAB, pin) is None
     # A pin bump without the default, and a default bump without the pin, both fail;

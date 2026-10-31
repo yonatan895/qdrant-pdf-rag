@@ -552,7 +552,8 @@ def test_pack_refuses_a_pending_digest_and_writes_no_kit(pack_tree):
     _git(pack_tree["tree"], "commit", "-q", "-am", "pending")
     done = run_pack(pack_tree)
     assert done.returncode != 0
-    assert "digest is sha256:PENDING: record the digest .github/workflows/devkit.yml pushed" in done.stderr
+    assert "records digest: sha256:PENDING, which is no longer a committed state: record key:" in done.stderr
+    assert "in one pin PR, after the change merges" in done.stderr
     assert not list((pack_tree["tree"] / "dist").glob("mfr-devkit-*"))
     assert not (pack_tree["tmp"] / "skopeo.log").exists()
 
@@ -907,11 +908,12 @@ def test_link_tools_refuses_a_tool_off_its_pin_and_changes_nothing(link_tree, da
 
 
 @pytest.mark.parametrize("name, data, message", [
-    ("task", b"#!/bin/sh\necho 3.52.0\n", "the linked task is not the pinned version"),
-    ("helm", b"#!/bin/sh\necho v4.2.0+gold\n", "the linked helm is not the pinned version"),
+    ("task", b"#!/bin/sh\necho 3.52.0\n", "the image's task is not the pinned version"),
+    ("helm", b"#!/bin/sh\necho v4.2.0+gold\n", "the image's helm is not the pinned version"),
 ])
 def test_link_tools_refuses_a_binary_that_is_not_the_pinned_version(link_tree, name, data, message):
-    # A pin whose digest matches bytes that report another version is refused, not trusted.
+    # A pin whose digest matches bytes that report another version is refused, not
+    # trusted, and before anything is linked: the checkout keeps no new link.
     tree, image, _archive = link_tree
     (image / name).write_bytes(data)
     pin = tree / "scripts/tools" / f"{name}-pin.txt"
@@ -920,6 +922,7 @@ def test_link_tools_refuses_a_binary_that_is_not_the_pinned_version(link_tree, n
     proc = _link(tree, image)
     assert proc.returncode == 2
     assert proc.stderr.startswith(f"link-tools: {message}")
+    assert not (tree / ".tools").exists()
 
 
 def test_link_tools_refuses_a_directory_in_place_of_a_tool(link_tree):
@@ -929,6 +932,28 @@ def test_link_tools_refuses_a_directory_in_place_of_a_tool(link_tree):
     assert proc.returncode == 2
     assert proc.stderr.startswith("link-tools: .tools/bin/helm is a directory")
     assert (tree / ".tools/bin/helm").is_dir() and not (tree / ".tools/bin/helm").is_symlink()
+    assert not (tree / ".tools/bin/task").exists()
+
+
+@pytest.mark.parametrize("linked", [".tools", ".tools/bin", ".tools/cache"])
+def test_link_tools_never_writes_through_a_shared_tools_link(link_tree, tmp_path, linked):
+    # A worktree whose .tools (or a part of it) links another checkout's pinned tools:
+    # writing through the link would replace that checkout's binaries.
+    tree, image, archive = link_tree
+    shared = tmp_path / "shared-tools"
+    for name in ("bin", "cache"):
+        (shared / name).mkdir(parents=True)
+    (shared / "bin/task").write_bytes(b"#!/bin/sh\necho shared\n")
+    before = {p.relative_to(shared): p.read_bytes() for p in shared.rglob("*") if p.is_file()}
+    target = shared if linked == ".tools" else shared / linked.split("/")[1]
+    if linked != ".tools":
+        (tree / ".tools").mkdir()
+    (tree / linked).symlink_to(target)
+    proc = _link(tree, image, "--task-archive", str(archive))
+    assert proc.returncode == 2
+    assert proc.stderr.startswith(f"link-tools: {linked} is a symlink; link-tools writes only a checkout-owned")
+    assert {p.relative_to(shared): p.read_bytes() for p in shared.rglob("*") if p.is_file()} == before
+    assert sorted(p.name for p in (shared / "bin").iterdir()) == ["task"]
 
 
 def test_link_tools_rerun_is_a_no_op_and_a_stale_copy_converges(link_tree):

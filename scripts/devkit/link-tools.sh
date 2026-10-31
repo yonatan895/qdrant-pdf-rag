@@ -43,8 +43,8 @@ printf '%s\n' "$HELM_BINARY_SHA256" | grep -Eqx '[0-9a-f]{64}' ||
 KIT_FIX="run this in the dev kit image that scripts/tools/devkit-pin.txt names for this checkout"
 digest() { sha256sum "$1" | awk '{print $1}'; }
 
-# Verify every source before linking anything, so a missing tool or a digest
-# refusal leaves .tools/ as it was.
+# Check everything before writing anything, so every refusal leaves .tools/ as it was:
+# each image binary's digest and version, the archive, and the checkout's .tools/.
 verify() {  # name expected
     [ -f "$FROM/$1" ] && [ ! -L "$FROM/$1" ] && [ -x "$FROM/$1" ] ||
         die "the image has no executable $1; $KIT_FIX"
@@ -53,13 +53,26 @@ verify() {  # name expected
 }
 verify task "$TASK_BINARY_SHA256"
 verify helm "$HELM_BINARY_SHA256"
+[ "$("$FROM/task" --version)" = "${TASK_VERSION#v}" ] || die "the image's task is not the pinned version; $KIT_FIX"
+case "$("$FROM/helm" version --short)" in
+    "$HELM_VERSION"|"$HELM_VERSION"+*) ;;
+    *) die "the image's helm is not the pinned version; $KIT_FIX";;
+esac
 if [ -n "$TASK_ARCHIVE" ]; then
     [ -f "$TASK_ARCHIVE" ] || die "the --task-archive file is missing"
     [ "$(digest "$TASK_ARCHIVE")" = "$TASK_SHA256" ] ||
         die "the --task-archive file does not match the sha256 in scripts/tools/task-pin.txt"
 fi
 
+# Write only into this checkout's own .tools/: through a linked .tools, .tools/bin or
+# .tools/cache this would replace pinned tools that another checkout shares.
+for dir in .tools .tools/bin .tools/cache; do
+    [ ! -L "$ROOT/$dir" ] || die "$dir is a symlink; link-tools writes only a checkout-owned .tools/ (remove the link and rerun)"
+done
 BIN="$ROOT/.tools/bin"
+for name in task helm; do
+    [ ! -d "$BIN/$name" ] || [ -L "$BIN/$name" ] || die ".tools/bin/$name is a directory; remove it and rerun"
+done
 mkdir -p "$BIN"
 link() {  # name
     target="$FROM/$1"
@@ -67,7 +80,6 @@ link() {  # name
         echo "link-tools: .tools/bin/$1 already links the verified image $1"
         return
     fi
-    [ ! -d "$BIN/$1" ] || [ -L "$BIN/$1" ] || die ".tools/bin/$1 is a directory; remove it and rerun"
     # Replace atomically (rename, never follow an existing link) so a concurrent
     # run-task.sh never sees a missing or partial tool.
     tmp="$BIN/.$1.link.$$"
@@ -78,11 +90,6 @@ link() {  # name
 }
 link task
 link helm
-[ "$("$BIN/task" --version)" = "${TASK_VERSION#v}" ] || die "the linked task is not the pinned version; $KIT_FIX"
-case "$("$BIN/helm" version --short)" in
-    "$HELM_VERSION"|"$HELM_VERSION"+*) ;;
-    *) die "the linked helm is not the pinned version; $KIT_FIX";;
-esac
 
 if [ -n "$TASK_ARCHIVE" ]; then
     CACHE="$ROOT/.tools/cache"
