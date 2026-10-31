@@ -98,7 +98,8 @@ jobs:
           openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$RUNNER_TEMP/signing.key"
           umask 022
           openssl pkey -in "$RUNNER_TEMP/signing.key" -pubout -out "$OUT/release-signing.pub"
-          SNEAKERNET_SIGNING_KEY="$RUNNER_TEMP/signing.key" sh scripts/devkit/pack.sh --reuse-image "$RUNNER_TEMP/layout" | tee "$RUNNER_TEMP/pack.log"
+          # Throwaway signing key and open licence decisions: an explicit rehearsal pack (license_gate: rehearsal).
+          CI_REHEARSAL=1 SNEAKERNET_SIGNING_KEY="$RUNNER_TEMP/signing.key" sh scripts/devkit/pack.sh --reuse-image "$RUNNER_TEMP/layout" --license-rehearsal | tee "$RUNNER_TEMP/pack.log"
           sed -n 's/^Trust anchor (publish on GitHub, carry separately): //p' "$RUNNER_TEMP/pack.log" > "$OUT/anchor.txt"
           # The anchor bootstrap exactly as pack.sh prints it for the release record.
           sed -n '/^----- anchor bootstrap -----$/,/^----- end anchor bootstrap -----$/p' "$RUNNER_TEMP/pack.log" | sed '1d;$d' > "$OUT/bootstrap.ps1"
@@ -150,7 +151,7 @@ jobs:
           # skopeo copy, readback by digest and by tag. A second run must pass too.
           for run in 1 2; do
             MFR_SESSION_DIR="$SESSION" SNEAKERNET_TRUSTED_PUB="$RUNNER_TEMP/proof/release-signing.pub" \
-              sh "$KIT/install.sh" --registry "$REPO" --registry-ca-dir "$TLS/certs"
+              sh "$KIT/install.sh" --registry "$REPO" --registry-ca-dir "$TLS/certs" --rehearsal
           done
       - name: Render the bastion with the pinned Linux oc
         run: |
