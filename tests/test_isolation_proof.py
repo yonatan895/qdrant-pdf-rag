@@ -170,6 +170,9 @@ if args[0] == "logs":
     targets = json.loads(pod["spec"]["containers"][0]["command"][-1])
     net = scen["network"].get(ident, {})
     res = [{"id": t["id"], "status": net.get(t["class"], "timeout")} for t in targets]
+    for r, t in zip(res, targets):
+        if t["kind"] == "dns":
+            r["retried"] = ident in scen.get("dns_retried", [])
     print("probe starting " + scen.get("canary", ""))
     print("MFR-PROBE " + json.dumps(res)); sys.exit(0)
 if args[0] == "get":
@@ -971,7 +974,8 @@ def test_probe_program_classifies_real_sockets(tmp_path: Path) -> None:
         {"id": "a", "kind": "tcp", "host": "127.0.0.1", "port": listener.getsockname()[1],
          "timeout": 2},
         {"id": "b", "kind": "tcp", "host": "127.0.0.1", "port": closed_port, "timeout": 2},
-        {"id": "c", "kind": "dns", "host": "localhost", "port": None, "timeout": 2},
+        {"id": "c", "kind": "dns", "host": "localhost", "port": None, "timeout": 2,
+         "retry_delay": 0},
         {"id": "d", "kind": "kube_service", "host": None, "port": None, "timeout": 2},
     ]
     try:
@@ -985,7 +989,86 @@ def test_probe_program_classifies_real_sockets(tmp_path: Path) -> None:
     assert line.startswith(proof.PROBE_MARKER)
     assert json.loads(line[len(proof.PROBE_MARKER):]) == [
         {"id": "a", "status": "connected"}, {"id": "b", "status": "refused"},
-        {"id": "c", "status": "resolved"}, {"id": "d", "status": "no-address"}]
+        {"id": "c", "status": "resolved", "retried": False},
+        {"id": "d", "status": "no-address"}]
+
+
+def _run_probe_program(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+                       targets: list[dict[str, Any]], answers: list[bool],
+                       refuse_tcp: bool = False) -> tuple[list[dict[str, Any]], list[str]]:
+    """Run PROBE_PROGRAM in-process with stubbed lookups; sleeps are recorded, not slept."""
+    import socket
+    import time
+
+    lookups: list[str] = []
+    sleeps: list[float] = []
+
+    def getaddrinfo(host: str, *args: Any, **kwargs: Any) -> list[Any]:
+        lookups.append(host)
+        if answers.pop(0):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 0))]
+        raise socket.gaierror(socket.EAI_NONAME, "unresolved")
+
+    def create_connection(*args: Any, **kwargs: Any) -> Any:
+        raise TimeoutError if refuse_tcp else AssertionError("no TCP target expected")
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(socket, "create_connection", create_connection)
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    monkeypatch.setattr(sys, "argv", ["probe", json.dumps(targets)])
+    exec(proof.PROBE_PROGRAM, {"__name__": "__main__"})  # noqa: S102 - the program under test
+    (line,) = capsys.readouterr().out.splitlines()
+    assert line.startswith(proof.PROBE_MARKER) and sleeps in ([], [0.25])
+    return json.loads(line[len(proof.PROBE_MARKER):]), lookups
+
+
+DNS_TARGET = {"id": "d", "kind": "dns", "host": "kubernetes.default.svc", "port": None,
+              "timeout": 2, "retry_delay": 0.25}
+
+
+def test_dns_probe_retries_one_unresolved_lookup_and_records_it(monkeypatch, capsys) -> None:
+    """Item g: the Kind lane saw 1 of 9 bastion DNS probes unresolved with policies intact."""
+    results, lookups = _run_probe_program(monkeypatch, capsys, [DNS_TARGET], [False, True])
+    assert results == [{"id": "d", "status": "resolved", "retried": True}]
+    assert lookups == ["kubernetes.default.svc"] * 2
+
+
+def test_dns_probe_failing_twice_stays_unresolved(monkeypatch, capsys) -> None:
+    results, lookups = _run_probe_program(monkeypatch, capsys, [DNS_TARGET], [False, False])
+    assert results == [{"id": "d", "status": "unresolved", "retried": True}]
+    assert len(lookups) == 2
+
+
+def test_resolved_dns_and_blocked_tcp_are_never_retried(monkeypatch, capsys) -> None:
+    tcp = {"id": "t", "kind": "tcp", "host": "10.0.3.30", "port": 4000, "timeout": 2}
+    results, lookups = _run_probe_program(monkeypatch, capsys, [DNS_TARGET, tcp], [True],
+                                          refuse_tcp=True)
+    assert results == [{"id": "d", "status": "resolved", "retried": False},
+                       {"id": "t", "status": "timeout"}]
+    assert lookups == ["kubernetes.default.svc"]
+
+
+def test_dns_targets_carry_the_retry_delay_and_retries_reach_the_record(
+        cluster: Cluster) -> None:
+    cluster.scenario["dns_retried"] = ["bastion", "control"]
+    code, record = cluster.run("--probe")
+    assert (code, record["verdict"]) == (0, "proven")
+    probes = record["checks"]["probes"]
+    dns = [t for t in probes["targets"] if t["kind"] == "dns"]
+    assert dns and all(t["retry_delay"] == proof.DNS_RETRY_DELAY_S for t in dns)
+    assert all("retry_delay" not in t for t in probes["targets"] if t["kind"] != "dns")
+    retried = {(r["identity"], r["class"]) for r in probes["results"] if r.get("retried")}
+    assert retried == {("bastion", "dns")}
+    assert probes["control"]["retried"] == [t["id"] for t in dns]
+
+
+def test_a_retried_dns_probe_cannot_turn_a_violation_into_a_pass(cluster: Cluster) -> None:
+    cluster.scenario["dns_retried"] = ["dev"]
+    cluster.scenario["network"]["dev"]["dns"] = "unresolved"
+    code, record = cluster.run("--probe")
+    assert code == 1
+    subject = f"dev -> dns {proof.DNS_PROBE_NAME}:None"
+    assert reasons(record, "probes") == [f"{subject}: unexpected-block: unresolved"]
 
 
 # --------------------------------------------------------------------------- lifecycle

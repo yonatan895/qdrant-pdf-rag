@@ -2298,7 +2298,9 @@ It records:
   real pod; the operator therefore needs configmap create and delete in both namespaces.
   The run is marked by an annotation, never a label. A probe
   pod in the production namespace that no policy selects is the negative control: a
-  blocked result counts only for a target the control reached. A CIDR wider than one
+  blocked result counts only for a target the control reached. A DNS probe that comes back
+  `unresolved` is looked up once more after `DNS_RETRY_DELAY_S` (2 s) and the result is
+  marked `retried`; no other outcome is retried. A CIDR wider than one
   address is not probed; give such a class a `--probe-host CLASS=HOST`.
 
 The record holds verbs, resources, object names and outcomes, never a Secret value, token

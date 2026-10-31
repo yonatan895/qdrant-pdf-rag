@@ -271,6 +271,12 @@ DNS_PROBE_NAME = "kubernetes.default.svc"
 # (ADR-0009 D-3); it is probed with the egress class of that name.
 KUBE_SERVICE_CLASS = "api_server"
 
+# A DNS probe that comes back `unresolved` is looked up once more after this
+# delay (the Kind lane saw one transient miss in nine with policies intact).
+# Only `unresolved` is retried, and only a second real answer turns it into
+# `resolved`; the result records that the retry happened.
+DNS_RETRY_DELAY_S = 2.0
+
 REACHED = frozenset({"connected", "resolved"})
 BLOCKED = frozenset({"timeout", "unreachable", "unresolved"})
 PROBE_STATUSES = REACHED | BLOCKED | {"refused", "dns-error", "no-address", "error"}
@@ -283,19 +289,27 @@ CANI_ROW = re.compile(
 # Runs inside each probe pod (python3 in the devkit image). It prints one marker
 # line of target ids and outcome classes; no payload is read or printed.
 PROBE_PROGRAM = r"""
-import errno, json, os, socket, sys
+import errno, json, os, socket, sys, time
+
+def resolve(host):
+    try:
+        socket.getaddrinfo(host, None)
+        return "resolved"
+    except OSError:
+        return "unresolved"
+
 out = []
 for t in json.loads(sys.argv[1]):
     host, port = t.get("host"), t.get("port")
     if t["kind"] == "kube_service":
         host = os.environ.get("KUBERNETES_SERVICE_HOST")
         port = int(os.environ.get("KUBERNETES_SERVICE_PORT", "443"))
+    retried = None
     if t["kind"] == "dns":
-        try:
-            socket.getaddrinfo(host, None)
-            status = "resolved"
-        except OSError:
-            status = "unresolved"
+        status, retried = resolve(host), False
+        if status == "unresolved":
+            time.sleep(t["retry_delay"])
+            status, retried = resolve(host), True
     elif not host:
         status = "no-address"
     else:
@@ -311,7 +325,10 @@ for t in json.loads(sys.argv[1]):
         except OSError as exc:
             unreachable = {errno.EHOSTUNREACH, errno.ENETUNREACH}
             status = "unreachable" if exc.errno in unreachable else "error"
-    out.append({"id": t["id"], "status": status})
+    entry = {"id": t["id"], "status": status}
+    if retried is not None:
+        entry["retried"] = retried
+    out.append(entry)
 print("MFR-PROBE " + json.dumps(out), flush=True)
 """
 
@@ -1410,8 +1427,11 @@ def probe_targets(kube: Kube, contract: Contract, params: Params, agent_service:
     unprobed: list[str] = []
 
     def add(cls: str, kind: str, host: str | None, port: int | None) -> None:
-        targets.append({"id": f"t{len(targets)}", "class": cls, "kind": kind,
-                        "host": host, "port": port, "timeout": timeout})
+        target = {"id": f"t{len(targets)}", "class": cls, "kind": kind,
+                  "host": host, "port": port, "timeout": timeout}
+        if kind == "dns":
+            target["retry_delay"] = DNS_RETRY_DELAY_S
+        targets.append(target)
 
     services = kube.items(["get", "services", "-n", contract.prod], "get services")
     for svc in services:
@@ -1518,18 +1538,22 @@ def wait_for_pod(kube: Kube, name: str, namespace: str, timeout: float, interval
         time.sleep(interval)
 
 
-def read_probe(kube: Kube, name: str, namespace: str, ids: set[str]) -> dict[str, str]:
+def read_probe(kube: Kube, name: str, namespace: str,
+               ids: set[str]) -> tuple[dict[str, str], set[str]]:
+    """The probe's status per target id, and the ids of DNS targets it retried."""
     proc = kube.run(["logs", name, "-n", namespace], "probe logs")
     for line in proc.stdout.splitlines():
         if line.startswith(PROBE_MARKER):
             try:
                 results = json.loads(line[len(PROBE_MARKER):])
                 out = {str(r["id"]): str(r["status"]) for r in results}
-            except (ValueError, KeyError, TypeError) as exc:
+                flags = {str(r["id"]): r.get("retried", False) for r in results}
+            except (ValueError, KeyError, TypeError, AttributeError) as exc:
                 raise ProofError("probe-failed", name) from exc
-            if set(out) != ids or not set(out.values()) <= PROBE_STATUSES:
+            if (set(out) != ids or not set(out.values()) <= PROBE_STATUSES
+                    or not all(isinstance(f, bool) for f in flags.values())):
                 raise ProofError("probe-failed", name)
-            return out
+            return out, {i for i, f in flags.items() if f}
     raise ProofError("probe-failed", name)
 
 
@@ -1574,9 +1598,11 @@ def run_probes(kube: Kube, contract: Contract, params: Params, run_id: str,
         pods.append((identity, pod["metadata"]["name"]))
     ids = {t["id"] for t in targets}
     outcomes: dict[str, dict[str, str]] = {}
+    retried: dict[str, set[str]] = {}
     for identity, name in pods:
         wait_for_pod(kube, name, identity.namespace, args.probe_timeout, args.probe_poll)
-        outcomes[identity.name] = read_probe(kube, name, identity.namespace, ids)
+        outcomes[identity.name], retried[identity.name] = read_probe(
+            kube, name, identity.namespace, ids)
     control = outcomes["control"]
     results = []
     for identity in identities:
@@ -1603,13 +1629,16 @@ def run_probes(kube: Kube, contract: Contract, params: Params, run_id: str,
                 findings.inconclusive("probes", subject, reason)
             results.append({"identity": identity.name, "namespace": identity.namespace,
                             "class": target["class"], "target": label, "expect": expect,
-                            "status": status, "verdict": verdict})
+                            "status": status, "verdict": verdict,
+                            "retried": target["id"] in retried[identity.name]})
     return {
         "status": "ran",
-        "targets": [{k: t[k] for k in ("id", "class", "kind", "host", "port")} for t in targets],
+        "targets": [{k: t[k] for k in ("id", "class", "kind", "host", "port", "retry_delay")
+                     if k in t} for t in targets],
         "cidrs_not_probed": unprobed,
         "control": {"namespace": contract.prod,
-                    "results": {t["id"]: control[t["id"]] for t in targets}},
+                    "results": {t["id"]: control[t["id"]] for t in targets},
+                    "retried": sorted(retried["control"])},
         "results": results,
     }
 
