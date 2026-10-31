@@ -80,6 +80,18 @@ not an arbitrary system binary.
   checkout whose locks differ from the image's and names the kit to request.
   Not implemented yet (F5): a documented step that gives a checkout the
   `.tools/bin/task` that `run-task.sh` requires.
+- <a id="gap-ci-status"></a>Gap agents read CI with
+  `python3 scripts/gap/ci_status.py --wait` after a push, the GitLab
+  counterpart of `gh run watch`. It uses the commit's merge request pipeline,
+  else its branch pipeline, follows the `lanes` bridge into the child
+  pipeline, and prints each job and, for a failed test job, the failing test
+  ids from its JUnit report, never log text. Export `MFR_GITLAB_URL`
+  (`https://<gitlab host>`) and `MFR_GITLAB_PROJECT` (`<group>/<name>`); the
+  `read_api` token comes from `/etc/mfr/dev-gitlab/token` (Secret
+  `mfr-dev-gitlab`), never argv. Exit 0 passed, 1 failed, 2 still running at
+  `--timeout` (default 3600 s), 3 usage, network or auth error; `--json`
+  prints one object. A selected lane with no GitLab job prints as NOT RUN and
+  is not verified.
 
 Deployment render tests require the existing Helm **4.3.0 linux-amd64** bytes
 recorded in [the Helm pin](../scripts/tools/helm-pin.txt). Prepare them explicitly:
