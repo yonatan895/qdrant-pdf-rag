@@ -561,6 +561,22 @@ tasks:
         if [ -n "${TASK_OWUI_STATE:-}" ]; then export OWUI_STATE="$TASK_OWUI_STATE"; fi;
         sh scripts/openwebui/dev.sh down
 
+  workspace:isolation-kind:
+    desc: Workspace isolation proof on a throwaway Kind cluster (heavy; ISO_STATE required)
+    summary: |
+      `sh scripts/ci/workspace_isolation_kind.sh`, the CI lane kind-workspace-isolation
+      (.github/workflows/workspace-isolation.yml): the proof must be proven, fail on
+      two negative controls, then be proven again. Needs docker, kind, kubectl, the
+      scripts/tools/oc-pin.txt oc and Python 3.14 (KIND_BIN, KUBECTL, OC, PYTHON pick
+      them). ISO_STATE names an empty state directory; ISO_CLUSTER names the new
+      cluster. On a shared host take the heavy-work lock first.
+    env:
+      TASK_ISO_STATE: '{{.ISO_STATE}}'
+    cmds:
+      - >-
+        if [ -n "${TASK_ISO_STATE:-}" ]; then export ISO_STATE="$TASK_ISO_STATE"; fi;
+        sh scripts/ci/workspace_isolation_kind.sh
+
   openwebui:acceptance:
     desc: Acceptance suite against an existing Kind lane (KIND_NAME, APP_NS, OWUI_STATE required)
     summary: |
