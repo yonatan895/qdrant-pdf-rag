@@ -129,9 +129,10 @@ class World:
         return sha
 
     def bundle(self, sha: str, *, name_sha: str | None = None, key: Path | None = None, tamper=None,
-               append=None) -> Path:
+               append=None, origin: str = "upstream") -> Path:
         """A signed tarball whose repo.bundle HEAD is upstream HEAD and whose
-        MANIFEST and file name say name_sha (default: sha)."""
+        MANIFEST and file name say name_sha (default: sha), and whose MANIFEST
+        declares `origin` (#1118 F2; "" leaves the line out)."""
         name_sha = name_sha or sha
         stage = self.root / "stage" / f"{name_sha}-{len(list(self.bundles.iterdir()))}"
         stage.mkdir(parents=True)
@@ -144,7 +145,7 @@ class World:
             "repo.bundle": (stage / "repo.bundle").read_bytes(),
             "qdrant-image.tar": b"qdrant", "openobserve-image.tar": b"openobserve", "otelcol-image.tar": b"otelcol",
             f"app-ingest-{name_sha}.tar": b"ingest", f"app-agent-{name_sha}.tar": b"agent",
-            "MANIFEST.txt": (f"sha: {name_sha}\n" + task_manifest()).encode(),
+            "MANIFEST.txt": (f"sha: {name_sha}\n" + task_manifest() + (f"origin: {origin}\n" if origin else "")).encode(),
             **_task_members(),
             "PACKING_RECORD.txt": b"record\n", "sbom.json": b'{"images": []}\n',
             "THIRD-PARTY-NOTICES.txt": b"notices\n",
@@ -1026,3 +1027,48 @@ def test_names_ledger_text_and_messages_round_trip_exactly(tmp_path, keys):
     assert_one_stop(after_push, f"STOP: import/{r2} is already pushed to origin; never rerun after the push: "
                                 "fix forward with new commits on its MR branch")
     assert world.git(world.fork, "rev-parse", f"import/{r2}").strip() == tip
+
+
+# -- #1118 F2: only an upstream release is imported ------------------------------
+
+NOT_UPSTREAM = ("STOP: the bundle is not an upstream release (its MANIFEST origin is not upstream; FAIL line "
+                "above); do not import it: only signed upstream releases are imported")
+
+
+def _gap_anchor(world: World, tmp_path: Path) -> tuple[Path, Path]:
+    """The gap release key and its operator anchor, outside FORK, R and BUNDLE."""
+    gap_key = gen_sign_keypair(tmp_path / "home", "gap-release.key")
+    anchor = world.root / "trust" / "gap.pub"
+    subprocess.run(["openssl", "pkey", "-in", str(gap_key), "-pubout", "-out", str(anchor)],
+                   check=True, capture_output=True)
+    return gap_key, anchor
+
+
+@pytest.mark.parametrize(("origin", "stop"), [
+    ("gap", NOT_UPSTREAM),
+    ("upstream", REFUSALS["other-key"]),
+], ids=["gap-release", "gap-key-signs-upstream"])
+def test_a_gap_signed_bundle_is_never_imported_and_the_upstream_rerun_imports(world, tmp_path, origin, stop):
+    """#1118 F2 G3: with BOTH anchors exported, a gap release (origin: gap,
+    gap key) and a gap-signed bundle that claims origin: upstream each stop
+    at step 1 and change nothing. The rerun with the upstream-signed bundle of
+    the same sha, the gap anchor still exported, reaches IMPORT READY."""
+    world.create_fork(world.r1)
+    gap_key, gap_anchor = _gap_anchor(world, tmp_path)
+    extra = {"SNEAKERNET_GAP_TRUSTED_PUB": str(gap_anchor)}
+    r2 = world.release({"README.md": "two\n"}, "Release 2", key=gap_key, origin=origin)
+    fork_refs, bare_refs = world.refs(world.fork), world.refs(world.bare)
+
+    stopped = world.run(r2, extra=extra)
+
+    assert_one_stop(stopped, stop)
+    if origin == "gap":
+        assert ("FAIL: the bundle's release origin (gap) is not accepted here (accepted: upstream)"
+                in stopped.stdout)
+    else:
+        assert ("FAIL: bundle pubkey does not match SNEAKERNET_TRUSTED_PUB, the release trust anchor for the "
+                "bundle's origin (upstream)") in stopped.stdout
+    assert world.refs(world.fork) == fork_refs
+    assert world.refs(world.bare) == bare_refs
+    world.bundle(r2)  # The same release, signed by the upstream key.
+    assert_ready(world, world.run(r2, extra=extra), r2)

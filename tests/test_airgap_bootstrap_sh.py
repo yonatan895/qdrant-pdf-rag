@@ -67,7 +67,7 @@ def bundle_dir(tmp_path):
         f"app-ingest-{head}.tar": b"mock-ingest",
         f"app-agent-{head}.tar": b"mock-agent",
         "oauth-proxy-image.tar": b"mock-oauth-proxy",
-        "MANIFEST.txt": (f"sha: {head}\n" + task_manifest()).encode(),
+        "MANIFEST.txt": (f"sha: {head}\n" + task_manifest() + "origin: upstream\n").encode(),
         **task_members(),
         "PACKING_RECORD.txt": b"record\n",
         "sbom.json": b'{"images": []}\n',
@@ -107,7 +107,7 @@ def test_bootstrap_refuses_a_damaged_or_untrusted_bundle(bundle_dir, tamper, nee
     tamper(bundle_dir)
     env = _offline_env(bundle_dir) if pinned_pub else {"PATH": "/usr/bin:/bin"}
     if pinned_pub:
-        env["SNEAKERNET_TRUSTED_PUB"] = str(gen_other_pub(bundle_dir))
+        env["SNEAKERNET_TRUSTED_PUB"] = str(gen_other_pub(bundle_dir.parent))
     r = _bootstrap(bundle_dir, env)
     assert r.returncode != 0
     assert needle in r.stdout + r.stderr
@@ -641,3 +641,141 @@ def test_interrupted_promotion_warns_of_partial_dist_then_recovers_complete_bund
     assert retained.read_text() == "retain operator evidence"
     assert (workspace / "airgap.env").read_text() == "INTERNAL_REGISTRY=operator-kept\n"
     assert _bootstrap(bundle_dir).returncode == 0
+
+
+# --- #1118 F2: the anchor for the declared origin (inline twin) -------------
+
+def _pub_of(key, out):
+    out.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["openssl", "pkey", "-in", str(key), "-pubout", "-out", str(out)], check=True, capture_output=True)
+    return out
+
+
+def _repack(bundle_dir, *, origin="upstream", key=None):
+    """Rewrite the bundle's origin line and re-sign every member list with
+    `key` (default: the fixture's own packing key, saved as packer.key)."""
+    packer = bundle_dir.parent / "packer.key"
+    if not packer.exists():
+        shutil.copy(bundle_dir / "signing.key", packer)
+    shutil.copy(key or packer, bundle_dir / "signing.key")
+    manifest = bundle_dir / "MANIFEST.txt"
+    kept = [line for line in manifest.read_text().splitlines(keepends=True) if not line.startswith("origin:")]
+    manifest.write_text("".join(kept) + (f"origin: {origin}\n" if origin else ""))
+    _pub_of(bundle_dir / "signing.key", bundle_dir / "sneakernet-signing.pub")
+    _resign(bundle_dir)
+
+
+def _anchors(bundle_dir):
+    """Operator anchors in a /work/anchors-like directory outside the bundle."""
+    from tests.helpers_airgap import gap_release_anchor
+
+    packer = bundle_dir.parent / "packer.key"
+    if not packer.exists():
+        shutil.copy(bundle_dir / "signing.key", packer)
+    up = _pub_of(packer, bundle_dir.parent / "work" / "anchors" / "upstream.pub")
+    return {"SNEAKERNET_TRUSTED_PUB": str(up), "SNEAKERNET_GAP_TRUSTED_PUB": str(gap_release_anchor())}
+
+
+@pytest.mark.parametrize(("case", "needle"), [
+    ("gap-key-signs-upstream", ("bundle pubkey does not match SNEAKERNET_TRUSTED_PUB, the release trust anchor "
+                                "for the bundle's origin (upstream)")),
+    ("upstream-key-signs-gap", ("bundle pubkey does not match SNEAKERNET_GAP_TRUSTED_PUB, the release trust "
+                                "anchor for the bundle's origin (gap)")),
+    ("gap-anchor-only", ("no release trust anchor is configured for the bundle's origin (upstream) — set "
+                         "SNEAKERNET_TRUSTED_PUB")),
+    ("same-key-both-roles", ("release trust anchors SNEAKERNET_TRUSTED_PUB and SNEAKERNET_GAP_TRUSTED_PUB hold "
+                             "the same key")),
+    ("anchor-inside-bundle", "release trust anchor SNEAKERNET_TRUSTED_PUB lies inside the bundle it would verify"),
+    ("anchor-is-a-link", "release trust anchor SNEAKERNET_GAP_TRUSTED_PUB is not a readable plain file (not a link)"),
+    ("no-origin", "MANIFEST.txt must declare exactly one release origin"),
+    ("origin-twice", "MANIFEST.txt must declare exactly one release origin"),
+])
+def test_bootstrap_with_an_anchor_binds_the_bundled_key_to_the_declared_origin(bundle_dir, case, needle):
+    """#1118 F2: with either anchor set, bootstrap accepts only the anchor for
+    the origin the authenticated MANIFEST declares. Each refusal happens
+    before any clone, names variables only, and the next ordinary run (the
+    bundle signed by its origin's key, both anchors set) bootstraps."""
+    from tests.helpers_airgap import gap_release_key
+
+    env = {**_offline_env(bundle_dir), **_anchors(bundle_dir)}
+    if case == "gap-key-signs-upstream":
+        _repack(bundle_dir, key=gap_release_key())
+    elif case == "upstream-key-signs-gap":
+        _repack(bundle_dir, origin="gap")
+    elif case == "gap-anchor-only":
+        env.pop("SNEAKERNET_TRUSTED_PUB")
+    elif case == "same-key-both-roles":
+        env["SNEAKERNET_GAP_TRUSTED_PUB"] = env["SNEAKERNET_TRUSTED_PUB"]
+    elif case == "anchor-inside-bundle":
+        shutil.copy(env["SNEAKERNET_TRUSTED_PUB"], bundle_dir / "upstream.pub")
+        env["SNEAKERNET_TRUSTED_PUB"] = str(bundle_dir / "upstream.pub")
+    elif case == "anchor-is-a-link":
+        link = bundle_dir.parent / "gap-link.pub"
+        link.symlink_to(env["SNEAKERNET_GAP_TRUSTED_PUB"])
+        env["SNEAKERNET_GAP_TRUSTED_PUB"] = str(link)
+    elif case == "no-origin":
+        _repack(bundle_dir, origin=None)
+    else:
+        _repack(bundle_dir)
+        manifest = bundle_dir / "MANIFEST.txt"
+        manifest.write_text(manifest.read_text() + "origin: upstream\n")
+        _resign(bundle_dir)
+    refused = _bootstrap(bundle_dir, env)
+    assert refused.returncode == 1
+    assert needle in refused.stderr
+    assert str(bundle_dir.parent) not in refused.stderr  # names variables, never paths
+    assert not (bundle_dir / "operator workspace").exists()
+    (bundle_dir / "upstream.pub").unlink(missing_ok=True)
+    _repack(bundle_dir)
+    again = _bootstrap(bundle_dir, {**_offline_env(bundle_dir), **_anchors(bundle_dir)})
+    assert again.returncode == 0, again.stdout + again.stderr
+
+
+def test_bootstrap_with_both_anchors_accepts_a_gap_release_signed_by_the_gap_key(bundle_dir):
+    """#1118 F2: a gap release (origin: gap, gap key) bootstraps with both
+    anchors exported, and the upstream anchor alone cannot vouch for it."""
+    from tests.helpers_airgap import gap_release_key
+
+    _repack(bundle_dir, origin="gap", key=gap_release_key())
+    anchors = _anchors(bundle_dir)
+    only_upstream = _bootstrap(bundle_dir, {**_offline_env(bundle_dir),
+                                            "SNEAKERNET_TRUSTED_PUB": anchors["SNEAKERNET_TRUSTED_PUB"]})
+    assert only_upstream.returncode == 1
+    assert "no release trust anchor is configured for the bundle's origin (gap)" in only_upstream.stderr
+    ok = _bootstrap(bundle_dir, {**_offline_env(bundle_dir), **anchors})
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+
+def test_bootstrap_without_an_anchor_never_reads_the_origin(bundle_dir):
+    """#1118 F2: with no anchor set bootstrap behaves as before (TOFU; the
+    anchor stays optional here): a bundle without an origin line bootstraps
+    with output identical to one that declares origin: upstream."""
+    twin = bundle_dir.parent / "twin" / "extracted"
+    shutil.copytree(bundle_dir, twin)
+    _repack(twin, origin=None)
+    with_origin = _bootstrap(bundle_dir)
+    without = _bootstrap(twin)
+    assert with_origin.returncode == 0, with_origin.stdout + with_origin.stderr
+    def same_place(text):  # Task's installer prints the bundle directory.
+        return text.replace(str(twin), str(bundle_dir))
+
+    assert (without.returncode, same_place(without.stdout), same_place(without.stderr)) == (
+        0, with_origin.stdout, with_origin.stderr)
+
+
+@pytest.mark.parametrize("anchored", [True, False], ids=["anchors-set", "no-anchor"])
+def test_bootstrap_refuses_a_flipped_origin_before_reading_it(bundle_dir, anchored):
+    """#1118 F2: an origin line edited after signing never selects an anchor:
+    with anchors set the MANIFEST's own signed checksum entry refuses it, and
+    without them the member checksums do; no message claims an origin."""
+    env = {**_offline_env(bundle_dir), **(_anchors(bundle_dir) if anchored else {})}
+    manifest = bundle_dir / "MANIFEST.txt"
+    manifest.write_text(manifest.read_text().replace("origin: upstream\n", "origin: gap\n"))
+    r = _bootstrap(bundle_dir, env)
+    assert r.returncode == 1
+    if anchored:
+        assert "FAIL: MANIFEST.txt does not match its signed SHA256SUMS entry" in r.stderr
+    else:
+        assert "MANIFEST.txt: FAILED" in r.stdout
+    assert "origin" not in r.stderr
+    assert not (bundle_dir / "operator workspace").exists()

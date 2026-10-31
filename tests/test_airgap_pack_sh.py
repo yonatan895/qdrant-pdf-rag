@@ -415,6 +415,50 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     assert "Third-party notices: THIRD-PARTY-NOTICES.txt" in (dist / "PACKING_RECORD.txt").read_text()
 
 
+def test_packed_origin_is_signed_and_the_real_guard_accepts_it_with_both_anchors(pack_tree, tmp_path_factory):
+    """#1118 F2: the real pack writes exactly one `origin: upstream` line
+    inside the signed MANIFEST, and the exact archive it produced bootstraps
+    and passes the real live-stage guard with both anchors exported (the
+    hermetic proof that the packer and the guard agree). The gap key in the
+    upstream role is refused."""
+    from tests.helpers_airgap import gap_release_anchor
+
+    tmp_path, _skopeo_log, head, key = pack_tree
+    r, _ = _run_pack(pack_tree)
+    assert r.returncode == 0, r.stderr
+    dist = tmp_path / "dist"
+    manifest = (dist / "MANIFEST.txt").read_bytes()
+    assert [line for line in manifest.decode().splitlines() if line.startswith("origin:")] == ["origin: upstream"]
+    assert f"{sha256_bytes(manifest)}  MANIFEST.txt\n" in (dist / "SHA256SUMS").read_text()
+    anchors = tmp_path_factory.mktemp("work-anchors")
+    subprocess.run(["openssl", "pkey", "-in", str(key), "-pubout", "-out", str(anchors / "upstream.pub")],
+                   check=True, capture_output=True)
+    both = {"SNEAKERNET_TRUSTED_PUB": str(anchors / "upstream.pub"),
+            "SNEAKERNET_GAP_TRUSTED_PUB": str(gap_release_anchor())}
+    extract = tmp_path_factory.mktemp("extracted")
+    with tarfile.open(dist / f"qdrant-pdf-rag-{head}.tar") as archive:
+        archive.extractall(extract, filter="data")
+    boot = subprocess.run(["sh", "bootstrap.sh"], cwd=extract, env={"PATH": "/usr/bin:/bin", **both},
+                          capture_output=True, text=True, check=False)
+    assert boot.returncode == 0, boot.stdout + boot.stderr
+    workspace = extract / "qdrant-pdf-rag"
+
+    def guard(env):
+        return subprocess.run(
+            ["sh", "-c", '. "$1/scripts/airgap/common.sh"; MANIFEST=dist/MANIFEST.txt; check_checkout_sha',
+             str(workspace / "scripts" / "airgap" / "guard"), str(workspace)],
+            cwd=workspace, capture_output=True, text=True, check=False,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(extract), **env})
+
+    ok = guard(both)
+    assert ok.returncode == 0, ok.stderr
+    assert ok.stderr == ""
+    swapped = guard({"SNEAKERNET_TRUSTED_PUB": str(gap_release_anchor())})
+    assert swapped.returncode == 1
+    assert swapped.stderr.startswith("FAIL: bundle pubkey does not match SNEAKERNET_TRUSTED_PUB, the release "
+                                     "trust anchor for the bundle's origin (upstream)")
+
+
 def test_pack_bundles_oauth_proxy_once_digest_recorded(pack_tree):
     """Once the connected host records a digest, the sidecar image joins the
     bundle, MANIFEST, SBOM and member checksums."""

@@ -627,13 +627,28 @@ checksums **after**.
   verified signed release (#1118 F1, ADR-0009 §1): a packed MANIFEST must be
   reachable, and:
   1. *MANIFEST authenticity.* The guard never reads a bare file. `SHA256SUMS`,
-     `SHA256SUMS.sig` and `sneakernet-signing.pub` must sit next to it, the
-     bundled key must equal a configured release trust anchor byte-for-byte,
-     the signature over `SHA256SUMS` must verify with that anchor, and
+     `SHA256SUMS.sig` and `sneakernet-signing.pub` must sit next to it, and
      `SHA256SUMS` must list `MANIFEST.txt` exactly once with the file's real
-     sha256. The anchor is `SNEAKERNET_TRUSTED_PUB` and it is required; the
-     guard reads anchors from the variable-name list
-     `RELEASE_TRUST_ANCHOR_VARS` so a second (gap) key can join it. Image
+     sha256 (checked first, so an edited `origin:` line is reported as an
+     edit). The MANIFEST must declare exactly one release origin, byte for
+     byte `origin: upstream` (written by `pack.sh`) or `origin: gap` (the gap
+     pack, ADR-0009 §5); a missing, repeated or unknown origin is refused.
+     The bundled key must then equal **the anchor for that origin**
+     byte-for-byte, and the signature over `SHA256SUMS` must verify with it,
+     which authenticates the origin line itself (#1118 F2). The anchors are
+     origin-tagged in `RELEASE_TRUST_ANCHOR_VARS`: `SNEAKERNET_TRUSTED_PUB`
+     for `upstream` (required for an upstream bundle) and
+     `SNEAKERNET_GAP_TRUSTED_PUB` for `gap`. So a gap-signed bundle that says
+     `upstream`, an upstream-signed one that says `gap`, and a third key are
+     each refused, and the origin printed in records is never a false label
+     (like `signed:`, it is not a trust root on its own). Every configured
+     anchor must be a readable plain file (not a link) outside the executing
+     checkout and outside the bundle directory it verifies (an anchor is never
+     supplied by the artifact it vouches for, so never a tracked
+     `gap/records/*.pub`), and the two anchors must hold different keys
+     (compared as keys, not bytes). Operators keep them in `/work/anchors/`
+     on the bastion ([install and ops](install_and_ops.md#42-transfer--automated-bootstrap)).
+     Nothing is cached: each live-stage run re-checks the files. Image
      archives stay load.sh's `sha256sum -c`; only this MANIFEST link is
      rechecked.
   2. *Identity.* HEAD must equal the packed SHA and no tracked file may differ
@@ -671,8 +686,10 @@ checksums **after**.
   *Connected opt-out.* `AIRGAP_UNVERIFIED_CHECKOUT=1` restores the pre-F1
   rules for connected developers and the connected CI and Kind lanes: no
   MANIFEST runs with the "not release-verified" notice, and without an anchor
-  the signature check is TOFU (a configured anchor still pins the key); a
-  reachable MANIFEST is still checked against HEAD and the tree. It is read
+  the signature check is TOFU (a configured anchor still pins the key for the
+  declared origin); a reachable MANIFEST is still checked against HEAD and the
+  tree, and one without an `origin:` line (packed before #1118 F2) is read as
+  `upstream` with a notice. It is read
   from the process environment only (an `airgap.env` assignment is ignored)
   and is refused with a fixed message unless `CI_REHEARSAL=1` is in the
   process environment too; any value other than `1` or unset is refused.
@@ -681,12 +698,24 @@ checksums **after**.
   index-flag refusals to an existing workspace before copying artifacts into
   `dist/`. Not covered: edits to files the checkout does not track
   (`airgap.env` is operator config by design), and an anchor file that is
-  itself replaced on the bastion.
+  itself replaced on the bastion. Also not covered, and required of the gap
+  release pipeline (ADR-0009 F6): candidate code that a gap release build
+  executes must not be able to write the anchor files, `airgap.env` or any
+  operator workspace on `/work` (it could replace an anchor or the guard
+  before the next deploy session), and the guard runs from the bundle's own
+  checkout, so a malicious bundle could carry its own lying guard. Upstream
+  bundles are checked before anything runs by the Windows anchor bootstrap;
+  a gap bundle must be verified by the installed release's code before
+  promotion (F6).
 - `bootstrap.sh` cannot source `common.sh` (no clone exists yet), so it
-  carries an inline twin of the trust check (bundle signature honoring
-  `SNEAKERNET_TRUSTED_PUB`, then `SHA256SUMS`). There the anchor stays
-  optional, since bootstrap only creates the workspace; every later live
-  stage requires it (guard above). It clones into
+  carries an inline twin of the trust check (bundle signature, then the
+  anchors, then `SHA256SUMS`). There the anchors stay optional, since
+  bootstrap only creates the workspace; every later live stage requires the
+  one for the bundle's origin (guard above). When either anchor is set, it
+  checks `MANIFEST.txt` against its signed `SHA256SUMS` entry, then reads
+  its `origin:` and requires the bundled key to equal that origin's anchor;
+  an anchor inside the bundle directory, a link, or two anchors holding the
+  same key are refused. With no anchor its output is unchanged. It clones into
   `AIRGAP_WORKSPACE` (default `qdrant-pdf-rag`), skips the clone when a
   repo already exists, copies (not links) the archives into `dist/`, and
   seeds `airgap.env` from the example only when absent — never overwriting

@@ -77,3 +77,20 @@ environment and its Task and Helm, so these GitLab CI/CD variables are retired:
 `hazards`: the image holds the Task binary only, and the artifact tests and the
 doctor read the archive. These variables are not items of the derived
 extension surface, so this entry has no `- removed` line.
+
+## 2026-10-31 GH#1118 Release origin and the gap trust anchor
+
+The signed bundle MANIFEST now declares its release origin, `origin: upstream`
+(`pack.sh`; a gap release will declare `origin: gap`). Outside dry-run the
+live stages accept a bundle only when its signature verifies with the anchor
+for that origin: `SNEAKERNET_TRUSTED_PUB` for upstream, as before, and the new
+operator key `SNEAKERNET_GAP_TRUSTED_PUB` for gap releases. A MANIFEST without
+an `origin:` line is refused, so roll back to a release packed before this
+change with that release's own bootstrap and scripts in its own workspace.
+Keep both anchors as plain files in `/work/anchors/` on the bastion, never
+inside a workspace or bundle and never as links, and never point the two
+variables at the same key: each is refused with a fixed message.
+`bootstrap.sh` applies the same rule when an anchor is set, the release import
+accepts only `origin: upstream`, and `scripts/devkit/install.sh` refuses an
+upstream anchor that is the gap key. Both anchors are listed, commented out, in
+`airgap.env.example`. Nothing is removed.

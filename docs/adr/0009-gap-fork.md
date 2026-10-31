@@ -61,7 +61,7 @@
   the [release gate](../release-verification.md) accepted, and the bundle's
   `repo.bundle` HEAD is the release commit. A **gap release** (§5) is the
   only other source of production code.
-- **Current behavior** (F1 is done) of `check_checkout_sha` in
+- **Current behavior** (F1 and F2 are done) of `check_checkout_sha` in
   `scripts/airgap/common.sh`, which load, deploy, ingest and validate call
   (the pipeline runs all four), and so does `retire_legacy.sh`, the other
   writer-key entry point (#1118 item e):
@@ -70,9 +70,14 @@
     MANIFEST, no configured trust anchor, a signature that does not verify
     against the anchor, HEAD other than the MANIFEST sha, and a tracked or
     hidden change are each refused.
-  - The trust anchor `SNEAKERNET_TRUSTED_PUB` is required. The guard reads
-    its anchors from a list of variable names (`RELEASE_TRUST_ANCHOR_VARS`),
-    so F2 adds the gap release key as a second name.
+  - The signed MANIFEST declares its origin in one line, `origin: upstream`
+    or `origin: gap` (F2). The guard verifies the signature with the anchor
+    for that origin only: `SNEAKERNET_TRUSTED_PUB` for upstream (required for
+    an upstream bundle) and `SNEAKERNET_GAP_TRUSTED_PUB` for gap. A missing,
+    repeated or unknown origin, a signer that is not that origin's anchor, two
+    anchors holding the same key, and an anchor that is a link or lies inside
+    the checkout or the bundle are each refused. The import (§4) accepts only
+    `origin: upstream`.
   - Under `AIRGAP_DRYRUN=1` it still prints `Notice: dry-run — checkout not
     release-verified` and returns 0.
   - So a plain clone of the fork runs nothing live in the gap.
@@ -364,7 +369,9 @@ The script runs these steps. Each refusal is a fixed `STOP:` line in it.
 1. **Verify the bundle** with the fork's own code: the `SHA256SUMS`
    signature against the trust anchor, every member checksum, and
    `repo.bundle` HEAD equal to the MANIFEST sha. The trust anchor is
-   required; there is no trust on first use. The signature covers only the
+   required; there is no trust on first use. Only an upstream release is
+   imported: the MANIFEST must say `origin: upstream` and verify with the
+   upstream anchor, even when the gap anchor is set (F2). The signature covers only the
    listed members, so the tarball may hold nothing else: a link, a path, a
    repeated name or an unlisted member stops the import before that member
    is unpacked. The bundle unpacks into `$R/bundle`, never over a file the
@@ -461,7 +468,10 @@ stays, and it is the gate.
      site's secret store.
    - It never leaves the gap and is a separate trust anchor.
    - Its public key reaches operators inside the site, and its fingerprint
-     is recorded in `gap/records/`.
+     is recorded in `gap/records/`. The anchor operators use is a file
+     outside the fork, `/work/anchors/gap.pub` on the bastion
+     (`SNEAKERNET_GAP_TRUSTED_PUB`): the guard refuses an anchor inside the
+     executing checkout, so a gap MR can never change it.
 4. **Record.** A release record goes in `gap/records/`, shaped like
    [the release record](../release-record.md). Each release-gate check is
    marked run with its evidence, or NOT RUN. A NOT RUN required check blocks
@@ -791,7 +801,7 @@ The names the gap builds on are a **public API**, limited to this list:
 | Item | Scope | Verifier-owned |
 |---|---|---|
 | F1 | Done: outside dry-run, load, deploy, ingest, validate and retire-legacy refuse a checkout that is not a verified signed release. The trust anchor is required. The opt-out needs `CI_REHEARSAL=1`. Tests go in the air-gap shell suites. The live bundle lanes export the packing job's key as the anchor; hermetic fixtures from plain trees set the opt-out | Lanes and taskfiles: yes |
-| F2 | Two trust anchors (upstream and gap) and the MANIFEST `origin:` field | No |
+| F2 | Done: two origin-bound trust anchors (`SNEAKERNET_TRUSTED_PUB` for upstream, `SNEAKERNET_GAP_TRUSTED_PUB` for gap, files in `/work/anchors/`) and the signed MANIFEST `origin:` field. The guard, `bootstrap.sh` and load accept only the declared origin's anchor; the import accepts only `origin: upstream`; the dev kit install refuses an upstream anchor that is the gap key. Left to F6: the gap pack, the key runbook, and pre-promotion verification of a gap bundle by the installed release's code, with build isolation from the anchors and `/work` | The `taskfiles/airgap.yml` operator-key bridge: yes. The rest: no |
 | F3 | Done in this PR: `tests/test_hygiene.py` fails on GitHub Actions when `gap/` or `.gitlab/` exists | No |
 | F4 | The CODEOWNERS generator, its equality test and the GitLab hygiene check | No |
 | F5 | The dev kit (§8), as [plan](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480613459) PR-2, PR-4 (with `prepare_python.py --kit`) and PR-5 (with `scripts/gap/ci_status.py`) | `agent_doctor.py` and `prepare_python.py`: yes. `devkit_key.py` is not a unit-evidence input: both import it only to word the refusal, with a fixed fallback (#1152, #1162). The factory workflow is separate from `e2e.yml` and not an acceptance producer: no |

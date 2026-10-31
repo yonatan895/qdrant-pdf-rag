@@ -245,8 +245,14 @@ main() {
     : > "$WORK/empty.env"
     # common.sh cds to this checkout; the chain is checked from the bundle
     # directory with a relative name (sha256sum escapes some path characters).
-    if ! env AIRGAP_ENV="$WORK/empty.env" AIRGAP_DRYRUN=0 sh -c '. "$1" && cd "$2" && check_manifest_chain MANIFEST.txt' \
+    # Only an upstream release is imported (#1118 F2), verified with the
+    # upstream anchor alone: a gap anchor in the environment plays no part.
+    if ! env -u SNEAKERNET_GAP_TRUSTED_PUB AIRGAP_ENV="$WORK/empty.env" AIRGAP_DRYRUN=0 \
+            sh -c '. "$1" && cd "$2" && check_manifest_chain MANIFEST.txt verified upstream' \
             "$SELF" "$COMMON" "$UNPACKED"; then
+        if ! grep -qx 'origin: upstream' "$UNPACKED/MANIFEST.txt"; then
+            stop "the bundle is not an upstream release (its MANIFEST origin is not upstream; FAIL line above); do not import it: only signed upstream releases are imported"
+        fi
         stop "the bundle is not signed by SNEAKERNET_TRUSTED_PUB (FAIL line above); do not import it: ask for a correctly signed bundle"
     fi
     if [ -n "$(awk 'NR == FNR { listed[$2] = 1; next }

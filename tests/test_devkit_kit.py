@@ -701,6 +701,24 @@ def test_install_requires_an_independent_trusted_key(packed, trust, message):
     assert not Path(ctx["env"]["STUB_REGISTRY"]).exists()
 
 
+def test_install_refuses_an_upstream_anchor_that_is_the_gap_key(packed):
+    """#1118 F2 G4: kits are signed by the upstream release key only, so an
+    SNEAKERNET_TRUSTED_PUB holding the same key as SNEAKERNET_GAP_TRUSTED_PUB
+    is refused before any push (the gap key can never install a kit); with a
+    distinct gap anchor exported the next ordinary install passes."""
+    ctx, kit, _ = packed
+    same = ctx["tmp"] / "anchors" / "gap.pub"
+    same.parent.mkdir()
+    shutil.copy(ctx["pub"], same)
+    done = run_install(ctx, kit, SNEAKERNET_GAP_TRUSTED_PUB=str(same))
+    assert done.returncode != 0
+    assert ("SNEAKERNET_TRUSTED_PUB holds the same key as SNEAKERNET_GAP_TRUSTED_PUB: a kit is signed by the "
+            "upstream release key only") in done.stderr
+    assert not Path(ctx["env"]["STUB_REGISTRY"]).exists()
+    again = run_install(ctx, kit, SNEAKERNET_GAP_TRUSTED_PUB=str(gen_other_pub(ctx["tmp"] / "anchors", "gap")))
+    assert again.returncode == 0, again.stderr
+
+
 def test_install_refuses_a_signature_the_trusted_key_does_not_verify(packed):
     ctx, kit, _ = packed
     other = gen_sign_keypair(ctx["tmp"], "other.key")
