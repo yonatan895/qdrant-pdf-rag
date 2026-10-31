@@ -59,7 +59,7 @@ def test_recorded_election_decides_a_dual_license():
 def test_repository_record_reconciles_with_the_real_pins():
     problems, unresolved, state = problems_for(real_inventory())
     assert problems == []
-    assert state == "absent"
+    assert state in ("absent", "current"), "a recorded release approval must match the current inventory"
     assert unresolved == [], "every owner decision is recorded; pymupdf is the owner-decision exception"
 
 
@@ -257,13 +257,18 @@ def test_record_drift_is_flagged(mutate, needle):
     assert any(name in p and needle in p for p in problems), problems
 
 
+def without_release_approval(inventory):
+    inventory["release_approval"] = {"approval_ref": None, "approved_digest": None}
+    return inventory
+
+
 def test_release_mode_blocks_on_unresolved_decisions_and_missing_approval():
-    problems, unresolved, state = problems_for(real_inventory(), release=True)
+    problems, unresolved, state = problems_for(without_release_approval(real_inventory()), release=True)
     assert state == "absent"
     assert unresolved == []
     assert problems == ["release approval: no owner approval is recorded for this inventory"]
     # Withdrawal: an unresolved item must block the release, not only the missing approval.
-    inventory = real_inventory()
+    inventory = without_release_approval(real_inventory())
     pymupdf = next(e for e in inventory["python"] if e["name"] == "pymupdf")
     pymupdf["status"] = "pending-owner-decision"
     pymupdf["decision"]["legal_confirmation"] = "pending"
@@ -297,7 +302,7 @@ def test_missing_legal_confirmation_on_an_elected_entry_fails_check():
 
 @pytest.mark.parametrize("value", ["confirmed", "waived-by-owner-decision"])
 def test_recognized_legal_confirmation_values_pass(value):
-    inventory = real_inventory()
+    inventory = without_release_approval(real_inventory())
     next(e for e in inventory["python"] if e["name"] == "pymupdf")["decision"]["legal_confirmation"] = value
     assert problems_for(inventory, release=True)[0] == [
         "release approval: no owner approval is recorded for this inventory"]
@@ -496,7 +501,7 @@ def notice_inventory(tmp_path, text=b"Synthetic MIT task license\n"):
 
 
 def test_notices_carry_real_texts_and_open_decisions_and_refuse_a_missing_member(tmp_path):
-    inventory = notice_inventory(tmp_path)
+    inventory = without_release_approval(notice_inventory(tmp_path))
     # An open decision (here a withdrawn pymupdf disposition) must stay visible in the notices.
     next(e for e in inventory["python"] if e["name"] == "pymupdf")["status"] = "pending-owner-decision"
     text = li.render_notices(REPO, inventory, tmp_path)

@@ -406,7 +406,12 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     assert "Apache License" in notices and "Zero-Clause BSD" in notices and "MIT License" in notices
     assert "Components awaiting owner decision: 0" in notices
     assert "pymupdf==" not in notices.split("COMPONENTS")[0]
-    assert "Owner approval of this inventory: absent" in notices
+    # The approval line states the packed inventory's own approval state. The fixture rebinds
+    # image pins, so a release approval copied from the repository is reported "stale", exactly
+    # as `license_inventory check` judges that tree.
+    from scripts import license_inventory as li
+    expected = li.run_check(tmp_path, li.load_inventory(tmp_path), None, False)[2]
+    assert f"Owner approval of this inventory: {expected}\n" in notices
     assert "Third-party notices: THIRD-PARTY-NOTICES.txt" in (dist / "PACKING_RECORD.txt").read_text()
 
 
