@@ -529,42 +529,43 @@ def kit_problems(inventory, root=REPO):
 
 
 # The RPMs whose header tags use a Fedora legacy abbreviation with several SPDX
-# readings (read from the pinned image, 2026-10-31); each awaits the owner.
+# readings (read from the pinned image, 2026-10-31), approved by the maintainer.
 AMBIGUOUS_RPMS = {"cracklib", "cracklib-dicts", "gzip", "less", "libcbor", "libdb", "libeconf", "libedit",
                   "libfdisk", "libfido2", "libpwquality", "libseccomp", "libutempter", "openssh",
                   "openssh-clients", "pam", "shadow-utils-subid", "util-linux", "util-linux-core"}
+ALL_LICENCES_REF = "https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6543481300"
+APPROVED_KIT_DIGEST = "854999ae9a8ce9d537fcda1d6f2f3fb603d1269c87b12ee9f3544e31757eaf77"
 
 
-def test_repository_kit_record_reconciles_and_only_owner_decisions_block_the_pack():
-    """Every kit component has a record bound to its real pin; what still refuses a
-    promotable pack is only the owner's: open decisions and the absent kit approval."""
+def test_repository_kit_record_passes_the_enforced_gate_at_the_approved_digest():
+    """Every kit component has a record bound to its real pin, no decision is open, and
+    the maintainer's kit approval binds exactly the digest the tool computes."""
     inventory = real_inventory()
-    problems, blockers, state = kit_problems(inventory)
-    assert problems == [] and state == "absent"
-    pending = {b.split(":")[2] for b in blockers if b.endswith("awaits owner decision")}
-    assert pending == AMBIGUOUS_RPMS
-    assert blockers[-1].startswith("devkit approval: no owner approval is recorded for the kit inventory")
-    assert len(blockers) == len(AMBIGUOUS_RPMS) + 1
+    assert kit_problems(inventory) == ([], [], "current")
+    assert li.kit_scope_digest(inventory) == APPROVED_KIT_DIGEST
+    assert inventory["devkit"]["approval"] == {"approval_ref": ALL_LICENCES_REF, "approved_digest": APPROVED_KIT_DIGEST}
     # The release scope and its digest do not include the kit section.
     without = {k: v for k, v in inventory.items() if k != "devkit"}
     assert li.scope_digest(without) == li.scope_digest(inventory)
     assert problems_for(inventory)[0] == []
 
 
-def test_only_the_maintainers_gpl_decision_is_recorded_as_a_kit_approval():
-    """GPL RPMs carry the 2026-10-28 decision; nothing else restricted is approved on the
-    owner's behalf, and ambiguous RPM tags stay open with their terms named."""
+def test_kit_approvals_are_exactly_the_maintainers_recorded_decisions():
+    """GPL-only RPMs carry the 2026-10-28 decision, the ambiguous-tag RPMs the 2026-10-31
+    one; nothing else is approved, and each tag stays as recorded from the RPM header."""
     kit = real_inventory()["devkit"]
-    approved = {e["id"]: e for e in kit["components"] if e["status"] == "approved"}
-    assert set(approved) == {"rpm:crun", "rpm:git-core", "rpm:tar"}
-    for entry in approved.values():
-        assert entry["class"] == "strong-copyleft" and entry["approval_ref"].startswith(GPL_DECISION_REF)
-        assert entry["decision"]["owner"] == "yonatan895" and entry["decision"]["date"] == "2026-10-28"
-    assert not [e for e in kit["python"] if e["status"] == "approved"]
-    for entry in kit["components"]:
-        if entry["status"] == "pending-owner-decision":
-            assert entry["class"] in li.RESTRICTED - {"strong-copyleft"}
+    approved = {e["name"]: e for e in kit["components"] if e["status"] == "approved"}
+    assert set(approved) == {"crun", "git-core", "tar"} | AMBIGUOUS_RPMS
+    for name, entry in approved.items():
+        if name in AMBIGUOUS_RPMS:
+            assert entry["approval_ref"] == ALL_LICENCES_REF and entry["decision"]["date"] == "2026-10-31"
             assert "NOASSERTION" in entry["license_spdx"] and entry["ambiguous_terms"]
+        else:
+            assert entry["class"] == "strong-copyleft" and entry["approval_ref"].startswith(GPL_DECISION_REF)
+            assert entry["decision"]["date"] == "2026-10-28"
+        assert entry["decision"]["owner"] == "yonatan895"
+    assert not [e for e in kit["python"] if e["status"] != "declared"]
+    for entry in kit["components"]:
         if entry.get("kind") == "rpm":
             # The declared tag is the RPM header, kept verbatim next to its normalized form.
             assert li.normalize_rpm_tag(entry["license_declared"])[0] == entry["license_spdx"]

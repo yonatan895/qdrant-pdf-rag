@@ -100,9 +100,13 @@ rather than split. The wheel classifier table also maps the exact MPL 2.0 classi
 Recorded decisions: `crun`, `git-core` and `tar` (GPL only) are `approved` under the
 maintainer's 2026-10-28 decision that GPL-licensed RPMs are acceptable in the
 workspace image ([#1118 comment](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480982316)).
-An RPM whose tag also has an ambiguous term (`gzip`, `less`, `pam`, `libpwquality`,
-`shadow-utils-subid`, `util-linux`, `util-linux-core`) stays open. That decision
-covers only its GPL part. Nothing else is approved on the owner's behalf.
+The 19 RPMs with an ambiguous term are `approved` under the maintainer's 2026-10-31
+decision ("I approve all licenses",
+[#1118 comment](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6543481300)),
+each under its RPM `License` tag as recorded, and for an OR tag whichever alternative
+applies. The same decision records `devkit.approval` at kit scope digest
+`854999ae9a8ce9d537fcda1d6f2f3fb603d1269c87b12ee9f3544e31757eaf77`; a kit whose digest
+differs (a new RPM, wheel or tool, or a changed tag) needs a new decision.
 
 The gate: `pack.sh` runs `license_inventory.py check --kit` before it pulls anything.
 `--kit` is the kit's `check --release`. It fails with fixed `FAIL` lines when:
