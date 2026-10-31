@@ -1,7 +1,7 @@
 #!/bin/sh
 # CONNECTED SIDE (#1118, ADR-0009 §8 "The kit"): pack the signed dev kit.
 #
-#   SNEAKERNET_SIGNING_KEY=<pem> sh scripts/devkit/pack.sh [--reuse-image DIR]
+#   SNEAKERNET_SIGNING_KEY=<pem> sh scripts/devkit/pack.sh [--reuse-image DIR] [--license-rehearsal]
 #
 # Output: dist/mfr-devkit-<key>/, a directory of plain files. The transfer rule
 # forbids top-level archives and links, so the kit is never a tarball: the image
@@ -23,20 +23,24 @@
 #
 # Refuses a stale kit key or a sha256:PENDING digest (D-8), and runs the kit licence
 # gate (license_inventory.py check --kit, docs/licensing.md#dev-kit) before any pull:
-# an unrecorded kit component refuses every pack; an open owner decision or an absent
-# or stale kit approval refuses a promotable pack (SNEAKERNET_KEY_TRUSTED=true) and
-# is recorded as license_gate: rehearsal otherwise. --reuse-image takes the image/
+# an unrecorded kit component, an open owner decision or an absent or stale kit
+# approval refuses the pack, whatever the key (MANIFEST license_gate: enforced). The
+# one exception, --license-rehearsal, needs CI_REHEARSAL=1 and no custodied key
+# (SNEAKERNET_KEY_TRUSTED): it records the open items and license_gate: rehearsal,
+# and install.sh refuses such a kit without --rehearsal. --reuse-image takes the image/
 # directory of an earlier kit with the same key instead of pulling: the snapshot-only
 # re-sign (D-9). Its digest must still equal the pin.
 
 . "$(dirname -- "$0")/../airgap/common.sh"
 
 REUSE_IMAGE=""
+LICENSE_GATE=enforced
 while [ $# -gt 0 ]; do
     case "$1" in
         --reuse-image) REUSE_IMAGE="${2:-}"; [ -n "$REUSE_IMAGE" ] || die "--reuse-image needs the image/ directory of an earlier kit"; shift 2 ;;
-        -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
-        *) die "unsupported argument (usage: sh scripts/devkit/pack.sh [--reuse-image DIR])" ;;
+        --license-rehearsal) LICENSE_GATE=rehearsal; shift ;;
+        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+        *) die "unsupported argument (usage: sh scripts/devkit/pack.sh [--reuse-image DIR] [--license-rehearsal])" ;;
     esac
 done
 
@@ -66,9 +70,14 @@ printf '%s\n' "$DIGEST" | grep -Eqx 'sha256:[0-9a-f]{64}' || die "scripts/tools/
 # kit scope. A kit component (dev wheel, RPM, tool pin, base image) without a
 # record, an open owner decision, or an absent or stale kit approval refuses the
 # pack before anything is pulled. Its summary line goes into MANIFEST.
-# An ephemeral-key kit is a non-promotable rehearsal (docs/deploy.md): its open
-# decisions are printed and recorded in MANIFEST and the notices, not enforced.
-if [ "${SNEAKERNET_KEY_TRUSTED:-}" = "true" ]; then LICENSE_GATE=enforced; else LICENSE_GATE=rehearsal; fi
+# The licence rehearsal is an explicit CI exception (the devkit-proof transport
+# proof): never with a custodied key, and never without the CI_REHEARSAL marker.
+if [ "$LICENSE_GATE" = rehearsal ]; then
+    [ "${CI_REHEARSAL:-}" = 1 ] ||
+        die "--license-rehearsal needs CI_REHEARSAL=1: it packs a CI rehearsal kit that install.sh refuses; pack a kit for the gap without it (docs/licensing.md#dev-kit)"
+    [ "${SNEAKERNET_KEY_TRUSTED:-}" != true ] ||
+        die "--license-rehearsal cannot be combined with SNEAKERNET_KEY_TRUSTED=true: a custodied-key kit always enforces the licence gate"
+fi
 # shellcheck disable=SC2046
 LICENSE_SUMMARY=$(python3 "$REPO_ROOT/scripts/license_inventory.py" --root "$REPO_ROOT" check --kit \
     $([ "$LICENSE_GATE" = rehearsal ] && echo --rehearsal)) || {
@@ -78,7 +87,7 @@ LICENSE_SUMMARY=$(python3 "$REPO_ROOT/scripts/license_inventory.py" --root "$REP
 LICENSE_STATUS=$(printf '%s\n' "$LICENSE_SUMMARY" | sed -n '$p' | sed 's/^license-inventory: //')
 if [ "$LICENSE_GATE" = rehearsal ] && printf '%s\n' "$LICENSE_SUMMARY" | grep -q '^license-inventory: UNRESOLVED: devkit'; then
     printf '%s\n' "$LICENSE_SUMMARY" | grep '^license-inventory: UNRESOLVED: devkit' >&2
-    echo "WARNING: rehearsal kit (ephemeral key): the open licence items above are recorded, not enforced; a promotable kit (SNEAKERNET_KEY_TRUSTED=true) refuses them (docs/licensing.md#dev-kit)" >&2
+    echo "WARNING: licence rehearsal kit: the open licence items above are recorded, not enforced; install.sh refuses this kit without --rehearsal (docs/licensing.md#dev-kit)" >&2
 fi
 
 REMOTE=$(git remote get-url origin 2>/dev/null || true)

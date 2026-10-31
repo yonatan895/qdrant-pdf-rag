@@ -1324,7 +1324,7 @@
     ],
     "evidence": {
       "rpm_licenses": "RPM License header tags read 2026-10-31 from the rpmdb of the pinned kit image ghcr.io/yonatan895/qdrant-pdf-rag-devkit@sha256:b5c03e1950517c6a8689cc2273350a99ad1643b31f45ca1c00925ec28d470c8c with rpm -qa --qf '%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\\t%{LICENSE}\\n' (docker run --network none); all 26 NEVRAs of images/devkit-packages.txt present, and the other 116 equal licenses/ubi9-python-314-minimal.rpms.txt. Legacy Fedora abbreviations are normalized only where fedora-license-data (commit cbd8b74c) maps them to one SPDX identifier.",
-      "wheels": "generate --kit --wheelhouse against /opt/devkit/wheelhouse copied from the same image: 83 wheels, each the exact locked bytes (name, version, file name and sha256 of requirements.dev.lock.txt)."
+      "wheels": "generate --kit --wheelhouse against the dev wheelhouse: 83 wheels, each the exact locked bytes (name, version, file name and sha256 of requirements.dev.lock.txt). Recorded 2026-10-31 from /opt/devkit/wheelhouse of the pinned image; regenerate from the factory's dev wheelhouse (python3 scripts/dependency_lock.py prepare --profile dev), which holds the same hash-locked bytes, never from installed site-packages."
     },
     "python": [
       {

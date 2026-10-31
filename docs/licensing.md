@@ -82,7 +82,7 @@ the `devkit` section of `licenses/inventory.json`, with their own approval, beca
 | Kit component | Record | Licence source |
 |---|---|---|
 | Runtime wheels (66) | the release `python` records, reused | as above |
-| Dev-only wheels (17) | `devkit.python`, bound to `requirements.dev.lock.txt` | `generate --kit --wheelhouse` on the image's `/opt/devkit/wheelhouse` (exact locked bytes) |
+| Dev-only wheels (17) | `devkit.python`, bound to `requirements.dev.lock.txt` | `generate --kit --wheelhouse` on the factory's dev wheelhouse (`dependency_lock.py prepare --profile dev`; exact locked bytes) |
 | RPMs (26, `images/devkit-packages.txt`) | `devkit.components`, kind `rpm`, bound to the NEVRA | RPM `License` header tag from the pinned image's rpmdb (`devkit.evidence`) |
 | Task, Helm, oc, `oras.exe`, Linux `oras` | `devkit.components`, kind `tool`, bound to the pin's `version`, `sha256`, `license` and `license-sha256` | the pin's `license:` line; `task-LICENSE` and `oras-LICENSE` checked against their pinned digests |
 | UBI base, project | `devkit.shared`: the release records `image:ubi9-python-314-minimal` and `project:mainframe-rag` | the `FROM` digest of `images/Containerfile.devkit` must equal the shared base record's digest |
@@ -115,14 +115,16 @@ The gate: `pack.sh` runs `license_inventory.py check --kit` before it pulls anyt
   digest, which `check --kit` prints. The digest covers every kit record, shared
   ones included; decision fields are excluded.
 
-Open owner decisions refuse a **promotable** kit (`SNEAKERNET_KEY_TRUSTED=true`, the
-custodied release key). An ephemeral-key kit is a non-promotable rehearsal, as for
-the bundle ([deploy](deploy.md)): pack runs `check --kit --rehearsal`, which reports
-those items as `UNRESOLVED`. It records `license_gate: rehearsal` and the state in
-MANIFEST and the notices, and still refuses a missing or drifted record. The
-`devkit-proof` transport proof is such a pack. Record each decision as for the
-release, then set `devkit.approval.approval_ref` and `approved_digest` to the
-printed digest.
+The gate is enforced by default, whatever the signing key, and MANIFEST records
+`license_gate: enforced`. The one exception is `pack.sh --license-rehearsal`, which
+needs `CI_REHEARSAL=1` and is refused with `SNEAKERNET_KEY_TRUSTED=true`. It runs
+`check --kit --rehearsal`, which reports the open decisions and the approval as
+`UNRESOLVED` and still refuses a missing or drifted record. It records
+`license_gate: rehearsal` and the open items in MANIFEST and the notices. The
+kit's `install.sh` refuses a kit without `license_gate: enforced` unless it is given
+`--rehearsal`. Only the `devkit-proof` CI transport proof uses either flag; the gap
+runbook uses neither. Record each decision as for the release, then set
+`devkit.approval.approval_ref` and `approved_digest` to the printed digest.
 
 The kit's `THIRD-PARTY-NOTICES.txt` comes from `notices --kit`. It lists every
 component: each wheel, each RPM with its NEVRA and verbatim tag, each tool with its
@@ -136,8 +138,11 @@ RPMs; that is decision 3 below.
 
 Refresh after a kit pin change: on the connected side, read the tags with
 `rpm -qa --qf '%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\t%{LICENSE}\n'`
-in the new image and copy out `/opt/devkit/wheelhouse`, or prepare the dev
-wheelhouse. Then run `generate --kit --wheelhouse DIR --rpm-licenses FILE`. A
+in the new image, and prepare the factory's dev wheelhouse with
+`python3 scripts/dependency_lock.py prepare --profile dev` (the hash-locked bytes the
+image installs). Then run `generate --kit --wheelhouse DIR --rpm-licenses FILE`.
+Use the wheelhouse, not installed `--site-packages`: installed dist-info gives
+different evidence fields and moves the kit digest. A
 changed tag drops that RPM's decision fields. A new restricted record is seeded
 `pending-owner-decision`, never approved.
 

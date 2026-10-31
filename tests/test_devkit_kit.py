@@ -405,7 +405,8 @@ def test_pack_writes_a_signed_plain_file_kit_whose_manifest_binds_the_pins(packe
     assert sbom["image"]["digest"] == ctx["digest"] and sbom["kit_key"] == expected_key
     assert "oras-LICENSE" in (kit / "THIRD-PARTY-NOTICES.txt").read_text()
     assert fields["license_status"].startswith("OK (") and "kit_unresolved=0 kit_approval=current" in fields["license_status"]
-    assert fields["license_gate"] == "rehearsal" and fields["signed"] == "ephemeral"
+    # Enforced by default, even with an ephemeral key.
+    assert fields["license_gate"] == "enforced" and fields["signed"] == "ephemeral"
     assert (kit / "task-LICENSE").read_bytes() == task_members()["task-LICENSE"]
 
 
@@ -470,14 +471,14 @@ def test_pack_refuses_a_stale_kit_approval(pack_tree):
     # A re-derived RPM header now declares more than the approved record did.
     openssl.update(license_declared="Apache-2.0 AND MIT", license_spdx="Apache-2.0 AND MIT")
     _commit_inventory(pack_tree, inventory, approve=False)
-    done = run_pack(pack_tree, SNEAKERNET_KEY_TRUSTED="true")
+    done = run_pack(pack_tree)
     assert done.returncode != 0
     assert "devkit approval: kit dependency or license records changed since the approved digest" in done.stderr
     assert "kit_approval=stale" in done.stderr
     assert not list((pack_tree["tree"] / "dist").glob("mfr-devkit-*"))
     # Re-approving the new digest is the fix the message names; the next pack passes.
     _commit_inventory(pack_tree, inventory)
-    assert run_pack(pack_tree, SNEAKERNET_KEY_TRUSTED="true").returncode == 0
+    assert run_pack(pack_tree).returncode == 0
 
 
 @pytest.mark.parametrize("status, message", [
@@ -485,36 +486,49 @@ def test_pack_refuses_a_stale_kit_approval(pack_tree):
     # Exclusion is no way out: the image installs the exact RPM list either way.
     ("excluded", "devkit: rpm:git-core: excluded, but the kit still ships it"),
 ])
-def test_promotable_pack_refuses_an_unresolved_kit_decision(pack_tree, status, message):
-    """A withdrawn decision (status only, so the approved digest stays current) refuses."""
+def test_pack_refuses_an_unresolved_kit_decision(pack_tree, status, message):
+    """A withdrawn decision (status only, so the approved digest stays current) refuses
+    an ordinary pack with an ephemeral key: enforcement does not depend on the key."""
     inventory = _inventory(pack_tree["tree"])
     git = next(e for e in inventory["devkit"]["components"] if e["id"] == "rpm:git-core")
     git.update(status=status, approval_ref=None)
     _commit_inventory(pack_tree, inventory, approve=False)
-    done = run_pack(pack_tree, SNEAKERNET_KEY_TRUSTED="true")
+    done = run_pack(pack_tree)
     assert done.returncode != 0
     assert message in done.stderr
     assert "kit_approval=current" in done.stderr
     assert not list((pack_tree["tree"] / "dist").glob("mfr-devkit-*"))
 
 
-def test_rehearsal_pack_records_open_decisions_that_a_promotable_pack_refuses(pack_tree):
-    """An open RPM decision and no kit approval: an ephemeral-key (non-promotable) kit
-    packs and records both; a promotable one refuses."""
-    tree = pack_tree["tree"]
-    inventory = _inventory(tree)
+def _open_decision(ctx) -> None:
+    """An open RPM decision and no kit approval, committed."""
+    inventory = _inventory(ctx["tree"])
     libedit = next(e for e in inventory["devkit"]["components"] if e["id"] == "rpm:libedit")
     libedit.update(status="pending-owner-decision", approval_ref=None)
     inventory["devkit"]["approval"] = {"approval_ref": None, "approved_digest": None}
-    _commit_inventory(pack_tree, inventory, approve=False)
-    done = run_pack(pack_tree, SNEAKERNET_KEY_TRUSTED="true")
+    _commit_inventory(ctx, inventory, approve=False)
+
+
+@pytest.mark.parametrize("args, env, message", [
+    ((), {}, "devkit: rpm:libedit: NOASSERTION (unknown) awaits owner decision"),
+    ((), {"CI_REHEARSAL": "1"}, "devkit approval: no owner approval is recorded for the kit inventory"),
+    (("--license-rehearsal",), {}, "--license-rehearsal needs CI_REHEARSAL=1"),
+    (("--license-rehearsal",), {"CI_REHEARSAL": "1", "SNEAKERNET_KEY_TRUSTED": "true"},
+     "--license-rehearsal cannot be combined with SNEAKERNET_KEY_TRUSTED=true"),
+])
+def test_pack_enforces_open_decisions_unless_an_explicit_ci_rehearsal(pack_tree, args, env, message):
+    _open_decision(pack_tree)
+    done = run_pack(pack_tree, *args, **env)
     assert done.returncode != 0
-    assert "devkit: rpm:libedit: NOASSERTION (unknown) awaits owner decision" in done.stderr
-    assert "devkit approval: no owner approval is recorded for the kit inventory" in done.stderr
-    assert not list((tree / "dist").glob("mfr-devkit-*"))
-    done = run_pack(pack_tree)
+    assert message in done.stderr
+    assert not list((pack_tree["tree"] / "dist").glob("mfr-devkit-*"))
+
+
+def test_licence_rehearsal_kit_records_open_items_and_installs_only_as_a_rehearsal(pack_tree):
+    _open_decision(pack_tree)
+    done = run_pack(pack_tree, "--license-rehearsal", CI_REHEARSAL="1")
     assert done.returncode == 0, done.stderr
-    assert "WARNING: rehearsal kit (ephemeral key)" in done.stderr
+    assert "WARNING: licence rehearsal kit" in done.stderr
     kit = kit_dir(pack_tree)
     fields = _manifest(kit)
     assert fields["license_gate"] == "rehearsal" and fields["signed"] == "ephemeral"
@@ -522,6 +536,14 @@ def test_rehearsal_pack_records_open_decisions_that_a_promotable_pack_refuses(pa
     notices = (kit / "THIRD-PARTY-NOTICES.txt").read_text()
     assert "Owner approval of the kit inventory: absent" in notices
     assert "Components awaiting owner decision: 1\n  - rpm:libedit: NOASSERTION (unknown)" in notices
+    # The gap installer refuses it before any push; only an explicit CI rehearsal accepts it.
+    refused = run_install(pack_tree, kit)
+    assert refused.returncode != 0
+    assert "the kit MANIFEST has no license_gate: enforced" in refused.stderr
+    assert not (pack_tree["tmp"] / "registry").exists()
+    accepted = run_install(pack_tree, kit, "--rehearsal")
+    assert accepted.returncode == 0, accepted.stderr
+    assert "WARNING: licence rehearsal kit accepted for a CI rehearsal" in accepted.stderr
 
 
 def test_pack_refuses_a_pending_digest_and_writes_no_kit(pack_tree):
@@ -601,6 +623,7 @@ def test_install_verifies_pushes_reads_back_and_checks_the_pod(packed):
     done = run_install(ctx, kit, "--verify-pod", "mfr-bastion",
                        STUB_POD_IMAGE_ID=f"quay.example/mf/devkit@{digest}")
     assert done.returncode == 0, done.stderr
+    assert _manifest(kit)["license_gate"] == "enforced" and "licence rehearsal" not in done.stderr
     assert f"readback: quay.example/mf/devkit:{key} = {digest}" in done.stdout
     assert f"pod: mfr-bastion runs {digest}" in done.stdout
     calls = [json.loads(line) for line in Path(ctx["env"]["SKOPEO_LOG"]).read_text().splitlines()]
