@@ -461,10 +461,12 @@ class DoctorTests(TestCase):
                         shipped.write_bytes(original + b'\n')
                     else:
                         shipped.unlink()
-                    code, report = self.kit_report()
-                    self.assertEqual(code, 2, report)
-                    self.assertIn(refusal, report)
-                    shipped.write_bytes(original)
+                    try:
+                        code, report = self.kit_report()
+                        self.assertEqual(code, 2, report)
+                        self.assertIn(refusal, report)
+                    finally:  # each case starts from the matching kit
+                        shipped.write_bytes(original)
         self.assertEqual(self.kit_report()[0], 0)
 
     def test_dev_kit_refusal_survives_when_the_key_cannot_be_named(self):
