@@ -1183,7 +1183,7 @@ and CI tooling have different owners and pull credentials.
 | OAuth sidecar (optional) | `openshift4/ose-oauth-proxy:v4.14` | as the agent; absent while `images.txt` says `sha256:PENDING` | `load.sh` | cluster pods |
 | Open WebUI front end (default on, ADR-0007/ADR-0008, #1074) | `qdrant-pdf-rag-openwebui:v0.12.3-slim` | as the agent; absent while `images.txt` says `sha256:PENDING` (the factory records the pushed manifest digest of the image built from `images/openwebui/Containerfile`, the recipe the `scripts/openwebui/` dev environment and acceptance lane also build); the upstream `open-webui/open-webui:v0.12.3-slim` line is factory build provenance, never pushed | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `openwebui`) when `openwebui.enabled` |
 | Open WebUI allow-list proxy (ADR-0007 E1, **Verifier-owned** where the workflow builds or mirrors images) | `nginxinc/nginx-unprivileged:1.30.6-alpine` | pinned by digest in `images.txt`; bundled as `openwebui-proxy-image.tar` exactly when the Open WebUI member is | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `proxy`) when `openwebui.enabled` |
-| CI job image | `ci/python:3.14`, or a complete `CI_PYTHON_IMAGE` | mirrored UBI Python 3.14 (GIL) with git, pip, tar, sha256sum | platform or factory mirror, not this repository | GitLab runner. ADR-0009 §8 replaces it with the dev workspace image (next row); not implemented until F5 PR-5 sets the default `CI_PYTHON_IMAGE` to the kit pin's digest |
+| CI job image | `qdrant-pdf-rag-devkit@<kit pin digest>`: the dev workspace image (next row) | the default `CI_PYTHON_IMAGE` names the digest in `scripts/tools/devkit-pin.txt` (a unit test keeps them equal); leave the project variable unset | `scripts/devkit/install.sh`, as the next row | GitLab runner: every job. The former `ci/python:3.14` role is retired (GH#1118 F5) |
 | Dev workspace image (ADR-0009 §8, #1118) | `qdrant-pdf-rag-devkit:<kit key>` | manifest digest in `scripts/tools/devkit-pin.txt` (`sha256:PENDING` until the factory pushes); built from `images/Containerfile.devkit` by `.github/workflows/devkit.yml`; carried by the separate dev kit, never a release-bundle member or an `images.txt` line | the first push from Windows ([`docs/runbooks/devkit-windows.md`](runbooks/devkit-windows.md)), then `scripts/devkit/install.sh` in the bastion | bastion, dev pod and runner jobs, from the templates and runner configurations in `deploy/workspace/` (contract: `deploy/workspace/contract.json`) |
 | CI Qdrant service | `qdrant/qdrant@sha256:<images.txt digest>` | the `images.txt` manifest digest, so a tag is never enough | registry-to-registry copy that preserves the digest | GitLab runner (`sim`, `gate-l1`) |
 
@@ -1211,8 +1211,8 @@ containers, a writable host or cluster access.
 | Area | Requirement | Used by |
 |---|---|---|
 | GitLab | Release version recorded, 16.10 or later (`workflow:auto_cancel`), 17.10 or later for draft-MR routing to `wip` (`CI_MERGE_REQUEST_DRAFT`; older releases run drafts on `gate`, which is safe but slower); protected tags; `CI_COMMIT_TAG` and `CI_COMMIT_REF_PROTECTED`; variables expanded in `image`, `services` and `tags`; `CI_OPEN_MERGE_REQUESTS`; dynamic child pipelines (`trigger:include:artifact`) | all pipelines |
-| Runner | Tags `gate` (ready merge request and tag pipelines) and `wip` (branch and draft merge request pipelines), or one tag for all from the project variable `CI_RUNNER_TAG`; linux-amd64; an executor that starts job and service images from the approved registry with a service alias; reads `CI_TASK_ARCHIVE`, `CI_HELM_ARCHIVE` and `CI_BM25_CACHE_DIR` from the runner; no route to PyPI, Docker Hub or GitHub | all GitLab jobs |
-| Python packages | `PIP_FIND_LINKS` wheelhouse or `PIP_INDEX_URL` internal index, never a public index | `.py-base` |
+| Runner | Tags `gate` (ready merge request and tag pipelines) and `wip` (branch and draft merge request pipelines), or one tag for all from the project variable `CI_RUNNER_TAG`; linux-amd64; an executor that starts job and service images from the approved registry with a service alias; reads `CI_TASK_ARCHIVE` and `CI_BM25_CACHE_DIR` from the runner; no route to PyPI, Docker Hub or GitHub | all GitLab jobs |
+| Python packages | none acquired: the dev kit job image holds the dev lock installed, and `prepare_python.py --kit` installs only the checkout, with no index | `.py-base` |
 | Quay | Release version recorded; Docker v2 API reachable by `skopeo`; a push identity for the five runtime paths; pull access for cluster and runner; organization layout may differ from upstream paths | `load.sh`, runner |
 | OpenShift | Namespace-scoped deployer; `restricted-v2` SCC with no `anyuid`; RWO block storage for Qdrant (NFS only for the read-only corpus); ClusterIP-only Qdrant; Route only with OAuth | deploy, ingest |
 | Models | Platform-owned HTTP gateway and per-leg Secret references; no models hosted here | agent, ingest |
@@ -1284,7 +1284,8 @@ live in `.github/workflows/e2e.yml`.
   classification authorizes new network access or cluster operations.
 - CI installs the pinned host Task into `.tools/bin` and dispatches through
   `run-task.sh`, checksum-verified, with no public download; offline GitLab
-  mounts the approved Task/Helm archives. See
+  links the dev kit image's Task and Helm after checking them against their
+  pins, and mounts the approved Task archive for the artifact tests. See
   [tool preparation](task-runner.md#installation).
 - Pinned third-party versions live in-repo (kubectl + sha256, helm, kind, node
   image); the local-path provisioner manifest is pinned to a source commit and
@@ -2112,17 +2113,24 @@ Keep root `.gitlab-ci.yml` and GitHub `ci.yml`; shared product hygiene/test mean
 changes together. GitLab merge-request and protected-tag pipelines run every lane
 (#808); branch pipelines run the lanes `scripts/review_tooling.py` selects, as a
 child pipeline. GitLab uses images from the operator-set CI_APPROVED_REGISTRY (never the
-GitLab registry; CI_PYTHON_IMAGE overrides the job image), the `gate`/`wip` runner tags
-(CI_RUNNER_TAG overrides both) and internal
-PIP_INDEX_URL or PIP_FIND_LINKS, failing closed without a package source. No
-public network, GHCR, deploy/pack/image-build or opencode reviewer in GitLab.
+GitLab registry), the `gate`/`wip` runner tags (CI_RUNNER_TAG overrides both)
+and no package source. No public network, GHCR, deploy/pack/image-build or
+opencode reviewer in GitLab.
 GitLab CI runs in its own CI namespace through the site's GitLab Runner Operator,
 never in the production namespace, and holds no production deploy authority or
 signing key ([ADR-0009 §2](adr/0009-gap-fork.md#2-isolation-of-development-from-the-live-release)).
 Its runner configurations are `deploy/workspace/runner-{gate,wip}.example.toml`.
-ADR-0009 §8 makes the job image this repository's dev workspace image; that is
-not implemented until F5 PR-5 sets the default `CI_PYTHON_IMAGE` to the
-digest in `scripts/tools/devkit-pin.txt`.
+The job image is this repository's dev workspace image (ADR-0009 §8): the
+default `CI_PYTHON_IMAGE` is `$CI_APPROVED_REGISTRY/qdrant-pdf-rag-devkit` by the
+digest in `scripts/tools/devkit-pin.txt`, which
+`tests/test_ci_gitlab_parity.py` keeps equal to the pin. Leave the project
+variable unset, so each branch runs on the kit for its own dev lock. Jobs use the
+image's installed environment (`prepare_python.py --kit`) and its Task and Helm
+(`scripts/devkit/link-tools.sh`, which checks each binary against its pin), and
+fail closed on any other image. `CI_TASK_ARCHIVE` stays: the artifact tests and
+the doctor read the Task archive, which the image does not hold. `CI_HELM_ARCHIVE`
+is retired and refused by hygiene; `PIP_FIND_LINKS` and `PIP_INDEX_URL` are no
+longer read ([release notes](release-notes.md)).
 Issue #397 authorizes the offline context check in hygiene and a small GitHub
 context workflow; #370 owns GitLab/GitHub gate parity, #584 the lint ruleset.
 Coverage ratchets and a real internal-runner pipeline run (#446) are not part of it.

@@ -1,5 +1,6 @@
 """The signed dev kit (#1118, ADR-0009 §8): scripts/devkit/pack.sh and the
-install.sh it ships, end to end and hermetically.
+install.sh it ships, end to end and hermetically; and scripts/devkit/link-tools.sh,
+which gives a checkout inside the kit image its pinned .tools/bin tools.
 
 pack.sh runs in a throwaway git repository against a stub skopeo that "pulls" a
 real synthetic OCI layout, fake pinned oras archives and a loopback GitHub API.
@@ -802,3 +803,122 @@ def test_pack_refuses_a_runbook_whose_bootstrap_drifted_from_the_adr(pack_tree):
     assert done.returncode != 0
     assert "step 1 differs from the anchor bootstrap in ADR-0009" in done.stderr
     assert not list((pack_tree["tree"] / "dist").glob("mfr-devkit-*"))
+
+
+# ---- scripts/devkit/link-tools.sh: a checkout in the kit image gets its tools (F5) ----
+#
+# The helper runs from a copy of the repository's scripts against fake pins whose
+# binary digests are those of small stand-in executables in a fake image
+# /usr/local/bin, so every check is real but nothing needs the actual tools.
+
+FAKE_TASK = b'#!/bin/sh\ncase " $* " in *" --version "*) echo 3.53.1;; *) echo "fake-task $*";; esac\n'
+FAKE_HELM = b'#!/bin/sh\necho v4.3.0+gtest\n'
+FAKE_TASK_ARCHIVE = b"stand-in for task_linux_amd64.tar.gz\n"
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+@pytest.fixture
+def link_tree(tmp_path):
+    tree = tmp_path / "checkout"
+    for name in ("scripts/devkit/link-tools.sh", "scripts/tools/task-artifact.sh", "scripts/tools/run-task.sh"):
+        (tree / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO / name, tree / name)
+    (tree / "scripts/tools/task-pin.txt").write_text(
+        "version: v3.53.1\nasset: task_linux_amd64.tar.gz\n"
+        f"sha256: {_sha(FAKE_TASK_ARCHIVE)}\nbinary-sha256: {_sha(FAKE_TASK)}\nlicense-sha256: {'a' * 64}\n"
+        "origin: https://github.com/go-task/task/releases/download/v3.53.1/task_linux_amd64.tar.gz\n")
+    (tree / "scripts/tools/helm-pin.txt").write_text(
+        f"version: v4.3.0\nasset: helm-v4.3.0-linux-amd64.tar.gz\nsha256: {'b' * 64}\n"
+        f"binary-sha256: {_sha(FAKE_HELM)}\n")
+    image = tmp_path / "image-usr-local-bin"
+    image.mkdir()
+    for name, data in (("task", FAKE_TASK), ("helm", FAKE_HELM)):
+        (image / name).write_bytes(data)
+        (image / name).chmod(0o755)
+    archive = tmp_path / "runner mount" / "task archive.tar.gz"
+    archive.parent.mkdir()
+    archive.write_bytes(FAKE_TASK_ARCHIVE)
+    return tree, image, archive
+
+
+def _link(tree: Path, image: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "HOME": str(tree.parent)}
+    env.pop("XDG_CONFIG_HOME", None)
+    return subprocess.run(["sh", str(tree / "scripts/devkit/link-tools.sh"), "--from", str(image), *args],
+                          cwd=tree.parent, env=env, capture_output=True, text=True, check=False)
+
+
+def _state(tree: Path) -> dict[str, tuple[int, int, str]]:
+    """(inode, mtime, link target or digest) of everything under .tools/, links not followed."""
+    out = {}
+    for path in sorted((tree / ".tools").rglob("*")):
+        info = path.lstat()
+        what = os.readlink(path) if path.is_symlink() else ("dir" if path.is_dir() else _sha(path.read_bytes()))
+        out[str(path.relative_to(tree))] = (info.st_ino, info.st_mtime_ns, what)
+    return out
+
+
+def test_link_tools_gives_run_task_and_the_doctor_the_verified_image_tools(link_tree, monkeypatch):
+    from scripts import agent_doctor
+
+    tree, image, archive = link_tree
+    proc = _link(tree, image, "--task-archive", str(archive))
+    assert proc.returncode == 0, proc.stderr
+    for name in ("task", "helm"):
+        assert os.readlink(tree / ".tools/bin" / name) == str(image / name)
+    assert (tree / ".tools/cache/task_linux_amd64.tar.gz").read_bytes() == FAKE_TASK_ARCHIVE
+    # The consumers accept the result: run-task.sh verifies and runs the linked Task...
+    env = {**os.environ, "HOME": str(tree.parent)}
+    env.pop("XDG_CONFIG_HOME", None)
+    ran = subprocess.run(["sh", "scripts/tools/run-task.sh", "--list"], cwd=tree, env=env,
+                         capture_output=True, text=True, check=False)
+    assert ran.returncode == 0, ran.stderr
+    assert ran.stdout.startswith("fake-task --offline --dir ") and ran.stdout.rstrip().endswith("--list")
+    # ...and the doctor finds the pinned Task, its cached archive and the pinned Helm on PATH.
+    assert agent_doctor.inspect_task(tree).status == "ready"
+    monkeypatch.setenv("PATH", f"{tree / '.tools/bin'}:{os.environ['PATH']}")
+    assert agent_doctor.inspect_helm(tree).status == "ready"
+
+
+@pytest.mark.parametrize("damage, message", [
+    (lambda image, archive: (image / "task").write_bytes(FAKE_TASK + b"#\n"),
+     "the image's task does not match the binary-sha256 in scripts/tools/task-pin.txt"),
+    (lambda image, archive: (image / "helm").write_bytes(FAKE_HELM + b"#\n"),
+     "the image's helm does not match the binary-sha256 in scripts/tools/helm-pin.txt"),
+    (lambda image, archive: (image / "helm").unlink(), "the image has no executable helm"),
+    (lambda image, archive: ((image / "real-task").write_bytes(FAKE_TASK), (image / "task").unlink(),
+                             (image / "task").symlink_to(image / "real-task")), "the image has no executable task"),
+    (lambda image, archive: archive.write_bytes(b"another archive\n"),
+     "the --task-archive file does not match the sha256 in scripts/tools/task-pin.txt"),
+    (lambda image, archive: archive.unlink(), "the --task-archive file is missing"),
+], ids=["task-digest", "helm-digest", "helm-absent", "task-symlink", "archive-digest", "archive-absent"])
+def test_link_tools_refuses_a_tool_off_its_pin_and_changes_nothing(link_tree, damage, message):
+    tree, image, archive = link_tree
+    damage(image, archive)
+    proc = _link(tree, image, "--task-archive", str(archive))
+    assert proc.returncode == 2
+    assert proc.stderr.startswith(f"link-tools: {message}")
+    # Fixed text: never the paths it was given.
+    assert str(image) not in proc.stderr and str(archive.parent) not in proc.stderr
+    assert not (tree / ".tools").exists()
+
+
+def test_link_tools_rerun_is_a_no_op_and_a_stale_copy_converges(link_tree):
+    tree, image, archive = link_tree
+    assert _link(tree, image, "--task-archive", str(archive)).returncode == 0
+    first = _state(tree)
+    again = _link(tree, image, "--task-archive", str(archive))
+    assert again.returncode == 0, again.stderr
+    assert _state(tree) == first
+    assert "already links the verified image task" in again.stdout
+    assert "already holds the verified archive" in again.stdout
+    # A copy left by an older install (other bytes) is replaced by the verified link.
+    (tree / ".tools/bin/task").unlink()
+    (tree / ".tools/bin/task").write_bytes(b"#!/bin/sh\necho stale\n")
+    assert _link(tree, image).returncode == 0
+    assert os.readlink(tree / ".tools/bin/task") == str(image / "task")
+    assert {k: v for k, v in _state(tree).items() if k != ".tools/bin/task" and k != ".tools/bin"} == \
+        {k: v for k, v in first.items() if k != ".tools/bin/task" and k != ".tools/bin"}

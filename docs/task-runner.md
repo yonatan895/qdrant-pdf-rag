@@ -78,8 +78,14 @@ not an arbitrary system binary.
   the gap. A separate venv layers on the image's installed environment
   ([`prepare_python.py --kit`](dependencies.md)). `agent_doctor` refuses a
   checkout whose locks differ from the image's and names the kit to request.
-  Not implemented yet (F5): a documented step that gives a checkout the
-  `.tools/bin/task` that `run-task.sh` requires.
+  `sh scripts/devkit/link-tools.sh` gives the checkout the `.tools/bin/task`
+  and `.tools/bin/helm` that `run-task.sh` and the doctor read: it links the
+  image's binaries after checking each one's sha256 against the
+  `binary-sha256` of its pin, refuses a mismatch with a fixed message, and a
+  rerun changes nothing. The image holds no Task archive, so for the artifact
+  tests and the doctor add `--task-archive <the bundle's
+  task_linux_amd64.tar.gz>`, which it checks against the pin and caches in
+  `.tools/cache/`.
 
 Deployment render tests require the existing Helm **4.3.0 linux-amd64** bytes
 recorded in [the Helm pin](../scripts/tools/helm-pin.txt). Prepare them explicitly:
@@ -125,8 +131,9 @@ must be **CPython 3.14 GIL with experimental JIT disabled**; a later minor is no
 implicitly qualified. Prepared CI interpreters use
 `python scripts/agent_doctor.py --python "$(command -v python)"` without creating
 a local venv. Symlinks preserve virtualenv identity. GitHub unit shards run this
-gate after explicit preparation; GitLab transfers both `CI_TASK_ARCHIVE` and
-`CI_HELM_ARCHIVE` and installs them offline before the same gate.
+gate after explicit preparation; GitLab jobs run on the dev kit image and run
+`scripts/devkit/link-tools.sh --task-archive "$CI_TASK_ARCHIVE"` before the
+same gate.
 
 The complete runtime/dev/build wheel profiles, offline preparation, actual
 installed inventory checks and release SBOM reconciliation are owned by

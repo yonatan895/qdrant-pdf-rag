@@ -1123,11 +1123,11 @@ class TestTaskCiConsumers(unittest.TestCase):
         script = "\n".join(commands[:gate])
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td)
-            tool = root / "scripts/tools/install-task.sh"
+            # The kit image's Task and Helm (GH#1118 F5): link-tools.sh verifies and
+            # links them and caches the transferred Task archive the artifact tests read.
+            tool = root / "scripts/devkit/link-tools.sh"
             tool.parent.mkdir(parents=True)
-            tool.write_text('printf "%s\\n" "$@" > archive-args\nexit "${INSTALL_STATUS:-0}"\n')
-            helm_tool = root / "scripts/tools/install-helm.sh"
-            helm_tool.write_text('printf "%s\\n" "$@" > helm-args\nexit "${HELM_INSTALL_STATUS:-0}"\n')
+            tool.write_text('printf "%s\\n" "$@" > link-args\nexit "${LINK_STATUS:-0}"\n')
             # One `python` stub: `python -m pytest ...` is the unit shard, any
             # other call is the prerequisite doctor.
             doctor = root / "python"
@@ -1139,42 +1139,30 @@ class TestTaskCiConsumers(unittest.TestCase):
             missing = subprocess.run(["sh", "-eu", "-c", script], cwd=root, env=env,
                                      capture_output=True, text=True, check=False)
             self.assertNotEqual(missing.returncode, 0)
-            self.assertFalse((root / "archive-args").exists())
+            self.assertFalse((root / "link-args").exists())
             self.assertFalse((root / "tests-ran").exists())
             archive = str(root / "offline archive with spaces.tar.gz")
-            helm_archive = str(root / "offline helm with spaces.tar.gz")
-            missing_helm = subprocess.run(
-                ["sh", "-eu", "-c", script], cwd=root,
-                env={**env, "CI_TASK_ARCHIVE": archive},
-                capture_output=True, text=True, check=False,
-            )
-            self.assertNotEqual(missing_helm.returncode, 0)
-            self.assertFalse((root / "helm-args").exists())
-            self.assertFalse((root / "tests-ran").exists())
-            for task_status, helm_status, doctor_status in ((9, 0, 0), (0, 7, 0), (0, 0, 2), (0, 0, 0)):
-                for marker in ("archive-args", "helm-args", "doctor-args", "tests-ran"):
+            for link_status, doctor_status in ((2, 0), (0, 2), (0, 0)):
+                for marker in ("link-args", "doctor-args", "tests-ran"):
                     (root / marker).unlink(missing_ok=True)
                 proc = subprocess.run(
                     ["sh", "-eu", "-c", script], cwd=root,
-                    env={**env, "CI_TASK_ARCHIVE": archive, "CI_HELM_ARCHIVE": helm_archive,
-                         "CI_PROJECT_DIR": str(root), "INSTALL_STATUS": str(task_status),
-                         "HELM_INSTALL_STATUS": str(helm_status), "DOCTOR_STATUS": str(doctor_status)},
+                    env={**env, "CI_TASK_ARCHIVE": archive, "CI_PROJECT_DIR": str(root),
+                         "LINK_STATUS": str(link_status), "DOCTOR_STATUS": str(doctor_status)},
                     capture_output=True, text=True, check=False,
                 )
-                expected = task_status or helm_status or doctor_status
+                expected = link_status or doctor_status
                 self.assertEqual(proc.returncode, expected, proc.stdout + proc.stderr)
-                self.assertEqual((root / "archive-args").read_text(), f"--archive\n{archive}\n")
+                self.assertEqual((root / "link-args").read_text(), f"--task-archive\n{archive}\n")
                 self.assertEqual((root / "tests-ran").exists(), expected == 0)
-                self.assertEqual((root / "doctor-args").exists(), task_status == helm_status == 0)
-                if task_status == 0:
-                    self.assertEqual((root / "helm-args").read_text(), f"--archive\n{helm_archive}\n")
+                self.assertEqual((root / "doctor-args").exists(), link_status == 0)
             self.assertEqual((root / "tests-ran").read_text(),
                              "-q -p tests.ci_shard --unit-shard=2 --unit-shards=4 "
                              "--unit-durations=tests/unit-durations.json --junitxml=unit-junit.xml\n")
             self.assertEqual((root / "doctor-args").read_text(),
                              f"scripts/agent_doctor.py\n--python\n{root / 'python'}\n")
             self.assertEqual(shlex.split(commands[1]),
-                             ["sh", "scripts/tools/install-task.sh", "--archive", "$CI_TASK_ARCHIVE"])
+                             ["sh", "scripts/devkit/link-tools.sh", "--task-archive", "$CI_TASK_ARCHIVE"])
 
 
 
