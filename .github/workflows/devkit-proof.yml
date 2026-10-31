@@ -404,12 +404,12 @@ jobs:
           $argv = [IO.File]::ReadAllLines((Join-Path $Out 'argv.log'))
           $sep = [string][char]0x1f
           foreach ($want in @(
-              @('exec', 'mfr-bastion', '--', 'sh', '-c', "rm -rf /work/kits/$name && mkdir -p /work/kits /work/trust"),
+              @('exec', 'mfr-bastion', '--', 'sh', '-c', "rm -rf /work/kits/$name && mkdir -p /work/kits /work/anchors"),
               @('cp', $name, "mfr-bastion:/work/kits/$name"),
-              @('cp', 'release-signing.pub', 'mfr-bastion:/work/trust/release-signing.pub'),
+              @('cp', 'release-signing.pub', 'mfr-bastion:/work/anchors/release-signing.pub'),
               @('exec', '-i', 'mfr-bastion', '--', 'mfr-session-login'),
               @('exec', '-i', 'mfr-bastion', '--', 'mfr-session-login', '--registry'),
-              @('exec', 'mfr-bastion', '--', 'env', 'SNEAKERNET_TRUSTED_PUB=/work/trust/release-signing.pub', 'sh', "/work/kits/$name/install.sh", '--registry', $Registry, '--verify-pod', 'mfr-bastion'),
+              @('exec', 'mfr-bastion', '--', 'env', 'SNEAKERNET_TRUSTED_PUB=/work/anchors/release-signing.pub', 'sh', "/work/kits/$name/install.sh", '--registry', $Registry, '--verify-pod', 'mfr-bastion'),
               @('exec', '-i', 'mfr-devkit-push', '--', 'dd', 'of=/tmp/kit/oras', 'bs=1M', 'status=none'),
               @('exec', 'mfr-devkit-push', '--', 'sh', '-c', 'cd /tmp/kit && sha256sum -c --ignore-missing --quiet SHA256SUMS && chmod 0755 oras'))) {
               if ($argv -cnotcontains ($want -join $sep)) { throw "oc.exe never received the argv: $($want -join ' | ')" }
