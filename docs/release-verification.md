@@ -591,7 +591,7 @@ export SNEAKERNET_TRUSTED_PUB=/absolute/path/to/independently-trusted/signing.pu
 ```
 
 Every live stage below needs that anchor: outside dry-run, validate, load,
-deploy and ingest refuse a checkout that is not a verified signed release
+deploy, ingest and retire-legacy refuse a checkout that is not a verified signed release
 ([deploy §4](deploy.md#4-signing-and-provenance)). Never set the connected
 opt-out `AIRGAP_UNVERIFIED_CHECKOUT` for this gate.
 

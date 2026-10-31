@@ -592,8 +592,8 @@ checksums **after**.
   tarball. Without a pinned pubkey, verification is TOFU: it binds members
   together but proves nothing about *which* key signed. The executing-checkout
   guard below therefore requires `SNEAKERNET_TRUSTED_PUB` outside dry-run
-  (#1118 F1), so load, deploy, ingest and validate never run on TOFU alone
-  outside the connected opt-out described there.
+  (#1118 F1), so load, deploy, ingest, validate and retire-legacy never run
+  on TOFU alone outside the connected opt-out described there.
 - Load re-verifies the signature, then checksums, then the `IMAGE_SHA`
   against the manifest, then all six base image digests (plus the
   oauth-proxy digest when the bundle carries it) — and pushes under fixed
@@ -622,7 +622,8 @@ checksums **after**.
   archive's image config before any push. Deploy and ingest repeat the registry
   read-back and render by digest (see the image identity section below).
 - Executing-checkout guard (`common.sh::check_checkout_sha`, run by load,
-  deploy, ingest and validate). Outside dry-run the checkout must be a
+  deploy, ingest, validate and `retire_legacy.sh`, before any cluster or
+  Qdrant contact). Outside dry-run the checkout must be a
   verified signed release (#1118 F1, ADR-0009 §1): a packed MANIFEST must be
   reachable, and:
   1. *MANIFEST authenticity.* The guard never reads a bare file. `SHA256SUMS`,

@@ -528,8 +528,8 @@ _guard_git() {
         GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" --work-tree="$REPO_ROOT" "$@"
 }
 
-# Executing-checkout identity for deploy/ingest/validate/load (issue #414,
-# #1118 F1). Outside dry-run the checkout must be a verified signed release:
+# Executing-checkout identity for deploy/ingest/validate/load/retire_legacy
+# (issue #414, #1118 F1). Outside dry-run the checkout must be a verified signed release:
 # a packed MANIFEST whose SHA256SUMS signature verifies against a configured
 # release trust anchor (check_manifest_chain), a git HEAD equal to its sha, and
 # no tracked staged/unstaged change against it (an edited script or chart at

@@ -6,6 +6,8 @@ copy (the rollback data) and deletes nothing; `--stage retire` takes this
 run's snapshots on every peer, binds and records them, and only then deletes.
 Both converge when re-run after a crash at any point. kubectl is a stub that records every call; its `exec -i deploy/rag-agent`
 arm runs the real in-pod program locally against a fake Qdrant HTTP server.
+The fixture tree is a plain copy, so live runs take the connected opt-out
+(#1118 F1); the verified-release guard itself is tested at the end.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import subprocess
 
 import pytest
 
-from tests.helpers_airgap import FakeQdrant, make_bin_tree, write_stub
+from tests.helpers_airgap import FakeQdrant, connected_checkout, make_bin_tree, write_stub
 
 L, LC = "mainframe_manuals", "mainframe_manuals__completions"
 K, KC = "mainframe_manuals_d53595e_keep", "mainframe_manuals_d53595e_keep__completions"
@@ -91,6 +93,8 @@ def _run(tree, qdrant, *args, **env):
     }
     (tree / "empty.env").write_text("")
     base.update(env)
+    connected_checkout(base, explicit=tuple(env))
+    base = {key: value for key, value in base.items() if value is not None}
     script = tree / "scripts" / "airgap" / "retire_legacy.sh"
     return subprocess.run(["sh", str(script), *args], capture_output=True, text=True,
                           env=base, cwd=tree, check=False)
@@ -565,3 +569,136 @@ def test_in_pod_ids_match_the_package_derivations():
         assert module.manifest_point_id(name) == manifest_point_id(name)
         assert module.publication_point_id(name) == publication_metadata_point_id(name)
     assert json.dumps(module.BUILD_FIELDS)  # the binding fields stay a fixed tuple
+
+
+# --- #1118 item e: the verified-release guard (F1) --------------------------------
+
+_MODES = [("--stage", "copy"), ("--stage", "retire"), ("--rollback",)]
+_RELEASE = {"AIRGAP_UNVERIFIED_CHECKOUT": None, "CI_REHEARSAL": None}
+_NO_MANIFEST = ("FAIL: checkout is not a verified signed release (no packed MANIFEST) — run from the "
+                "checkout that bootstrap.sh creates from the signed bundle, with SNEAKERNET_TRUSTED_PUB set; "
+                "only a connected developer or CI lane may set AIRGAP_UNVERIFIED_CHECKOUT=1 with "
+                "CI_REHEARSAL=1 instead\n")
+_OPT_OUT_REFUSED = ("FAIL: AIRGAP_UNVERIFIED_CHECKOUT=1 is refused without CI_REHEARSAL=1 in the process "
+                    "environment — the unverified-checkout opt-out is for connected development and the "
+                    "connected CI and Kind lanes only, never the air gap; run from a verified signed release "
+                    "instead\n")
+_HEAD_DIFFERS = ("FAIL: executing checkout HEAD does not match the packed MANIFEST sha — run from the approved "
+                 "bundle checkout (git rev-parse HEAD and the MANIFEST sha: line must agree); overriding "
+                 "IMAGE_SHA alone never changes which code executes\n")
+
+
+def _anchor():
+    from tests.helpers_airgap import release_anchor
+
+    return str(release_anchor())
+
+
+def _git_release(tree, manifest_sha=None):
+    """Commit the fixture tree and pack a signed MANIFEST naming `manifest_sha`
+    (default: the commit itself, i.e. a verified signed release)."""
+    from tests.helpers_airgap import write_signed_manifest
+
+    for args in (("init", "-q", "-b", "main"), ("add", "."),
+                 ("-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "release")):
+        subprocess.run(["git", *args], cwd=tree, check=True, capture_output=True)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tree, text=True).strip()
+    write_signed_manifest(tree / "dist", f"sha: {manifest_sha or head}\n")
+    return head
+
+
+def _refused_untouched(tree, qdrant, result, message):
+    assert result.returncode == 1
+    assert result.stderr.endswith(message), result.stderr
+    assert result.stderr.count("FAIL:") == 1
+    assert _log(tree) == "", "kubectl/oc was invoked before the guard"
+    assert qdrant.ops == [], "Qdrant was contacted before the guard"
+
+
+@pytest.mark.parametrize("mode", _MODES, ids=["copy", "retire", "rollback"])
+def test_an_unverified_clone_is_refused_before_any_cluster_or_qdrant_call(tree, qdrant, mode):
+    _legacy_site(qdrant)
+    result = _run(tree, qdrant, *mode, "--confirm", L, SNEAKERNET_TRUSTED_PUB=_anchor(), **_RELEASE)
+    _refused_untouched(tree, qdrant, result, _NO_MANIFEST)
+
+
+def test_the_port_forward_rollback_is_guarded_too(tree, qdrant):
+    _went_live(tree, qdrant)
+    (tree / "kc.log").unlink()
+    qdrant.ops.clear()
+    result = _run(tree, qdrant, "--rollback", "--confirm", L, "--qdrant-url", qdrant.url,
+                  SNEAKERNET_TRUSTED_PUB=_anchor(), **_RELEASE)
+    _refused_untouched(tree, qdrant, result, _NO_MANIFEST)
+    assert qdrant.aliases[L] == "mainframe_manuals__gen2"
+
+
+def test_a_clone_at_another_head_than_its_manifest_is_refused_even_with_the_opt_out(tree, qdrant):
+    """F1: the opt-out keeps the pre-F1 rules, so a present MANIFEST is still
+    checked against HEAD."""
+    _legacy_site(qdrant)
+    _git_release(tree, manifest_sha="0" * 40)
+    for env in (_RELEASE, {"AIRGAP_UNVERIFIED_CHECKOUT": "1", "CI_REHEARSAL": "1"}):
+        result = _copy(tree, qdrant, SNEAKERNET_TRUSTED_PUB=_anchor(), **env)
+        _refused_untouched(tree, qdrant, result, _HEAD_DIFFERS)
+
+
+@pytest.mark.parametrize("env, message", [
+    ({"AIRGAP_UNVERIFIED_CHECKOUT": "1", "CI_REHEARSAL": None}, _OPT_OUT_REFUSED),
+    ({"AIRGAP_UNVERIFIED_CHECKOUT": "1", "CI_REHEARSAL": "0"}, _OPT_OUT_REFUSED),
+    ({"AIRGAP_UNVERIFIED_CHECKOUT": "true", "CI_REHEARSAL": "1"},
+     ("FAIL: AIRGAP_UNVERIFIED_CHECKOUT must be 1 (connected opt-out, with CI_REHEARSAL=1) or unset; "
+      "refusing to guess\n")),
+], ids=["no-rehearsal", "rehearsal-0", "unknown-value"])
+def test_the_opt_out_is_accepted_only_with_ci_rehearsal(tree, qdrant, env, message):
+    _legacy_site(qdrant)
+    result = _copy(tree, qdrant, **env)
+    _refused_untouched(tree, qdrant, result, message)
+
+
+def test_the_opt_out_cannot_come_from_the_operator_file(tree, qdrant):
+    _legacy_site(qdrant)
+    env_file = tree / "site.env"
+    env_file.write_text("AIRGAP_UNVERIFIED_CHECKOUT=1\nCI_REHEARSAL=1\n")
+    result = _copy(tree, qdrant, AIRGAP_ENV=str(env_file), SNEAKERNET_TRUSTED_PUB=_anchor(), **_RELEASE)
+    assert result.returncode != 0
+    assert _log(tree) == "" and qdrant.ops == []
+
+
+def test_the_connected_opt_out_runs_with_a_notice(tree, qdrant):
+    _legacy_site(qdrant)
+    result = _copy(tree, qdrant, AIRGAP_UNVERIFIED_CHECKOUT="1", CI_REHEARSAL="1")
+    assert result.returncode == 0, result.stderr
+    assert "Notice: no packed MANIFEST — checkout not release-verified" in result.stderr
+    assert K in qdrant.collections
+
+
+def test_a_verified_signed_release_runs_both_stages_and_the_rollback(tree, qdrant):
+    _legacy_site(qdrant)
+    _git_release(tree)
+    env = {"SNEAKERNET_TRUSTED_PUB": _anchor(), **_RELEASE}
+    copied = _copy(tree, qdrant, **env)
+    assert copied.returncode == 0, copied.stderr
+    assert "not release-verified" not in copied.stderr
+    retired = _retire(tree, qdrant, **env)
+    assert retired.returncode == 0, retired.stderr
+    _assert_retired(qdrant)
+    rolled = _run(tree, qdrant, "--rollback", "--confirm", L, **env)
+    assert rolled.returncode == 0, rolled.stderr
+    assert qdrant.aliases[L] == K
+
+
+def test_a_verified_release_without_the_anchor_is_refused_before_any_call(tree, qdrant):
+    _legacy_site(qdrant)
+    _git_release(tree)
+    result = _copy(tree, qdrant, SNEAKERNET_TRUSTED_PUB=None, **_RELEASE)
+    _refused_untouched(tree, qdrant, result,
+                       "FAIL: no release trust anchor is configured — set SNEAKERNET_TRUSTED_PUB to the "
+                       "release signing public key obtained out of band (docs/release-verification.md); "
+                       "trust on first use never establishes a release\n")
+
+
+def test_dry_run_needs_no_verified_release(tree, qdrant):
+    _legacy_site(qdrant)
+    result = _retire(tree, qdrant, AIRGAP_DRYRUN="1", **_RELEASE)
+    assert result.returncode == 0, result.stderr
+    assert _log(tree) == "" and qdrant.ops == []

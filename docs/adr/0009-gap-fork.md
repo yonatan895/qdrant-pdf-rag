@@ -63,7 +63,8 @@
   only other source of production code.
 - **Current behavior** (F1 is done) of `check_checkout_sha` in
   `scripts/airgap/common.sh`, which load, deploy, ingest and validate call
-  (the pipeline runs all four):
+  (the pipeline runs all four), and so does `retire_legacy.sh`, the other
+  writer-key entry point (#1118 item e):
   - Outside dry-run it refuses, with a fixed message, any checkout that is
     not a verified signed release as the decision below defines it. No
     MANIFEST, no configured trust anchor, a signature that does not verify
@@ -768,7 +769,7 @@ The names the gap builds on are a **public API**, limited to this list:
 
 | Item | Scope | Verifier-owned |
 |---|---|---|
-| F1 | Done: outside dry-run, load, deploy, ingest and validate refuse a checkout that is not a verified signed release. The trust anchor is required. The opt-out needs `CI_REHEARSAL=1`. Tests go in the air-gap shell suites. The live bundle lanes export the packing job's key as the anchor; hermetic fixtures from plain trees set the opt-out | Lanes and taskfiles: yes |
+| F1 | Done: outside dry-run, load, deploy, ingest, validate and retire-legacy refuse a checkout that is not a verified signed release. The trust anchor is required. The opt-out needs `CI_REHEARSAL=1`. Tests go in the air-gap shell suites. The live bundle lanes export the packing job's key as the anchor; hermetic fixtures from plain trees set the opt-out | Lanes and taskfiles: yes |
 | F2 | Two trust anchors (upstream and gap) and the MANIFEST `origin:` field | No |
 | F3 | Done in this PR: `tests/test_hygiene.py` fails on GitHub Actions when `gap/` or `.gitlab/` exists | No |
 | F4 | The CODEOWNERS generator, its equality test and the GitLab hygiene check | No |
