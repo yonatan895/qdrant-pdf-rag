@@ -11,8 +11,10 @@ Status: partially implemented. The record, the check and the bundled notices
 exist. The maintainer recorded dispositions on 2026-10-23 (issue #376 comment);
 on 2026-10-26 the maintainer recorded `pymupdf` as an owner decision, an explicit
 exception to waiting for qualified legal confirmation (withdrawn if confirmation is
-refused or the use changes). No entry is unresolved; `release_approval` is absent, so
-`check --release` still fails until the maintainer records the per-release approval.
+refused or the use changes). No entry is unresolved. The maintainer recorded the per-release approval for the
+first fresh-install release candidate on 2026-10-31 (#1118), bound to scope digest
+`07bbf2cf…`; any later dependency, pin or notice change voids it, and
+`check --release` then fails until a new approval is recorded.
 Source of authority: #376 and its triage comments (19 and 24 September, 1 October
 2026): close on a documented owner disposition, never on CI alone.
 Decision owners: `licenses/inventory.json` (the record),
