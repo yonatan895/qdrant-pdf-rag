@@ -95,8 +95,9 @@ explicitly unresolved and prevent claims of production compatibility.
   of `scripts/devkit/pack.sh` the kit name, the fingerprint (the hash in the
   kit's `SHA256SUMS.sha256`), the 16-hex trust anchor beside it, and the
   anchor bootstrap text exactly as printed. The authoritative bootstrap is
-  the copy in [ADR-0009 §8](adr/0009-gap-fork.md#the-anchor-bootstrap-verbatim);
-  if the printed text differs from it, do not publish. Publish all four with
+  the copy in [ADR-0009 §8](adr/0009-gap-fork.md#the-anchor-bootstrap-verbatim)
+  at the commit the kit was packed from (its MANIFEST `commit:`); if the
+  printed text differs from it, do not publish. Publish all four with
   this record on GitHub. The operator carries the fingerprint (with its
   anchor) and the bootstrap by a route separate from the kit transfer, and
   runs step 1 of [the Windows runbook](runbooks/devkit-windows.md) before any
