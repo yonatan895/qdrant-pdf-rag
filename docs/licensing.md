@@ -184,8 +184,9 @@ attribution (work, authors, source URL and commit, licence, "unmodified subset")
 the record's obligation, the notices and `INDEX.md`.
 
 The maintainer dropped the three upstream manuals that publish no licence (Qdrant
-`qdrant/landing_page`, `open-webui/docs`, `openobserve/openobserve-docs`; decision
-recorded on #1174). A set without an upstream licence cannot be expressed in the
+`qdrant/landing_page`, `open-webui/docs`, `openobserve/openobserve-docs`;
+[#1174 comment](https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548227953),
+which supersedes the risk-acceptance part of the blanket approval). A set without an upstream licence cannot be expressed in the
 manifest: `reference_docs.py` refuses `NOASSERTION` or an empty licence-file list.
 `INDEX.md` points readers to the Qdrant API specs, the vendored Qdrant skills and the
 Open WebUI and OpenObserve READMEs instead.
