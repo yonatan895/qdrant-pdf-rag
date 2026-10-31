@@ -2285,10 +2285,16 @@ It records:
   operator cannot read it, pass them with `--cluster-network CIDR`, or the check stays
   `unchecked` and the result inconclusive;
 - the agent ingress policies;
-- with `--probe`, TCP and DNS outcomes from probe pods carrying exactly the labels of a
-  live pod of each role (for runner jobs without a live job: the role label, the runner
-  configuration's `pod_labels` and GitLab Runner's default labels). The run is marked by
-  an annotation, never a label. A probe
+- with `--probe`, TCP and DNS outcomes from probe pods carrying the labels of a live pod
+  of each role (for runner jobs without a live job: the role label, the runner
+  configuration's `pod_labels` and GitLab Runner's default labels), minus the keys a
+  workload controller owns (`pod-template-hash`, `controller-revision-hash`,
+  `statefulset.kubernetes.io/pod-name`, `apps.kubernetes.io/pod-index`, `job-name`,
+  `controller-uid`, `batch.kubernetes.io/*`). Each probe pod's controller reference
+  (`blockOwnerDeletion: false`) is the run's `mfr-proof-owner-<run>` ConfigMap in its
+  namespace, so no ReplicaSet, StatefulSet or Job adopts it and then deletes it or the
+  real pod; the operator therefore needs configmap create and delete in both namespaces.
+  The run is marked by an annotation, never a label. A probe
   pod in the production namespace that no policy selects is the negative control: a
   blocked result counts only for a target the control reached. A CIDR wider than one
   address is not probed; give such a class a `--probe-host CLASS=HOST`.
@@ -2298,7 +2304,9 @@ or env value.
 
 Exit 0 means proven, 1 a violation, 2 a usage or environment error, an inconclusive
 result, or a run without `--probe` (verdict `static-only`, never the full proof). Run one
-proof at a time: each run first deletes probe objects (label
-`isolation-proof.mainframe-rag.io/run`, an annotation on `mfr-proof-*` pods) that an earlier run left, and removes its own on
-every exit, SIGTERM and SIGHUP included; only a SIGKILL leaves them for the next run.
+proof at a time: each run first deletes probe objects (`mfr-proof-*` pods and
+`mfr-proof-owner-*` ConfigMaps with the annotation `isolation-proof.mainframe-rag.io/run`)
+that an earlier run left, and removes its own on every exit, SIGTERM and SIGHUP included;
+only a SIGKILL leaves them for the next run, and deleting a leftover owner ConfigMap also
+garbage-collects its probe pods.
 Tests: `tests/test_isolation_proof.py` (a stub `oc`, canary leak assertions).

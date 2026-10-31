@@ -128,13 +128,20 @@ if args[0] == "create":
     if obj["metadata"]["name"].startswith(tuple(scen.get("fail_create", []))):
         fail()
     obj["metadata"]["namespace"] = ns
+    obj["metadata"]["uid"] = f"uid-{len(state.get('created', []))}-{obj['metadata']['name']}"
     state["objects"].append(obj)
     state.setdefault("created", []).append(obj); save()
+    if obj["kind"] == "Pod" and scen.get("sigterm_on_pod_create"):
+        import signal, time
+        os.kill(os.getppid(), signal.SIGTERM)
+        time.sleep(10)
+    if opt("-o") == "json":
+        out(obj)
     print(f"{obj['kind'].lower()}/{obj['metadata']['name']}"); sys.exit(0)
 if args[0] == "delete":
     if scen.get("fail_delete") or ns in scen.get("fail_delete_ns", []):
         fail()
-    assert args[1] == "pod", args
+    kind = {"pod": "Pod", "configmap": "ConfigMap"}[args[1]]
     names = set()
     for a in args[2:]:
         if a == "-n" or a.startswith("-"):
@@ -142,7 +149,8 @@ if args[0] == "delete":
         names.add(a)
     keep, gone = [], []
     for obj in state["objects"]:
-        hit = obj["metadata"]["namespace"] == ns and obj["metadata"]["name"] in names
+        hit = (obj["kind"] == kind and obj["metadata"]["namespace"] == ns
+               and obj["metadata"]["name"] in names)
         (gone if hit else keep).append(obj)
     state["objects"] = keep; save()
     for obj in gone:
@@ -175,6 +183,9 @@ if args[0] == "get":
         live = [o for o in state["objects"] if o["kind"] == "Pod"
                 and o["metadata"]["namespace"] == ns]
         out({"items": scen["pods"].get(ns, []) + live})
+    if what == "configmaps":
+        out({"items": [o for o in state["objects"] if o["kind"] == "ConfigMap"
+                       and o["metadata"]["namespace"] == ns]})
     if what == "pod":
         pod = next((o for o in state["objects"] if o["metadata"]["name"] == rest[0]), None)
         if pod is None:
@@ -421,6 +432,28 @@ def cluster(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Cluster:
     return Cluster(tmp_path, monkeypatch)
 
 
+NOTHING_LEFT = {PROD: {"pods": 0, "configmaps": 0}, CI: {"pods": 0, "configmaps": 0}}
+# Every label key a workload controller owns or selects on (item a of the #1118 fix train).
+CONTROLLER_LABELS = {
+    "pod-template-hash": "6d9f7c5b8",
+    "controller-revision-hash": "mgr-7c9d",
+    "statefulset.kubernetes.io/pod-name": "gitlab-runner-mgr-0",
+    "apps.kubernetes.io/pod-index": "0",
+    "job-name": "mgr",
+    "controller-uid": "3f0c",
+    "batch.kubernetes.io/job-name": "mgr",
+    "batch.kubernetes.io/controller-uid": "3f0c",
+}
+
+
+def adoptable(pod: dict[str, Any], selector: dict[str, str]) -> bool:
+    """Kubernetes adoption (ReplicaSet, StatefulSet, Job): an orphan whose labels match."""
+    meta = pod["metadata"]
+    if any(o.get("controller") for o in meta.get("ownerReferences") or []):
+        return False
+    return all(meta["labels"].get(k) == v for k, v in selector.items())
+
+
 def reasons(record: dict[str, Any], check: str, kind: str = "violation") -> list[str]:
     return [f"{f['subject']}: {f['reason']}" for f in record["findings"]
             if f["check"] == check and f["kind"] == kind]
@@ -433,10 +466,15 @@ def test_clean_workspace_is_proven_with_probes_and_leaves_nothing(cluster: Clust
     code, record = cluster.run("--probe")
     assert (code, record["verdict"], record["findings"]) == (0, "proven", [])
     assert cluster.objects() == []
-    assert record["cleanup"]["remaining"] == {PROD: 0, CI: 0}
+    assert record["cleanup"]["remaining"] == {PROD: {"pods": 0, "configmaps": 0},
+                                              CI: {"pods": 0, "configmaps": 0}}
     # Baseline ServiceAccounts were really created (negative control) and removed.
     created = [c for c in cluster.calls() if c[0] == "create"]
-    assert len(created) == 5  # four role probes and the control
+    # Four role probes and the control, plus the run's owner ConfigMap per namespace.
+    assert sorted(c[c.index("-n") + 1] for c in created) == [
+        CI, CI, CI, CI, PROD, PROD, PROD]
+    assert record["cleanup"]["deleted"] == {PROD: {"pods": 2, "configmaps": 1},
+                                            CI: {"pods": 3, "configmaps": 1}}
     classes = {r["name"]: r["class"] for r in record["checks"]["pods"]}
     assert classes == {"mfr-bastion-0": "bastion", "rag-agent-1": "release",
                        "mfr-dev-0": "dev", "runner-abc123-project-5-concurrent-0-xk2p9": "runner",
@@ -859,6 +897,69 @@ def test_runner_probe_without_a_live_job_carries_the_runner_default_labels(
     assert set(proof.RUNNER_DEFAULT_LABEL_KEYS) <= set(labels)
 
 
+def _owners_and_probes(cluster: Cluster) -> tuple[dict[str, dict[str, Any]],
+                                                  dict[str, dict[str, Any]]]:
+    created = cluster.created()
+    owners = {o["metadata"]["namespace"]: o for o in created if o["kind"] == "ConfigMap"}
+    probes = {o["metadata"]["name"].split("-")[2]: o for o in created if o["kind"] == "Pod"}
+    return owners, probes
+
+
+def test_probe_from_a_deployment_pod_has_no_hash_and_one_controller_owner(
+        cluster: Cluster) -> None:
+    """#1148 re-review 2: the manager's ReplicaSet must never adopt (and then delete) a probe."""
+    manager = cluster.scenario["pods"][CI][2]
+    manager["metadata"]["labels"].update({"pod-template-hash": "6d9f7c5b8",
+                                          "operator.gitlab.com/instance": "mfr"})
+    code, record = cluster.run("--probe")
+    assert (code, record["verdict"]) == (0, "proven")
+    owners, probes = _owners_and_probes(cluster)
+    run = record["run_id"]
+    assert {ns: o["metadata"]["name"] for ns, o in owners.items()} == {
+        PROD: f"mfr-proof-owner-{run}", CI: f"mfr-proof-owner-{run}"}
+    for owner in owners.values():
+        assert owner["metadata"]["annotations"] == {proof.PROOF_ANNOTATION: run}
+        assert "labels" not in owner["metadata"] and "data" not in owner
+    probe = probes["manager"]
+    # Every non-controller label of the live pod, so its policies still select the probe.
+    assert probe["metadata"]["labels"] == {MGR_KEY: MGR_VALUE,
+                                           "operator.gitlab.com/instance": "mfr"}
+    for body in probes.values():
+        owner = owners[body["metadata"]["namespace"]]
+        assert body["metadata"]["ownerReferences"] == [{
+            "apiVersion": "v1", "kind": "ConfigMap", "name": owner["metadata"]["name"],
+            "uid": owner["metadata"]["uid"], "controller": True, "blockOwnerDeletion": False}]
+    replica_set = {MGR_KEY: MGR_VALUE, "pod-template-hash": "6d9f7c5b8"}
+    assert adoptable(manager, replica_set)  # the model agrees the live pod is the RS's own
+    assert not adoptable(probe, replica_set)
+    assert not adoptable(dict(probe, metadata=dict(probe["metadata"], ownerReferences=[])),
+                         replica_set)
+
+
+def test_statefulset_or_job_labels_cannot_make_a_probe_adoptable(cluster: Cluster) -> None:
+    manager = cluster.scenario["pods"][CI][2]
+    manager["metadata"]["labels"].update({**CONTROLLER_LABELS, "team": "ci"})
+    runner = cluster.scenario["pods"][CI][1]
+    runner["metadata"]["labels"].update(CONTROLLER_LABELS)
+    code, record = cluster.run("--probe")
+    assert (code, record["verdict"]) == (0, "proven")
+    _, probes = _owners_and_probes(cluster)
+    assert probes["manager"]["metadata"]["labels"] == {MGR_KEY: MGR_VALUE, "team": "ci"}
+    assert probes["runner"]["metadata"]["labels"] == {ROLE: "runner", "pod": "runner-abc"}
+    for body in probes.values():
+        assert not set(body["metadata"]["labels"]) & set(CONTROLLER_LABELS)
+        # A StatefulSet or Job selector holds no hash key: only the controller
+        # reference keeps a controller with a role-label selector off the probe.
+        for selector in ({MGR_KEY: MGR_VALUE}, {ROLE: "runner"}, {}):
+            assert not adoptable(body, selector)
+
+
+@pytest.mark.parametrize("key", [*CONTROLLER_LABELS, "batch.kubernetes.io/new-key"])
+def test_controller_label_keys_are_dropped_and_others_kept(key: str) -> None:
+    labels = {key: "x", "app": "a", "batch.example.com/job-name": "kept"}
+    assert proof.probe_labels(labels) == {"app": "a", "batch.example.com/job-name": "kept"}
+
+
 def test_probe_program_classifies_real_sockets(tmp_path: Path) -> None:
     import socket
 
@@ -897,13 +998,14 @@ def test_cleanup_after_an_error_then_the_next_run_succeeds(cluster: Cluster) -> 
     assert (record["error"]["code"], record["error"]["detail"]) == ("kube-call-failed",
                                                                     "probe logs")
     assert cluster.objects() == []
-    # The dev, runner and manager probe pods.
-    assert record["cleanup"]["deleted"] == {PROD: 2, CI: 3}
+    # The bastion and control probes in PROD; dev, runner and manager in CI; one owner each.
+    assert record["cleanup"]["deleted"] == {PROD: {"pods": 2, "configmaps": 1},
+                                            CI: {"pods": 3, "configmaps": 1}}
     assert CANARY not in cluster.output.read_text()
     cluster.scenario["logs_fail"] = []
     code, record = cluster.run("--probe")
     assert (code, record["verdict"]) == (0, "proven")
-    assert record["leftovers_removed"] == {PROD: 0, CI: 0}
+    assert record["leftovers_removed"] == NOTHING_LEFT
     assert cluster.objects() == []
 
 
@@ -918,7 +1020,8 @@ def test_leftovers_of_an_interrupted_run_are_removed_first(cluster: Cluster) -> 
     cluster.state.write_text(json.dumps({"objects": [stale, unrelated]}))
     code, record = cluster.run("--probe")
     assert (code, record["verdict"]) == (0, "proven")
-    assert record["leftovers_removed"] == {PROD: 0, CI: 1}
+    assert record["leftovers_removed"] == {PROD: {"pods": 0, "configmaps": 0},
+                                           CI: {"pods": 1, "configmaps": 0}}
     assert [o["metadata"]["name"] for o in cluster.objects()] == ["mfr-proof-keep"]
     assert "mfr-proof-dev-dead" not in {r["name"] for r in record["checks"]["pods"]}
 
@@ -1069,7 +1172,8 @@ def test_failed_delete_in_one_namespace_still_cleans_the_other(cluster: Cluster)
     assert CANARY not in cluster.output.read_text()
     cluster.scenario.pop("fail_delete_ns")
     code, record = cluster.run("--probe")
-    assert (code, record["verdict"], record["leftovers_removed"]) == (0, "proven", {PROD: 2, CI: 0})
+    assert (code, record["verdict"], record["leftovers_removed"]) == (
+        0, "proven", {PROD: {"pods": 2, "configmaps": 1}, CI: {"pods": 0, "configmaps": 0}})
     assert cluster.objects() == []
 
 
@@ -1111,9 +1215,75 @@ def test_sigterm_removes_probe_objects_and_the_next_run_works(cluster: Cluster) 
     assert (proc.returncode, record["error"]["code"]) == (2, "interrupted")
     assert cluster.objects() == []
     assert CANARY not in proc.stdout + proc.stderr + cluster.output.read_text()
+    assert record["cleanup"]["deleted"] == {PROD: {"pods": 2, "configmaps": 1},
+                                            CI: {"pods": 3, "configmaps": 1}}
     cluster.scenario.pop("sigterm_on_logs")
     code, record = cluster.run("--probe")
+    assert (code, record["verdict"], record["leftovers_removed"]) == (0, "proven", NOTHING_LEFT)
+    assert cluster.objects() == []
+
+
+def test_sigterm_during_probe_creation_removes_owners_and_probes(cluster: Cluster) -> None:
+    cluster.scenario["sigterm_on_pod_create"] = True
+    cluster.write_scenario()
+    proc = subprocess.run([sys.executable, str(SCRIPT), *cluster.argv("--probe")],
+                          capture_output=True, text=True, check=False, timeout=120)
+    record = json.loads(cluster.output.read_text())
+    assert (proc.returncode, record["error"]["code"]) == (2, "interrupted")
+    kinds = sorted(o["kind"] for o in cluster.created())
+    assert kinds == ["ConfigMap", "ConfigMap", "Pod"]
+    assert cluster.objects() == []
+    assert record["cleanup"]["remaining"] == NOTHING_LEFT
+    cluster.scenario.pop("sigterm_on_pod_create")
+    code, record = cluster.run("--probe")
+    assert (code, record["verdict"], record["leftovers_removed"]) == (0, "proven", NOTHING_LEFT)
+    assert cluster.objects() == []
+
+
+def test_owner_left_by_a_killed_run_is_removed_and_unrelated_configmaps_kept(
+        cluster: Cluster) -> None:
+    dead = {"apiVersion": "v1", "kind": "ConfigMap",
+            "metadata": {"name": "mfr-proof-owner-dead", "namespace": PROD, "uid": "u-dead",
+                         "annotations": {proof.PROOF_ANNOTATION: "dead"}}}
+    orphan = {"apiVersion": "v1", "kind": "Pod",
+              "metadata": {"name": "mfr-proof-bastion-dead", "namespace": PROD,
+                           "labels": {ROLE: "bastion"},
+                           "annotations": {proof.PROOF_ANNOTATION: "dead"},
+                           "ownerReferences": [{"apiVersion": "v1", "kind": "ConfigMap",
+                                                "name": "mfr-proof-owner-dead", "uid": "u-dead",
+                                                "controller": True,
+                                                "blockOwnerDeletion": False}]},
+              "spec": {"containers": [{"name": "probe"}]}}
+    unannotated = {"apiVersion": "v1", "kind": "ConfigMap",
+                   "metadata": {"name": "mfr-proof-owner-site", "namespace": PROD}}
+    other = {"apiVersion": "v1", "kind": "ConfigMap",
+             "metadata": {"name": "site-config", "namespace": CI,
+                          "annotations": {proof.PROOF_ANNOTATION: "dead"}}}
+    cluster.state.write_text(json.dumps({"objects": [dead, orphan, unannotated, other]}))
+    code, record = cluster.run("--probe")
     assert (code, record["verdict"]) == (0, "proven")
+    assert record["leftovers_removed"] == {PROD: {"pods": 1, "configmaps": 1},
+                                           CI: {"pods": 0, "configmaps": 0}}
+    assert sorted(o["metadata"]["name"] for o in cluster.objects()) == [
+        "mfr-proof-owner-site", "site-config"]
+
+
+def test_owner_without_a_uid_stops_before_any_probe_pod(cluster: Cluster,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    real = proof.Kube.create_object
+
+    def no_uid(self: Any, obj: dict[str, Any], namespace: str, step: str) -> dict[str, Any]:
+        created = real(self, obj, namespace, step)
+        created["metadata"].pop("uid")
+        return created
+
+    monkeypatch.setattr(proof.Kube, "create_object", no_uid)
+    code, record = cluster.run("--probe")
+    assert (code, record["error"]) == (2, {"code": "kube-call-failed",
+                                           "message": proof.MESSAGES["kube-call-failed"],
+                                           "detail": "create probe owner"})
+    assert [o["kind"] for o in cluster.created()] == ["ConfigMap"]
+    assert cluster.objects() == []
 
 
 def test_unknown_probe_status_is_refused(cluster: Cluster) -> None:

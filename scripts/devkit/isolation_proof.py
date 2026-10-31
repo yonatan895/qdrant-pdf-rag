@@ -33,14 +33,18 @@ matrix, the runner rules, the agent Service and the Qdrant ports. It checks:
 6. With --probe: short-lived probe pods carrying each role's labels (and the
    runner manager's) test TCP reachability and DNS. A probe pod in the
    production namespace that no policy selects is the negative control: a
-   "blocked" result counts only for a target the control reached.
+   "blocked" result counts only for a target the control reached. A probe
+   never carries a label a workload controller owns, and its controller
+   reference points to the run's owner ConfigMap in its namespace, so no
+   ReplicaSet, StatefulSet or Job adopts (and then deletes) it or a real pod.
 
 The record carries verbs, resources, object names and outcomes only: never a
 Secret value, a token, an env value or manual text. Exit codes: 0 proven,
 1 violation found, 2 usage or environment error, an inconclusive proof, or a
 run without --probe (never the full proof). Run one proof at a time: probe
-objects are removed on every exit, SIGTERM and SIGHUP included; after a
-SIGKILL the next run removes what the killed run left.
+objects (probe pods and owner ConfigMaps) are removed on every exit, SIGTERM
+and SIGHUP included; after a SIGKILL the next run removes what the killed run
+left, and deleting an owner ConfigMap also garbage-collects its probes.
 
 Standard library only (Python 3.14).
 """
@@ -72,6 +76,19 @@ RECORD_SCHEMA = "mfr-isolation-proof/v1"
 CONTRACT_SCHEMA_VERSION = 1
 PROOF_ANNOTATION = "isolation-proof.mainframe-rag.io/run"
 PROBE_NAME_PREFIX = "mfr-proof-"
+OWNER_NAME_PREFIX = "mfr-proof-owner-"
+# Label keys a workload controller owns or selects on. A probe copies a live
+# pod's labels without them, so a controller's selector (a ReplicaSet's
+# includes pod-template-hash) does not match the probe.
+CONTROLLER_LABEL_KEYS = frozenset({
+    "pod-template-hash",
+    "controller-revision-hash",
+    "statefulset.kubernetes.io/pod-name",
+    "apps.kubernetes.io/pod-index",
+    "job-name",
+    "controller-uid",
+})
+CONTROLLER_LABEL_PREFIXES = ("batch.kubernetes.io/",)
 PROBE_MARKER = "MFR-PROBE "
 CALL_TIMEOUT_S = 60
 
@@ -569,8 +586,8 @@ class Kube:
             raise ProofError("kube-call-failed", step)
         return proc
 
-    def json(self, args: list[str], step: str) -> dict[str, Any]:
-        proc = self.run([*args, "-o", "json"], step)
+    def json(self, args: list[str], step: str, stdin: str | None = None) -> dict[str, Any]:
+        proc = self.run([*args, "-o", "json"], step, stdin=stdin)
         try:
             value = json.loads(proc.stdout)
         except ValueError as exc:
@@ -587,6 +604,10 @@ class Kube:
 
     def create(self, obj: dict[str, Any], namespace: str, step: str) -> None:
         self.run(["create", "-n", namespace, "-f", "-", "-o", "name"], step, stdin=json.dumps(obj))
+
+    def create_object(self, obj: dict[str, Any], namespace: str, step: str) -> dict[str, Any]:
+        """Create and return the object as the API server stored it (with its uid)."""
+        return self.json(["create", "-n", namespace, "-f", "-"], step, stdin=json.dumps(obj))
 
     def items(self, args: list[str], step: str) -> list[dict[str, Any]]:
         items = self.json(args, step).get("items")
@@ -1417,8 +1438,34 @@ def probe_targets(kube: Kube, contract: Contract, params: Params, agent_service:
     return targets, unprobed
 
 
+def probe_labels(labels: Mapping[str, str]) -> dict[str, str]:
+    """A live pod's labels without the keys a workload controller owns."""
+    return {k: v for k, v in labels.items()
+            if k not in CONTROLLER_LABEL_KEYS and not k.startswith(CONTROLLER_LABEL_PREFIXES)}
+
+
+def create_owner(kube: Kube, namespace: str, run_id: str) -> dict[str, Any]:
+    """Create the run's owner ConfigMap in `namespace`; return the probes' ownerReference.
+
+    A controller adopts only a pod with no controller reference, so every probe
+    names this ConfigMap as its controller. blockOwnerDeletion is false: setting
+    it true needs update on the owner's finalizers, and nothing waits on it.
+    """
+    name = f"{OWNER_NAME_PREFIX}{run_id}"
+    created = kube.create_object(
+        {"apiVersion": "v1", "kind": "ConfigMap",
+         "metadata": {"name": name, "annotations": {PROOF_ANNOTATION: run_id}}},
+        namespace, "create probe owner")
+    uid = (created.get("metadata") or {}).get("uid")
+    if not isinstance(uid, str) or not uid:
+        raise ProofError("kube-call-failed", "create probe owner")
+    return {"apiVersion": "v1", "kind": "ConfigMap", "name": name, "uid": uid,
+            "controller": True, "blockOwnerDeletion": False}
+
+
 def probe_pod(identity: Identity, run_id: str, image: str, targets: list[dict[str, Any]],
-              resources: Mapping[str, str], deadline: int) -> dict[str, Any]:
+              resources: Mapping[str, str], deadline: int,
+              owner: Mapping[str, Any]) -> dict[str, Any]:
     spec: dict[str, Any] = {
         "restartPolicy": "Never",
         "activeDeadlineSeconds": deadline,
@@ -1442,11 +1489,13 @@ def probe_pod(identity: Identity, run_id: str, image: str, targets: list[dict[st
     if identity.service_account:
         spec["serviceAccountName"] = identity.service_account
     return {"apiVersion": "v1", "kind": "Pod",
-            # No proof label: the probe carries exactly the identity's labels, so
-            # no selector can tell it from the real pod. The run is an annotation.
+            # No proof label: the probe carries the identity's labels minus the
+            # controller-owned keys, so no policy selector can tell it from the
+            # real pod. The run is an annotation; the owner keeps controllers off.
             "metadata": {"name": f"{PROBE_NAME_PREFIX}{identity.name}-{run_id}",
-                         "labels": dict(identity.labels),
-                         "annotations": {PROOF_ANNOTATION: run_id}},
+                         "labels": probe_labels(identity.labels),
+                         "annotations": {PROOF_ANNOTATION: run_id},
+                         "ownerReferences": [dict(owner)]},
             "spec": spec}
 
 
@@ -1508,9 +1557,12 @@ def run_probes(kube: Kube, contract: Contract, params: Params, run_id: str,
     resources = {"cpu": args.probe_cpu, "memory": args.probe_memory,
                  "ephemeral-storage": args.probe_ephemeral_storage}
     identities = probe_identities(contract, live, runner_labels)
+    owners = {ns: create_owner(kube, ns, run_id)
+              for ns in dict.fromkeys(i.namespace for i in identities)}
     pods = []
     for identity in identities:
-        pod = probe_pod(identity, run_id, image, targets, resources, int(args.probe_timeout))
+        pod = probe_pod(identity, run_id, image, targets, resources, int(args.probe_timeout),
+                        owners[identity.namespace])
         kube.create(pod, identity.namespace, "create probe pod")
         pods.append((identity, pod["metadata"]["name"]))
     ids = {t["id"] for t in targets}
@@ -1558,32 +1610,43 @@ def run_probes(kube: Kube, contract: Contract, params: Params, run_id: str,
 # --------------------------------------------------------------------------- lifecycle
 
 
-def proof_pods(kube: Kube, namespace: str, run_id: str | None) -> list[str]:
-    """Probe pods by name prefix and run annotation (any run when run_id is None)."""
+# Probe objects in deletion order: pods first, then the owners (whose deletion
+# also garbage-collects any probe a failed pod delete left behind).
+PROOF_OBJECTS = (("pods", "pod", PROBE_NAME_PREFIX), ("configmaps", "configmap", OWNER_NAME_PREFIX))
+
+
+def proof_objects(kube: Kube, resource: str, namespace: str, run_id: str | None) -> list[str]:
+    """Probe objects by name prefix and run annotation (any run when run_id is None)."""
+    prefix = next(p for r, _, p in PROOF_OBJECTS if r == resource)
     names = []
-    for pod in kube.items(["get", "pods", "-n", namespace], "list probe pods"):
-        meta = pod.get("metadata") or {}
+    for obj in kube.items(["get", resource, "-n", namespace], f"list probe {resource}"):
+        meta = obj.get("metadata") or {}
         name = str(meta.get("name", ""))
         run = (meta.get("annotations") or {}).get(PROOF_ANNOTATION)
-        if run is not None and name.startswith(PROBE_NAME_PREFIX) and run_id in (None, run):
+        if run is not None and name.startswith(prefix) and run_id in (None, run):
             names.append(name)
     return names
 
 
-def sweep(kube: Kube, namespaces: Iterable[str], run_id: str | None) -> dict[str, int]:
-    """Delete probe pods in every namespace; one failure does not skip the rest."""
-    removed: dict[str, int] = {}
+def sweep(kube: Kube, namespaces: Iterable[str],
+          run_id: str | None) -> dict[str, dict[str, int]]:
+    """Delete probe pods, then owners, in every namespace; one failure skips nothing else."""
+    removed: dict[str, dict[str, int]] = {}
     failed: ProofError | None = None
     for ns in namespaces:
-        try:
-            names = proof_pods(kube, ns, run_id)
-            if names:
-                kube.run(["delete", "pod", *names, "-n", ns, "--ignore-not-found",
-                          "--wait=true"], "delete probe pods")
-        except ProofError as exc:
-            failed = failed or exc
-            continue
-        removed[ns] = len(names)
+        counts: dict[str, int] = {}
+        for resource, kind, _ in PROOF_OBJECTS:
+            try:
+                names = proof_objects(kube, resource, ns, run_id)
+                if names:
+                    kube.run(["delete", kind, *names, "-n", ns, "--ignore-not-found",
+                              "--wait=true"], f"delete probe {resource}")
+            except ProofError as exc:
+                failed = failed or exc
+                continue
+            counts[resource] = len(names)
+        if len(counts) == len(PROOF_OBJECTS):
+            removed[ns] = counts
     if failed is not None:
         raise failed
     return removed
@@ -1593,10 +1656,11 @@ def cleanup(kube: Kube, contract: Contract, run_id: str) -> dict[str, Any]:
     namespaces = (contract.prod, contract.ci)
     try:
         deleted = sweep(kube, namespaces, run_id)
-        remaining = {ns: len(proof_pods(kube, ns, run_id)) for ns in namespaces}
+        remaining = {ns: {r: len(proof_objects(kube, r, ns, run_id)) for r, _, _ in PROOF_OBJECTS}
+                     for ns in namespaces}
     except ProofError as exc:
         raise ProofError("cleanup-failed", exc.detail) from exc
-    if any(remaining.values()):
+    if any(n for counts in remaining.values() for n in counts.values()):
         raise ProofError("cleanup-failed")
     return {"deleted": deleted, "remaining": remaining}
 
