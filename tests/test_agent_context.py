@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
-from scripts.check_agent_context import CHAIN_BUDGET, REQUIRED, check
+from scripts.check_agent_context import CHAIN_BUDGET, ENTRY_BUDGET, REQUIRED, check
 
 REAL_ROOT = Path(__file__).resolve().parents[1]
 SHA = "a"*40
@@ -30,7 +30,9 @@ class ContextCheckTests(TestCase):
 |---|---|---|---|
 | example | [Owner](owner.md#contract) | [Source](../Taskfile.yml) | [Tests](owner.md) |
 <!-- context-map:end -->
-<!-- instruction-chains:start -->
+''', encoding="utf-8")
+        self.maintenance = self.root/"docs/agent-maintenance.md"
+        self.maintenance.write_text('''<!-- instruction-chains:start -->
 | Invocation directory | Chain |
 |---|---|
 | `.` | [Root](../AGENTS.md) |
@@ -40,6 +42,9 @@ class ContextCheckTests(TestCase):
 
     def replace(self, old, new):
         self.workflow.write_text(self.workflow.read_text().replace(old, new))
+
+    def replace_chains(self, old, new):
+        self.maintenance.write_text(self.maintenance.read_text().replace(old, new))
 
     def test_valid_minimal_layout(self):
         self.assertEqual(check(self.root)[0], [])
@@ -51,10 +56,18 @@ class ContextCheckTests(TestCase):
         (self.root/"AGENTS.md").write_bytes(b"x\r\n"*2731)
         self.assertTrue(any("8193" in e for e in check(self.root)[0]))
 
+    def test_entry_path_budget_covers_root_and_guide(self):
+        agents = len((self.root/"AGENTS.md").read_bytes())
+        self.workflow.write_text("x"*(ENTRY_BUDGET-agents+1), encoding="utf-8")
+        errors = check(self.root)[0]
+        self.assertTrue(any("entry path budget" in e for e in errors))
+        self.workflow.write_text("x"*(ENTRY_BUDGET-agents), encoding="utf-8")
+        self.assertFalse(any("entry path budget" in e for e in check(self.root)[0]))
+
     def test_chain_includes_separators_and_client_limit(self):
         (self.root/"src").mkdir()
         (self.root/"src/AGENTS.md").write_text("x"*(CHAIN_BUDGET-8))
-        self.replace('| `.` | [Root](../AGENTS.md) |', '| `src` | [Root](../AGENTS.md), [Nested](../src/AGENTS.md) |')
+        self.replace_chains('| `.` | [Root](../AGENTS.md) |', '| `src` | [Root](../AGENTS.md), [Nested](../src/AGENTS.md) |')
         self.assertTrue(any("chain budget exceeded" in e for e in check(self.root)[0]))
         (self.root/"src/AGENTS.md").write_text("small")
         self.assertEqual(check(self.root)[0], [])
@@ -166,7 +179,7 @@ class ContextCheckTests(TestCase):
         self.assertTrue(any("stay inside" in e for e in check(self.root)[0]))
         (self.root/"src").mkdir()
         (self.root/"src/AGENTS.md").write_text('nested')
-        self.replace('[Root](../AGENTS.md)', '[Root](../AGENTS.md), [Sibling](../src/AGENTS.md)')
+        self.replace_chains('[Root](../AGENTS.md)', '[Root](../AGENTS.md), [Sibling](../src/AGENTS.md)')
         self.assertTrue(any("not an instruction on this directory chain" in e for e in check(self.root)[0]))
 
     def test_symlink_outside_repository_is_not_read(self):
@@ -191,7 +204,8 @@ class VendoredSkillsTests(TestCase):
         _required_tree(self.root)
         (self.root/"docs/agent-workflow.md").write_text(
             "<!-- context-map:start -->\n| C | O | B | E |\n|---|---|---|---|\n"
-            "| x | [O](o.md) | [B](o.md) | [E](o.md) |\n<!-- context-map:end -->\n"
+            "| x | [O](o.md) | [B](o.md) | [E](o.md) |\n<!-- context-map:end -->\n")
+        (self.root/"docs/agent-maintenance.md").write_text(
             "<!-- instruction-chains:start -->\n| D | C |\n|---|---|\n"
             "| `.` | [R](../AGENTS.md) |\n<!-- instruction-chains:end -->\n")
         (self.root/"docs/o.md").write_text("owner\n")
