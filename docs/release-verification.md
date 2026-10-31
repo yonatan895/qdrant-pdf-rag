@@ -554,10 +554,12 @@ and the ingest Job strategic merge patch `$KIND_STATE/ingest-sizing.json`:
 Create the env file. No key values go in it. It selects the one-node 1/1/1
 collection policy and pins a non-root id for the bundled OpenObserve (OpenShift
 assigns one). It also declares the 4096-token window the local reasoning model
-serves, with the budget `scripts/local_lane_budget.sh` pins for that window: the
-application defaults assume 32768, so without these keys every answer requests
-more output tokens than the server accepts and fails as 502. Open WebUI stays
-on, its default; the next block adds its site keys for the test IdP:
+serves, with the `scripts/local_lane_budget.sh` pins the operator path carries (7
+of its 12): the application defaults assume 32768, so without these keys every
+answer requests more output tokens than the server accepts and fails as 502. Its
+prompt-size pins have no operator path and are not needed, because serving packs
+prompts by token budget. Open WebUI stays on, its default; the next block adds
+its site keys for the test IdP:
 
 ```sh
 cat > "$KIND_STATE/airgap.env" <<EOF
@@ -821,7 +823,7 @@ recovery. Access the console privately with
 This check uses the actual application's Settings, Secret-backed key and CA mount.
 It launches a fresh client process per CA choice so trust cannot be retained from
 the positive case. The wrong-CA case uses the image's system trust bundle, which
-does not contain the lane CA; application pods do not mount a service-account CA. The diagnostic timeout is 10 seconds; it does not change
+does not contain the lane CA; the agent and ingest containers do not mount a service-account CA. The diagnostic timeout is 10 seconds; it does not change
 application request deadlines. Run it while the interactive client is idle:
 
 ```sh

@@ -435,14 +435,26 @@ def test_release_gate_kind_recipe_runs_as_documented(pipe_tree):
     assert values["openobserve"]["runAsId"] == 10001
     # The real models serve 4096 tokens: the recipe carries the local lane's
     # budget pins, or every answer asks for more output than the server takes.
-    pins = dict(re.findall(r"\$\{(LLM_[A-Z_]+):=([^}]+)\}", (REPO / "scripts/local_lane_budget.sh").read_text()))
-    recipe = dict(line.split("=", 1) for line in airgap_env.read_text().splitlines() if line.startswith("LLM_"))
-    budget = {k: v for k, v in recipe.items() if k in pins}
-    assert budget == {k: pins[k] for k in budget} and "LLM_MAX_MODEL_LEN" in budget
+    # Exactly the pins with an operator path: the prompt-size pins have none
+    # (serving packs prompts by token budget), so listing one would be a no-op.
+    pins = dict(re.findall(r"\$\{([A-Z_]+):=([^}]+)\}", (REPO / "scripts/local_lane_budget.sh").read_text()))
+    operator = re.search(r'^OPERATOR_ENV_KEYS="([^"]*)"', (REPO / "scripts/airgap/common.sh").read_text(),
+                         re.MULTILINE)
+    assert operator, "OPERATOR_ENV_KEYS moved"
+    carried = {k: v for k, v in pins.items() if k in operator.group(1).split()}
+    assert (len(pins), len(carried)) == (12, 7) and "LLM_REASONING_EFFORTS" in carried
+    recipe = dict(line.split("=", 1) for line in airgap_env.read_text().splitlines() if "=" in line)
+    assert {k: v for k, v in recipe.items() if k in pins} == carried
     reasoning = values["models"]["reasoning"]
     assert (reasoning["maxModelLen"], reasoning["reservedOutputTokens"], reasoning["thinkingReserveTokensSimple"],
             reasoning["thinkingReserveTokensComplex"], reasoning["reasoningEffortSimple"],
-            reasoning["reasoningEffortComplex"]) == (4096, 1536, 0, 1000, "low", "high")
+            reasoning["reasoningEffortComplex"], reasoning["reasoningEfforts"]) == (
+                4096, 1536, 0, 1000, "low", "high", "low,medium,high")
+    # Stored render: the pins reach the agent container's environment.
+    (agent,) = [c for d in docs if (d["kind"], d["metadata"]["name"]) == ("Deployment", "rag-agent")
+                for c in d["spec"]["template"]["spec"]["containers"] if c["name"] == "agent"]
+    agent_env = {e["name"]: e.get("value") for e in agent["env"]}
+    assert {k: agent_env.get(k) for k in carried} == carried
     job = yaml.safe_load((pipe_tree / "dist/ingest-rendered.yaml").read_text())
     (container,) = [c for c in job["spec"]["template"]["spec"]["containers"] if c["name"] == "ingest"]
     env = {e["name"]: e.get("value") for e in container["env"]}

@@ -59,7 +59,7 @@ def test_recorded_election_decides_a_dual_license():
 def test_repository_record_reconciles_with_the_real_pins():
     problems, unresolved, state = problems_for(real_inventory())
     assert problems == []
-    assert state in ("absent", "current"), "a recorded release approval must match the current inventory"
+    assert state == "current", "the recorded release approval must match the current inventory"
     assert unresolved == [], "every owner decision is recorded; pymupdf is the owner-decision exception"
 
 
