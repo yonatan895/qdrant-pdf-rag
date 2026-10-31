@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -27,6 +28,14 @@ except ModuleNotFoundError:
     from dependency_lock import load as _local_load_dependency_lock
 
     load_dependency_lock = _local_load_dependency_lock
+
+try:
+    from scripts.prepare_python import KIT_LOCK_FILES, KIT_ROOT
+except ModuleNotFoundError:
+    from prepare_python import KIT_LOCK_FILES as _LOCAL_KIT_LOCK_FILES
+    from prepare_python import KIT_ROOT as _LOCAL_KIT_ROOT
+
+    KIT_LOCK_FILES, KIT_ROOT = _LOCAL_KIT_LOCK_FILES, _LOCAL_KIT_ROOT
 
 PROBE_TIMEOUT_S = 5
 # Executes only stdlib/metadata reads, never imports product packages or loads .env.
@@ -159,6 +168,40 @@ def inspect_helm(root: Path) -> Finding:
     return Finding("ready", "Helm", f"pinned Helm {version} executable checksum verified")
 
 
+def kit_name(root: Path) -> str:
+    """The kit this checkout needs (ADR-0009 §8). scripts/devkit_key.py is imported
+    only for this message, with fixed text if it cannot name the key, so the
+    doctor's verdict never depends on that file."""
+    fallback = "the kit `python3 scripts/devkit_key.py` names for this checkout"
+    try:
+        kit_key = importlib.import_module(
+            "scripts.devkit_key" if load_dependency_lock.__module__.startswith("scripts.") else "devkit_key")
+        return f"mfr-devkit-{kit_key.key(root)}"
+    except Exception:  # noqa: BLE001 — any failure keeps the refusal, with the fixed fallback
+        return fallback
+
+
+def inspect_kit(root: Path) -> Finding | None:
+    """Inside a dev kit image (its /opt/devkit/locks/ exists), the image's two lock
+    files must equal this checkout's; outside one there is nothing to check."""
+    locks = KIT_ROOT / "locks"
+    if not (locks.exists() or locks.is_symlink()):
+        return None
+    try:
+        matches = all(
+            not (locks / name).is_symlink() and (locks / name).is_file() and (root / name).is_file()
+            and (locks / name).read_bytes() == (root / name).read_bytes()
+            for name in KIT_LOCK_FILES)
+    except OSError:
+        matches = False
+    if not matches:
+        return Finding("missing prerequisite", "dev kit",
+                       "this dev kit image was built for another dev lock; fix: request "
+                       f"{kit_name(root)}, stop until that kit is installed, then rerun this check in its image")
+    return Finding("ready", "dev kit", "image lock files equal requirements.dev.lock.txt and "
+                   "locks/cp314-linux-x86_64.json")
+
+
 def inspect_runtime(python: Path, packages: list[str]) -> dict | None:
     try:
         result = subprocess.run(
@@ -214,6 +257,9 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False,
     for name in required:
         add("ready" if (root/name).is_file() else "missing prerequisite", name, "tracked input presence",
             f"fix: git checkout -- {name}")
+    kit = inspect_kit(root)
+    if kit is not None:
+        results.append(kit)
     try:
         project = tomllib.loads((root/"pyproject.toml").read_text(encoding="utf-8"))
         requirement = project["project"]["requires-python"]

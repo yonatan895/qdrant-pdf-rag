@@ -98,5 +98,8 @@ standard-library-only and performs no
 service probe by default. An explicitly requested bounded Docker probe may
 report unavailable access. Results distinguish `ready`, `missing prerequisite`
 and `unable to verify`; readiness is not test/application/production acceptance.
+Inside a dev kit image (`/opt/devkit/locks/` exists) it also adds a `dev kit`
+finding and refuses a kit whose lock files differ from the checkout's, naming
+`mfr-devkit-<key>` ([dependencies](dependencies.md)); outside one it adds nothing.
 It never sources `.env`, reads secret values, installs, launches or repairs.
 Use the tier's existing runbook after diagnosing prerequisites.
