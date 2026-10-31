@@ -409,7 +409,7 @@ The script runs these steps. Each refusal is a fixed `STOP:` line in it.
 
 After `IMPORT READY`:
 
-1. Until follow-ups F4 and F5 land, run these by hand.
+1. Run these by hand.
    - **Dev kit.** If `agent_doctor` refuses the dev kit, it names the kit to
      request. Stop until that kit is installed.
    - **CODEOWNERS.** The `hygiene` job fails while the file is stale. Run
@@ -499,17 +499,20 @@ gap patches stay ledgered.
   owner group and the named approvers as arguments, so no site name enters
   upstream.
   - **Every path except `gap/`** is owned by the gap maintainer group, and
-    code-owner approval is required on `main`. The form is `*` and then
-    the exclusion `!/gap/` (GitLab 17.11, or 17.10 behind a feature flag).
-    Without exclusions `*` still owns `gap/`: stricter, not weaker. The
-    site's GitLab confirms it with GH#446.
+    code-owner approval is required on `main`. The site's GitLab floor is
+    17.0, which has no `!` exclusion (17.10), so the section lists each
+    tracked top-level entry except `gap/` (plus `.gitlab/`). A new top-level
+    path changes the output, so it waits for a regenerated, protected file.
+    The file uses only 17.0 syntax: sections and path entries (GH#446).
   - **The protected list** also needs a **second named approver**. It is the
     list that `scripts/acceptance.py` and `scripts/unit_evidence.py` already
     define (`VERIFICATION_INPUTS`, `taskfiles/*.yml` and the producer
     workflows), plus the gap's own gates: `.gitlab-ci.yml`,
     `.gitlab/CODEOWNERS`, `scripts/check_junit_clean.py`,
     `scripts/gate_l1.py`, the dev kit pin, and the gap release pipeline and
-    signing files (today both `pack.sh` signers; F6 adds its own).
+    signing files (today both `pack.sh` signers; F6 adds its own), and
+    the generator itself. Each approver is a single user, never a group;
+    one person may give both approvals (maintainer, 2026-10-31).
   - **One source of truth.** An upstream unit test
     (`tests/test_gap_codeowners.py`) asserts that the generator's protected
     set equals those lists plus the named gap additions. The GitLab hygiene
