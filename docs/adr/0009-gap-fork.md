@@ -533,10 +533,10 @@ refreshed with each kit (Q9).
   - the session login helpers (`mfr-session-login` and its logout).
 
   It runs under `restricted-v2` with an arbitrary non-root UID. The
-  checkout's own source is used in place, so development installs and
-  builds nothing. `prepare_python.py --kit --venv DIR` gives the checkout a
-  venv layered over that environment, with only the checkout installed
-  editable.
+  checkout's own source is used in place, so development installs no
+  dependency and builds no image. `prepare_python.py --kit --venv DIR` gives
+  the checkout a venv layered over that environment, with only the checkout
+  installed editable.
 - **The bastion** runs the Linux-only operator path. It is a pod on this
   image under its own ServiceAccount, with no RBAC (D-2) and no Secret
   mount. At session start the operator's own `oc` on Windows pipes in two

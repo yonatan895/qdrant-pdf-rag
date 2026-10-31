@@ -641,6 +641,36 @@ def test_kit_mode_refuses_an_image_environment_that_differs_from_the_dev_lock(lo
     assert "prepare-python: preparation failed; environment is not qualified" in err
 
 
+@pytest.mark.parametrize("damage", ["symlink-venv", "no-image-environment", "newline-in-site-dir"])
+def test_kit_mode_refuses_an_unusable_target_or_image_environment_before_any_process(locked, monkeypatch,
+                                                                                    capsys, damage):
+    root, _, _ = locked
+    kit, image_site = _kit_image(root)
+    calls = _kit_run(monkeypatch, root, image_site)
+    venv = root / "kit-venv"
+    if damage == "symlink-venv":
+        (root / "elsewhere").mkdir()
+        venv.symlink_to(root / "elsewhere")
+    scripts = root / "kit-image/opt/app-root/bin"
+    layers = {"no-image-environment": [], "newline-in-site-dir": [root / "odd\nsite"]}.get(damage, [image_site])
+    monkeypatch.setattr(prepare_python, "image_environment", lambda: (layers, scripts))
+    assert prepare_python.main(["--root", str(root), "--kit", str(kit), "--venv", str(venv)]) == 2
+    expected = {"symlink-venv": "refusing to prepare a symlink environment"}.get(
+        damage, "the dev kit image's installed environment is unavailable")
+    assert expected in capsys.readouterr().err
+    assert calls == [] and not list((root / "elsewhere").iterdir() if damage == "symlink-venv" else [])
+    assert damage == "symlink-venv" or not venv.exists()
+
+
+def test_kit_image_environment_is_the_running_interpreters_site_and_scripts():
+    """Unpatched: the layers are this interpreter's site directories, as `site` reports them."""
+    import site
+    import sysconfig
+    layers, scripts = prepare_python.image_environment()
+    assert layers == [Path(path) for path in site.getsitepackages() if Path(path).is_dir()] and layers
+    assert scripts == Path(sysconfig.get_path("scripts")) and (scripts / "python").exists()
+
+
 def test_kit_mode_refuses_an_image_built_for_another_dev_lock_naming_the_kit(tmp_path):
     root = Path(__file__).resolve().parents[1]
     kit = tmp_path / "kit-image"
