@@ -403,6 +403,8 @@ def test_release_gate_kind_recipe_runs_as_documented(pipe_tree):
     nothing added. It once stopped at stage 1 (Open WebUI is on by default and
     the lab had no IdP; the lab now adds the test IdP's site keys) and at stage
     3 (its Kind sizing overlay needs the process-environment CI_REHEARSAL=1)."""
+    import re
+
     import yaml
 
     from tests.test_airgap_ingest_sh import PATCHING_KUBECTL
@@ -431,6 +433,16 @@ def test_release_gate_kind_recipe_runs_as_documented(pipe_tree):
     assert {("Deployment", "rag-openwebui"), ("Route", "rag-openwebui")} <= {
         (d["kind"], d["metadata"]["name"]) for d in docs}
     assert values["openobserve"]["runAsId"] == 10001
+    # The real models serve 4096 tokens: the recipe carries the local lane's
+    # budget pins, or every answer asks for more output than the server takes.
+    pins = dict(re.findall(r"\$\{(LLM_[A-Z_]+):=([^}]+)\}", (REPO / "scripts/local_lane_budget.sh").read_text()))
+    recipe = dict(line.split("=", 1) for line in airgap_env.read_text().splitlines() if line.startswith("LLM_"))
+    budget = {k: v for k, v in recipe.items() if k in pins}
+    assert budget == {k: pins[k] for k in budget} and "LLM_MAX_MODEL_LEN" in budget
+    reasoning = values["models"]["reasoning"]
+    assert (reasoning["maxModelLen"], reasoning["reservedOutputTokens"], reasoning["thinkingReserveTokensSimple"],
+            reasoning["thinkingReserveTokensComplex"], reasoning["reasoningEffortSimple"],
+            reasoning["reasoningEffortComplex"]) == (4096, 1536, 0, 1000, "low", "high")
     job = yaml.safe_load((pipe_tree / "dist/ingest-rendered.yaml").read_text())
     (container,) = [c for c in job["spec"]["template"]["spec"]["containers"] if c["name"] == "ingest"]
     env = {e["name"]: e.get("value") for e in container["env"]}

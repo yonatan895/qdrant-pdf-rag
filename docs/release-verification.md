@@ -553,8 +553,11 @@ and the ingest Job strategic merge patch `$KIND_STATE/ingest-sizing.json`:
 
 Create the env file. No key values go in it. It selects the one-node 1/1/1
 collection policy and pins a non-root id for the bundled OpenObserve (OpenShift
-assigns one). Open WebUI stays on, its default; the next block adds its site
-keys for the test IdP:
+assigns one). It also declares the 4096-token window the local reasoning model
+serves, with the budget `scripts/local_lane_budget.sh` pins for that window: the
+application defaults assume 32768, so without these keys every answer requests
+more output tokens than the server accepts and fails as 502. Open WebUI stays
+on, its default; the next block adds its site keys for the test IdP:
 
 ```sh
 cat > "$KIND_STATE/airgap.env" <<EOF
@@ -585,6 +588,13 @@ QDRANT_SHARD_NUMBER=1
 QDRANT_REPLICATION_FACTOR=1
 QDRANT_WRITE_CONSISTENCY_FACTOR=1
 OPENOBSERVE_RUN_AS_ID=10001
+LLM_MAX_MODEL_LEN=4096
+LLM_RESERVED_OUTPUT_TOKENS=1536
+LLM_THINKING_RESERVE_TOKENS_SIMPLE=0
+LLM_THINKING_RESERVE_TOKENS_COMPLEX=1000
+LLM_REASONING_EFFORT_SIMPLE=low
+LLM_REASONING_EFFORT_COMPLEX=high
+LLM_REASONING_EFFORTS=low,medium,high
 EOF
 export AIRGAP_ENV="$KIND_STATE/airgap.env"
 export SNEAKERNET_TRUSTED_PUB=/absolute/path/to/independently-trusted/signing.pub
@@ -810,13 +820,14 @@ recovery. Access the console privately with
 
 This check uses the actual application's Settings, Secret-backed key and CA mount.
 It launches a fresh client process per CA choice so trust cannot be retained from
-the positive case. The diagnostic timeout is 10 seconds; it does not change
+the positive case. The wrong-CA case uses the image's system trust bundle, which
+does not contain the lane CA; application pods do not mount a service-account CA. The diagnostic timeout is 10 seconds; it does not change
 application request deadlines. Run it while the interactive client is idle:
 
 ```sh
 export TEST_NAMESPACE="$KIND_NAMESPACE"
 kubectl -n "$TEST_NAMESPACE" exec -i deploy/rag-agent -c agent -- python3 - <<'PY_TLS'
-import json,os,socket,subprocess,sys,urllib.parse
+import json,os,socket,ssl,subprocess,sys,urllib.parse
 from mainframe_rag.config import load_settings
 s=load_settings()
 base=s.embed_base_url.rstrip('/')
@@ -824,6 +835,8 @@ url=base+'/models'
 parts=urllib.parse.urlsplit(url)
 ip=socket.gethostbyname(parts.hostname)
 wrong_hostname=urllib.parse.urlunsplit((parts.scheme,ip+(':'+str(parts.port) if parts.port else ''),parts.path,'',''))
+system_ca=ssl.get_default_verify_paths().openssl_cafile
+assert os.path.isfile(system_ca) and os.path.realpath(system_ca)!=os.path.realpath(os.environ['SSL_CERT_FILE']),system_ca
 child="""import os,json,httpx2
 headers={'Authorization':'Bearer '+os.environ['PROBE_KEY']} if os.environ.get('PROBE_KEY') else {}
 try:
@@ -838,7 +851,7 @@ for name,endpoint,key,authority,expected in [
  ('correct',url,s.embed_api_key,os.environ['SSL_CERT_FILE'],200),
  ('missing-key',url,'',os.environ['SSL_CERT_FILE'],401),
  ('wrong-key',url,'sk-invalid',os.environ['SSL_CERT_FILE'],401),
- ('wrong-ca',url,s.embed_api_key,'/var/run/secrets/kubernetes.io/serviceaccount/ca.crt','tls'),
+ ('wrong-ca',url,s.embed_api_key,system_ca,'tls'),
  ('wrong-hostname',wrong_hostname,s.embed_api_key,os.environ['SSL_CERT_FILE'],'tls'),
 ]:
  r=subprocess.run([sys.executable,'-c',child],env={**os.environ,'PROBE_URL':endpoint,'PROBE_KEY':key,'SSL_CERT_FILE':authority},capture_output=True,text=True,check=True)
