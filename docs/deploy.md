@@ -2255,7 +2255,9 @@ It records:
 
 - each F9 ServiceAccount's `can-i --list` in both namespaces against a fixed, versioned
   baseline in the script (`BASELINE_VERSION`: the Kubernetes and OpenShift self-review,
-  discovery and default `system:authenticated` rules). Any other rule is a violation,
+  discovery and default `system:authenticated` rules, and the `get` on the four OIDC
+  issuer discovery URLs that `system:service-account-issuer-discovery` grants every
+  ServiceAccount). Any other rule is a violation,
   whichever binding or group granted it; a site whose defaults differ fails closed until
   a reviewed PR changes the baseline;
 - a negative matrix asked outright of each F9 ServiceAccount in both namespaces: secret

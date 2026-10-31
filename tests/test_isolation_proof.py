@@ -1135,6 +1135,44 @@ def test_group_grant_beyond_the_fixed_baseline_is_caught(cluster: Cluster, row, 
     assert record["checks"]["rbac"]["baseline_version"] == proof.BASELINE_VERSION
 
 
+# Stock ClusterRole system:service-account-issuer-discovery, bound to
+# system:serviceaccounts, as `can-i --list` prints it (item f: the Kind lane).
+ISSUER_DISCOVERY_ROWS = "".join(
+    f"{'':48}[{url}]{'':4}[]{'':16}[get]\n" for url in (
+        "/.well-known/openid-configuration", "/.well-known/openid-configuration/",
+        "/openid/v1/jwks", "/openid/v1/jwks/"))
+
+
+def test_stock_issuer_discovery_grant_is_in_the_baseline(cluster: Cluster) -> None:
+    for key in ("baseline", "mfr-bastion", "mfr-dev", "mfr-runner-job"):
+        cluster.scenario["can_i_list"][key] = BASELINE_TABLE + ISSUER_DISCOVERY_ROWS
+    code, record = cluster.run()
+    assert (code, record["verdict"], record["findings"]) == (2, "static-only", [])
+    dev = next(a for a in record["checks"]["rbac"]["service_accounts"] if a["role"] == "dev")
+    assert "get /openid/v1/jwks/" in dev["rules"][CI]
+    assert dev["beyond_baseline"] == {PROD: [], CI: []}
+    assert record["checks"]["rbac"]["baseline_version"] == "k8s-1.33+openshift-4.20/v2"
+
+
+@pytest.mark.parametrize("url, verb", [
+    ("/.well-known/openid-configuration", "post"),
+    ("/openid/v1/jwks", "put"),
+    ("/openid/v1/jwks/", "delete"),
+    ("/openid/v1/keys", "get"),
+    ("/metrics", "get"),
+])
+def test_other_grants_to_service_accounts_on_non_resource_urls_still_fail(
+        cluster: Cluster, url: str, verb: str) -> None:
+    row = f"{'':48}[{url}]{'':4}[]{'':16}[{verb}]\n"
+    for sa in ("mfr-bastion", "mfr-dev", "mfr-runner-job"):
+        cluster.scenario["can_i_list"][sa] = BASELINE_TABLE + ISSUER_DISCOVERY_ROWS + row
+    code, record = cluster.run()
+    assert code == 1
+    assert sorted(set(reasons(record, "rbac"))) == sorted(
+        f"{r} in {ns}: beyond-baseline: {verb} {url}"
+        for r in ("bastion", "dev", "runner") for ns in (PROD, CI))
+
+
 @pytest.mark.parametrize("verb, target", [
     ("create", "pods/portforward"), ("patch", "pods/ephemeralcontainers"),
     ("create", "serviceaccounts/token"), ("get", "services/proxy"),

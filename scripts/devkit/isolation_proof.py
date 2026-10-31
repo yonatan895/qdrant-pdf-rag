@@ -120,9 +120,12 @@ MESSAGES = {
 #   system:webhook, system:scope-impersonation and
 #   system:openshift:public-info-viewer; and the per-namespace
 #   system:image-pullers RoleBinding for system:serviceaccounts:<ns>.
+# - Kubernetes 1.33 (and OpenShift) bootstrap ClusterRole
+#   system:service-account-issuer-discovery, bound to system:serviceaccounts:
+#   `get` on the four OIDC issuer discovery URLs (v2; found by the Kind lane).
 # A site whose defaults differ fails closed: the extra rule is reported, and
 # the baseline changes only in a reviewed PR that bumps BASELINE_VERSION.
-BASELINE_VERSION = "k8s-1.33+openshift-4.20/v1"
+BASELINE_VERSION = "k8s-1.33+openshift-4.20/v2"
 BASELINE_CONTROL_RULE = "create selfsubjectaccessreviews.authorization.k8s.io"
 EXPECTED_BASELINE = frozenset({
     "create selfsubjectaccessreviews.authorization.k8s.io",
@@ -152,6 +155,10 @@ EXPECTED_BASELINE = frozenset({
         "/livez/*", "/readyz", "/readyz/*", "/openapi", "/openapi/*", "/version",
         "/version/", "/version/*", "/.well-known", "/.well-known/*",
         "/.well-known/oauth-authorization-server")),
+    # system:service-account-issuer-discovery
+    *(f"get {url}" for url in (
+        "/.well-known/openid-configuration", "/.well-known/openid-configuration/",
+        "/openid/v1/jwks", "/openid/v1/jwks/")),
 })
 
 # Negative matrix (step 2): (verb, resource, subresource), asked of every F9
