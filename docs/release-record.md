@@ -91,6 +91,10 @@ explicitly unresolved and prevent claims of production compatibility.
 - Licensing gate: `python3 scripts/license_inventory.py check --release` result
   (exit code, unresolved count, `release_approval` state) NOT RECORDED; it must pass
   on the packed commit before transfer ([licensing](licensing.md#what-a-release-must-satisfy)).
+- Dev kit licence gate (when a kit ships): `python3 scripts/license_inventory.py check --kit`
+  result (exit code, `kit_unresolved`, `kit_approval` state) NOT RECORDED, and the kit
+  `MANIFEST.txt` line `license_gate: enforced` NOT RECORDED; both are required before
+  transfer ([dev kit](licensing.md#dev-kit)).
 - Open blockers and their owners: NOT RECORDED.
 - Transfer receipt and destination checksum: NOT RECORDED.
 - Air-gap bootstrap / pipeline / site OpenShift acceptance evidence: NOT RUN.
