@@ -7,6 +7,7 @@ class cannot rest on declared metadata; owner approval goes stale when records
 change. None of this is a legal verdict, and no test marks a license approved.
 """
 import copy
+import re
 import shutil
 import zipfile
 
@@ -515,3 +516,150 @@ def test_notices_carry_real_texts_and_open_decisions_and_refuse_a_missing_member
         li.render_notices(REPO, inventory, None)
 
 
+
+
+# --- dev kit scope (#1118, ADR-0009 §8) -------------------------------------
+
+GPL_DECISION_REF = "gh:yonatan895/qdrant-pdf-rag#1118 issuecomment-6480982316"
+
+
+def kit_problems(inventory, root=REPO):
+    """(record problems, owner-decision blockers, kit approval state)."""
+    return li.run_kit_check(root, inventory, None)
+
+
+# The RPMs whose header tags use a Fedora legacy abbreviation with several SPDX
+# readings (read from the pinned image, 2026-10-31), approved by the maintainer.
+AMBIGUOUS_RPMS = {"cracklib", "cracklib-dicts", "gzip", "less", "libcbor", "libdb", "libeconf", "libedit",
+                  "libfdisk", "libfido2", "libpwquality", "libseccomp", "libutempter", "openssh",
+                  "openssh-clients", "pam", "shadow-utils-subid", "util-linux", "util-linux-core"}
+ALL_LICENCES_REF = "https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6543481300"
+APPROVED_KIT_DIGEST = "854999ae9a8ce9d537fcda1d6f2f3fb603d1269c87b12ee9f3544e31757eaf77"
+
+
+def test_repository_kit_record_passes_the_enforced_gate_at_the_approved_digest():
+    """Every kit component has a record bound to its real pin, no decision is open, and
+    the maintainer's kit approval binds exactly the digest the tool computes."""
+    inventory = real_inventory()
+    assert kit_problems(inventory) == ([], [], "current")
+    assert li.kit_scope_digest(inventory) == APPROVED_KIT_DIGEST
+    assert inventory["devkit"]["approval"] == {"approval_ref": ALL_LICENCES_REF, "approved_digest": APPROVED_KIT_DIGEST}
+    # The release scope and its digest do not include the kit section.
+    without = {k: v for k, v in inventory.items() if k != "devkit"}
+    assert li.scope_digest(without) == li.scope_digest(inventory)
+    assert problems_for(inventory)[0] == []
+
+
+def test_kit_approvals_are_exactly_the_maintainers_recorded_decisions():
+    """GPL-only RPMs carry the 2026-10-28 decision, the ambiguous-tag RPMs the 2026-10-31
+    one; nothing else is approved, and each tag stays as recorded from the RPM header."""
+    kit = real_inventory()["devkit"]
+    approved = {e["name"]: e for e in kit["components"] if e["status"] == "approved"}
+    assert set(approved) == {"crun", "git-core", "tar"} | AMBIGUOUS_RPMS
+    for name, entry in approved.items():
+        if name in AMBIGUOUS_RPMS:
+            assert entry["approval_ref"] == ALL_LICENCES_REF and entry["decision"]["date"] == "2026-10-31"
+            assert "NOASSERTION" in entry["license_spdx"] and entry["ambiguous_terms"]
+        else:
+            assert entry["class"] == "strong-copyleft" and entry["approval_ref"].startswith(GPL_DECISION_REF)
+            assert entry["decision"]["date"] == "2026-10-28"
+        assert entry["decision"]["owner"] == "yonatan895"
+    assert not [e for e in kit["python"] if e["status"] != "declared"]
+    for entry in kit["components"]:
+        if entry.get("kind") == "rpm":
+            # The declared tag is the RPM header, kept verbatim next to its normalized form.
+            assert li.normalize_rpm_tag(entry["license_declared"])[0] == entry["license_spdx"]
+
+
+@pytest.mark.parametrize("tag, expected", [
+    ("GPLv2", ("GPL-2.0-only", "normalized-rpm-license-tag", [])),
+    ("ASL 2.0", ("Apache-2.0", "normalized-rpm-license-tag", [])),
+    ("GPL-2.0-only", ("GPL-2.0-only", "rpm-license-tag", [])),
+    ("Apache-2.0 AND MIT AND MPL-2.0", ("Apache-2.0 AND MIT AND MPL-2.0", "rpm-license-tag", [])),
+    # Legacy abbreviations Fedora maps to several identifiers are never guessed.
+    ("MIT", ("NOASSERTION", "normalized-rpm-license-tag", ["MIT"])),
+    ("BSD and GPLv2+", ("NOASSERTION AND GPL-2.0-or-later", "normalized-rpm-license-tag", ["BSD"])),
+    ("GPLv3+ or BSD", ("GPL-3.0-or-later OR NOASSERTION", "normalized-rpm-license-tag", ["BSD"])),
+    ("LGPLv2+", ("NOASSERTION", "normalized-rpm-license-tag", ["LGPLv2+"])),
+])
+def test_rpm_license_tags_normalize_only_unambiguous_terms(tag, expected):
+    assert li.normalize_rpm_tag(tag) == expected
+
+
+def test_rpm_license_tags_with_grouping_are_kept_whole_not_reassociated():
+    tag = "GPL-2.0-or-later AND (MIT OR BSD-3-Clause)"
+    assert li.normalize_rpm_tag(tag) == ("NOASSERTION", "normalized-rpm-license-tag", [tag])
+
+
+@pytest.fixture
+def kit_tree(tmp_path):
+    copy_license_inputs(tmp_path)
+    copy_task_tools(tmp_path)
+    for relative in ("requirements.lock.txt", "requirements.dev.lock.txt", "images/devkit-packages.txt",
+                     "images/Containerfile.devkit", *(f"scripts/tools/{pin}" for _, pin in li.KIT_TOOL_PINS)):
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO / relative, tmp_path / relative)
+    shutil.copytree(REPO / "locks", tmp_path / "locks")
+    assert kit_problems(real_inventory(), tmp_path)[0] == []
+    return tmp_path
+
+
+def _edit(path, old, new):
+    text = path.read_text()
+    assert old in text
+    path.write_text(text.replace(old, new, 1))
+
+
+@pytest.mark.parametrize("change, message", [
+    # The image's base moves without a shared record for the new digest.
+    (lambda t: _edit(t / "images/Containerfile.devkit", "@sha256:638914ba", "@sha256:000000ba"),
+     "devkit: the base image of images/Containerfile.devkit has no shared license record with its digest"),
+    # A tool is re-pinned: its license must be re-reviewed.
+    (lambda t: _edit(t / "scripts/tools/helm-pin.txt", "version: v4.3.0", "version: v4.3.1"),
+     "devkit:kit-tool:helm: scripts/tools/helm-pin.txt differs from the record; re-review the tool license"),
+    # An RPM leaves the list while its record stays.
+    (lambda t: _edit(t / "images/devkit-packages.txt", "yajl-0:2.1.0-25.el9.x86_64\n", ""),
+     "devkit:rpm:yajl: recorded RPM yajl-0:2.1.0-25.el9.x86_64 is not in images/devkit-packages.txt"),
+])
+def test_kit_pin_changes_need_a_license_re_review(kit_tree, change, message):
+    change(kit_tree)
+    problems = kit_problems(real_inventory(), kit_tree)[0]
+    assert any(p.startswith(message) for p in problems), problems
+
+
+def test_every_tool_pin_the_devkit_image_reads_is_a_kit_tool_pin():
+    """A tool added to the image recipe cannot ship without a kit license record."""
+    read = set(re.findall(r"\$pins/([a-z0-9-]+-pin\.txt)", (REPO / "images/Containerfile.devkit").read_text()))
+    assert read and read <= {pin for _, pin in li.KIT_TOOL_PINS}
+
+
+def test_kit_generate_derives_rpm_records_from_header_tags_and_never_approves():
+    inventory = real_inventory()
+    tags = {e["bind"]["nevra"]: e["license_declared"] for e in inventory["devkit"]["components"] if e["kind"] == "rpm"}
+    # Stand-in dists carrying the recorded dev-only identities, so only the RPM path changes.
+    found = {}
+    for entry in inventory["devkit"]["python"]:
+        found[(entry["name"], entry["version"])] = [li.Dist(entry["name"], entry["version"], "wheel", entry["wheel"],
+                                                            entry["sha256"], _metadata(entry), {})]
+    nevra = next(n for n in tags if n.startswith("git-core-"))
+    tags[nevra] = "GPLv2 and Sleepycat"
+    merged, warnings = li.generate_kit(REPO, inventory, found, tags)
+    git = next(e for e in merged["devkit"]["components"] if e["id"] == "rpm:git-core")
+    assert git["status"] == "pending-owner-decision" and git["approval_ref"] is None and "decision" not in git
+    assert warnings[-1] == "rpm git-core: License tag changed; decision fields dropped, owner re-review needed"
+    tar = next(e for e in merged["devkit"]["components"] if e["id"] == "rpm:tar")
+    assert tar["status"] == "approved" and tar["approval_ref"].startswith(GPL_DECISION_REF)
+    with pytest.raises(li.InventoryError):
+        li.generate_kit(REPO, inventory, found, {k: v for k, v in tags.items() if k != nevra})
+
+
+def _metadata(entry):
+    field = {"License-Expression": "License-Expression", "License": "License"}.get(entry["declared_source"], "License")
+    return f"Metadata-Version: 2.4\nName: {entry['name']}\nVersion: {entry['version']}\n{field}: {entry['license_declared']}\n".encode()
+
+
+def test_kit_notices_refuse_an_oras_licence_off_its_pinned_digest(tmp_path):
+    inventory = real_inventory()
+    (tmp_path / "oras-LICENSE").write_bytes(b"not the pinned licence\n")
+    with pytest.raises(li.InventoryError):
+        li.render_kit_notices(REPO, inventory, tmp_path)

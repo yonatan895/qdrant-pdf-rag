@@ -3,7 +3,7 @@
 # its image into the site registry. Ships inside the kit as install.sh.
 #
 #   SNEAKERNET_TRUSTED_PUB=<release-signing.pub> sh install.sh \
-#       --registry <registry>/<path> [--verify-pod <pod>] [--registry-ca-dir DIR] [--kit DIR]
+#       --registry <registry>/<path> [--verify-pod <pod>] [--registry-ca-dir DIR] [--kit DIR] [--rehearsal]
 #
 # Run it only after the Windows trust-anchor check (devkit-windows.md step 1): a
 # verifier inside the kit cannot vouch for itself, so these checks are trusted
@@ -13,7 +13,8 @@
 #   3. any member missing or differing from SHA256SUMS, and any file, link or
 #      special file SHA256SUMS does not list (the inventory);
 #   4. a MANIFEST whose key, image digest, config digest or oras.exe digest
-#      differs from the members;
+#      differs from the members, or that lacks license_gate: enforced (a licence
+#      rehearsal kit from pack.sh --license-rehearsal; only CI passes --rehearsal);
 # then copies the OCI layout to <registry>/<path>:<key> with skopeo, using the
 # session registry auth (mfr-session-login --registry), reads the manifest back
 # by digest and by tag, and with --verify-pod checks that pod's imageID.
@@ -29,14 +30,16 @@ KIT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 REPOSITORY=""
 POD=""
 CA_DIR=""
+REHEARSAL=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --kit) KIT=$(CDPATH= cd -- "${2:-}" 2>/dev/null && pwd -P) || die "--kit must name the kit directory"; shift 2 ;;
         --registry) REPOSITORY="${2:-}"; shift 2 ;;
         --verify-pod) POD="${2:-}"; [ -n "$POD" ] || die "--verify-pod needs a pod name"; shift 2 ;;
         --registry-ca-dir) CA_DIR="${2:-}"; [ -d "$CA_DIR" ] || die "--registry-ca-dir must name a directory of CA certificates (*.crt)"; shift 2 ;;
+        --rehearsal) REHEARSAL=1; shift ;;
         -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
-        *) die "unsupported argument (usage: sh install.sh --registry <registry>/<path> [--verify-pod <pod>] [--registry-ca-dir DIR] [--kit DIR])" ;;
+        *) die "unsupported argument (usage: sh install.sh --registry <registry>/<path> [--verify-pod <pod>] [--registry-ca-dir DIR] [--kit DIR] [--rehearsal])" ;;
     esac
 done
 case "$KIT" in
@@ -95,6 +98,12 @@ cmp -s "$WORK/listed" "$WORK/present" ||
 
 echo "==> 4. MANIFEST against the members"
 field() { awk -v k="$1:" '$1 == k { n++; v = $2 } END { if (n == 1) print v }' "$KIT/MANIFEST.txt"; }
+# The kit licence gate (docs/licensing.md#dev-kit): a gap kit was packed with it enforced.
+case "$(field license_gate):$REHEARSAL" in
+    enforced:*) ;;
+    rehearsal:1) echo "WARNING: licence rehearsal kit accepted for a CI rehearsal (--rehearsal); never install it in the gap" >&2 ;;
+    *) die "the kit MANIFEST has no license_gate: enforced (a licence rehearsal kit or an older kit): do not install it in the gap; ask for a kit packed without --license-rehearsal after the owner records the kit licence decisions (docs/licensing.md#dev-kit)" ;;
+esac
 KEY=$(field key)
 DIGEST=$(field image_digest)
 printf '%s\n' "$KEY" | grep -Eqx '[0-9a-f]{64}' || die "MANIFEST names no valid key: transfer the kit again"

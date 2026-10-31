@@ -7,13 +7,15 @@
 #   - the exact RPM set in images/devkit-packages.txt (skopeo, git-core, openssl, tar,
 #     gzip and their dependencies), from the UBI repositories only;
 #   - the hash-locked dev wheels (requirements.dev.lock.txt) installed into the base
-#     environment, plus the verified dev wheelhouse at /opt/devkit/wheelhouse;
+#     environment, with the two lock files at /opt/devkit/locks/. The wheels themselves
+#     are bind-mounted for the install only, so the image holds no wheelhouse (D-7);
 #   - Task, Helm 4 and oc/kubectl from scripts/tools/*-pin.txt;
 #   - the session helpers from images/devkit/bin/.
 # The project itself is not installed: a checkout's source is used in place
-# (PYTHONPATH=<checkout>/src), so development installs and builds nothing.
+# (PYTHONPATH=<checkout>/src), or `prepare_python.py --kit --venv DIR` layers a small
+# venv over this environment with only the checkout installed editable.
 #
-# Named build contexts (scripts/image_inventory.py BUILD_CONTEXTS):
+# Named build contexts (scripts/image_inventory.py BUILD_CONTEXTS), both bind-mounted:
 #   wheelhouse    the dev wheelhouse (dependency_lock.py prepare --profile dev)
 #   devkit-tools  the Task, Helm and oc archives named by their pins' asset: lines
 # Build scripts and pins are bind-mounted, never copied into the image. The kit key
@@ -75,13 +77,14 @@ USER root
 COPY --from=tools /out/ /usr/local/bin/
 COPY requirements.dev.lock.txt /opt/devkit/locks/requirements.dev.lock.txt
 COPY locks/cp314-linux-x86_64.json /opt/devkit/locks/locks/cp314-linux-x86_64.json
-# Wheels only: the context's .task-complete marker records the factory host, not the kit.
-COPY --from=wheelhouse /*.whl /opt/devkit/wheelhouse/
 # The agent image's idiom with the dev profile: verify the wheelhouse, install offline
-# with hashes, then record the installed receipt, which must equal the dev lock.
+# with hashes, then record the installed receipt, which must equal the dev lock. The
+# wheelhouse is bind-mounted for this step only, so no wheel remains in the image (D-7).
+# The verifier reads only *.whl, so the context's .task-complete marker plays no part.
 RUN --mount=type=bind,source=scripts/dependency_lock.py,target=/opt/devkit-build/dependency_lock.py \
-    python3 /opt/devkit-build/dependency_lock.py --root /opt/devkit/locks wheelhouse --profile dev --directory /opt/devkit/wheelhouse >/dev/null \
-    && PIP_CONFIG_FILE=/dev/null python3 -m pip --isolated install --no-index --no-cache-dir --only-binary=:all: --require-hashes --find-links /opt/devkit/wheelhouse -r /opt/devkit/locks/requirements.dev.lock.txt \
+    --mount=type=bind,from=wheelhouse,target=/opt/devkit-build/wheelhouse \
+    python3 /opt/devkit-build/dependency_lock.py --root /opt/devkit/locks wheelhouse --profile dev --directory /opt/devkit-build/wheelhouse >/dev/null \
+    && PIP_CONFIG_FILE=/dev/null python3 -m pip --isolated install --no-index --no-cache-dir --only-binary=:all: --require-hashes --find-links /opt/devkit-build/wheelhouse -r /opt/devkit/locks/requirements.dev.lock.txt \
     && python3 -m pip check \
     && python3 /opt/devkit-build/dependency_lock.py --root /opt/devkit/locks installed --profile dev --output /opt/devkit/installed-inventory.json \
     && rm -rf /root/.cache \

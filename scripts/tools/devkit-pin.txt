@@ -9,5 +9,5 @@
 #
 # `python3 scripts/devkit_key.py --check` refuses a stale key. Only kit packing and
 # the release gate run it (D-8); a dependency PR does not have to re-pin.
-key: 04ca88a2d2e17fe0f0eb80b82946039f644f5e41ef12a0314c6de05e978d2157
-digest: sha256:b5c03e1950517c6a8689cc2273350a99ad1643b31f45ca1c00925ec28d470c8c
+key: 88cf3592671febf6ab57b5f092faac43c523d27722e6effef4d6ad69f2cfbe96
+digest: sha256:PENDING
