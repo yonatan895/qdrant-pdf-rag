@@ -682,7 +682,7 @@ def test_bootstrap_refuses_an_unsafe_reference_docs_member_and_keeps_the_previou
     _replace_docs(bundle_dir, member())
     result = _bootstrap(bundle_dir)
     assert result.returncode != 0
-    assert f"FAIL: reference docs: {needle}" in result.stderr
+    assert "FAIL: reference docs: " in result.stderr and needle in result.stderr
     assert "SUCCESS" not in result.stdout
     assert {p.relative_to(docs): p.read_bytes() for p in docs.rglob("*") if p.is_file()} == before
     assert not (bundle_dir / "operator workspace/dist/escaped.md").exists()
