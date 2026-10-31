@@ -12,6 +12,7 @@ import base64
 import hashlib
 import importlib.util
 import json
+import re
 import shutil
 import socket
 import ssl
@@ -443,14 +444,30 @@ CANARIES = (
     DISPLAY,
     "CANARY-ACCESS-TOKEN",
     "CANARY-SIGNATURE",
-    "eyJ",
 )
+# A JWT is base64url('{"...') + "." + base64url('{"...'): two "eyJ" segments joined
+# by a dot. A bare "eyJ" substring also turns up by chance in the random
+# state/nonce/code_challenge of the printed authorization URL, which made the
+# old plain-substring canary flaky.
+JWT_SHAPE = re.compile(r"eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*")
 
 
 def assert_no_leak(out: str) -> None:
     for c in CANARIES:
         assert c not in out, f"output leaked {c[:8]}..."
+    assert not JWT_SHAPE.search(out), "output leaked a JWT"
     assert "code-" not in out.split("https://", 1)[-1].split("\n", 1)[-1]
+
+
+def test_leak_check_flags_a_jwt_but_not_random_url_parameters():
+    """Regression for the flaky canary: random base64url may contain "eyJ"."""
+    url_line = ("https://adfs.example/adfs/oauth2/authorize?state=tddZzdtIeyJ2eyYTPWR8ZDLrtuo09gGo"
+                "&nonce=YnZR6_rywj16TQZq6EJpuJCr6JLWdlam&code_challenge_method=S256\n")
+    assert_no_leak("discovery: ok\n" + url_line)
+    header = base64.urlsafe_b64encode(b'{"alg":"RS256"}').rstrip(b"=").decode()
+    payload = base64.urlsafe_b64encode(b'{"upn":"x"}').rstrip(b"=").decode()
+    with pytest.raises(AssertionError, match="leaked a JWT"):
+        assert_no_leak(f"token: {header}.{payload}.sig\n")
 
 
 @needs_openssl
