@@ -61,8 +61,8 @@ The default `CI_PYTHON_IMAGE` in `.gitlab-ci.yml` is now the dev workspace
 image, `$CI_APPROVED_REGISTRY/qdrant-pdf-rag-devkit` by the digest in
 `scripts/tools/devkit-pin.txt` (ADR-0009 §8). Install the kit image there
 (`scripts/devkit/install.sh --registry <CI_APPROVED_REGISTRY>/qdrant-pdf-rag-devkit`)
-and leave the project variable `CI_PYTHON_IMAGE` unset; a job on any other
-image fails with a fixed message. Jobs use the image's installed dev
+and leave the project variable `CI_PYTHON_IMAGE` unset; a Python job (lint,
+test, hazards, sim, gate-l1) on any other image fails with a fixed message. Jobs use the image's installed dev
 environment and its Task and Helm, so these GitLab CI/CD variables are retired:
 
 - `CI_HELM_ARCHIVE`: the `hygiene` job refuses it with a fixed message naming

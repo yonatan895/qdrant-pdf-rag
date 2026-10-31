@@ -73,7 +73,8 @@
 #                                   where scripts/devkit/install.sh puts it; so each
 #                                   branch runs on the kit for its own dev lock. Its
 #                                   installed dev environment, Task and Helm are
-#                                   used in place; a job on any other image fails.
+#                                   used in place; a Python job on any other image
+#                                   fails.
 #   CI_TASK_ARCHIVE (required for test, sim, hazards) path on the runner to the
 #                                   approved pinned linux-amd64 Task release archive
 #                                   (scripts/tools/task-pin.txt), for example the
@@ -221,6 +222,9 @@ lanes:
         exit 1
       fi
       python3 scripts/prepare_python.py --kit --venv "$CI_PROJECT_DIR/.venv"
+    # The base image's BASH_ENV/ENV source its activate script in every bash
+    # child, which would put the image interpreter back in front of the venv.
+    - unset BASH_ENV ENV
     - export PATH="$CI_PROJECT_DIR/.venv/bin:$PATH"
 
 hygiene:

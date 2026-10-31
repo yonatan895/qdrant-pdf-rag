@@ -43,7 +43,8 @@ printf '%s\n' "$HELM_BINARY_SHA256" | grep -Eqx '[0-9a-f]{64}' ||
 KIT_FIX="run this in the dev kit image that scripts/tools/devkit-pin.txt names for this checkout"
 digest() { sha256sum "$1" | awk '{print $1}'; }
 
-# Verify every source before linking anything, so a refusal leaves .tools/ as it was.
+# Verify every source before linking anything, so a missing tool or a digest
+# refusal leaves .tools/ as it was.
 verify() {  # name expected
     [ -f "$FROM/$1" ] && [ ! -L "$FROM/$1" ] && [ -x "$FROM/$1" ] ||
         die "the image has no executable $1; $KIT_FIX"

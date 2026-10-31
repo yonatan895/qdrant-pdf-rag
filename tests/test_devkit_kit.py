@@ -906,6 +906,31 @@ def test_link_tools_refuses_a_tool_off_its_pin_and_changes_nothing(link_tree, da
     assert not (tree / ".tools").exists()
 
 
+@pytest.mark.parametrize("name, data, message", [
+    ("task", b"#!/bin/sh\necho 3.52.0\n", "the linked task is not the pinned version"),
+    ("helm", b"#!/bin/sh\necho v4.2.0+gold\n", "the linked helm is not the pinned version"),
+])
+def test_link_tools_refuses_a_binary_that_is_not_the_pinned_version(link_tree, name, data, message):
+    # A pin whose digest matches bytes that report another version is refused, not trusted.
+    tree, image, _archive = link_tree
+    (image / name).write_bytes(data)
+    pin = tree / "scripts/tools" / f"{name}-pin.txt"
+    expected = _sha(FAKE_TASK if name == "task" else FAKE_HELM)
+    pin.write_text(pin.read_text().replace(f"binary-sha256: {expected}", f"binary-sha256: {_sha(data)}"))
+    proc = _link(tree, image)
+    assert proc.returncode == 2
+    assert proc.stderr.startswith(f"link-tools: {message}")
+
+
+def test_link_tools_refuses_a_directory_in_place_of_a_tool(link_tree):
+    tree, image, _archive = link_tree
+    (tree / ".tools/bin/helm").mkdir(parents=True)
+    proc = _link(tree, image)
+    assert proc.returncode == 2
+    assert proc.stderr.startswith("link-tools: .tools/bin/helm is a directory")
+    assert (tree / ".tools/bin/helm").is_dir() and not (tree / ".tools/bin/helm").is_symlink()
+
+
 def test_link_tools_rerun_is_a_no_op_and_a_stale_copy_converges(link_tree):
     tree, image, archive = link_tree
     assert _link(tree, image, "--task-archive", str(archive)).returncode == 0

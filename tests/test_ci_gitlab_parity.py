@@ -202,7 +202,7 @@ def kit_violations(doc):
     """Python jobs use the kit's environment and tools, never a wheelhouse or an archive install."""
     found = []
     base = '\n'.join(lines(doc['.py-base'], 'before_script'))
-    if KIT_PYTHON not in base or '/opt/devkit/locks' not in base \
+    if KIT_PYTHON not in base or '/opt/devkit/locks' not in base or 'unset BASH_ENV ENV' not in base \
             or 'export PATH="$CI_PROJECT_DIR/.venv/bin:$PATH"' not in base:
         found.append('.py-base: Python does not come from the kit (prepare_python.py --kit)')
     all_jobs = jobs(doc)
@@ -535,6 +535,8 @@ NEGATIVE_CONTROLS = {
         CI_PYTHON_IMAGE=KIT_REPOSITORY + ':latest'),
     'Python from a wheelhouse': lambda d: d['.py-base'].update(before_script=[
         'python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse "$PIP_FIND_LINKS"']),
+    'image activation can reorder PATH in bash children': lambda d: d['.py-base']['before_script'].remove(
+        'unset BASH_ENV ENV'),
     'Python job outside the kit environment': lambda d: d['gate-l1'].update(extends='.gate-pipeline'),
     'Helm from an archive': lambda d: d['sim']['script'].insert(
         1, 'sh scripts/tools/install-helm.sh --archive "$CI_HELM_ARCHIVE"'),

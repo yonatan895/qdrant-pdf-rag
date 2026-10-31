@@ -2127,7 +2127,7 @@ digest in `scripts/tools/devkit-pin.txt`, which
 variable unset, so each branch runs on the kit for its own dev lock. Jobs use the
 image's installed environment (`prepare_python.py --kit`) and its Task and Helm
 (`scripts/devkit/link-tools.sh`, which checks each binary against its pin), and
-fail closed on any other image. `CI_TASK_ARCHIVE` stays: the artifact tests and
+the Python jobs fail closed on any other image. `CI_TASK_ARCHIVE` stays: the artifact tests and
 the doctor read the Task archive, which the image does not hold. `CI_HELM_ARCHIVE`
 is retired and refused by hygiene; `PIP_FIND_LINKS` and `PIP_INDEX_URL` are no
 longer read ([release notes](release-notes.md)).
