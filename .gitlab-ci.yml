@@ -232,6 +232,9 @@ hygiene:
   stage: hygiene
   script:
     - python3 scripts/check_agent_context.py
+    # Code-owner approvals stand in for the Verifier (ADR-0009 section 6, GH#1118 F4):
+    # the committed .gitlab/CODEOWNERS must equal the generator output.
+    - python3 scripts/gap_codeowners.py check
     - |
       set -eu
       if [ -n "${CI_COMMIT_TAG:-}" ] && [ "${CI_COMMIT_REF_PROTECTED:-}" != "true" ]; then

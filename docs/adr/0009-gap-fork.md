@@ -321,8 +321,10 @@ The gap maintainer creates the fork once:
    checkout exists yet, so this runs the bundle's own code; every later
    import verifies with the fork's code first (step 1 below).
 2. Push its history to the empty GitLab project.
-3. Commit `gap/README.md` and a `gap/patches.md` that holds only its title
-   line, with the trailer `Upstream-Release: <SHA>`.
+3. Commit `gap/README.md`, a `gap/patches.md` that holds only its title
+   line and the `.gitlab/CODEOWNERS` that
+   `python3 scripts/gap_codeowners.py write --group @<group> --approver @<user>`
+   writes (§6), with the trailer `Upstream-Release: <SHA>`.
 4. Then protect `main` (§6).
 
 Agents never push `main`.
@@ -407,11 +409,11 @@ The script runs these steps. Each refusal is a fixed `STOP:` line in it.
 
 After `IMPORT READY`:
 
-1. Until follow-ups F4 and F5 land, run these by hand.
+1. Run these by hand.
    - **Dev kit.** If `agent_doctor` refuses the dev kit, it names the kit to
      request. Stop until that kit is installed.
-   - **CODEOWNERS.** If the file has drifted, run the generator and commit
-     its output.
+   - **CODEOWNERS.** The `hygiene` job fails while the file is stale. Run
+     `python3 scripts/gap_codeowners.py refresh` and commit its output.
    - **Keys.** `$R/env-keys.diff` lists the key changes. Apply them to
      `gap/config/` in their own commit.
    - **Extension surface.** `$R/release-notes.diff` lists each removed or
@@ -492,24 +494,31 @@ gap patches stay ledgered.
   - `main` is protected, with no direct push;
   - a merge needs a successful pipeline and the approvals below;
   - the merge method is a merge commit, and squashing is not allowed.
-- **CODEOWNERS (Q5).** A generator (follow-up F4, proposed
+- **CODEOWNERS (Q5).** A generator (follow-up F4,
   `scripts/gap_codeowners.py`) writes `.gitlab/CODEOWNERS`. It takes the
   owner group and the named approvers as arguments, so no site name enters
   upstream.
   - **Every path except `gap/`** is owned by the gap maintainer group, and
-    code-owner approval is required on `main`. F4 confirms which
-    CODEOWNERS form leaves `gap/` without an owner on the site's GitLab.
+    code-owner approval is required on `main`. The site's GitLab floor is
+    17.0, which has no `!` exclusion (17.10), so the section lists each
+    tracked top-level entry except `gap/` (plus `.gitlab/`). A new top-level
+    path changes the output, so it waits for a regenerated, protected file.
+    The file uses only 17.0 syntax: sections and path entries (GH#446).
   - **The protected list** also needs a **second named approver**. It is the
     list that `scripts/acceptance.py` and `scripts/unit_evidence.py` already
     define (`VERIFICATION_INPUTS`, `taskfiles/*.yml` and the producer
     workflows), plus the gap's own gates: `.gitlab-ci.yml`,
     `.gitlab/CODEOWNERS`, `scripts/check_junit_clean.py`,
     `scripts/gate_l1.py`, the dev kit pin, and the gap release pipeline and
-    signing files.
-  - **One source of truth.** An upstream unit test asserts that the
-    generator's protected set equals those lists plus the named gap
-    additions. The GitLab hygiene job fails when the committed file differs
-    from the generator output.
+    signing files (today both `pack.sh` signers; F6 adds its own), and
+    the generator itself. Each approver is a single user, never a group;
+    one person may give both approvals (maintainer, 2026-10-31).
+  - **One source of truth.** An upstream unit test
+    (`tests/test_gap_codeowners.py`) asserts that the generator's protected
+    set equals those lists plus the named gap additions. The GitLab hygiene
+    job fails when the committed file differs from the generator output,
+    whose owners it reads back from that file, or when a `CODEOWNERS` or
+    `docs/CODEOWNERS`, which GitLab reads first, exists.
 - **Required verification met** (in the gap) means all of the following:
   - The latest pipeline on the MR head is green, every job ran, and the
     clean-JUnit gate passes.
@@ -793,7 +802,7 @@ The names the gap builds on are a **public API**, limited to this list:
 | F1 | Done: outside dry-run, load, deploy, ingest, validate and retire-legacy refuse a checkout that is not a verified signed release. The trust anchor is required. The opt-out needs `CI_REHEARSAL=1`. Tests go in the air-gap shell suites. The live bundle lanes export the packing job's key as the anchor; hermetic fixtures from plain trees set the opt-out | Lanes and taskfiles: yes |
 | F2 | Two trust anchors (upstream and gap) and the MANIFEST `origin:` field | No |
 | F3 | Done in this PR: `tests/test_hygiene.py` fails on GitHub Actions when `gap/` or `.gitlab/` exists | No |
-| F4 | The CODEOWNERS generator, its equality test and the GitLab hygiene check | No |
+| F4 | Done: `scripts/gap_codeowners.py`, its equality test and the GitLab hygiene check (§6) | No |
 | F5 | The dev kit (§8), as [plan](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480613459) PR-2, PR-4 (with `prepare_python.py --kit`) and PR-5 (with `scripts/gap/ci_status.py`) | `agent_doctor.py` and `prepare_python.py`: yes. `devkit_key.py` is not a unit-evidence input: both import it only to word the refusal, with a fixed fallback (#1152, #1162). The factory workflow is separate from `e2e.yml` and not an acceptance producer: no |
 | F6 | The gap release pipeline: protected-tag build and sign jobs, the unprivileged in-namespace build, the gap pack (`origin: gap`), the key-generation runbook and the release record template | Pack and taskfiles: yes |
 | F7 | Done: `scripts/gap/import_release.sh` from §4, with its throwaway-repo tests. §4 links to it | No |
