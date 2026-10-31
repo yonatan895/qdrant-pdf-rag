@@ -11,6 +11,7 @@
 #   image/                 the pinned dev workspace image (oras.exe and skopeo read it)
 #   oras.exe, oras-LICENSE the pinned Windows ORAS (scripts/tools/oras-windows-pin.txt)
 #   oras                   the pinned static Linux ORAS (oras-pin.txt), for the runbook fallback
+#   task-LICENSE           the licence of the image's pinned Task (task-pin.txt license-sha256)
 #   bastion.template.yaml  deploy/workspace/bastion.template.yaml
 #   devkit-windows.md      docs/runbooks/devkit-windows.md
 #   install.sh, image_manifest.py   the bastion verifier/installer and its OCI reader
@@ -22,10 +23,11 @@
 #
 # Refuses a stale kit key or a sha256:PENDING digest (D-8), and runs the kit licence
 # gate (license_inventory.py check --kit, docs/licensing.md#dev-kit) before any pull:
-# an unrecorded kit component, an open owner decision or an absent or stale kit
-# approval refuses the pack. --reuse-image takes the image/ directory of an earlier
-# kit with the same key instead of pulling: the snapshot-only re-sign (D-9). Its
-# digest must still equal the pin.
+# an unrecorded kit component refuses every pack; an open owner decision or an absent
+# or stale kit approval refuses a promotable pack (SNEAKERNET_KEY_TRUSTED=true) and
+# is recorded as license_gate: rehearsal otherwise. --reuse-image takes the image/
+# directory of an earlier kit with the same key instead of pulling: the snapshot-only
+# re-sign (D-9). Its digest must still equal the pin.
 
 . "$(dirname -- "$0")/../airgap/common.sh"
 
@@ -33,7 +35,7 @@ REUSE_IMAGE=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --reuse-image) REUSE_IMAGE="${2:-}"; [ -n "$REUSE_IMAGE" ] || die "--reuse-image needs the image/ directory of an earlier kit"; shift 2 ;;
-        -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
         *) die "unsupported argument (usage: sh scripts/devkit/pack.sh [--reuse-image DIR])" ;;
     esac
 done
@@ -64,11 +66,20 @@ printf '%s\n' "$DIGEST" | grep -Eqx 'sha256:[0-9a-f]{64}' || die "scripts/tools/
 # kit scope. A kit component (dev wheel, RPM, tool pin, base image) without a
 # record, an open owner decision, or an absent or stale kit approval refuses the
 # pack before anything is pulled. Its summary line goes into MANIFEST.
-LICENSE_SUMMARY=$(python3 "$REPO_ROOT/scripts/license_inventory.py" --root "$REPO_ROOT" check --kit) || {
+# An ephemeral-key kit is a non-promotable rehearsal (docs/deploy.md): its open
+# decisions are printed and recorded in MANIFEST and the notices, not enforced.
+if [ "${SNEAKERNET_KEY_TRUSTED:-}" = "true" ]; then LICENSE_GATE=enforced; else LICENSE_GATE=rehearsal; fi
+# shellcheck disable=SC2046
+LICENSE_SUMMARY=$(python3 "$REPO_ROOT/scripts/license_inventory.py" --root "$REPO_ROOT" check --kit \
+    $([ "$LICENSE_GATE" = rehearsal ] && echo --rehearsal)) || {
     printf '%s\n' "$LICENSE_SUMMARY" >&2
     die "the dev kit licence check failed (its FAIL lines above name each item): record every kit component in the devkit section of licenses/inventory.json, have the owner resolve open decisions, then record devkit.approval with the kit scope digest above (docs/licensing.md#dev-kit)"
 }
 LICENSE_STATUS=$(printf '%s\n' "$LICENSE_SUMMARY" | sed -n '$p' | sed 's/^license-inventory: //')
+if [ "$LICENSE_GATE" = rehearsal ] && printf '%s\n' "$LICENSE_SUMMARY" | grep -q '^license-inventory: UNRESOLVED: devkit'; then
+    printf '%s\n' "$LICENSE_SUMMARY" | grep '^license-inventory: UNRESOLVED: devkit' >&2
+    echo "WARNING: rehearsal kit (ephemeral key): the open licence items above are recorded, not enforced; a promotable kit (SNEAKERNET_KEY_TRUSTED=true) refuses them (docs/licensing.md#dev-kit)" >&2
+fi
 
 REMOTE=$(git remote get-url origin 2>/dev/null || true)
 GITHUB_REPO=${DEVKIT_SNAPSHOT_REPO:-}
@@ -165,6 +176,23 @@ tar -xzf "$ORAS_LINUX_SOURCE" -C "$STAGE/oras-linux" oras || die "$ORAS_LINUX_AS
     die "the Linux oras does not match the binary-sha256 in scripts/tools/oras-pin.txt"
 cp "$STAGE/oras-linux/oras" "$KIT/oras"
 
+echo "==> Pinned Task licence (the image's /usr/local/bin/task)"
+# The image holds the Task binary only; its MIT notice travels in the kit.
+. "$REPO_ROOT/scripts/tools/task-artifact.sh"
+task_read_pin "$REPO_ROOT/scripts/tools/task-pin.txt"
+TASK_SOURCE=${DEVKIT_TASK_ARCHIVE:-$REPO_ROOT/.tools/cache/$TASK_ASSET}
+if [ ! -f "$TASK_SOURCE" ] && [ -z "${DEVKIT_TASK_ARCHIVE:-}" ]; then
+    command -v curl >/dev/null 2>&1 || die "curl or a provisioned DEVKIT_TASK_ARCHIVE is required on the connected pack host"
+    TASK_SOURCE="$STAGE/$TASK_ASSET"
+    curl -fsSL --retry 3 --retry-all-errors -o "$TASK_SOURCE" "$TASK_ORIGIN" || die "could not download $TASK_ASSET"
+fi
+[ -f "$TASK_SOURCE" ] || die "DEVKIT_TASK_ARCHIVE file not found: $TASK_SOURCE"
+mkdir "$STAGE/task"
+# Verifies the archive, binary and licence against task-pin.txt or exits non-zero.
+( task_extract_verified "$TASK_SOURCE" "$STAGE/task" ) ||
+    die "$TASK_ASSET does not match scripts/tools/task-pin.txt: download it again from the pinned origin"
+cp "$STAGE/task/LICENSE" "$KIT/task-LICENSE"
+
 echo "==> Anchor bootstrap (ADR-0009 §8 verbatim; the runbook's copy must be identical)"
 # The fenced block after a marker line, exactly.
 fenced_after() {
@@ -206,6 +234,7 @@ echo "==> MANIFEST"
     echo "oras_sha256: $ORAS_BINARY_SHA256"
     echo "oras_linux_sha256: $ORAS_LINUX_BINARY_SHA256"
     echo "license_status: $LICENSE_STATUS"
+    echo "license_gate: $LICENSE_GATE"
     # Every kit key input, as `pin_sha256: <hex> <path>` in the key's order.
     python3 -I - "$REPO_ROOT" <<'PYEOF'
 import hashlib, sys

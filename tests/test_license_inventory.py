@@ -7,6 +7,7 @@ class cannot rest on declared metadata; owner approval goes stale when records
 change. None of this is a legal verdict, and no test marks a license approved.
 """
 import copy
+import re
 import shutil
 import zipfile
 
@@ -523,19 +524,27 @@ GPL_DECISION_REF = "gh:yonatan895/qdrant-pdf-rag#1118 issuecomment-6480982316"
 
 
 def kit_problems(inventory, root=REPO):
+    """(record problems, owner-decision blockers, kit approval state)."""
     return li.run_kit_check(root, inventory, None)
 
 
+# The RPMs whose header tags use a Fedora legacy abbreviation with several SPDX
+# readings (read from the pinned image, 2026-10-31); each awaits the owner.
+AMBIGUOUS_RPMS = {"cracklib", "cracklib-dicts", "gzip", "less", "libcbor", "libdb", "libeconf", "libedit",
+                  "libfdisk", "libfido2", "libpwquality", "libseccomp", "libutempter", "openssh",
+                  "openssh-clients", "pam", "shadow-utils-subid", "util-linux", "util-linux-core"}
+
+
 def test_repository_kit_record_reconciles_and_only_owner_decisions_block_the_pack():
-    """Every kit component has a record bound to its real pin; what still refuses the
-    pack is only the owner's: open decisions and the absent kit approval."""
+    """Every kit component has a record bound to its real pin; what still refuses a
+    promotable pack is only the owner's: open decisions and the absent kit approval."""
     inventory = real_inventory()
-    problems, unresolved, state = kit_problems(inventory)
-    assert state == "absent"
-    blockers = {f"devkit: {item} awaits owner decision" for item in unresolved}
-    assert set(problems) == blockers | {
-        ("devkit approval: no owner approval is recorded for the kit inventory; record devkit.approval with "
-         "the kit scope digest (docs/licensing.md#dev-kit)")}
+    problems, blockers, state = kit_problems(inventory)
+    assert problems == [] and state == "absent"
+    pending = {b.split(":")[2] for b in blockers if b.endswith("awaits owner decision")}
+    assert pending == AMBIGUOUS_RPMS
+    assert blockers[-1].startswith("devkit approval: no owner approval is recorded for the kit inventory")
+    assert len(blockers) == len(AMBIGUOUS_RPMS) + 1
     # The release scope and its digest do not include the kit section.
     without = {k: v for k, v in inventory.items() if k != "devkit"}
     assert li.scope_digest(without) == li.scope_digest(inventory)
@@ -574,6 +583,53 @@ def test_only_the_maintainers_gpl_decision_is_recorded_as_a_kit_approval():
 ])
 def test_rpm_license_tags_normalize_only_unambiguous_terms(tag, expected):
     assert li.normalize_rpm_tag(tag) == expected
+
+
+def test_rpm_license_tags_with_grouping_are_kept_whole_not_reassociated():
+    tag = "GPL-2.0-or-later AND (MIT OR BSD-3-Clause)"
+    assert li.normalize_rpm_tag(tag) == ("NOASSERTION", "normalized-rpm-license-tag", [tag])
+
+
+@pytest.fixture
+def kit_tree(tmp_path):
+    copy_license_inputs(tmp_path)
+    copy_task_tools(tmp_path)
+    for relative in ("requirements.lock.txt", "requirements.dev.lock.txt", "images/devkit-packages.txt",
+                     "images/Containerfile.devkit", *(f"scripts/tools/{pin}" for _, pin in li.KIT_TOOL_PINS)):
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO / relative, tmp_path / relative)
+    shutil.copytree(REPO / "locks", tmp_path / "locks")
+    assert kit_problems(real_inventory(), tmp_path)[0] == []
+    return tmp_path
+
+
+def _edit(path, old, new):
+    text = path.read_text()
+    assert old in text
+    path.write_text(text.replace(old, new, 1))
+
+
+@pytest.mark.parametrize("change, message", [
+    # The image's base moves without a shared record for the new digest.
+    (lambda t: _edit(t / "images/Containerfile.devkit", "@sha256:638914ba", "@sha256:000000ba"),
+     "devkit: the base image of images/Containerfile.devkit has no shared license record with its digest"),
+    # A tool is re-pinned: its license must be re-reviewed.
+    (lambda t: _edit(t / "scripts/tools/helm-pin.txt", "version: v4.3.0", "version: v4.3.1"),
+     "devkit:kit-tool:helm: scripts/tools/helm-pin.txt differs from the record; re-review the tool license"),
+    # An RPM leaves the list while its record stays.
+    (lambda t: _edit(t / "images/devkit-packages.txt", "yajl-0:2.1.0-25.el9.x86_64\n", ""),
+     "devkit:rpm:yajl: recorded RPM yajl-0:2.1.0-25.el9.x86_64 is not in images/devkit-packages.txt"),
+])
+def test_kit_pin_changes_need_a_license_re_review(kit_tree, change, message):
+    change(kit_tree)
+    problems = kit_problems(real_inventory(), kit_tree)[0]
+    assert any(p.startswith(message) for p in problems), problems
+
+
+def test_every_tool_pin_the_devkit_image_reads_is_a_kit_tool_pin():
+    """A tool added to the image recipe cannot ship without a kit license record."""
+    read = set(re.findall(r"\$pins/([a-z0-9-]+-pin\.txt)", (REPO / "images/Containerfile.devkit").read_text()))
+    assert read and read <= {pin for _, pin in li.KIT_TOOL_PINS}
 
 
 def test_kit_generate_derives_rpm_records_from_header_tags_and_never_approves():

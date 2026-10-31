@@ -34,6 +34,7 @@ from tests.helpers_airgap import (
     symlink_tools,
 )
 from tests.helpers_image_inventory import tar_bytes
+from tests.helpers_task_artifact import task_archive, task_members
 
 TOOLS = ("sh", "dirname", "basename", "awk", "sed", "git", "tar", "gzip", "sha256sum", "date", "cat",
          "chmod", "cp", "mkdir", "rm", "mv", "grep", "tr", "cut", "head", "ls", "openssl", "python3",
@@ -214,14 +215,22 @@ def _write_inventory(tree: Path, inventory: dict, *, approve: bool = True) -> No
 def _resolve_kit_inventory(tree: Path) -> None:
     """The fixture's owner: rebind the oras records to the fake pins, resolve every
     open kit decision and approve the result, so a pack can pass the licence gate."""
+    _resolve_tools_only(tree)
+    inventory = _inventory(tree)
+    for entry in inventory["devkit"]["components"]:
+        if entry["status"] == "pending-owner-decision":
+            entry.update(status="approved", approval_ref="test-owner-record")
+    _write_inventory(tree, inventory)
+
+
+def _resolve_tools_only(tree: Path) -> None:
+    """Rebind the oras records to the fixture's fake pins and nothing else."""
     inventory = _inventory(tree)
     for entry in inventory["devkit"]["components"]:
         if entry["kind"] == "tool":
             pin = li.read_pin(tree, entry["bind"]["pin"].removeprefix("scripts/tools/"))
             entry["bind"].update({k: pin[k] for k in li.KIT_TOOL_FIELDS if k in pin})
-        if entry["status"] == "pending-owner-decision":
-            entry.update(status="approved", approval_ref="test-owner-record")
-    _write_inventory(tree, inventory)
+    _write_inventory(tree, inventory, approve=False)
 
 
 def _commit_inventory(ctx, inventory: dict, *, approve: bool = True) -> None:
@@ -289,6 +298,7 @@ def pack_tree(tmp_path, github):
         "DEVKIT_TEST_LAYOUT": str(layout),
         "DEVKIT_GITHUB_API": github,
         "SNEAKERNET_SIGNING_KEY": str(key),
+        "DEVKIT_TASK_ARCHIVE": str(task_archive()),
         **{name: str(path) for name, path in archives.items()},
     }
     return {"tree": tree, "env": env, "digest": digest, "pub": pub, "tmp": tmp_path}
@@ -395,6 +405,8 @@ def test_pack_writes_a_signed_plain_file_kit_whose_manifest_binds_the_pins(packe
     assert sbom["image"]["digest"] == ctx["digest"] and sbom["kit_key"] == expected_key
     assert "oras-LICENSE" in (kit / "THIRD-PARTY-NOTICES.txt").read_text()
     assert fields["license_status"].startswith("OK (") and "kit_unresolved=0 kit_approval=current" in fields["license_status"]
+    assert fields["license_gate"] == "rehearsal" and fields["signed"] == "ephemeral"
+    assert (kit / "task-LICENSE").read_bytes() == task_members()["task-LICENSE"]
 
 
 def test_kit_notices_name_every_kit_component_and_carry_the_pinned_oras_licence(packed):
@@ -419,6 +431,8 @@ def test_kit_notices_name_every_kit_component_and_carry_the_pinned_oras_licence(
     assert "image:ubi9-python-314-minimal" in notices and "project:mainframe-rag" in notices
     # The texts: the oras licence from the kit, the project LICENSE and the base RPM list.
     assert f"### kit-tool:oras-windows: oras-LICENSE (kit member)\n{ORAS_LICENSE.decode().rstrip()}" in notices
+    task_license = task_members()["task-LICENSE"].decode().rstrip()
+    assert f"### kit-tool:task: task-LICENSE (kit member)\n{task_license}" in notices
     assert "### project:mainframe-rag: LICENSE" in notices
     assert "### image:ubi9-python-314-minimal: licenses/ubi9-python-314-minimal.rpms.txt" in notices
 
@@ -456,27 +470,58 @@ def test_pack_refuses_a_stale_kit_approval(pack_tree):
     # A re-derived RPM header now declares more than the approved record did.
     openssl.update(license_declared="Apache-2.0 AND MIT", license_spdx="Apache-2.0 AND MIT")
     _commit_inventory(pack_tree, inventory, approve=False)
-    done = run_pack(pack_tree)
+    done = run_pack(pack_tree, SNEAKERNET_KEY_TRUSTED="true")
     assert done.returncode != 0
     assert "devkit approval: kit dependency or license records changed since the approved digest" in done.stderr
     assert "kit_approval=stale" in done.stderr
     assert not list((pack_tree["tree"] / "dist").glob("mfr-devkit-*"))
     # Re-approving the new digest is the fix the message names; the next pack passes.
     _commit_inventory(pack_tree, inventory)
-    assert run_pack(pack_tree).returncode == 0
+    assert run_pack(pack_tree, SNEAKERNET_KEY_TRUSTED="true").returncode == 0
 
 
-def test_pack_refuses_an_unresolved_kit_decision(pack_tree):
+@pytest.mark.parametrize("status, message", [
+    ("pending-owner-decision", "devkit: rpm:git-core: GPL-2.0-only (strong-copyleft) awaits owner decision"),
+    # Exclusion is no way out: the image installs the exact RPM list either way.
+    ("excluded", "devkit: rpm:git-core: excluded, but the kit still ships it"),
+])
+def test_promotable_pack_refuses_an_unresolved_kit_decision(pack_tree, status, message):
     """A withdrawn decision (status only, so the approved digest stays current) refuses."""
     inventory = _inventory(pack_tree["tree"])
     git = next(e for e in inventory["devkit"]["components"] if e["id"] == "rpm:git-core")
-    git.update(status="pending-owner-decision", approval_ref=None)
+    git.update(status=status, approval_ref=None)
     _commit_inventory(pack_tree, inventory, approve=False)
-    done = run_pack(pack_tree)
+    done = run_pack(pack_tree, SNEAKERNET_KEY_TRUSTED="true")
     assert done.returncode != 0
-    assert "devkit: rpm:git-core: GPL-2.0-only (strong-copyleft) awaits owner decision" in done.stderr
+    assert message in done.stderr
     assert "kit_approval=current" in done.stderr
     assert not list((pack_tree["tree"] / "dist").glob("mfr-devkit-*"))
+
+
+def test_rehearsal_pack_records_open_decisions_that_a_promotable_pack_refuses(pack_tree):
+    """An open RPM decision and no kit approval: an ephemeral-key (non-promotable) kit
+    packs and records both; a promotable one refuses."""
+    tree = pack_tree["tree"]
+    inventory = _inventory(tree)
+    libedit = next(e for e in inventory["devkit"]["components"] if e["id"] == "rpm:libedit")
+    libedit.update(status="pending-owner-decision", approval_ref=None)
+    inventory["devkit"]["approval"] = {"approval_ref": None, "approved_digest": None}
+    _commit_inventory(pack_tree, inventory, approve=False)
+    done = run_pack(pack_tree, SNEAKERNET_KEY_TRUSTED="true")
+    assert done.returncode != 0
+    assert "devkit: rpm:libedit: NOASSERTION (unknown) awaits owner decision" in done.stderr
+    assert "devkit approval: no owner approval is recorded for the kit inventory" in done.stderr
+    assert not list((tree / "dist").glob("mfr-devkit-*"))
+    done = run_pack(pack_tree)
+    assert done.returncode == 0, done.stderr
+    assert "WARNING: rehearsal kit (ephemeral key)" in done.stderr
+    kit = kit_dir(pack_tree)
+    fields = _manifest(kit)
+    assert fields["license_gate"] == "rehearsal" and fields["signed"] == "ephemeral"
+    assert "kit_unresolved=1 kit_approval=absent kit_gate=rehearsal" in fields["license_status"]
+    notices = (kit / "THIRD-PARTY-NOTICES.txt").read_text()
+    assert "Owner approval of the kit inventory: absent" in notices
+    assert "Components awaiting owner decision: 1\n  - rpm:libedit: NOASSERTION (unknown)" in notices
 
 
 def test_pack_refuses_a_pending_digest_and_writes_no_kit(pack_tree):

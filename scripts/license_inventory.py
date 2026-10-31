@@ -565,6 +565,9 @@ KNOWN_SPDX = PERMISSIVE | WEAK | STRONG | NETWORK
 
 def normalize_rpm_tag(tag: str) -> tuple[str, str, list[str]]:
     """(SPDX expression, spdx_basis, ambiguous terms) for an RPM License header tag."""
+    if "(" in tag or ")" in tag:
+        # Splitting would drop the grouping and change the meaning: keep it whole.
+        return "NOASSERTION", "normalized-rpm-license-tag", [tag.strip()]
     spdx_form = re.search(r"\s(AND|OR)\s", tag) is not None
     parts = re.split(r"\s+(and|or|AND|OR)\s+", tag.strip())
     terms, operators = parts[0::2], [p.upper() for p in parts[1::2]]
@@ -655,8 +658,14 @@ def kit_findings(inventory: dict) -> tuple[str, list[str]]:
     blockers = [f"devkit: {item} awaits owner decision" for item in kit_unresolved(inventory)]
     wheels, components = kit_records(inventory)
     for entry in [*wheels, *components]:
+        label = entry.get("id") or f"python:{entry.get('name')}"
         if (entry.get("decision") or {}).get("legal_confirmation") == "pending":
-            blockers.append(f"devkit: {entry.get('name', '?')}: legal confirmation of the recorded decision is pending")
+            blockers.append(f"devkit: {label}: legal confirmation of the recorded decision is pending")
+        # Every kit record binds something the kit ships, so exclusion is never a
+        # disposition here: drop the component from its pin, or record an approval.
+        if entry.get("status") == "excluded":
+            blockers.append(f"devkit: {label}: excluded, but the kit still ships it; remove it from its pin "
+                            "or record an owner approval")
     approval = (kit_section(inventory) or {}).get("approval") or {}
     if not approval.get("approval_ref"):
         state = "absent"
@@ -753,11 +762,14 @@ def check_kit(root: Path, inventory: dict, problems: list[str],
 
 
 def run_kit_check(root: Path, inventory: dict, found) -> tuple[list[str], list[str], str]:
-    """(problems including pack blockers, kit unresolved, kit approval state)."""
+    """(record problems, owner-decision blockers, kit approval state).
+
+    Record problems (a kit component without a record, a record off its pin) fail
+    every kit check; owner-decision blockers fail all but a rehearsal (--rehearsal)."""
     problems: list[str] = []
     check_kit(root, inventory, problems, found)
     state, blockers = kit_findings(inventory)
-    return problems + blockers, kit_unresolved(inventory), state
+    return problems, blockers, state
 
 
 # --- notices ---------------------------------------------------------------
@@ -1049,6 +1061,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
             child.add_argument("--kit", action="store_true",
                                help="also reconcile the devkit section with the kit pins and fail on any "
                                     "unresolved kit decision or stale/absent kit approval (dev kit pack gate)")
+            child.add_argument("--rehearsal", action="store_true",
+                               help="with --kit: report open kit decisions and the kit approval as UNRESOLVED "
+                                    "instead of failing (an ephemeral-key, non-promotable kit)")
         else:
             child.add_argument("--kit", action="store_true",
                                help="re-derive the devkit dev-only wheel records instead of the runtime ones")
@@ -1066,6 +1081,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     root = args.root.resolve()
     kit_summary = ""
+    open_kit: list[str] = []
     try:
         location = args.inventory or root / INVENTORY
         existing = load_inventory(root, args.inventory) if args.command != "generate" or location.is_file() else None
@@ -1088,6 +1104,8 @@ def main(argv: list[str] | None = None) -> int:
         if existing is None:
             raise InventoryError("license inventory is missing")
         inventory = existing
+        if args.command == "check" and args.rehearsal and not args.kit:
+            raise InventoryError("--rehearsal needs --kit")
         if args.command == "notices":
             if args.kit and args.bundle_dir is None:
                 raise InventoryError("notices --kit needs --bundle-dir KIT")
@@ -1099,11 +1117,17 @@ def main(argv: list[str] | None = None) -> int:
         found = collect_dists(args.wheelhouse, args.site_packages) if (args.wheelhouse or args.site_packages) else None
         problems, unresolved, state = run_check(root, inventory, found, args.release)
         if args.kit:
-            kit_problems, pending_kit, kit_state = run_kit_check(root, inventory, found)
+            kit_problems, kit_blockers, kit_state = run_kit_check(root, inventory, found)
+            pending_kit = kit_unresolved(inventory)
             problems += kit_problems
+            if args.rehearsal:
+                open_kit = kit_blockers
+            else:
+                problems += kit_blockers
             kit = kit_section(inventory) or {"python": [], "components": []}
             kit_summary = (f" kit_python={len(kit['python'])} kit_components={len(kit['components'])} "
-                           f"kit_unresolved={len(pending_kit)} kit_approval={kit_state}")
+                           f"kit_unresolved={len(pending_kit)} kit_approval={kit_state}"
+                           + (" kit_gate=rehearsal" if args.rehearsal else " kit_gate=enforced"))
     except (InventoryError, locks.LockError, OSError, KeyError, TypeError, zipfile.BadZipFile, tarfile.TarError):
         print("license-inventory: FAIL: license inventory or its inputs are invalid")
         return 2
@@ -1112,7 +1136,7 @@ def main(argv: list[str] | None = None) -> int:
     if len(problems) > PROBLEM_LIMIT:
         print(f"license-inventory: FAIL: ... and {len(problems) - PROBLEM_LIMIT} more")
     if not args.release:
-        for item in unresolved:
+        for item in unresolved + open_kit:
             print(f"license-inventory: UNRESOLVED: {item}")
     if args.kit:
         print(f"license-inventory: kit scope digest: {kit_scope_digest(inventory)}")

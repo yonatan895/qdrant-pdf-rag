@@ -84,7 +84,7 @@ the `devkit` section of `licenses/inventory.json`, with their own approval, beca
 | Runtime wheels (66) | the release `python` records, reused | as above |
 | Dev-only wheels (17) | `devkit.python`, bound to `requirements.dev.lock.txt` | `generate --kit --wheelhouse` on the image's `/opt/devkit/wheelhouse` (exact locked bytes) |
 | RPMs (26, `images/devkit-packages.txt`) | `devkit.components`, kind `rpm`, bound to the NEVRA | RPM `License` header tag from the pinned image's rpmdb (`devkit.evidence`) |
-| Task, Helm, oc, `oras.exe`, Linux `oras` | `devkit.components`, kind `tool`, bound to the pin's `version`, `sha256`, `license` and `license-sha256` | the pin's `license:` line; `oras-LICENSE` checked against its pinned digest |
+| Task, Helm, oc, `oras.exe`, Linux `oras` | `devkit.components`, kind `tool`, bound to the pin's `version`, `sha256`, `license` and `license-sha256` | the pin's `license:` line; `task-LICENSE` and `oras-LICENSE` checked against their pinned digests |
 | UBI base, project | `devkit.shared`: the release records `image:ubi9-python-314-minimal` and `project:mainframe-rag` | the `FROM` digest of `images/Containerfile.devkit` must equal the shared base record's digest |
 
 RPM tags are free-form. `license_declared` keeps the tag verbatim. `license_spdx`
@@ -93,7 +93,9 @@ fedora-license-data (commit `cbd8b74c`) gives exactly one identifier (`GPLv2`,
 `GPLv2+`, `GPLv3+`, `ASL 2.0`, `ISC`, `Sleepycat`, `Public Domain`). `BSD`, `MIT`,
 `LGPLv2`, `LGPLv2+`, `GFDL` and `BSD with advertising` each map to several, so they
 become `NOASSERTION` (class `unknown`), are named in `ambiguous_terms`, and stay
-`pending-owner-decision`.
+`pending-owner-decision`. A tag with parentheses is kept whole as `NOASSERTION`
+rather than split. The wheel classifier table also maps the exact MPL 2.0 classifier
+(`pathspec` declares only that).
 
 Recorded decisions: `crun`, `git-core` and `tar` (GPL only) are `approved` under the
 maintainer's 2026-10-28 decision that GPL-licensed RPMs are acceptable in the
@@ -103,26 +105,33 @@ An RPM whose tag also has an ambiguous term (`gzip`, `less`, `pam`, `libpwqualit
 covers only its GPL part. Nothing else is approved on the owner's behalf.
 
 The gate: `pack.sh` runs `license_inventory.py check --kit` before it pulls anything.
-`--kit` is the kit's `check --release`. A pack is refused with fixed `FAIL` lines
-when:
-- a dev wheel, RPM or tool pin has no record, or a record differs from its pin;
-- any kit-scope record is `pending-owner-decision` or awaits legal confirmation;
+`--kit` is the kit's `check --release`. It fails with fixed `FAIL` lines when:
+- a dev wheel, RPM or tool pin has no record, or a record differs from its pin
+  (every pack refuses this);
+- an owner decision is open: a kit-scope record is `pending-owner-decision`, awaits
+  legal confirmation, or is `excluded` (the image installs the exact pinned set, so
+  exclusion never removes a component);
 - `devkit.approval` is absent, or its `approved_digest` differs from the kit scope
   digest, which `check --kit` prints. The digest covers every kit record, shared
   ones included; decision fields are excluded.
 
-Unlike the release `pack.sh`, which leaves `--release` to the handoff, the kit pack
-needs the owner's kit approval first. Record each decision as for the release.
-Then set `devkit.approval.approval_ref` and `approved_digest` to the printed digest.
+Open owner decisions refuse a **promotable** kit (`SNEAKERNET_KEY_TRUSTED=true`, the
+custodied release key). An ephemeral-key kit is a non-promotable rehearsal, as for
+the bundle ([deploy](deploy.md)): pack runs `check --kit --rehearsal`, which reports
+those items as `UNRESOLVED`. It records `license_gate: rehearsal` and the state in
+MANIFEST and the notices, and still refuses a missing or drifted record. The
+`devkit-proof` transport proof is such a pack. Record each decision as for the
+release, then set `devkit.approval.approval_ref` and `approved_digest` to the
+printed digest.
 
 The kit's `THIRD-PARTY-NOTICES.txt` comes from `notices --kit`. It lists every
 component: each wheel, each RPM with its NEVRA and verbatim tag, each tool with its
 pin, and the shared base and project, with class, status and approval. It carries
-the project `LICENSE`, the base RPM list, the bound wheel texts and `oras-LICENSE`.
-RPM and wheel licence texts ship in the image (`/usr/share/licenses`,
-`<dist>.dist-info`). Task's MIT text is not in the kit; the release bundle carries
-it as `task-LICENSE`. Helm and oc ship no licence file; their Apache-2.0 text is
-the one in `oras-LICENSE`. No source or written offer is carried for GPL or LGPL
+the project `LICENSE`, the base RPM list, the bound wheel texts, `task-LICENSE`
+(extracted from the verified pinned Task archive) and `oras-LICENSE`. RPM and wheel
+licence texts ship in the image (`/usr/share/licenses`, `<dist>.dist-info`). Helm
+and oc ship no licence file in the kit; their Apache-2.0 text is the one in
+`oras-LICENSE`. No source or written offer is carried for GPL or LGPL
 RPMs; that is decision 3 below.
 
 Refresh after a kit pin change: on the connected side, read the tags with

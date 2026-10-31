@@ -591,6 +591,7 @@
         "bind": {
           "license": "MIT \u2014 https://github.com/go-task/task/blob/v3.53.1/LICENSE",
           "license-sha256": "ae22882adc54d4c2cec2bb1ce5e0b252c7f3344efd55c72144738e8fcc89509b",
+          "notice_member": "task-LICENSE",
           "pin": "scripts/tools/task-pin.txt",
           "sha256": "a54a408f6861ff921f6e87774180db31bacd8c1e7c944ca696db9fea49a82fc7",
           "version": "v3.53.1"
@@ -602,9 +603,10 @@
         "license_declared": "MIT \u2014 https://github.com/go-task/task/blob/v3.53.1/LICENSE (license: line of scripts/tools/task-pin.txt)",
         "license_spdx": "MIT",
         "name": "go-task/task v3.53.1 (linux-amd64 binary in the image, /usr/local/bin/task)",
-        "obligation": "MIT: keep the copyright and permission notice with copies. The kit does not carry the Task LICENSE text (the release bundle carries it as task-LICENSE, digest pinned in task-pin.txt).",
+        "obligation": "MIT: keep the copyright and permission notice with copies. The kit carries the upstream LICENSE as task-LICENSE (digest pinned in task-pin.txt), extracted from the verified release archive.",
         "ships_in": [
-          "dev workspace image"
+          "dev workspace image",
+          "task-LICENSE"
         ],
         "spdx_basis": "upstream-project-license",
         "status": "declared"
