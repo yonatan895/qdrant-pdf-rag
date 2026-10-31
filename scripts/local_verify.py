@@ -250,7 +250,7 @@ def changed_paths(root: Path, state: dict) -> list[str]:
 CI_LINT_SCRIPTS = ('scripts/eval_retrieval.py', 'scripts/review_tooling.py', 'scripts/ci_evidence.py',
                    'scripts/acceptance_evidence.py', 'scripts/devkit_key.py', 'scripts/devkit/isolation_proof.py',
                    'scripts/devkit/issue_snapshot.py', 'scripts/extension_surface.py', 'scripts/gitlab_lanes.py',
-                   'scripts/release_archive.py')
+                   'scripts/release_archive.py', 'scripts/gap/ci_status.py')
 
 
 def t0_targets(root: Path, changed: list[str]) -> dict[str, list[str]]:

@@ -616,7 +616,8 @@ class TaskContractsTests(unittest.TestCase):
                    "scripts/ci_evidence.py", "scripts/acceptance_evidence.py",
                    "scripts/devkit_key.py", "scripts/devkit/isolation_proof.py",
                    "scripts/devkit/issue_snapshot.py", "scripts/extension_surface.py",
-                   "scripts/gitlab_lanes.py", "scripts/release_archive.py"]
+                   "scripts/gitlab_lanes.py", "scripts/release_archive.py",
+                   "scripts/gap/ci_status.py"]
         self.assertEqual(staged, [
             ["-m", "ruff", "check", "src", "tests", *scripts],
             ["-m", "mypy", "src"],
