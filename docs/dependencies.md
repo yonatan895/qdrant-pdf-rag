@@ -64,6 +64,9 @@ D-7): `prepare_python.py --kit --venv .venv` prepares offline from that image's
 `locks/cp314-linux-x86_64.json`; otherwise it refuses and names the kit to
 request (`mfr-devkit-<key>`). `--kit` never acquires, so it refuses `--connected`
 and `--internal-index`, and it refuses wheels the pod's user cannot read.
+`agent_doctor.py` makes the same lock comparison in any image that has
+`/opt/devkit/locks/` and reports a mismatch as a `dev kit` finding naming the
+same kit. Outside a kit image it adds no finding.
 
 GitHub uses the same helper and manifest. GitLab accepts `PIP_FIND_LINKS` as a
 local complete dev wheelhouse, or explicitly selects `--internal-index` using

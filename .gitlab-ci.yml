@@ -346,6 +346,6 @@ lint:
   extends: [.py-base, .gate-pipeline]
   stage: hygiene
   script:
-    - ruff check src tests scripts/eval_retrieval.py scripts/review_tooling.py scripts/ci_evidence.py scripts/acceptance_evidence.py
+    - ruff check src tests scripts/eval_retrieval.py scripts/review_tooling.py scripts/ci_evidence.py scripts/acceptance_evidence.py scripts/devkit_key.py scripts/devkit/isolation_proof.py scripts/devkit/issue_snapshot.py scripts/extension_surface.py scripts/gitlab_lanes.py scripts/release_archive.py
     - mypy src
-    - mypy --follow-imports=silent scripts/eval_retrieval.py scripts/review_tooling.py scripts/ci_evidence.py scripts/acceptance_evidence.py
+    - mypy --follow-imports=silent scripts/eval_retrieval.py scripts/review_tooling.py scripts/ci_evidence.py scripts/acceptance_evidence.py scripts/devkit_key.py scripts/devkit/isolation_proof.py scripts/devkit/issue_snapshot.py scripts/extension_surface.py scripts/gitlab_lanes.py scripts/release_archive.py

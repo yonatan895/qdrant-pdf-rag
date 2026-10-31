@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import subprocess
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import ClassVar
@@ -11,6 +12,8 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from scripts import agent_doctor as doctor
+
+REPO = Path(__file__).resolve().parents[1]
 
 # Fix commands a refusal must name (#1118 C7), written out independently of the
 # doctor's constants: a weaker model in the gap copies them literally.
@@ -84,6 +87,11 @@ class DoctorTests(TestCase):
         self.probe = self.runtime_patch.start()
         self.addCleanup(tools_patch.stop)
         self.addCleanup(self.runtime_patch.stop)
+        # Hermetic outside a kit even when the suite itself runs in a dev kit image.
+        self.kit = self.root/'kit'
+        kit_patch = patch.object(doctor, 'KIT_ROOT', self.kit)
+        kit_patch.start()
+        self.addCleanup(kit_patch.stop)
 
     def test_task_runner_requires_verified_workspace_binary(self):
         local = self.root/'.tools/bin/task'
@@ -408,6 +416,80 @@ class DoctorTests(TestCase):
                        'air-gap fix: export SIM_BM25_CACHE_DIR=/absolute/path/to/offline-prepared/bm25-weights',
                        'python3 scripts/fetch_bm25_weights.py --out "$SIM_BM25_CACHE_DIR" '
                        '--verify-manifest bm25-weights.sha256 --verify-only')
+
+    def install_kit(self):
+        """A dev kit image layout (images/Containerfile.devkit) built from this checkout's locks."""
+        for name in ('requirements.dev.lock.txt', 'locks/cp314-linux-x86_64.json'):
+            shipped = self.kit/'locks'/name
+            shipped.parent.mkdir(parents=True, exist_ok=True)
+            shipped.write_bytes((self.root/name).read_bytes())
+        # The other kit key inputs, so the key is computable for this checkout.
+        for name in ('scripts/tools/oc-pin.txt', 'images/devkit-packages.txt', 'images/Containerfile.devkit',
+                     'scripts/dependency_lock.py', 'scripts/tools/install-task.sh',
+                     'scripts/tools/task-artifact.sh', 'scripts/tools/install-helm.sh', 'images/devkit/helper'):
+            (self.root/name).parent.mkdir(parents=True, exist_ok=True)
+            (self.root/name).write_text('# kit key input fixture: ' + name)
+
+    def kit_report(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = doctor.main(['--root', str(self.root)])
+        return code, output.getvalue()
+
+    def test_dev_kit_with_this_checkouts_locks_is_ready(self):
+        self.install_kit()
+        code, report = self.kit_report()
+        self.assertEqual(code, 0, report)
+        self.assertIn('ready: dev kit: image lock files equal requirements.dev.lock.txt and '
+                      'locks/cp314-linux-x86_64.json\n', report)
+
+    def test_dev_kit_built_for_another_lock_refuses_and_names_the_kit(self):
+        self.install_kit()
+        # The kit factory's own naming command, run on this checkout.
+        named = subprocess.run([sys.executable, str(REPO/'scripts/devkit_key.py'), '--root', str(self.root)],
+                               capture_output=True, text=True, check=True).stdout.strip()
+        self.assertRegex(named, r'^[0-9a-f]{64}$')
+        refusal = (f'missing prerequisite: dev kit: this dev kit image was built for another dev lock; '
+                   f'fix: request mfr-devkit-{named}, stop until that kit is installed, '
+                   'then rerun this check in its image\n')
+        for name in ('requirements.dev.lock.txt', 'locks/cp314-linux-x86_64.json'):
+            shipped = self.kit/'locks'/name
+            original = shipped.read_bytes()
+            for change in ('differs', 'absent'):
+                with self.subTest(lock=name, change=change):
+                    if change == 'differs':
+                        shipped.write_bytes(original + b'\n')
+                    else:
+                        shipped.unlink()
+                    code, report = self.kit_report()
+                    self.assertEqual(code, 2, report)
+                    self.assertIn(refusal, report)
+                    shipped.write_bytes(original)
+        self.assertEqual(self.kit_report()[0], 0)
+
+    def test_dev_kit_refusal_survives_when_the_key_cannot_be_named(self):
+        self.install_kit()
+        (self.kit/'locks/requirements.dev.lock.txt').write_text('another dev lock\n')
+        refusal = ('missing prerequisite: dev kit: this dev kit image was built for another dev lock; '
+                   'fix: request the kit `python3 scripts/devkit_key.py` names for this checkout, '
+                   'stop until that kit is installed, then rerun this check in its image\n')
+        with patch.dict(sys.modules, {'scripts.devkit_key': None, 'devkit_key': None}):
+            code, report = self.kit_report()
+        self.assertEqual(code, 2, report)
+        self.assertIn(refusal, report)
+        # A missing key input is the same: the refusal stands with the fixed text.
+        (self.root/'images/devkit-packages.txt').unlink()
+        code, report = self.kit_report()
+        self.assertEqual(code, 2, report)
+        self.assertIn(refusal, report)
+
+    def test_outside_a_dev_kit_the_report_is_unchanged(self):
+        code, absent = self.kit_report()
+        self.assertEqual(code, 0, absent)
+        self.assertNotIn('dev kit', absent)
+        # /opt/devkit without locks/ is not a kit image: same report, byte for byte.
+        (self.kit/'wheelhouse').mkdir(parents=True)
+        self.assertEqual(self.kit_report(), (0, absent))
 
     def test_docker_probe_refusals_name_the_check_command(self):
         with patch.object(doctor.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)):

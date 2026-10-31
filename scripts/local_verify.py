@@ -248,7 +248,9 @@ def changed_paths(root: Path, state: dict) -> list[str]:
 
 # The CI lint_and_types scope (.github/workflows/ci.yml): T0 never flags what CI accepts.
 CI_LINT_SCRIPTS = ('scripts/eval_retrieval.py', 'scripts/review_tooling.py', 'scripts/ci_evidence.py',
-                   'scripts/acceptance_evidence.py')
+                   'scripts/acceptance_evidence.py', 'scripts/devkit_key.py', 'scripts/devkit/isolation_proof.py',
+                   'scripts/devkit/issue_snapshot.py', 'scripts/extension_surface.py', 'scripts/gitlab_lanes.py',
+                   'scripts/release_archive.py')
 
 
 def t0_targets(root: Path, changed: list[str]) -> dict[str, list[str]]:
