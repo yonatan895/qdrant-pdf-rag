@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -212,8 +213,10 @@ class World:
         return subprocess.run(["sh", str(self.fork / SCRIPT)], cwd=self.root, env=env, capture_output=True,
                               text=True, check=False, start_new_session=True, timeout=600)
 
-    def refs(self, repo: Path) -> str:
-        return self.git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+    def refs(self, repo: Path, *, stash: bool = True) -> str:
+        listed = self.git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+        return listed if stash else "".join(r for r in listed.splitlines(keepends=True)
+                                            if not r.startswith("refs/stash "))
 
     def tree(self, rev: str) -> dict[bytes, bytes]:
         """Blob ids by path outside the site layer."""
@@ -674,6 +677,32 @@ exec "$REAL_GIT" "$@"
 """
 
 
+def _crash(world: World, sha: str, sub: str, at: int, mode: str):
+    """Run the import with git interrupted at the at-th call of sub."""
+    wrap = world.root / "wrap"
+    wrap.mkdir(exist_ok=True)
+    (wrap / "git").write_text(CRASH)
+    (wrap / "git").chmod(0o755)
+    (wrap / "count").unlink(missing_ok=True)
+    crashed = world.run(sha, path_prefix=str(wrap), extra={
+        "CRASH_SUB": sub, "CRASH_AT": str(at), "CRASH_MODE": mode, "CRASH_COUNT": str(wrap / "count"),
+        "REAL_GIT": shutil.which("git")})
+    assert crashed.returncode != 0
+    assert "IMPORT READY" not in crashed.stdout
+    return crashed
+
+
+def _straight(tmp_path: Path, keys) -> tuple[World, str, str]:
+    """The uninterrupted reference run of _patched_world: world, release, tip."""
+    straight = World(tmp_path / "straight", keys)
+    r2 = _patched_world(straight)
+    return straight, r2, assert_ready(straight, straight.run(r2), r2)
+
+
+STASHED = re.compile(r'^Stashed the unfinished import\'s uncommitted changes as "import_release ([0-9a-f]{40}) '
+                     r'(\d{8}T\d{6}Z)"; restore them with: git -C (.+) stash apply ([0-9a-f]{40})$', re.MULTILINE)
+
+
 @pytest.mark.parametrize(("sub", "at", "mode"), [
     ("clone", 1, "after"),        # step 1: the bootstrap's workspace clone
     ("revert", 2, "after"),       # step 4: between two reverts
@@ -684,33 +713,158 @@ exec "$REAL_GIT" "$@"
     ("commit", 3, "fail"),        # step 6: a failing command, which STOPs
 ], ids=lambda value: str(value))
 def test_resume_after_an_interruption_converges_to_the_uninterrupted_result(tmp_path, keys, sub, at, mode):
-    straight = World(tmp_path / "straight", keys)
-    r2 = _patched_world(straight)
-    assert_ready(straight, straight.run(r2), r2)
+    straight, r2, _ = _straight(tmp_path, keys)
 
     world = World(tmp_path / "interrupted", keys)
     assert _patched_world(world) == r2  # Same content and dates: same commits.
-    wrap = world.root / "wrap"
-    wrap.mkdir()
-    (wrap / "git").write_text(CRASH)
-    (wrap / "git").chmod(0o755)
-    crashed = world.run(r2, path_prefix=str(wrap), extra={
-        "CRASH_SUB": sub, "CRASH_AT": str(at), "CRASH_MODE": mode, "CRASH_COUNT": str(wrap / "count"),
-        "REAL_GIT": shutil.which("git")})
-    assert crashed.returncode != 0
-    assert "IMPORT READY" not in crashed.stdout
+    crashed = _crash(world, r2, sub, at, mode)
     if mode == "fail":
         assert_one_stop(crashed, f"STOP: step 6 (re-apply the gap patches) failed (exit 1); rerun the same command "
                                  f"to reset and resume; if it stops here again, open GitLab issue "
                                  f'"Release import {r2} stopped" with the last 20 lines of this output')
 
+    left = world.git(world.fork, "status", "--porcelain")
+
     resumed = world.run(r2)
 
     tip = assert_ready(world, resumed, r2)
     assert tip == straight.git(straight.fork, "rev-parse", f"import/{r2}").strip()
-    assert world.refs(world.fork) == straight.refs(straight.fork)
+    # The script's own commits are rebuilt, never kept under a second name.
+    assert world.refs(world.fork, stash=False) == straight.refs(straight.fork)
     assert reapplied(world, r2) == reapplied(straight, r2)
     assert world.git(world.fork, "status", "--porcelain") == ""
+    # Uncommitted state left on the import branch is stashed, never discarded.
+    stashed = STASHED.findall(resumed.stdout)
+    assert len(stashed) == (1 if left else 0), resumed.stdout[-3000:]
+    if stashed:
+        assert world.git(world.fork, "stash", "list", "--format=%gs") == (
+            f"On import/{r2}: import_release {r2} {stashed[0][1]}\n")
+
+
+# -- step 0 never loses work -----------------------------------------------------
+
+DIRTY = "STOP: {fork} has local changes (listed above); commit or remove them, or ask the gap maintainer, then rerun"
+
+
+@pytest.mark.parametrize("where", ["import-branch", "other-branch"])
+def test_step_0_stops_before_setting_anything_aside_then_stashes_and_converges(tmp_path, keys, where):
+    """The review's T2: an untracked file next to a tracked edit stops step 0
+    before the edit is touched. Once the untracked file is gone, the edit is
+    stashed under a printed name (recoverable), never discarded, and the
+    import ends as the uninterrupted run did. On another branch any change
+    stops the run; nothing there is ever set aside."""
+    straight, r2, straight_tip = _straight(tmp_path, keys)
+    world = World(tmp_path / "interrupted", keys)
+    assert _patched_world(world) == r2
+    _crash(world, r2, "cherry-pick", 2, "after")  # An unfinished import/<SHA> with the script's commits.
+    if where == "other-branch":
+        world.git(world.fork, "switch", "-q", "main")
+    edit = "operator edit\n"
+    (world.fork / "README.md").write_text(edit)
+    (world.fork / "notes.txt").write_text("untracked\n")
+    refs, status = world.refs(world.fork), world.git(world.fork, "status", "--porcelain")
+
+    stopped = world.run(r2)
+
+    assert_one_stop(stopped, DIRTY.format(fork=world.fork))
+    assert world.refs(world.fork) == refs  # No stash, no deleted or renamed branch.
+    assert world.git(world.fork, "status", "--porcelain") == status
+    assert world.read("README.md") == edit
+    assert "Stashed" not in stopped.stdout and "Discarding" not in stopped.stdout
+
+    (world.fork / "notes.txt").unlink()
+    if where == "other-branch":
+        again = world.run(r2)
+        assert_one_stop(again, DIRTY.format(fork=world.fork))
+        assert world.read("README.md") == edit and world.refs(world.fork) == refs
+        world.git(world.fork, "checkout", "--", "README.md")  # The operator's own call.
+
+    resumed = world.run(r2)
+
+    tip = assert_ready(world, resumed, r2)
+    assert tip == straight_tip
+    assert world.refs(world.fork, stash=False) == straight.refs(straight.fork)
+    stashed = STASHED.findall(resumed.stdout)
+    if where == "other-branch":
+        assert stashed == [] and world.git(world.fork, "stash", "list") == ""
+        return
+    [(name_sha, stamp, fork, commit)] = stashed
+    assert name_sha == r2 and shlex.split(fork) == [str(world.fork)]
+    assert world.git(world.fork, "stash", "list", "--format=%gs") == f"On import/{r2}: import_release {r2} {stamp}\n"
+    assert world.git(world.fork, "rev-parse", "refs/stash").strip() == commit
+    world.git(world.fork, "stash", "apply", "-q", commit)
+    assert world.read("README.md") == edit
+
+
+@pytest.mark.parametrize("where", ["import-branch", "other-branch"])
+def test_commits_added_to_an_unfinished_import_are_kept_under_a_printed_name(tmp_path, keys, where):
+    """The review's T3: a commit someone added to an unfinished import/<SHA>
+    is kept as import/<SHA>-<UTC timestamp>, and the import still ends as the
+    uninterrupted run did."""
+    straight, r2, straight_tip = _straight(tmp_path, keys)
+    world = World(tmp_path / "interrupted", keys)
+    assert _patched_world(world) == r2
+    _crash(world, r2, "cherry-pick", 2, "after")
+    added = world.commit(world.fork, {"src/app.py": world.read("src/app.py") + "operator fix\n"}, "Operator fix")
+    if where == "other-branch":
+        world.git(world.fork, "switch", "-q", "main")
+
+    resumed = world.run(r2)
+
+    tip = assert_ready(world, resumed, r2)
+    assert tip == straight_tip
+    kept = re.findall(rf"^Kept the unfinished import's commits as branch (import/{r2}-\d{{8}}T\d{{6}}Z)$",
+                      resumed.stdout, re.MULTILINE)
+    assert len(kept) == 1, resumed.stdout[-3000:]
+    assert world.git(world.fork, "rev-parse", f"refs/heads/{kept[0]}").strip() == added
+    refs = world.refs(world.fork).replace(f"refs/heads/{kept[0]} {added}\n", "")
+    assert refs == straight.refs(straight.fork)
+
+
+# The documented heading is "## GL#NNN <full commit sha>"; each of these only
+# looks like one. CRLF and a lowercase gl# were refused before.
+NEAR_MISS = {
+    "no-space": "##GL#41 {sha}",
+    "leading-space": " ## GL#41 {sha}",
+    "tab": "##\tGL#41 {sha}",
+    "leading-tab": "\t## GL#41 {sha}",
+    "three-hashes": "### GL#41 {sha}",
+    "lowercase": "## gl#41 {sha}",
+    "crlf": "## GL#41 {sha}\r",
+}
+
+
+@pytest.mark.parametrize("case", sorted(NEAR_MISS))
+def test_a_near_miss_ledger_heading_stops_and_the_fixed_ledger_converges(tmp_path, keys, case):
+    """The review's T4: a near-miss heading would hide its gap patch from the
+    set-aside. It stops the import before the branch exists; after the ledger
+    is fixed on main, the import matches the uninterrupted run."""
+    straight, r2, straight_tip = _straight(tmp_path, keys)
+    world = World(tmp_path / "near miss", keys)
+    assert _patched_world(world) == r2
+    good = world.read("gap/patches.md")
+    p41 = good.splitlines()[3].split()[2]
+    world.commit(world.fork, {"gap/patches.md": with_line(good, 4, NEAR_MISS[case].format(sha=p41))}, "Near miss")
+    world.git(world.fork, "push", "-q", "origin", "main")
+    refs = world.refs(world.fork)
+
+    stopped = world.run(r2)
+
+    assert_one_stop(stopped, 'STOP: gap/patches.md line 4 is not a ledger heading "## GL#NNN <full commit sha>"; '
+                             "fix the ledger on main through an MR, then rerun")
+    assert world.refs(world.fork) == refs
+    assert world.git(world.fork, "status", "--porcelain") == ""
+
+    world.git(world.fork, "switch", "-q", "main")  # Step 0 left FORK detached at origin/main.
+    world.commit(world.fork, {"gap/patches.md": good}, "Fix the ledger heading")
+    world.git(world.fork, "push", "-q", "origin", "main")
+    tip = assert_ready(world, world.run(r2), r2)
+    # main gained two commits, so the commit ids differ; the content does not.
+    assert world.tree(tip) == straight.tree(straight_tip)
+    sha = re.compile(r"[0-9a-f]{40}")
+    assert sha.sub("<sha>", world.git(world.fork, "show", f"{tip}:gap/patches.md")) == sha.sub(
+        "<sha>", straight.git(straight.fork, "show", f"{straight_tip}:gap/patches.md"))
+    assert [row.split()[:2] for row in reapplied(world, r2)] == [row.split()[:2] for row in reapplied(straight, r2)]
 
 
 # -- round trips -----------------------------------------------------------------

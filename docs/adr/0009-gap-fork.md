@@ -273,7 +273,7 @@
 | Path | Holds |
 |---|---|
 | `gap/README.md` | The gap entry point, read after AGENTS.md. It names the gap maintainer group and the named approvers, restates these rules and says where site inputs live. Never name it `AGENTS.md`: the context check would require it in the upstream chain table |
-| `gap/patches.md` | The gap-patch ledger. A `# Gap patches` title line, then one section per patch: a heading `## GL#NNN <full commit sha>`, then one `- path: <path>` line per upstream-owned path the patch changes. Every `## ` line is such a heading; the import refuses any other. Other lines are free text. Sections are in application order: a new patch is appended at the end |
+| `gap/patches.md` | The gap-patch ledger. A `# Gap patches` title line, then one section per patch: a heading `## GL#NNN <full commit sha>`, then one `- path: <path>` line per upstream-owned path the patch changes. Every line that starts with `##`, after any blanks, must be exactly such a heading; the import refuses any other, such as `##GL#`, ` ## `, `##<tab>` or `###`. Other lines are free text. Sections are in application order: a new patch is appended at the end |
 | `gap/config/` | The site's non-secret configuration (Q2), such as its `airgap.env` without secret values. Secrets stay in Kubernetes Secrets or the site's secret store and are referenced by name only. Site values for the `deploy/workspace/` manifests go in `gap/config/workspace.env`. Rehearsal-only overrides (`CI_REHEARSAL` keys) never go here |
 | `gap/records/` | Dated site records, `YYYY-MM-DD-<slug>.md`: imports, gap releases, go-live checks, isolation proofs, incidents. Gap records never go in `docs/records/` |
 | `gap/runbooks/` | Site procedures that upstream cannot know |
@@ -339,10 +339,22 @@ sh "$FORK/scripts/gap/import_release.sh"
 The script runs these steps. Each refusal is a fixed `STOP:` line in it.
 
 0. **Reset.** It is safe on every run and is how to resume after any stop.
-   It aborts the unfinished import's merge, revert or cherry-pick, discards
-   that import's uncommitted changes, deletes the local `import/<SHA>`
-   branch and removes `$R`. Any other local change or operation in progress
-   stops it instead.
+   It never discards work that exists nowhere else. Every stop check runs
+   first and changes nothing: a pushed branch, commits after `IMPORT READY`,
+   an untracked file, and any local change or operation in progress outside
+   the unfinished import (on another branch, say). Only then does it set
+   aside the unfinished import's uncommitted tracked changes with
+   `git stash push -m "import_release <SHA> <UTC timestamp>"`, print that
+   name and the `git stash apply` command that restores them, abort that
+   import's merge, revert or cherry-pick, and remove `$R`. The local
+   `import/<SHA>` branch is deleted only when its tip is the script's own
+   work: already on `origin/main`, or set by the script's last step (its
+   reflog entries carry the reflog action `import_release <SHA>`). Commits
+   anyone else added are kept: the branch is renamed
+   `import/<SHA>-<UTC timestamp>` and the name is printed. Keeping, rather
+   than stopping, lets a crashed or stopped run resume with no operator
+   step and still loses nothing; the operator deletes the kept branch once
+   its commits are moved or not needed.
 1. **Verify the bundle** with the fork's own code: the `SHA256SUMS`
    signature against the trust anchor, every member checksum, and
    `repo.bundle` HEAD equal to the MANIFEST sha. The trust anchor is
