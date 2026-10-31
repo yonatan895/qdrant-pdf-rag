@@ -102,6 +102,10 @@ explicitly unresolved and prevent claims of production compatibility.
   anchor) and the bootstrap by a route separate from the kit transfer, and
   runs step 1 of [the Windows runbook](runbooks/devkit-windows.md) before any
   push.
+- Dev kit licence gate (when a kit ships): `python3 scripts/license_inventory.py check --kit`
+  result (exit code, `kit_unresolved`, `kit_approval` state) NOT RECORDED, and the kit
+  `MANIFEST.txt` line `license_gate: enforced` NOT RECORDED; both are required before
+  transfer ([dev kit](licensing.md#dev-kit)).
 - Open blockers and their owners: NOT RECORDED.
 - Transfer receipt and destination checksum: NOT RECORDED.
 - Air-gap bootstrap / pipeline / site OpenShift acceptance evidence: NOT RUN.

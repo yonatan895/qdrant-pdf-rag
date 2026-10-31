@@ -1576,7 +1576,7 @@ is never used in the air gap. The dev
 workspace image is built only by the connected factory and reaches the site in
 the separate signed dev kit, never in the release bundle
 ([image role](#quay-image-roles); kit licence check:
-[ADR-0009 §8](adr/0009-gap-fork.md#8-dev-workspace-image-and-dev-kit-d3)).
+[licensing: dev kit](licensing.md#dev-kit)).
 The bastion, dev and runner-job pods run that image from
 [`deploy/workspace/`](../deploy/workspace/contract.json), and the
 [isolation proof](#workspace-isolation-proof) records their
