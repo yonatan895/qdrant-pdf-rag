@@ -1210,7 +1210,7 @@ containers, a writable host or cluster access.
 
 | Area | Requirement | Used by |
 |---|---|---|
-| GitLab | Release version recorded, 16.10 or later (`workflow:auto_cancel`); protected tags; `CI_COMMIT_TAG` and `CI_COMMIT_REF_PROTECTED`; variables expanded in `image`, `services` and `tags`; `CI_OPEN_MERGE_REQUESTS`; dynamic child pipelines (`trigger:include:artifact`) | all pipelines |
+| GitLab | Release version recorded, 16.10 or later (`workflow:auto_cancel`), 17.10 or later for draft-MR routing to `wip` (`CI_MERGE_REQUEST_DRAFT`; older releases run drafts on `gate`, which is safe but slower); protected tags; `CI_COMMIT_TAG` and `CI_COMMIT_REF_PROTECTED`; variables expanded in `image`, `services` and `tags`; `CI_OPEN_MERGE_REQUESTS`; dynamic child pipelines (`trigger:include:artifact`) | all pipelines |
 | Runner | Tags `gate` (ready merge request and tag pipelines) and `wip` (branch and draft merge request pipelines), or one tag for all from the project variable `CI_RUNNER_TAG`; linux-amd64; an executor that starts job and service images from the approved registry with a service alias; reads `CI_TASK_ARCHIVE`, `CI_HELM_ARCHIVE` and `CI_BM25_CACHE_DIR` from the runner; no route to PyPI, Docker Hub or GitHub | all GitLab jobs |
 | Python packages | `PIP_FIND_LINKS` wheelhouse or `PIP_INDEX_URL` internal index, never a public index | `.py-base` |
 | Quay | Release version recorded; Docker v2 API reachable by `skopeo`; a push identity for the five runtime paths; pull access for cluster and runner; organization layout may differ from upstream paths | `load.sh`, runner |
@@ -2352,3 +2352,12 @@ UBI Python base from `images.txt` stands in for the dev kit image. The proof mus
 Qdrant, it must fail on both the static policy check and the live probe; restored, it must
 report `proven` again. It runs on pull requests that change the proof, the templates, the
 contract or the lane, nightly on main, and on dispatch.
+A green lane does not prove what only the site can:
+- OVN-Kubernetes semantics (post-DNAT matching, cross-node paths, a shared VIP for GitLab
+  and the registry);
+- OpenShift DNS (the 5353 path) and `restricted-v2` admission;
+- the real GitLab Runner Operator, its manager labels, and TLS to the real endpoints;
+- drift between the hand-copied agent ingress policy and the chart.
+
+A stand-in that is down answers "refused", which counts as a reach. Those are proven only
+by the recorded site run of `isolation_proof.py --probe` (ADR-0009 §2).
