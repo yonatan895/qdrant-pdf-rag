@@ -35,6 +35,7 @@ from tests.helpers_airgap import (
     symlink_tools,
 )
 from tests.helpers_image_inventory import tar_bytes
+from tests.helpers_posix_shells import posix_shells
 from tests.helpers_task_artifact import task_archive, task_members
 
 TOOLS = ("sh", "dirname", "basename", "awk", "sed", "git", "tar", "gzip", "sha256sum", "date", "cat",
@@ -846,8 +847,9 @@ def link_tree(tmp_path):
 
 
 # GitLab jobs run these scripts with `sh`: bash in POSIX mode in the kit image,
-# dash on GitHub's runners. The tests below that take `shell` run them under both.
-POSIX_SHELLS = ("bash", "dash")
+# dash on GitHub's runners. The tests below that take `shell` run them under both
+# where dash exists, and always on GitHub (posix_shells).
+POSIX_SHELLS = posix_shells()
 
 
 def _sh(tree: Path, shell: str) -> str:

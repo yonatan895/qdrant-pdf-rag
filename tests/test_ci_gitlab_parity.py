@@ -10,7 +10,9 @@ pipelines run every lane on `wip`, branch pipelines run the lane selector on
 synthetic git histories, and the unit shards are checked against a real
 collection. Job steps run under both shells a GitLab job can meet: bash with
 errexit and pipefail (the runner) and dash (GitHub's and Debian's `sh`), with
-`sh` resolving to the same shell. A real GitLab pipeline run is still required to prove runner,
+`sh` resolving to the same shell. The dash cases are collected where dash is
+installed and always on GitHub, never in the dash-less kit image
+(tests/helpers_posix_shells.py). A real GitLab pipeline run is still required to prove runner,
 image, service, child-pipeline and auto-cancel behavior.
 """
 import copy
@@ -27,6 +29,8 @@ from pathlib import Path
 import pytest
 import yaml
 from scripts.gitlab_lanes import LANE_JOBS, child_config, selected_jobs
+
+from tests.helpers_posix_shells import posix_shells
 
 ROOT = Path(__file__).resolve().parents[1]
 GITLAB = yaml.safe_load((ROOT / '.gitlab-ci.yml').read_text())
@@ -52,7 +56,8 @@ TIMEOUT_COUNTERPARTS = {'select': ('ci.yml', 'select'), 'hygiene': ('agent-conte
 WORKFLOWS = {'ci.yml': GITHUB,
              'agent-context.yml': yaml.safe_load((ROOT / '.github/workflows/agent-context.yml').read_text())}
 # GitLab's runner runs job scripts with bash under errexit and pipefail; the kit
-# image's `sh` is bash (POSIX mode) and GitHub's is dash. Steps run under both.
+# image's `sh` is bash (POSIX mode) and GitHub's is dash. Steps run under both
+# where dash exists, and always on GitHub (posix_shells).
 JOB_SHELLS = {'bash': ['-o', 'pipefail', '-e', '-c'], 'dash': ['-e', '-c']}
 SELECT_SCRIPT = [
     'git fetch --no-tags origin "+refs/heads/${CI_DEFAULT_BRANCH}:refs/remotes/origin/${CI_DEFAULT_BRANCH}"',
@@ -835,9 +840,24 @@ def stage(tmp_path):
     return bin_dir
 
 
-@pytest.fixture(params=sorted(JOB_SHELLS))
+@pytest.fixture(params=posix_shells())
 def shell(request):
     return request.param
+
+
+@pytest.mark.parametrize(('github', 'dash', 'expected'), [
+    (None, '/usr/bin/dash', ('bash', 'dash')),
+    ('true', '/usr/bin/dash', ('bash', 'dash')),
+    # A GitHub runner without dash still collects the dash cases, which then fail.
+    ('true', None, ('bash', 'dash')),
+    # The kit image (GitLab's unit lane): no dash and not GitHub, so bash only.
+    (None, None, ('bash',)),
+    ('', None, ('bash',)),
+], ids=['dash-installed', 'github', 'github-without-dash', 'kit', 'github-empty'])
+def test_dash_cases_are_collected_where_dash_exists_and_always_on_github(github, dash, expected):
+    environ = {} if github is None else {'GITHUB_ACTIONS': github}
+    assert posix_shells(environ, lambda name: dash if name == 'dash' else f'/usr/bin/{name}') == expected
+    assert set(expected) <= JOB_SHELLS.keys()
 
 
 def shell_run(tmp_path, shell, script, env, cwd):

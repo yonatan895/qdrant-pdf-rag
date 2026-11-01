@@ -645,7 +645,10 @@ real collection that the four shards are disjoint and complete and load only
 GitHub's producer plugins. It runs the sim tier against the mirrored Qdrant
 service. Every shard and sim reject skipped and xfailed tests
 through their JUnit report, and sim omits only `tests/test_qdrant_auth.py` and
-`tests/test_openwebui_proxy_nginx.py`, which need a local Docker daemon. Merge
+`tests/test_openwebui_proxy_nginx.py`, which need a local Docker daemon. The
+kit image has no dash, so the dash cases of the job-step shell proofs are
+collected only where dash exists and always on GitHub
+(`tests/helpers_posix_shells.py`). Merge
 request and tag pipelines run every lane; branch pipelines run the lanes the
 `scripts/review_tooling.py` classifier selects, as a child pipeline
 (`scripts/gitlab_lanes.py`).
