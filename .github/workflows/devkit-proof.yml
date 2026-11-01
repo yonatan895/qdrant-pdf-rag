@@ -91,8 +91,12 @@ jobs:
           print(entry["digest"])
           PY
           DIGEST="$(cat "$RUNNER_TEMP/digest")"
-          # Runner-local pin for the synthetic image; this commit is never pushed.
-          sed -i "s/^digest: .*/digest: $DIGEST/" scripts/tools/devkit-pin.txt
+          # Runner-local pin for the synthetic image; this commit is never pushed. The key
+          # is the checkout's own: a PR that changes the kit inputs carries a stale key
+          # until its pin PR (one-step flow), and the synthetic digest binds no real image.
+          PIN_KEY="$(python3 scripts/devkit_key.py)"
+          sed -i -e "s/^key: .*/key: $PIN_KEY/" -e "s/^digest: .*/digest: $DIGEST/" scripts/tools/devkit-pin.txt
+          python3 scripts/devkit_key.py --check
           git -c user.name=devkit-proof -c user.email=devkit-proof@invalid commit -q -m "devkit-proof: synthetic pin" scripts/tools/devkit-pin.txt
           umask 077
           openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$RUNNER_TEMP/signing.key"

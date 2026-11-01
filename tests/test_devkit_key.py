@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -282,3 +286,36 @@ def test_factory_least_permissions_pinned_actions_and_buildkit():
     assert push.index("imagetools inspect \"$IMAGE:$KEY\"") < push.index("imagetools create --prefer-index")
     # Only a registry "not found" may create the tag; any other inspect failure refuses.
     assert "grep -qi 'not found'" in push and "refusing to tag" in push
+
+
+def test_transport_proof_packs_a_kit_input_change_before_its_pin_pr(tmp_path):
+    """devkit-proof's runner-local pin must pass pack.sh's check while the committed key is stale.
+
+    One-step pinning merges a kit-input change with the old key, so the proof's synthetic
+    pin takes the checkout's own key as well as the synthetic digest (PR #1181 linux job).
+    """
+    document = yaml.safe_load((REPO / ".github/workflows/devkit-proof.yml").read_text())
+    step = next(step["run"] for step in document["jobs"]["linux"]["steps"]
+                if step.get("name") == "Pack a synthetic kit with the real pack.sh")
+    lines = step.splitlines()
+    start = lines.index('DIGEST="$(cat "$RUNNER_TEMP/digest")"') + 1
+    end = next(i for i, line in enumerate(lines) if line.startswith("git -c user.name=devkit-proof"))
+    rewrite = "\n".join(lines[start:end])
+    assert "pack.sh" not in rewrite and "scripts/tools/devkit-pin.txt" in rewrite
+    root = _tree(tmp_path)
+    (root / "scripts").mkdir(exist_ok=True)
+    shutil.copy2(REPO / "scripts/devkit_key.py", root / "scripts/devkit_key.py")
+    (root / devkit_key.PIN).write_text(PIN_OK)
+    with pytest.raises(devkit_key.DevkitKeyError, match="is stale"):
+        devkit_key.check(root)
+    synthetic = "sha256:" + "d" * 64
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "python3").symlink_to(sys.executable)
+    env = {**os.environ, "DIGEST": synthetic, "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"}
+    result = subprocess.run(["bash", "-eu", "-c", rewrite], cwd=root, env=env,
+                            capture_output=True, text=True, timeout=60, check=False)
+    assert result.returncode == 0, result.stderr
+    assert devkit_key.read_pin(root) == (devkit_key.key(root), synthetic)
+    assert devkit_key.check(root) == f"devkit-key: {devkit_key.PIN} matches key {devkit_key.key(root)} at {synthetic}"
+    assert "# comment" in (root / devkit_key.PIN).read_text()
