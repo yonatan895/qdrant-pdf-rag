@@ -100,6 +100,20 @@ def test_urllib3_security_pin_covers_project_and_runtime_profiles():
         assert packages["urllib3"]["wheel"] == f"urllib3-{version}-py3-none-any.whl"
 
 
+def test_exact_project_pins_equal_the_runtime_and_dev_locks():
+    """#588: pyjwt is imported directly (mcp/tool_auth.py), so it is declared at
+    its locked version, not left in the locks alone."""
+    root = Path(__file__).resolve().parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
+    pins = {locks.canonical(requirement.name): str(requirement.specifier)
+            for requirement in map(Requirement, project["dependencies"])
+            if str(requirement.specifier).startswith("==")}
+    assert {"pyjwt", "urllib3"} <= set(pins)
+    for profile in ("runtime", "dev"):
+        _, packages = locks.load(root, profile)
+        assert pins == {name: f"=={packages[name]['version']}" for name in pins}, profile
+
+
 OLEFILE_GUARD = (
     "olefile makes Pillow's FPX decoder importable (GHSA-5x8w-8jj5-q52h)"
 )
