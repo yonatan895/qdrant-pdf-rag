@@ -1352,8 +1352,12 @@ VERDICT_CASES = [
 ]
 
 
-@pytest.mark.parametrize(("code", "token"), VERDICT_CASES)
-def test_access_token_verdicts_are_fixed_and_print_no_token_value(tmp_path, capsys, code, token):
+# Explicit ids: make_access() stamps iat/exp from the clock, so token-derived ids
+# would differ between the CI shard-selection and run collections.
+@pytest.mark.parametrize(("code", "token"), VERDICT_CASES,
+                         ids=[f"{code}-{n}" for n, (code, _) in enumerate(VERDICT_CASES)])
+def test_access_token_verdicts_are_fixed_and_print_no_token_value(request, tmp_path, capsys, code, token):
+    assert token not in request.node.nodeid  # nor in the test id that CI logs print
     rc, _ = _access(tmp_path, token, *GOOD_ARGS)
     out = capsys.readouterr().out
     assert rc == 10, out
