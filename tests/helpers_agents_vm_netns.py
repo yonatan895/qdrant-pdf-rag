@@ -1,6 +1,6 @@
 """The gap VM egress fence, run for real in a throwaway rootless user+net namespace.
 
-Run by tests/test_devkit_kit.py as root of `unshare --map-auto --map-root-user --net
+Run by tests/agents_vm_netns_contracts.py as root of `unshare --map-auto --map-root-user --net
 --mount --fork` (no real privilege): argv is <agents_vm.py> <agents uid>. It builds a
 veth pair to a peer namespace that answers on documentation addresses (RFC 5737,
 RFC 3849), loads the fence with the real `install-fence` code path, and probes as the

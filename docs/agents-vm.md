@@ -8,8 +8,10 @@ run** on the VM. The trials ran on the connected host in Docker and in rootless 
 5.7.0 ([Podman trial](https://github.com/yonatan895/qdrant-pdf-rag/issues/1172#issuecomment-6548398452));
 SELinux labels, linger, delegation on a fresh account and the nftables fence were not
 exercised there. The nftables layer, `install-fence`, the host-side proof and `start`'s
-fence check run against real nftables in a rootless user+net namespace
-(`tests/test_devkit_kit.py`, #1181); the systemd layer needs real privilege and was not.
+fence check run against real nftables in a rootless user+net namespace with
+`tests/agents_vm_netns_contracts.py` (#1181; not a unit test, since CI runners have no
+such namespaces, so run it after a fence change; a skip is not a pass). The systemd
+layer needs real privilege and was not run.
 Source of authority: #1172 design and decisions of 2026-10-31
 ([VM design](https://github.com/yonatan895/qdrant-pdf-rag/issues/1172#issuecomment-6546764341),
 [rootless Podman](https://github.com/yonatan895/qdrant-pdf-rag/issues/1172#issuecomment-6546800917),
