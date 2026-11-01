@@ -15,10 +15,18 @@ stand in for it. This writes `.gitlab/CODEOWNERS` with two sections:
 The protected list has one source of truth: the paths `scripts/acceptance.py`
 binds as Verifier-owned (`VERIFICATION_INPUTS`, which includes
 `scripts/unit_evidence.py` INPUTS, every `taskfiles/*.yml` and the producer
-workflows), plus the gap's own gates in GAP_GATES. `tests/test_gap_codeowners.py`
-pins that equality. The owner group and the approvers are arguments, so no
+workflows), plus the gap's own gates in GAP_GATES. VERIFIER_LIST copies it as
+data, and `tests/test_gap_codeowners.py` pins that equality upstream, where
+the Verifier guards it. The owner group and the approvers are arguments, so no
 site name enters upstream; `refresh` and `check` read them back from the
 committed file, whose bytes are themselves on the protected list.
+
+The check imports nothing from the checkout: in the fork a group-only change
+can edit any unprotected file, and a new top-level name matches no entry of
+the generated file until it is regenerated, so only this check catches it.
+The hygiene job runs it first, as
+`python3 -I` (no script directory or cwd on sys.path, no PYTHON* variables),
+so its whole closure is this protected file and the standard library.
 
 Commands, from the checkout root (usage: ADR-0009 sections 4 and 6):
   write --group @GROUP --approver @USER [--approver @USER ...]
@@ -41,11 +49,6 @@ from pathlib import Path
 # absolute(), not resolve(): the checkout root is where the script is called
 # from, even through a symlinked scripts/ (as tests/test_gap_codeowners.py runs it).
 ROOT = Path(__file__).absolute().parents[1]
-if __package__ in (None, ''):
-    sys.path.insert(0, str(ROOT))  # direct script entry imports the Verifier's list as data
-
-from scripts.acceptance import VERIFICATION_INPUTS
-from scripts.acceptance_evidence import PRODUCERS
 
 TARGET = '.gitlab/CODEOWNERS'
 # GitLab reads the first of these that exists and ignores the rest, so either
@@ -55,10 +58,24 @@ SHADOWING = ('CODEOWNERS', 'docs/CODEOWNERS')
 # GitLab `*` does not cross `/`, so this pattern is the same set and also
 # covers a taskfile added after the file was generated.
 TASKFILES = 'taskfiles/*.yml'
+# The Verifier's protected list as data, never imported: acceptance.py
+# VERIFICATION_INPUTS (with unit_evidence.py INPUTS), every taskfile and the
+# acceptance producers' workflows. The upstream equality test keeps it equal.
+VERIFIER_LIST = (
+    'pyproject.toml', 'tests/conftest.py', 'tests/ci_shard.py', 'scripts/unit_evidence.py',
+    'requirements.dev.lock.txt', 'locks/cp314-linux-x86_64.json', 'scripts/prepare_python.py',
+    'scripts/dependency_lock.py', 'scripts/agent_doctor.py',
+    'scripts/review_tooling.py', 'scripts/ci_evidence.py', 'Taskfile.yml', 'scripts/tools/run-task.sh',
+    'scripts/tools/task-pin.txt', 'scripts/check_hazard_sensitivity.py', 'tests/hazards/critical.json',
+    TASKFILES,
+    '.github/workflows/agent-context.yml', '.github/workflows/agent-probes.yml', '.github/workflows/ci.yml',
+    '.github/workflows/e2e.yml', '.github/workflows/ha.yml', '.github/workflows/load.yml',
+)
 # The gap's own gates (ADR-0009 section 6). F6 adds the gap release pipeline
 # and its signing files here when they exist; today's signers are the bundle
 # and kit pack scripts. The generator is listed too: the hygiene job is only
-# as strong as the check it runs.
+# as strong as the check it runs. So is every code-owner file GitLab reads
+# first: a merge request adding one needs the approver even without hygiene.
 GAP_GATES = (
     '.gitlab-ci.yml',
     TARGET,
@@ -68,6 +85,7 @@ GAP_GATES = (
     'scripts/airgap/pack.sh',
     'scripts/devkit/pack.sh',
     'scripts/gap_codeowners.py',
+    *SHADOWING,
 )
 GROUP_SECTION = '[Gap maintainers]'
 PROTECTED_SECTION = '[Protected list]'
@@ -106,8 +124,7 @@ class Refused(ValueError):
 
 def protected_paths() -> tuple[str, ...]:
     """The Verifier's protected list plus the gap's gates, sorted and unique."""
-    workflows = {'.github/workflows/' + producer.workflow for producer in PRODUCERS}
-    return tuple(sorted({*VERIFICATION_INPUTS, TASKFILES, *workflows, *GAP_GATES}))
+    return tuple(sorted({*VERIFIER_LIST, *GAP_GATES}))
 
 
 def validate_owners(group: str, approvers: Sequence[str]) -> None:

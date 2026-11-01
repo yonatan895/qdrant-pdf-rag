@@ -510,15 +510,22 @@ gap patches stay ledgered.
     workflows), plus the gap's own gates: `.gitlab-ci.yml`,
     `.gitlab/CODEOWNERS`, `scripts/check_junit_clean.py`,
     `scripts/gate_l1.py`, the dev kit pin, and the gap release pipeline and
-    signing files (today both `pack.sh` signers; F6 adds its own), and
-    the generator itself. Each approver is a single user, never a group;
-    one person may give both approvals (maintainer, 2026-10-31).
-  - **One source of truth.** An upstream unit test
-    (`tests/test_gap_codeowners.py`) asserts that the generator's protected
-    set equals those lists plus the named gap additions. The GitLab hygiene
-    job fails when the committed file differs from the generator output,
-    whose owners it reads back from that file, or when a `CODEOWNERS` or
-    `docs/CODEOWNERS`, which GitLab reads first, exists.
+    signing files (today both `pack.sh` signers; F6 adds its own), the
+    generator itself, and `CODEOWNERS` and `docs/CODEOWNERS`, which GitLab
+    reads before `.gitlab/CODEOWNERS`. Each approver is a single user, never
+    a group; one person may give both approvals (maintainer, 2026-10-31).
+  - **One source of truth.** The generator holds the Verifier's list as
+    data and imports nothing from the checkout. An upstream unit test
+    (`tests/test_gap_codeowners.py`) asserts that its protected set equals
+    those lists plus the named gap additions. The GitLab hygiene job fails
+    when the committed file differs from the generator output, whose owners
+    it reads back from that file, or when a `CODEOWNERS` or
+    `docs/CODEOWNERS` exists.
+  - **The check runs untouched.** A new top-level name matches no entry of
+    the 17.0 file until it is regenerated, so only the hygiene check catches
+    it. The check is the job's first step and runs as
+    `python3 -I`, so nothing a group-only change can edit runs before or
+    inside it (#1176 review).
 - **Required verification met** (in the gap) means all of the following:
   - The latest pipeline on the MR head is green, every job ran, and the
     clean-JUnit gate passes.

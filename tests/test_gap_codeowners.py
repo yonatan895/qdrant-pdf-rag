@@ -6,12 +6,19 @@ path except gap/ using only GitLab 17.0 syntax (sections and plain path
 entries; no `!` exclusion, which needs 17.10+). Generated files are checked
 line by line, owners round-trip exactly, and every weakened or hand-edited
 file, missing file and shadowing CODEOWNERS fails the real hygiene step.
+
+Under the 17.0 enumeration a new top-level name (a root CODEOWNERS included)
+matches no entry, so the hygiene step is the guard against a shadowing file:
+it must run first in its job, isolated (`python3 -I`), and execute nothing a
+group-only change can alter (#1176 review B1, run here against a simulated
+fork commit).
 """
 
 from __future__ import annotations
 
 import fnmatch
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -31,8 +38,13 @@ APPROVERS = ['@first.approver', '@second_approver-2']
 # the generator the hygiene job runs (#1176 review).
 GAP_GATES = {'.gitlab-ci.yml', '.gitlab/CODEOWNERS', 'scripts/check_junit_clean.py', 'scripts/gate_l1.py',
              'scripts/tools/devkit-pin.txt', 'scripts/airgap/pack.sh', 'scripts/devkit/pack.sh',
-             'scripts/gap_codeowners.py'}
-CHECK_STEP = 'python3 scripts/gap_codeowners.py check'
+             'scripts/gap_codeowners.py',
+             # Every code-owner file GitLab reads first: adding one needs the
+             # approver even if the hygiene step were neutralised (#1176 B1).
+             'CODEOWNERS', 'docs/CODEOWNERS'}
+# Isolated: no script directory or cwd on sys.path and no PYTHON* variables,
+# so no group-owned file can shadow a module the check imports.
+CHECK_STEP = 'python3 -I scripts/gap_codeowners.py check'
 
 
 def gitlab_glob(pattern: str, path: str) -> bool:
@@ -89,8 +101,11 @@ def test_protected_set_is_the_verifier_list_plus_the_named_gap_gates():
 def test_every_path_the_verifier_binds_is_protected_and_every_named_path_exists():
     bound = verification_inputs(ROOT)  # the real function acceptance hashes
     assert bound and all(any(gitlab_glob(p, path) for p in codeowners.protected_paths()) for path in bound)
-    named = [p for p in codeowners.protected_paths() if '*' not in p and p != codeowners.TARGET]
+    absent = {codeowners.TARGET, *codeowners.SHADOWING}
+    named = [p for p in codeowners.protected_paths() if '*' not in p and p not in absent]
     assert [p for p in named if not (ROOT / p).is_file()] == []
+    # Upstream tracks no code-owner file at all (F3 enforces .gitlab/).
+    assert [p for p in codeowners.SHADOWING if (ROOT / p).exists() or (ROOT / p).is_symlink()] == []
     # In the fork, which tracks the file, it must already be current.
     if (ROOT / codeowners.TARGET).exists():
         assert codeowners.main(['--root', str(ROOT), 'check']) == 0
@@ -314,3 +329,113 @@ def test_the_gitlab_hygiene_job_runs_the_check_and_fails_on_drift(tmp_path):
     assert step().returncode == 0
     target.write_text(_drop_protected(target.read_text()))
     assert step().returncode == 1
+
+
+def test_every_code_owner_file_gitlab_reads_is_protected():
+    # GitLab reads the first of these; a merge request adding an earlier one
+    # matches the protected line in the target branch's file.
+    assert {'CODEOWNERS', 'docs/CODEOWNERS', '.gitlab/CODEOWNERS'} <= set(codeowners.protected_paths())
+    assert set(codeowners.SHADOWING) <= set(codeowners.protected_paths())
+
+
+def test_the_check_is_the_first_code_the_hygiene_job_runs():
+    # A group-owned script run earlier in the job could change the workspace
+    # the check reads (#1176 B1). Nothing runs before it: no before_script on
+    # the job, its templates or the defaults.
+    gitlab = yaml.safe_load((ROOT / '.gitlab-ci.yml').read_text())
+    job = gitlab['hygiene']
+    assert job['script'][0] == CHECK_STEP
+    templates = job.get('extends', [])
+    for name in [templates] if isinstance(templates, str) else templates:
+        assert 'before_script' not in gitlab[name]
+    assert 'before_script' not in job and 'before_script' not in gitlab.get('default', {})
+    assert 'before_script' not in gitlab
+
+
+# The attack payload: when the code-owner check runs, report success and exit.
+SHIM = ("import os, sys\n"
+        "if sys.argv and sys.argv[0].endswith('gap_codeowners.py'):\n"
+        "    sys.stdout.write('OK: .gitlab/CODEOWNERS equals the generator output.\\n')\n"
+        "    sys.stdout.flush()\n"
+        "    os._exit(0)\n")
+# Standard-library names the check or its former imports load at run time.
+STDLIB_NAMES = ('json', 'hashlib', 'tempfile', 'shutil', 're', 'argparse', 'subprocess', 'pathlib', 'zipfile')
+
+
+def fork(tmp_path: Path) -> Path:
+    """A simulated fork commit: this checkout's scripts/, gap/, and the generated file."""
+    root = tmp_path / 'fork'
+    root.mkdir()
+    shutil.copytree(ROOT / 'scripts', root / 'scripts', ignore=shutil.ignore_patterns('__pycache__'))
+    tracked(root, *TREE)
+    git(root, 'add', '--', 'scripts')
+    result = subprocess.run([sys.executable, '-I', str(root / 'scripts/gap_codeowners.py'), 'write', '--group',
+                             GROUP, '--approver', APPROVERS[0]], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    commit(root)
+    return root
+
+
+def commit(root: Path) -> None:
+    git(root, 'add', '-A')
+    git(root, '-c', 'user.name=fork', '-c', 'user.email=fork@example.invalid', 'commit', '-q', '-m', 'fork')
+
+
+def hygiene_step(root: Path) -> subprocess.CompletedProcess[str]:
+    """The job's code-owner step, as written in .gitlab-ci.yml, run from the fork root."""
+    steps = yaml.safe_load((ROOT / '.gitlab-ci.yml').read_text())['hygiene']['script']
+    step = next(s for s in steps if 'gap_codeowners.py check' in s)
+    env = {**os.environ, 'PATH': os.pathsep.join([str(Path(sys.executable).parent), os.environ['PATH']])}
+    return subprocess.run(['sh', '-ec', step], cwd=root, env=env, capture_output=True, text=True, check=False)
+
+
+def test_a_root_codeowners_with_a_root_module_shadowing_the_stdlib_fails_the_step(tmp_path):
+    # Reviewer variant 1: an MR adds only new top-level names, which no entry
+    # of the 17.0 file owns, and a stdlib-shadowing module at the root and in
+    # scripts/ (both group-owned) that reports success.
+    root = fork(tmp_path)
+    assert hygiene_step(root).returncode == 0
+    (root / 'CODEOWNERS').write_text('* @attacker\n')
+    for name in STDLIB_NAMES:
+        (root / f'{name}.py').write_text(SHIM)
+        (root / f'scripts/{name}.py').write_text(SHIM)
+    commit(root)
+    result = hygiene_step(root)
+    assert (result.returncode, result.stdout, result.stderr) == (1, '', codeowners.SHADOWED.format(path='CODEOWNERS'))
+
+
+def test_docs_codeowners_with_edited_group_owned_scripts_fails_the_step(tmp_path):
+    # Reviewer variant 2: docs/CODEOWNERS plus a short edit to scripts the
+    # check used to import (acceptance_evidence.py, scripts/__init__.py and the
+    # rest): every unprotected script under scripts/ gets the payload.
+    root = fork(tmp_path)
+    protected = set(codeowners.protected_paths())
+    edited = [p for p in sorted((root / 'scripts').rglob('*.py'))
+              if str(p.relative_to(root)) not in protected]
+    assert root / 'scripts/acceptance_evidence.py' in edited and root / 'scripts/__init__.py' in edited
+    for path in edited:
+        path.write_text(path.read_text() + '\n' + SHIM)
+    (root / 'docs/CODEOWNERS').write_text('* @attacker\n')
+    commit(root)
+    result = hygiene_step(root)
+    assert (result.returncode, result.stdout, result.stderr) == (1, '', codeowners.SHADOWED.format(path='docs/CODEOWNERS'))
+
+
+def test_the_isolated_check_loads_no_module_from_the_checkout(tmp_path):
+    # The check's whole import closure is the protected script plus the
+    # standard library: nothing a group-only change can edit is executed.
+    root = fork(tmp_path)
+    script = root / 'scripts/gap_codeowners.py'
+    probe = ('import runpy, sys\n'
+             f'sys.argv = [{str(script)!r}, "check"]\n'
+             'try:\n'
+             f'    runpy.run_path({str(script)!r}, run_name="__main__")\n'
+             'except SystemExit as stop:\n'
+             '    assert stop.code == 0, stop.code\n'
+             'for module in list(sys.modules.values()):\n'
+             '    print(getattr(module, "__file__", None) or "")\n')
+    result = subprocess.run([sys.executable, '-I', '-c', probe], cwd=root, capture_output=True, text=True,
+                            check=False)
+    assert result.returncode == 0, result.stderr
+    loaded = [line for line in result.stdout.splitlines() if line.startswith(str(root))]
+    assert loaded == []
