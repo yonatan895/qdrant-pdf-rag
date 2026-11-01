@@ -407,11 +407,11 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     assert "Components awaiting owner decision: 0" in notices
     assert "pymupdf==" not in notices.split("COMPONENTS")[0]
     # The approval line states the packed inventory's own approval state. The fixture rebinds
-    # image pins, so a release approval copied from the repository is reported "stale", exactly
-    # as `license_inventory check` judges that tree.
+    # image pins, so the release approval copied from the repository (current there) is stale
+    # here, exactly as `license_inventory check` judges that tree.
     from scripts import license_inventory as li
-    expected = li.run_check(tmp_path, li.load_inventory(tmp_path), None, False)[2]
-    assert f"Owner approval of this inventory: {expected}\n" in notices
+    assert li.run_check(tmp_path, li.load_inventory(tmp_path), None, False)[2] == "stale"
+    assert "Owner approval of this inventory: stale\n" in notices
     assert "Third-party notices: THIRD-PARTY-NOTICES.txt" in (dist / "PACKING_RECORD.txt").read_text()
 
 
