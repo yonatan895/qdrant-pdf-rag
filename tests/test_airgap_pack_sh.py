@@ -910,12 +910,17 @@ def test_reference_docs_builder_keeps_the_subset_and_licence_only(tmp_path):
     ([*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/../escape.md", b"x")], "absolute, escapes or is unusual"),
     ([*GOOD_DOC_ENTRIES, tar_file("/etc/doc.md", b"x")], "absolute, escapes or is unusual"),
     ([*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/docs/new\nline.md", b"x")], "absolute, escapes or is unusual"),
+    # Names bootstrap.sh would refuse at the site (`LC_ALL=C tar -t` escapes them) fail at pack time.
+    ([*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/docs/caf\u00e9.md", b"x")], "absolute, escapes or is unusual"),
+    ([*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/docs/c1\u0085control.md", b"x")], "absolute, escapes or is unusual"),
+    ([*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/docs/back\\slash.md", b"x")], "absolute, escapes or is unusual"),
     ([*GOOD_DOC_ENTRIES, tar_link(f"{DOC_ROOT}/docs/link.md", "../../../etc/passwd")], "is a link or special file"),
     ([*GOOD_DOC_ENTRIES, tar_link(f"{DOC_ROOT}/docs/hard.md", f"{DOC_ROOT}/LICENSE", tarfile.LNKTYPE)],
      "is a link or special file"),
     ([*GOOD_DOC_ENTRIES, tar_file("second-root/docs/x.md", b"x")], "more than one top-level directory"),
     ([*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/docs/index.md", b"again")], "holds a member name twice"),
-], ids=["dotdot", "absolute", "newline", "symlink", "hardlink", "second-root", "duplicate"])
+], ids=["dotdot", "absolute", "newline", "non-ascii", "c1-control", "backslash", "symlink", "hardlink", "second-root",
+        "duplicate"])
 def test_reference_docs_builder_refuses_an_unsafe_archive(tmp_path, entries, needle):
     result, out = _refdocs_build(tmp_path, entries)
     assert result.returncode == 1

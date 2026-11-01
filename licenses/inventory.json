@@ -698,7 +698,7 @@
       "license_declared": "AGPL-3.0-only (LICENSE at the pinned source)",
       "license_spdx": "AGPL-3.0-only",
       "name": "Reference docs: OpenObserve (in-repo docs) v1.1.2",
-      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/openobserve/, with LICENSE beside them. The AGPL-3.0 text ships as COPYING; the docs are unmodified and their source is the pinned archive.",
+      "obligation": "Raw upstream sources, kept subset only and unmodified, in reference-docs.tar.gz under reference-docs/sets/openobserve/, with LICENSE beside them. The AGPL-3.0 text ships as LICENSE; the docs are unmodified and their source is the pinned archive.",
       "ships_in": [
         "reference-docs.tar.gz"
       ],
@@ -4624,7 +4624,7 @@
   ],
   "release_approval": {
     "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
-    "approved_digest": "4fad8d20125903282f8063592627404e16e8c729a88f644b8aa799f5c192839e"
+    "approved_digest": "2fcedf6557e54c74cc77ae280f326d2f1616e57ae9fb325534dd4895a7649812"
   },
   "schema_version": 1
 }

@@ -44,9 +44,12 @@ FILES = "FILES.sha256"
 NO_LICENCE = frozenset({"", "NOASSERTION", "NONE"})
 SET_ID = re.compile(r"^[a-z0-9][a-z0-9.-]{0,63}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
-# No control character (newline included) and no backslash: names stay plain in
-# sha256sum lines and in `tar -t` listings, which bootstrap.sh checks.
-SAFE_PART = re.compile(r"^[^\x00-\x1f\x7f\\]+$")
+# Printable ASCII (0x20-0x7e) without backslash: exactly the names bootstrap.sh
+# step 5 accepts, because `LC_ALL=C tar -t` prints anything else (non-ASCII, C0
+# or C1 controls, DEL, backslash) as a backslash escape, which bootstrap refuses.
+# Such a name fails here at pack time instead of at the site.
+# tests/test_airgap_bootstrap_sh.py pins both sides to this one definition.
+SAFE_PART = re.compile(r"^[\x20-\x5b\x5d-\x7e]+$")
 # Hard caps against an endless or hostile input (the pins bound the real sizes).
 MAX_DOWNLOAD_BYTES = 2 * 1024**3
 MAX_KEPT_BYTES = 1024**3

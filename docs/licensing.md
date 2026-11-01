@@ -17,7 +17,7 @@ first fresh-install release candidate on 2026-10-31 (#1118), bound to scope dige
 the approval is now recorded under the maintainer's 2026-10-31 blanket licence
 approval of every #1174 doc set
 ([#1174 comment](https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543)),
-bound to scope digest `4fad8d20…`. Any later dependency, pin or notice change voids it, and
+bound to scope digest `2fcedf65…`. Any later dependency, pin or notice change voids it, and
 `check --release` then fails until a new approval is recorded.
 Source of authority: #376 and its triage comments (19 and 24 September, 1 October
 2026): close on a documented owner disposition, never on CI alone.

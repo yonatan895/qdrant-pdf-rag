@@ -6,9 +6,11 @@ Tests bootstrap.sh against a mock sneakernet extraction directory:
 - Successful verification clones the bundle, populates dist/, and initializes airgap.env.
 """
 
+import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -704,3 +706,43 @@ def test_bootstrap_requires_the_reference_docs_member(bundle_dir):
     assert result.returncode != 0
     assert "exactly the required bundle members" in result.stderr
     assert not (bundle_dir / "operator workspace").exists()
+
+
+
+def _builder_name_rule():
+    path = REPO / "scripts/airgap/reference_docs.py"
+    spec = importlib.util.spec_from_file_location("reference_docs_rule", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # Its dataclasses resolve their module while it loads.
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        del sys.modules[spec.name]
+    return module.SAFE_PART
+
+
+def test_bootstrap_accepts_exactly_the_names_the_reference_docs_builder_accepts(bundle_dir):
+    """#1179 review P1: one name rule for both sides. Every character the pack-time
+    builder accepts in a path component unpacks and verifies at the site (step 5 lists
+    names under `LC_ALL=C`, which escapes anything else with a backslash), and each
+    class the builder refuses is refused by bootstrap too, so pack never ships a
+    signed member the site then rejects."""
+    rule = _builder_name_rule()
+    accepted = [chr(c) for c in range(0x110) if c != ord("/") and rule.match(f"x{chr(c)}x")]
+    assert accepted == [chr(c) for c in range(0x20, 0x7F) if chr(c) not in "/\\"]
+    files = {"sets/demo/LICENSE": b"Demo licence text\n"}
+    files.update({f"sets/demo/n{char}n.md": char.encode() for char in accepted})
+    files.update({" lead and trail ": b"spaces", "sets/demo/-dash": b"dash"})
+    _replace_docs(bundle_dir, reference_docs_member(files))
+    result = _bootstrap(bundle_dir)
+    assert result.returncode == 0, result.stdout + result.stderr
+    docs = bundle_dir / "operator workspace/dist/reference-docs"
+    for char in accepted:
+        assert (docs / f"sets/demo/n{char}n.md").read_bytes() == char.encode(), repr(char)
+    for refused in ("\u00e9", "\u0085", "\x7f", "\\", "\x01"):
+        assert not rule.match(f"x{refused}x"), repr(refused)
+        bad = {"sets/demo/LICENSE": b"Demo licence text\n", f"sets/demo/bad{refused}name.md": b"x"}
+        _replace_docs(bundle_dir, reference_docs_member(bad))
+        result = _bootstrap(bundle_dir)
+        assert result.returncode != 0, repr(refused)
+        assert "FAIL: reference docs: the member holds a path outside reference-docs/" in result.stderr
