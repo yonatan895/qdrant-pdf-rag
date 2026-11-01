@@ -11,6 +11,7 @@ dependencies = [
     "httpx2",
     "urllib3==2.8.0",
     "fastapi",
+    "pyjwt[crypto]==2.15.1",
     "jinja2",
     "python-multipart",
     "uvicorn",
