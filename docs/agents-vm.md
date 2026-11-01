@@ -7,7 +7,9 @@ evidence. The site steps (preflight, load, fence, proof, start) are **required, 
 run** on the VM. The trials ran on the connected host in Docker and in rootless Podman
 5.7.0 ([Podman trial](https://github.com/yonatan895/qdrant-pdf-rag/issues/1172#issuecomment-6548398452));
 SELinux labels, linger, delegation on a fresh account and the nftables fence were not
-exercised there.
+exercised there. The nftables layer, `install-fence`, the host-side proof and `start`'s
+fence check run against real nftables in a rootless user+net namespace
+(`tests/test_devkit_kit.py`, #1181); the systemd layer needs real privilege and was not.
 Source of authority: #1172 design and decisions of 2026-10-31
 ([VM design](https://github.com/yonatan895/qdrant-pdf-rag/issues/1172#issuecomment-6546764341),
 [rootless Podman](https://github.com/yonatan895/qdrant-pdf-rag/issues/1172#issuecomment-6546800917),
@@ -137,30 +139,50 @@ sudo python3 scripts/devkit/agents_vm.py render-fence --out /root/mfr-fence   # 
 sudo python3 scripts/devkit/agents_vm.py install-fence
 ```
 
-- **Primary layer, nftables:** table `inet mfr_agents`, an output chain that matches
-  `meta skuid <agents uid>`: established traffic, DNS, GitLab and LiteLLM are accepted,
-  everything else is counted and dropped. Rootless Podman's network helper (pasta or
-  slirp4netns) runs as `agents`, so container traffic is caught too. That includes the
+- **Primary layer, nftables:** table `inet mfr_agents`. Its output chain (policy
+  accept) jumps to the chain `agents_egress` only on `meta skuid <agents uid>`; there
+  established traffic, DNS, GitLab and LiteLLM are accepted, and everything else is
+  counted and dropped. A packet with no socket owner (IPv6 neighbour discovery, kernel
+  sockets of NFS, iSCSI or WireGuard) cannot match `meta skuid`, so it stays under the
+  base chain's accept: other users and the kernel are unaffected (#1181). Rootless
+  Podman's network helper (pasta or slirp4netns) runs as `agents`, so container traffic
+  is caught too. That includes the
   VM's own services: pasta lets a container reach the host's loopback and addresses as
   `agents` (`host.containers.internal`), so the fence has no blanket loopback accept. A
   local DNS stub such as `127.0.0.53` passes only when it is listed in `MFR_VM_DNS`.
-- **Second layer, systemd:** a drop-in for `user-<uid>.slice` with `IPAddressDeny=any`
-  and `IPAddressAllow=` the same addresses (no `localhost`). It covers every process of
-  the user's slice, Podman's `libpod-*` scopes included. It filters both directions, so
-  the viewers' SSH clients go in `MFR_VM_SSH_CLIENTS`.
+- **Second layer, systemd:** a drop-in for `user-<uid>.slice` with `IPAddressDeny=any`,
+  `IPAddressAllow=localhost` and `IPAddressAllow=` the same addresses. It covers every
+  process of the user's slice, Podman's `libpod-*` scopes included. It filters both
+  directions, so the viewers' SSH clients go in `MFR_VM_SSH_CLIENTS`.
+- **Which loopback each layer governs.** The systemd filter is cgroup eBPF: it applies
+  to the slice's sockets in every network namespace, the container's included. Without
+  `localhost` it would cut the container's own `127.0.0.1`, over which every
+  `opencode run --standalone` reaches its child server (#1181), so workers and the
+  warm-up would fail. The nftables table lives in the host's namespace only, where
+  pasta's host-side sockets and the `agents` shell are; it has no loopback accept. So
+  the host's loopback is refused to `agents` by nftables alone, and the proof's
+  `host-loopback` control checks exactly that layer.
 - `install-fence` checks the table with `nft -c` before loading it and changes nothing
-  when nft refuses it. It writes `/etc/nftables/mfr-agents.nft`; include that file from
-  the distribution's nftables service configuration so it survives a reboot (a site
-  admin decision). Re-render after any address change.
-- `install-fence --remove` deletes both layers: the proof's negative control only.
+  when nft refuses it or is missing. After loading it reads the live table back
+  (`nft -j list table`) and refuses unless the output chain only jumps the agents uid
+  into `agents_egress` and that chain ends in a drop. It writes
+  `/etc/nftables/mfr-agents.nft`; include that file from the distribution's nftables
+  service configuration so it survives a reboot (a site admin decision). Re-render
+  after any address change. Running it again converges on the same table and files.
+- `install-fence --remove` deletes both layers: the proof's negative control only. It
+  refuses while any Podman container of `agents` runs (a `conmon` of that uid), since
+  that container would run unfenced; stop `mfr-agents` first. Removing again
+  converges: no table and no files is the state it wants.
 
 ## Egress proof (as `agents`)
 
 ```sh
 python3 scripts/devkit/agents_vm.py proof --output /path/to/private/proof-fenced.json
+podman stop mfr-agents                                                  # if it runs
 sudo python3 scripts/devkit/agents_vm.py install-fence --remove        # admin
 python3 scripts/devkit/agents_vm.py proof --fence-off --output /path/to/private/proof-open.json
 sudo python3 scripts/devkit/agents_vm.py install-fence                 # admin, at once
+podman rm mfr-agents && python3 scripts/devkit/agents_vm.py start     # if it ran
 ```
 
 Each run probes from the host shell and from inside a kit container (`podman run
@@ -168,7 +190,9 @@ Each run probes from the host shell and from inside a kit container (`podman run
 LiteLLM and DNS answer and every negative control (production Qdrant, the agent, the
 OpenShift API, the internet, a service on the VM's loopback and one on its own address)
 fails. Inside the container the loopback control targets `host.containers.internal`,
-the path pasta gives to the host's loopback. Fence off, it passes only when those same negative
+the path pasta gives to the host's loopback, and `container:loopback` must connect in
+both modes: a listener on the container's own `127.0.0.1`, one byte each way, the
+path OpenCode's workers need. Fence off, it passes only when those same negative
 controls connect, which proves the probes can see a working path; a control that
 fails either way proves nothing and is reported as such. Stdout carries labels and
 states only. The JSON records hold the addresses, so they go in the private install
@@ -182,7 +206,11 @@ podman secret create mfr-gitlab-credentials /path/to/git-credentials   # optiona
 python3 scripts/devkit/agents_vm.py start
 ```
 
-`start` runs the long-lived container `mfr-agents` from the loaded image: `--init`,
+`start` refuses unless it runs as `agents` and the fence is in force for that uid:
+every `MFR_VM_BLOCKED` target must be refused from the host. `agents` cannot read the
+nftables ruleset (netlink needs `CAP_NET_ADMIN`), so `start` checks the fence by its
+effect; that holds while those targets answer without the fence, which the fence-off
+proof shows. Then it runs the long-lived container `mfr-agents` from the loaded image: `--init`,
 `--userns=keep-id:uid=1000770000,gid=0 --user 1000770000:0` (the default rootless user
 namespace cannot map the kit's OpenShift-style uid; this maps `agents` onto it, so its
 files are the container user's without `:U`), `--cap-drop=all`, `no-new-privileges`,
@@ -257,6 +285,8 @@ pin until then.
 ## Known gaps
 
 - The site run: load, fence, both proofs, start, a worker round, and the Windows viewer.
+- The systemd layer (cgroup eBPF, `IPAddressAllow=localhost`) needs real privilege; it
+  was reasoned from `systemd.resource-control(5)`, not executed.
 - Mode (b), the OpenCode plugin that reports OSC 7501 status, was not run on v2.
 - An interactive `hc attach` from a host TTY was not run in the trial.
 - The OpenCode binary bundles JavaScript dependencies whose notices it does not list

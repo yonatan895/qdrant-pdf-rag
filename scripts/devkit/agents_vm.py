@@ -7,16 +7,19 @@ outside git: the GitLab, LiteLLM and DNS addresses are site inputs, never reposi
 content. The file is read as KEY=VALUE lines and never executed.
 
   render-fence  --site-env F --out DIR [--uid N]
-        Render the egress fence for the agents user: an nftables table that matches
-        `meta skuid <agents>` (primary layer: it also catches the rootless-Podman
-        network helper, pasta or slirp4netns, which runs as that user) and a systemd
-        drop-in for user-<uid>.slice with IPAddressDeny=any plus IPAddressAllow (second
-        layer). Neither layer accepts loopback wholesale: pasta reaches the VM's own
-        services as that user. Writes DIR/mfr-agents.nft and
+        Render the egress fence for the agents user: an nftables table whose output
+        chain jumps to its fence chain on `meta skuid <agents>` only (primary layer: it
+        also catches the rootless-Podman network helper, pasta or slirp4netns, which runs
+        as that user; it has no loopback accept, since pasta reaches the VM's own
+        services as that user) and a systemd drop-in for user-<uid>.slice with
+        IPAddressDeny=any plus IPAddressAllow of localhost and the same addresses
+        (second layer). Writes DIR/mfr-agents.nft and
         DIR/user-<uid>.slice.d/50-mfr-agents-egress.conf.
   install-fence --site-env F [--uid N] [--root DIR] [--remove]
-        As root: render, check with `nft -c`, load the table, install the drop-in and
-        reload systemd. --remove deletes both (the proof's fence-off negative control).
+        As root: render, check with `nft -c`, load the table, read the live table back,
+        install the drop-in and reload systemd. --remove deletes both (the proof's
+        fence-off negative control) and refuses while a container of the agents user
+        runs. Both converge when repeated.
   proof         --site-env F [--fence-off] [--where host|container|both] [--output FILE]
         As the agents user: probe GitLab, LiteLLM and DNS (must connect) and every
         MFR_VM_BLOCKED target (production Qdrant, the agent, the OpenShift API, the
@@ -28,9 +31,10 @@ content. The file is read as KEY=VALUE lines and never executed.
         cpu, memory and pids delegated to user@<uid>.service, and linger. start and the
         container proof run it first.
   start         --site-env F
-        As the agents user: run the kit image as the long-lived container mfr-agents
-        under rootless Podman with --init, keep-id onto the kit's uid 1000770000:0, and
-        the resource figures of #1172.
+        As the agents user, and only while every MFR_VM_BLOCKED target is refused to
+        this uid: run the kit image as the long-lived container mfr-agents under
+        rootless Podman with --init, keep-id onto the kit's uid 1000770000:0, and the
+        resource figures of #1172.
   observe
         The forced command of a view-only SSH key: `hc attach --observe <terminal>`
         inside mfr-agents for the terminal named in SSH_ORIGINAL_COMMAND, or `hc ls`.
@@ -56,6 +60,7 @@ from pathlib import Path
 DEFAULT_SITE_ENV = "/etc/mfr-agents/site.env"
 CONTAINER = "mfr-agents"
 NFT_TABLE = "mfr_agents"
+NFT_FENCE_CHAIN = "agents_egress"
 NFT_FILE = "mfr-agents.nft"
 DROPIN = "50-mfr-agents-egress.conf"
 REQUIRED = ("MFR_VM_AGENTS_USER", "MFR_VM_DNS", "MFR_VM_GITLAB", "MFR_VM_GITLAB_PORTS", "MFR_VM_GITLAB_HOST",
@@ -265,8 +270,13 @@ def render_nft(site: Site, uid: int) -> str:
             if members:
                 lines.append(f"    set {name}{family} {{ type {kind}; flags interval; "
                              f"elements = {{ {', '.join(members)} }}; }}")
+    # Dispatch on a positive uid match only. A packet without a socket owner (IPv6
+    # neighbour discovery, kernel NFS, iSCSI or WireGuard sockets) cannot match
+    # `meta skuid` at all: with `skuid != uid accept` it fell through to the drop for
+    # every user (#1181 B1); here it stays in the base chain and its accept policy.
     lines += ["    chain output {", "        type filter hook output priority filter; policy accept;",
-              f"        meta skuid != {uid} accept",
+              f"        meta skuid {uid} jump {NFT_FENCE_CHAIN}", "    }",
+              f"    chain {NFT_FENCE_CHAIN} {{",
               # No blanket loopback accept: pasta reaches the host's local services as
               # this uid. A local DNS stub (127.0.0.53) passes only through the DNS set.
               "        ct state established,related accept"]
@@ -290,8 +300,11 @@ def render_dropin(site: Site, uid: int) -> str:
     lines = [f"# Egress fence for the agents user (uid {uid}), #1172 second layer: cgroup/eBPF",
              "# filtering for every process in the user's slice, Podman's libpod scopes included.",
              f"# Rendered by scripts/devkit/agents_vm.py from a site env file (sha256 {site.digest}).",
-             "# No localhost entry: host-local services are fenced off too (pasta runs as this user).",
-             "[Slice]", "IPAddressDeny=any", f"IPAddressAllow={allowed}"]
+             "# localhost: this filter applies in every network namespace of the slice, so without it",
+             "# the container's own loopback is cut, and OpenCode's --standalone run reaches its child",
+             "# server over 127.0.0.1 there. The host's loopback stays shut by the nftables layer, which",
+             "# matches this uid in the host's namespace, where pasta's host-side sockets live.",
+             "[Slice]", "IPAddressDeny=any", "IPAddressAllow=localhost", f"IPAddressAllow={allowed}"]
     if site.ssh_clients:
         # The filter applies in both directions: let the viewers' SSH sessions in. The
         # nftables layer still refuses agents-owned connections to these addresses.
@@ -309,59 +322,152 @@ def render_fence(site: Site, uid: int, out: Path) -> list[Path]:
     return [nft, dropin]
 
 
+def admin_run(argv: list[str], after: str = "nothing was changed") -> subprocess.CompletedProcess:
+    """One admin tool call; a missing or unrunnable tool is a fixed refusal, never a traceback."""
+    try:
+        return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
+    except OSError:
+        raise Refused(f"{argv[0]} is not installed or cannot run; {after}") from None
+
+
+def live_fence_problems(listing: str, uid: int) -> list[str]:
+    """Read-back of `nft -j list table`: the output chain only jumps the agents uid into
+    the fence chain, and the fence chain ends in a drop."""
+    try:
+        items = json.loads(listing)["nftables"]
+        chains = {i["chain"]["name"]: i["chain"] for i in items if "chain" in i}
+        rules: dict[str, list] = {}
+        for item in items:
+            if "rule" in item:
+                rules.setdefault(item["rule"]["chain"], []).append(item["rule"]["expr"])
+    except (ValueError, TypeError, KeyError):
+        return ["the listing is not nftables JSON"]
+    problems = []
+    base = chains.get("output") or {}
+    if (base.get("type"), base.get("hook"), base.get("policy")) != ("filter", "output", "accept"):
+        problems.append("no output hook chain with policy accept")
+    dispatch = [{"match": {"op": "==", "left": {"meta": {"key": "skuid"}}, "right": uid}},
+                {"jump": {"target": NFT_FENCE_CHAIN}}]
+    if rules.get("output") != [dispatch]:
+        problems.append(f"the output chain does not only jump uid {uid} into {NFT_FENCE_CHAIN}")
+    fence = rules.get(NFT_FENCE_CHAIN) or [[]]
+    if NFT_FENCE_CHAIN not in chains or not any("drop" in expr for expr in fence[-1]):
+        problems.append(f"{NFT_FENCE_CHAIN} does not end in a drop")
+    return problems
+
+
+def agents_containers(root: Path, uid: int) -> bool:
+    """Whether a Podman container of the agents user runs: each has a conmon monitor
+    process of that uid (readable from /proc without privilege)."""
+    proc = root / "proc"
+    for status in proc.glob("[0-9]*/status") if proc.is_dir() else []:
+        try:
+            fields = dict(line.split(":", 1) for line in status.read_text(encoding="utf-8").splitlines()
+                          if ":" in line)
+        except OSError:
+            continue  # the process ended meanwhile
+        name = fields.get("Name", "").strip()
+        real_uid = (fields.get("Uid", "").split() or [""])[0]
+        if name in ("conmon", "conmonrs") and real_uid == str(uid):
+            return True
+    return False
+
+
 def install_fence(site: Site, uid: int, root: Path, remove: bool) -> None:
+    """Converges: installing again replaces the table and rewrites the same files;
+    removing again finds no table and no files, which is the state it wants."""
     nft_dir = root / "etc/nftables"
     dropin_dir = root / f"etc/systemd/system/user-{uid}.slice.d"
     if remove:
-        subprocess.run(["nft", "delete", "table", "inet", NFT_TABLE], stdin=subprocess.DEVNULL,
-                       capture_output=True, check=False)
+        # A running container would keep running unfenced (#1181 B3): refuse instead.
+        if agents_containers(root, uid):
+            raise Refused("a Podman container of the agents user is running; stop it first (as agents: "
+                          f"podman stop {CONTAINER}), then remove the fence")
+        if admin_run(["nft", "delete", "table", "inet", NFT_TABLE]).returncode != 0 and \
+                admin_run(["nft", "list", "table", "inet", NFT_TABLE]).returncode == 0:
+            raise Refused("nft could not delete the loaded table; nothing else was changed")
         (nft_dir / NFT_FILE).unlink(missing_ok=True)
         (dropin_dir / DROPIN).unlink(missing_ok=True)
     else:
         nft_dir.mkdir(parents=True, exist_ok=True)
-        dropin_dir.mkdir(parents=True, exist_ok=True)
         staged = nft_dir / f".{NFT_FILE}.new"
         staged.write_text(render_nft(site, uid), encoding="utf-8")
-        for argv in (["nft", "-c", "-f", str(staged)], ["nft", "-f", str(staged)]):
-            if subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, check=False).returncode != 0:
-                staged.unlink()
-                raise Refused("nft refused the rendered table; nothing was changed")
-        staged.replace(nft_dir / NFT_FILE)
+        try:
+            for argv in (["nft", "-c", "-f", str(staged)], ["nft", "-f", str(staged)]):
+                if admin_run(argv).returncode != 0:
+                    raise Refused("nft refused the rendered table; nothing was changed")
+            listed = admin_run(["nft", "-j", "list", "table", "inet", NFT_TABLE])
+            problems = live_fence_problems(listed.stdout, uid) if listed.returncode == 0 else ["it is not loaded"]
+            if problems:
+                raise Refused("the loaded nftables table is not the rendered fence (" + "; ".join(problems) +
+                              "); the drop-in was not installed; run install-fence again")
+            staged.replace(nft_dir / NFT_FILE)
+        finally:
+            staged.unlink(missing_ok=True)
+        dropin_dir.mkdir(parents=True, exist_ok=True)
         (dropin_dir / DROPIN).write_text(render_dropin(site, uid), encoding="utf-8")
-    if subprocess.run(["systemctl", "daemon-reload"], stdin=subprocess.DEVNULL, capture_output=True,
-                      check=False).returncode != 0:
+    if admin_run(["systemctl", "daemon-reload"], "check the drop-in by hand").returncode != 0:
         raise Refused("systemctl daemon-reload failed; check the drop-in by hand")
 
 
 # --- proof -------------------------------------------------------------------
 
 # Runs unchanged on the host's python3 and inside the kit image (python3 -I -c).
-# argv[1] is JSON: {"connect": [[label, host, port], ...], "resolve": [label, name]}.
+# argv[1] is JSON: {"connect": [[label, host, port], ...], "resolve": [label, name] or
+# null, "loopback": label or null}. The connects run in parallel (a dropped one waits
+# out its 5 s timeout). "loopback" is a listener on the probe's own 127.0.0.1 and one
+# byte each way: in a container, the path OpenCode's --standalone client takes to its
+# child server (#1181 B2).
 PROBE = r"""
-import json, socket, sys
+import json, socket, sys, threading
 spec = json.loads(sys.argv[1])
 out = {}
-for label, host, port in spec["connect"]:
+def connect(label, host, port):
     try:
         socket.create_connection((host, port), timeout=5).close()
         out[label] = "connected"
     except OSError as error:
         out[label] = "failed:" + type(error).__name__
-label, name = spec["resolve"]
-try:
-    socket.getaddrinfo(name, 443, type=socket.SOCK_STREAM)
-    out[label] = "connected"
-except OSError as error:
-    out[label] = "failed:" + type(error).__name__
+threads = [threading.Thread(target=connect, args=item) for item in spec["connect"]]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join()
+if spec.get("loopback"):
+    try:
+        with socket.socket() as server:
+            server.settimeout(5)
+            server.bind(("127.0.0.1", 0))
+            server.listen(1)
+            with socket.create_connection(server.getsockname(), timeout=5) as client:
+                peer = server.accept()[0]
+                with peer:
+                    peer.settimeout(5)
+                    client.sendall(b"q")
+                    peer.sendall(peer.recv(1))
+                    ok = client.recv(1) == b"q"
+        out[spec["loopback"]] = "connected" if ok else "failed:NoEcho"
+    except OSError as error:
+        out[spec["loopback"]] = "failed:" + type(error).__name__
+if spec.get("resolve"):
+    label, name = spec["resolve"]
+    try:
+        socket.getaddrinfo(name, 443, type=socket.SOCK_STREAM)
+        out[label] = "connected"
+    except OSError as error:
+        out[label] = "failed:" + type(error).__name__
 print(json.dumps(out, sort_keys=True))
 """
+LOOPBACK_LABEL = "container:loopback"
 
 
 def probe_spec(site: Site, place: str = "host") -> tuple[dict, list[str], list[str]]:
     """(spec, labels that must connect, labels that must fail with the fence on).
 
     In a container, 127.0.0.1 is the container's own loopback; the host's loopback is
-    reached through pasta as host.containers.internal, so that is the target there."""
+    reached through pasta as host.containers.internal, so that is the target there.
+    The container's own loopback must work, fenced or not (OpenCode's workers use it);
+    on the host the agents uid's loopback is the host-loopback negative control."""
     connect = []
     allowed = []
     for name, nets, port_list in (("gitlab", site.gitlab, site.gitlab_ports),
@@ -378,7 +484,11 @@ def probe_spec(site: Site, place: str = "host") -> tuple[dict, list[str], list[s
         connect.append([f"blocked:{label}", host, port])
         blocked_labels.append(f"blocked:{label}")
     allowed.append("dns:resolve")
-    return {"connect": connect, "resolve": ["dns:resolve", site.gitlab_host]}, allowed, blocked_labels
+    spec = {"connect": connect, "resolve": ["dns:resolve", site.gitlab_host], "loopback": None}
+    if place == "container":
+        spec["loopback"] = LOOPBACK_LABEL
+        allowed.append(LOOPBACK_LABEL)
+    return spec, allowed, blocked_labels
 
 
 def verdict(results: dict[str, str], allowed: list[str], blocked_labels: list[str], fence_off: bool) -> list[str]:
@@ -503,13 +613,34 @@ def preflight(site: Site, root: Path = Path("/"), uid: int | None = None) -> Non
         raise Refused("preflight failed: " + "; ".join(problems))
 
 
+def fence_leaks(site: Site) -> list[str]:
+    """Labels of the negative controls this uid can reach right now, from the host.
+
+    The agents uid cannot read the nftables ruleset (netlink needs CAP_NET_ADMIN), so
+    `start` checks the fence by its effect: every MFR_VM_BLOCKED target must be refused.
+    That holds only while those targets answer without the fence, which the fence-off
+    proof establishes; host-loopback (the VM's own sshd) is refused by nftables alone."""
+    spec, _, blocked_labels = probe_spec(site, "host")
+    spec = {"connect": [item for item in spec["connect"] if item[0] in blocked_labels]}
+    results = run_probe([sys.executable, "-I", "-c", PROBE, json.dumps(spec)])
+    return [label for label in blocked_labels if results.get(label, "connected") == "connected"]
+
+
 def start(site: Site) -> int:
     preflight(site)
+    if pwd.getpwuid(os.getuid()).pw_name != site.user:
+        raise Refused("run start as the agents user: the fence matches that uid only")
     if os.environ.get("KUBECONFIG") or (Path.home() / ".kube").exists():
         raise Refused("this account holds OpenShift credentials (KUBECONFIG or ~/.kube); the agents "
                       "user must have none (docs/agents-vm.md#accounts)")
     if shutil.which("podman") is None:
         raise Refused("podman is not on PATH; the VM runs the kit under rootless Podman")
+    leaks = fence_leaks(site)
+    if leaks:
+        # Fail closed (#1181 B3): no fence installed, a removed fence, or a broken one.
+        raise Refused("the egress fence is not in force for this user: " + ", ".join(leaks) +
+                      " connected (or gave no result); the admin runs install-fence "
+                      "(docs/agents-vm.md#egress-fence-as-the-admin)")
 
     def podman(*args: str) -> subprocess.CompletedProcess:
         return subprocess.run(["podman", *args], stdin=subprocess.DEVNULL, capture_output=True, text=True,

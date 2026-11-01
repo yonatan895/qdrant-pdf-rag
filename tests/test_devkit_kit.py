@@ -1329,11 +1329,18 @@ def test_fence_renders_an_skuid_allow_list_then_drop_and_the_slice_second_layer(
     done = vm.main(["render-fence", "--site-env", str(_site(tmp_path)), "--uid", "1500", "--out", str(out)])
     assert done == 0
     nft = (out / "mfr-agents.nft").read_text()
-    chain = nft.split("chain output {", 1)[1]
-    rules = [line.strip() for line in chain.splitlines() if line.strip() and line.strip() != "}"]
-    assert rules == [
+    def chain(name):
+        body = nft.split(f"chain {name} {{", 1)[1].split("\n    }", 1)[0]
+        return [line.strip() for line in body.splitlines() if line.strip()]
+
+    # Only a positive uid match enters the fence (#1181 B1): a packet with no socket
+    # owner (IPv6 neighbour discovery, kernel NFS/iSCSI/WireGuard sockets) cannot match
+    # `meta skuid`, so it must fall to the base chain's accept, never to the drop.
+    assert chain("output") == [
         "type filter hook output priority filter; policy accept;",
-        "meta skuid != 1500 accept",
+        "meta skuid 1500 jump agents_egress",
+    ]
+    assert chain("agents_egress") == [
         "ct state established,related accept",
         "ip daddr @dns4 udp dport { 53 } accept",
         "ip daddr @dns4 tcp dport { 53 } accept",
@@ -1341,14 +1348,20 @@ def test_fence_renders_an_skuid_allow_list_then_drop_and_the_slice_second_layer(
         "ip daddr @litellm4 tcp dport { 443 } accept",
         'counter drop comment "mfr-agents egress fence: not GitLab, LiteLLM or DNS"',
     ]
+    assert "skuid !=" not in nft and nft.count("meta skuid") == 1
     assert "elements = { 192.0.2.53/32 }" in nft and "elements = { 198.51.100.0/28 }" in nft
     # The negative controls are never allowed, nor is loopback: pasta reaches host-local
     # services as the agents uid (Podman trial), so no blanket `oifname "lo" accept`.
     assert "203.0.113." not in nft and "127.0.0.1" not in nft and '"lo"' not in nft
     assert nft.startswith("# Egress fence") and "table inet mfr_agents\ndelete table inet mfr_agents\n" in nft
     dropin = (out / "user-1500.slice.d/50-mfr-agents-egress.conf").read_text().splitlines()
-    assert dropin[4:] == ["[Slice]", "IPAddressDeny=any", "IPAddressAllow=192.0.2.53/32 192.0.2.10/32 198.51.100.0/28"]
-    assert "localhost" not in "\n".join(dropin[4:])
+    # The slice layer is cgroup eBPF, so it filters every network namespace of the slice:
+    # without localhost it would cut the container's own loopback, over which OpenCode's
+    # --standalone client reaches its child server (#1181 B2). The host's loopback stays
+    # shut by the nftables layer above, which has no loopback accept.
+    assert dropin[dropin.index("[Slice]"):] == [
+        "[Slice]", "IPAddressDeny=any", "IPAddressAllow=localhost",
+        "IPAddressAllow=192.0.2.53/32 192.0.2.10/32 198.51.100.0/28"]
 
 
 @pytest.mark.parametrize("override, message", [
@@ -1384,33 +1397,145 @@ def test_site_env_inside_a_git_work_tree_is_refused(tmp_path, capsys):
     assert "inside a git work tree" in capsys.readouterr().err
 
 
-def test_install_fence_checks_before_loading_and_removes_for_the_negative_control(tmp_path, monkeypatch):
+def _nft_listing(uid: int, *, op: str = "==", verdict: str = "jump") -> str:
+    """`nft -j list table inet mfr_agents` as nftables 1.1.6 prints the loaded fence."""
+    dispatch = {"jump": {"target": "agents_egress"}} if verdict == "jump" else {"accept": None}
+    items = [
+        {"metainfo": {"version": "1.1.6", "json_schema_version": 1}},
+        {"table": {"family": "inet", "name": "mfr_agents", "handle": 5}},
+        {"chain": {"family": "inet", "table": "mfr_agents", "name": "output", "handle": 1, "type": "filter",
+                   "hook": "output", "prio": 0, "policy": "accept"}},
+        {"chain": {"family": "inet", "table": "mfr_agents", "name": "agents_egress", "handle": 2}},
+        {"rule": {"family": "inet", "table": "mfr_agents", "chain": "output", "handle": 4, "expr": [
+            {"match": {"op": op, "left": {"meta": {"key": "skuid"}}, "right": uid}}, dispatch]}},
+        {"rule": {"family": "inet", "table": "mfr_agents", "chain": "agents_egress", "handle": 7, "expr": [
+            {"counter": {"packets": 0, "bytes": 0}}, {"drop": None}]}},
+    ]
+    return json.dumps({"nftables": items})
+
+
+@pytest.fixture
+def fence_host(tmp_path, monkeypatch):
+    """A stateful fake nft (the table is loaded or not) and systemctl, logging each call."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    log = tmp_path / "calls.log"
-    for tool, rc in (("nft", "${NFT_RC:-0}"), ("systemctl", "0")):
-        (bin_dir / tool).write_text(f'#!/bin/sh\necho "{tool} $*" >> "{log}"\nexit {rc}\n')
+    ctx = {"log": tmp_path / "calls.log", "loaded": tmp_path / "nft.loaded", "listing": tmp_path / "nft.json",
+           "root": tmp_path / "root", "site": _site(tmp_path), "bin": bin_dir}
+    (bin_dir / "nft").write_text(f"""#!/bin/sh
+echo "nft $*" >> "{ctx['log']}"
+case "$1" in
+  -c) exit ${{NFT_RC:-0}} ;;
+  -f) [ "${{NFT_RC:-0}}" = 0 ] || exit 1; touch "{ctx['loaded']}"; exit 0 ;;
+  -j) [ -f "{ctx['loaded']}" ] || exit 1; cat "{ctx['listing']}"; exit 0 ;;
+  list) [ -f "{ctx['loaded']}" ] ;;
+  delete) [ -f "{ctx['loaded']}" ] || exit 1; rm "{ctx['loaded']}" ;;
+  *) exit 64 ;;
+esac
+""")
+    (bin_dir / "systemctl").write_text(f'#!/bin/sh\necho "systemctl $*" >> "{ctx["log"]}"\n')
+    for tool in ("nft", "systemctl"):
         (bin_dir / tool).chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
-    root = tmp_path / "root"
-    site = _site(tmp_path)
-    assert vm.main(["install-fence", "--site-env", str(site), "--uid", "1500", "--root", str(root)]) == 0
+    ctx["listing"].write_text(_nft_listing(1500))
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    return ctx
+
+
+def _fence(ctx, *extra: str) -> int:
+    return vm.main(["install-fence", "--site-env", str(ctx["site"]), "--uid", "1500", "--root", str(ctx["root"]),
+                    *extra])
+
+
+def _calls(ctx) -> list[str]:
+    lines = ctx["log"].read_text().splitlines() if ctx["log"].exists() else []
+    ctx["log"].unlink(missing_ok=True)
+    return lines
+
+
+def test_install_fence_checks_before_loading_and_removes_for_the_negative_control(fence_host, monkeypatch):
+    ctx = fence_host
+    root = ctx["root"]
+    nft_file = root / "etc/nftables/mfr-agents.nft"
+    dropin = root / "etc/systemd/system/user-1500.slice.d/50-mfr-agents-egress.conf"
+    assert _fence(ctx) == 0
     staged = root / "etc/nftables/.mfr-agents.nft.new"
-    assert log.read_text().splitlines() == [f"nft -c -f {staged}", f"nft -f {staged}", "systemctl daemon-reload"]
-    assert (root / "etc/nftables/mfr-agents.nft").read_text().count("meta skuid != 1500 accept") == 1
-    assert (root / "etc/systemd/system/user-1500.slice.d/50-mfr-agents-egress.conf").is_file()
+    # Check, load, then read the live table back before anything else is installed.
+    assert _calls(ctx) == [f"nft -c -f {staged}", f"nft -f {staged}", "nft -j list table inet mfr_agents",
+                           "systemctl daemon-reload"]
+    assert nft_file.read_text().count("meta skuid 1500 jump agents_egress") == 1
+    assert dropin.is_file() and not staged.exists()
+    installed = (nft_file.read_bytes(), dropin.read_bytes())
+    # Installing again converges on the same files and the same live table.
+    assert _fence(ctx) == 0 and (nft_file.read_bytes(), dropin.read_bytes()) == installed
+    assert ctx["loaded"].exists() and not staged.exists()
+    _calls(ctx)
     # A table nft rejects changes nothing.
-    log.unlink()
     monkeypatch.setenv("NFT_RC", "1")
-    (root / "etc/nftables/mfr-agents.nft").write_text("previous\n")
-    assert vm.main(["install-fence", "--site-env", str(site), "--uid", "1500", "--root", str(root)]) == 2
-    assert (root / "etc/nftables/mfr-agents.nft").read_text() == "previous\n" and not staged.exists()
-    monkeypatch.setenv("NFT_RC", "0")
-    log.unlink()
-    assert vm.main(["install-fence", "--site-env", str(site), "--uid", "1500", "--root", str(root), "--remove"]) == 0
-    assert log.read_text().splitlines() == ["nft delete table inet mfr_agents", "systemctl daemon-reload"]
+    nft_file.write_text("previous\n")
+    assert _fence(ctx) == 2
+    assert nft_file.read_text() == "previous\n" and not staged.exists()
+    monkeypatch.delenv("NFT_RC")
+    _calls(ctx)
+    assert _fence(ctx, "--remove") == 0
+    assert _calls(ctx) == ["nft delete table inet mfr_agents", "systemctl daemon-reload"]
+    assert not nft_file.exists() and not dropin.exists() and not ctx["loaded"].exists()
+    # Removing again converges: no table to delete is the state remove wants.
+    assert _fence(ctx, "--remove") == 0
+    assert _calls(ctx) == ["nft delete table inet mfr_agents", "nft list table inet mfr_agents",
+                           "systemctl daemon-reload"]
+    # The next ordinary operation after removal: the fence installs again.
+    assert _fence(ctx) == 0 and ctx["loaded"].exists() and nft_file.read_bytes() == installed[0]
+
+
+def test_install_fence_without_nft_refuses_cleanly_and_changes_nothing(fence_host, capsys):
+    ctx = fence_host
+    (ctx["bin"] / "nft").unlink()
+    root = ctx["root"]
+    assert _fence(ctx) == 2
+    assert capsys.readouterr().err == "agents-vm: nft is not installed or cannot run; nothing was changed\n"
+    assert not (root / "etc/nftables/.mfr-agents.nft.new").exists()
     assert not (root / "etc/nftables/mfr-agents.nft").exists()
     assert not (root / "etc/systemd/system/user-1500.slice.d/50-mfr-agents-egress.conf").exists()
+    assert _calls(ctx) == []
+    # --remove cannot tell whether a table is still loaded: it refuses and keeps the files.
+    dropin = root / "etc/systemd/system/user-1500.slice.d/50-mfr-agents-egress.conf"
+    dropin.parent.mkdir(parents=True)
+    dropin.write_text("kept\n")
+    assert _fence(ctx, "--remove") == 2
+    assert capsys.readouterr().err == "agents-vm: nft is not installed or cannot run; nothing was changed\n"
+    assert dropin.read_text() == "kept\n" and _calls(ctx) == []
+
+
+@pytest.mark.parametrize("listing", [
+    _nft_listing(1500, op="!=", verdict="accept"),  # the #1181 B1 shape: socket-less packets reach the drop
+    _nft_listing(1501),                              # another uid
+    "not json",
+], ids=["skuid-not-equal-accept", "another-uid", "unreadable"])
+def test_install_fence_refuses_a_live_table_that_does_not_dispatch_only_the_agents_uid(fence_host, capsys, listing):
+    ctx = fence_host
+    ctx["listing"].write_text(listing)
+    assert _fence(ctx) == 2
+    assert capsys.readouterr().err.startswith("agents-vm: the loaded nftables table is not the rendered fence")
+    # Nothing past the failed read-back: no drop-in, no daemon-reload.
+    assert not (ctx["root"] / "etc/systemd/system/user-1500.slice.d/50-mfr-agents-egress.conf").exists()
+    assert _calls(ctx)[-1] == "nft -j list table inet mfr_agents"
+
+
+def test_remove_refuses_while_an_agents_container_runs(fence_host, capsys):
+    ctx = fence_host
+    assert _fence(ctx) == 0
+    _calls(ctx)
+    proc = ctx["root"] / "proc"
+    for pid, name, uid in (("41", "conmon", 1600), ("42", "sshd", 1500), ("43", "conmon", 1500)):
+        (proc / pid).mkdir(parents=True)
+        (proc / pid / "status").write_text(f"Name:\t{name}\nState:\tS (sleeping)\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
+    assert _fence(ctx, "--remove") == 2
+    assert capsys.readouterr().err.startswith(
+        "agents-vm: a Podman container of the agents user is running; stop it first")
+    # The fence stays whole: the container would otherwise run unfenced.
+    assert _calls(ctx) == [] and ctx["loaded"].exists()
+    assert (ctx["root"] / "etc/nftables/mfr-agents.nft").exists()
+    shutil.rmtree(proc / "43")
+    assert _fence(ctx, "--remove") == 0 and not ctx["loaded"].exists()
 
 
 def _results(allowed, blocked, ok_allowed=True, ok_blocked=False):
@@ -1498,6 +1623,164 @@ def test_proof_refuses_to_run_as_another_user(tmp_path, capsys):
     assert vm.main(["proof", "--site-env", str(_site(tmp_path, MFR_VM_AGENTS_USER="nobody-else")),
                     "--where", "host"]) == 2
     assert "run the proof as the agents user" in capsys.readouterr().err
+
+
+def test_container_proof_checks_its_own_loopback_which_opencode_workers_need(tmp_path):
+    """#1181 B2: `opencode run --standalone` talks to its child server over 127.0.0.1
+    inside the container, so the container proof must see its own loopback work, fenced
+    or not. On the host the agents uid's loopback is a negative control instead."""
+    site = vm.load_site(_site(tmp_path))
+    spec, allowed, blocked = vm.probe_spec(site, "container")
+    assert spec["loopback"] == "container:loopback" and "container:loopback" in allowed
+    assert "container:loopback" not in blocked
+    host_spec, host_allowed, _ = vm.probe_spec(site, "host")
+    assert not host_spec.get("loopback") and "container:loopback" not in host_allowed
+    # The probe code itself: a listener on its own 127.0.0.1, one byte each way.
+    done = subprocess.run([sys.executable, "-I", "-c", vm.PROBE,
+                           json.dumps({"connect": [], "resolve": None, "loopback": "container:loopback"})],
+                          stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, check=True)
+    assert json.loads(done.stdout) == {"container:loopback": "connected"}
+    # A missing result fails the verdict, fenced or not.
+    results = _results(allowed, blocked)
+    del results["container:loopback"]
+    assert vm.verdict(results, allowed, blocked, fence_off=False)[0].startswith("the probe returned no result")
+    results["container:loopback"] = "failed:TimeoutError"
+    assert vm.verdict(results, allowed, blocked, fence_off=True)[0].startswith("container:loopback must connect")
+
+
+@pytest.fixture
+def start_host(tmp_path, monkeypatch):
+    """`start` as the agents user against a fake podman; preflight's host checks pass."""
+    log = tmp_path / "podman.log"
+    fake = tmp_path / "bin/podman"
+    fake.parent.mkdir()
+    fake.write_text(f"""#!/bin/sh
+echo "podman $*" >> "{log}"
+case "$1 $2" in
+  "image inspect") echo "sha256:{'ab' * 32}" ;;
+esac
+""")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("KUBECONFIG", raising=False)
+    monkeypatch.setattr(vm, "preflight", lambda *args, **kwargs: None)
+    shut = [_listen("127.0.0.2") for _ in range(6)]
+    ports = [s.getsockname()[1] for s in shut]
+    for s in shut:
+        s.close()
+    blocked_env = " ".join(f"{label}=127.0.0.2:{port}" for label, port in zip(vm.BLOCKED_LABELS, ports, strict=True))
+    site = _site(tmp_path, MFR_VM_AGENTS_USER=pwd.getpwuid(os.getuid()).pw_name, MFR_VM_BLOCKED=blocked_env,
+                 MFR_VM_WORK=str(tmp_path / "work"))
+    return {"log": log, "site": site, "ports": dict(zip(vm.BLOCKED_LABELS, ports, strict=True))}
+
+
+def test_start_runs_the_container_only_while_the_fence_refuses_every_negative_control(start_host, capsys):
+    ctx = start_host
+    assert vm.main(["start", "--site-env", str(ctx["site"])]) == 0
+    runs = [line for line in ctx["log"].read_text().splitlines() if line.startswith("podman run")]
+    assert len(runs) == 1 and "--name mfr-agents" in runs[0]
+    ctx["log"].unlink()
+    # One negative control answers: the fence is not in force for this uid (not
+    # installed, removed, or another user), so no container starts.
+    leak = socket.socket()
+    leak.bind(("127.0.0.2", ctx["ports"]["openshift-api"]))
+    leak.listen(1)
+    try:
+        assert vm.main(["start", "--site-env", str(ctx["site"])]) == 2
+    finally:
+        leak.close()
+    err = capsys.readouterr().err
+    assert err.startswith("agents-vm: the egress fence is not in force for this user: blocked:openshift-api "
+                          "connected")
+    assert "127.0.0" not in err
+    assert not ctx["log"].exists()  # not even an image inspect
+
+
+def test_start_refuses_another_user_before_any_probe(start_host, capsys, tmp_path):
+    (tmp_path / "other").mkdir()
+    other = _site(tmp_path / "other", MFR_VM_AGENTS_USER="nobody-else")
+    assert vm.main(["start", "--site-env", str(other)]) == 2
+    assert "run start as the agents user" in capsys.readouterr().err
+    assert not start_host["log"].exists()
+
+
+def _netns_env() -> dict[str, str]:
+    # nft and ip usually live in sbin, which an unprivileged PATH may leave out.
+    return {**os.environ, "PATH": f"{os.environ.get('PATH', '')}:/usr/sbin:/sbin"}
+
+
+def _rootless_netns() -> str | None:
+    """Why the namespace test cannot run here, or None."""
+    if not sys.platform.startswith("linux") or not 0 < os.getuid() < 65536:
+        return "needs Linux and a uid that a 65536-id namespace maps"
+    path = _netns_env()["PATH"]
+    missing = [t for t in ("unshare", "newuidmap", "nft", "ip", "nsenter", "setpriv")
+               if shutil.which(t, path=path) is None]
+    if missing or not Path("/usr/bin/python3").is_file():
+        return "missing " + " ".join(missing or ["/usr/bin/python3"])
+    try:
+        pwd.getpwuid(os.getuid())
+        done = subprocess.run(["unshare", "--map-auto", "--map-root-user", "--net", "--mount", "--fork", "nft",
+                               "list", "ruleset"], stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+                              check=False, env=_netns_env())
+    except (KeyError, OSError, subprocess.TimeoutExpired):
+        return "no passwd entry or unshare failed"
+    return None if done.returncode == 0 else "unavailable: " + done.stderr.decode(errors="replace")[-200:]
+
+
+def test_fence_in_a_rootless_netns_limits_only_the_agents_uid_and_start_fails_closed():
+    """The real install-fence, proof and start code against real nftables in a throwaway
+    user+net namespace (#1181 B1, B3): fenced, the agents uid reaches only GitLab,
+    LiteLLM and DNS; other uids and root are untouched, including IPv6 to a fresh
+    neighbour (a solicitation has no socket owner); start runs only while fenced."""
+    unavailable = _rootless_netns()
+    if unavailable:
+        pytest.skip(f"rootless user+net namespace: {unavailable}")
+    uid = os.getuid()
+    done = subprocess.run(["unshare", "--map-auto", "--map-root-user", "--net", "--mount", "--fork",
+                           "/usr/bin/python3", "-I", str(REPO / "tests/helpers_agents_vm_netns.py"),
+                           str(REPO / "scripts/devkit/agents_vm.py"), str(uid)],
+                          stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=600, check=False,
+                          env=_netns_env())
+    assert done.returncode == 0, done.stderr[-2000:]
+    report = json.loads(done.stdout.strip().splitlines()[-1])
+    allowed = {"gitlab", "litellm", "dns-tcp", "udp:dns", "ipv6-gitlab-fresh-neighbour"}
+    everything = {"gitlab", "litellm", "dns-tcp", "udp:dns", "udp:other-resolver", "qdrant", "agent",
+                  "openshift-api", "internet", "host-loopback", "host-address", "ipv6-gitlab-fresh-neighbour"}
+
+    def connected(results):
+        return {label for label, state in results.items() if state == "connected"}
+
+    a, b, x = report["A_no_fence"], report["B_fence"], report["X_old_rule"]
+    # Without the fence everything answers: the negative controls can see a path.
+    for who in ("agents", "other", "root"):
+        assert connected(a[who]) == everything, (who, a[who])
+    assert (a["proof"], a["proof_fence_off"]) == (1, 0)
+    assert a["start"]["rc"] == 2 and a["start"]["podman_run"] == 0
+    assert "the egress fence is not in force for this user" in a["start"]["err"]
+    # Fenced: the agents uid reaches only the allow list; everyone else is unaffected.
+    assert (b["install"], b["install_again"], b["loaded"]) == (0, 0, True)
+    assert connected(b["agents"]) == allowed, b["agents"]
+    assert b["agents"]["udp:other-resolver"] == "failed:PermissionError"
+    assert connected(b["other"]) == everything, b["other"]
+    assert connected(b["root"]) == everything, b["root"]
+    assert (b["proof"], b["proof_fence_off"]) == (0, 1)
+    assert b["start"]["rc"] == 0 and b["start"]["podman_run"] == 1
+    # The old `meta skuid != uid accept` shape drops the solicitation for every uid:
+    # these probes see it, so the pass above is not vacuous.
+    for who in ("other", "root"):
+        assert x[who]["ipv6-gitlab-fresh-neighbour"] != "connected", x[who]
+        assert connected(x[who]) == everything - {"ipv6-gitlab-fresh-neighbour"}, x[who]
+    # --remove refuses while a container (its conmon) runs, and the fence stays loaded;
+    # then it removes, converges when repeated, and start fails closed.
+    assert report["C_remove_while_running"] == {"remove": 2, "loaded": True}
+    c = report["C_remove"]
+    assert (c["remove"], c["remove_again"], c["loaded"], c["proof_fence_off"]) == (0, 0, False, 0)
+    assert c["start"]["rc"] == 2 and c["start"]["podman_run"] == 0
+    # The next ordinary operation: the fence installs again and start runs.
+    d = report["D_reinstall"]
+    assert (d["install"], d["proof"], d["start"]["rc"], d["start"]["podman_run"]) == (0, 0, 0, 1)
 
 
 def test_container_runs_with_init_the_sized_limits_and_no_openshift_credentials(tmp_path):
