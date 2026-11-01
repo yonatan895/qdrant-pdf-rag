@@ -103,6 +103,9 @@ GATEWAY_MAX_TOKEN_CHARS = 32 * 1024
 KNOWN_ALGS = GATEWAY_ALGS + ("ES256", "RS384", "RS512", "PS256", "PS384", "ES384", "HS256", "none")
 # Open WebUI v0.12.3 refreshes the access token 5 minutes before it expires.
 MIN_LIFETIME_S = 600
+# The gateway's clock leeway (tool_auth.GatewayAuthConfig.leeway_s default). Its
+# verifier (PyJWT) refuses int(nbf) or int(iat) > now + leeway and int(exp) <= now - leeway.
+GATEWAY_LEEWAY_S = 30.0
 
 # One verdict per run, most severe first. Codes and text are fixed and stable.
 ACCESS_VERDICTS = {
@@ -111,12 +114,17 @@ ACCESS_VERDICTS = {
     "too_large": "the access token is above the gateways' 32 KiB limit",
     "userinfo_audience": "the access token is for urn:microsoft:userinfo; every gateway refuses it",
     "unsupported_alg": "the access token is not signed with RS256 under a key id",
-    "claims_missing": "the access token lacks a usable sub, iss, aud or exp",
+    "claims_missing": "the access token lacks a usable sub, iss, aud or exp, or has a "
+    "non-numeric iat or nbf",
     "issuer_mismatch": "the access token's iss differs from the expected issuer",
     "expired": "the access token has already expired",
+    "not_yet_valid": "the access token's nbf or iat is beyond the gateways' 30 s clock leeway",
     "no_groups": "the access token carries no value in the group claim",
     "team_group_missing": "the access token's group claim lacks the team group",
     "gateway_audience_missing": "the access token's aud names no configured gateway audience",
+    "issuer_unchecked": "no --expect-iss was given; the access token's iss was not compared",
+    "team_group_unchecked": "no --team-group was given; the gateways allow only their "
+    "configured group",
     "audience_unchecked": "no --gateway-audience was given; the token fits a gateway only "
     "through token exchange",
     "ok": "the access token meets every gateway expectation",
@@ -478,12 +486,15 @@ def analyse_access_token(
     team_group: str | None,
     gateway_audiences: list[str],
     refresh_issued: bool | None,
-    now: float | None,
+    now: float,
 ) -> tuple[list[str], str]:
     """Return (report lines, verdict code). Lines carry no value from the token.
 
-    ``issuers`` lists (label, value) pairs the iss may equal; None skips the comparison and ``now`` None the expiry check
-    (offline); ``refresh_issued`` None means the token response is unknown.
+    ``issuers`` lists (label, value) pairs the iss may equal; None (offline without
+    --expect-iss) skips the comparison and gives ``issuer_unchecked``, as a None
+    ``team_group`` gives ``team_group_unchecked``: "ok" only when every gateway check
+    ran. ``now`` is this host's clock, standing in for the gateway's.
+    ``refresh_issued`` None means the token response is unknown.
     """
     if not token:
         return ["access token: absent"], "absent"
@@ -532,9 +543,10 @@ def analyse_access_token(
         )
     sub_ok = isinstance(claims.get("sub"), str) and bool(claims.get("sub"))
     lines.append(f"sub: {'present' if sub_ok else 'absent'}")
-    exp, iat = claims.get("exp"), claims.get("iat")
-    iat_ok = "iat" not in claims or _number(iat)  # PyJWT refuses a non-numeric iat
-    if _number(exp) and _number(iat):
+    exp, iat, nbf = claims.get("exp"), claims.get("iat"), claims.get("nbf")
+    # PyJWT refuses a present iat or nbf that is not a number (null included).
+    times_ok = all(name not in claims or _number(claims[name]) for name in ("iat", "nbf"))
+    if _number(exp) and _number(iat) and math.isfinite(exp - iat):
         lifetime = int(exp - iat)
         lines.append(f"lifetime: {lifetime} s")
         if lifetime < MIN_LIFETIME_S:
@@ -560,13 +572,14 @@ def analyse_access_token(
         lines.append(f"group claim '{group_claim}': absent")
     else:
         kind, count, groups = role_values(raw)
+        groups = [g for g in groups if g]  # tool_auth._groups: non-empty strings only
         if isinstance(raw, str):  # the gateway library takes a string as one group
             groups, count = [raw] if raw else [], 1 if raw else 0
         line = f"group claim '{group_claim}': present, type={kind}, count={count}"
         if groups:
             line += f", form={value_form(groups)}"
         lines.append(line)
-    team_ok = team_group is None or team_group in groups
+    team_ok = team_group is not None and team_group in groups
     if team_group is not None:
         lines.append(
             f"configured team group '{team_group}': " + ("present" if team_ok else "absent")
@@ -579,18 +592,27 @@ def analyse_access_token(
         verdict = "userinfo_audience"
     elif alg not in GATEWAY_ALGS or not has_kid:
         verdict = "unsupported_alg"
-    elif not (aud_ok and sub_ok and isinstance(iss, str) and iss and _number(exp) and iat_ok):
+    elif not (aud_ok and sub_ok and isinstance(iss, str) and iss and _number(exp) and times_ok):
         verdict = "claims_missing"
     elif iss_match is False:
         verdict = "issuer_mismatch"
-    elif now is not None and exp <= now:
+    elif int(exp) <= now - GATEWAY_LEEWAY_S:
         verdict = "expired"
+    elif any(
+        name in claims and int(value) > now + GATEWAY_LEEWAY_S
+        for name, value in (("nbf", nbf), ("iat", iat))
+    ):
+        verdict = "not_yet_valid"
     elif not groups:
         verdict = "no_groups"
-    elif not team_ok:
+    elif team_group is not None and not team_ok:
         verdict = "team_group_missing"
     elif gateway_audiences and not matched_aud:
         verdict = "gateway_audience_missing"
+    elif iss_match is None:
+        verdict = "issuer_unchecked"
+    elif team_group is None:
+        verdict = "team_group_unchecked"
     elif not gateway_audiences:
         verdict = "audience_unchecked"
     else:
@@ -1025,7 +1047,7 @@ def run_decode_only(args: argparse.Namespace) -> None:
             team_group=args.team_group,
             gateway_audiences=args.gateway_audience,
             refresh_issued=None,
-            now=None,
+            now=time.time(),  # a saved token is judged as the gateway would judge it now
         )
         report_access(lines, verdict)
         return
@@ -1145,7 +1167,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--decode-only", metavar="FILE", help="analyse a saved ID token file offline; no network"
     )
-    p.add_argument("--expect-iss", help="with --decode-only: expected iss (optional)")
+    p.add_argument(
+        "--expect-iss",
+        help="with --decode-only: expected iss (optional; with --access-token, without it "
+        "the verdict is issuer_unchecked)",
+    )
     p.add_argument(
         "--access-token",
         action="store_true",
@@ -1155,7 +1181,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--team-group",
         help="access-token mode: the team group the gateways allow, e.g. 'DOMAIN\\team' "
-        "(ADFS_TEAM_GROUP)",
+        "(ADFS_TEAM_GROUP); without it the verdict is team_group_unchecked",
     )
     p.add_argument(
         "--gateway-audience",
@@ -1178,6 +1204,9 @@ def resolve_mode(args: argparse.Namespace) -> None:
             raise CheckError(
                 EXIT_USAGE, "--access-token does not take the ID token role or expect flags"
             )
+        if args.expect_iss is not None and not args.decode_only:
+            # Live, iss is compared with the discovery issuer fields; never ignore a flag.
+            raise CheckError(EXIT_USAGE, "--expect-iss is for --decode-only")
         if args.team_group is not None and not args.team_group:
             raise CheckError(EXIT_USAGE, "--team-group must not be empty")
         if any(not a for a in args.gateway_audience):

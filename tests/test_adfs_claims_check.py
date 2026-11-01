@@ -1367,15 +1367,94 @@ def test_access_token_verdicts_are_fixed_and_print_no_token_value(request, tmp_p
     assert "Traceback" not in out
 
 
+# #1182 review B1/B2. The gateway (tool_auth.verify_token) refuses every token
+# below, so the probe must not say "ok": a check the probe skipped has its own
+# verdict, and nbf/iat/exp follow PyJWT's rules with the gateway's 30 s leeway.
+_T = int(time.time())
+_NO_TEAM = ("--gateway-audience", GW_AUD, "--expect-iss", AT_ISS)
+_NO_ISS = ("--team-group", TEAM, "--gateway-audience", GW_AUD)
+SKIPPED_CHECK_CASES = [
+    ("team_group_unchecked", make_access({"groups": [AT_OTHER_GROUP]}), _NO_TEAM),
+    ("team_group_unchecked", make_access(), _NO_TEAM),
+    ("no_groups", make_access({"groups": ["", ""]}), _NO_TEAM),  # tool_auth._groups drops ""
+    ("no_groups", make_access({"groups": ["", 7, None]}), GOOD_ARGS),
+    ("issuer_unchecked", make_access({"iss": "http://CANARY-ISS.example/other"}), _NO_ISS),
+    ("issuer_unchecked", make_access(), _NO_ISS),
+    ("not_yet_valid", make_access({"nbf": _T + 3600}), GOOD_ARGS),
+    ("not_yet_valid", make_access({"iat": _T + 3600, "exp": _T + 7200}), GOOD_ARGS),
+    ("claims_missing", make_access({"nbf": "CANARY-GROUP-soon"}), GOOD_ARGS),  # PyJWT DecodeError
+    ("claims_missing", make_access({"nbf": None}), GOOD_ARGS),
+    ("claims_missing", make_access({"nbf": float("inf")}), GOOD_ARGS),
+    ("expired", make_access({"iat": _T - 7200, "exp": _T - 3600}), GOOD_ARGS),  # offline too
+]
+
+
+@pytest.mark.parametrize(("code", "token", "args"), SKIPPED_CHECK_CASES,
+                         ids=[f"{code}-{n}" for n, (code, _, _) in enumerate(SKIPPED_CHECK_CASES)])
+def test_access_token_is_never_ok_where_the_gateway_refuses(request, tmp_path, capsys, code, token,
+                                                           args):
+    assert token not in request.node.nodeid
+    rc, _ = _access(tmp_path, token, *args)
+    out = capsys.readouterr().out
+    assert rc == 10, out
+    assert _verdict(out) == code
+    assert out.rstrip().splitlines()[-1] == f"FAIL: {chk.ACCESS_VERDICTS[code]}"
+    assert "RESULT: ok" not in out and "Traceback" not in out
+    assert_no_at_leak(out)
+
+
+# PyJWT 2.15 (the gateway's verifier): int(nbf) or int(iat) > now + leeway is not
+# yet valid; int(exp) <= now - leeway is expired. Expected codes are written out.
+_NOW = 1_000_000.0
+TIME_CASES = [
+    ("ok", {"nbf": 1_000_030}),
+    ("ok", {"nbf": 1_000_030.9}),  # int() truncates
+    ("not_yet_valid", {"nbf": 1_000_031}),
+    ("ok", {"iat": 1_000_030, "exp": 1_003_600}),
+    ("not_yet_valid", {"iat": 1_000_031, "exp": 1_003_600}),
+    ("ok", {"iat": 999_000, "exp": 999_971}),
+    ("expired", {"iat": 999_000, "exp": 999_970}),
+    ("expired", {"iat": 999_000, "exp": 999_970.9}),  # int() truncates
+]
+
+
+@pytest.mark.parametrize(("code", "claims"), TIME_CASES,
+                         ids=[f"{code}-{n}" for n, (code, _) in enumerate(TIME_CASES)])
+def test_access_token_time_rules_mirror_the_gateway_leeway(code, claims):
+    body = {"iat": 999_000, "exp": 1_003_600} | claims
+    _, verdict = chk.analyse_access_token(
+        make_access(body), issuers=[("--expect-iss value", AT_ISS)], client_id=None,
+        group_claim="groups", team_group=TEAM, gateway_audiences=[GW_AUD], refresh_issued=None,
+        now=_NOW,
+    )
+    assert verdict == code
+
+
+def test_access_token_leeway_is_the_gateway_default():
+    import dataclasses
+
+    from mainframe_rag.mcp.tool_auth import GatewayAuthConfig
+
+    (field,) = [f for f in dataclasses.fields(GatewayAuthConfig) if f.name == "leeway_s"]
+    assert chk.GATEWAY_LEEWAY_S == field.default == 30.0
+
+
+def test_access_token_lifetime_survives_huge_times(tmp_path, capsys):
+    rc, _ = _access(tmp_path, make_access({"iat": -1e308, "exp": 1e308}), *GOOD_ARGS)
+    out = capsys.readouterr().out
+    assert rc == 0, out  # PyJWT accepts both; the lifetime is not finite
+    assert "lifetime: unknown" in out and "Traceback" not in out
+
+
 def test_every_verdict_code_is_exercised_and_fixed():
-    covered = {code for code, _ in VERDICT_CASES} | {"ok", "absent", "expired", "audience_unchecked"}
+    covered = ({code for code, _ in VERDICT_CASES} | {code for code, _, _ in SKIPPED_CHECK_CASES}
+               | {"ok", "absent", "audience_unchecked"})
     assert covered == set(chk.ACCESS_VERDICTS)
-    expired = make_access({"exp": int(time.time()) - 5})
-    common = {"issuers": None, "client_id": None, "group_claim": "groups", "team_group": TEAM,
-              "gateway_audiences": [GW_AUD], "refresh_issued": None}
+    expired = make_access({"exp": int(time.time()) - 60})
+    common = {"issuers": [("--expect-iss value", AT_ISS)], "client_id": None, "group_claim": "groups",
+              "team_group": TEAM, "gateway_audiences": [GW_AUD], "refresh_issued": None}
     assert chk.analyse_access_token(expired, now=time.time(), **common)[1] == "expired"
-    assert chk.analyse_access_token(expired, now=None, **common)[1] == "ok"
-    assert chk.analyse_access_token(None, now=None, **common) == (["access token: absent"], "absent")
+    assert chk.analyse_access_token(None, now=time.time(), **common) == (["access token: absent"], "absent")
 
 
 def test_access_token_group_claim_and_team_group_hints(tmp_path, capsys):
@@ -1385,16 +1464,17 @@ def test_access_token_group_claim_and_team_group_hints(tmp_path, capsys):
     assert "equals it ignoring letter case" in out
     # A single string is one group for the gateway library, not a ','-split list.
     rc, _ = _access(tmp_path, make_access({"role": TEAM}, drop=("groups",)),
-                    "--group-claim", "role", "--team-group", TEAM, "--gateway-audience", GW_AUD)
+                    "--group-claim", "role", "--team-group", TEAM, "--gateway-audience", GW_AUD,
+                    "--expect-iss", AT_ISS)
     out = capsys.readouterr().out
     assert rc == 0, out
     assert "group claim 'role': present, type=string, count=1, form=domain-qualified" in out
     # Without --gateway-audience the token fits only a token exchange: never "ok".
-    rc, _ = _access(tmp_path, make_access({"aud": AT_OTHER_AUD, "groups": [AT_OTHER_GROUP]}))
+    rc, _ = _access(tmp_path, make_access({"aud": AT_OTHER_AUD}), "--team-group", TEAM,
+                    "--expect-iss", AT_ISS)
     out = capsys.readouterr().out
     assert rc == 10 and _verdict(out) == "audience_unchecked", out
     assert "configured gateway audiences matched" not in out
-    assert "iss: present (not compared offline without --expect-iss)" in out
     assert_no_at_leak(out)
 
 
@@ -1404,6 +1484,10 @@ def test_access_token_mode_flag_rules(tmp_path, capsys, monkeypatch):
     assert _access(tmp_path, token, "--expect-baseline-only")[0] == 2
     assert _access(tmp_path, token, "--team-group", "")[0] == 2
     assert _access(tmp_path, token, "--gateway-audience", "")[0] == 2
+    live = ["--access-token", "--expect-iss", AT_ISS, "--issuer", "https://adfs.invalid/adfs",
+            "--client-id", CLIENT_ID, "--ca-bundle", str(tmp_path / "none.pem")]
+    assert chk.main(live) == 2
+    assert "FAIL: --expect-iss is for --decode-only" in capsys.readouterr().out
     f = tmp_path / "id.jwt"
     f.write_text(make_jwt({"roles": [BASELINE, GROUP], "upn": UPN, "name": DISPLAY}))
     assert chk.main(["--decode-only", str(f), "--team-group", TEAM, *UPN_ARG]) == 2
@@ -1423,7 +1507,7 @@ def test_lifetime_and_refresh_warnings(tmp_path, capsys):
     assert rc == 0 and "lifetime: 300 s" in out and "WARN: the lifetime is under 600 s" in out
     lines, _ = chk.analyse_access_token(
         make_access(), issuers=None, client_id=None, group_claim="groups", team_group=None,
-        gateway_audiences=[], refresh_issued=False, now=None,
+        gateway_audiences=[], refresh_issued=False, now=time.time(),
     )
     assert "refresh token issued: no" in lines
     assert any(ln.startswith("WARN: no refresh token") for ln in lines)
@@ -1443,6 +1527,22 @@ def test_access_token_flow_reports_the_forwarded_token(adfs):
     assert_no_at_leak(out)
     assert_no_leak(out)
     assert "CANARY-REFRESH-TOKEN" not in out
+
+
+@needs_openssl
+def test_access_token_flow_refuses_a_future_token_and_an_unchecked_team_group(adfs):
+    adfs.discovery_extra = {"access_token_issuer": AT_ISS}
+    now = int(time.time())
+    adfs.token_extra = {"access_token": make_access({"nbf": now + 3600, "iat": now + 3600,
+                                                     "exp": now + 7200})}
+    rc, out = run_check(adfs, "--access-token", "--team-group", TEAM, "--gateway-audience", GW_AUD)
+    assert rc == 10 and _verdict(out) == "not_yet_valid", out
+    adfs.token_extra = {"access_token": make_access()}
+    rc, out = run_check(adfs, "--access-token", "--gateway-audience", GW_AUD)
+    assert rc == 10 and _verdict(out) == "team_group_unchecked", out
+    assert out.rstrip().splitlines()[-1] == f"FAIL: {chk.ACCESS_VERDICTS['team_group_unchecked']}"
+    assert_no_at_leak(out)
+    assert_no_leak(out)
 
 
 @needs_openssl

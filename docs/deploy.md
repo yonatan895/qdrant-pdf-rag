@@ -2290,22 +2290,32 @@ audiences are named, with present/absent. It then prints one fixed line,
 | `too_large` | above the gateways' 32 KiB token limit (many groups) |
 | `userinfo_audience` | issued for `urn:microsoft:userinfo`; every gateway refuses it |
 | `unsupported_alg` | not RS256 (the gateway default), or no key id |
-| `claims_missing` | no usable `sub`, `iss`, `aud` or `exp`, a non-string `aud` member, or a non-numeric `iat` |
+| `claims_missing` | no usable `sub`, `iss`, `aud` or `exp`, a non-string `aud` member, or a non-numeric `iat` or `nbf` |
 | `issuer_mismatch` | `iss` equals neither discovery issuer field (or `--expect-iss`) |
-| `expired` | already expired (live flow only) |
-| `no_groups` | the group claim (`--group-claim`, default `groups`) is absent or empty |
+| `expired` | `exp` is at least 30 s past (the gateways' clock leeway) |
+| `not_yet_valid` | `nbf` or `iat` is more than 30 s ahead: clock skew between AD FS and the cluster |
+| `no_groups` | the group claim (`--group-claim`, default `groups`) holds no non-empty string |
 | `team_group_missing` | `--team-group` is not among the groups (a case or domain near miss is hinted) |
 | `gateway_audience_missing` | `aud` names none of the `--gateway-audience` values |
+| `issuer_unchecked` | everything else passed, but `--decode-only` had no `--expect-iss` |
+| `team_group_unchecked` | everything else passed, but no `--team-group` was given |
 | `audience_unchecked` | everything else passed, but no `--gateway-audience` was given |
 | `ok` | a gateway configured with this issuer, audience and group can verify it |
+
+`ok` needs every gateway check to have run: a check without its input gives the matching
+`*_unchecked` code (exit 10), never `ok`. Time checks follow the gateways' verifier (PyJWT,
+the 30 s `leeway_s` default of `tool_auth.GatewayAuthConfig`), in the live flow and offline
+alike, with this host's clock standing in for the gateway's: a saved token that has expired
+since gives `expired`, so analyse a fresh one.
 
 `audience_unchecked` (exit 10) means the token can serve only as the subject token of a
 token exchange (#1088 path a), for example when its `aud` is the client ID; extra audiences
 (path b) need `--gateway-audience` and `ok`. It warns
 when the lifetime is under 600 s (Open WebUI refreshes 300 s before expiry) and when no
 refresh token is issued (#1088 item 3). `--team-group` also reads `ADFS_TEAM_GROUP` in this mode
-only. The ID-token role flags and `--expect-*` are refused with `--access-token`. Record the
-verdict code and counts in the site packet, never the token.
+only. The ID-token role flags, `--expect-refused` and `--expect-baseline-only` are refused with
+`--access-token`; `--expect-iss` is taken with `--decode-only` only (the live flow compares the
+discovery issuer fields). Record the verdict code and counts in the site packet, never the token.
 
 Tests: `tests/test_adfs_claims_check.py` (a fake TLS AD FS, canary leak assertions).
 
