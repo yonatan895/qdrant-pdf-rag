@@ -99,6 +99,8 @@
       "SERVICEMONITOR_ENABLED",
       "SKOPEO_ARGS",
       "SNAPSHOT_STORAGE_CLASS",
+      "SNEAKERNET_GAP_TRUSTED_PUB",
+      "SNEAKERNET_TRUSTED_PUB",
       "STORAGE_CLASS",
       "UI_ENABLED"
     ],
@@ -395,6 +397,7 @@
       "manifest openwebui_proxy",
       "manifest openwebui_proxy_config_digest",
       "manifest openwebui_proxy_digest",
+      "manifest origin",
       "manifest otelcol",
       "manifest otelcol_config_digest",
       "manifest otelcol_digest",

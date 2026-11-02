@@ -18,6 +18,8 @@ from scripts.airgap import image_manifest
 
 from tests.helpers_airgap import (
     REPO,
+    gap_release_anchor,
+    gap_release_key,
     gen_other_pub,
     make_bin_tree,
     release_anchor,
@@ -159,7 +161,7 @@ def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False, o
         **task_members(),
         "repo.bundle": b"bundle-content\n",
         "MANIFEST.txt": (
-            f"sha: {sha}\ndate: 2026-09-05T00:00:00Z\nimage_format: oci-archive\n"
+            f"sha: {sha}\ndate: 2026-09-05T00:00:00Z\nimage_format: oci-archive\norigin: upstream\n"
             f"qdrant_digest: {digests['qdrant']}\n"
             f"openobserve_digest: {digests['openobserve']}\n"
             f"otelcol_digest: {digests['otelcol']}\n"
@@ -195,10 +197,12 @@ def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False, o
     _sign_artifacts(artdir)
 
 
-def _sign_artifacts(artdir: Path) -> None:
+def _sign_artifacts(artdir: Path, key: Path | None = None) -> None:
     """The throwaway release key + offline signature, mirroring pack.sh output.
-    One key per process, so release_anchor() is its trust anchor (#1118 F1)."""
-    shutil.copy(release_key(), artdir / "signing.key")
+    One key per process, so release_anchor() is its trust anchor (#1118 F1);
+    `key` signs instead (the gap release key, #1118 F2)."""
+    shutil.copy(key or release_key(), artdir / "signing.key")
+    (artdir / "sneakernet-signing.pub").unlink(missing_ok=True)
     sign_sums(artdir)
 
 
@@ -541,15 +545,60 @@ def test_load_refuses_member_that_is_not_one_oci_image_before_any_push(load_tree
     assert not _copies(skopeo_log)
 
 
-def test_load_trusted_pub_mismatch_refuses(load_tree):
+def test_load_trusted_pub_mismatch_refuses(load_tree, tmp_path_factory):
     tmp_path, _ = load_tree
     _make_artifacts(tmp_path / "dist", sha=IMAGE_SHA)
-    pinned = _run_load(load_tree, ("SNEAKERNET_TRUSTED_PUB", str(tmp_path / "dist" / "sneakernet-signing.pub")))
+    # The bundled key's bytes, copied outside the checkout and the bundle (#1118 F2).
+    outside = tmp_path_factory.mktemp("work-anchors")
+    shutil.copy(tmp_path / "dist" / "sneakernet-signing.pub", outside / "upstream.pub")
+    pinned = _run_load(load_tree, ("SNEAKERNET_TRUSTED_PUB", str(outside / "upstream.pub")))
     assert pinned.returncode == 0, pinned.stderr
-    other_pub = gen_other_pub(tmp_path)
+    other_pub = gen_other_pub(outside)
     r = _run_load(load_tree, ("SNEAKERNET_TRUSTED_PUB", str(other_pub)))
     assert r.returncode != 0
     assert "does not match SNEAKERNET_TRUSTED_PUB" in r.stderr
+
+
+# --- #1118 F2: load pins the bundled key to the declared origin's anchor ----
+
+_BOTH = (("SNEAKERNET_TRUSTED_PUB", str(release_anchor())),
+         ("SNEAKERNET_GAP_TRUSTED_PUB", str(gap_release_anchor())))
+
+
+def test_load_refuses_a_gap_key_signing_an_upstream_bundle_then_loads_the_next(load_tree):
+    """#1118 F2 spot row through load.sh: a bundle that says origin: upstream
+    but is signed by the gap key is refused before any push, with both
+    anchors configured; re-signed by the upstream key, the next ordinary load
+    pushes."""
+    tmp_path, skopeo_log = load_tree
+    _make_artifacts(tmp_path / "dist")
+    _sign_artifacts(tmp_path / "dist", gap_release_key())
+    refused = _run_load(load_tree, *_BOTH)
+    assert refused.returncode == 1
+    assert ("FAIL: bundle pubkey does not match SNEAKERNET_TRUSTED_PUB, the release trust anchor for the "
+            "bundle's origin (upstream)") in refused.stderr
+    assert not _copies(skopeo_log)
+    _sign_artifacts(tmp_path / "dist")
+    again = _run_load(load_tree, *_BOTH)
+    assert again.returncode == 0, again.stderr
+    assert _copies(skopeo_log)
+
+
+def test_load_accepts_a_gap_release_only_with_the_gap_anchor(load_tree):
+    """#1118 F2: a gap release (origin: gap, gap key) loads with both anchors
+    and is refused before any push when only the upstream anchor is set."""
+    tmp_path, skopeo_log = load_tree
+    dist = tmp_path / "dist"
+    _make_artifacts(dist)
+    _edit_manifest_and_resign(dist, lambda text: text.replace("origin: upstream\n", "origin: gap\n"))
+    _sign_artifacts(dist, gap_release_key())
+    refused = _run_load(load_tree)
+    assert refused.returncode == 1
+    assert "no release trust anchor is configured for the bundle's origin (gap)" in refused.stderr
+    assert not _copies(skopeo_log)
+    ok = _run_load(load_tree, *_BOTH)
+    assert ok.returncode == 0, ok.stderr
+    assert _copies(skopeo_log)
 
 
 def test_load_signed_missing_task_member_refuses_before_push(load_tree):

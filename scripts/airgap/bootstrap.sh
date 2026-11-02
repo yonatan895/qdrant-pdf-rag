@@ -21,20 +21,6 @@ for sigfile in sneakernet-signing.pub SHA256SUMS.sig; do
         exit 1
     fi
 done
-# Trust anchor (optional, strict): SNEAKERNET_TRUSTED_PUB names a pubkey
-# obtained out of band. Without it this check is TOFU — it binds the
-# members together but cannot prove which key signed. (Twin of
-# check_trusted_pub in common.sh, inlined: no clone exists yet to source.)
-if [ -n "${SNEAKERNET_TRUSTED_PUB:-}" ]; then
-    if [ ! -f "$SNEAKERNET_TRUSTED_PUB" ]; then
-        echo "FAIL: SNEAKERNET_TRUSTED_PUB file not found: $SNEAKERNET_TRUSTED_PUB" >&2
-        exit 1
-    fi
-    cmp -s "$SNEAKERNET_TRUSTED_PUB" sneakernet-signing.pub || {
-        echo "FAIL: bundle pubkey does not match SNEAKERNET_TRUSTED_PUB — untrusted bundle." >&2
-        exit 1
-    }
-fi
 openssl dgst -sha256 -verify sneakernet-signing.pub -signature SHA256SUMS.sig SHA256SUMS >/dev/null \
     || { echo "FAIL: SHA256SUMS signature verification failed — do not trust this bundle." >&2; exit 1; }
 # Enforce the new bundle's complete inventory before any member is executed.
@@ -51,6 +37,60 @@ awk -v members="$MEMBERS" '
     NF != 2 || length($1) != 64 || $1 !~ /^[0-9a-f]+$/ || !($2 in wanted) || seen[$2]++ { bad=1 }
     END { for (name in wanted) if (!seen[name]) bad=1; exit bad }
 ' SHA256SUMS || { echo "FAIL: SHA256SUMS must contain exactly the required bundle members, including Task." >&2; exit 1; }
+# Trust anchors (optional here, strict when set; #1118 F1/F2). Twin of
+# check_trusted_pub in common.sh, inlined: no clone exists yet to source.
+# SNEAKERNET_TRUSTED_PUB (upstream releases) and SNEAKERNET_GAP_TRUSTED_PUB
+# (gap releases) name operator-held public keys obtained out of band. With
+# neither set this check is TOFU: it binds the members together but cannot
+# prove which key signed (every later live stage requires the anchor). With
+# either set, each must be a plain readable file outside this bundle, the two
+# must hold different keys, and the bundled key must equal the anchor for the
+# origin MANIFEST.txt declares, read only after the signed SHA256SUMS has
+# authenticated MANIFEST.txt. Messages name variables, never paths.
+if [ -n "${SNEAKERNET_TRUSTED_PUB:-}${SNEAKERNET_GAP_TRUSTED_PUB:-}" ]; then
+    [ "$(awk '$2 == "MANIFEST.txt" { print $1 }' SHA256SUMS)" = "$(sha256sum MANIFEST.txt | awk '{ print $1 }')" ] || {
+        echo "FAIL: MANIFEST.txt does not match its signed SHA256SUMS entry — do not trust this bundle." >&2; exit 1;
+    }
+    BUNDLE_REAL=$(pwd -P)
+    ANCHOR_IDS=""
+    for ANCHOR_PAIR in upstream:SNEAKERNET_TRUSTED_PUB gap:SNEAKERNET_GAP_TRUSTED_PUB; do
+        ANCHOR_VAR=${ANCHOR_PAIR#*:}
+        eval "ANCHOR=\${$ANCHOR_VAR:-}"
+        [ -n "$ANCHOR" ] || continue
+        { [ -f "$ANCHOR" ] && [ -r "$ANCHOR" ] && [ ! -L "$ANCHOR" ]; } || {
+            echo "FAIL: release trust anchor $ANCHOR_VAR is not a readable plain file (not a link) — point it at the release signing public key obtained out of band." >&2; exit 1;
+        }
+        case "$ANCHOR" in */*) ANCHOR_DIR=${ANCHOR%/*}; [ -n "$ANCHOR_DIR" ] || ANCHOR_DIR=/ ;; *) ANCHOR_DIR=. ;; esac
+        ANCHOR_DIR=$(cd -P -- "$ANCHOR_DIR" && pwd -P)
+        case "${ANCHOR_DIR%/}/${ANCHOR##*/}" in "$BUNDLE_REAL"/*)
+            echo "FAIL: release trust anchor $ANCHOR_VAR lies inside the bundle it would verify — an anchor never comes from the artifact it vouches for; keep it outside (/work/anchors on the bastion)." >&2; exit 1 ;;
+        esac
+        if openssl pkey -pubin -in "$ANCHOR" -noout 2>/dev/null; then
+            ANCHOR_ID=$(openssl pkey -pubin -in "$ANCHOR" -outform DER | sha256sum | awk '{ print $1 }')
+        else
+            ANCHOR_ID=$(sha256sum < "$ANCHOR" | awk '{ print $1 }')
+        fi
+        for ANCHOR_PREV in $ANCHOR_IDS; do
+            [ "${ANCHOR_PREV%%:*}" != "$ANCHOR_ID" ] || {
+                echo "FAIL: release trust anchors ${ANCHOR_PREV#*:} and $ANCHOR_VAR hold the same key — the upstream and gap release keys must differ; fix the anchor files." >&2; exit 1;
+            }
+        done
+        ANCHOR_IDS="$ANCHOR_IDS $ANCHOR_ID:$ANCHOR_VAR"
+    done
+    ORIGIN=$(awk '/^origin:/ { n++; v = $0 } END { if (n != 1) exit 1; print v }' MANIFEST.txt) || ORIGIN=""
+    case "$ORIGIN" in
+        "origin: upstream") ORIGIN=upstream; ANCHOR_VAR=SNEAKERNET_TRUSTED_PUB ;;
+        "origin: gap") ORIGIN=gap; ANCHOR_VAR=SNEAKERNET_GAP_TRUSTED_PUB ;;
+        *) echo "FAIL: MANIFEST.txt must declare exactly one release origin (origin: upstream or origin: gap) — do not trust this bundle." >&2; exit 1 ;;
+    esac
+    eval "ANCHOR=\${$ANCHOR_VAR:-}"
+    [ -n "$ANCHOR" ] || {
+        echo "FAIL: no release trust anchor is configured for the bundle's origin ($ORIGIN) — set $ANCHOR_VAR to the $ORIGIN release signing public key obtained out of band." >&2; exit 1;
+    }
+    cmp -s "$ANCHOR" sneakernet-signing.pub || {
+        echo "FAIL: bundle pubkey does not match $ANCHOR_VAR, the release trust anchor for the bundle's origin ($ORIGIN) — untrusted bundle." >&2; exit 1;
+    }
+fi
 sha256sum -c SHA256SUMS
 BUNDLE_HEAD=$(git bundle list-heads repo.bundle HEAD | awk '{print $1}')
 [ "$BUNDLE_HEAD" = "$PACKED_SHA" ] || { echo "FAIL: repo.bundle HEAD does not match MANIFEST SHA." >&2; exit 1; }

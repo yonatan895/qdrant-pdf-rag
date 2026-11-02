@@ -22,9 +22,12 @@ from tests.helpers_airgap import (
     b64,
     connected_checkout,
     copy_chart,
+    gap_release_anchor,
+    gap_release_key,
     install_rendering_helm,
     make_bin_tree,
     release_anchor,
+    release_key,
     rendered_env,
     run_sh,
     set_oauth_proxy_pin,
@@ -389,7 +392,7 @@ def _write_pods(tree, digests: dict[str, str], **override) -> None:
     (tree[0] / "pods.json").write_text(json.dumps({"items": items}))
 
 
-def _manifest(tree, chart_sha=None, sha=IMAGE_SHA, config_digests=True):
+def _manifest(tree, chart_sha=None, sha=IMAGE_SHA, config_digests=True, origin="upstream", key=None):
     dist = tree[0] / "dist"
     dist.mkdir(exist_ok=True)
     write_git_identity_stub(tree[0], sha)  # a claimed release needs a resolvable checkout (#414)
@@ -398,7 +401,7 @@ def _manifest(tree, chart_sha=None, sha=IMAGE_SHA, config_digests=True):
         lines.append(f"chart_sha256: {chart_sha}")
     if config_digests:
         lines += [f"{role}_config_digest: {_config_of(role)}" for role in ROLE_REFS]
-    write_signed_manifest(dist, "\n".join(lines) + "\n")
+    write_signed_manifest(dist, "\n".join(lines) + "\n", origin=origin, key=key)
 
 
 def _chart(tree):
@@ -1579,9 +1582,9 @@ def test_unusable_service_ca_blocks_route_before_mutation(tree, ca):
 
 # ------------------------------------------------- registry image identity (#272)
 
-def _release(tree):
+def _release(tree, origin="upstream", key=None):
     """A release-path deploy: packed MANIFEST, loaded registry, running pods."""
-    _manifest(tree, sha256_bytes(_chart(tree).read_bytes()))
+    _manifest(tree, sha256_bytes(_chart(tree).read_bytes()), origin=origin, key=key)
     digests = _load_all(tree)
     _write_pods(tree, digests)
     return digests
@@ -1609,6 +1612,61 @@ def test_release_renders_first_party_images_by_verified_digest(tree):
     assert "running images match the verified registry digests" in result.stdout
     # The vendored Qdrant chart cannot render a digest: its tag stays, the pods are compared.
     assert "image.tag=v1.19.2" in _helm_log(tree)
+
+
+# --- #1118 F2: the release origin and its anchor, through deploy.sh ----------
+
+_BOTH_ANCHORS = (("SNEAKERNET_TRUSTED_PUB", str(release_anchor())),
+                 ("SNEAKERNET_GAP_TRUSTED_PUB", str(gap_release_anchor())))
+
+
+@pytest.mark.parametrize(("origin", "signer", "anchors", "needle"), [
+    ("upstream", "gap", "both", ("bundle pubkey does not match SNEAKERNET_TRUSTED_PUB, the release trust anchor "
+                                 "for the bundle's origin (upstream)")),
+    ("gap", "upstream", "both", ("bundle pubkey does not match SNEAKERNET_GAP_TRUSTED_PUB, the release trust "
+                                 "anchor for the bundle's origin (gap)")),
+    ("gap", "gap", "upstream-only", "no release trust anchor is configured for the bundle's origin (gap)"),
+    ("upstream", "upstream", "same-key", ("release trust anchors SNEAKERNET_TRUSTED_PUB and "
+                                          "SNEAKERNET_GAP_TRUSTED_PUB hold the same key")),
+    (None, "upstream", "both", "packed MANIFEST declares no release origin"),
+], ids=["gap-key-signs-upstream", "upstream-key-signs-gap", "gap-release-without-gap-anchor",
+        "same-key-both-roles", "no-origin"])
+def test_release_deploy_refuses_a_bundle_its_origin_anchor_did_not_sign(tree, origin, signer, anchors, needle):
+    """#1118 F2 spot rows of the guard matrix through the real deploy entry
+    point on the release path: each is refused before any cluster mutation,
+    and the next ordinary run with the bundle signed by its origin's key and
+    both anchors configured deploys."""
+    key = gap_release_key() if signer == "gap" else release_key()
+    _release(tree, origin=origin, key=key)
+    env = dict(_BOTH_ANCHORS)
+    if anchors == "upstream-only":
+        env["SNEAKERNET_GAP_TRUSTED_PUB"] = ""
+    elif anchors == "same-key":
+        env["SNEAKERNET_GAP_TRUSTED_PUB"] = str(release_anchor())
+    refused = _run(tree, *env.items(), *_RELEASE_PATH)
+    assert refused.returncode == 1
+    assert needle in refused.stderr
+    assert _mutations(tree) == []
+    _release(tree, origin=origin or "upstream", key=gap_release_key() if origin == "gap" else release_key())
+    again = _run(tree, *_BOTH_ANCHORS, *_RELEASE_PATH)
+    assert again.returncode == 0, again.stderr
+    assert "upgrade" in _helm_log(tree)
+
+
+def test_release_deploy_of_a_gap_release_uses_the_gap_anchor_only(tree):
+    """#1118 F2: a gap release (origin: gap, signed by the gap key) deploys
+    with both anchors configured, and is refused when the gap anchor is unset
+    even though the upstream anchor is (the upstream key cannot stand in)."""
+    _release(tree, origin="gap", key=gap_release_key())
+    ok = _run(tree, *_BOTH_ANCHORS, *_RELEASE_PATH)
+    assert ok.returncode == 0, ok.stderr
+    assert "upgrade" in _helm_log(tree)
+    tree[1].unlink()
+    refused = _run(tree, ("SNEAKERNET_TRUSTED_PUB", str(release_anchor())), ("SNEAKERNET_GAP_TRUSTED_PUB", ""),
+                   *_RELEASE_PATH)
+    assert refused.returncode == 1
+    assert "no release trust anchor is configured for the bundle's origin (gap)" in refused.stderr
+    assert _mutations(tree) == []
 
 
 def test_manifest_without_config_digests_refuses_before_any_mutation(tree):

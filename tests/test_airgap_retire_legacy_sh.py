@@ -692,9 +692,9 @@ def test_a_verified_release_without_the_anchor_is_refused_before_any_call(tree, 
     _git_release(tree)
     result = _copy(tree, qdrant, SNEAKERNET_TRUSTED_PUB=None, **_RELEASE)
     _refused_untouched(tree, qdrant, result,
-                       "FAIL: no release trust anchor is configured — set SNEAKERNET_TRUSTED_PUB to the "
-                       "release signing public key obtained out of band (docs/release-verification.md); "
-                       "trust on first use never establishes a release\n")
+                       "FAIL: no release trust anchor is configured for the bundle's origin (upstream) — set "
+                       "SNEAKERNET_TRUSTED_PUB to the upstream release signing public key obtained out of band "
+                       "(docs/release-verification.md); trust on first use never establishes a release\n")
 
 
 def test_dry_run_needs_no_verified_release(tree, qdrant):

@@ -13,7 +13,7 @@ cd "$REPO_ROOT"
 # the snapshot over whatever the file assigned — so `VAR=x sh scripts/tools/run-task.sh airgap:load`
 # beats a stale key in airgap.env instead of being silently overridden by it.
 # Empty stays unset, matching the ${VAR:-default} idiom used everywhere below.
-OPERATOR_ENV_KEYS="AGENT_NETWORK_POLICY AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES AGENT_ROUTE AIRGAP_APP_REGISTRY AIRGAP_BUNDLE_DIR AIRGAP_DRYRUN AIRGAP_ENV AIRGAP_WORKSPACE CONTEXTUAL_EMBED_ENABLED CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CORPUS_PVC DENSE_DIM EMBED_BASE_URL EMBED_MODE EMBED_MODEL EMBED_MODEL_REVISION FEEDBACK_ENABLED FEEDBACK_RETENTION_DAYS FEEDBACK_SECRET FEEDBACK_STORAGE_SIZE GATEWAY_API_KEY_SECRET GATEWAY_API_KEY_SECRET_KEY GATEWAY_BASE_URL GATEWAY_CA_CONFIGMAP GATEWAY_PROBE_MAX_TOKENS GHCR_OWNER IMAGE_SHA INGEST_ALIAS_PUBLISH INGEST_AUTHORIZE_FROM_CATALOG INGEST_EXTRA_PATCH INGEST_REINGEST INGEST_RETIRE_DOCS INGEST_TIMEOUT INGEST_WORKERS INGEST_WORK_SIZE INSECURE_REGISTRY INTERNAL_REGISTRY KC LLM_BASE_URL LLM_MODEL_REASONING LLM_MAX_MODEL_LEN LLM_RESERVED_OUTPUT_TOKENS LLM_THINKING_RESERVE_TOKENS_SIMPLE LLM_THINKING_RESERVE_TOKENS_COMPLEX LLM_REASONING_EFFORT_SIMPLE LLM_REASONING_EFFORT_COMPLEX LLM_REASONING_EFFORTS LLM_STREAM REQUEST_DEADLINE_S REQUEST_MAX_CONCURRENT REQUEST_QUEUE_MAX REQUEST_QUEUE_WAIT_S CHAT_CONDENSE_ENABLED METRICS_ENABLED NAMESPACE OPENWEBUI_ENABLED OPENWEBUI_HOST OPENWEBUI_IDP_CA_FILE OPENWEBUI_IDP_EGRESS_CIDRS OPENWEBUI_IDP_EGRESS_PORT OPENWEBUI_OIDC_ADMIN_ROLES OPENWEBUI_OIDC_ALLOWED_ROLES OPENWEBUI_OIDC_CLIENT_ID OPENWEBUI_OIDC_EMAIL_CLAIM OPENWEBUI_OIDC_GROUP_CLAIM OPENWEBUI_OIDC_PROVIDER_URL OPENWEBUI_OIDC_ROLES_CLAIM OPENWEBUI_OIDC_SCOPES OPENWEBUI_OIDC_USERNAME_CLAIM OPENWEBUI_RETENTION_DAYS OPENWEBUI_SECRET OPENWEBUI_STORAGE_SIZE OTEL_DEPLOYMENT_ENVIRONMENT OTEL_EXPORTER_OTLP_ENDPOINT OPENOBSERVE_RUN_AS_ID OTEL_SERVICE_NAME PULL_SECRET QDRANT_EXTRA_VALUES QDRANT_IMAGE QDRANT_RELEASE QDRANT_PEER_URLS QDRANT_REPLICATION_FACTOR QDRANT_SHARD_NUMBER QDRANT_STORAGE_SIZE QDRANT_TAG QDRANT_WRITE_CONSISTENCY_FACTOR QUERY RERANK_BASE_URL RERANK_ENABLED RERANK_ENDPOINT_ORDER RERANK_MODEL SKOPEO_ARGS SNAPSHOT_STORAGE_CLASS SNEAKERNET_KEY_TRUSTED SNEAKERNET_SIGNING_KEY SNEAKERNET_TRUSTED_PUB AIRGAP_TASK_ARCHIVE SERVICEMONITOR_ENABLED STORAGE_CLASS TRACE_QUERY_PASSWORD TRACE_QUERY_URL TRACE_QUERY_USER TRACE_TIMEOUT INGEST_CPU_LIMIT INGEST_CPU_REQUEST INGEST_MEMORY_LIMIT INGEST_MEMORY_REQUEST QDRANT_CPU_LIMIT QDRANT_CPU_REQUEST QDRANT_DATA_SIZE QDRANT_MEMORY_LIMIT QDRANT_MEMORY_REQUEST QDRANT_SNAPSHOT_SIZE UI_ENABLED"
+OPERATOR_ENV_KEYS="AGENT_NETWORK_POLICY AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES AGENT_ROUTE AIRGAP_APP_REGISTRY AIRGAP_BUNDLE_DIR AIRGAP_DRYRUN AIRGAP_ENV AIRGAP_WORKSPACE CONTEXTUAL_EMBED_ENABLED CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CORPUS_PVC DENSE_DIM EMBED_BASE_URL EMBED_MODE EMBED_MODEL EMBED_MODEL_REVISION FEEDBACK_ENABLED FEEDBACK_RETENTION_DAYS FEEDBACK_SECRET FEEDBACK_STORAGE_SIZE GATEWAY_API_KEY_SECRET GATEWAY_API_KEY_SECRET_KEY GATEWAY_BASE_URL GATEWAY_CA_CONFIGMAP GATEWAY_PROBE_MAX_TOKENS GHCR_OWNER IMAGE_SHA INGEST_ALIAS_PUBLISH INGEST_AUTHORIZE_FROM_CATALOG INGEST_EXTRA_PATCH INGEST_REINGEST INGEST_RETIRE_DOCS INGEST_TIMEOUT INGEST_WORKERS INGEST_WORK_SIZE INSECURE_REGISTRY INTERNAL_REGISTRY KC LLM_BASE_URL LLM_MODEL_REASONING LLM_MAX_MODEL_LEN LLM_RESERVED_OUTPUT_TOKENS LLM_THINKING_RESERVE_TOKENS_SIMPLE LLM_THINKING_RESERVE_TOKENS_COMPLEX LLM_REASONING_EFFORT_SIMPLE LLM_REASONING_EFFORT_COMPLEX LLM_REASONING_EFFORTS LLM_STREAM REQUEST_DEADLINE_S REQUEST_MAX_CONCURRENT REQUEST_QUEUE_MAX REQUEST_QUEUE_WAIT_S CHAT_CONDENSE_ENABLED METRICS_ENABLED NAMESPACE OPENWEBUI_ENABLED OPENWEBUI_HOST OPENWEBUI_IDP_CA_FILE OPENWEBUI_IDP_EGRESS_CIDRS OPENWEBUI_IDP_EGRESS_PORT OPENWEBUI_OIDC_ADMIN_ROLES OPENWEBUI_OIDC_ALLOWED_ROLES OPENWEBUI_OIDC_CLIENT_ID OPENWEBUI_OIDC_EMAIL_CLAIM OPENWEBUI_OIDC_GROUP_CLAIM OPENWEBUI_OIDC_PROVIDER_URL OPENWEBUI_OIDC_ROLES_CLAIM OPENWEBUI_OIDC_SCOPES OPENWEBUI_OIDC_USERNAME_CLAIM OPENWEBUI_RETENTION_DAYS OPENWEBUI_SECRET OPENWEBUI_STORAGE_SIZE OTEL_DEPLOYMENT_ENVIRONMENT OTEL_EXPORTER_OTLP_ENDPOINT OPENOBSERVE_RUN_AS_ID OTEL_SERVICE_NAME PULL_SECRET QDRANT_EXTRA_VALUES QDRANT_IMAGE QDRANT_RELEASE QDRANT_PEER_URLS QDRANT_REPLICATION_FACTOR QDRANT_SHARD_NUMBER QDRANT_STORAGE_SIZE QDRANT_TAG QDRANT_WRITE_CONSISTENCY_FACTOR QUERY RERANK_BASE_URL RERANK_ENABLED RERANK_ENDPOINT_ORDER RERANK_MODEL SKOPEO_ARGS SNAPSHOT_STORAGE_CLASS SNEAKERNET_GAP_TRUSTED_PUB SNEAKERNET_KEY_TRUSTED SNEAKERNET_SIGNING_KEY SNEAKERNET_TRUSTED_PUB AIRGAP_TASK_ARCHIVE SERVICEMONITOR_ENABLED STORAGE_CLASS TRACE_QUERY_PASSWORD TRACE_QUERY_URL TRACE_QUERY_USER TRACE_TIMEOUT INGEST_CPU_LIMIT INGEST_CPU_REQUEST INGEST_MEMORY_LIMIT INGEST_MEMORY_REQUEST QDRANT_CPU_LIMIT QDRANT_CPU_REQUEST QDRANT_DATA_SIZE QDRANT_MEMORY_LIMIT QDRANT_MEMORY_REQUEST QDRANT_SNAPSHOT_SIZE UI_ENABLED"
 # CI_REHEARSAL (#1014) is honored from the process environment only: the
 # operator file travels to the air gap and must never opt itself in.
 # readonly BEFORE sourcing: an operator-file assignment to it aborts the shell
@@ -447,51 +447,130 @@ has_bundle_evidence() {
     [ -f ../SHA256SUMS ] && awk '$2 == "MANIFEST.txt" { f=1 } END { exit !f }' ../SHA256SUMS
 }
 
-# Release trust anchors (#1118 F1): the variables that may name a release
-# signing public key obtained out of band. A verified release needs its
-# SHA256SUMS signature to verify against one of them. F2 adds the gap release
-# key as a second name here. It must also teach load.sh (check_trusted_pub)
-# and bootstrap.sh's inline twin, which pin SNEAKERNET_TRUSTED_PUB alone, and
-# register the new key where operator keys are listed (OPERATOR_ENV_KEYS, the
-# airgap taskfile, airgap.env.example and the §9 snapshot).
-# Names, not paths: a path may hold spaces and is never printed here.
-RELEASE_TRUST_ANCHOR_VARS="SNEAKERNET_TRUSTED_PUB"
+# Release trust anchors (#1118 F1, F2): origin-tagged pairs <origin>:<variable>.
+# A packed MANIFEST declares its release origin in one signed line
+# (`origin: upstream` from pack.sh, `origin: gap` from the gap pack, F6), and
+# only the anchor named for that origin may vouch for it: the gap key can never
+# pass a bundle off as upstream, nor the upstream key one as gap. The anchors
+# are operator-held files outside every workspace and bundle (/work/anchors on
+# the bastion, ADR-0009 §8). Names, not paths: a path may hold spaces and is
+# never printed here.
+RELEASE_TRUST_ANCHOR_VARS="upstream:SNEAKERNET_TRUSTED_PUB gap:SNEAKERNET_GAP_TRUSTED_PUB"
 
-# $1 = bundle directory (SHA256SUMS, SHA256SUMS.sig, sneakernet-signing.pub).
-# Succeeds when the bundled key is byte-identical to a configured anchor and
-# the signature over SHA256SUMS verifies with that anchor. Fixed messages.
-verify_release_anchor() {
-    _anchor_set=0
-    _anchor_match=""
-    for _anchor_var in $RELEASE_TRUST_ANCHOR_VARS; do
-        eval "_anchor_path=\${$_anchor_var:-}"
-        [ -n "$_anchor_path" ] || continue
-        _anchor_set=1
-        { [ -f "$_anchor_path" ] && [ -r "$_anchor_path" ]; } || \
-            die "release trust anchor $_anchor_var is not a readable file — point it at the release signing public key obtained out of band (docs/release-verification.md)"
-        if [ -z "$_anchor_match" ] && cmp -s "$_anchor_path" "$1/sneakernet-signing.pub"; then
-            _anchor_match=$_anchor_path
+# $1 = release origin; prints its anchor variable name.
+release_anchor_var() {
+    for _rav_pair in $RELEASE_TRUST_ANCHOR_VARS; do
+        if [ "${_rav_pair%%:*}" = "$1" ]; then
+            echo "${_rav_pair#*:}"; unset _rav_pair; return 0
         fi
     done
-    [ "$_anchor_set" -eq 1 ] || \
-        die "no release trust anchor is configured — set SNEAKERNET_TRUSTED_PUB to the release signing public key obtained out of band (docs/release-verification.md); trust on first use never establishes a release"
-    [ -n "$_anchor_match" ] || \
-        die "bundle pubkey does not match any configured release trust anchor ($RELEASE_TRUST_ANCHOR_VARS) — untrusted bundle; use the signed release bundle or fix the anchor"
-    openssl dgst -sha256 -verify "$_anchor_match" -signature "$1/SHA256SUMS.sig" "$1/SHA256SUMS" >/dev/null 2>&1 || \
+    unset _rav_pair
+    return 1
+}
+
+# $1 = MANIFEST; prints its release origin (upstream or gap). Exactly one line
+# may start with `origin:`, and it must be `origin: upstream` or `origin: gap`
+# byte for byte. Status 1: no origin line (or no MANIFEST); 2: a repeated,
+# malformed or unknown one.
+manifest_origin() {
+    [ -f "$1" ] || return 1
+    _mo_line=$(awk '/^origin:/ { n++; v = $0 } END { if (n == 0) exit 1; if (n > 1) exit 2; print v }' "$1") || return $?
+    case "$_mo_line" in
+        "origin: upstream") echo upstream ;;
+        "origin: gap") echo gap ;;
+        *) unset _mo_line; return 2 ;;
+    esac
+    unset _mo_line
+}
+
+# $1 = a file path; prints its absolute path with every directory link resolved.
+_physical_path() {
+    case "$1" in
+        */*) _pp_dir=${1%/*}; [ -n "$_pp_dir" ] || _pp_dir=/ ;;
+        *) _pp_dir=. ;;
+    esac
+    _pp_dir=$(cd -P -- "$_pp_dir" && pwd -P) || return 1
+    printf '%s/%s\n' "${_pp_dir%/}" "${1##*/}"
+    unset _pp_dir
+}
+
+# Every configured anchor (#1118 F2), checked on each use and never cached:
+# a readable regular file, not a link, outside the executing checkout and
+# outside the bundle directory $1 (an anchor is never supplied by the artifact
+# it verifies, G5), and no two anchors hold the same key (G4). Fixed messages
+# naming variables only.
+check_release_anchors() {
+    _ra_root=$(cd -P -- "$REPO_ROOT" && pwd -P)
+    _ra_bundle=$(cd -P -- "$1" && pwd -P)
+    _ra_ids=""
+    for _ra_pair in $RELEASE_TRUST_ANCHOR_VARS; do
+        _ra_var=${_ra_pair#*:}
+        eval "_ra_path=\${$_ra_var:-}"
+        [ -n "$_ra_path" ] || continue
+        { [ -f "$_ra_path" ] && [ -r "$_ra_path" ]; } || \
+            die "release trust anchor $_ra_var is not a readable file — point it at the release signing public key obtained out of band (docs/release-verification.md)"
+        [ ! -L "$_ra_path" ] || \
+            die "release trust anchor $_ra_var is a link — point it at the plain key file itself, outside the checkout and the bundle (/work/anchors on the bastion)"
+        _ra_real=$(_physical_path "$_ra_path") || \
+            die "release trust anchor $_ra_var is not a readable file — point it at the release signing public key obtained out of band (docs/release-verification.md)"
+        case "$_ra_real" in
+            "$_ra_root"/*|"$_ra_bundle"/*)
+                die "release trust anchor $_ra_var lies inside the executing checkout or the bundle it would verify — an anchor never comes from the artifact it vouches for; keep it outside both (/work/anchors on the bastion)" ;;
+        esac
+        # Key identity, not bytes: the same key re-encoded is the same key.
+        _ra_id=$({ openssl pkey -pubin -in "$_ra_path" -outform DER 2>/dev/null || cat -- "$_ra_path"; } | sha256sum | awk '{print $1}')
+        for _ra_prev in $_ra_ids; do
+            [ "${_ra_prev%%:*}" != "$_ra_id" ] || \
+                die "release trust anchors ${_ra_prev#*:} and $_ra_var hold the same key — the upstream and gap release keys must differ, or a gap release could pass as upstream; fix the anchor files"
+        done
+        _ra_ids="$_ra_ids $_ra_id:$_ra_var"
+    done
+    unset _ra_root _ra_bundle _ra_ids _ra_pair _ra_var _ra_path _ra_real _ra_id _ra_prev
+}
+
+# $1 = bundle directory, $2 = its declared origin. Validates every configured
+# anchor, then requires the anchor for that origin and a bundled key equal to
+# it byte for byte. Prints the anchor path for the caller's signature check.
+_pin_bundle_key() {
+    check_release_anchors "$1"
+    _pk_var=$(release_anchor_var "$2") || die "unknown release origin — refusing to guess"
+    eval "_pk_path=\${$_pk_var:-}"
+    [ -n "$_pk_path" ] || \
+        die "no release trust anchor is configured for the bundle's origin ($2) — set $_pk_var to the $2 release signing public key obtained out of band (docs/release-verification.md); trust on first use never establishes a release"
+    cmp -s "$_pk_path" "$1/sneakernet-signing.pub" || \
+        die "bundle pubkey does not match $_pk_var, the release trust anchor for the bundle's origin ($2) — untrusted bundle; use the signed release bundle or fix the anchor"
+    printf '%s\n' "$_pk_path"
+    unset _pk_var _pk_path
+}
+
+# $1 = bundle directory (SHA256SUMS, SHA256SUMS.sig, sneakernet-signing.pub),
+# $2 = the origin its MANIFEST declares. Succeeds when the anchor for that
+# origin is configured, the bundled key equals it byte for byte, and the
+# signature over SHA256SUMS verifies with it. Fixed messages.
+verify_release_anchor() {
+    _anchor_path=$(_pin_bundle_key "$1" "$2") || exit 1
+    openssl dgst -sha256 -verify "$_anchor_path" -signature "$1/SHA256SUMS.sig" "$1/SHA256SUMS" >/dev/null 2>&1 || \
         die "SHA256SUMS signature verification failed for the packed MANIFEST — do not trust this bundle; rerun bootstrap.sh from the signed bundle"
-    unset _anchor_set _anchor_match _anchor_var _anchor_path
+    unset _anchor_path
 }
 
 # Signature and checksum chain for the MANIFEST the guard is about to trust
 # (issue #414): the guard may not read a bare file. $1 = MANIFEST path; its
 # directory must hold SHA256SUMS, SHA256SUMS.sig and sneakernet-signing.pub.
-# The signature over SHA256SUMS must verify against a configured release trust
-# anchor (verify_release_anchor, #1118 F1). Only under the connected opt-out
-# ($2 = unverified) is a missing anchor trust on first use, like load.sh, while
-# a configured one still pins the key. SHA256SUMS must list MANIFEST.txt
-# exactly once with the file's actual sha256. Image archives are load.sh's job
-# (sha256sum -c); only the cheap MANIFEST link is rechecked here. Fixed
-# messages: no file names or contents.
+# $3 = the origins this caller accepts (default "upstream gap"). In order:
+#   1. SHA256SUMS must list MANIFEST.txt exactly once with the file's actual
+#      sha256 (first, so an edited origin line is reported as an edit, never
+#      as an origin mismatch);
+#   2. the MANIFEST declares exactly one known origin (#1118 F2, G6) that the
+#      caller accepts;
+#   3. the signature over SHA256SUMS verifies against the anchor for that
+#      origin (verify_release_anchor, #1118 F1/F2), which authenticates the
+#      origin line itself.
+# Only under the connected opt-out ($2 = unverified) is a missing anchor trust
+# on first use, like load.sh, and a missing origin read as upstream with a
+# notice; a configured anchor still pins the key for the origin. Image
+# archives are load.sh's job (sha256sum -c); only the cheap MANIFEST link is
+# rechecked here. Fixed messages: no file names or contents.
 check_manifest_chain() {
     _chain_dir=$(dirname -- "$1")
     for _chain_f in SHA256SUMS SHA256SUMS.sig sneakernet-signing.pub; do
@@ -499,18 +578,32 @@ check_manifest_chain() {
             die "packed MANIFEST is not backed by a signed bundle (SHA256SUMS, SHA256SUMS.sig and sneakernet-signing.pub must sit next to it) — rerun bootstrap.sh from the signed bundle; an unsigned MANIFEST never establishes a release"
     done
     command -v openssl >/dev/null 2>&1 || die "openssl is required to verify the bundle signature"
-    if [ "${2:-}" = unverified ]; then
-        check_trusted_pub "$_chain_dir"
-        (cd "$_chain_dir" && openssl dgst -sha256 -verify sneakernet-signing.pub -signature SHA256SUMS.sig SHA256SUMS >/dev/null 2>&1) \
-            || die "SHA256SUMS signature verification failed for the packed MANIFEST — do not trust this bundle; rerun bootstrap.sh from the signed bundle"
-    else
-        verify_release_anchor "$_chain_dir"
-    fi
     _chain_want=$(awk '$2 == "MANIFEST.txt" { n++; h=$1 } END { if (n == 1) print h }' "$_chain_dir/SHA256SUMS")
     _chain_have=$(sha256sum "$1" | awk '{print $1}')
     { [ -n "$_chain_want" ] && [ "$_chain_want" = "$_chain_have" ]; } || \
         die "packed MANIFEST does not match its signed checksum entry (edited, or not listed exactly once) — rerun bootstrap.sh from the signed bundle"
-    unset _chain_dir _chain_f _chain_want _chain_have
+    _chain_rc=0
+    _chain_origin=$(manifest_origin "$1") || _chain_rc=$?
+    if [ "$_chain_rc" -eq 1 ] && [ "${2:-}" = unverified ]; then
+        _chain_origin=upstream
+        echo "Notice: packed MANIFEST declares no release origin — read as upstream (AIRGAP_UNVERIFIED_CHECKOUT=1, connected rehearsal only)" >&2
+    elif [ "$_chain_rc" -eq 1 ]; then
+        die "packed MANIFEST declares no release origin (origin: upstream or origin: gap) — it was not packed by a release this checkout's guard knows; use a signed bundle packed by this release"
+    elif [ "$_chain_rc" -ne 0 ]; then
+        die "packed MANIFEST declares its release origin more than once or with an unknown value — exactly one line, origin: upstream or origin: gap, is accepted; use the signed bundle's MANIFEST.txt"
+    fi
+    case " ${3:-upstream gap} " in
+        *" $_chain_origin "*) ;;
+        *) die "the bundle's release origin ($_chain_origin) is not accepted here (accepted: ${3:-upstream gap}) — do not use this bundle for this step" ;;
+    esac
+    if [ "${2:-}" = unverified ]; then
+        check_trusted_pub "$_chain_dir" "$_chain_origin"
+        (cd "$_chain_dir" && openssl dgst -sha256 -verify sneakernet-signing.pub -signature SHA256SUMS.sig SHA256SUMS >/dev/null 2>&1) \
+            || die "SHA256SUMS signature verification failed for the packed MANIFEST — do not trust this bundle; rerun bootstrap.sh from the signed bundle"
+    else
+        verify_release_anchor "$_chain_dir" "$_chain_origin"
+    fi
+    unset _chain_dir _chain_f _chain_want _chain_have _chain_rc _chain_origin
 }
 
 # The release guard's git reads (#1149 N1), for that command only: the
@@ -762,20 +855,36 @@ pin_recorded() {
     return 1
 }
 
-# Trust anchor (optional, strict): when SNEAKERNET_TRUSTED_PUB names a
-# pubkey file obtained out of band (org-published fingerprint, HTTPS
-# Actions artifact), the bundle is refused unless its bundled pub matches
-# byte-for-byte. Without it, signature verification is TOFU: it binds the
-# members together but cannot prove which key signed. $1 = artifact dir.
-# (bootstrap.sh carries an inline twin: it verifies before any clone exists
-# to source this file from.)
+# Trust anchor (optional, strict): when any release trust anchor is
+# configured (RELEASE_TRUST_ANCHOR_VARS), the bundle is refused unless its
+# bundled pub equals the anchor for the origin its MANIFEST declares, byte for
+# byte (#1118 F2). Without any anchor, signature verification is TOFU: it
+# binds the members together but cannot prove which key signed. $1 = artifact
+# dir; $2 = the origin when the caller has read it already. Otherwise it is
+# read here, a missing one as upstream: load.sh calls this before its own
+# signature check and then runs the strict guard (check_checkout_sha), which
+# refuses a missing origin outside the connected opt-out. (bootstrap.sh
+# carries an inline twin: it verifies before any clone exists to source this
+# file from.)
 check_trusted_pub() {
-    if [ -n "${SNEAKERNET_TRUSTED_PUB:-}" ]; then
-        [ -f "$SNEAKERNET_TRUSTED_PUB" ] || \
-            die "SNEAKERNET_TRUSTED_PUB file not found: $SNEAKERNET_TRUSTED_PUB"
-        cmp -s "$SNEAKERNET_TRUSTED_PUB" "$1/sneakernet-signing.pub" || \
-            die "bundle pubkey does not match SNEAKERNET_TRUSTED_PUB — untrusted bundle"
+    _tp_any=""
+    for _tp_pair in $RELEASE_TRUST_ANCHOR_VARS; do
+        eval "_tp_any=\${_tp_any}\${${_tp_pair#*:}:-}"
+    done
+    if [ -n "$_tp_any" ]; then
+        _tp_origin=${2:-}
+        if [ -z "$_tp_origin" ]; then
+            _tp_rc=0
+            _tp_origin=$(manifest_origin "$1/MANIFEST.txt") || _tp_rc=$?
+            case "$_tp_rc" in
+                0) ;;
+                1) _tp_origin=upstream ;;
+                *) die "packed MANIFEST declares its release origin more than once or with an unknown value — exactly one line, origin: upstream or origin: gap, is accepted; use the signed bundle's MANIFEST.txt" ;;
+            esac
+        fi
+        _pin_bundle_key "$1" "$_tp_origin" >/dev/null || exit 1
     fi
+    unset _tp_any _tp_pair _tp_origin _tp_rc
 }
 
 # Run a command, or only print it under AIRGAP_DRYRUN=1.
