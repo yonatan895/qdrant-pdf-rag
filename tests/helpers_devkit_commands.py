@@ -373,6 +373,8 @@ def gap_commands(root: Path = REPO) -> dict[str, set[str]]:
             calls.setdefault(command, set()).add(path.relative_to(root).as_posix())
     for pattern in SCRIPT_GLOBS:
         for path in root.glob(pattern):
+            if not path.is_file():
+                continue
             for command in interpreter(path):
                 calls.setdefault(command, set()).add(path.relative_to(root).as_posix())
     return calls
