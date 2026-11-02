@@ -10,8 +10,9 @@ The owning inputs are `locks/cp314-linux-x86_64.json` and its three complete,
 hash-pinned requirements files. The manifest records each selected wheel,
 version, SHA-256 and public origin. Versions change only through a dedicated
 reviewed refresh; every other pin stays fixed.
-The `urllib3` security pin is also explicit in `pyproject.toml`; its runtime/dev
-lock entries and wheel identity must agree with that project dependency.
+The `urllib3` security pin and the directly imported `pyjwt` are also explicit in
+`pyproject.toml`; their runtime/dev lock entries must agree with those project
+dependencies, and urllib3's wheel identity too.
 `hypothesis` (property tests, #817) and its `sortedcontainers` dependency are dev-profile
 only; they are in neither the runtime nor the build closure, nor any image.
 
