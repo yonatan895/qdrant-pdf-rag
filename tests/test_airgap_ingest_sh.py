@@ -283,7 +283,7 @@ def test_ingest_logs_follow_retry_and_stop_owned_stream(ingest_tree, job_succeed
     from pathlib import Path
 
     tree, _ = ingest_tree
-    write_stub(tree / "bin/kubectl", """#!/usr/bin/python3
+    write_stub(tree / "bin/kubectl", """#!/usr/bin/env python3
 import os,signal,sys,time
 from pathlib import Path
 a=sys.argv[1:]
@@ -334,7 +334,7 @@ def test_ingest_cancellation_reaps_local_observers(ingest_tree, cancel_signal, c
     from pathlib import Path
 
     tree, _ = ingest_tree
-    write_stub(tree / "bin/kubectl", """#!/usr/bin/python3
+    write_stub(tree / "bin/kubectl", """#!/usr/bin/env python3
 import os,sys,time
 from pathlib import Path
 a=sys.argv[1:]
