@@ -963,18 +963,60 @@ def test_reference_docs_builder_keeps_the_subset_and_licence_only(tmp_path, monk
     ([*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/docs/caf\u00e9.md", b"x")], "absolute, escapes or is unusual"),
     ([*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/docs/c1\u0085control.md", b"x")], "absolute, escapes or is unusual"),
     ([*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/docs/back\\slash.md", b"x")], "absolute, escapes or is unusual"),
+    # RC run 41451915308: the same character rule still holds for a kept path (ruff ships
+    # U+2026 names only outside its kept subset), and for a licence file it keeps.
+    ([*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/docs/snap\u2026shot.md", b"x")], "absolute, escapes or is unusual"),
+    # Structural refusals cover every member, kept or not (src/ is outside docs/**).
+    ([*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/src/../../escape.go", b"x")], "absolute, escapes or is unusual"),
+    ([*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/src/./dot.go", b"x")], "absolute, escapes or is unusual"),
+    ([*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/src//empty.go", b"x")], "absolute, escapes or is unusual"),
+    ([*GOOD_DOC_ENTRIES, tar_file("/src/abs\u2026.go", b"x")], "absolute, escapes or is unusual"),
+    ([*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/src/main.go", b"again")], "holds a member name twice"),
+    ([*GOOD_DOC_ENTRIES, tar_file("second-root/src/x\u2026.go", b"x")], "more than one top-level directory"),
     ([*GOOD_DOC_ENTRIES, tar_link(f"{DOC_ROOT}/docs/link.md", "../../../etc/passwd")], "is a link or special file"),
     ([*GOOD_DOC_ENTRIES, tar_link(f"{DOC_ROOT}/docs/hard.md", f"{DOC_ROOT}/LICENSE", tarfile.LNKTYPE)],
      "is a link or special file"),
     ([*GOOD_DOC_ENTRIES, tar_file("second-root/docs/x.md", b"x")], "more than one top-level directory"),
     ([*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/docs/index.md", b"again")], "holds a member name twice"),
-], ids=["dotdot", "absolute", "newline", "non-ascii", "c1-control", "backslash", "symlink", "hardlink", "second-root",
-        "duplicate"])
+], ids=["dotdot", "absolute", "newline", "non-ascii", "c1-control", "backslash", "kept-ellipsis",
+        "discarded-dotdot", "discarded-dot", "discarded-empty", "discarded-absolute", "discarded-duplicate",
+        "discarded-second-root", "symlink", "hardlink", "second-root", "duplicate"])
 def test_reference_docs_builder_refuses_an_unsafe_archive(tmp_path, entries, needle):
     result, out = _refdocs_build(tmp_path, entries)
     assert result.returncode == 1
     assert "reference-docs: FAIL: set doc-set: " in result.stderr and needle in result.stderr
     assert not out.exists() and not out.with_name(out.name + ".partial").exists()
+
+
+@pytest.mark.parametrize("name", ["snap\u2026shot.snap", "caf\u00e9.go", "c1\u0085control.go", "back\\slash.go",
+                                  "del\x7f.go", "new\nline.go"],
+                         ids=["ellipsis", "non-ascii", "c1-control", "backslash", "del", "newline"])
+def test_reference_docs_builder_ignores_an_unusual_name_outside_the_kept_subset(tmp_path, name):
+    """RC run 41451915308: the pinned ruff archive holds U+2026 names only in test
+    snapshots it does not keep. The bundle name rule binds what ships, so a discarded
+    member's characters neither refuse the set nor reach the output in any form."""
+    entries = [*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/crates/snapshots/{name}", b"discarded\n")]
+    result, out = _refdocs_build(tmp_path, entries)
+    assert result.returncode == 0, result.stderr
+    with tarfile.open(out) as archive:
+        names = sorted(m.name for m in archive.getmembers())
+        listing = archive.extractfile("reference-docs/FILES.sha256").read().decode()
+        index = archive.extractfile("reference-docs/INDEX.md").read().decode()
+    assert names == [
+        "reference-docs/FILES.sha256", "reference-docs/INDEX.md", "reference-docs/project/LICENSE",
+        "reference-docs/project/docs/a.md", "reference-docs/sets/doc-set/LICENSE",
+        "reference-docs/sets/doc-set/docs/index.md"]
+    assert "crates" not in listing and "crates" not in index and "snapshots" not in result.stdout + result.stderr
+
+
+def test_reference_docs_builder_refuses_a_licence_file_name_outside_the_bundle_rule(tmp_path):
+    """A licence file is always shipped, so its name obeys the bundle rule even when
+    the archive holds it."""
+    entries = [*GOOD_DOC_ENTRIES, tar_file(f"{DOC_ROOT}/LICEN\u00c7E", b"licence\n")]
+    result, out = _refdocs_build(tmp_path, entries, license_files=("LICENSE", "LICEN\u00c7E"))
+    assert result.returncode == 1
+    assert "license_files must be plain relative paths" in result.stderr
+    assert not out.exists()
 
 
 def test_reference_docs_builder_ignores_a_link_outside_the_kept_subset(tmp_path):

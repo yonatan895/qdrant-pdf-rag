@@ -748,10 +748,13 @@ checksums **after**.
   named by their sha256; when set, pack never downloads, like
   `AIRGAP_TASK_ARCHIVE`) or `.tools/cache/reference-docs`, else downloads it from
   the pinned URL (about 1.4 GB in all, deleted after use), and fails closed on a
-  sha256 mismatch. Archives are untrusted: an absolute, `..` or control-character
-  member name, a second top-level directory or a duplicate refuses the archive; a
-  link or special file inside the kept subset refuses the set; a missing licence
-  file or an include that matches nothing refuses the set. Only regular files of
+  sha256 mismatch. Archives are untrusted: an absolute member name, an empty, `.`
+  or `..` component, a second top-level directory or a duplicate refuses the
+  archive, kept or not; a kept path (licence files included) outside the bundle
+  name rule (printable ASCII without backslash, what bootstrap step 5 accepts), a
+  link or special file inside the kept subset, a missing licence file or an
+  include that matches nothing refuses the set. A member that is not kept is
+  never written, so its characters do not matter. Only regular files of
   the kept subset and their licence files are copied; nothing upstream is built,
   rendered or executed (raw Markdown, MDX, AsciiDoc, reST, Hugo/Docusaurus
   sources; the CPython set is python.org's own rendered HTML and text). The
