@@ -150,7 +150,7 @@ a pod name.
     if ($name -notmatch '^mfr-devkit-[0-9a-f]{64}$') { throw 'STOP: $Kit must name the kit directory itself, mfr-devkit-<key>, with no trailing backslash.' }
     & $Oc wait --for=condition=Ready pod/mfr-bastion --timeout=600s
     if ($LASTEXITCODE -ne 0) { throw 'STOP: the bastion is not Ready. Run oc describe pod mfr-bastion and fix the event it shows (image pull, quota, admission).' }
-    & $Oc exec mfr-bastion -- sh -c "rm -rf /work/kits/$name && mkdir -p /work/kits /work/trust"
+    & $Oc exec mfr-bastion -- sh -c "rm -rf /work/kits/$name && mkdir -p /work/kits /work/anchors"
     if ($LASTEXITCODE -ne 0) { throw 'STOP: cannot prepare /work in the bastion. Check the mfr-bastion-work claim.' }
     Push-Location -LiteralPath (Split-Path -Parent $Kit)
     try {
@@ -159,7 +159,7 @@ a pod name.
     } finally { Pop-Location }
     Push-Location -LiteralPath (Split-Path -Parent $TrustedPub)
     try {
-        & $Oc cp (Split-Path -Leaf $TrustedPub) mfr-bastion:/work/trust/release-signing.pub
+        & $Oc cp (Split-Path -Leaf $TrustedPub) mfr-bastion:/work/anchors/release-signing.pub
         if ($LASTEXITCODE -ne 0) { throw 'STOP: oc cp of the release key failed. Run this step again.' }
     } finally { Pop-Location }
     "Kit copied to /work/kits/$name"
@@ -183,7 +183,7 @@ checks the bastion pod's `imageID`.
     if ($LASTEXITCODE -ne 0) { throw 'STOP: session login failed. Run oc login again, then this step.' }
     & $Oc get secret $Robot -o 'jsonpath={.data.\.dockerconfigjson}' | & $Oc exec -i mfr-bastion -- mfr-session-login --registry
     if ($LASTEXITCODE -ne 0) { throw 'STOP: the registry credential was refused. Check $Robot, then run this step again.' }
-    & $Oc exec mfr-bastion -- env SNEAKERNET_TRUSTED_PUB=/work/trust/release-signing.pub sh "/work/kits/$name/install.sh" --registry $Registry --verify-pod mfr-bastion @InstallArgs
+    & $Oc exec mfr-bastion -- env SNEAKERNET_TRUSTED_PUB=/work/anchors/release-signing.pub sh "/work/kits/$name/install.sh" --registry $Registry --verify-pod mfr-bastion @InstallArgs
     if ($LASTEXITCODE -ne 0) { throw 'STOP: install.sh refused the kit; its FAIL line names the fix.' }
     'Dev kit installed. End the session with: oc exec mfr-bastion -- mfr-session-logout; oc logout'
 }

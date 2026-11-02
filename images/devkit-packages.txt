@@ -1,7 +1,8 @@
 # Dev workspace image RPMs (#1118, ADR-0009 §8): the exact set microdnf adds to the
 # pinned UBI base, as name-epoch:version-release.arch, sorted, one per line.
 #
-# Requested: skopeo, git-core, openssl, tar, gawk and gzip (tar's archives are gzip).
+# Requested: skopeo, git-core, openssl, tar, gawk, gzip (tar's archives are gzip) and
+# diffutils (cmp, which the gap scripts call; #1183).
 # The base already has gawk, coreutils-single (sha256sum, install), findutils, grep
 # and sed. Every other line is a dependency microdnf resolved. Source: the UBI 9
 # BaseOS and AppStream repositories only, with RPM signature checks on, and weak
@@ -10,11 +11,12 @@
 # images/Containerfile.devkit installs exactly these NEVRAs and fails the build when the
 # added set differs or a base RPM changes. A dedicated pin PR updates the list: resolve
 # in the pinned base with the same microdnf options and record `rpm -qa` added lines.
-# Resolved 2026-10-30.
+# Resolved 2026-10-30; diffutils added 2026-11-02 (the other 26 lines resolved unchanged).
 containers-common-5:5.8-1.el9.x86_64
 cracklib-0:2.9.6-28.el9.x86_64
 cracklib-dicts-0:2.9.6-28.el9.x86_64
 crun-0:1.27-1.el9_8.x86_64
+diffutils-0:3.7-12.el9.x86_64
 git-core-0:2.52.0-1.el9.x86_64
 gzip-0:1.12-2.el9_8.x86_64
 less-0:590-6.el9.x86_64

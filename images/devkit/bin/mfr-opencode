@@ -1,0 +1,38 @@
+#!/bin/sh
+# OpenCode with the dev kit's required offline settings (#1172; docs/agents-vm.md#required-settings).
+#
+#   mfr-opencode run "<task>"      a worker turn: opencode run --standalone "<task>"
+#   mfr-opencode [args]            the controller TUI: opencode --standalone [args]
+#
+# - OPENCODE_DISABLE_MODELS_FETCH=1 (without it OpenCode fetches its model catalogue
+#   even with the hardened config), plus the autoupdate and LSP-download switches. The
+#   wrapper sets them itself, so a caller's environment cannot turn them off.
+# - Every run is --standalone: a private `serve --stdio` child that exits with the run,
+#   never the shared background service on 127.0.0.1:49374 that a plain run starts and
+#   leaves behind (a second worker then fails on the busy port).
+# - The flags that skip the permission policy (--auto, --yolo,
+#   --dangerously-skip-permissions) and the subcommands that run or manage that shared
+#   service or replace the binary are refused.
+# The hardened config itself is the managed file /etc/opencode/opencode.json, which no
+# user or project config overrides. Messages are fixed text.
+set -eu
+
+die() { echo "mfr-opencode: $1" >&2; exit 2; }
+OPENCODE=${MFR_OPENCODE_BIN:-/usr/local/bin/opencode}
+
+for arg in "$@"; do
+    case "$arg" in
+        --auto|--auto=*|--yolo|--yolo=*|--dangerously-skip-permissions|--dangerously-skip-permissions=*)
+            die "the permission policy cannot be skipped in the dev kit (docs/agents-vm.md#required-settings)";;
+    esac
+done
+
+export OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1
+
+case "${1:-}" in
+    run) shift; exec "$OPENCODE" run --standalone "$@";;
+    serve|service|web|upgrade|uninstall)
+        die "this subcommand runs or replaces the shared OpenCode service; workers run --standalone (docs/agents-vm.md#required-settings)";;
+    -v|--version|-h|--help) exec "$OPENCODE" "$1";;
+    *) exec "$OPENCODE" --standalone "$@";;
+esac
