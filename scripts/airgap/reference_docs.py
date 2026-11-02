@@ -13,9 +13,12 @@ and ``reference-docs/project/``. Raw sources only: nothing upstream is built,
 rendered or executed, and nothing is fetched at runtime or in the gap.
 
 Archives are untrusted input even after the checksum matches: an absolute
-member name, a ``..`` component, an unusual character, a second top-level
-directory or a duplicate name refuses the whole archive, and a link, device or
-FIFO inside the kept subset refuses the set. The output holds regular files
+member name, an empty, ``.`` or ``..`` component, a second top-level directory
+or a duplicate name refuses the whole archive, whatever is kept. A kept path
+(selected or a licence file) with a character outside the bundle name rule
+(``SAFE_PART``), or a link, device or FIFO inside the kept subset, refuses the
+set; a member that is not kept is never written, so its characters do not
+matter (upstream test snapshots may use any). The output holds regular files
 only, so ``bootstrap.sh`` can refuse anything else.
 
   build     produce the member (pack time)
@@ -47,7 +50,8 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 # Printable ASCII (0x20-0x7e) without backslash: exactly the names bootstrap.sh
 # step 5 accepts, because `LC_ALL=C tar -t` prints anything else (non-ASCII, C0
 # or C1 controls, DEL, backslash) as a backslash escape, which bootstrap refuses.
-# Such a name fails here at pack time instead of at the site.
+# Such a name fails here at pack time instead of at the site. It binds every name
+# that ships (kept paths, licence files, manifest paths), not discarded members.
 # tests/test_airgap_bootstrap_sh.py pins both sides to this one definition.
 SAFE_PART = re.compile(r"^[\x20-\x5b\x5d-\x7e]+$")
 # Hard caps against an endless or hostile input (the pins bound the real sizes).
@@ -96,10 +100,16 @@ class Kept:
 # --- manifest -----------------------------------------------------------------
 
 
-def safe_relative(name: str) -> bool:
+def plain_relative(name: str) -> bool:
+    """Structure only: relative, no empty, ``.`` or ``..`` component (any member)."""
     if not name or name.startswith("/") or name.endswith("/"):
         return False
-    return all(part not in ("", ".", "..") and SAFE_PART.match(part) for part in name.split("/"))
+    return all(part not in ("", ".", "..") for part in name.split("/"))
+
+
+def safe_relative(name: str) -> bool:
+    """Structure plus the bundle name rule: a name that may ship."""
+    return plain_relative(name) and all(SAFE_PART.match(part) for part in name.split("/"))
 
 
 def load_manifest(path: Path) -> list[DocSet]:
@@ -239,7 +249,7 @@ def extract_kept(archive: Path, dest: Path, want, *, strip_root: bool, label: st
         with tarfile.open(archive, "r|*") as handle:
             for member in handle:
                 name = member.name
-                if not safe_relative(name.rstrip("/") if member.isdir() else name):
+                if not plain_relative(name.rstrip("/") if member.isdir() else name):
                     raise RefDocsError(f"{label}: archive member name is absolute, escapes or is unusual")
                 if name in names:
                     raise RefDocsError(f"{label}: archive holds a member name twice")
@@ -257,6 +267,8 @@ def extract_kept(archive: Path, dest: Path, want, *, strip_root: bool, label: st
                     relative = name.rstrip("/")
                 if not want(relative):
                     continue
+                if not safe_relative(relative):
+                    raise RefDocsError(f"{label}: archive member name is absolute, escapes or is unusual")
                 if member.isdir():
                     continue
                 if not member.isreg():
