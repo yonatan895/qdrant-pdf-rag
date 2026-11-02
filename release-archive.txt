@@ -3,4 +3,5 @@
 # scripts/release_archive.py; contract in docs/deploy.md#release-archive.
 # Repository: ghcr.io/yonatan895/qdrant-pdf-rag-release-archive
 # Columns: release-sha  manifest-digest  signing-key-sha256  packed-date (MANIFEST date, UTC)
+2cd8f67d3c56f6253cf1f7e508b19536e7fc197a  sha256:a570dc4164d801f3da38f12ea7e6d5f831d05454d72324287e753d59977869b5  ef47a949b71fde0bbffa99e4b0b567a927523116037f8cd69a5be74441688f6d  2026-11-02T13:59:56Z
 d53595eb03ac220028263ab415c953db47371554  sha256:a72ce4e0e4e26da6aaf0db3683b26cc574ca314bc2e1a58172167b813d211048  156af8024c404d196eb1a5fd214a8b4277095f2f5e2515355301d95644730efd  2026-10-06T20:47:05Z
