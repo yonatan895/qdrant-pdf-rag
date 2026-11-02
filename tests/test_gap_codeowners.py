@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -350,6 +351,27 @@ def test_the_check_is_the_first_code_the_hygiene_job_runs():
         assert 'before_script' not in gitlab[name]
     assert 'before_script' not in job and 'before_script' not in gitlab.get('default', {})
     assert 'before_script' not in gitlab
+
+
+def test_every_documented_invocation_runs_isolated():
+    # Operators run write and refresh as the hygiene job runs check, so a
+    # planted module cannot alter the generated file (maintainer, 2026-11-02).
+    # Found by scanning the tracked tree for a subcommand after the script
+    # name; tests drive the script through sys.executable, not as operators.
+    names = subprocess.run(['git', 'ls-files', '-z'], cwd=ROOT, capture_output=True, check=True).stdout
+    found = []
+    for name in names.decode().split('\0'):
+        path = ROOT / name
+        if not name or name.startswith('tests/') or not path.is_file():
+            continue
+        data = path.read_bytes()
+        if b'gap_codeowners.py' not in data:
+            continue
+        for line in data.decode('utf-8', 'replace').splitlines():
+            for match in re.finditer(r'gap_codeowners\.py\s+(write|refresh|check)\b', line):
+                found.append((name, match[1], line.strip()))
+                assert re.search(r"(?:^|[\s`'\"])python3 -I \S*$", line[:match.start()]), (name, line)
+    assert {command for _, command, _ in found} == {'write', 'refresh', 'check'}, found
 
 
 # The attack payload: when the code-owner check runs, report success and exit.

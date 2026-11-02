@@ -323,7 +323,7 @@ The gap maintainer creates the fork once:
 2. Push its history to the empty GitLab project.
 3. Commit `gap/README.md`, a `gap/patches.md` that holds only its title
    line and the `.gitlab/CODEOWNERS` that
-   `python3 scripts/gap_codeowners.py write --group @<group> --approver @<user>`
+   `python3 -I scripts/gap_codeowners.py write --group @<group> --approver @<user>`
    writes (§6), with the trailer `Upstream-Release: <SHA>`.
 4. Then protect `main` (§6).
 
@@ -413,7 +413,7 @@ After `IMPORT READY`:
    - **Dev kit.** If `agent_doctor` refuses the dev kit, it names the kit to
      request. Stop until that kit is installed.
    - **CODEOWNERS.** The `hygiene` job fails while the file is stale. Run
-     `python3 scripts/gap_codeowners.py refresh` and commit its output.
+     `python3 -I scripts/gap_codeowners.py refresh` and commit its output.
    - **Keys.** `$R/env-keys.diff` lists the key changes. Apply them to
      `gap/config/` in their own commit.
    - **Extension surface.** `$R/release-notes.diff` lists each removed or
@@ -525,7 +525,9 @@ gap patches stay ledgered.
     the 17.0 file until it is regenerated, so only the hygiene check catches
     it. The check is the job's first step and runs as
     `python3 -I`, so nothing a group-only change can edit runs before or
-    inside it (#1176 review).
+    inside it (#1176 review). Every documented `write` and `refresh` also
+    runs as `python3 -I`, so a planted module cannot alter the generated
+    file (maintainer, 2026-11-02).
 - **Required verification met** (in the gap) means all of the following:
   - The latest pipeline on the MR head is green, every job ran, and the
     clean-JUnit gate passes.
