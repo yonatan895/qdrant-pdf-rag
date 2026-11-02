@@ -74,6 +74,9 @@
 - No condition is weakened. Passing a gate means Open WebUI behaves as the
   condition states, not that a setting exists.
 - The Pipe is the only model. Open WebUI never reaches Qdrant or a gateway.
+  Amended by [ADR-0010](0010-team-tools-on-open-webui.md): the Pipe is the
+  only Docs model, and Open WebUI reaches LiteLLM and the team-tool gateways
+  only for Team models.
 - The agent stays the single owner of grounding, refusals, verification state
   and error codes (ADR-0007, "Where a customization goes").
 - No-go conditions now stop a release or a site. The fallback is the console

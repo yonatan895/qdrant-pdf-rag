@@ -4,7 +4,8 @@
   superseded in part by [ADR-0008](0008-open-webui-main-docs-platform.md)
   (default-on, release gates; the conditions below stay); amended by
   [ADR-0010](0010-team-tools-on-open-webui.md) for team tools (the decision
-  paragraph, V2, R2 and one no-go item, as its table lists).
+  paragraph, V2, R2, one no-go item and the framework reading, as its table
+  lists).
   Accepting this record does not enable anything: the chart component stays
   off by default (superseded by ADR-0008: default on), and a site enables it only after every condition below
   passes. Amends [ADR-0004](0004-operator-console-htmx.md) and
@@ -239,7 +240,9 @@ the pilot. The console remains the only supported front end.
   framework":** these rules bind this repository's code, dependencies and
   answer path. A pinned, unmodified third-party image may contain such
   libraries only while their features are off and outside every answer path
-  (V1, V2), as with OpenObserve (ADR-0006).
+  (V1, V2), as with OpenObserve (ADR-0006). Amended by
+  [ADR-0010](0010-team-tools-on-open-webui.md): Open WebUI's built-in tool
+  loop is on for Team models only, under the limits its table lists.
 
 ## Where a customization goes
 
