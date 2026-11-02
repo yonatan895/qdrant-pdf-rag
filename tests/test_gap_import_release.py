@@ -22,7 +22,13 @@ from pathlib import Path
 
 import pytest
 
-from tests.helpers_airgap import REPO, gen_sign_keypair, sha256_bytes, sign_sums
+from tests.helpers_airgap import (
+    REPO,
+    gen_sign_keypair,
+    reference_docs_member,
+    sha256_bytes,
+    sign_sums,
+)
 from tests.helpers_task_artifact import copy_task_tools, task_manifest, task_members
 
 SCRIPT = "scripts/gap/import_release.sh"
@@ -129,9 +135,10 @@ class World:
         return sha
 
     def bundle(self, sha: str, *, name_sha: str | None = None, key: Path | None = None, tamper=None,
-               append=None) -> Path:
+               append=None, origin: str = "upstream") -> Path:
         """A signed tarball whose repo.bundle HEAD is upstream HEAD and whose
-        MANIFEST and file name say name_sha (default: sha)."""
+        MANIFEST and file name say name_sha (default: sha), and whose MANIFEST
+        declares `origin` (#1118 F2; "" leaves the line out)."""
         name_sha = name_sha or sha
         stage = self.root / "stage" / f"{name_sha}-{len(list(self.bundles.iterdir()))}"
         stage.mkdir(parents=True)
@@ -142,9 +149,10 @@ class World:
         files = {
             "bootstrap.sh": (REPO / "scripts/airgap/bootstrap.sh").read_bytes(),
             "repo.bundle": (stage / "repo.bundle").read_bytes(),
+            "reference-docs.tar.gz": reference_docs_member(),
             "qdrant-image.tar": b"qdrant", "openobserve-image.tar": b"openobserve", "otelcol-image.tar": b"otelcol",
             f"app-ingest-{name_sha}.tar": b"ingest", f"app-agent-{name_sha}.tar": b"agent",
-            "MANIFEST.txt": (f"sha: {name_sha}\n" + task_manifest()).encode(),
+            "MANIFEST.txt": (f"sha: {name_sha}\n" + task_manifest() + (f"origin: {origin}\n" if origin else "")).encode(),
             **_task_members(),
             "PACKING_RECORD.txt": b"record\n", "sbom.json": b'{"images": []}\n',
             "THIRD-PARTY-NOTICES.txt": b"notices\n",
@@ -1026,3 +1034,138 @@ def test_names_ledger_text_and_messages_round_trip_exactly(tmp_path, keys):
     assert_one_stop(after_push, f"STOP: import/{r2} is already pushed to origin; never rerun after the push: "
                                 "fix forward with new commits on its MR branch")
     assert world.git(world.fork, "rev-parse", f"import/{r2}").strip() == tip
+
+
+# -- #1118 F2: only an upstream release is imported ------------------------------
+
+NOT_UPSTREAM = ("STOP: the bundle is not an upstream release (its MANIFEST origin is not upstream; FAIL line "
+                "above); do not import it: only signed upstream releases are imported")
+
+
+def _gap_anchor(world: World, tmp_path: Path) -> tuple[Path, Path]:
+    """The gap release key and its operator anchor, outside FORK, R and BUNDLE."""
+    gap_key = gen_sign_keypair(tmp_path / "home", "gap-release.key")
+    anchor = world.root / "trust" / "gap.pub"
+    subprocess.run(["openssl", "pkey", "-in", str(gap_key), "-pubout", "-out", str(anchor)],
+                   check=True, capture_output=True)
+    return gap_key, anchor
+
+
+@pytest.mark.parametrize(("origin", "stop"), [
+    ("gap", NOT_UPSTREAM),
+    ("upstream", REFUSALS["other-key"]),
+], ids=["gap-release", "gap-key-signs-upstream"])
+def test_a_gap_signed_bundle_is_never_imported_and_the_upstream_rerun_imports(world, tmp_path, origin, stop):
+    """#1118 F2 G3: with BOTH anchors exported, a gap release (origin: gap,
+    gap key) and a gap-signed bundle that claims origin: upstream each stop
+    at step 1 and change nothing. The rerun with the upstream-signed bundle of
+    the same sha, the gap anchor still exported, reaches IMPORT READY."""
+    world.create_fork(world.r1)
+    gap_key, gap_anchor = _gap_anchor(world, tmp_path)
+    extra = {"SNEAKERNET_GAP_TRUSTED_PUB": str(gap_anchor)}
+    r2 = world.release({"README.md": "two\n"}, "Release 2", key=gap_key, origin=origin)
+    fork_refs, bare_refs = world.refs(world.fork), world.refs(world.bare)
+
+    stopped = world.run(r2, extra=extra)
+
+    assert_one_stop(stopped, stop)
+    if origin == "gap":
+        assert ("FAIL: the bundle's release origin (gap) is not accepted here (accepted: upstream)"
+                in stopped.stdout)
+    else:
+        assert ("FAIL: bundle pubkey does not match SNEAKERNET_TRUSTED_PUB, the release trust anchor for the "
+                "bundle's origin (upstream)") in stopped.stdout
+    assert world.refs(world.fork) == fork_refs
+    assert world.refs(world.bare) == bare_refs
+    world.bundle(r2)  # The same release, signed by the upstream key.
+    assert_ready(world, world.run(r2, extra=extra), r2)
+
+
+def _live_guard(world: World, tarball: Path, anchors: dict[str, str], where: Path):
+    """The live stages' guard (check_manifest_chain, every origin accepted) on
+    the same bundle and anchors, from the fork's own common.sh, exactly as the
+    import's step 1 sources it."""
+    unpacked = where / "guard bundle"
+    unpacked.mkdir(parents=True)
+    subprocess.run(["tar", "-xf", str(tarball)], cwd=unpacked, check=True, capture_output=True)
+    (where / "empty.env").write_text("")
+    env = {**world.env(RUN_DATE), "AIRGAP_ENV": str(where / "empty.env"), "AIRGAP_DRYRUN": "0", **anchors}
+    return subprocess.run(["sh", "-c", '. "$1" && cd "$2" && check_manifest_chain MANIFEST.txt verified',
+                           str(world.fork / SCRIPT), str(world.fork / SHIPPED[1]), str(unpacked)],
+                          env=env, capture_output=True, text=True, check=False, timeout=120)
+
+
+SAME_KEY = "release trust anchors SNEAKERNET_TRUSTED_PUB and SNEAKERNET_GAP_TRUSTED_PUB hold the same key"
+GAP_NOT_A_FILE = "release trust anchor SNEAKERNET_GAP_TRUSTED_PUB is not a readable file"
+
+
+AGREEMENT = [
+    ("gap-key-in-both-roles", SAME_KEY),
+    ("gap-key-in-both-roles-copy", SAME_KEY),
+    ("gap-key-in-both-roles-der", SAME_KEY),
+    ("upstream-key-in-both-roles-der", SAME_KEY),
+    ("swapped-anchors", ("bundle pubkey does not match SNEAKERNET_TRUSTED_PUB, the release trust anchor for the "
+                         "bundle's origin (upstream)")),
+    ("gap-anchor-is-a-link", "release trust anchor SNEAKERNET_GAP_TRUSTED_PUB is a link"),
+    ("gap-anchor-is-a-directory", GAP_NOT_A_FILE),
+    ("gap-anchor-missing", GAP_NOT_A_FILE),
+]
+
+
+@pytest.mark.parametrize(("case", "fail"), AGREEMENT, ids=[case for case, _ in AGREEMENT])
+def test_import_step_1_and_the_live_guard_agree_with_both_anchors_set(world, tmp_path, case, fail):
+    """#1180 N1: step 1 keeps SNEAKERNET_GAP_TRUSTED_PUB set, so it applies
+    every anchor rule of the live guard (G4 one key per role, G5 a plain
+    readable file): with the operator's anchors, a bundle signed and declared
+    `origin: upstream` stops at step 1 exactly when the live guard refuses it,
+    with the guard's FAIL line, and changes nothing. The counterexample is
+    both variables at the gap key and a gap-signed bundle claiming upstream.
+    The next ordinary run (upstream-signed bundle, distinct anchors) passes
+    both the guard and the whole import."""
+    world.create_fork(world.r1)
+    gap_key, gap_anchor = _gap_anchor(world, tmp_path)
+    trust = world.root / "trust"
+
+    def der(pub: Path) -> str:
+        out = trust / f"{pub.stem}.der"
+        subprocess.run(["openssl", "pkey", "-pubin", "-in", str(pub), "-outform", "DER", "-out", str(out)],
+                       check=True, capture_output=True)
+        return str(out)
+
+    up, gap = str(world.anchor), str(gap_anchor)
+    signer = gap_key if case.startswith("gap-key-") else None
+    anchors = {
+        "gap-key-in-both-roles": lambda: (gap, gap),
+        "gap-key-in-both-roles-copy": lambda: (str(shutil.copy(gap_anchor, trust / "gap-copy.pub")), gap),
+        "gap-key-in-both-roles-der": lambda: (gap, der(gap_anchor)),
+        "upstream-key-in-both-roles-der": lambda: (up, der(world.anchor)),
+        "swapped-anchors": lambda: (gap, up),
+        "gap-anchor-is-a-link": lambda: (up, str(_symlink(trust / "gap-link.pub", gap_anchor))),
+        "gap-anchor-is-a-directory": lambda: (up, str(trust)),
+        "gap-anchor-missing": lambda: (up, str(trust / "absent.pub")),
+    }[case]()
+    env = {"SNEAKERNET_TRUSTED_PUB": anchors[0], "SNEAKERNET_GAP_TRUSTED_PUB": anchors[1]}
+    r2 = world.release({"README.md": "two\n"}, "Release 2", key=signer)
+    tarball = world.bundles / f"qdrant-pdf-rag-{r2}.tar"
+    fork_refs, bare_refs = world.refs(world.fork), world.refs(world.bare)
+
+    guard = _live_guard(world, tarball, env, tmp_path / "refused")
+    stopped = world.run(r2, extra=env)
+
+    assert guard.returncode != 0
+    assert f"FAIL: {fail}" in guard.stdout + guard.stderr
+    assert_one_stop(stopped, REFUSALS["other-key"])
+    assert f"FAIL: {fail}" in stopped.stdout
+    assert world.refs(world.fork) == fork_refs
+    assert world.refs(world.bare) == bare_refs
+
+    world.bundle(r2)  # The same release, signed by the upstream key.
+    ordinary = {"SNEAKERNET_TRUSTED_PUB": up, "SNEAKERNET_GAP_TRUSTED_PUB": gap}
+    accepted = _live_guard(world, tarball, ordinary, tmp_path / "accepted")
+    assert accepted.returncode == 0, accepted.stderr
+    assert_ready(world, world.run(r2, extra=ordinary), r2)
+
+
+def _symlink(link: Path, target: Path) -> Path:
+    link.symlink_to(target)
+    return link

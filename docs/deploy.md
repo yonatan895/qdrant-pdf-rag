@@ -515,7 +515,8 @@ The connected host packs one tarball: git bundle, Qdrant + OpenObserve
 `images.txt` digest is recorded; [image format](#bundle-image-format)), vendored chart, bootstrap script,
 `MANIFEST.txt`, `PACKING_RECORD.txt`, digest enumeration, `THIRD-PARTY-NOTICES.txt`
 ([licensing](licensing.md); pack fails closed on an unrecorded dependency, image
-digest or notice change, and bootstrap requires the member), offline signature,
+digest or notice change, and bootstrap requires the member), the
+[reference docs](#reference-docs) member `reference-docs.tar.gz`, offline signature,
 and member checksums. Verify the tarball digest **before** unpacking, member
 checksums **after**.
 
@@ -627,13 +628,28 @@ checksums **after**.
   verified signed release (#1118 F1, ADR-0009 §1): a packed MANIFEST must be
   reachable, and:
   1. *MANIFEST authenticity.* The guard never reads a bare file. `SHA256SUMS`,
-     `SHA256SUMS.sig` and `sneakernet-signing.pub` must sit next to it, the
-     bundled key must equal a configured release trust anchor byte-for-byte,
-     the signature over `SHA256SUMS` must verify with that anchor, and
+     `SHA256SUMS.sig` and `sneakernet-signing.pub` must sit next to it, and
      `SHA256SUMS` must list `MANIFEST.txt` exactly once with the file's real
-     sha256. The anchor is `SNEAKERNET_TRUSTED_PUB` and it is required; the
-     guard reads anchors from the variable-name list
-     `RELEASE_TRUST_ANCHOR_VARS` so a second (gap) key can join it. Image
+     sha256 (checked first, so an edited `origin:` line is reported as an
+     edit). The MANIFEST must declare exactly one release origin, byte for
+     byte `origin: upstream` (written by `pack.sh`) or `origin: gap` (the gap
+     pack, ADR-0009 §5); a missing, repeated or unknown origin is refused.
+     The bundled key must then equal **the anchor for that origin**
+     byte-for-byte, and the signature over `SHA256SUMS` must verify with it,
+     which authenticates the origin line itself (#1118 F2). The anchors are
+     origin-tagged in `RELEASE_TRUST_ANCHOR_VARS`: `SNEAKERNET_TRUSTED_PUB`
+     for `upstream` (required for an upstream bundle) and
+     `SNEAKERNET_GAP_TRUSTED_PUB` for `gap`. So a gap-signed bundle that says
+     `upstream`, an upstream-signed one that says `gap`, and a third key are
+     each refused, and the origin printed in records is never a false label
+     (like `signed:`, it is not a trust root on its own). Every configured
+     anchor must be a readable plain file (not a link) outside the executing
+     checkout and outside the bundle directory it verifies (an anchor is never
+     supplied by the artifact it vouches for, so never a tracked
+     `gap/records/*.pub`), and the two anchors must hold different keys
+     (compared as keys, not bytes). Operators keep them in `/work/anchors/`
+     on the bastion ([install and ops](install_and_ops.md#42-transfer--automated-bootstrap)).
+     Nothing is cached: each live-stage run re-checks the files. Image
      archives stay load.sh's `sha256sum -c`; only this MANIFEST link is
      rechecked.
   2. *Identity.* HEAD must equal the packed SHA and no tracked file may differ
@@ -671,8 +687,10 @@ checksums **after**.
   *Connected opt-out.* `AIRGAP_UNVERIFIED_CHECKOUT=1` restores the pre-F1
   rules for connected developers and the connected CI and Kind lanes: no
   MANIFEST runs with the "not release-verified" notice, and without an anchor
-  the signature check is TOFU (a configured anchor still pins the key); a
-  reachable MANIFEST is still checked against HEAD and the tree. It is read
+  the signature check is TOFU (a configured anchor still pins the key for the
+  declared origin); a reachable MANIFEST is still checked against HEAD and the
+  tree, and one without an `origin:` line (packed before #1118 F2) is read as
+  `upstream` with a notice. It is read
   from the process environment only (an `airgap.env` assignment is ignored)
   and is refused with a fixed message unless `CI_REHEARSAL=1` is in the
   process environment too; any value other than `1` or unset is refused.
@@ -681,12 +699,24 @@ checksums **after**.
   index-flag refusals to an existing workspace before copying artifacts into
   `dist/`. Not covered: edits to files the checkout does not track
   (`airgap.env` is operator config by design), and an anchor file that is
-  itself replaced on the bastion.
+  itself replaced on the bastion. Also not covered, and required of the gap
+  release pipeline (ADR-0009 F6): candidate code that a gap release build
+  executes must not be able to write the anchor files, `airgap.env` or any
+  operator workspace on `/work` (it could replace an anchor or the guard
+  before the next deploy session), and the guard runs from the bundle's own
+  checkout, so a malicious bundle could carry its own lying guard. Upstream
+  bundles are checked before anything runs by the Windows anchor bootstrap;
+  a gap bundle must be verified by the installed release's code before
+  promotion (F6).
 - `bootstrap.sh` cannot source `common.sh` (no clone exists yet), so it
-  carries an inline twin of the trust check (bundle signature honoring
-  `SNEAKERNET_TRUSTED_PUB`, then `SHA256SUMS`). There the anchor stays
-  optional, since bootstrap only creates the workspace; every later live
-  stage requires it (guard above). It clones into
+  carries an inline twin of the trust check (bundle signature, then the
+  anchors, then `SHA256SUMS`). There the anchors stay optional, since
+  bootstrap only creates the workspace; every later live stage requires the
+  one for the bundle's origin (guard above). When either anchor is set, it
+  checks `MANIFEST.txt` against its signed `SHA256SUMS` entry, then reads
+  its `origin:` and requires the bundled key to equal that origin's anchor;
+  an anchor inside the bundle directory, a link, or two anchors holding the
+  same key are refused. With no anchor its output is unchanged. It clones into
   `AIRGAP_WORKSPACE` (default `qdrant-pdf-rag`), skips the clone when a
   repo already exists, copies (not links) the archives into `dist/`, and
   seeds `airgap.env` from the example only when absent — never overwriting
@@ -706,6 +736,36 @@ checksums **after**.
   stage on its own initiative; operator files remain through recovery.
   The copy list includes `oauth-proxy-image.tar` when the bundle contains it;
   no manual sidecar-image copy is needed before `airgap:load`.
+- <a id="reference-docs"></a>**Reference docs (GH#1174).** `reference-docs.tar.gz`
+  is a required signed member: the project's own docs from the packed commit
+  (`README.md`, `AGENTS.md`, `LICENSE`, `docs/` with the ADRs and
+  `docs/architecture.md`, the vendored Qdrant skills) plus every upstream doc set
+  pinned in `scripts/airgap/reference-docs.json` (version-matched docs of the
+  shipped and called components and the main Python libraries; the OpenShift
+  subset is the path list `scripts/airgap/reference-docs-openshift.paths`). Each
+  row pins an archive URL, its sha256, kept-path globs and the licence files.
+  Pack reads each archive from `AIRGAP_REFDOCS_CACHE` (a directory of archives
+  named by their sha256; when set, pack never downloads, like
+  `AIRGAP_TASK_ARCHIVE`) or `.tools/cache/reference-docs`, else downloads it from
+  the pinned URL (about 1.4 GB in all, deleted after use), and fails closed on a
+  sha256 mismatch. Archives are untrusted: an absolute, `..` or control-character
+  member name, a second top-level directory or a duplicate refuses the archive; a
+  link or special file inside the kept subset refuses the set; a missing licence
+  file or an include that matches nothing refuses the set. Only regular files of
+  the kept subset and their licence files are copied; nothing upstream is built,
+  rendered or executed (raw Markdown, MDX, AsciiDoc, reST, Hugo/Docusaurus
+  sources; the CPython set is python.org's own rendered HTML and text). The
+  member holds `reference-docs/INDEX.md` (set, component, version, source@sha,
+  licence, path), `reference-docs/FILES.sha256` (every file) and is
+  deterministic for a given commit. MANIFEST binds it (`reference_docs_sha256`,
+  `reference_docs_sets`), the SBOM lists every set, and every set has a
+  license record ([licensing](licensing.md#reference-docs)); a set without an
+  upstream licence cannot be expressed in the manifest. Bootstrap step 5 lists
+  the member (regular files under `reference-docs/` only, no `..`), unpacks it
+  into `dist/.reference-docs-staging`, requires every file to match
+  `FILES.sha256` and no unlisted file, then replaces `dist/reference-docs/`;
+  a refusal leaves the previous release's docs in place. The vLLM
+  `--help=all` capture (generated engine-args and metrics pages) is a follow-up.
 
 <a id="release-archive"></a>
 ### Release archive (#1118, decision D5)
@@ -1184,7 +1244,7 @@ and CI tooling have different owners and pull credentials.
 | Open WebUI front end (default on, ADR-0007/ADR-0008, #1074) | `qdrant-pdf-rag-openwebui:v0.12.3-slim` | as the agent; absent while `images.txt` says `sha256:PENDING` (the factory records the pushed manifest digest of the image built from `images/openwebui/Containerfile`, the recipe the `scripts/openwebui/` dev environment and acceptance lane also build); the upstream `open-webui/open-webui:v0.12.3-slim` line is factory build provenance, never pushed | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `openwebui`) when `openwebui.enabled` |
 | Open WebUI allow-list proxy (ADR-0007 E1, **Verifier-owned** where the workflow builds or mirrors images) | `nginxinc/nginx-unprivileged:1.30.6-alpine` | pinned by digest in `images.txt`; bundled as `openwebui-proxy-image.tar` exactly when the Open WebUI member is | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `proxy`) when `openwebui.enabled` |
 | CI job image | `qdrant-pdf-rag-devkit@<kit pin digest>`: the dev workspace image (next row) | the default `CI_PYTHON_IMAGE` names the digest in `scripts/tools/devkit-pin.txt` (a unit test keeps them equal); leave the project variable unset | `scripts/devkit/install.sh`, as the next row | GitLab runner: every job. The former `ci/python:3.14` role is retired (GH#1118 F5) |
-| Dev workspace image (ADR-0009 §8, #1118) | `qdrant-pdf-rag-devkit:<kit key>` | manifest digest in `scripts/tools/devkit-pin.txt`, recorded with its key in one pin PR after the factory pushes the image for that key (a kit-input change merges with the pin untouched; kit packing and the release gate refuse a stale pin; `sha256:PENDING` is refused); built from `images/Containerfile.devkit` by `.github/workflows/devkit.yml`; carried by the separate dev kit, never a release-bundle member or an `images.txt` line | the first push from Windows ([`docs/runbooks/devkit-windows.md`](runbooks/devkit-windows.md)), then `scripts/devkit/install.sh` in the bastion | bastion, dev pod and runner jobs, from the templates and runner configurations in `deploy/workspace/` (contract: `deploy/workspace/contract.json`) |
+| Dev workspace image (ADR-0009 §8, #1118) | `qdrant-pdf-rag-devkit:<kit key>` | manifest digest in `scripts/tools/devkit-pin.txt`, recorded with its key in one pin PR after the factory pushes the image for that key (a kit-input change merges with the pin untouched; kit packing and the release gate refuse a stale pin; `sha256:PENDING` is refused); built from `images/Containerfile.devkit` by `.github/workflows/devkit.yml`; carried by the separate dev kit, never a release-bundle member or an `images.txt` line | the first push from Windows ([`docs/runbooks/devkit-windows.md`](runbooks/devkit-windows.md)), then `scripts/devkit/install.sh` in the bastion | bastion, dev pod and runner jobs, from the templates and runner configurations in `deploy/workspace/` (contract: `deploy/workspace/contract.json`); the coding agents on the gap orchestration VM under rootless Podman ([agents VM](agents-vm.md), #1172) |
 | CI Qdrant service | `qdrant/qdrant@sha256:<images.txt digest>` | the `images.txt` manifest digest, so a tag is never enough | registry-to-registry copy that preserves the digest | GitLab runner (`sim`, `gate-l1`) |
 
 The CI Qdrant service is a different role from the runtime Qdrant image. `load.sh`
@@ -1210,8 +1270,8 @@ containers, a writable host or cluster access.
 
 | Area | Requirement | Used by |
 |---|---|---|
-| GitLab | Release version recorded, 16.10 or later (`workflow:auto_cancel`), 17.10 or later for draft-MR routing to `wip` (`CI_MERGE_REQUEST_DRAFT`; older releases run drafts on `gate`, which is safe but slower); protected tags; `CI_COMMIT_TAG` and `CI_COMMIT_REF_PROTECTED`; variables expanded in `image`, `services` and `tags`; `CI_OPEN_MERGE_REQUESTS`; dynamic child pipelines (`trigger:include:artifact`) | all pipelines |
-| Runner | Tags `gate` (ready merge request and tag pipelines) and `wip` (branch and draft merge request pipelines), or one tag for all from the project variable `CI_RUNNER_TAG`; linux-amd64; an executor that starts job and service images from the approved registry with a service alias; reads `CI_TASK_ARCHIVE` and `CI_BM25_CACHE_DIR` from the runner; no route to PyPI, Docker Hub or GitHub | all GitLab jobs |
+| GitLab | 17.0 or later, with every feature in the [17.0 feature audit](#gitlab-170-feature-audit); the site does not disclose its minor version and nothing here depends on it | all pipelines |
+| Runner | Tags `gate` (ready merge request and tag pipelines) and `wip` (branch and draft merge request pipelines), or one tag for all from the project variable `CI_RUNNER_TAG`; linux-amd64; an executor that starts job and service images from the approved registry with a service alias; reads `CI_TASK_ARCHIVE` and `CI_BM25_CACHE_DIR` from the runner; maximum job timeout at least 40 minutes; no route to PyPI, Docker Hub or GitHub | all GitLab jobs |
 | Python packages | none acquired: the dev kit job image holds the dev lock installed, and `prepare_python.py --kit` installs only the checkout, with no index | `.py-base` |
 | Quay | Release version recorded; Docker v2 API reachable by `skopeo`; a push identity for the five runtime paths; pull access for cluster and runner; organization layout may differ from upstream paths | `load.sh`, runner |
 | OpenShift | Namespace-scoped deployer; `restricted-v2` SCC with no `anyuid`; RWO block storage for Qdrant (NFS only for the read-only corpus); ClusterIP-only Qdrant; Route only with OAuth | deploy, ingest |
@@ -1219,6 +1279,31 @@ containers, a writable host or cluster access.
 
 Site qualification of the actual versions and permissions is #446 packets C/D and
 is not claimed by this table.
+
+<a id="gitlab-170-feature-audit"></a>
+#### GitLab 17.0 feature audit
+
+Every GitLab feature the repository depends on, checked against the GitLab
+docs at tag `v17.0.0-ee` (`gitlab-org/gitlab`, `doc/`). Nothing reads a feature
+introduced after 17.0. `tests/test_ci_gitlab_parity.py` refuses
+`CI_MERGE_REQUEST_DRAFT` (17.10), and #1176 CODEOWNERS uses no `!` exclusion
+(17.10 behind a flag, 17.11 GA).
+
+| Feature | Used by | Version note in the 17.0 docs | 17.0 doc (`doc/` path) |
+|---|---|---|---|
+| `workflow:rules` with `variables`; `rules:if` with `==`, `!=`, `== null`, `=~ /re/i` and `&&` | `.gitlab-ci.yml` | documented, no later note | `ci/yaml/index.md#workflowrules`, `ci/jobs/job_rules.md#compare-a-variable-to-a-regular-expression` |
+| `workflow:auto_cancel:on_new_commit`, `workflow:rules:auto_cancel` | `.gitlab-ci.yml` | GA in 16.10 | `ci/yaml/index.md#workflowauto_cancelon_new_commit` |
+| `interruptible`, also on trigger jobs | every job, `lanes` | trigger jobs from 16.8 | `ci/yaml/index.md#interruptible` |
+| `default` (`image`, `interruptible`, `tags`), `extends`, `stages`, `variables`, `GIT_DEPTH` | `.gitlab-ci.yml` | documented, no later note | `ci/yaml/index.md#default` |
+| `tags`, `image` and `services:name` with CI/CD variables; a literal `services:alias` | all jobs, `sim`, `gate-l1` | documented, no later note | `ci/yaml/index.md#tags`, `#services` |
+| `parallel: N`, `needs`, `timeout`, `artifacts` (`paths`, `when`, `reports:junit`) | `test`, `lanes`, every job | documented, no later note | `ci/yaml/index.md#parallel`, `#timeout`, `#artifactsreportsjunit` |
+| `trigger:include:artifact`, `trigger:strategy: depend`, `trigger:forward:yaml_variables` | `lanes` | `forward` GA in 15.1 | `ci/yaml/index.md#triggerforward`, `ci/pipelines/downstream_pipelines.md` |
+| Draft detection by title (`Draft:`, `[Draft]`, `(Draft)`, any case) through `CI_MERGE_REQUEST_TITLE` | `workflow:rules` | documented, no later note | `user/project/merge_requests/drafts.md`; `lib/gitlab/regex/merge_requests.rb` (`merge_request_draft`), read by `MergeRequest#draft?` in `app/models/merge_request.rb` |
+| Predefined variables: `CI_PIPELINE_SOURCE`, `CI_COMMIT_TAG`, `CI_COMMIT_BRANCH`, `CI_COMMIT_SHA`, `CI_COMMIT_REF_PROTECTED`, `CI_DEFAULT_BRANCH`, `CI_OPEN_MERGE_REQUESTS`, `CI_MERGE_REQUEST_TITLE`, `CI_MERGE_REQUEST_IID`, `CI_MERGE_REQUEST_SOURCE_BRANCH_SHA`, `CI_MERGE_REQUEST_TARGET_BRANCH_SHA`, `CI_MERGE_REQUEST_DIFF_BASE_SHA`, `CI_NODE_INDEX`, `CI_NODE_TOTAL`, `CI_PROJECT_DIR`, `CI_PROJECT_ID`, `CI_PROJECT_PATH`, `CI_PIPELINE_ID`, `CI_JOB_URL`, `CI_API_V4_URL`, `CI_SERVER_URL` | `.gitlab-ci.yml`, `scripts/gap/ci_status.py` | documented, no later note | `ci/variables/predefined_variables.md` |
+| CODEOWNERS: sections, optional `^[Section]`, `[Section][N]`, default section owners, `*` and path entries, user and group owners | `.gitlab/CODEOWNERS` (#1176) | documented, no later note | `user/project/codeowners/reference.md` |
+| REST: `GET /projects/:id`, `/pipelines` (`sha`, `order_by`, `sort`), `/pipelines/:id`, `/pipelines/:id/jobs`, `/pipelines/:id/bridges`, `/repository/commits/:sha`, `/repository/commits/:sha/merge_requests`, `/merge_requests/:iid` (`head_pipeline`), `/jobs/:id/artifacts`, `/jobs/:id/artifacts/*path` | `scripts/gap/ci_status.py` (`read_api`) | documented, no later note | `api/projects.md`, `api/pipelines.md`, `api/jobs.md`, `api/commits.md`, `api/merge_requests.md`, `api/job_artifacts.md` |
+| REST: `POST /projects/:id/merge_requests/:iid/notes` | `gate-l1` (optional `GITLAB_TOKEN`) | documented, no later note | `api/notes.md` |
+| Settings: protected branch with **Require approval from code owners** and approval rules (Premium); merge method **Merge commit**; squash **Do not allow**; **Pipelines must succeed**; protected tags with **Allowed to create**; **Auto-cancel redundant pipelines**; project access token scope `read_api` | ADR-0009 §6, this section | documented, no later note | `user/project/protected_branches.md`, `user/project/merge_requests/methods/index.md`, `user/project/merge_requests/squash_and_merge.md`, `user/project/protected_tags.md`, `ci/pipelines/settings.md`, `user/project/settings/project_access_tokens.md` |
 
 ### Shared LiteLLM configuration
 
@@ -1252,7 +1337,7 @@ and the dry-run gate; air-gap GitLab runs hygiene, lint/types, the unit suite
 in four shards, hazards, the sim tier and gate-l1 only (no e2e, load, deploy,
 multi-peer docker, GHCR, or PDFs/tokens/hostnames in file). Merge request and
 tag pipelines run every GitLab lane on the `gate` runner tag, a draft merge
-request every lane on `wip` (GitLab >= 17.10); branch pipelines
+request (by its title) every lane on `wip`; branch pipelines
 run on `wip` and select lanes with the fail-closed classifier through a child
 pipeline; a newer commit cancels the older pipeline on the same ref, never a
 tag pipeline (ADR-0009 section 2). GitLab unit/sim
@@ -2188,7 +2273,7 @@ expectations. It prints claim **names**, the roles claim's JSON type and value *
 token size in bytes, yes/no answers and, in role-list mode, the **configured** roles that
 matched. It never prints tokens, the secret, other claim values or identity, and
 every failure is one fixed line with a distinct exit code (3 TLS, 5 callback, 6 token, 7 ID
-token, 8 claims). The ID token signature is **not** verified; this is a diagnostic only.
+token, 8 claims, 10 access token). The ID token signature is **not** verified; this is a diagnostic only.
 
 Claim names are flags with the chart defaults: `--email-claim` (`email`), `--username-claim`
 (`name`), `--group-claim` (`groups`) and `--roles-claim` (`roles`). When a configured claim is
@@ -2259,6 +2344,64 @@ URL or code.
 Register that second redirect URI on the **test** client only, next to
 `https://<host>/oauth/oidc/callback`, and remove it when the check is done; the production
 client keeps only the HTTPS callback.
+
+**Access-token mode (team tools, #1075; #1088 item 1).** `--access-token` runs the same flow
+(or `--decode-only` on a saved access token) and reports on the **access token** in the token
+response: the token Open WebUI forwards to the team-tool gateways, never the ID token. AD FS
+issues it for `urn:microsoft:userinfo` when the client requests no other resource, and every
+gateway refuses that token. Run it before any gateway work at the site:
+
+```sh
+python3 -I scripts/openwebui/adfs_claims_check.py --paste --access-token \
+  --redirect-uri https://<openwebui-host>/oauth/oidc/callback \
+  --issuer https://<adfs-host>/adfs --client-id <client-id> \
+  --client-secret-file <file> --ca-bundle <ca.pem> \
+  --group-claim groups --team-group 'DOMAIN\team-group' [--gateway-audience <gateway-aud>]
+```
+
+It prints claim names, the JWT `alg` and whether it has a key id, the `aud` count with yes/no
+for `urn:microsoft:userinfo` and for the client ID, which of the discovery `access_token_issuer`
+or `issuer` (or `--expect-iss`) the token's `iss` equals (set the gateway issuer to that one;
+AD FS access tokens usually carry `.../adfs/services/trust`), whether `sub` is present, the lifetime in seconds, whether
+a refresh token was issued, and the group claim's type, count and form. Token values (`aud`,
+`iss`, `sub`, groups) are never printed; only the **configured** team group and gateway
+audiences are named, with present/absent. It then prints one fixed line,
+`access token verdict: <code>`, most severe first, and exits 0 for `ok` and 10 otherwise:
+
+| Verdict | Meaning |
+|---|---|
+| `absent` | the token response carries no access token |
+| `opaque` | not a JWT; no gateway can verify it |
+| `too_large` | above the gateways' 32 KiB token limit (many groups) |
+| `userinfo_audience` | issued for `urn:microsoft:userinfo`; every gateway refuses it |
+| `unsupported_alg` | not RS256 (the gateway default), or no key id |
+| `claims_missing` | no usable `sub`, `iss`, `aud` or `exp`, a non-string `aud` member, or a non-numeric `iat` or `nbf` |
+| `issuer_mismatch` | `iss` equals neither discovery issuer field (or `--expect-iss`) |
+| `expired` | `exp` is at least 30 s past (the gateways' clock leeway) |
+| `not_yet_valid` | `nbf` or `iat` is more than 30 s ahead: clock skew between AD FS and the cluster |
+| `no_groups` | the group claim (`--group-claim`, default `groups`) holds no non-empty string |
+| `team_group_missing` | `--team-group` is not among the groups (a case or domain near miss is hinted) |
+| `gateway_audience_missing` | `aud` names none of the `--gateway-audience` values |
+| `issuer_unchecked` | everything else passed, but `--decode-only` had no `--expect-iss` |
+| `team_group_unchecked` | everything else passed, but no `--team-group` was given |
+| `audience_unchecked` | everything else passed, but no `--gateway-audience` was given |
+| `ok` | a gateway configured with this issuer, audience and group can verify it |
+
+`ok` needs every gateway check to have run: a check without its input gives the matching
+`*_unchecked` code (exit 10), never `ok`. Time checks follow the gateways' verifier (PyJWT,
+the 30 s `leeway_s` default of `tool_auth.GatewayAuthConfig`), in the live flow and offline
+alike, with this host's clock standing in for the gateway's: a saved token that has expired
+since gives `expired`, so analyse a fresh one.
+
+`audience_unchecked` (exit 10) means the token can serve only as the subject token of a
+token exchange (#1088 path a), for example when its `aud` is the client ID; extra audiences
+(path b) need `--gateway-audience` and `ok`. It warns
+when the lifetime is under 600 s (Open WebUI refreshes 300 s before expiry) and when no
+refresh token is issued (#1088 item 3). `--team-group` also reads `ADFS_TEAM_GROUP` in this mode
+only. The ID-token role flags, `--expect-refused` and `--expect-baseline-only` are refused with
+`--access-token`; `--expect-iss` is taken with `--decode-only` only (the live flow compares the
+discovery issuer fields). Record the verdict code and counts in the site packet, never the token.
+
 Tests: `tests/test_adfs_claims_check.py` (a fake TLS AD FS, canary leak assertions).
 
 <a id="workspace-isolation-proof"></a>

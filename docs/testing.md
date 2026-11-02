@@ -80,7 +80,8 @@ Pure builders live in `tests/fakes.py` (`make_hit`, `make_point`,
 `QdrantFake`, `LegacyQdrantFake`, `EmbedderFake`, `RerankerFake`,
 `PromotingRerankerFake`, `settings_kw`, `iter_golden_queries`,
 `vllm_models_mock`, `embedding_mock`) and `tests/helpers_airgap.py` (`make_bin_tree`,
-`run_sh`, `sign_sums`, `skopeo_stub`, `assert_pull_secret_wired`).
+`run_sh`, `sign_sums`, `skopeo_stub`, `assert_pull_secret_wired`, and `system_path`, the
+narrowed PATH that keeps the product's `python3` in the dev kit image).
 `tests/conftest.py` re-exports the retrieval doubles as
 backwards-compatible aliases — import from either, define in neither.
 
@@ -641,11 +642,14 @@ counterexamples, not immunity to all faults or a global coverage percentage.
 Offline GitLab runs the unit suite as four `parallel` jobs: tests/ci_shard.py
 splits the eligible collection with the same duration-balanced layout GitHub
 uses for its eight shards, and `tests/test_ci_gitlab_parity.py` proves on a
-real collection that the four shards are disjoint and complete. It runs the sim
-tier against the mirrored Qdrant service (`CI_BM25_CACHE_DIR` supplies the
-verified BM25 cache). Every shard and sim reject skipped and xfailed tests
+real collection that the four shards are disjoint and complete and load only
+GitHub's producer plugins. It runs the sim tier against the mirrored Qdrant
+service. Every shard and sim reject skipped and xfailed tests
 through their JUnit report, and sim omits only `tests/test_qdrant_auth.py` and
-`tests/test_openwebui_proxy_nginx.py`, which need a local Docker daemon. Merge
+`tests/test_openwebui_proxy_nginx.py`, which need a local Docker daemon. The
+kit image has no dash, so the dash cases of the job-step shell proofs are
+collected only where dash exists and always on GitHub
+(`tests/helpers_posix_shells.py`). Merge
 request and tag pipelines run every lane; branch pipelines run the lanes the
 `scripts/review_tooling.py` classifier selects, as a child pipeline
 (`scripts/gitlab_lanes.py`).

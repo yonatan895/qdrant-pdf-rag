@@ -7,7 +7,9 @@ import fcntl
 import hashlib
 import json
 import os
+import pwd
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -388,6 +390,10 @@ def _prepare_new(source_state, state, *, profile="COLAB_CPU_TRANSPORT", extra=()
 # still-ordinary deadline keeps the retry-until-deadline path under test (the
 # work window stays several times a normal run) without waiting 30 s.
 SHORT_DEADLINE_SECONDS = "12"
+# The production path admits the retained Qdrant and the gateway network before its
+# native workload starts; in a one-CPU CI slot (the dev kit lane, #1183) that alone
+# takes most of a 12 s run's 8 s work window, so its short deadline is longer.
+SHORT_PRODUCTION_DEADLINE_SECONDS = "20"
 
 
 def _prepare_short_deadline(source_state, state):
@@ -822,6 +828,32 @@ def _distinct_local_ports(count):
         return tuple(sock.getsockname()[1] for sock in sockets)
 
 
+def _real_ssh_keygen(binaries):
+    """The lab's ssh-keygen: the real OpenSSH tool, never a fake (#1183).
+
+    OpenSSH refuses to run for a uid without an account ("No user exists for
+    uid"), as in the dev kit image under an arbitrary CI uid. There the real
+    tool runs under nss_wrapper with a private account for this uid; elsewhere
+    the controller resolves it from PATH as an operator's run does."""
+    try:
+        pwd.getpwuid(os.getuid())
+        return []
+    except KeyError:
+        pass
+    real = shutil.which("ssh-keygen")
+    library = next((path for path in ("/usr/lib64/libnss_wrapper.so", "/usr/lib/x86_64-linux-gnu/libnss_wrapper.so")
+                    if Path(path).is_file()), None)
+    if real is None or library is None:
+        pytest.fail("uid has no account and no nss_wrapper is available for the real ssh-keygen", pytrace=False)
+    passwd = binaries.parent / "lab-passwd"
+    passwd.write_text(f"lab:x:{os.getuid()}:{os.getgid()}:lab:{binaries.parent}:/bin/sh\n")
+    wrapper = binaries / "ssh-keygen"
+    wrapper.write_text(f"#!/bin/sh\nLD_PRELOAD={shlex.quote(library)} NSS_WRAPPER_PASSWD={shlex.quote(str(passwd))} "
+                       f"NSS_WRAPPER_GROUP=/etc/group exec {shlex.quote(real)} \"$@\"\n")
+    wrapper.chmod(0o755)
+    return ["--ssh-keygen", str(wrapper)]
+
+
 @pytest.fixture
 def local_ports():
     """The reasoning, embedding and Qdrant forward ports of one test."""
@@ -850,7 +882,7 @@ def lab(tmp_path, monkeypatch, request, local_ports):
     common = ["--dataset", "synthetic", "--gateway-image", IMAGE,
               "--colab", str(binaries / "colab"), "--ssh", str(binaries / "ssh"),
               "--docker", str(binaries / "docker"), "--reasoning-port", reasoning_port,
-              "--embedding-port", embedding_port, "--deadline-seconds", "30"]
+              "--embedding-port", embedding_port, "--deadline-seconds", "30", *_real_ssh_keygen(binaries)]
     prerequisites = []
     if profile != "COLAB_CPU_TRANSPORT":
         cpu = tmp_path / "cpu-proof"
@@ -2248,7 +2280,7 @@ def test_malformed_production_sidecar_cannot_block_exact_recovery_then_next_nati
     short_approval = root / "short-scan-production-approval.json"
     test_colab_production._json(short_approval, approval)
     state = _prepare_production_again(run, "short-deadline-sidecar-run", approval=short_approval,
-                                      extra=("--deadline-seconds", SHORT_DEADLINE_SECONDS))
+                                      extra=("--deadline-seconds", SHORT_PRODUCTION_DEADLINE_SECONDS))
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "stop_fail")
     failed = _production_cli(state, timeout=60)
     assert failed.returncode == 1, failed.stdout + failed.stderr

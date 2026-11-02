@@ -16,6 +16,9 @@
   *(Amendment, ADR-0007, accepted 2026-10-24: while Open WebUI is enabled, its chat
   history may also hold question, answer and excerpt text as user session
   state, not quality records, under ADR-0007's storage and retention rules.)*
+  *(Amendment, [ADR-0010](0010-team-tools-on-open-webui.md), accepted
+  2026-11-02: that chat history may also hold tool output returned in
+  Team-model chats, under the same rules.)*
 - **Consequences / rules:**
   - No backend choice under #529 or #782 may ingest question, answer, excerpt or
     comment text. Using content for analytics means exporting from the feedback

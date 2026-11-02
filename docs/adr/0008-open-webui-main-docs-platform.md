@@ -57,6 +57,9 @@
   6. **Scope is docs Q&A.** Team tools (Splunk, mail, GitLab) are the next
      track on the same platform and need their own ADR. Until then this
      instance holds no tool, tool server or model connection (ADR-0007 V2).
+     Amended by [ADR-0010](0010-team-tools-on-open-webui.md): team tools run
+     on this instance through separate Team models, and the Docs model stays
+     tool-free.
   7. **Scale is one replica, SQLite, at most 100 users**, under the existing
      licence sign-off (L1). High availability (Postgres plus Redis) needs its
      own ADR.
@@ -71,6 +74,9 @@
 - No condition is weakened. Passing a gate means Open WebUI behaves as the
   condition states, not that a setting exists.
 - The Pipe is the only model. Open WebUI never reaches Qdrant or a gateway.
+  Amended by [ADR-0010](0010-team-tools-on-open-webui.md): the Pipe is the
+  only Docs model, and Open WebUI reaches LiteLLM and the team-tool gateways
+  only for Team models.
 - The agent stays the single owner of grounding, refusals, verification state
   and error codes (ADR-0007, "Where a customization goes").
 - No-go conditions now stop a release or a site. The fallback is the console

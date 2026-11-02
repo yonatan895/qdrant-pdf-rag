@@ -175,7 +175,9 @@ def test_relogin_replaces_kubeconfig(sess):
 
 
 def test_not_tmpfs_refused(sess):
-    d = Path(tempfile.mkdtemp(dir=Path.home() / ".cache", prefix="mfr-sess-disk-"))
+    disk = Path.home() / ".cache"  # a disk directory; a fresh CI HOME may not have one yet (#1183)
+    disk.mkdir(parents=True, exist_ok=True)
+    d = Path(tempfile.mkdtemp(dir=disk, prefix="mfr-sess-disk-"))
     try:
         r = login(sess, TOKEN.encode(), MFR_SESSION_DIR=str(d))
         assert r.returncode == 2

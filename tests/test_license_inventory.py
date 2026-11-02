@@ -7,6 +7,8 @@ class cannot rest on declared metadata; owner approval goes stale when records
 change. None of this is a legal verdict, and no test marks a license approved.
 """
 import copy
+import hashlib
+import json
 import re
 import shutil
 import zipfile
@@ -394,6 +396,61 @@ def test_changed_image_digest_requires_re_review(tree, capsys, old, new, record)
     assert code == 1 and record in out and "re-review the image" in out
 
 
+def test_every_reference_docs_set_has_exactly_one_matching_approved_record():
+    """GH#1174: the gate covers every manifest row, bound to the same archive and licence."""
+    rows = json.loads((REPO / li.REFERENCE_DOCS).read_text())["sets"]
+    records = [e for e in real_inventory()["components"] if e.get("kind") == "reference-docs"]
+    assert sorted(r["bind"]["reference_docs"]["set"] for r in records) == sorted(row["id"] for row in rows)
+    by_set = {r["bind"]["reference_docs"]["set"]: r for r in records}
+    for row in rows:
+        record = by_set[row["id"]]
+        assert record["license_spdx"] == row["license"] and record["status"] == "approved"
+        assert record["bind"]["reference_docs"]["sha256"] == row["sha256"]
+        assert record["approval_ref"].endswith("/issues/1174#issuecomment-6548012543")
+        assert li.expression_class(row["license"]) == record["class"]
+
+
+def _manifest(tree):
+    path = tree / li.REFERENCE_DOCS
+    return path, json.loads(path.read_text())
+
+
+@pytest.mark.parametrize("change", ["new-set", "re-pinned", "licence", "licence-file", "dropped-set"])
+def test_reference_docs_manifest_drift_fails_the_gate(tree, capsys, change):
+    path, data = _manifest(tree)
+    row = data["sets"][0]
+    if change == "new-set":
+        data["sets"].append({**row, "id": "unrecorded-set"})
+        needle = "reference docs set unrecorded-set: no license record"
+    elif change == "re-pinned":
+        row["sha256"] = "0" * 64
+        needle = f"component:docs:{row['id']}: reference docs archive, licence files or licence differ"
+    elif change == "licence":
+        row["license"] = "MIT AND CC-BY-4.0"
+        needle = f"component:docs:{row['id']}: reference docs archive, licence files or licence differ"
+    elif change == "licence-file":
+        row["license_files"] = [*row["license_files"], "NOTICE"]
+        needle = f"component:docs:{row['id']}: reference docs archive, licence files or licence differ"
+    else:
+        data["sets"].pop(0)
+        needle = f"component:docs:{row['id']}: bound reference docs set is not in scripts/airgap/reference-docs.json"
+    original = path.read_text()
+    path.write_text(json.dumps(data))
+    code, out = run(tree, capsys)
+    assert code == 1 and needle in out
+    path.write_text(original)
+    assert run(tree, capsys)[0] == 0
+
+
+def test_oauth_proxy_record_names_the_upstream_mit_licence_and_the_registry_terms():
+    """The upstream openshift/oauth-proxy LICENSE is MIT (#1174 inventory A8); the image
+    is still pulled under Red Hat registry terms, so the record keeps both and stays
+    proprietary-class."""
+    entry = next(e for e in real_inventory()["components"] if e["id"] == "image:oauth-proxy")
+    assert entry["license_spdx"] == "MIT AND LicenseRef-Red-Hat-Registry-Terms"
+    assert entry["class"] == "proprietary" and entry["status"] == "approved"
+
+
 def test_unrecorded_vendored_asset_and_second_chart_are_flagged(tree, capsys):
     vendor = tree / "src/mainframe_rag/webui/static/vendor"
     (vendor / "extra-lib.js").write_text("// new vendored library\n")
@@ -539,7 +596,11 @@ AMBIGUOUS_RPMS = {"cracklib", "cracklib-dicts", "gzip", "less", "libcbor", "libd
                   "libfdisk", "libfido2", "libpwquality", "libseccomp", "libutempter", "openssh",
                   "openssh-clients", "pam", "shadow-utils-subid", "util-linux", "util-linux-core"}
 ALL_LICENCES_REF = "https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6543481300"
-APPROVED_KIT_DIGEST = "854999ae9a8ce9d537fcda1d6f2f3fb603d1269c87b12ee9f3544e31757eaf77"
+# The kit scope approval in force: the maintainer's decision of 2026-11-02 on #1181
+# (#1183 option A). It binds the scope with the two agent tools (#1172) and
+# diffutils (#1183); 854999ae… (#1118) is superseded.
+KIT_SCOPE_APPROVAL_REF = "https://github.com/yonatan895/qdrant-pdf-rag/pull/1181#issuecomment-6576583551"
+APPROVED_KIT_DIGEST = "32132abeedcae2772e2f08d540358fe859b7290f03aaf1e62ba05ee9460b5bc4"
 
 
 def test_repository_kit_record_passes_the_enforced_gate_at_the_approved_digest():
@@ -548,7 +609,8 @@ def test_repository_kit_record_passes_the_enforced_gate_at_the_approved_digest()
     inventory = real_inventory()
     assert kit_problems(inventory) == ([], [], "current")
     assert li.kit_scope_digest(inventory) == APPROVED_KIT_DIGEST
-    assert inventory["devkit"]["approval"] == {"approval_ref": ALL_LICENCES_REF, "approved_digest": APPROVED_KIT_DIGEST}
+    assert inventory["devkit"]["approval"] == {"approval_ref": KIT_SCOPE_APPROVAL_REF,
+                                               "approved_digest": APPROVED_KIT_DIGEST}
     # The release scope and its digest do not include the kit section.
     without = {k: v for k, v in inventory.items() if k != "devkit"}
     assert li.scope_digest(without) == li.scope_digest(inventory)
@@ -557,10 +619,11 @@ def test_repository_kit_record_passes_the_enforced_gate_at_the_approved_digest()
 
 def test_kit_approvals_are_exactly_the_maintainers_recorded_decisions():
     """GPL-only RPMs carry the 2026-10-28 decision, the ambiguous-tag RPMs the 2026-10-31
-    one; nothing else is approved, and each tag stays as recorded from the RPM header."""
+    one; nothing else is approved, and each tag stays as recorded from the RPM header.
+    diffutils (#1183, GPLv3+) entered under the GPL decision."""
     kit = real_inventory()["devkit"]
     approved = {e["name"]: e for e in kit["components"] if e["status"] == "approved"}
-    assert set(approved) == {"crun", "git-core", "tar"} | AMBIGUOUS_RPMS
+    assert set(approved) == {"crun", "diffutils", "git-core", "tar"} | AMBIGUOUS_RPMS
     for name, entry in approved.items():
         if name in AMBIGUOUS_RPMS:
             assert entry["approval_ref"] == ALL_LICENCES_REF and entry["decision"]["date"] == "2026-10-31"
@@ -601,7 +664,8 @@ def kit_tree(tmp_path):
     copy_license_inputs(tmp_path)
     copy_task_tools(tmp_path)
     for relative in ("requirements.lock.txt", "requirements.dev.lock.txt", "images/devkit-packages.txt",
-                     "images/Containerfile.devkit", *(f"scripts/tools/{pin}" for _, pin in li.KIT_TOOL_PINS)):
+                     "images/Containerfile.devkit", "images/devkit/agents/herdr-core-LICENSE",
+                     "images/devkit/agents/opencode-LICENSE", *(li.kit_pin_path(pin) for _, pin in li.KIT_TOOL_PINS)):
         (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO / relative, tmp_path / relative)
     shutil.copytree(REPO / "locks", tmp_path / "locks")
@@ -625,6 +689,15 @@ def _edit(path, old, new):
     # An RPM leaves the list while its record stays.
     (lambda t: _edit(t / "images/devkit-packages.txt", "yajl-0:2.1.0-25.el9.x86_64\n", ""),
      "devkit:rpm:yajl: recorded RPM yajl-0:2.1.0-25.el9.x86_64 is not in images/devkit-packages.txt"),
+    # An agent tool (#1172) is re-pinned: a pin-bump PR re-reviews its licence.
+    (lambda t: _edit(t / "images/devkit/agents/opencode-pin.txt", "version: 2.2.5", "version: 2.2.6"),
+     "devkit:kit-tool:opencode: images/devkit/agents/opencode-pin.txt differs from the record"),
+    # Its committed licence text drifts from the pinned, recorded bytes.
+    (lambda t: _edit(t / "images/devkit/agents/opencode-LICENSE", "MIT License", "MIT-ish License"),
+     "devkit:kit-tool:opencode: licence file images/devkit/agents/opencode-LICENSE is missing or differs"),
+    (lambda t: _edit(t / "images/devkit/agents/herdr-core-pin.txt",
+                     "license-sha256: c71d239d", "license-sha256: 00000000"),
+     "devkit:kit-tool:herdr-core: images/devkit/agents/herdr-core-pin.txt differs from the record"),
 ])
 def test_kit_pin_changes_need_a_license_re_review(kit_tree, change, message):
     change(kit_tree)
@@ -633,9 +706,29 @@ def test_kit_pin_changes_need_a_license_re_review(kit_tree, change, message):
 
 
 def test_every_tool_pin_the_devkit_image_reads_is_a_kit_tool_pin():
-    """A tool added to the image recipe cannot ship without a kit license record."""
+    """A tool added to the image recipe cannot ship without a kit license record: the
+    scripts/tools pins the recipe names and every pin the agent-tools stage reads."""
     read = set(re.findall(r"\$pins/([a-z0-9-]+-pin\.txt)", (REPO / "images/Containerfile.devkit").read_text()))
     assert read and read <= {pin for _, pin in li.KIT_TOOL_PINS}
+    installer = (REPO / "images/devkit/agents/install_agent_tools.py").read_text()
+    pins_line = installer.split("\nPINS = ", 1)[1].split("\n", 1)[0]
+    agent_pins = {f"images/devkit/agents/{name}" for name in re.findall(r'"([a-z0-9-]+-pin\.txt)"', pins_line)}
+    on_disk = {p.relative_to(REPO).as_posix() for p in (REPO / "images/devkit/agents").glob("*-pin.txt")}
+    assert agent_pins == on_disk and agent_pins <= {pin for _, pin in li.KIT_TOOL_PINS}
+
+
+def test_agent_tool_records_bind_their_pins_and_licence_texts():
+    """herdr-core (Apache-2.0) and OpenCode (MIT, the v2.2.5 tag's LICENSE: the archive has
+    none) are kit tools whose licence texts the kit notices carry (#1172)."""
+    kit = {e["id"]: e for e in real_inventory()["devkit"]["components"]}
+    for tool, spdx in (("herdr-core", "Apache-2.0"), ("opencode", "MIT")):
+        entry = kit[f"kit-tool:{tool}"]
+        assert (entry["kind"], entry["license_spdx"], entry["class"]) == ("tool", spdx, "permissive")
+        assert entry["bind"]["pin"] == f"images/devkit/agents/{tool}-pin.txt"
+        licence = REPO / f"images/devkit/agents/{tool}-LICENSE"
+        assert entry["bind"]["files"] == [{"name": "LICENSE", "notice": True, "path": licence.relative_to(REPO).as_posix(),
+                                           "sha256": hashlib.sha256(licence.read_bytes()).hexdigest()}]
+    # The kit notices render these texts: tests/test_devkit_kit.py, on a packed kit.
 
 
 def test_kit_generate_derives_rpm_records_from_header_tags_and_never_approves():

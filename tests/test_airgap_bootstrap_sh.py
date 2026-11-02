@@ -6,9 +6,11 @@ Tests bootstrap.sh against a mock sneakernet extraction directory:
 - Successful verification clones the bundle, populates dist/, and initializes airgap.env.
 """
 
+import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -16,9 +18,12 @@ from tests.helpers_airgap import (
     REPO,
     gen_other_pub,
     gen_sign_keypair,
+    reference_docs_member,
     sha256_bytes,
     sign_sums,
     symlink_tools,
+    tar_file,
+    tar_link,
 )
 from tests.helpers_task_artifact import copy_task_tools, task_manifest, task_members
 
@@ -61,13 +66,14 @@ def bundle_dir(tmp_path):
     files = {
         "bootstrap.sh": (extract_dir / "bootstrap.sh").read_bytes(),
         "repo.bundle": (extract_dir / "repo.bundle").read_bytes(),
+        "reference-docs.tar.gz": reference_docs_member(),
         "qdrant-image.tar": b"mock-qdrant",
         "openobserve-image.tar": b"mock-openobserve",
         "otelcol-image.tar": b"mock-otelcol",
         f"app-ingest-{head}.tar": b"mock-ingest",
         f"app-agent-{head}.tar": b"mock-agent",
         "oauth-proxy-image.tar": b"mock-oauth-proxy",
-        "MANIFEST.txt": (f"sha: {head}\n" + task_manifest()).encode(),
+        "MANIFEST.txt": (f"sha: {head}\n" + task_manifest() + "origin: upstream\n").encode(),
         **task_members(),
         "PACKING_RECORD.txt": b"record\n",
         "sbom.json": b'{"images": []}\n',
@@ -107,7 +113,7 @@ def test_bootstrap_refuses_a_damaged_or_untrusted_bundle(bundle_dir, tamper, nee
     tamper(bundle_dir)
     env = _offline_env(bundle_dir) if pinned_pub else {"PATH": "/usr/bin:/bin"}
     if pinned_pub:
-        env["SNEAKERNET_TRUSTED_PUB"] = str(gen_other_pub(bundle_dir))
+        env["SNEAKERNET_TRUSTED_PUB"] = str(gen_other_pub(bundle_dir.parent))
     r = _bootstrap(bundle_dir, env)
     assert r.returncode != 0
     assert needle in r.stdout + r.stderr
@@ -249,7 +255,7 @@ def _offline_env(bundle_dir):
     bin_dir.mkdir(exist_ok=True)
     symlink_tools(bundle_dir, (
         "sh", "sha256sum", "openssl", "cmp", "sed", "awk", "git", "uname",
-        "mkdir", "cp", "chmod", "tar", "gzip", "mktemp", "mv", "rm", "grep", "dirname",
+        "mkdir", "cp", "chmod", "tar", "gzip", "mktemp", "mv", "rm", "grep", "dirname", "find", "sort",
     ))
     return {"PATH": str(bin_dir), "AIRGAP_WORKSPACE": "operator workspace"}
 
@@ -284,6 +290,13 @@ def test_bootstrap_actual_runner_without_build_or_app_tools_and_rerun(bundle_dir
     assert len(list(dist_dir.glob("app-agent-*.tar"))) == 1
     assert (dist_dir / "oauth-proxy-image.tar").is_file()
     assert (dist_dir / "THIRD-PARTY-NOTICES.txt").read_bytes() == b"notices\n"
+    # GH#1174: the signed reference docs member is unpacked beside it, readable without tools.
+    docs = dist_dir / "reference-docs"
+    assert (docs / "sets/demo/docs/guide.md").read_bytes() == b"# Demo guide\n"
+    assert sorted(p.relative_to(docs).as_posix() for p in docs.rglob("*") if p.is_file()) == [
+        "FILES.sha256", "INDEX.md", "project/README.md", "sets/demo/LICENSE", "sets/demo/docs/guide.md"]
+    assert "Reference docs: operator workspace/dist/reference-docs/INDEX.md (4 files)" in first.stdout
+    assert not (dist_dir / ".reference-docs-staging").exists()
     # The dist/ copy stays verifiable: the signature and every member checksum hold there.
     verify = subprocess.run(
         ["sh", "-c", "openssl dgst -sha256 -verify sneakernet-signing.pub -signature SHA256SUMS.sig SHA256SUMS >/dev/null && sha256sum -c SHA256SUMS"],
@@ -641,3 +654,245 @@ def test_interrupted_promotion_warns_of_partial_dist_then_recovers_complete_bund
     assert retained.read_text() == "retain operator evidence"
     assert (workspace / "airgap.env").read_text() == "INTERNAL_REGISTRY=operator-kept\n"
     assert _bootstrap(bundle_dir).returncode == 0
+
+
+def _replace_docs(bundle_dir, data):
+    (bundle_dir / "reference-docs.tar.gz").write_bytes(data)
+    _resign(bundle_dir)  # A validly signed member is still checked before it is unpacked.
+
+
+@pytest.mark.parametrize(("member", "needle"), [
+    (lambda: reference_docs_member(extra=[tar_file("reference-docs/../escaped.md", b"x")]),
+     "a path outside reference-docs/ or a .. component"),
+    (lambda: reference_docs_member(extra=[tar_file("other/top.md", b"x")]),
+     "a path outside reference-docs/ or a .. component"),
+    (lambda: reference_docs_member(extra=[tar_link("reference-docs/sets/demo/link.md", "/etc/passwd")]),
+     "a link, directory or device entry"),
+    (lambda: reference_docs_member(extra=[tar_file("reference-docs/sets/demo/unlisted.md", b"x")]),
+     "the unpacked files differ from the FILES.sha256 list"),
+    (lambda: reference_docs_member(extra=[tar_file("reference-docs/sets/demo/docs/guide.md", b"swapped\n")]),
+     "a file does not match FILES.sha256"),
+], ids=["dotdot", "outside-top", "symlink", "unlisted-file", "changed-file"])
+def test_bootstrap_refuses_an_unsafe_reference_docs_member_and_keeps_the_previous_docs(bundle_dir, member, needle):
+    """GH#1174: the member is signed, yet it is still untrusted: an escaping, linked,
+    unlisted or altered entry is refused, nothing lands outside the staging directory,
+    and the previous release's docs stay in place."""
+    first = _bootstrap(bundle_dir)
+    assert first.returncode == 0, first.stdout + first.stderr
+    docs = bundle_dir / "operator workspace/dist/reference-docs"
+    before = {p.relative_to(docs): p.read_bytes() for p in docs.rglob("*") if p.is_file()}
+    _replace_docs(bundle_dir, member())
+    result = _bootstrap(bundle_dir)
+    assert result.returncode != 0
+    assert "FAIL: reference docs: " in result.stderr and needle in result.stderr
+    assert "SUCCESS" not in result.stdout
+    assert {p.relative_to(docs): p.read_bytes() for p in docs.rglob("*") if p.is_file()} == before
+    assert not (bundle_dir / "operator workspace/dist/escaped.md").exists()
+    assert not (bundle_dir / "operator workspace/dist/.reference-docs-staging").exists()
+    # The next ordinary run from a good bundle unpacks the new docs.
+    _replace_docs(bundle_dir, reference_docs_member({"sets/demo/LICENSE": b"Demo licence text\n",
+                                                     "sets/demo/docs/guide.md": b"# Guide v2\n"}))
+    again = _bootstrap(bundle_dir)
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert (docs / "sets/demo/docs/guide.md").read_bytes() == b"# Guide v2\n"
+    assert not (docs / "project/README.md").exists()
+
+
+def test_bootstrap_requires_the_reference_docs_member(bundle_dir):
+    sums = bundle_dir / "SHA256SUMS"
+    sums.write_text("".join(x for x in sums.read_text().splitlines(keepends=True) if "reference-docs.tar.gz" not in x))
+    sign_sums(bundle_dir)
+    result = _bootstrap(bundle_dir)
+    assert result.returncode != 0
+    assert "exactly the required bundle members" in result.stderr
+    assert not (bundle_dir / "operator workspace").exists()
+
+
+
+def _builder_name_rule():
+    path = REPO / "scripts/airgap/reference_docs.py"
+    spec = importlib.util.spec_from_file_location("reference_docs_rule", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # Its dataclasses resolve their module while it loads.
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        del sys.modules[spec.name]
+    return module.SAFE_PART
+
+
+def test_bootstrap_accepts_exactly_the_names_the_reference_docs_builder_accepts(bundle_dir):
+    """#1179 review P1: one name rule for both sides. Every character the pack-time
+    builder accepts in a path component unpacks and verifies at the site (step 5 lists
+    names under `LC_ALL=C`, which escapes anything else with a backslash), and each
+    class the builder refuses is refused by bootstrap too, so pack never ships a
+    signed member the site then rejects."""
+    rule = _builder_name_rule()
+    accepted = [chr(c) for c in range(0x110) if c != ord("/") and rule.match(f"x{chr(c)}x")]
+    assert accepted == [chr(c) for c in range(0x20, 0x7F) if chr(c) not in "/\\"]
+    files = {"sets/demo/LICENSE": b"Demo licence text\n"}
+    files.update({f"sets/demo/n{char}n.md": char.encode() for char in accepted})
+    files.update({" lead and trail ": b"spaces", "sets/demo/-dash": b"dash"})
+    _replace_docs(bundle_dir, reference_docs_member(files))
+    result = _bootstrap(bundle_dir)
+    assert result.returncode == 0, result.stdout + result.stderr
+    docs = bundle_dir / "operator workspace/dist/reference-docs"
+    for char in accepted:
+        assert (docs / f"sets/demo/n{char}n.md").read_bytes() == char.encode(), repr(char)
+    for refused in ("\u00e9", "\u0085", "\x7f", "\\", "\x01"):
+        assert not rule.match(f"x{refused}x"), repr(refused)
+        bad = {"sets/demo/LICENSE": b"Demo licence text\n", f"sets/demo/bad{refused}name.md": b"x"}
+        _replace_docs(bundle_dir, reference_docs_member(bad))
+        result = _bootstrap(bundle_dir)
+        assert result.returncode != 0, repr(refused)
+        assert "FAIL: reference docs: the member holds a path outside reference-docs/" in result.stderr
+
+
+# --- #1118 F2: the anchor for the declared origin (inline twin) -------------
+
+def _pub_of(key, out):
+    out.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["openssl", "pkey", "-in", str(key), "-pubout", "-out", str(out)], check=True, capture_output=True)
+    return out
+
+
+def _repack(bundle_dir, *, origin="upstream", key=None):
+    """Rewrite the bundle's origin line and re-sign every member list with
+    `key` (default: the fixture's own packing key, saved as packer.key)."""
+    packer = bundle_dir.parent / "packer.key"
+    if not packer.exists():
+        shutil.copy(bundle_dir / "signing.key", packer)
+    shutil.copy(key or packer, bundle_dir / "signing.key")
+    manifest = bundle_dir / "MANIFEST.txt"
+    kept = [line for line in manifest.read_text().splitlines(keepends=True) if not line.startswith("origin:")]
+    manifest.write_text("".join(kept) + (f"origin: {origin}\n" if origin else ""))
+    _pub_of(bundle_dir / "signing.key", bundle_dir / "sneakernet-signing.pub")
+    _resign(bundle_dir)
+
+
+def _anchors(bundle_dir):
+    """Operator anchors in a /work/anchors-like directory outside the bundle."""
+    from tests.helpers_airgap import gap_release_anchor
+
+    packer = bundle_dir.parent / "packer.key"
+    if not packer.exists():
+        shutil.copy(bundle_dir / "signing.key", packer)
+    up = _pub_of(packer, bundle_dir.parent / "work" / "anchors" / "upstream.pub")
+    return {"SNEAKERNET_TRUSTED_PUB": str(up), "SNEAKERNET_GAP_TRUSTED_PUB": str(gap_release_anchor())}
+
+
+@pytest.mark.parametrize(("case", "needle"), [
+    ("gap-key-signs-upstream", ("bundle pubkey does not match SNEAKERNET_TRUSTED_PUB, the release trust anchor "
+                                "for the bundle's origin (upstream)")),
+    ("upstream-key-signs-gap", ("bundle pubkey does not match SNEAKERNET_GAP_TRUSTED_PUB, the release trust "
+                                "anchor for the bundle's origin (gap)")),
+    ("gap-anchor-only", ("no release trust anchor is configured for the bundle's origin (upstream) — set "
+                         "SNEAKERNET_TRUSTED_PUB")),
+    ("same-key-both-roles", ("release trust anchors SNEAKERNET_TRUSTED_PUB and SNEAKERNET_GAP_TRUSTED_PUB hold "
+                             "the same key")),
+    ("gap-key-in-both-roles", ("release trust anchors SNEAKERNET_TRUSTED_PUB and SNEAKERNET_GAP_TRUSTED_PUB "
+                               "hold the same key")),
+    ("same-key-der-encoded", ("release trust anchors SNEAKERNET_TRUSTED_PUB and SNEAKERNET_GAP_TRUSTED_PUB hold "
+                              "the same key")),
+    ("anchor-inside-bundle", "release trust anchor SNEAKERNET_TRUSTED_PUB lies inside the bundle it would verify"),
+    ("anchor-is-a-link", "release trust anchor SNEAKERNET_GAP_TRUSTED_PUB is not a readable plain file (not a link)"),
+    ("no-origin", "MANIFEST.txt must declare exactly one release origin"),
+    ("origin-twice", "MANIFEST.txt must declare exactly one release origin"),
+])
+def test_bootstrap_with_an_anchor_binds_the_bundled_key_to_the_declared_origin(bundle_dir, case, needle):
+    """#1118 F2: with either anchor set, bootstrap accepts only the anchor for
+    the origin the authenticated MANIFEST declares. Each refusal happens
+    before any clone, names variables only, and the next ordinary run (the
+    bundle signed by its origin's key, both anchors set) bootstraps."""
+    from tests.helpers_airgap import gap_release_key
+
+    env = {**_offline_env(bundle_dir), **_anchors(bundle_dir)}
+    if case == "gap-key-signs-upstream":
+        _repack(bundle_dir, key=gap_release_key())
+    elif case == "upstream-key-signs-gap":
+        _repack(bundle_dir, origin="gap")
+    elif case == "gap-anchor-only":
+        env.pop("SNEAKERNET_TRUSTED_PUB")
+    elif case == "same-key-both-roles":
+        env["SNEAKERNET_GAP_TRUSTED_PUB"] = env["SNEAKERNET_TRUSTED_PUB"]
+    elif case == "gap-key-in-both-roles":  # #1180 N1's counterexample, refused like import step 1
+        _repack(bundle_dir, key=gap_release_key())
+        env["SNEAKERNET_TRUSTED_PUB"] = env["SNEAKERNET_GAP_TRUSTED_PUB"]
+    elif case == "same-key-der-encoded":  # key identity, as common.sh and devkit/install.sh compare it
+        der = bundle_dir.parent / "work" / "anchors" / "gap.der"
+        subprocess.run(["openssl", "pkey", "-pubin", "-in", env["SNEAKERNET_TRUSTED_PUB"], "-outform", "DER",
+                        "-out", str(der)], check=True, capture_output=True)
+        env["SNEAKERNET_GAP_TRUSTED_PUB"] = str(der)
+    elif case == "anchor-inside-bundle":
+        shutil.copy(env["SNEAKERNET_TRUSTED_PUB"], bundle_dir / "upstream.pub")
+        env["SNEAKERNET_TRUSTED_PUB"] = str(bundle_dir / "upstream.pub")
+    elif case == "anchor-is-a-link":
+        link = bundle_dir.parent / "gap-link.pub"
+        link.symlink_to(env["SNEAKERNET_GAP_TRUSTED_PUB"])
+        env["SNEAKERNET_GAP_TRUSTED_PUB"] = str(link)
+    elif case == "no-origin":
+        _repack(bundle_dir, origin=None)
+    else:
+        _repack(bundle_dir)
+        manifest = bundle_dir / "MANIFEST.txt"
+        manifest.write_text(manifest.read_text() + "origin: upstream\n")
+        _resign(bundle_dir)
+    refused = _bootstrap(bundle_dir, env)
+    assert refused.returncode == 1
+    assert needle in refused.stderr
+    assert str(bundle_dir.parent) not in refused.stderr  # names variables, never paths
+    assert not (bundle_dir / "operator workspace").exists()
+    (bundle_dir / "upstream.pub").unlink(missing_ok=True)
+    _repack(bundle_dir)
+    again = _bootstrap(bundle_dir, {**_offline_env(bundle_dir), **_anchors(bundle_dir)})
+    assert again.returncode == 0, again.stdout + again.stderr
+
+
+def test_bootstrap_with_both_anchors_accepts_a_gap_release_signed_by_the_gap_key(bundle_dir):
+    """#1118 F2: a gap release (origin: gap, gap key) bootstraps with both
+    anchors exported, and the upstream anchor alone cannot vouch for it."""
+    from tests.helpers_airgap import gap_release_key
+
+    _repack(bundle_dir, origin="gap", key=gap_release_key())
+    anchors = _anchors(bundle_dir)
+    only_upstream = _bootstrap(bundle_dir, {**_offline_env(bundle_dir),
+                                            "SNEAKERNET_TRUSTED_PUB": anchors["SNEAKERNET_TRUSTED_PUB"]})
+    assert only_upstream.returncode == 1
+    assert "no release trust anchor is configured for the bundle's origin (gap)" in only_upstream.stderr
+    ok = _bootstrap(bundle_dir, {**_offline_env(bundle_dir), **anchors})
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+
+def test_bootstrap_without_an_anchor_never_reads_the_origin(bundle_dir):
+    """#1118 F2: with no anchor set bootstrap behaves as before (TOFU; the
+    anchor stays optional here): a bundle without an origin line bootstraps
+    with output identical to one that declares origin: upstream."""
+    twin = bundle_dir.parent / "twin" / "extracted"
+    shutil.copytree(bundle_dir, twin)
+    _repack(twin, origin=None)
+    with_origin = _bootstrap(bundle_dir)
+    without = _bootstrap(twin)
+    assert with_origin.returncode == 0, with_origin.stdout + with_origin.stderr
+    def same_place(text):  # Task's installer prints the bundle directory.
+        return text.replace(str(twin), str(bundle_dir))
+
+    assert (without.returncode, same_place(without.stdout), same_place(without.stderr)) == (
+        0, with_origin.stdout, with_origin.stderr)
+
+
+@pytest.mark.parametrize("anchored", [True, False], ids=["anchors-set", "no-anchor"])
+def test_bootstrap_refuses_a_flipped_origin_before_reading_it(bundle_dir, anchored):
+    """#1118 F2: an origin line edited after signing never selects an anchor:
+    with anchors set the MANIFEST's own signed checksum entry refuses it, and
+    without them the member checksums do; no message claims an origin."""
+    env = {**_offline_env(bundle_dir), **(_anchors(bundle_dir) if anchored else {})}
+    manifest = bundle_dir / "MANIFEST.txt"
+    manifest.write_text(manifest.read_text().replace("origin: upstream\n", "origin: gap\n"))
+    r = _bootstrap(bundle_dir, env)
+    assert r.returncode == 1
+    if anchored:
+        assert "FAIL: MANIFEST.txt does not match its signed SHA256SUMS entry" in r.stderr
+    else:
+        assert "MANIFEST.txt: FAILED" in r.stdout
+    assert "origin" not in r.stderr
+    assert not (bundle_dir / "operator workspace").exists()

@@ -616,6 +616,14 @@ def _kit_run(monkeypatch, root: Path, image_site: Path) -> list[list[str]]:
 
     scripts = root / "kit-image/opt/app-root/bin"
     monkeypatch.setattr(prepare_python, "image_environment", lambda: ([image_site], scripts))
+    # --kit runs as the image's python3, whose own purelib is the synthetic image's
+    # site, never a kit venv (#1183: in the kit, pytest itself runs in one).
+    real_get_path = prepare_python.sysconfig.get_path
+
+    def get_path(name, *args, **kwargs):
+        return str(image_site) if name == "purelib" and not args and not kwargs else real_get_path(name, *args, **kwargs)
+
+    monkeypatch.setattr(prepare_python.sysconfig, "get_path", get_path)
     monkeypatch.setattr(prepare_python.subprocess, "run", run)
     monkeypatch.setattr(locks.urllib.request, "urlopen", lambda *a, **kw: pytest.fail("network used"))
     return calls
@@ -639,7 +647,10 @@ def test_kit_mode_layers_a_venv_over_the_image_environment_without_any_wheelhous
     assert top_level[-1] == prepare_python.TOP_LEVEL_NAMES
     # The verifier ran for real in the new venv; the same interpreter reports the layered set.
     python = venv / "bin/python"
-    probe = "import importlib.metadata as m; print(sorted(d.metadata['Name'] for d in m.distributions()))"
+    # One install per real dist-info: a platlibdir=lib64 interpreter (the dev kit's RHEL
+    # python) reaches the same site-packages through lib64 and lib (#1183).
+    probe = ("import importlib.metadata as m, os; print(sorted(name for name, _ in "
+             "{(d.metadata['Name'], os.path.realpath(d._path)) for d in m.distributions()}))")
     listed = subprocess.run([str(python), "-I", "-c", probe], capture_output=True, text=True, check=True).stdout
     assert listed.strip() == "['example', 'pip', 'synthetic-checkout']"
     # `python -m ruff` finds its binary beside the interpreter: native tools are linked,

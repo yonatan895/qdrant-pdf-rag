@@ -77,3 +77,30 @@ environment and its Task and Helm, so these GitLab CI/CD variables are retired:
 `hazards`: the image holds the Task binary only, and the artifact tests and the
 doctor read the archive. These variables are not items of the derived
 extension surface, so this entry has no `- removed` line.
+
+## 2026-10-31 GH#1174 Offline reference docs in the release bundle
+
+The bundle gains the required signed member `reference-docs.tar.gz` and three
+MANIFEST fields (`reference_docs`, `reference_docs_sha256`,
+`reference_docs_sets`). `bootstrap.sh` verifies it and unpacks it to
+`dist/reference-docs/` (start at `INDEX.md`): this repository's docs at the
+release commit and 38 version-matched upstream doc sets. Nothing to do for the
+gap maintainer; `dist/reference-docs/` is untracked, like the other members.
+
+## 2026-10-31 GH#1118 Release origin and the gap trust anchor
+
+The signed bundle MANIFEST now declares its release origin, `origin: upstream`
+(`pack.sh`; a gap release will declare `origin: gap`). Outside dry-run the
+live stages accept a bundle only when its signature verifies with the anchor
+for that origin: `SNEAKERNET_TRUSTED_PUB` for upstream, as before, and the new
+operator key `SNEAKERNET_GAP_TRUSTED_PUB` for gap releases. A MANIFEST without
+an `origin:` line is refused, so roll back to a release packed before this
+change with that release's own bootstrap and scripts in its own workspace.
+Keep both anchors as plain files in `/work/anchors/` on the bastion, never
+inside a workspace or bundle and never as links, and never point the two
+variables at the same key: each is refused with a fixed message.
+`bootstrap.sh` applies the same rule when an anchor is set, the release import
+accepts only `origin: upstream` under the same anchor rules, and
+`scripts/devkit/install.sh` refuses an upstream anchor that is the gap key
+(compared as keys, so a PEM and a DER copy of one key are refused). Both anchors are listed, commented out, in
+`airgap.env.example`. Nothing is removed.

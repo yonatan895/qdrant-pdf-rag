@@ -13,7 +13,10 @@ import hashlib
 import io
 import json
 import os
+import pwd
+import re
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
@@ -24,7 +27,9 @@ from pathlib import Path
 
 import pytest
 from scripts import license_inventory as li
+from scripts.devkit import agents_vm as vm
 
+from tests import helpers_devkit_commands as kitcmd
 from tests.helpers_airgap import (
     REPO,
     copy_chart,
@@ -35,6 +40,7 @@ from tests.helpers_airgap import (
     symlink_tools,
 )
 from tests.helpers_image_inventory import tar_bytes
+from tests.helpers_posix_shells import posix_shells
 from tests.helpers_task_artifact import task_archive, task_members
 
 TOOLS = ("sh", "dirname", "basename", "awk", "sed", "git", "tar", "gzip", "sha256sum", "date", "cat",
@@ -429,7 +435,11 @@ def test_kit_notices_name_every_kit_component_and_carry_the_pinned_oras_licence(
     for nevra in rpms:
         assert f"nevra: {nevra}  RPM License tag: " in notices, nevra
     for _, pin in li.KIT_TOOL_PINS:
-        assert f"pin: scripts/tools/{pin} " in notices, pin
+        assert f"pin: {li.kit_pin_path(pin)} " in notices, pin
+    # The agent tools' licence texts (#1172) are the committed, pinned ones.
+    for tool in ("herdr-core", "opencode"):
+        text = (REPO / f"images/devkit/agents/{tool}-LICENSE").read_text().rstrip()
+        assert f"### kit-tool:{tool}: images/devkit/agents/{tool}-LICENSE\n{text}" in notices
     assert "image:ubi9-python-314-minimal" in notices and "project:mainframe-rag" in notices
     # The texts: the oras licence from the kit, the project LICENSE and the base RPM list.
     assert f"### kit-tool:oras-windows: oras-LICENSE (kit member)\n{ORAS_LICENSE.decode().rstrip()}" in notices
@@ -701,6 +711,32 @@ def test_install_requires_an_independent_trusted_key(packed, trust, message):
     assert not Path(ctx["env"]["STUB_REGISTRY"]).exists()
 
 
+@pytest.mark.parametrize("encoding", ["pem-copy", "der"])
+def test_install_refuses_an_upstream_anchor_that_is_the_gap_key(packed, encoding):
+    """#1118 F2 G4: kits are signed by the upstream release key only, so an
+    SNEAKERNET_TRUSTED_PUB holding the same key as SNEAKERNET_GAP_TRUSTED_PUB
+    is refused before any push (the gap key can never install a kit). Key
+    identity, not bytes, as the live guard compares it (#1180 N2): the same
+    key re-encoded as DER is refused too. With a distinct gap anchor exported
+    the next ordinary install passes."""
+    ctx, kit, _ = packed
+    same = ctx["tmp"] / "anchors" / "gap.pub"
+    same.parent.mkdir()
+    if encoding == "der":
+        subprocess.run(["openssl", "pkey", "-pubin", "-in", str(ctx["pub"]), "-outform", "DER", "-out", str(same)],
+                       check=True, capture_output=True)
+        assert same.read_bytes() != Path(ctx["pub"]).read_bytes()
+    else:
+        shutil.copy(ctx["pub"], same)
+    done = run_install(ctx, kit, SNEAKERNET_GAP_TRUSTED_PUB=str(same))
+    assert done.returncode != 0
+    assert ("SNEAKERNET_TRUSTED_PUB holds the same key as SNEAKERNET_GAP_TRUSTED_PUB: a kit is signed by the "
+            "upstream release key only") in done.stderr
+    assert not Path(ctx["env"]["STUB_REGISTRY"]).exists()
+    again = run_install(ctx, kit, SNEAKERNET_GAP_TRUSTED_PUB=str(gen_other_pub(ctx["tmp"] / "anchors", "gap")))
+    assert again.returncode == 0, again.stderr
+
+
 def test_install_refuses_a_signature_the_trusted_key_does_not_verify(packed):
     ctx, kit, _ = packed
     other = gen_sign_keypair(ctx["tmp"], "other.key")
@@ -845,10 +881,28 @@ def link_tree(tmp_path):
     return tree, image, archive
 
 
-def _link(tree: Path, image: Path, *args: str) -> subprocess.CompletedProcess[str]:
+# GitLab jobs run these scripts with `sh`: bash in POSIX mode in the kit image,
+# dash on GitHub's runners. The tests below that take `shell` run them under both
+# where dash exists, and always on GitHub (posix_shells).
+POSIX_SHELLS = posix_shells()
+
+
+def _sh(tree: Path, shell: str) -> str:
+    """A `sh` that is `shell`, as the kit's /bin/sh is bash (POSIX mode) and GitHub's is dash."""
+    target = shutil.which(shell)
+    assert target, f"{shell} is required: link-tools.sh and run-task.sh are proven under bash and dash"
+    link = tree.parent / f"sh-{shell}" / "sh"
+    if not link.is_symlink():
+        link.parent.mkdir(exist_ok=True)
+        link.symlink_to(target)
+    return str(link)
+
+
+def _link(tree: Path, image: Path, *args: str, shell: str | None = None) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "HOME": str(tree.parent)}
     env.pop("XDG_CONFIG_HOME", None)
-    return subprocess.run(["sh", str(tree / "scripts/devkit/link-tools.sh"), "--from", str(image), *args],
+    sh = _sh(tree, shell) if shell else "sh"
+    return subprocess.run([sh, str(tree / "scripts/devkit/link-tools.sh"), "--from", str(image), *args],
                           cwd=tree.parent, env=env, capture_output=True, text=True, check=False)
 
 
@@ -862,11 +916,12 @@ def _state(tree: Path) -> dict[str, tuple[int, int, str]]:
     return out
 
 
-def test_link_tools_gives_run_task_and_the_doctor_the_verified_image_tools(link_tree, monkeypatch):
+@pytest.mark.parametrize("shell", POSIX_SHELLS)
+def test_link_tools_gives_run_task_and_the_doctor_the_verified_image_tools(link_tree, monkeypatch, shell):
     from scripts import agent_doctor
 
     tree, image, archive = link_tree
-    proc = _link(tree, image, "--task-archive", str(archive))
+    proc = _link(tree, image, "--task-archive", str(archive), shell=shell)
     assert proc.returncode == 0, proc.stderr
     for name in ("task", "helm"):
         assert os.readlink(tree / ".tools/bin" / name) == str(image / name)
@@ -874,7 +929,7 @@ def test_link_tools_gives_run_task_and_the_doctor_the_verified_image_tools(link_
     # The consumers accept the result: run-task.sh verifies and runs the linked Task...
     env = {**os.environ, "HOME": str(tree.parent)}
     env.pop("XDG_CONFIG_HOME", None)
-    ran = subprocess.run(["sh", "scripts/tools/run-task.sh", "--list"], cwd=tree, env=env,
+    ran = subprocess.run([_sh(tree, shell), "scripts/tools/run-task.sh", "--list"], cwd=tree, env=env,
                          capture_output=True, text=True, check=False)
     assert ran.returncode == 0, ran.stderr
     assert ran.stdout.startswith("fake-task --offline --dir ") and ran.stdout.rstrip().endswith("--list")
@@ -896,10 +951,11 @@ def test_link_tools_gives_run_task_and_the_doctor_the_verified_image_tools(link_
      "the --task-archive file does not match the sha256 in scripts/tools/task-pin.txt"),
     (lambda image, archive: archive.unlink(), "the --task-archive file is missing"),
 ], ids=["task-digest", "helm-digest", "helm-absent", "task-symlink", "archive-digest", "archive-absent"])
-def test_link_tools_refuses_a_tool_off_its_pin_and_changes_nothing(link_tree, damage, message):
+@pytest.mark.parametrize("shell", POSIX_SHELLS)
+def test_link_tools_refuses_a_tool_off_its_pin_and_changes_nothing(link_tree, damage, message, shell):
     tree, image, archive = link_tree
     damage(image, archive)
-    proc = _link(tree, image, "--task-archive", str(archive))
+    proc = _link(tree, image, "--task-archive", str(archive), shell=shell)
     assert proc.returncode == 2
     assert proc.stderr.startswith(f"link-tools: {message}")
     # Fixed text: never the paths it was given.
@@ -956,11 +1012,12 @@ def test_link_tools_never_writes_through_a_shared_tools_link(link_tree, tmp_path
     assert sorted(p.name for p in (shared / "bin").iterdir()) == ["task"]
 
 
-def test_link_tools_rerun_is_a_no_op_and_a_stale_copy_converges(link_tree):
+@pytest.mark.parametrize("shell", POSIX_SHELLS)
+def test_link_tools_rerun_is_a_no_op_and_a_stale_copy_converges(link_tree, shell):
     tree, image, archive = link_tree
-    assert _link(tree, image, "--task-archive", str(archive)).returncode == 0
+    assert _link(tree, image, "--task-archive", str(archive), shell=shell).returncode == 0
     first = _state(tree)
-    again = _link(tree, image, "--task-archive", str(archive))
+    again = _link(tree, image, "--task-archive", str(archive), shell=shell)
     assert again.returncode == 0, again.stderr
     assert _state(tree) == first
     assert "already links the verified image task" in again.stdout
@@ -968,7 +1025,970 @@ def test_link_tools_rerun_is_a_no_op_and_a_stale_copy_converges(link_tree):
     # A copy left by an older install (other bytes) is replaced by the verified link.
     (tree / ".tools/bin/task").unlink()
     (tree / ".tools/bin/task").write_bytes(b"#!/bin/sh\necho stale\n")
-    assert _link(tree, image).returncode == 0
+    assert _link(tree, image, shell=shell).returncode == 0
     assert os.readlink(tree / ".tools/bin/task") == str(image / "task")
     assert {k: v for k, v in _state(tree).items() if k != ".tools/bin/task" and k != ".tools/bin"} == \
         {k: v for k, v in first.items() if k != ".tools/bin/task" and k != ".tools/bin"}
+
+
+# --- agent tools in the kit image (#1172) -------------------------------------------
+# herdr-core and OpenCode are downloaded by the connected-side image build and verified
+# by images/devkit/agents/install_agent_tools.py; the hardened OpenCode config and the
+# mfr-opencode wrapper carry the trial's five required settings (#1172
+# issuecomment-6548130709). The expected digests below are the issue's, typed
+# independently of the pin files.
+
+AGENTS = REPO / "images/devkit/agents"
+INSTALLER = AGENTS / "install_agent_tools.py"
+ISSUE_PINS = {
+    "herdr-core-pin.txt": {
+        "version": "0.1.15",
+        "sha256": "efbb1382da3d5053cb20c60c166a62ec34e73d8299977fb1f5abed28ddec8d66",
+        "binary-sha256": "b66176f871f8f1e0f34962a5d3d0dcb54f5a19443f601e51a38f167f829d4981",
+        "license": "Apache-2.0",
+    },
+    "opencode-pin.txt": {
+        "version": "2.2.5",
+        "sha256": "09f44302c10fd036912f59c81fd1aef5df45dd06f649197f9dfc9bbe2a79614e",
+        "binary-sha256": "8d060e1d2fbb9bb44cf09ae6ed1f3f6a7cff070b5227e2f90970132b23a92050",
+        "license": "MIT",
+    },
+}
+
+
+def test_agent_tool_pins_are_the_issue_digests_and_their_licences_are_pinned():
+    for name, expected in ISSUE_PINS.items():
+        pin = li.read_pin(REPO, f"images/devkit/agents/{name}")
+        assert {k: pin[k] for k in expected} == expected, name
+        assert pin["origin"].startswith("https://") and pin["origin"].endswith("/" + pin["asset"])
+        tool = name.removesuffix("-pin.txt")
+        licence = (AGENTS / f"{tool}-LICENSE").read_bytes()
+        assert hashlib.sha256(licence).hexdigest() == pin["license-sha256"]
+    # OpenCode's archive holds no licence: the tag's LICENSE is the source, by commit.
+    assert "9bbb8ce18c80f099e0e448775f59d965ead40a21/LICENSE" in li.read_pin(
+        REPO, "images/devkit/agents/opencode-pin.txt")["license-source"]
+    assert (AGENTS / "opencode-LICENSE").read_text().startswith("MIT License\n")
+    assert "Apache License" in (AGENTS / "herdr-core-LICENSE").read_text()
+
+
+def _fake_tool_archive(path: Path, members: dict[str, bytes], *, link: str | None = None) -> None:
+    with tarfile.open(path, "w:gz") as handle:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size, info.mode = len(data), 0o755
+            handle.addfile(info, io.BytesIO(data))
+        if link:
+            info = tarfile.TarInfo(link)
+            info.type, info.linkname = tarfile.SYMTYPE, "/etc/passwd"
+            handle.addfile(info)
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+@pytest.fixture
+def agent_archives(tmp_path):
+    """Generated stand-ins for both release archives and pins naming their digests."""
+    pins, archives = tmp_path / "pins", tmp_path / "archives"
+    pins.mkdir()
+    archives.mkdir()
+    herdr = {"herdr-core": b"#!/bin/sh\necho 'herdr-core 0.1.15'\n", "LICENSE": b"Apache License (test copy)\n",
+             "THIRD-PARTY-NOTICES": b"notices (test copy)\n"}
+    opencode = {"opencode": b"#!/bin/sh\necho v2.2.5 >&2\n"}  # a "v" prefix, on stderr
+    oc_licence = b"MIT License (test copy)\n"
+    _fake_tool_archive(archives / "herdr-core-linux-x86_64.tar.gz", herdr)
+    _fake_tool_archive(archives / "opencode-linux-x64.tar.gz", opencode)
+    (pins / "opencode-LICENSE").write_bytes(oc_licence)
+    (pins / "herdr-core-LICENSE").write_bytes(herdr["LICENSE"])
+    (pins / "herdr-core-pin.txt").write_text(
+        "# test pin\nversion: 0.1.15\nasset: herdr-core-linux-x86_64.tar.gz\n"
+        f"sha256: {_sha((archives / 'herdr-core-linux-x86_64.tar.gz').read_bytes())}\n"
+        f"binary: herdr-core\nbinary-sha256: {_sha(herdr['herdr-core'])}\n"
+        "origin: https://releases.example/core/0.1.15/herdr-core-linux-x86_64.tar.gz\nlicense: Apache-2.0\n"
+        f"license-member: LICENSE\nlicense-sha256: {_sha(herdr['LICENSE'])}\n"
+        f"notices-member: THIRD-PARTY-NOTICES\nnotices-sha256: {_sha(herdr['THIRD-PARTY-NOTICES'])}\n")
+    (pins / "opencode-pin.txt").write_text(
+        "version: 2.2.5\nasset: opencode-linux-x64.tar.gz\n"
+        f"sha256: {_sha((archives / 'opencode-linux-x64.tar.gz').read_bytes())}\n"
+        f"binary: opencode\nbinary-sha256: {_sha(opencode['opencode'])}\n"
+        "origin: https://github.example/releases/download/v2.2.5/opencode-linux-x64.tar.gz\nlicense: MIT\n"
+        f"license-sha256: {_sha(oc_licence)}\n")
+    return {"pins": pins, "archives": archives, "out": tmp_path / "out", "herdr": herdr, "opencode": opencode,
+            "oc_licence": oc_licence}
+
+
+def _install_tools(ctx):
+    return subprocess.run([sys.executable, "-I", str(INSTALLER), "--pins", str(ctx["pins"]), "--archives",
+                           str(ctx["archives"]), "--bin-dir", str(ctx["out"] / "bin"),
+                           "--license-dir", str(ctx["out"] / "licenses")],
+                          capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL)
+
+
+def test_agent_tools_install_only_verified_bytes_with_the_hc_link(agent_archives):
+    ctx = agent_archives
+    done = _install_tools(ctx)
+    assert done.returncode == 0, done.stderr
+    out = ctx["out"]
+    assert (out / "bin/herdr-core").read_bytes() == ctx["herdr"]["herdr-core"]
+    assert os.readlink(out / "bin/hc") == "herdr-core"
+    assert (out / "bin/opencode").read_bytes() == ctx["opencode"]["opencode"]
+    assert os.access(out / "bin/opencode", os.X_OK)
+    assert (out / "licenses/herdr-core/LICENSE").read_bytes() == ctx["herdr"]["LICENSE"]
+    assert (out / "licenses/herdr-core/THIRD-PARTY-NOTICES").read_bytes() == ctx["herdr"]["THIRD-PARTY-NOTICES"]
+    assert (out / "licenses/opencode/LICENSE").read_bytes() == ctx["oc_licence"]
+    assert sorted(p.name for p in (out / "bin").iterdir()) == ["hc", "herdr-core", "opencode"]
+
+
+def _swap_archive(ctx, asset: str, members: dict[str, bytes], **kw) -> None:
+    _fake_tool_archive(ctx["archives"] / asset, members, **kw)
+
+
+def _repin(ctx, name: str, field: str, value: str) -> None:
+    path = ctx["pins"] / name
+    lines = [f"{field}: {value}" if line.startswith(f"{field}:") else line for line in path.read_text().splitlines()]
+    path.write_text("\n".join(lines) + "\n")
+
+
+def _refit_archive(ctx, asset: str, pin: str, members: dict[str, bytes], **kw) -> None:
+    """Replace an archive and re-pin its archive digest only, so a later check must refuse."""
+    _swap_archive(ctx, asset, members, **kw)
+    _repin(ctx, pin, "sha256", _sha((ctx["archives"] / asset).read_bytes()))
+
+
+HERDR_ASSET, OC_ASSET = "herdr-core-linux-x86_64.tar.gz", "opencode-linux-x64.tar.gz"
+
+
+@pytest.mark.parametrize("damage, message", [
+    # The archive itself is not the pinned one (a re-uploaded release, a mirror).
+    (lambda c: _swap_archive(c, OC_ASSET, {"opencode": b"#!/bin/sh\necho 2.2.5 tampered\n"}),
+     "opencode-linux-x64.tar.gz does not match the sha256 in opencode-pin.txt"),
+    # A pinned archive whose binary differs from the binary pin.
+    (lambda c: _refit_archive(c, OC_ASSET, "opencode-pin.txt", {"opencode": b"#!/bin/sh\necho 2.2.5 # other\n"}),
+     "opencode does not match the binary-sha256 in opencode-pin.txt"),
+    # herdr's archive licence or notices differ from their pins.
+    (lambda c: _refit_archive(c, HERDR_ASSET, "herdr-core-pin.txt", {**c["herdr"], "LICENSE": b"changed\n"}),
+     "the herdr-core licence does not match the license-sha256 in herdr-core-pin.txt"),
+    (lambda c: _refit_archive(c, HERDR_ASSET, "herdr-core-pin.txt",
+                              {**c["herdr"], "THIRD-PARTY-NOTICES": b"changed\n"}),
+     "the herdr-core notices do not match the notices-sha256 in herdr-core-pin.txt"),
+    # OpenCode's committed licence text drifted from its pinned digest.
+    (lambda c: (c["pins"] / "opencode-LICENSE").write_bytes(b"MIT License (edited)\n"),
+     "the opencode licence does not match the license-sha256 in opencode-pin.txt"),
+    # A member that is a link, or missing, is never followed or invented.
+    (lambda c: _refit_archive(c, OC_ASSET, "opencode-pin.txt", {}, link="opencode"),
+     "opencode-linux-x64.tar.gz holds opencode more than once or not as a regular file"),
+    (lambda c: _refit_archive(c, OC_ASSET, "opencode-pin.txt", {"other": b"x"}),
+     "opencode-linux-x64.tar.gz has no member opencode"),
+    # The verified binary does not report the pinned version.
+    (lambda c: (_refit_archive(c, OC_ASSET, "opencode-pin.txt", {"opencode": b"#!/bin/sh\necho 2.2.50\n"}),
+                _repin(c, "opencode-pin.txt", "binary-sha256", _sha(b"#!/bin/sh\necho 2.2.50\n"))),
+     "opencode --version does not name the pinned version 2.2.5 (rc 0)"),
+    # A pin whose origin is not https, or does not name its asset, is refused unread.
+    (lambda c: _repin(c, "herdr-core-pin.txt", "origin", "http://releases.example/herdr-core-linux-x86_64.tar.gz"),
+     "herdr-core-pin.txt origin is not an https URL that names its asset"),
+    (lambda c: _repin(c, "opencode-pin.txt", "sha256", "PENDING"),
+     "opencode-pin.txt sha256 is not 64 lowercase hex"),
+])
+def test_agent_tools_refuse_any_digest_mismatch_and_install_nothing(agent_archives, damage, message):
+    damage(agent_archives)
+    done = _install_tools(agent_archives)
+    assert done.returncode == 1
+    assert done.stderr == f"agent-tools: {message}; nothing was installed\n"
+    assert not (agent_archives["out"] / "bin").exists() and not (agent_archives["out"] / "licenses").exists()
+
+
+def test_the_image_recipe_installs_the_agent_tools_through_the_verifier():
+    recipe = (REPO / "images/Containerfile.devkit").read_text()
+    stage = recipe.split("FROM rpms AS agent-tools", 1)[1].split("\nFROM ", 1)[0]
+    assert "install_agent_tools.py --pins /opt/devkit-build/agents" in stage
+    assert "source=images/devkit/agents" in stage
+    # Nothing fetched by a shell tool and nothing piped to a shell: Python verifies, then installs.
+    assert not re.search(r"\b(curl|wget)\b|\|\s*(sh|bash)\b", stage)
+    assert "COPY --from=agent-tools /out/bin/ /usr/local/bin/" in recipe
+    assert "COPY --from=agent-tools /out/licenses/ /usr/share/licenses/" in recipe
+    assert "COPY --chmod=0644 images/devkit/agents/opencode.json /etc/opencode/opencode.json" in recipe
+    # Setting 1 holds for any invocation in the image, not only through the wrapper.
+    assert "OPENCODE_DISABLE_MODELS_FETCH=1" in re.search(r"(?m)^ENV OPENCODE_.*$", recipe)[0]
+
+
+def test_hardened_opencode_config_carries_the_required_settings_and_no_secret():
+    raw = (AGENTS / "opencode.json").read_text()
+    config = json.loads(raw)
+    assert config["autoupdate"] is False and config["share"] == "disabled"
+    assert config["enabled_providers"] == ["site-litellm"] and "$schema" not in config
+    provider = config["provider"]["site-litellm"]
+    # Setting 3: explicit timeouts, 30 s each (a silently dropped LiteLLM path hung > 300 s without).
+    assert {k: provider["options"][k] for k in ("timeout", "headerTimeout", "chunkTimeout")} == {
+        "timeout": 30000, "headerTimeout": 30000, "chunkTimeout": 30000}
+    # The site LiteLLM with the separate dev key, read from a mounted secret; the model from site config.
+    assert provider["options"]["baseURL"] == "{env:MFR_LLM_BASE_URL}"
+    assert provider["options"]["apiKey"] == "{file:/run/secrets/mfr-dev-litellm}"
+    assert config["model"] == "site-litellm/{env:MFR_LLM_MODEL}"
+    assert list(provider["models"]) == ["{env:MFR_LLM_MODEL}"]
+    # Setting 4: an explicit shell policy (v2 renamed bash to shell; both are set alike).
+    shell = config["permission"]["shell"]
+    assert config["permission"]["bash"] == shell
+    rules = list(shell.items())
+    assert rules[0] == ("*", "ask")  # last match wins: anything unlisted asks, and a headless run rejects it
+    for denied in ("git push*", "curl*", "wget*", "ssh*", "oc *", "kubectl*", "podman*", "pip *"):
+        assert shell[denied] == "deny", denied
+        assert all(action != "allow" for _, action in rules[rules.index((denied, "deny")) + 1:])
+    assert config["permission"]["webfetch"] == "deny" and config["permission"]["websearch"] == "deny"
+    assert not re.search(r"sk-[A-Za-z0-9]|Bearer|https?://(?!opencode)", raw)
+
+
+def _run_wrapper(tmp_path, *args, **env):
+    fake = tmp_path / "opencode"
+    fake.write_text('#!/bin/sh\nprintf "%s\\n" "fetch=$OPENCODE_DISABLE_MODELS_FETCH" "$@"\n')
+    fake.chmod(0o755)
+    full = {"PATH": os.environ["PATH"], "MFR_OPENCODE_BIN": str(fake), **env}
+    return subprocess.run(["sh", str(REPO / "images/devkit/bin/mfr-opencode"), *args], capture_output=True,
+                          text=True, env=full, check=False, stdin=subprocess.DEVNULL)
+
+
+def test_wrapper_runs_every_worker_standalone_with_the_catalogue_fetch_off(tmp_path):
+    # Setting 2 (--standalone) and setting 1 (the env switch), even against the caller's env.
+    done = _run_wrapper(tmp_path, "run", "Write RESULT.txt", OPENCODE_DISABLE_MODELS_FETCH="0")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines() == ["fetch=1", "run", "--standalone", "Write RESULT.txt"]
+    tui = _run_wrapper(tmp_path, "/work/repo")
+    assert tui.stdout.splitlines() == ["fetch=1", "--standalone", "/work/repo"]
+
+
+@pytest.mark.parametrize("args", [("run", "--auto", "x"), ("--yolo",), ("run", "--dangerously-skip-permissions"),
+                                  ("serve",), ("service", "start"), ("upgrade",)])
+def test_wrapper_refuses_permission_skips_and_the_shared_service(tmp_path, args):
+    done = _run_wrapper(tmp_path, *args)
+    assert done.returncode == 2 and done.stdout == ""
+    assert done.stderr.startswith("mfr-opencode: ")
+
+
+@pytest.fixture
+def workers_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (("init", "-q", "-b", "main"), ("config", "user.email", "t@example.com"),
+                 ("config", "user.name", "T"), ("commit", "-q", "--allow-empty", "-m", "seed")):
+        _git(repo, *args)
+    log = tmp_path / "hc.log"
+    hc = tmp_path / "hc"
+    hc.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$HC_LOG"\n'
+        'case "$1" in\n'
+        '  wait) if [ "$2" = w-bad ]; then code=3; else code=0; fi\n'
+        '        printf \'{"ended":true,"reason":"exit","exit_code":%s}\\n\' "$code";;\n'
+        '  read) echo "DONE $2";;\n'
+        "esac\n")
+    hc.chmod(0o755)
+    worker = tmp_path / "mfr-opencode"  # the warm-up turn runs the real wrapper's name
+    worker.write_text('#!/bin/sh\nprintf "%s\\n" "mfr-opencode $*" >> "$HC_LOG"\n'
+                      'mkdir -p "$HOME/.local/share/opencode" && : > "$HOME/.local/share/opencode/opencode.db"\n'
+                      'exit "${WARM_RC:-0}"\n')
+    worker.chmod(0o755)
+    tasks = tmp_path / "tasks.txt"
+    tasks.write_text("# id<TAB>task\none\tWrite RESULT.txt\nbad\tFail on purpose\n")
+    home = tmp_path / "home"  # a fresh HOME: no OpenCode state database yet
+    home.mkdir()
+    env = {"PATH": f"{tmp_path}:{os.environ['PATH']}", "MFR_HC_BIN": str(hc), "HC_LOG": str(log), "HOME": str(home)}
+    return {"repo": repo, "tasks": tasks, "log": log, "env": env, "tmp": tmp_path}
+
+
+def _workers(ctx, *args):
+    return subprocess.run([sys.executable, str(REPO / "images/devkit/bin/mfr-agent-workers"), *args],
+                          capture_output=True, text=True, env=ctx["env"], cwd=ctx["tmp"], check=False,
+                          stdin=subprocess.DEVNULL)
+
+
+def test_workers_get_their_own_worktrees_and_run_mfr_opencode_under_hc(workers_repo):
+    ctx = workers_repo
+    done = _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"]))
+    assert done.returncode == 0, done.stdout + done.stderr
+    worktrees = ctx["tmp"] / "agent-worktrees"
+    calls = ctx["log"].read_text().splitlines()
+    # One serial warm-up turn on the fresh HOME before any worker starts (Podman trial).
+    assert calls[0] == "mfr-opencode run Reply with the single word OK. Do not use any tool."
+    assert calls[1:] == [f"run --bg --name w-{i} --cwd {worktrees / f'w-{i}'} --no-parent -- mfr-opencode run {task}"
+                     for i, task in (("one", "Write RESULT.txt"), ("bad", "Fail on purpose"))]
+    branches = _git(ctx["repo"], "worktree", "list", "--porcelain")
+    assert "branch refs/heads/agents/w-one" in branches and "branch refs/heads/agents/w-bad" in branches
+    collected = _workers(ctx, "collect", "--tasks", str(ctx["tasks"]), "--logs", str(ctx["tmp"] / "logs"))
+    assert collected.returncode == 1
+    assert "worker=w-one ended=True reason=exit exit_code=0 ok=yes" in collected.stdout
+    assert "worker=w-bad ended=True reason=exit exit_code=3 ok=no" in collected.stdout
+    assert collected.stdout.splitlines()[-1] == "workers=2 failures=1"
+    assert (ctx["tmp"] / "logs/w-one.log").read_text() == "DONE w-one\n"
+    # The state database now exists: a second batch starts without another warm-up.
+    ctx["log"].unlink()
+    ctx["tasks"].write_text("two\tAnother task\n")
+    assert _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"])).returncode == 0
+    assert [c.split(" --cwd")[0] for c in ctx["log"].read_text().splitlines()] == ["run --bg --name w-two"]
+
+
+def test_a_failed_warm_up_starts_no_worker(workers_repo):
+    ctx = workers_repo
+    ctx["env"]["WARM_RC"] = "1"
+    done = _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"]))
+    assert done.returncode == 2
+    assert done.stderr == "mfr-agent-workers: the warm-up turn failed (rc 1); no worker was started\n"
+    assert [c for c in ctx["log"].read_text().splitlines() if c.startswith("run ")] == []
+
+
+@pytest.mark.parametrize("tasks", ["one Write it\n", "One\tx\n", "a\tx\na\ty\n", "# nothing\n"])
+def test_workers_refuse_a_malformed_tasks_file_before_any_start(workers_repo, tasks):
+    ctx = workers_repo
+    ctx["tasks"].write_text(tasks)
+    done = _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"]))
+    assert done.returncode == 2 and done.stderr.startswith("mfr-agent-workers: ")
+    assert not ctx["log"].exists()
+
+
+# --- gap orchestration VM: egress fence, proof, container (#1172) --------------------
+
+# Documentation-only addresses (RFC 5737): never a site's.
+SITE_ENV = """\
+# test site inputs
+MFR_VM_AGENTS_USER=agents
+MFR_VM_DNS=192.0.2.53
+MFR_VM_GITLAB=192.0.2.10
+MFR_VM_GITLAB_PORTS=443 22
+MFR_VM_GITLAB_HOST=gitlab.site.example
+MFR_VM_LITELLM="198.51.100.0/28"
+MFR_VM_LITELLM_PORTS=443
+MFR_VM_LITELLM_BASE_URL=https://litellm.site.example/v1
+MFR_VM_LLM_MODEL=site-reasoning
+MFR_VM_BLOCKED=qdrant=203.0.113.6:6333 agent=203.0.113.7:8000 openshift-api=203.0.113.8:6443 internet=203.0.113.9:443 host-loopback=127.0.0.1:22 host-address=192.0.2.99:22
+MFR_VM_KIT_IMAGE=localhost/qdrant-pdf-rag-devkit:testkey
+MFR_VM_KIT_DIGEST=sha256:%s
+MFR_VM_WORK=/home/agents/work
+""" % ("ab" * 32)
+
+
+def _site(tmp_path, text=SITE_ENV, **override):
+    lines = [line for line in text.splitlines() if line.split("=", 1)[0] not in override]
+    lines += [f"{k}={v}" for k, v in override.items()]
+    path = tmp_path / "site.env"
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def _agents_account(monkeypatch):
+    """This process's account name, for MFR_VM_AGENTS_USER. A kit CI job (GitLab on
+    OpenShift) runs as an arbitrary uid with no passwd entry; give it one, as the VM's
+    agents user has, so the agents-user paths still run there."""
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        entry = pwd.struct_passwd(("agents", "x", os.getuid(), os.getgid(), "", "/nonexistent", "/sbin/nologin"))
+        real = pwd.getpwuid
+        monkeypatch.setattr(pwd, "getpwuid", lambda uid: entry if uid == os.getuid() else real(uid))
+        return "agents"
+
+
+def _no_passwd_entry(monkeypatch):
+    """Simulate the kit's passwd-less CI uid."""
+    def missing(uid):
+        raise KeyError(f"getpwuid(): uid not found: {uid}")
+    monkeypatch.setattr(pwd, "getpwuid", missing)
+
+
+def test_fence_renders_an_skuid_allow_list_then_drop_and_the_slice_second_layer(tmp_path):
+    out = tmp_path / "fence"
+    done = vm.main(["render-fence", "--site-env", str(_site(tmp_path)), "--uid", "1500", "--out", str(out)])
+    assert done == 0
+    nft = (out / "mfr-agents.nft").read_text()
+    def chain(name):
+        body = nft.split(f"chain {name} {{", 1)[1].split("\n    }", 1)[0]
+        return [line.strip() for line in body.splitlines() if line.strip()]
+
+    # Only a positive uid match enters the fence (#1181 B1): a packet with no socket
+    # owner (IPv6 neighbour discovery, kernel NFS/iSCSI/WireGuard sockets) cannot match
+    # `meta skuid`, so it must fall to the base chain's accept, never to the drop.
+    assert chain("output") == [
+        "type filter hook output priority filter; policy accept;",
+        "meta skuid 1500 jump agents_egress",
+    ]
+    assert chain("agents_egress") == [
+        "ct state established,related accept",
+        "ip daddr @dns4 udp dport { 53 } accept",
+        "ip daddr @dns4 tcp dport { 53 } accept",
+        "ip daddr @gitlab4 tcp dport { 22, 443 } accept",
+        "ip daddr @litellm4 tcp dport { 443 } accept",
+        'counter drop comment "mfr-agents egress fence: not GitLab, LiteLLM or DNS"',
+    ]
+    assert "skuid !=" not in nft and nft.count("meta skuid") == 1
+    assert "elements = { 192.0.2.53/32 }" in nft and "elements = { 198.51.100.0/28 }" in nft
+    # The negative controls are never allowed, nor is loopback: pasta reaches host-local
+    # services as the agents uid (Podman trial), so no blanket `oifname "lo" accept`.
+    assert "203.0.113." not in nft and "127.0.0.1" not in nft and '"lo"' not in nft
+    assert nft.startswith("# Egress fence") and "table inet mfr_agents\ndelete table inet mfr_agents\n" in nft
+    dropin = (out / "user-1500.slice.d/50-mfr-agents-egress.conf").read_text().splitlines()
+    # The slice layer is cgroup eBPF, so it filters every network namespace of the slice:
+    # without localhost it would cut the container's own loopback, over which OpenCode's
+    # --standalone client reaches its child server (#1181 B2). The host's loopback stays
+    # shut by the nftables layer above, which has no loopback accept.
+    assert dropin[dropin.index("[Slice]"):] == [
+        "[Slice]", "IPAddressDeny=any", "IPAddressAllow=localhost",
+        "IPAddressAllow=192.0.2.53/32 192.0.2.10/32 198.51.100.0/28"]
+
+
+@pytest.mark.parametrize("override, message", [
+    ({"MFR_VM_GITLAB": "gitlab.site.example"}, "MFR_VM_GITLAB holds a value that is not an IP address or CIDR"),
+    ({"MFR_VM_LITELLM": "0.0.0.0/0"}, "MFR_VM_LITELLM holds a range broader than /16"),
+    ({"MFR_VM_BLOCKED": "qdrant=198.51.100.3:6333 agent=203.0.113.7:8000 openshift-api=203.0.113.8:6443 "
+                        "internet=203.0.113.9:443 host-loopback=127.0.0.1:22 host-address=192.0.2.99:22"},
+     "blocked target qdrant lies inside an allowed address: its negative control could never fail"),
+    ({"MFR_VM_BLOCKED": "qdrant=203.0.113.6:6333 agent=203.0.113.7:8000"},
+     "MFR_VM_BLOCKED has no negative control for openshift-api, internet, host-loopback, host-address"),
+    ({"MFR_VM_BLOCKED": "qdrant=203.0.113.6:6333 agent=203.0.113.7:8000 openshift-api=203.0.113.8:6443 "
+                        "internet=203.0.113.9:443 host-loopback=192.0.2.98:22 host-address=192.0.2.99:22"},
+     "the host-loopback negative control must be a loopback address"),
+    ({"MFR_VM_VOLUME_LABEL": "U"}, "MFR_VM_VOLUME_LABEL is Z (SELinux private, the default), z (shared) or none"),
+    ({"MFR_VM_AGENTS_USER": "root"}, "MFR_VM_AGENTS_USER is not a plain unprivileged user name"),
+    ({"MFR_VM_DNS": "$(id)"}, "site env line"),
+    ({"MFR_VM_KIT_DIGEST": ""}, "the site env file has no value for MFR_VM_KIT_DIGEST"),
+])
+def test_fence_refuses_unsafe_or_unprovable_site_inputs(tmp_path, capsys, override, message):
+    out = tmp_path / "fence"
+    assert vm.main(["render-fence", "--site-env", str(_site(tmp_path, **override)), "--uid", "1500",
+                    "--out", str(out)]) == 2
+    assert capsys.readouterr().err.startswith(f"agents-vm: {message}")
+    assert not out.exists()
+
+
+def test_site_env_inside_a_git_work_tree_is_refused(tmp_path, capsys):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "private").mkdir()
+    path = tmp_path / "private/site.env"
+    path.write_text(SITE_ENV)
+    assert vm.main(["render-fence", "--site-env", str(path), "--uid", "1500", "--out", str(tmp_path / "f")]) == 2
+    assert "inside a git work tree" in capsys.readouterr().err
+
+
+def _nft_listing(uid: int, *, op: str = "==", verdict: str = "jump") -> str:
+    """`nft -j list table inet mfr_agents` as nftables 1.1.6 prints the loaded fence."""
+    dispatch = {"jump": {"target": "agents_egress"}} if verdict == "jump" else {"accept": None}
+    items = [
+        {"metainfo": {"version": "1.1.6", "json_schema_version": 1}},
+        {"table": {"family": "inet", "name": "mfr_agents", "handle": 5}},
+        {"chain": {"family": "inet", "table": "mfr_agents", "name": "output", "handle": 1, "type": "filter",
+                   "hook": "output", "prio": 0, "policy": "accept"}},
+        {"chain": {"family": "inet", "table": "mfr_agents", "name": "agents_egress", "handle": 2}},
+        {"rule": {"family": "inet", "table": "mfr_agents", "chain": "output", "handle": 4, "expr": [
+            {"match": {"op": op, "left": {"meta": {"key": "skuid"}}, "right": uid}}, dispatch]}},
+        {"rule": {"family": "inet", "table": "mfr_agents", "chain": "agents_egress", "handle": 7, "expr": [
+            {"counter": {"packets": 0, "bytes": 0}}, {"drop": None}]}},
+    ]
+    return json.dumps({"nftables": items})
+
+
+@pytest.fixture
+def fence_host(tmp_path, monkeypatch):
+    """A stateful fake nft (the table is loaded or not) and systemctl, logging each call."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    ctx = {"log": tmp_path / "calls.log", "loaded": tmp_path / "nft.loaded", "listing": tmp_path / "nft.json",
+           "root": tmp_path / "root", "site": _site(tmp_path), "bin": bin_dir}
+    (bin_dir / "nft").write_text(f"""#!/bin/sh
+echo "nft $*" >> "{ctx['log']}"
+case "$1" in
+  -c) exit ${{NFT_RC:-0}} ;;
+  -f) [ "${{NFT_RC:-0}}" = 0 ] || exit 1; touch "{ctx['loaded']}"; exit 0 ;;
+  -j) [ -f "{ctx['loaded']}" ] || exit 1; cat "{ctx['listing']}"; exit 0 ;;
+  list) [ -f "{ctx['loaded']}" ] ;;
+  delete) [ -f "{ctx['loaded']}" ] || exit 1; rm "{ctx['loaded']}" ;;
+  *) exit 64 ;;
+esac
+""")
+    (bin_dir / "systemctl").write_text(f'#!/bin/sh\necho "systemctl $*" >> "{ctx["log"]}"\n')
+    for tool in ("nft", "systemctl"):
+        (bin_dir / tool).chmod(0o755)
+    ctx["listing"].write_text(_nft_listing(1500))
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    return ctx
+
+
+def _fence(ctx, *extra: str) -> int:
+    return vm.main(["install-fence", "--site-env", str(ctx["site"]), "--uid", "1500", "--root", str(ctx["root"]),
+                    *extra])
+
+
+def _calls(ctx) -> list[str]:
+    lines = ctx["log"].read_text().splitlines() if ctx["log"].exists() else []
+    ctx["log"].unlink(missing_ok=True)
+    return lines
+
+
+def test_install_fence_checks_before_loading_and_removes_for_the_negative_control(fence_host, monkeypatch):
+    ctx = fence_host
+    root = ctx["root"]
+    nft_file = root / "etc/nftables/mfr-agents.nft"
+    dropin = root / "etc/systemd/system/user-1500.slice.d/50-mfr-agents-egress.conf"
+    assert _fence(ctx) == 0
+    staged = root / "etc/nftables/.mfr-agents.nft.new"
+    # Check, load, then read the live table back before anything else is installed.
+    assert _calls(ctx) == [f"nft -c -f {staged}", f"nft -f {staged}", "nft -j list table inet mfr_agents",
+                           "systemctl daemon-reload"]
+    assert nft_file.read_text().count("meta skuid 1500 jump agents_egress") == 1
+    assert dropin.is_file() and not staged.exists()
+    installed = (nft_file.read_bytes(), dropin.read_bytes())
+    # Installing again converges on the same files and the same live table.
+    assert _fence(ctx) == 0 and (nft_file.read_bytes(), dropin.read_bytes()) == installed
+    assert ctx["loaded"].exists() and not staged.exists()
+    _calls(ctx)
+    # A table nft rejects changes nothing.
+    monkeypatch.setenv("NFT_RC", "1")
+    nft_file.write_text("previous\n")
+    assert _fence(ctx) == 2
+    assert nft_file.read_text() == "previous\n" and not staged.exists()
+    monkeypatch.delenv("NFT_RC")
+    _calls(ctx)
+    assert _fence(ctx, "--remove") == 0
+    assert _calls(ctx) == ["nft delete table inet mfr_agents", "systemctl daemon-reload"]
+    assert not nft_file.exists() and not dropin.exists() and not ctx["loaded"].exists()
+    # Removing again converges: no table to delete is the state remove wants.
+    assert _fence(ctx, "--remove") == 0
+    assert _calls(ctx) == ["nft delete table inet mfr_agents", "nft list table inet mfr_agents",
+                           "systemctl daemon-reload"]
+    # The next ordinary operation after removal: the fence installs again.
+    assert _fence(ctx) == 0 and ctx["loaded"].exists() and nft_file.read_bytes() == installed[0]
+
+
+def test_install_fence_without_nft_refuses_cleanly_and_changes_nothing(fence_host, capsys):
+    ctx = fence_host
+    (ctx["bin"] / "nft").unlink()
+    root = ctx["root"]
+    assert _fence(ctx) == 2
+    assert capsys.readouterr().err == "agents-vm: nft is not installed or cannot run; nothing was changed\n"
+    assert not (root / "etc/nftables/.mfr-agents.nft.new").exists()
+    assert not (root / "etc/nftables/mfr-agents.nft").exists()
+    assert not (root / "etc/systemd/system/user-1500.slice.d/50-mfr-agents-egress.conf").exists()
+    assert _calls(ctx) == []
+    # --remove cannot tell whether a table is still loaded: it refuses and keeps the files.
+    dropin = root / "etc/systemd/system/user-1500.slice.d/50-mfr-agents-egress.conf"
+    dropin.parent.mkdir(parents=True)
+    dropin.write_text("kept\n")
+    assert _fence(ctx, "--remove") == 2
+    assert capsys.readouterr().err == "agents-vm: nft is not installed or cannot run; nothing was changed\n"
+    assert dropin.read_text() == "kept\n" and _calls(ctx) == []
+
+
+@pytest.mark.parametrize("listing", [
+    _nft_listing(1500, op="!=", verdict="accept"),  # the #1181 B1 shape: socket-less packets reach the drop
+    _nft_listing(1501),                              # another uid
+    "not json",
+], ids=["skuid-not-equal-accept", "another-uid", "unreadable"])
+def test_install_fence_refuses_a_live_table_that_does_not_dispatch_only_the_agents_uid(fence_host, capsys, listing):
+    ctx = fence_host
+    ctx["listing"].write_text(listing)
+    assert _fence(ctx) == 2
+    assert capsys.readouterr().err.startswith("agents-vm: the loaded nftables table is not the rendered fence")
+    # Nothing past the failed read-back: no drop-in, no daemon-reload.
+    assert not (ctx["root"] / "etc/systemd/system/user-1500.slice.d/50-mfr-agents-egress.conf").exists()
+    assert _calls(ctx)[-1] == "nft -j list table inet mfr_agents"
+
+
+def test_remove_refuses_while_an_agents_container_runs(fence_host, capsys):
+    ctx = fence_host
+    assert _fence(ctx) == 0
+    _calls(ctx)
+    proc = ctx["root"] / "proc"
+    for pid, name, uid in (("41", "conmon", 1600), ("42", "sshd", 1500), ("43", "conmon", 1500)):
+        (proc / pid).mkdir(parents=True)
+        (proc / pid / "status").write_text(f"Name:\t{name}\nState:\tS (sleeping)\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
+    assert _fence(ctx, "--remove") == 2
+    assert capsys.readouterr().err.startswith(
+        "agents-vm: a Podman container of the agents user is running; stop it first")
+    # The fence stays whole: the container would otherwise run unfenced.
+    assert _calls(ctx) == [] and ctx["loaded"].exists()
+    assert (ctx["root"] / "etc/nftables/mfr-agents.nft").exists()
+    shutil.rmtree(proc / "43")
+    assert _fence(ctx, "--remove") == 0 and not ctx["loaded"].exists()
+
+
+def _results(allowed, blocked, ok_allowed=True, ok_blocked=False):
+    out = {label: "connected" if ok_allowed else "failed:TimeoutError" for label in allowed}
+    out.update({label: "connected" if ok_blocked else "failed:TimeoutError" for label in blocked})
+    return out
+
+
+def test_proof_verdict_needs_the_allow_list_open_and_every_negative_control_shut(tmp_path):
+    site = vm.load_site(_site(tmp_path))
+    spec, allowed, blocked = vm.probe_spec(site)
+    assert allowed == ["gitlab1:22", "gitlab1:443", "litellm1:443", "dns:resolve"]
+    assert blocked == ["blocked:agent", "blocked:host-address", "blocked:host-loopback", "blocked:internet",
+                       "blocked:openshift-api", "blocked:qdrant"]
+    assert spec["resolve"] == ["dns:resolve", "gitlab.site.example"]
+    targets = {label: host for label, host, _ in spec["connect"]}
+    assert targets["blocked:host-loopback"] == "127.0.0.1"
+    # Inside a container 127.0.0.1 is the container itself: the host's loopback is
+    # reached through pasta as host.containers.internal, so that is the probe there.
+    inside = {label: host for label, host, _ in vm.probe_spec(site, "container")[0]["connect"]}
+    assert inside["blocked:host-loopback"] == "host.containers.internal"
+    assert {k: v for k, v in inside.items() if k != "blocked:host-loopback"} == {
+        k: v for k, v in targets.items() if k != "blocked:host-loopback"}
+    assert vm.verdict(_results(allowed, blocked), allowed, blocked, fence_off=False) == []
+    leak = _results(allowed, blocked)
+    leak["blocked:openshift-api"] = "connected"
+    assert vm.verdict(leak, allowed, blocked, fence_off=False) == [
+        "blocked:openshift-api connected with the fence on: the fence leaks"]
+    tight = _results(allowed, blocked)
+    tight["litellm1:443"] = "failed:ConnectionRefusedError"
+    assert vm.verdict(tight, allowed, blocked, fence_off=False)[0].startswith("litellm1:443 must connect")
+    # Fence off: the same negative controls must connect, or they prove nothing.
+    assert vm.verdict(_results(allowed, blocked, ok_blocked=True), allowed, blocked, fence_off=True) == []
+    assert vm.verdict(_results(allowed, blocked), allowed, blocked, fence_off=True)[0].startswith(
+        "blocked:agent did not connect with the fence off")
+    assert vm.verdict({}, allowed, blocked, fence_off=False)[0].startswith("the probe returned no result")
+
+
+def _listen(address: str):
+    server = socket.socket()
+    server.bind((address, 0))
+    server.listen(8)
+    return server
+
+
+def test_proof_probes_real_sockets_and_fails_on_a_reachable_negative_control(tmp_path, capsys, monkeypatch):
+    """The host run, end to end on loopback: GitLab and LiteLLM listen on 127.0.0.1, the
+    four negative controls are 127.0.0.2 ports. Nothing listens there, as a working fence
+    would make it; then one starts listening and the same proof must fail."""
+    gitlab, litellm = _listen("127.0.0.1"), _listen("127.0.0.1")
+    shut = [_listen("127.0.0.2") for _ in range(6)]
+    ports = [s.getsockname()[1] for s in shut]
+    for s in shut:
+        s.close()
+    blocked_env = " ".join(f"{label}=127.0.0.2:{port}"
+                           for label, port in zip(("qdrant", "agent", "openshift-api", "internet", "host-loopback",
+                                                   "host-address"), ports, strict=True))
+    env = _site(tmp_path, MFR_VM_AGENTS_USER=_agents_account(monkeypatch), MFR_VM_DNS="127.0.0.53",
+                MFR_VM_GITLAB="127.0.0.1", MFR_VM_GITLAB_PORTS=str(gitlab.getsockname()[1]),
+                MFR_VM_GITLAB_HOST="localhost", MFR_VM_LITELLM="127.0.0.1",
+                MFR_VM_LITELLM_PORTS=str(litellm.getsockname()[1]), MFR_VM_BLOCKED=blocked_env)
+    try:
+        record = tmp_path / "proof.json"
+        assert vm.main(["proof", "--site-env", str(env), "--where", "host", "--output", str(record)]) == 0
+        printed = capsys.readouterr().out
+        assert printed.splitlines()[-1] == "proof: host PASS (fenced)"
+        assert "127.0.0" not in printed  # labels only on stdout; addresses stay in the private record
+        run = json.loads(record.read_text())["runs"]["host"]
+        assert run["verdict"] == "pass" and run["results"]["blocked:qdrant"].startswith("failed:")
+        leak = socket.socket()
+        leak.bind(("127.0.0.2", ports[2]))
+        leak.listen(1)
+        try:
+            assert vm.main(["proof", "--site-env", str(env), "--where", "host"]) == 1
+            assert "proof: host FAIL blocked:openshift-api connected with the fence on: the fence leaks" in \
+                capsys.readouterr().out
+        finally:
+            leak.close()
+    finally:
+        gitlab.close()
+        litellm.close()
+
+
+def test_proof_refuses_to_run_as_another_user(tmp_path, capsys):
+    assert vm.main(["proof", "--site-env", str(_site(tmp_path, MFR_VM_AGENTS_USER="nobody-else")),
+                    "--where", "host"]) == 2
+    assert "run the proof as the agents user" in capsys.readouterr().err
+
+
+def test_container_proof_checks_its_own_loopback_which_opencode_workers_need(tmp_path):
+    """#1181 B2: `opencode run --standalone` talks to its child server over 127.0.0.1
+    inside the container, so the container proof must see its own loopback work, fenced
+    or not. On the host the agents uid's loopback is a negative control instead."""
+    site = vm.load_site(_site(tmp_path))
+    spec, allowed, blocked = vm.probe_spec(site, "container")
+    assert spec["loopback"] == "container:loopback" and "container:loopback" in allowed
+    assert "container:loopback" not in blocked
+    host_spec, host_allowed, _ = vm.probe_spec(site, "host")
+    assert not host_spec.get("loopback") and "container:loopback" not in host_allowed
+    # The probe code itself: a listener on its own 127.0.0.1, one byte each way.
+    done = subprocess.run([sys.executable, "-I", "-c", vm.PROBE,
+                           json.dumps({"connect": [], "resolve": None, "loopback": "container:loopback"})],
+                          stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, check=True)
+    assert json.loads(done.stdout) == {"container:loopback": "connected"}
+    # A missing result fails the verdict, fenced or not.
+    results = _results(allowed, blocked)
+    del results["container:loopback"]
+    assert vm.verdict(results, allowed, blocked, fence_off=False)[0].startswith("the probe returned no result")
+    results["container:loopback"] = "failed:TimeoutError"
+    assert vm.verdict(results, allowed, blocked, fence_off=True)[0].startswith("container:loopback must connect")
+
+
+@pytest.fixture
+def start_host(tmp_path, monkeypatch):
+    """`start` as the agents user against a fake podman; preflight's host checks pass."""
+    log = tmp_path / "podman.log"
+    fake = tmp_path / "bin/podman"
+    fake.parent.mkdir()
+    fake.write_text(f"""#!/bin/sh
+echo "podman $*" >> "{log}"
+case "$1 $2" in
+  "image inspect") echo "sha256:{'ab' * 32}" ;;
+esac
+""")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("KUBECONFIG", raising=False)
+    monkeypatch.setattr(vm, "preflight", lambda *args, **kwargs: None)
+    shut = [_listen("127.0.0.2") for _ in range(6)]
+    ports = [s.getsockname()[1] for s in shut]
+    for s in shut:
+        s.close()
+    blocked_env = " ".join(f"{label}=127.0.0.2:{port}" for label, port in zip(vm.BLOCKED_LABELS, ports, strict=True))
+    site = _site(tmp_path, MFR_VM_AGENTS_USER=_agents_account(monkeypatch), MFR_VM_BLOCKED=blocked_env,
+                 MFR_VM_WORK=str(tmp_path / "work"))
+    return {"log": log, "site": site, "ports": dict(zip(vm.BLOCKED_LABELS, ports, strict=True))}
+
+
+def test_start_runs_the_container_only_while_the_fence_refuses_every_negative_control(start_host, capsys):
+    ctx = start_host
+    assert vm.main(["start", "--site-env", str(ctx["site"])]) == 0
+    runs = [line for line in ctx["log"].read_text().splitlines() if line.startswith("podman run")]
+    assert len(runs) == 1 and "--name mfr-agents" in runs[0]
+    ctx["log"].unlink()
+    # One negative control answers: the fence is not in force for this uid (not
+    # installed, removed, or another user), so no container starts.
+    leak = socket.socket()
+    leak.bind(("127.0.0.2", ctx["ports"]["openshift-api"]))
+    leak.listen(1)
+    try:
+        assert vm.main(["start", "--site-env", str(ctx["site"])]) == 2
+    finally:
+        leak.close()
+    err = capsys.readouterr().err
+    assert err.startswith("agents-vm: the egress fence is not in force for this user: blocked:openshift-api "
+                          "connected")
+    assert "127.0.0" not in err
+    assert not ctx["log"].exists()  # not even an image inspect
+
+
+def test_start_refuses_another_user_before_any_probe(start_host, capsys, tmp_path):
+    (tmp_path / "other").mkdir()
+    other = _site(tmp_path / "other", MFR_VM_AGENTS_USER="nobody-else")
+    assert vm.main(["start", "--site-env", str(other)]) == 2
+    assert "run start as the agents user" in capsys.readouterr().err
+    assert not start_host["log"].exists()
+
+
+def test_a_uid_without_a_passwd_entry_is_never_the_agents_user(start_host, capsys, tmp_path, monkeypatch):
+    """Fail closed: an account with no passwd entry (the kit's arbitrary CI uid) is not
+    `agents`, so neither the proof nor start runs; never a KeyError traceback."""
+    _no_passwd_entry(monkeypatch)
+    (tmp_path / "proof").mkdir()
+    proof_site = _site(tmp_path / "proof", MFR_VM_AGENTS_USER="agents")
+    assert vm.main(["proof", "--site-env", str(proof_site), "--where", "host"]) == 2
+    assert "run the proof as the agents user" in capsys.readouterr().err
+    assert vm.main(["start", "--site-env", str(start_host["site"])]) == 2
+    assert "run start as the agents user" in capsys.readouterr().err
+    assert not start_host["log"].exists()
+
+
+def test_container_runs_with_init_the_sized_limits_and_no_openshift_credentials(tmp_path):
+    site = vm.load_site(_site(tmp_path))
+    argv = vm.run_args(site)
+    assert argv[:2] == ["podman", "run"] and "--init" in argv  # setting 5
+    # Rootless Podman cannot map the kit's uid with its default userns (Podman trial).
+    assert {"--userns=keep-id:uid=1000770000,gid=0", "--user=1000770000:0"} <= set(argv)
+    assert "--volume=/home/agents/work:/work:Z" in argv
+    assert "--volume=/home/agents/work:/work:z" in vm.run_args(vm.load_site(_site(tmp_path, MFR_VM_VOLUME_LABEL="z")))
+    assert "--volume=/home/agents/work:/work" in vm.run_args(vm.load_site(_site(tmp_path, MFR_VM_VOLUME_LABEL="none")))
+    # Agent overhead (#1172: requests 2 CPU / 2 GiB, limits 4 CPU / 4 GiB) plus the tools' default 2 CPU / 4 GiB.
+    assert {"--cpus=6", "--memory=8192m", "--memory-swap=8192m", "--memory-reservation=2048m",
+            "--cpu-shares=2048"} <= set(argv)
+    assert "--env=KUBECONFIG=/dev/null" in argv and "--secret=mfr-dev-litellm" in argv
+    assert not [a for a in argv if "kube" in a.lower() and a != "--env=KUBECONFIG=/dev/null"]
+    assert "--env=MFR_LLM_MODEL=site-reasoning" in argv
+    bigger = vm.run_args(vm.load_site(_site(tmp_path, MFR_VM_TOOL_CPUS="4", MFR_VM_TOOL_MEMORY_MIB="8192")))
+    assert {"--cpus=8", "--memory=12288m", "--memory-reservation=2048m"} <= set(bigger)
+
+
+@pytest.mark.parametrize("requested, expected", [
+    ("", ["exec", "mfr-agents", "hc", "ls"]),
+    ("w-1", ["exec", "-it", "mfr-agents", "hc", "attach", "--observe", "w-1"]),
+    ("dev/t7", ["exec", "-it", "mfr-agents", "hc", "attach", "--observe", "dev/t7"]),
+    ("w-1; sh", None), ("--help", None), ("../x", None),
+])
+def test_view_only_ssh_command_attaches_observe_only_or_refuses(tmp_path, requested, expected):
+    fake = tmp_path / "podman"
+    fake.write_text('#!/bin/sh\nprintf "%s\\n" "$@" "xdg=$XDG_RUNTIME_DIR"\n')
+    fake.chmod(0o755)
+    done = subprocess.run([sys.executable, str(REPO / "scripts/devkit/agents_vm.py"), "observe"],
+                          env={"PATH": f"{tmp_path}:{os.environ['PATH']}", "SSH_ORIGINAL_COMMAND": requested},
+                          capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL)
+    if expected is None:
+        assert done.returncode == 2 and done.stdout == ""
+    else:
+        # Podman's own runtime dir, so podman exec finds the container (Podman trial).
+        assert done.returncode == 0 and done.stdout.splitlines() == [*expected, f"xdg=/run/user/{os.getuid()}"]
+
+
+def test_view_only_ssh_command_needs_no_passwd_entry(tmp_path):
+    """The kit's arbitrary CI uid has no passwd entry; observe still finds Podman's runtime dir."""
+    fake = tmp_path / "podman"
+    fake.write_text('#!/bin/sh\nprintf "%s\\n" "$@" "xdg=$XDG_RUNTIME_DIR" "home=${HOME-unset}"\n')
+    fake.chmod(0o755)
+    passwdless = ("import pwd, runpy, sys\n"
+                  "def missing(uid):\n    raise KeyError(uid)\n"
+                  "pwd.getpwuid = missing\n"
+                  "sys.argv = [sys.argv[1], 'observe']\n"
+                  "runpy.run_path(sys.argv[0], run_name='__main__')\n")
+    done = subprocess.run([sys.executable, "-c", passwdless, str(REPO / "scripts/devkit/agents_vm.py")],
+                          env={"PATH": f"{tmp_path}:{os.environ['PATH']}", "SSH_ORIGINAL_COMMAND": ""},
+                          capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL)
+    assert (done.returncode, done.stderr) == (0, "")
+    assert done.stdout.splitlines() == ["exec", "mfr-agents", "hc", "ls", f"xdg=/run/user/{os.getuid()}", "home=unset"]
+
+
+def test_the_example_site_env_renders_once_its_kit_placeholders_are_filled(tmp_path):
+    example = (REPO / "scripts/devkit/agents-vm.env.example").read_text()
+    # Only documentation addresses (RFC 5737) in the committed example.
+    for address in re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", example):
+        assert address.startswith(("192.0.2.", "198.51.100.", "203.0.113.")) or address == "127.0.0.1", address
+    filled = example.replace("<kit key>", "testkey").replace("<64 hex from devkit-pin.txt>", "cd" * 32)
+    path = tmp_path / "site.env"
+    path.write_text(filled)
+    assert vm.main(["render-fence", "--site-env", str(path), "--uid", "1500", "--out", str(tmp_path / "f")]) == 0
+
+
+def _preflight_root(tmp_path, *, subuid="agents:100000:65536\n", controllers="cpuset cpu io memory pids\n",
+                    linger=True):
+    root = tmp_path / "root"
+    (root / "etc").mkdir(parents=True)
+    (root / "etc/subuid").write_text(subuid)
+    (root / "etc/subgid").write_text("agents:100000:65536\n")
+    (root / "sys/fs/cgroup").mkdir(parents=True)
+    (root / "sys/fs/cgroup/cgroup.controllers").write_text("cpu memory pids\n")
+    service = root / "sys/fs/cgroup/user.slice/user-1500.slice/user@1500.service"
+    service.mkdir(parents=True)
+    (service / "cgroup.controllers").write_text(controllers)
+    (root / "var/lib/systemd/linger").mkdir(parents=True)
+    if linger:
+        (root / "var/lib/systemd/linger/agents").touch()
+    return root
+
+
+@pytest.mark.parametrize("knobs, message", [
+    ({}, None),
+    ({"controllers": "cpu pids\n"}, ("user@1500.service does not delegate memory: --memory, --cpus and the pids "
+                                    "limit would be silently unenforced")),
+    ({"linger": False}, "linger is off for agents"),
+    ({"subuid": "agents:100000:1000\n"}, "/etc/subuid gives agents no range of at least 65536 ids"),
+])
+def test_preflight_fails_clearly_without_delegation_linger_or_subids(tmp_path, capsys, knobs, message):
+    root = _preflight_root(tmp_path, **knobs)
+    rc = vm.main(["preflight", "--site-env", str(_site(tmp_path)), "--uid", "1500", "--root", str(root)])
+    err = capsys.readouterr().err
+    if message is None:
+        assert rc == 0 and err == ""
+    else:
+        assert rc == 2 and err.startswith("agents-vm: preflight failed: ") and message in err
+
+
+# --- the gap scripts' commands are in the kit image (#1183) --------------------------
+# GitLab CI and the bastion run the gap scripts in the kit image, so every external
+# command they call must be in it. The commands are derived from the scripts; the map
+# (tests/helpers_devkit_commands.py) says which recipe input provides each, and is
+# checked here against the recipe and the recorded base rpmdb, with no image.
+# tests/devkit_image_contracts.py checks the same map against a built image.
+
+
+
+def _base_rpm_names():
+    lines = (REPO / "licenses/ubi9-python-314-minimal.rpms.txt").read_text(encoding="utf-8").splitlines()
+    return {line.split("\t")[0] for line in lines if line and not line.startswith("#")}
+
+
+def _kit_rpm_names():
+    return {li.rpm_name(nevra)[0] for nevra in li.kit_rpm_lines(REPO) or []}
+
+
+def test_every_command_the_gap_scripts_call_has_a_recorded_kit_provider():
+    """The map names exactly the commands the scripts call: a new command needs a
+    provider, and a command no script calls any more leaves the map."""
+    calls = kitcmd.gap_commands()
+    missing = {c: sorted(s) for c, s in calls.items() if c not in kitcmd.KIT_COMMANDS}
+    assert missing == {}, "add each to KIT_COMMANDS with the kit input that provides it"
+    assert sorted(set(kitcmd.KIT_COMMANDS) - set(calls)) == []
+    # The scan reaches the scripts the gap scripts source and the image's own helpers.
+    scanned = {p.relative_to(REPO).as_posix() for p in kitcmd.script_paths()}
+    assert {"scripts/tools/task-artifact.sh", "scripts/airgap/common.sh", "scripts/gap/import_release.sh",
+            "scripts/devkit/install.sh", "images/devkit/bin/mfr-opencode"} <= scanned
+    # The issue's commands (#1183), named independently of the scan.
+    assert {"cmp", "sha256sum", "python3", "git", "tar", "skopeo", "openssl", "oc", "awk"} <= set(calls)
+
+
+def test_command_scan_ignores_directories_among_the_kit_helpers(tmp_path):
+    """A directory beside the image's helpers (a ``__pycache__`` an earlier test left by
+    importing one) is not a script: the scan must not depend on test order."""
+    bin_dir = tmp_path / "images/devkit/bin"
+    (bin_dir / "__pycache__").mkdir(parents=True)
+    (bin_dir / "mfr-helper").write_text("#!/usr/bin/env python3\nprint('ok')\n", encoding="utf-8")
+    calls = kitcmd.gap_commands(tmp_path)
+    assert calls == {"env": {"images/devkit/bin/mfr-helper"}, "python3": {"images/devkit/bin/mfr-helper"}}
+
+
+def test_each_kit_command_provider_is_installed_by_the_image_recipe():
+    """Each provider is in the image: an RPM the recipe installs or the pinned base
+    holds, a pinned tool the recipe stages into /usr/local/bin, or the base's Python."""
+    recipe = (REPO / "images/Containerfile.devkit").read_text(encoding="utf-8")
+    rpms = _kit_rpm_names() | _base_rpm_names()
+    absent = []
+    for name, provider in sorted(kitcmd.KIT_COMMANDS.items()):
+        kind, _, detail = provider.partition(":")
+        if kind == "rpm":
+            ok = detail in rpms
+        elif kind == "tool":
+            ok = (f'"$pins/{detail}-pin.txt"' in recipe or f"{detail}-pin.txt" in recipe) and (
+                (REPO / f"scripts/tools/{detail}-pin.txt").is_file()
+                or (REPO / f"images/devkit/agents/{detail}-pin.txt").is_file())
+        elif kind == "kit-bin":
+            ok = (REPO / "images/devkit/bin" / name).is_file()
+        elif kind == "app-root":
+            ok = re.search(r"^FROM registry\.access\.redhat\.com/ubi9/python-314-minimal@sha256:[0-9a-f]{64}",
+                           recipe, re.MULTILINE) is not None
+        else:
+            ok = False
+        if not ok:
+            absent.append(f"{name}: {provider}")
+    assert absent == [], "the kit image does not provide these gap-script commands"
+    # cmp and diff come from diffutils, which the recipe installs by exact NEVRA (#1183).
+    assert "diffutils-0:3.7-12.el9.x86_64" in (li.kit_rpm_lines(REPO) or [])
+
+
+def test_command_scan_reads_command_positions_and_skips_data(tmp_path):
+    """The scan's own contract on a script with every construct the gap scripts use."""
+    script = tmp_path / "s.sh"
+    script.write_text(
+        "#!/bin/sh\n"
+        "# a comment naming `notacmd1` and $(notacmd2)\n"
+        "set -eu\n"
+        "helper() { alpha \"$1\"; }\n"
+        "X=$(beta -x | gamma) Y=\"${Z:-not acmd3}\" delta --flag\n"
+        "N=$((N + 1))\n"
+        "if epsilon; then zeta; elif ! eta; then :; else theta; fi\n"
+        "case \"$1\" in\n"
+        "    patone|pattwo) iota ;;\n"
+        "    *) kappa\n"
+        "        ;;\n"
+        "esac\n"
+        "for t in lambda mu; do command -v \"$t\" >/dev/null || exit 1; done\n"
+        "command -v nu >/dev/null\n"
+        "env -u GIT_DIR xi --arg\n"
+        "omicron 2>/dev/null </dev/null && pi || rho\n"
+        "printf '%s' \"$(sigma \"$(tau)\")\" `upsilon`\n"
+        "cat <<'EOF' | phi\n"
+        "heredocword --not-a-command\n"
+        "EOF\n"
+        "find . -print0 | xargs -0 chi\n"
+        "exec psi \"$@\"\n"
+        "helper x\n",
+        encoding="utf-8")
+    assert kitcmd.scan(script) - kitcmd.defined_functions([script]) == {
+        "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa", "lambda", "mu",
+        "nu", "env", "xi", "omicron", "pi", "rho", "sigma", "tau", "upsilon", "cat", "phi", "find", "xargs",
+        "chi", "psi"}
+    assert kitcmd.interpreter(script) == {"sh"}

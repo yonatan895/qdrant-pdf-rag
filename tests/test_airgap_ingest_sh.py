@@ -23,6 +23,7 @@ from tests.helpers_airgap import (
     rendered_container,
     rendered_env,
     run_sh,
+    system_path,
     write_git_identity_stub,
     write_signed_manifest,
     write_stub,
@@ -57,7 +58,7 @@ def _run_ingest(tree, *extra_env, policy: tuple[str, str, str] | None = ("1", "1
     """
     tmp_path, kc_log = tree
     env = {
-        "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin",
+        "PATH": system_path(tmp_path / 'bin'),
         "KC_LOG": str(kc_log),
         "IMAGE_SHA": IMAGE_SHA,
         "INTERNAL_REGISTRY": "reg.internal:5000",
@@ -282,7 +283,7 @@ def test_ingest_logs_follow_retry_and_stop_owned_stream(ingest_tree, job_succeed
     from pathlib import Path
 
     tree, _ = ingest_tree
-    write_stub(tree / "bin/kubectl", """#!/usr/bin/python3
+    write_stub(tree / "bin/kubectl", """#!/usr/bin/env python3
 import os,signal,sys,time
 from pathlib import Path
 a=sys.argv[1:]
@@ -333,7 +334,7 @@ def test_ingest_cancellation_reaps_local_observers(ingest_tree, cancel_signal, c
     from pathlib import Path
 
     tree, _ = ingest_tree
-    write_stub(tree / "bin/kubectl", """#!/usr/bin/python3
+    write_stub(tree / "bin/kubectl", """#!/usr/bin/env python3
 import os,sys,time
 from pathlib import Path
 a=sys.argv[1:]

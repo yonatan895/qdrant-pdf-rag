@@ -19,6 +19,7 @@ from tests.helpers_airgap import (
     copy_chart,
     install_rendering_helm,
     make_bin_tree,
+    system_path,
     write_stub,
 )
 
@@ -49,7 +50,7 @@ def _run_pipeline(pipe_tree, *args, extra_env=None):
     empty_env = pipe_tree / "empty.env"
     empty_env.write_text("")
     env = {
-        "PATH": f"{pipe_tree / 'bin'}:/usr/bin:/bin",
+        "PATH": system_path(pipe_tree / 'bin'),
         "AIRGAP_DRYRUN": "1",
         "AIRGAP_ENV": str(empty_env),
         "IMAGE_SHA": IMAGE_SHA,
@@ -288,7 +289,7 @@ def _task_tree(pipe_tree):
 def _run_task(pipe_tree, task, *args, extra_env=None):
     import subprocess as _sp
 
-    env = {"PATH": f"{pipe_tree / 'bin'}:{os.path.dirname(task)}:/usr/bin:/bin",
+    env = {"PATH": system_path(pipe_tree / 'bin', os.path.dirname(task)),
            "HOME": str(pipe_tree), **(extra_env or {})}
     return _sp.run([task, "--taskfile", str(pipe_tree / "Taskfile.yml"), "--dir", str(pipe_tree), *args],
                    capture_output=True, text=True, env=env, cwd=pipe_tree, check=False, timeout=300)
@@ -386,7 +387,7 @@ def _release_gate_owui_site_env(state):
     assert setup and block, "Open WebUI site-key blocks moved"
     r = subprocess.run(["sh", "-ec", setup.group(1) + "\n" + block.group(1)], cwd=REPO, capture_output=True,
                        text=True, check=False,
-                       env={"PATH": "/usr/bin:/bin", "KIND_STATE": str(state), "KIND_NAME": "rag-live-release",
+                       env={"PATH": system_path(), "KIND_STATE": str(state), "KIND_NAME": "rag-live-release",
                             "KIND_NAMESPACE": "rag-kind-gate"})
     assert r.returncode == 0, r.stderr
     owui_state = state / "owui-acceptance"
@@ -513,7 +514,7 @@ def test_release_gate_kind_cluster_matches_the_operator_lane(tmp_path):
     code = re.search(r"python3 - <<'PY'\n(import json, os\nfrom pathlib import Path\nroot = .*?)\nPY\n", doc, re.DOTALL)
     assert code, "Kind config block moved"
     r = subprocess.run([sys.executable, "-", ], input=code.group(1), text=True, capture_output=True, check=False,
-                       env={"KIND_STATE": str(tmp_path), "PATH": "/usr/bin:/bin"})
+                       env={"KIND_STATE": str(tmp_path), "PATH": system_path()})
     assert r.returncode == 0, r.stderr
     lab = json.loads((tmp_path / "kind-config.json").read_text())
     create = next(s for s in job["steps"] if s.get("name") == "Start authenticated TLS registry + Kind")
@@ -568,7 +569,7 @@ def test_release_gate_kind_recipe_creates_a_valid_openobserve_secret(pipe_tree):
     state = pipe_tree / "kind-state"
     state.mkdir()
     r = subprocess.run(["sh", "-ec", block.group(1)], capture_output=True, text=True, check=False,
-                       env={"PATH": f"{pipe_tree / 'bin'}:/usr/bin:/bin", "KIND_STATE": str(state),
+                       env={"PATH": system_path(pipe_tree / 'bin'), "KIND_STATE": str(state),
                             "KIND_NAMESPACE": "rag-kind-gate", "SECRET_CAPTURE": str(capture)})
     assert r.returncode == 0, r.stderr
     secret = __import__("json").loads(capture.read_text())

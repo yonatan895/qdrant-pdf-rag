@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Start and collect OpenCode workers under herdr-core, mode (a) of #1172.
+
+    mfr-agent-workers start   --repo DIR --tasks FILE [--base REF] [--prefix NAME] [--worktrees DIR]
+    mfr-agent-workers collect --tasks FILE [--prefix NAME] [--timeout SECONDS] [--logs DIR]
+
+The tasks file holds one worker per line, `<id><TAB><task>`; `#` lines and blank lines
+are skipped. An id is 1 to 32 of [a-z0-9-], starting with a letter or digit.
+
+start first runs ONE serial warm-up turn (`mfr-opencode run "<warm-up>"`) when OpenCode's
+state database does not exist yet: parallel cold starts on a fresh HOME race to create
+its schema (`table account_state already exists`; the Podman trial lost 4 of 33 workers
+without it, 0 of 18 with it). A failed warm-up starts no worker. Then start gives each
+worker its own git worktree and branch (`agents/<prefix>-<id>`, from
+--base, default HEAD) and launches it in the background as the hc terminal
+`<prefix>-<id>`:
+
+    hc run --bg --name <prefix>-<id> --cwd <worktree> --no-parent -- mfr-opencode run "<task>"
+
+mfr-opencode adds --standalone and the offline settings (docs/agents-vm.md). collect
+runs `hc wait --json` for each worker, saves `hc read` to <logs>/<name>.log and prints
+one line per worker. It exits 0 only when every worker ended by exiting 0. The
+workers keep running if this process, its terminal or the viewer goes away; collect
+again from any shell. Messages are fixed text plus ids and exit codes.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ID = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+WORKER = "mfr-opencode"
+WARM_UP = "Reply with the single word OK. Do not use any tool."
+
+
+class Refused(Exception):
+    pass
+
+
+def tasks(path: Path) -> list[tuple[str, str]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        raise Refused("the tasks file is missing or unreadable") from None
+    out: list[tuple[str, str]] = []
+    for number, line in enumerate(lines, 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        ident, sep, task = line.partition("\t")
+        if not sep or not ID.fullmatch(ident) or not task.strip():
+            raise Refused(f"tasks line {number} is not '<id><TAB><task>' with a valid id")
+        if any(ident == seen for seen, _ in out):
+            raise Refused(f"tasks line {number} repeats an id")
+        out.append((ident, task.strip()))
+    if not out:
+        raise Refused("the tasks file names no worker")
+    return out
+
+
+def hc() -> str:
+    return os.environ.get("MFR_HC_BIN", "hc")
+
+
+def run(argv: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False, **kwargs)
+
+
+def state_db() -> Path:
+    """OpenCode's state database: OPENCODE_DB when absolute, else under the XDG data dir."""
+    configured = os.environ.get("OPENCODE_DB", "")
+    if configured.startswith("/"):
+        return Path(configured)
+    data = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+    return Path(data) / "opencode" / (configured or "opencode.db")
+
+
+def warm_up(cwd: Path) -> None:
+    if state_db().exists():
+        print("warm-up=skipped state-db=present")
+        return
+    try:
+        done = subprocess.run([WORKER, "run", WARM_UP], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              cwd=cwd, timeout=600, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        raise Refused("the warm-up turn did not run; no worker was started") from None
+    if done.returncode != 0:
+        raise Refused(f"the warm-up turn failed (rc {done.returncode}); no worker was started")
+    print("warm-up=done")
+
+
+def start(args: argparse.Namespace) -> int:
+    work = tasks(args.tasks)
+    if not ID.fullmatch(args.prefix):
+        raise Refused("--prefix must match the id pattern")
+    if not args.base or args.base.startswith("-"):
+        raise Refused("--base must name a commit, not an option")
+    repo = args.repo.resolve()
+    worktrees = (args.worktrees or repo.parent / "agent-worktrees").resolve()
+    worktrees.mkdir(parents=True, exist_ok=True)
+    warm_up(repo)
+    failed = 0
+    for ident, task in work:
+        name = f"{args.prefix}-{ident}"
+        path = worktrees / name
+        done = run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", f"agents/{name}", str(path), args.base])
+        if done.returncode != 0:
+            print(f"worker={name} start=failed step=worktree rc={done.returncode}")
+            failed += 1
+            continue
+        done = run([hc(), "run", "--bg", "--name", name, "--cwd", str(path), "--no-parent", "--",
+                    WORKER, "run", task])
+        state = "started" if done.returncode == 0 else f"failed step=hc-run rc={done.returncode}"
+        failed += done.returncode != 0
+        print(f"worker={name} start={state} worktree={path}")
+    return 1 if failed else 0
+
+
+def collect(args: argparse.Namespace) -> int:
+    work = tasks(args.tasks)
+    logs = args.logs.resolve()
+    logs.mkdir(parents=True, exist_ok=True)
+    bad = 0
+    for ident, _ in work:
+        name = f"{args.prefix}-{ident}"
+        waited = run([hc(), "wait", name, "--timeout", str(args.timeout), "--json"])
+        try:
+            state = json.loads(waited.stdout or "{}")
+        except ValueError:
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        read = run([hc(), "read", name])
+        (logs / f"{name}.log").write_text(read.stdout, encoding="utf-8")
+        ok = state.get("ended") is True and state.get("reason") == "exit" and state.get("exit_code") == 0
+        bad += not ok
+        print(f"worker={name} ended={state.get('ended')} reason={state.get('reason')} "
+              f"exit_code={state.get('exit_code')} ok={'yes' if ok else 'no'} log={logs / (name + '.log')}")
+    print(f"workers={len(work)} failures={bad}")
+    return 1 if bad else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="mfr-agent-workers", description=__doc__.split("\n\n")[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    s = sub.add_parser("start")
+    s.add_argument("--repo", type=Path, required=True)
+    s.add_argument("--tasks", type=Path, required=True)
+    s.add_argument("--base", default="HEAD")
+    s.add_argument("--prefix", default="w")
+    s.add_argument("--worktrees", type=Path)
+    c = sub.add_parser("collect")
+    c.add_argument("--tasks", type=Path, required=True)
+    c.add_argument("--prefix", default="w")
+    c.add_argument("--timeout", type=int, default=3600)
+    c.add_argument("--logs", type=Path, default=Path("agent-logs"))
+    args = parser.parse_args(argv)
+    try:
+        return start(args) if args.command == "start" else collect(args)
+    except Refused as error:
+        print(f"mfr-agent-workers: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

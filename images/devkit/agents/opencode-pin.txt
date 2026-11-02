@@ -1,0 +1,29 @@
+# OpenCode pin for the dev workspace image (#1172, ADR-0009 §8).
+#
+# Maintainer decisions 2026-10-31 (#1172 issuecomment-6547202945): checksum-only trust
+# (HTTPS plus the sha256 below; OpenCode publishes no signature or provenance), and the
+# v2 line. The trial rerun (issuecomment-6548130709) chose v2.2.5 over the 1.19.5
+# fallback, with five required settings (docs/agents-vm.md#required-settings).
+#
+# Verification performed 2026-10-31 on the connected host:
+#   gh api repos/anomalyco/opencode/releases/tags/v2.2.5 lists the asset with
+#   digest sha256:09f44302…614e, equal to the downloaded archive's sha256. tar lists one
+#   member, opencode; its digest is binary-sha256 below.
+#   The archive holds no licence file. The licence is the repository root LICENSE at the
+#   v2.2.5 tag (commit 9bbb8ce18c80f099e0e448775f59d965ead40a21, blob 6439474b), MIT,
+#   kept byte-for-byte as images/devkit/agents/opencode-LICENSE (license-sha256 below).
+#
+# The kit build downloads the archive from origin on the connected side only and
+# verifies every digest before it installs anything
+# (images/devkit/agents/install_agent_tools.py, run by images/Containerfile.devkit).
+
+version: 2.2.5
+asset: opencode-linux-x64.tar.gz
+sha256: 09f44302c10fd036912f59c81fd1aef5df45dd06f649197f9dfc9bbe2a79614e
+binary: opencode
+binary-sha256: 8d060e1d2fbb9bb44cf09ae6ed1f3f6a7cff070b5227e2f90970132b23a92050
+origin: https://github.com/anomalyco/opencode/releases/download/v2.2.5/opencode-linux-x64.tar.gz
+license: MIT
+license-source: https://github.com/anomalyco/opencode/blob/9bbb8ce18c80f099e0e448775f59d965ead40a21/LICENSE
+license-sha256: 625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b
+platforms: linux-amd64 only
