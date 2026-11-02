@@ -8,6 +8,7 @@ mechanical tree/run/sign/stub plumbing lives here.
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 import io
 import json
@@ -156,14 +157,17 @@ def copy_license_inputs(tmp_path: Path) -> None:
 
 
 def tar_gz(entries: list[tuple[tarfile.TarInfo, bytes | None]]) -> bytes:
-    """A gzip tar of exactly these entries (regular files get their bytes)."""
+    """A gzip tar of exactly these entries (regular files get their bytes).
+
+    Byte-stable for the same entries: the gzip header mtime is 0, not the clock,
+    so a pin computed from one call matches the next (GH#1185)."""
     buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
         for info, data in entries:
             if data is not None:
                 info.size = len(data)
             archive.addfile(info, io.BytesIO(data) if data is not None else None)
-    return buffer.getvalue()
+    return gzip.compress(buffer.getvalue(), mtime=0)
 
 
 def tar_file(name: str, data: bytes) -> tuple[tarfile.TarInfo, bytes]:
