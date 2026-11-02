@@ -371,7 +371,9 @@ The script runs these steps. Each refusal is a fixed `STOP:` line in it.
    `repo.bundle` HEAD equal to the MANIFEST sha. The trust anchor is
    required; there is no trust on first use. Only an upstream release is
    imported: the MANIFEST must say `origin: upstream` and verify with the
-   upstream anchor, even when the gap anchor is set (F2). The signature covers only the
+   upstream anchor (F2). A gap anchor that is set stays set, so the live
+   guard's anchor rules apply here too: two anchors holding one key, or a gap
+   anchor that is a link or not a readable file, stop this step. The signature covers only the
    listed members, so the tarball may hold nothing else: a link, a path, a
    repeated name or an unlisted member stops the import before that member
    is unpacked. The bundle unpacks into `$R/bundle`, never over a file the

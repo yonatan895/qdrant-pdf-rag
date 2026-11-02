@@ -509,7 +509,8 @@ environment or the workspace `airgap.env`. Each bundle's signed MANIFEST
 declares `origin: upstream` or `origin: gap`, and the live stages and
 `bootstrap.sh` accept only the matching anchor's signature. An anchor that is a
 link, lies inside the checkout or bundle, or holds the same key as the other
-anchor is refused. Each workspace has its own `airgap.env`, so a rollback to a
+anchor (in any encoding) is refused; the release import applies the same
+rules, and the dev kit install refuses one key in both roles. Each workspace has its own `airgap.env`, so a rollback to a
 release signed by a since-rotated key points that workspace's
 `SNEAKERNET_TRUSTED_PUB` at the old public key.
 

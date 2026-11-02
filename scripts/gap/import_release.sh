@@ -245,9 +245,11 @@ main() {
     : > "$WORK/empty.env"
     # common.sh cds to this checkout; the chain is checked from the bundle
     # directory with a relative name (sha256sum escapes some path characters).
-    # Only an upstream release is imported (#1118 F2), verified with the
-    # upstream anchor alone: a gap anchor in the environment plays no part.
-    if ! env -u SNEAKERNET_GAP_TRUSTED_PUB AIRGAP_ENV="$WORK/empty.env" AIRGAP_DRYRUN=0 \
+    # Only an upstream release is imported (#1118 F2). Both anchors stay set,
+    # so every rule of the live guard applies (#1180 N1): a gap anchor that is
+    # not a plain readable file, or that holds the upstream anchor's key, stops
+    # here, as it stops every live stage.
+    if ! AIRGAP_ENV="$WORK/empty.env" AIRGAP_DRYRUN=0 \
             sh -c '. "$1" && cd "$2" && check_manifest_chain MANIFEST.txt verified upstream' \
             "$SELF" "$COMMON" "$UNPACKED"; then
         if ! grep -qx 'origin: upstream' "$UNPACKED/MANIFEST.txt"; then

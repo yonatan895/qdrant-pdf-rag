@@ -68,8 +68,13 @@ case "$TRUSTED" in
 esac
 # Kits are built connected and signed by the upstream key only (#1118 F2): an
 # upstream anchor that is the gap release key would let the gap key install one.
+# Key identity, not bytes, as the live guard compares anchors (common.sh
+# check_release_anchors, #1180 N2): a PEM and a DER copy of one key are one key.
+key_identity() {
+    { openssl pkey -pubin -in "$1" -outform DER 2>/dev/null || cat -- "$1"; } | sha256sum | awk '{print $1}'
+}
 if [ -n "${SNEAKERNET_GAP_TRUSTED_PUB:-}" ] && [ -f "$SNEAKERNET_GAP_TRUSTED_PUB" ] &&
-    cmp -s "$SNEAKERNET_TRUSTED_PUB" "$SNEAKERNET_GAP_TRUSTED_PUB"; then
+    [ "$(key_identity "$SNEAKERNET_TRUSTED_PUB")" = "$(key_identity "$SNEAKERNET_GAP_TRUSTED_PUB")" ]; then
     die "SNEAKERNET_TRUSTED_PUB holds the same key as SNEAKERNET_GAP_TRUSTED_PUB: a kit is signed by the upstream release key only; point SNEAKERNET_TRUSTED_PUB at the upstream release-signing key"
 fi
 

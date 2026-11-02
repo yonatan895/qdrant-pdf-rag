@@ -701,15 +701,23 @@ def test_install_requires_an_independent_trusted_key(packed, trust, message):
     assert not Path(ctx["env"]["STUB_REGISTRY"]).exists()
 
 
-def test_install_refuses_an_upstream_anchor_that_is_the_gap_key(packed):
+@pytest.mark.parametrize("encoding", ["pem-copy", "der"])
+def test_install_refuses_an_upstream_anchor_that_is_the_gap_key(packed, encoding):
     """#1118 F2 G4: kits are signed by the upstream release key only, so an
     SNEAKERNET_TRUSTED_PUB holding the same key as SNEAKERNET_GAP_TRUSTED_PUB
-    is refused before any push (the gap key can never install a kit); with a
-    distinct gap anchor exported the next ordinary install passes."""
+    is refused before any push (the gap key can never install a kit). Key
+    identity, not bytes, as the live guard compares it (#1180 N2): the same
+    key re-encoded as DER is refused too. With a distinct gap anchor exported
+    the next ordinary install passes."""
     ctx, kit, _ = packed
     same = ctx["tmp"] / "anchors" / "gap.pub"
     same.parent.mkdir()
-    shutil.copy(ctx["pub"], same)
+    if encoding == "der":
+        subprocess.run(["openssl", "pkey", "-pubin", "-in", str(ctx["pub"]), "-outform", "DER", "-out", str(same)],
+                       check=True, capture_output=True)
+        assert same.read_bytes() != Path(ctx["pub"]).read_bytes()
+    else:
+        shutil.copy(ctx["pub"], same)
     done = run_install(ctx, kit, SNEAKERNET_GAP_TRUSTED_PUB=str(same))
     assert done.returncode != 0
     assert ("SNEAKERNET_TRUSTED_PUB holds the same key as SNEAKERNET_GAP_TRUSTED_PUB: a kit is signed by the "

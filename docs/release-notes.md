@@ -91,6 +91,7 @@ Keep both anchors as plain files in `/work/anchors/` on the bastion, never
 inside a workspace or bundle and never as links, and never point the two
 variables at the same key: each is refused with a fixed message.
 `bootstrap.sh` applies the same rule when an anchor is set, the release import
-accepts only `origin: upstream`, and `scripts/devkit/install.sh` refuses an
-upstream anchor that is the gap key. Both anchors are listed, commented out, in
+accepts only `origin: upstream` under the same anchor rules, and
+`scripts/devkit/install.sh` refuses an upstream anchor that is the gap key
+(compared as keys, so a PEM and a DER copy of one key are refused). Both anchors are listed, commented out, in
 `airgap.env.example`. Nothing is removed.

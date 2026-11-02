@@ -685,6 +685,10 @@ def _anchors(bundle_dir):
                          "SNEAKERNET_TRUSTED_PUB")),
     ("same-key-both-roles", ("release trust anchors SNEAKERNET_TRUSTED_PUB and SNEAKERNET_GAP_TRUSTED_PUB hold "
                              "the same key")),
+    ("gap-key-in-both-roles", ("release trust anchors SNEAKERNET_TRUSTED_PUB and SNEAKERNET_GAP_TRUSTED_PUB "
+                               "hold the same key")),
+    ("same-key-der-encoded", ("release trust anchors SNEAKERNET_TRUSTED_PUB and SNEAKERNET_GAP_TRUSTED_PUB hold "
+                              "the same key")),
     ("anchor-inside-bundle", "release trust anchor SNEAKERNET_TRUSTED_PUB lies inside the bundle it would verify"),
     ("anchor-is-a-link", "release trust anchor SNEAKERNET_GAP_TRUSTED_PUB is not a readable plain file (not a link)"),
     ("no-origin", "MANIFEST.txt must declare exactly one release origin"),
@@ -706,6 +710,14 @@ def test_bootstrap_with_an_anchor_binds_the_bundled_key_to_the_declared_origin(b
         env.pop("SNEAKERNET_TRUSTED_PUB")
     elif case == "same-key-both-roles":
         env["SNEAKERNET_GAP_TRUSTED_PUB"] = env["SNEAKERNET_TRUSTED_PUB"]
+    elif case == "gap-key-in-both-roles":  # #1180 N1's counterexample, refused like import step 1
+        _repack(bundle_dir, key=gap_release_key())
+        env["SNEAKERNET_TRUSTED_PUB"] = env["SNEAKERNET_GAP_TRUSTED_PUB"]
+    elif case == "same-key-der-encoded":  # key identity, as common.sh and devkit/install.sh compare it
+        der = bundle_dir.parent / "work" / "anchors" / "gap.der"
+        subprocess.run(["openssl", "pkey", "-pubin", "-in", env["SNEAKERNET_TRUSTED_PUB"], "-outform", "DER",
+                        "-out", str(der)], check=True, capture_output=True)
+        env["SNEAKERNET_GAP_TRUSTED_PUB"] = str(der)
     elif case == "anchor-inside-bundle":
         shutil.copy(env["SNEAKERNET_TRUSTED_PUB"], bundle_dir / "upstream.pub")
         env["SNEAKERNET_TRUSTED_PUB"] = str(bundle_dir / "upstream.pub")
