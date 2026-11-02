@@ -287,8 +287,11 @@ if 'IMPORT_TRACE' in os.environ:
 '''
     (foreign / "trace_hook.py").write_text(trace_hook)
     (foreign / "sitecustomize.py").write_text("import trace_hook\n")
+    # The test interpreter's packages: its purelib, plus the image environment a dev
+    # kit venv layers in through its own .pth, which a plain path line skips (#1183).
+    installed = dict.fromkeys([sysconfig.get_path("purelib"), *(p for p in sys.path if p.endswith("site-packages"))])
     (site / "foreign-editable.pth").write_text(
-        f"{foreign}\n{sysconfig.get_path('purelib')}\nimport trace_hook\n")
+        f"{foreign}\n" + "".join(f"{path}\n" for path in installed) + "import trace_hook\n")
     probe = subprocess.run([str(environment / "bin/python"), "-c",
                             "import mainframe_rag; print(mainframe_rag.__file__)"],
                            env={"PATH": os.defpath}, capture_output=True, text=True, check=True)

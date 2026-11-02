@@ -30,6 +30,7 @@ from tests.helpers_airgap import (
     set_oauth_proxy_pin,
     set_openwebui_pin,
     sha256_bytes,
+    system_path,
     write_git_identity_stub,
     write_signed_manifest,
     write_stub,
@@ -171,7 +172,7 @@ def tree(tmp_path):
 def _run(tree, *extra_env):
     tmp_path, _ = tree
     env = {
-        "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin",
+        "PATH": system_path(tmp_path / 'bin'),
         "HELM_LOG": str(tmp_path / "helm-args.log"),
         "IMAGE_SHA": IMAGE_SHA,
         "INTERNAL_REGISTRY": "reg.internal",
@@ -259,7 +260,7 @@ def test_model_budget_operator_precedence_reaches_rendered_pod(tree, source):
             ["sh", str(tools / "run-task.sh"), "airgap:deploy",
              *[f"{key}={value}" for key, value in selected.items()]],
             capture_output=True, text=True, check=False, cwd=root,
-            env={"PATH": f"{root / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(log),
+            env={"PATH": system_path(root / 'bin'), "HELM_LOG": str(log),
                  "AIRGAP_ENV": str(env_file), "AIRGAP_DRYRUN": "1", **alternate},
         )
     else:
@@ -1406,7 +1407,7 @@ def test_openwebui_domain_qualified_roles_reach_the_pod_verbatim(tree, source):
             shutil.copyfile(REPO / "scripts/tools" / name, tools / name)
         (root / ".tools/bin").mkdir(parents=True)
         (root / ".tools/bin/task").symlink_to(REPO / ".tools/bin/task")
-        env = {"PATH": f"{root / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(log),
+        env = {"PATH": system_path(root / 'bin'), "HELM_LOG": str(log),
                "IMAGE_SHA": IMAGE_SHA, "INTERNAL_REGISTRY": "reg.internal", "NAMESPACE": "ns",
                "STORAGE_CLASS": "standard", "EMBED_MODEL": "embed", "DENSE_DIM": "64",
                "EMBED_MODEL_REVISION": "rev-1", "EMBED_BASE_URL": "http://vllm:8000/v1",
@@ -2031,7 +2032,7 @@ def _trace_query(tree, flags, env=None):
     return subprocess.run(
         ["sh", "-c", TRACE_QUERY.replace("FLAGS", flags)], cwd=tree[0], capture_output=True,
         text=True, check=False,
-        env={"PATH": f"{tree[0] / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(tree[1]), **(env or {})})
+        env={"PATH": system_path(tree[0] / 'bin'), "HELM_LOG": str(tree[1]), **(env or {})})
 
 
 def test_default_smoke_gets_trace_query_settings_without_manual_env(tree):

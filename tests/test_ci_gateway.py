@@ -21,7 +21,13 @@ import yaml
 from mainframe_rag.config import Settings
 from mainframe_rag.retrieve.filters import parse_query, query_kind
 from mainframe_rag.retrieve.rerank import HttpReranker, probe_reranker
-from tests.helpers_airgap import copy_chart, install_rendering_helm, make_bin_tree, write_stub
+from tests.helpers_airgap import (
+    copy_chart,
+    install_rendering_helm,
+    make_bin_tree,
+    system_path,
+    write_stub,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -69,7 +75,7 @@ def gateway_rendered(tmp_path, resident_kubectl):
     path.write_text(example
                     + "\n" + "\n".join(f"{key}={value}" for key, value in selected.items()) + "\n")
     result = subprocess.run(["sh", "scripts/airgap/pipeline.sh", "--skip-load"], cwd=tmp_path,
-                            env={"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin", "AIRGAP_DRYRUN": "1"},
+                            env={"PATH": system_path(tmp_path / 'bin'), "AIRGAP_DRYRUN": "1"},
                             capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
     return tmp_path
@@ -293,7 +299,7 @@ def test_gateway_check_round_trips_context_model_and_rejects_drift(gateway_rende
                       + f"\nCONTEXT_LLM_MODEL={shlex.quote(context_model)}\n"
                       + f"CONTEXTUAL_EMBED_ENABLED={'true' if context_model else 'false'}\n")
     rendered = subprocess.run(["sh", "scripts/airgap/pipeline.sh", "--skip-load"], cwd=gateway_rendered,
-                              env={"PATH": f"{gateway_rendered / 'bin'}:/usr/bin:/bin", "AIRGAP_DRYRUN": "1"},
+                              env={"PATH": system_path(gateway_rendered / 'bin'), "AIRGAP_DRYRUN": "1"},
                               capture_output=True, text=True, check=False)
     assert rendered.returncode == 0, rendered.stdout + rendered.stderr
     job = yaml.safe_load((gateway_rendered / "dist/ingest-rendered.yaml").read_text())

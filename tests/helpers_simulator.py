@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -20,9 +21,11 @@ def prepare_simulator(root: Path, log: Path) -> dict[str, str]:
     bindir = root / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
     path = bindir / "docker"
+    # The recorder runs on this test's interpreter: os.defpath need not hold a python3
+    # (the dev kit image has only python3.14 in /usr/bin, #1183).
     path.write_text(
         '#!/bin/sh\n'
-        'python3 - "$RECORDER_LOG" "tool-docker" "$@" <<\'PYEOF\'\n'
+        f'{shlex.quote(sys.executable)} - "$RECORDER_LOG" "tool-docker" "$@" <<\'PYEOF\'\n'
         'import json, os, sys\n'
         'log, tag, argv = sys.argv[1], sys.argv[2], sys.argv[3:]\n'
         'with open(log, "a", encoding="utf-8") as fh:\n'

@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -18,6 +19,25 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 STUB_TOOL = "#!/bin/sh\nexit 0\n"
+
+SYSTEM_DIRS = ("/usr/bin", "/bin")
+
+
+def system_path(*front: str | os.PathLike[str], system_dirs: tuple[str, ...] = SYSTEM_DIRS) -> str:
+    """A narrowed PATH: the `front` directories, then only the system tool directories.
+
+    The product scripts still need the operator's `python3` (common.sh refuses
+    without it). Ubuntu keeps it in /usr/bin; the dev kit image keeps only
+    python3.14 there and `python3` in /opt/app-root/bin (#1183). When the
+    system directories hold no `python3`, the directory of the one the test
+    environment resolves follows them, so a system tool still wins.
+    """
+    dirs = [os.fspath(path) for path in front] + list(system_dirs)
+    if shutil.which("python3", path=os.pathsep.join(system_dirs)) is None:
+        interpreter = shutil.which("python3")
+        if interpreter is not None:
+            dirs.append(os.path.dirname(interpreter))
+    return os.pathsep.join(dirs)
 
 
 def set_oauth_proxy_pin(tree: Path, digest: str) -> None:

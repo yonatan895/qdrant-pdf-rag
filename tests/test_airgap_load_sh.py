@@ -25,6 +25,7 @@ from tests.helpers_airgap import (
     run_sh,
     sha256_bytes,
     sign_sums,
+    system_path,
     write_git_identity_stub,
     write_stub,
 )
@@ -224,7 +225,7 @@ def load_tree(tmp_path):
 def _run_load(tree, *extra_env, cwd=None):
     tmp_path, skopeo_log = tree
     env = {
-        "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin",
+        "PATH": system_path(tmp_path / 'bin'),
         "SKOPEO_LOG": str(skopeo_log),
         "SKOPEO_STATE": str(tmp_path / "skopeo-state"),
         "IMAGE_SHA": IMAGE_SHA,
@@ -271,7 +272,7 @@ def test_load_succeeds_from_the_parent_dir_and_an_explicit_bundle_dir(load_tree)
     (subdir / "scripts" / "airgap").mkdir(parents=True)
     for f in ("common.sh", "load.sh", "image_identity.sh", "image_manifest.py", "model_config.py"):
         shutil.copy(REPO / "scripts" / "airgap" / f, subdir / "scripts" / "airgap" / f)
-    env = {"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin", "SKOPEO_LOG": str(skopeo_log),
+    env = {"PATH": system_path(tmp_path / 'bin'), "SKOPEO_LOG": str(skopeo_log),
            "SKOPEO_STATE": str(tmp_path / "skopeo-state"), "IMAGE_SHA": IMAGE_SHA,
            "INTERNAL_REGISTRY": "reg.internal:5000", "SNEAKERNET_TRUSTED_PUB": str(release_anchor())}
     r = subprocess.run(["sh", str(subdir / "scripts" / "airgap" / "load.sh")], capture_output=True,

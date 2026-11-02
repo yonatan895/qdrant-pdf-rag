@@ -11,6 +11,7 @@ Tests validate.sh in dry-run mode against hermetic stubs:
 import os
 import re
 import shutil
+import subprocess
 
 import pytest
 
@@ -26,6 +27,7 @@ from tests.helpers_airgap import (
     retired_keys_listed,
     run_sh,
     symlink_tools,
+    system_path,
     write_signed_manifest,
     write_stub,
 )
@@ -58,7 +60,7 @@ def _kubectl_stub(resource, stderr_text, rc=1):
 
 def _run(tree, extra_env=None):
     env = {
-        "PATH": f"{tree / 'bin'}:/usr/bin:/bin",
+        "PATH": system_path(tree / 'bin'),
         "AIRGAP_DRYRUN": "1",
         # Issue #478: an empty regular file (not /dev/null) keeps the
         # environment-only shape while ignoring repo ./airgap.env. A
@@ -535,7 +537,7 @@ def _guard_run(tree, manifest_rel, extra_env=None):
 
     from tests.helpers_airgap import release_anchor
 
-    env = {"PATH": "/usr/bin:/bin", "GUARD_MANIFEST": manifest_rel,
+    env = {"PATH": system_path(), "GUARD_MANIFEST": manifest_rel,
            "SNEAKERNET_TRUSTED_PUB": str(release_anchor())}
     for key, value in (extra_env or {}).items():
         if value is None:
@@ -1776,6 +1778,31 @@ def test_validate_live_reports_the_stored_layout(tree, layout):
 
 
 # --- Retired airgap.env keys (#1070): silent ignoring becomes a loud refusal ---
+
+
+@pytest.mark.parametrize("system_python3", [True, False], ids=["ubuntu-shape", "kit-image-shape"])
+def test_narrowed_path_keeps_the_product_python3_after_the_system_tools(tmp_path, system_python3):
+    """#1183: the narrowed PATH these tests run under still resolves the python3 that
+    common.sh's retired-key check requires. The dev kit image keeps only python3.14 in
+    /usr/bin; there the test environment's python3 follows the system directories, so a
+    system tool of the same name still wins and nothing else is put in front."""
+    system, front = tmp_path / "system", tmp_path / "front"
+    system.mkdir()
+    front.mkdir()
+    (system / "sh").symlink_to(shutil.which("sh") or "/bin/sh")
+    if system_python3:
+        write_stub(system / "python3", "#!/bin/sh\nexit 0\n")
+    path = system_path(front, system_dirs=(str(system),))
+    dirs = path.split(os.pathsep)
+    assert dirs[:2] == [str(front), str(system)]
+    expected = str(system / "python3") if system_python3 else shutil.which("python3")
+    assert expected is not None
+    assert len(dirs) == (2 if system_python3 else 3)
+    resolved = subprocess.run([str(system / "sh"), "-c", "command -v python3"], env={"PATH": path},
+                              capture_output=True, text=True, check=True).stdout.strip()
+    assert resolved == expected
+    assert shutil.which("python3", path=system_path()) is not None  # this host's real directories
+
 
 
 def _assert_retired_refusal(r, calls, expected):

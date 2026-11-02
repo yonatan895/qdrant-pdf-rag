@@ -18,7 +18,13 @@ import subprocess
 
 import pytest
 
-from tests.helpers_airgap import FakeQdrant, connected_checkout, make_bin_tree, write_stub
+from tests.helpers_airgap import (
+    FakeQdrant,
+    connected_checkout,
+    make_bin_tree,
+    system_path,
+    write_stub,
+)
 
 L, LC = "mainframe_manuals", "mainframe_manuals__completions"
 K, KC = "mainframe_manuals_d53595e_keep", "mainframe_manuals_d53595e_keep__completions"
@@ -82,7 +88,7 @@ def tree(tmp_path):
 
 def _run(tree, qdrant, *args, **env):
     base = {
-        "PATH": f"{tree / 'bin'}:/usr/bin:/bin",
+        "PATH": system_path(tree / 'bin'),
         "KC_LOG": str(tree / "kc.log"),
         "AIRGAP_ENV": str(tree / "empty.env"),
         "NAMESPACE": "ns",
@@ -175,7 +181,7 @@ def _layout(qdrant):
     done = subprocess.run(
         ["python3", str(REPO / "scripts/airgap/legacy_layout.py"), "check", "--collection", L],
         input="\n", capture_output=True, text=True, check=False,
-        env={"PATH": "/usr/bin:/bin", "QDRANT_URL": qdrant.url, "QDRANT_API_KEY": FakeQdrant.READ_KEY})
+        env={"PATH": system_path(), "QDRANT_URL": qdrant.url, "QDRANT_API_KEY": FakeQdrant.READ_KEY})
     return done.stdout.strip()
 
 
