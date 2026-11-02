@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 from pathlib import PurePosixPath
 
 import pytest
@@ -887,7 +888,7 @@ GOOD_DOC_ENTRIES = [tar_file(f"{DOC_ROOT}/LICENSE", b"MIT License\n"), tar_file(
                     tar_file(f"{DOC_ROOT}/src/main.go", b"package main\n")]
 
 
-def test_reference_docs_builder_keeps_the_subset_and_licence_only(tmp_path):
+def test_reference_docs_builder_keeps_the_subset_and_licence_only(tmp_path, monkeypatch):
     result, out = _refdocs_build(tmp_path, GOOD_DOC_ENTRIES)
     assert result.returncode == 0, result.stderr
     assert "reference-docs: OK sets=1 files=" in result.stdout
@@ -899,9 +900,13 @@ def test_reference_docs_builder_keeps_the_subset_and_licence_only(tmp_path):
             "reference-docs/project/docs/a.md", "reference-docs/sets/doc-set/LICENSE",
             "reference-docs/sets/doc-set/docs/index.md"]
         assert archive.extractfile("reference-docs/sets/doc-set/docs/index.md").read() == b"# Index\n"
-    # Deterministic: the same pins and commit give the same bytes.
+    # Deterministic: the same pins and commit give the same bytes, also when the
+    # second build starts in a later second (GH#1185: a clock-stamped fixture
+    # changed the pin, so INDEX.md differed whenever the builds straddled a second).
     first = out.read_bytes()
     out.unlink()
+    later = time.time() + 86400
+    monkeypatch.setattr(time, "time", lambda: later)
     again, _ = _refdocs_build(tmp_path, GOOD_DOC_ENTRIES)
     assert again.returncode == 0 and out.read_bytes() == first
 
