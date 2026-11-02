@@ -1921,6 +1921,16 @@ def test_every_command_the_gap_scripts_call_has_a_recorded_kit_provider():
     assert {"cmp", "sha256sum", "python3", "git", "tar", "skopeo", "openssl", "oc", "awk"} <= set(calls)
 
 
+def test_command_scan_ignores_directories_among_the_kit_helpers(tmp_path):
+    """A directory beside the image's helpers (a ``__pycache__`` an earlier test left by
+    importing one) is not a script: the scan must not depend on test order."""
+    bin_dir = tmp_path / "images/devkit/bin"
+    (bin_dir / "__pycache__").mkdir(parents=True)
+    (bin_dir / "mfr-helper").write_text("#!/usr/bin/env python3\nprint('ok')\n", encoding="utf-8")
+    calls = kitcmd.gap_commands(tmp_path)
+    assert calls == {"env": {"images/devkit/bin/mfr-helper"}, "python3": {"images/devkit/bin/mfr-helper"}}
+
+
 def test_each_kit_command_provider_is_installed_by_the_image_recipe():
     """Each provider is in the image: an RPM the recipe installs or the pinned base
     holds, a pinned tool the recipe stages into /usr/local/bin, or the base's Python."""
