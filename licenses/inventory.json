@@ -582,7 +582,7 @@
   ],
   "devkit": {
     "approval": {
-      "approval_ref": "maintainer in-session approval, relayed by the coordinator (yonatan895, 2026-11-02): #1183 option A (diffutils) and the #1181 kit licence scope at this digest",
+      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/pull/1181#issuecomment-6576583551",
       "approved_digest": "32132abeedcae2772e2f08d540358fe859b7290f03aaf1e62ba05ee9460b5bc4"
     },
     "components": [
