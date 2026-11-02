@@ -17,6 +17,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.helpers_airgap import system_path
+
 ROOT = Path(__file__).resolve().parents[1]
 GATE = ROOT / 'scripts/ci/egress_gate.sh'
 PROBE = ROOT / 'scripts/ci/egress_probe.py'
@@ -101,7 +103,7 @@ def stubs(tmp_path):
                        ('setpriv', SETPRIV_STUB), ('getent', GETENT_STUB), ('groupadd', GROUPADD_STUB)):
         (bindir / name).write_text(body)
         (bindir / name).chmod(0o755)
-    env = {**os.environ, 'PATH': f'{bindir}:/usr/bin:/bin', 'STATE': str(state)}
+    env = {**os.environ, 'PATH': system_path(bindir), 'STATE': str(state)}
     env.pop('EGRESS_GATE_GROUP', None)
 
     def gate(*args, **overrides):
@@ -409,7 +411,7 @@ def node_probe(tmp_path, curl_exit, nodes='gapbox-control-plane'):
     (bindir / 'docker').chmod(0o755)
     script = step['run'].replace('/usr/local/bin/kind', str(tmp_path / 'kind'))
     return subprocess.run(['bash', '-ec', script], capture_output=True, text=True, check=False,
-                          env={**os.environ, 'PATH': f'{bindir}:/usr/bin:/bin', 'NODES': nodes,
+                          env={**os.environ, 'PATH': system_path(bindir), 'NODES': nodes,
                                'CURL_EXIT': str(curl_exit)})
 
 

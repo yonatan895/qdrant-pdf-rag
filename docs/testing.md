@@ -80,7 +80,8 @@ Pure builders live in `tests/fakes.py` (`make_hit`, `make_point`,
 `QdrantFake`, `LegacyQdrantFake`, `EmbedderFake`, `RerankerFake`,
 `PromotingRerankerFake`, `settings_kw`, `iter_golden_queries`,
 `vllm_models_mock`, `embedding_mock`) and `tests/helpers_airgap.py` (`make_bin_tree`,
-`run_sh`, `sign_sums`, `skopeo_stub`, `assert_pull_secret_wired`).
+`run_sh`, `sign_sums`, `skopeo_stub`, `assert_pull_secret_wired`, and `system_path`, the
+narrowed PATH that keeps the product's `python3` in the dev kit image).
 `tests/conftest.py` re-exports the retrieval doubles as
 backwards-compatible aliases — import from either, define in neither.
 

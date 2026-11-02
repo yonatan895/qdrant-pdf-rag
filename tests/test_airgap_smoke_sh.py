@@ -5,11 +5,12 @@ search success path, search failure path, and namespace validation.
 """
 
 import contextlib
+import os
 from pathlib import Path
 
 import pytest
 
-from tests.helpers_airgap import make_bin_tree, run_sh, write_stub
+from tests.helpers_airgap import make_bin_tree, run_sh, system_path, write_stub
 
 STUB_KC_TEMPLATE = """#!/bin/sh
 # Check if this is the healthz probe, search query, or OpenObserve trace poll.
@@ -56,7 +57,7 @@ def _setup_stub(tmp_path, health_exit=0, search_exit=0, default_exit=0, trace_ex
 
 def _run_smoke(tmp_path, *extra_env):
     env = {
-        "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin",
+        "PATH": system_path(tmp_path / 'bin'),
         "NAMESPACE": "test-ns",
         "QUERY": "IEA500I test",
         "TRACE_QUERY_URL": "http://o2:5080",
@@ -80,7 +81,7 @@ def _clean_sysbin(tmp_path):
     clean_bin = tmp_path / "clean_sysbin"
     if not clean_bin.exists():
         clean_bin.mkdir(exist_ok=True)
-        for bin_dir in ("/bin", "/usr/bin"):
+        for bin_dir in system_path().split(os.pathsep):
             p_dir = Path(bin_dir)
             if not p_dir.is_dir():
                 continue
