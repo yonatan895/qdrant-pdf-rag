@@ -596,11 +596,10 @@ AMBIGUOUS_RPMS = {"cracklib", "cracklib-dicts", "gzip", "less", "libcbor", "libd
                   "libfdisk", "libfido2", "libpwquality", "libseccomp", "libutempter", "openssh",
                   "openssh-clients", "pam", "shadow-utils-subid", "util-linux", "util-linux-core"}
 ALL_LICENCES_REF = "https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6543481300"
-# The kit scope approval in force: the maintainer's in-session decision of 2026-11-02
-# (#1183 option A, #1181), relayed by the coordinator. It binds the scope with the two
-# agent tools (#1172) and diffutils (#1183); 854999ae… (#1118) is superseded.
-KIT_SCOPE_APPROVAL_REF = ("maintainer in-session approval, relayed by the coordinator (yonatan895, 2026-11-02): "
-                          "#1183 option A (diffutils) and the #1181 kit licence scope at this digest")
+# The kit scope approval in force: the maintainer's decision of 2026-11-02 on #1181
+# (#1183 option A). It binds the scope with the two agent tools (#1172) and
+# diffutils (#1183); 854999ae… (#1118) is superseded.
+KIT_SCOPE_APPROVAL_REF = "https://github.com/yonatan895/qdrant-pdf-rag/pull/1181#issuecomment-6576583551"
 APPROVED_KIT_DIGEST = "32132abeedcae2772e2f08d540358fe859b7290f03aaf1e62ba05ee9460b5bc4"
 
 

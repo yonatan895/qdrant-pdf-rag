@@ -117,8 +117,8 @@ applies. That decision recorded `devkit.approval` at kit scope digest
 differs (a new RPM, wheel or tool, or a changed tag) needs a new decision.
 The two agent-tool records of #1172 (permissive, `declared`) and `diffutils` (#1183,
 GPLv3+, under the GPL decision above) moved the digest. The maintainer approved the
-resulting kit licence scope on 2026-11-02 (in-session approval relayed by the
-coordinator: #1183 option A and the #1181 kit scope), so `devkit.approval` now binds
+resulting kit licence scope on 2026-11-02
+([#1181 comment 6576583551](https://github.com/yonatan895/qdrant-pdf-rag/pull/1181#issuecomment-6576583551), #1183 option A), so `devkit.approval` now binds
 `32132abeedcae2772e2f08d540358fe859b7290f03aaf1e62ba05ee9460b5bc4`.
 
 The gate: `pack.sh` runs `license_inventory.py check --kit` before it pulls anything.
