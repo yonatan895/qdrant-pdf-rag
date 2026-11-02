@@ -582,8 +582,8 @@
   ],
   "devkit": {
     "approval": {
-      "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6543481300",
-      "approved_digest": "854999ae9a8ce9d537fcda1d6f2f3fb603d1269c87b12ee9f3544e31757eaf77"
+      "approval_ref": "maintainer in-session approval, relayed by the coordinator (yonatan895, 2026-11-02): #1183 option A (diffutils) and the #1181 kit licence scope at this digest",
+      "approved_digest": "32132abeedcae2772e2f08d540358fe859b7290f03aaf1e62ba05ee9460b5bc4"
     },
     "components": [
       {
@@ -705,6 +705,68 @@
       {
         "approval_ref": null,
         "bind": {
+          "files": [
+            {
+              "name": "LICENSE",
+              "notice": true,
+              "path": "images/devkit/agents/herdr-core-LICENSE",
+              "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+            }
+          ],
+          "license": "Apache-2.0",
+          "license-sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "pin": "images/devkit/agents/herdr-core-pin.txt",
+          "sha256": "efbb1382da3d5053cb20c60c166a62ec34e73d8299977fb1f5abed28ddec8d66",
+          "version": "0.1.15"
+        },
+        "class": "permissive",
+        "distributed_by_repo": true,
+        "id": "kit-tool:herdr-core",
+        "kind": "tool",
+        "license_declared": "Apache-2.0 (license: line of images/devkit/agents/herdr-core-pin.txt; LICENSE in the release archive)",
+        "license_spdx": "Apache-2.0",
+        "name": "herdr-core 0.1.15 (linux-amd64 binary in the image, /usr/local/bin/herdr-core with an hc link)",
+        "obligation": "Apache-2.0 section 4: the image carries the archive's LICENSE and THIRD-PARTY-NOTICES under /usr/share/licenses/herdr-core/ (both digests pinned in herdr-core-pin.txt), and the kit notices carry the LICENSE text.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "upstream-project-license",
+        "status": "declared"
+      },
+      {
+        "approval_ref": null,
+        "bind": {
+          "files": [
+            {
+              "name": "LICENSE",
+              "notice": true,
+              "path": "images/devkit/agents/opencode-LICENSE",
+              "sha256": "625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b"
+            }
+          ],
+          "license": "MIT",
+          "license-sha256": "625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b",
+          "pin": "images/devkit/agents/opencode-pin.txt",
+          "sha256": "09f44302c10fd036912f59c81fd1aef5df45dd06f649197f9dfc9bbe2a79614e",
+          "version": "2.2.5"
+        },
+        "class": "permissive",
+        "distributed_by_repo": true,
+        "id": "kit-tool:opencode",
+        "kind": "tool",
+        "license_declared": "MIT (license: line of images/devkit/agents/opencode-pin.txt; repository LICENSE at tag v2.2.5, commit 9bbb8ce1)",
+        "license_spdx": "MIT",
+        "name": "OpenCode 2.2.5 (linux-x64 binary in the image, /usr/local/bin/opencode)",
+        "obligation": "MIT: keep the copyright and permission notice with copies. The release archive holds no licence file; the image carries the tag's LICENSE under /usr/share/licenses/opencode/ and the kit notices carry it (digest pinned in opencode-pin.txt). The single-file binary bundles JavaScript dependencies whose notices it does not enumerate.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "upstream-project-license",
+        "status": "declared"
+      },
+      {
+        "approval_ref": null,
+        "bind": {
           "nevra": "containers-common-5:5.8-1.el9.x86_64"
         },
         "class": "permissive",
@@ -805,6 +867,33 @@
         "spdx_basis": "rpm-license-tag",
         "status": "approved",
         "version": "0:1.27-1.el9_8.x86_64"
+      },
+      {
+        "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1118 issuecomment-6480982316 (maintainer decisions 2026-10-28: GPL-licensed RPMs such as git, tar and gawk are acceptable in the workspace image)",
+        "bind": {
+          "nevra": "diffutils-0:3.7-12.el9.x86_64"
+        },
+        "class": "strong-copyleft",
+        "decision": {
+          "date": "2026-10-28",
+          "disposition": "GPL-licensed RPMs are acceptable in the dev workspace image (#1118 maintainer decisions, ADR-0009 section 8)",
+          "owner": "yonatan895"
+        },
+        "distributed_by_repo": true,
+        "evidence": "rpm-header",
+        "id": "rpm:diffutils",
+        "kind": "rpm",
+        "license_declared": "GPLv3+",
+        "license_spdx": "GPL-3.0-or-later",
+        "name": "diffutils",
+        "note": "Added for cmp and diff, which the gap scripts call (#1183 option A, maintainer decision 2026-11-02, relayed in session by the coordinator); its GPL licence is covered by the 2026-10-28 decision.",
+        "obligation": "GPL-2.0 section 3 / GPL-3.0 section 6: object code passes with the Corresponding Source or a written offer. The kit carries neither; whether the transfer triggers it is decision 2 and 3 of docs/licensing.md. Unmodified UBI package; its license text ships in the image under /usr/share/licenses.",
+        "ships_in": [
+          "dev workspace image"
+        ],
+        "spdx_basis": "normalized-rpm-license-tag",
+        "status": "approved",
+        "version": "0:3.7-12.el9.x86_64"
       },
       {
         "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1118 issuecomment-6480982316 (maintainer decisions 2026-10-28: GPL-licensed RPMs such as git, tar and gawk are acceptable in the workspace image)",
@@ -1415,72 +1504,10 @@
         "spdx_basis": "rpm-license-tag",
         "status": "declared",
         "version": "0:2.1.0-25.el9.x86_64"
-      },
-      {
-        "approval_ref": null,
-        "bind": {
-          "files": [
-            {
-              "name": "LICENSE",
-              "notice": true,
-              "path": "images/devkit/agents/herdr-core-LICENSE",
-              "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
-            }
-          ],
-          "license": "Apache-2.0",
-          "license-sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
-          "pin": "images/devkit/agents/herdr-core-pin.txt",
-          "sha256": "efbb1382da3d5053cb20c60c166a62ec34e73d8299977fb1f5abed28ddec8d66",
-          "version": "0.1.15"
-        },
-        "class": "permissive",
-        "distributed_by_repo": true,
-        "id": "kit-tool:herdr-core",
-        "kind": "tool",
-        "license_declared": "Apache-2.0 (license: line of images/devkit/agents/herdr-core-pin.txt; LICENSE in the release archive)",
-        "license_spdx": "Apache-2.0",
-        "name": "herdr-core 0.1.15 (linux-amd64 binary in the image, /usr/local/bin/herdr-core with an hc link)",
-        "obligation": "Apache-2.0 section 4: the image carries the archive's LICENSE and THIRD-PARTY-NOTICES under /usr/share/licenses/herdr-core/ (both digests pinned in herdr-core-pin.txt), and the kit notices carry the LICENSE text.",
-        "ships_in": [
-          "dev workspace image"
-        ],
-        "spdx_basis": "upstream-project-license",
-        "status": "declared"
-      },
-      {
-        "approval_ref": null,
-        "bind": {
-          "files": [
-            {
-              "name": "LICENSE",
-              "notice": true,
-              "path": "images/devkit/agents/opencode-LICENSE",
-              "sha256": "625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b"
-            }
-          ],
-          "license": "MIT",
-          "license-sha256": "625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b",
-          "pin": "images/devkit/agents/opencode-pin.txt",
-          "sha256": "09f44302c10fd036912f59c81fd1aef5df45dd06f649197f9dfc9bbe2a79614e",
-          "version": "2.2.5"
-        },
-        "class": "permissive",
-        "distributed_by_repo": true,
-        "id": "kit-tool:opencode",
-        "kind": "tool",
-        "license_declared": "MIT (license: line of images/devkit/agents/opencode-pin.txt; repository LICENSE at tag v2.2.5, commit 9bbb8ce1)",
-        "license_spdx": "MIT",
-        "name": "OpenCode 2.2.5 (linux-x64 binary in the image, /usr/local/bin/opencode)",
-        "obligation": "MIT: keep the copyright and permission notice with copies. The release archive holds no licence file; the image carries the tag's LICENSE under /usr/share/licenses/opencode/ and the kit notices carry it (digest pinned in opencode-pin.txt). The single-file binary bundles JavaScript dependencies whose notices it does not enumerate.",
-        "ships_in": [
-          "dev workspace image"
-        ],
-        "spdx_basis": "upstream-project-license",
-        "status": "declared"
       }
     ],
     "evidence": {
-      "rpm_licenses": "RPM License header tags read 2026-10-31 from the rpmdb of the pinned kit image ghcr.io/yonatan895/qdrant-pdf-rag-devkit@sha256:b5c03e1950517c6a8689cc2273350a99ad1643b31f45ca1c00925ec28d470c8c with rpm -qa --qf '%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\\t%{LICENSE}\\n' (docker run --network none); all 26 NEVRAs of images/devkit-packages.txt present, and the other 116 equal licenses/ubi9-python-314-minimal.rpms.txt. Legacy Fedora abbreviations are normalized only where fedora-license-data (commit cbd8b74c) maps them to one SPDX identifier.",
+      "rpm_licenses": "RPM License header tags read 2026-10-31 from the rpmdb of the pinned kit image ghcr.io/yonatan895/qdrant-pdf-rag-devkit@sha256:b5c03e1950517c6a8689cc2273350a99ad1643b31f45ca1c00925ec28d470c8c with rpm -qa --qf '%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\\t%{LICENSE}\\n' (docker run --network none); all 26 NEVRAs of images/devkit-packages.txt present, and the other 116 equal licenses/ubi9-python-314-minimal.rpms.txt. Legacy Fedora abbreviations are normalized only where fedora-license-data (commit cbd8b74c) maps them to one SPDX identifier. diffutils-0:3.7-12.el9.x86_64 (#1183) added 2026-11-02: its tag GPLv3+ was read with the same rpm -qa query after microdnf resolved the full list plus diffutils in the pinned base (the other 26 NEVRAs resolved unchanged), and again from the rpmdb of a local build of images/Containerfile.devkit.",
       "wheels": "generate --kit --wheelhouse against the dev wheelhouse: 83 wheels, each the exact locked bytes (name, version, file name and sha256 of requirements.dev.lock.txt). Recorded 2026-10-31 from /opt/devkit/wheelhouse of the pinned image; regenerate from the factory's dev wheelhouse (python3 scripts/dependency_lock.py prepare --profile dev), which holds the same hash-locked bytes, never from installed site-packages."
     },
     "python": [

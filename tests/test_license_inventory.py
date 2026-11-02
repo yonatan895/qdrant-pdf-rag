@@ -540,7 +540,12 @@ AMBIGUOUS_RPMS = {"cracklib", "cracklib-dicts", "gzip", "less", "libcbor", "libd
                   "libfdisk", "libfido2", "libpwquality", "libseccomp", "libutempter", "openssh",
                   "openssh-clients", "pam", "shadow-utils-subid", "util-linux", "util-linux-core"}
 ALL_LICENCES_REF = "https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6543481300"
-APPROVED_KIT_DIGEST = "854999ae9a8ce9d537fcda1d6f2f3fb603d1269c87b12ee9f3544e31757eaf77"
+# The kit scope approval in force: the maintainer's in-session decision of 2026-11-02
+# (#1183 option A, #1181), relayed by the coordinator. It binds the scope with the two
+# agent tools (#1172) and diffutils (#1183); 854999ae… (#1118) is superseded.
+KIT_SCOPE_APPROVAL_REF = ("maintainer in-session approval, relayed by the coordinator (yonatan895, 2026-11-02): "
+                          "#1183 option A (diffutils) and the #1181 kit licence scope at this digest")
+APPROVED_KIT_DIGEST = "32132abeedcae2772e2f08d540358fe859b7290f03aaf1e62ba05ee9460b5bc4"
 
 
 def test_repository_kit_record_passes_the_enforced_gate_at_the_approved_digest():
@@ -549,7 +554,8 @@ def test_repository_kit_record_passes_the_enforced_gate_at_the_approved_digest()
     inventory = real_inventory()
     assert kit_problems(inventory) == ([], [], "current")
     assert li.kit_scope_digest(inventory) == APPROVED_KIT_DIGEST
-    assert inventory["devkit"]["approval"] == {"approval_ref": ALL_LICENCES_REF, "approved_digest": APPROVED_KIT_DIGEST}
+    assert inventory["devkit"]["approval"] == {"approval_ref": KIT_SCOPE_APPROVAL_REF,
+                                               "approved_digest": APPROVED_KIT_DIGEST}
     # The release scope and its digest do not include the kit section.
     without = {k: v for k, v in inventory.items() if k != "devkit"}
     assert li.scope_digest(without) == li.scope_digest(inventory)
@@ -558,10 +564,11 @@ def test_repository_kit_record_passes_the_enforced_gate_at_the_approved_digest()
 
 def test_kit_approvals_are_exactly_the_maintainers_recorded_decisions():
     """GPL-only RPMs carry the 2026-10-28 decision, the ambiguous-tag RPMs the 2026-10-31
-    one; nothing else is approved, and each tag stays as recorded from the RPM header."""
+    one; nothing else is approved, and each tag stays as recorded from the RPM header.
+    diffutils (#1183, GPLv3+) entered under the GPL decision."""
     kit = real_inventory()["devkit"]
     approved = {e["name"]: e for e in kit["components"] if e["status"] == "approved"}
-    assert set(approved) == {"crun", "git-core", "tar"} | AMBIGUOUS_RPMS
+    assert set(approved) == {"crun", "diffutils", "git-core", "tar"} | AMBIGUOUS_RPMS
     for name, entry in approved.items():
         if name in AMBIGUOUS_RPMS:
             assert entry["approval_ref"] == ALL_LICENCES_REF and entry["decision"]["date"] == "2026-10-31"

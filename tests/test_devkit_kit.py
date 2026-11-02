@@ -29,6 +29,7 @@ import pytest
 from scripts import license_inventory as li
 from scripts.devkit import agents_vm as vm
 
+from tests import helpers_devkit_commands as kitcmd
 from tests.helpers_airgap import (
     REPO,
     copy_chart,
@@ -1787,3 +1788,99 @@ def test_preflight_fails_clearly_without_delegation_linger_or_subids(tmp_path, c
         assert rc == 0 and err == ""
     else:
         assert rc == 2 and err.startswith("agents-vm: preflight failed: ") and message in err
+
+
+# --- the gap scripts' commands are in the kit image (#1183) --------------------------
+# GitLab CI and the bastion run the gap scripts in the kit image, so every external
+# command they call must be in it. The commands are derived from the scripts; the map
+# (tests/helpers_devkit_commands.py) says which recipe input provides each, and is
+# checked here against the recipe and the recorded base rpmdb, with no image.
+# tests/devkit_image_contracts.py checks the same map against a built image.
+
+
+
+def _base_rpm_names():
+    lines = (REPO / "licenses/ubi9-python-314-minimal.rpms.txt").read_text(encoding="utf-8").splitlines()
+    return {line.split("\t")[0] for line in lines if line and not line.startswith("#")}
+
+
+def _kit_rpm_names():
+    return {li.rpm_name(nevra)[0] for nevra in li.kit_rpm_lines(REPO) or []}
+
+
+def test_every_command_the_gap_scripts_call_has_a_recorded_kit_provider():
+    """The map names exactly the commands the scripts call: a new command needs a
+    provider, and a command no script calls any more leaves the map."""
+    calls = kitcmd.gap_commands()
+    missing = {c: sorted(s) for c, s in calls.items() if c not in kitcmd.KIT_COMMANDS}
+    assert missing == {}, "add each to KIT_COMMANDS with the kit input that provides it"
+    assert sorted(set(kitcmd.KIT_COMMANDS) - set(calls)) == []
+    # The scan reaches the scripts the gap scripts source and the image's own helpers.
+    scanned = {p.relative_to(REPO).as_posix() for p in kitcmd.script_paths()}
+    assert {"scripts/tools/task-artifact.sh", "scripts/airgap/common.sh", "scripts/gap/import_release.sh",
+            "scripts/devkit/install.sh", "images/devkit/bin/mfr-opencode"} <= scanned
+    # The issue's commands (#1183), named independently of the scan.
+    assert {"cmp", "sha256sum", "python3", "git", "tar", "skopeo", "openssl", "oc", "awk"} <= set(calls)
+
+
+def test_each_kit_command_provider_is_installed_by_the_image_recipe():
+    """Each provider is in the image: an RPM the recipe installs or the pinned base
+    holds, a pinned tool the recipe stages into /usr/local/bin, or the base's Python."""
+    recipe = (REPO / "images/Containerfile.devkit").read_text(encoding="utf-8")
+    rpms = _kit_rpm_names() | _base_rpm_names()
+    absent = []
+    for name, provider in sorted(kitcmd.KIT_COMMANDS.items()):
+        kind, _, detail = provider.partition(":")
+        if kind == "rpm":
+            ok = detail in rpms
+        elif kind == "tool":
+            ok = (f'"$pins/{detail}-pin.txt"' in recipe or f"{detail}-pin.txt" in recipe) and (
+                (REPO / f"scripts/tools/{detail}-pin.txt").is_file()
+                or (REPO / f"images/devkit/agents/{detail}-pin.txt").is_file())
+        elif kind == "kit-bin":
+            ok = (REPO / "images/devkit/bin" / name).is_file()
+        elif kind == "app-root":
+            ok = re.search(r"^FROM registry\.access\.redhat\.com/ubi9/python-314-minimal@sha256:[0-9a-f]{64}",
+                           recipe, re.MULTILINE) is not None
+        else:
+            ok = False
+        if not ok:
+            absent.append(f"{name}: {provider}")
+    assert absent == [], "the kit image does not provide these gap-script commands"
+    # cmp and diff come from diffutils, which the recipe installs by exact NEVRA (#1183).
+    assert "diffutils-0:3.7-12.el9.x86_64" in (li.kit_rpm_lines(REPO) or [])
+
+
+def test_command_scan_reads_command_positions_and_skips_data(tmp_path):
+    """The scan's own contract on a script with every construct the gap scripts use."""
+    script = tmp_path / "s.sh"
+    script.write_text(
+        "#!/bin/sh\n"
+        "# a comment naming `notacmd1` and $(notacmd2)\n"
+        "set -eu\n"
+        "helper() { alpha \"$1\"; }\n"
+        "X=$(beta -x | gamma) Y=\"${Z:-not acmd3}\" delta --flag\n"
+        "N=$((N + 1))\n"
+        "if epsilon; then zeta; elif ! eta; then :; else theta; fi\n"
+        "case \"$1\" in\n"
+        "    patone|pattwo) iota ;;\n"
+        "    *) kappa\n"
+        "        ;;\n"
+        "esac\n"
+        "for t in lambda mu; do command -v \"$t\" >/dev/null || exit 1; done\n"
+        "command -v nu >/dev/null\n"
+        "env -u GIT_DIR xi --arg\n"
+        "omicron 2>/dev/null </dev/null && pi || rho\n"
+        "printf '%s' \"$(sigma \"$(tau)\")\" `upsilon`\n"
+        "cat <<'EOF' | phi\n"
+        "heredocword --not-a-command\n"
+        "EOF\n"
+        "find . -print0 | xargs -0 chi\n"
+        "exec psi \"$@\"\n"
+        "helper x\n",
+        encoding="utf-8")
+    assert kitcmd.scan(script) - kitcmd.defined_functions([script]) == {
+        "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa", "lambda", "mu",
+        "nu", "env", "xi", "omicron", "pi", "rho", "sigma", "tau", "upsilon", "cat", "phi", "find", "xargs",
+        "chi", "psi"}
+    assert kitcmd.interpreter(script) == {"sh"}

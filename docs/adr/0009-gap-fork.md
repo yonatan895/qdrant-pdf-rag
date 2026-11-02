@@ -548,9 +548,12 @@ refreshed with each kit (Q9).
   - the CPython 3.14 GIL build, the pinned Task and Helm 4;
   - the dev environment installed from the hash-locked `requirements.dev.lock.txt`
     wheels, which are bind-mounted for the install only (D-7);
-  - `oc` and `skopeo`, plus git-core, openssl, sha256sum, tar and gawk, from
-    an exact RPM NEVRA list, so drift fails the build. GPL-licensed RPMs are
-    accepted;
+  - `oc` and `skopeo`, plus git-core, openssl, sha256sum, tar, gawk and
+    diffutils (`cmp`, #1183), from an exact RPM NEVRA list, so drift fails the
+    build. GPL-licensed RPMs are accepted. Every command the gap scripts call
+    has a recorded provider (`tests/helpers_devkit_commands.py`), checked against
+    the recipe in unit CI and against a built image by
+    `tests/devkit_image_contracts.py`;
   - the session login helpers (`mfr-session-login` and its logout);
   - the coding agents' tools (#1172): herdr-core and OpenCode, pinned by sha256 and
     verified during the connected-side build, with a hardened offline OpenCode
