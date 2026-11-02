@@ -1325,6 +1325,26 @@ def _site(tmp_path, text=SITE_ENV, **override):
     return path
 
 
+def _agents_account(monkeypatch):
+    """This process's account name, for MFR_VM_AGENTS_USER. A kit CI job (GitLab on
+    OpenShift) runs as an arbitrary uid with no passwd entry; give it one, as the VM's
+    agents user has, so the agents-user paths still run there."""
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        entry = pwd.struct_passwd(("agents", "x", os.getuid(), os.getgid(), "", "/nonexistent", "/sbin/nologin"))
+        real = pwd.getpwuid
+        monkeypatch.setattr(pwd, "getpwuid", lambda uid: entry if uid == os.getuid() else real(uid))
+        return "agents"
+
+
+def _no_passwd_entry(monkeypatch):
+    """Simulate the kit's passwd-less CI uid."""
+    def missing(uid):
+        raise KeyError(f"getpwuid(): uid not found: {uid}")
+    monkeypatch.setattr(pwd, "getpwuid", missing)
+
+
 def test_fence_renders_an_skuid_allow_list_then_drop_and_the_slice_second_layer(tmp_path):
     out = tmp_path / "fence"
     done = vm.main(["render-fence", "--site-env", str(_site(tmp_path)), "--uid", "1500", "--out", str(out)])
@@ -1582,7 +1602,7 @@ def _listen(address: str):
     return server
 
 
-def test_proof_probes_real_sockets_and_fails_on_a_reachable_negative_control(tmp_path, capsys):
+def test_proof_probes_real_sockets_and_fails_on_a_reachable_negative_control(tmp_path, capsys, monkeypatch):
     """The host run, end to end on loopback: GitLab and LiteLLM listen on 127.0.0.1, the
     four negative controls are 127.0.0.2 ports. Nothing listens there, as a working fence
     would make it; then one starts listening and the same proof must fail."""
@@ -1594,7 +1614,7 @@ def test_proof_probes_real_sockets_and_fails_on_a_reachable_negative_control(tmp
     blocked_env = " ".join(f"{label}=127.0.0.2:{port}"
                            for label, port in zip(("qdrant", "agent", "openshift-api", "internet", "host-loopback",
                                                    "host-address"), ports, strict=True))
-    env = _site(tmp_path, MFR_VM_AGENTS_USER=pwd.getpwuid(os.getuid()).pw_name, MFR_VM_DNS="127.0.0.53",
+    env = _site(tmp_path, MFR_VM_AGENTS_USER=_agents_account(monkeypatch), MFR_VM_DNS="127.0.0.53",
                 MFR_VM_GITLAB="127.0.0.1", MFR_VM_GITLAB_PORTS=str(gitlab.getsockname()[1]),
                 MFR_VM_GITLAB_HOST="localhost", MFR_VM_LITELLM="127.0.0.1",
                 MFR_VM_LITELLM_PORTS=str(litellm.getsockname()[1]), MFR_VM_BLOCKED=blocked_env)
@@ -1671,7 +1691,7 @@ esac
     for s in shut:
         s.close()
     blocked_env = " ".join(f"{label}=127.0.0.2:{port}" for label, port in zip(vm.BLOCKED_LABELS, ports, strict=True))
-    site = _site(tmp_path, MFR_VM_AGENTS_USER=pwd.getpwuid(os.getuid()).pw_name, MFR_VM_BLOCKED=blocked_env,
+    site = _site(tmp_path, MFR_VM_AGENTS_USER=_agents_account(monkeypatch), MFR_VM_BLOCKED=blocked_env,
                  MFR_VM_WORK=str(tmp_path / "work"))
     return {"log": log, "site": site, "ports": dict(zip(vm.BLOCKED_LABELS, ports, strict=True))}
 
@@ -1702,6 +1722,19 @@ def test_start_refuses_another_user_before_any_probe(start_host, capsys, tmp_pat
     (tmp_path / "other").mkdir()
     other = _site(tmp_path / "other", MFR_VM_AGENTS_USER="nobody-else")
     assert vm.main(["start", "--site-env", str(other)]) == 2
+    assert "run start as the agents user" in capsys.readouterr().err
+    assert not start_host["log"].exists()
+
+
+def test_a_uid_without_a_passwd_entry_is_never_the_agents_user(start_host, capsys, tmp_path, monkeypatch):
+    """Fail closed: an account with no passwd entry (the kit's arbitrary CI uid) is not
+    `agents`, so neither the proof nor start runs; never a KeyError traceback."""
+    _no_passwd_entry(monkeypatch)
+    (tmp_path / "proof").mkdir()
+    proof_site = _site(tmp_path / "proof", MFR_VM_AGENTS_USER="agents")
+    assert vm.main(["proof", "--site-env", str(proof_site), "--where", "host"]) == 2
+    assert "run the proof as the agents user" in capsys.readouterr().err
+    assert vm.main(["start", "--site-env", str(start_host["site"])]) == 2
     assert "run start as the agents user" in capsys.readouterr().err
     assert not start_host["log"].exists()
 
@@ -1743,6 +1776,23 @@ def test_view_only_ssh_command_attaches_observe_only_or_refuses(tmp_path, reques
     else:
         # Podman's own runtime dir, so podman exec finds the container (Podman trial).
         assert done.returncode == 0 and done.stdout.splitlines() == [*expected, f"xdg=/run/user/{os.getuid()}"]
+
+
+def test_view_only_ssh_command_needs_no_passwd_entry(tmp_path):
+    """The kit's arbitrary CI uid has no passwd entry; observe still finds Podman's runtime dir."""
+    fake = tmp_path / "podman"
+    fake.write_text('#!/bin/sh\nprintf "%s\\n" "$@" "xdg=$XDG_RUNTIME_DIR" "home=${HOME-unset}"\n')
+    fake.chmod(0o755)
+    passwdless = ("import pwd, runpy, sys\n"
+                  "def missing(uid):\n    raise KeyError(uid)\n"
+                  "pwd.getpwuid = missing\n"
+                  "sys.argv = [sys.argv[1], 'observe']\n"
+                  "runpy.run_path(sys.argv[0], run_name='__main__')\n")
+    done = subprocess.run([sys.executable, "-c", passwdless, str(REPO / "scripts/devkit/agents_vm.py")],
+                          env={"PATH": f"{tmp_path}:{os.environ['PATH']}", "SSH_ORIGINAL_COMMAND": ""},
+                          capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL)
+    assert (done.returncode, done.stderr) == (0, "")
+    assert done.stdout.splitlines() == ["exec", "mfr-agents", "hc", "ls", f"xdg=/run/user/{os.getuid()}", "home=unset"]
 
 
 def test_the_example_site_env_renders_once_its_kit_placeholders_are_filled(tmp_path):

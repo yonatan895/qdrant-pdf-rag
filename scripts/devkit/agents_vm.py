@@ -45,6 +45,7 @@ files and the proof's --output record, which belong in the private install recor
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import hashlib
 import ipaddress
@@ -523,10 +524,20 @@ def run_probe(argv: list[str]) -> dict[str, str]:
     return data if isinstance(data, dict) else {}
 
 
-def proof(site: Site, fence_off: bool, where: str) -> tuple[int, dict]:
-    me = pwd.getpwuid(os.getuid()).pw_name
+def require_agents_user(site: Site, action: str) -> str:
+    """The fence matches the agents uid only, so `action` runs as that account or not at all.
+    A uid with no passwd entry (the kit's arbitrary uid in a CI job) is not `agents`: fail closed."""
+    try:
+        me = pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        me = None
     if me != site.user:
-        raise Refused("run the proof as the agents user: the fence matches that uid only")
+        raise Refused(f"run {action} as the agents user: the fence matches that uid only")
+    return site.user
+
+
+def proof(site: Site, fence_off: bool, where: str) -> tuple[int, dict]:
+    me = require_agents_user(site, "the proof")
     if where in ("container", "both"):
         preflight(site)
     places = ("host", "container") if where == "both" else (where,)
@@ -628,8 +639,7 @@ def fence_leaks(site: Site) -> list[str]:
 
 def start(site: Site) -> int:
     preflight(site)
-    if pwd.getpwuid(os.getuid()).pw_name != site.user:
-        raise Refused("run start as the agents user: the fence matches that uid only")
+    require_agents_user(site, "start")
     if os.environ.get("KUBECONFIG") or (Path.home() / ".kube").exists():
         raise Refused("this account holds OpenShift credentials (KUBECONFIG or ~/.kube); the agents "
                       "user must have none (docs/agents-vm.md#accounts)")
@@ -675,10 +685,12 @@ def observe() -> int:
         return 2
     # Rootless Podman finds its containers through HOME and XDG_RUNTIME_DIR; keep the
     # account's own (a short hc HOME elsewhere makes podman exec miss the container).
-    account = pwd.getpwuid(os.getuid())
+    # sshd sets HOME; a uid with no passwd entry (a kit CI job) keeps whatever it has.
     env = dict(os.environ)
-    env.setdefault("HOME", account.pw_dir)
-    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{account.pw_uid}")
+    if "HOME" not in env:
+        with contextlib.suppress(KeyError):
+            env["HOME"] = pwd.getpwuid(os.getuid()).pw_dir
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
     os.execvpe(argv[0], argv, env)
     return 127  # not reached
 

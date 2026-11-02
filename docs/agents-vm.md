@@ -208,7 +208,8 @@ podman secret create mfr-gitlab-credentials /path/to/git-credentials   # optiona
 python3 scripts/devkit/agents_vm.py start
 ```
 
-`start` refuses unless it runs as `agents` and the fence is in force for that uid:
+`start` (like `proof`) refuses unless it runs as `agents` (a uid with no passwd entry
+is not `agents`) and the fence is in force for that uid:
 every `MFR_VM_BLOCKED` target must be refused from the host. `agents` cannot read the
 nftables ruleset (netlink needs `CAP_NET_ADMIN`), so `start` checks the fence by its
 effect; that holds while those targets answer without the fence, which the fence-off
