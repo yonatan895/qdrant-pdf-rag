@@ -231,6 +231,10 @@ hygiene:
   extends: .gate-pipeline
   stage: hygiene
   script:
+    # Code-owner approvals stand in for the Verifier (ADR-0009 section 6, GH#1118 F4):
+    # the committed .gitlab/CODEOWNERS must equal the generator output. First in
+    # the job and isolated (-I), so no group-owned file runs before or inside it.
+    - python3 -I scripts/gap_codeowners.py check
     - python3 scripts/check_agent_context.py
     - |
       set -eu
