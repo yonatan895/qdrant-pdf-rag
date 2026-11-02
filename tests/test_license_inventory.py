@@ -7,6 +7,7 @@ class cannot rest on declared metadata; owner approval goes stale when records
 change. None of this is a legal verdict, and no test marks a license approved.
 """
 import copy
+import json
 import re
 import shutil
 import zipfile
@@ -392,6 +393,61 @@ def test_changed_image_digest_requires_re_review(tree, capsys, old, new, record)
     images.write_text(images.read_text().replace(old, new))
     code, out = run(tree, capsys)
     assert code == 1 and record in out and "re-review the image" in out
+
+
+def test_every_reference_docs_set_has_exactly_one_matching_approved_record():
+    """GH#1174: the gate covers every manifest row, bound to the same archive and licence."""
+    rows = json.loads((REPO / li.REFERENCE_DOCS).read_text())["sets"]
+    records = [e for e in real_inventory()["components"] if e.get("kind") == "reference-docs"]
+    assert sorted(r["bind"]["reference_docs"]["set"] for r in records) == sorted(row["id"] for row in rows)
+    by_set = {r["bind"]["reference_docs"]["set"]: r for r in records}
+    for row in rows:
+        record = by_set[row["id"]]
+        assert record["license_spdx"] == row["license"] and record["status"] == "approved"
+        assert record["bind"]["reference_docs"]["sha256"] == row["sha256"]
+        assert record["approval_ref"].endswith("/issues/1174#issuecomment-6548012543")
+        assert li.expression_class(row["license"]) == record["class"]
+
+
+def _manifest(tree):
+    path = tree / li.REFERENCE_DOCS
+    return path, json.loads(path.read_text())
+
+
+@pytest.mark.parametrize("change", ["new-set", "re-pinned", "licence", "licence-file", "dropped-set"])
+def test_reference_docs_manifest_drift_fails_the_gate(tree, capsys, change):
+    path, data = _manifest(tree)
+    row = data["sets"][0]
+    if change == "new-set":
+        data["sets"].append({**row, "id": "unrecorded-set"})
+        needle = "reference docs set unrecorded-set: no license record"
+    elif change == "re-pinned":
+        row["sha256"] = "0" * 64
+        needle = f"component:docs:{row['id']}: reference docs archive, licence files or licence differ"
+    elif change == "licence":
+        row["license"] = "MIT AND CC-BY-4.0"
+        needle = f"component:docs:{row['id']}: reference docs archive, licence files or licence differ"
+    elif change == "licence-file":
+        row["license_files"] = [*row["license_files"], "NOTICE"]
+        needle = f"component:docs:{row['id']}: reference docs archive, licence files or licence differ"
+    else:
+        data["sets"].pop(0)
+        needle = f"component:docs:{row['id']}: bound reference docs set is not in scripts/airgap/reference-docs.json"
+    original = path.read_text()
+    path.write_text(json.dumps(data))
+    code, out = run(tree, capsys)
+    assert code == 1 and needle in out
+    path.write_text(original)
+    assert run(tree, capsys)[0] == 0
+
+
+def test_oauth_proxy_record_names_the_upstream_mit_licence_and_the_registry_terms():
+    """The upstream openshift/oauth-proxy LICENSE is MIT (#1174 inventory A8); the image
+    is still pulled under Red Hat registry terms, so the record keeps both and stays
+    proprietary-class."""
+    entry = next(e for e in real_inventory()["components"] if e["id"] == "image:oauth-proxy")
+    assert entry["license_spdx"] == "MIT AND LicenseRef-Red-Hat-Registry-Terms"
+    assert entry["class"] == "proprietary" and entry["status"] == "approved"
 
 
 def test_unrecorded_vendored_asset_and_second_chart_are_flagged(tree, capsys):

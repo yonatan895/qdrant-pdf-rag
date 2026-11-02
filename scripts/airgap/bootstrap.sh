@@ -42,7 +42,7 @@ openssl dgst -sha256 -verify sneakernet-signing.pub -signature SHA256SUMS.sig SH
 PACKED_SHA=$(sed -n 's/^sha: *//p' MANIFEST.txt)
 [ "${#PACKED_SHA}" -eq 40 ] || { echo "FAIL: MANIFEST must name a full commit SHA." >&2; exit 1; }
 case "$PACKED_SHA" in *[!0-9a-f]*) echo "FAIL: invalid MANIFEST SHA." >&2; exit 1;; esac
-MEMBERS="bootstrap.sh repo.bundle task_linux_amd64.tar.gz task-pin.txt task-LICENSE qdrant-image.tar openobserve-image.tar otelcol-image.tar app-ingest-$PACKED_SHA.tar app-agent-$PACKED_SHA.tar MANIFEST.txt PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub"
+MEMBERS="bootstrap.sh repo.bundle reference-docs.tar.gz task_linux_amd64.tar.gz task-pin.txt task-LICENSE qdrant-image.tar openobserve-image.tar otelcol-image.tar app-ingest-$PACKED_SHA.tar app-agent-$PACKED_SHA.tar MANIFEST.txt PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub"
 [ ! -f oauth-proxy-image.tar ] || MEMBERS="$MEMBERS oauth-proxy-image.tar"
 [ ! -f openwebui-image.tar ] || MEMBERS="$MEMBERS openwebui-image.tar"
 [ ! -f openwebui-proxy-image.tar ] || MEMBERS="$MEMBERS openwebui-proxy-image.tar"
@@ -149,7 +149,40 @@ trap - EXIT HUP INT TERM
 (cd "$DEST_DIR/dist" && sha256sum -c SHA256SUMS >/dev/null) \
     || { echo "FAIL: committed dist/ does not verify against SHA256SUMS; rerun bootstrap.sh." >&2; exit 1; }
 
-echo "==> 5. Checking airgap.env"
+echo "==> 5. Unpacking the reference docs to ./$DEST_DIR/dist/reference-docs (GH#1174)"
+# The member is signed and verified above; it is still treated as untrusted:
+# only regular files under reference-docs/ with no absolute or .. path are
+# accepted, it is unpacked into a fresh staging directory, every file must match
+# its FILES.sha256 line and no unlisted file may exist, and only then does the
+# new tree replace the previous release's one.
+DOCS_MEMBER="$DEST_DIR/dist/reference-docs.tar.gz"
+DOCS_DEST="$DEST_DIR/dist/reference-docs"
+DOCS_STAGE="$DEST_DIR/dist/.reference-docs-staging"
+docs_fail() { echo "FAIL: reference docs: $1; the workspace and dist/ members are in place, only dist/reference-docs was not updated. Rerun bootstrap.sh from the verified bundle." >&2; exit 1; }
+rm -rf "$DOCS_STAGE"
+mkdir "$DOCS_STAGE"
+trap 'rm -rf "$DOCS_STAGE"' EXIT
+trap 'exit 1' HUP INT TERM
+LC_ALL=C tar -tzvf "$DOCS_MEMBER" > "$DOCS_STAGE/types" 2>/dev/null && LC_ALL=C tar -tzf "$DOCS_MEMBER" > "$DOCS_STAGE/names" 2>/dev/null \
+    || docs_fail "the member cannot be listed"
+docs_types=$(awk 'substr($0, 1, 1) != "-"' "$DOCS_STAGE/types")
+docs_names=$(awk '$0 !~ /^reference-docs\/./ || $0 ~ /(^|\/)\.\.(\/|$)/ || $0 ~ /\\/' "$DOCS_STAGE/names")
+[ -z "$docs_types" ] || docs_fail "the member holds a link, directory or device entry"
+[ -z "$docs_names" ] || docs_fail "the member holds a path outside reference-docs/ or a .. component"
+(cd "$DOCS_STAGE" && tar -xzf ../reference-docs.tar.gz --no-same-owner --no-same-permissions) || docs_fail "the member cannot be unpacked"
+[ -f "$DOCS_STAGE/reference-docs/FILES.sha256" ] && [ -f "$DOCS_STAGE/reference-docs/INDEX.md" ] || docs_fail "INDEX.md or FILES.sha256 is missing"
+(cd "$DOCS_STAGE/reference-docs" && sha256sum --quiet --strict -c FILES.sha256 >/dev/null 2>&1) || docs_fail "a file does not match FILES.sha256"
+(cd "$DOCS_STAGE/reference-docs" && LC_ALL=C find . -type f ! -path ./FILES.sha256 | sed 's#^\./##' | LC_ALL=C sort > ../found \
+    && sed 's/^[0-9a-f]\{64\}  //' FILES.sha256 | LC_ALL=C sort > ../listed && cmp -s ../found ../listed) \
+    || docs_fail "the unpacked files differ from the FILES.sha256 list"
+[ -z "$(find "$DOCS_STAGE/reference-docs" ! -type f ! -type d)" ] || docs_fail "the member unpacked a non-regular file"
+rm -rf "$DOCS_DEST"
+mv "$DOCS_STAGE/reference-docs" "$DOCS_DEST"
+rm -rf "$DOCS_STAGE"
+trap - EXIT HUP INT TERM
+echo "    Reference docs: $DOCS_DEST/INDEX.md ($(sed -n '$=' "$DOCS_DEST/FILES.sha256") files)"
+
+echo "==> 6. Checking airgap.env"
 if [ ! -f "$DEST_DIR/airgap.env" ]; then
     if [ -f "$DEST_DIR/airgap.env.example" ]; then
         cp "$DEST_DIR/airgap.env.example" "$DEST_DIR/airgap.env"

@@ -6,9 +6,11 @@ Tests bootstrap.sh against a mock sneakernet extraction directory:
 - Successful verification clones the bundle, populates dist/, and initializes airgap.env.
 """
 
+import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -16,9 +18,12 @@ from tests.helpers_airgap import (
     REPO,
     gen_other_pub,
     gen_sign_keypair,
+    reference_docs_member,
     sha256_bytes,
     sign_sums,
     symlink_tools,
+    tar_file,
+    tar_link,
 )
 from tests.helpers_task_artifact import copy_task_tools, task_manifest, task_members
 
@@ -61,6 +66,7 @@ def bundle_dir(tmp_path):
     files = {
         "bootstrap.sh": (extract_dir / "bootstrap.sh").read_bytes(),
         "repo.bundle": (extract_dir / "repo.bundle").read_bytes(),
+        "reference-docs.tar.gz": reference_docs_member(),
         "qdrant-image.tar": b"mock-qdrant",
         "openobserve-image.tar": b"mock-openobserve",
         "otelcol-image.tar": b"mock-otelcol",
@@ -249,7 +255,7 @@ def _offline_env(bundle_dir):
     bin_dir.mkdir(exist_ok=True)
     symlink_tools(bundle_dir, (
         "sh", "sha256sum", "openssl", "cmp", "sed", "awk", "git", "uname",
-        "mkdir", "cp", "chmod", "tar", "gzip", "mktemp", "mv", "rm", "grep", "dirname",
+        "mkdir", "cp", "chmod", "tar", "gzip", "mktemp", "mv", "rm", "grep", "dirname", "find", "sort",
     ))
     return {"PATH": str(bin_dir), "AIRGAP_WORKSPACE": "operator workspace"}
 
@@ -284,6 +290,13 @@ def test_bootstrap_actual_runner_without_build_or_app_tools_and_rerun(bundle_dir
     assert len(list(dist_dir.glob("app-agent-*.tar"))) == 1
     assert (dist_dir / "oauth-proxy-image.tar").is_file()
     assert (dist_dir / "THIRD-PARTY-NOTICES.txt").read_bytes() == b"notices\n"
+    # GH#1174: the signed reference docs member is unpacked beside it, readable without tools.
+    docs = dist_dir / "reference-docs"
+    assert (docs / "sets/demo/docs/guide.md").read_bytes() == b"# Demo guide\n"
+    assert sorted(p.relative_to(docs).as_posix() for p in docs.rglob("*") if p.is_file()) == [
+        "FILES.sha256", "INDEX.md", "project/README.md", "sets/demo/LICENSE", "sets/demo/docs/guide.md"]
+    assert "Reference docs: operator workspace/dist/reference-docs/INDEX.md (4 files)" in first.stdout
+    assert not (dist_dir / ".reference-docs-staging").exists()
     # The dist/ copy stays verifiable: the signature and every member checksum hold there.
     verify = subprocess.run(
         ["sh", "-c", "openssl dgst -sha256 -verify sneakernet-signing.pub -signature SHA256SUMS.sig SHA256SUMS >/dev/null && sha256sum -c SHA256SUMS"],
@@ -641,3 +654,95 @@ def test_interrupted_promotion_warns_of_partial_dist_then_recovers_complete_bund
     assert retained.read_text() == "retain operator evidence"
     assert (workspace / "airgap.env").read_text() == "INTERNAL_REGISTRY=operator-kept\n"
     assert _bootstrap(bundle_dir).returncode == 0
+
+
+def _replace_docs(bundle_dir, data):
+    (bundle_dir / "reference-docs.tar.gz").write_bytes(data)
+    _resign(bundle_dir)  # A validly signed member is still checked before it is unpacked.
+
+
+@pytest.mark.parametrize(("member", "needle"), [
+    (lambda: reference_docs_member(extra=[tar_file("reference-docs/../escaped.md", b"x")]),
+     "a path outside reference-docs/ or a .. component"),
+    (lambda: reference_docs_member(extra=[tar_file("other/top.md", b"x")]),
+     "a path outside reference-docs/ or a .. component"),
+    (lambda: reference_docs_member(extra=[tar_link("reference-docs/sets/demo/link.md", "/etc/passwd")]),
+     "a link, directory or device entry"),
+    (lambda: reference_docs_member(extra=[tar_file("reference-docs/sets/demo/unlisted.md", b"x")]),
+     "the unpacked files differ from the FILES.sha256 list"),
+    (lambda: reference_docs_member(extra=[tar_file("reference-docs/sets/demo/docs/guide.md", b"swapped\n")]),
+     "a file does not match FILES.sha256"),
+], ids=["dotdot", "outside-top", "symlink", "unlisted-file", "changed-file"])
+def test_bootstrap_refuses_an_unsafe_reference_docs_member_and_keeps_the_previous_docs(bundle_dir, member, needle):
+    """GH#1174: the member is signed, yet it is still untrusted: an escaping, linked,
+    unlisted or altered entry is refused, nothing lands outside the staging directory,
+    and the previous release's docs stay in place."""
+    first = _bootstrap(bundle_dir)
+    assert first.returncode == 0, first.stdout + first.stderr
+    docs = bundle_dir / "operator workspace/dist/reference-docs"
+    before = {p.relative_to(docs): p.read_bytes() for p in docs.rglob("*") if p.is_file()}
+    _replace_docs(bundle_dir, member())
+    result = _bootstrap(bundle_dir)
+    assert result.returncode != 0
+    assert "FAIL: reference docs: " in result.stderr and needle in result.stderr
+    assert "SUCCESS" not in result.stdout
+    assert {p.relative_to(docs): p.read_bytes() for p in docs.rglob("*") if p.is_file()} == before
+    assert not (bundle_dir / "operator workspace/dist/escaped.md").exists()
+    assert not (bundle_dir / "operator workspace/dist/.reference-docs-staging").exists()
+    # The next ordinary run from a good bundle unpacks the new docs.
+    _replace_docs(bundle_dir, reference_docs_member({"sets/demo/LICENSE": b"Demo licence text\n",
+                                                     "sets/demo/docs/guide.md": b"# Guide v2\n"}))
+    again = _bootstrap(bundle_dir)
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert (docs / "sets/demo/docs/guide.md").read_bytes() == b"# Guide v2\n"
+    assert not (docs / "project/README.md").exists()
+
+
+def test_bootstrap_requires_the_reference_docs_member(bundle_dir):
+    sums = bundle_dir / "SHA256SUMS"
+    sums.write_text("".join(x for x in sums.read_text().splitlines(keepends=True) if "reference-docs.tar.gz" not in x))
+    sign_sums(bundle_dir)
+    result = _bootstrap(bundle_dir)
+    assert result.returncode != 0
+    assert "exactly the required bundle members" in result.stderr
+    assert not (bundle_dir / "operator workspace").exists()
+
+
+
+def _builder_name_rule():
+    path = REPO / "scripts/airgap/reference_docs.py"
+    spec = importlib.util.spec_from_file_location("reference_docs_rule", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # Its dataclasses resolve their module while it loads.
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        del sys.modules[spec.name]
+    return module.SAFE_PART
+
+
+def test_bootstrap_accepts_exactly_the_names_the_reference_docs_builder_accepts(bundle_dir):
+    """#1179 review P1: one name rule for both sides. Every character the pack-time
+    builder accepts in a path component unpacks and verifies at the site (step 5 lists
+    names under `LC_ALL=C`, which escapes anything else with a backslash), and each
+    class the builder refuses is refused by bootstrap too, so pack never ships a
+    signed member the site then rejects."""
+    rule = _builder_name_rule()
+    accepted = [chr(c) for c in range(0x110) if c != ord("/") and rule.match(f"x{chr(c)}x")]
+    assert accepted == [chr(c) for c in range(0x20, 0x7F) if chr(c) not in "/\\"]
+    files = {"sets/demo/LICENSE": b"Demo licence text\n"}
+    files.update({f"sets/demo/n{char}n.md": char.encode() for char in accepted})
+    files.update({" lead and trail ": b"spaces", "sets/demo/-dash": b"dash"})
+    _replace_docs(bundle_dir, reference_docs_member(files))
+    result = _bootstrap(bundle_dir)
+    assert result.returncode == 0, result.stdout + result.stderr
+    docs = bundle_dir / "operator workspace/dist/reference-docs"
+    for char in accepted:
+        assert (docs / f"sets/demo/n{char}n.md").read_bytes() == char.encode(), repr(char)
+    for refused in ("\u00e9", "\u0085", "\x7f", "\\", "\x01"):
+        assert not rule.match(f"x{refused}x"), repr(refused)
+        bad = {"sets/demo/LICENSE": b"Demo licence text\n", f"sets/demo/bad{refused}name.md": b"x"}
+        _replace_docs(bundle_dir, reference_docs_member(bad))
+        result = _bootstrap(bundle_dir)
+        assert result.returncode != 0, repr(refused)
+        assert "FAIL: reference docs: the member holds a path outside reference-docs/" in result.stderr

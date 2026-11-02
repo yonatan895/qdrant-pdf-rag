@@ -462,9 +462,12 @@ This generates `dist/qdrant-pdf-rag-<sha>.tar` and its digest
 `dist/qdrant-pdf-rag-<sha>.tar.sha256`. The bundle holds the git bundle, the app
 images, the vendored Qdrant/OpenObserve/otelcol images (and the oauth-proxy
 sidecar when its pin is recorded), the Helm chart, `bootstrap.sh`, the signed
-manifests/SBOM/notices, and the pinned host runner. Pack reuses the installer's
-`.tools/cache`, or an explicit `AIRGAP_TASK_ARCHIVE=<absolute path>`, for that
-runner archive. [Deploy §4](deploy.md#4-signing-and-provenance)
+manifests/SBOM/notices, the pinned host runner and the offline reference docs.
+Pack reuses the installer's `.tools/cache`, or an explicit
+`AIRGAP_TASK_ARCHIVE=<absolute path>`, for that runner archive. The reference
+docs step downloads about 1.4 GB of pinned upstream doc archives (deleted after
+use) unless `AIRGAP_REFDOCS_CACHE=<directory>` holds them named by sha256, in
+which case it never downloads. [Deploy §4](deploy.md#4-signing-and-provenance)
 owns the member contract and provenance rules; do not restate them here.
 
 ### 4.2 Transfer & Automated Bootstrap
@@ -502,7 +505,10 @@ and refuse any checkout that is not this verified signed release
 The `bootstrap.sh` script verifies the bundle signature and every member
 checksum, clones `repo.bundle`, verifies HEAD against the manifest, installs the
 bundled pinned Task without network access or preinstalled Make/Task, seeds
-`airgap.env` only when absent, and stages `dist/` before promotion. The trust
+`airgap.env` only when absent, stages `dist/` before promotion, and unpacks the
+verified reference docs to `qdrant-pdf-rag/dist/reference-docs/`: open
+`INDEX.md` there for this repository's docs and the version-matched upstream
+docs, readable with any text viewer or browser ([reference docs](deploy.md#reference-docs)). The trust
 chain, staging/interruption recovery, refusal messages and the executing-checkout
 guard are owned by [deploy §4](deploy.md#4-signing-and-provenance); read them
 before a recovery attempt. A rerun never advances an existing workspace to a new

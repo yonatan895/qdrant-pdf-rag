@@ -515,7 +515,8 @@ The connected host packs one tarball: git bundle, Qdrant + OpenObserve
 `images.txt` digest is recorded; [image format](#bundle-image-format)), vendored chart, bootstrap script,
 `MANIFEST.txt`, `PACKING_RECORD.txt`, digest enumeration, `THIRD-PARTY-NOTICES.txt`
 ([licensing](licensing.md); pack fails closed on an unrecorded dependency, image
-digest or notice change, and bootstrap requires the member), offline signature,
+digest or notice change, and bootstrap requires the member), the
+[reference docs](#reference-docs) member `reference-docs.tar.gz`, offline signature,
 and member checksums. Verify the tarball digest **before** unpacking, member
 checksums **after**.
 
@@ -706,6 +707,36 @@ checksums **after**.
   stage on its own initiative; operator files remain through recovery.
   The copy list includes `oauth-proxy-image.tar` when the bundle contains it;
   no manual sidecar-image copy is needed before `airgap:load`.
+- <a id="reference-docs"></a>**Reference docs (GH#1174).** `reference-docs.tar.gz`
+  is a required signed member: the project's own docs from the packed commit
+  (`README.md`, `AGENTS.md`, `LICENSE`, `docs/` with the ADRs and
+  `docs/architecture.md`, the vendored Qdrant skills) plus every upstream doc set
+  pinned in `scripts/airgap/reference-docs.json` (version-matched docs of the
+  shipped and called components and the main Python libraries; the OpenShift
+  subset is the path list `scripts/airgap/reference-docs-openshift.paths`). Each
+  row pins an archive URL, its sha256, kept-path globs and the licence files.
+  Pack reads each archive from `AIRGAP_REFDOCS_CACHE` (a directory of archives
+  named by their sha256; when set, pack never downloads, like
+  `AIRGAP_TASK_ARCHIVE`) or `.tools/cache/reference-docs`, else downloads it from
+  the pinned URL (about 1.4 GB in all, deleted after use), and fails closed on a
+  sha256 mismatch. Archives are untrusted: an absolute, `..` or control-character
+  member name, a second top-level directory or a duplicate refuses the archive; a
+  link or special file inside the kept subset refuses the set; a missing licence
+  file or an include that matches nothing refuses the set. Only regular files of
+  the kept subset and their licence files are copied; nothing upstream is built,
+  rendered or executed (raw Markdown, MDX, AsciiDoc, reST, Hugo/Docusaurus
+  sources; the CPython set is python.org's own rendered HTML and text). The
+  member holds `reference-docs/INDEX.md` (set, component, version, source@sha,
+  licence, path), `reference-docs/FILES.sha256` (every file) and is
+  deterministic for a given commit. MANIFEST binds it (`reference_docs_sha256`,
+  `reference_docs_sets`), the SBOM lists every set, and every set has a
+  license record ([licensing](licensing.md#reference-docs)); a set without an
+  upstream licence cannot be expressed in the manifest. Bootstrap step 5 lists
+  the member (regular files under `reference-docs/` only, no `..`), unpacks it
+  into `dist/.reference-docs-staging`, requires every file to match
+  `FILES.sha256` and no unlisted file, then replaces `dist/reference-docs/`;
+  a refusal leaves the previous release's docs in place. The vLLM
+  `--help=all` capture (generated engine-args and metrics pages) is a follow-up.
 
 <a id="release-archive"></a>
 ### Release archive (#1118, decision D5)

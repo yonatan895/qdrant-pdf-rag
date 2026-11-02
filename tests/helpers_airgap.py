@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import re
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -84,6 +86,8 @@ def make_bin_tree(tmp_path: Path, scripts: list[str]) -> Path:
     if "common.sh" in scripts:
         # resolve_observability evaluates the values mapper's decisions.
         scripts = [*scripts, "model_config.py", "map_values.py"]
+    if "pack.sh" in scripts:
+        scripts = [*scripts, "reference_docs.py"]
     if any(name in scripts for name in ("pack.sh", "load.sh", "deploy.sh", "ingest.sh")):
         scripts = [*scripts, "image_identity.sh", "image_manifest.py"]
     if any(name in scripts for name in ("deploy.sh", "ingest.sh")):
@@ -124,10 +128,99 @@ def copy_license_inputs(tmp_path: Path) -> None:
                      "LICENSE.mattpocock-skills", "NOTICE.mattpocock-skills",
                      ".agents/mattpocock-skills.sha256",
                      "LICENSE.pstack-skills", "NOTICE.pstack-skills",
-                     ".agents/pstack-skills.sha256", "bm25-weights.sha256", *vendor):
+                     ".agents/pstack-skills.sha256", "bm25-weights.sha256",
+                     "scripts/airgap/reference-docs.json", "scripts/airgap/reference-docs-openshift.paths", *vendor):
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO / relative, target)
+
+
+def tar_gz(entries: list[tuple[tarfile.TarInfo, bytes | None]]) -> bytes:
+    """A gzip tar of exactly these entries (regular files get their bytes)."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for info, data in entries:
+            if data is not None:
+                info.size = len(data)
+            archive.addfile(info, io.BytesIO(data) if data is not None else None)
+    return buffer.getvalue()
+
+
+def tar_file(name: str, data: bytes) -> tuple[tarfile.TarInfo, bytes]:
+    info = tarfile.TarInfo(name)
+    info.mode = 0o644
+    return info, data
+
+
+def tar_link(name: str, target: str, kind: bytes = tarfile.SYMTYPE) -> tuple[tarfile.TarInfo, None]:
+    info = tarfile.TarInfo(name)
+    info.type = kind
+    info.linkname = target
+    return info, None
+
+
+def reference_docs_member(files: dict[str, bytes] | None = None, extra=()) -> bytes:
+    """A reference-docs.tar.gz shaped like the one pack.sh ships (GH#1174):
+    regular files under reference-docs/, with INDEX.md and a FILES.sha256 line
+    for every other file. ``extra`` entries are appended unlisted."""
+    files = dict(files if files is not None else {
+        "sets/demo/LICENSE": b"Demo licence text\n",
+        "sets/demo/docs/guide.md": b"# Demo guide\n",
+        "project/README.md": b"Hello\n",
+    })
+    files.setdefault("INDEX.md", b"# Offline reference documentation\n")
+    files["FILES.sha256"] = "".join(f"{sha256_bytes(data)}  {name}\n" for name, data in sorted(files.items())).encode()
+    return tar_gz([tar_file(f"reference-docs/{name}", data) for name, data in sorted(files.items())] + list(extra))
+
+
+# Two original doc sets for pack trees, shaped like codeload archives.
+REFDOCS_FIXTURE_SETS = {
+    "demo-guide": {
+        "root": "demo-guide-0123abc",
+        "files": {"LICENSE": b"MIT License\n\nCopyright (c) fixture authors\n", "docs/index.md": b"# Demo guide\n",
+                  "docs/deep/page.md": b"A nested page.\n", "src/code.py": b"print('not docs')\n"},
+        "license": "MIT", "license_files": ["LICENSE"], "include": ["docs/**"],
+    },
+    "demo-site": {
+        "root": "demo-site-main",
+        "files": {"COPYING": b"BSD 2-Clause fixture licence\n", "content/a.md": b"Site page A.\n",
+                  "theme/app.js": b"// not kept\n"},
+        "license": "BSD-2-Clause", "license_files": ["COPYING"], "include": ["content/*.md"],
+    },
+}
+
+
+def write_reference_docs_fixture(tree: Path) -> Path:
+    """Fake pinned doc sets for a pack tree: archives in a sha256-named cache,
+    the tree's manifest and matching license records. Returns the cache."""
+    from scripts import license_inventory as li
+
+    cache = tree / "refdocs-cache"
+    cache.mkdir(exist_ok=True)
+    rows = []
+    for ident, spec in REFDOCS_FIXTURE_SETS.items():
+        data = tar_gz([tar_file(f"{spec['root']}/{name}", body) for name, body in spec["files"].items()])
+        digest = sha256_bytes(data)
+        (cache / digest).write_bytes(data)
+        row = {"id": ident, "component": f"Fixture {ident}", "version": "1.0", "source": f"fixture/{ident}@0123abc",
+               "url": f"https://example.invalid/{ident}.tar.gz", "sha256": digest, "license": spec["license"],
+               "license_files": spec["license_files"], "include": spec["include"]}
+        rows.append(row)
+    (tree / "scripts/airgap/reference-docs.json").write_text(json.dumps({"schema_version": 1, "sets": rows}, indent=2) + "\n")
+    record = tree / "licenses" / "inventory.json"
+    inventory = json.loads(record.read_text())
+    inventory["components"] = [c for c in inventory["components"] if c.get("kind") != "reference-docs"]
+    for row in rows:
+        inventory["components"].append({
+            "approval_ref": "fixture", "class": li.expression_class(row["license"]),
+            "bind": {"reference_docs": {"set": row["id"], **{k: row[k] for k in ("url", "sha256", "license_files")}}},
+            "decision": {"date": "2026-10-31", "disposition": "fixture", "owner": "fixture"},
+            "distributed_by_repo": True, "id": f"docs:{row['id']}", "kind": "reference-docs",
+            "license_declared": "fixture", "license_spdx": row["license"], "name": row["component"],
+            "obligation": "fixture obligation", "ships_in": ["reference-docs.tar.gz"],
+            "spdx_basis": "license-file-text", "status": "approved"})
+    record.write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n")
+    return cache
 
 
 def symlink_tools(tmp_path: Path, tools: tuple[str, ...]) -> None:
