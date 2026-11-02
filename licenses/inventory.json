@@ -4712,7 +4712,7 @@
     }
   ],
   "release_approval": {
-    "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543",
+    "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6577725968",
     "approved_digest": "2fcedf6557e54c74cc77ae280f326d2f1616e57ae9fb325534dd4895a7649812"
   },
   "schema_version": 1
