@@ -390,6 +390,10 @@ def _prepare_new(source_state, state, *, profile="COLAB_CPU_TRANSPORT", extra=()
 # still-ordinary deadline keeps the retry-until-deadline path under test (the
 # work window stays several times a normal run) without waiting 30 s.
 SHORT_DEADLINE_SECONDS = "12"
+# The production path admits the retained Qdrant and the gateway network before its
+# native workload starts; in a one-CPU CI slot (the dev kit lane, #1183) that alone
+# takes most of a 12 s run's 8 s work window, so its short deadline is longer.
+SHORT_PRODUCTION_DEADLINE_SECONDS = "20"
 
 
 def _prepare_short_deadline(source_state, state):
@@ -2276,7 +2280,7 @@ def test_malformed_production_sidecar_cannot_block_exact_recovery_then_next_nati
     short_approval = root / "short-scan-production-approval.json"
     test_colab_production._json(short_approval, approval)
     state = _prepare_production_again(run, "short-deadline-sidecar-run", approval=short_approval,
-                                      extra=("--deadline-seconds", SHORT_DEADLINE_SECONDS))
+                                      extra=("--deadline-seconds", SHORT_PRODUCTION_DEADLINE_SECONDS))
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "stop_fail")
     failed = _production_cli(state, timeout=60)
     assert failed.returncode == 1, failed.stdout + failed.stderr
