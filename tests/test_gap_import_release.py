@@ -1097,8 +1097,8 @@ AGREEMENT = [
     ("gap-key-in-both-roles-copy", SAME_KEY),
     ("gap-key-in-both-roles-der", SAME_KEY),
     ("upstream-key-in-both-roles-der", SAME_KEY),
-    ("swapped-anchors", "bundle pubkey does not match SNEAKERNET_TRUSTED_PUB, the release trust anchor for the "
-                        "bundle's origin (upstream)"),
+    ("swapped-anchors", ("bundle pubkey does not match SNEAKERNET_TRUSTED_PUB, the release trust anchor for the "
+                         "bundle's origin (upstream)")),
     ("gap-anchor-is-a-link", "release trust anchor SNEAKERNET_GAP_TRUSTED_PUB is a link"),
     ("gap-anchor-is-a-directory", GAP_NOT_A_FILE),
     ("gap-anchor-missing", GAP_NOT_A_FILE),
