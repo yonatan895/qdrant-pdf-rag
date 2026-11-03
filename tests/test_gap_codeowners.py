@@ -31,6 +31,8 @@ from scripts.acceptance import VERIFICATION_INPUTS, verification_inputs
 from scripts.acceptance_evidence import PRODUCERS
 from scripts.unit_evidence import INPUTS as UNIT_INPUTS
 
+from tests import helpers_signing_closure as closure
+
 ROOT = Path(__file__).resolve().parents[1]
 GROUP = '@site/gap-maintainers'
 APPROVERS = ['@first.approver', '@second_approver-2']
@@ -43,6 +45,10 @@ GAP_GATES = {'.gitlab-ci.yml', '.gitlab/CODEOWNERS', 'scripts/check_junit_clean.
              # Every code-owner file GitLab reads first: adding one needs the
              # approver even if the hygiene step were neutralised (#1176 B1).
              'CODEOWNERS', 'docs/CODEOWNERS'}
+# ADR-0009 section 6, written out: the entry points that pack, sign or verify a
+# release or kit (#588 N1). Every file they run or read by name is protected.
+SIGNING_ENTRY_POINTS = {'scripts/airgap/pack.sh', 'scripts/airgap/bootstrap.sh', 'scripts/airgap/load.sh',
+                        'scripts/devkit/pack.sh', 'scripts/devkit/install.sh', 'scripts/gap/import_release.sh'}
 # Isolated: no script directory or cwd on sys.path and no PYTHON* variables,
 # so no group-owned file can shadow a module the check imports.
 CHECK_STEP = 'python3 -I scripts/gap_codeowners.py check'
@@ -92,11 +98,29 @@ def written(tmp_path: Path) -> Path:
     return tmp_path / '.gitlab/CODEOWNERS'
 
 
-def test_protected_set_is_the_verifier_list_plus_the_named_gap_gates():
+def test_protected_set_is_the_verifier_list_plus_the_named_gap_gates_and_the_signing_closure():
     workflows = {'.github/workflows/' + p.workflow for p in PRODUCERS}
-    assert set(codeowners.protected_paths()) == {*VERIFICATION_INPUTS, 'taskfiles/*.yml', *workflows, *GAP_GATES}
+    signing = closure.derive(ROOT, SIGNING_ENTRY_POINTS)
+    assert set(codeowners.protected_paths()) == {*VERIFICATION_INPUTS, 'taskfiles/*.yml', *workflows, *GAP_GATES,
+                                                 *signing}
     assert set(UNIT_INPUTS) <= set(codeowners.protected_paths())
     assert not any(p.startswith('gap/') for p in codeowners.protected_paths())
+
+
+def test_every_file_the_signing_entry_points_run_is_protected_and_the_list_tracks_the_scripts():
+    # #588 N1: a group-only change to code a signer or verifier runs (common.sh
+    # holds the anchor checks and check_manifest_chain) could change what is
+    # packed, signed or accepted. The closure is derived from the scripts, and
+    # the generator's copy must equal it: a new dependency fails here until it
+    # is protected, and a dropped one leaves the list.
+    signing = closure.derive(ROOT, SIGNING_ENTRY_POINTS)
+    assert {'scripts/airgap/common.sh', 'scripts/airgap/image_identity.sh', 'scripts/airgap/image_manifest.py',
+            'scripts/license_inventory.py', 'scripts/tools/task-artifact.sh', 'licenses/inventory.json',
+            'scripts/airgap/reference_docs.py', 'images.txt', *SIGNING_ENTRY_POINTS} <= signing
+    assert sorted(signing - set(codeowners.protected_paths())) == []
+    assert set(codeowners.SIGNING_ENTRY_POINTS) == SIGNING_ENTRY_POINTS
+    assert set(codeowners.SIGNING_CLOSURE) == signing
+    assert not any(p.startswith('gap/') for p in signing)
 
 
 def test_every_path_the_verifier_binds_is_protected_and_every_named_path_exists():
@@ -434,7 +458,9 @@ def test_docs_codeowners_with_edited_group_owned_scripts_fails_the_step(tmp_path
     protected = set(codeowners.protected_paths())
     edited = [p for p in sorted((root / 'scripts').rglob('*.py'))
               if str(p.relative_to(root)) not in protected]
-    assert root / 'scripts/acceptance_evidence.py' in edited and root / 'scripts/__init__.py' in edited
+    # scripts/__init__.py is now protected (#588 N1: license_inventory.py may
+    # import it), so a group-only change can no longer edit it.
+    assert root / 'scripts/acceptance_evidence.py' in edited and root / 'scripts/__init__.py' not in edited
     for path in edited:
         path.write_text(path.read_text() + '\n' + SHIM)
     (root / 'docs/CODEOWNERS').write_text('* @attacker\n')
@@ -461,3 +487,124 @@ def test_the_isolated_check_loads_no_module_from_the_checkout(tmp_path):
     assert result.returncode == 0, result.stderr
     loaded = [line for line in result.stdout.splitlines() if line.startswith(str(root))]
     assert loaded == []
+
+
+# -- the signing closure derivation (tests/helpers_signing_closure.py) on fixture repositories --
+
+def repo(tmp_path: Path, files: dict[str, str]) -> Path:
+    for name, text in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text)
+    if not (tmp_path / '.git').exists():
+        git(tmp_path, 'init', '-q')
+    git(tmp_path, 'add', '-A')
+    return tmp_path
+
+
+def derived(root: Path, *entries: str, reviewed: dict[tuple[str, str], tuple[str | None, str]] | None = None
+            ) -> set[str]:
+    # The fixtures review nothing and declare no root variable unless a test says so.
+    return set(closure.derive(root, entries or ('scripts/pack.sh',), reviewed=reviewed or {}, root_variables={}))
+
+
+PACK = ('#!/bin/sh\n'
+        'set -eu\n'
+        '. "$(dirname -- "$0")/common.sh"\n'
+        'python3 "$REPO_ROOT/scripts/sign.py" --pin "$REPO_ROOT/pins/key.txt"\n'
+        'echo "done: see docs/guide.md"\n')
+COMMON = ('REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\n'
+          'cd "$REPO_ROOT"\n'
+          'case "$x" in */*) die "a pattern, not a command" ;; esac\n')
+SIGN = 'import json\nimport helper\n'
+BASE = {'scripts/pack.sh': PACK, 'scripts/common.sh': COMMON, 'scripts/sign.py': SIGN,
+        'scripts/helper.py': 'X = 1\n', 'pins/key.txt': 'k\n', 'docs/guide.md': 'g\n',
+        'scripts/unrelated.sh': 'echo\n'}
+BASE_CLOSURE = {'scripts/pack.sh', 'scripts/common.sh', 'scripts/sign.py', 'scripts/helper.py', 'pins/key.txt'}
+
+
+def test_derivation_follows_sourcing_interpreters_imports_and_pins_only(tmp_path):
+    # Not the message's docs/guide.md, not an unrelated script, not a case pattern.
+    assert derived(repo(tmp_path, BASE)) == BASE_CLOSURE
+
+
+def test_a_new_sourced_file_is_flagged(tmp_path):
+    root = repo(tmp_path, BASE)
+    pinned = derived(root)
+    repo(root, {'scripts/common.sh': COMMON + '. "$REPO_ROOT/scripts/anchors.sh"\n',
+                'scripts/anchors.sh': '. scripts/more.env\n', 'scripts/more.env': 'A=1\n'})
+    assert derived(root) - pinned == {'scripts/anchors.sh', 'scripts/more.env'}
+
+
+def test_a_new_python_import_is_flagged_and_a_stdlib_shadow_is_a_dependency(tmp_path):
+    root = repo(tmp_path, BASE)
+    pinned = derived(root)
+    repo(root, {'scripts/sign.py': SIGN + 'from scripts.lib import verify\n', 'scripts/__init__.py': '',
+                'scripts/lib/__init__.py': '', 'scripts/lib/verify.py': '',
+                # Python puts the script's directory first: this json.py would run.
+                'scripts/json.py': ''})
+    assert derived(root) - pinned == {'scripts/__init__.py', 'scripts/lib/__init__.py', 'scripts/lib/verify.py',
+                                      'scripts/json.py'}
+
+
+def test_a_removed_dependency_is_dropped(tmp_path):
+    root = repo(tmp_path, BASE)
+    repo(root, {'scripts/sign.py': 'import json\n'})
+    assert derived(root) == BASE_CLOSURE - {'scripts/helper.py'}
+
+
+def test_sh_c_positionals_and_python_heredocs_are_followed(tmp_path):
+    root = repo(tmp_path, {**BASE, 'scripts/pack.sh': (
+        'ROOT=$(CDPATH=\'\' cd -- "$(dirname -- "$0")/.." && pwd)\n'
+        'LIB="$ROOT/scripts/common.sh"\n'
+        "sh -c '. \"$1\" && run_it' \"$0\" \"$LIB\"\n"
+        'python3 -I - "$ROOT" <<\'PYEOF\' || exit 1\n'
+        'import helper\n'
+        'open("pins/key.txt")\n'
+        'PYEOF\n')})
+    assert derived(root) == {'scripts/pack.sh', 'scripts/common.sh', 'scripts/helper.py', 'pins/key.txt'}
+
+
+@pytest.mark.parametrize('line, problem', [
+    ('. "$SOMEWHERE/lib.sh"', "cannot resolve sourced file '$SOMEWHERE/lib.sh'"),
+    ('. "$REPO_ROOT/scripts/missing.sh"', "cannot resolve sourced file '$REPO_ROOT/scripts/missing.sh'"),
+    ('sh "$REPO_ROOT/scripts/missing.sh"', "cannot resolve shell script '$REPO_ROOT/scripts/missing.sh'"),
+    ('python3 "$TOOLS/x.py"', "cannot resolve Python script '$TOOLS/x.py'"),
+    ('"$TOOL" --sign', "cannot resolve command '$TOOL'"),
+    ('eval "$CMD"', "cannot resolve command '$CMD'"),
+    ('python3 -c "import yaml_like_thirdparty"', "cannot resolve import 'yaml_like_thirdparty'"),
+    ('python3 -c "import importlib; importlib.import_module(name)"', 'dynamic code (import_module)'),
+    ('sh -c', 'sh -c without a command string'),
+])
+def test_an_unresolvable_reference_fails_closed(tmp_path, line, problem):
+    root = repo(tmp_path, {**BASE, 'scripts/pack.sh': PACK + line + '\n'})
+    with pytest.raises(closure.Unresolved) as raised:
+        derived(root)
+    assert any(problem in p for p in raised.value.problems), raised.value.problems
+
+
+def test_a_reviewed_reference_is_accepted_and_an_unused_one_fails(tmp_path):
+    root = repo(tmp_path, {**BASE, 'scripts/pack.sh': PACK + '. "$OPERATOR_ENV"\nsh "$KIT/x.sh"\n',
+                           'tools/x.sh': 'echo\n'})
+    reviewed = {('scripts/pack.sh', '$OPERATOR_ENV'): (None, 'outside the repository'),
+                ('scripts/pack.sh', '$KIT/x.sh'): ('tools/x.sh', 'the kit copy of tools/x.sh')}
+    assert derived(root, reviewed=reviewed) == BASE_CLOSURE | {'tools/x.sh'}
+    with pytest.raises(closure.Unresolved, match='no longer used'):
+        derived(root, reviewed={**reviewed, ('scripts/pack.sh', '$GONE'): (None, 'stale')})
+
+
+def test_an_unparseable_or_untracked_entry_point_fails_closed(tmp_path):
+    root = repo(tmp_path, {**BASE, 'scripts/pack.sh': PACK + "echo 'unterminated\n"})
+    with pytest.raises(closure.Unresolved, match='cannot parse shell'):
+        derived(root)
+    with pytest.raises(closure.Unresolved, match='not a tracked file'):
+        derived(root, 'scripts/absent.sh')
+
+
+def test_the_generated_file_names_the_approver_on_every_signing_dependency(tmp_path):
+    # The simulated fork commit: the real generator writes the closure into
+    # the protected section, and the hygiene step passes on it.
+    root = fork(tmp_path)
+    protected = entries((root / codeowners.TARGET).read_text(), '[Protected list]')
+    for path in closure.derive(ROOT, SIGNING_ENTRY_POINTS):
+        assert f'/{path} {APPROVERS[0]}' in protected
+    assert hygiene_step(root).returncode == 0

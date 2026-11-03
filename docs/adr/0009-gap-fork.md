@@ -526,6 +526,25 @@ gap patches stay ledgered.
     generator itself, and `CODEOWNERS` and `docs/CODEOWNERS`, which GitLab
     reads before `.gitlab/CODEOWNERS`. Each approver is a single user, never
     a group; one person may give both approvals (maintainer, 2026-10-31).
+  - **The signers' dependencies** are on the list too (#588 N1, maintainer,
+    2026-11-02). The entry points that pack, sign or verify a release or a
+    kit are `scripts/airgap/pack.sh`, `bootstrap.sh` and `load.sh`,
+    `scripts/devkit/pack.sh` and `install.sh`, and
+    `scripts/gap/import_release.sh`. The release guard and its anchor
+    checks live in the `common.sh` they source. Every tracked file these
+    run or read by name is protected: sourced files, invoked scripts,
+    Python imports, pins and the files packed into the kit. The generator
+    holds this list as data (`SIGNING_CLOSURE`); F6 adds its pack and sign
+    entry points.
+    `tests/helpers_signing_closure.py` derives it from the scripts, and an
+    upstream test pins the two equal. A new dependency fails that test
+    until the generator lists it. The derivation fails closed: a reference
+    it cannot resolve fails unless it is reviewed by name with its reason.
+    It does not see paths built at run time (loop variables, string
+    formatting), files read through a directory, the text `eval` runs, or
+    code loaded from outside the repository. In the fork the test is
+    group-owned code, so a new file in a protected script's directory that
+    shadows a module that script imports is caught only by the `test` job.
   - **One source of truth.** The generator holds the Verifier's list as
     data and imports nothing from the checkout. An upstream unit test
     (`tests/test_gap_codeowners.py`) asserts that its protected set equals
