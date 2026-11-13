@@ -59,22 +59,26 @@
 
 ## Enforced today and still promised
 
-Checked against this tree when the record was accepted. "In code" means the
-mechanism is present and tested here; it does not mean a site has run it.
-"Site record" items cannot be verified from this tree.
+Checked against this tree when the record was accepted. Labels: **Enforced**
+means a runtime guard here refuses the counterexample; **Enforced by test**
+means a test here fails on it; **In code** means the mechanism is present and
+tested here, not that a site has run it; **Partly** means part of the item
+exists here and the rest is a site record; **Not started** means none of it
+exists here. "Site record" items cannot be verified from this tree.
 
 | Item | What exists today | Verified by |
 |---|---|---|
-| F1 | Unverified-checkout refusal: `check_checkout_sha` in `scripts/airgap/common.sh` refuses, outside dry-run, a checkout that is not a verified signed release. **Enforced.** | The function and its launch-path callers are in the file. |
-| F2 | Origin-bound anchors: `scripts/airgap/bootstrap.sh` reads exactly one `origin:` line and verifies with `SNEAKERNET_TRUSTED_PUB` for upstream or `SNEAKERNET_GAP_TRUSTED_PUB` for gap. **In code.** | The anchor and origin handling is in the file. |
+| F1 | Unverified-checkout refusal: `check_checkout_sha` in `scripts/airgap/common.sh` refuses, outside dry-run, a checkout that is not a verified signed release, except under the documented connected-rehearsal opt-out `AIRGAP_UNVERIFIED_CHECKOUT=1` together with `CI_REHEARSAL=1`. Its callers are `scripts/airgap/validate.sh`, `ingest.sh`, `load.sh`, `deploy.sh` and `retire_legacy.sh`. **Enforced.** | The function and those callers are in the files; `grep -rn check_checkout_sha scripts` finds them. |
+| F2 | Origin-bound anchors: `scripts/airgap/bootstrap.sh` reads exactly one `origin:` line and, when an anchor is set, verifies with `SNEAKERNET_TRUSTED_PUB` for upstream or `SNEAKERNET_GAP_TRUSTED_PUB` for gap; without one it is trust-on-first-use. **In code.** | The anchor and origin handling is in the file. |
 | F3 | `gap/` and `.gitlab/` absent upstream: `tests/test_hygiene.py` fails on GitHub Actions when either path exists. **Enforced by test.** | The test exists. |
 | F4 | CODEOWNERS generator: `scripts/gap_codeowners.py`. **In code.** The GitLab-side protection settings are site records, not verifiable here. | The script exists. |
-| F5 | Dev kit: the pack, install and `agent_doctor` path. **Done.** | `scripts/devkit/pack.sh` and `scripts/devkit/install.sh` exist. |
+| F5 | Dev kit: the pack, install and `agent_doctor` path. **In code.** | `scripts/devkit/pack.sh`, `scripts/devkit/install.sh` and `scripts/agent_doctor.py` exist. |
 | F7 | Import procedure: `scripts/gap/import_release.sh`, exercised on throwaway repositories. **In code.** | The script and `tests/test_gap_import_release.py` exist. |
 | F10 | Extension surface: `scripts/extension_surface.py` derives the list; a snapshot and test pin it. **In code.** | The script, `tests/fixtures/extension-surface.json` and `tests/test_extension_surface.py` exist. |
 | F8 | Owner-document updates. **Partly:** `docs/deploy.md`, `docs/task-runner.md`, `docs/live-stack.md`, `docs/licensing.md` and `docs/install_and_ops.md` carry gap content; the remaining Consequences entries are not confirmed updated here. | Those files contain the gap sections. |
 | F9 | Namespace isolation: the manifests in `deploy/workspace/` and `scripts/devkit/isolation_proof.py` exist. **Partly:** the live proof at a site is not recorded here. | The directory and script exist. |
-| F6 | Gap release pipeline: protected-tag build and sign jobs, the unprivileged in-namespace build, the `origin: gap` pack, the key-generation runbook and the release record template. **NOT STARTED.** | No such pipeline or pack exists; `scripts/airgap/pack.sh` writes only `origin: upstream`. |
+| F11 | GitLab CI iteration: `.gitlab-ci.yml` shards the unit job (`parallel: 4`), marks every job `interruptible` with automatic cancellation of redundant pipelines, sets the `gate` and `wip` runner tags, and selects lanes on branch pipelines through `scripts/gitlab_lanes.py`; `tests/test_ci_gitlab_parity.py` pins the pipeline shape. **Enforced by test.** Running it on a real site runner is not recorded here. | `grep -n 'F11\|interruptible\|parallel:' .gitlab-ci.yml` finds the markers; the pipeline-shape cases in `tests/test_ci_gitlab_parity.py` and `scripts/gitlab_lanes.py` cover them. |
+| F6 | Gap release pipeline: protected-tag build and sign jobs, the unprivileged in-namespace build, the `origin: gap` pack and the key-generation runbook. **Not started.** The release record template exists at [`../release-record.md`](../release-record.md). | No such pipeline or pack exists; `scripts/airgap/pack.sh` writes only `origin: upstream`. |
 
 Until F6 exists, no gap release can be produced, so gap-developed code has no
 route to production; an upstream release is the only route. The maintainer
@@ -212,9 +216,11 @@ raised F6 in priority on 2026-11-13.
     limits on every container (build, helper and services).
 - **CI capacity and agent iteration (2026-10-30).** Gap agents reach the CI
   namespace only through GitLab: they push a branch and read the result.
-  Coding agents run in the dev pod in the CI namespace and also on a separate
-  agents machine outside OpenShift ([agents VM](../agents-vm.md)); the machine
-  is an addition, not a replacement.
+  The maintainer states (2026-11-13) that at the site coding agents run in the
+  dev pod in the CI namespace and also on a separate agents machine outside
+  OpenShift ([agents VM](../agents-vm.md)); the recorded site proofs for that
+  machine are still listed as not run in that document. The machine is an
+  addition, not a replacement.
   The dev pod has no RBAC there, because creating a pod would let it mount
   any Secret in the namespace.
   - There are four job slots of about 1 CPU each, since pytest runs on one
@@ -821,10 +827,10 @@ The names the gap builds on are a **public API**, limited to this list:
 
 ## Consequences
 
-- **AGENTS.md** changes in this PR:
-  - The "one history" bullet becomes "Air-gapped GitLab is a downstream
-    fork" with a link here. The bullet goes from 286 to 283 bytes.
-  - The hard boundary "private configuration" gains "outside the fork's
+- **AGENTS.md** already carries the new wording:
+  - The "one history" bullet is "Air-gapped GitLab is a downstream fork"
+    with a link here. The bullet went from 286 to 283 bytes.
+  - The hard boundary "private configuration" reads "outside the fork's
     `gap/config/`" (Q2). On GitHub, the F3 check keeps `gap/` absent.
 
   The file stays under 8192 bytes. The MR and gap-maintainer reading is in
