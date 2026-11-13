@@ -187,6 +187,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    if args.update_baseline and report["failures"] > 0:
+        print(
+            "FAIL: refusing to record a baseline from a run with query "
+            f"failures ({report['failures']} failed)",
+            file=sys.stderr,
+        )
+        return 1
+
     baseline = None
     regressions: list[str] = []
     check_path = args.check

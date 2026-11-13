@@ -87,6 +87,41 @@ def test_main_refuses_baseline_from_unservable_collection(tmp_path, monkeypatch,
     assert "refusing to record a baseline" in capfd.readouterr().err
 
 
+def test_main_refuses_baseline_from_run_with_query_failures(tmp_path, monkeypatch, capfd):
+    """#1213: a run that could not answer some query says nothing about the
+    rest of the corpus, so --update-baseline refuses it the way it refuses an
+    unservable collection: exit 1, exact stderr line, no baseline written."""
+    golden = _hermetic_main(monkeypatch, tmp_path, report=_report() | {"failures": 2})
+    baseline = tmp_path / "baseline.json"
+    rc = main(["--golden", str(golden), "--update-baseline", str(baseline)])
+    assert rc == 1
+    assert "FAIL: refusing to record a baseline from a run with query failures (2 failed)" \
+        in capfd.readouterr().err
+    assert not baseline.exists()
+
+
+def test_main_refusal_leaves_an_existing_baseline_untouched(tmp_path, monkeypatch, capfd):
+    # the refusal forbids creating OR modifying the baseline file
+    golden = _hermetic_main(monkeypatch, tmp_path, report=_report() | {"failures": 2})
+    baseline = tmp_path / "baseline.json"
+    update_baseline(_report(), baseline)
+    before = baseline.read_bytes()
+    rc = main(["--golden", str(golden), "--update-baseline", str(baseline)])
+    assert rc == 1
+    assert baseline.read_bytes() == before
+
+
+def test_main_records_baseline_from_failure_free_run(tmp_path, monkeypatch, capfd):
+    # control for #1213: the refusal is conditioned on failures alone, so a
+    # clean run still records its baseline unchanged
+    golden = _hermetic_main(monkeypatch, tmp_path)
+    baseline = tmp_path / "baseline.json"
+    rc = main(["--golden", str(golden), "--update-baseline", str(baseline)])
+    assert rc == 0
+    assert baseline.exists()
+    assert "refusing to record a baseline" not in capfd.readouterr().err
+
+
 def test_main_exit_0_when_gate_applied_and_green(tmp_path, monkeypatch):
     golden = _hermetic_main(monkeypatch, tmp_path)
     baseline = tmp_path / "baseline.json"
