@@ -3261,7 +3261,7 @@ def test_measurement_inputs_need_a_reasoning_profile(lab):
 def test_production_refuses_agent_settings_its_frozen_contract_owns_then_prepares_normally(storage_lab):
     """The representation settings of a production index are frozen by its
     admission; a measurement input cannot name one, set or unset."""
-    root, run, _ = storage_lab
+    _, run, _ = storage_lab
     frozen = run.production_admission()
     assert "DENSE_QUERY_PREFIX" in {*frozen.environment, *frozen.unset_environment}
     causes = []
