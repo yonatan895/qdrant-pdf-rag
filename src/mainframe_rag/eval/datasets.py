@@ -344,6 +344,10 @@ def read_golden_bytes(path: Path | str) -> bytes:
         data = target.read_bytes()
         if hashlib.sha256(data).hexdigest() != match[1].lower():
             raise DatasetPinError("frozen holdout sha256 mismatch")
+        # Validate the text encoding here, as the old text reader did, so an
+        # invalid protected dataset still fails as DatasetPinError rather than
+        # raising a decode error later. The bytes remain the identity source.
+        data.decode("utf-8")
         return data
     except (OSError, UnicodeError, ValueError) as exc:
         raise DatasetPinError("frozen holdout or its sha256 pin is unavailable or invalid") from exc
