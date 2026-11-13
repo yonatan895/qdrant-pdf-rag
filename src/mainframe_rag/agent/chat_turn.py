@@ -47,9 +47,9 @@ def validate_request_text(
     Runs at the request model, before retrieval or any model call. `product`
     and `version` are bounded by Settings.query_max_chars; chat bodies
     (`messages` given) are also held to Settings.chat_max_body_chars across
-    every field. Every field must be UTF-8 encodable. Raises ValueError with a
-    fixed message and never echoes the value, so the 422 envelope and logs
-    carry no input text.
+    every field (the request-size guard, issue #1192). Every field must be
+    UTF-8 encodable. Raises ValueError with a fixed message and never echoes
+    the value, so the 422 envelope and logs carry no input text.
     """
     for value in (product, version):
         if value is not None and len(value) > settings.query_max_chars:
@@ -57,7 +57,7 @@ def validate_request_text(
     if messages is not None and (
         chat_body_chars(messages, splunk_context, product, version) > settings.chat_max_body_chars
     ):
-        raise ValueError("chat body exceeds the character limit")
+        raise RequestTooLarge(settings.chat_max_body_chars)
     texts = [query, product, version, splunk_context, *(m.content for m in messages or [])]
     if any(t is not None and has_lone_surrogate(t) for t in texts):
         raise ValueError("field contains an unpaired surrogate")
@@ -67,8 +67,26 @@ class InvalidChatTurn(ValueError):
     """Invalid conversation input; HTTP adapters supply the fixed 422 envelope."""
 
 
+class RequestTooLarge(InvalidChatTurn):
+    """The request text exceeds the request-size guard (issue #1192): the one
+    length refusal on the answer and chat paths, kept as abuse protection.
+    Carries the configured limit only, never input text."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__("request exceeds the character limit")
+        self.limit = limit
+
+
+def too_large_message(limit: int) -> str:
+    """Fixed client message for the request-size guard; states the limit."""
+    return f"request exceeds the {limit}-character limit"
+
+
 @dataclass(frozen=True)
 class PreparedChatTurn:
+    """`query` is the latest user message, whole: prompt content. What
+    retrieval searches is derived from it (`user_message.derive_retrieval_query`)."""
+
     query: str
     history: tuple[ChatMessage, ...]
 
@@ -100,16 +118,15 @@ def prepare_chat_turn(
     the model prompt. Check raw body size before excluding any supplied entry.
     """
     if settings is not None and chat_body_chars(messages, splunk_context) > settings.chat_max_body_chars:
-        raise InvalidChatTurn("chat body exceeds the character limit")
+        raise RequestTooLarge(settings.chat_max_body_chars)
     active = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "user"), None)
     if active is None:
         raise InvalidChatTurn("a user message is required")
     if is_unsearchable_query(messages[active].content):
         raise InvalidChatTurn("the active user message is blank or has control characters")
-    query = messages[active].content.strip()
-    if settings is not None and len(query) > settings.query_max_chars:
-        raise InvalidChatTurn("the active user message exceeds the character limit")
+    # No length refusal below the request-size guard above (issue #1192): a
+    # long message is budgeted into the prompt, not rejected.
     return PreparedChatTurn(
-        query=query,
+        query=messages[active].content.strip(),
         history=tuple(m for m in messages[:active] if m.role != "system"),
     )

@@ -428,7 +428,7 @@ def test_ui_chat_body_cap_counts_splunk_context(ui_client, monkeypatch):
         json={"messages": [{"role": "user", "content": "hi"}], "splunk_context": "x" * 60},
     )
     assert resp.status_code == 422
-    assert resp.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    assert resp.json() == {"code": "invalid_request", "message": "request exceeds the 40-character limit"}
 
 
 def test_ui_healthz_badge_reflects_agent_status(ui_client, monkeypatch):
@@ -837,14 +837,13 @@ def test_ui_stream_retrieval_and_prompt_use_same_active_user(ui_client, monkeypa
 @pytest.mark.parametrize("messages", [
     pytest.param([{"role": "assistant", "content": "No user question was supplied"}], id="missing-user"),
     pytest.param([{"role": "user", "content": " \t\n "}, {"role": "assistant", "content": "Short tail"}], id="blank"),
-    pytest.param([{"role": "user", "content": "x" * 2001}, {"role": "assistant", "content": "Short tail"}],
-                 id="over-length"),
     pytest.param([{"role": "user", "content": "\x00x"}], id="nul"),
     pytest.param([{"role": "user", "content": "a\x1bb"}], id="escape"),
 ])
 def test_ui_stream_unsearchable_question_refuses_before_work(ui_client, messages):
-    """Issue #579: no user turn, blank, over-length or control-character text is
-    a fixed 422 before retrieval or a model call."""
+    """Issue #579: no user turn, blank or control-character text is a fixed
+    422 before retrieval or a model call. Length is not a refusal below the
+    request-size guard (issue #1192)."""
     result = ui_client.post("/ui/chat/stream", json={"messages": messages})
     assert result.status_code == 422
     assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
