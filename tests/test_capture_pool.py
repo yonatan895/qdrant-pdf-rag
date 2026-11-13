@@ -7,6 +7,7 @@ The capture→replay seam is pinned structurally: rows emitted by
 (ranked id lists, chunk table, optional finite CE).
 """
 
+import json
 from datetime import UTC
 
 import pytest
@@ -474,3 +475,27 @@ def test_capture_retry_records_the_pool_search_prefetches():
     assert recorded == {"missing"}, "the known-wrong sibling never enters the recorded pool"
     hits, _, _ = search(FilterClient(), FakeEmbedder(), "mainframe_manuals", query, limit=8)
     assert {h.chunk_id for h in hits} == recorded
+
+
+def test_current_behaviour_capture_truncates_previous_pool_on_open(in_process_capture, tmp_path):
+    """A capture opens its output in "w" mode before running any query, so the previous pool is already destroyed when the new run ends early (tracker #1211)."""
+    _, golden = in_process_capture
+    out = tmp_path / "pool.jsonl"
+    previous = [
+        {"query": "earlier capture A", "legs": [], "outcome": {}, "notes": None},
+        {"query": "earlier capture B", "legs": [], "outcome": {}, "notes": None},
+    ]
+    out.write_text("".join(json.dumps(row) + "\n" for row in previous), encoding="utf-8")
+
+    assert main(["--golden", str(golden), "--out", str(out)]) == 0
+
+    survivors = out.read_text(encoding="utf-8").splitlines()
+    assert not any("earlier capture" in line for line in survivors), (
+        "capture now preserves the previous pool across a run; tracker #1211 no longer applies"
+    )
+    recorded = [json.loads(line) for line in survivors]
+    assert {row["query"] for row in recorded} == {
+        "first question",
+        "second question",
+        "third question",
+    }, "a normal capture replaces the pool with exactly this run's queries"
