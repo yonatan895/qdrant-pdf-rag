@@ -229,6 +229,30 @@ def test_gateway_api_keys_load_from_env(monkeypatch):
     assert s.context_llm_api_key == "sk-context"
 
 
+def test_model_validation_error_hides_secret_input(monkeypatch):
+    """#1204: a model-level failure must not echo validated settings, whose
+    repr contains gateway keys."""
+    key = "synthetic-key-abcdefghijklmnop"
+    monkeypatch.setenv("LLM_API_KEY", key)
+    for name in ("LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LLM_REASONING_EFFORTS", "low")
+    with pytest.raises(ValidationError) as caught:
+        Settings(_env_file=None)
+    message = str(caught.value)
+    assert key not in message
+    assert key[:6] not in message
+    assert "input_value" not in message
+
+
+def test_field_validation_error_hides_input_value(monkeypatch):
+    """#1204: field-level failures must not echo the rejected input."""
+    monkeypatch.setenv("ANSWER_TIMEOUT_S", "not-a-number")
+    with pytest.raises(ValidationError) as caught:
+        Settings(_env_file=None)
+    assert "not-a-number" not in str(caught.value)
+
+
 # AGENTS.md lethal rule: no default flips. Every Settings field must appear
 # here with its exact default, so a changed or added field fails CI instead of
 # depending on reviewer vigilance. `ingest_workers` is host-dependent and pins
