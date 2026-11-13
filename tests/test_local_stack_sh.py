@@ -372,6 +372,32 @@ def test_two_backend_live_path_preserves_flag_after_gateway_handoff(tmp_path):
     assert 'probe-rerank=false' in recorded
 
 
+def test_site_shape_probe_failure_stops_before_ingest_with_the_quality_guard(tmp_path):
+    """#1195 review B3: the site shape is a candidate venue for plumbing only.
+    A probe failure (the likely unsupported reasoning_effort) must stop the
+    stack before ingest or the agent, with the fixed quality-venue message."""
+    result, calls = _live(
+        tmp_path, _host(tmp_path), {"GATEWAY_SHAPE": "site"},
+        python="#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n"
+               "case \"$*\" in *probe_gateway.py*) exit 23;; esac\n")
+    assert result.returncode == 1, result.stderr
+    assert "reasoning_effort" in result.stderr
+    assert "candidate venue for plumbing only" in result.stderr
+    assert "not validated for quality" in result.stderr and "#1193" in result.stderr
+    assert calls and all("probe_gateway.py" in call for call in calls)
+    assert not any("run_ingest" in call or "uvicorn" in call for call in calls)
+
+
+def test_local_shape_probe_failure_keeps_its_existing_exit_without_the_site_guard(tmp_path):
+    result, calls = _live(
+        tmp_path, _host(tmp_path), {"GATEWAY_SHAPE": "local"},
+        python="#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n"
+               "case \"$*\" in *probe_gateway.py*) exit 23;; esac\n")
+    assert result.returncode == 23, result.stderr
+    assert "not validated for quality" not in result.stderr
+    assert calls and all("probe_gateway.py" in call for call in calls)
+
+
 _BUDGET_KEYS = ("LLM_MAX_MODEL_LEN", "LLM_RESERVED_OUTPUT_TOKENS", "LLM_THINKING_RESERVE_TOKENS_SIMPLE",
                 "LLM_THINKING_RESERVE_TOKENS_COMPLEX", "LLM_REASONING_EFFORT_SIMPLE",
                 "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS", "LLM_MAX_CHUNK_TOKENS_NARRATIVE",

@@ -421,7 +421,18 @@ export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic%20$_O2_AUTH"
 export OTEL_DEPLOYMENT_ENVIRONMENT="${OTEL_DEPLOYMENT_ENVIRONMENT:-local}"
 
 step "Probing every model leg through the gateway"
-"$PY" "$REPO_ROOT/scripts/probe_gateway.py" --stream --max-tokens "$GATEWAY_PROBE_MAX_TOKENS"
+if [ "${GATEWAY_SHAPE:-local}" = "site" ]; then
+    # #1195 review B3: the site shape is a candidate venue for plumbing, not
+    # a validated quality venue. The pinned adapter has no
+    # `allowed_openai_params` for `reasoning_effort`, which the agent and this
+    # probe both send, so a probe failure is the expected signal that the
+    # shape cannot run the answer path. Stop here, before ingest or the agent.
+    if ! "$PY" "$REPO_ROOT/scripts/probe_gateway.py" --stream --max-tokens "$GATEWAY_PROBE_MAX_TOKENS"; then
+        die "site-shaped gateway probe failed: the reasoning leg most likely rejects reasoning_effort (the site shape has no argument allow-list); this shape is a candidate venue for plumbing only and is not validated for quality. #1193's argument probe must record the site's actual parameter behavior before any arm is used as a baseline."
+    fi
+else
+    "$PY" "$REPO_ROOT/scripts/probe_gateway.py" --stream --max-tokens "$GATEWAY_PROBE_MAX_TOKENS"
+fi
 
 if [ -n "$CORPUS_DIR" ]; then
     step "Ingesting $CORPUS_DIR through the gateway (collection $QDRANT_COLLECTION)"

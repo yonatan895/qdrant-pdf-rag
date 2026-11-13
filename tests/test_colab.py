@@ -3095,3 +3095,227 @@ def test_refusal_cause_reaches_only_the_test_sink_never_the_user_message(lab, mo
     assert "Colab controller refused invalid/missing prerequisites; no acceptance claimed." in captured.err
     assert "CAUSE-MARKER-xyz" not in captured.out + captured.err
     assert [str(c) for c in causes] == ["CAUSE-MARKER-xyz"]
+
+
+# ------------------------------------------ issue #1195 measurement inputs
+# `config` keys of a synthetic prepare at c5259460, before the lane took
+# measurement inputs. An unparameterised prepare must write exactly these.
+REFERENCE_CONFIG_KEYS = {
+    "dataset", "gateway_image", "docker_gateway", "gateway_name", "gateway_network", "gateway_debug",
+    "gateway_limits", "reasoning_port", "embedding_port", "qdrant_port", "cu_cap", "cu_floor",
+    "namespace", "qdrant_service", "kube_context", "poll_seconds", "ingest_reingest",
+    "corpus", "golden", "inventory", "source_inventory", "embedding_evidence", "production_approval",
+    "data_state", "kubeconfig", "inference_lock", "transport_receipt",
+}
+OTHER_REVISION = "0123456789abcdef0123456789abcdef01234567"
+EXTRA_BODY = '{"chat_template_kwargs": {"enable_thinking": false}}  $HOME `x` \'q\''
+
+
+def _prepare_g4(source_state, state, *extra, expect=0):
+    config = _manifest(source_state)["config"]
+    argv, source = _prepare_arguments(
+        source_state, state, profile="COLAB_G4_BF16",
+        extra=("--inference-lock", config["inference_lock"],
+               "--transport-receipt", config["transport_receipt"], *extra))
+    assert _controller_call(argv, source_root=source) == expect
+    return state
+
+
+def _env_recorder(root):
+    """A private workload that records the environment it was actually given."""
+    script = root / "record-env"
+    script.write_text(f"#!{sys.executable}\n"
+                      "import json, os, pathlib\n"
+                      "pathlib.Path(os.environ['FAKE_COLAB_ROOT'], 'workload-env.json')"
+                      ".write_text(json.dumps(dict(os.environ)))\n")
+    script.chmod(0o755)
+    return script
+
+
+@pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
+def test_unparameterised_prepare_writes_the_manifest_it_always_wrote(lab, monkeypatch):
+    from mainframe_rag.serve.colab_profiles import build_profile
+
+    root, state, _ = lab
+    manifest = _manifest(state)
+    assert set(manifest["config"]) == REFERENCE_CONFIG_KEYS
+    profile = dict(manifest["profile"])
+    assert profile.pop("inference_lock_sha256") == manifest["prepared_identity"]["prerequisites_sha256"]["inference_lock"]
+    # tests/test_colab_profiles.py pins this owner's default output to the
+    # digest of the commit before the inputs existed.
+    assert profile == build_profile("COLAB_G4_BF16", deadline_seconds=30)
+    assert json.dumps(profile, sort_keys=True) == json.dumps(
+        build_profile("COLAB_G4_BF16", deadline_seconds=30), sort_keys=True)
+    # Every input at its reference value is the same prepared contract.
+    explicit = _manifest(_prepare_g4(
+        state, root / "explicit-reference", "--reasoning-model", "Qwen/Qwen3.8-27B",
+        "--reasoning-revision", profile["servers"][0]["revision"], "--reasoning-max-model-len", "32768",
+        "--reasoning-max-num-seqs", "2", "--reasoning-parser", "qwen3", "--gateway-shape", "local"))
+    assert explicit["config"] == manifest["config"] and explicit["profile"] == manifest["profile"]
+    for name in ("config_sha256", "profile_sha256"):
+        assert explicit["prepared_identity"][name] == manifest["prepared_identity"][name]
+    assert set(explicit) == set(manifest)
+    # Run time adds nothing ambient: the caller's shell cannot select a shape.
+    monkeypatch.setenv("GATEWAY_SHAPE", "site")
+    assert _run_fake(state, (str(_env_recorder(root)),)) == 0
+    observed = json.loads((root / "workload-env.json").read_text())
+    assert "GATEWAY_SHAPE" not in observed and "GATEWAY_SHAPE" not in _sandbox_env(state)
+    assert observed["LLM_MAX_MODEL_LEN"] == "32768"
+
+
+@pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
+def test_ambient_agent_settings_never_reach_the_workload(lab, monkeypatch):
+    """#1195 review B1: a shell value not recorded by `prepare` used to reach
+    `workload-env.json`/`sandbox.env` (observed with LLM_RESERVED_OUTPUT_TOKENS
+    and LLM_STREAM) and change caps and counts without binding approval."""
+    root, state, _ = lab
+    monkeypatch.setenv("LLM_RESERVED_OUTPUT_TOKENS", "8192")
+    monkeypatch.setenv("LLM_STREAM", "true")
+    monkeypatch.setenv("PROMPT_MAX_CONTEXT_CHARS", "50000")
+    monkeypatch.setenv("COMPARATIVE_SPLIT_ENABLED", "false")
+    # Documented caller-only inputs survive the clear.
+    monkeypatch.setenv("QDRANT_API_KEY", "fixture-reader-1195")
+    monkeypatch.setenv("EMBED_API_KEY", "fixture-embed-1195")
+    assert _run_fake(state, (str(_env_recorder(root)),)) == 0
+    observed = json.loads((root / "workload-env.json").read_text())
+    for env in (observed, _sandbox_env(state)):
+        for name in ("LLM_RESERVED_OUTPUT_TOKENS", "LLM_STREAM", "PROMPT_MAX_CONTEXT_CHARS",
+                     "COMPARATIVE_SPLIT_ENABLED"):
+            assert name not in env
+        # The lane's own values are applied after the clear.
+        assert env["LLM_MAX_MODEL_LEN"] == "32768"
+        assert env["LLM_REASONING_EFFORT_SIMPLE"] == "medium"
+    # Documented caller-only inputs are inherited by the workload. The sandbox
+    # handoff carries only values that differ from the caller's shell, so the
+    # sourcing terminal keeps supplying its own role keys.
+    assert observed["QDRANT_API_KEY"] == "fixture-reader-1195"
+    assert observed["EMBED_API_KEY"] == "fixture-embed-1195"
+    # A prepared --agent-env value still arrives and beats the ambient value.
+    measured = _prepare_g4(
+        state, root / "ambient-prepared",
+        "--agent-env", "LLM_RESERVED_OUTPUT_TOKENS=4096",
+        "--agent-env", "PROMPT_MAX_CONTEXT_CHARS=24000")
+    assert _run_fake(measured, (str(_env_recorder(root)),)) == 0
+    observed = json.loads((root / "workload-env.json").read_text())
+    for env in (observed, _sandbox_env(measured)):
+        assert env["LLM_RESERVED_OUTPUT_TOKENS"] == "4096"
+        assert env["PROMPT_MAX_CONTEXT_CHARS"] == "24000"
+
+
+@pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
+def test_prepared_measurement_inputs_reach_the_workload_exactly_and_bind_approval(lab, monkeypatch):
+    root, state, _ = lab
+    reference = _manifest(state)
+    measured = _prepare_g4(
+        state, root / "measured", "--reasoning-model", "Example-Org/Other-Model",
+        "--reasoning-revision", OTHER_REVISION, "--reasoning-max-model-len", "65536",
+        "--reasoning-max-num-seqs", "4", "--reasoning-parser", "none", "--gateway-shape", "site",
+        "--agent-env", "LLM_REASONING_EFFORT_SIMPLE=low", "--agent-env", "LLM_REASONING_EFFORTS=low,medium",
+        "--agent-env", "LLM_MAX_MODEL_LEN=49152", "--agent-env", "LLM_FUTURE_REQUEST_BODY=" + EXTRA_BODY)
+    manifest = _manifest(measured)
+    assert manifest["config"]["gateway_shape"] == "site"
+    assert manifest["config"]["agent_env"] == {
+        "LLM_REASONING_EFFORT_SIMPLE": "low", "LLM_REASONING_EFFORTS": "low,medium",
+        "LLM_MAX_MODEL_LEN": "49152", "LLM_FUTURE_REQUEST_BODY": EXTRA_BODY}
+    assert manifest["profile"]["reasoning_inputs"] == {
+        "model_id": "Example-Org/Other-Model", "revision": OTHER_REVISION,
+        "max_model_len": 65536, "max_num_seqs": 4, "reasoning_parser": "none"}
+    assert json.loads((measured / "model-profile.json").read_text()) == manifest["profile"]
+    for name in ("config_sha256", "profile_sha256", "model_profile_sha256"):
+        assert manifest["prepared_identity"][name] != reference["prepared_identity"][name]
+    # The approval binds the inputs: editing one after prepare refuses the run
+    # before any allocation, and the untouched state still runs.
+    edited = json.loads((measured / "manifest.json").read_text())
+    edited["config"]["agent_env"]["LLM_REASONING_EFFORT_SIMPLE"] = "xhigh"
+    (measured / "manifest.json").write_text(json.dumps(edited))
+    assert _run_fake(measured) == 2 and _manifest(measured)["allocation_attempted"] is False
+    edited["config"]["agent_env"]["LLM_REASONING_EFFORT_SIMPLE"] = "low"
+    (measured / "manifest.json").write_text(json.dumps(edited))
+    # Ambient values at run time lose to the prepared ones.
+    monkeypatch.setenv("GATEWAY_SHAPE", "local")
+    monkeypatch.setenv("LLM_REASONING_EFFORT_SIMPLE", "xhigh")
+    assert _run_fake(measured, (str(_env_recorder(root)),)) == 0
+    observed = json.loads((root / "workload-env.json").read_text())
+    sandbox = _sandbox_env(measured)
+    for env in (observed, sandbox):
+        assert env["GATEWAY_SHAPE"] == "site"
+        assert env["GATEWAY_REASONING_MODEL"] == "Example-Org/Other-Model"
+        assert env["LLM_MAX_MODEL_LEN"] == "49152"
+        assert env["LLM_REASONING_EFFORT_SIMPLE"] == "low" and env["LLM_REASONING_EFFORTS"] == "low,medium"
+        assert env["LLM_REASONING_EFFORT_COMPLEX"] == "medium"
+        assert env["LLM_FUTURE_REQUEST_BODY"] == EXTRA_BODY
+    # Without an agent window of its own, the agent gets the served window.
+    served = _prepare_g4(state, root / "served-window", "--reasoning-max-model-len", "131072")
+    assert _run_fake(served, (str(_env_recorder(root)),)) == 0
+    assert json.loads((root / "workload-env.json").read_text())["LLM_MAX_MODEL_LEN"] == "131072"
+    # The next ordinary run is unaffected.
+    assert _run_fake(_prepare_new(state, root / "ordinary-after-measurement")) == 0
+
+
+@pytest.mark.parametrize("extra", [
+    ("--agent-env", "LLM_API_KEY=sk-not-here"),
+    ("--agent-env", "FEEDBACK_SERVICE_TOKEN=x"),
+    ("--agent-env", "LLM_BASE_URL=http://elsewhere/v1"),
+    ("--agent-env", "FEEDBACK_URL=http://elsewhere/feedback"),
+    ("--agent-env", "OTEL_EXPORTER_OTLP_ENDPOINT=http://elsewhere:4318"),
+    ("--agent-env", "LLM_MODEL_REASONING=Other/Model"),
+    ("--agent-env", "QDRANT_COLLECTION=other"),
+    ("--agent-env", "EMBED_MODE=hash"),
+    ("--agent-env", "ALLOW_HASH_MODE=1"),
+    ("--agent-env", "GATEWAY_SHAPE=site"),
+    ("--agent-env", "PYTHONPATH=/elsewhere"),
+    ("--agent-env", "llm_stream=true"),
+    ("--agent-env", "LLM_STREAM"),
+    ("--agent-env", "LLM_STREAM=true", "--agent-env", "LLM_STREAM=false"),
+    ("--agent-env", "LLM_STREAM=true\nexport X=1"),
+    ("--agent-env", "LLM_REASONING_EFFORT_SIMPLE=extreme"),
+    ("--agent-env", "LLM_REASONING_EFFORT_SIMPLE=high"),          # not in the declared domain
+    ("--agent-env", "LLM_MAX_MODEL_LEN=65536"),                   # above the served 32768
+    ("--agent-env", "LLM_RESERVED_OUTPUT_TOKENS=many"),
+    ("--reasoning-max-model-len", "262144"),
+    ("--reasoning-max-num-seqs", "0"),
+    ("--reasoning-model", "Example-Org/Other-Model"),             # no revision of its own
+    ("--reasoning-parser", "qwen3 --trust-remote-code"),
+    ("--gateway-shape", "platform"),
+])
+@pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
+def test_measurement_inputs_fail_closed_at_prepare(lab, extra):
+    root, state, _ = lab
+    refused = root / "refused"
+    try:
+        _prepare_g4(state, refused, *extra, expect=2)
+    except SystemExit as usage:  # argparse choices
+        assert usage.code == 2
+    assert not refused.exists()
+
+
+def test_measurement_inputs_need_a_reasoning_profile(lab):
+    root, state, _ = lab
+    for extra in (("--agent-env", "LLM_STREAM=true"), ("--reasoning-max-model-len", "65536")):
+        argv, source = _prepare_arguments(state, root / "refused", extra=extra)
+        assert _controller_call(argv, source_root=source) == 2
+        assert not (root / "refused").exists()
+
+
+def test_production_refuses_agent_settings_its_frozen_contract_owns_then_prepares_normally(storage_lab):
+    """The representation settings of a production index are frozen by its
+    admission; a measurement input cannot name one, set or unset."""
+    _, run, _ = storage_lab
+    frozen = run.production_admission()
+    assert "DENSE_QUERY_PREFIX" in {*frozen.environment, *frozen.unset_environment}
+    causes = []
+    controller.refusal_cause_sink = causes.append
+    try:
+        with pytest.raises(AssertionError):  # the helper asserts a successful prepare
+            _prepare_production_again(run, "frozen-agent-setting",
+                                      extra=("--agent-env", "DENSE_QUERY_PREFIX=Other: "))
+    finally:
+        controller.refusal_cause_sink = None
+    assert [str(cause) for cause in causes] == ["agent environment names a frozen production setting"]
+    assert not (run.state.parent / "frozen-agent-setting" / "manifest.json").exists()
+    measured = _prepare_production_again(
+        run, "production-with-agent-setting",
+        extra=("--agent-env", "LLM_REASONING_EFFORT_SIMPLE=low", "--reasoning-max-model-len", "65536"))
+    manifest = _manifest(measured)
+    assert manifest["config"]["agent_env"] == {"LLM_REASONING_EFFORT_SIMPLE": "low"}
+    assert manifest["profile"]["reasoning_inputs"]["max_model_len"] == 65536

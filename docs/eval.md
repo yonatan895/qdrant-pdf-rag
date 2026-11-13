@@ -468,8 +468,11 @@ deployment fields remain unknown. Trend manifests separately label the
 evaluator checkout SHA as `evaluator_git_sha`; it never attributes the deployment.
 Retain the deployment lane's actual image/bundle/configuration/corpus receipt
 beside these private results before comparing builds. HTTP mode cannot join
-the remote process's answer logs, so finish/token-budget attribution stays
-unknown without a separately retained request-ID log/trace join. Answer and
+the remote process's answer logs. Its default JSON request therefore leaves
+the finish reason and token counts unknown; `--stream` reads them from the SSE
+`final` instead ([measurement protocol](#measurement-protocol)). The
+packing-attribution fields (`budget_verified`, `units_omitted`, query
+complexity) stay log-only and unknown over HTTP. Answer and
 golden content in reports remains private, outside git and public CI.
 
 Sampling temperature (issue #596): the answer eval sends `temperature=0` by
@@ -534,9 +537,88 @@ bit-deterministic, so expect few verdict flips across repeats, not zero:
   separate so neither rate hides behind the other's pass rate.
 - Non-200 responses record the error code only (no bodies); transport
   exceptions record errors. Exit 0 iff zero failures and zero errors.
-  Deliberate non-features: no retries, no `finish_reason` checks, and the
-  judge never re-parses citations (the agent validator is the single source
-  of truth).
+  Deliberate non-features: no retries, no `finish_reason` verdict (it is
+  measured, never judged), and the judge never re-parses citations (the agent
+  validator is the single source of truth).
+
+<a id="measurement-protocol"></a>
+### Measurement protocol for answer changes (#1195)
+
+Confirmed by the maintainer on 2026-11-13. The site serves a different
+reasoning model on different hardware behind a platform gateway, so a result
+measured here carries over only through quantities that do not depend on the
+host.
+
+- **Two groups, reported apart.** The report's `metrics.measurement` block and
+  the summary's two tables keep them separate; the
+  [metric contract](metric-contract.md#answer-measurement-groups) defines each
+  value, its source and its limits.
+  - Hardware-independent: pass rate per class, truncation rate, and prompt,
+    completion and reasoning tokens per answer (p50/p95).
+  - Hardware-dependent: time to first token, decode tokens per second and
+    end-to-end time (p50/p95).
+- **Decide on the first group only.** Quality and budget decisions never read
+  a timing. Time at a site is predicted as tokens divided by that site's own
+  measured tokens per second (its in-pod gateway probe) and then checked there.
+- **Venue.** A validated Colab G4 lane for quality. The site-shaped gateway is
+  a candidate venue for plumbing only: on the pinned adapter it likely rejects
+  `reasoning_effort`, so `run_local_stack.sh` stops a quality lane whose
+  startup probe fails. A quality run requires a probe that reaches `/v1/answer`
+  with a judged row, and #1193's argument probe must record the actual site's
+  parameter behavior before any site-shape arm is used as a baseline
+  ([inputs](colab-playground.md#measurement-inputs)). The 8 GB local pair is
+  for plumbing and relative checks only.
+- **Method.** Sweeps run a fixed class-interleaved subset three times; a
+  winner is confirmed by one full pass. The holdout is never used for tuning
+  (§7).
+
+Flags (defaults are unchanged without them):
+
+| Flag | Effect |
+|---|---|
+| `--stream` | HTTP mode only. Sends the same request with `stream: true` and judges the SSE `final`, which already carries `finish_reason`, `ttft_ms` and `usage` ([agent contract](agent.md), §3 Streaming). Rows gain finish reason, token counts, `ttft_ms`, the client-side `client_first_token_ms` and `decode_tps`. Token deltas and the `final`'s retrieval hits are not kept. An `error` event, a stream that ends without `final`, or a `final` without valid counts is an error row with a fixed label. The in-process client buffers the whole response, so the flag is refused without `--agent-url`; in-process rows keep their answer-log join |
+| `--subset N` | The default sampler's round-robin (sorted classes, sorted ids, one row per class per round), so every cutoff of its order keeps every class. Refused (exit 2, no request) when `N` is below the class count, and refused before any read when the resolved dataset contains the frozen holdout: a sweep needs an explicit non-holdout `--golden`. Exclusive with `--all`. `params.sample` records the mode, row count, class count, a SHA-256 over the ordered ids, and the resolved datasets' basenames + SHA-256, so two arms can prove they ran the same rows over the same splits |
+| `--repeats R` | 1–10 whole passes over the sample (pass 1 over every row, then pass 2, ...), so drift within a session lands on every row equally. Rows carry `repeat`; `metrics` pools all passes; `metrics.repeats` gives, per metric, the per-pass values with min, max, mean and range, plus `verdict_flips` (entry ids judged differently across passes). More than one pass is a sweep, so the same non-holdout `--golden` rule applies |
+
+Without `--stream`, the JSON request is unchanged: the row still records the
+model-leg `llm_ms` (and `ttft_ms` when the agent runs with `LLM_STREAM`) from
+the existing `Server-Timing` header, and the `generation_incomplete` rate is
+reported for every transport as an upper bound on truncation. Token counts
+stay unknown there, never zero.
+
+A difference between two arms that is smaller than the range either arm shows
+across its own repeats is noise at this sample size; confirm it with the full
+pass or do not claim it.
+
+```bash
+# One arm of a sweep: 24 interleaved rows, three passes, counts from the stream.
+# The explicit non-holdout --golden is mandatory: --subset/--repeats refuse a
+# resolved set that contains the frozen holdout (exit 2, before any request).
+VENUE=rc .venv/bin/python -m mainframe_rag.eval.answers \
+  --agent-url http://127.0.0.1:8087 --golden "$PRODUCTION_GOLDEN_PATH" \
+  --stream --subset 24 --repeats 3 \
+  --out "$LAB_STATE/arm-a.json" --summary "$LAB_STATE/arm-a.md"
+# Confirm the winner: one full pass.
+VENUE=rc .venv/bin/python -m mainframe_rag.eval.answers \
+  --agent-url http://127.0.0.1:8087 --golden "$PRODUCTION_GOLDEN_PATH" \
+  --stream --all --out "$LAB_STATE/confirm.json" --summary "$LAB_STATE/confirm.md"
+```
+
+Sweep order, one variable at a time, each arm against the same subset
+identity:
+
+1. Site-shaped candidate: today's defaults behind `--gateway-shape site`, only
+   after #1193's argument probe records the site's actual parameter behavior.
+   It is not a quality baseline before then (see **Venue**).
+2. Effort and chat-template arguments.
+3. Window 32k, 64k and 128k, each with and without more evidence.
+4. Concurrency, raised until the cache or latency breaks.
+
+Rows run sequentially, so the eval itself measures single-request behaviour;
+the concurrency step varies the served `--max-num-seqs` and drives load with
+the load tools (§8), reading this eval's hardware-independent group for the
+quality side. A live Colab session has not run this protocol yet; one is
+required before it gates a change.
 
 ### Failure taxonomy (#830)
 
