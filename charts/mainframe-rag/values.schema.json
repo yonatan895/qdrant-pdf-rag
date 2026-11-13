@@ -120,9 +120,40 @@
             "reasoningEffortSimple": { "type": "string", "enum": ["low", "medium", "high", "xhigh"] },
             "reasoningEffortComplex": { "type": "string", "enum": ["low", "medium", "high", "xhigh"] },
             "reasoningEfforts": { "type": "string", "pattern": "^(low|medium|high|xhigh)(,(low|medium|high|xhigh))*$" },
-            "stream": { "type": "boolean" }
+            "stream": { "type": "boolean" },
+            "extraBody": {
+              "type": "object",
+              "propertyNames": {
+                "minLength": 1,
+                "not": { "enum": ["model", "messages", "stream", "stream_options", "max_tokens", "max_completion_tokens", "temperature", "reasoning_effort"] }
+              },
+              "properties": {
+                "chat_template_kwargs": { "type": "object" }
+              }
+            },
+            "effortTransport": { "type": "string", "enum": ["top_level", "chat_template", "none"] },
+            "estimatorMarginRatio": { "type": "number", "minimum": 0, "maximum": 8 }
           },
           "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "extraBody": {
+                    "properties": {
+                      "chat_template_kwargs": { "required": ["reasoning_effort"] }
+                    },
+                    "required": ["chat_template_kwargs"]
+                  }
+                },
+                "required": ["extraBody"]
+              },
+              "then": {
+                "properties": {
+                  "effortTransport": { "const": "none" }
+                },
+                "required": ["effortTransport"]
+              }
+            },
             {
               "if": {
                 "properties": {

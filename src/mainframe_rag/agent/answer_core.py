@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, replace
@@ -226,21 +227,41 @@ def _resolve_reasoning_effort(
 
 
 def _output_cap(settings: Settings, complexity: str, prepared: PreparedPrompt) -> int | None:
-    """Completion cap (#777): the answer reserve plus the path's thinking
-    reserve, exactly the terms the prompt budget priced, so a runaway
+    """Completion cap (#777, #1193): the answer reserve plus the path's
+    thinking reserve, exactly the terms the prompt budget priced, so a runaway
     generation ends as `length` (generation_incomplete) instead of running to
-    the served window. Sent only when the prompt count was verified against
-    the server tokenizer: then prompt + cap <= window - safety margin, and the
-    server cannot reject it. An estimator-only prompt keeps no cap rather
-    than risk an over-window request."""
-    if not prepared.budget_verified:
-        return None
+    the served window.
+
+    Server-verified prompt count: that full cap; prompt + cap <= window -
+    safety margin, and the server cannot reject it.
+
+    Estimator-only count (a gateway without `/tokenize`, or a transient
+    downgrade): a cap is still sent, so output length never depends on
+    gateway or server defaults. The estimate can undercount, so the cap
+    leaves `ceil(estimate * LLM_ESTIMATOR_MARGIN_RATIO)` free on top of it:
+    estimate + margin + cap <= window. It is at most the full cap and never
+    below the answer reserve; at that floor the margin is whatever the window
+    leaves, at least the standard safety margin (the prompt passed the same
+    verify limit, so the floor always fits). A prompt that does not fit its
+    limit was already refused as `prompt_budget_exceeded` before this point.
+
+    None only on the no-tokenizer character-packing path, which has no count
+    to place a cap against (offline and tests; serving always has a
+    tokenizer)."""
     thinking = (
         settings.llm_thinking_reserve_tokens_complex
         if complexity == "complex"
         else settings.llm_thinking_reserve_tokens_simple
     )
-    return settings.llm_reserved_output_tokens + thinking
+    full = settings.llm_reserved_output_tokens + thinking
+    if prepared.budget_verified:
+        return full
+    if prepared.prompt_tokens is None:
+        return None
+    estimate = prepared.prompt_tokens
+    margin = math.ceil(estimate * settings.llm_estimator_margin_ratio)
+    room = settings.llm_max_model_len - estimate - margin
+    return max(settings.llm_reserved_output_tokens, min(full, room))
 
 
 async def _build_prepared_prompt(

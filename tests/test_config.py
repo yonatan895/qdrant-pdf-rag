@@ -1,5 +1,7 @@
 """Config fail-fast behavior (architecture.md section 5.2)."""
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -284,6 +286,9 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "llm_reasoning_effort_complex": "medium",
     "llm_reasoning_efforts": "low,medium,xhigh",
     "llm_temperature": 0.2,
+    "llm_extra_body": "",
+    "llm_effort_transport": "top_level",
+    "llm_estimator_margin_ratio": 1.0,
     "llm_max_model_len": 32768,
     "llm_reserved_output_tokens": 2560,
     "llm_thinking_reserve_tokens_simple": 8192,
@@ -364,6 +369,78 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "context_max_chars": 500,
     "context_cache_path": None,
 }
+
+
+_MODEL_ARG_KEYS = ("LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT")
+
+
+@pytest.mark.parametrize("from_env", [False, True])
+def test_model_request_arguments_round_trip_configuration(monkeypatch, from_env):
+    """Issue #1193: the JSON text reaches the shared request arguments
+    unchanged in structure, from the environment as from a field."""
+    for name in _MODEL_ARG_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    raw = '{"top_k": 20, "chat_template_kwargs": {"enable_thinking": false, "nested": {"a": [1, 2.5, null]}}}'
+    if from_env:
+        monkeypatch.setenv("LLM_EXTRA_BODY", raw)
+        monkeypatch.setenv("LLM_EFFORT_TRANSPORT", "chat_template")
+        settings = Settings(_env_file=None)
+    else:
+        settings = Settings(_env_file=None, llm_extra_body=raw, llm_effort_transport="chat_template")
+    args = settings.model_request_args()
+    assert args.effort_transport == "chat_template"
+    assert args.extra_body == {
+        "top_k": 20, "chat_template_kwargs": {"enable_thinking": False, "nested": {"a": [1, 2.5, None]}}}
+    for name in _MODEL_ARG_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    unset = Settings(_env_file=None, llm_extra_body="  ").model_request_args()
+    assert (dict(unset.extra_body), unset.effort_transport) == ({}, "top_level")
+
+
+@pytest.mark.parametrize(("overrides", "named"), [
+    # Protected: the application builds these.
+    *[({"llm_extra_body": json.dumps({key: 1})}, key) for key in ("model", "messages", "stream", "stream_options")],
+    # Owned by another setting: refused, never a second owner.
+    ({"llm_extra_body": '{"max_tokens": 9}'}, "LLM_RESERVED_OUTPUT_TOKENS"),
+    ({"llm_extra_body": '{"max_completion_tokens": 9}'}, "LLM_RESERVED_OUTPUT_TOKENS"),
+    ({"llm_extra_body": '{"temperature": 1.5}'}, "LLM_TEMPERATURE"),
+    ({"llm_extra_body": '{"reasoning_effort": "low"}'}, "LLM_EFFORT_TRANSPORT"),
+    # A fixed template effort competes with a sent effort on both transports.
+    ({"llm_extra_body": '{"chat_template_kwargs": {"reasoning_effort": "low"}}'}, "LLM_EFFORT_TRANSPORT=none"),
+    ({"llm_extra_body": '{"chat_template_kwargs": {"reasoning_effort": "low"}}',
+      "llm_effort_transport": "chat_template"}, "LLM_EFFORT_TRANSPORT=none"),
+    # Shape.
+    ({"llm_extra_body": '{"chat_template_kwargs": "private-text"}'}, "chat_template_kwargs must be a JSON object"),
+    ({"llm_extra_body": '["private-text"]'}, "one JSON object"),
+    ({"llm_extra_body": '"private-text"'}, "one JSON object"),
+    ({"llm_extra_body": '{"top_k": 1, "top_k": 2}'}, "unique"),
+    ({"llm_extra_body": '{"": 1}'}, "nonempty keys"),
+    ({"llm_extra_body": '{"top_p": NaN}'}, "finite"),
+    ({"llm_extra_body": '{"top_p": 1e999}'}, "finite"),
+    ({"llm_extra_body": '{"private-text": '}, "one JSON object"),
+    ({"llm_extra_body": json.dumps({"pad": "x" * 4096})}, "at most 4096"),
+    ({"llm_effort_transport": "private-text"}, "top_level"),
+])
+def test_refused_model_request_arguments_stop_startup(monkeypatch, overrides, named):
+    """Fail closed at Settings validation, never per request; the message
+    names the field, not the supplied text."""
+    from pydantic import ValidationError
+
+    for name in _MODEL_ARG_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(ValidationError) as caught:
+        Settings(_env_file=None, **overrides)
+    message = "; ".join(error["msg"] for error in caught.value.errors())
+    assert named in message and "private-text" not in message
+
+
+def test_fixed_template_effort_is_accepted_when_no_effort_is_sent(monkeypatch):
+    for name in _MODEL_ARG_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    settings = Settings(_env_file=None, llm_effort_transport="none",
+                        llm_extra_body='{"chat_template_kwargs": {"reasoning_effort": "minimal"}}')
+    assert settings.model_request_args().extra_fields("high") == {
+        "chat_template_kwargs": {"reasoning_effort": "minimal"}}
 
 
 def test_every_setting_default_is_pinned(tmp_path, monkeypatch):

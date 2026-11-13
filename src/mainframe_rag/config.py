@@ -19,6 +19,8 @@ from opentelemetry import propagate
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from mainframe_rag.model_args import EffortTransport, ModelRequestArgs, parse_body_fields
+
 # Dense dimension of the hashed embedder. Fixed so CI never depends on the
 # vLLM team's DENSE_DIM; prod always overrides via embed_mode=vllm + DENSE_DIM.
 HASH_EMBED_DIM = 256
@@ -326,6 +328,20 @@ class Settings(BaseSettings):
     # Qwen3.8 template needs "low,medium,xhigh" (the default since #777).
     llm_reasoning_efforts: str = Field(default="low,medium,xhigh")
     llm_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    # Model request arguments (#1193). The served model and its chat template
+    # are platform-owned and can change, so nothing is assumed about them:
+    # LLM_EXTRA_BODY is one JSON object of extra chat-request body fields
+    # (sampling parameters, chat_template_kwargs, ...) merged into every chat
+    # request; LLM_EFFORT_TRANSPORT selects how the effort travels: top_level
+    # (`reasoning_effort`, the default and the pre-#1193 bytes), chat_template
+    # (`chat_template_kwargs.reasoning_effort`) or none (not sent). Both unset
+    # send exactly the earlier request. Validated at startup, never per
+    # request: model/messages/stream/stream_options are protected, and
+    # max_tokens/max_completion_tokens/temperature/reasoning_effort are
+    # refused because their own settings own them. The /tokenize count renders
+    # the same template arguments (model_args.ModelRequestArgs).
+    llm_extra_body: str = Field(default="")
+    llm_effort_transport: EffortTransport = Field(default="top_level")
 
     # Context budgeting via tokenizer accounting:
     # budget = max_model_len - reserved_output_tokens - measured_system_prompt - safety_margin
@@ -350,6 +366,16 @@ class Settings(BaseSettings):
     # actually finish.
     llm_thinking_reserve_tokens_complex: int = Field(default=8192, ge=0, le=16384)
     llm_token_safety_margin: int = Field(default=128, ge=0, le=1024)
+    # Estimator-only output cap (#1193). Without a server count the prompt
+    # size is an estimate, and the estimator undercounts technical text
+    # (measured on original synthetic text, two tokenizer families: prose +2%,
+    # JCL +35..41%, tables +47..53%, message lines about +140%). The cap then
+    # leaves this fraction of the estimate free on top of the estimate:
+    # max_tokens = window - estimate - ceil(estimate * ratio), at most the
+    # verified cap and never below the answer reserve (answer_core._output_cap).
+    # 1.0 tolerates a prompt up to twice its estimate; 0 keeps only the
+    # standard margin.
+    llm_estimator_margin_ratio: float = Field(default=1.0, ge=0.0, le=8.0)
     # Complex-path narrative cap above the largest chunk (~1150 tokens, #777).
     llm_max_chunk_tokens_narrative: int = Field(default=1200, ge=50, le=2048)
     llm_tokenize_timeout_s: float = Field(default=5.0, gt=0.0, le=60.0)
@@ -525,6 +551,21 @@ class Settings(BaseSettings):
             if getattr(self, name) not in efforts:
                 raise ValueError(f"{name.upper()} must be one of LLM_REASONING_EFFORTS")
         return self
+
+    @model_validator(mode="after")
+    def _model_request_args_are_valid(self) -> Settings:
+        """Fail closed at startup (#1193): a refused extra body never reaches
+        a request. Messages name fields, not supplied values."""
+        self.model_request_args()
+        return self
+
+    def model_request_args(self) -> ModelRequestArgs:
+        """The configured extra body and effort transport as the one value
+        the chat-body builder and the tokenizer share."""
+        return ModelRequestArgs(
+            extra_body=parse_body_fields(self.llm_extra_body, name="LLM_EXTRA_BODY"),
+            effort_transport=self.llm_effort_transport,
+        )
 
     def reasoning_efforts(self) -> tuple[ReasoningEffort, ...]:
         """Declared efforts in ascending vocabulary order; refuses unknown,

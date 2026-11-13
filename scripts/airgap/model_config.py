@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import os
 import re
 import ssl
@@ -24,7 +26,24 @@ REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 # Mirrors config.Settings defaults; tests pin both sides (#748).
 REASONING_EFFORT_DEFAULTS = {"LLM_REASONING_EFFORT_SIMPLE": "medium", "LLM_REASONING_EFFORT_COMPLEX": "medium",
                              "LLM_REASONING_EFFORTS": "low,medium,xhigh"}
-REASONING_ENV_KEYS = (*REASONING_INTEGER_FIELDS, *REASONING_EFFORT_FIELDS, "LLM_REASONING_EFFORTS", "LLM_STREAM")
+# Model request arguments (#1193). Mirrors mainframe_rag.model_args, which the
+# bastion preflight cannot import; tests pin the constants and the refusals of
+# both sides in step. Empty keeps the application default (the earlier request).
+EXTRA_BODY_KEY = "LLM_EXTRA_BODY"
+EXTRA_BODY_MAX_CHARS = 4096
+EXTRA_BODY_PROTECTED_KEYS = ("model", "messages", "stream", "stream_options")
+EXTRA_BODY_OWNED_KEYS = {
+    "max_tokens": "LLM_RESERVED_OUTPUT_TOKENS and the thinking reserves",
+    "max_completion_tokens": "LLM_RESERVED_OUTPUT_TOKENS and the thinking reserves",
+    "temperature": "LLM_TEMPERATURE",
+    "reasoning_effort": "LLM_EFFORT_TRANSPORT and the effort settings",
+}
+EFFORT_TRANSPORT_KEY = "LLM_EFFORT_TRANSPORT"
+EFFORT_TRANSPORTS = ("top_level", "chat_template", "none")
+ESTIMATOR_MARGIN_KEY = "LLM_ESTIMATOR_MARGIN_RATIO"  # chart estimatorMarginRatio, 0..8, decimal
+MODEL_ARGUMENT_ENV_KEYS = (EXTRA_BODY_KEY, EFFORT_TRANSPORT_KEY, ESTIMATOR_MARGIN_KEY)
+REASONING_ENV_KEYS = (*REASONING_INTEGER_FIELDS, *REASONING_EFFORT_FIELDS, "LLM_REASONING_EFFORTS", "LLM_STREAM",
+                      *MODEL_ARGUMENT_ENV_KEYS)
 
 # Request admission and total deadline (#374 handoff, #843 D1). Empty keeps the
 # chart default (deadline 270; admission 4/4/30, #843); zero is an explicit selection. Limits match config.Settings and the
@@ -363,13 +382,112 @@ def validate_operator_booleans(values: Mapping[str, str]) -> None:
     require_in_place_retired(values.get("INGEST_ALIAS_PUBLISH", ""))
 
 
-def reasoning_overrides(values: Mapping[str, str]) -> dict[str, int | str | bool]:
+class JsonObject(dict):
+    """An operator-supplied JSON object carried into the release values.
+
+    Its keys and strings are arbitrary text, so the values serializer writes
+    it as one JSON flow mapping (YAML reads JSON) instead of block keys."""
+
+    def flow(self) -> str:
+        """ASCII JSON, with each surrogate-pair escape as YAML's 8-digit
+        form: the chart's YAML reader refuses JSON's `\\ud83d\\ude00` pairs."""
+
+        def pair(match: re.Match[str]) -> str:
+            if match.group(1) is None:
+                return match.group(0)  # an escaped backslash, kept as is
+            high, low = int(match.group(1), 16), int(match.group(2), 16)
+            return f"\\U{0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00):08X}"
+
+        return re.sub(r"\\\\|\\u(d[89ab][0-9a-f]{2})\\u(d[c-f][0-9a-f]{2})", pair,
+                      json.dumps(self, ensure_ascii=True))
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result or not key:
+            raise ValueError("duplicate or empty key")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(_name: str) -> object:
+    raise ValueError("non-finite number")
+
+
+def _finite_json(value: object) -> bool:
+    """Finite, and integers exact through the chart: Helm reads every number
+    as a 64-bit float, which would silently change a larger integer."""
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return abs(value) <= 2**53
+    if isinstance(value, dict):
+        return all(_finite_json(item) for item in value.values())
+    if isinstance(value, list):
+        return all(_finite_json(item) for item in value)
+    return True
+
+
+def model_argument_overrides(values: Mapping[str, str]) -> dict[str, object]:
+    """Model request arguments (#1193) as chart values; empty is omitted.
+
+    The same rules as mainframe_rag.model_args, so a refused selection stops
+    at preflight instead of at pod startup. Diagnostics name the field or the
+    fixed key, never the supplied text.
+    """
+    result: dict[str, object] = {}
+    transport = values.get(EFFORT_TRANSPORT_KEY, "")
+    if transport != "":
+        if transport not in EFFORT_TRANSPORTS:
+            raise ValueError(f"{EFFORT_TRANSPORT_KEY} must be top_level, chat_template or none")
+        result["effortTransport"] = transport
+    raw = values.get(EXTRA_BODY_KEY, "").strip()
+    if raw != "":
+        shape = (f"{EXTRA_BODY_KEY} must be one JSON object with unique, nonempty keys and finite numbers"
+                 " (integers within 2^53)")
+        if len(raw) > EXTRA_BODY_MAX_CHARS:
+            raise ValueError(f"{EXTRA_BODY_KEY} must be at most {EXTRA_BODY_MAX_CHARS} characters")
+        try:
+            body = json.loads(raw, object_pairs_hook=_unique_json_object, parse_constant=_reject_json_constant)
+        except (ValueError, RecursionError):
+            raise ValueError(shape) from None
+        if not isinstance(body, dict) or not _finite_json(body):
+            raise ValueError(shape)
+        try:
+            # An unpaired surrogate escape cannot be sent as a request body.
+            json.dumps(body, ensure_ascii=False).encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError(shape) from None
+        for key in EXTRA_BODY_PROTECTED_KEYS:
+            if key in body:
+                raise ValueError(f"{EXTRA_BODY_KEY} must not set the protected field {key}")
+        for key, owner in EXTRA_BODY_OWNED_KEYS.items():
+            if key in body:
+                raise ValueError(f"{EXTRA_BODY_KEY} must not set {key}; use {owner}")
+        kwargs = body.get("chat_template_kwargs", {})
+        if not isinstance(kwargs, dict):
+            raise ValueError(f"{EXTRA_BODY_KEY} chat_template_kwargs must be a JSON object")
+        if "reasoning_effort" in kwargs and transport != "none":
+            raise ValueError(
+                f"{EXTRA_BODY_KEY} chat_template_kwargs.reasoning_effort requires {EFFORT_TRANSPORT_KEY}=none")
+        if body:
+            result["extraBody"] = JsonObject(body)
+    raw = values.get(ESTIMATOR_MARGIN_KEY, "")
+    if raw != "":
+        if not re.fullmatch(r"[0-9](?:\.[0-9]{1,3})?", raw) or float(raw) > 8:
+            raise ValueError(f"{ESTIMATOR_MARGIN_KEY} must be a number from 0 to 8")
+        result["estimatorMarginRatio"] = float(raw) if "." in raw else int(raw)
+    return result
+
+
+def reasoning_overrides(values: Mapping[str, str]) -> dict[str, object]:
     """Bound explicit app settings without inventing deployment defaults.
 
     Limits match config.Settings. Empty/unset values stay omitted; zero and
     false are explicit selections. Field-only errors never echo supplied text.
     """
-    result: dict[str, int | str | bool] = {}
+    result: dict[str, object] = model_argument_overrides(values)
     for name, (field, minimum, maximum) in REASONING_INTEGER_FIELDS.items():
         raw = values.get(name, "")
         if raw == "":

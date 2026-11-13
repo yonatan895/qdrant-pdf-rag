@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 import httpx2
 
 from mainframe_rag.config import bearer_auth_headers
+from mainframe_rag.model_args import DEFAULT_MODEL_REQUEST_ARGS, ModelRequestArgs
 from mainframe_rag.ports import ChatMessage
 
 if TYPE_CHECKING:
@@ -95,11 +96,15 @@ class VllmTokenizer:
         api_key: str | None = None,
         retry_after_s: float = TOKENIZE_RETRY_AFTER_S,
         clock: Callable[[], float] = time.monotonic,
+        request_args: ModelRequestArgs = DEFAULT_MODEL_REQUEST_ARGS,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         # vLLM serves /tokenize at the server root; /v1/tokenize is a 404.
         self._origin = self._base_url.removesuffix("/v1")
         self._model = model
+        # The generation's own arguments (#1193): the count must render the
+        # template the generation renders, extra-body arguments included.
+        self._request_args = request_args
         self._timeout_s = timeout_s
         self._client = client
         self._api_key = api_key
@@ -145,13 +150,15 @@ class VllmTokenizer:
             "add_generation_prompt": True,
             "add_special_tokens": False,
         }
-        if reasoning_effort:
-            # vLLM chat completions forward the selected effort and enable
-            # thinking. /tokenize needs these explicit nested template kwargs.
-            # Keep them local to this call: one tokenizer serves concurrent turns.
-            payload["chat_template_kwargs"] = {
-                "reasoning_effort": reasoning_effort, "enable_thinking": reasoning_effort != "none",
-            }
+        # /tokenize takes the template arguments explicitly, so it gets the
+        # ones this generation sends (#1193): on the default top-level
+        # transport the server forwards the selected effort and enables
+        # thinking; on the others exactly the request's chat_template_kwargs,
+        # extra-body arguments included. Keep them local to this call: one
+        # tokenizer serves concurrent turns.
+        template_kwargs = self._request_args.template_kwargs(reasoning_effort)
+        if template_kwargs:
+            payload["chat_template_kwargs"] = template_kwargs
         count = self._remote_count(payload)
         if count is not None:
             return count
@@ -236,5 +243,6 @@ def build_tokenizer(
             timeout_s=settings.llm_tokenize_timeout_s,
             client=client,
             api_key=settings.llm_api_key,
+            request_args=settings.model_request_args(),
         )
     return FallbackTokenizer()

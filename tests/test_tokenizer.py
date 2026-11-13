@@ -365,3 +365,47 @@ def test_effort_specific_count_failure_still_pins_unverified_estimation():
         assert tokenizer.count_messages(messages, reasoning_effort="medium") == expected
         assert not tokenizer.remote_confirmed
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize(("transport", "extra", "effort", "expected"), [
+    # Default transport, nothing configured: the pre-#1193 count arguments.
+    ("top_level", {}, "low", {"reasoning_effort": "low", "enable_thinking": True}),
+    ("top_level", {}, None, None),
+    # A configured template argument is sent with the generation, so it is
+    # counted, and wins over the implied thinking flag.
+    ("top_level", {"chat_template_kwargs": {"enable_thinking": False, "budget": 512}}, "low",
+     {"reasoning_effort": "low", "enable_thinking": False, "budget": 512}),
+    # Template transport: exactly the generation's chat_template_kwargs.
+    ("chat_template", {}, "high", {"reasoning_effort": "high"}),
+    ("chat_template", {"chat_template_kwargs": {"thinking": True}}, "high",
+     {"thinking": True, "reasoning_effort": "high"}),
+    ("chat_template", {"chat_template_kwargs": {"thinking": True}}, None, {"thinking": True}),
+    # Effort not sent: only what the operator configured, a fixed effort included.
+    ("none", {}, "high", None),
+    ("none", {"chat_template_kwargs": {"reasoning_effort": "minimal", "enable_thinking": False}}, "high",
+     {"reasoning_effort": "minimal", "enable_thinking": False}),
+    # Body fields outside the template never reach /tokenize.
+    ("none", {"top_k": 20}, "high", None),
+])
+def test_chat_token_count_renders_the_generations_template_arguments(transport, extra, effort, expected):
+    """Issue #1193: the count and the generation come from one ModelRequestArgs,
+    so the generation's own chat_template_kwargs is the independent oracle."""
+    from mainframe_rag.agent.answer import _chat_body
+
+    settings = Settings(_env_file=None, llm_base_url="http://synthetic/v1", llm_model_reasoning="reasoning",
+                        llm_extra_body=json.dumps(extra), llm_effort_transport=transport)
+    captured = {}
+    tokenizer = build_tokenizer(settings, TokenizerPostFake(count=12, capture=captured))
+    messages = [ChatMessage(role="user", content="synthetic question")]
+    assert tokenizer.count_messages(messages, reasoning_effort=effort) == 12
+    assert captured["json"].get("chat_template_kwargs") == expected
+    assert set(captured["json"]) - {"chat_template_kwargs"} == {
+        "model", "messages", "add_generation_prompt", "add_special_tokens"}
+    generation = _chat_body("reasoning", [m.model_dump() for m in messages], effort, 0.2,
+                            stream=True, args=settings.model_request_args())
+    if transport != "top_level":
+        assert generation.get("chat_template_kwargs") == expected
+    else:
+        # Top-level effort is mapped by the server; configured arguments match.
+        assert generation.get("chat_template_kwargs") == extra.get("chat_template_kwargs")
+        assert generation.get("reasoning_effort") == effort

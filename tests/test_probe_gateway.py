@@ -5,6 +5,8 @@ no network. Success paths are forced with mocks; every failure asserted is
 a canned server answer, never a connect error accident.
 """
 
+import json
+
 import httpx2
 import pytest
 import scripts.probe_gateway as probe_mod
@@ -371,3 +373,279 @@ def test_larger_budget_retains_strict_final_answer_gate(monkeypatch, content, fi
     }]}), *_healthy_routes()]
     _, rc = _run(monkeypatch, routes, argv=["--max-tokens", "512"])
     assert rc == 1
+
+
+# --- Argument probe (issue #1193): a real loopback upstream, real httpx ---
+
+_PRIVATE_REASONING = "PRIVATE-REASONING-TEXT step by step"
+_PRIVATE_ANSWER = "PRIVATE-ANSWER-TEXT 06:10 06:55"
+_PRIVATE_UPSTREAM_ERROR = "PRIVATE-UPSTREAM-ERROR unknown template argument"
+
+
+class ArgumentUpstream:
+    """OpenAI-compatible chat upstream on 127.0.0.1 whose behaviour depends on
+    the request arguments, as a served chat template's does:
+
+    - `chat_template_kwargs.thinking` present: HTTP 400 with an error text
+      (a gateway refusing an argument it does not know);
+    - thinking switched off (`enable_thinking: false`): content only;
+    - otherwise reasoning deltas in a separate field, then content, with more
+      reasoning at effort `high` than at `low`;
+    - `buffered: true`: a JSON body despite the stream ask.
+
+    Usage reports `completion_tokens_details.reasoning_tokens` only when
+    `report_reasoning_tokens` is set (vLLM does not; some gateways do)."""
+
+    def __init__(self, report_reasoning_tokens=True):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        upstream = self
+        self.requests: list[dict] = []
+        self.report_reasoning_tokens = report_reasoning_tokens
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                raw = self.rfile.read(int(self.headers["Content-Length"]))
+                body = json.loads(raw)
+                upstream.requests.append(
+                    {"path": self.path, "body": body, "authorization": self.headers.get("Authorization")})
+                kwargs = body.get("chat_template_kwargs", {})
+                if "thinking" in kwargs:
+                    return self._send(400, "application/json", json.dumps({"error": {"message": _PRIVATE_UPSTREAM_ERROR}}))
+                effort = body.get("reasoning_effort") or kwargs.get("reasoning_effort") or "medium"
+                thinks = kwargs.get("enable_thinking", True)
+                steps = {"low": 1, "medium": 2, "high": 4, "xhigh": 6}[effort] if thinks else 0
+                usage = {"prompt_tokens": 41, "completion_tokens": 6 + 5 * steps, "total_tokens": 47 + 5 * steps}
+                if upstream.report_reasoning_tokens:
+                    usage["completion_tokens_details"] = {"reasoning_tokens": 5 * steps}
+                if body.get("buffered"):
+                    message = {"content": _PRIVATE_ANSWER, "reasoning_content": _PRIVATE_REASONING * steps}
+                    return self._send(200, "application/json", json.dumps(
+                        {"choices": [{"message": message, "finish_reason": "stop"}], "usage": usage}))
+                finish = "length" if body["max_tokens"] < 6 + 5 * steps else "stop"
+                frames = [{"choices": [{"delta": {"reasoning_content": _PRIVATE_REASONING}}]} for _ in range(steps)]
+                frames.append({"choices": [{"delta": {"content": _PRIVATE_ANSWER}}]})
+                frames.append({"choices": [{"delta": {}, "finish_reason": finish}]})
+                frames.append({"choices": [], "usage": usage})
+                text = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames) + "data: [DONE]\n\n"
+                return self._send(200, "text/event-stream", text)
+
+            def _send(self, status, content_type, text):
+                data = text.encode()
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(data)
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(5)
+
+    @property
+    def base_url(self):
+        return f"http://127.0.0.1:{self._server.server_address[1]}/v1"
+
+
+def _arg_probe(monkeypatch, capsys, upstream, argv, **env):
+    """Run `--probe-args` against the loopback upstream; (rc, rows, summary, raw output)."""
+    _env(monkeypatch, **{
+        "LLM_BASE_URL": upstream.base_url, "LLM_API_KEY": "sk-PRIVATE-KEY", "GATEWAY_PROBE_MAX_TOKENS": None,
+        "LLM_EXTRA_BODY": None, "LLM_EFFORT_TRANSPORT": None, **env})
+    rc = main(["--probe-args", *argv])
+    out = capsys.readouterr().out
+    lines = out.strip().splitlines()
+    return rc, [json.loads(line) for line in lines[:-1]], lines[-1], out
+
+
+_ROW_KEYS = {
+    "candidate", "args", "status", "error", "finish_reason", "prompt_tokens", "completion_tokens",
+    "reasoning_tokens", "reasoning_field", "reasoning_chars", "content_chars", "ttft_ms",
+    "first_content_ms", "decode_tps", "elapsed_ms",
+}
+
+
+def test_argument_probe_reports_each_candidate_without_any_text(monkeypatch, capsys):
+    """One fixed prompt under every candidate; rows show which arguments
+    change the model's thinking, and carry no prompt, answer, reasoning,
+    key or upstream error text."""
+    with ArgumentUpstream() as upstream:
+        rc, rows, summary, out = _arg_probe(monkeypatch, capsys, upstream, [])
+    assert [row["candidate"] for row in rows] == [
+        "baseline", "configured",
+        "effort-top-low", "effort-template-low", "effort-top-medium", "effort-template-medium",
+        "effort-top-xhigh", "effort-template-xhigh",
+        "enable-thinking-on", "enable-thinking-off", "thinking-on", "thinking-off",
+    ]
+    by_name = {row["candidate"]: row for row in rows}
+    assert all(set(row) == _ROW_KEYS for row in rows)
+    # The same fixed prompt, bounded, streamed, authenticated, once per candidate.
+    assert len(upstream.requests) == len(rows)
+    assert {json.dumps(r["body"]["messages"]) for r in upstream.requests} == {
+        json.dumps([{"role": "user", "content": probe_mod.ARG_PROBE_PROMPT}])}
+    assert all(r["path"] == "/v1/chat/completions" and r["authorization"] == "Bearer sk-PRIVATE-KEY"
+               and r["body"]["stream"] is True and r["body"]["max_tokens"] == probe_mod.ARG_PROBE_MAX_TOKENS
+               for r in upstream.requests)
+    # Each candidate's arguments reached the wire exactly as its row states.
+    fixed = {"model", "messages", "temperature", "max_tokens", "stream", "stream_options"}
+    assert [{k: v for k, v in r["body"].items() if k not in fixed} for r in upstream.requests] == [
+        row["args"] for row in rows]
+    assert by_name["baseline"]["args"] == {}
+    assert by_name["configured"]["args"] == {"reasoning_effort": "medium"}
+    # Discovery: effort and the thinking switch show up in the counts.
+    low, medium = by_name["effort-template-low"], by_name["effort-top-medium"]
+    assert (low["status"], low["finish_reason"], low["prompt_tokens"]) == (200, "stop", 41)
+    assert (low["completion_tokens"], low["reasoning_tokens"]) == (11, 5)
+    assert (medium["completion_tokens"], medium["reasoning_tokens"]) == (16, 10)
+    assert low["reasoning_field"] and low["reasoning_chars"] == len(_PRIVATE_REASONING)
+    assert medium["reasoning_chars"] == 2 * len(_PRIVATE_REASONING)
+    off = by_name["enable-thinking-off"]
+    assert (off["reasoning_field"], off["reasoning_chars"], off["reasoning_tokens"]) == (False, 0, 0)
+    assert off["content_chars"] == len(_PRIVATE_ANSWER) and off["error"] is None
+    for row in (low, medium, off):
+        assert isinstance(row["ttft_ms"], int) and isinstance(row["first_content_ms"], int)
+        assert 0 <= row["ttft_ms"] <= row["first_content_ms"] <= row["elapsed_ms"]
+    # A refused argument is a finding: status and a fixed label, nothing else.
+    refused = by_name["thinking-on"]
+    assert (refused["status"], refused["error"], refused["finish_reason"]) == (400, "http_error", None)
+    assert refused["prompt_tokens"] is None and refused["decode_tps"] is None
+    assert rc == 0 and summary == f"ARGUMENT PROBE DONE: candidates={len(rows)} completed={len(rows) - 2}"
+    for private in (probe_mod.ARG_PROBE_PROMPT, "PRIVATE-", "sk-PRIVATE-KEY", "06:10", "step by step"):
+        assert private not in out
+
+
+def test_argument_probe_builtin_candidates_follow_the_served_efforts(monkeypatch, capsys):
+    with ArgumentUpstream() as upstream:
+        _, rows, _, _ = _arg_probe(monkeypatch, capsys, upstream, [], LLM_REASONING_EFFORTS="low,medium,high",
+                                   GATEWAY_PROBE_MAX_TOKENS="16",
+                                   LLM_EXTRA_BODY='{"chat_template_kwargs": {"enable_thinking": false}}',
+                                   LLM_EFFORT_TRANSPORT="chat_template", LLM_REASONING_EFFORT_SIMPLE="high")
+    assert [row["candidate"] for row in rows] == [
+        "baseline", "configured",
+        "effort-top-low", "effort-template-low", "effort-top-medium", "effort-template-medium",
+        "effort-top-high", "effort-template-high",
+        "enable-thinking-on", "enable-thinking-off", "thinking-on", "thinking-off",
+    ]
+    by_name = {row["candidate"]: row for row in rows}
+    # `configured` is what the application sends at the simple effort.
+    assert by_name["configured"]["args"] == {
+        "chat_template_kwargs": {"enable_thinking": False, "reasoning_effort": "high"}}
+    assert by_name["configured"]["reasoning_field"] is False
+    assert by_name["effort-top-high"]["args"] == {"reasoning_effort": "high"}
+    assert by_name["effort-top-high"]["reasoning_tokens"] == 20
+    # The readiness budget variable (16 here) does not shrink this mode's budget.
+    assert {r["body"]["max_tokens"] for r in upstream.requests} == {probe_mod.ARG_PROBE_MAX_TOKENS}
+
+
+def test_argument_probe_takes_operator_candidates_from_file_and_flags(monkeypatch, capsys, tmp_path):
+    candidates = tmp_path / "candidates.json"
+    candidates.write_text(json.dumps({
+        "site-budget": {"chat_template_kwargs": {"thinking_budget": 256}, "top_k": 20},
+        "thinking-off": {"seed": 7},  # a later definition replaces the built-in in place
+    }), encoding="utf-8")
+    with ArgumentUpstream(report_reasoning_tokens=False) as upstream:
+        rc, rows, summary, _ = _arg_probe(monkeypatch, capsys, upstream, [
+            "--candidates-file", str(candidates),
+            "--candidate", 'short={"reasoning_effort": "high", "max_tokens": 8}',
+            "--candidate", 'whole={"buffered": true}',
+            "--only", "short,site-budget", "--only", "thinking-off,whole", "--max-tokens", "64", "--timeout", "5",
+        ], GATEWAY_PROBE_MAX_TOKENS="16")  # the readiness budget is not this mode's
+    assert [row["candidate"] for row in rows] == ["short", "site-budget", "thinking-off", "whole"]
+    assert [r["body"]["max_tokens"] for r in upstream.requests] == [8, 64, 64, 64]
+    assert upstream.requests[1]["body"]["chat_template_kwargs"] == {"thinking_budget": 256}
+    assert upstream.requests[1]["body"]["top_k"] == 20 and upstream.requests[2]["body"]["seed"] == 7
+    short, _, _, whole = rows
+    # A cut generation is reported as its finish; usage without a reasoning
+    # breakdown reports none rather than zero.
+    assert (short["finish_reason"], short["reasoning_tokens"], short["reasoning_field"]) == ("length", None, True)
+    # A buffered JSON answer still yields counts, with no first-token time.
+    assert (whole["status"], whole["error"], whole["finish_reason"]) == (200, None, "stop")
+    assert (whole["ttft_ms"], whole["first_content_ms"], whole["decode_tps"]) == (None, None, None)
+    assert whole["content_chars"] == len(_PRIVATE_ANSWER) and whole["completion_tokens"] == 16
+    assert rc == 0 and summary == "ARGUMENT PROBE DONE: candidates=4 completed=4"
+
+
+def test_argument_probe_fails_only_when_the_baseline_does_not_complete(monkeypatch, capsys):
+    """Unreachable gateway: every row is a transport label (class name only)
+    and the mode fails because `baseline` did not complete."""
+    with ArgumentUpstream() as upstream:
+        dead = upstream.base_url
+    _env(monkeypatch, LLM_BASE_URL=dead, GATEWAY_PROBE_MAX_TOKENS=None, LLM_EXTRA_BODY=None,
+         LLM_EFFORT_TRANSPORT=None)
+    rc = main(["--probe-args", "--only", "baseline,enable-thinking-off", "--timeout", "2"])
+    lines = capsys.readouterr().out.strip().splitlines()
+    rows = [json.loads(line) for line in lines[:-1]]
+    assert rc == 1 and lines[-1] == "ARGUMENT PROBE FAILED: candidates=2 completed=0"
+    assert all(row["status"] is None and row["error"] == "transport_error:ConnectError" for row in rows)
+    assert "127.0.0.1" not in "".join(lines)
+
+
+def test_argument_probe_requires_a_reasoning_model(monkeypatch, capsys):
+    _env(monkeypatch, LLM_MODEL_REASONING=None, GATEWAY_PROBE_MAX_TOKENS=None)
+    fake = FakeGateway([])
+    monkeypatch.setattr(probe_mod, "httpx2", fake)
+    assert main(["--probe-args"]) == 1
+    assert "not configured" in capsys.readouterr().out and fake.calls == []
+
+
+@pytest.mark.parametrize("argv", [
+    ["--candidate", 'bad={"messages": []}'],
+    ["--candidate", 'bad={"model": "PRIVATE-TEXT"}'],
+    ["--candidate", 'bad={"stream": false}'],
+    ["--candidate", 'bad=["PRIVATE-TEXT"]'],
+    ["--candidate", "PRIVATE TEXT={}"],
+    ["--candidate", "no-separator"],
+    ["--candidate", "baseline={}"],
+    ["--only", "PRIVATE-TEXT-undefined"],
+    ["--no-builtin"],
+    ["--candidates-file", "/nonexistent/PRIVATE-TEXT.json"],
+    ["--models"],
+    ["--stream"],
+])
+def test_argument_probe_refuses_bad_candidates_before_any_request(monkeypatch, capsys, argv):
+    _env(monkeypatch, GATEWAY_PROBE_MAX_TOKENS=None)
+    fake = FakeGateway([])
+    monkeypatch.setattr(probe_mod, "httpx2", fake)
+    with pytest.raises(SystemExit) as exc:
+        main(["--probe-args", *argv])
+    assert exc.value.code == 2 and fake.calls == []
+    assert "PRIVATE" not in capsys.readouterr().err
+
+
+def test_candidate_options_require_the_argument_probe(monkeypatch, capsys):
+    _env(monkeypatch)
+    fake = FakeGateway(_healthy_routes())
+    monkeypatch.setattr(probe_mod, "httpx2", fake)
+    with pytest.raises(SystemExit) as exc:
+        main(["--candidate", "x={}"])
+    assert exc.value.code == 2 and fake.calls == []
+
+
+@pytest.mark.parametrize(("transport", "extra", "expected"), [
+    (None, None, {"reasoning_effort": "medium"}),
+    ("chat_template", '{"chat_template_kwargs": {"enable_thinking": true}, "top_k": 20}',
+     {"chat_template_kwargs": {"enable_thinking": True, "reasoning_effort": "medium"}, "top_k": 20}),
+    ("none", None, {}),
+])
+def test_readiness_chat_sends_the_configured_model_arguments(monkeypatch, transport, extra, expected):
+    """The readiness chat mirrors the application's request (#1193): unset,
+    the top-level effort it always sent, in the same key order."""
+    fake, rc = _run(monkeypatch, _healthy_routes(), LLM_EFFORT_TRANSPORT=transport, LLM_EXTRA_BODY=extra)
+    assert rc == 0
+    body = next(b for url, b in fake.bodies if url.endswith("/chat/completions"))
+    assert {k: v for k, v in body.items() if k not in ("model", "messages", "temperature", "max_tokens")} == expected
+    if transport is None:
+        assert list(body) == ["model", "messages", "temperature", "max_tokens", "reasoning_effort"]

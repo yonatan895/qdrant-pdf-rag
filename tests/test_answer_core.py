@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import math
 from pathlib import Path
 
 import httpx2
@@ -31,7 +32,7 @@ from mainframe_rag.agent.answer_core import (
 )
 from mainframe_rag.agent.core_ports import ModelDone, ModelToken, RetrievalResult
 from mainframe_rag.agent.model_adapter import ModelAdapter
-from mainframe_rag.agent.tokenizer import VllmTokenizer
+from mainframe_rag.agent.tokenizer import VllmTokenizer, build_tokenizer
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage, ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
@@ -482,14 +483,9 @@ _COMPLEX = ("diagnose abend S0C4 with registers and spool dump", "llm_reasoning_
 
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("mode", ["post", "stream"])
-async def test_estimator_only_budget_sends_no_output_cap(mode):
-    """Without a server token count the prompt total is an estimate, so a cap
-    could push prompt + max_tokens past the served window: none is sent (#777)."""
-    settings = _settings(llm_stream=False)
+def _answer_transport():
     content = "Reissue the command.\n\nCitations:\n- " + _hit().cite
-    transport = HttpxStreamFake(
+    return HttpxStreamFake(
         lines=[
             "data: " + json.dumps({"choices": [{"delta": {"content": content}}]}),
             'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}',
@@ -498,19 +494,151 @@ async def test_estimator_only_budget_sends_no_output_cap(mode):
         payload={"choices": [{"message": {"content": content}, "finish_reason": "stop"}]},
     )
 
+
+async def _core_bodies(settings, tokenizer, mode, query="IEA500I"):
+    """Run one answer through the real HTTP client; (output, chat bodies)."""
+    transport = _answer_transport()
+
     def retrieve(*_a, **_k):
         return [_hit()], "nl", {}
 
     deps = _deps(settings, HttpxLLMClient(settings, client=transport), retrieve)
+    deps.tokenizer = tokenizer
     if mode == "stream":
-        events = [event async for event in execute_answer_core_stream(AnswerCoreInput(query="IEA500I"), deps)]
+        events = [event async for event in execute_answer_core_stream(AnswerCoreInput(query=query), deps)]
         output = events[-1]["output"]
     else:
-        output = await execute_answer_core(AnswerCoreInput(query="IEA500I"), deps)
-    bodies = transport.stream_bodies  # buffered callers read the stream too (#868)
-    assert not transport.post_bodies
+        output = await execute_answer_core(AnswerCoreInput(query=query), deps)
+    assert not transport.post_bodies  # buffered callers read the stream too (#868)
+    return output, transport.stream_bodies
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["post", "stream"])
+async def test_no_tokenizer_packing_sends_no_output_cap(mode):
+    """The offline character-packing path counts nothing, so there is no
+    prompt size to place a cap against: none is sent (#777, #1193). Serving
+    always has a tokenizer."""
+    output, bodies = await _core_bodies(_settings(llm_stream=False), None, mode)
     assert output.finish_reason == "stop" and not output.budget_verified
     assert len(bodies) == 1 and "max_tokens" not in bodies[0]
+
+
+class _FixedEstimate:
+    """Estimator-only tokenizer reporting one prompt size (never confirmed)."""
+
+    remote_confirmed = False
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+
+    def count_tokens(self, text):
+        return self.count
+
+    def count_messages(self, messages, *, reasoning_effort=None):
+        return self.count
+
+
+_CAP_BUDGET = {
+    "llm_max_model_len": 16384, "llm_reserved_output_tokens": 2000, "llm_token_safety_margin": 128,
+    "llm_thinking_reserve_tokens_simple": 3000, "llm_thinking_reserve_tokens_complex": 5000,
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("estimate", "ratio", "query", "cap"), [
+    # Small prompt: the full priced cap, as on the verified path.
+    (1000, 1.0, "IEA500I", 5000),
+    (1000, 1.0, _COMPLEX[0], 7000),
+    # 16384 - 6000 - ceil(6000 * 1.0) = 4384: the margin shrinks the cap.
+    (6000, 1.0, "IEA500I", 4384),
+    # 16384 - 6001 - ceil(6001 * 0.25) = 8882 > full cap 5000.
+    (6001, 0.25, "IEA500I", 5000),
+    # ceil(): 16384 - 9001 - ceil(9001 * 0.25 = 2250.25) = 5132 on the complex path (full 7000).
+    (9001, 0.25, _COMPLEX[0], 5132),
+    # The margin would leave less than the answer reserve: the cap is the
+    # answer reserve (the prompt fit its limit, so this always fits).
+    (11000, 1.0, "IEA500I", 2000),
+    # Ratio 0: only the standard margin remains, which the full cap satisfies.
+    (11256, 0.0, "IEA500I", 5000),
+])
+@pytest.mark.parametrize("mode", ["post", "stream"])
+async def test_estimator_only_budget_sends_a_margined_output_cap(estimate, ratio, query, cap, mode):
+    """Issue #1193: an estimator-only prompt still carries a cap, so output
+    length never depends on gateway defaults, and estimate + margin + cap
+    stays inside the configured window."""
+    settings = _settings(llm_stream=False, llm_estimator_margin_ratio=ratio, **_CAP_BUDGET)
+    output, bodies = await _core_bodies(settings, _FixedEstimate(estimate), mode, query)
+    assert output.finish_reason == "stop" and not output.budget_verified
+    assert len(bodies) == 1 and bodies[0]["max_tokens"] == cap
+    margin = max(128, math.ceil(estimate * ratio)) if cap > 2000 else 128
+    assert estimate + margin + cap <= 16384
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["post", "stream"])
+async def test_estimator_only_prompt_over_its_limit_is_still_refused(mode):
+    """The cap rule adds no new outcome: a prompt that cannot fit keeps the
+    existing prompt_budget_exceeded refusal, before any model call."""
+    from mainframe_rag.agent.answer import PromptBudgetExceeded
+
+    settings = _settings(llm_stream=False, **_CAP_BUDGET)
+    # Simple-path verify limit: 16384 - 2000 - 3000 - 128 = 11256.
+    with pytest.raises(PromptBudgetExceeded):
+        await _core_bodies(settings, _FixedEstimate(11257), mode)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["post", "stream"])
+async def test_pinned_tokenizer_endpoint_still_caps_the_generation(mode):
+    """The gateway-without-/tokenize deployment end to end: the real client
+    pins the estimator on a 404 and the generation is still capped."""
+    settings = _settings(llm_stream=False, **_CAP_BUDGET)
+    calls = []
+
+    def absent(request):
+        calls.append(request.url.path)
+        return httpx2.Response(404, json={"error": "not served"})
+
+    with httpx2.Client(transport=httpx2.MockTransport(absent)) as client:
+        tokenizer = VllmTokenizer(settings.llm_base_url, settings.llm_model_reasoning, client=client)
+        output, bodies = await _core_bodies(settings, tokenizer, mode)
+    assert calls == ["/tokenize"] and not output.budget_verified
+    assert bodies[0]["max_tokens"] == 5000
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("transport", "extra"), [
+    ("chat_template", {"chat_template_kwargs": {"enable_thinking": True}}),
+    ("none", {"chat_template_kwargs": {"thinking_budget": 256}, "top_k": 20}),
+    ("top_level", {"chat_template_kwargs": {"enable_thinking": False}}),
+])
+@pytest.mark.parametrize("mode", ["post", "stream"])
+async def test_token_count_and_generation_share_the_template_arguments(transport, extra, mode):
+    """Issue #1193: the verified count renders the template arguments the
+    generation sends, extra-body arguments included, for the same messages."""
+    settings = _settings(llm_stream=False, llm_effort_transport=transport, llm_extra_body=json.dumps(extra),
+                         llm_reasoning_effort_simple="low", **_CAP_BUDGET)
+    tokenized = []
+
+    def count(request):
+        tokenized.append(json.loads(request.content))
+        return httpx2.Response(200, json={"count": 10})
+
+    with httpx2.Client(transport=httpx2.MockTransport(count)) as client:
+        output, bodies = await _core_bodies(settings, build_tokenizer(settings, client), mode)
+    assert output.budget_verified and bodies[0]["max_tokens"] == 5000
+    sent = bodies[0]["chat_template_kwargs"]
+    assert tokenized and tokenized[-1]["messages"] == bodies[0]["messages"]
+    if transport == "top_level":
+        assert bodies[0]["reasoning_effort"] == "low" and sent == extra["chat_template_kwargs"]
+        assert all(body["chat_template_kwargs"] == {"reasoning_effort": "low", "enable_thinking": False}
+                   for body in tokenized)
+    else:
+        assert "reasoning_effort" not in bodies[0]
+        assert sent == {**extra["chat_template_kwargs"], **({"reasoning_effort": "low"} if transport == "chat_template" else {})}
+        assert all(body["chat_template_kwargs"] == sent for body in tokenized)
+    assert bodies[0].get("top_k") == extra.get("top_k")
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("effort,source,mode,is_chat,qf", [

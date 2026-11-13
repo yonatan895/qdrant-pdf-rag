@@ -274,6 +274,46 @@ def test_model_budget_operator_precedence_reaches_rendered_pod(tree, source):
     assert {name: pod.get(name) for name in selected} == selected
 
 
+@pytest.mark.parametrize("source", ["file", "environment"])
+def test_model_request_arguments_operator_precedence_reaches_rendered_pod(tree, source):
+    """Issue #1193 through real common.sh, mapper and Helm: the operator's JSON
+    (single-quoted in the sourced file) reaches the Deployment as the same
+    object, and an explicit environment value beats the file. The Task bridge
+    for these keys is the Verifier's (taskfiles/ are not edited here)."""
+    root, _log = tree
+    selected = {
+        "LLM_EXTRA_BODY": '{"top_k": 20, "stop": ["a b", "c\\"d"], "chat_template_kwargs": {"enable_thinking": false}}',
+        "LLM_EFFORT_TRANSPORT": "chat_template", "LLM_ESTIMATOR_MARGIN_RATIO": "0.5",
+    }
+    alternate = {
+        "LLM_EXTRA_BODY": '{"top_k": 1}', "LLM_EFFORT_TRANSPORT": "none", "LLM_ESTIMATOR_MARGIN_RATIO": "2",
+    }
+    file_values = {
+        "INTERNAL_REGISTRY": "reg.internal", "NAMESPACE": "ns",
+        "STORAGE_CLASS": "standard", "IMAGE_SHA": IMAGE_SHA,
+        "EMBED_MODEL": "embed", "DENSE_DIM": "64", "EMBED_MODEL_REVISION": "rev-1",
+        "EMBED_BASE_URL": "http://vllm:8000/v1", "OPENWEBUI_ENABLED": "false",
+        **(selected if source == "file" else alternate),
+    }
+    env_file = root / "airgap.env"
+    env_file.write_text("".join(f"{key}='{value}'\n" for key, value in file_values.items()))
+    overrides = selected if source == "environment" else {}
+    result = _run(tree, ("AIRGAP_ENV", str(env_file)), *overrides.items())
+    assert result.returncode == 0, result.stderr
+    pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
+    assert json.loads(pod["LLM_EXTRA_BODY"]) == json.loads(selected["LLM_EXTRA_BODY"])
+    assert (pod["LLM_EFFORT_TRANSPORT"], pod["LLM_ESTIMATOR_MARGIN_RATIO"]) == ("chat_template", "0.5")
+
+
+def test_refused_model_request_arguments_stop_the_deploy_before_helm(tree):
+    root, _log = tree
+    result = _run(tree, ("LLM_EXTRA_BODY", '{"max_tokens": 999999, "note": "unsupported-private-value"}'))
+    assert result.returncode != 0
+    assert "LLM_EXTRA_BODY must not set max_tokens" in result.stderr
+    assert "unsupported-private-value" not in result.stderr + result.stdout
+    assert not (root / "dist/agent-rendered.yaml").exists()
+
+
 def test_pull_secret_bad_name_fails_closed(tree):
     r = _run(tree, ("PULL_SECRET", "a&b"))
     assert r.returncode != 0
@@ -878,8 +918,6 @@ def test_invalid_networkpolicy_selection_fails_before_any_mutation(tree, env):
 
 @pytest.mark.parametrize("ownership", ["legacy", "ours", "other-release", "controller", "other-manager"])
 def test_app_adoption_checks_ownership_before_any_release_mutation(tree, ownership):
-    import json
-
     meta = {"name": "rag-agent", "namespace": "ns"}
     if ownership in ("ours", "other-release", "other-namespace"):
         meta["annotations"] = {
@@ -954,8 +992,6 @@ def test_old_helm_fails_before_any_release_mutation(tree):
 
 @pytest.mark.parametrize("owner", ["legacy", "other", "controller"])
 def test_disabled_legacy_resources_are_checked_then_cleaned_after_rollout(tree, owner):
-    import json
-
     meta = {"name": "jaeger", "namespace": "ns"}
     if owner == "other":
         meta["annotations"] = {"meta.helm.sh/release-name": "another"}
@@ -1010,8 +1046,6 @@ def test_other_servicemonitor_read_error_still_blocks_mutations(tree):
 
 
 def test_readable_owned_leftover_servicemonitor_is_still_cleaned(tree):
-    import json
-
     path = tree[0] / "sm.json"
     path.write_text(json.dumps({"apiVersion": "monitoring.coreos.com/v1", "kind": "ServiceMonitor",
                                 "metadata": {"name": "rag-agent", "namespace": "ns"}}))
@@ -1025,8 +1059,6 @@ def test_readable_owned_leftover_servicemonitor_is_still_cleaned(tree):
 
 
 def test_disabled_cleanup_never_accepts_a_pvc(tree):
-    import json
-
     path = tree[0] / "disabled.json"
     path.write_text(json.dumps({"kind": "List", "items": [
         {"apiVersion": "v1", "kind": "PersistentVolumeClaim",
@@ -1039,8 +1071,6 @@ def test_disabled_cleanup_never_accepts_a_pvc(tree):
 
 
 def test_legacy_cleanup_waits_for_successful_rollouts(tree):
-    import json
-
     path = tree[0] / "disabled.json"
     path.write_text(json.dumps({"kind": "List", "items": [
         {"apiVersion": "apps/v1", "kind": "Deployment",
@@ -1055,8 +1085,6 @@ def test_legacy_cleanup_waits_for_successful_rollouts(tree):
 
 
 def test_shared_gateway_aliases_and_secret_reach_requests(tree):
-    import json
-
     import httpx2
 
     from mainframe_rag.agent.answer import HttpxLLMClient
@@ -1166,8 +1194,6 @@ def test_external_collector_passes_through(tree):
 def test_upgrade_from_bundled_jaeger_removes_it_after_rollout(tree):
     # Leftover Jaeger objects are removed only after the release is upgraded
     # and the workloads rolled out; the retained Jaeger PVC is never listed.
-    import json
-
     path = tree[0] / "disabled.json"
     path.write_text(json.dumps({"kind": "List", "items": [
         {"apiVersion": "apps/v1", "kind": "Deployment",
@@ -1203,8 +1229,6 @@ def _route(name="rag-agent", *, to="rag-agent", port="oauth", termination="reenc
 
 
 def _write_json(tree, name, document):
-    import json
-
     path = tree[0] / name
     path.write_text(json.dumps(document))
     return str(path)
@@ -2406,8 +2430,6 @@ def test_sizing_keys_render_what_the_free_form_overlay_rendered(tmp_path):
 # --- #1070 R2: StatefulSet volume sizes are immutable ------------------------
 
 def _live_statefulset(tree, data="500Gi", snapshots="500Gi", name="qdrant"):
-    import json
-
     path = tree[0] / "live-sts.json"
     path.write_text(json.dumps({"spec": {"volumeClaimTemplates": [
         {"metadata": {"name": "qdrant-storage"}, "spec": {"resources": {"requests": {"storage": data}}}},
