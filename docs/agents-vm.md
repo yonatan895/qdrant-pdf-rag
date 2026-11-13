@@ -251,8 +251,9 @@ person pushes and opens merge requests (the shell policy denies `git push`).
 
 ### Task briefs
 
-A worker gets one task and nothing else, so the task text is its whole context.
-Write the brief before starting the worker, in five parts:
+A worker starts with its task text and the repository, nothing else, so the brief
+carries everything it is not expected to find out by reading. Write the brief before
+starting the worker, in five parts:
 
 - **TITLE**: one line naming the change.
 - **PROBLEM**: what is wrong today and the required behaviour, concretely.
@@ -263,12 +264,12 @@ Write the brief before starting the worker, in five parts:
 
 The tasks file holds one task per line, `<id><TAB><task>`, and no continuation line
 (`tasks()` in `images/devkit/bin/mfr-agent-workers`), so the brief is that one line,
-with the part labels in capitals. The brief is the largest lever: with a
-full brief 23 of 24 runs solved, with a title and path only 6 of 12, on 12 scoped fixes
-with a hosted flash-class model, not the site model
-([#1196](https://github.com/yonatan895/qdrant-pdf-rag/issues/1196)). For scoped fixes
-use the model's default reasoning setting; a higher one did not solve more in that
-measurement.
+with the part labels in capitals. In one measurement on 12 scoped fixes with a hosted
+flash-class model, not the site model
+([#1196](https://github.com/yonatan895/qdrant-pdf-rag/issues/1196)), a full brief
+solved 23 of 24 runs (12 at each of two reasoning settings) and a title and path only
+solved 6 of 12. For scoped fixes use the model's default reasoning setting; the higher
+one did not solve more in that measurement.
 
 <a id="windows-viewer"></a>
 ## Windows: view only
