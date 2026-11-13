@@ -146,6 +146,30 @@ def test_should_skip_gates_on_rules_version() -> None:
     assert should_skip(rec, "a" * 64, rules_version="v1", force_reingest=False) is True
 
 
+def test_should_skip_treats_latest_skipped_like_upserted() -> None:
+    # Issue #1215: a document whose latest ledger status is "skipped" already
+    # satisfies the same gates as "upserted" (it carries the identical sha256/
+    # doc_id/rules_version and passed the completion check when written), so
+    # re-marking it skipped must not count as a reason to re-parse it next run.
+    skipped = InventoryRecord(path="x.pdf", sha256="a" * 64, status="skipped", rules_version="v1")
+    upserted = InventoryRecord(path="x.pdf", sha256="a" * 64, status="upserted", rules_version="v1")
+    assert should_skip(skipped, "a" * 64, rules_version="v1") is True
+    assert should_skip(upserted, "a" * 64, rules_version="v1") is True
+    # Same secondary gates as "upserted": a rules bump or sha mismatch requeues.
+    assert should_skip(skipped, "a" * 64, rules_version="v2") is False
+    assert should_skip(skipped, "b" * 64, rules_version="v1") is False
+    # A pre-versioning skipped record carries no field and never skips (fail closed).
+    old = InventoryRecord(path="x.pdf", sha256="a" * 64, status="skipped")
+    assert should_skip(old, "a" * 64, rules_version="v1") is False
+    # Issue #179: --reingest never skips, whatever the status.
+    assert should_skip(skipped, "a" * 64, rules_version="v1", force_reingest=True) is False
+    # Every other status still re-processes (fail closed): only a recorded
+    # completion ("upserted") or a recorded already-complete skip counts.
+    for status in ("error", "pending", "failed", "superseded"):
+        rec = InventoryRecord(path="x.pdf", sha256="a" * 64, status=status, rules_version="v1")
+        assert should_skip(rec, "a" * 64, rules_version="v1") is False
+
+
 # ---------------------------------------------------------------- payload
 def _upsert_one(contexts=None):
     from types import SimpleNamespace
