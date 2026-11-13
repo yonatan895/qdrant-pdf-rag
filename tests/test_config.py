@@ -181,7 +181,7 @@ def test_chat_bounds_are_enforced():
     with pytest.raises(ValidationError):
         Settings(_env_file=None, chat_max_body_chars=500)
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, chat_max_body_chars=200000)
+        Settings(_env_file=None, chat_max_body_chars=2_000_000)
     with pytest.raises(ValidationError):
         Settings(_env_file=None, chat_max_turns=0)
     with pytest.raises(ValidationError):
@@ -297,7 +297,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "llm_tokenize_timeout_s": 5.0,
     "llm_stream": False,
     "chat_condense_enabled": False,
-    "chat_max_body_chars": 32768,
+    "chat_max_body_chars": 131072,
     "chat_max_turns": 10,
     "chat_max_prior_turn_chars": 1000,
     "ui_enabled": False,

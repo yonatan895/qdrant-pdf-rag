@@ -489,8 +489,6 @@ def test_chat_condensation_uses_only_history_before_normalized_user(
 @pytest.mark.parametrize("messages,path,stream", [
     ([], "/v1/chat", False),
     ([{"role": "assistant", "content": "No user"}], "/v1/chat/completions", True),
-    ([{"role": "user", "content": "x" * 2001}, {"role": "assistant", "content": "Short tail"}],
-     "/v1/chat", True),
 ])
 def test_chat_invalid_active_turn_has_no_model_or_retrieval(chat_client, messages, path, stream):
     result = chat_client.post(path, json={"messages": messages, "stream": stream})
@@ -532,9 +530,39 @@ def test_chat_ignored_tail_still_counts_toward_body_limit(chat_client, monkeypat
         {"role": "system", "content": "x" * 64},
     ]})
     assert result.status_code == 422
-    assert result.json() == _FIXED_422
+    assert result.json() == {"code": "invalid_request", "message": "request exceeds the 64-character limit"}
     assert chat_client.mock_search.calls == []
     assert chat_client.fake_llm.chat_calls == []
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("condense", [False, True])
+def test_chat_long_pasted_turn_is_answered_and_never_condensed_whole(
+    chat_client, monkeypatch, stream, condense
+):
+    """Issue #1192: a long pasted follow-up is answered (it was a 422). The
+    search runs on the derived query, the reasoning prompt carries the whole
+    turn exactly, and with condensation on no model call receives the paste
+    as a condensation input (the derived query carries an identifier, so the
+    condensation model is not called at all)."""
+    monkeypatch.setattr(app_mod.settings, "chat_condense_enabled", condense)
+    prose = "The restart fails every time and the console shows the lines below."
+    paste = "\n".join([
+        prose, "",
+        "ZQX377I RESTART REJECTED FOR REGION ZRGN  <<state=held>>",
+        *(f"  {i:06d}  {i:04X}E5F6 00000000  |..synthetic listing..|\tend" for i in range(90)),
+    ])
+    assert len(paste) > app_mod.settings.query_max_chars
+    result = chat_client.post("/v1/chat", json={"messages": [
+        {"role": "user", "content": "What does IEA500I mean?"},
+        {"role": "assistant", "content": "An earlier answer"},
+        {"role": "user", "content": paste},
+    ], "stream": stream})
+    assert result.status_code == 200
+    assert [c["query"] for c in chat_client.mock_search.calls] == [f"{prose} ZQX377I"]
+    calls = [*chat_client.fake_llm.chat_calls, *chat_client.fake_llm.stream_calls]
+    assert len(calls) == 1
+    assert f"Question: {paste}\n" in calls[0]["messages"][-1].content
 
 
 @pytest.mark.anyio

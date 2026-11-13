@@ -2527,8 +2527,9 @@ async def test_httpx_llm_client_chat_stream_empty_content_recovers_via_post():
 
 def test_overlong_query_fails_closed_before_retrieval(client, monkeypatch):
     """Issue #87: the default cap (2000 chars) fails closed with the
-    validation envelope on /v1/search and /v1/answer before any retrieval
-    work runs; the boundary length is still served."""
+    validation envelope on /v1/search before any retrieval work runs; the
+    boundary length is still served. /v1/answer no longer refuses by this
+    cap (issue #1192, tests below)."""
     called = []
     orig = app_mod.retrieve_search
 
@@ -2537,10 +2538,9 @@ def test_overlong_query_fails_closed_before_retrieval(client, monkeypatch):
         return orig(*a, **k)
 
     monkeypatch.setattr(app_mod, "retrieve_search", recording)
-    for path in ("/v1/search", "/v1/answer"):
-        resp = client.post(path, json={"query": "x" * 2001})
-        assert resp.status_code == 422
-        assert resp.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    resp = client.post("/v1/search", json={"query": "x" * 2001})
+    assert resp.status_code == 422
+    assert resp.json() == {"code": "invalid_request", "message": "request body failed validation"}
     assert called == []
     assert client.post("/v1/search", json={"query": "x" * 2000}).status_code == 200
 
@@ -2588,7 +2588,147 @@ def test_chat_body_cap_counts_product_and_version(client, monkeypatch):
     body = {"messages": [{"role": "user", "content": "q" * 500}], "product": "p" * 400, "version": "v" * 400}
     resp = client.post("/v1/chat", json=body)
     assert resp.status_code == 422
-    assert resp.json() == _FIXED_422
+    assert resp.json() == {"code": "invalid_request", "message": "request exceeds the 1000-character limit"}
+
+
+# Original synthetic paste (issue #1192): invented ids and listing lines.
+_PASTE_PROSE = "The nightly job fails in its second step and I do not understand the output."
+_PASTE = "\n".join([
+    _PASTE_PROSE, "",
+    "ZQX104E ALLOCATION FAILED FOR STEP ZSTEP2, RC=12",
+    *(f"{0x2000 + 16 * i:08X}  {i:04X}A1B2 C3D4{i:04X} 00000000  *..synthetic..*" for i in range(80)),
+    "\tEND OF LISTING  <<rc=12>>",
+])
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_long_pasted_answer_query_is_answered_from_a_derived_query(client, monkeypatch, caplog, stream):
+    """Issue #1192: a message over `query_max_chars` is answered. Retrieval
+    gets the derived query (bounded, the user's prose plus identifiers), the
+    model gets the whole message, and no log line carries the text."""
+    search = MagicMockSearch()
+    seen: list = []
+
+    class Recording(StreamingFakeLLM):
+        async def chat_stream(self, messages, *args, **kwargs):
+            seen.append(messages)
+            async for item in super().chat_stream(messages, *args, **kwargs):
+                yield item
+
+    llm = Recording() if stream else FakeLLM()
+    monkeypatch.setattr(app_mod, "retrieve_search", search.search)
+    monkeypatch.setattr(app_mod, "llm", llm)
+    assert len(_PASTE) > app_mod.settings.query_max_chars
+    with caplog.at_level("DEBUG"):
+        resp = client.post("/v1/answer", json={"query": _PASTE, "stream": stream})
+    assert resp.status_code == 200
+    (call,) = search.calls
+    assert call["query"] == f"{_PASTE_PROSE} ZQX104E"
+    prompt = (seen[-1] if stream else llm.last_messages)[-1].content
+    assert f"Question: {_PASTE}\n" in prompt
+    final = (next(e[1] for e in _parse_sse_events(resp.text) if e[0] == "final") if stream
+             else resp.json())
+    assert final["message_omitted_chars"] == 0
+    assert "ZQX104E" not in caplog.text and "synthetic" not in caplog.text
+    assert "long_message" in caplog.text
+
+
+@pytest.mark.parametrize("path", ["/v1/answer", "/v1/chat"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_shortened_message_is_reported_as_a_count_on_every_response(client, monkeypatch, path, stream):
+    """Issue #1192: when the middle of the message is left out of the prompt,
+    JSON, the answer `final` event and the chat finish chunk carry
+    `message_omitted_chars`, equal to the count the prompt marker states."""
+    import re
+
+    seen: list = []
+
+    class Recording(StreamingFakeLLM):
+        def chat(self, messages, *args, **kwargs):
+            seen.append(messages)
+            return super().chat(messages, *args, **kwargs)
+
+        async def chat_stream(self, messages, *args, **kwargs):
+            seen.append(messages)
+            async for item in super().chat_stream(messages, *args, **kwargs):
+                yield item
+
+    monkeypatch.setattr(app_mod, "retrieve_search", MagicMockSearch().search)
+    monkeypatch.setattr(app_mod, "llm", Recording())
+    paste = "\n".join(["Why does the copy step stop here?",
+                       *(f"{i:08X} {i:04X}0000 FFFF{i:04X} 0000{i:04X}" for i in range(2500))])
+    body = ({"query": paste} if path == "/v1/answer"
+            else {"messages": [{"role": "user", "content": paste}]})
+    resp = client.post(path, json={**body, "stream": stream})
+    assert resp.status_code == 200
+    if not stream:
+        reported = resp.json()["message_omitted_chars"]
+    elif path == "/v1/answer":
+        reported = next(e[1] for e in _parse_sse_events(resp.text) if e[0] == "final")[
+            "message_omitted_chars"]
+    else:
+        frames = [json.loads(line[5:]) for line in resp.text.splitlines()
+                  if line.startswith("data:") and line[5:].strip() != "[DONE]"]
+        reported = frames[-1]["choices"][0]["message_omitted_chars"]
+    stated = re.search(r"\[\.\.\. (\d+) characters of the pasted message omitted",
+                       seen[-1][-1].content)
+    assert stated and reported == int(stated.group(1)) > 0
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_large_splunk_context_on_answer_stays_accepted(client, monkeypatch, stream):
+    """PR #1198 B2: `/v1/answer` never bounded `splunk_context` (it is cut to
+    `splunk_context_max_chars` in the prompt), so a short query with a context
+    larger than the request-size guard is still answered; the context counts
+    toward the guard only up to its cut."""
+    search = MagicMockSearch()
+    llm = FakeLLM()
+    monkeypatch.setattr(app_mod, "retrieve_search", search.search)
+    monkeypatch.setattr(app_mod, "llm", StreamingFakeLLM() if stream else llm)
+    context = "synthetic telemetry line\n" * 5601
+    assert len(context) > 140_000 > app_mod.settings.chat_max_body_chars
+    resp = client.post("/v1/answer", json={"query": "ZQX104E", "splunk_context": context,
+                                           "stream": stream})
+    assert resp.status_code == 200 and len(search.calls) == 1
+    # The cut context still counts: query + cap is over a guard set just below.
+    cap = app_mod.settings.splunk_context_max_chars
+    monkeypatch.setattr(app_mod.settings, "chat_max_body_chars", cap + 6)
+    assert client.post("/v1/answer", json={"query": "ZQX104E", "splunk_context": context}
+                       ).status_code == 422
+    monkeypatch.setattr(app_mod.settings, "chat_max_body_chars", cap + 7)
+    assert client.post("/v1/answer", json={"query": "ZQX104E", "splunk_context": context}
+                       ).status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/v1/answer", {"query": "q" * 600, "splunk_context": "s" * 500}),
+        ("/v1/answer", {"query": "q" * 1001, "stream": True}),
+        ("/v1/chat", {"messages": [{"role": "user", "content": "q" * 1001}]}),
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "q" * 400},
+                                               {"role": "assistant", "content": "a" * 601}]}),
+    ],
+    ids=["answer-with-context", "answer-stream", "chat", "chat-alias-history"],
+)
+def test_request_size_guard_states_the_limit_and_does_no_work(client, monkeypatch, caplog, path, body):
+    """Issue #1192: the one length refusal on the answer and chat paths is the
+    request-size guard, with a fixed message that states the configured limit
+    and never the text; a body at the limit is served."""
+    search = MagicMockSearch()
+    llm = FakeLLM()
+    monkeypatch.setattr(app_mod, "retrieve_search", search.search)
+    monkeypatch.setattr(app_mod, "llm", llm)
+    monkeypatch.setattr(app_mod.settings, "chat_max_body_chars", 1000)
+    with caplog.at_level("DEBUG"):
+        resp = client.post(path, json=body)
+    assert resp.status_code == 422
+    assert resp.json() == {"code": "invalid_request", "message": "request exceeds the 1000-character limit"}
+    assert search.calls == [] and llm.calls == 0
+    assert "qqqq" not in caplog.text and "qqqq" not in resp.text
+    at_limit = ({"query": "q" * 1000} if path == "/v1/answer"
+                else {"messages": [{"role": "user", "content": "q" * 1000}]})
+    assert client.post(path, json=at_limit).status_code == 200
 
 
 @pytest.mark.parametrize(

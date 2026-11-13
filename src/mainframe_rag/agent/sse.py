@@ -86,6 +86,7 @@ def final_payload(
     script_review_required: bool = False,
     supplied_evidence: Sequence[SuppliedExcerpt] = (),
     evidence_omitted: int = 0,
+    message_omitted_chars: int = 0,
 ) -> dict[str, Any]:
     """Terminal `final` for the streamed answer: verified citations/script
     identical in shape to the JSON mode and the empty-hits path.
@@ -111,6 +112,7 @@ def final_payload(
         "script_review_required": script_review_required,
         "supplied_evidence": [e.model_dump() for e in supplied_evidence],
         "evidence_omitted": evidence_omitted,
+        "message_omitted_chars": message_omitted_chars,
         "query_kind": query_kind,
         "hits": [h.model_dump() for h in hits],
         "finish_reason": finish_reason,
@@ -196,4 +198,5 @@ def output_final_payload(
         script_review_required=output.script_review_required,
         supplied_evidence=output.supplied,
         evidence_omitted=len(output.evidence.omitted_indices),
+        message_omitted_chars=output.message_omitted_chars,
     )

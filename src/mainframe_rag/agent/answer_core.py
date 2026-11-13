@@ -49,6 +49,7 @@ from mainframe_rag.agent.core_ports import (
     RetrievalResult,
     Retriever,
 )
+from mainframe_rag.agent.user_message import derive_retrieval_query
 from mainframe_rag.config import REASONING_EFFORTS, ReasoningEffort, Settings
 from mainframe_rag.logs import error_type
 from mainframe_rag.ports import ChatMessage, Tokenizer, TokenUsage
@@ -141,8 +142,10 @@ async def resolve_search_query(
 ) -> str:
     """The one owner of the follow-up condensation rule: chat turns after the
     first condense only when CHAT_CONDENSE_ENABLED is on; every other turn
-    searches its literal text. Both the core retrieval branch and the route
-    handlers call this so the flag cannot be honored on one path only."""
+    searches its literal text, or, for a message over `query_max_chars`,
+    the query derived from it (issue #1192; never a model call). Both
+    the core retrieval branch and the route handlers call this so the flag
+    cannot be honored on one path only."""
     input_data = _prepare_chat_input(input_data, deps.settings)
     if (
         input_data.is_chat
@@ -153,7 +156,7 @@ async def resolve_search_query(
         ctx = trace.set_span_in_context(parent_span) if parent_span is not None else None
         with start_as_current_span(tracer, "chat.condense", kind=SpanKind.CLIENT, context=ctx):
             return await condense_query(deps.llm, input_data.messages, deps.settings)
-    return input_data.query
+    return derive_retrieval_query(input_data.query, deps.settings)
 
 
 @dataclass
@@ -195,6 +198,9 @@ class AnswerCoreOutput:
     # The effort this answer was generated at (issue #780 answer records);
     # None on the empty-hits path, where no generation ran.
     reasoning_effort: str | None = None
+    # Characters of the user's message left out of the prompt to fit the
+    # window (issue #1192); 0 when it was sent whole and on no-hits paths.
+    message_omitted_chars: int = 0
 
 
 class CoreToken(TypedDict):
@@ -435,6 +441,7 @@ def _finalize_answer(
         budget_verified=prepared.budget_verified,
         supplied=prepared.supplied,
         reasoning_effort=reasoning_effort,
+        message_omitted_chars=prepared.message_omitted_chars,
     )
 
 
@@ -491,10 +498,13 @@ async def execute_answer_core(
     hits, kind, timings = retrieved.hits, retrieved.kind, retrieved.timings
 
     classify_fn = deps.classify_query_complexity_fn or classify_query_complexity
-    complexity = classify_fn(input_data.query)
+    # Complexity and the no-hits wording read what retrieval searched, which
+    # is the message itself within `query_max_chars` (issue #1192).
+    search_text = derive_retrieval_query(input_data.query, settings)
+    complexity = classify_fn(search_text)
 
     if not hits:
-        return _empty_output(input_data.query, kind, timings, complexity)
+        return _empty_output(search_text, kind, timings, complexity)
 
     # 3. Prompt building (shared with the streaming executor)
     effort = _resolve_reasoning_effort(input_data, settings, complexity)
@@ -566,14 +576,17 @@ async def execute_answer_core_stream(
     hits, kind, timings = retrieved.hits, retrieved.kind, retrieved.timings
 
     classify_fn = deps.classify_query_complexity_fn or classify_query_complexity
-    complexity = classify_fn(input_data.query)
+    # Complexity and the no-hits wording read what retrieval searched, which
+    # is the message itself within `query_max_chars` (issue #1192).
+    search_text = derive_retrieval_query(input_data.query, settings)
+    complexity = classify_fn(search_text)
 
     # 2. Empty hits short-circuit: only the terminal record is yielded. The
     # empty answer is not a streamed token — /v1/answer's contract is a
     # single `final` (schema parity, review S6) and the chat routes emit the
     # canned text from the final output themselves.
     if not hits:
-        yield {"type": "final", "output": _empty_output(input_data.query, kind, timings, complexity)}
+        yield {"type": "final", "output": _empty_output(search_text, kind, timings, complexity)}
         return
 
     # 3. Prompt building (shared with the buffered executor)
