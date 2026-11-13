@@ -1,7 +1,8 @@
 # ADR-0009: The air-gapped GitLab is a downstream fork; one pinned dev workspace image
 
-- **Status:** proposed (tracker [GH#1118](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118),
-  items C1 to C3). Maintainer decisions:
+- **Status:** accepted by the maintainer on 2026-11-13 (tracker
+  [GH#1118](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118), items C1
+  to C3). Maintainer decisions:
   - D2 in [comment 6442866734](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6442866734);
   - D3 and D4 in [comment 6443165098](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6443165098);
   - Q1, Q2 and Q5, plus coordinator defaults Q3, Q4 and Q6 to Q9, in [GH#1120 comment 6443697962](https://github.com/yonatan895/qdrant-pdf-rag/pull/1120#issuecomment-6443697962);
@@ -22,9 +23,11 @@
     which revise D-1, D-4 and D-5 and replace B1.
 
   This record replaces the AGENTS.md rule "Keep one public GitHub /
-  air-gapped GitLab history". Accepting it changes no product default,
-  identity or baseline. The enforcement and tooling it commits to are
-  follow-up items for GH#1118 (listed at the end) and do not exist yet.
+  air-gapped GitLab history"; AGENTS.md already carries the new wording,
+  "Air-gapped GitLab is a downstream fork". Accepting it changes no product
+  default, identity or baseline. The enforcement and tooling it commits to
+  are follow-up items for GH#1118 (listed at the end); the section after the
+  Decision says which of them exist today.
 - **Context:**
   - Releases reach the gap as signed bundles, and practically nothing leaves
     it. A single shared history cannot exist, because commits made in the gap
@@ -53,6 +56,29 @@
   - A separate signed **dev kit** carries one pinned dev workspace image. The
     bastion, the dev pod and the runner jobs run it, each under its own
     identity. The kit is a prerequisite of the fresh install.
+
+## Enforced today and still promised
+
+Checked against this tree when the record was accepted. "In code" means the
+mechanism is present and tested here; it does not mean a site has run it.
+"Site record" items cannot be verified from this tree.
+
+| Item | What exists today | Verified by |
+|---|---|---|
+| F1 | Unverified-checkout refusal: `check_checkout_sha` in `scripts/airgap/common.sh` refuses, outside dry-run, a checkout that is not a verified signed release. **Enforced.** | The function and its launch-path callers are in the file. |
+| F2 | Origin-bound anchors: `scripts/airgap/bootstrap.sh` reads exactly one `origin:` line and verifies with `SNEAKERNET_TRUSTED_PUB` for upstream or `SNEAKERNET_GAP_TRUSTED_PUB` for gap. **In code.** | The anchor and origin handling is in the file. |
+| F3 | `gap/` and `.gitlab/` absent upstream: `tests/test_hygiene.py` fails on GitHub Actions when either path exists. **Enforced by test.** | The test exists. |
+| F4 | CODEOWNERS generator: `scripts/gap_codeowners.py`. **In code.** The GitLab-side protection settings are site records, not verifiable here. | The script exists. |
+| F5 | Dev kit: the pack, install and `agent_doctor` path. **Done.** | `scripts/devkit/pack.sh` and `scripts/devkit/install.sh` exist. |
+| F7 | Import procedure: `scripts/gap/import_release.sh`, exercised on throwaway repositories. **In code.** | The script and `tests/test_gap_import_release.py` exist. |
+| F10 | Extension surface: `scripts/extension_surface.py` derives the list; a snapshot and test pin it. **In code.** | The script, `tests/fixtures/extension-surface.json` and `tests/test_extension_surface.py` exist. |
+| F8 | Owner-document updates. **Partly:** `docs/deploy.md`, `docs/task-runner.md`, `docs/live-stack.md`, `docs/licensing.md` and `docs/install_and_ops.md` carry gap content; the remaining Consequences entries are not confirmed updated here. | Those files contain the gap sections. |
+| F9 | Namespace isolation: the manifests in `deploy/workspace/` and `scripts/devkit/isolation_proof.py` exist. **Partly:** the live proof at a site is not recorded here. | The directory and script exist. |
+| F6 | Gap release pipeline: protected-tag build and sign jobs, the unprivileged in-namespace build, the `origin: gap` pack, the key-generation runbook and the release record template. **NOT STARTED.** | No such pipeline or pack exists; `scripts/airgap/pack.sh` writes only `origin: upstream`. |
+
+Until F6 exists, no gap release can be produced, so gap-developed code has no
+route to production; an upstream release is the only route. The maintainer
+raised F6 in priority on 2026-11-13.
 
 ## 1. One-way flow and release trust
 
@@ -186,6 +212,9 @@
     limits on every container (build, helper and services).
 - **CI capacity and agent iteration (2026-10-30).** Gap agents reach the CI
   namespace only through GitLab: they push a branch and read the result.
+  Coding agents run in the dev pod in the CI namespace and also on a separate
+  agents machine outside OpenShift ([agents VM](../agents-vm.md)); the machine
+  is an addition, not a replacement.
   The dev pod has no RBAC there, because creating a pod would let it mount
   any Secret in the namespace.
   - There are four job slots of about 1 CPU each, since pytest runs on one
