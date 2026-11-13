@@ -40,8 +40,7 @@ EXTRA_BODY_OWNED_KEYS = {
 }
 EFFORT_TRANSPORT_KEY = "LLM_EFFORT_TRANSPORT"
 EFFORT_TRANSPORTS = ("top_level", "chat_template", "none")
-ESTIMATOR_MARGIN_KEY = "LLM_ESTIMATOR_MARGIN_RATIO"  # chart estimatorMarginRatio, 0..8, decimal
-MODEL_ARGUMENT_ENV_KEYS = (EXTRA_BODY_KEY, EFFORT_TRANSPORT_KEY, ESTIMATOR_MARGIN_KEY)
+MODEL_ARGUMENT_ENV_KEYS = (EXTRA_BODY_KEY, EFFORT_TRANSPORT_KEY)
 REASONING_ENV_KEYS = (*REASONING_INTEGER_FIELDS, *REASONING_EFFORT_FIELDS, "LLM_REASONING_EFFORTS", "LLM_STREAM",
                       *MODEL_ARGUMENT_ENV_KEYS)
 
@@ -473,11 +472,6 @@ def model_argument_overrides(values: Mapping[str, str]) -> dict[str, object]:
                 f"{EXTRA_BODY_KEY} chat_template_kwargs.reasoning_effort requires {EFFORT_TRANSPORT_KEY}=none")
         if body:
             result["extraBody"] = JsonObject(body)
-    raw = values.get(ESTIMATOR_MARGIN_KEY, "")
-    if raw != "":
-        if not re.fullmatch(r"[0-9](?:\.[0-9]{1,3})?", raw) or float(raw) > 8:
-            raise ValueError(f"{ESTIMATOR_MARGIN_KEY} must be a number from 0 to 8")
-        result["estimatorMarginRatio"] = float(raw) if "." in raw else int(raw)
     return result
 
 

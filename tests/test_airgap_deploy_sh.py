@@ -283,10 +283,10 @@ def test_model_request_arguments_operator_precedence_reaches_rendered_pod(tree, 
     root, _log = tree
     selected = {
         "LLM_EXTRA_BODY": '{"top_k": 20, "stop": ["a b", "c\\"d"], "chat_template_kwargs": {"enable_thinking": false}}',
-        "LLM_EFFORT_TRANSPORT": "chat_template", "LLM_ESTIMATOR_MARGIN_RATIO": "0.5",
+        "LLM_EFFORT_TRANSPORT": "chat_template",
     }
     alternate = {
-        "LLM_EXTRA_BODY": '{"top_k": 1}', "LLM_EFFORT_TRANSPORT": "none", "LLM_ESTIMATOR_MARGIN_RATIO": "2",
+        "LLM_EXTRA_BODY": '{"top_k": 1}', "LLM_EFFORT_TRANSPORT": "none",
     }
     file_values = {
         "INTERNAL_REGISTRY": "reg.internal", "NAMESPACE": "ns",
@@ -302,7 +302,7 @@ def test_model_request_arguments_operator_precedence_reaches_rendered_pod(tree, 
     assert result.returncode == 0, result.stderr
     pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
     assert json.loads(pod["LLM_EXTRA_BODY"]) == json.loads(selected["LLM_EXTRA_BODY"])
-    assert (pod["LLM_EFFORT_TRANSPORT"], pod["LLM_ESTIMATOR_MARGIN_RATIO"]) == ("chat_template", "0.5")
+    assert pod["LLM_EFFORT_TRANSPORT"] == "chat_template"
 
 
 def test_refused_model_request_arguments_stop_the_deploy_before_helm(tree):

@@ -48,7 +48,7 @@ MAPPER_KEYS = [
     "LLM_MAX_MODEL_LEN", "LLM_RESERVED_OUTPUT_TOKENS",
     "LLM_THINKING_RESERVE_TOKENS_SIMPLE", "LLM_THINKING_RESERVE_TOKENS_COMPLEX",
     "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS", "LLM_STREAM",
-    "LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT", "LLM_ESTIMATOR_MARGIN_RATIO",
+    "LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT",
     "REQUEST_DEADLINE_S", "REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S",
     "RERANK_ENABLED", "RERANK_BASE_URL", "RERANK_MODEL", "RERANK_ENDPOINT_ORDER",
     "GATEWAY_API_KEY_SECRET", "GATEWAY_API_KEY_SECRET_KEY", "GATEWAY_CA_CONFIGMAP", "PULL_SECRET",
@@ -651,8 +651,8 @@ _HOSTILE_EXTRA_BODY = {
 }
 
 
-@pytest.mark.parametrize(("transport", "ratio"), [("chat_template", "0.25"), ("none", "0"), ("top_level", "8")])
-def test_model_request_arguments_round_trip_to_the_agent_settings(monkeypatch, mapper_env, transport, ratio):
+@pytest.mark.parametrize("transport", ["chat_template", "none", "top_level"])
+def test_model_request_arguments_round_trip_to_the_agent_settings(monkeypatch, mapper_env, transport):
     """Issue #1193, producer to consumer: the operator's JSON text -> values
     mapper -> chart render -> pod environment -> Settings yields the same
     arguments, exactly, across delimiters and nesting."""
@@ -660,25 +660,22 @@ def test_model_request_arguments_round_trip_to_the_agent_settings(monkeypatch, m
 
     monkeypatch.setenv("LLM_EXTRA_BODY", "  " + json.dumps(_HOSTILE_EXTRA_BODY) + " ")
     monkeypatch.setenv("LLM_EFFORT_TRANSPORT", transport)
-    monkeypatch.setenv("LLM_ESTIMATOR_MARGIN_RATIO", ratio)
     result, output = mapper_env()
     assert result.returncode == 0, result.stderr
     pod = _rendered_agent_env(output)
     settings = Settings(_env_file=None, llm_extra_body=pod["LLM_EXTRA_BODY"],
-                        llm_effort_transport=pod["LLM_EFFORT_TRANSPORT"],
-                        llm_estimator_margin_ratio=pod["LLM_ESTIMATOR_MARGIN_RATIO"])
+                        llm_effort_transport=pod["LLM_EFFORT_TRANSPORT"])
     args = settings.model_request_args()
     assert args.extra_body == _HOSTILE_EXTRA_BODY and args.effort_transport == transport
-    assert settings.llm_estimator_margin_ratio == float(ratio)
 
 
 def test_unset_model_request_arguments_render_no_environment(monkeypatch, mapper_env):
-    for name in ("LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT", "LLM_ESTIMATOR_MARGIN_RATIO"):
+    for name in ("LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT"):
         monkeypatch.setenv(name, "")
     monkeypatch.setenv("LLM_EXTRA_BODY", " {} ")  # an empty object is no arguments
     result, output = mapper_env()
     assert result.returncode == 0, result.stderr
-    assert not {"LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT", "LLM_ESTIMATOR_MARGIN_RATIO"} & set(_rendered_agent_env(output))
+    assert not {"LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT"} & set(_rendered_agent_env(output))
 
 
 _REFUSED_MODEL_ARGUMENTS = [
@@ -723,8 +720,6 @@ def test_refused_model_request_arguments_fail_in_preflight_as_at_startup(monkeyp
 
 
 @pytest.mark.parametrize(("name", "bad"), [
-    ("LLM_ESTIMATOR_MARGIN_RATIO", "8.001"), ("LLM_ESTIMATOR_MARGIN_RATIO", "-1"),
-    ("LLM_ESTIMATOR_MARGIN_RATIO", "unsupported-private-value"), ("LLM_ESTIMATOR_MARGIN_RATIO", "1e1"),
     # Helm reads numbers as 64-bit floats: a larger integer would be changed in transit.
     ("LLM_EXTRA_BODY", '{"seed": 9007199254740993}'),
 ])
@@ -739,20 +734,15 @@ def test_preflight_model_argument_mirror_matches_the_application():
     from scripts.airgap import model_config
 
     from mainframe_rag import model_args
-    from mainframe_rag.config import Settings
 
     assert set(model_config.EXTRA_BODY_PROTECTED_KEYS) == model_args.PROTECTED_BODY_KEYS
     assert model_config.EXTRA_BODY_OWNED_KEYS == model_args.OWNED_BODY_KEYS
     assert model_config.EXTRA_BODY_MAX_CHARS == model_args.EXTRA_BODY_MAX_CHARS
     assert model_config.EFFORT_TRANSPORTS == model_args.EFFORT_TRANSPORTS
-    ratio = Settings.model_fields["llm_estimator_margin_ratio"]
-    assert [(m.ge if hasattr(m, "ge") else m.le) for m in ratio.metadata] == [0.0, 8.0]
     schema = json.loads((CHART / "values.schema.json").read_text())["properties"]["models"]["properties"]["reasoning"]
     refused = set(schema["properties"]["extraBody"]["propertyNames"]["not"]["enum"])
     assert refused == model_args.PROTECTED_BODY_KEYS | set(model_args.OWNED_BODY_KEYS)
     assert tuple(schema["properties"]["effortTransport"]["enum"]) == model_args.EFFORT_TRANSPORTS
-    assert (schema["properties"]["estimatorMarginRatio"]["minimum"],
-            schema["properties"]["estimatorMarginRatio"]["maximum"]) == (0, 8)
 
 
 def test_preflight_effort_mirror_matches_settings():

@@ -288,7 +288,6 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "llm_temperature": 0.2,
     "llm_extra_body": "",
     "llm_effort_transport": "top_level",
-    "llm_estimator_margin_ratio": 1.0,
     "llm_max_model_len": 32768,
     "llm_reserved_output_tokens": 2560,
     "llm_thinking_reserve_tokens_simple": 8192,

@@ -349,7 +349,9 @@ class Settings(BaseSettings):
     # model's native 262144 is not served). With a server-verified prompt
     # count, the answer reserve plus the path's thinking reserve is also sent
     # as max_tokens, so a runaway generation ends as `length` instead of
-    # running to the window (answer_core._output_cap).
+    # running to the window (answer_core._output_cap). An estimator-only count
+    # sends a cap only when the prompt's byte upper bound plus the reserves
+    # fits the window; otherwise it stays uncapped as before.
     # Visible answers reached 2331 tokens in #759, above the old 1536 reserve.
     llm_max_model_len: int = Field(default=32768, ge=512, le=131072)
     llm_reserved_output_tokens: int = Field(default=2560, ge=128, le=16384)
@@ -366,16 +368,6 @@ class Settings(BaseSettings):
     # actually finish.
     llm_thinking_reserve_tokens_complex: int = Field(default=8192, ge=0, le=16384)
     llm_token_safety_margin: int = Field(default=128, ge=0, le=1024)
-    # Estimator-only output cap (#1193). Without a server count the prompt
-    # size is an estimate, and the estimator undercounts technical text
-    # (measured on original synthetic text, two tokenizer families: prose +2%,
-    # JCL +35..41%, tables +47..53%, message lines about +140%). The cap then
-    # leaves this fraction of the estimate free on top of the estimate:
-    # max_tokens = window - estimate - ceil(estimate * ratio), at most the
-    # verified cap and never below the answer reserve (answer_core._output_cap).
-    # 1.0 tolerates a prompt up to twice its estimate; 0 keeps only the
-    # standard margin.
-    llm_estimator_margin_ratio: float = Field(default=1.0, ge=0.0, le=8.0)
     # Complex-path narrative cap above the largest chunk (~1150 tokens, #777).
     llm_max_chunk_tokens_narrative: int = Field(default=1200, ge=50, le=2048)
     llm_tokenize_timeout_s: float = Field(default=5.0, gt=0.0, le=60.0)

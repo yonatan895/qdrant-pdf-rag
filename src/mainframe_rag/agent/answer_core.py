@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import time
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, replace
@@ -226,28 +225,53 @@ def _resolve_reasoning_effort(
     )
 
 
+def _prompt_token_upper_bound(messages: list[ChatMessage]) -> int:
+    """A non-undercounting upper bound on the rendered prompt's tokens (#1193).
+
+    One token is at least one UTF-8 byte: every byte-level token maps to one or
+    more bytes, so counting the UTF-8 bytes of each message's role and content
+    can never be smaller than the text's token count. The fixed overhead covers
+    chat-template special tokens (role markers, separators and the BOS/EOS the
+    count includes). This is the quantity the estimator-only cap is priced
+    against; the estimator itself is not trusted, because review measured an
+    8x undercount on the default request shape: 8 excerpts of 4000
+    space-separated hex characters estimated 4328 tokens against 27459 real,
+    and the old ratio cap sent `max_tokens=10752`, making `real prompt + cap =
+    38211 > 32768` for a request the base answered uncapped (PR #1201 review
+    B1)."""
+    return (
+        sum(
+            len(message.role.encode("utf-8")) + len(message.content.encode("utf-8"))
+            for message in messages
+        )
+        + 8 * len(messages)
+        + 16
+    )
+
+
 def _output_cap(settings: Settings, complexity: str, prepared: PreparedPrompt) -> int | None:
-    """Completion cap (#777, #1193): the answer reserve plus the path's
-    thinking reserve, exactly the terms the prompt budget priced, so a runaway
-    generation ends as `length` (generation_incomplete) instead of running to
-    the served window.
+    """Completion cap (#777, #1193) bounding `real prompt + cap <= window -
+    safety margin`, never an estimate plus a proportional margin.
 
-    Server-verified prompt count: that full cap; prompt + cap <= window -
-    safety margin, and the server cannot reject it.
+    A server-verified count is exact: send the full cap (the answer reserve
+    plus the path's thinking reserve, the terms the prompt budget priced), so a
+    runaway generation ends as `length` (generation_incomplete) instead of
+    running to the served window.
 
-    Estimator-only count (a gateway without `/tokenize`, or a transient
-    downgrade): a cap is still sent, so output length never depends on
-    gateway or server defaults. The estimate can undercount, so the cap
-    leaves `ceil(estimate * LLM_ESTIMATOR_MARGIN_RATIO)` free on top of it:
-    estimate + margin + cap <= window. It is at most the full cap and never
-    below the answer reserve; at that floor the margin is whatever the window
-    leaves, at least the standard safety margin (the prompt passed the same
-    verify limit, so the floor always fits). A prompt that does not fit its
-    limit was already refused as `prompt_budget_exceeded` before this point.
+    An estimator-only count (a gateway without `/tokenize`, or a transient
+    downgrade) cannot establish that bound, so the cap is priced against
+    `_prompt_token_upper_bound(prepared.messages)` instead:
+    `room = window - upper_bound - safety`; if `room` is at least the answer
+    reserve, send `min(full, room)`, otherwise send no cap. This is
+    deliberately not a cap-on-every-generation rule: a long estimator-only
+    prompt runs uncapped, exactly as on the base, so the cap adds no new
+    server refusal (and no new 502 for a request the base answered). A prompt
+    over its limit was already refused as `prompt_budget_exceeded` before this
+    point.
 
-    None only on the no-tokenizer character-packing path, which has no count
-    to place a cap against (offline and tests; serving always has a
-    tokenizer)."""
+    None also on the no-tokenizer character-packing path
+    (`prompt_tokens is None`), which has no count to place a cap against
+    (offline and tests; serving always has a tokenizer)."""
     thinking = (
         settings.llm_thinking_reserve_tokens_complex
         if complexity == "complex"
@@ -258,10 +282,14 @@ def _output_cap(settings: Settings, complexity: str, prepared: PreparedPrompt) -
         return full
     if prepared.prompt_tokens is None:
         return None
-    estimate = prepared.prompt_tokens
-    margin = math.ceil(estimate * settings.llm_estimator_margin_ratio)
-    room = settings.llm_max_model_len - estimate - margin
-    return max(settings.llm_reserved_output_tokens, min(full, room))
+    room = (
+        settings.llm_max_model_len
+        - _prompt_token_upper_bound(prepared.messages)
+        - settings.llm_token_safety_margin
+    )
+    if room < settings.llm_reserved_output_tokens:
+        return None
+    return min(full, room)
 
 
 async def _build_prepared_prompt(

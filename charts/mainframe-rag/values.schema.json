@@ -131,8 +131,7 @@
                 "chat_template_kwargs": { "type": "object" }
               }
             },
-            "effortTransport": { "type": "string", "enum": ["top_level", "chat_template", "none"] },
-            "estimatorMarginRatio": { "type": "number", "minimum": 0, "maximum": 8 }
+            "effortTransport": { "type": "string", "enum": ["top_level", "chat_template", "none"] }
           },
           "allOf": [
             {

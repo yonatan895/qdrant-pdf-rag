@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import inspect
 import json
-import math
 from pathlib import Path
 
 import httpx2
@@ -19,20 +18,25 @@ from mainframe_rag.agent.answer import (
     REASON_MALFORMED_FRAME,
     REASON_MISSING_FINISH,
     HttpxLLMClient,
+    PreparedPrompt,
+    PromptEvidence,
     TruncatedStreamError,
+    build_messages,
 )
 from mainframe_rag.agent.answer_core import (
     AnswerCoreDeps,
     AnswerCoreInput,
     LLMChatError,
     RetrievalError,
+    _output_cap,
+    _prompt_token_upper_bound,
     execute_answer_core,
     execute_answer_core_stream,
     resolve_search_query,
 )
 from mainframe_rag.agent.core_ports import ModelDone, ModelToken, RetrievalResult
 from mainframe_rag.agent.model_adapter import ModelAdapter
-from mainframe_rag.agent.tokenizer import VllmTokenizer, build_tokenizer
+from mainframe_rag.agent.tokenizer import FallbackTokenizer, VllmTokenizer, build_tokenizer
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage, ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
@@ -545,34 +549,113 @@ _CAP_BUDGET = {
 }
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize(("estimate", "ratio", "query", "cap"), [
-    # Small prompt: the full priced cap, as on the verified path.
-    (1000, 1.0, "IEA500I", 5000),
-    (1000, 1.0, _COMPLEX[0], 7000),
-    # 16384 - 6000 - ceil(6000 * 1.0) = 4384: the margin shrinks the cap.
-    (6000, 1.0, "IEA500I", 4384),
-    # 16384 - 6001 - ceil(6001 * 0.25) = 8882 > full cap 5000.
-    (6001, 0.25, "IEA500I", 5000),
-    # ceil(): 16384 - 9001 - ceil(9001 * 0.25 = 2250.25) = 5132 on the complex path (full 7000).
-    (9001, 0.25, _COMPLEX[0], 5132),
-    # The margin would leave less than the answer reserve: the cap is the
-    # answer reserve (the prompt fit its limit, so this always fits).
-    (11000, 1.0, "IEA500I", 2000),
-    # Ratio 0: only the standard margin remains, which the full cap satisfies.
-    (11256, 0.0, "IEA500I", 5000),
+def _prepared_prompt(
+    content: str | list[ChatMessage], *, verified: bool = False, prompt_tokens: int | None = 1
+) -> PreparedPrompt:
+    messages = [ChatMessage(role="user", content=content)] if isinstance(content, str) else content
+    return PreparedPrompt(
+        messages=messages, evidence=PromptEvidence(),
+        budget_verified=verified, prompt_tokens=prompt_tokens,
+    )
+
+
+def test_prompt_token_upper_bound_counts_utf8_bytes_and_template_overhead():
+    """A token is at least one byte: the helper sums role/content UTF-8 bytes
+    and adds fixed chat-template overhead, so it cannot undercount (#1193)."""
+    messages = [
+        ChatMessage(role="system", content="abc"),
+        ChatMessage(role="user", content="four é"),
+    ]
+    # Roles 6 + 4; contents 3 + 7 bytes (é is two); 8 per message and 16 total.
+    assert _prompt_token_upper_bound(messages) == 6 + 4 + 3 + 7 + 8 * 2 + 16
+
+
+@pytest.mark.parametrize(("content_chars", "verified", "prompt_tokens", "cap"), [
+    # Short prompt: upper bound 1028, room 15228 -> the full priced cap.
+    (1000, False, 1000, 5000),
+    # Medium prompt: upper bound 12028, room 4228 -> capped by the byte bound,
+    # still positive and provably inside the window.
+    (12000, False, 6000, 4228),
+    # Upper bound 14528 leaves room 1728, below the 2000 answer reserve: no cap.
+    (14500, False, 9000, None),
+    # A server-verified count is exact and keeps the full cap.
+    (14500, True, 14500, 5000),
+    # No tokenizer count: no cap to price.
+    (1000, False, None, None),
 ])
-@pytest.mark.parametrize("mode", ["post", "stream"])
-async def test_estimator_only_budget_sends_a_margined_output_cap(estimate, ratio, query, cap, mode):
-    """Issue #1193: an estimator-only prompt still carries a cap, so output
-    length never depends on gateway defaults, and estimate + margin + cap
-    stays inside the configured window."""
-    settings = _settings(llm_stream=False, llm_estimator_margin_ratio=ratio, **_CAP_BUDGET)
-    output, bodies = await _core_bodies(settings, _FixedEstimate(estimate), mode, query)
-    assert output.finish_reason == "stop" and not output.budget_verified
-    assert len(bodies) == 1 and bodies[0]["max_tokens"] == cap
-    margin = max(128, math.ceil(estimate * ratio)) if cap > 2000 else 128
-    assert estimate + margin + cap <= 16384
+def test_output_cap_follows_the_byte_upper_bound(content_chars, verified, prompt_tokens, cap):
+    """PR #1201 review B1: an estimator-only cap is priced from a quantity
+    that cannot undercount, or not sent at all."""
+    prepared = _prepared_prompt("x" * content_chars, verified=verified, prompt_tokens=prompt_tokens)
+    settings = _settings(**_CAP_BUDGET)
+    assert _output_cap(settings, "simple", prepared) == cap
+    if cap is not None and not verified:
+        assert (
+            _prompt_token_upper_bound(prepared.messages)
+            + cap + settings.llm_token_safety_margin <= settings.llm_max_model_len
+        )
+
+
+_LONG_PROSE = [ChatMessage(role="user", content="p" * 31000)]
+_LONG_CHAT = [
+    ChatMessage(role="system", content="s" * 2000),
+    *[
+        ChatMessage(role="user" if i % 2 == 0 else "assistant", content="c" * 1000)
+        for i in range(30)
+    ],
+]
+
+
+@pytest.mark.parametrize(("messages", "estimate"), [
+    (_LONG_PROSE, 21846),   # review row 6: 40 prose excerpts
+    (_LONG_CHAT, 21496),    # review row 7: 60 prose turns + 8 excerpts
+], ids=["long-prose", "long-chat"])
+def test_long_estimator_prompt_runs_uncapped_not_at_the_answer_reserve(messages, estimate):
+    """The old ratio rule hit its floor on a long prompt and sent the 2560
+    answer reserve (window - 2 x estimate is negative at these sizes). The
+    byte bound leaves less than that floor, so the new rule sends no cap: the
+    base behavior, not a smaller generation budget."""
+    settings = _settings()  # shipped defaults: window 32768, answer 2560
+    prepared = _prepared_prompt(messages, prompt_tokens=estimate)
+    assert _output_cap(settings, "simple", prepared) is None
+    full = settings.llm_reserved_output_tokens + settings.llm_thinking_reserve_tokens_simple
+    old_room = settings.llm_max_model_len - estimate - estimate  # old ratio 1.0
+    assert max(settings.llm_reserved_output_tokens, min(full, old_room)) == 2560
+
+
+def test_default_spaced_hex_prompt_is_not_a_new_cap_refusal():
+    """PR #1201 review B1 row 1, end to end through the real prompt builder:
+    default Settings and 8 excerpts of 4000 spaced-hex characters through the
+    FallbackTokenizer. The estimator reports about 7.2k here while the prompt
+    is 35.5k bytes (review measured 4328 estimated against 27459 real for the
+    same shape); the old ratio cap sent 10752 at this size, enough for a
+    server's `prompt + max_tokens` check to refuse a request base answered
+    uncapped. The new cap is absent, or bounded by the prompt's bytes, so this
+    shape cannot become a new 502 because of the cap."""
+    settings = _settings()  # window 32768, answer 2560, thinking 8192
+    text = "ab12 " * 800  # 4000 characters of spaced hex
+    hits = [
+        agent_hit(
+            text=text, chunk_id=f"hex-{i}",
+            cite=f"SA22-0000-0{i} Synthetic Reference, Chapter 2 > IEA500I, p. 1-{i}",
+        )
+        for i in range(8)
+    ]
+    prepared = build_messages(
+        "IEA500I", hits,
+        max_context_chars=settings.prompt_max_context_chars,
+        max_chunk_chars=settings.prompt_max_chunk_chars,
+        tokenizer=FallbackTokenizer(), settings=settings, complexity="simple",
+    )
+    assert prepared.prompt_tokens is not None and not prepared.budget_verified
+    cap = _output_cap(settings, "simple", prepared)
+    prompt_bytes = sum(
+        len(message.role.encode("utf-8")) + len(message.content.encode("utf-8"))
+        for message in prepared.messages
+    )
+    assert prompt_bytes >= 8 * 4000  # the request shape review measured
+    assert cap is None or prompt_bytes + cap + settings.llm_token_safety_margin <= settings.llm_max_model_len
+    assert cap is None  # no cap, so the cap adds no refusal to a base-answered request
 
 
 @pytest.mark.anyio

@@ -93,7 +93,6 @@ MAXIMAL_INPUT = {
     "LLM_REASONING_EFFORT_SIMPLE": "medium", "LLM_REASONING_EFFORT_COMPLEX": "medium",
     "LLM_REASONING_EFFORTS": "low,medium", "LLM_STREAM": "true",
     "LLM_EXTRA_BODY": '{"chat_template_kwargs": {"enable_thinking": true}}', "LLM_EFFORT_TRANSPORT": "chat_template",
-    "LLM_ESTIMATOR_MARGIN_RATIO": "0.5",
     "REQUEST_DEADLINE_S": "200", "REQUEST_MAX_CONCURRENT": "4", "REQUEST_QUEUE_MAX": "4",
     "REQUEST_QUEUE_WAIT_S": "30", "RERANK_ENABLED": "true", "RERANK_BASE_URL": "http://rerank.example.invalid/v1",
     "GATEWAY_API_KEY_SECRET": "gw", "GATEWAY_API_KEY_SECRET_KEY": "key", "GATEWAY_CA_CONFIGMAP": "ca",

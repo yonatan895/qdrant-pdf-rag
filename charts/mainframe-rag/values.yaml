@@ -129,9 +129,6 @@ models:
     #   chat_template_kwargs:
     #     enable_thinking: true
     # effortTransport: top_level
-    # Estimator-only output cap margin as a fraction of the estimated prompt
-    # (0..8, application default 1.0); used only without a /tokenize count.
-    # estimatorMarginRatio: 1.0
   rerank:
     enabled: false
     baseUrl: ""

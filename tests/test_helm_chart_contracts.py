@@ -502,8 +502,6 @@ def test_chart_preserves_positive_operator_dimension_and_worker_range():
     ("stream", False, "LLM_STREAM"),
     ("effortTransport", "chat_template", "LLM_EFFORT_TRANSPORT"),
     ("effortTransport", "none", "LLM_EFFORT_TRANSPORT"),
-    ("estimatorMarginRatio", 0.25, "LLM_ESTIMATOR_MARGIN_RATIO"),
-    ("estimatorMarginRatio", 0, "LLM_ESTIMATOR_MARGIN_RATIO"),
 ])
 def test_direct_chart_optional_budget_limits_reach_pod(field, value, environment):
     rendered = run_new_template({"models": {"reasoning": {field: value}}})
@@ -514,22 +512,20 @@ def test_direct_chart_optional_budget_limits_reach_pod(field, value, environment
 
 def test_model_request_arguments_reach_the_pod_as_settings_accept_them():
     """Issue #1193: the chart's extraBody object arrives as the JSON text the
-    application validates, nested object intact; unset renders none of the
-    three variables, so the default pod sends the earlier request."""
+    application validates, nested object intact; unset renders neither
+    variable, so the default pod sends the earlier request."""
     from mainframe_rag.config import Settings
 
     default = env_map(run_new_template({})["Deployment", "rag-agent"])
-    assert not {"LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT", "LLM_ESTIMATOR_MARGIN_RATIO"} & set(default)
+    assert not {"LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT"} & set(default)
     extra = {"top_k": 20, "stop": ["</done>", "a\"b"], "chat_template_kwargs": {
         "enable_thinking": False, "nested": {"budget": 256, "ratio": 0.5, "none": None}}}
     pod = env_map(run_new_template({"models": {"reasoning": {
-        "extraBody": extra, "effortTransport": "chat_template", "estimatorMarginRatio": 0.5}}})["Deployment", "rag-agent"])
+        "extraBody": extra, "effortTransport": "chat_template"}}})["Deployment", "rag-agent"])
     settings = Settings(_env_file=None, llm_extra_body=pod["LLM_EXTRA_BODY"]["value"],
-                        llm_effort_transport=pod["LLM_EFFORT_TRANSPORT"]["value"],
-                        llm_estimator_margin_ratio=pod["LLM_ESTIMATOR_MARGIN_RATIO"]["value"])
+                        llm_effort_transport=pod["LLM_EFFORT_TRANSPORT"]["value"])
     args = settings.model_request_args()
     assert args.extra_body == extra and args.effort_transport == "chat_template"
-    assert settings.llm_estimator_margin_ratio == 0.5
     # A fixed template effort is accepted only when no effort is sent.
     fixed = {"extraBody": {"chat_template_kwargs": {"reasoning_effort": "minimal"}}, "effortTransport": "none"}
     pod = env_map(run_new_template({"models": {"reasoning": fixed}})["Deployment", "rag-agent"])
@@ -567,8 +563,6 @@ def test_direct_chart_refuses_model_request_arguments_the_application_refuses(ex
 
 
 @pytest.mark.parametrize("path,bad", [
-    ("models.reasoning.estimatorMarginRatio", -0.1), ("models.reasoning.estimatorMarginRatio", 8.5),
-    ("models.reasoning.estimatorMarginRatio", "1.0"),
     ("models.reasoning.maxModelLen", 511), ("models.reasoning.maxModelLen", "16384"),
     ("models.reasoning.reservedOutputTokens", 127),
     ("models.reasoning.thinkingReserveTokensComplex", 16385),
