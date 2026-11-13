@@ -26,6 +26,11 @@ log = logging.getLogger(__name__)
 
 from mainframe_rag.agent.chat_turn import prepare_chat_turn
 from mainframe_rag.agent.tokenizer import estimate_tokens
+from mainframe_rag.agent.user_message import (
+    MESSAGE_WINDOW_SHARE,
+    derive_retrieval_query,
+    fit_message,
+)
 from mainframe_rag.config import Settings, bearer_auth_headers
 from mainframe_rag.ingest.chunk import (
     UNIT_ATOMIC,
@@ -1311,8 +1316,12 @@ def _build_prompt(
     history_turns = _split_history_turns(history) if history is not None else []
     antecedent: list[ChatMessage] = history_turns[-1] if history_turns else []
     older_turns: list[list[ChatMessage]] = history_turns[:-1]
+    # The message is prompt content; identifier anchoring, the resolved-code
+    # note and complexity read what retrieval searched (issue #1192). The two
+    # are the same string for every message within `query_max_chars`.
+    search_text = derive_retrieval_query(query, settings) if settings is not None else query
     if complexity is None:
-        complexity = classify_query_complexity(query)
+        complexity = classify_query_complexity(search_text)
 
     parts: list[str] = []
     context_entries: list[str] = []
@@ -1331,20 +1340,50 @@ def _build_prompt(
         if len(splunk_text) > splunk_context_max_chars:
             splunk_text = splunk_text[:splunk_context_max_chars].rstrip() + _TRUNCATED_SUFFIX
         context_entries.append(f"{SPLUNK_HEADER}\n" + splunk_text)
-    question_text = f"{QUESTION_LABEL} " + query
-    if resolved_note := resolved_code_note(query):
+    system_content = (
+        SYSTEM_PROMPT + SYSTEM_PROMPT_COMPLEX_EXTENSION
+        if complexity == "complex"
+        else SYSTEM_PROMPT
+    )
+    resolved_note = resolved_code_note(search_text)
+    message_text = query
+    # Tokens the estimator under-prices the fitted message by (0 for a
+    # message within `query_max_chars`, which is never fitted or re-counted).
+    message_drift = 0
+    if settings is not None and len(query) > settings.query_max_chars:
+        # A long message shares the window with the evidence instead of being
+        # refused (issue #1192): it gets at most MESSAGE_WINDOW_SHARE of what
+        # the fixed content and the previous turn leave, and keeps head and
+        # tail around a visible marker beyond that.
+        thinking = (
+            settings.llm_thinking_reserve_tokens_complex
+            if complexity == "complex"
+            else settings.llm_thinking_reserve_tokens_simple
+        )
+        free = (
+            settings.llm_max_model_len
+            - settings.llm_reserved_output_tokens
+            - thinking
+            - settings.llm_token_safety_margin
+            - estimate_tokens(
+                "\n".join([system_content, *context_entries, QUESTION_LABEL, resolved_note])
+            )
+            - sum(estimate_tokens(m.content) for m in antecedent)
+        )
+        message_text, message_tokens = fit_message(
+            query,
+            int(free * MESSAGE_WINDOW_SHARE),
+            tokenizer.count_tokens if tokenizer is not None else None,
+        )
+        message_drift = max(0, message_tokens - estimate_tokens(message_text))
+    question_text = f"{QUESTION_LABEL} " + message_text
+    if resolved_note:
         question_text += "\n" + resolved_note
     # Pre-excerpt user parts, exactly as before: the estimator below counts
     # this shape, so it stays character-identical.
     parts = [*context_entries, question_text]
     if is_chat and not context_entries:
         parts.insert(0, "")
-
-    system_content = (
-        SYSTEM_PROMPT + SYSTEM_PROMPT_COMPLEX_EXTENSION
-        if complexity == "complex"
-        else SYSTEM_PROMPT
-    )
 
     # The tail sits outside every excerpt frame, in the instruction region:
     # its worked example is fixed synthetic text showing the cite format,
@@ -1357,7 +1396,7 @@ def _build_prompt(
     )
 
     packed: list[PackedExcerpt] = []
-    requested = _requested_identifiers(query)
+    requested = _requested_identifiers(search_text)
 
     def candidate() -> list[ChatMessage]:
         return [
@@ -1393,7 +1432,7 @@ def _build_prompt(
         # trailing citation example).
         fixed_tokens = estimate_tokens(
             system_content + "\n" + "\n".join(parts) + "\n" + tail_part
-        ) + sum(estimate_tokens(m.content) for m in antecedent)
+        ) + sum(estimate_tokens(m.content) for m in antecedent) + message_drift
         budget_tokens = max(100, model_len - reserved - thinking_reserve - margin - fixed_tokens)
 
         packed = _plan_packed_excerpts(
@@ -2319,7 +2358,11 @@ async def condense_query(
     Bypasses LLM rewrite if the latest turn already contains explicit message,
     abend, or member identifiers."""
     turn = prepare_chat_turn(messages, settings)
-    latest_text = turn.query
+    # A long pasted message is condensed and searched as its derived
+    # retrieval query, never whole (issue #1192); unchanged within the bound.
+    latest_text = (
+        derive_retrieval_query(turn.query, settings) if settings is not None else turn.query
+    )
     from mainframe_rag.retrieve.filters import parse_query
 
     # Heuristic bypass: If message contains explicit codes (e.g. IEE400I, S0C4, DFS058I), search directly

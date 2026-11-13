@@ -1321,3 +1321,206 @@ async def test_core_no_hits_remains_deterministic_not_budget_error():
     out = await execute_answer_core(AnswerCoreInput(query="obscure thing", hits=[]), deps)
     assert out.verification_state == "insufficient_evidence"
     assert (llm.chat_calls, llm.stream_calls) == (0, 0)
+
+
+# --- Long pasted input (issue #1192) -------------------------------------
+# Original synthetic text only: an invented console listing around two
+# sentences of the user's own prose. `ZQX` message ids, `ZQXPRM07` and the
+# storage lines are made up for these tests.
+
+_PASTE_HEAD = "My batch job stops right after the allocation step and I cannot see why."
+_PASTE_TAIL = "What does the first message mean and how do I get the step to run again?"
+
+
+def _synthetic_paste(lines: int = 60) -> str:
+    dump = [f"{0x1000 + 16 * i:08X}  {i:04X}C1D2 E3F4{i:04X} 00000000 {i * 7:08X}  *..synthetic..*"
+            for i in range(lines)]
+    return "\n".join([
+        _PASTE_HEAD,
+        "",
+        "ZQX104E ALLOCATION FAILED FOR STEP ZSTEP1, RC=12",
+        "ZQX377I MEMBER ZQXPRM07 WAS READ; SYSTEM COMPLETION CODE 0C4",
+        "\tSTORAGE AT FAILURE  <<key=8>>  [ptr -> 0x1000]",
+        *dump,
+        "ZQX104E ALLOCATION FAILED FOR STEP ZSTEP1, RC=12",
+        "",
+        _PASTE_TAIL,
+    ])
+
+
+def _user_prompt(prepared) -> str:
+    return prepared.messages[-1].content
+
+
+@pytest.mark.parametrize("extra", [0, 1])
+def test_message_at_the_limit_keeps_retrieval_query_and_prompt_bytes(extra):
+    """The #1192 invariant: a message at or under `query_max_chars` is its own
+    retrieval query and its prompt is the one built with the long-message path
+    out of reach (limit at its maximum), with no extra tokenizer call. One
+    character more is the first message that takes the new path."""
+    from mainframe_rag.agent.answer import build_chat_messages, build_messages
+    from mainframe_rag.agent.tokenizer import FallbackTokenizer
+    from mainframe_rag.agent.user_message import derive_retrieval_query
+
+    class Counting(FallbackTokenizer):
+        text_counts = 0
+
+        def count_tokens(self, text):
+            self.text_counts += 1
+            return super().count_tokens(text)
+
+    settings = _settings()
+    legacy = _settings(query_max_chars=20000)
+    message = _synthetic_paste()[: settings.query_max_chars + extra]
+    assert len(message) == settings.query_max_chars + extra
+    derived = derive_retrieval_query(message, settings)
+    tokenizer = Counting()
+    built = build_messages(message, [_hit()], tokenizer=tokenizer, settings=settings)
+    reference = build_messages(message, [_hit()], tokenizer=FallbackTokenizer(), settings=legacy)
+    history = [ChatMessage(role="user", content="An earlier question"),
+               ChatMessage(role="assistant", content="An earlier answer"),
+               ChatMessage(role="user", content=message)]
+    chat = build_chat_messages(history, [_hit()], tokenizer=tokenizer, settings=settings)
+    chat_reference = build_chat_messages(history, [_hit()], tokenizer=FallbackTokenizer(),
+                                         settings=legacy)
+    if extra:
+        assert derived != message and len(derived) <= settings.query_max_chars
+        assert tokenizer.text_counts > 0
+        return
+    assert derived == message
+    assert built.messages == reference.messages
+    assert chat.messages == chat_reference.messages
+    assert f"Question: {message}\n" in _user_prompt(built) + "\n"
+    assert "omitted to fit" not in _user_prompt(built)
+    assert tokenizer.text_counts == 0
+
+
+def test_derived_retrieval_query_is_prose_plus_identifiers_and_bounded():
+    from mainframe_rag.agent.user_message import derive_retrieval_query
+    from mainframe_rag.retrieve.filters import parse_query
+
+    settings = _settings()
+    message = _synthetic_paste(400)
+    assert len(message) > 10 * settings.query_max_chars
+    query = derive_retrieval_query(message, settings)
+    assert query == derive_retrieval_query(message, settings)  # deterministic
+    assert len(query) <= settings.query_max_chars
+    assert query.startswith(f"{_PASTE_HEAD} {_PASTE_TAIL}")
+    parsed = parse_query(query)
+    assert parsed.message_ids == ["ZQX104E", "ZQX377I"]
+    assert "ZQXPRM07" in parsed.members and parsed.system_codes == ["0C4"]
+    assert "C1D2" not in query and "synthetic" not in query  # no dump body
+    # Hex words are message-id shaped by accident: a dump line adds no ids.
+    hexdump = "\n".join(f"FFFF{i:03d}A EEEE{i:03d}B 0000{i:04X}" for i in range(400))
+    assert derive_retrieval_query(f"{_PASTE_HEAD}\n{hexdump}", settings) == _PASTE_HEAD
+    # Prose-free pastes still search something bounded: identifiers alone, or
+    # the head of the text when there is neither prose nor an identifier.
+    only_dump = "\n".join(message.splitlines()[2:-2])
+    assert derive_retrieval_query(only_dump, settings).split() == [
+        "ZQX104E", "ZQX377I", "abend", "0C4", "ZQXPRM07"]
+    blob = "7f3a " * 1000
+    head = derive_retrieval_query(blob, settings)
+    assert 0 < len(head) <= settings.query_max_chars and blob.startswith(head)
+
+
+def test_derived_retrieval_query_respects_the_embed_input_bound():
+    """Issue #374 keeps holding: prefix + derived query fits the bound, also
+    after acronym expansion. A message within `query_max_chars` is untouched,
+    so its existing over-bound refusal stays with the request guard."""
+    from mainframe_rag.agent.user_message import derive_retrieval_query
+    from mainframe_rag.retrieve.rewrite import expand_query
+
+    prefix = "Instruct: retrieve the passage\nQuery: "
+    settings = _settings(embed_max_input_chars=300, dense_query_prefix=prefix,
+                         acronym_expansion_enabled=True)
+    for message in (_synthetic_paste(), "Why does the IPL of the LPAR stop? " * 80):
+        assert len(message) > settings.query_max_chars
+        query = derive_retrieval_query(message, settings)
+        assert query and len(prefix) + len(expand_query(query)) <= 300
+    for short in ("What does ZQX104E mean?", "Why does the IPL of the LPAR stop? " * 40):
+        assert derive_retrieval_query(short, settings) is short
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("chat", [False, True])
+async def test_core_answers_a_long_paste_from_a_derived_query(stream, chat):
+    """A long message is answered: retrieval and complexity see the derived
+    query, the model sees the user's whole message, byte for byte."""
+    queries: list[str] = []
+    classified: list[str] = []
+    message = _synthetic_paste()
+
+    def retrieve(_qdrant, _embedder, _collection, query, **_kwargs):
+        queries.append(query)
+        return [_hit()], "identifier", {}
+
+    def classify(query):
+        classified.append(query)
+        return "simple"
+
+    llm = CoreFakeLLM()
+    settings = _settings()
+    assert len(message) > settings.query_max_chars
+    deps = _deps(settings, llm, retrieve)
+    deps.classify_query_complexity_fn = classify
+    source = AnswerCoreInput(
+        query=message,
+        messages=[ChatMessage(role="user", content=message)] if chat else None,
+        is_chat=chat,
+    )
+    assert await resolve_search_query(source, deps) == queries_expected(message, settings)
+    if stream:
+        events = [item async for item in execute_answer_core_stream(source, deps)]
+        assert events[-1]["type"] == "final"
+    else:
+        assert (await execute_answer_core(source, deps)).finish_reason == "stop"
+    assert queries == classified == [queries_expected(message, settings)]
+    assert len(queries[0]) <= settings.query_max_chars
+    prompt = llm.calls[0]["messages"][-1].content
+    assert f"Question: {message}\n" in prompt and "omitted to fit" not in prompt
+
+
+def queries_expected(message: str, settings: Settings) -> str:
+    from mainframe_rag.agent.user_message import derive_retrieval_query
+
+    return derive_retrieval_query(message, settings)
+
+
+@pytest.mark.parametrize("remote_factor", [1, 3])
+def test_over_budget_message_keeps_head_and_tail_with_a_marker_and_evidence(remote_factor):
+    """A message over its share of the window is never refused and never cut
+    silently: head and tail stay around one marker that states the omitted
+    count, and the excerpts keep their place. A served tokenizer that prices
+    the paste above the estimator still ends inside the window."""
+    import re
+
+    from mainframe_rag.agent.answer import build_messages
+    from mainframe_rag.agent.tokenizer import FallbackTokenizer
+
+    class Served(FallbackTokenizer):
+        def count_tokens(self, text):
+            return remote_factor * super().count_tokens(text)
+
+        def count_messages(self, messages, *, reasoning_effort=None):
+            return remote_factor * super().count_messages(messages, reasoning_effort=reasoning_effort)
+
+    settings = _settings(llm_max_model_len=8192, llm_reserved_output_tokens=512,
+                         llm_thinking_reserve_tokens_simple=512,
+                         llm_thinking_reserve_tokens_complex=512)
+    message = _synthetic_paste(3000)
+    tokenizer = Served()
+    prepared = build_messages(message, [_hit()], tokenizer=tokenizer, settings=settings)
+    prompt = _user_prompt(prepared)
+    question = prompt[prompt.index("Question: ") + len("Question: "):]
+    marker = re.search(r"\n\[\.\.\. (\d+) characters of the pasted message omitted to fit the "
+                       r"model window \.\.\.\]\n", question)
+    assert marker and question.count("omitted to fit") == 1
+    head, rest = question[: marker.start()], question[marker.end():]
+    assert message.startswith(head) and head.startswith(_PASTE_HEAD)
+    tail = next(rest[:n] for n in range(len(rest), 0, -1) if message.endswith(rest[:n]))
+    assert tail.endswith(_PASTE_TAIL)
+    assert len(head.rstrip()) + int(marker.group(1)) + len(tail.lstrip()) == len(message)
+    assert prepared.evidence.supplied_count == 1 and "IEA500I" in prompt
+    limit = 8192 - 512 - 512 - settings.llm_token_safety_margin
+    assert tokenizer.count_messages(prepared.messages) <= limit

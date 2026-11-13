@@ -161,6 +161,43 @@ suffix), so `ieasysxx` and `IEASYSXX` both filter on `IEASYSxx` (see §10).
 lone member or completion code flips it too), else `nl`. The kind drives RRF
 weights and the rerank bypass — but never the filter shape.
 
+<a id="derived-retrieval-query"></a>
+## 3c. Retrieval query derived from a long message (#1192)
+
+`/v1/search` searches the query it is given and refuses one over
+`query_max_chars`. The answer and chat paths accept long pasted input, so
+there the retrieval query is derived from the user's message by
+`agent/user_message.derive_retrieval_query`. It is deterministic and calls no
+model.
+
+- **Within `query_max_chars`**: the message is the retrieval query,
+  unchanged. Every stage in this file sees what it saw before, and the
+  embed-input bound still refuses a message whose dense text exceeds it.
+- **Over `query_max_chars`**, the query is built from two parts:
+  1. *Prose lines*: lines with at least 3 whitespace-separated tokens, at
+     least 70% of them plain words (letters, with inner apostrophes or
+     hyphens, edge punctuation ignored), and not mostly capitals (more
+     lowercase than uppercase letters; scripts without case pass). They are
+     joined in order with whitespace collapsed, and the head is kept when
+     they exceed the room.
+  2. *Identifiers* the prose does not already carry, taken from the rest of
+     the message with the shared patterns: message ids, then system codes
+     (written back as `abend 0C4`, `U4038`, `wait state 064` so `parse_query`
+     reads them), then members (the case-sensitive ingest pattern), then
+     document numbers; first occurrence first, at most 12 in total. Lines
+     where half or more of the tokens are hex words of 4+ characters are
+     skipped: dump words are identifier-shaped by accident.
+  A message with neither falls back to its own head, whitespace collapsed,
+  cut at a word boundary.
+- The result never exceeds `query_max_chars`, or `embed_max_input_chars`
+  minus the dense query prefix when that is lower, also after acronym
+  expansion (§7) when that is enabled, so the embed-input bound (#374) holds for the dense text
+  and the paste never reaches BM25 whole.
+- The derived query then takes the ordinary path: `parse_query`, filters,
+  query kind, splitting and rerank dispatch behave as for a typed query with
+  the same text. Console output written in capitals contributes identifiers,
+  not prose; that is intended (the message entry is found by its id).
+
 <a id="multi-path"></a>
 ## 3b. Multi-path splitting
 

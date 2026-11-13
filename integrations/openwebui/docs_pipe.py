@@ -65,7 +65,11 @@ TRUNCATED = ("The answer stream ended before it completed. "
              "Treat any text above as incomplete and retry.")
 NO_TEXT_TURN = "Ask a question in plain text; attachments and images are not supported."
 TRIMMED = "Earlier messages in this chat were not sent"
-DEFAULT_MAX_BODY_CHARS = 32768  # the agent's Settings.chat_max_body_chars default
+DEFAULT_MAX_BODY_CHARS = 131072  # the agent's Settings.chat_max_body_chars default
+# The last message alone exceeds the request-size guard: the one length
+# refusal (a long paste under it is answered). States the limit, never text.
+TOO_LONG = ("This message is longer than the documentation service accepts "
+            "({limit} characters). Shorten it and retry.")
 NO_EXCERPT = "Excerpt text is not available in this response."
 TASK_REPLY = "Docs question"
 
@@ -474,7 +478,7 @@ class Pipe:
             description="Read timeout for one answer, seconds (connect is bounded at 10 s).",
         )
         MAX_BODY_CHARS: int = Field(
-            default=DEFAULT_MAX_BODY_CHARS, ge=1000, le=100000,
+            default=DEFAULT_MAX_BODY_CHARS, ge=1000, le=1048576,
             description="Request body cap in characters. Must equal the deployed agent's "
                         "chat_max_body_chars; older turns are dropped to fit it.",
         )
@@ -507,7 +511,7 @@ class Pipe:
             return NO_TEXT_TURN
         request, trimmed = fit_request(request, self.valves.MAX_BODY_CHARS)
         if request is None:
-            return ERROR_MESSAGES["invalid_request"]  # the question alone exceeds the cap
+            return TOO_LONG.format(limit=self.valves.MAX_BODY_CHARS)
         answer = self._answer(request, __event_emitter__, trimmed)
         if body.get("stream") is True:
             return _chunks(answer)
