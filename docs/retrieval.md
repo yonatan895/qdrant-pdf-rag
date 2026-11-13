@@ -177,9 +177,13 @@ model.
   1. *Prose lines*: lines with at least 3 whitespace-separated tokens, at
      least 70% of them plain words (letters, with inner apostrophes or
      hyphens, edge punctuation ignored), and not mostly capitals (more
-     lowercase than uppercase letters; scripts without case pass). They are
-     joined in order with whitespace collapsed, and the head is kept when
-     they exceed the room.
+     lowercase than uppercase letters; scripts without case pass), each
+     with whitespace collapsed. When they exceed the room, whole lines are
+     chosen by priority and then position: lines that contain `?`, then the
+     first and the last prose line, then the rest from the top until one
+     does not fit. Pasted log lines that read as prose therefore cannot push
+     the user's question out. The chosen lines keep their original order; a
+     first choice longer than the room is cut at a word.
   2. *Identifiers* the prose does not already carry, taken from the rest of
      the message with the shared patterns: message ids, then system codes
      (written back as `abend 0C4`, `U4038`, `wait state 064` so `parse_query`

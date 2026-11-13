@@ -198,6 +198,9 @@ class AnswerCoreOutput:
     # The effort this answer was generated at (issue #780 answer records);
     # None on the empty-hits path, where no generation ran.
     reasoning_effort: str | None = None
+    # Characters of the user's message left out of the prompt to fit the
+    # window (issue #1192); 0 when it was sent whole and on no-hits paths.
+    message_omitted_chars: int = 0
 
 
 class CoreToken(TypedDict):
@@ -389,6 +392,7 @@ def _finalize_answer(
         budget_verified=prepared.budget_verified,
         supplied=prepared.supplied,
         reasoning_effort=reasoning_effort,
+        message_omitted_chars=prepared.message_omitted_chars,
     )
 
 

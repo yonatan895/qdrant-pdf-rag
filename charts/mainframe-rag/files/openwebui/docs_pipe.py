@@ -65,6 +65,9 @@ TRUNCATED = ("The answer stream ended before it completed. "
              "Treat any text above as incomplete and retry.")
 NO_TEXT_TURN = "Ask a question in plain text; attachments and images are not supported."
 TRIMMED = "Earlier messages in this chat were not sent"
+# The agent reports `message_omitted_chars` > 0 when the question was too
+# long for the model window and its middle was left out of the prompt.
+SHORTENED = "Your message was too long for the model; its middle part was not read"
 DEFAULT_MAX_BODY_CHARS = 131072  # the agent's Settings.chat_max_body_chars default
 # The last message alone exceeds the request-size guard: the one length
 # refusal (a long paste under it is answered). States the limit, never text.
@@ -563,7 +566,10 @@ class Pipe:
                 yield text
             for source in _source_events(final):
                 await event(source)
-            await status(_status_text(final) + (f" · {TRIMMED}" if trimmed else ""), True)
+            omitted = final.get("message_omitted_chars")
+            shortened = type(omitted) is int and omitted > 0
+            await status(_status_text(final) + (f" · {SHORTENED}" if shortened else "")
+                         + (f" · {TRIMMED}" if trimmed else ""), True)
         except _Failure as failure:
             text = shown.close() + shown.newlines()
             yield text + ("\n\n" if shown.emitted else "") + failure.text

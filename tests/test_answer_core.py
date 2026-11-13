@@ -1521,6 +1521,117 @@ def test_over_budget_message_keeps_head_and_tail_with_a_marker_and_evidence(remo
     tail = next(rest[:n] for n in range(len(rest), 0, -1) if message.endswith(rest[:n]))
     assert tail.endswith(_PASTE_TAIL)
     assert len(head.rstrip()) + int(marker.group(1)) + len(tail.lstrip()) == len(message)
+    assert prepared.message_omitted_chars == int(marker.group(1))
     assert prepared.evidence.supplied_count == 1 and "IEA500I" in prompt
     limit = 8192 - 512 - 512 - settings.llm_token_safety_margin
     assert tokenizer.count_messages(prepared.messages) <= limit
+
+
+def _hex_paste(chars: int) -> str:
+    """A one-line question followed by a generated hex dump (the #1198 review
+    input shape): 8-digit words the estimator prices as one token each."""
+    import random
+
+    rng = random.Random(1192)
+    words = (f"{rng.getrandbits(32):08x}" for _ in range(chars // 9 + 1))
+    lines, row = [], []
+    for word in words:
+        row.append(word)
+        if len(row) == 8:
+            lines.append(" ".join(row))
+            row = []
+    return ("Why does the transfer stop at this record?\n" + "\n".join(lines))[:chars]
+
+
+@pytest.mark.parametrize("chars", [40_000, 100_000, 131_072])
+@pytest.mark.parametrize("remote", [False, True])
+def test_hex_dump_prompt_fits_the_window_under_a_per_character_count(chars, remote):
+    """PR #1198 B1: the estimator prices an 8-digit hex word as one token, a
+    BPE tokenizer near one per character. Whether or not a served count is
+    available, the prompt stays inside the window when the pasted part is
+    counted at one token per non-blank character, the dump is cut with the
+    marker rather than refused, and the evidence keeps its place."""
+    from mainframe_rag.agent.answer import build_chat_messages, build_messages
+    from mainframe_rag.agent.tokenizer import FallbackTokenizer, estimate_tokens
+
+    def per_character(text: str) -> int:
+        return sum(1 for ch in text if not ch.isspace())
+
+    class Served(FallbackTokenizer):
+        """Stands in for /tokenize: confirmed counts, one token per character."""
+
+        remote_confirmed = True
+
+        def count_tokens(self, text):
+            return per_character(text)
+
+        def count_messages(self, messages, *, reasoning_effort=None):
+            return sum(per_character(m.content) for m in messages)
+
+    settings = _settings()
+    limit = (settings.llm_max_model_len - settings.llm_reserved_output_tokens
+             - settings.llm_thinking_reserve_tokens_simple - settings.llm_token_safety_margin)
+    message = _hex_paste(chars)
+    assert len(message) == chars
+    hits = [_hit().model_copy(update={"chunk_id": f"c{i}"}) for i in range(8)]
+    tokenizer = Served() if remote else FallbackTokenizer()
+    # A guard-size message leaves no room for earlier turns under the guard.
+    earlier = [] if chars == settings.chat_max_body_chars else [
+        ChatMessage(role="user", content="An earlier question"),
+        ChatMessage(role="assistant", content="An earlier answer")]
+    history = [*earlier, ChatMessage(role="user", content=message)]
+    for prepared in (build_messages(message, hits, tokenizer=tokenizer, settings=settings),
+                     build_chat_messages(history, hits, tokenizer=tokenizer, settings=settings)):
+        prompt = _user_prompt(prepared)
+        start = prompt.index("Question: ") + len("Question: ")
+        end = prompt.index("\n\n", prompt.rindex("omitted to fit"))
+        pasted, rest = prompt[start:end], prompt[:start] + prompt[end:]
+        others = "".join(m.content for m in prepared.messages[:-1]) + rest
+        if remote:
+            assert tokenizer.count_messages(prepared.messages) <= limit
+        else:
+            assert per_character(pasted) + estimate_tokens(others) <= limit
+        assert prompt.count("omitted to fit the model window") == 1
+        assert pasted.startswith("Why does the transfer stop at this record?")
+        assert message.endswith(pasted[-200:])
+        assert 0 < prepared.message_omitted_chars < chars
+        assert prepared.evidence.supplied_count == 8
+
+
+def test_conservative_price_bounds_dump_text_and_is_never_below_the_estimator():
+    from mainframe_rag.agent.tokenizer import estimate_tokens
+    from mainframe_rag.agent.user_message import conservative_tokens
+
+    hexdump = _hex_paste(9000)
+    samples = [hexdump, "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0NTY3ODkrLw==" * 40,
+               "x" * 5000, "The step ends early and I do not know why.", "IEF450I ZJOB ZSTEP - ABEND=S0C4",
+               "\u05e9\u05dc\u05d5\u05dd \U0001f600 \u4e2d\u6587", "a\tb\n\n  c"]
+    for text in samples:
+        assert conservative_tokens(text) >= estimate_tokens(text)
+    # Hex and digits: one token per character that is not a blank.
+    assert conservative_tokens(hexdump) >= 0.85 * len(hexdump)
+    assert conservative_tokens("x" * 5000) == 5000
+    assert conservative_tokens("The step ends early") == 2 + 2 + 2 + 3
+    assert conservative_tokens("\U0001f600") == 4
+
+
+def test_derived_query_keeps_the_question_when_pasted_lines_read_as_prose():
+    """PR #1198 review: lowercase log-style lines are prose by the line rule;
+    they must not push the user's question, or the first and last prose
+    lines, out of the derived query."""
+    from mainframe_rag.agent.user_message import derive_retrieval_query
+
+    settings = _settings()
+    opening = "Here is what the scheduler wrote before it gave up."
+    question = "Why does the scheduler give up after the third retry?"
+    closing = "This started after the weekend maintenance window."
+    log = [f"worker {i} finished the copy phase and released the lock again" for i in range(400)]
+    for message in ("\n".join([opening, *log, question, closing]),
+                    "\n".join([question, *log]), "\n".join([*log, question])):
+        query = derive_retrieval_query(message, settings)
+        assert len(query) <= settings.query_max_chars
+        assert question in query
+        assert query == derive_retrieval_query(message, settings)
+    query = derive_retrieval_query("\n".join([opening, *log, question, closing]), settings)
+    assert query.startswith(opening) and query.endswith(closing)
+    assert query.index(opening) < query.index("worker 0 ") < query.index(question)

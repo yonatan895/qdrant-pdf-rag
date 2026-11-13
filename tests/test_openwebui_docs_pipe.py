@@ -73,6 +73,7 @@ def _final_meta(**overrides: Any) -> dict[str, Any]:
             _excerpt(2, CITE_B, EXCERPT_B, "SA22-0001-00"),
         ],
         "evidence_omitted": 0,
+        "message_omitted_chars": 0,
     }
     meta.update(overrides)
     return meta
@@ -1111,10 +1112,10 @@ def test_round_trip_a_long_paste_reaches_the_model_exactly(real_agent, monkeypat
         "ZQX104E TRANSFER ENDED  <<rc=12>>  [a|b]  {\"k\": 'v'}\\path\\x",
         "\tcol1\t\tcol3   three spaces  →  é\r",
         "```", "  indented   listing", "```",
-        *(f"{i:08X}  {i:04X}0000 FFFF{i:04X}  *.synthetic.*" for i in range(600)),
+        *(f"{i:08X}  {i:04X}0000 FFFF{i:04X}  *.synthetic.*" for i in range(150)),
         "last line of the paste",
     ])
-    assert 20000 < len(paste) < CAP
+    assert 6000 < len(paste) < CAP
     content, events = run_pipe(None, transport=transport,
                                messages=[{"role": "user", "content": paste}])
     assert content.startswith("Reissue the command.")
@@ -1122,6 +1123,57 @@ def test_round_trip_a_long_paste_reaches_the_model_exactly(real_agent, monkeypat
     assert [s["query"] for s in searches] == [f"{prose} last line of the paste ZQX104E"]
     (messages,) = seen
     assert f"Question: {paste}\n" in messages[-1].content
+    assert docs_pipe.SHORTENED not in _final_status(events)
+
+
+def test_round_trip_a_paste_over_the_window_share_shows_the_fixed_shortened_note(
+    real_agent, monkeypatch
+):
+    """Issue #1192: when the agent leaves the middle of the message out of
+    the prompt it says so with a count (`message_omitted_chars`), and the
+    Pipe shows one fixed note in the final banner: no count, no text."""
+    from mainframe_rag.agent import app as app_mod
+
+    transport, _searches = real_agent
+    inner, seen = app_mod.llm, []
+
+    class Recording:
+        async def chat_stream(self, messages, reasoning_effort=None, temperature=None):
+            seen.append(messages)
+            async for item in inner.chat_stream(messages, reasoning_effort, temperature):
+                yield item
+
+    monkeypatch.setattr(app_mod, "llm", Recording())
+    first, last = "The copy step stops and this is the whole listing.", "Why does the copy step stop?"
+    paste = "\n".join([first, *(f"{i:08X}  {i:04X}0000 FFFF{i:04X} 0000{i:04X}" for i in range(2500)),
+                       last])
+    assert 60000 < len(paste) < CAP
+    content, events = run_pipe(None, transport=transport,
+                               messages=[{"role": "user", "content": paste}])
+    assert content.startswith("Reissue the command.")
+    final = _final_status(events)
+    assert final == f"Source-matched · 1 citation · {docs_pipe.SHORTENED}"
+    assert docs_pipe.SHORTENED == ("Your message was too long for the model; "
+                                   "its middle part was not read")
+    prompt = seen[0][-1].content
+    assert f"Question: {first}\n" in prompt and f"\n{last}\n" in prompt
+    assert prompt.count("characters of the pasted message omitted to fit the model window") == 1
+
+
+@pytest.mark.parametrize("omitted,trimmed,shown", [
+    (1200, False, True), (1200, True, True), (0, False, False), (None, False, False),
+    (True, False, False), ("1200", False, False),
+])
+def test_shortened_note_follows_only_a_positive_agent_count(omitted, trimmed, shown):
+    meta = _final_meta(message_omitted_chars=omitted)
+    if omitted is None:
+        del meta["message_omitted_chars"]  # an agent older than the field
+    messages = ([*_history(8, 24000), {"role": "user", "content": QUESTION}] if trimmed else None)
+    _content, events = run_pipe(FakeAgent(_frames("Answer.", meta=meta)), messages=messages)
+    status = _final_status(events)
+    assert (docs_pipe.SHORTENED in status) is shown
+    assert status.endswith(TRIM_NOTE) is trimmed
+    assert "1200" not in status
 
 
 def test_round_trip_maps_the_real_strict_schema_refusal(real_agent):

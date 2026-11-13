@@ -22,13 +22,16 @@ Nothing here logs, and no error text carries, any part of the message.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from mainframe_rag.agent.tokenizer import estimate_tokens
 from mainframe_rag.config import Settings
 from mainframe_rag.regexes import DOCNO_RE, MEMBER_RE, MSG_RE, find_system_codes
 from mainframe_rag.retrieve.filters import parse_query
 from mainframe_rag.retrieve.rewrite import expand_query
+
+if TYPE_CHECKING:
+    from mainframe_rag.ports import Tokenizer
 
 # A long message may take at most this fraction of the prompt tokens left
 # after the fixed instructions, caller context and the mandatory previous
@@ -128,42 +131,68 @@ def _cut_at_word(text: str, limit: int) -> str:
     return cut.rstrip()
 
 
+def _select_prose(lines: list[str], room: int) -> str:
+    """Prose lines that fit `room`, by priority and then position: lines that
+    ask something (contain `?`), then the first and the last prose line, then
+    the rest from the top. A line is taken whole or not at all, except the
+    very first choice, which is cut at a word when it alone is too long. The
+    chosen lines are joined in their original order."""
+    last = len(lines) - 1
+    order = sorted(
+        range(len(lines)),
+        key=lambda i: (0 if "?" in lines[i] else 1 if i in (0, last) else 2, i),
+    )
+    chosen: set[int] = set()
+    used = 0
+    for i in order:
+        cost = len(lines[i]) + (1 if chosen else 0)
+        if used + cost <= room:
+            chosen.add(i)
+            used += cost
+        elif not chosen:
+            return _cut_at_word(lines[i], max(0, room))
+        elif "?" not in lines[i] and i not in (0, last):
+            break  # the remainder is a contiguous head; stop at the first miss
+    return " ".join(lines[i] for i in sorted(chosen))
+
+
 def derive_retrieval_query(message: str, settings: Settings) -> str:
     """The text retrieval searches for this message.
 
     At or under `query_max_chars` the message itself, unchanged. Above it:
-    the prose lines (whitespace collapsed, in order, head kept) followed by
-    the identifiers found in the rest of the message. A message with neither
-    prose nor identifiers falls back to its own head. The result never
-    exceeds `retrieval_query_limit`, also after acronym expansion.
+    the prose lines (whitespace collapsed; question lines and the first and
+    last prose line first, see `_select_prose`) followed by the identifiers
+    found in the rest of the message. A message with neither prose nor
+    identifiers falls back to its own head. The result never exceeds
+    `retrieval_query_limit`, also after acronym expansion.
     """
     if len(message) <= settings.query_max_chars:
         return message
     limit = retrieval_query_limit(settings)
-    prose = " ".join(" ".join(line.split()) for line in message.splitlines() if is_prose_line(line))
-    suffix = " ".join(_identifier_terms(message, prose))[:limit].rstrip()
-    if not prose and not suffix:
-        prose = " ".join(message.split())
+    lines = [" ".join(line.split()) for line in message.splitlines() if is_prose_line(line)]
+    suffix = " ".join(_identifier_terms(message, " ".join(lines)))[:limit].rstrip()
+    if not lines and not suffix:
+        lines = [" ".join(message.split())]
     room = limit - (len(suffix) + 1 if suffix else 0)
     for _ in range(_FIT_ROUNDS):
-        head = _cut_at_word(prose, max(0, room))
-        query = " ".join(part for part in (head, suffix) if part)
+        query = " ".join(part for part in (_select_prose(lines, room), suffix) if part)
         over = len(_effective(query, settings)) - limit
         if over <= 0:
             return query
         room -= over
-    return suffix or _cut_at_word(prose, limit // 2)
+    return suffix or _cut_at_word(lines[0], limit // 2)
 
 
 def _effective(query: str, settings: Settings) -> str:
     return expand_query(query) if settings.acronym_expansion_enabled else query
 
 
-def _elide(message: str, keep: int) -> str:
+def _elide(message: str, keep: int) -> tuple[str, int]:
     """Head and tail of `message` around the marker, about `keep` characters
-    kept, each cut moved to a nearby line break when one exists."""
+    kept, each cut moved to a nearby line break when one exists; and the
+    number of characters left out (0 when the message is returned whole)."""
     if keep >= len(message):
-        return message
+        return message, 0
     half = max(1, keep // 2)
     head_end, tail_start = half, len(message) - half
     slack = max(1, half // 5)
@@ -172,32 +201,76 @@ def _elide(message: str, keep: int) -> str:
     if (newline := message.find("\n", tail_start, tail_start + slack)) > 0:
         tail_start = newline + 1
     head, tail = message[:head_end].rstrip(), message[tail_start:].lstrip()
-    return head + elision_marker(len(message) - len(head) - len(tail)) + tail
+    omitted = len(message) - len(head) - len(tail)
+    return head + elision_marker(omitted) + tail, omitted
+
+
+# Worst-case pricing for text no served tokenizer has counted. A byte-level
+# BPE never emits more tokens than UTF-8 bytes, so one token per byte is the
+# ceiling; dump text (hex, digits, mixed-case or capital runs, punctuation)
+# sits close to it: digits are split one by one and random letter runs find
+# few merges (measured about 0.85 tokens per character on spaced hex, 0.65 on
+# base64). Only an ordinary word (letters only with no digit attached,
+# lowercase, optionally capitalised, at most NATURAL_WORD_MAX letters) is
+# cheaper: one token per NATURAL_WORD_CHARS characters, which random
+# lowercase letters also stay under. A single space
+# joins the next token and is free; a line break or a run of blanks is one.
+NATURAL_WORD_CHARS = 2
+NATURAL_WORD_MAX = 15
+_PRICED = re.compile(r"[A-Za-z0-9]+|\n|[ \t]{2,}|[^\sA-Za-z0-9]")
+
+
+def conservative_tokens(text: str) -> int:
+    """Upper-bound token price of `text` (see the constants above)."""
+    total = 0
+    for match in _PRICED.finditer(text):
+        run = match.group()
+        if run[0].isascii() and run[0].isalnum():
+            natural = (
+                len(run) <= NATURAL_WORD_MAX
+                and run.isalpha()
+                and (run.islower() or run[1:].islower())
+            )
+            total += -(-len(run) // NATURAL_WORD_CHARS) if natural else len(run)
+        elif run[0].isascii():
+            total += 1
+        else:
+            total += len(run.encode("utf-8", "surrogatepass"))
+    return total
 
 
 def fit_message(
-    message: str, budget_tokens: int, count: Callable[[str], int] | None = None
-) -> tuple[str, int]:
-    """`message` within `budget_tokens`, and the tokens it was priced at.
+    message: str, budget_tokens: int, tokenizer: Tokenizer | None = None
+) -> tuple[str, int, int]:
+    """`message` within `budget_tokens`, the tokens it was priced at, and the
+    number of its characters left out.
 
     Whole when it fits; otherwise head and tail around the visible marker,
-    never a silent cut. `count` is the served tokenizer when one exists; a
-    count is never trusted below the in-process estimate. Bounded rounds: the
-    caller's whole-prompt verification stays the final check.
+    never a silent cut. A count the served tokenizer confirmed is used (never
+    below the in-process estimate); without one, or when the count fell back
+    to the estimator, the text is priced by `conservative_tokens`, because the
+    estimator prices a hex word as one token. The message is cut until its
+    price fits; only a budget below the marker's own price can leave it over,
+    which the caller's whole-prompt verification then refuses.
     """
     budget = max(1, budget_tokens)
 
     def price(text: str) -> int:
-        estimated = estimate_tokens(text)
-        return max(estimated, count(text)) if count is not None else estimated
+        if tokenizer is not None:
+            counted = tokenizer.count_tokens(text)
+            if getattr(tokenizer, "remote_confirmed", False):
+                return max(counted, estimate_tokens(text))
+        return conservative_tokens(text)
 
     keep = min(len(message), budget * _MAX_CHARS_PER_TOKEN)
-    text = _elide(message, keep)
+    text, omitted = _elide(message, keep)
     tokens = price(text)
-    for _ in range(_FIT_ROUNDS):
-        if tokens <= budget:
-            break
-        keep = max(2, int(keep * budget / tokens * 0.95))
-        text = _elide(message, keep)
+    rounds = 0
+    while tokens > budget and keep > 2:
+        rounds += 1
+        # Proportional first; halving after that, so the loop always ends.
+        scaled = int(keep * budget / tokens * 0.95) if rounds <= _FIT_ROUNDS else keep // 2
+        keep = max(2, min(scaled, keep - 1))
+        text, omitted = _elide(message, keep)
         tokens = price(text)
-    return text, tokens
+    return text, tokens, omitted

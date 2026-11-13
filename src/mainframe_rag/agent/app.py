@@ -405,11 +405,15 @@ def _require_query_length(request_id: str, query: str) -> None:
     _require_embed_input(request_id, query)
 
 
-def _require_message(request_id: str, message: str, *extra: str | None) -> None:
+def _require_message(
+    request_id: str, message: str, splunk_context: str | None, *extra: str | None
+) -> None:
     """Admit an answer-path message (issue #1192). Blank and control-character
     messages are refused as on search. Length is refused only by the
     request-size guard (`chat_max_body_chars` over the message plus the other
-    caller text), with a fixed message that states the limit. A message over
+    caller text), with a fixed message that states the limit. `splunk_context`
+    counts at no more than `splunk_context_max_chars`, the part that can reach
+    the prompt, so a caller with a large context stays accepted. A message over
     `query_max_chars` is answered: retrieval gets the derived query, never the
     raw text, and the embed-input bound is checked on that query. Counts are
     logged, never text."""
@@ -417,7 +421,8 @@ def _require_message(request_id: str, message: str, *extra: str | None) -> None:
         log.warning(json_log(request_id, "query_unsearchable", chars=len(message)))
         raise AppError(422, "invalid_request", "request body failed validation")
     limit = settings.chat_max_body_chars
-    size = len(message) + sum(len(v) for v in extra if v)
+    context = min(len(splunk_context or ""), settings.splunk_context_max_chars)
+    size = len(message) + context + sum(len(v) for v in extra if v)
     if size > limit:
         log.warning(json_log(request_id, "request_too_large", chars=size, limit=limit))
         raise AppError(422, "invalid_request", too_large_message(limit))
@@ -1169,6 +1174,10 @@ class AnswerResponse(BaseModel):
     # retrieval list. See docs/agent.md.
     supplied_evidence: list[SuppliedExcerpt] = Field(default_factory=list)
     evidence_omitted: int = 0
+    # Characters of the user's message left out of the prompt to fit the
+    # model window (issue #1192): 0 when the message was sent whole. A count
+    # only, never text. Clients show a fixed note when it is positive.
+    message_omitted_chars: int = 0
 
 
 class ChatRequest(BoundedRequestText):
@@ -1222,6 +1231,10 @@ class ChatCompletionsResponse(BaseModel):
     # retrieval list. See docs/agent.md.
     supplied_evidence: list[SuppliedExcerpt] = Field(default_factory=list)
     evidence_omitted: int = 0
+    # Characters of the user's message left out of the prompt to fit the
+    # model window (issue #1192): 0 when the message was sent whole. A count
+    # only, never text. Clients show a fixed note when it is positive.
+    message_omitted_chars: int = 0
 
 
 class HealthzResponse(BaseModel):
@@ -1891,6 +1904,7 @@ def _answer_metadata(output: AnswerCoreOutput, *, hits: list | None = None) -> d
         "script_review_required": output.script_review_required,
         "supplied_evidence": [e.model_dump() for e in output.supplied] if has_hits else [],
         "evidence_omitted": len(output.evidence.omitted_indices) if has_hits else 0,
+        "message_omitted_chars": output.message_omitted_chars if has_hits else 0,
     }
 
 

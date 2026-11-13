@@ -859,6 +859,9 @@ class PreparedPrompt:
     evidence: PromptEvidence
     budget_verified: bool = False
     supplied: tuple[SuppliedExcerpt, ...] = ()
+    # Characters of the user's message left out of the prompt to fit the
+    # window (issue #1192); 0 when the message was sent whole. A count only.
+    message_omitted_chars: int = 0
 
 
 def _prompt_evidence(packed: list[PackedExcerpt], total_hits: int) -> PromptEvidence:
@@ -1350,6 +1353,7 @@ def _build_prompt(
     # Tokens the estimator under-prices the fitted message by (0 for a
     # message within `query_max_chars`, which is never fitted or re-counted).
     message_drift = 0
+    message_omitted = 0
     if settings is not None and len(query) > settings.query_max_chars:
         # A long message shares the window with the evidence instead of being
         # refused (issue #1192): it gets at most MESSAGE_WINDOW_SHARE of what
@@ -1370,10 +1374,8 @@ def _build_prompt(
             )
             - sum(estimate_tokens(m.content) for m in antecedent)
         )
-        message_text, message_tokens = fit_message(
-            query,
-            int(free * MESSAGE_WINDOW_SHARE),
-            tokenizer.count_tokens if tokenizer is not None else None,
+        message_text, message_tokens, message_omitted = fit_message(
+            query, int(free * MESSAGE_WINDOW_SHARE), tokenizer
         )
         message_drift = max(0, message_tokens - estimate_tokens(message_text))
     question_text = f"{QUESTION_LABEL} " + message_text
@@ -1397,6 +1399,16 @@ def _build_prompt(
 
     packed: list[PackedExcerpt] = []
     requested = _requested_identifiers(search_text)
+
+    def counted(messages: list[ChatMessage]) -> int:
+        """Whole-prompt count. A count the server did not confirm prices a
+        long message as the estimator does, so the message's own priced
+        surplus is added back (0 for a message within `query_max_chars`)."""
+        assert tokenizer is not None
+        used = tokenizer.count_messages(messages, reasoning_effort=reasoning_effort)
+        if message_drift and not getattr(tokenizer, "remote_confirmed", False):
+            used += message_drift
+        return used
 
     def candidate() -> list[ChatMessage]:
         return [
@@ -1449,7 +1461,7 @@ def _build_prompt(
         # first and contiguous; the recount below is the exact check.
         if older_turns:
             candidates, older_turns = older_turns, []
-            estimated = sum(estimate_tokens(m.content) for m in candidate())
+            estimated = sum(estimate_tokens(m.content) for m in candidate()) + message_drift
             kept_turns: list[list[ChatMessage]] = []
             for turn in reversed(candidates):
                 cost = sum(estimate_tokens(m.content) for m in turn)
@@ -1476,7 +1488,7 @@ def _build_prompt(
             if not packed and not is_chat:
                 break
             messages = candidate()
-            used = tokenizer.count_messages(messages, reasoning_effort=reasoning_effort)
+            used = counted(messages)
             if used <= verify_limit:
                 verified_clean = True
                 break
@@ -1492,7 +1504,7 @@ def _build_prompt(
             # instead of returning an unchecked prompt. One bounded extra
             # count, not a repair loop.
             messages = candidate()
-            used = tokenizer.count_messages(messages, reasoning_effort=reasoning_effort)
+            used = counted(messages)
             if used > verify_limit:
                 raise PromptBudgetExceeded(used, verify_limit)
             verified_clean = True
@@ -1549,6 +1561,7 @@ def _build_prompt(
         evidence=_prompt_evidence(packed, len(hits)),
         budget_verified=budget_verified,
         supplied=_supplied_excerpts(packed),
+        message_omitted_chars=message_omitted,
     )
 
 

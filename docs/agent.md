@@ -56,7 +56,9 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   splunk_context?, stream (default false), temperature?}` → `AnswerResponse{request_id,
   answer, citations, citations_inferred, inferred_indices, script,
   script_lang, verification_state, script_review_required, supplied_evidence,
-  evidence_omitted}` (the last two: [supplied-evidence projection](#supplied-excerpts)).
+  evidence_omitted, message_omitted_chars}` (`supplied_evidence` and `evidence_omitted`:
+  [supplied-evidence projection](#supplied-excerpts); `message_omitted_chars`:
+  [long messages](#long-messages)).
   `temperature` (issue #596) is an optional per-request override of
   `Settings.llm_temperature` (0.0–2.0, no inf/NaN; out-of-range 422s before
   retrieval); omitted means the configured default. The chat routes accept
@@ -154,7 +156,7 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   `ChatCompletionsResponse{id: "chatcmpl-<request_id>", created, model,
   choices[], usage, citations, citations_inferred, inferred_indices, hits,
   verification_state, script, script_lang, script_review_required,
-  supplied_evidence, evidence_omitted}`;
+  supplied_evidence, evidence_omitted, message_omitted_chars}`;
   `choices[0].message.content` carries the answer plus a trailing markdown
   `**Citations:**` bullet list when cites exist. Empty hits return
   `finish_reason: "stop"`, zeroed usage, and empty citations/hits. Provenance
@@ -495,7 +497,7 @@ status (`/ui` failures render HTML banners instead, §1):
 | `sources_unavailable` / `the requested sources are not available` | 404 / 503 | 404: the cursor's build is unknown or no longer retained (never a successor's entries); 503: the build has no catalog (published before #827), missing/redirected controls, or a malformed catalog entry the caller may see |
 | `sources_timeout` / `the sources listing timed out` | 504 | Listing exceeded `EVIDENCE_TIMEOUT_S` |
 | `upstream_error` / `sources listing failed` | 502 | Storage fault during a listing (type logged only); `authentication_required` / `access_unavailable` apply to listings as to reads |
-| `invalid_request` / `request exceeds the <N>-character limit` | 422 | Request-size guard (issue #1192), the only length refusal on `/v1/answer`, `/v1/chat*` and `/ui/chat*`: the query or chat messages plus `splunk_context`, `product` and `version` exceed `chat_max_body_chars`. `<N>` is the configured limit; the message never carries input text. Refused before retrieval or any model call |
+| `invalid_request` / `request exceeds the <N>-character limit` | 422 | Request-size guard (issue #1192), the only length refusal on `/v1/answer`, `/v1/chat*` and `/ui/chat*`: the query or chat messages plus `splunk_context` (on `/v1/answer` at most `splunk_context_max_chars` of it), `product` and `version` exceed `chat_max_body_chars`. `<N>` is the configured limit; the message never carries input text. Refused before retrieval or any model call |
 | `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query guard (a `/v1/search` query over `query_max_chars`; on every path a query that is empty after `str.strip()` or contains NUL/C0 controls other than `\t\n\r`, issue #579; or, when `embed_max_input_chars` is set, a query whose dense text — prefix plus query — exceeds it, issue #374: refused before any model call, never truncated; an effective query that only grows past the bound after expansion/condensation is refused by the embedder with the same envelope), and a chat/console active `user` turn that is missing, blank or control-character; `product`/`version` longer than `query_max_chars`, any text field holding an unpaired surrogate (issues #1011, #1013: refused at the request model, before retrieval or any model call), and any body Starlette cannot parse, e.g. invalid UTF-8 (issue #1031: never the framework `detail` shape). The console's client-owned `messages` history that fails to parse (invalid JSON, deep nesting, over-long integers) degrades to an empty history (issue #1032) |
 | `overloaded` / `the service is at capacity; retry later` | 503 + `Retry-After: 1` | Request admission refused (issue #374): all `request_max_concurrent` slots busy and the bounded wait queue full or its wait expired. Raised first, before validation, the serving gate and any retrieval/model work; only when a limit is selected. `/ui/chat` renders its fixed banner; `/ui/chat/stream` returns this envelope |
 | `deadline_exceeded` / `request deadline exceeded` | 504 | Total request deadline (`request_deadline_s`, issue #374) expired before the response began; on an already-open stream it is an `error` event (no `final`, `generation_incomplete`) instead. Only when a deadline is selected |
@@ -523,7 +525,7 @@ then exactly one terminal `event: final` carrying the full answer, validated
 citations, the `citations_inferred` provenance flag, the `inferred_indices`
 list, the `verification_state` label, optional script plus its review flag,
 retrieval hits, the `supplied_evidence` projection with `evidence_omitted`,
-query kind, `ttft_ms`, and token usage. A mid-stream failure
+`message_omitted_chars`, query kind, `ttft_ms`, and token usage. A mid-stream failure
 emits `event: error` and ends **without** a `final` — clients must treat
 stream-end-without-final as a failed request. `/ui/chat/stream` consumes the
 same token→final contract with the identical `final` terminal event.
@@ -531,8 +533,8 @@ same token→final contract with the identical `final` terminal event.
 `/v1/chat` + `/v1/chat/completions` with `stream=true` instead stream OpenAI
 `chat.completion.chunk` frames (`data: {...}` content deltas), then one
 terminal chunk with `finish_reason` carrying `citations`,
-`citations_inferred`, `inferred_indices`, `hits`, `supplied_evidence` and
-`evidence_omitted` (chat chunks carry no
+`citations_inferred`, `inferred_indices`, `hits`, `supplied_evidence`,
+`evidence_omitted` and `message_omitted_chars` (chat chunks carry no
 `usage`), then `data: [DONE]`. A mid-stream failure emits one
 `data: {"error": {"code": "upstream_error", "message": "stream failed"}, "verification_state": "generation_incomplete"}`
 frame (the strict `error` object plus the additive sibling state, issue #365;
@@ -615,16 +617,31 @@ call (`agent/user_message.derive_retrieval_query`; the rule is owned by
   that share it is sent whole. Over it, the head and the tail are kept around
   one line, `[... N characters of the pasted message omitted to fit the model
   window ...]`, where N is the exact count left out. Never a silent cut.
-  The share is priced with the served tokenizer when one is configured (at
-  most five text counts, long messages only), never below the in-process
-  estimate; the whole-prompt verification stays the final check.
+  Pricing (long messages only): a count the served tokenizer confirmed is
+  used, never below the in-process estimate. Without a confirmed count (no
+  `/tokenize`, or a fallback) the message is priced by
+  `user_message.conservative_tokens`, because the estimator prices a hex
+  word as one token: one token per character (per UTF-8 byte outside
+  ASCII, the byte-level BPE ceiling), one per 2 characters for an ordinary
+  lowercase or capitalised word of at most 15 letters with no digit attached, a single space free.
+  The message is cut until that price fits its share, and the surplus over
+  the estimator is charged to the excerpt plan and to every unconfirmed
+  whole-prompt count, so a dump cannot push the prompt past the window.
+  The estimator itself and every short-message budget are unchanged.
+- The response reports the cut: `message_omitted_chars` (integer, 0 when the
+  message was sent whole) on `AnswerResponse`, the answer `final` event,
+  `ChatCompletionsResponse` and the chat finish chunk. It equals the N of
+  the marker and carries no text. The Pipe shows a fixed note when it is
+  positive; the console does not render it.
 - The only length refusal is the request-size guard `chat_max_body_chars`
-  (§2). Logs carry character counts (`long_message`, `request_too_large`),
+  (§2). On `/v1/answer`, `splunk_context` counts toward it at no more than
+  `splunk_context_max_chars`, the part that can reach the prompt, so a large
+  context is still accepted and cut as before. A chat body counts it whole,
+  as it always did. Logs carry character counts (`long_message`, `request_too_large`),
   never text.
 - Not changed: prior turns are still cut to `chat_max_prior_turn_chars`, so a
   long paste in an earlier turn reaches later turns as its first 1000
-  characters plus ` ... [history truncated]`. The response does not report
-  that a message was shortened; only the prompt carries the marker.
+  characters plus ` ... [history truncated]`.
 
 Resolved system code (#944): when `find_system_codes` normalizes a query token
 that is written with an `S` prefix or as `X'hhh'` (SAFB -> AFB, S0C4 -> 0C4,
@@ -1623,7 +1640,7 @@ only; the PR lints and types this file directly.
 | Citations | One `source` event per validated citation in the terminal frame: `source{name: citation, id: doc_id}`, `document[]` = the `supplied_evidence[].text` entries carrying that citation (the excerpt the prompt actually held, never a new search), parallel `metadata[]` with `[index] citation`, doc id, page label, product, version and `label` (`source-matched`, or `inferred, not grounding` when `citations_inferred`). No URLs: a name or id that Open WebUI could render as a link (a scheme such as `http:` or `javascript:`, a bare `http` prefix, `//` or `www.`) is prefixed with `Citation: `. Supplied but uncited excerpts are not sources |
 | Verification | One final `status` event (`done: true`) in the console's wording: "Source-matched · N citation(s)" only for `accepted` with non-inferred citations; otherwise "Insufficient evidence — not operational guidance", "Unverified draft — no eligible citation", "Incomplete generation — output was cut off", or "Unverified — verification state unknown" for anything else. Inferred citations and `script_review_required` append their fixed warnings. Abstention text is the agent's own content; banners never enter the message content, so they are not sent back as history |
 | Errors | An error envelope's stable `code` selects a fixed message (`invalid_request`, `prompt_budget_exceeded`, `upstream_error`, `model_timeout`, `deadline_exceeded`, `overloaded`, `not_configured`, `representation_unavailable`, `internal`; `not_found`/`method_not_allowed`/`http_error` = configuration). An in-stream error frame uses the same table and the incomplete banner. Unknown codes, non-JSON bodies, transport failures and any internal fault give one fixed "could not be reached" text: the agent's `message`, upstream bodies and exception text are never shown, and the Pipe never raises into Open WebUI (which would display the exception) |
-| History trim | Open WebUI resends the whole chat each turn, so the Pipe fits the body to the agent's cap before sending, counted as the agent counts it (`chat_body_chars`: message characters plus `product` plus `version`, not JSON bytes). It drops the oldest turns first, then any leading assistant turn (history never starts with an answer to a dropped question); the last user turn is always kept. If that turn alone exceeds the cap, the Pipe returns its fixed too-long text, which states the valve's limit, and makes no agent call. When turns were dropped it emits the fixed status "Earlier messages in this chat were not sent" (no content) and appends it to the final banner. The agent has no turn-count cap on the request, so the character cap is the only limit. A long last turn under the cap is sent whole and unchanged; the agent answers it ([long messages](#long-messages)) |
+| History trim | Open WebUI resends the whole chat each turn, so the Pipe fits the body to the agent's cap before sending, counted as the agent counts it (`chat_body_chars`: message characters plus `product` plus `version`, not JSON bytes). It drops the oldest turns first, then any leading assistant turn (history never starts with an answer to a dropped question); the last user turn is always kept. If that turn alone exceeds the cap, the Pipe returns its fixed too-long text, which states the valve's limit, and makes no agent call. When turns were dropped it emits the fixed status "Earlier messages in this chat were not sent" (no content) and appends it to the final banner. When the agent reports `message_omitted_chars` > 0 the final banner also carries the fixed note "Your message was too long for the model; its middle part was not read" (no count, no text). The agent has no turn-count cap on the request, so the character cap is the only limit. A long last turn under the cap is sent whole and unchanged; the agent answers it ([long messages](#long-messages)) |
 | Tasks | Background task calls (title, tags, follow-ups, summaries), detected by `__task__`, `__metadata__["task"]`, or a `task`/`metadata.task` body key, return the fixed text `Docs question` and never call the agent |
 | Allowed calls | One `POST {AGENT_URL}/v1/chat` per question. No tools, no model calls, no other host, `trust_env=False` (no proxy environment), no redirects (a 3xx is the fixed "could not be reached" text), no forwarded identity headers, no logging |
 

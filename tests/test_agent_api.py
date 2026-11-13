@@ -2626,8 +2626,78 @@ def test_long_pasted_answer_query_is_answered_from_a_derived_query(client, monke
     assert call["query"] == f"{_PASTE_PROSE} ZQX104E"
     prompt = (seen[-1] if stream else llm.last_messages)[-1].content
     assert f"Question: {_PASTE}\n" in prompt
+    final = (next(e[1] for e in _parse_sse_events(resp.text) if e[0] == "final") if stream
+             else resp.json())
+    assert final["message_omitted_chars"] == 0
     assert "ZQX104E" not in caplog.text and "synthetic" not in caplog.text
     assert "long_message" in caplog.text
+
+
+@pytest.mark.parametrize("path", ["/v1/answer", "/v1/chat"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_shortened_message_is_reported_as_a_count_on_every_response(client, monkeypatch, path, stream):
+    """Issue #1192: when the middle of the message is left out of the prompt,
+    JSON, the answer `final` event and the chat finish chunk carry
+    `message_omitted_chars`, equal to the count the prompt marker states."""
+    import re
+
+    seen: list = []
+
+    class Recording(StreamingFakeLLM):
+        def chat(self, messages, *args, **kwargs):
+            seen.append(messages)
+            return super().chat(messages, *args, **kwargs)
+
+        async def chat_stream(self, messages, *args, **kwargs):
+            seen.append(messages)
+            async for item in super().chat_stream(messages, *args, **kwargs):
+                yield item
+
+    monkeypatch.setattr(app_mod, "retrieve_search", MagicMockSearch().search)
+    monkeypatch.setattr(app_mod, "llm", Recording())
+    paste = "\n".join(["Why does the copy step stop here?",
+                       *(f"{i:08X} {i:04X}0000 FFFF{i:04X} 0000{i:04X}" for i in range(2500))])
+    body = ({"query": paste} if path == "/v1/answer"
+            else {"messages": [{"role": "user", "content": paste}]})
+    resp = client.post(path, json={**body, "stream": stream})
+    assert resp.status_code == 200
+    if not stream:
+        reported = resp.json()["message_omitted_chars"]
+    elif path == "/v1/answer":
+        reported = next(e[1] for e in _parse_sse_events(resp.text) if e[0] == "final")[
+            "message_omitted_chars"]
+    else:
+        frames = [json.loads(line[5:]) for line in resp.text.splitlines()
+                  if line.startswith("data:") and line[5:].strip() != "[DONE]"]
+        reported = frames[-1]["choices"][0]["message_omitted_chars"]
+    stated = re.search(r"\[\.\.\. (\d+) characters of the pasted message omitted",
+                       seen[-1][-1].content)
+    assert stated and reported == int(stated.group(1)) > 0
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_large_splunk_context_on_answer_stays_accepted(client, monkeypatch, stream):
+    """PR #1198 B2: `/v1/answer` never bounded `splunk_context` (it is cut to
+    `splunk_context_max_chars` in the prompt), so a short query with a context
+    larger than the request-size guard is still answered; the context counts
+    toward the guard only up to its cut."""
+    search = MagicMockSearch()
+    llm = FakeLLM()
+    monkeypatch.setattr(app_mod, "retrieve_search", search.search)
+    monkeypatch.setattr(app_mod, "llm", StreamingFakeLLM() if stream else llm)
+    context = "synthetic telemetry line\n" * 5601
+    assert len(context) > 140_000 > app_mod.settings.chat_max_body_chars
+    resp = client.post("/v1/answer", json={"query": "ZQX104E", "splunk_context": context,
+                                           "stream": stream})
+    assert resp.status_code == 200 and len(search.calls) == 1
+    # The cut context still counts: query + cap is over a guard set just below.
+    cap = app_mod.settings.splunk_context_max_chars
+    monkeypatch.setattr(app_mod.settings, "chat_max_body_chars", cap + 6)
+    assert client.post("/v1/answer", json={"query": "ZQX104E", "splunk_context": context}
+                       ).status_code == 422
+    monkeypatch.setattr(app_mod.settings, "chat_max_body_chars", cap + 7)
+    assert client.post("/v1/answer", json={"query": "ZQX104E", "splunk_context": context}
+                       ).status_code == 200
 
 
 @pytest.mark.parametrize(
