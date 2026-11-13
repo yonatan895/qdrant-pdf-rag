@@ -18,11 +18,13 @@
     #1078, mail, z/OS) would decide alone whether a service identity may
     call it and what that identity may read.
   - Site topology, as the maintainer states it (2026-11-13): one product
-    namespace; a separate CI namespace that holds only the GitLab runners;
-    and the coding agents on a Linux VM outside OpenShift
-    ([agents-vm](../agents-vm.md#accounts)). ADR-0009's text still places
-    coding agents in a dev pod in the CI namespace; its correction is a
-    separate pending change, and this record does not edit ADR-0009.
+    namespace; a separate CI namespace that holds the GitLab runners and a
+    dev pod (ADR-0009 §2); and the agents VM, a Linux VM outside OpenShift
+    ([agents-vm](../agents-vm.md#accounts)).
+  - The maintainer accepted ADR-0009 on 2026-11-13; its status change is a
+    separate pull request, so this record cites it as accepted, pending
+    merge. Its follow-up F6 (gap release build and signing) is not started
+    and is now raised in priority.
   - State at c5259460: only the caller-verification library exists
     (`src/mainframe_rag/mcp/tool_auth.py`); no gateway is built. The agents
     VM holds a dev LiteLLM key and, optionally, a GitLab project token, no
@@ -79,9 +81,10 @@
      live read access to production metrics and traces. The rule it must
      meet: it forwards only to the backend's search endpoints; it bounds time
      range, rows, timeout and concurrency; it has one authenticated entry
-     point, for the agents VM only (nothing in the CI namespace gets one);
-     and the trace backend itself gains no Route. It is not deployable until
-     #1199 amends ADR-0006. Its detailed design is follow-up.
+     point, for the agents VM only; and the trace backend itself gains no Route. It is not deployable until
+     #1199 amends ADR-0006. The dev pod and CI job pods get no entry point
+     under this ADR; extending it to the dev pod would be a separate
+     decision. Its detailed design is follow-up.
   4. **D4, not adopted.**
      - A new orchestration layer. Open WebUI's native tool loop serves users
        (ADR-0010 TD3); herdr-core plus OpenCode serves the agents.
@@ -139,8 +142,8 @@ probe of `verify_token`.
 |---|---|---|---|---|
 | G1. A user-class call runs as one verified user (**required**) | The forwarded IdP token: signature, issuer, exactly this gateway's audience, expiry, and a group in `allowed_groups` ([caller verification](../team-tools.md#caller-verification)); and the entry point fixing `require_single_audience=True` | The IdP (keys, registrations, group membership); the gateway's configuration, through a deployed release only | The token's `exp` plus `leeway_s` (at most 300 s); cached keys for `jwks_ttl_s` (default 300 s, no upper bound in the library); stale keys at most `jwks_max_stale_s` after a failed fetch | `verify_token` refuses each failing check and `principal_from_scope` raises without a verified principal (`tests/test_mcp_tool_auth.py`). Executed: the library default (`require_single_audience=False`) accepts a two-audience token, so the guarantee holds only where the entry point fixes it on. **Required:** each gateway pins that setting in a test. E1 is the stated exception to per-user entitlement |
 | G2. No credential crosses classes (**required**) | Each entry point serves one class and names only its own audience. With an IdP-issued workload token: TD6's single-audience rule and the group check, as in G1. With a per-workload secret (open (a)): a second verifier that accepts no IdP token | The identity team: which client or user may be issued which audience and group. The gateway's configuration, through a deployed release | As G1 for tokens; for a per-workload secret, until rotation (open (a)) | Executed: with distinct audience and group per entry point, each class's token is refused at the other's entry point. Executed: a user who is issued the agent audience and the agent group is accepted. So separation rests on what the IdP issues plus each gateway fixing the single-audience requirement; the library cannot tell the classes apart. **Required:** each agent-class gateway's acceptance shows a valid user token refused at its entry point and its own credential refused at a user entry point; the site records the IdP's issuing rule |
-| G3. The agents reach no production user data, except the rated-case export (D1) | No matrix cell for a live production source; no credential for one on the agents VM; the egress fence ([agents-vm](../agents-vm.md)). For agent-authored code that runs in CI job pods after a push: the CI namespace's isolation from the product namespace (ADR-0009 §2 isolation proof) | The maintainer (this matrix and the exception); the platform and source owners (credentials); the VM administrator (fence); the platform team (CI namespace policy) | Until the fence or the namespace policy changes, a credential is issued, or the exception is widened by a new decision | `agents_vm.py start` refuses an unfenced account; the fence proof's negative controls; the isolation proof's probes from the CI namespace. Both proofs are site steps, required and **not yet run**. Nothing technical limits what an export file contains: that rests on the #1199 export tool and the ADR-0005 amendment |
-| G4. Agent work reaches production only as a reviewed merge request and a signed release | *Implemented:* outside dry-run, load, deploy, ingest and validate refuse a checkout that is not a verified signed release (ADR-0009 F1). *Site record, not verifiable from this repository:* protected `main`, code-owner approvals, and a Developer-role bot token that cannot approve or merge (ADR-0009 §6). *Not built:* the gap release build and signing (ADR-0009 follow-up F6, not started) | The gap maintainer group (GitLab settings, approvers); holders of a release key; an operator, through the dev-only opt-out, which the scripts refuse without `CI_REHEARSAL=1` (that nobody in the gap sets it is a rule, not a control) | Standing; the bot token expires and is rotated | The F1 refusal and its air-gap shell suites. Because F6 does not exist, gap-developed code has no route to production yet: an upstream signed release is the only route today. ADR-0009's own status is still "proposed" |
+| G3. The agents reach no production user data, except the rated-case export (D1) | No matrix cell for a live production source; no credential for one on the agents VM; the egress fence ([agents-vm](../agents-vm.md)). For the dev pod, and for agent-authored code that runs in CI job pods after a push: the CI namespace's isolation from the product namespace (ADR-0009 §2 isolation proof) | The maintainer (this matrix and the exception); the platform and source owners (credentials); the VM administrator (fence); the platform team (CI namespace policy) | Until the fence or the namespace policy changes, a credential is issued, or the exception is widened by a new decision | `agents_vm.py start` refuses an unfenced account; the fence proof's negative controls; the isolation proof's probes from the CI namespace. Both proofs are site steps, required and **not yet run**. Nothing technical limits what an export file contains: that rests on the #1199 export tool and the ADR-0005 amendment |
+| G4. Agent work reaches production only as a reviewed merge request and a signed release | *Implemented:* outside dry-run, load, deploy, ingest and validate refuse a checkout that is not a verified signed release (ADR-0009 F1). *Site record, not verifiable from this repository:* protected `main`, code-owner approvals, and a Developer-role bot token that cannot approve or merge (ADR-0009 §6). *Not built:* the gap release build and signing (ADR-0009 follow-up F6, not started) | The gap maintainer group (GitLab settings, approvers); holders of a release key; an operator, through the dev-only opt-out, which the scripts refuse without `CI_REHEARSAL=1` (that nobody in the gap sets it is a rule, not a control) | Standing; the bot token expires and is rotated | The F1 refusal and its air-gap shell suites. Because F6 does not exist, gap-developed code has no route to production yet: an upstream signed release is the only route today. ADR-0009 is accepted, pending merge of its status change; F6 is raised in priority |
 | G5. Agent-class telemetry reads return no question, answer or excerpt text | The product emits none into tier 1 (ADR-0005, ADR-0006, [observability](../observability.md#data-tiers)) | Product code, through a reviewed release; any other writer into the backend, since the metrics scraping or forwarding path is a site decision (ADR-0006) | Standing | The one-time ADR-0006 qualification scan (its record notes the `_meta` stream was not scanned). The gateway adds no content filter: a free-form read returns whatever any writer stored |
 | G6. The telemetry gateway cannot mutate or starve the backend (**required**) | Forward-only to search endpoints; fixed bounds on time range, rows, timeout and concurrency (D3) | The gateway's code and configuration, through a deployed release | Standing | **Required** of the gateway's record: pinning tests for the forwarded path set and for each bound |
 
@@ -156,7 +159,7 @@ probe of `verify_token`.
 | ADR-0003 | Unchanged in text. D1 adds a condition before the bridge is enabled for users ("Shared credentials"); ADR-0003's own reactivation gate still applies |
 | ADR-0006, "ClusterIP only … no Route and no extra auth layer" | Unchanged here, and the order stands: the telemetry gateway is not deployable until #1199 amends it. The amendment must cover a reader other than the operator; the external exposure of the agents' entry point, to which the AGENTS.md Route rules apply (the VM is outside the cluster); and the trace backend's NetworkPolicy admitting the gateway as a new client |
 | ADR-0005, content only in the feedback store | Unchanged here. Exports on the agents VM, the full message and history, and the onward leg to the model gateway under the dev key need the amendment in #1199 (its item 6) |
-| ADR-0009 | Not edited. G4 relies on §1 and §6. Its text places coding agents in a dev pod; under the topology above the agents run on the VM and the CI namespace holds only runners, so nothing in the CI namespace gets a gateway entry point |
+| ADR-0009 (accepted 2026-11-13, pending merge of its status change) | Unchanged. G3 relies on its §2 and G4 on its §1 and §6. The dev pod and CI job pods of its CI namespace get no gateway entry point under this ADR, so its §2 isolation proof is unchanged |
 | [agents-vm](../agents-vm.md) fence allow-list | Unchanged here; one host is added only with the telemetry gateway's record |
 
 ## Open points
@@ -190,8 +193,8 @@ probe of `verify_token`.
    onward leg to the model gateway.
 3. Open point (a) and its ADR-0010 amendment, before any agent-class entry
    point is built.
-4. The ADR-0009 correction (agents on the VM, not in a dev pod), and F6
-   before any gap-developed change can reach production.
+4. ADR-0009 follow-up F6 (raised in priority), before any gap-developed
+   change can reach production.
 
 ## Consequences
 
