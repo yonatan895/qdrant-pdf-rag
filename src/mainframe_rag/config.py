@@ -248,6 +248,10 @@ class Settings(BaseSettings):
     # closed with the same invalid_request 422 as any other body-validation
     # failure; caller-supplied splunk_context truncates with the standard
     # suffix, like per-chunk text. Longest golden query is 165 chars.
+    # Since issue #1192 `query_max_chars` refuses only /v1/search queries and
+    # the product/version fields. On the answer and chat paths it is the
+    # longest message searched as written: a longer one is answered, with a
+    # derived retrieval query and token-budgeted prompt text.
     query_max_chars: int = Field(default=2000, ge=200, le=20000)
     splunk_context_max_chars: int = Field(default=4000, ge=500, le=50000)
     # User-message block ordering policy (answer.build_messages): "retrieval"
@@ -357,7 +361,10 @@ class Settings(BaseSettings):
 
     # Multi-turn chat engine and operator console
     chat_condense_enabled: bool = False
-    chat_max_body_chars: int = Field(default=32768, ge=1000, le=100000)
+    # Request-size guard for /v1/answer, /v1/chat and /ui (issue #1192): abuse
+    # protection only, the one length refusal on those paths. The Open WebUI
+    # Pipe valve MAX_BODY_CHARS must carry the same value.
+    chat_max_body_chars: int = Field(default=131072, ge=1000, le=1048576)
     chat_max_turns: int = Field(default=10, ge=1, le=50)
     chat_max_prior_turn_chars: int = Field(default=1000, ge=200, le=5000)
     ui_enabled: bool = False
