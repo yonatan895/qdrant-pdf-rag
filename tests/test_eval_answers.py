@@ -9,6 +9,7 @@ part of plain pytest."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 
@@ -1308,6 +1309,20 @@ def test_stream_eval_failed_stream_is_an_error_row_and_the_next_case_runs(
     assert report["metrics"]["measurement"]["hardware_independent"]["tokens"]["prompt_tokens"]["n"] == 1
 
 
+def test_stream_final_without_ttft_key_is_an_error_row_not_an_exception(http_answer_eval):
+    """#1195 review N8: `_final_counts` used to accept a missing key and
+    `stream_signals` then raised through the runner. The key is now required;
+    a non-conforming endpoint fails the row closed and the run continues."""
+    final = _final_frame()
+    final.pop("ttft_ms")
+    respond = _stream_agent(lambda body: _sse(("final", final)))
+    status, report, _, _ = http_answer_eval(respond, extra=("--stream",))
+    assert status == 1
+    row = report["results"][0]
+    assert (row["verdict"], row["failures"]) == ("error", ["malformed answer stream"])
+    assert "prompt_tokens" not in row
+
+
 def test_stream_eval_non_200_keeps_the_envelope_code(http_answer_eval):
     import httpx2
 
@@ -1427,6 +1442,25 @@ def test_measurement_summary_groups_use_nearest_rank_over_known_model_rows():
     assert summarize(rows)["measurement"] == groups
 
 
+def test_zero_prompt_tokens_on_a_model_row_is_unknown_never_a_known_zero():
+    """The agent turns a missing upstream usage block into zeros (#1195 review
+    N1). A model call always has a positive prompt count, so all-zero usage is
+    an unreported count: unknown, and excluded from every distribution."""
+    class Client:
+        def post(self, *args, **kwargs):
+            return _StubResponse(_answer_payload())
+
+    signals = {"r1": {"finish_reason": "stop", "prompt_tokens": 0, "completion_tokens": 0,
+                      "reasoning_tokens": 0, "total_tokens": 0}}
+    row = run_query(Client(), _entry(), signals)
+    assert row["path"] == "llm" and row["verdict"] == "pass"
+    assert (row["prompt_tokens"], row["completion_tokens"], row["reasoning_tokens"],
+            row["total_tokens"]) == (None, None, None, None)
+    assert any("usage not reported" in warn for warn in row["warns"])
+    tokens = summarize([row])["measurement"]["hardware_independent"]["tokens"]
+    assert tokens["prompt_tokens"]["n"] == 0 and tokens["completion_tokens"]["n"] == 0
+
+
 def test_decode_rate_is_absent_unless_every_input_is_known_and_positive():
     from mainframe_rag.eval.measurement import decode_tps
 
@@ -1467,7 +1501,7 @@ def test_subset_is_the_interleaved_sampler_and_refuses_to_drop_a_class():
     assert identity["ids_sha256"] != sample_identity(select_subset(entries, 6))["ids_sha256"]
 
 
-def _run_sweep(tmp_path, monkeypatch, respond, args):
+def _run_sweep(tmp_path, monkeypatch, respond, args, *, golden=True):
     """The real CLI over an inert HTTP boundary, without the fixture's --all."""
     import httpx2
 
@@ -1478,12 +1512,14 @@ def _run_sweep(tmp_path, monkeypatch, respond, args):
                         lambda **kwargs: real_client(transport=httpx2.MockTransport(respond), **kwargs))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(answers, "load_settings", lambda: pytest.fail("remote eval touched local Settings"))
-    golden = tmp_path / "original.jsonl"
-    golden.write_text("".join(json.dumps(e) + "\n" for e in _sweep_entries()))
-    status = answers.main([
-        "--agent-url", "http://deployed-agent:8087", "--golden", str(golden),
-        "--out", str(tmp_path / "report.json"), "--summary", str(tmp_path / "summary.md"), *args,
-    ])
+    source = tmp_path / "original.jsonl"
+    source.write_text("".join(json.dumps(e) + "\n" for e in _sweep_entries()))
+    argv = ["--agent-url", "http://deployed-agent:8087"]
+    if golden:
+        argv += ["--golden", str(source)]
+    argv += ["--out", str(tmp_path / "report.json"),
+             "--summary", str(tmp_path / "summary.md"), *args]
+    status = answers.main(argv)
     report = tmp_path / "report.json"
     return status, json.loads(report.read_text()) if report.exists() else None
 
@@ -1493,6 +1529,105 @@ def test_subset_too_small_exits_before_any_request(tmp_path, monkeypatch):
         raise AssertionError("no request may be sent for a refused subset")
 
     assert _run_sweep(tmp_path, monkeypatch, respond, ["--subset", "2"]) == (2, None)
+
+
+def _rc_workspace(tmp_path, monkeypatch) -> list[dict]:
+    """Synthetic RC workspace: dev golden plus a pinned synthetic holdout."""
+    evals = tmp_path / "evals"
+    evals.mkdir()
+    entries = _sweep_entries()
+    (evals / "golden.jsonl").write_text("".join(json.dumps(e) + "\n" for e in entries))
+    holdout = [
+        _entry(id="H-0", query="h0", query_class="message_id"),
+        _entry(id="H-1", query="h1", query_class="syntax"),
+    ]
+    data = "".join(json.dumps(e) + "\n" for e in holdout)
+    (evals / "holdout.jsonl").write_text(data)
+    digest = hashlib.sha256(data.encode()).hexdigest()
+    (evals / "holdout.jsonl.sha256").write_text(f"{digest}  holdout.jsonl\n")
+    monkeypatch.setenv("VENUE", "rc")
+    return holdout
+
+
+@pytest.mark.parametrize("flags", [["--subset", "5"], ["--repeats", "3"]])
+def test_tuning_sweep_refuses_the_resolved_holdout_before_any_request(
+    tmp_path, monkeypatch, capsys, flags,
+):
+    """#1195 review B2: `VENUE=rc --subset` without an explicit --golden used
+    to resolve golden + holdout and could draw holdout rows. The guard runs at
+    resolution, before the holdout is opened or any model call is sent."""
+    import httpx2
+
+    from mainframe_rag.eval import answers
+
+    _rc_workspace(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(answers, "load_settings", lambda: pytest.fail("refusal read Settings"))
+    monkeypatch.setattr(httpx2, "Client", lambda **kwargs: pytest.fail("refusal sent a request"))
+    status = answers.main([
+        "--agent-url", "http://deployed-agent:8087", *flags,
+        "--out", str(tmp_path / "report.json"),
+    ])
+    assert status == 2
+    assert not (tmp_path / "report.json").exists()
+    message = capsys.readouterr().err
+    assert "needs an explicit non-holdout --golden" in message
+    assert "frozen holdout holdout.jsonl" in message
+
+
+def test_explicit_tuning_golden_selects_no_holdout_and_records_the_dataset_digest(
+    tmp_path, monkeypatch,
+):
+    import httpx2
+
+    _rc_workspace(tmp_path, monkeypatch)
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=_HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": []})
+        if json.loads(request.content)["query"].startswith("n"):
+            return httpx2.Response(200, json=_answer_payload(
+                answer="The excerpts do not answer this.", citations=[]))
+        return httpx2.Response(200, json=_answer_payload())
+
+    status, report = _run_sweep(
+        tmp_path, monkeypatch, respond, ["--subset", "5", "--repeats", "3"])
+    assert status == 0
+    source = (tmp_path / "original.jsonl").read_bytes()
+    assert report["params"]["sample"]["datasets"] == [
+        {"name": "original.jsonl", "sha256": hashlib.sha256(source).hexdigest()},
+    ]
+    assert not {row["id"] for row in report["results"]} & {"H-0", "H-1"}
+
+
+def test_default_sampler_over_the_rc_set_still_runs_and_records_both_datasets(
+    tmp_path, monkeypatch,
+):
+    """The pre-existing default/--max-queries exposure is not made worse: it
+    is not a new sweep guard, and its identity now names both resolved sets."""
+    import httpx2
+
+    _rc_workspace(tmp_path, monkeypatch)
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=_HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": []})
+        if json.loads(request.content)["query"].startswith("n"):
+            return httpx2.Response(200, json=_answer_payload(
+                answer="The excerpts do not answer this.", citations=[]))
+        return httpx2.Response(200, json=_answer_payload())
+
+    status, report = _run_sweep(
+        tmp_path, monkeypatch, respond, ["--max-queries", "4"], golden=False)
+    assert status == 0
+    sample = report["params"]["sample"]
+    assert sample["mode"] == "default"
+    assert [dataset["name"] for dataset in sample["datasets"]] == ["golden.jsonl", "holdout.jsonl"]
+    assert all(len(dataset["sha256"]) == 64 for dataset in sample["datasets"])
 
 
 def test_subset_and_all_are_exclusive(http_answer_eval):
@@ -1567,6 +1702,8 @@ def test_repeats_run_whole_passes_and_report_spread_and_flips(tmp_path, monkeypa
     assert report["params"]["sample"] == {
         "mode": "subset", "n": 5, "classes": 3,
         "ids_sha256": answers.sample_identity(answers.select_subset(_sweep_entries(), 5))["ids_sha256"],
+        "datasets": [{"name": "original.jsonl",
+                      "sha256": hashlib.sha256((tmp_path / "original.jsonl").read_bytes()).hexdigest()}],
     }
     assert report["metrics"]["queries"] == 15  # pooled
     repeats = report["metrics"]["repeats"]

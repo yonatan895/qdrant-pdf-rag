@@ -560,9 +560,14 @@ host.
 - **Decide on the first group only.** Quality and budget decisions never read
   a timing. Time at a site is predicted as tokens divided by that site's own
   measured tokens per second (its in-pod gateway probe) and then checked there.
-- **Venue.** The Colab G4 lane behind the site-shaped gateway
-  ([inputs](colab-playground.md#measurement-inputs)) for quality. The 8 GB
-  local pair is for plumbing and relative checks only.
+- **Venue.** A validated Colab G4 lane for quality. The site-shaped gateway is
+  a candidate venue for plumbing only: on the pinned adapter it likely rejects
+  `reasoning_effort`, so `run_local_stack.sh` stops a quality lane whose
+  startup probe fails. A quality run requires a probe that reaches `/v1/answer`
+  with a judged row, and #1193's argument probe must record the actual site's
+  parameter behavior before any site-shape arm is used as a baseline
+  ([inputs](colab-playground.md#measurement-inputs)). The 8 GB local pair is
+  for plumbing and relative checks only.
 - **Method.** Sweeps run a fixed class-interleaved subset three times; a
   winner is confirmed by one full pass. The holdout is never used for tuning
   (§7).
@@ -572,8 +577,8 @@ Flags (defaults are unchanged without them):
 | Flag | Effect |
 |---|---|
 | `--stream` | HTTP mode only. Sends the same request with `stream: true` and judges the SSE `final`, which already carries `finish_reason`, `ttft_ms` and `usage` ([agent contract](agent.md), §3 Streaming). Rows gain finish reason, token counts, `ttft_ms`, the client-side `client_first_token_ms` and `decode_tps`. Token deltas and the `final`'s retrieval hits are not kept. An `error` event, a stream that ends without `final`, or a `final` without valid counts is an error row with a fixed label. The in-process client buffers the whole response, so the flag is refused without `--agent-url`; in-process rows keep their answer-log join |
-| `--subset N` | The default sampler's round-robin (sorted classes, sorted ids, one row per class per round), so every cutoff of its order keeps every class. Refused (exit 2, no request) when `N` is below the class count. Exclusive with `--all`. `params.sample` records the mode, row count, class count and a SHA-256 over the ordered ids, so two arms can prove they ran the same rows |
-| `--repeats R` | 1–10 whole passes over the sample (pass 1 over every row, then pass 2, ...), so drift within a session lands on every row equally. Rows carry `repeat`; `metrics` pools all passes; `metrics.repeats` gives, per metric, the per-pass values with min, max, mean and range, plus `verdict_flips` (entry ids judged differently across passes) |
+| `--subset N` | The default sampler's round-robin (sorted classes, sorted ids, one row per class per round), so every cutoff of its order keeps every class. Refused (exit 2, no request) when `N` is below the class count, and refused before any read when the resolved dataset contains the frozen holdout: a sweep needs an explicit non-holdout `--golden`. Exclusive with `--all`. `params.sample` records the mode, row count, class count, a SHA-256 over the ordered ids, and the resolved datasets' basenames + SHA-256, so two arms can prove they ran the same rows over the same splits |
+| `--repeats R` | 1–10 whole passes over the sample (pass 1 over every row, then pass 2, ...), so drift within a session lands on every row equally. Rows carry `repeat`; `metrics` pools all passes; `metrics.repeats` gives, per metric, the per-pass values with min, max, mean and range, plus `verdict_flips` (entry ids judged differently across passes). More than one pass is a sweep, so the same non-holdout `--golden` rule applies |
 
 Without `--stream`, the JSON request is unchanged: the row still records the
 model-leg `llm_ms` (and `ttft_ms` when the agent runs with `LLM_STREAM`) from
@@ -587,6 +592,8 @@ pass or do not claim it.
 
 ```bash
 # One arm of a sweep: 24 interleaved rows, three passes, counts from the stream.
+# The explicit non-holdout --golden is mandatory: --subset/--repeats refuse a
+# resolved set that contains the frozen holdout (exit 2, before any request).
 VENUE=rc .venv/bin/python -m mainframe_rag.eval.answers \
   --agent-url http://127.0.0.1:8087 --golden "$PRODUCTION_GOLDEN_PATH" \
   --stream --subset 24 --repeats 3 \
@@ -600,7 +607,9 @@ VENUE=rc .venv/bin/python -m mainframe_rag.eval.answers \
 Sweep order, one variable at a time, each arm against the same subset
 identity:
 
-1. Site-shaped baseline: today's defaults behind `--gateway-shape site`.
+1. Site-shaped candidate: today's defaults behind `--gateway-shape site`, only
+   after #1193's argument probe records the site's actual parameter behavior.
+   It is not a quality baseline before then (see **Venue**).
 2. Effort and chat-template arguments.
 3. Window 32k, 64k and 128k, each with and without more evidence.
 4. Concurrency, raised until the cache or latency breaks.

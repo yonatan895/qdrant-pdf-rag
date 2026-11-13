@@ -122,6 +122,32 @@ AGENT_ENV_DENIED_PREFIXES = ("GATEWAY_", "PG_", "LITELLM_", "QDRANT_", "EMBED_",
 AGENT_ENV_DENIED_SUFFIXES = ("_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_URL", "_URLS", "_ENDPOINT")
 AGENT_ENV_DENIED = frozenset({"LLM_BASE_URL", "LLM_MODEL_REASONING", "DENSE_DIM", "ALLOW_HASH_MODE", "VENUE",
                               "PY", "PATH", "HOME", "CORPUS_DIR", "TMPDIR"})
+# Ambient answer-path settings are never approved inputs (#1195 review B1).
+# They can change prompt packing, output caps, retrieval, request limits or
+# token counts, so the workload boundary clears them before the lane's own
+# values and `config["agent_env"]` are applied. Documented caller inputs are
+# not here: Qdrant role keys and other credentials (`*_KEY` etc.), gateway leg
+# routing (`GATEWAY_*`, `PG_*`, `LITELLM_*`, `EMBED_*`, `RERANK_*`), `COLAB_*`,
+# executable overrides, `PY`/`PATH` and the local-stack/ingest inputs.
+AMBIENT_AGENT_PREFIXES = ("LLM_", "PROMPT_", "RRF_", "RETRIEVE_MAX_", "CHAT_", "ZOWE_MCP_")
+AMBIENT_AGENT_NAMES = frozenset({
+    "ACRONYM_EXPANSION_ENABLED", "ANSWER_TIMEOUT_S", "COMPARATIVE_SPLIT_ENABLED",
+    "DIAGNOSTIC_DUALPATH_ENABLED", "DENSE_HNSW_EF", "DENSE_QUANT_OVERSAMPLING",
+    "DENSE_QUANT_RESCORE", "DENSE_QUERY_PREFIX", "EVIDENCE_MAX_BYTES", "EVIDENCE_TIMEOUT_S",
+    "QUERY_MAX_CHARS", "SPLUNK_CONTEXT_MAX_CHARS", "REQUEST_DEADLINE_S",
+    "REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S",
+})
+
+
+def ambient_agent_setting(name: str) -> bool:
+    """True for an answer-path setting that must never be inherited.
+
+    Case-insensitive because the settings model accepts mixed-case aliases;
+    the lane's own values are applied after the clear."""
+    upper = name.upper()
+    return upper.startswith(AMBIENT_AGENT_PREFIXES) or upper in AMBIENT_AGENT_NAMES
+
+
 GATEWAY_SHAPES = ("local", "site")
 REASONING_FLAGS = (("reasoning_model", "model_id"), ("reasoning_revision", "revision"),
                    ("reasoning_max_model_len", "max_model_len"), ("reasoning_max_num_seqs", "max_num_seqs"),
@@ -1534,6 +1560,14 @@ class Run:
 
     def gateway_environment(self, bridge: str) -> dict[str, str]:
         env = self.execution_environment()
+        # Ambient answer-path settings are not in the prepared approval
+        # (#1195 review B1): an unprepared `LLM_RESERVED_OUTPUT_TOKENS` or
+        # `LLM_STREAM` would silently change prompt packing, caps and counts.
+        # Clear them before the lane's own values below; `environment()`
+        # applies `config["agent_env"]` afterwards, so prepared values win.
+        for name in tuple(env):
+            if ambient_agent_setting(name):
+                del env[name]
         identity = transport_identity(self.config, bridge)
         ownership = self.manifest.get("gateway_network", {})
         env.update(PG_NET=self.config["gateway_network"], GATEWAY_NAME=self.config["gateway_name"],

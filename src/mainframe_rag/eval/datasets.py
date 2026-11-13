@@ -76,15 +76,42 @@ def load_golden(path: Path) -> list[GoldenEntry]:
     return parse_golden_text(read_golden_text(path))
 
 
+def _golden_records(text: str) -> list[dict[str, Any]]:
+    return [
+        json.loads(line)
+        for line in map(str.strip, text.splitlines())
+        if line and not line.startswith("#")
+    ]
+
+
 def load_golden_records(paths: Sequence[Path | str]) -> list[dict[str, Any]]:
     """Raw JSON records from acquired golden files, in argument order (the
     answer tiers score the raw record; release records are valid here)."""
     return [
-        json.loads(text)
+        record
         for path in paths
-        for text in map(str.strip, read_golden_text(path).splitlines())
-        if text and not text.startswith("#")
+        for record in _golden_records(read_golden_text(path))
     ]
+
+
+def load_golden_records_with_identity(
+    paths: Sequence[Path | str],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Raw records plus a text-free dataset identity for the run parameters.
+
+    Identity is the basename and sha256 of the exact bytes read, one entry per
+    resolved dataset in argument order, so an arm can prove which split it
+    used without recording a private path or any question text."""
+    records: list[dict[str, Any]] = []
+    identity: list[dict[str, str]] = []
+    for path in paths:
+        data = read_golden_bytes(path)
+        records.extend(_golden_records(data.decode("utf-8")))
+        identity.append({
+            "name": Path(path).name,
+            "sha256": hashlib.sha256(data).hexdigest(),
+        })
+    return records, identity
 
 
 def parse_golden_text(text: str) -> list[GoldenEntry]:
@@ -250,6 +277,22 @@ def resolve_golden_paths(
     return paths
 
 
+def require_tuning_golden(paths: Sequence[Path | str], operation: str) -> None:
+    """Refuse a tuning sweep whose resolved set includes the frozen holdout.
+
+    ``--subset``/``--repeats`` write the rows an arm is tuned on; the holdout
+    is never a tuning dataset (docs/eval.md section 7). The guard lives here,
+    before any read, so an unsafe invocation cannot open the holdout or send a
+    model call. An explicit non-holdout ``--golden`` is the only way through.
+    """
+    for path in paths:
+        if _is_holdout(path):
+            raise VenueError(
+                f"{operation} needs an explicit non-holdout --golden: "
+                f"the resolved set contains the frozen holdout {HOLDOUT_FILENAME}"
+            )
+
+
 def resolve_harness_golden_paths(
     embed_mode: str,
     explicit: Sequence[Path | str] | None = None,
@@ -267,7 +310,7 @@ def resolve_harness_golden_paths(
     return resolve_golden_paths(explicit, venue)
 
 
-def read_golden_text(path: Path | str) -> str:
+def read_golden_bytes(path: Path | str) -> bytes:
     """Read once; authorize and verify frozen holdout bytes before decoding.
 
     A resolved holdout uses its target's adjacent ``.sha256`` file. The
@@ -275,6 +318,8 @@ def read_golden_text(path: Path | str) -> str:
     with the historical ``evals/`` prefix; it never redirects the read.
     The pin travels with the approved dataset, including installed usage.
     Ordinary dev datasets retain their existing unpinned read semantics.
+    Returns the exact file bytes, so a dataset identity hashes the same
+    bytes its pin (or an independent `sha256sum`) names.
     """
     path = Path(path)
     try:
@@ -289,7 +334,7 @@ def read_golden_text(path: Path | str) -> str:
     protected = path.name == HOLDOUT_FILENAME or target.name == HOLDOUT_FILENAME
     require_rc_for_golden([HOLDOUT_PATH if protected else target])
     if not protected:
-        return target.read_text(encoding="utf-8")
+        return target.read_bytes()
     try:
         pin = target.with_name(target.name + ".sha256")
         record = pin.read_text(encoding="utf-8")
@@ -299,9 +344,14 @@ def read_golden_text(path: Path | str) -> str:
         data = target.read_bytes()
         if hashlib.sha256(data).hexdigest() != match[1].lower():
             raise DatasetPinError("frozen holdout sha256 mismatch")
-        return data.decode("utf-8")
+        return data
     except (OSError, UnicodeError, ValueError) as exc:
         raise DatasetPinError("frozen holdout or its sha256 pin is unavailable or invalid") from exc
+
+
+def read_golden_text(path: Path | str) -> str:
+    """Decoded `read_golden_bytes` (same authorization and pin rules)."""
+    return read_golden_bytes(path).decode("utf-8")
 
 
 def read_release_set_text(path: Path | str) -> tuple[str, str]:

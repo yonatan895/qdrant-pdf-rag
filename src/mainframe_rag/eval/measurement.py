@@ -148,6 +148,10 @@ def _final_counts(final: dict[str, Any]) -> bool:
         isinstance(finish, str) and bool(finish)
         and isinstance(usage, dict)
         and all(is_count(usage.get(key)) for key in (*TOKEN_FIELDS, "total_tokens"))
+        # The key is required even when its value is null: the zero-hits final
+        # legitimately carries `ttft_ms: null`, but a final without the key
+        # would make `stream_signals` raise instead of failing the row closed.
+        and "ttft_ms" in final
         and (ttft is None or is_count(ttft))
     )
 

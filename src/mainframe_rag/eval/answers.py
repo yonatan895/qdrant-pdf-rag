@@ -76,8 +76,11 @@ Measurement protocol (issue #1195, docs/metric-contract.md)
     --stream (HTTP mode) reads the SSE `final`, so rows carry finish reason,
     token counts and time to first token without the in-process log join.
     --subset N is the same round-robin with a guard that no class is dropped
-    and a recorded sample identity; --repeats R runs the sample R times in
-    whole passes and reports the per-metric spread. Defaults are unchanged.
+    and a recorded sample identity (ordered ids plus each resolved dataset's
+    basename and sha256); a sweep refuses a resolved set that contains the
+    frozen holdout and needs an explicit non-holdout --golden. --repeats R
+    runs the sample R times in whole passes and reports the per-metric spread.
+    Defaults are unchanged.
 """
 
 from __future__ import annotations
@@ -173,12 +176,14 @@ from mainframe_rag.config import load_settings
 from mainframe_rag.eval.datasets import (
     DatasetError,
     VenueError,  # noqa: F401 — compatibility export
-    load_golden_records,
+    load_golden_records_with_identity,
     require_rc_for_collection,
+    require_tuning_golden,
     resolve_golden_paths,
 )
 from mainframe_rag.eval.measurement import (
     decode_tps,
+    is_count,
     measurement_summary,
     parse_server_timing,
     read_answer_stream,
@@ -759,6 +764,19 @@ def _judge_response(
     if rate is None and type(llm_ms) is int and type(ttft_ms) is int:
         # Buffered path with LLM_STREAM: both legs are server-measured.
         rate = decode_tps(signal("completion_tokens"), signal("reasoning_tokens"), llm_ms - ttft_ms)
+    # A model call always has a positive prompt count. The agent turns a
+    # missing upstream usage block into zeros, so an all-zero usage on the
+    # model path means "not reported": unknown, never a known zero (#1195
+    # review N1). The zero-hits path has no model call and keeps its zeros.
+    prompt_tokens = signal("prompt_tokens")
+    completion_tokens = signal("completion_tokens")
+    reasoning_tokens = signal("reasoning_tokens")
+    total_tokens = signal("total_tokens")
+    if not zero_hits and is_count(prompt_tokens) and prompt_tokens == 0:
+        # A positive prompt count with zero completion is a real upstream
+        # count for a finished call; only the all-zero sentinel is unknown.
+        prompt_tokens = completion_tokens = reasoning_tokens = total_tokens = None
+        warns.append("zero prompt tokens: model usage not reported (unknown)")
     gold_ids = sorted({str(d) for d in (entry.get("expected_doc_ids") or [])})
     hit_ids = (
         None
@@ -790,10 +808,10 @@ def _judge_response(
         # caller without the capture handler — never fabricated).
         query_complexity=signals.get("query_complexity"),
         finish_reason=signal("finish_reason"),
-        prompt_tokens=signal("prompt_tokens"),
-        completion_tokens=signal("completion_tokens"),
-        reasoning_tokens=signal("reasoning_tokens"),
-        total_tokens=signal("total_tokens"),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        reasoning_tokens=reasoning_tokens,
+        total_tokens=total_tokens,
         # Hardware-dependent timings (issue #1195). `ttft_ms` and `llm_ms`
         # are the server's model-leg clocks; `client_first_token_ms` is this
         # client's request start to the first SSE token (retrieval included).
@@ -1075,10 +1093,14 @@ def main(argv: list[str] | None = None) -> int:
                              "(issue #1195; default off keeps the JSON request)")
     parser.add_argument("--subset", type=_subset, default=None,
                         help="sweep subset size: the class-interleaved round-robin, refused "
-                             "if any class would be dropped (replaces --max-queries)")
+                             "if any class would be dropped; a resolved set that contains the "
+                             "frozen holdout needs an explicit non-holdout --golden "
+                             "(replaces --max-queries)")
     parser.add_argument("--repeats", type=_repeats, default=1,
                         help=f"run the sample this many whole passes (1–{_MAX_REPEATS}) and "
-                             "report the per-metric spread (default 1)")
+                             "report the per-metric spread; more than one pass is a sweep and "
+                             "needs an explicit non-holdout --golden under VENUE=rc "
+                             "(default 1)")
     args = parser.parse_args(argv)
     if args.stream and args.agent_url is None:
         parser.error("--stream needs --agent-url: the in-process client buffers the response, "
@@ -1088,11 +1110,17 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         # Venue rule (issue #268): dev defaults to the golden set only; the
-        # holdout and the real-corpus collection require VENUE=rc.
+        # holdout and the real-corpus collection require VENUE=rc. A tuning
+        # sweep additionally refuses a resolved set that contains the holdout
+        # (review B2), before any read or model call: only an explicit
+        # non-holdout --golden may feed --subset/--repeats.
         golden_paths = resolve_golden_paths(args.golden)
+        if args.subset is not None or args.repeats > 1:
+            operation = "--subset" if args.subset is not None else f"--repeats {args.repeats}"
+            require_tuning_golden(golden_paths, operation)
         if args.agent_url is None:
             require_rc_for_collection(load_settings().qdrant_collection)
-        entries = load_golden_records(golden_paths)
+        entries, datasets = load_golden_records_with_identity(golden_paths)
     except DatasetError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2
@@ -1181,6 +1209,9 @@ def main(argv: list[str] | None = None) -> int:
         "sample": {
             "mode": "subset" if args.subset is not None else "all" if args.all else "default",
             **sample_identity(sample),
+            # Dataset identity (review N2): basename + sha256 of the exact
+            # resolved files, never a private path or question text.
+            "datasets": datasets,
         },
     }
     report: dict[str, Any] = {"metrics": metrics, "results": results, "params": params}

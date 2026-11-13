@@ -3164,6 +3164,45 @@ def test_unparameterised_prepare_writes_the_manifest_it_always_wrote(lab, monkey
 
 
 @pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
+def test_ambient_agent_settings_never_reach_the_workload(lab, monkeypatch):
+    """#1195 review B1: a shell value not recorded by `prepare` used to reach
+    `workload-env.json`/`sandbox.env` (observed with LLM_RESERVED_OUTPUT_TOKENS
+    and LLM_STREAM) and change caps and counts without binding approval."""
+    root, state, _ = lab
+    monkeypatch.setenv("LLM_RESERVED_OUTPUT_TOKENS", "8192")
+    monkeypatch.setenv("LLM_STREAM", "true")
+    monkeypatch.setenv("PROMPT_MAX_CONTEXT_CHARS", "50000")
+    monkeypatch.setenv("COMPARATIVE_SPLIT_ENABLED", "false")
+    # Documented caller-only inputs survive the clear.
+    monkeypatch.setenv("QDRANT_API_KEY", "fixture-reader-1195")
+    monkeypatch.setenv("EMBED_API_KEY", "fixture-embed-1195")
+    assert _run_fake(state, (str(_env_recorder(root)),)) == 0
+    observed = json.loads((root / "workload-env.json").read_text())
+    for env in (observed, _sandbox_env(state)):
+        for name in ("LLM_RESERVED_OUTPUT_TOKENS", "LLM_STREAM", "PROMPT_MAX_CONTEXT_CHARS",
+                     "COMPARATIVE_SPLIT_ENABLED"):
+            assert name not in env
+        # The lane's own values are applied after the clear.
+        assert env["LLM_MAX_MODEL_LEN"] == "32768"
+        assert env["LLM_REASONING_EFFORT_SIMPLE"] == "medium"
+    # Documented caller-only inputs are inherited by the workload. The sandbox
+    # handoff carries only values that differ from the caller's shell, so the
+    # sourcing terminal keeps supplying its own role keys.
+    assert observed["QDRANT_API_KEY"] == "fixture-reader-1195"
+    assert observed["EMBED_API_KEY"] == "fixture-embed-1195"
+    # A prepared --agent-env value still arrives and beats the ambient value.
+    measured = _prepare_g4(
+        state, root / "ambient-prepared",
+        "--agent-env", "LLM_RESERVED_OUTPUT_TOKENS=4096",
+        "--agent-env", "PROMPT_MAX_CONTEXT_CHARS=24000")
+    assert _run_fake(measured, (str(_env_recorder(root)),)) == 0
+    observed = json.loads((root / "workload-env.json").read_text())
+    for env in (observed, _sandbox_env(measured)):
+        assert env["LLM_RESERVED_OUTPUT_TOKENS"] == "4096"
+        assert env["PROMPT_MAX_CONTEXT_CHARS"] == "24000"
+
+
+@pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
 def test_prepared_measurement_inputs_reach_the_workload_exactly_and_bind_approval(lab, monkeypatch):
     root, state, _ = lab
     reference = _manifest(state)

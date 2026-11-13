@@ -237,12 +237,19 @@ require the separately approved live run; unit packets prove integration only.
 The [measurement protocol](eval.md#measurement-protocol) varies the reasoning
 server, the agent's settings and the gateway shape. All three are `prepare`
 inputs. They are written into the prepared manifest (`profile` and `config`),
-whose digests the run approval binds, and nothing is read from the caller's
-environment at run time: a value changed after `prepare` refuses the run, and
-an ambient `GATEWAY_SHAPE` or agent setting loses to the prepared one. A
-`prepare` without these flags writes the manifest it always wrote (the tests
-pin the default profile and gateway configuration to their digests at
-`c5259460`).
+whose digests the run approval binds. At run time the workload inherits only
+documented caller inputs: the Qdrant role keys and other private secrets,
+`COLAB_*` and executable overrides, and the local-stack/ingest inputs (for
+example `UI_ENABLED`, `INGEST_WORKERS`); the gateway handoff supplies the model
+legs and their URLs. Ambient answer-path settings are cleared before the lane's
+own values are applied: every `LLM_*` name plus `PROMPT_*`, `RRF_*`,
+`RETRIEVE_MAX_*`, `CHAT_*`, `ZOWE_MCP_*` and the explicit answer/retrieval/
+request names in `scripts/colab.py` (`AMBIENT_AGENT_NAMES`). Those names are
+never read from the caller at run time; a value changed after `prepare` refuses
+the run, and a prepared `--agent-env` value or the lane's own value wins. An
+ambient `GATEWAY_SHAPE` is likewise ignored. A `prepare` without these flags
+writes the manifest it always wrote (the tests pin the default profile and
+gateway configuration to their digests at `c5259460`).
 
 | `prepare` flag | Default | Bounds |
 |---|---|---|
@@ -284,19 +291,25 @@ with the same inputs the Task passes:
 (default `local`, unchanged) renders the reasoning route without the
 `/tokenize` pass-through and without `allowed_openai_params`. The agent then
 cannot verify prompt counts against the served tokenizer, and the gateway
-forwards `reasoning_effort` only if its own adapter accepts it. That is the
-point of the baseline step: it shows what today's defaults do behind a gateway
-this repository does not configure. Keys, routing, `/v1/score` and the
-strict-finish handler are the same in both shapes. The stack's startup probe
-(`scripts/probe_gateway.py`) may report the missing routes; its handling is
-owned by #1193.
+forwards `reasoning_effort` only if its own adapter accepts it. **This is a
+candidate venue for plumbing, not a validated quality venue.** On the pinned
+adapter the likely answer is a rejection, so `run_local_stack.sh` runs its
+existing startup probe and, if it fails, stops with a fixed message before
+ingest or the agent: a quality run cannot silently proceed through a gateway
+that rejects the agent's request.
 
-Then run the sandbox lane as below, point the answer eval at the agent with
-`--agent-url ... --stream --subset 24 --repeats 3`, and keep each arm's
-manifest digest beside its report. Follow the protocol's sweep order: one
-`prepare` per served configuration (window, concurrency, model, gateway
-shape); arms that differ only in agent settings also need their own `prepare`,
-because those settings are part of the approved manifest.
+A quality run requires a probe that reaches `/v1/answer` with a judged row.
+#1193's argument probe records whether the actual site's gateway forwards,
+drops or rejects `reasoning_effort`; that record is a prerequisite before any
+arm is used as a baseline. Keys, routing, `/v1/score` and the strict-finish
+handler are the same in both shapes.
+
+Once that probe is recorded, run the sandbox lane as below, point the answer
+eval at the agent with `--agent-url ... --stream --subset 24 --repeats 3`, and
+keep each arm's manifest digest beside its report. Follow the protocol's sweep
+order: one `prepare` per served configuration (window, concurrency, model,
+gateway shape); arms that differ only in agent settings also need their own
+`prepare`, because those settings are part of the approved manifest.
 
 ## Sandbox lane (daily iteration)
 
