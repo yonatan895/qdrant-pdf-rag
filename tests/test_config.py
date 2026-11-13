@@ -234,6 +234,8 @@ def test_model_validation_error_hides_secret_input(monkeypatch):
     repr contains gateway keys."""
     key = "synthetic-key-abcdefghijklmnop"
     monkeypatch.setenv("LLM_API_KEY", key)
+    for name in ("LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("LLM_REASONING_EFFORTS", "low")
     with pytest.raises(ValidationError) as caught:
         Settings(_env_file=None)
