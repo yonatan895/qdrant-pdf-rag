@@ -46,9 +46,11 @@ Judging contract (structural first)
     verdict still fires there.
 
 Deliberate non-features
-    - No finish_reason check: AnswerResponse does not expose it; the app
-      alerts finish_reason != stop per request in its logs. Changing the
-      production response contract for an eval is out of scope.
+    - No finish_reason verdict: the JSON AnswerResponse does not expose it and
+      judge() never reads it. The finish reason, token counts and time to
+      first token are recorded per row where an existing surface carries them
+      (in-process answer log, or the SSE `final` under --stream; issue #1195)
+      and reported in the measurement groups, never as a verdict input.
     - No retries: /v1/answer is single-shot by contract (issue #20 PR C);
       an eval that retried would measure retry policy, not the product.
     - No baseline comparison yet: reasoning-model sampling is not
@@ -69,6 +71,13 @@ Execution shape
     ids, no RNG): every query_class — including negative/abstain traps — is
     represented, and reports are reproducible. --max-queries bounds GPU cost
     (each query is one reasoning-model call); --all runs the full corpus.
+
+Measurement protocol (issue #1195, docs/metric-contract.md)
+    --stream (HTTP mode) reads the SSE `final`, so rows carry finish reason,
+    token counts and time to first token without the in-process log join.
+    --subset N is the same round-robin with a guard that no class is dropped
+    and a recorded sample identity; --repeats R runs the sample R times in
+    whole passes and reports the per-metric spread. Defaults are unchanged.
 """
 
 from __future__ import annotations
@@ -167,6 +176,15 @@ from mainframe_rag.eval.datasets import (
     load_golden_records,
     require_rc_for_collection,
     resolve_golden_paths,
+)
+from mainframe_rag.eval.measurement import (
+    decode_tps,
+    measurement_summary,
+    parse_server_timing,
+    read_answer_stream,
+    repeat_spread,
+    sample_identity,
+    stream_signals,
 )
 
 
@@ -509,6 +527,9 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     metrics["budget_verified_rate"] = (
         round(metrics["budget_verified_n"] / len(signaled), 4) if signaled else None
     )
+    # Measurement protocol (issue #1195): hardware-independent and
+    # hardware-dependent groups, reported apart. Report-only.
+    metrics["measurement"] = measurement_summary(results)
     return metrics
 
 
@@ -580,6 +601,7 @@ def run_query(
     answer_signals: dict[str, dict[str, Any]] | None = None,
     hits: list[dict[str, Any]] | None = None,
     temperature: float | None = 0.0,
+    stream: bool = False,
 ) -> dict[str, Any]:
     """One live /v1/answer call + verdict. Records everything the report and
     the manifest need, including the failure detail (the answer body is the
@@ -589,7 +611,11 @@ def run_query(
     Temperature pins deterministic sampling (issue #596): 0.0 by default so
     comparisons are stable; pass the production setting explicitly to measure
     it, or None for the server default. No retries — a failed request is an
-    error row, never retried (deliberate non-feature)."""
+    error row, never retried (deliberate non-feature).
+
+    stream=True (issue #1195) sends the same request with `stream: true` and
+    judges the SSE `final`, which carries the same answer fields plus the
+    finish reason, token usage and `ttft_ms`. Token deltas are not kept."""
     t0 = time.monotonic()
     row: dict[str, Any] = {
         "id": entry["id"],
@@ -605,12 +631,35 @@ def run_query(
         "trap_type": entry.get("trap_type"),
         "domain": entry.get("domain"),
     }
+    body: dict[str, Any] = {"query": entry["query"], "temperature": temperature}
+    measured: dict[str, Any] = {}
+    outcome = None
     try:
-        resp = client.post("/v1/answer", json={"query": entry["query"], "temperature": temperature})
+        if stream:
+            outcome = read_answer_stream(client, {**body, "stream": True})
+            resp = outcome.response
+        else:
+            resp = client.post("/v1/answer", json=body)
     except Exception as exc:  # noqa: BLE001 — one bad request must not kill the run
         row.update(verdict="error", failures=[f"request error: {type(exc).__name__}"], elapsed_ms=int((time.monotonic() - t0) * 1000))
         return row
     elapsed_ms = int((time.monotonic() - t0) * 1000)
+    if outcome is not None and outcome.failure is not None:
+        # Fixed labels only: an `error` event, a stream that ended without
+        # `final`, or a `final` without valid counts is never a judged answer.
+        row.update(verdict="error", failures=[outcome.failure], elapsed_ms=elapsed_ms)
+        return row
+    if outcome is not None and outcome.final is not None:
+        measured = stream_signals(outcome.final)
+        measured["client_first_token_ms"] = outcome.first_token_ms
+        if outcome.first_token_ms is not None:
+            measured["decode_tps"] = decode_tps(
+                measured["completion_tokens"], measured["reasoning_tokens"],
+                elapsed_ms - outcome.first_token_ms,
+            )
+        return _judge_response(
+            row, entry, outcome.final, elapsed_ms, answer_signals, hits, measured
+        )
     if resp.status_code != 200:
         # The error envelope is the agent's fixed client contract; str(exc)
         # and upstream bodies never reach the client, so do not expect them.
@@ -625,6 +674,26 @@ def run_query(
     if not isinstance(data, dict):
         row.update(verdict="error", failures=["malformed answer response"], elapsed_ms=elapsed_ms)
         return row
+    # JSON path: the LLM-leg timings ride `Server-Timing` (`ttft` only when the
+    # server measured it, i.e. with LLM_STREAM). Absent stays absent.
+    headers = getattr(resp, "headers", None)
+    measured = parse_server_timing(headers.get("Server-Timing") if headers is not None else None)
+    return _judge_response(row, entry, data, elapsed_ms, answer_signals, hits, measured)
+
+
+def _judge_response(
+    row: dict[str, Any],
+    entry: dict[str, Any],
+    data: dict[str, Any],
+    elapsed_ms: int,
+    answer_signals: dict[str, dict[str, Any]] | None,
+    hits: list[dict[str, Any]] | None,
+    measured: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate and judge one answer object (the JSON body or the SSE
+    `final`: same answer fields). `measured` holds the count/timing signals
+    the transport itself carried; the in-process log join wins where both
+    exist, and an absent signal stays None."""
     answer_value = data.get("answer")
     citation_values = data.get("citations")
     if (
@@ -680,6 +749,16 @@ def run_query(
     if zero_hits:
         warns.append("zero-hits path: gold substrings not judged (canned agent message)")
     signals = (answer_signals or {}).get(str(data.get("request_id") or ""), {})
+
+    def signal(key: str) -> Any:
+        value = signals.get(key)
+        return measured.get(key) if value is None else value
+
+    llm_ms, ttft_ms = measured.get("llm_ms"), measured.get("ttft_ms")
+    rate = measured.get("decode_tps")
+    if rate is None and type(llm_ms) is int and type(ttft_ms) is int:
+        # Buffered path with LLM_STREAM: both legs are server-measured.
+        rate = decode_tps(signal("completion_tokens"), signal("reasoning_tokens"), llm_ms - ttft_ms)
     gold_ids = sorted({str(d) for d in (entry.get("expected_doc_ids") or [])})
     hit_ids = (
         None
@@ -710,11 +789,18 @@ def run_query(
         # joined the app's answer log line, else None (error rows, or a
         # caller without the capture handler — never fabricated).
         query_complexity=signals.get("query_complexity"),
-        finish_reason=signals.get("finish_reason"),
-        prompt_tokens=signals.get("prompt_tokens"),
-        completion_tokens=signals.get("completion_tokens"),
-        reasoning_tokens=signals.get("reasoning_tokens"),
-        total_tokens=signals.get("total_tokens"),
+        finish_reason=signal("finish_reason"),
+        prompt_tokens=signal("prompt_tokens"),
+        completion_tokens=signal("completion_tokens"),
+        reasoning_tokens=signal("reasoning_tokens"),
+        total_tokens=signal("total_tokens"),
+        # Hardware-dependent timings (issue #1195). `ttft_ms` and `llm_ms`
+        # are the server's model-leg clocks; `client_first_token_ms` is this
+        # client's request start to the first SSE token (retrieval included).
+        ttft_ms=ttft_ms,
+        llm_ms=llm_ms,
+        client_first_token_ms=measured.get("client_first_token_ms"),
+        decode_tps=rate,
         # Whether the model emitted a Citations: header at all — separates
         # truncated-before-cites from chose-not-to-cite downstream. The
         # signal is parse-time (the returned body has the header stripped);
@@ -871,6 +957,7 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
             lines.append(f"| {mode} | {count} |")
         lines.append(f"- inferred indices off gold: {metrics.get('inferred_index_off_gold')}")
     lines.append("")
+    lines.extend(_measurement_lines(metrics))
     fails = [r for r in results if r.get("verdict") in ("fail", "error")]
     if fails:
         lines.append("## Failures")
@@ -885,6 +972,84 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
             lines.append(f"- answer (truncated): {body}")
             lines.append("")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _measurement_lines(metrics: dict[str, Any]) -> list[str]:
+    """The two metric groups (issue #1195) as summary tables: counts and
+    durations only. Decisions read the first table; the second describes the
+    measured host."""
+    groups = metrics.get("measurement")
+    if not groups:
+        return []
+    independent, dependent = groups["hardware_independent"], groups["hardware_dependent"]
+    truncation, incomplete = independent["truncation"], independent["generation_incomplete"]
+    lines = [
+        "## Hardware-independent (decide on these)",
+        (f"- truncation rate: {truncation['rate']} "
+         f"({truncation['truncated']}/{truncation['n']} model answers with a known finish reason)"),
+        (f"- generation_incomplete rate: {incomplete['rate']} "
+         f"({incomplete['count']}/{incomplete['n']}; upper bound, every transport)"),
+        f"- rows with a reported reasoning split: {independent['reasoning_split_rows']}",
+        "",
+        "| class | n | pass | rate |",
+        "|---|---|---|---|",
+    ]
+    for cls, block in independent["pass_rate_by_class"].items():
+        lines.append(f"| {cls} | {block['n']} | {block['pass']} | {block['rate']} |")
+    lines += ["", "| tokens per answer | n | p50 | p95 | mean | max |", "|---|---|---|---|---|---|"]
+    for name, block in independent["tokens"].items():
+        lines.append(f"| {name} | {block['n']} | {block['p50']} | {block['p95']} | {block['mean']} | {block['max']} |")
+    lines += ["", "## Hardware-dependent (this host only)", "",
+              "| timing | n | p50 | p95 | mean | max |", "|---|---|---|---|---|---|"]
+    for name, block in dependent.items():
+        lines.append(f"| {name} | {block['n']} | {block['p50']} | {block['p95']} | {block['mean']} | {block['max']} |")
+    repeats = metrics.get("repeats")
+    if repeats:
+        lines += ["", f"## Spread over {repeats['n']} repeats", "",
+                  f"- entries judged differently across repeats: {len(repeats['verdict_flips'])}",
+                  "", "| metric | min | max | mean | range |", "|---|---|---|---|---|"]
+        for name, block in repeats["spread"].items():
+            if block["range"] is not None:
+                lines.append(f"| {name} | {block['min']} | {block['max']} | {block['mean']} | {block['range']} |")
+    lines.append("")
+    return lines
+
+
+_MAX_REPEATS = 10
+
+
+def _repeats(raw: str) -> int:
+    message = f"repeats must be an integer from 1 to {_MAX_REPEATS}"
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(message) from None
+    if not 1 <= value <= _MAX_REPEATS:
+        raise argparse.ArgumentTypeError(message)
+    return value
+
+
+def _subset(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError("subset must be a positive integer") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("subset must be a positive integer")
+    return value
+
+
+def select_subset(entries: list[dict[str, Any]], size: int) -> list[dict[str, Any]]:
+    """Sweep subset (issue #1195): the default sampler's class-interleaved
+    round-robin, refused when the size cannot hold one row of every class.
+    One sampling rule (`select_sample`); the guard is what makes a subset
+    comparable to a full pass class by class."""
+    classes = {entry["query_class"] for entry in entries}
+    if size < len(classes):
+        raise ValueError(
+            f"subset of {size} would drop a class: {len(classes)} classes need at least one row each"
+        )
+    return select_sample(entries, size)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -904,7 +1069,22 @@ def main(argv: list[str] | None = None) -> int:
                         help="sampling temperature sent per request (default 0 for stable "
                              "comparisons, issue #596; pass the production setting explicitly "
                              "to measure it)")
+    parser.add_argument("--stream", action="store_true",
+                        help="HTTP mode: request the SSE stream and record finish reason, "
+                             "token counts and time to first token from its final event "
+                             "(issue #1195; default off keeps the JSON request)")
+    parser.add_argument("--subset", type=_subset, default=None,
+                        help="sweep subset size: the class-interleaved round-robin, refused "
+                             "if any class would be dropped (replaces --max-queries)")
+    parser.add_argument("--repeats", type=_repeats, default=1,
+                        help=f"run the sample this many whole passes (1–{_MAX_REPEATS}) and "
+                             "report the per-metric spread (default 1)")
     args = parser.parse_args(argv)
+    if args.stream and args.agent_url is None:
+        parser.error("--stream needs --agent-url: the in-process client buffers the response, "
+                     "so its first-token time would be the total time")
+    if args.subset is not None and args.all:
+        parser.error("--subset and --all are exclusive")
 
     try:
         # Venue rule (issue #268): dev defaults to the golden set only; the
@@ -920,8 +1100,18 @@ def main(argv: list[str] | None = None) -> int:
         print("BUILD FAILED: duplicate entry ids across golden files", file=sys.stderr)
         return 1
 
-    sample = entries if args.all else select_sample(entries, args.max_queries)
+    if args.subset is not None:
+        try:
+            sample = select_subset(entries, args.subset)
+        except ValueError as exc:
+            print(f"FAIL: {exc}", file=sys.stderr)
+            return 2
+    else:
+        sample = entries if args.all else select_sample(entries, args.max_queries)
     print(f"[*] answer-tier eval: {len(sample)} of {len(entries)} entries (deterministic stratified sample)", file=sys.stderr)
+    # Whole passes, not row-by-row repeats: drift during a session (cache
+    # warmth, co-tenant load) lands on every row equally (issue #1195).
+    passes = [(number, entry) for number in range(1, args.repeats + 1) for entry in sample]
 
     results: list[dict[str, Any]] = []
     deployment: dict[str, Any] | None = None
@@ -952,19 +1142,22 @@ def main(argv: list[str] | None = None) -> int:
         if health_error is not None:
             print(f"FAIL: {health_error}", file=sys.stderr)
             results = [dict(entry, temperature=args.temperature, verdict="error",
-                            failures=[health_error], elapsed_ms=0) for entry in sample]
+                            failures=[health_error], elapsed_ms=0) for _, entry in passes]
         else:
-            for i, entry in enumerate(sample, 1):
+            for i, (number, entry) in enumerate(passes, 1):
                 pool = _fetch_pool(client, entry["query"])
                 row = run_query(
-                    client, entry, signals, pool, temperature=args.temperature
+                    client, entry, signals, pool, temperature=args.temperature,
+                    stream=args.stream,
                 )
                 if pool is not None:
                     apply_pool_join(row, entry, pool)
+                if args.repeats > 1:
+                    row["repeat"] = number
                 results.append(row)
                 marker = row.get("verdict", "?").upper()
                 print(
-                    f"[{i:>3}/{len(sample)}] {marker:5s} {row['id']:8s} "
+                    f"[{i:>3}/{len(passes)}] {marker:5s} {row['id']:8s} "
                     f"{row['query'][:58]}",
                     file=sys.stderr,
                 )
@@ -972,7 +1165,24 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"        FAIL {f}", file=sys.stderr)
 
     metrics = summarize(results)
-    params: dict[str, Any] = {"temperature": args.temperature}
+    if args.repeats > 1 and health_error is None:
+        # Pooled metrics above; per-pass metrics only feed the spread.
+        metrics["repeats"] = repeat_spread(
+            [summarize([r for r in results if r.get("repeat") == number])
+             for number in range(1, args.repeats + 1)],
+            results,
+        )
+    params: dict[str, Any] = {
+        "temperature": args.temperature,
+        # Measurement identity (issue #1195): which rows, in which order, how
+        # often and over which transport. Ids are hashed, never listed here.
+        "transport": "sse" if args.stream else "json",
+        "repeats": args.repeats,
+        "sample": {
+            "mode": "subset" if args.subset is not None else "all" if args.all else "default",
+            **sample_identity(sample),
+        },
+    }
     report: dict[str, Any] = {"metrics": metrics, "results": results, "params": params}
     if deployment is not None:
         params.update(agent_url=args.agent_url, request_timeout=args.request_timeout)
