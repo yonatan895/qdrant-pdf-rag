@@ -103,6 +103,9 @@ GitLab and LiteLLM, and its egress is set on the VM itself.
   **No OpenShift credential of any kind.**
 - Containers on OpenShift happen only through GitLab CI (`wip` runners, read with
   `scripts/gap/ci_status.py`). The VM never creates pods.
+- What the agents may read, and what stays out of their reach, is the agent class
+  of [ADR-0011](adr/0011-gateway-caller-classes.md). It adds no credential or fence
+  rule by itself.
 
 <a id="site-inputs"></a>
 ## Site inputs

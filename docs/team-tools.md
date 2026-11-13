@@ -7,6 +7,11 @@ docs instance; the Docs model stays tool-free
 ([ADR-0010](adr/0010-team-tools-on-open-webui.md)). This document owns the
 contracts every gateway shares.
 
+Who may call a gateway, and under whose authority (a signed-in user, or the
+improvement agents' workload identity), is decided in
+[ADR-0011](adr/0011-gateway-caller-classes.md); the contract below is the user
+class's.
+
 <a id="caller-verification"></a>
 ## Caller verification (issue #1076)
 
