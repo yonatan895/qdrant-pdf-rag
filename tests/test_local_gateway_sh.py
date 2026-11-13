@@ -925,6 +925,27 @@ def test_reasoning_leg_is_on_by_default_and_explicit_on_is_identical(value):
     assert explicit == baseline and "gemma-4-E4B" in explicit and '"/tokenize"' in explicit
 
 
+def test_tokenize_off_leaves_out_only_the_tokenize_passthrough():
+    """Issue #1193: the platform-gateway shape (no /tokenize) for the
+    estimator-only lane; everything else renders as with the default."""
+    baseline = yaml.safe_load(_read_cfg(_render()))
+    assert yaml.safe_load(_read_cfg(_render({"GATEWAY_TOKENIZE": "on"}))) == baseline
+    without = yaml.safe_load(_read_cfg(_render({"GATEWAY_TOKENIZE": "off"})))
+    routes = without["general_settings"]["pass_through_endpoints"]
+    assert [route["path"] for route in baseline["general_settings"]["pass_through_endpoints"]] == [
+        "/tokenize", "/v1/score"]
+    assert [route["path"] for route in routes] == ["/v1/score"]
+    without["general_settings"]["pass_through_endpoints"].insert(
+        0, baseline["general_settings"]["pass_through_endpoints"][0])
+    assert without == baseline
+
+
+@pytest.mark.parametrize("value", ["false", "OFF", "0"])
+def test_tokenize_switch_accepts_only_on_or_off(value):
+    proc = _render({"GATEWAY_TOKENIZE": value})
+    assert proc.returncode == 1 and "GATEWAY_TOKENIZE must be on or off" in proc.stderr
+
+
 @pytest.mark.parametrize("value", ["false", "OFF", "0", "no"])
 def test_reasoning_switch_accepts_only_on_or_off(value):
     proc = _render({"GATEWAY_REASONING": value})

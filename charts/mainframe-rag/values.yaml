@@ -116,6 +116,19 @@ models:
     # both efforts above must be members. Stock Qwen3.8 needs low,medium,xhigh.
     # reasoningEfforts: low,medium,xhigh
     # stream: true
+    # Model request arguments (#1193); absent keys send the earlier request.
+    # extraBody is merged into every chat request and may nest objects such as
+    # chat_template_kwargs. model, messages, stream and stream_options are
+    # protected; max_tokens, max_completion_tokens, temperature and
+    # reasoning_effort are refused (their own settings own them).
+    # effortTransport: top_level (reasoning_effort), chat_template
+    # (chat_template_kwargs.reasoning_effort) or none (not sent; only then may
+    # extraBody fix chat_template_kwargs.reasoning_effort). Find the arguments
+    # the served model honours with `probe_gateway.py --probe-args`.
+    # extraBody:
+    #   chat_template_kwargs:
+    #     enable_thinking: true
+    # effortTransport: top_level
   rerank:
     enabled: false
     baseUrl: ""

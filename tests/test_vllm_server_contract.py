@@ -453,3 +453,108 @@ async def test_chat_stream_rejected_fallback_propagates_without_done():
     assert items == []
     assert len(fake.post_bodies) == 1
     assert "stream" not in fake.post_bodies[0]
+
+
+# Issue #1193: model request arguments. Every chat path builds its body in
+# `_chat_body`; these drive each path's stream leg and recovery POST.
+_EMPTY_STOP_LINES = [
+    'data: {"choices": [{"delta": {}}]}',
+    'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}',
+    "data: [DONE]",
+]
+_RECOVERED = {"choices": [{"message": {"content": "recovered"}, "finish_reason": "stop"}]}
+_CONTENT_LINES = [
+    'data: {"choices": [{"delta": {"content": "hi"}}]}',
+    'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}',
+    "data: [DONE]",
+]
+_CHAT_PATHS = ["achat", "achat_llm_stream", "chat_stream", "sync", "sync_llm_stream"]
+
+
+async def _bodies_on_path(path, settings, *, effort="low", temperature=0.2, max_tokens=77):
+    """(stream bodies, recovery POST bodies) one chat path put on the wire."""
+    recovers = path in ("achat_llm_stream", "chat_stream", "sync_llm_stream")
+    fake = HttpxStreamFake(lines=_EMPTY_STOP_LINES if recovers else _CONTENT_LINES, payload=_RECOVERED)
+    if path.startswith("sync"):
+        fake.stream = fake.stream_sync
+    llm = HttpxLLMClient(settings, client=fake)
+    kwargs = {"reasoning_effort": effort, "temperature": temperature, "max_tokens": max_tokens}
+    if path == "chat_stream":
+        items = [item async for item in llm.chat_stream(_msgs(), **kwargs)]
+        assert items[-1]["type"] == "done"
+    elif path.startswith("sync"):
+        assert llm._chat_sync(_msgs(), **kwargs).content
+    else:
+        assert (await llm.achat(_msgs(), **kwargs)).content
+    assert len(fake.stream_bodies) == 1 and len(fake.post_bodies) == (1 if recovers else 0)
+    return fake.stream_bodies, fake.post_bodies
+
+
+def _path_settings(path, **overrides):
+    return Settings(**_settings_kwargs(llm_stream=path.endswith("llm_stream"), **overrides))
+
+
+# The pre-#1193 wire bytes, written out by hand (key order included): the
+# invariant is that unset settings send exactly these.
+_LEGACY_MESSAGES = '[{"role": "user", "content": "What does IEA500I mean?"}]'
+_LEGACY_POST = (
+    '{"model": "trial-reasoning-model", "messages": ' + _LEGACY_MESSAGES
+    + ', "reasoning_effort": "low", "temperature": 0.2, "max_tokens": 77}'
+)
+_LEGACY_STREAM = _LEGACY_POST[:-1] + ', "stream": true, "stream_options": {"include_usage": true}}'
+_LEGACY_BARE_STREAM = (
+    '{"model": "trial-reasoning-model", "messages": ' + _LEGACY_MESSAGES
+    + ', "stream": true, "stream_options": {"include_usage": true}}'
+)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("path", _CHAT_PATHS)
+async def test_unset_model_arguments_send_the_earlier_bytes_on_every_path(path, monkeypatch):
+    for name in ("LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT"):
+        monkeypatch.delenv(name, raising=False)
+    streams, posts = await _bodies_on_path(path, _path_settings(path))
+    assert [json.dumps(body) for body in streams] == [_LEGACY_STREAM]
+    assert [json.dumps(body) for body in posts] == [_LEGACY_POST] * len(posts)
+    # Omitted effort, temperature and cap stay omitted.
+    streams, _ = await _bodies_on_path(path, _path_settings(path), effort=None, temperature=None, max_tokens=None)
+    assert json.dumps(streams[0]) == _LEGACY_BARE_STREAM
+
+
+_EXTRA = {"top_k": 20, "chat_template_kwargs": {"enable_thinking": False, "nested": {"deep": [1, {"x": None}]}}}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("path", _CHAT_PATHS)
+@pytest.mark.parametrize(("transport", "effort_at"), [
+    ("top_level", "top"), ("chat_template", "template"), ("none", None),
+])
+async def test_extra_body_and_effort_transport_reach_every_chat_path(path, transport, effort_at):
+    settings = _path_settings(path, llm_extra_body=json.dumps(_EXTRA), llm_effort_transport=transport)
+    streams, posts = await _bodies_on_path(path, settings)
+    for body in (*streams, *posts):
+        assert body["top_k"] == 20
+        kwargs = body["chat_template_kwargs"]
+        # Nested operator arguments pass through intact.
+        assert kwargs["enable_thinking"] is False and kwargs["nested"] == {"deep": [1, {"x": None}]}
+        assert body.get("reasoning_effort") == ("low" if effort_at == "top" else None)
+        assert kwargs.get("reasoning_effort") == ("low" if effort_at == "template" else None)
+        # Fields the application owns are still the application's.
+        assert body["model"] == "trial-reasoning-model" and body["messages"][0]["role"] == "user"
+        assert body["temperature"] == 0.2 and body["max_tokens"] == 77
+    assert all(body["stream"] is True and body["stream_options"] == {"include_usage": True} for body in streams)
+    assert all("stream" not in body and "stream_options" not in body for body in posts)
+
+
+@pytest.mark.anyio
+async def test_extra_body_is_not_shared_between_requests():
+    """One client serves concurrent turns: a request's effort must not stay
+    in the configured arguments for the next one."""
+    settings = Settings(**_settings_kwargs(
+        llm_extra_body='{"chat_template_kwargs": {"enable_thinking": true}}', llm_effort_transport="chat_template"))
+    fake = HttpxStreamFake(lines=_CONTENT_LINES)
+    llm = HttpxLLMClient(settings, client=fake)
+    await llm.achat(_msgs(), reasoning_effort="high")
+    await llm.achat(_msgs())
+    assert fake.stream_bodies[0]["chat_template_kwargs"] == {"enable_thinking": True, "reasoning_effort": "high"}
+    assert fake.stream_bodies[1]["chat_template_kwargs"] == {"enable_thinking": True}

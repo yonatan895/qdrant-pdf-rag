@@ -138,6 +138,16 @@ restores the snapshot over whatever the file assigned; empty stays unset
   is above 0; the chart schema refuses it). Limits are per agent replica.
   Sizing rule: `REQUEST_MAX_CONCURRENT` = 2 x the engine's concurrent sequence
   slots; the site sets it from its own engine numbers.
+- Model request arguments (#1193): `LLM_EXTRA_BODY` (one JSON object; single-quote
+  it in the operator file) and `LLM_EFFORT_TRANSPORT` (`top_level`,
+  `chat_template`, `none`) follow the same precedence/export path into
+  `models.reasoning.extraBody` and `effortTransport` and the rendered agent pod.
+  `model_config.model_argument_overrides` mirrors the application's refusals
+  ([rules](agent.md#model-request-arguments)) so a refused selection stops at
+  preflight, and the chart schema refuses the same keys for direct Helm callers.
+  The mapper writes the object as one JSON flow mapping, never as block keys
+  built from operator text, and refuses integers beyond 2^53 because Helm reads
+  numbers as 64-bit floats. Unset renders neither variable.
 - Optional application budgets (`LLM_MAX_MODEL_LEN`, `LLM_RESERVED_OUTPUT_TOKENS`,
   `LLM_THINKING_RESERVE_TOKENS_SIMPLE` / `COMPLEX`), reasoning efforts
   (`LLM_REASONING_EFFORT_SIMPLE` / `COMPLEX`) and `LLM_STREAM` follow that same

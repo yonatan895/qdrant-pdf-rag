@@ -33,6 +33,7 @@ try:
     from scripts.airgap.model_config import (
         MODEL_CONFIG_KEYS,
         SIZING_ENV_KEYS,
+        JsonObject,
         feedback_config,
         ingest_resources,
         network_policy,
@@ -49,6 +50,7 @@ except ModuleNotFoundError:
     from model_config import (  # type: ignore[no-redef]  # Direct bastion-script execution.
         MODEL_CONFIG_KEYS,
         SIZING_ENV_KEYS,
+        JsonObject,
         feedback_config,
         ingest_resources,
         network_policy,
@@ -179,7 +181,11 @@ def emit_yaml(node, indent: int = 0) -> list[str]:
             return [pad + "{}"]
         lines: list[str] = []
         for key, val in node.items():
-            if isinstance(val, (dict, list)):
+            if isinstance(val, JsonObject):
+                # Operator JSON (#1193): arbitrary keys and strings, so one
+                # JSON flow mapping, never block keys built from its text.
+                lines.append(f"{pad}{key}: {val.flow()}")
+            elif isinstance(val, (dict, list)):
                 lines.append(f"{pad}{key}:")
                 lines.extend(emit_yaml(val, indent + 1))
             else:

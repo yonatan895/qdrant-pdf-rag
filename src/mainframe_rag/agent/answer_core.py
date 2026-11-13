@@ -231,22 +231,71 @@ def _resolve_reasoning_effort(
     )
 
 
+def _prompt_token_upper_bound(messages: list[ChatMessage]) -> int:
+    """A non-undercounting upper bound on the rendered prompt's tokens (#1193).
+
+    One token is at least one UTF-8 byte: every byte-level token maps to one or
+    more bytes, so counting the UTF-8 bytes of each message's role and content
+    can never be smaller than the text's token count. The fixed overhead covers
+    chat-template special tokens (role markers, separators and the BOS/EOS the
+    count includes). This is the quantity the estimator-only cap is priced
+    against; the estimator itself is not trusted, because review measured an
+    8x undercount on the default request shape: 8 excerpts of 4000
+    space-separated hex characters estimated 4328 tokens against 27459 real,
+    and the old ratio cap sent `max_tokens=10752`, making `real prompt + cap =
+    38211 > 32768` for a request the base answered uncapped (PR #1201 review
+    B1)."""
+    return (
+        sum(
+            len(message.role.encode("utf-8")) + len(message.content.encode("utf-8"))
+            for message in messages
+        )
+        + 8 * len(messages)
+        + 16
+    )
+
+
 def _output_cap(settings: Settings, complexity: str, prepared: PreparedPrompt) -> int | None:
-    """Completion cap (#777): the answer reserve plus the path's thinking
-    reserve, exactly the terms the prompt budget priced, so a runaway
-    generation ends as `length` (generation_incomplete) instead of running to
-    the served window. Sent only when the prompt count was verified against
-    the server tokenizer: then prompt + cap <= window - safety margin, and the
-    server cannot reject it. An estimator-only prompt keeps no cap rather
-    than risk an over-window request."""
-    if not prepared.budget_verified:
-        return None
+    """Completion cap (#777, #1193) bounding `real prompt + cap <= window -
+    safety margin`, never an estimate plus a proportional margin.
+
+    A server-verified count is exact: send the full cap (the answer reserve
+    plus the path's thinking reserve, the terms the prompt budget priced), so a
+    runaway generation ends as `length` (generation_incomplete) instead of
+    running to the served window.
+
+    An estimator-only count (a gateway without `/tokenize`, or a transient
+    downgrade) cannot establish that bound, so the cap is priced against
+    `_prompt_token_upper_bound(prepared.messages)` instead:
+    `room = window - upper_bound - safety`; if `room` is at least the answer
+    reserve, send `min(full, room)`, otherwise send no cap. This is
+    deliberately not a cap-on-every-generation rule: a long estimator-only
+    prompt runs uncapped, exactly as on the base, so the cap adds no new
+    server refusal (and no new 502 for a request the base answered). A prompt
+    over its limit was already refused as `prompt_budget_exceeded` before this
+    point.
+
+    None also on the no-tokenizer character-packing path
+    (`prompt_tokens is None`), which has no count to place a cap against
+    (offline and tests; serving always has a tokenizer)."""
     thinking = (
         settings.llm_thinking_reserve_tokens_complex
         if complexity == "complex"
         else settings.llm_thinking_reserve_tokens_simple
     )
-    return settings.llm_reserved_output_tokens + thinking
+    full = settings.llm_reserved_output_tokens + thinking
+    if prepared.budget_verified:
+        return full
+    if prepared.prompt_tokens is None:
+        return None
+    room = (
+        settings.llm_max_model_len
+        - _prompt_token_upper_bound(prepared.messages)
+        - settings.llm_token_safety_margin
+    )
+    if room < settings.llm_reserved_output_tokens:
+        return None
+    return min(full, room)
 
 
 async def _build_prepared_prompt(

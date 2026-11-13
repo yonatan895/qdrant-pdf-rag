@@ -32,6 +32,9 @@
 # GATEWAY_REASONING=off (default on; #862 retrieval-only Colab profiles) serves
 # only the embed and rerank legs: no reasoning route, /tokenize pass-through,
 # LLM key or LLM_* handoff exports. GATEWAY_REASONING_URL is then unused.
+# GATEWAY_TOKENIZE=off (default on; #1193) leaves out the /tokenize
+# pass-through only, like a platform gateway that does not serve it: the agent
+# then counts with its estimator and sends the estimator-only output cap.
 # Never a product path; never in CI or the air gap.
 
 set -eu
@@ -73,6 +76,7 @@ GATEWAY_LLM_KEY="${GATEWAY_LLM_KEY:-}"
 GATEWAY_EMBED_KEY="${GATEWAY_EMBED_KEY:-}"
 GATEWAY_RERANK_KEY="${GATEWAY_RERANK_KEY:-}"
 GATEWAY_REASONING="${GATEWAY_REASONING:-on}"
+GATEWAY_TOKENIZE="${GATEWAY_TOKENIZE:-on}"
 GATEWAY_DRYRUN="${GATEWAY_DRYRUN:-0}"
 # LiteLLM --detailed_debug logs full request bodies (prompts with manual
 # excerpts, embedding inputs): local short diagnosis only, never default
@@ -127,6 +131,10 @@ esac
 case "$GATEWAY_REASONING" in
     on|off) ;;
     *) die "GATEWAY_REASONING must be on or off, got '$GATEWAY_REASONING'" ;;
+esac
+case "$GATEWAY_TOKENIZE" in
+    on|off) ;;
+    *) die "GATEWAY_TOKENIZE must be on or off" ;;
 esac
 case "$GATEWAY_DEBUG" in
     1|true) GATEWAY_DEBUG_ARGS="--detailed_debug" ;;
@@ -434,7 +442,7 @@ general_settings:
   master_key: ${GATEWAY_MASTER_KEY}
   pass_through_endpoints:
 EOF
-if [ "$GATEWAY_REASONING" = on ]; then
+if [ "$GATEWAY_REASONING" = on ] && [ "$GATEWAY_TOKENIZE" = on ]; then
     cat >> "${CFG_DIR}/config.yaml" <<EOF
     - path: "/tokenize"
       target: "${TOKENIZE_TARGET}"
