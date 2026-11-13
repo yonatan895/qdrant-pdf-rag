@@ -159,7 +159,12 @@ def new_http_client(timeout: float, connect_retries: int) -> httpx2.Client:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
 
     # Qdrant
     qdrant_url: str = "http://localhost:6333"
