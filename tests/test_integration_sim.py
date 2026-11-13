@@ -962,7 +962,8 @@ def test_ops_cli_real_agent_round_trip_and_recovery(
         streamed = accepted("answer", "IEA500I operator message", "--stream")
         assert streamed["finish_reason"] == "stop"
 
-        code, rejected, stderr = invoke("answer", "x" * 2001)
+        # /v1/search keeps the query cap; /v1/answer answers long input (#1192).
+        code, rejected, stderr = invoke("search", "x" * 2001)
         assert code == 7 and rejected["ok"] is False
         assert rejected["error"]["code"] == "request_rejected"
         assert rejected["error"]["status"] == 422
