@@ -8,9 +8,23 @@ The serializable profile is the sole producer of remote model argv.
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
+GENERATOR_MODEL = "Qwen/Qwen3.8-27B"
 GENERATOR_REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+# Reasoning-server inputs of the measurement protocol (#1195). The defaults
+# are the reference values, so an unparameterised profile is unchanged. The
+# window ceiling is serve.budget.ModelSpec.context_need's and
+# Settings.llm_max_model_len's (131072); a test pins the three in step.
+REASONING_DEFAULTS = {"model_id": GENERATOR_MODEL, "revision": GENERATOR_REVISION,
+                      "max_model_len": 32768, "reasoning_parser": "qwen3"}
+REASONING_WINDOW_BOUNDS = (4096, 131072)
+REASONING_SEQUENCE_BOUNDS = (1, 16)
+REASONING_PARSER_NONE = "none"
+_MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
+_REVISION = re.compile(r"[0-9a-f]{40}")
+_PARSER = re.compile(r"[a-z0-9_]{1,32}")
 EMBEDDING_REVISION = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
 # #862 retrieval-only measurement profiles: Qwen3-Embedding-8B plus ONE
 # Qwen3-Reranker and no reasoning server (an 8B reranker cannot co-reside with
@@ -43,9 +57,53 @@ def profile_server(profile: dict[str, Any], role: str) -> dict[str, Any]:
     return server
 
 
-def build_profile(name: str, *, embed_max_len: int = 8192,
-                  deadline_seconds: int = 7200) -> dict[str, Any]:
-    """Produce a public reference profile; reject unknown profiles/oversize inputs."""
+def reasoning_inputs(name: str, overrides: dict[str, Any] | None) -> dict[str, Any]:
+    """Resolve the reasoning-server inputs of a profile, fail closed.
+
+    Absent keys take the reference value. A model other than the reference
+    needs its own immutable revision: the reference pin is never reused for
+    it. Fit is not proven here (see the module docstring): the allocation
+    fractions stay the profile's, and vLLM refuses at startup a window its
+    KV pool cannot hold, which the lane reports as a failed, released run."""
+    if name not in COLAB_PROFILES or name == "COLAB_CPU_TRANSPORT" or name in RERANKERS:
+        raise ValueError("reasoning inputs need a profile with a reasoning server")
+    given = dict(overrides or {})
+    allowed = {*REASONING_DEFAULTS, "max_num_seqs"}
+    if not set(given) <= allowed or any(value is None for value in given.values()):
+        raise ValueError("unknown or empty reasoning input")
+    resolved = {**REASONING_DEFAULTS,
+                "max_num_seqs": 1 if name == "COLAB_A100_80GB_BF16" else 2, **given}
+    model, revision, parser = (resolved[key] for key in ("model_id", "revision", "reasoning_parser"))
+    if (type(model) is not str or not _MODEL_ID.fullmatch(model) or ".." in model
+            or type(revision) is not str or not _REVISION.fullmatch(revision)):
+        raise ValueError("reasoning model needs a Hugging Face repository id and a 40-hex revision")
+    if model != GENERATOR_MODEL and "revision" not in given:
+        raise ValueError("a non-reference reasoning model needs its own pinned revision")
+    if type(parser) is not str or not _PARSER.fullmatch(parser):
+        raise ValueError("reasoning parser must be a vLLM parser name or 'none'")
+    for key, (low, high) in (("max_model_len", REASONING_WINDOW_BOUNDS),
+                             ("max_num_seqs", REASONING_SEQUENCE_BOUNDS)):
+        if type(resolved[key]) is not int or not low <= resolved[key] <= high:
+            raise ValueError(f"reasoning {key} outside the declared bounds {low}..{high}")
+    return resolved
+
+
+def reasoning_window(profile: dict[str, Any]) -> int:
+    """The served reasoning window, read from the argv that launches it."""
+    argv = profile_server(profile, "reasoning")["argv"]
+    if argv.count("--max-model-len") != 1:
+        raise ValueError("reasoning argv has no unique window")
+    return int(argv[argv.index("--max-model-len") + 1])
+
+
+def build_profile(name: str, *, embed_max_len: int = 8192, deadline_seconds: int = 7200,
+                  reasoning: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Produce a public reference profile; reject unknown profiles/oversize inputs.
+
+    `reasoning` (#1195) carries measurement inputs for the reasoning server.
+    Inputs equal to the reference leave the profile exactly as before; any
+    other input is recorded as `reasoning_inputs`, so the prepared manifest,
+    its approval and every consumer that rebuilds the profile see them."""
     if name not in COLAB_PROFILES:
         raise ValueError(f"unknown Colab profile: {name}")
     if (type(deadline_seconds) is not int or type(embed_max_len) is not int
@@ -67,6 +125,14 @@ def build_profile(name: str, *, embed_max_len: int = 8192,
         "dense_dim": 0 if cpu else 4096,
         "servers": [],
     }
+    if cpu or rerank:
+        if reasoning:
+            raise ValueError("reasoning inputs need a profile with a reasoning server")
+        inputs = None
+    else:
+        inputs = reasoning_inputs(name, reasoning)
+        if inputs != reasoning_inputs(name, None):
+            profile["reasoning_inputs"] = inputs
     if cpu:
         return profile
     embedding = ("embed", "Qwen/Qwen3-Embedding-8B", EMBEDDING_REVISION, "embedding", 8001,
@@ -82,14 +148,19 @@ def build_profile(name: str, *, embed_max_len: int = 8192,
         models = (embedding, ("rerank", model, revision, "reranker", 8000, "0.30",
                               RERANK_WINDOW, RERANK_SEQUENCES))
     else:
-        models = (("reasoning", "Qwen/Qwen3.8-27B", GENERATOR_REVISION, "reasoning", 8000,
-                   "0.73" if a100 else "0.66", 32768, 1 if a100 else 2), embedding)
+        assert inputs is not None
+        models = (("reasoning", inputs["model_id"], inputs["revision"], "reasoning", 8000,
+                   "0.73" if a100 else "0.66", inputs["max_model_len"], inputs["max_num_seqs"]),
+                  embedding)
     for role, model, revision, path, port, allocation, window, sequences in models:
         argv = ["/content/rag-vllm/bin/vllm", "serve", f"/content/models/{path}",
                 "--served-model-name", model, "--dtype", "bfloat16",
                 "--tensor-parallel-size", "1"]
         if role == "reasoning":
-            argv += ["--language-model-only", "--reasoning-parser", "qwen3"]
+            assert inputs is not None
+            argv.append("--language-model-only")
+            if inputs["reasoning_parser"] != REASONING_PARSER_NONE:
+                argv += ["--reasoning-parser", inputs["reasoning_parser"]]
         elif role == "rerank":
             argv += ["--runner", "pooling", "--hf-overrides", RERANK_HF_OVERRIDES, "--chat-template",
                      f"/content/models/{path}/{RERANK_CHAT_TEMPLATE}"]

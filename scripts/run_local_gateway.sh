@@ -32,6 +32,11 @@
 # GATEWAY_REASONING=off (default on; #862 retrieval-only Colab profiles) serves
 # only the embed and rerank legs: no reasoning route, /tokenize pass-through,
 # LLM key or LLM_* handoff exports. GATEWAY_REASONING_URL is then unused.
+# GATEWAY_SHAPE=site (default local; issue #1195) renders the shape a platform
+# gateway may have: no /tokenize pass-through and no argument allow-list on
+# the reasoning route, so the agent's prompt counts are unverified and an
+# argument outside the OpenAI chat schema is not forwarded on this gateway's
+# say-so. Routing, keys, /v1/score and the strict-finish handler are unchanged.
 # Never a product path; never in CI or the air gap.
 
 set -eu
@@ -73,6 +78,7 @@ GATEWAY_LLM_KEY="${GATEWAY_LLM_KEY:-}"
 GATEWAY_EMBED_KEY="${GATEWAY_EMBED_KEY:-}"
 GATEWAY_RERANK_KEY="${GATEWAY_RERANK_KEY:-}"
 GATEWAY_REASONING="${GATEWAY_REASONING:-on}"
+GATEWAY_SHAPE="${GATEWAY_SHAPE:-local}"
 GATEWAY_DRYRUN="${GATEWAY_DRYRUN:-0}"
 # LiteLLM --detailed_debug logs full request bodies (prompts with manual
 # excerpts, embedding inputs): local short diagnosis only, never default
@@ -127,6 +133,10 @@ esac
 case "$GATEWAY_REASONING" in
     on|off) ;;
     *) die "GATEWAY_REASONING must be on or off, got '$GATEWAY_REASONING'" ;;
+esac
+case "$GATEWAY_SHAPE" in
+    local|site) ;;
+    *) die "GATEWAY_SHAPE must be local or site, got '$GATEWAY_SHAPE'" ;;
 esac
 case "$GATEWAY_DEBUG" in
     1|true) GATEWAY_DEBUG_ARGS="--detailed_debug" ;;
@@ -411,11 +421,17 @@ if [ "$GATEWAY_REASONING" = on ]; then
       model: strict_openai/${GATEWAY_REASONING_MODEL}
       api_base: ${GATEWAY_REASONING_URL}
       api_key: dummy
+EOF
+    # Site shape (#1195): no allow-list, as on a gateway this repo does not
+    # configure. drop_params stays off, so nothing is silently rewritten.
+    if [ "$GATEWAY_SHAPE" = local ]; then
+        cat >> "${CFG_DIR}/config.yaml" <<EOF
       # The agent sends reasoning_effort; the openai adapter would reject it
       # (unsupported param) and litellm.drop_params would silently change
       # behavior. Forward it to vLLM instead — fidelity over convenience.
       allowed_openai_params: ["reasoning_effort"]
 EOF
+    fi
 fi
 cat >> "${CFG_DIR}/config.yaml" <<EOF
   - model_name: ${GATEWAY_EMBED_MODEL}
@@ -434,7 +450,7 @@ general_settings:
   master_key: ${GATEWAY_MASTER_KEY}
   pass_through_endpoints:
 EOF
-if [ "$GATEWAY_REASONING" = on ]; then
+if [ "$GATEWAY_REASONING" = on ] && [ "$GATEWAY_SHAPE" = local ]; then
     cat >> "${CFG_DIR}/config.yaml" <<EOF
     - path: "/tokenize"
       target: "${TOKENIZE_TARGET}"
