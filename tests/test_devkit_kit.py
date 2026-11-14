@@ -1226,6 +1226,9 @@ def test_hardened_opencode_config_carries_the_required_settings_and_no_secret():
     assert provider["options"]["apiKey"] == "{file:/run/secrets/mfr-dev-litellm}"
     assert config["model"] == "site-litellm/{env:MFR_LLM_MODEL}"
     assert list(provider["models"]) == ["{env:MFR_LLM_MODEL}"]
+    # 4,096 and 8,192 were too small for OpenCode's own compaction summary (#1196); with the
+    # roughly 18,000-token prompts it sends, 12,000 still fits the 32,000 context.
+    assert provider["models"]["{env:MFR_LLM_MODEL}"]["limit"] == {"context": 32000, "output": 12000}
     # Setting 4: an explicit shell policy (v2 renamed bash to shell; both are set alike).
     shell = config["permission"]["shell"]
     assert config["permission"]["bash"] == shell
@@ -1309,8 +1312,20 @@ def test_workers_get_their_own_worktrees_and_run_mfr_opencode_under_hc(workers_r
     calls = ctx["log"].read_text().splitlines()
     # One serial warm-up turn on the fresh HOME before any worker starts (Podman trial).
     assert calls[0] == "mfr-opencode run Reply with the single word OK. Do not use any tool."
-    assert calls[1:] == [f"run --bg --name w-{i} --cwd {worktrees / f'w-{i}'} --no-parent -- mfr-opencode run {task}"
-                     for i, task in (("one", "Write RESULT.txt"), ("bad", "Fail on purpose"))]
+    briefs = worktrees / ".briefs"
+    start_line = ("Carry out the task in your instructions under the heading TASK BRIEF. It is the only task. "
+                  "If you lose track, re-read that block and continue. Start now.")
+    # The brief travels as instructions (sent on every step), never as the prompt (#1196); hc drops
+    # the caller's environment, so the per-worker config is passed through env.
+    assert calls[1:] == [f"run --bg --name w-{i} --cwd {worktrees / f'w-{i}'} --no-parent -- "
+                         f"env OPENCODE_CONFIG={briefs / f'w-{i}.json'} mfr-opencode run {start_line}"
+                         for i in ("one", "bad")]
+    assert (briefs / "w-one.md").read_text() == "TASK BRIEF\n\nWrite RESULT.txt\n"
+    assert json.loads((briefs / "w-one.json").read_text()) == {
+        "instructions": [str(briefs / "w-one.md")],
+        "tools": {"execute": False, "question": False, "subagent": False, "task": False}}
+    # The briefs live outside every worktree, so a worker cannot commit one.
+    assert _git(worktrees / "w-one", "status", "--porcelain") == ""
     branches = _git(ctx["repo"], "worktree", "list", "--porcelain")
     assert "branch refs/heads/agents/w-one" in branches and "branch refs/heads/agents/w-bad" in branches
     collected = _workers(ctx, "collect", "--tasks", str(ctx["tasks"]), "--logs", str(ctx["tmp"] / "logs"))
@@ -1333,6 +1348,40 @@ def test_a_failed_warm_up_starts_no_worker(workers_repo):
     assert done.returncode == 2
     assert done.stderr == "mfr-agent-workers: the warm-up turn failed (rc 1); no worker was started\n"
     assert [c for c in ctx["log"].read_text().splitlines() if c.startswith("run ")] == []
+
+
+def test_a_task_can_name_a_brief_file_with_several_lines(workers_repo):
+    ctx = workers_repo
+    (ctx["tmp"] / "fix.md").write_text("TITLE: one\n\nPROBLEM: two\nlines\n")
+    ctx["tasks"].write_text("fix\t@fix.md\n")
+    done = _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"]))
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert (ctx["tmp"] / "agent-worktrees/.briefs/w-fix.md").read_text() == (
+        "TASK BRIEF\n\nTITLE: one\n\nPROBLEM: two\nlines\n")
+    # The next ordinary operation: collect needs only the ids, so it still works after the
+    # brief's source file is gone (review of #1227).
+    (ctx["tmp"] / "fix.md").unlink()
+    collected = _workers(ctx, "collect", "--tasks", str(ctx["tasks"]), "--logs", str(ctx["tmp"] / "logs"))
+    assert collected.returncode == 0, collected.stdout + collected.stderr
+    assert collected.stdout.splitlines()[-1] == "workers=1 failures=0"
+    # A brief that cannot be written starts nothing: no worktree, no branch, no worker.
+    ctx["log"].unlink()
+    (ctx["tmp"] / "fix.md").write_text("TITLE: again\n")
+    ctx["tasks"].write_text("late\t@fix.md\n")
+    blocked = ctx["tmp"] / "agent-worktrees/.briefs/w-late.md"
+    blocked.mkdir()
+    refused = _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"]))
+    assert refused.returncode == 2
+    assert refused.stderr == "mfr-agent-workers: a worker brief could not be written; no worker was started\n"
+    assert not ctx["log"].exists() and "agents/w-late" not in _git(ctx["repo"], "branch", "--list")
+    blocked.rmdir()
+    for missing in ("gone\t@nope.md\n", "empty\t@empty.md\n"):
+        (ctx["tmp"] / "empty.md").write_text("\n")
+        ctx["tasks"].write_text(missing)
+        ctx["log"].unlink(missing_ok=True)
+        refused = _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"]))
+        assert refused.returncode == 2 and refused.stderr.startswith("mfr-agent-workers: tasks line 1 names ")
+        assert not ctx["log"].exists()
 
 
 @pytest.mark.parametrize("tasks", ["one Write it\n", "One\tx\n", "a\tx\na\ty\n", "# nothing\n"])

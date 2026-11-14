@@ -72,11 +72,19 @@ Also set: `autoupdate: false`, `share: disabled`, `webfetch` and `websearch` den
 `MFR_LLM_BASE_URL` with the model `MFR_LLM_MODEL`, and its key is read from the Podman
 secret `/run/secrets/mfr-dev-litellm`: the **separate dev LiteLLM key** of the CI
 namespace decision, never a production key. The image holds no key. Model limits are a
-conservative 32,000-token context and 4,096-token output.
+conservative 32,000-token context and 12,000-token output: 4,096 and 8,192 were too
+small for OpenCode's own compaction summary, which then ends the run, and OpenCode
+sends prompts of up to about 18,000 tokens, so 12,000 still fits the context
+([#1196](https://github.com/yonatan895/qdrant-pdf-rag/issues/1196)).
 
-Not verified on v2.2.5 and left to the site run: that `/etc/opencode/opencode.json`
-outranks a project `opencode.json` (OpenCode's documentation says so); permission keys
-that a project config adds next to the managed ones. The egress fence, not the
+Probed on v2.2.5 in a container, not on the VM: with the managed file in place, a config
+named by `OPENCODE_CONFIG` that holds only `instructions` and `tools` is loaded as well
+(the worker repeated a phrase found only in its instructions file, and the tools set to
+false were gone). Not verified on v2.2.5 and left to the site run: that
+`/etc/opencode/opencode.json` outranks a project `opencode.json` (OpenCode's
+documentation says so); permission keys that a project config adds next to the managed
+ones. On the VM, check the delivery once: start one worker whose brief asks it to repeat
+a phrase. The egress fence, not the
 permission policy, is the network control.
 
 <a id="accounts"></a>
@@ -243,8 +251,9 @@ mfr-agent-workers start --repo /work/<repo> --tasks tasks.txt   # one "<id><TAB>
 mfr-agent-workers collect --tasks tasks.txt                      # hc wait --json, hc read, summary
 ```
 
-`start` runs `hc run --bg --name w-<id> --cwd <worktree> --no-parent -- mfr-opencode
-run "<task>"` for each line. `hc wait` falls back to the process exit, so no OpenCode
+`start` writes each brief beside the worktrees and runs `hc run --bg --name w-<id> --cwd
+<worktree> --no-parent -- env OPENCODE_CONFIG=<brief config> mfr-opencode run "<fixed
+start line>"` for each line ([task briefs](#task-briefs)). `hc wait` falls back to the process exit, so no OpenCode
 plugin is needed. The workers keep running if the controller, its terminal or a viewer
 goes away; `collect` again from any shell. The workers commit on their branches; a
 person pushes and opens merge requests (the shell policy denies `git push`).
@@ -262,9 +271,31 @@ starting the worker, in five parts:
 - **WHERE**: the file paths to change.
 - **MUST NOT CHANGE**: what stays as it is.
 
-The tasks file holds one task per line, `<id><TAB><task>`, and no continuation line
-(`tasks()` in `images/devkit/bin/mfr-agent-workers`), so the brief is that one line,
-with the part labels in capitals. In one measurement on 12 scoped fixes with a hosted
+The tasks file holds one task per line, `<id><TAB><task>`. A brief of several lines goes
+in its own file, named in the tasks file as `<id><TAB>@<file>` (relative to the tasks
+file). `mfr-agent-workers start` does not send the brief as the prompt: it writes it to
+`.briefs/<name>.md` beside the worktrees and gives the worker a config that loads it as
+instructions and turns off the tools a worker does not need. OpenCode drops old turns
+long before the model's limit, so a brief sent as the first message is gone a few dozen
+steps in, and the worker then makes up a task from what is left. A one-line task cannot
+begin with `@`.
+
+Rules from running a hosted flash-class model, not the site model, on real fixes in this
+repository ([#1196](https://github.com/yonatan895/qdrant-pdf-rag/issues/1196)):
+
+- **One behaviour and its tests per worker.** A brief with four parts ended with nothing
+  committed; the same work as single parts completed. Split "write the failing test"
+  from "make it pass" when the fix touches several code paths.
+- **Take the brief from the issue, word for word.** A brief rewritten from memory left
+  out half of its issue.
+- **A worker's report is a claim.** Exit code 0 covered runs that committed nothing or
+  answered another task, and one report of passing tests on a commit that fails. Before
+  a branch leaves the VM, someone other than the worker runs the named tests at the
+  commit and reads the diff, and the change gets its review.
+- **A run that ends in a compaction error is retried as it is**; one that repeats the
+  same reads for an hour is stopped and its task split.
+
+In one measurement on 12 scoped fixes with a hosted
 flash-class model, not the site model
 ([#1196](https://github.com/yonatan895/qdrant-pdf-rag/issues/1196)), a full brief
 solved 23 of 24 runs (12 at each of two reasoning settings) and a title and path only

@@ -19,7 +19,7 @@
         "{env:MFR_LLM_MODEL}": {
           "name": "{env:MFR_LLM_MODEL}",
           "tool_call": true,
-          "limit": { "context": 32000, "output": 4096 }
+          "limit": { "context": 32000, "output": 12000 }
         }
       }
     }
