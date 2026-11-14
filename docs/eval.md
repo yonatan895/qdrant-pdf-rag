@@ -463,7 +463,24 @@ report. Missing/null required answer or citation fields are malformed, including
 on abstention cases. Per-case HTTP, transport or malformed-response errors remain rows,
 later cases still run, and any error makes the final exit nonzero. Existing
 rates retain their judged-row meanings; `metrics.queries` counts all selected
-cases and `metrics.errors` exposes unsuccessful ones.
+cases and `metrics.errors` exposes unsuccessful ones. The report also carries
+the coverage fields added under issue #1216, each counted over every selected
+case:
+
+- `total`: every case the run selected, the same count as `metrics.queries`;
+  judged, error and unjudged rows alike.
+- `unjudged`: rows with no pass, fail or error verdict, so
+  `judged + errors + unjudged == total`.
+- `error_rate`: `metrics.errors` divided by `total`; null on an empty run.
+- `judged_rate`: `metrics.judged` divided by `total`, the share of selected
+  cases that actually received a pass or fail verdict; null on an empty run.
+
+Every pass rate is over judged rows only: `unjudged` and `error` rows are in no
+rate denominator, so read the rates together with these fields rather than
+inferring coverage from the rate alone. Metrics from a run built before these
+fields exist — an older report file, for example — stay readable: without them
+the text summary prints the answer pass rate line in its previous shape, with
+the pass rate and its judged-row count only.
 
 HTTP reports and trend manifests record the target URL, observed fixed health
 fields and pre-scoring representation verdict. `/healthz` exposes no immutable
