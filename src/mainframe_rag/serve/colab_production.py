@@ -377,8 +377,11 @@ def _profile(profile: Object) -> tuple[Object, int]:
     if type(argv) is not list or argv.count("--max-model-len") != 1:
         raise ProductionAdmissionError("embedding server window flags are unsupported")
     window = int(argv[argv.index("--max-model-len") + 1])
+    # Recorded reasoning inputs (#1195) are rebuilt by their owner, so a
+    # parameterised profile is admitted only as exactly what prepare produced.
     wanted = build_profile(profile["name"], embed_max_len=window,
-                           deadline_seconds=profile["deadline_seconds"])
+                           deadline_seconds=profile["deadline_seconds"],
+                           reasoning=profile.get("reasoning_inputs"))
     current = {key: value for key, value in profile.items()
                if key not in ("inference_lock_sha256", "expires_at")}
     if not wanted["accelerator"] or _digest(current) != _digest(wanted):

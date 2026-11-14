@@ -566,6 +566,74 @@ def test_purge_unlink_failure_is_a_failed_run_and_the_next_run_removes_the_uploa
     assert not inside.exists()
 
 
+def test_current_behaviour_one_undeletable_upload_blocks_the_whole_purge(tmp_path):
+    """One upload file that cannot be unlinked makes the entire purge run fail
+    and roll back every expired chat's rows on every retry until the blocking
+    entry is fixed by hand, and the sibling files already unlinked inside the
+    failed transaction are lost even though their rows survive (tracker #1211)."""
+    data, db, conn = _db(tmp_path)
+
+    # Two expired chats and one fresh one, each with its own upload row.
+    payload = json.dumps({"messages": [{"content": CANARY_OLD}]})
+    stale = NOW - 31 * DAY
+    conn.executemany(
+        "INSERT INTO chat VALUES (?, 'u1', 't', ?, ?, ?, NULL)",
+        [("c-old-1", payload, stale, stale), ("c-old-2", payload, stale, stale),
+         ("c-keep", json.dumps({"messages": [{"content": "fresh"}]}), NOW, NOW)],
+    )
+    good = _upload(data, "good.txt", "an expired chat's answer", 31)
+    # open-webui stores an upload's location verbatim in file.path, and
+    # _upload_path resolves it without stat-ing it first, so a non-empty
+    # directory recorded there makes the real unlink fail for any user
+    # (ENOTEMPTY): no monkeypatching, no root-sensitive permission trick.
+    blocked = data / "uploads" / "blocked"
+    blocked.mkdir()
+    (blocked / "part").write_text("stuck")
+    conn.executemany(
+        "INSERT INTO file VALUES (?, 'u1', ?, ?)",
+        [("f-1", str(good), stale), ("f-2", str(blocked), stale)],
+    )
+    conn.executemany(
+        "INSERT INTO chat_file VALUES (?, ?)", [("c-old-1", "f-1"), ("c-old-2", "f-2")]
+    )
+    conn.commit()
+    with pytest.raises(purge.PurgeError, match="unlink"):
+        purge._unlink(blocked)  # the single undeletable upload, sanity check
+
+    # The documented shape of #1211: the unlinks happen inside the purge
+    # transaction (purge_chats.py's own comment: "a failure rolls the rows
+    # back"), so one unlink failure fails the whole run and BOTH expired
+    # chats' rows roll back untouched. The retry never converges: the blocking
+    # entry is still undeletable next run, so every purge fails until it is
+    # fixed by hand, and the data keeps accumulating.
+    for _ in range(2):
+        with pytest.raises(purge.PurgeError, match="unlink"):
+            purge.purge(db, data, 30, NOW)
+    assert {r[0] for r in conn.execute("SELECT id FROM chat")} == {
+        "c-old-1", "c-old-2", "c-keep"
+    }
+    assert {r[0] for r in conn.execute("SELECT id FROM file")} == {"f-1", "f-2"}
+    assert conn.execute("SELECT COUNT(*) FROM chat_file").fetchone()[0] == 2
+    # not purged, not marked pending: nothing about these chats was settled
+    assert json.loads(conn.execute(
+        "SELECT chat FROM chat WHERE id = 'c-old-1'").fetchone()[0])
+    # The rollback restores rows only. good.txt was unlinked inside the failed
+    # transaction before the blocking entry raised, and unlinking is not
+    # transactional: the row says the file exists, but it is gone for good.
+    assert not good.exists()
+    assert (blocked / "part").read_text() == "stuck"
+
+    # Nothing the sidecar does can converge: only clearing the blocking entry
+    # out-of-band lets the same purge complete both chats in one run.
+    (blocked / "part").unlink()
+    blocked.rmdir()
+    assert purge.purge(db, data, 30, NOW) == {
+        "chats": 2, "snapshots": 0, "linked_rows": 2, "files": 2, "orphans": 0
+    }
+    assert conn.execute("SELECT COUNT(*) FROM chat").fetchone()[0] == 1
+    conn.close()
+
+
 def _upload(data, name, text, age_days):
     import os
     path = data / "uploads" / name
@@ -686,3 +754,93 @@ def test_purge_cli_once_exit_codes_and_window_bounds(tmp_path):
     for suffix in ("-wal", "-shm"):
         (data / f"webui.db{suffix}").unlink(missing_ok=True)
     assert purge.main(["--days", "30", "--data-dir", str(data), "--once"]) == 1
+
+
+def test_purge_main_resumes_its_counters_from_the_status_file(tmp_path, capsys):
+    data, db, conn = _db(tmp_path, chat_columns="id TEXT PRIMARY KEY")
+    status: dict = {}
+    assert purge.run_once(db, data, 30, status, NOW) is False
+    assert purge.run_once(db, data, 30, status, NOW + 1) is False
+    recorded = json.loads((data / purge.STATUS_NAME).read_text())
+    assert recorded["consecutive_failures"] == 2 and recorded["total_failures"] == 2
+    conn.close()
+    capsys.readouterr()
+    # A new process starts from an empty dict, like a pod restart.
+    assert purge.main(["--days", "30", "--data-dir", str(data), "--once"]) == 1
+    resumed = json.loads((data / purge.STATUS_NAME).read_text())
+    assert resumed["consecutive_failures"] == 3 and resumed["total_failures"] == 3
+    err = capsys.readouterr().err
+    assert "chat purge FAILED (schema); consecutive failures 3" in err
+
+
+def test_purge_main_counts_a_status_file_that_is_not_json_as_empty(tmp_path, capsys):
+    data, _db_path, conn = _db(tmp_path, chat_columns="id TEXT PRIMARY KEY")
+    conn.close()
+    (data / purge.STATUS_NAME).write_text("not json at all\n")
+    assert purge.main(["--days", "30", "--data-dir", str(data), "--once"]) == 1
+    recorded = json.loads((data / purge.STATUS_NAME).read_text())
+    assert recorded["consecutive_failures"] == 1 and recorded["total_failures"] == 1
+    err = capsys.readouterr().err
+    assert "chat purge FAILED (schema); consecutive failures 1" in err
+    assert "Traceback" not in err
+
+
+def test_purge_main_with_no_status_file_reports_a_fresh_success(tmp_path):
+    data, _db_path, conn = _db(tmp_path)
+    _seed(conn, data)
+    conn.close()
+    assert not (data / purge.STATUS_NAME).exists()
+    assert purge.main(["--days", "30", "--data-dir", str(data), "--once"]) == 0
+    recorded = json.loads((data / purge.STATUS_NAME).read_text())
+    assert recorded["consecutive_failures"] == 0
+    assert recorded["last_success"] and not recorded["last_error"]
+
+
+def test_purge_main_after_a_restart_clears_restored_failures_on_its_first_success(tmp_path, capsys):
+    data, _db_path, conn = _db(tmp_path)
+    _seed(conn, data)
+    conn.close()
+    # A failing purge was restarted: the counters on the claim say so.
+    (data / purge.STATUS_NAME).write_text(json.dumps({
+        "consecutive_failures": 5, "total_failures": 7, "last_error": "busy", "last_success": 1}))
+    assert purge.main(["--days", "30", "--data-dir", str(data), "--once"]) == 0
+    recorded = json.loads((data / purge.STATUS_NAME).read_text())
+    assert recorded["consecutive_failures"] == 0 and recorded["total_failures"] == 7
+    assert recorded["last_error"] == "" and recorded["last_success"] > 1
+    assert capsys.readouterr().out.startswith("chat purge ok: window 30 days,")
+
+
+@pytest.mark.parametrize("key", ["consecutive_failures", "total_failures"])
+@pytest.mark.parametrize("raw", ['"3"', "null", "2.0", "2.5", "-3", "true", "NaN"],
+                         ids=["string", "null", "float-whole", "float", "negative", "bool", "nan"])
+def test_purge_main_restarts_a_counter_that_is_not_a_non_negative_int(tmp_path, capsys, key, raw):
+    data, _db_path, conn = _db(tmp_path, chat_columns="id TEXT PRIMARY KEY")
+    conn.close()
+    # Not a file this script writes: a hand edit or a foreign tool.
+    (data / purge.STATUS_NAME).write_text(f'{{"{key}": {raw}}}')
+    assert purge.main(["--days", "30", "--data-dir", str(data), "--once"]) == 1
+    recorded = json.loads((data / purge.STATUS_NAME).read_text())
+    assert recorded["consecutive_failures"] == 1 and type(recorded["consecutive_failures"]) is int
+    assert recorded["total_failures"] == 1 and type(recorded["total_failures"]) is int
+    err = capsys.readouterr().err
+    assert err == "chat purge FAILED (schema); consecutive failures 1\n"
+
+
+def test_purge_main_keeps_a_valid_counter_beside_a_dropped_one(tmp_path, capsys):
+    data, _db_path, conn = _db(tmp_path, chat_columns="id TEXT PRIMARY KEY")
+    conn.close()
+    (data / purge.STATUS_NAME).write_text('{"consecutive_failures": 4, "total_failures": "x"}')
+    assert purge.main(["--days", "30", "--data-dir", str(data), "--once"]) == 1
+    recorded = json.loads((data / purge.STATUS_NAME).read_text())
+    assert recorded["consecutive_failures"] == 5 and recorded["total_failures"] == 1
+    assert "consecutive failures 5" in capsys.readouterr().err
+
+
+def test_purge_main_counts_a_status_file_too_deeply_nested_to_parse_as_empty(tmp_path, capsys):
+    data, _db_path, conn = _db(tmp_path, chat_columns="id TEXT PRIMARY KEY")
+    conn.close()
+    (data / purge.STATUS_NAME).write_text("[" * 100_000 + "]" * 100_000)
+    assert purge.main(["--days", "30", "--data-dir", str(data), "--once"]) == 1
+    recorded = json.loads((data / purge.STATUS_NAME).read_text())
+    assert recorded["consecutive_failures"] == 1 and recorded["total_failures"] == 1
+    assert capsys.readouterr().err == "chat purge FAILED (schema); consecutive failures 1\n"

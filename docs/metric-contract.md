@@ -45,6 +45,43 @@ Buckets (pinned in `metrics.py`, verified cumulative on the wire):
 Privacy (verified by grep over full exposition): no query text, headings,
 doc ids, keys, or tokens appear in any series.
 
+<a id="answer-measurement-groups"></a>
+## Answer measurement groups (#1195)
+
+The answer eval reports two groups apart
+([protocol](eval.md#measurement-protocol)). They are eval-report fields, not
+Prometheus series, and every value is a count, a duration or an id: no
+question, answer or reasoning text enters a row field, a log or a report
+through them. Distributions are nearest-rank p50/p95 (no interpolation) with
+their own `n`; a row without a signal is left out, never counted as zero.
+Token and timing distributions cover judged rows that made a model call; the
+zero-hits short-circuit has no generation and is excluded.
+
+Hardware-independent (`metrics.measurement.hardware_independent`): decisions
+on quality and budgets use only these.
+
+| Value | Definition | Source and limits |
+|---|---|---|
+| `pass_rate_by_class` | Judged rows passing, per `query_class`, with `n` | The eval's own verdicts |
+| `truncation` | Share of model answers whose `finish_reason` is not `stop` | SSE `final` (`--stream`) or the in-process answer log. `n` is the rows with a known finish reason; `rate` is null when none is known |
+| `generation_incomplete` | Share of judged rows served as `generation_incomplete` | The response's `verification_state`, on every transport. An upper bound on truncation: it also counts a finished answer with no usable body ([states](agent.md#answer-contract)) |
+| `tokens.prompt_tokens`, `.completion_tokens`, `.reasoning_tokens` | Per-answer usage as the reasoning endpoint reported it | Same as `truncation`. `completion_tokens` includes reasoning tokens. `reasoning_split_rows` counts rows with a nonzero reasoning count: zero means the endpoint reported no split, not that the model did not reason |
+
+Token counts are the served model's own tokenizer counts, so they are
+independent of hardware but not of the model: compare them across arms of one
+model, and re-measure after a model change.
+
+Hardware-dependent (`metrics.measurement.hardware_dependent`): describe the
+measured host and gateway only; never a decision input.
+
+| Value | Definition | Source and limits |
+|---|---|---|
+| `ttft_ms` | Model-call start to the first visible content delta, on the agent's clock. Includes prompt prefill and all reasoning | SSE `final`; on the JSON path `Server-Timing: ttft`, present only with `LLM_STREAM` |
+| `client_first_token_ms` | The eval's request start to its first SSE `token` event. Adds retrieval, admission queueing and the network to `ttft_ms` | `--stream` only |
+| `llm_ms` | Whole model leg on the agent's clock | JSON `Server-Timing: llm` (the SSE response does not carry it) |
+| `elapsed_ms` | The eval's request start to the complete response | Always |
+| `decode_tps` | Visible tokens (`completion_tokens - reasoning_tokens`) per second between the first visible token and the end of generation: the client span `elapsed_ms - client_first_token_ms` under `--stream`, or `llm_ms - ttft_ms` when both server legs are known | Null unless every input is known and the span is positive. Overstated when the endpoint reports no reasoning split (thinking tokens stay in the numerator while their time does not); check `reasoning_split_rows`. The first delta's own tokens are in the numerator but precede the span, a small upward bias on short answers |
+
 ## Trace contract (OpenObserve service `mainframe-rag-agent`)
 
 Operations and Kinds (13, matching the OBS-1B tree plus `chat.condense`):

@@ -596,11 +596,11 @@ AMBIGUOUS_RPMS = {"cracklib", "cracklib-dicts", "gzip", "less", "libcbor", "libd
                   "libfdisk", "libfido2", "libpwquality", "libseccomp", "libutempter", "openssh",
                   "openssh-clients", "pam", "shadow-utils-subid", "util-linux", "util-linux-core"}
 ALL_LICENCES_REF = "https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6543481300"
-# The kit scope approval in force: the maintainer's decision of 2026-11-02 on #1181
-# (#1183 option A). It binds the scope with the two agent tools (#1172) and
-# diffutils (#1183); 854999ae… (#1118) is superseded.
-KIT_SCOPE_APPROVAL_REF = "https://github.com/yonatan895/qdrant-pdf-rag/pull/1181#issuecomment-6576583551"
-APPROVED_KIT_DIGEST = "32132abeedcae2772e2f08d540358fe859b7290f03aaf1e62ba05ee9460b5bc4"
+# The kit scope approval in force: the maintainer's decision of 2026-11-14 on #1228
+# (base image on the UBI 9.9 build, RPM set re-resolved). 32132abe… (#1181) and
+# 854999ae… (#1118) are superseded.
+KIT_SCOPE_APPROVAL_REF = "https://github.com/yonatan895/qdrant-pdf-rag/pull/1228#issuecomment-6875113278"
+APPROVED_KIT_DIGEST = "833299c98226a2cce008a6fa3e79b0091a349d7907037a62baf95c47c338cc9b"
 
 
 def test_repository_kit_record_passes_the_enforced_gate_at_the_approved_digest():
@@ -681,14 +681,14 @@ def _edit(path, old, new):
 
 @pytest.mark.parametrize("change, message", [
     # The image's base moves without a shared record for the new digest.
-    (lambda t: _edit(t / "images/Containerfile.devkit", "@sha256:638914ba", "@sha256:000000ba"),
+    (lambda t: _edit(t / "images/Containerfile.devkit", "@sha256:30a3131d", "@sha256:0000001d"),
      "devkit: the base image of images/Containerfile.devkit has no shared license record with its digest"),
     # A tool is re-pinned: its license must be re-reviewed.
     (lambda t: _edit(t / "scripts/tools/helm-pin.txt", "version: v4.3.0", "version: v4.3.1"),
      "devkit:kit-tool:helm: scripts/tools/helm-pin.txt differs from the record; re-review the tool license"),
     # An RPM leaves the list while its record stays.
-    (lambda t: _edit(t / "images/devkit-packages.txt", "yajl-0:2.1.0-25.el9.x86_64\n", ""),
-     "devkit:rpm:yajl: recorded RPM yajl-0:2.1.0-25.el9.x86_64 is not in images/devkit-packages.txt"),
+    (lambda t: _edit(t / "images/devkit-packages.txt", "libcbor-0:0.7.0-5.el9.x86_64\n", ""),
+     "devkit:rpm:libcbor: recorded RPM libcbor-0:0.7.0-5.el9.x86_64 is not in images/devkit-packages.txt"),
     # An agent tool (#1172) is re-pinned: a pin-bump PR re-reviews its licence.
     (lambda t: _edit(t / "images/devkit/agents/opencode-pin.txt", "version: 2.2.5", "version: 2.2.6"),
      "devkit:kit-tool:opencode: images/devkit/agents/opencode-pin.txt differs from the record"),

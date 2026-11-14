@@ -184,3 +184,116 @@ def test_existing_profiles_keep_their_server_roles_and_order():
     for name in ("COLAB_G4_BF16", "COLAB_A100_80GB_BF16"):
         assert [server["role"] for server in build_profile(name)["servers"]] == ["reasoning", "embed"]
     assert build_profile("COLAB_CPU_TRANSPORT")["servers"] == []
+
+
+# ---------------------------------------- issue #1195 reasoning-server inputs
+REVISION = "0123456789abcdef0123456789abcdef01234567"
+# sha256 of the canonical JSON of each default profile at c5259460, the commit
+# before the reasoning server took inputs: the unparameterised profile, and so
+# the prepared manifest's `profile`, is exactly what it was.
+REFERENCE_DIGESTS = {
+    "COLAB_CPU_TRANSPORT": "8cab3997dd77c9495bc21602e0c401f41fff338004e2a1037cb0b19fa5a3dd8d",
+    "COLAB_G4_BF16": "a8f27a4c57292c821bca6575199b91380c9dde98fa281eeb4d850e6cb9804048",
+    "COLAB_A100_80GB_BF16": "49f11a95fa62fbb077b573275b891fa11dfe86dbcfb708ca30d0ad625fd733dd",
+    "COLAB_G4_RERANK_8B": "95874206d9009f51891943d8b3313b109f022dc911d96bdfd017f7d21da54b12",
+    "COLAB_G4_RERANK_4B": "0171c50fab73a43b3ae37e7fe223bebf91c5901d6c14aa4891694ab20fe8d2da",
+}
+
+
+def _digest(value):
+    import hashlib
+    import json
+
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                     allow_nan=False).encode()).hexdigest()
+
+
+def _flag(argv, name):
+    assert argv.count(name) == 1
+    return argv[argv.index(name) + 1]
+
+
+def test_unparameterised_profiles_are_byte_identical_to_the_reference():
+    from mainframe_rag.serve.colab_profiles import COLAB_PROFILES
+
+    assert set(REFERENCE_DIGESTS) == set(COLAB_PROFILES)
+    for name, digest in REFERENCE_DIGESTS.items():
+        assert _digest(build_profile(name)) == digest, name
+
+
+@pytest.mark.parametrize("name,sequences", [("COLAB_G4_BF16", 2), ("COLAB_A100_80GB_BF16", 1)])
+def test_reference_values_given_explicitly_are_the_unparameterised_profile(name, sequences):
+    explicit = build_profile(name, reasoning={
+        "model_id": "Qwen/Qwen3.8-27B", "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "max_model_len": 32768, "max_num_seqs": sequences, "reasoning_parser": "qwen3"})
+    assert explicit == build_profile(name) == build_profile(name, reasoning={})
+    assert "reasoning_inputs" not in explicit and _digest(explicit) == REFERENCE_DIGESTS[name]
+
+
+def test_reasoning_inputs_produce_the_argv_and_are_recorded_for_the_manifest():
+    from mainframe_rag.serve.colab_profiles import reasoning_window
+
+    reference = build_profile("COLAB_G4_BF16")
+    profile = build_profile("COLAB_G4_BF16", reasoning={
+        "model_id": "Example-Org/Other.Model-9B", "revision": REVISION,
+        "max_model_len": 131072, "max_num_seqs": 8, "reasoning_parser": "none"})
+    assert profile["reasoning_inputs"] == {
+        "model_id": "Example-Org/Other.Model-9B", "revision": REVISION,
+        "max_model_len": 131072, "max_num_seqs": 8, "reasoning_parser": "none"}
+    reasoning, embedding = profile["servers"]
+    assert (reasoning["model_id"], reasoning["revision"]) == ("Example-Org/Other.Model-9B", REVISION)
+    argv = reasoning["argv"]
+    assert _flag(argv, "--served-model-name") == "Example-Org/Other.Model-9B"
+    assert _flag(argv, "--max-model-len") == "131072" and _flag(argv, "--max-num-seqs") == "8"
+    assert "--reasoning-parser" not in argv
+    # Everything the inputs do not name is the reference: allocations, the
+    # loopback bind, the embedding server, the admission minima.
+    assert _flag(argv, "--gpu-memory-utilization") == "0.66" and argv[-4:] == ["--host", "127.0.0.1", "--port", "8000"]
+    assert embedding == reference["servers"][1]
+    assert {k: v for k, v in profile.items() if k not in ("servers", "reasoning_inputs")} == {
+        k: v for k, v in reference.items() if k != "servers"}
+    assert reasoning_window(profile) == 131072 and reasoning_window(reference) == 32768
+    # One input alone keeps the rest at the reference, including its revision.
+    window_only = build_profile("COLAB_G4_BF16", reasoning={"max_model_len": 65536})
+    assert window_only["servers"][0]["revision"] == reference["servers"][0]["revision"]
+    assert _flag(window_only["servers"][0]["argv"], "--reasoning-parser") == "qwen3"
+    assert window_only["reasoning_inputs"]["max_num_seqs"] == 2
+    # Recorded inputs rebuild the same profile: the round trip consumers rely on.
+    assert build_profile("COLAB_G4_BF16", reasoning=profile["reasoning_inputs"]) == profile
+
+
+@pytest.mark.parametrize("name,inputs", [
+    ("COLAB_G4_BF16", {"model_id": "Example/Other"}),  # no revision of its own
+    ("COLAB_G4_BF16", {"model_id": "Example/Other", "revision": "main"}),
+    ("COLAB_G4_BF16", {"model_id": "../escape/x", "revision": REVISION}),
+    ("COLAB_G4_BF16", {"model_id": "no-slash", "revision": REVISION}),
+    ("COLAB_G4_BF16", {"model_id": "a/b --trust-remote-code", "revision": REVISION}),
+    ("COLAB_G4_BF16", {"revision": REVISION.upper()}),
+    ("COLAB_G4_BF16", {"max_model_len": 4095}),
+    ("COLAB_G4_BF16", {"max_model_len": 131073}),
+    ("COLAB_G4_BF16", {"max_model_len": "65536"}),
+    ("COLAB_G4_BF16", {"max_model_len": True}),
+    ("COLAB_G4_BF16", {"max_num_seqs": 0}),
+    ("COLAB_G4_BF16", {"max_num_seqs": 17}),
+    ("COLAB_G4_BF16", {"reasoning_parser": "qwen3 --enable-auto-tool-choice"}),
+    ("COLAB_G4_BF16", {"reasoning_parser": ""}),
+    ("COLAB_G4_BF16", {"reasoning_parser": None}),
+    ("COLAB_G4_BF16", {"gpu_memory_utilization": "0.95"}),  # not an input
+    ("COLAB_CPU_TRANSPORT", {"max_model_len": 65536}),
+    ("COLAB_G4_RERANK_8B", {"max_model_len": 65536}),
+])
+def test_reasoning_inputs_fail_closed(name, inputs):
+    with pytest.raises(ValueError):
+        build_profile(name, reasoning=inputs)
+
+
+def test_reasoning_window_ceiling_is_the_budget_and_settings_ceiling():
+    from mainframe_rag.config import Settings
+    from mainframe_rag.serve.budget import ModelSpec
+    from mainframe_rag.serve.colab_profiles import REASONING_WINDOW_BOUNDS
+
+    def ceiling(field):
+        return next(item.le for item in field.metadata if getattr(item, "le", None) is not None)
+
+    assert REASONING_WINDOW_BOUNDS[1] == ceiling(ModelSpec.model_fields["context_need"]) == ceiling(
+        Settings.model_fields["llm_max_model_len"]) == 131072
