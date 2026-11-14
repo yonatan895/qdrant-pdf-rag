@@ -74,7 +74,7 @@ image_of() {  # name in images.txt -> name-without-tag@digest
     awk -v n="$1" '$1 == n { sub(/:[^:\/]*$/, "", $1); print $1 "@" $2; found = 1 } END { exit !found }' \
         "$ROOT/images.txt" || die "images.txt has no pin for $1"
 }
-DEVKIT_IMAGE=$(image_of registry.access.redhat.com/ubi9/python-314-minimal:9.8)
+DEVKIT_IMAGE=$(image_of registry.access.redhat.com/ubi9/python-314-minimal:9.9)
 QDRANT_IMAGE=$(image_of docker.io/qdrant/qdrant:v1.19.2-unprivileged)
 DEVKIT_REPOSITORY=${DEVKIT_IMAGE%@*}
 DEVKIT_DIGEST=${DEVKIT_IMAGE#*@}
