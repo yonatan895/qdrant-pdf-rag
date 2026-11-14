@@ -303,6 +303,17 @@ def run_gate(
             baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
 
         if update_baseline_flag:
+            # A run with query failures must never become the new pin: an
+            # errored retrieval result is not a reference. Refuse before the
+            # baseline file is touched.
+            failures = report.get("failures", 0)
+            if failures > 0:
+                reason = (
+                    f"--update-baseline refused: {failures} query failures occurred; "
+                    f"baseline file left unchanged: {baseline_path}"
+                )
+                print(f"ERROR: {reason}", file=sys.stderr)
+                return 1, f"## Retrieval Evaluation Gate (L1)\n\n**ERROR:** {reason}\n"
             update_baseline(report, baseline_path)
             print(f"[*] baseline updated at {baseline_path}", file=sys.stderr)
             baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
