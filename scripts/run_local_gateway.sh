@@ -311,10 +311,13 @@ import ipaddress
 import sys
 from urllib.parse import urlsplit
 
-try:
-    subnets = [ipaddress.ip_network(part, strict=False) for part in sys.argv[1].split()]
-except ValueError:
-    sys.exit(1)
+subnets = []
+for part in sys.argv[1].split():
+    try:
+        subnets.append(ipaddress.ip_network(part, strict=False))
+    except ValueError:
+        # One unreadable entry must not hide a colliding one beside it.
+        continue
 for url in sys.argv[2:]:
     if not url:
         continue

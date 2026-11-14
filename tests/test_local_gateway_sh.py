@@ -1138,6 +1138,51 @@ def test_probe_records_ownership_when_its_colliding_network_cannot_be_removed(ga
     assert json.loads(following.stdout)["created"] is True
 
 
+def _adopt_network(lab, subnet: str, network_id: str = "d" * 64) -> None:
+    path = lab[0] / "networks.json"
+    networks = json.loads(path.read_text())
+    networks[TRANSPORT_NETWORK] = {"id": network_id, "name": TRANSPORT_NETWORK,
+                                   "driver": "bridge", "subnet": subnet}
+    path.write_text(json.dumps(networks))
+
+
+@pytest.mark.parametrize("subnets,colliding", [
+    ("", None),
+    ("fd00:1::/64", None),
+    ("not-a-subnet", None),
+    ("10.0.0.0/24 192.168.0.0/24", None),
+    ("fd00:1::/64 127.0.0.0/24", "127.0.0.0/24"),
+    ("10.0.0.0/24 127.0.0.0/8", "127.0.0.0/8"),
+    ("127.0.0.9/24", "127.0.0.0/24"),
+    ("not-a-subnet 127.0.0.0/24", "127.0.0.0/24"),
+    ("1[27]* 127.0.0.0/24", "127.0.0.0/24"),
+])
+def test_every_parsable_subnet_of_an_adopted_network_is_checked(gateway_transport, subnets, colliding):
+    _adopt_network(gateway_transport, subnets)
+    probe = _transport_operation(gateway_transport)
+    calls = _transport_calls(gateway_transport)
+    assert not any(argv[:2] in (["network", "create"], ["network", "rm"]) for argv in calls), calls
+    if colliding is None:
+        assert probe.returncode == 0, probe.stderr
+        assert json.loads(probe.stdout)["created"] is False
+    else:
+        assert probe.returncode == 1 and probe.stdout == ""
+        assert probe.stderr.splitlines()[-1] == "ERROR: " + _collision_line(colliding, "127.0.0.2")
+        assert not any(argv[0] == "run" for argv in calls), calls
+
+
+@pytest.mark.parametrize("created", ["1", "0"])
+def test_earlier_run_state_decides_whether_a_colliding_network_is_removed(gateway_transport, created):
+    _adopt_network(gateway_transport, "127.0.0.0/24", CREATED_NETWORK_ID)
+    probe = _transport_operation(gateway_transport, GATEWAY_TRANSPORT_NETWORK_ID=CREATED_NETWORK_ID,
+                                 GATEWAY_TRANSPORT_NETWORK_CREATED=created)
+    assert probe.returncode == 1 and _collision_line("127.0.0.0/24", "127.0.0.2") in probe.stderr
+    removed = ["network", "rm", CREATED_NETWORK_ID] in _transport_calls(gateway_transport)
+    remaining = json.loads((gateway_transport[0] / "networks.json").read_text())
+    assert removed is (created == "1")
+    assert (TRANSPORT_NETWORK in remaining) is (created == "0")
+
+
 # --- #1218: the probe keeps the failing request's error class -----------------
 
 def _probe_failure_line(error_class: str) -> str:
