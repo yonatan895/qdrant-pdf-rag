@@ -157,8 +157,8 @@ def plant_stdlib_shadows(tree: Path, places: dict[str, tuple[str, ...]], marker:
             source.write_text(STDLIB_SHADOW.format(marker=str(marker)))
             if form == "pyc":
                 compiled = source.with_suffix(".pyc")
-                subprocess.run([python, "-I", "-c", "import py_compile, sys; "
-                                "py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)",
+                subprocess.run([python, "-I", "-c", ("import py_compile, sys; "
+                                "py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)"),
                                 str(source), str(compiled)], check=True, capture_output=True)
                 source.unlink()
                 source = compiled
