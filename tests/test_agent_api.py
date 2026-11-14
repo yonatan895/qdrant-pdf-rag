@@ -612,6 +612,42 @@ def test_healthz_representation_legacy_unknown_and_pending_degrade(client, monke
     assert (body["status"], body["representation"]) == ("degraded", "pending")
 
 
+def test_cached_resolution_failure_logs_error_type_on_every_refusal(client, monkeypatch, caplog):
+    """Issue #1211: the gate caches a resolution failure for the TTL, so one
+    probe carries the fault, but every refused request still gets the fixed
+    envelope and still logs the exception class at error level (error
+    contract: `error_type` in logs, never the exception text)."""
+    import logging
+
+    import mainframe_rag.agent.serving as serving_mod
+
+    probes: list[int] = []
+
+    async def failing_resolution(client_arg, settings_arg, rules_v):
+        probes.append(1)
+        raise ConnectionError("store unreachable: secret-upstream-text")
+
+    monkeypatch.setattr(serving_mod, "resolve_published_generation", failing_resolution)
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(60.0))
+    with caplog.at_level(logging.INFO):
+        responses = [client.post("/v1/search", json={"query": "IEA500I"}) for _ in range(3)]
+
+    assert [(r.status_code, r.json()["code"]) for r in responses] == [
+        (503, "representation_unavailable")
+    ] * 3
+    assert len(probes) == 1, "the cached failure answers later requests"
+    refusals = []
+    for record in caplog.records:
+        try:
+            payload = json.loads(record.getMessage())
+        except (ValueError, TypeError):
+            continue
+        if payload.get("request_id") == "serving":
+            refusals.append((record.levelname, payload.get("action"), payload.get("error_type")))
+    assert refusals == [("ERROR", "representation_unavailable", "ConnectionError")] * 3
+    assert "secret-upstream-text" not in caplog.text
+
+
 def test_lifespan_refuses_pending_contract(monkeypatch):
     """Issue #391 F2: an interrupted migration blocks startup, not only the
     live /healthz signal — the interval before a probe observes it must not
