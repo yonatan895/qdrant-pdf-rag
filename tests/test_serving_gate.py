@@ -8,6 +8,9 @@ the real-server case in test_integration_sim.
 
 from __future__ import annotations
 
+import asyncio
+import traceback
+
 import pytest
 
 from mainframe_rag.config import Settings
@@ -170,6 +173,150 @@ async def test_gate_zero_ttl_validates_every_request_and_caches_refusals(monkeyp
     await gate.generation(object(), s, RULES)
     assert len(calls) == 2
     assert generation.outcome == "pending" and not generation.servable
+
+
+def _faulting_gate(monkeypatch, *, ttl_s: float = 120.0):
+    """Gate plus probe bookkeeping for the failure-caching tests. The
+    resolution seam raises while `probe["state"]["faulty"]` and the clock is
+    frozen, so a probe count is the only witness of what the gate did."""
+    import mainframe_rag.agent.serving as serving_mod
+
+    calls: list[int] = []
+    clock = {"t": 1000.0}
+    state = {"faulty": True}
+
+    async def fake_resolve(client, settings, rules_v):
+        calls.append(1)
+        if state["faulty"]:
+            raise RuntimeError("alias lookup failed")
+        return serving_mod.ServingGeneration("physical-1", "compatible")
+
+    monkeypatch.setattr(serving_mod.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(serving_mod, "resolve_published_generation", fake_resolve)
+    probe = {"calls": calls, "clock": clock, "state": state}
+    return serving_mod.ServingGate(ttl_s=ttl_s), _settings(), probe
+
+
+@pytest.mark.anyio
+async def test_gate_caches_resolution_failure_for_the_ttl(monkeypatch):
+    """A failed resolution is recorded like a result: while it is fresh every
+    caller re-raises it without touching Qdrant again, so the fault costs one
+    probe per TTL window instead of one per request."""
+    gate, s, probe = _faulting_gate(monkeypatch, ttl_s=60.0)
+
+    raised: list[BaseException] = []
+    for _ in range(3):
+        with pytest.raises(RuntimeError, match="alias lookup failed") as captured:
+            await gate.generation(object(), s, RULES)
+        raised.append(captured.value)
+
+    assert len(probe["calls"]) == 1
+    assert raised[0] is raised[1] is raised[2]
+
+
+@pytest.mark.anyio
+async def test_gate_cached_failure_traceback_stays_bounded(monkeypatch):
+    """Re-raising the recorded failure must not grow its traceback: Python
+    appends the raising frames to an exception's `__traceback__` on every
+    raise, so a shared object would retain frames for every refusal in the
+    window (unbounded under sustained traffic within a long TTL). The class
+    and message callers see stay the same."""
+    gate, s, probe = _faulting_gate(monkeypatch, ttl_s=300.0)
+
+    for _ in range(200):
+        with pytest.raises(RuntimeError, match="alias lookup failed") as captured:
+            await gate.generation(object(), s, RULES)
+
+    assert len(probe["calls"]) == 1
+    frames = traceback.extract_tb(captured.value.__traceback__)
+    assert len(frames) <= 3, f"{len(frames)} frames retained after 200 cached refusals"
+
+
+@pytest.mark.anyio
+async def test_gate_concurrent_misses_during_a_failure_probe_once(monkeypatch):
+    """The cached failure is read on the fast path before the lock, so callers
+    queued behind a single-flight probe never re-run the resolution."""
+    gate, s, probe = _faulting_gate(monkeypatch, ttl_s=120.0)
+
+    outcomes = await asyncio.gather(
+        *(gate.generation(object(), s, RULES) for _ in range(8)),
+        return_exceptions=True,
+    )
+
+    assert all(isinstance(outcome, RuntimeError) for outcome in outcomes)
+    assert len(probe["calls"]) == 1
+    assert outcomes[0] is outcomes[-1]
+
+
+@pytest.mark.anyio
+async def test_gate_reprobes_after_ttl_and_recovers(monkeypatch):
+    """The failure expires under the same rule as a result: the first request
+    past the TTL probes again, and the success it gets is what later callers
+    are served — recovery needs no restart."""
+    gate, s, probe = _faulting_gate(monkeypatch, ttl_s=30.0)
+    with pytest.raises(RuntimeError):
+        await gate.generation(object(), s, RULES)
+
+    probe["clock"]["t"] += 31.0
+    probe["state"]["faulty"] = False
+    recovered = await gate.generation(object(), s, RULES)
+    assert len(probe["calls"]) == 2
+    assert recovered.physical == "physical-1" and recovered.servable
+
+    cached = await gate.generation(object(), s, RULES)
+    assert cached is recovered
+    assert len(probe["calls"]) == 2
+
+
+@pytest.mark.anyio
+async def test_gate_fresh_probe_bypasses_cached_failure(monkeypatch):
+    """`fresh=True` stays live and uncached during a fault; when it succeeds
+    the recorded failure is cleared for the requests that follow."""
+    gate, s, probe = _faulting_gate(monkeypatch, ttl_s=120.0)
+    with pytest.raises(RuntimeError):
+        await gate.generation(object(), s, RULES)
+
+    with pytest.raises(RuntimeError):
+        await gate.generation(object(), s, RULES, fresh=True)
+    assert len(probe["calls"]) == 2
+
+    probe["state"]["faulty"] = False
+    forced = await gate.generation(object(), s, RULES, fresh=True)
+    assert len(probe["calls"]) == 3
+    assert forced.servable
+
+    served = await gate.generation(object(), s, RULES)
+    assert served is forced
+    assert len(probe["calls"]) == 3
+
+
+@pytest.mark.anyio
+async def test_gate_failed_fresh_probe_is_not_recorded_for_requests(monkeypatch):
+    """A failed `fresh=True` validation (readiness probe, startup gate) raises
+    to its own caller but is not recorded: one probe that meets a store blip
+    must not refuse every request for the TTL after the store is back. The
+    next request validates live and is served."""
+    gate, s, probe = _faulting_gate(monkeypatch, ttl_s=300.0)
+    with pytest.raises(RuntimeError, match="alias lookup failed"):
+        await gate.generation(object(), s, RULES, fresh=True)
+
+    probe["state"]["faulty"] = False
+    served = await gate.generation(object(), s, RULES)
+    assert served.servable
+    assert len(probe["calls"]) == 2
+
+
+@pytest.mark.anyio
+async def test_gate_zero_ttl_does_not_cache_failures(monkeypatch):
+    """TTL=0 keeps its paranoid contract under a fault: nothing short-circuits,
+    so every request re-probes instead of re-raising a stale failure."""
+    gate, s, probe = _faulting_gate(monkeypatch, ttl_s=0.0)
+
+    for _ in range(3):
+        with pytest.raises(RuntimeError, match="alias lookup failed"):
+            await gate.generation(object(), s, RULES)
+
+    assert len(probe["calls"]) == 3
 
 
 @pytest.mark.anyio

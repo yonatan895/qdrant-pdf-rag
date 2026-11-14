@@ -612,6 +612,86 @@ def test_healthz_representation_legacy_unknown_and_pending_degrade(client, monke
     assert (body["status"], body["representation"]) == ("degraded", "pending")
 
 
+def test_cached_resolution_failure_logs_error_type_on_every_refusal(client, monkeypatch, caplog):
+    """Issue #1211: the gate caches a resolution failure for the TTL, so one
+    probe carries the fault, but every refused request still gets the fixed
+    envelope and still logs the exception class at error level (error
+    contract: `error_type` in logs, never the exception text)."""
+    import logging
+
+    import mainframe_rag.agent.serving as serving_mod
+
+    probes: list[int] = []
+
+    async def failing_resolution(client_arg, settings_arg, rules_v):
+        probes.append(1)
+        raise ConnectionError("store unreachable: secret-upstream-text")
+
+    monkeypatch.setattr(serving_mod, "resolve_published_generation", failing_resolution)
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(60.0))
+    with caplog.at_level(logging.INFO):
+        responses = [client.post("/v1/search", json={"query": "IEA500I"}) for _ in range(3)]
+
+    assert [(r.status_code, r.json()["code"]) for r in responses] == [
+        (503, "representation_unavailable")
+    ] * 3
+    assert len(probes) == 1, "the cached failure answers later requests"
+    refusals = []
+    for record in caplog.records:
+        try:
+            payload = json.loads(record.getMessage())
+        except (ValueError, TypeError):
+            continue
+        if payload.get("request_id") == "serving":
+            refusals.append((record.levelname, payload.get("action"), payload.get("error_type")))
+    assert refusals == [("ERROR", "representation_unavailable", "ConnectionError")] * 3
+    assert "secret-upstream-text" not in caplog.text
+
+
+def test_failed_healthz_during_a_store_blip_does_not_refuse_later_requests(client, monkeypatch):
+    """Issue #1211 / PR #1243: /healthz validates with `fresh=True`. When that
+    one validation meets a store blip, /healthz reports it, but the failure is
+    not recorded for requests: once the store is back the next request is
+    served instead of getting 503 for the rest of the TTL."""
+    import mainframe_rag.agent.serving as serving_mod
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+    from tests.fakes import AliasQdrant, manifest_envelope, published_build
+
+    s = app_mod.settings
+    alias, physical = s.qdrant_collection, f"{s.qdrant_collection}__genblip"
+    build_aliases, publications = published_build(alias, physical)
+    qd = AliasQdrant(
+        aliases={alias: physical, **build_aliases},
+        manifests={
+            f"{physical}__completions": manifest_envelope(
+                s, extraction_rules_version(), f"{physical}__completions"
+            )
+        },
+        points={physical},
+        publications=publications,
+    )
+    monkeypatch.setattr(app_mod, "http", _ready_pool())
+    monkeypatch.setattr(app_mod, "qdrant", qd)
+    monkeypatch.setattr(app_mod, "retrieve_search", lambda *a, **k: ([_hit()], "nl", {}))
+
+    real_resolution = serving_mod.resolve_published_generation
+    blip = {"left": 1}
+
+    async def blipping_resolution(client_arg, settings_arg, rules_v):
+        if blip["left"]:
+            blip["left"] -= 1
+            raise ConnectionError("store unreachable")
+        return await real_resolution(client_arg, settings_arg, rules_v)
+
+    monkeypatch.setattr(serving_mod, "resolve_published_generation", blipping_resolution)
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(300.0))
+
+    assert client.get("/healthz").status_code == 503
+    assert blip["left"] == 0, "the healthz validation met the blip"
+    resp = client.post("/v1/search", json={"query": "IEA500I"})
+    assert resp.status_code == 200, resp.text
+
+
 def test_lifespan_refuses_pending_contract(monkeypatch):
     """Issue #391 F2: an interrupted migration blocks startup, not only the
     live /healthz signal — the interval before a probe observes it must not

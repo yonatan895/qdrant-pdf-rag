@@ -1254,7 +1254,12 @@ without a build binding (a pre-build publication) is refused as `legacy`
 (`unbound_generation`); no build UUID is invented for it.
 
 The gate binds a request to a validated physical name, and aliases become visible
-after revalidation. Negative results are cached too. See
+after revalidation. A resolution failure on the request path is cached and re-raised
+for the TTL like any other result, so one probe per window carries the fault and a
+later successful resolution clears it. Requests can therefore be refused for up to
+the TTL after the store recovers; each refusal still logs the exception class as
+`error_type`. A failed fresh validation (readiness probe or startup gate) is
+reported to its caller but not recorded, so it never refuses requests by itself. See
 [metadata outcomes](ingest.md#metadata-contract) for distinctions the reader
 currently collapses and publication checks that remain incomplete.
 
