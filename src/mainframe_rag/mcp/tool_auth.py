@@ -218,11 +218,12 @@ class JwksCache:
     `jwks_timeout_s` always applies (per request, whatever the client's
     defaults), and a response for any
     other URL is refused; token-supplied `jku`/`x5u` are never read. The set
-    is kept for `jwks_ttl_s`, refetched early on an unknown kid at most once
-    per `jwks_min_refetch_s`, and always replaced by a successful fetch. A
-    failed fetch keeps the last-good set until it is `jwks_max_stale_s` older
-    than its successful fetch, then fails closed (0: at once). File mode loads
-    the pinned JWKS once at construction and never touches the network.
+    is kept for `jwks_ttl_s`, refetched early on an unknown kid or a failed
+    fetch at most once per `jwks_min_refetch_s`, and always replaced by a
+    successful fetch. A failed fetch keeps the last-good set until it is
+    `jwks_max_stale_s` older than its successful fetch, then fails closed
+    (0: at once). File mode loads the pinned JWKS once at construction and
+    never touches the network.
     """
 
     def __init__(
@@ -239,6 +240,7 @@ class JwksCache:
         self._keys: dict[str, dict[str, Any]] = {}
         self._fetched_at: float | None = None
         self._good_at: float | None = None
+        self._fetch_failed = False
         self._lock = asyncio.Lock()
         if config.jwks_file is not None:
             self._keys = _parse_jwks(json.loads(config.jwks_file.read_bytes()))
@@ -270,7 +272,9 @@ class JwksCache:
         age = self._clock() - self._fetched_at
         if age >= self._config.jwks_ttl_s:
             return True
-        return kid not in self._keys and age >= self._config.jwks_min_refetch_s
+        return age >= self._config.jwks_min_refetch_s and (
+            self._fetch_failed or kid not in self._keys
+        )
 
     async def _refresh(self, kid: str) -> None:
         if not self._due(kid):
@@ -279,13 +283,16 @@ class JwksCache:
             if not self._due(kid):
                 return
             # Concurrent callers wait on the lock and re-check, so they see
-            # the outcome; a failure is retried at the refetch floor.
+            # the outcome; a failed fetch is due again at the refetch floor
+            # measured from that attempt, and a success ends the retrying.
             fetched = await self._fetch()
             now = self._clock()
             self._fetched_at = now
             if fetched is not None:
                 self._keys, self._good_at = fetched, now
+                self._fetch_failed = False
                 return
+            self._fetch_failed = True
             age = None if self._good_at is None else now - self._good_at
             if age is not None and age <= self._config.jwks_max_stale_s:
                 # Revocation is learned only from a successful fetch, so

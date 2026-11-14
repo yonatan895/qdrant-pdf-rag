@@ -92,7 +92,9 @@ the body streams). Every request passes `follow_redirects=False` and
 URL other than `jwks_url` is refused. Deeply nested JSON counts as a failed fetch.
 Token-supplied `jku`/`x5u` are never read. Keys are cached for `jwks_ttl_s` (300 s).
 An unknown `kid` triggers an early refetch at most once per `jwks_min_refetch_s`
-(30 s), so a rotated key is found. Concurrent cold requests share one fetch. A
+(30 s), so a rotated key is found. After a failed fetch, the next request at least
+`jwks_min_refetch_s` after that attempt retries, whatever its `kid`, until a fetch
+succeeds; then `jwks_ttl_s` applies again. Concurrent cold requests share one fetch. A
 `kid` listed twice is dropped. File mode (`jwks_file`) loads a pinned JWKS once at
 construction for air-gapped testing and never touches the network. Exactly one
 source is configured.
@@ -108,7 +110,9 @@ revocation is learned only from a successful fetch, so dropping keys during an
 IdP outage revokes nothing sooner. It only turns an outage, or one token with a
 random `kid` that forces a refetch during it, into a denial of service for every
 user. Each failed fetch that keeps stale keys logs one line,
-`{"action": "tool_auth_jwks_stale", "gateway", "age_s"}`, and nothing else.
+`{"action": "tool_auth_jwks_stale", "gateway", "age_s"}`, and nothing else. While
+requests keep arriving during an outage, each replica therefore makes one fetch
+attempt and logs at most one such line per `jwks_min_refetch_s`, not per `jwks_ttl_s`.
 
 **Errors.** Bodies use the repository envelope `{code, message}` with fixed text:
 
