@@ -38,6 +38,7 @@ from tests.helpers_airgap import (
     gen_other_pub,
     gen_sign_keypair,
     make_bin_tree,
+    plant_stdlib_shadows,
     symlink_tools,
 )
 from tests.helpers_image_inventory import tar_bytes
@@ -841,6 +842,27 @@ def test_pack_refuses_a_runbook_whose_bootstrap_drifted_from_the_adr(pack_tree):
     assert done.returncode != 0
     assert "step 1 differs from the anchor bootstrap in ADR-0009" in done.stderr
     assert not list((pack_tree["tree"] / "dist").glob("mfr-devkit-*"))
+
+
+@pytest.mark.parametrize("form", ["py", "pyc"])
+def test_pack_runs_no_stdlib_shadow_a_group_only_change_adds(pack_tree, tmp_path_factory, form):
+    """#588 N1 (review B1): devkit_key.py and license_inventory.py run while the
+    kit signing key is set; a group-only stdlib shadow beside them must not run."""
+    tree = pack_tree["tree"]
+    marker = tmp_path_factory.mktemp("shadow") / "ran.log"
+    python = shutil.which("python3", path=str(tree / "bin"))
+    planted = plant_stdlib_shadows(tree, {"": ("json",), "scripts": ("argparse", "hashlib", "json"),
+                                          "scripts/airgap": ("argparse", "hashlib", "json", "tarfile"),
+                                          "scripts/devkit": ("argparse", "json")}, marker, form, python)
+    _git(tree, "add", "-f", *planted)
+    _git(tree, "commit", "-q", "-m", "group-only change")
+    done = run_pack(pack_tree)
+    assert done.returncode == 0, done.stderr
+    assert (kit_dir(pack_tree) / "SHA256SUMS.sig").is_file()
+    assert not marker.exists(), marker.read_text()
+    # The plant is live: the same script run without -I loads it.
+    subprocess.run([python, "scripts/devkit_key.py", "--check"], cwd=tree, capture_output=True, check=False)
+    assert "argparse from " in marker.read_text()
 
 
 # ---- scripts/devkit/link-tools.sh: a checkout in the kit image gets its tools (F5) ----

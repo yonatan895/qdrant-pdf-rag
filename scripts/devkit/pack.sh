@@ -59,7 +59,7 @@ COMMIT=$(git rev-parse HEAD)
 
 # D-8: a stale key or an unpublished (sha256:PENDING) digest is refused here, by
 # devkit_key.py --check, never by ordinary CI.
-python3 "$REPO_ROOT/scripts/devkit_key.py" --check >/dev/null ||
+python3 -I "$REPO_ROOT/scripts/devkit_key.py" --check >/dev/null ||
     die "the dev kit pin is stale or unpublished (devkit_key.py --check above names the fix); a kit is packed only for the pinned, published key"
 KEY=$(sed -n 's/^key: *//p' "$REPO_ROOT/scripts/tools/devkit-pin.txt")
 DIGEST=$(sed -n 's/^digest: *//p' "$REPO_ROOT/scripts/tools/devkit-pin.txt")
@@ -78,7 +78,7 @@ if [ "$LICENSE_GATE" = rehearsal ]; then
         die "--license-rehearsal cannot be combined with SNEAKERNET_KEY_TRUSTED=true: a custodied-key kit always enforces the licence gate"
 fi
 # shellcheck disable=SC2046
-LICENSE_SUMMARY=$(python3 "$REPO_ROOT/scripts/license_inventory.py" --root "$REPO_ROOT" check --kit \
+LICENSE_SUMMARY=$(python3 -I "$REPO_ROOT/scripts/license_inventory.py" --root "$REPO_ROOT" check --kit \
     $([ "$LICENSE_GATE" = rehearsal ] && echo --rehearsal)) || {
     printf '%s\n' "$LICENSE_SUMMARY" >&2
     die "the dev kit licence check failed (its FAIL lines above name each item): record every kit component in the devkit section of licenses/inventory.json, have the owner resolve open decisions, then record devkit.approval with the kit scope digest above (docs/licensing.md#dev-kit)"
@@ -248,7 +248,7 @@ echo "==> MANIFEST"
 import hashlib, sys
 from pathlib import Path
 root = Path(sys.argv[1])
-sys.path.insert(0, str(root / "scripts"))
+sys.path.append(str(root / "scripts"))  # after the standard library
 from devkit_key import inputs
 for relative in inputs(root):
     print(f"pin_sha256: {hashlib.sha256((root / relative).read_bytes()).hexdigest()} {relative}")
@@ -264,7 +264,7 @@ import json, re, sys
 from pathlib import Path
 root, kit = Path(sys.argv[1]), Path(sys.argv[2])
 image, digest, config, license_status, commit = sys.argv[3:8]
-sys.path.insert(0, str(root / "scripts"))
+sys.path.append(str(root / "scripts"))  # after the standard library
 from dependency_lock import load
 from license_inventory import KIT_TOOL_PINS, kit_pin_path, read_pin
 
@@ -293,7 +293,7 @@ PYEOF
     die "the SBOM could not be written from the pins"
 # Every kit component with its licence, decision state and the notice texts held
 # (oras-LICENSE is read from the kit and checked against its pinned digest).
-python3 "$REPO_ROOT/scripts/license_inventory.py" --root "$REPO_ROOT" notices --kit --bundle-dir "$KIT" \
+python3 -I "$REPO_ROOT/scripts/license_inventory.py" --root "$REPO_ROOT" notices --kit --bundle-dir "$KIT" \
     --output "$KIT/THIRD-PARTY-NOTICES.txt" >/dev/null ||
     die "the kit third-party notices could not be rendered from licenses/inventory.json (docs/licensing.md#dev-kit)"
 

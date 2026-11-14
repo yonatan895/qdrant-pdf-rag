@@ -46,7 +46,7 @@ inspect_args() {
 # `skopeo inspect` has to unpack the archive into a temporary directory (#1066).
 archive_manifest() {
     _am_rc=0
-    _am_digest=$(python3 scripts/airgap/image_manifest.py archive "$1" "$2") || _am_rc=$?
+    _am_digest=$(python3 -I scripts/airgap/image_manifest.py archive "$1" "$2") || _am_rc=$?
     case "$_am_rc" in
         0) printf '%s' "$_am_digest" ;;
         6) die "$(basename "$1"): an image blob is missing or does not match its digest — wrong image bytes; do not trust this bundle" ;;
@@ -56,7 +56,7 @@ archive_manifest() {
 
 # $1 = manifest file written by archive_manifest. Prints its image config digest.
 archive_config_digest() {
-    python3 scripts/airgap/image_manifest.py config < "$1" ||
+    python3 -I scripts/airgap/image_manifest.py config < "$1" ||
         die "archive manifest $(basename "$1") has no usable image config digest"
 }
 
@@ -96,7 +96,7 @@ verify_registry_role() {
         die "cannot read back registry image $_vr_ref — it is not verified; load the bundle or fix registry access"
     }
     _vr_rc=0
-    _vr_digest=$(python3 scripts/airgap/image_manifest.py registry "$_vr_tmp" "$_vr_expected") || _vr_rc=$?
+    _vr_digest=$(python3 -I scripts/airgap/image_manifest.py registry "$_vr_tmp" "$_vr_expected") || _vr_rc=$?
     rm -f "$_vr_tmp"
     case "$_vr_rc" in
         0) ;;
@@ -142,7 +142,7 @@ verify_running_images() {
     $KC -n "$NAMESPACE" get deployments,statefulsets,replicasets,pods -o json > "$_vp_tmp" || { rm -f "$_vp_tmp"; die "cannot read workloads and pods to verify the running image identity"; }
     _vp_rc=0
     # shellcheck disable=SC2086
-    python3 scripts/airgap/check_pod_images.py "$NAMESPACE" "$QDRANT_RELEASE" $_vp_pairs < "$_vp_tmp" || _vp_rc=$?
+    python3 -I scripts/airgap/check_pod_images.py "$NAMESPACE" "$QDRANT_RELEASE" $_vp_pairs < "$_vp_tmp" || _vp_rc=$?
     rm -f "$_vp_tmp"
     [ "$_vp_rc" -eq 0 ] || die "running pods do not use the verified registry images"
 }

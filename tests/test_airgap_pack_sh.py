@@ -29,6 +29,7 @@ from tests.helpers_airgap import (
     copy_license_inputs,
     gen_sign_keypair,
     make_bin_tree,
+    plant_stdlib_shadows,
     run_sh,
     set_oauth_proxy_pin,
     set_openwebui_pin,
@@ -778,6 +779,32 @@ def test_pack_refuses_unreviewed_license_change_before_any_image_call(pack_tree,
     result, _ = _run_pack(pack_tree)
     assert result.returncode == 0, result.stderr
     assert (root / "dist" / "THIRD-PARTY-NOTICES.txt").is_file()
+
+
+@pytest.mark.parametrize("form", ["py", "pyc"])
+def test_pack_runs_no_stdlib_shadow_a_group_only_change_adds(pack_tree, tmp_path_factory, form):
+    """#588 N1 (review B1): a group-only change can add a module that shadows the
+    standard library next to a script pack.sh runs while the signing key is set
+    (scripts/argparse.py, scripts/airgap/tarfile.py, a sourceless .pyc, a root
+    json.py for the SBOM heredoc). Every host-side python3 runs isolated (-I) and
+    the sibling imports append their directory, so the standard library resolves
+    first and the signed bundle is the one the protected code built."""
+    root = pack_tree[0]
+    marker = tmp_path_factory.mktemp("shadow") / "ran.log"
+    python = shutil.which("python3", path=str(root / "bin"))
+    planted = plant_stdlib_shadows(root, {"": ("json",), "scripts": ("argparse", "hashlib", "json"),
+                                          "scripts/airgap": ("argparse", "hashlib", "json", "tarfile")},
+                                   marker, form, python)
+    subprocess.run(["git", "add", "-f", *planted], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "group-only change"], cwd=root, check=True)
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode == 0, result.stderr
+    assert (root / "dist" / "SHA256SUMS.sig").is_file()
+    assert not marker.exists(), marker.read_text()
+    # The plant is live: the same script run without -I loads it.
+    subprocess.run([python, "scripts/license_inventory.py", "--root", str(root), "check"], cwd=root,
+                   capture_output=True, check=False)
+    assert "argparse from " in marker.read_text()
 
 
 # --- #1000: the release signing key is reachable only from the protected path
