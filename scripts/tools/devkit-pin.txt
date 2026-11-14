@@ -11,5 +11,5 @@
 # PR records the key and its digest together. sha256:PENDING is not a valid state.
 # `python3 scripts/devkit_key.py --check` refuses a stale key or a PENDING digest.
 # Only kit packing and the release gate run it (D-8); unit CI never checks freshness.
-key: 1d9aeb70b1f890a2fa85eba46e3146be4d1e90b68149d2eada973b37ed2117cf
-digest: sha256:c9d56c32148131a13f3e0a0d1ec824bc226cdb0361bd5f004e653e33cfa4d48e
+key: a9c2e05adee98aabf1b07ac9ef3bccfad82144c584d622db62c2c81002181646
+digest: sha256:1d2f8649a8223738b225d315f885beba554b7ee83586d678016f3c9008d303f4
