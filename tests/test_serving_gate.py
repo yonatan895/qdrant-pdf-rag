@@ -9,6 +9,7 @@ the real-server case in test_integration_sim.
 from __future__ import annotations
 
 import asyncio
+import traceback
 
 import pytest
 
@@ -211,6 +212,24 @@ async def test_gate_caches_resolution_failure_for_the_ttl(monkeypatch):
 
     assert len(probe["calls"]) == 1
     assert raised[0] is raised[1] is raised[2]
+
+
+@pytest.mark.anyio
+async def test_gate_cached_failure_traceback_stays_bounded(monkeypatch):
+    """Re-raising the recorded failure must not grow its traceback: Python
+    appends the raising frames to an exception's `__traceback__` on every
+    raise, so a shared object would retain frames for every refusal in the
+    window (unbounded under sustained traffic within a long TTL). The class
+    and message callers see stay the same."""
+    gate, s, probe = _faulting_gate(monkeypatch, ttl_s=300.0)
+
+    for _ in range(200):
+        with pytest.raises(RuntimeError, match="alias lookup failed") as captured:
+            await gate.generation(object(), s, RULES)
+
+    assert len(probe["calls"]) == 1
+    frames = traceback.extract_tb(captured.value.__traceback__)
+    assert len(frames) <= 3, f"{len(frames)} frames retained after 200 cached refusals"
 
 
 @pytest.mark.anyio

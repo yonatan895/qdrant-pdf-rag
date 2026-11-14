@@ -136,9 +136,11 @@ class ServingGate:
                 # A failed resolution is recorded with the same TTL rule as a
                 # result, so a fault costs one probe per window instead of one
                 # per request. It stays an exception: the caller maps it, the
-                # gate never turns it into a ServingGeneration.
+                # gate never turns it into a ServingGeneration. The traceback
+                # is reset per hit: a re-raised object otherwise keeps every
+                # refusal's frames for the whole window.
                 assert self._failed is not None
-                raise self._failed
+                raise self._failed.with_traceback(None)
         async with self._lock:
             if not fresh:
                 if self._result_is_fresh():
@@ -146,7 +148,7 @@ class ServingGate:
                     return self._cached
                 if self._failure_is_fresh():
                     assert self._failed is not None
-                    raise self._failed
+                    raise self._failed.with_traceback(None)
             try:
                 generation = await resolve_published_generation(client, settings, rules_v)
             except Exception as exc:
