@@ -1991,8 +1991,9 @@ default **30 days** (maintainer decision 2026-10-24). An explicit null fails the
 - An unexpected table layout or a timestamp that is not epoch seconds refuses to delete
   anything. A busy database or a failed vacuum is a failed run. Each run logs one line of counts.
   Failures are retried after 5 minutes and counted in `rag-openwebui-data/.mainframe-rag-purge.json`
-  (`consecutive_failures`, `total_failures`, `last_success`). Alert on `consecutive_failures`
-  above 0 for more than a day.
+  (`consecutive_failures`, `total_failures`, `last_success`). The sidecar reloads the file on
+  start, so a pod restart does not reset the counters; the next successful run sets
+  `consecutive_failures` back to 0. Alert on `consecutive_failures` above 0 for more than a day.
 - Backups of `rag-openwebui-data` hold chat text. They are protected records that never leave
   the enterprise, and their retention follows the same window: at most 30 days plus one backup
   cycle.

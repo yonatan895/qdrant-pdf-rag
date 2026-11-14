@@ -795,3 +795,16 @@ def test_purge_main_with_no_status_file_reports_a_fresh_success(tmp_path):
     assert recorded["consecutive_failures"] == 0
     assert recorded["last_success"] and not recorded["last_error"]
 
+
+def test_purge_main_after_a_restart_clears_restored_failures_on_its_first_success(tmp_path, capsys):
+    data, _db_path, conn = _db(tmp_path)
+    _seed(conn, data)
+    conn.close()
+    # A failing purge was restarted: the counters on the claim say so.
+    (data / purge.STATUS_NAME).write_text(json.dumps({
+        "consecutive_failures": 5, "total_failures": 7, "last_error": "busy", "last_success": 1}))
+    assert purge.main(["--days", "30", "--data-dir", str(data), "--once"]) == 0
+    recorded = json.loads((data / purge.STATUS_NAME).read_text())
+    assert recorded["consecutive_failures"] == 0 and recorded["total_failures"] == 7
+    assert recorded["last_error"] == "" and recorded["last_success"] > 1
+    assert capsys.readouterr().out.startswith("chat purge ok: window 30 days,")

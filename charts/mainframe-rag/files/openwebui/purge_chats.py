@@ -26,7 +26,9 @@ Fail closed and counted, never reported as success: an unexpected schema (a
 pin import changed it) or a timestamp that is not epoch seconds refuses to
 delete anything; a busy database, an upload that cannot be removed or an
 incomplete scrub is a failed run, retried after --retry-seconds. Each run writes counters to .mainframe-rag-purge.json
-next to the database and logs one fixed line of counts. Chat content, titles
+next to the database and logs one fixed line of counts. On start the counters
+are loaded from that file, so a restart does not reset them; the next successful
+run sets consecutive_failures back to 0. Chat content, titles
 and identifiers are never logged. The table layout is Open WebUI v0.12.3's,
 pending #1073 qualification and re-qualified on every pin import (P1).
 Stdlib only: the image's own interpreter runs it.
