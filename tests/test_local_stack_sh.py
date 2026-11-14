@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -460,7 +461,8 @@ def _host(tmp_path: Path, avail_mb: int = 64000, psi: float = 0.0) -> dict[str, 
     o2_env = tmp_path / "o2.env"
     o2_env.write_text("ZO_ROOT_USER_EMAIL=r@x.invalid\nZO_ROOT_USER_PASSWORD=fixture-o2-password\nO2_BASIC_AUTH=Zm9v\n")
     o2_env.chmod(0o600)
-    return {"HOST_MEMINFO": str(meminfo), "HOST_PSI_DIR": str(psi_dir), "HOST_CPUS": "8", "O2_ENV_FILE": str(o2_env)}
+    return {"HOST_MEMINFO": str(meminfo), "HOST_PSI_DIR": str(psi_dir), "HOST_CPUS": "8",
+            "LOCAL_OPENOBSERVE_DATA_DIR": str(tmp_path / "o2-stub-data"), "O2_ENV_FILE": str(o2_env)}
 
 
 def _plan_workers(tmp_path: Path, host: dict[str, str]) -> tuple[subprocess.CompletedProcess, str]:
@@ -504,18 +506,22 @@ def test_invalid_ingest_workers_fails_closed(tmp_path, bad):
 
 def _live(tmp_path: Path, host: dict[str, str], extra: dict[str, str] | None = None, *,
           gateway: str | None = None, python: str | None = None, curl: str | None = None,
-          drop: tuple[str, ...] = ()):
+          openobserve: str | None = None, drop: tuple[str, ...] = ()):
     """Run the live path from an isolated checkout with stub gateway/curl/docker/
     python up to the first stub failure; returns its result and recorded calls.
 
     Defaults record every python call; the agent health check then sees a 200 and
-    the script stops, so the run ends right after the ingest."""
+    the script stops, so the run ends right after the ingest. The trace-backend
+    owner script is absent unless `openobserve` installs a stub for it, which
+    only matters on the owned-start path; reused backends never call it."""
     scripts = tmp_path / "checkout" / "scripts"
     scripts.mkdir(parents=True)
     for name in (SCRIPT.name, "local_lane_budget.sh"):
         (scripts / name).write_text((SCRIPT.parent / name).read_text())
     (scripts / "run_local_gateway.sh").write_text(
         gateway or "#!/bin/sh\nprintf 'export RERANK_ENABLED=true\\n' > \"$GATEWAY_ENV_FILE\"\n")
+    if openobserve is not None:
+        (scripts / "run_local_openobserve.sh").write_text(openobserve)
     bindir = tmp_path / "bin"
     bindir.mkdir()
     calls = tmp_path / "calls"
@@ -627,3 +633,104 @@ def test_missing_host_files_skip_checks_with_notice(tmp_path):
     assert "--workers 3 " in ingest  # falls back to the CPU-1 default
     assert "skipping the RAM admission check" in r.stderr
     assert "skipping the memory pressure check" in r.stderr
+
+
+# Stand-in for run_local_openobserve.sh. Started with no argument it serves the
+# trace backend: records its own PID (the process run_local_stack.sh owns via
+# O2_PID) in backend.pid, writes an up-marker that it removes when it exits,
+# and loops until signalled. With "stop" it stops the recorded backend, like
+# the real owner script does.
+_O2_STUB = """#!/bin/sh
+D=${LOCAL_OPENOBSERVE_DATA_DIR:?}
+mkdir -p "$D"
+if [ "$1" = stop ]; then
+    p=$(cat "$D/backend.pid" 2>/dev/null) || exit 0
+    [ -n "$p" ] || exit 0
+    kill -TERM "$p" 2>/dev/null || exit 0
+    i=0
+    while kill -0 "$p" 2>/dev/null && [ "$i" -lt 100 ]; do
+        i=$((i + 1))
+        sleep 0.1
+    done
+    kill -KILL "$p" 2>/dev/null || true
+    exit 0
+fi
+printf '%s\\n' "$$" > "$D/backend.pid"
+printf '%s\\n' "$$" > "$D/backend.up"
+trap 'rm -f "$D/backend.up"' EXIT
+trap 'exit 0' TERM INT
+i=0
+while [ "$i" -lt 1200 ]; do
+    i=$((i + 1))
+    sleep 1 &
+    t=$!
+    wait "$t" || exit 0
+    [ -f "$D/backend.up" ] || exit 0
+done
+"""
+
+# Health probe that answers only while a backend up-marker exists, so a failed
+# earlier run cannot leave a backend that the next run would silently reuse.
+_MARKER_CURL = """#!/bin/sh
+for a in "$@"; do
+    case $a in
+        */healthz) [ -f "${LOCAL_OPENOBSERVE_DATA_DIR:?}/backend.up" ] || exit 7; exit 0 ;;
+    esac
+done
+printf '200'
+"""
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _file_pid(path: Path) -> int | None:
+    text = path.read_text().strip() if path.exists() else ""
+    return int(text) if text.isdigit() else None
+
+
+def test_owned_trace_backend_stopped_when_later_check_fails(tmp_path):
+    host = _host(tmp_path)
+    data = Path(host["LOCAL_OPENOBSERVE_DATA_DIR"])
+    r, _ = _live(tmp_path, host, {"O2_ENV_FILE": str(tmp_path / "absent-o2.env")},
+                 curl=_MARKER_CURL, openobserve=_O2_STUB)
+    assert r.returncode != 0
+    assert "Starting local OpenObserve" in r.stdout
+    assert "OpenObserve credentials file" in r.stderr
+    pid = _file_pid(data / "backend.pid")
+    assert pid, "the run never started a backend it owns"
+    assert not _pid_alive(pid), f"backend {pid} started by this run is still running"
+    assert not (data / "backend.up").exists(), "the backend it started left its up-marker behind"
+
+
+def test_reused_trace_backend_survives_a_later_check_failure(tmp_path):
+    host = _host(tmp_path)
+    data = Path(host["LOCAL_OPENOBSERVE_DATA_DIR"])
+    data.mkdir(parents=True)
+    owner = subprocess.Popen(
+        ["sh", "-c", _O2_STUB],
+        env={**os.environ, "LOCAL_OPENOBSERVE_DATA_DIR": str(data)},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not (data / "backend.up").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert (data / "backend.up").exists(), "the pre-existing backend never came up"
+
+        r, _ = _live(tmp_path, host, {"O2_ENV_FILE": str(tmp_path / "absent-o2.env")})
+        assert r.returncode != 0
+        assert "(reusing)" in r.stdout
+        assert "OpenObserve credentials file" in r.stderr
+        assert owner.poll() is None, "the run stopped a backend it did not start"
+        assert (data / "backend.up").exists(), "the run stopped a backend it did not start"
+        assert _file_pid(data / "backend.pid") == owner.pid
+    finally:
+        owner.terminate()
+        owner.wait(timeout=30)

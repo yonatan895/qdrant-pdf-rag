@@ -337,7 +337,34 @@ fi
 # OpenObserve is part of the stack, not an option: reuse whatever answers on
 # its port (an operator-managed backend is not ours to stop), otherwise start
 # the pinned owner script and stop it again on exit.
+#
+# The exit trap is armed here, before the first process this run owns: every
+# check that can still fail below (backend health, credentials, the gateway
+# env file) then stops what this run started. A backend reused because it was
+# already answering keeps running: O2_PID stays empty for it.
+AGENT_PID=""
+GW_PID=""
 O2_PID=""
+cleanup() {
+    if [ -n "$AGENT_PID" ]; then
+        kill "$AGENT_PID" 2>/dev/null || true
+        wait "$AGENT_PID" 2>/dev/null || true
+    fi
+    # An OpenObserve this run started is stopped here; one reused because it
+    # was already answering has no O2_PID and is left alone.
+    if [ -n "$O2_PID" ]; then
+        kill -TERM "$O2_PID" 2>/dev/null || true
+        wait "$O2_PID" 2>/dev/null || true
+    fi
+    if [ -n "$GW_PID" ]; then
+        kill -TERM "$GW_PID" 2>/dev/null || true
+        # Wait for the gateway's own trap to stop its containers (it owns
+        # their names and cleanup); a hard crash leaves 'sh scripts/tools/run-task.sh local:gateway:down'.
+        wait "$GW_PID" 2>/dev/null || true
+    fi
+    rm -f "$GATEWAY_ENV_FILE"
+}
+trap cleanup EXIT INT TERM
 # Anything answering on the port is reused (the owner script's own probe is
 # strict); a foreign service then fails the credentials or trace check below.
 o2_up() { curl -s -m 3 -o /dev/null "$O2_URL/healthz" 2>/dev/null; }
@@ -376,26 +403,6 @@ GATEWAY_PORT="$GATEWAY_PORT" GATEWAY_ENV_FILE="$GATEWAY_ENV_FILE" \
     GATEWAY_RERANK_URL="$RERANK_GW_URL" \
     sh "$REPO_ROOT/scripts/run_local_gateway.sh" >"$LOG_DIR/local-stack-gateway.log" 2>&1 &
 GW_PID=$!
-
-AGENT_PID=""
-cleanup() {
-    if [ -n "$AGENT_PID" ]; then
-        kill "$AGENT_PID" 2>/dev/null || true
-        wait "$AGENT_PID" 2>/dev/null || true
-    fi
-    if [ -n "${O2_PID:-}" ]; then
-        kill -TERM "$O2_PID" 2>/dev/null || true
-        wait "$O2_PID" 2>/dev/null || true
-    fi
-    if [ -n "$GW_PID" ]; then
-        kill -TERM "$GW_PID" 2>/dev/null || true
-        # Wait for the gateway's own trap to stop its containers (it owns
-        # their names and cleanup); a hard crash leaves 'sh scripts/tools/run-task.sh local:gateway:down'.
-        wait "$GW_PID" 2>/dev/null || true
-    fi
-    rm -f "$GATEWAY_ENV_FILE"
-}
-trap cleanup EXIT INT TERM
 
 _i=0
 while [ "$_i" -lt 180 ] && [ ! -s "$GATEWAY_ENV_FILE" ]; do
