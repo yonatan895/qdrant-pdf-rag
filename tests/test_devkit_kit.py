@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1234,7 +1235,15 @@ def test_hardened_opencode_config_carries_the_required_settings_and_no_secret():
     assert config["permission"]["bash"] == shell
     rules = list(shell.items())
     assert rules[0] == ("*", "ask")  # last match wins: anything unlisted asks, and a headless run rejects it
-    for denied in ("git push*", "curl*", "wget*", "ssh*", "oc *", "kubectl*", "podman*", "pip *"):
+    # Tests run only through the time-limited wrapper (#1196): bare pytest is denied, and of the
+    # task runner only the tasks that run no test are allowed (the rest fall to "*": ask, which a
+    # headless worker cannot answer), so `run-task.sh test` is not a way round the limit.
+    assert shell["mfr-test *"] == "allow" and shell["mfr-test"] == "allow"
+    tasks = {rule.removeprefix("sh scripts/tools/run-task.sh ") for rule, action in shell.items()
+             if rule.startswith("sh scripts/tools/run-task.sh ") and action == "allow"}
+    assert tasks == {"--list*", "qa:context*", "check-context*", "qa:lint*", "lint*", "qa:typecheck*", "typecheck*"}
+    for denied in ("git push*", "curl*", "wget*", "ssh*", "oc *", "kubectl*", "podman*", "pip *",
+                   "pytest*", "python3 -m pytest*", "python -m pytest*"):
         assert shell[denied] == "deny", denied
         assert all(action != "allow" for _, action in rules[rules.index((denied, "deny")) + 1:])
     assert config["permission"]["webfetch"] == "deny" and config["permission"]["websearch"] == "deny"
@@ -1265,6 +1274,47 @@ def test_wrapper_refuses_permission_skips_and_the_shared_service(tmp_path, args)
     done = _run_wrapper(tmp_path, *args)
     assert done.returncode == 2 and done.stdout == ""
     assert done.stderr.startswith("mfr-opencode: ")
+
+
+def _run_mfr_test(tmp_path, body, *args, **env):
+    fake = tmp_path / "fake-python"  # stands in for `python3`; receives "-m pytest <args>"
+    fake.write_text("#!/bin/sh\n" + body)
+    fake.chmod(0o755)
+    full = {"PATH": os.environ["PATH"], "MFR_TEST_PYTHON": str(fake), **env}
+    return subprocess.run([sys.executable, str(REPO / "images/devkit/bin/mfr-test"), *args], capture_output=True,
+                          text=True, env=full, check=False, stdin=subprocess.DEVNULL, timeout=60)
+
+
+def test_mfr_test_passes_pytest_arguments_and_its_exit_code_through(tmp_path):
+    done = _run_mfr_test(tmp_path, 'printf "%s\\n" "$@"; exit 5\n', "tests/test_x.py", "-q", "-k", "a b")
+    assert done.returncode == 5 and done.stderr == ""
+    assert done.stdout.splitlines() == ["-m", "pytest", "tests/test_x.py", "-q", "-k", "a b"]
+
+
+def test_mfr_test_stops_a_run_that_never_returns_and_its_children(tmp_path):
+    marker = tmp_path / "child.pid"
+    # The "test" starts a child and both sleep far past the limit, like a test awaiting forever.
+    body = f'sleep 300 &\necho $! > {marker}\nsleep 300\n'
+    done = _run_mfr_test(tmp_path, body, "tests/test_hang.py", MFR_TEST_LIMIT_S="1")
+    assert done.returncode == 124
+    assert done.stderr == "mfr-test: stopped at the 1 s limit; a test did not return\n"
+    child = int(marker.read_text())
+    for _ in range(50):  # the whole process group is ended, not only the runner
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("the hung test's child process survived the limit")
+
+
+@pytest.mark.parametrize("value", ["0", "3601", "ten", "-5", ""])
+def test_mfr_test_refuses_a_limit_outside_its_range_before_running_anything(tmp_path, value):
+    ran = tmp_path / "ran"
+    done = _run_mfr_test(tmp_path, f": > {ran}\n", MFR_TEST_LIMIT_S=value)
+    assert done.returncode == 2 and not ran.exists()
+    assert done.stderr == "mfr-test: MFR_TEST_LIMIT_S must be a whole number of seconds from 1 to 3600\n"
 
 
 @pytest.fixture
