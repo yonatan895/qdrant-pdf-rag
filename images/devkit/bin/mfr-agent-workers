@@ -7,7 +7,7 @@
 The tasks file holds one worker per line, `<id><TAB><task>`; `#` lines and blank lines
 are skipped. An id is 1 to 32 of [a-z0-9-], starting with a letter or digit. A task
 written as `@<file>` is read from that file (relative to the tasks file), so a brief can
-span lines.
+span lines; a one-line task therefore cannot begin with `@`. Only start reads brief files.
 
 start first runs ONE serial warm-up turn (`mfr-opencode run "<warm-up>"`) when OpenCode's
 state database does not exist yet: parallel cold starts on a fresh HOME race to create
@@ -26,7 +26,8 @@ beside it that loads the file as OpenCode instructions and turns off the tools a
 does not need. OpenCode drops old turns well before the model's limit, so a brief sent
 as the first message is forgotten a few dozen steps in; instructions are sent every
 step (#1196). hc does not pass the caller's environment on, hence `env`. The managed
-/etc/opencode/opencode.json still applies and outranks this file.
+/etc/opencode/opencode.json still applies (probed on OpenCode 2.2.5 and 2.3.0 in a
+container; docs/agents-vm.md#required-settings).
 
 mfr-opencode adds --standalone and the offline settings (docs/agents-vm.md). collect
 runs `hc wait --json` for each worker, saves `hc read` to <logs>/<name>.log and prints
@@ -47,7 +48,7 @@ from pathlib import Path
 ID = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 WORKER = "mfr-opencode"
 WARM_UP = "Reply with the single word OK. Do not use any tool."
-START = ("Carry out the task in your instructions (the block that starts with TITLE). It is the only task. "
+START = ("Carry out the task in your instructions under the heading TASK BRIEF. It is the only task. "
          "If you lose track, re-read that block and continue. Start now.")
 # Tools a worker turn never needs; each one costs prompt tokens on every step (#1196).
 WORKER_TOOLS_OFF = ("execute", "question", "subagent", "task")
@@ -57,7 +58,9 @@ class Refused(Exception):
     pass
 
 
-def tasks(path: Path) -> list[tuple[str, str]]:
+def tasks(path: Path, *, briefs: bool = True) -> list[tuple[str, str]]:
+    """The workers a tasks file names. collect needs only the ids, so it passes briefs=False
+    and a brief file removed after start does not stop it."""
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
@@ -72,7 +75,7 @@ def tasks(path: Path) -> list[tuple[str, str]]:
         if any(ident == seen for seen, _ in out):
             raise Refused(f"tasks line {number} repeats an id")
         task = task.strip()
-        if task.startswith("@"):
+        if task.startswith("@") and briefs:
             try:
                 task = (path.parent / task[1:]).read_text(encoding="utf-8").strip()
             except (OSError, UnicodeDecodeError):
@@ -119,10 +122,13 @@ def warm_up(cwd: Path) -> None:
 def write_brief(briefs: Path, name: str, task: str) -> Path:
     """The brief and the per-worker config that loads it as instructions; returns the config."""
     brief = briefs / f"{name}.md"
-    brief.write_text(task + "\n", encoding="utf-8")
     config = briefs / f"{name}.json"
-    config.write_text(json.dumps({"instructions": [str(brief)],
-                                  "tools": dict.fromkeys(WORKER_TOOLS_OFF, False)}) + "\n", encoding="utf-8")
+    try:
+        brief.write_text("TASK BRIEF\n\n" + task + "\n", encoding="utf-8")
+        config.write_text(json.dumps({"instructions": [str(brief)],
+                                      "tools": dict.fromkeys(WORKER_TOOLS_OFF, False)}) + "\n", encoding="utf-8")
+    except OSError:
+        raise Refused("a worker brief could not be written; no worker was started") from None
     return config
 
 
@@ -136,10 +142,14 @@ def start(args: argparse.Namespace) -> int:
     worktrees = (args.worktrees or repo.parent / "agent-worktrees").resolve()
     worktrees.mkdir(parents=True, exist_ok=True)
     briefs = worktrees / ".briefs"
-    briefs.mkdir(exist_ok=True)
+    try:
+        briefs.mkdir(exist_ok=True)
+    except OSError:
+        raise Refused("the briefs directory could not be created; no worker was started") from None
+    configs = {ident: write_brief(briefs, f"{args.prefix}-{ident}", task) for ident, task in work}
     warm_up(repo)
     failed = 0
-    for ident, task in work:
+    for ident, _ in work:
         name = f"{args.prefix}-{ident}"
         path = worktrees / name
         done = run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", f"agents/{name}", str(path), args.base])
@@ -147,7 +157,7 @@ def start(args: argparse.Namespace) -> int:
             print(f"worker={name} start=failed step=worktree rc={done.returncode}")
             failed += 1
             continue
-        config = write_brief(briefs, name, task)
+        config = configs[ident]
         done = run([hc(), "run", "--bg", "--name", name, "--cwd", str(path), "--no-parent", "--",
                     "env", f"OPENCODE_CONFIG={config}", WORKER, "run", START])
         state = "started" if done.returncode == 0 else f"failed step=hc-run rc={done.returncode}"
@@ -157,7 +167,7 @@ def start(args: argparse.Namespace) -> int:
 
 
 def collect(args: argparse.Namespace) -> int:
-    work = tasks(args.tasks)
+    work = tasks(args.tasks, briefs=False)
     logs = args.logs.resolve()
     logs.mkdir(parents=True, exist_ok=True)
     bad = 0
