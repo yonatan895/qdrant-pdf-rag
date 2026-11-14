@@ -269,6 +269,49 @@ prepare_transport_network() {
     GATEWAY_NETWORK_TARGET="$GATEWAY_TRANSPORT_NETWORK_ID"
 }
 
+# A bridge network whose subnet holds a backend address can never carry the
+# probe or the gateway to that backend, so refuse it before anything starts.
+check_network_backend_collision() {
+    _collision_network="$1"
+    shift
+    _collision_subnets="$(gateway_docker network inspect "$_collision_network" \
+        --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null)" || _collision_subnets=""
+    _collision_match="$(python3 - "$_collision_subnets" "$@" <<'PY'
+import ipaddress
+import sys
+from urllib.parse import urlsplit
+
+try:
+    subnets = [ipaddress.ip_network(part, strict=False) for part in sys.argv[1].split()]
+except ValueError:
+    sys.exit(1)
+for url in sys.argv[2:]:
+    if not url:
+        continue
+    try:
+        host = urlsplit(url).hostname
+        if host is None:
+            continue
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        # A backend named by host is resolved by the container runtime, so no
+        # subnet can prove a collision here.
+        continue
+    for subnet in subnets:
+        if address in subnet:
+            print(f"{subnet} {address}")
+            sys.exit(0)
+sys.exit(1)
+PY
+    )" || _collision_match=""
+    [ -n "$_collision_match" ] || return 0
+    _collision_subnet="${_collision_match% *}"
+    _collision_backend="${_collision_match#* }"
+    # Only a network this run created is this run to remove.
+    release_transport_network || true
+    die "gateway network subnet $_collision_subnet contains backend address $_collision_backend; refusing"
+}
+
 # python3 mints keys and reads JSON below; docker is checked after the
 # DRYRUN exit so render-only runs stay hermetic (CI has no daemon).
 command -v python3 >/dev/null 2>&1 || die "python3 is required (key minting + JSON reads)"
@@ -312,6 +355,8 @@ PY
     require_fresh_container_owner
     prepare_transport_network
     trap 'release_transport_network || true; exit 130' INT TERM
+    check_network_backend_collision "$GATEWAY_TRANSPORT_NETWORK_ID" \
+        "$GATEWAY_REASONING_URL" "$GATEWAY_EMBED_URL" "$GATEWAY_RERANK_URL"
     # Emit ownership before the potentially interrupted probe, so recovery can
     # release an owned network. This identity alone is never a passing result:
     # the caller must also require this operation's exit status to be zero.
@@ -548,6 +593,8 @@ if [ "$GATEWAY_RESET_KEYS" = "1" ]; then
 fi
 
 prepare_transport_network
+check_network_backend_collision "$GATEWAY_TRANSPORT_NETWORK_ID" \
+    "$GATEWAY_REASONING_URL" "$GATEWAY_EMBED_URL" "$GATEWAY_RERANK_URL"
 echo "==> Starting key-store postgres ($PG_NAME, volume $PG_VOLUME)"
 service_docker "$PG_MEMORY_MIB" -d --rm --name "$PG_NAME" --network "$GATEWAY_NETWORK_TARGET" \
     --label "$GATEWAY_RUN_LABEL=$GATEWAY_RUN_OWNER" \
