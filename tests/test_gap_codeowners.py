@@ -510,7 +510,7 @@ def derived(root: Path, *entries: str, reviewed: dict[tuple[str, str], tuple[str
 PACK = ('#!/bin/sh\n'
         'set -eu\n'
         '. "$(dirname -- "$0")/common.sh"\n'
-        'python3 "$REPO_ROOT/scripts/sign.py" --pin "$REPO_ROOT/pins/key.txt"\n'
+        'python3 -I "$REPO_ROOT/scripts/sign.py" --pin "$REPO_ROOT/pins/key.txt"\n'
         'echo "done: see docs/guide.md"\n')
 COMMON = ('REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\n'
           'cd "$REPO_ROOT"\n'
@@ -546,6 +546,34 @@ def test_a_new_python_import_is_flagged_and_a_stdlib_shadow_is_a_dependency(tmp_
                                       'scripts/json.py'}
 
 
+
+def test_every_form_the_import_system_loads_is_a_dependency(tmp_path):
+    # #588 N1 (review B1): a sourceless .pyc, an extension module, a package
+    # __init__ in any of those forms, and the cached bytecode of a source (an
+    # unchecked hash-based .pyc in __pycache__ loads without reading the source)
+    # all load under an imported name, so each is in the closure.
+    root = repo(tmp_path, BASE)
+    pinned = derived(root)
+    planted = {'scripts/json.pyc', 'scripts/json.cpython-314-x86_64-linux-gnu.so', 'scripts/json/__init__.pyc',
+               'scripts/helper.abi3.so', 'scripts/__pycache__/helper.cpython-314.pyc',
+               'scripts/__pycache__/sign.cpython-314.opt-1.pyc', 'scripts/helper/__init__.so'}
+    for name in planted:
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_bytes(b'\0')
+    git(root, 'add', '-f', *sorted(planted))
+    # sign.py runs as the program (compiled from source, never from its cache);
+    # its cached bytecode is still listed, conservatively, once anything imports
+    # it. Nothing imports it here, so only the imported names' forms count.
+    assert derived(root) - pinned == planted - {'scripts/__pycache__/sign.cpython-314.opt-1.pyc'}
+
+
+def test_a_pod_side_python_is_not_a_host_call(tmp_path):
+    # kubectl exec runs the interpreter inside the pod image: not a host call,
+    # so the -I rule does not apply to it.
+    root = repo(tmp_path, {**BASE, 'scripts/pack.sh': PACK + '"$KC" exec deploy/x -- python3 /app/x.py\n'})
+    reviewed = {('scripts/pack.sh', '$KC'): (None, 'oc or kubectl')}
+    assert derived(root, reviewed=reviewed) == BASE_CLOSURE
+
 def test_a_removed_dependency_is_dropped(tmp_path):
     root = repo(tmp_path, BASE)
     repo(root, {'scripts/sign.py': 'import json\n'})
@@ -574,6 +602,16 @@ def test_sh_c_positionals_and_python_heredocs_are_followed(tmp_path):
     ('python3 -c "import yaml_like_thirdparty"', "cannot resolve import 'yaml_like_thirdparty'"),
     ('python3 -c "import importlib; importlib.import_module(name)"', 'dynamic code (import_module)'),
     ('sh -c', 'sh -c without a command string'),
+    # #588 N1 (review B1): without -I the script's directory (or the cwd) precedes the
+    # standard library, so a group-only argparse.py beside a signer runs inside it.
+    ('python3 "$REPO_ROOT/scripts/helper.py"', 'python3 runs without -I'),
+    ('python3 -u "$REPO_ROOT/scripts/helper.py"', 'python3 runs without -I'),
+    ('python3 -c "import json"', 'python3 runs without -I'),
+    ('python3 -m json.tool', 'python3 runs without -I'),
+    ("python3 - <<'EOF'\nimport json\nEOF", 'python3 runs without -I'),
+    ('python3 "$REPO_ROOT/scripts/helper.py" -I', 'python3 runs without -I'),
+    ('"$REPO_ROOT/scripts/helper.py"', 'runs scripts/helper.py through its #! line'),
+    ('python3 -I -c "import sys; sys.path.insert(0, \'scripts\')"', 'sys.path.insert puts a directory before'),
 ])
 def test_an_unresolvable_reference_fails_closed(tmp_path, line, problem):
     root = repo(tmp_path, {**BASE, 'scripts/pack.sh': PACK + line + '\n'})

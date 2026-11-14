@@ -20,13 +20,20 @@ Edges followed, from each reached file:
   inside sourced files), ``$(dirname -- "$0")``, a variable assigned such a path, a variable in
   ROOT_VARIABLES, or a repository-relative word.
 - Python: ``import``/``from`` statements, resolved against the repository root and the
-  directory of every reached Python file (the script directory Python puts first on
-  ``sys.path``), before the standard library, so a planted ``json.py`` next to a script is a
-  dependency; and every string literal, or ``/`` chain of literals, that names a tracked file
-  from the root or the file's own directory.
+  directory of every reached Python file, before the standard library, so a planted
+  ``json.py`` next to a script is a dependency. This is conservative: every host-side call
+  runs ``python3 -I`` and the scripts append their own directory, so at run time the standard
+  library resolves first. Every file the import system can load under a name counts: source,
+  sourceless ``.pyc``, extension modules, package ``__init__`` in any of those forms, and
+  ``__pycache__`` bytecode. Also every string literal, or ``/`` chain of literals, that names a
+  tracked file from the root or the file's own directory.
 - A reached ``.sh`` or ``.py`` file is followed as code, however it was reached.
 
-Fail closed: a sourced or executed reference that names no tracked file, an import that is
+Fail closed: a host-side ``python``/``python3`` call without ``-I`` before its program (#588 N1:
+otherwise the script directory or cwd precedes the standard library, so a group-only
+``argparse.py`` beside a signer runs inside it), a ``sys.path.insert`` in reached Python (it
+puts a directory before the standard library even under ``-I``; append instead), a repository
+``.py`` run through its ``#!`` line, a sourced or executed reference that names no tracked file, an import that is
 neither in the repository nor in the standard library, a dynamic import or ``exec``/``eval``
 in Python, a dynamic shell command word (``$cmd``, ``eval "$cmd"``) and a file that cannot be
 read or parsed are each reported, and ``derive()`` raises ``Unresolved`` listing all of them,
@@ -327,6 +334,28 @@ class _Lexer:
         return UNKNOWN
 
 
+def _python_options(args: list[str]) -> list[str]:
+    """The interpreter options before the program (a script, -c, -m or -)."""
+    options, rest = [], list(args)
+    while rest:
+        option = rest.pop(0)
+        if option == '-' or not option.startswith('-') or len(option) < 2:
+            break
+        options.append(option)
+        if option in ('-c', '-m'):
+            break
+        if option in ('-W', '-X', '--check-hash-based-pycs') and rest:
+            rest.pop(0)
+    return options
+
+
+# A file the import system can load under a module name, by suffix: source,
+# sourceless bytecode, an extension module (name.<tag>.so), and the cached
+# bytecode of a source (__pycache__/name.<tag>.pyc; an unchecked hash-based one
+# loads without reading the source).
+LOADABLE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)(?:\.[A-Za-z0-9_-]+)*\.(?:py|pyc|pyo|pyw|so|pyd)')
+
+
 def shell_commands(text: str) -> list[_Command]:
     lexer = _Lexer(text)
     lexer.parse()
@@ -350,6 +379,15 @@ class _Derivation:
         self.root = root
         self.tracked = frozenset(filter(None, listed.split('\0')))
         self.dirs = frozenset(posixpath.dirname(p) for p in self.tracked) | {''}
+        # Module path (dir/name) -> every tracked file the import system can load for it.
+        self.loadable: dict[str, list[str]] = {}
+        for path in sorted(self.tracked):
+            directory, base = posixpath.split(path)
+            match = LOADABLE.fullmatch(base)
+            if match:
+                if posixpath.basename(directory) == '__pycache__':
+                    directory = posixpath.dirname(directory)
+                self.loadable.setdefault(posixpath.join(directory, match[1]), []).append(path)
         self.reviewed, self.root_variables = reviewed, root_variables
         self.used: set[tuple[str, str]] = set()
         self.closure: set[str] = set()
@@ -492,6 +530,8 @@ class _Derivation:
             return  # an indirect assignment built by eval: ${name}=value
         elif '/' in name or '$' in name or '\0' in name:
             path = self.execution(name, ctx, 'command')
+            if path is not None and path.endswith('.py'):
+                self.problems.add(f'{ctx.file}:{cmd.line}: runs {path} through its #! line, not python3 -I')
             if path is not None:
                 self.reach(path)
 
@@ -547,6 +587,11 @@ class _Derivation:
             self.problems.add(f'{ctx.file}:{cmd.line}: shell reads a script from stdin')
 
     def python_invocation(self, args: list[str], cmd: _Command, ctx: _Context) -> None:
+        # #588 N1: without -I the script's directory (or the cwd, for -c, -m and -)
+        # comes before the standard library and PYTHON* variables apply, so a file a
+        # group-only change adds beside a signer (argparse.py, tarfile.pyc) runs in it.
+        if not any(o[:1] == '-' and o[1:2] != '-' and 'I' in o[1:] for o in _python_options(args)):
+            self.problems.add(f'{ctx.file}:{cmd.line}: python3 runs without -I')
         rest = list(args)
         while rest:
             option = rest.pop(0)
@@ -614,6 +659,11 @@ class _Derivation:
                 called = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ''
                 if called in DYNAMIC_CALLS and not (called == 'compile' and isinstance(func, ast.Attribute)):
                     self.problems.add(f'{label}:{node.lineno}: dynamic code ({called})')
+                if called == 'insert' and isinstance(func, ast.Attribute) and ast.unparse(func.value) == 'sys.path':
+                    # #588 N1: a directory put before the standard library lets a file in it
+                    # shadow a standard module even under -I; append instead.
+                    self.problems.add(f'{label}:{node.lineno}: sys.path.insert puts a directory before the '
+                                      'standard library')
             elif isinstance(node, ast.Constant) and isinstance(node.value, str):
                 self.literal(node.value, here)
             elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
@@ -658,19 +708,21 @@ class _Derivation:
         package: str | None = base
         for part in (name.split('.') if name else []):
             here = posixpath.join(package, part) if package else part
-            if f'{here}/__init__.py' in self.tracked:
-                found.append(f'{here}/__init__.py')
+            # Every form counts, whichever the import system would pick (conservative).
+            init, module = self.loadable.get(f'{here}/__init__', []), self.loadable.get(here, [])
+            if init:
+                found += init + module
                 package = here
-            elif here in self.dirs and f'{here}.py' not in self.tracked:
+            elif here in self.dirs and not module:
                 package = here  # a namespace package
             else:
-                found += [f'{here}.py'] if f'{here}.py' in self.tracked else []
+                found += module
                 package = None
                 break
         if package is not None:
             for item in names:
                 prefix = posixpath.join(package, item) if package else item
-                found += [p for p in (f'{prefix}.py', f'{prefix}/__init__.py') if p in self.tracked]
+                found += self.loadable.get(prefix, []) + self.loadable.get(f'{prefix}/__init__', [])
         if not found and label is not None:
             self.problems.add(f'{label}: cannot resolve relative import {name!r}')
         for path in found:

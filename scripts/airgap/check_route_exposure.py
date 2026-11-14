@@ -39,7 +39,9 @@ import re
 import sys
 from pathlib import Path
 
-from check_app_ownership import check as check_ownership
+# Run as a file (python3 -I): the sibling, searched after the standard library.
+sys.path.append(str(Path(__file__).resolve().parent))
+from check_app_ownership import check as check_ownership  # noqa: E402
 
 OWNED = 'rag-agent'
 OWNED_OPENWEBUI = 'rag-openwebui'

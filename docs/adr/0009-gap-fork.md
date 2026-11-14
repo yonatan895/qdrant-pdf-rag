@@ -577,9 +577,26 @@ gap patches stay ledgered.
     it cannot resolve fails unless it is reviewed by name with its reason.
     It does not see paths built at run time (loop variables, string
     formatting), files read through a directory, the text `eval` runs, or
-    code loaded from outside the repository. In the fork the test is
-    group-owned code, so a new file in a protected script's directory that
-    shadows a module that script imports is caught only by the `test` job.
+    code loaded from outside the repository.
+  - **No standard-library shadow runs in a signer or verifier.** Every
+    host-side Python call the entry points reach runs as `python3 -I`, and
+    the scripts that import a sibling append their own directory. The
+    standard library therefore resolves first, so a file a group-only change
+    adds (`scripts/argparse.py`, a sourceless `.pyc`) cannot replace a
+    standard module. This rests on the protected scripts, not on the fork's
+    `test` job. The derivation fails closed on a reached call without `-I`
+    and on a repository `.py` run through its `#!` line, so the upstream
+    test pins the property; it also fails on a `sys.path.insert` in
+    reached Python. It counts every form the import system loads:
+    source, sourceless `.pyc`, extension modules, package `__init__`
+    and `__pycache__` bytecode (#588 N1 review B1).
+  - **Residual: sibling shadows.** A file in one of those forms that
+    shadows a repository module a protected script imports, such as
+    `scripts/dependency_lock/__init__.py` or an unchecked hash-based
+    `scripts/__pycache__/dependency_lock.<tag>.pyc` (loaded without reading
+    the source, even under `-I`), is found only by the derivation.
+    In the fork that test is group-owned code the same change can edit, and
+    the protected hygiene check does not derive anything.
   - **One source of truth.** The generator holds the Verifier's list as
     data and imports nothing from the checkout. An upstream unit test
     (`tests/test_gap_codeowners.py`) asserts that its protected set equals

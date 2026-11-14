@@ -46,6 +46,8 @@ try:
         validate_model_config,
     )
 except ModuleNotFoundError:
+    # Run as a file (python3 -I): the sibling, searched after the standard library.
+    sys.path.append(str(Path(__file__).resolve().parent))
     from model_config import (  # type: ignore[no-redef]  # Direct bastion-script execution.
         MODEL_CONFIG_KEYS,
         SIZING_ENV_KEYS,

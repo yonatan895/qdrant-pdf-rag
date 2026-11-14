@@ -247,7 +247,7 @@ verify_registry_image() {
     skopeo inspect --raw $(inspect_args) "docker://$_vdst" > "$VERIFY_TMP/registry.raw" || \
         die "cannot read back registry image $_vdst after the push — it is not verified; fix registry access and rerun"
     _vrc=0
-    _vdigest=$(python3 scripts/airgap/image_manifest.py load "$VERIFY_TMP/$_vtar.manifest" "$VERIFY_TMP/registry.raw" "$_vexpected") || _vrc=$?
+    _vdigest=$(python3 -I scripts/airgap/image_manifest.py load "$VERIFY_TMP/$_vtar.manifest" "$VERIFY_TMP/registry.raw" "$_vexpected") || _vrc=$?
     case "$_vrc" in
         0) ;;
         3) die "archive for $_vdst no longer matches its MANIFEST digest — do not trust this bundle" ;;
