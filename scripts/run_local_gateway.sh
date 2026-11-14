@@ -12,6 +12,14 @@
 # Probe/release use GATEWAY_TRANSPORT_NETWORK_ID and the returned created flag
 # as GATEWAY_TRANSPORT_NETWORK_CREATED. Pass both to the later normal launch.
 # This proves image/network/upstream reachability, not a running gateway service.
+# A network this script creates gets the first GATEWAY_NETWORK_SUBNETS entry
+# (fixed private /24s) that holds no IP-literal backend address and that the
+# runtime accepts, else the runtime's own pool. Probe and serve then refuse a
+# created or pre-existing network whose subnet holds a backend address
+# ("gateway network subnet <cidr> contains backend address <ip>; refusing"),
+# removing only a created one. A failed probe reports
+# "gateway network transport probe failed: <error class>" (errno text,
+# "timed out", "HTTP <status>"), never a URL or a response body.
 # GATEWAY_RUN_OWNER is a fresh run identity; transport-release also recovers
 # its labelled gateway/Postgres containers. Never reuse another run's owner.
 #
@@ -59,6 +67,9 @@ GATEWAY_TRANSPORT_NETWORK_ID="${GATEWAY_TRANSPORT_NETWORK_ID:-}"
 GATEWAY_TRANSPORT_NETWORK_CREATED="${GATEWAY_TRANSPORT_NETWORK_CREATED:-0}"
 GATEWAY_RUN_OWNER="${GATEWAY_RUN_OWNER:-}"
 GATEWAY_RUN_LABEL="io.mainframe-rag.gateway-run"
+# Private /24s requested, in order, for a network this script creates (#1218).
+# The runtime's own pool can hold a backend address; a fixed list, not a setting.
+GATEWAY_NETWORK_SUBNETS="10.213.17.0/24 10.213.18.0/24 172.29.217.0/24 192.168.217.0/24"
 GATEWAY_NETWORK_TARGET="$PG_NET"
 PG_PASSWORD="${PG_PASSWORD:-litellm-local-dev}"
 GATEWAY_RESET_KEYS="${GATEWAY_RESET_KEYS:-0}"
@@ -257,7 +268,23 @@ prepare_transport_network() {
         fi
     else
         [ -z "$GATEWAY_TRANSPORT_NETWORK_ID" ] || die "transport network identity changed"
-        _created_network_id="$(gateway_docker network create "$PG_NET" 2>/dev/null)" || die "transport network could not be prepared"
+        # Take the first candidate that holds no backend address and that the
+        # runtime accepts (it refuses one overlapping another network).
+        _created_network_id=""
+        for _candidate_subnet in $GATEWAY_NETWORK_SUBNETS; do
+            [ -z "$(backend_collision "$_candidate_subnet")" ] || continue
+            if _created_network_id="$(gateway_docker network create --subnet "$_candidate_subnet" \
+                "$PG_NET" 2>/dev/null)"; then
+                break
+            fi
+            _created_network_id=""
+        done
+        # A runtime that accepts none keeps its own pool; the backend check
+        # after this function still refuses a collision there.
+        if [ -z "$_created_network_id" ]; then
+            _created_network_id="$(gateway_docker network create "$PG_NET" 2>/dev/null)" || \
+                die "transport network could not be prepared"
+        fi
         _probe_created=1
         if ! _probe_network_id="$(transport_network_id)" || [ "$_probe_network_id" != "$_created_network_id" ]; then
             gateway_docker network rm "$_created_network_id" >/dev/null 2>&1 || true
@@ -267,6 +294,71 @@ prepare_transport_network() {
     GATEWAY_TRANSPORT_NETWORK_ID="$_probe_network_id"
     GATEWAY_TRANSPORT_NETWORK_CREATED="$_probe_created"
     GATEWAY_NETWORK_TARGET="$GATEWAY_TRANSPORT_NETWORK_ID"
+}
+
+# A bridge network whose subnet holds a backend address can never carry the
+# probe or the gateway to that backend, so refuse it before anything starts.
+# The probe's one ownership record (stdout) for the prepared network.
+emit_transport_ownership() {
+    python3 - "$PG_NET" "$GATEWAY_TRANSPORT_NETWORK_ID" "$GATEWAY_TRANSPORT_NETWORK_CREATED" \
+        "$LITELLM_IMAGE" "$GATEWAY_REASONING_URL" "$GATEWAY_EMBED_URL" <<'PY'
+import json
+import sys
+print(json.dumps({"network_name": sys.argv[1], "network_id": sys.argv[2],
+                  "created": sys.argv[3] == "1", "gateway_image": sys.argv[4],
+                  "reasoning_url": sys.argv[5], "embedding_url": sys.argv[6]}))
+PY
+}
+
+# backend_collision prints "<subnet> <address>" for the first IP-literal backend
+# host (reasoning, embedding, rerank URL) inside one of the whitespace-separated
+# subnets in $1, and nothing when none is.
+backend_collision() {
+    python3 - "$1" "$GATEWAY_REASONING_URL" "$GATEWAY_EMBED_URL" "$GATEWAY_RERANK_URL" <<'PY' || true
+import ipaddress
+import sys
+from urllib.parse import urlsplit
+
+subnets = []
+for part in sys.argv[1].split():
+    try:
+        subnets.append(ipaddress.ip_network(part, strict=False))
+    except ValueError:
+        # One unreadable entry must not hide a colliding one beside it.
+        continue
+for url in sys.argv[2:]:
+    if not url:
+        continue
+    try:
+        host = urlsplit(url).hostname
+        if host is None:
+            continue
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        # A backend named by host is resolved by the container runtime, so no
+        # subnet can prove a collision here.
+        continue
+    for subnet in subnets:
+        if address in subnet:
+            print(f"{subnet} {address}")
+            sys.exit(0)
+sys.exit(1)
+PY
+}
+
+check_network_backend_collision() {
+    _collision_subnets="$(gateway_docker network inspect "$1" \
+        --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null)" || _collision_subnets=""
+    _collision_match="$(backend_collision "$_collision_subnets")"
+    [ -n "$_collision_match" ] || return 0
+    _collision_subnet="${_collision_match% *}"
+    _collision_backend="${_collision_match#* }"
+    # Only a network this run created is this run to remove. When that removal
+    # fails, the probe still records ownership so its caller can release it.
+    if ! release_transport_network && [ "$GATEWAY_OPERATION" = transport-probe ]; then
+        emit_transport_ownership
+    fi
+    die "gateway network subnet $_collision_subnet contains backend address $_collision_backend; refusing"
 }
 
 # python3 mints keys and reads JSON below; docker is checked after the
@@ -312,30 +404,55 @@ PY
     require_fresh_container_owner
     prepare_transport_network
     trap 'release_transport_network || true; exit 130' INT TERM
+    check_network_backend_collision "$GATEWAY_TRANSPORT_NETWORK_ID"
     # Emit ownership before the potentially interrupted probe, so recovery can
     # release an owned network. This identity alone is never a passing result:
     # the caller must also require this operation's exit status to be zero.
-    python3 - "$PG_NET" "$_probe_network_id" "$_probe_created" "$LITELLM_IMAGE" \
-        "$GATEWAY_REASONING_URL" "$GATEWAY_EMBED_URL" <<'PY'
-import json
-import sys
-print(json.dumps({"network_name": sys.argv[1], "network_id": sys.argv[2],
-                  "created": sys.argv[3] == "1", "gateway_image": sys.argv[4],
-                  "reasoning_url": sys.argv[5], "embedding_url": sys.argv[6]}))
-PY
-    if ! gateway_docker run --rm --pull never --network "$_probe_network_id" \
+    emit_transport_ownership
+    # The probe prints only one fixed-form error class of the failing request
+    # (an errno text, "timed out", "HTTP <status>"): never a URL or a body.
+    _probe_status=0
+    _probe_output="$(gateway_docker run --rm --pull never --network "$_probe_network_id" \
         --add-host=host.docker.internal:host-gateway --entrypoint python \
         "$LITELLM_IMAGE" -c '
+import os
 import sys
+import urllib.error
 import urllib.request
+
+
+def error_class(exc):
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code}"
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, TimeoutError):
+        return "timed out"
+    if isinstance(reason, OSError) and isinstance(reason.errno, int) and reason.errno > 0:
+        return os.strerror(reason.errno)
+    return type(reason).__name__
+
+
 for origin in sys.argv[1:]:
     url = origin.rstrip("/").removesuffix("/v1") + "/health"
-    with urllib.request.urlopen(url, timeout=5) as response:
-        if response.status != 200 or response.geturl() != url:
-            raise RuntimeError("transport health check failed")
-' "$GATEWAY_REASONING_URL" "$GATEWAY_EMBED_URL" >/dev/null 2>&1; then
+    try:
+        with urllib.request.urlopen(url, timeout=5) as response:
+            passed = response.status == 200 and response.geturl() == url
+    except Exception as exc:
+        print("transport-probe-error:", error_class(exc), flush=True)
+        sys.exit(1)
+    if not passed:
+        print("transport-probe-error: unexpected health response", flush=True)
+        sys.exit(1)
+' "$GATEWAY_REASONING_URL" "$GATEWAY_EMBED_URL" 2>/dev/null)" || _probe_status=$?
+    if [ "$_probe_status" -ne 0 ]; then
+        _probe_error="$(printf '%s\n' "$_probe_output" | sed -n 's/^transport-probe-error: //p' | tail -n 1)"
+        # Anything else (a runtime error, an unexpected line) keeps only the status.
+        case "$_probe_error" in
+            ''|*[!A-Za-z0-9\ ._-]*) _probe_error="probe container exit status $_probe_status" ;;
+        esac
+        [ "${#_probe_error}" -le 64 ] || _probe_error="probe container exit status $_probe_status"
         release_transport_network || true
-        die "gateway network transport probe failed"
+        die "gateway network transport probe failed: $_probe_error"
     fi
     exit 0
 fi
@@ -548,6 +665,7 @@ if [ "$GATEWAY_RESET_KEYS" = "1" ]; then
 fi
 
 prepare_transport_network
+check_network_backend_collision "$GATEWAY_TRANSPORT_NETWORK_ID"
 echo "==> Starting key-store postgres ($PG_NAME, volume $PG_VOLUME)"
 service_docker "$PG_MEMORY_MIB" -d --rm --name "$PG_NAME" --network "$GATEWAY_NETWORK_TARGET" \
     --label "$GATEWAY_RUN_LABEL=$GATEWAY_RUN_OWNER" \
