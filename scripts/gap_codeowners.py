@@ -17,7 +17,10 @@ binds as Verifier-owned (`VERIFICATION_INPUTS`, which includes
 `scripts/unit_evidence.py` INPUTS, every `taskfiles/*.yml` and the producer
 workflows), plus the gap's own gates in GAP_GATES and every file the release
 and kit signers and verifiers (SIGNING_ENTRY_POINTS) run or read by name,
-SIGNING_CLOSURE. VERIFIER_LIST and SIGNING_CLOSURE are data, and
+SIGNING_CLOSURE, with every other module or package form of the names that
+closure imports in the directories it imports them from (import_guards()).
+No compiled Python file may be tracked at all. VERIFIER_LIST, SIGNING_CLOSURE
+and the import directories and names are data, and
 `tests/test_gap_codeowners.py` pins them upstream, where the Verifier guards
 it: VERIFIER_LIST equal to the Verifier's lists, and SIGNING_CLOSURE equal to
 the closure `tests/helpers_signing_closure.py` derives from the scripts, so a
@@ -37,7 +40,8 @@ Commands, from the checkout root (usage: ADR-0009 sections 4 and 6):
   write --group @GROUP --approver @USER [--approver @USER ...]
   refresh   rewrite the file for this checkout, keeping its owners
   check     the GitLab hygiene job: fail unless the committed file equals
-            the generator output and no CODEOWNERS file shadows it
+            the generator output, no CODEOWNERS file shadows it and no
+            compiled Python file is tracked
 
 Exit codes: 0 ok, 1 check failed or refused, 2 usage. Messages are fixed.
 Standard library only: the hygiene job runs it on the image's python3.
@@ -124,6 +128,25 @@ SIGNING_CLOSURE = (
     'scripts/tools/oc-pin.txt', 'scripts/tools/oras-pin.txt', 'scripts/tools/oras-windows-pin.txt',
     'scripts/tools/task-artifact.sh', 'scripts/tools/task-pin.txt',
 )
+# Where the closure's Python looks for the repository modules it imports: the
+# directories it appends to sys.path (a script's own directory, the heredocs'
+# scripts/), and every top-level repository name it imports through them,
+# derived by tests/helpers_signing_closure.py and pinned equal upstream. A
+# same-name package directory or module in any of these directories could load
+# instead of the reviewed one (a package beats a module in the same directory, an
+# earlier directory beats a later one), so each such form is protected, present or
+# not (#588 N1 re-review R1, R4). Compiled forms (.so, .pyc, __pycache__/) are
+# refused outright: see COMPILED.
+SIGNING_IMPORT_DIRS = ('scripts', 'scripts/airgap')
+SIGNING_IMPORT_NAMES = (
+    'check_app_ownership', 'dependency_lock', 'devkit_key', 'image_inventory', 'image_manifest',
+    'license_inventory', 'model_config', 'scripts',
+)
+# Compiled Python loads without its source: an extension module or bytecode
+# beside a module (or an unchecked hash-based __pycache__ file) would run in a
+# signer instead of the reviewed code, even under python3 -I (#588 N1 re-review
+# R2, R3). None is ever tracked, anywhere in the fork.
+COMPILED = re.compile(r'(?:^|/)__pycache__/|\.(?:pyc|pyo|so|pyd)$', re.IGNORECASE)
 GROUP_SECTION = '[Gap maintainers]'
 PROTECTED_SECTION = '[Protected list]'
 UNOWNED = 'gap'
@@ -151,6 +174,8 @@ UNREADABLE = ('FAIL: .gitlab/CODEOWNERS is missing, or does not name one group a
 IO_ERROR = 'FAIL: .gitlab/CODEOWNERS or its directory cannot be read or written.\n'
 GIT_ERROR = 'FAIL: git ls-files failed; run from a git checkout of the fork.\n'
 NAME_ERROR = 'FAIL: a tracked top-level name cannot be a CODEOWNERS path; rename it.\n'
+COMPILED_ERROR = ('FAIL: a tracked file is compiled Python (.pyc, .pyo, .so, .pyd or __pycache__/), which a\n'
+                  'signer could load instead of its reviewed source. Remove it (ADR-0009 section 6).\n')
 SHADOWED = ('FAIL: {path} exists, and GitLab would read it instead of .gitlab/CODEOWNERS.\n'
             'Remove it; .gitlab/CODEOWNERS is the only code-owner file (ADR-0009 section 6).\n')
 
@@ -159,9 +184,16 @@ class Refused(ValueError):
     """A fixed, user-facing refusal."""
 
 
+def import_guards() -> tuple[str, ...]:
+    """Each module and package form of SIGNING_IMPORT_NAMES in SIGNING_IMPORT_DIRS that is not the real one."""
+    forms = {form for directory in SIGNING_IMPORT_DIRS for name in SIGNING_IMPORT_NAMES
+             for form in (f'{directory}/{name}.py', f'{directory}/{name}/')}
+    return tuple(sorted(forms - set(SIGNING_CLOSURE)))
+
+
 def protected_paths() -> tuple[str, ...]:
-    """The Verifier's protected list, the gap's gates and the signing closure, sorted and unique."""
-    return tuple(sorted({*VERIFIER_LIST, *GAP_GATES, *SIGNING_CLOSURE}))
+    """The Verifier's protected list, the gap's gates, the signing closure and its import guards."""
+    return tuple(sorted({*VERIFIER_LIST, *GAP_GATES, *SIGNING_CLOSURE, *import_guards()}))
 
 
 def validate_owners(group: str, approvers: Sequence[str]) -> None:
@@ -173,7 +205,10 @@ def validate_owners(group: str, approvers: Sequence[str]) -> None:
 
 
 def group_owned(root: Path) -> tuple[str, ...]:
-    """Each tracked top-level entry except gap/, as `name/` or `name`, plus `.gitlab/`."""
+    """Each tracked top-level entry except gap/, as `name/` or `name`, plus `.gitlab/`.
+
+    Refuses a tracked compiled Python file anywhere, gap/ included (COMPILED).
+    """
     try:
         listed = subprocess.run(['git', '-C', str(root), 'ls-files', '-z'], capture_output=True,
                                 check=True, timeout=60).stdout
@@ -182,6 +217,8 @@ def group_owned(root: Path) -> tuple[str, ...]:
     entries = {'.gitlab/'}
     for raw in filter(None, listed.split(b'\0')):
         path = raw.decode('utf-8', 'replace')
+        if COMPILED.search(path):
+            raise Refused(COMPILED_ERROR)
         name, nested, _ = path.partition('/')
         if not NAME.fullmatch(name):
             raise Refused(NAME_ERROR)

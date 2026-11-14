@@ -397,6 +397,8 @@ class _Derivation:
         self.stack: list[str] = []
         self.labels: list[str] = []
         self.by: dict[str, str] = {}
+        # Top-level imported name -> the search bases ('' is the root) where it resolved in the repo.
+        self.resolved: dict[str, set[str]] = {}
 
     def add(self, path: str) -> None:
         self.closure.add(path)
@@ -691,9 +693,11 @@ class _Derivation:
 
     def module(self, name: str, names: Iterable[str], label: str, here: str) -> None:
         found = False
-        for base in self.python_roots(here):
-            found |= self.package_from(base, name, names, None)
         top = name.split('.')[0]
+        for base in self.python_roots(here):
+            if self.package_from(base, name, names, None):
+                found = True
+                self.resolved.setdefault(top, set()).add(base)
         if found or top in sys.stdlib_module_names or top in sys.builtin_module_names:
             return
         key = (label, f'import {top}')
@@ -737,10 +741,27 @@ def derive(root: Path, entry_points: Iterable[str],
     return frozenset(referrers(root, entry_points, reviewed, root_variables))
 
 
+def import_paths(root: Path, entry_points: Iterable[str],
+                 reviewed: Mapping[tuple[str, str], tuple[str | None, str]] = REVIEWED,
+                 root_variables: Mapping[tuple[str, str], str] = ROOT_VARIABLES
+                 ) -> tuple[frozenset[str], frozenset[str]]:
+    """The directories (not the root) where a repository import of the closure resolves, and every
+    top-level repository name it imports: scripts/gap_codeowners.py SIGNING_IMPORT_DIRS and _NAMES."""
+    run = _run(root, entry_points, reviewed, root_variables)
+    dirs = frozenset(base for bases in run.resolved.values() for base in bases if base)
+    return dirs, frozenset(run.resolved)
+
+
 def referrers(root: Path, entry_points: Iterable[str],
               reviewed: Mapping[tuple[str, str], tuple[str | None, str]] = REVIEWED,
               root_variables: Mapping[tuple[str, str], str] = ROOT_VARIABLES) -> dict[str, str]:
     """derive(), with the first file (or heredoc) that reached each path."""
+    run = _run(root, entry_points, reviewed, root_variables)
+    return {path: run.by[path] for path in sorted(run.closure)}
+
+
+def _run(root: Path, entry_points: Iterable[str], reviewed: Mapping[tuple[str, str], tuple[str | None, str]],
+         root_variables: Mapping[tuple[str, str], str]) -> _Derivation:
     run = _Derivation(root, reviewed, root_variables)
     for entry in entry_points:
         if entry not in run.tracked:
@@ -762,7 +783,7 @@ def referrers(root: Path, entry_points: Iterable[str],
     stale += [f'root variable {key} is no longer used' for key in root_variables if key not in run.used]
     if run.problems or stale:
         raise Unresolved([*run.problems, *stale])
-    return {path: run.by[path] for path in sorted(run.closure)}
+    return run
 
 
 if __name__ == '__main__':

@@ -590,20 +590,30 @@ gap patches stay ledgered.
     reached Python. It counts every form the import system loads:
     source, sourceless `.pyc`, extension modules, package `__init__`
     and `__pycache__` bytecode (#588 N1 review B1).
-  - **Residual: sibling shadows.** A file in one of those forms that
-    shadows a repository module a protected script imports, such as
-    `scripts/dependency_lock/__init__.py` or an unchecked hash-based
-    `scripts/__pycache__/dependency_lock.<tag>.pyc` (loaded without reading
-    the source, even under `-I`), is found only by the derivation.
-    In the fork that test is group-owned code the same change can edit, and
-    the protected hygiene check does not derive anything.
+  - **No repository-module shadow either** (#588 N1 re-review R1-R4,
+    maintainer, 2026-11-14). Two more cases bypass `-I`: a file that loads in
+    place of a repository module a protected script imports, and compiled
+    code, which loads without its source. Both are closed by the protected
+    check, not by the `test` job:
+    - The generated file also protects every other module and package form
+      (`<dir>/<name>.py`, `<dir>/<name>/`) of each top-level repository name
+      the closure imports, in each directory it imports them from
+      (`SIGNING_IMPORT_NAMES` x `SIGNING_IMPORT_DIRS`, present or not). This
+      covers `scripts/dependency_lock/__init__.py` and `scripts/scripts/`,
+      which answers `from scripts import` once a heredoc has appended
+      `scripts/`. Both lists are data, derived and pinned upstream like
+      `SIGNING_CLOSURE`.
+    - `check` refuses any tracked compiled Python file, anywhere in the
+      fork: `.pyc`, `.pyo`, `.so`, `.pyd` or a `__pycache__/` entry. That
+      covers an extension module and an unchecked hash-based `__pycache__`
+      file, which Python loads without reading the source.
   - **One source of truth.** The generator holds the Verifier's list as
     data and imports nothing from the checkout. An upstream unit test
     (`tests/test_gap_codeowners.py`) asserts that its protected set equals
     those lists plus the named gap additions. The GitLab hygiene job fails
     when the committed file differs from the generator output, whose owners
-    it reads back from that file, or when a `CODEOWNERS` or
-    `docs/CODEOWNERS` exists.
+    it reads back from that file, when a `CODEOWNERS` or
+    `docs/CODEOWNERS` exists, or when a compiled Python file is tracked.
   - **The check runs untouched.** A new top-level name matches no entry of
     the 17.0 file until it is regenerated, so only the hygiene check catches
     it. The check is the job's first step and runs as

@@ -101,8 +101,10 @@ def written(tmp_path: Path) -> Path:
 def test_protected_set_is_the_verifier_list_plus_the_named_gap_gates_and_the_signing_closure():
     workflows = {'.github/workflows/' + p.workflow for p in PRODUCERS}
     signing = closure.derive(ROOT, SIGNING_ENTRY_POINTS)
+    dirs, names = closure.import_paths(ROOT, SIGNING_ENTRY_POINTS)
+    guards = {f'{d}/{n}{form}' for d in dirs for n in names for form in ('.py', '/')} - signing
     assert set(codeowners.protected_paths()) == {*VERIFICATION_INPUTS, 'taskfiles/*.yml', *workflows, *GAP_GATES,
-                                                 *signing}
+                                                 *signing, *guards}
     assert set(UNIT_INPUTS) <= set(codeowners.protected_paths())
     assert not any(p.startswith('gap/') for p in codeowners.protected_paths())
 
@@ -123,10 +125,23 @@ def test_every_file_the_signing_entry_points_run_is_protected_and_the_list_track
     assert not any(p.startswith('gap/') for p in signing)
 
 
+def test_the_import_guards_track_where_the_signing_closure_imports_repository_modules():
+    # #588 N1 re-review R1/R4: a package scripts/dependency_lock/ beats the module
+    # beside it, and scripts/scripts/ answers `from scripts import` once a heredoc
+    # appended scripts/. The generator's directories and names must equal the
+    # derivation's, so a new sibling import or appended directory is guarded too.
+    dirs, names = closure.import_paths(ROOT, SIGNING_ENTRY_POINTS)
+    assert set(codeowners.SIGNING_IMPORT_DIRS) == dirs and set(codeowners.SIGNING_IMPORT_NAMES) == names
+    assert {'scripts/dependency_lock/', 'scripts/scripts/', 'scripts/scripts.py', 'scripts/image_manifest.py',
+            'scripts/airgap/dependency_lock.py'} <= set(codeowners.import_guards())
+    # A guard never names a real file: that would be a closure member instead.
+    assert [p for p in codeowners.import_guards() if (ROOT / p).exists()] == []
+
+
 def test_every_path_the_verifier_binds_is_protected_and_every_named_path_exists():
     bound = verification_inputs(ROOT)  # the real function acceptance hashes
     assert bound and all(any(gitlab_glob(p, path) for p in codeowners.protected_paths()) for path in bound)
-    absent = {codeowners.TARGET, *codeowners.SHADOWING}
+    absent = {codeowners.TARGET, *codeowners.SHADOWING, *codeowners.import_guards()}
     named = [p for p in codeowners.protected_paths() if '*' not in p and p not in absent]
     assert [p for p in named if not (ROOT / p).is_file()] == []
     # Upstream tracks no code-owner file at all (F3 enforces .gitlab/).
@@ -434,6 +449,54 @@ def hygiene_step(root: Path) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, 'PATH': os.pathsep.join([str(Path(sys.executable).parent), os.environ['PATH']])}
     return subprocess.run(['sh', '-ec', step], cwd=root, env=env, capture_output=True, text=True, check=False)
 
+
+
+def needs_approver(root: Path, path: str) -> bool:
+    """GitLab 17.0 semantics on the committed file: a protected entry names the path or a parent directory."""
+    protected = entries((root / codeowners.TARGET).read_text(), '[Protected list]')
+    return any(f'/{path}' == entry or (entry.endswith('/') and f'/{path}'.startswith(entry))
+               for entry in (line.split(' ')[0] for line in protected))
+
+
+@pytest.mark.parametrize('path', [
+    'scripts/dependency_lock.cpython-314-x86_64-linux-gnu.so',  # R2: an extension beats the source
+    'scripts/__pycache__/dependency_lock.cpython-314.pyc',  # R3: unchecked hash-based bytecode
+    'scripts/argparse.pyc', 'scripts/airgap/tarfile.pyo', 'scripts/devkit/x.pyd', 'gap/tools/helper.so',
+    'docs/__pycache__/notes.txt', 'Scripts.PYC',
+])
+def test_a_tracked_compiled_python_file_fails_the_step_until_removed(tmp_path, path):
+    # #588 N1 re-review R2/R3: compiled Python loads without its reviewed source,
+    # even under python3 -I. The protected check refuses it wherever it is tracked.
+    root = fork(tmp_path)
+    (root / path).parent.mkdir(parents=True, exist_ok=True)
+    (root / path).write_bytes(b'\0')
+    git(root, 'add', '-f', '--', path)
+    commit(root)
+    failed = hygiene_step(root)
+    assert failed.returncode == 1 and failed.stderr == codeowners.COMPILED_ERROR, failed.stderr
+    git(root, 'rm', '-q', '--', path)
+    commit(root)
+    passed = hygiene_step(root)
+    assert passed.returncode == 0, passed.stderr
+
+
+@pytest.mark.parametrize('path', [
+    'scripts/dependency_lock/__init__.py',  # R1: a package beats the module beside it
+    'scripts/scripts/__init__.py',  # R4: `from scripts import` after a heredoc appended scripts/
+    'scripts/scripts.py',
+    'scripts/image_manifest.py',  # scripts/ is appended before scripts/airgap/
+    'scripts/airgap/dependency_lock.py',
+    'scripts/airgap/model_config/__init__.py',
+])
+def test_a_module_shadowing_a_signer_import_needs_the_named_approver(tmp_path, path):
+    # #588 N1 re-review R1/R4: the generated file the protected check holds equal
+    # to the generator makes such a group-only change need a named approver.
+    root = fork(tmp_path)
+    assert not needs_approver(root, 'scripts/acceptance_evidence.py')  # the evaluator is not vacuous
+    tracked(root, path)
+    commit(root)
+    assert hygiene_step(root).returncode == 0
+    assert needs_approver(root, path)
 
 def test_a_root_codeowners_with_a_root_module_shadowing_the_stdlib_fails_the_step(tmp_path):
     # Reviewer variant 1: an MR adds only new top-level names, which no entry
