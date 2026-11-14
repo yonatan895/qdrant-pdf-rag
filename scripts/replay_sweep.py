@@ -517,7 +517,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n")
-    return 0
+    return 1 if sum(result.get("failures", 0) for result in results) else 0
 
 
 if __name__ == "__main__":
