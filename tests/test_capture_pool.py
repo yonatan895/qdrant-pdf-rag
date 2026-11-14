@@ -477,8 +477,15 @@ def test_capture_retry_records_the_pool_search_prefetches():
     assert {h.chunk_id for h in hits} == recorded
 
 
-def test_current_behaviour_capture_truncates_previous_pool_on_open(in_process_capture, tmp_path):
-    """A capture opens its output in "w" mode before running any query, so the previous pool is already destroyed when the new run ends early (tracker #1211)."""
+def test_current_behaviour_capture_truncates_previous_pool_on_open(in_process_capture, tmp_path, monkeypatch):
+    """A capture opens its output in "w" mode before running any query, so the previous pool is already destroyed when the new run ends early (tracker #1211).
+
+    Current behaviour for tracker #1211: the truncation happens on open, so an
+    exception on the first query leaves the pool file without the earlier
+    capture even though no new record for it was ever written.
+    """
+    from scripts import capture_pool
+
     _, golden = in_process_capture
     out = tmp_path / "pool.jsonl"
     previous = [
@@ -487,7 +494,28 @@ def test_current_behaviour_capture_truncates_previous_pool_on_open(in_process_ca
     ]
     out.write_text("".join(json.dumps(row) + "\n" for row in previous), encoding="utf-8")
 
-    assert main(["--golden", str(golden), "--out", str(out)]) == 0
+    pool_during_first_query: list[str] = []
+    real = capture_pool.capture_query
+
+    def fail_first_query(client, embedder, collection, query, *args, **kwargs):
+        if query != "first question":
+            return real(client, embedder, collection, query, *args, **kwargs)
+        # Sample the file while this query is still in flight: a capture that
+        # opens --out only after the loop (or renames a side file over it)
+        # still holds the previous pool at this point.
+        pool_during_first_query.append(out.read_text(encoding="utf-8"))
+        raise RuntimeError("capture leg blew up on the first query")
+
+    monkeypatch.setattr(capture_pool, "capture_query", fail_first_query)
+
+    # main() catches the per-query error, writes an error row, and returns 1:
+    # the run ends early exactly like a capture host that dies on query one.
+    assert main(["--golden", str(golden), "--out", str(out)]) == 1
+
+    assert len(pool_during_first_query) == 1
+    assert not any("earlier capture" in line for line in pool_during_first_query[0].splitlines()), (
+        "the previous pool survived while the first query ran; tracker #1211 no longer applies"
+    )
 
     survivors = out.read_text(encoding="utf-8").splitlines()
     assert not any("earlier capture" in line for line in survivors), (
@@ -498,4 +526,4 @@ def test_current_behaviour_capture_truncates_previous_pool_on_open(in_process_ca
         "first question",
         "second question",
         "third question",
-    }, "a normal capture replaces the pool with exactly this run's queries"
+    }, "the aborted run still replaces the pool with its own rows"
