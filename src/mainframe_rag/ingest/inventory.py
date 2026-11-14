@@ -74,6 +74,10 @@ def should_skip(
     when the rules changed — otherwise a regex widening desyncs queries
     (new rules) from payloads (old rules) and recall collapses silently.
     Records from before versioning carry no field and never skip.
+    A latest status of `skipped` counts as finished exactly like
+    `upserted`: the writer records it only when the document was
+    already complete, so re-parsing it every run would never let the
+    ledger converge (issue #1215).
     `--reingest` (issue #179) forces re-extraction of every doc, so a
     forced run never skips on the progress file."""
     if force_reingest:
@@ -82,7 +86,7 @@ def should_skip(
         return False
     if record.rules_version != rules_version:
         return False
-    return record.status == "upserted" or (allow_dry and record.status == "dry")
+    return record.status in ("upserted", "skipped") or (allow_dry and record.status == "dry")
 
 
 def append_record(progress_path: Path, record: InventoryRecord) -> None:
