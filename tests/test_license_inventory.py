@@ -681,14 +681,14 @@ def _edit(path, old, new):
 
 @pytest.mark.parametrize("change, message", [
     # The image's base moves without a shared record for the new digest.
-    (lambda t: _edit(t / "images/Containerfile.devkit", "@sha256:638914ba", "@sha256:000000ba"),
+    (lambda t: _edit(t / "images/Containerfile.devkit", "@sha256:30a3131d", "@sha256:0000001d"),
      "devkit: the base image of images/Containerfile.devkit has no shared license record with its digest"),
     # A tool is re-pinned: its license must be re-reviewed.
     (lambda t: _edit(t / "scripts/tools/helm-pin.txt", "version: v4.3.0", "version: v4.3.1"),
      "devkit:kit-tool:helm: scripts/tools/helm-pin.txt differs from the record; re-review the tool license"),
     # An RPM leaves the list while its record stays.
-    (lambda t: _edit(t / "images/devkit-packages.txt", "yajl-0:2.1.0-25.el9.x86_64\n", ""),
-     "devkit:rpm:yajl: recorded RPM yajl-0:2.1.0-25.el9.x86_64 is not in images/devkit-packages.txt"),
+    (lambda t: _edit(t / "images/devkit-packages.txt", "libcbor-0:0.7.0-5.el9.x86_64\n", ""),
+     "devkit:rpm:libcbor: recorded RPM libcbor-0:0.7.0-5.el9.x86_64 is not in images/devkit-packages.txt"),
     # An agent tool (#1172) is re-pinned: a pin-bump PR re-reviews its licence.
     (lambda t: _edit(t / "images/devkit/agents/opencode-pin.txt", "version: 2.2.5", "version: 2.2.6"),
      "devkit:kit-tool:opencode: images/devkit/agents/opencode-pin.txt differs from the record"),
