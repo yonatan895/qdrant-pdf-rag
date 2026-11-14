@@ -390,19 +390,50 @@ print(json.dumps({"network_name": sys.argv[1], "network_id": sys.argv[2],
                   "created": sys.argv[3] == "1", "gateway_image": sys.argv[4],
                   "reasoning_url": sys.argv[5], "embedding_url": sys.argv[6]}))
 PY
-    if ! gateway_docker run --rm --pull never --network "$_probe_network_id" \
+    # The probe prints only one fixed-form error class of the failing request
+    # (an errno text, "timed out", "HTTP <status>"): never a URL or a body.
+    _probe_status=0
+    _probe_output="$(gateway_docker run --rm --pull never --network "$_probe_network_id" \
         --add-host=host.docker.internal:host-gateway --entrypoint python \
         "$LITELLM_IMAGE" -c '
+import os
 import sys
+import urllib.error
 import urllib.request
+
+
+def error_class(exc):
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code}"
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, TimeoutError):
+        return "timed out"
+    if isinstance(reason, OSError) and isinstance(reason.errno, int) and reason.errno > 0:
+        return os.strerror(reason.errno)
+    return type(reason).__name__
+
+
 for origin in sys.argv[1:]:
     url = origin.rstrip("/").removesuffix("/v1") + "/health"
-    with urllib.request.urlopen(url, timeout=5) as response:
-        if response.status != 200 or response.geturl() != url:
-            raise RuntimeError("transport health check failed")
-' "$GATEWAY_REASONING_URL" "$GATEWAY_EMBED_URL" >/dev/null 2>&1; then
+    try:
+        with urllib.request.urlopen(url, timeout=5) as response:
+            passed = response.status == 200 and response.geturl() == url
+    except Exception as exc:
+        print("transport-probe-error:", error_class(exc), flush=True)
+        sys.exit(1)
+    if not passed:
+        print("transport-probe-error: unexpected health response", flush=True)
+        sys.exit(1)
+' "$GATEWAY_REASONING_URL" "$GATEWAY_EMBED_URL" 2>/dev/null)" || _probe_status=$?
+    if [ "$_probe_status" -ne 0 ]; then
+        _probe_error="$(printf '%s\n' "$_probe_output" | sed -n 's/^transport-probe-error: //p' | tail -n 1)"
+        # Anything else (a runtime error, an unexpected line) keeps only the status.
+        case "$_probe_error" in
+            ''|*[!A-Za-z0-9\ ._-]*) _probe_error="probe container exit status $_probe_status" ;;
+        esac
+        [ "${#_probe_error}" -le 64 ] || _probe_error="probe container exit status $_probe_status"
         release_transport_network || true
-        die "gateway network transport probe failed"
+        die "gateway network transport probe failed: $_probe_error"
     fi
     exit 0
 fi

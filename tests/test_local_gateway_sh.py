@@ -12,6 +12,7 @@ import ipaddress
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -1114,6 +1115,69 @@ def test_serve_refuses_adopted_network_collision_without_removing_it(gateway_tra
     assert not any(argv[0] == "run" for argv in calls), calls
     networks = json.loads((root / "networks.json").read_text())
     assert networks[TRANSPORT_NETWORK]["id"] == adopted_id
+
+
+# --- #1218: the probe keeps the failing request's error class -----------------
+
+def _probe_failure_line(error_class: str) -> str:
+    # Issue #1218 fixes this wording: the class only, no URL and no body.
+    return f"gateway network transport probe failed: {error_class}"
+
+
+class _StatusHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"backend body must not reach the failure line"
+        self.send_response(503)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.mark.parametrize("failure", ["refused", "status", "timeout"])
+def test_probe_failure_line_names_the_error_class_without_url_or_body(gateway_transport, failure):
+    root, _, urls, _ = gateway_transport
+    listener = socket.socket()
+    listener.bind(("127.0.0.2", 0))
+    port = listener.getsockname()[1]
+    server = thread = None
+    if failure == "refused":
+        listener.close()
+        expected = "Connection refused"
+    elif failure == "status":
+        listener.close()
+        server = http.server.ThreadingHTTPServer(("127.0.0.2", port), _StatusHandler)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": .01})
+        thread.start()
+        expected = "HTTP 503"
+    else:
+        listener.listen(1)  # connects, never answers: the 5 s read timeout fires
+        expected = "timed out"
+    embed_url = f"http://127.0.0.2:{port}/v1"
+    try:
+        probe = _transport_operation(gateway_transport, GATEWAY_EMBED_URL=embed_url,
+                                     FAKE_GATEWAY_EMBED_URL=embed_url)
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=1)
+        listener.close()
+    assert probe.returncode == 1, probe.stderr
+    assert probe.stderr.splitlines()[-1] == "ERROR: " + _probe_failure_line(expected)
+    assert not any(url in probe.stderr for url in (urls[0], embed_url))
+    assert "body" not in probe.stderr and "Traceback" not in probe.stderr
+    # The ownership record precedes the failure, and the created network is gone.
+    assert json.loads(probe.stdout)["created"] is True
+    assert TRANSPORT_NETWORK not in json.loads((root / "networks.json").read_text())
+
+
+def test_probe_container_failure_without_a_request_class_names_its_exit_status(gateway_transport):
+    probe = _transport_operation(gateway_transport, FAKE_GATEWAY_SCENARIO="gateway-network-down")
+    assert probe.returncode == 1
+    assert probe.stderr.splitlines()[-1] == "ERROR: " + _probe_failure_line("probe container exit status 7")
 
 
 # --- #862: retrieval-only gateway (embed + rerank legs, no reasoning leg) ----
