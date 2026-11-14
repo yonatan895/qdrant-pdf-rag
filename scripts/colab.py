@@ -1580,9 +1580,13 @@ class Run:
                    GATEWAY_TRANSPORT_NETWORK_ID=ownership.get("network_id", ""),
                    GATEWAY_TRANSPORT_NETWORK_CREATED="1" if ownership.get("created") is True else "0")
         env.update(self.config["gateway_limits"])
-        # The gateway shape is the prepared one (#1195), never the caller's
-        # ambient value: absent means the script's own default.
-        env.pop("GATEWAY_SHAPE", None)
+        # The gateway render is the prepared one (#1195), never the caller's
+        # ambient value: absent means the script's own default. The same
+        # holds for the other render switches (#1201 review B1): an exported
+        # GATEWAY_TOKENIZE=off would drop /tokenize, GATEWAY_REASONING=off the
+        # reasoning route; the retrieval-only lane sets its own "off" below.
+        for name in ("GATEWAY_SHAPE", "GATEWAY_TOKENIZE", "GATEWAY_REASONING"):
+            env.pop(name, None)
         if self.config.get("gateway_shape"):
             env["GATEWAY_SHAPE"] = self.config["gateway_shape"]
         return env

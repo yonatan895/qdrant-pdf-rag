@@ -3242,6 +3242,23 @@ def test_unparameterised_prepare_writes_the_manifest_it_always_wrote(lab, monkey
 
 
 @pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
+@pytest.mark.parametrize("name", ["GATEWAY_TOKENIZE", "GATEWAY_REASONING"])
+def test_ambient_gateway_render_switches_never_reach_the_run(lab, monkeypatch, name):
+    """#1201 review B1: an exported `GATEWAY_TOKENIZE=off` (#1193's
+    estimator-only lane) or `GATEWAY_REASONING=off` reached
+    `run_local_gateway.sh` and changed the prepared venue (no /tokenize, so
+    estimator counts and another cap rule; or no reasoning route). The gateway
+    render depends only on prepared state, like `GATEWAY_SHAPE`."""
+    root, state, _ = lab
+    monkeypatch.setenv(name, "off")
+    assert _run_fake(state, (str(_env_recorder(root)),)) == 0
+    observed = json.loads((root / "workload-env.json").read_text())
+    for env in (observed, _sandbox_env(state)):
+        assert name not in env
+        assert env["LLM_MAX_MODEL_LEN"] == "32768"
+
+
+@pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
 def test_ambient_agent_settings_never_reach_the_workload(lab, monkeypatch):
     """#1195 review B1: a shell value not recorded by `prepare` used to reach
     `workload-env.json`/`sandbox.env` (observed with LLM_RESERVED_OUTPUT_TOKENS
