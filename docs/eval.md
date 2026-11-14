@@ -775,6 +775,12 @@ VENUE=rc sh scripts/tools/run-task.sh eval:capture-pool          # records into 
 #    kinds per config. Dev pools only; adoption is a separate default change.
 ```
 
+**Exit status.** `replay_sweep.py` exits 1 when any pool row records a capture
+error (the rows that already made `capture_pool.py` exit 1, shown in the table's
+`fail` column); the table and `--json` are still written. It exits 2 when it
+refuses (frozen holdout outside RC, failed heading join) and 0 otherwise.
+Unmatched queries and skipped configs do not change the exit status.
+
 **Depth.** `DEPTH` (`--depth`, at most 200) records each leg deeper than
 production; the default records exactly the production prefetch, and a
 capture is never shallower. Cross-encoder scores stop at 100 per leg (the

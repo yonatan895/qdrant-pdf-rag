@@ -411,3 +411,24 @@ def test_main_exits_0_when_no_failures(sweep_cli) -> None:
 
 def test_main_exits_0_when_configs_only_skipped(sweep_cli) -> None:
     assert sweep_cli([_sweep_result("stub", skipped="pool depth 50 < prefetch 100")]) == 0
+
+
+def test_main_exits_1_over_a_captured_error_row_and_still_reports(tmp_path, monkeypatch, capsys):
+    """End to end over a real pools file: ``run_config`` counts the captured
+    error row, so ``main`` exits 1, and the table and ``--json`` still cover
+    every config (the exit code adds a signal, it withholds no artefact)."""
+    monkeypatch.delenv("VENUE", raising=False)
+    monkeypatch.setattr("mainframe_rag.config.load_settings", lambda: _settings())
+    pools = tmp_path / "pools.jsonl"
+    records = [_record(["P1"], docs={"P1": "D1"}), {"query": "broken", "error": "timeout"}]
+    pools.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    golden = tmp_path / "golden.jsonl"
+    golden.write_text(json.dumps({"id": "q1", "query": "q", "expected_doc_ids": ["D1"],
+                                  "query_class": "syntax"}) + "\n", encoding="utf-8")
+    out = tmp_path / "sweep.json"
+
+    assert replay_sweep.main(["--pools", str(pools), "--golden", str(golden), "--json", str(out)]) == 1
+    results = json.loads(out.read_text(encoding="utf-8"))
+    assert [r["label"] for r in results] == [c.label for c in candidate_configs(_settings())]
+    assert {(r["failures"], r["n"]) for r in results} == {(1, 1)}
+    assert len(capsys.readouterr().out.splitlines()) == 2 + len(results)
