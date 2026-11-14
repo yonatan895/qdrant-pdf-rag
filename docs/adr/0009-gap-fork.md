@@ -561,13 +561,59 @@ gap patches stay ledgered.
     generator itself, and `CODEOWNERS` and `docs/CODEOWNERS`, which GitLab
     reads before `.gitlab/CODEOWNERS`. Each approver is a single user, never
     a group; one person may give both approvals (maintainer, 2026-10-31).
+  - **The signers' dependencies** are on the list too (#588 N1, maintainer,
+    2026-11-02). The entry points that pack, sign or verify a release or a
+    kit are `scripts/airgap/pack.sh`, `bootstrap.sh` and `load.sh`,
+    `scripts/devkit/pack.sh` and `install.sh`, and
+    `scripts/gap/import_release.sh`. The release guard and its anchor
+    checks live in the `common.sh` they source. Every tracked file these
+    run or read by name is protected: sourced files, invoked scripts,
+    Python imports, pins and the files packed into the kit. The generator
+    holds this list as data (`SIGNING_CLOSURE`); F6 adds its pack and sign
+    entry points.
+    `tests/helpers_signing_closure.py` derives it from the scripts, and an
+    upstream test pins the two equal. A new dependency fails that test
+    until the generator lists it. The derivation fails closed: a reference
+    it cannot resolve fails unless it is reviewed by name with its reason.
+    It does not see paths built at run time (loop variables, string
+    formatting), files read through a directory, the text `eval` runs, or
+    code loaded from outside the repository.
+  - **No standard-library shadow runs in a signer or verifier.** Every
+    host-side Python call the entry points reach runs as `python3 -I`, and
+    the scripts that import a sibling append their own directory. The
+    standard library therefore resolves first, so a file a group-only change
+    adds (`scripts/argparse.py`, a sourceless `.pyc`) cannot replace a
+    standard module. This rests on the protected scripts, not on the fork's
+    `test` job. The derivation fails closed on a reached call without `-I`
+    and on a repository `.py` run through its `#!` line, so the upstream
+    test pins the property; it also fails on a `sys.path.insert` in
+    reached Python. It counts every form the import system loads:
+    source, sourceless `.pyc`, extension modules, package `__init__`
+    and `__pycache__` bytecode (#588 N1 review B1).
+  - **No repository-module shadow either** (#588 N1 re-review R1-R4,
+    maintainer, 2026-11-14). Two more cases bypass `-I`: a file that loads in
+    place of a repository module a protected script imports, and compiled
+    code, which loads without its source. Both are closed by the protected
+    check, not by the `test` job:
+    - The generated file also protects every other module and package form
+      (`<dir>/<name>.py`, `<dir>/<name>/`) of each top-level repository name
+      the closure imports, in each directory it imports them from
+      (`SIGNING_IMPORT_NAMES` x `SIGNING_IMPORT_DIRS`, present or not). This
+      covers `scripts/dependency_lock/__init__.py` and `scripts/scripts/`,
+      which answers `from scripts import` once a heredoc has appended
+      `scripts/`. Both lists are data, derived and pinned upstream like
+      `SIGNING_CLOSURE`.
+    - `check` refuses any tracked compiled Python file, anywhere in the
+      fork: `.pyc`, `.pyo`, `.so`, `.pyd` or a `__pycache__/` entry. That
+      covers an extension module and an unchecked hash-based `__pycache__`
+      file, which Python loads without reading the source.
   - **One source of truth.** The generator holds the Verifier's list as
     data and imports nothing from the checkout. An upstream unit test
     (`tests/test_gap_codeowners.py`) asserts that its protected set equals
     those lists plus the named gap additions. The GitLab hygiene job fails
     when the committed file differs from the generator output, whose owners
-    it reads back from that file, or when a `CODEOWNERS` or
-    `docs/CODEOWNERS` exists.
+    it reads back from that file, when a `CODEOWNERS` or
+    `docs/CODEOWNERS` exists, or when a compiled Python file is tracked.
   - **The check runs untouched.** A new top-level name matches no entry of
     the 17.0 file until it is regenerated, so only the hygiene check catches
     it. The check is the job's first step and runs as

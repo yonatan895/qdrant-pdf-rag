@@ -220,7 +220,9 @@ elif name=='docker':
             if target not in networks: sys.exit(1)
             print(networks[target]+' bridge')
     elif args[:2]==['network','create']:
-        target=args[2]
+        # The gateway owner may request a subnet (#1218); the name is last.
+        assert len(args)==3 or (len(args)==5 and args[2]=='--subnet'), args
+        target=args[-1]
         if target in networks: sys.exit(1)
         sequence=root/'gateway-network-sequence'
         number=int(sequence.read_text())+1 if sequence.exists() else 1

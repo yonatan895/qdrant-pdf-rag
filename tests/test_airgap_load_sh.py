@@ -22,6 +22,7 @@ from tests.helpers_airgap import (
     gap_release_key,
     gen_other_pub,
     make_bin_tree,
+    plant_stdlib_shadows,
     release_anchor,
     release_key,
     run_sh,
@@ -671,6 +672,26 @@ def test_load_success_proves_registry_serves_packed_config(load_tree):
         assert f"{ref}@{_digest(registry_raw)}" in r.stdout
         assert (_digest(registry_raw) == _digest(archive_raw)) is (image != "agent")
     assert len(_registry_calls(log)) == 5
+
+
+@pytest.mark.parametrize("form", ["py", "pyc"])
+def test_load_runs_no_stdlib_shadow_next_to_the_verifier(load_tree, tmp_path_factory, form):
+    """#588 N1 (review B1): image_manifest.py decides the digests load.sh accepts.
+    A group-only scripts/airgap/tarfile.py or hashlib.py (or a sourceless .pyc)
+    must not run inside the verifier: every host-side python3 runs isolated."""
+    root, _ = load_tree
+    _make_artifacts(root / "dist")
+    marker = tmp_path_factory.mktemp("shadow") / "ran.log"
+    python = shutil.which("python3", path=system_path())
+    plant_stdlib_shadows(root, {"scripts/airgap": ("argparse", "hashlib", "json", "tarfile")}, marker, form, python)
+    r = _run_load(load_tree)
+    assert r.returncode == 0, r.stderr
+    assert "Loaded 5 images into reg.internal:5000" in r.stdout
+    assert not marker.exists(), marker.read_text()
+    # The plant is live: the same script run without -I loads it.
+    subprocess.run([python, "scripts/airgap/image_manifest.py", "config"], cwd=root, input=b"{}",
+                   capture_output=True, check=False)
+    assert "tarfile from " in marker.read_text()
 
 
 def test_load_refuse_then_fix_next_run_passes(load_tree):

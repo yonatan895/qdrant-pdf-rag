@@ -233,7 +233,7 @@ bool_flag() {
 refuse_retired_keys() {
     command -v python3 >/dev/null 2>&1 || die "python3 is required for the retired-key check"
     export REGISTRY_INTERNAL OPENSHIFT_NAMESPACE VLLM_BASE_URL JAEGER_ENABLED JAEGER_QUERY_URL OTEL_EXPORTER_OTLP_ENDPOINT
-    python3 scripts/airgap/model_config.py --retired-keys || exit 1
+    python3 -I scripts/airgap/model_config.py --retired-keys || exit 1
 }
 
 # Product rules that every air-gap step enforces (AGENTS.md).
@@ -285,7 +285,7 @@ check_secret_name() {
 resolve_observability() {
     command -v python3 >/dev/null 2>&1 || die "python3 is required for observability decisions"
     export OTEL_EXPORTER_OTLP_ENDPOINT SERVICEMONITOR_ENABLED METRICS_ENABLED
-    _decisions=$(python3 scripts/airgap/map_values.py --bundle-decisions) ||
+    _decisions=$(python3 -I scripts/airgap/map_values.py --bundle-decisions) ||
         die "observability configuration refused (see the message above)"
     eval "$_decisions"
     unset _decisions
@@ -359,7 +359,7 @@ validate_model_config() {
     command -v python3 >/dev/null 2>&1 || die "python3 is required for model configuration validation"
     export $QDRANT_SIZING_KEYS $INGEST_SIZING_KEYS
     export GATEWAY_BASE_URL EMBED_BASE_URL EMBED_MODEL LLM_BASE_URL LLM_MODEL_REASONING LLM_MAX_MODEL_LEN LLM_RESERVED_OUTPUT_TOKENS LLM_THINKING_RESERVE_TOKENS_SIMPLE LLM_THINKING_RESERVE_TOKENS_COMPLEX LLM_REASONING_EFFORT_SIMPLE LLM_REASONING_EFFORT_COMPLEX LLM_REASONING_EFFORTS LLM_STREAM LLM_EXTRA_BODY LLM_EFFORT_TRANSPORT REQUEST_DEADLINE_S REQUEST_MAX_CONCURRENT REQUEST_QUEUE_MAX REQUEST_QUEUE_WAIT_S RERANK_BASE_URL CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CONTEXTUAL_EMBED_ENABLED UI_ENABLED INGEST_ALIAS_PUBLISH INGEST_REINGEST CHAT_CONDENSE_ENABLED AGENT_NETWORK_POLICY AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES FEEDBACK_ENABLED FEEDBACK_SECRET FEEDBACK_STORAGE_SIZE FEEDBACK_RETENTION_DAYS OPENWEBUI_ENABLED OPENWEBUI_SECRET OPENWEBUI_HOST OPENWEBUI_RETENTION_DAYS OPENWEBUI_STORAGE_SIZE OPENWEBUI_OIDC_PROVIDER_URL OPENWEBUI_OIDC_CLIENT_ID OPENWEBUI_OIDC_GROUP_CLAIM OPENWEBUI_OIDC_ROLES_CLAIM OPENWEBUI_OIDC_ALLOWED_ROLES OPENWEBUI_OIDC_ADMIN_ROLES OPENWEBUI_OIDC_SCOPES OPENWEBUI_OIDC_EMAIL_CLAIM OPENWEBUI_OIDC_USERNAME_CLAIM OPENWEBUI_IDP_EGRESS_CIDRS OPENWEBUI_IDP_EGRESS_PORT
-    python3 scripts/airgap/model_config.py
+    python3 -I scripts/airgap/model_config.py
 }
 
 # Qdrant data scratch and snapshots live on block storage; NFS is refused for
@@ -407,7 +407,7 @@ validate_helm_inputs() {
     # assignments deploy.sh passes to the Qdrant release.
     # shellcheck disable=SC2086
     export $QDRANT_SIZING_KEYS
-    python3 scripts/airgap/model_config.py --qdrant-sizing >/dev/null || exit 1
+    python3 -I scripts/airgap/model_config.py --qdrant-sizing >/dev/null || exit 1
 }
 
 # kubectl preferred, oc fallback — same choice in deploy/ingest/validate/smoke.
@@ -929,7 +929,7 @@ map_app_values() {
         echo "==> Gateway keys off: keyless model endpoints"
     fi
     export $INGEST_SIZING_KEYS
-    python3 scripts/airgap/map_values.py "$@"
+    python3 -I scripts/airgap/map_values.py "$@"
 }
 
 # Check required referenced keys without emitting their values. Selected
@@ -1124,9 +1124,9 @@ check_route_exposure() {
         _route_owui="--openwebui=disabled"
     fi
     if [ "$1" = enabled ] && [ -n "${2:-}" ]; then
-        _route_out=$(printf '%s' "$_route_json" | python3 scripts/airgap/check_route_exposure.py "$_route_owui" classify "$NAMESPACE" "$2" "$QDRANT_RELEASE" "${QDRANT_RELEASE}-headless" rag-feedback) || exit 1
+        _route_out=$(printf '%s' "$_route_json" | python3 -I scripts/airgap/check_route_exposure.py "$_route_owui" classify "$NAMESPACE" "$2" "$QDRANT_RELEASE" "${QDRANT_RELEASE}-headless" rag-feedback) || exit 1
     else
-        _route_out=$(printf '%s' "$_route_json" | python3 scripts/airgap/check_route_exposure.py "$_route_owui" inventory "$NAMESPACE" "$1" "$QDRANT_RELEASE" "${QDRANT_RELEASE}-headless" rag-feedback) || exit 1
+        _route_out=$(printf '%s' "$_route_json" | python3 -I scripts/airgap/check_route_exposure.py "$_route_owui" inventory "$NAMESPACE" "$1" "$QDRANT_RELEASE" "${QDRANT_RELEASE}-headless" rag-feedback) || exit 1
     fi
     case "$_route_out" in
         *owned-route-incompatible*) OWNED_ROUTE_PRESENT=1; OWNED_ROUTE_INCOMPATIBLE=1 ;;
@@ -1144,9 +1144,9 @@ check_route_exposure() {
 verify_agent_route() {
     [ "${AIRGAP_DRYRUN:-0}" != "1" ] || return 0
     _route_json=$($KC -n "$NAMESPACE" get route.route.openshift.io/rag-agent -o json) || die "Route rag-agent cannot be read after the release; exposure state is unknown and console exposure is NOT verified"
-    printf '%s' "$_route_json" | python3 scripts/airgap/check_app_ownership.py "$NAMESPACE" ||
+    printf '%s' "$_route_json" | python3 -I scripts/airgap/check_app_ownership.py "$NAMESPACE" ||
         die "Route rag-agent ownership is not established; cannot safely remove it and console exposure is NOT verified"
-    if ! printf '%s' "$_route_json" | python3 scripts/airgap/check_route_exposure.py verify "$NAMESPACE" "$1"; then
+    if ! printf '%s' "$_route_json" | python3 -I scripts/airgap/check_route_exposure.py verify "$NAMESPACE" "$1"; then
         $KC -n "$NAMESPACE" delete route.route.openshift.io/rag-agent --ignore-not-found >/dev/null 2>&1 ||
             die "Route rag-agent is not the OAuth contract AND could not be deleted: run '$KC -n $NAMESPACE delete route rag-agent' now"
         die "Route rag-agent did not converge to the OAuth reencrypt contract; it was deleted so no unauthenticated console stays exposed. Fix the cause and re-run airgap:deploy"
@@ -1161,9 +1161,9 @@ verify_agent_route() {
 verify_openwebui_route() {
     [ "${AIRGAP_DRYRUN:-0}" != "1" ] || return 0
     _route_json=$($KC -n "$NAMESPACE" get route.route.openshift.io/rag-openwebui -o json) || die "Route rag-openwebui cannot be read after the release; front-end exposure is NOT verified"
-    printf '%s' "$_route_json" | python3 scripts/airgap/check_app_ownership.py "$NAMESPACE" ||
+    printf '%s' "$_route_json" | python3 -I scripts/airgap/check_app_ownership.py "$NAMESPACE" ||
         die "Route rag-openwebui ownership is not established; cannot safely remove it and front-end exposure is NOT verified"
-    if ! printf '%s' "$_route_json" | python3 scripts/airgap/check_route_exposure.py verify-openwebui "$NAMESPACE" "$1" "${OPENWEBUI_HOST:-}"; then
+    if ! printf '%s' "$_route_json" | python3 -I scripts/airgap/check_route_exposure.py verify-openwebui "$NAMESPACE" "$1" "${OPENWEBUI_HOST:-}"; then
         $KC -n "$NAMESPACE" delete route.route.openshift.io/rag-openwebui --ignore-not-found >/dev/null 2>&1 ||
             die "Route rag-openwebui is not its contract AND could not be deleted: run '$KC -n $NAMESPACE delete route rag-openwebui' now"
         die "Route rag-openwebui did not converge to its reencrypt contract; it was deleted. Fix the cause and re-run airgap:deploy"
