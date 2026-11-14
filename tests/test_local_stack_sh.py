@@ -734,3 +734,36 @@ def test_reused_trace_backend_survives_a_later_check_failure(tmp_path):
     finally:
         owner.terminate()
         owner.wait(timeout=30)
+
+
+def test_pre_existing_gateway_env_file_survives_an_early_failure(tmp_path):
+    host = _host(tmp_path)
+    data = Path(host["LOCAL_OPENOBSERVE_DATA_DIR"])
+    data.mkdir(parents=True)
+    handoff = tmp_path / "gateway.env"
+    foreign_bytes = b"LOCAL_LITELLM_MASTER_KEY=other-stacks-key\n"
+    handoff.write_bytes(foreign_bytes)
+    owner = subprocess.Popen(
+        ["sh", "-c", _O2_STUB],
+        env={**os.environ, "LOCAL_OPENOBSERVE_DATA_DIR": str(data)},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not (data / "backend.up").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert (data / "backend.up").exists(), "the pre-existing backend never came up"
+
+        r, _ = _live(tmp_path, host, {"O2_ENV_FILE": str(tmp_path / "absent-o2.env")})
+        assert r.returncode != 0
+        assert "(reusing)" in r.stdout
+        assert "OpenObserve credentials file" in r.stderr
+        assert owner.poll() is None, "the run stopped a backend it did not start"
+        assert handoff.read_bytes() == foreign_bytes, (
+            "a run that never reached the gateway step deleted another stack's "
+            "gateway env file"
+        )
+    finally:
+        owner.terminate()
+        owner.wait(timeout=30)

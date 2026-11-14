@@ -345,6 +345,7 @@ fi
 AGENT_PID=""
 GW_PID=""
 O2_PID=""
+GW_ENV_CLAIMED=""
 cleanup() {
     if [ -n "$AGENT_PID" ]; then
         kill "$AGENT_PID" 2>/dev/null || true
@@ -362,7 +363,11 @@ cleanup() {
         # their names and cleanup); a hard crash leaves 'sh scripts/tools/run-task.sh local:gateway:down'.
         wait "$GW_PID" 2>/dev/null || true
     fi
-    rm -f "$GATEWAY_ENV_FILE"
+    # The env file is only ours once this run has claimed it at the gateway
+    # step; an earlier failure must leave another stack's file alone.
+    if [ "$GW_ENV_CLAIMED" = "1" ]; then
+        rm -f "$GATEWAY_ENV_FILE"
+    fi
 }
 trap cleanup EXIT INT TERM
 # Anything answering on the port is reused (the owner script's own probe is
@@ -395,6 +400,7 @@ _O2_PASS="$(sed -n 's/^ZO_ROOT_USER_PASSWORD=//p' "$O2_ENV_FILE")"
 
 # Gateway lifecycle stays owned by run_local_gateway.sh; this supervisor
 # starts it, waits for the leg-env handoff, and stops it on exit.
+GW_ENV_CLAIMED=1
 rm -f "$GATEWAY_ENV_FILE"
 step "Starting gateway (model legs behind LiteLLM on :$GATEWAY_PORT)"
 GATEWAY_PORT="$GATEWAY_PORT" GATEWAY_ENV_FILE="$GATEWAY_ENV_FILE" \
