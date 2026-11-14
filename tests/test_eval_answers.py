@@ -784,6 +784,27 @@ def test_write_summary_shows_coverage_next_to_pass_rate(tmp_path) -> None:
     ]
 
 
+def test_write_summary_falls_back_to_the_pre_coverage_line(tmp_path) -> None:
+    """A metrics dict saved before issue #1216 added the coverage fields
+    (for example one loaded from an older report file) has no total/unjudged;
+    the summary must still render the rate line in its old shape, not fail."""
+    rows = [
+        dict(row, id=f"MSG-{i}", query=f"question {i}")
+        for i, row in enumerate(_coverage_results(), start=1)
+    ]
+    metrics = summarize(rows)
+    for key in ("total", "unjudged", "error_rate", "judged_rate"):
+        metrics.pop(key)
+    path = tmp_path / "summary.md"
+    write_summary(path, rows, metrics)
+    rate_lines = [
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if "answer pass rate:" in line
+    ]
+    assert rate_lines == ["- answer pass rate: 0.6667 (n=3)"]
+
+
 def test_summarize_leaves_the_existing_metrics_unchanged() -> None:
     """Every metric this summary had before issue #1216 still holds the exact
     value it produced for the same rows (baselines and pass rates compare

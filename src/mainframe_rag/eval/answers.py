@@ -944,11 +944,16 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
     its detail so the report is self-contained."""
     lines: list[str] = ["# Answer-tier eval summary", ""]
     lines.append(f"- queries: {metrics['queries']} (judged {metrics['judged']}, errors {metrics['errors']})")
-    lines.append(
-        f"- answer pass rate: {metrics['answer_pass_rate']} "
-        f"(n={metrics['answer_n']}) ; judged {metrics['judged']}/{metrics['total']}, "
-        f"errors {metrics['errors']}, unjudged {metrics['unjudged']}"
-    )
+    if "total" in metrics and "unjudged" in metrics:
+        lines.append(
+            f"- answer pass rate: {metrics['answer_pass_rate']} "
+            f"(n={metrics['answer_n']}) ; judged {metrics['judged']}/{metrics['total']}, "
+            f"errors {metrics['errors']}, unjudged {metrics['unjudged']}"
+        )
+    else:
+        # Metrics from before issue #1216 (for example loaded from an older
+        # report file) carry no coverage fields: keep the line in its old shape.
+        lines.append(f"- answer pass rate: {metrics['answer_pass_rate']} (n={metrics['answer_n']})")
     lines.append(f"- abstain pass rate: {metrics['abstain_pass_rate']} (n={metrics['abstain_n']})")
     lines.append(f"- failures: {metrics['failures']}, warns: {metrics['warns']}, zero-hits paths: {metrics['zero_hits']}")
     lines.append(f"- inferred-citation rows (not grounded): {metrics['inferred_citations']}")
