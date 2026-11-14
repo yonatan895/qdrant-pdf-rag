@@ -102,13 +102,20 @@ class ServingGate:
     cache — that is how a rollback, degradation, or recovery becomes
     visible without a restart. Refusals are cached too (negative caching):
     a degraded generation must not force a Qdrant round-trip per request.
-    Concurrent misses share one validation (single-flight lock).
+    A failed resolution is cached and re-raised for the TTL under the same
+    rule, so one probe per window carries the fault instead of every
+    request re-running it. Concurrent misses share one validation
+    (single-flight lock).
     """
 
     def __init__(self, ttl_s: float) -> None:
         self._ttl_s = ttl_s
         self._cached: ServingGeneration | None = None
         self._checked_at = 0.0
+        # Exception from the last failed resolution, stamped like a result:
+        # while it is fresh, callers re-raise it without touching Qdrant.
+        self._failed: Exception | None = None
+        self._failed_at = 0.0
         self._lock = asyncio.Lock()
 
     async def generation(
@@ -121,24 +128,50 @@ class ServingGate:
     ) -> ServingGeneration:
         """Validated generation for this request/probe. `fresh=True` bypasses
         the cache and replaces it (readiness probes; startup gate)."""
-        if not fresh and self._fresh():
-            assert self._cached is not None
-            return self._cached
-        async with self._lock:
-            if not fresh and self._fresh():
+        if not fresh:
+            if self._result_is_fresh():
                 assert self._cached is not None
                 return self._cached
-            generation = await resolve_published_generation(client, settings, rules_v)
+            if self._failure_is_fresh():
+                # A failed resolution is recorded with the same TTL rule as a
+                # result, so a fault costs one probe per window instead of one
+                # per request. It stays an exception: the caller maps it, the
+                # gate never turns it into a ServingGeneration.
+                assert self._failed is not None
+                raise self._failed
+        async with self._lock:
+            if not fresh:
+                if self._result_is_fresh():
+                    assert self._cached is not None
+                    return self._cached
+                if self._failure_is_fresh():
+                    assert self._failed is not None
+                    raise self._failed
+            try:
+                generation = await resolve_published_generation(client, settings, rules_v)
+            except Exception as exc:
+                self._failed = exc
+                self._failed_at = time.monotonic()
+                raise
             self._cached = generation
             self._checked_at = time.monotonic()
+            self._failed = None
+            self._failed_at = 0.0
             return generation
 
     def invalidate(self) -> None:
         self._cached = None
         self._checked_at = 0.0
+        self._failed = None
+        self._failed_at = 0.0
 
-    def _fresh(self) -> bool:
-        return (
-            self._cached is not None
-            and (time.monotonic() - self._checked_at) < self._ttl_s
-        )
+    def _result_is_fresh(self) -> bool:
+        return self._fresh(self._cached is not None, self._checked_at)
+
+    def _failure_is_fresh(self) -> bool:
+        return self._fresh(self._failed is not None, self._failed_at)
+
+    def _fresh(self, recorded: bool, checked_at: float) -> bool:
+        # One freshness rule for results and failures alike, so `ttl_s=0.0`
+        # disables caching of either.
+        return recorded and (time.monotonic() - checked_at) < self._ttl_s

@@ -1254,7 +1254,9 @@ without a build binding (a pre-build publication) is refused as `legacy`
 (`unbound_generation`); no build UUID is invented for it.
 
 The gate binds a request to a validated physical name, and aliases become visible
-after revalidation. Negative results are cached too. See
+after revalidation. A resolution failure is cached and re-raised for the TTL like
+any other result, so one probe per window carries the fault and a later successful
+resolution clears it. See
 [metadata outcomes](ingest.md#metadata-contract) for distinctions the reader
 currently collapses and publication checks that remain incomplete.
 
