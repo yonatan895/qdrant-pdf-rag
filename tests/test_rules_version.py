@@ -163,11 +163,17 @@ def test_should_skip_treats_latest_skipped_like_upserted() -> None:
     assert should_skip(old, "a" * 64, rules_version="v1") is False
     # Issue #179: --reingest never skips, whatever the status.
     assert should_skip(skipped, "a" * 64, rules_version="v1", force_reingest=True) is False
-    # Every other status still re-processes (fail closed): only a recorded
-    # completion ("upserted") or a recorded already-complete skip counts.
-    for status in ("error", "pending", "failed", "superseded"):
+    # Every other status still re-processes (fail closed). These are the real
+    # vocabulary the ledger writes (see inventory.py: pending | upserted |
+    # skipped | dry | error | empty | retired); only "upserted" and "skipped"
+    # above, and "dry" below, may skip.
+    for status in ("pending", "error", "empty", "retired"):
         rec = InventoryRecord(path="x.pdf", sha256="a" * 64, status=status, rules_version="v1")
         assert should_skip(rec, "a" * 64, rules_version="v1") is False
+    # A real run never skips on a prior "dry"; only a dry run may (allow_dry).
+    dry = InventoryRecord(path="x.pdf", sha256="a" * 64, status="dry", rules_version="v1")
+    assert should_skip(dry, "a" * 64, rules_version="v1") is False
+    assert should_skip(dry, "a" * 64, rules_version="v1", allow_dry=True) is True
 
 
 # ---------------------------------------------------------------- payload
