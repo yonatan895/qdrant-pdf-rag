@@ -111,6 +111,31 @@ def test_main_refusal_leaves_an_existing_baseline_untouched(tmp_path, monkeypatc
     assert baseline.read_bytes() == before
 
 
+def test_refused_baseline_update_still_writes_report_summary_and_manifest(tmp_path, monkeypatch, capfd):
+    """#1213 review: refusing the baseline must not cost the operator the rest
+    of the run record. The report, the summary and the run manifest are still
+    written for a failed run; only the baseline write is withheld."""
+    golden = _hermetic_main(monkeypatch, tmp_path, report=_report() | {"failures": 2})
+    import scripts.eval_retrieval as ev
+
+    manifests: list[str] = []
+    monkeypatch.setattr(ev, "write_run_manifest",
+                        lambda *a, **k: manifests.append(a[0]) or {"git_sha": "test"})
+    baseline = tmp_path / "baseline.json"
+    out = tmp_path / "report.json"
+    summary = tmp_path / "summary.md"
+    rc = main(["--golden", str(golden), "--update-baseline", str(baseline),
+               "--out", str(out), "--summary", str(summary)])
+    err = capfd.readouterr().err
+    assert rc == 1
+    assert "FAIL: refusing to record a baseline from a run with query failures (2 failed)" in err
+    assert "baseline written" not in err
+    assert not baseline.exists()
+    assert out.exists() and json.loads(out.read_text())["failures"] == 2
+    assert summary.exists() and summary.read_text().startswith("## Retrieval eval")
+    assert manifests == ["eval"]
+
+
 def test_main_records_baseline_from_failure_free_run(tmp_path, monkeypatch, capfd):
     # control for #1213: the refusal is conditioned on failures alone, so a
     # clean run still records its baseline unchanged

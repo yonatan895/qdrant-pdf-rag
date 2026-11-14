@@ -187,14 +187,6 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    if args.update_baseline and report["failures"] > 0:
-        print(
-            "FAIL: refusing to record a baseline from a run with query "
-            f"failures ({report['failures']} failed)",
-            file=sys.stderr,
-        )
-        return 1
-
     baseline = None
     regressions: list[str] = []
     check_path = args.check
@@ -251,7 +243,17 @@ def main(argv: list[str] | None = None) -> int:
                 ):
                     regressions.append("baseline has no applicable comparison rule; requested gate unavailable")
                     gate_skipped = True
-    if args.update_baseline:
+    if args.update_baseline and report["failures"] > 0:
+        # A baseline must describe a healthy run: failed queries would poison
+        # the recorded recall@k numbers (issue #1213). The refusal withholds
+        # only this write — the report, summary and run manifest below still
+        # record the failed run, and its failures still decide the exit code.
+        print(
+            "FAIL: refusing to record a baseline from a run with query "
+            f"failures ({report['failures']} failed)",
+            file=sys.stderr,
+        )
+    elif args.update_baseline:
         update_baseline(report, args.update_baseline)
         print(f"baseline written to {args.update_baseline}", file=sys.stderr)
 
