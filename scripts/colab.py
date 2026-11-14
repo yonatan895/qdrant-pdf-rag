@@ -40,6 +40,7 @@ from mainframe_rag.serve.colab_profiles import (
     admit,
     build_profile,
     profile_server,
+    reasoning_window,
 )
 from mainframe_rag.serve.colab_storage import prove_qdrant_storage
 
@@ -108,6 +109,49 @@ except Exception:
 finally:
     connection.close()
 """
+
+
+# Measurement inputs (#1195). Extra agent environment is frozen in the prepared
+# manifest; these names stay with their owners (gateway legs and routing, any
+# URL or endpoint, the index, credentials, the hash opt-in, the process itself)
+# and are refused.
+AGENT_ENV_LIMIT = 32
+AGENT_ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+AGENT_ENV_DENIED_PREFIXES = ("GATEWAY_", "PG_", "LITELLM_", "QDRANT_", "EMBED_", "RERANK_", "PRODUCTION_",
+                             "LOCAL_", "PYTHON", "LD_", "DOCKER_", "KUBE", "RAG_COLAB_")
+AGENT_ENV_DENIED_SUFFIXES = ("_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_URL", "_URLS", "_ENDPOINT")
+AGENT_ENV_DENIED = frozenset({"LLM_BASE_URL", "LLM_MODEL_REASONING", "DENSE_DIM", "ALLOW_HASH_MODE", "VENUE",
+                              "PY", "PATH", "HOME", "CORPUS_DIR", "TMPDIR"})
+# Ambient answer-path settings are never approved inputs (#1195 review B1).
+# They can change prompt packing, output caps, retrieval, request limits or
+# token counts, so the workload boundary clears them before the lane's own
+# values and `config["agent_env"]` are applied. Documented caller inputs are
+# not here: Qdrant role keys and other credentials (`*_KEY` etc.), gateway leg
+# routing (`GATEWAY_*`, `PG_*`, `LITELLM_*`, `EMBED_*`, `RERANK_*`), `COLAB_*`,
+# executable overrides, `PY`/`PATH` and the local-stack/ingest inputs.
+AMBIENT_AGENT_PREFIXES = ("LLM_", "PROMPT_", "RRF_", "RETRIEVE_MAX_", "CHAT_", "ZOWE_MCP_")
+AMBIENT_AGENT_NAMES = frozenset({
+    "ACRONYM_EXPANSION_ENABLED", "ANSWER_TIMEOUT_S", "COMPARATIVE_SPLIT_ENABLED",
+    "DIAGNOSTIC_DUALPATH_ENABLED", "DENSE_HNSW_EF", "DENSE_QUANT_OVERSAMPLING",
+    "DENSE_QUANT_RESCORE", "DENSE_QUERY_PREFIX", "EVIDENCE_MAX_BYTES", "EVIDENCE_TIMEOUT_S",
+    "QUERY_MAX_CHARS", "SPLUNK_CONTEXT_MAX_CHARS", "REQUEST_DEADLINE_S",
+    "REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S",
+})
+
+
+def ambient_agent_setting(name: str) -> bool:
+    """True for an answer-path setting that must never be inherited.
+
+    Case-insensitive because the settings model accepts mixed-case aliases;
+    the lane's own values are applied after the clear."""
+    upper = name.upper()
+    return upper.startswith(AMBIENT_AGENT_PREFIXES) or upper in AMBIENT_AGENT_NAMES
+
+
+GATEWAY_SHAPES = ("local", "site")
+REASONING_FLAGS = (("reasoning_model", "model_id"), ("reasoning_revision", "revision"),
+                   ("reasoning_max_model_len", "max_model_len"), ("reasoning_max_num_seqs", "max_num_seqs"),
+                   ("reasoning_parser", "reasoning_parser"))
 
 
 class LabError(RuntimeError):
@@ -646,6 +690,47 @@ def prepare_production_admission(config: dict, profile: dict, state: Path,
         deadline=time.monotonic() + scan["deadline_seconds"])
 
 
+def agent_environment(pairs: list[str] | None, profile: dict) -> dict[str, str]:
+    """Validate `--agent-env NAME=VALUE` inputs for the prepared manifest.
+
+    Any agent setting may ride here (the lane names none of them), except the
+    names another owner controls. Names that are agent settings are checked
+    against the settings model now, so a bad value fails before allocation.
+    Diagnostics never echo a value."""
+    values: dict[str, str] = {}
+    for pair in pairs or ():
+        name, separator, value = pair.partition("=")
+        if (not separator or not AGENT_ENV_NAME.fullmatch(name) or name in values
+                or name in AGENT_ENV_DENIED or name.startswith(AGENT_ENV_DENIED_PREFIXES)
+                or name.endswith(AGENT_ENV_DENIED_SUFFIXES)
+                or len(value) > 4096 or not value.isprintable()):
+            raise LabError("agent environment needs distinct NAME=VALUE pairs outside the lane-owned names")
+        values[name] = value
+    if len(values) > AGENT_ENV_LIMIT:
+        raise LabError("agent environment exceeds its declared entry limit")
+    if not values:
+        return values
+    if not profile["accelerator"] or profile["name"] in COLAB_RERANK_PROFILES:
+        raise LabError("agent environment needs a profile with a reasoning server")
+    from pydantic import ValidationError
+
+    from mainframe_rag.config import Settings
+
+    window = reasoning_window(profile)
+    fields = {"llm_max_model_len": str(window), "llm_reasoning_effort_simple": "medium",
+              "llm_reasoning_effort_complex": "medium", "llm_reasoning_efforts": "low,medium,xhigh"}
+    fields.update({name.lower(): value for name, value in values.items()
+                   if name.lower() in Settings.model_fields})
+    try:
+        # BaseSettings supports this runtime option; the model plugin omits it.
+        settings = Settings(_env_file=None, **fields)  # type: ignore[call-arg, arg-type]
+    except ValidationError:
+        raise LabError("agent environment fails the agent settings validation") from None
+    if settings.llm_max_model_len > window:
+        raise LabError("agent window exceeds the served reasoning window")
+    return values
+
+
 def prepare(args: argparse.Namespace, *, source_root: Path | None = None) -> int:
     state = external(args.state)
     if state.exists() or state.is_symlink():
@@ -654,8 +739,11 @@ def prepare(args: argparse.Namespace, *, source_root: Path | None = None) -> int
     log_capture = source_root / "scripts/gateway/log_capture.py"
     if log_capture.is_symlink() or not log_capture.is_file():
         raise LabError("native bounded gateway capture source is required before preparing a run")
+    reasoning = {key: getattr(args, flag) for flag, key in REASONING_FLAGS
+                 if getattr(args, flag) is not None}
     profile = build_profile(args.profile, embed_max_len=args.embedding_max_len,
-                            deadline_seconds=args.deadline_seconds)
+                            deadline_seconds=args.deadline_seconds, reasoning=reasoning or None)
+    agent_env = agent_environment(args.agent_env, profile)
     if args.profile in COLAB_RERANK_PROFILES and args.dataset == "production":
         # #862: no reasoning server, so no answer lane, census admission or ingest.
         raise LabError("rerank measurement profiles are retrieval-only and synthetic; production needs a reasoning profile")
@@ -703,6 +791,13 @@ def prepare(args: argparse.Namespace, *, source_root: Path | None = None) -> int
               # Frozen per run (issue #737): approval covers the choice; the
               # ingest publisher alone decides whether checkpoints are reused.
               "ingest_reingest": args.ingest_reingest}
+    # Measurement inputs (#1195) are recorded only when given, so a prepare
+    # without them writes the manifest it always wrote. Approval binds them
+    # through config_sha256; nothing is read from the environment at run time.
+    if agent_env:
+        config["agent_env"] = agent_env
+    if args.gateway_shape != "local":
+        config["gateway_shape"] = args.gateway_shape
     for key in ("corpus", "golden", "inventory", "source_inventory", "embedding_evidence",
                 "production_approval", "data_state", "kubeconfig",
                 "inference_lock", "transport_receipt"):
@@ -760,6 +855,10 @@ def prepare(args: argparse.Namespace, *, source_root: Path | None = None) -> int
         raise LabError("private prerequisite changed while preparing its owned snapshot")
     if args.dataset == "production":
         admission = prepare_production_admission(config, profile, state, state / "execution", approval)
+        frozen = {name.casefold() for name in (*admission.environment, *admission.unset_environment)}
+        if any(name.casefold() in frozen for name in agent_env):
+            # Refused here, before any allocation; the run re-checks (#1195).
+            raise LabError("agent environment names a frozen production setting")
         manifest["production"] = admission.manifest
     manifest["prepared_identity"] = {
         "candidate": candidate, "config_sha256": object_digest(config), "profile_sha256": object_digest(profile),
@@ -1461,6 +1560,14 @@ class Run:
 
     def gateway_environment(self, bridge: str) -> dict[str, str]:
         env = self.execution_environment()
+        # Ambient answer-path settings are not in the prepared approval
+        # (#1195 review B1): an unprepared `LLM_RESERVED_OUTPUT_TOKENS` or
+        # `LLM_STREAM` would silently change prompt packing, caps and counts.
+        # Clear them before the lane's own values below; `environment()`
+        # applies `config["agent_env"]` afterwards, so prepared values win.
+        for name in tuple(env):
+            if ambient_agent_setting(name):
+                del env[name]
         identity = transport_identity(self.config, bridge)
         ownership = self.manifest.get("gateway_network", {})
         env.update(PG_NET=self.config["gateway_network"], GATEWAY_NAME=self.config["gateway_name"],
@@ -1471,6 +1578,11 @@ class Run:
                    GATEWAY_TRANSPORT_NETWORK_ID=ownership.get("network_id", ""),
                    GATEWAY_TRANSPORT_NETWORK_CREATED="1" if ownership.get("created") is True else "0")
         env.update(self.config["gateway_limits"])
+        # The gateway shape is the prepared one (#1195), never the caller's
+        # ambient value: absent means the script's own default.
+        env.pop("GATEWAY_SHAPE", None)
+        if self.config.get("gateway_shape"):
+            env["GATEWAY_SHAPE"] = self.config["gateway_shape"]
         return env
 
     def observe_gateway_network(self, raw: str, bridge: str) -> bool:
@@ -1561,12 +1673,16 @@ class Run:
                        GATEWAY_REASONING_MODEL=profile_server(self.profile, "reasoning")["model_id"],
                        GATEWAY_EMBED_MODEL=profile_server(self.profile, "embed")["model_id"],
                        GATEWAY_EMBED_MODEL_REVISION=profile_server(self.profile, "embed")["revision"],
-                       DENSE_DIM="4096", RERANK_ENABLED="false", LLM_MAX_MODEL_LEN="32768",
+                       DENSE_DIM="4096", RERANK_ENABLED="false",
+                       LLM_MAX_MODEL_LEN=str(reasoning_window(self.profile)),
                        LLM_REASONING_EFFORT_SIMPLE="medium", LLM_REASONING_EFFORT_COMPLEX="medium",  # #917
                        LLM_REASONING_EFFORTS="low,medium,xhigh",  # Qwen3.8 template domain (#748)
                        GATEWAY_PROBE_MAX_TOKENS="512", LITELLM_IMAGE=self.config["gateway_image"],
                        GATEWAY_ENV_FILE=str(self.state / "gateway.env"),
                        LOCAL_STACK_LOG_DIR=str(self.state))
+            # Prepared extra agent settings (#1195): effort defaults, an agent
+            # window below the served one, reserves, request-body extras.
+            env.update(self.config.get("agent_env", {}))
         if self.config["dataset"] == "production":
             from mainframe_rag.serve.colab_production import verify_workload_environment
             prepared = self.production_admission()
@@ -1589,6 +1705,8 @@ class Run:
             protected_names = set(prepared.environment) | set(prepared.unset_environment) | set(operation)
             protected_names.update(gateway_legs | {"PYTHONHOME"})
             protected = {name.casefold() for name in protected_names}
+            if any(name.casefold() in protected for name in self.config.get("agent_env", {})):
+                raise LabError("prepared agent environment names a frozen production setting")
             for name in tuple(env):
                 if name.casefold() in protected:
                     del env[name]
@@ -1945,6 +2063,17 @@ def parser() -> argparse.ArgumentParser:
     prep.add_argument("--poll-seconds", type=float, default=1)
     prep.add_argument("--ingest-reingest", action="store_true",
                       help="production only: explicit ingest --reingest, the contract's pending-build resumption")
+    # Measurement inputs (#1195): part of the prepared manifest the approval
+    # binds; omitted flags keep the reference values and today's manifest.
+    prep.add_argument("--reasoning-model", help="Hugging Face repository id of the reasoning model")
+    prep.add_argument("--reasoning-revision", help="its 40-hex revision (required for a non-reference model)")
+    prep.add_argument("--reasoning-max-model-len", type=int, help="served reasoning window (4096-131072)")
+    prep.add_argument("--reasoning-max-num-seqs", type=int, help="served reasoning concurrency (1-16)")
+    prep.add_argument("--reasoning-parser", help="vLLM reasoning parser name, or 'none' to serve without one")
+    prep.add_argument("--agent-env", action="append", metavar="NAME=VALUE",
+                      help="extra agent setting frozen into the run (repeatable; lane-owned names refused)")
+    prep.add_argument("--gateway-shape", choices=GATEWAY_SHAPES, default="local",
+                      help="'site': no /tokenize pass-through and no argument allow-list")
     fresh = commands.add_parser("initialize-fresh")
     fresh.add_argument("--state", type=Path, required=True)
     fresh.add_argument("--collection", required=True)
