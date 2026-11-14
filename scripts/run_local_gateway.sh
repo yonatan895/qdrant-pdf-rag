@@ -12,6 +12,14 @@
 # Probe/release use GATEWAY_TRANSPORT_NETWORK_ID and the returned created flag
 # as GATEWAY_TRANSPORT_NETWORK_CREATED. Pass both to the later normal launch.
 # This proves image/network/upstream reachability, not a running gateway service.
+# A network this script creates gets the first GATEWAY_NETWORK_SUBNETS entry
+# (fixed private /24s) that holds no IP-literal backend address and that the
+# runtime accepts, else the runtime's own pool. Probe and serve then refuse a
+# created or pre-existing network whose subnet holds a backend address
+# ("gateway network subnet <cidr> contains backend address <ip>; refusing"),
+# removing only a created one. A failed probe reports
+# "gateway network transport probe failed: <error class>" (errno text,
+# "timed out", "HTTP <status>"), never a URL or a response body.
 # GATEWAY_RUN_OWNER is a fresh run identity; transport-release also recovers
 # its labelled gateway/Postgres containers. Never reuse another run's owner.
 #

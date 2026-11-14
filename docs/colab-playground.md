@@ -193,7 +193,15 @@ session and is therefore unsuitable here. A fresh run refuses a pre-existing
 private store; global CLI sessions are neither imported nor adopted.
 Do not use an unreviewed public tunnel or call an SSH operation that could
 silently allocate a replacement session. Both host probes and probes from the
-actual digest-pinned gateway container network path must pass. The remote runtime
+actual digest-pinned gateway container network path must pass. The gateway
+owner creates its network on a fixed private /24 holding no backend address and,
+before any probe or serve, refuses a created or pre-existing network whose
+subnet holds one (`gateway network subnet <cidr> contains backend address <ip>;
+refusing`). A failed probe names the request's error class
+(`gateway network transport probe failed: No route to host`, for example).
+Both lines are in the run's private command log. A pre-existing network is
+never changed or removed: remove or recreate it on another subnet yourself.
+The remote runtime
 waits for explicit `/content/colab-transport-ok` before inference installation or
 model downloads. A CPU run never enters those GPU steps.
 
