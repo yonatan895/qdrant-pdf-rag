@@ -15,11 +15,16 @@ stand in for it. This writes `.gitlab/CODEOWNERS` with two sections:
 The protected list has one source of truth: the paths `scripts/acceptance.py`
 binds as Verifier-owned (`VERIFICATION_INPUTS`, which includes
 `scripts/unit_evidence.py` INPUTS, every `taskfiles/*.yml` and the producer
-workflows), plus the gap's own gates in GAP_GATES. VERIFIER_LIST copies it as
-data, and `tests/test_gap_codeowners.py` pins that equality upstream, where
-the Verifier guards it. The owner group and the approvers are arguments, so no
-site name enters upstream; `refresh` and `check` read them back from the
-committed file, whose bytes are themselves on the protected list.
+workflows), plus the gap's own gates in GAP_GATES and every file the release
+and kit signers and verifiers (SIGNING_ENTRY_POINTS) run or read by name,
+SIGNING_CLOSURE. VERIFIER_LIST and SIGNING_CLOSURE are data, and
+`tests/test_gap_codeowners.py` pins them upstream, where the Verifier guards
+it: VERIFIER_LIST equal to the Verifier's lists, and SIGNING_CLOSURE equal to
+the closure `tests/helpers_signing_closure.py` derives from the scripts, so a
+new dependency fails that test until it is listed here. The owner group and
+the approvers are arguments, so no site name enters upstream; `refresh` and
+`check` read them back from the committed file, whose bytes are themselves on
+the protected list.
 
 The check imports nothing from the checkout: in the fork a group-only change
 can edit any unprotected file, and a new top-level name matches no entry of
@@ -87,6 +92,38 @@ GAP_GATES = (
     'scripts/gap_codeowners.py',
     *SHADOWING,
 )
+# The entry points that pack, sign or verify a release or a dev kit (ADR-0009
+# sections 4, 5 and 8): the bundle packer, its bootstrap and loader (whose
+# sourced common.sh holds the live guard and its anchor checks), the kit
+# packer and installer, and the release import.
+SIGNING_ENTRY_POINTS = (
+    'scripts/airgap/pack.sh', 'scripts/airgap/bootstrap.sh', 'scripts/airgap/load.sh',
+    'scripts/devkit/pack.sh', 'scripts/devkit/install.sh', 'scripts/gap/import_release.sh',
+)
+# Every tracked file those entry points source, run, import or read by name
+# (pins, manifests, files packed into the kit), derived by
+# tests/helpers_signing_closure.py and pinned equal to it upstream. To
+# regenerate: python3 -m tests.helpers_signing_closure (upstream checkout).
+SIGNING_CLOSURE = (
+    'LICENSE', 'airgap.env.example', 'charts/mainframe-rag/files/openwebui/docs_pipe.py',
+    'charts/mainframe-rag/values.yaml', 'deploy/workspace/bastion.template.yaml', 'docs/adr/0009-gap-fork.md',
+    'docs/runbooks/devkit-windows.md', 'images.txt', 'images/Containerfile.devkit',
+    'images/devkit-packages.txt', 'images/devkit/agents/herdr-core-pin.txt',
+    'images/devkit/agents/opencode-pin.txt', 'licenses/inventory.json', 'locks/cp314-linux-x86_64.json',
+    'pyproject.toml', 'requirements.build.lock.txt', 'requirements.dev.lock.txt', 'requirements.lock.txt',
+    'scripts/__init__.py', 'scripts/airgap/bootstrap.sh', 'scripts/airgap/check_app_ownership.py',
+    'scripts/airgap/check_pod_images.py', 'scripts/airgap/check_route_exposure.py',
+    'scripts/airgap/collection-policy.env', 'scripts/airgap/common.sh', 'scripts/airgap/image_identity.sh',
+    'scripts/airgap/image_manifest.py', 'scripts/airgap/legacy_layout.py', 'scripts/airgap/load.sh',
+    'scripts/airgap/map_values.py', 'scripts/airgap/model_config.py', 'scripts/airgap/pack.sh',
+    'scripts/airgap/reference-docs.json', 'scripts/airgap/reference_docs.py', 'scripts/dependency_lock.py',
+    'scripts/devkit/install.sh', 'scripts/devkit/issue_snapshot.py', 'scripts/devkit/pack.sh',
+    'scripts/devkit/snapshot-issues.txt', 'scripts/devkit_key.py', 'scripts/gap/import_release.sh',
+    'scripts/image_inventory.py', 'scripts/license_inventory.py', 'scripts/tools/devkit-pin.txt',
+    'scripts/tools/helm-pin.txt', 'scripts/tools/install-helm.sh', 'scripts/tools/install-task.sh',
+    'scripts/tools/oc-pin.txt', 'scripts/tools/oras-pin.txt', 'scripts/tools/oras-windows-pin.txt',
+    'scripts/tools/task-artifact.sh', 'scripts/tools/task-pin.txt',
+)
 GROUP_SECTION = '[Gap maintainers]'
 PROTECTED_SECTION = '[Protected list]'
 UNOWNED = 'gap'
@@ -123,8 +160,8 @@ class Refused(ValueError):
 
 
 def protected_paths() -> tuple[str, ...]:
-    """The Verifier's protected list plus the gap's gates, sorted and unique."""
-    return tuple(sorted({*VERIFIER_LIST, *GAP_GATES}))
+    """The Verifier's protected list, the gap's gates and the signing closure, sorted and unique."""
+    return tuple(sorted({*VERIFIER_LIST, *GAP_GATES, *SIGNING_CLOSURE}))
 
 
 def validate_owners(group: str, approvers: Sequence[str]) -> None:
