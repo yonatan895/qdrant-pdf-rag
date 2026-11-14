@@ -433,7 +433,7 @@ elif args[:2] == ["network", "ls"]:
         print(item["id"])
 elif args[:2] == ["network", "rm"]:
     item = network(args[2])
-    if item is None:
+    if item is None or os.environ.get("FAKE_GATEWAY_NETWORK_RM_FAILS") == "1":
         sys.exit(1)
     # Docker daemon resources outlive the client process. A connected PG
     # prevents network removal even after its original shell was killed.
@@ -1115,6 +1115,27 @@ def test_serve_refuses_adopted_network_collision_without_removing_it(gateway_tra
     assert not any(argv[0] == "run" for argv in calls), calls
     networks = json.loads((root / "networks.json").read_text())
     assert networks[TRANSPORT_NETWORK]["id"] == adopted_id
+
+
+def test_probe_records_ownership_when_its_colliding_network_cannot_be_removed(gateway_transport):
+    root, _, _, _ = gateway_transport
+    collision = {"FAKE_GATEWAY_SUBNET": "127.0.0.0/24", "FAKE_GATEWAY_REFUSE_SUBNETS": "all"}
+    probe = _transport_operation(gateway_transport, **collision, FAKE_GATEWAY_NETWORK_RM_FAILS="1")
+    assert probe.returncode == 1, probe.stderr
+    assert _collision_line("127.0.0.0/24", "127.0.0.2") in probe.stderr
+    # The leftover is this run's: the caller gets the record its release needs.
+    identity = json.loads(probe.stdout)
+    assert identity["created"] is True and identity["network_id"] == CREATED_NETWORK_ID
+    assert not any(argv[0] == "run" for argv in _transport_calls(gateway_transport))
+    assert json.loads((root / "networks.json").read_text())[TRANSPORT_NETWORK]["id"] == CREATED_NETWORK_ID
+    released = _transport_operation(gateway_transport, "transport-release",
+                                    GATEWAY_TRANSPORT_NETWORK_ID=identity["network_id"],
+                                    GATEWAY_TRANSPORT_NETWORK_CREATED="1")
+    assert released.returncode == 0, released.stderr
+    assert TRANSPORT_NETWORK not in json.loads((root / "networks.json").read_text())
+    following = _transport_operation(gateway_transport)
+    assert following.returncode == 0, following.stderr
+    assert json.loads(following.stdout)["created"] is True
 
 
 # --- #1218: the probe keeps the failing request's error class -----------------

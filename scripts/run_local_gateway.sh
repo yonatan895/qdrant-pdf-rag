@@ -290,6 +290,18 @@ prepare_transport_network() {
 
 # A bridge network whose subnet holds a backend address can never carry the
 # probe or the gateway to that backend, so refuse it before anything starts.
+# The probe's one ownership record (stdout) for the prepared network.
+emit_transport_ownership() {
+    python3 - "$PG_NET" "$GATEWAY_TRANSPORT_NETWORK_ID" "$GATEWAY_TRANSPORT_NETWORK_CREATED" \
+        "$LITELLM_IMAGE" "$GATEWAY_REASONING_URL" "$GATEWAY_EMBED_URL" <<'PY'
+import json
+import sys
+print(json.dumps({"network_name": sys.argv[1], "network_id": sys.argv[2],
+                  "created": sys.argv[3] == "1", "gateway_image": sys.argv[4],
+                  "reasoning_url": sys.argv[5], "embedding_url": sys.argv[6]}))
+PY
+}
+
 # backend_collision prints "<subnet> <address>" for the first IP-literal backend
 # host (reasoning, embedding, rerank URL) inside one of the whitespace-separated
 # subnets in $1, and nothing when none is.
@@ -330,8 +342,11 @@ check_network_backend_collision() {
     [ -n "$_collision_match" ] || return 0
     _collision_subnet="${_collision_match% *}"
     _collision_backend="${_collision_match#* }"
-    # Only a network this run created is this run to remove.
-    release_transport_network || true
+    # Only a network this run created is this run to remove. When that removal
+    # fails, the probe still records ownership so its caller can release it.
+    if ! release_transport_network && [ "$GATEWAY_OPERATION" = transport-probe ]; then
+        emit_transport_ownership
+    fi
     die "gateway network subnet $_collision_subnet contains backend address $_collision_backend; refusing"
 }
 
@@ -382,14 +397,7 @@ PY
     # Emit ownership before the potentially interrupted probe, so recovery can
     # release an owned network. This identity alone is never a passing result:
     # the caller must also require this operation's exit status to be zero.
-    python3 - "$PG_NET" "$_probe_network_id" "$_probe_created" "$LITELLM_IMAGE" \
-        "$GATEWAY_REASONING_URL" "$GATEWAY_EMBED_URL" <<'PY'
-import json
-import sys
-print(json.dumps({"network_name": sys.argv[1], "network_id": sys.argv[2],
-                  "created": sys.argv[3] == "1", "gateway_image": sys.argv[4],
-                  "reasoning_url": sys.argv[5], "embedding_url": sys.argv[6]}))
-PY
+    emit_transport_ownership
     # The probe prints only one fixed-form error class of the failing request
     # (an errno text, "timed out", "HTTP <status>"): never a URL or a body.
     _probe_status=0
