@@ -232,7 +232,11 @@ while `diagnostic_dualpath_enabled` remains default-off.
   model backend. Explicit `--golden`, `--check PATH`, and
   `--update-baseline PATH` remain authoritative.
   A bare `--check` requires the selected default baseline (missing means exit 2);
-  a bare `--update-baseline` explicitly records that default.
+  a bare `--update-baseline` explicitly records that default. A run with query
+  failures is never recorded: the script prints
+  `FAIL: refusing to record a baseline from a run with query failures (N failed)`
+  and leaves the baseline untouched, while the report, summary and run manifest
+  still record the failed run and its failures decide the exit code (1).
   Every report carries `representation`: the serving gate's own verdict on the
   configured collection (`agent.serving.resolve_published_generation`:
   representation contract and immutable publication). A servable run is
