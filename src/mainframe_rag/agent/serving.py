@@ -102,9 +102,10 @@ class ServingGate:
     cache — that is how a rollback, degradation, or recovery becomes
     visible without a restart. Refusals are cached too (negative caching):
     a degraded generation must not force a Qdrant round-trip per request.
-    A failed resolution is cached and re-raised for the TTL under the same
-    rule, so one probe per window carries the fault instead of every
-    request re-running it. Concurrent misses share one validation
+    A failed resolution on the request path is cached and re-raised for the
+    TTL under the same rule, so one probe per window carries the fault
+    instead of every request re-running it; a failed `fresh=True`
+    validation is not recorded. Concurrent misses share one validation
     (single-flight lock).
     """
 
@@ -152,8 +153,14 @@ class ServingGate:
             try:
                 generation = await resolve_published_generation(client, settings, rules_v)
             except Exception as exc:
-                self._failed = exc
-                self._failed_at = time.monotonic()
+                # Only a request-path failure is recorded. A failed fresh
+                # validation (readiness probe, startup gate) raises to its own
+                # caller and leaves request state alone: one probe meeting a
+                # store blip must not refuse every request for the TTL after
+                # the store is back (#1211, PR #1243).
+                if not fresh:
+                    self._failed = exc
+                    self._failed_at = time.monotonic()
                 raise
             self._cached = generation
             self._checked_at = time.monotonic()

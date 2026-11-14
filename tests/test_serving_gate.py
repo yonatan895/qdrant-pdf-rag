@@ -291,6 +291,22 @@ async def test_gate_fresh_probe_bypasses_cached_failure(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_gate_failed_fresh_probe_is_not_recorded_for_requests(monkeypatch):
+    """A failed `fresh=True` validation (readiness probe, startup gate) raises
+    to its own caller but is not recorded: one probe that meets a store blip
+    must not refuse every request for the TTL after the store is back. The
+    next request validates live and is served."""
+    gate, s, probe = _faulting_gate(monkeypatch, ttl_s=300.0)
+    with pytest.raises(RuntimeError, match="alias lookup failed"):
+        await gate.generation(object(), s, RULES, fresh=True)
+
+    probe["state"]["faulty"] = False
+    served = await gate.generation(object(), s, RULES)
+    assert served.servable
+    assert len(probe["calls"]) == 2
+
+
+@pytest.mark.anyio
 async def test_gate_zero_ttl_does_not_cache_failures(monkeypatch):
     """TTL=0 keeps its paranoid contract under a fault: nothing short-circuits,
     so every request re-probes instead of re-raising a stale failure."""
