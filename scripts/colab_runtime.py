@@ -795,7 +795,7 @@ class RemoteRuntime:
 
     def __init__(self, profile: dict, *, root: Path = Path("/content"), http=request_json,
                  popen=subprocess.Popen, server_factory=TinyHTTPServer,
-                 observe=None, admission=None, terminate=terminate_group,
+                 observe=None, admission=None, profile_builder=None, terminate=terminate_group,
                  clock=time.time, sleep=time.sleep, development_sha: str | None = None):
         self.profile = profile
         self.root = root
@@ -804,6 +804,7 @@ class RemoteRuntime:
         self.server_factory = server_factory
         self.observe = observe or (lambda gpu: observe_resources(gpu, root=root))
         self.admission = admission
+        self.profile_builder = profile_builder
         self.clock = clock
         self.sleep = sleep
         self.gpu = bool(profile.get("accelerator"))
@@ -1207,6 +1208,38 @@ class RemoteRuntime:
                 or single("--chat-template") != server["local_dir"] + "/chat_template.jinja"):
             raise RuntimeError("reranker argv weakened the reference score configuration")
 
+    def reasoning_reference(self, servers: list) -> str:
+        """The reasoning model this profile may launch. Without recorded
+        inputs it is the fixed reference. With them (#1195, part of the
+        prepared and approved manifest) the uploaded profile owner must
+        rebuild exactly these servers from the inputs, so no argv other than
+        the one it produces for them is accepted."""
+        inputs = self.profile.get("reasoning_inputs")
+        if inputs is None:
+            return "Qwen/Qwen3.8-27B"
+        if self.profile_builder is None:
+            # Uploaded portable owner; deliberately no app dependency.
+            from colab_profiles import build_profile
+            self.profile_builder = build_profile
+        try:
+            embedding = servers[1]["argv"]
+            rebuilt = self.profile_builder(
+                self.profile["name"], deadline_seconds=self.profile["deadline_seconds"],
+                embed_max_len=int(embedding[embedding.index("--max-model-len") + 1]), reasoning=inputs)
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+            raise RuntimeError("recorded reasoning inputs are not a valid profile") from None
+        def launch(server: dict) -> tuple:
+            # The first three argv items and the directory are bound to this
+            # runtime's root by the reference loop in validate_profile.
+            return (server.get("role"), server.get("model_id"), server.get("revision"),
+                    server.get("port"), list(server.get("argv", []))[3:])
+
+        if (rebuilt.get("reasoning_inputs") != inputs
+                or [launch(server) for server in rebuilt["servers"]] != [launch(server) for server in servers]):
+            raise RuntimeError("model launch identity differs from the recorded reasoning inputs")
+        model: str = inputs["model_id"]
+        return model
+
     def validate_profile(self) -> None:
         duration = self.profile.get("deadline_seconds")
         if (type(duration) is not int or not 1 <= duration <= 7200 or not math.isfinite(self.deadline)
@@ -1233,7 +1266,7 @@ class RemoteRuntime:
             if [server.get("role") for server in servers] != ["embed", "rerank"]:
                 raise RuntimeError("reference requires embedding followed by reranker")
         else:
-            expected = (("reasoning", "Qwen/Qwen3.8-27B", 8000, "reasoning"),
+            expected = (("reasoning", self.reasoning_reference(servers), 8000, "reasoning"),
                         ("embed", "Qwen/Qwen3-Embedding-8B", 8001, "embedding"))
             if [server.get("role") for server in servers] != ["reasoning", "embed"]:
                 raise RuntimeError("reference requires reasoning followed by embedding")

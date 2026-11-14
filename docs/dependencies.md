@@ -142,9 +142,11 @@ Both pins move together with the base image CA store, proven by bundle content,
 not version. Production gateway TLS uses `SSL_CERT_FILE` from the site CA
 ConfigMap when `gateway.caConfigMapName` is set (chart); certifi is the fallback
 otherwise. certifi 2026.10.19 and pip 26.2.2 drop only "emSign ECC Root CA - G3";
-the G1, C1 and C3 roots remain. The pinned UBI digest and the current `9.8` tag
-ship the same `ca-certificates` 2025.2.80_v9.0.305-91.el9 bundle with all four
-emSign roots; no workaround is applied. Re-inspect on each base-image refresh.
+the G1, C1 and C3 roots remain. The pinned UBI digest (the `9.9` tag on 2026-11-14)
+ships `ca-certificates` 2026.2.92_v9.0.319-90.3.el9_8, whose bundle keeps only
+"emSign Root CA - G1" (the 9.8 base before it had all four emSign roots), so the
+base store is now narrower than the two wheels' bundles by C1 and C3; no workaround
+is applied and the wheel pins are unchanged. Re-inspect on each base-image refresh.
 
 ## FastEmbed and Pillow (#1064, #895)
 

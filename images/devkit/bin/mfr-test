@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Run the project's tests for a coding worker, under a time limit (#1196).
+
+    mfr-test [pytest arguments]        python3 -m pytest [pytest arguments]
+
+A worker has no way to notice that a test never returns: one that awaits forever (for
+example "red evidence" written against unfixed code) holds the worker, and the
+container's CPU and memory allowance, until a person looks. mfr-test stops the run
+after MFR_TEST_LIMIT_S seconds (default 600, 1 to 3600), ends the whole process group
+and exits 124. Otherwise it exits with pytest's own code. The hardened OpenCode config
+allows this wrapper and denies bare pytest, so a worker cannot run tests without the
+limit. Messages are fixed text.
+"""
+from __future__ import annotations
+
+import contextlib
+import os
+import signal
+import subprocess
+import sys
+
+DEFAULT_LIMIT_S = 600
+
+
+def limit() -> int:
+    raw = os.environ.get("MFR_TEST_LIMIT_S", str(DEFAULT_LIMIT_S))
+    if not raw.isdecimal() or not 1 <= int(raw) <= 3600:
+        print("mfr-test: MFR_TEST_LIMIT_S must be a whole number of seconds from 1 to 3600", file=sys.stderr)
+        raise SystemExit(2)
+    return int(raw)
+
+
+def main(argv: list[str]) -> int:
+    seconds = limit()
+    runner = os.environ.get("MFR_TEST_PYTHON") or sys.executable
+    try:
+        child = subprocess.Popen([runner, "-m", "pytest", *argv], stdin=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        print("mfr-test: the test runner could not be started", file=sys.stderr)
+        return 2
+    try:
+        return child.wait(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(child.pid, sig)
+            except ProcessLookupError:
+                break
+            try:
+                child.wait(timeout=10)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        print(f"mfr-test: stopped at the {seconds} s limit; a test did not return", file=sys.stderr)
+        return 124
+    except KeyboardInterrupt:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(child.pid, signal.SIGTERM)
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

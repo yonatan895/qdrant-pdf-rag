@@ -858,3 +858,26 @@ def test_interpreter_spelling_is_preserved_even_for_a_venv_symlink(original_inpu
     with pytest.raises(production.ProductionAdmissionError, match="environment"):
         production.verify_workload_environment(prepared, {**environment, "PY": str(interpreter.resolve())},
                                                execution_root=REPO, expected_interpreter=str(interpreter), cwd=REPO)
+
+
+# ---------------------------------------- issue #1195 reasoning-server inputs
+def test_production_admits_a_parameterised_profile_only_as_its_owner_builds_it():
+    from mainframe_rag.serve.colab_production import ProductionAdmissionError, _profile
+
+    inputs = {"max_model_len": 65536, "max_num_seqs": 4}
+    profile = build_profile("COLAB_G4_BF16", reasoning=inputs)
+    profile["inference_lock_sha256"] = "a" * 64
+    server, window = _profile(profile)
+    assert server is profile["servers"][1] and window == 8192
+    # The recorded inputs are the claim; argv that differs from what they
+    # build, or inputs dropped from a parameterised argv, is refused.
+    for weaken in (
+        lambda p: p["servers"][0]["argv"].append("--trust-remote-code"),
+        lambda p: p["reasoning_inputs"].update(max_model_len=131072),
+        lambda p: p.pop("reasoning_inputs"),
+        lambda p: p.update(reasoning_inputs={"max_model_len": 262144}),
+    ):
+        changed = build_profile("COLAB_G4_BF16", reasoning=inputs)
+        weaken(changed)
+        with pytest.raises((ProductionAdmissionError, ValueError)):
+            _profile(changed)

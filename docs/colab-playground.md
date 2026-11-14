@@ -6,6 +6,7 @@ one explicitly owned Colab session supplies model HTTP endpoints. Production
 serving remains platform-owned. CPU/fake lifecycle evidence does not establish
 GPU fit, full-corpus quality, deployment acceptance or production parity.
 
+<a id="reference-profiles"></a>
 ## Reference profiles and prerequisites
 
 | Profile | Assignment | Purpose |
@@ -21,7 +22,9 @@ The BF16 reference pins `Qwen/Qwen3.8-27B` at
 `1d8ad4ca9b3dd8059ad90a75d4983776a23d44af`, with native 4096-dimensional
 embeddings. Reference inference uses Python 3.12, vLLM 0.28.0, Transformers
 5.15.0 and CUDA 13.0. The application keeps its existing Python 3.14 environment.
-The profile owns model argv; do not add guessed vLLM flags. A100 40 GB is
+The profile owns model argv; do not add guessed vLLM flags. The reasoning
+model, its window, concurrency and parser are declared
+[measurement inputs](#measurement-inputs). A100 40 GB is
 ineligible for this pair. FP8 requires its own approved identity and evidence.
 These envelopes are estimates until actual co-residency is measured.
 
@@ -227,6 +230,86 @@ itself or replace the production admission manifest. First commissioning can use
 the explicitly selected synthetic lane while production prerequisites remain
 unmet. CPU skips this stage. Actual target-library execution and GPU fit still
 require the separately approved live run; unit packets prove integration only.
+
+<a id="measurement-inputs"></a>
+## Measurement inputs (#1195)
+
+The [measurement protocol](eval.md#measurement-protocol) varies the reasoning
+server, the agent's settings and the gateway shape. All three are `prepare`
+inputs. They are written into the prepared manifest (`profile` and `config`),
+whose digests the run approval binds. At run time the workload inherits only
+documented caller inputs: the Qdrant role keys and other private secrets,
+`COLAB_*` and executable overrides, and the local-stack/ingest inputs (for
+example `UI_ENABLED`, `INGEST_WORKERS`); the gateway handoff supplies the model
+legs and their URLs. Ambient answer-path settings are cleared before the lane's
+own values are applied: every `LLM_*` name plus `PROMPT_*`, `RRF_*`,
+`RETRIEVE_MAX_*`, `CHAT_*`, `ZOWE_MCP_*` and the explicit answer/retrieval/
+request names in `scripts/colab.py` (`AMBIENT_AGENT_NAMES`). Those names are
+never read from the caller at run time; a value changed after `prepare` refuses
+the run, and a prepared `--agent-env` value or the lane's own value wins. An
+ambient `GATEWAY_SHAPE` is likewise ignored. A `prepare` without these flags
+writes the manifest it always wrote (the tests pin the default profile and
+gateway configuration to their digests at `c5259460`).
+
+| `prepare` flag | Default | Bounds |
+|---|---|---|
+| `--reasoning-model` | `Qwen/Qwen3.8-27B` | A Hugging Face `owner/name` id |
+| `--reasoning-revision` | the reference pin | 40-hex commit. Required with any other model: the reference pin is never reused |
+| `--reasoning-max-model-len` | `32768` | 4096–131072 (the ceiling of `serve.budget` and `LLM_MAX_MODEL_LEN`) |
+| `--reasoning-max-num-seqs` | `2` (`1` on the A100 profile) | 1–16 |
+| `--reasoning-parser` | `qwen3` | A vLLM parser name, or `none` to serve without `--reasoning-parser` |
+| `--agent-env NAME=VALUE` (repeatable) | none | Any agent setting: effort defaults (`LLM_REASONING_EFFORT_SIMPLE`, `LLM_REASONING_EFFORT_COMPLEX`, `LLM_REASONING_EFFORTS`), reserves, an agent window below the served one, a request-body extra. At most 32; lane-owned names are refused (gateway legs and routing, any `*_URL` or `*_ENDPOINT`, `QDRANT_*`, `EMBED_*`, `RERANK_*`, credentials, `ALLOW_HASH_MODE`, interpreter paths). Names that are agent settings are validated against the settings model at `prepare` |
+| `--gateway-shape` | `local` | `site`: no `/tokenize` pass-through and no argument allow-list (below) |
+
+Only a reasoning profile (`COLAB_G4_BF16`, `COLAB_A100_80GB_BF16`) takes them.
+The agent's `LLM_MAX_MODEL_LEN` follows the served window unless `--agent-env`
+sets a smaller one; a larger one is refused. Non-reference inputs are recorded
+as `profile.reasoning_inputs`; production admission and the remote runtime
+rebuild the profile from them and refuse any argv their owner does not
+produce. These are the only inputs: allocation fractions, eager mode and every
+other flag stay the profile's.
+
+Fit is not proven by `prepare`. As for the reference
+([profiles](#reference-profiles)), admission and measured
+co-residency decide: the allocation fractions do not change, and vLLM refuses
+at startup a window its KV pool cannot hold or a model that does not load,
+which ends the run as failed and released. A new model, window or concurrency
+is an estimate until one session has started it.
+
+The Task entry does not carry these flags yet; call the controller directly
+with the same inputs the Task passes:
+
+```sh
+.venv/bin/python scripts/colab.py prepare --state "$COLAB_STATE" \
+  --gateway-image "$COLAB_GATEWAY_IMAGE" --profile COLAB_G4_BF16 --dataset synthetic \
+  --inference-lock "$COLAB_INFERENCE_LOCK" --transport-receipt "$COLAB_TRANSPORT_RECEIPT" \
+  --gateway-shape site --reasoning-max-model-len 65536 \
+  --agent-env LLM_REASONING_EFFORT_SIMPLE=low
+```
+
+**Site-shaped gateway.** `GATEWAY_SHAPE=site` on `scripts/run_local_gateway.sh`
+(default `local`, unchanged) renders the reasoning route without the
+`/tokenize` pass-through and without `allowed_openai_params`. The agent then
+cannot verify prompt counts against the served tokenizer, and the gateway
+forwards `reasoning_effort` only if its own adapter accepts it. **This is a
+candidate venue for plumbing, not a validated quality venue.** On the pinned
+adapter the likely answer is a rejection, so `run_local_stack.sh` runs its
+existing startup probe and, if it fails, stops with a fixed message before
+ingest or the agent: a quality run cannot silently proceed through a gateway
+that rejects the agent's request.
+
+A quality run requires a probe that reaches `/v1/answer` with a judged row.
+#1193's argument probe records whether the actual site's gateway forwards,
+drops or rejects `reasoning_effort`; that record is a prerequisite before any
+arm is used as a baseline. Keys, routing, `/v1/score` and the strict-finish
+handler are the same in both shapes.
+
+Once that probe is recorded, run the sandbox lane as below, point the answer
+eval at the agent with `--agent-url ... --stream --subset 24 --repeats 3`, and
+keep each arm's manifest digest beside its report. Follow the protocol's sweep
+order: one `prepare` per served configuration (window, concurrency, model,
+gateway shape); arms that differ only in agent settings also need their own
+`prepare`, because those settings are part of the approved manifest.
 
 ## Sandbox lane (daily iteration)
 

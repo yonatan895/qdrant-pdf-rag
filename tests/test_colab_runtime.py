@@ -1218,3 +1218,57 @@ def test_reranker_snapshot_without_its_pinned_score_template_is_refused(tmp_path
         stale.unlink()
     observed = fetch("Qwen/Qwen3-Reranker-8B", with_template=True)
     assert observed["metadata_sha256"]["chat_template.jinja"] == hashlib.sha256(b"{{ messages }}").hexdigest()
+
+
+# ---------------------------------------- issue #1195 reasoning-server inputs
+def _relocated_reasoning_runtime(tmp_path, reasoning):
+    from mainframe_rag.serve.colab_profiles import build_profile
+
+    runtime, _, clock = _relocated_rerank_runtime(tmp_path, "COLAB_G4_RERANK_8B")
+    profile = build_profile("COLAB_G4_BF16", deadline_seconds=3600, reasoning=reasoning)
+    for server in profile["servers"]:
+        server["local_dir"] = server["local_dir"].replace("/content", str(tmp_path), 1)
+        server["argv"] = [value.replace("/content", str(tmp_path), 1) for value in server["argv"]]
+    profile.update(inference_lock_sha256=runtime.profile["inference_lock_sha256"],
+                   expires_at=runtime.profile["expires_at"])
+    return RemoteRuntime(profile, root=tmp_path, clock=clock, sleep=clock.sleep,
+                         profile_builder=build_profile, development_sha="a" * 40), profile
+
+
+OTHER_MODEL = {"model_id": "Example-Org/Other-Model", "revision": "0123456789abcdef0123456789abcdef01234567",
+               "max_model_len": 65536, "max_num_seqs": 4, "reasoning_parser": "none"}
+
+
+@pytest.mark.parametrize("reasoning", [None, {"max_model_len": 131072}, OTHER_MODEL])
+def test_reasoning_profile_with_recorded_inputs_passes_remote_validation(tmp_path, reasoning):
+    runtime, profile = _relocated_reasoning_runtime(tmp_path, reasoning)
+    assert ("reasoning_inputs" in profile) is (reasoning is not None)
+    runtime.validate_profile()
+
+
+@pytest.mark.parametrize("reasoning,weaken", [
+    # Without recorded inputs the reasoning model is the fixed reference.
+    (None, lambda p: p["servers"][0].update(model_id="Example-Org/Other-Model")),
+    (None, lambda p: _set_flag(p["servers"][0]["argv"], "--served-model-name", "Example-Org/Other-Model")),
+    # Recorded inputs admit exactly the argv their owner builds from them.
+    (OTHER_MODEL, lambda p: _set_flag(p["servers"][0]["argv"], "--max-model-len", "131072")),
+    (OTHER_MODEL, lambda p: _set_flag(p["servers"][0]["argv"], "--max-num-seqs", "16")),
+    (OTHER_MODEL, lambda p: _set_flag(p["servers"][0]["argv"], "--gpu-memory-utilization", "0.95")),
+    (OTHER_MODEL, lambda p: p["servers"][0]["argv"].append("--trust-remote-code")),
+    (OTHER_MODEL, lambda p: p["servers"][0]["argv"].extend(["--reasoning-parser", "qwen3"])),
+    (OTHER_MODEL, lambda p: p["servers"][0].update(revision="f" * 40)),
+    (OTHER_MODEL, lambda p: p["servers"][0].update(model_id="Example-Org/Third-Model")),
+    (OTHER_MODEL, lambda p: _set_flag(p["servers"][0]["argv"], "--host", "0.0.0.0")),
+    (OTHER_MODEL, lambda p: p["reasoning_inputs"].update(max_model_len=131072)),
+    (OTHER_MODEL, lambda p: p["reasoning_inputs"].update(max_model_len=262144)),
+    (OTHER_MODEL, lambda p: p["reasoning_inputs"].update(gpu_memory_utilization="0.95")),
+    (OTHER_MODEL, lambda p: p["reasoning_inputs"].pop("revision")),
+    (OTHER_MODEL, lambda p: p.update(reasoning_inputs="Example-Org/Other-Model")),
+    (OTHER_MODEL, lambda p: p.update(reasoning_inputs={})),
+    (OTHER_MODEL, lambda p: p["servers"].pop()),
+])
+def test_reasoning_profile_refuses_a_launch_its_recorded_inputs_do_not_produce(tmp_path, reasoning, weaken):
+    runtime, profile = _relocated_reasoning_runtime(tmp_path, reasoning)
+    weaken(profile)
+    with pytest.raises(RuntimeError):
+        runtime.validate_profile()

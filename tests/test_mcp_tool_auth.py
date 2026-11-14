@@ -405,6 +405,65 @@ def test_idp_blip_with_a_random_kid_does_not_evict_the_good_key(caplog: pytest.L
     assert _stale_lines(caplog) == [{"action": "tool_auth_jwks_stale", "gateway": "splunk", "age_s": 350}]
 
 
+def test_a_failed_fetch_is_retried_at_the_refetch_floor(caplog: pytest.LogCaptureFixture):
+    gw = _Clocked()
+
+    async def run() -> tuple[list[str], list[int]]:
+        verdicts: list[str] = []
+        fetches: list[int] = []
+
+        async def step(at: float) -> None:
+            verdicts.append(await gw.attempt(at))
+            fetches.append(len(gw.idp.requests))
+
+        await step(0.0)
+        gw.idp.status = 503
+        await step(350.0)  # the TTL refresh fails, but stale keys still serve
+        await step(381.0)  # 31 s after the failure: refetch at the floor, not at 650
+        gw.idp.status = 200
+        await step(411.0)  # the retry succeeds and the normal TTL rules resume
+        await step(412.0)  # one second later: below the floor, so no new request
+        return verdicts, fetches
+
+    with caplog.at_level(logging.INFO, logger="tool_auth"):
+        verdicts, fetches = asyncio.run(run())
+    assert verdicts == ["allow"] * 5
+    assert fetches == [1, 2, 3, 4, 4]
+    assert _stale_lines(caplog) == [
+        {"action": "tool_auth_jwks_stale", "gateway": "splunk", "age_s": 350},
+        {"action": "tool_auth_jwks_stale", "gateway": "splunk", "age_s": 381},
+    ]
+
+
+def test_a_successful_retry_returns_to_the_ttl_cadence(caplog: pytest.LogCaptureFixture):
+    gw = _Clocked()
+    assert (gw.config.jwks_ttl_s, gw.config.jwks_min_refetch_s) == (300, 30)
+
+    async def run() -> tuple[list[str], list[int]]:
+        verdicts: list[str] = []
+        fetches: list[int] = []
+
+        async def step(at: float) -> None:
+            verdicts.append(await gw.attempt(at))
+            fetches.append(len(gw.idp.requests))
+
+        await step(0.0)
+        gw.idp.status = 503
+        await step(350.0)  # the TTL refresh fails
+        gw.idp.status = 200
+        await step(381.0)  # the retry at the floor succeeds
+        await step(412.0)  # 31 s after the success: past the floor, inside the TTL
+        await step(680.0)  # 299 s after the success: still inside the TTL
+        await step(681.0)  # 300 s after the success: the TTL refresh
+        return verdicts, fetches
+
+    with caplog.at_level(logging.INFO, logger="tool_auth"):
+        verdicts, fetches = asyncio.run(run())
+    assert verdicts == ["allow"] * 6
+    assert fetches == [1, 2, 3, 3, 3, 4]
+    assert _stale_lines(caplog) == [{"action": "tool_auth_jwks_stale", "gateway": "splunk", "age_s": 350}]
+
+
 def test_stale_keys_stop_at_max_stale_while_the_idp_stays_down(caplog: pytest.LogCaptureFixture):
     gw = _Clocked()
     assert gw.config.jwks_max_stale_s == 3600
@@ -413,7 +472,7 @@ def test_stale_keys_stop_at_max_stale_while_the_idp_stays_down(caplog: pytest.Lo
         verdicts = [await gw.attempt(0.0)]
         gw.idp.status = 503
         verdicts.append(await gw.attempt(3500.0))  # refresh fails, set is 3500 s old
-        verdicts.append(await gw.attempt(3610.0))  # no refresh due, but past max-stale
+        verdicts.append(await gw.attempt(3610.0))  # the floor retry fails, past max-stale
         verdicts.append(await gw.attempt(3900.0))  # refresh fails again
         return verdicts
 
