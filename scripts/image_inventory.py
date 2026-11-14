@@ -13,18 +13,18 @@ from pathlib import Path, PurePosixPath
 
 try:
     from scripts import dependency_lock as locks
-except ModuleNotFoundError:
-    import dependency_lock as _local_locks
-
-    locks = _local_locks
-try:
     from scripts.airgap import image_manifest as oci
 except ModuleNotFoundError:
+    # Run as a file (python3 -I, or the SBOM step's import): the siblings, searched
+    # after the standard library, so no file beside them can shadow a stdlib module.
     import sys
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent / 'airgap'))
+    _HERE = Path(__file__).resolve().parent
+    sys.path += [str(_HERE), str(_HERE / 'airgap')]
+    import dependency_lock as _local_locks
     import image_manifest as _local_oci
 
+    locks = _local_locks
     oci = _local_oci
 
 RECEIPT = 'opt/rag-locks/installed-inventory.json'

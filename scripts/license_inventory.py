@@ -42,7 +42,8 @@ from pathlib import Path
 
 try:
     from scripts import dependency_lock as locks
-except ModuleNotFoundError:
+except ModuleNotFoundError:  # run as a file (python3 -I): the sibling, searched after the standard library
+    sys.path.append(str(Path(__file__).resolve().parent))
     import dependency_lock as _local_locks
 
     locks = _local_locks

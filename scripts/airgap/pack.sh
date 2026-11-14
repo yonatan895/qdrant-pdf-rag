@@ -36,7 +36,7 @@ done
 # dependency, image pin, vendored asset or notice file, before any image is pulled.
 # Unresolved owner decisions are reported, not hidden; they do not block packing.
 command -v python3 >/dev/null 2>&1 || die "python3 is required for the license inventory check"
-LICENSE_SUMMARY=$(python3 "$REPO_ROOT/scripts/license_inventory.py" --root "$REPO_ROOT" check) || {
+LICENSE_SUMMARY=$(python3 -I "$REPO_ROOT/scripts/license_inventory.py" --root "$REPO_ROOT" check) || {
     printf '%s\n' "$LICENSE_SUMMARY" >&2
     die "license inventory check failed: record the dependency/notice change in licenses/inventory.json (docs/licensing.md)"
 }
@@ -46,7 +46,7 @@ LICENSE_STATUS=$(printf '%s\n' "$LICENSE_SUMMARY" | sed -n '$p' | sed 's/^licens
 # Packaging provenance (#1030): the shipped Containerfile FROM digests must equal
 # the approved pin in images.txt and the lock (the SBOM labels the base from
 # images.txt, so an off-pin FROM would otherwise be attested as the pin).
-python3 "$REPO_ROOT/scripts/image_inventory.py" --root "$REPO_ROOT" --check-containerfiles >/dev/null ||
+python3 -I "$REPO_ROOT/scripts/image_inventory.py" --root "$REPO_ROOT" --check-containerfiles >/dev/null ||
     die "Containerfile base digest check failed: images/Containerfile.* FROM must equal the pin in images.txt and the lock (scripts/image_inventory.py --check-containerfiles)"
 
 # `git bundle` records clean HEAD, so the license/SBOM scripts above must have
@@ -161,12 +161,12 @@ fi
 git archive --format=tar -o "$TASK_TMP/project-docs.tar" HEAD -- README.md AGENTS.md LICENSE docs \
     ':(glob).agents/skills/qdrant-*/**' .agents/qdrant-skills-provenance.md LICENSE.qdrant-skills NOTICE.qdrant-skills \
     || die "cannot archive the project docs of the packed commit"
-python3 "$REPO_ROOT/scripts/airgap/reference_docs.py" build --manifest "$REPO_ROOT/scripts/airgap/reference-docs.json" \
+python3 -I "$REPO_ROOT/scripts/airgap/reference_docs.py" build --manifest "$REPO_ROOT/scripts/airgap/reference-docs.json" \
     --project-tar "$TASK_TMP/project-docs.tar" --cache "$REFDOCS_CACHE" ${AIRGAP_REFDOCS_CACHE:+--offline} --work "$TASK_TMP" \
     --source-sha "$IMAGE_SHA" --mtime "$(git log -1 --format=%ct HEAD)" --output "$DIST/reference-docs.tar.gz" \
     || die "reference docs could not be packed: a pinned doc set is missing, differs from its sha256 or holds an unsafe entry (FAIL line above)"
 REFDOCS_SHA256=$(sha256sum "$DIST/reference-docs.tar.gz" | awk '{print $1}')
-REFDOCS_SETS=$(python3 "$REPO_ROOT/scripts/airgap/reference_docs.py" check --manifest "$REPO_ROOT/scripts/airgap/reference-docs.json" | sed -n 's/.*sets=//p')
+REFDOCS_SETS=$(python3 -I "$REPO_ROOT/scripts/airgap/reference_docs.py" check --manifest "$REPO_ROOT/scripts/airgap/reference-docs.json" | sed -n 's/.*sets=//p')
 
 echo "==> Pulling images (fail closed on missing tags)"
 extra_args="${SKOPEO_ARGS:-}"
@@ -330,13 +330,13 @@ export INGEST_IMAGE INGEST_DIGEST AGENT_IMAGE AGENT_DIGEST UBI_REF UBI_DIGEST
 export OAUTH_PROXY_REF OAUTH_DIGEST CHART_VERSION CHART_SHA256 DIST REPO_ROOT
 export OPENWEBUI_REF OPENWEBUI_DIGEST OPENWEBUI_PROXY_REF OPENWEBUI_PROXY_DIGEST
 export TASK_VERSION TASK_ASSET TASK_SHA256 TASK_BINARY_SHA256 TASK_LICENSE_SHA256 TASK_ORIGIN REFDOCS_SHA256
-python3 - <<'PYEOF'
+python3 -I - <<'PYEOF'
 import json
 import os
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(os.environ["REPO_ROOT"]) / "scripts"))
+sys.path.append(str(Path(os.environ["REPO_ROOT"]) / "scripts"))  # after the standard library
 from dependency_lock import load, LockError
 from image_inventory import inventory, verify_sbom
 root = Path(os.environ["REPO_ROOT"])
@@ -412,7 +412,7 @@ except (LockError, OSError, ValueError, KeyError):
 PYEOF
 
 echo "==> Third-party notices (license record + notice texts, readable offline)"
-python3 "$REPO_ROOT/scripts/license_inventory.py" --root "$REPO_ROOT" notices --bundle-dir "$DIST" --output "$DIST/THIRD-PARTY-NOTICES.txt" \
+python3 -I "$REPO_ROOT/scripts/license_inventory.py" --root "$REPO_ROOT" notices --bundle-dir "$DIST" --output "$DIST/THIRD-PARTY-NOTICES.txt" \
     || die "third-party notices could not be generated: a required notice material is missing or differs from licenses/inventory.json"
 
 echo "==> Bootstrap helper & Packing Record"

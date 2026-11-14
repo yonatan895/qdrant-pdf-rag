@@ -122,6 +122,50 @@ def make_bin_tree(tmp_path: Path, scripts: list[str]) -> Path:
     return tmp_path
 
 
+# A stdlib-shadowing module a group-only change could add next to a protected
+# script (#588 N1, review B1). It records that it ran, then hands over to the
+# real module so the run otherwise behaves normally. The record is the finding.
+STDLIB_SHADOW = """\
+import os as _os, sys as _sys
+with open({marker!r}, "a") as _log:
+    _log.write(f"{{__name__}} from {{__file__}}\\n")
+_here = _os.path.dirname(_os.path.abspath(__file__))
+_saved = _sys.path[:]
+_sys.path[:] = [p for p in _saved if _os.path.abspath(p or _os.getcwd()) != _here]
+del _sys.modules[__name__]
+try:
+    import importlib as _importlib
+    _sys.modules[__name__] = _importlib.import_module(__name__)
+finally:
+    _sys.path[:] = _saved
+"""
+
+
+def plant_stdlib_shadows(tree: Path, places: dict[str, tuple[str, ...]], marker: Path, form: str,
+                         python: str) -> list[str]:
+    """Write a recording shadow of each named stdlib module into each directory.
+
+    `form` is "py" (source) or "pyc" (a sourceless .pyc compiled by `python`,
+    the interpreter the scripts under test run). Returns the planted paths,
+    relative to `tree`.
+    """
+    planted = []
+    for directory, names in places.items():
+        for name in names:
+            source = tree / directory / f"{name}.py"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text(STDLIB_SHADOW.format(marker=str(marker)))
+            if form == "pyc":
+                compiled = source.with_suffix(".pyc")
+                subprocess.run([python, "-I", "-c", ("import py_compile, sys; "
+                                "py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)"),
+                                str(source), str(compiled)], check=True, capture_output=True)
+                source.unlink()
+                source = compiled
+            planted.append(str(source.relative_to(tree)))
+    return planted
+
+
 def copy_chart(tmp_path: Path) -> Path:
     (tmp_path / "charts").mkdir(exist_ok=True)
     dest = tmp_path / "charts" / next(REPO.glob("charts/qdrant-*.tgz")).name
