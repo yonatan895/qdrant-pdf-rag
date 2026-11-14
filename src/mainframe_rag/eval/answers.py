@@ -535,6 +535,17 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     # Measurement protocol (issue #1195): hardware-independent and
     # hardware-dependent groups, reported apart. Report-only.
     metrics["measurement"] = measurement_summary(results)
+    # Coverage of the rates above (#1216): every rate divides by judged rows
+    # only, so errors and rows with no pass/fail verdict are in no denominator
+    # at all. Report them next to the rates instead of hiding them in the pass
+    # rate. Appended after the #1195 measurement block so the key order of the
+    # existing JSON fields does not move.
+    total = len(results)
+    # Rows outside pass/fail/error, counted so judged + errors + unjudged == total.
+    metrics["total"] = total
+    metrics["unjudged"] = total - len(judged) - metrics["errors"]
+    metrics["error_rate"] = round(metrics["errors"] / total, 4) if total else None
+    metrics["judged_rate"] = round(len(judged) / total, 4) if total else None
     return metrics
 
 
@@ -933,7 +944,16 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
     its detail so the report is self-contained."""
     lines: list[str] = ["# Answer-tier eval summary", ""]
     lines.append(f"- queries: {metrics['queries']} (judged {metrics['judged']}, errors {metrics['errors']})")
-    lines.append(f"- answer pass rate: {metrics['answer_pass_rate']} (n={metrics['answer_n']})")
+    if "total" in metrics and "unjudged" in metrics:
+        lines.append(
+            f"- answer pass rate: {metrics['answer_pass_rate']} "
+            f"(n={metrics['answer_n']}) ; judged {metrics['judged']}/{metrics['total']}, "
+            f"errors {metrics['errors']}, unjudged {metrics['unjudged']}"
+        )
+    else:
+        # Metrics from before issue #1216 (for example loaded from an older
+        # report file) carry no coverage fields: keep the line in its old shape.
+        lines.append(f"- answer pass rate: {metrics['answer_pass_rate']} (n={metrics['answer_n']})")
     lines.append(f"- abstain pass rate: {metrics['abstain_pass_rate']} (n={metrics['abstain_n']})")
     lines.append(f"- failures: {metrics['failures']}, warns: {metrics['warns']}, zero-hits paths: {metrics['zero_hits']}")
     lines.append(f"- inferred-citation rows (not grounded): {metrics['inferred_citations']}")

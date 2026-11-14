@@ -17,7 +17,9 @@ first fresh-install release candidate on 2026-10-31 (#1118), bound to scope dige
 the approval is now recorded under the maintainer's 2026-10-31 blanket licence
 approval of every #1174 doc set
 ([#1174 comment](https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543)),
-bound to scope digest `2fcedf65…`. Any later dependency, pin or notice change voids it, and
+bound to scope digest `2fcedf65…`. The 2026-11-14 base image refresh (#1228) moved the
+scope again; the maintainer approved it the same day
+([#1228 comment](https://github.com/yonatan895/qdrant-pdf-rag/pull/1228#issuecomment-6875113278)), bound to scope digest `c535e932…`. Any later dependency, pin or notice change voids it, and
 `check --release` then fails until a new approval is recorded.
 Source of authority: #376 and its triage comments (19 and 24 September, 1 October
 2026): close on a documented owner disposition, never on CI alone.
@@ -90,7 +92,7 @@ the `devkit` section of `licenses/inventory.json`, with their own approval, beca
 |---|---|---|
 | Runtime wheels (66) | the release `python` records, reused | as above |
 | Dev-only wheels (17) | `devkit.python`, bound to `requirements.dev.lock.txt` | `generate --kit --wheelhouse` on the factory's dev wheelhouse (`dependency_lock.py prepare --profile dev`; exact locked bytes) |
-| RPMs (27, `images/devkit-packages.txt`) | `devkit.components`, kind `rpm`, bound to the NEVRA | RPM `License` header tag from the pinned image's rpmdb (`devkit.evidence`) |
+| RPMs (26, `images/devkit-packages.txt`) | `devkit.components`, kind `rpm`, bound to the NEVRA | RPM `License` header tag from the pinned image's rpmdb (`devkit.evidence`) |
 | Task, Helm, oc, `oras.exe`, Linux `oras` | `devkit.components`, kind `tool`, bound to the pin's `version`, `sha256`, `license` and `license-sha256` | the pin's `license:` line; `task-LICENSE` and `oras-LICENSE` checked against their pinned digests |
 | herdr-core, OpenCode (#1172, in the image) | `devkit.components`, kind `tool`, bound to `images/devkit/agents/<tool>-pin.txt` the same way, plus the committed licence text (`bind.files`), whose digest must equal the pin's `license-sha256` | herdr-core: Apache-2.0, the archive's `LICENSE` (the build checks it equals the committed copy); OpenCode: MIT, the repository `LICENSE` at tag v2.2.5 (commit `9bbb8ce1`), because the archive has none. The image carries both texts, and herdr's `THIRD-PARTY-NOTICES`, under `/usr/share/licenses/`; the kit notices carry both licence texts |
 | UBI base, project | `devkit.shared`: the release records `image:ubi9-python-314-minimal` and `project:mainframe-rag` | the `FROM` digest of `images/Containerfile.devkit` must equal the shared base record's digest |
@@ -120,6 +122,13 @@ GPLv3+, under the GPL decision above) moved the digest. The maintainer approved 
 resulting kit licence scope on 2026-11-02
 ([#1181 comment 6576583551](https://github.com/yonatan895/qdrant-pdf-rag/pull/1181#issuecomment-6576583551), #1183 option A), so `devkit.approval` now binds
 `32132abeedcae2772e2f08d540358fe859b7290f03aaf1e62ba05ee9460b5bc4`.
+The 2026-11-14 base refresh (UBI 9.9 digest `30a3131d…`, after the UBI repositories
+stopped serving 11 of the pinned builds) re-resolved the RPM set: 11 NEVRAs moved with
+unchanged `License` tags and `yajl` left the set (`crun` 1.29.1 no longer requires it).
+The kit scope digest is now `833299c98226a2cce008a6fa3e79b0091a349d7907037a62baf95c47c338cc9b`
+and the release scope digest moved with the base record. The maintainer approved both
+new digests on 2026-11-14 ([#1228 comment](https://github.com/yonatan895/qdrant-pdf-rag/pull/1228#issuecomment-6875113278)), so `devkit.approval` and
+`release_approval` now bind them.
 
 The gate: `pack.sh` runs `license_inventory.py check --kit` before it pulls anything.
 `--kit` is the kit's `check --release`. It fails with fixed `FAIL` lines when:
