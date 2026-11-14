@@ -272,8 +272,13 @@ temp dir, stops sims it started unless `--keep-sim`). An existing server
 via `QDRANT_SIM_URL`/`QDRANT_URL` is reused; the environment is restored
 afterward.
 
-Fails on regressions **or** any query failure. `--rerank` flips reranking
-on for A/B runs (leg order stays `RERANK_ENDPOINT_ORDER`, default
+Fails on regressions **or** any query failure. `--update-baseline` records
+the run as the baseline only when it had no query failures; otherwise it
+prints `ERROR: --update-baseline refused: N query failures occurred; baseline
+file left unchanged: PATH`, leaves the baseline untouched, still writes
+`--out`/`--summary`/`--delta` and the report on stdout, and exits 1 (the
+same contract as `eval_retrieval.py` above, #1211/#1213). `--rerank`
+flips reranking on for A/B runs (leg order stays `RERANK_ENDPOINT_ORDER`, default
 `score_first` — there is no gate flag for the order, by design (#252):
 the gate forces hash mode, so leg-order numbers there would compare stub
 legs; gateway-order A/Bs run the same gate with the env var set, after
@@ -774,6 +779,12 @@ VENUE=rc sh scripts/tools/run-task.sh eval:capture-pool          # records into 
 #    identifier separately (the other kind at production), and reports both
 #    kinds per config. Dev pools only; adoption is a separate default change.
 ```
+
+**Exit status.** `replay_sweep.py` exits 1 when any pool row records a capture
+error (the rows that already made `capture_pool.py` exit 1, shown in the table's
+`fail` column); the table and `--json` are still written. It exits 2 when it
+refuses (frozen holdout outside RC, failed heading join) and 0 otherwise.
+Unmatched queries and skipped configs do not change the exit status.
 
 **Depth.** `DEPTH` (`--depth`, at most 200) records each leg deeper than
 production; the default records exactly the production prefetch, and a

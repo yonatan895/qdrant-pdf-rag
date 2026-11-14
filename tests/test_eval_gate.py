@@ -6,12 +6,14 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from scripts.eval_retrieval import main
 
 from mainframe_rag.config import Settings
 from mainframe_rag.eval.retrieval import _set, update_baseline
+from tests.helpers_eval_local import free_port
 from tests.helpers_eval_local import retrieval_report as _report
 
 # --- main() exit-code contract (issue #159): a skipped gate is not a pass ---
@@ -319,6 +321,125 @@ def test_gate_golden_sha_mismatch_exits_2(tmp_path: Path, capfd):
 
     assert rc == 2
     assert "sha256 mismatch" in capfd.readouterr().err
+
+
+def _stub_gate_run(monkeypatch, report: dict) -> None:
+    """Drive run_gate() with no simulator, ingest, embedder or manifest writes."""
+    import scripts.gate_l1 as gl
+
+    class _Sim:
+        def __init__(self, *args, **kwargs):
+            self.url = f"http://127.0.0.1:{free_port()}"
+
+        def start(self) -> str:
+            return self.url
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(gl, "start_simulator", lambda *args, **kwargs: _Sim())
+    monkeypatch.setattr(gl, "generate_synthetic_golden_corpus", lambda entries, out_path: out_path)
+    monkeypatch.setattr(gl, "run_ingest", SimpleNamespace(main=lambda *args, **kwargs: 0))
+    monkeypatch.setattr(gl, "load_settings", lambda: SimpleNamespace(embed_mode="hash"))
+    monkeypatch.setattr(gl, "write_run_manifest", lambda *args, **kwargs: {"git_sha": "test"})
+    monkeypatch.setattr(gl, "evaluate", lambda *args, **kwargs: report)
+
+
+def test_gate_l1_refuses_update_baseline_after_failures(monkeypatch, tmp_path: Path, capfd):
+    """A run with query failures must never be recorded as the new pin."""
+    import scripts.gate_l1 as gl
+    from scripts.gate_l1 import run_gate
+
+    golden = _tmp_golden(tmp_path)
+    baseline = tmp_path / "baseline.json"
+    pinned = json.dumps({"_meta": {"embed_mode": "hash"}, "sentinel": True}).encode()
+    baseline.write_bytes(pinned)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("update_baseline must not run when the gate had failures")
+
+    _stub_gate_run(monkeypatch, _report() | {"failures": 1})
+    monkeypatch.setattr(gl, "update_baseline", _boom)
+
+    rc, _ = run_gate(golden_path=golden, baseline_path=baseline, update_baseline_flag=True)
+
+    assert rc == 1
+    assert baseline.read_bytes() == pinned
+    err = capfd.readouterr().err
+    assert "--update-baseline refused" in err
+    expected = (
+        f"ERROR: --update-baseline refused: 1 query failures occurred; "
+        f"baseline file left unchanged: {baseline}"
+    )
+    assert expected in err
+
+
+@pytest.mark.parametrize("pinned", [True, False], ids=["existing-baseline", "no-baseline"])
+def test_gate_l1_refused_update_baseline_still_writes_reports(monkeypatch, tmp_path: Path, capfd, pinned):
+    """A refused --update-baseline run keeps its report, summary and delta (#1211).
+
+    Same contract as scripts/eval_retrieval.py (#1213): the refusal withholds
+    only the baseline write; the failed run is still reported and exits 1.
+    """
+    import scripts.gate_l1 as gl
+
+    golden = _tmp_golden(tmp_path)
+    baseline = tmp_path / "baseline.json"
+    pinned_bytes = json.dumps({"_meta": {"embed_mode": "hash"}, "sentinel": True}).encode()
+    if pinned:
+        baseline.write_bytes(pinned_bytes)
+    out, summary, delta = tmp_path / "r" / "report.json", tmp_path / "r" / "summary.md", tmp_path / "r" / "delta.md"
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("update_baseline must not run when the gate had failures")
+
+    failed_report = _report() | {"failures": 3}
+    _stub_gate_run(monkeypatch, failed_report)
+    monkeypatch.setattr(gl, "update_baseline", _boom)
+
+    rc = gl.main([
+        "--golden", str(golden), "--baseline", str(baseline), "--update-baseline",
+        "--out", str(out), "--summary", str(summary), "--delta", str(delta),
+    ])
+
+    assert rc == 1
+    if pinned:
+        assert baseline.read_bytes() == pinned_bytes
+    else:
+        assert not baseline.exists()
+    assert json.loads(out.read_text(encoding="utf-8")) == failed_report
+    summary_md = summary.read_text(encoding="utf-8")
+    assert summary_md
+    assert delta.read_text(encoding="utf-8") == summary_md
+    captured = capfd.readouterr()
+    assert captured.out == summary_md + "\n"  # stdout is the evaluation report, not an error stub
+    assert "**ERROR:**" not in captured.out
+    assert (
+        "ERROR: --update-baseline refused: 3 query failures occurred; "
+        f"baseline file left unchanged: {baseline}"
+    ) in captured.err
+
+
+def test_gate_l1_update_baseline_records_clean_run(monkeypatch, tmp_path: Path):
+    """A zero-failure --update-baseline run still records the baseline and reloads it."""
+    from scripts.gate_l1 import run_gate
+
+    golden = _tmp_golden(tmp_path)
+    baseline = tmp_path / "baseline.json"
+    pinned = json.dumps({"_meta": {"embed_mode": "hash"}, "sentinel": True}).encode()
+    baseline.write_bytes(pinned)
+
+    report = _report()
+    _stub_gate_run(monkeypatch, report)
+
+    rc, _ = run_gate(golden_path=golden, baseline_path=baseline, update_baseline_flag=True)
+
+    assert rc == 0
+    recorded = json.loads(baseline.read_text())
+    assert baseline.read_bytes() != pinned
+    assert "sentinel" not in recorded  # the payload is rewritten fresh, not merged
+    assert recorded["_meta"]["embed_mode"] == "hash"
+    assert recorded["_meta"]["n"] == report["n"]
 
 
 def test_repo_golden_set_is_sha_pinned():
