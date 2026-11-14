@@ -272,8 +272,13 @@ temp dir, stops sims it started unless `--keep-sim`). An existing server
 via `QDRANT_SIM_URL`/`QDRANT_URL` is reused; the environment is restored
 afterward.
 
-Fails on regressions **or** any query failure. `--rerank` flips reranking
-on for A/B runs (leg order stays `RERANK_ENDPOINT_ORDER`, default
+Fails on regressions **or** any query failure. `--update-baseline` records
+the run as the baseline only when it had no query failures; otherwise it
+prints `ERROR: --update-baseline refused: N query failures occurred; baseline
+file left unchanged: PATH`, leaves the baseline untouched, still writes
+`--out`/`--summary`/`--delta` and the report on stdout, and exits 1 (the
+same contract as `eval_retrieval.py` above, #1211/#1213). `--rerank`
+flips reranking on for A/B runs (leg order stays `RERANK_ENDPOINT_ORDER`, default
 `score_first` — there is no gate flag for the order, by design (#252):
 the gate forces hash mode, so leg-order numbers there would compare stub
 legs; gateway-order A/Bs run the same gate with the env var set, after

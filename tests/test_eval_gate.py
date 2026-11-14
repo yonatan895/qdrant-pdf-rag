@@ -374,6 +374,52 @@ def test_gate_l1_refuses_update_baseline_after_failures(monkeypatch, tmp_path: P
     assert expected in err
 
 
+@pytest.mark.parametrize("pinned", [True, False], ids=["existing-baseline", "no-baseline"])
+def test_gate_l1_refused_update_baseline_still_writes_reports(monkeypatch, tmp_path: Path, capfd, pinned):
+    """A refused --update-baseline run keeps its report, summary and delta (#1211).
+
+    Same contract as scripts/eval_retrieval.py (#1213): the refusal withholds
+    only the baseline write; the failed run is still reported and exits 1.
+    """
+    import scripts.gate_l1 as gl
+
+    golden = _tmp_golden(tmp_path)
+    baseline = tmp_path / "baseline.json"
+    pinned_bytes = json.dumps({"_meta": {"embed_mode": "hash"}, "sentinel": True}).encode()
+    if pinned:
+        baseline.write_bytes(pinned_bytes)
+    out, summary, delta = tmp_path / "r" / "report.json", tmp_path / "r" / "summary.md", tmp_path / "r" / "delta.md"
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("update_baseline must not run when the gate had failures")
+
+    failed_report = _report() | {"failures": 3}
+    _stub_gate_run(monkeypatch, failed_report)
+    monkeypatch.setattr(gl, "update_baseline", _boom)
+
+    rc = gl.main([
+        "--golden", str(golden), "--baseline", str(baseline), "--update-baseline",
+        "--out", str(out), "--summary", str(summary), "--delta", str(delta),
+    ])
+
+    assert rc == 1
+    if pinned:
+        assert baseline.read_bytes() == pinned_bytes
+    else:
+        assert not baseline.exists()
+    assert json.loads(out.read_text(encoding="utf-8")) == failed_report
+    summary_md = summary.read_text(encoding="utf-8")
+    assert summary_md
+    assert delta.read_text(encoding="utf-8") == summary_md
+    captured = capfd.readouterr()
+    assert captured.out == summary_md + "\n"  # stdout is the evaluation report, not an error stub
+    assert "**ERROR:**" not in captured.out
+    assert (
+        "ERROR: --update-baseline refused: 3 query failures occurred; "
+        f"baseline file left unchanged: {baseline}"
+    ) in captured.err
+
+
 def test_gate_l1_update_baseline_records_clean_run(monkeypatch, tmp_path: Path):
     """A zero-failure --update-baseline run still records the baseline and reloads it."""
     from scripts.gate_l1 import run_gate
