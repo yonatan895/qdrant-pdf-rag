@@ -8,6 +8,7 @@ import httpx2
 import pytest
 
 from mainframe_rag.agent.tokenizer import (
+    TOKENIZE_REFUSED_RETRY_AFTER_S,
     TOKENIZE_RETRY_AFTER_S,
     FallbackTokenizer,
     VllmTokenizer,
@@ -160,6 +161,124 @@ def test_transient_failure_recovers_after_the_retry_window(failure, caplog):
         assert tok.remote_confirmed is True
     assert len(calls) == 3
     assert [r.levelname for r in caplog.records if r.name == "agent.tokenizer"] == ["WARNING", "INFO"]
+
+
+def test_a_refused_count_opens_a_long_window_and_a_probe_after_it_resumes(caplog):
+    """#1214: a 401 is not evidence the endpoint is unserved. The estimator
+    carries the load for the long window, then one probe resumes remote
+    counting: a rotated key must not cost the process its tokenizer."""
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx2.Response(401)
+        return httpx2.Response(200, json={"count": 41})
+
+    message = ChatMessage(role="user", content="IEF001A synthetic")
+    estimate = FallbackTokenizer().count_messages([message])
+    clock = _Clock()
+    with (
+        caplog.at_level(logging.INFO, logger="agent.tokenizer"),
+        httpx2.Client(transport=httpx2.MockTransport(respond)) as client,
+    ):
+        tok = VllmTokenizer("http://synthetic/v1", "reasoning", client=client, clock=clock)
+        assert tok.count_messages([message]) == estimate
+        assert tok._pinned is False
+        assert tok.remote_confirmed is False
+        assert len(calls) == 1
+        # Inside the long window the estimator serves, without traffic.
+        clock.now += TOKENIZE_REFUSED_RETRY_AFTER_S - 1
+        assert tok.count_messages([message]) == estimate
+        assert len(calls) == 1
+        # After the window one probe is allowed, exactly like the short one.
+        clock.now += 1
+        assert tok.count_messages([message]) == 41
+        assert tok.remote_confirmed is True
+        assert len(calls) == 2
+        # And remote counting stays resumed: no window left, the next
+        # count goes to the endpoint as a normal call, not as a probe.
+        assert tok.count_messages([message]) == 41
+        assert tok._retry_at is None
+        assert len(calls) == 3
+    warning = [rec for rec in caplog.records if rec.name == "agent.tokenizer" and rec.levelname == "WARNING"]
+    assert len(warning) == 1
+    assert "401" in warning[0].getMessage()
+    assert [r.levelname for r in caplog.records if r.name == "agent.tokenizer"] == ["WARNING", "INFO"]
+
+
+def test_a_refused_400_does_not_pin_the_estimator_for_the_process():
+    """#1214: one unusual payload must not disable remote counting for the
+    life of the process: every long window ends with another probe."""
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx2.Response(400, json={"error": "synthetic refused payload"})
+
+    message = ChatMessage(role="user", content="IEF001A synthetic")
+    estimate = FallbackTokenizer().count_messages([message])
+    clock = _Clock()
+    with httpx2.Client(transport=httpx2.MockTransport(respond)) as client:
+        tok = VllmTokenizer("http://synthetic/v1", "reasoning", client=client, clock=clock)
+        assert tok.count_messages([message]) == estimate
+        assert len(calls) == 1
+        for _ in range(3):
+            for _ in range(4):  # inside the window: estimator only
+                assert tok.count_messages([message]) == estimate
+            clock.now += TOKENIZE_REFUSED_RETRY_AFTER_S
+            # The window expires: one probe, refused again, window reopened.
+            assert tok.count_messages([message]) == estimate
+            assert tok._pinned is False
+    assert len(calls) == 4  # the first refusal plus one probe per window
+
+
+def test_a_late_success_that_was_not_the_probe_keeps_the_window():
+    """#1214: a count whose request was already in flight when a refusal
+    opened the window may keep its own result, but it must not clear that
+    window: the next probe stays reserved for after the window passes."""
+    calls = []
+    first_started = threading.Event()
+    release_first = threading.Event()
+
+    def respond(request):
+        calls.append(request)
+        if len(calls) == 1:
+            first_started.set()
+            assert release_first.wait(timeout=5.0)
+            return httpx2.Response(200, json={"count": 41})
+        return httpx2.Response(400)
+
+    message = ChatMessage(role="user", content="IEF001A synthetic")
+    estimate = FallbackTokenizer().count_messages([message])
+    clock = _Clock()
+    results = {}
+
+    def counted_as(key):
+        results[key] = tok.count_messages([message])
+
+    with httpx2.Client(transport=httpx2.MockTransport(respond)) as client:
+        tok = VllmTokenizer("http://synthetic/v1", "reasoning", client=client, clock=clock)
+        in_flight = threading.Thread(target=counted_as, args=("in_flight",))
+        in_flight.start()
+        assert first_started.wait(timeout=5.0)
+        refused = threading.Thread(target=counted_as, args=("refused",))
+        refused.start()
+        refused.join(timeout=5.0)
+        assert not refused.is_alive()
+        release_first.set()
+        in_flight.join(timeout=5.0)
+        assert not in_flight.is_alive()
+        assert results["refused"] == estimate
+        assert results["in_flight"] == 41
+        assert len(calls) == 2
+        # The success that was never the probe left the refusal window live.
+        assert tok._retry_at == clock.now + TOKENIZE_REFUSED_RETRY_AFTER_S
+        assert tok.count_messages([message]) == estimate
+        assert len(calls) == 2
+        clock.now += TOKENIZE_REFUSED_RETRY_AFTER_S
+        assert tok.count_messages([message]) == estimate
+        assert len(calls) == 3
 
 
 def test_failed_probe_reopens_the_window_without_extra_calls():
