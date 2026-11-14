@@ -1120,8 +1120,9 @@ thread pool.
   Counts, dimensions or elapsed cache TTL alone authorize neither operation.
   Guarded administrative rollback/disposal remain separate L1 work; do not
   delete retained pairs or their controls using the old manual GC recipe.
-- `should_skip`: exact-sha plus (`upserted` always, or `dry` only when the
-  current run is also dry — a real run never skips prior `dry`).
+- `should_skip`: exact-sha plus (`upserted` or `skipped` always — `skipped`
+  records an earlier already-complete check, issue #1215 — or `dry` only when
+  the current run is also dry; a real run never skips prior `dry`).
 - `load_inventory`: latest record per path; torn lines ignored; appends
   open/close per record (crash-safe — a mid-run crash keeps every completed
   record).
