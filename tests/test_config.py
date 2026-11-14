@@ -179,7 +179,7 @@ def test_chat_bounds_are_enforced():
     with pytest.raises(ValidationError):
         Settings(_env_file=None, chat_max_body_chars=500)
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, chat_max_body_chars=200000)
+        Settings(_env_file=None, chat_max_body_chars=2_000_000)
     with pytest.raises(ValidationError):
         Settings(_env_file=None, chat_max_turns=0)
     with pytest.raises(ValidationError):
@@ -227,6 +227,30 @@ def test_gateway_api_keys_load_from_env(monkeypatch):
     assert s.embed_api_key == "sk-embed"
     assert s.rerank_api_key == "sk-rerank"
     assert s.context_llm_api_key == "sk-context"
+
+
+def test_model_validation_error_hides_secret_input(monkeypatch):
+    """#1204: a model-level failure must not echo validated settings, whose
+    repr contains gateway keys."""
+    key = "synthetic-key-abcdefghijklmnop"
+    monkeypatch.setenv("LLM_API_KEY", key)
+    for name in ("LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LLM_REASONING_EFFORTS", "low")
+    with pytest.raises(ValidationError) as caught:
+        Settings(_env_file=None)
+    message = str(caught.value)
+    assert key not in message
+    assert key[:6] not in message
+    assert "input_value" not in message
+
+
+def test_field_validation_error_hides_input_value(monkeypatch):
+    """#1204: field-level failures must not echo the rejected input."""
+    monkeypatch.setenv("ANSWER_TIMEOUT_S", "not-a-number")
+    with pytest.raises(ValidationError) as caught:
+        Settings(_env_file=None)
+    assert "not-a-number" not in str(caught.value)
 
 
 # AGENTS.md lethal rule: no default flips. Every Settings field must appear
@@ -293,7 +317,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "llm_tokenize_timeout_s": 5.0,
     "llm_stream": False,
     "chat_condense_enabled": False,
-    "chat_max_body_chars": 32768,
+    "chat_max_body_chars": 131072,
     "chat_max_turns": 10,
     "chat_max_prior_turn_chars": 1000,
     "ui_enabled": False,

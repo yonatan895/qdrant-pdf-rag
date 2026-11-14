@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1226,12 +1227,23 @@ def test_hardened_opencode_config_carries_the_required_settings_and_no_secret():
     assert provider["options"]["apiKey"] == "{file:/run/secrets/mfr-dev-litellm}"
     assert config["model"] == "site-litellm/{env:MFR_LLM_MODEL}"
     assert list(provider["models"]) == ["{env:MFR_LLM_MODEL}"]
+    # 4,096 and 8,192 were too small for OpenCode's own compaction summary (#1196); with the
+    # roughly 18,000-token prompts it sends, 12,000 still fits the 32,000 context.
+    assert provider["models"]["{env:MFR_LLM_MODEL}"]["limit"] == {"context": 32000, "output": 12000}
     # Setting 4: an explicit shell policy (v2 renamed bash to shell; both are set alike).
     shell = config["permission"]["shell"]
     assert config["permission"]["bash"] == shell
     rules = list(shell.items())
     assert rules[0] == ("*", "ask")  # last match wins: anything unlisted asks, and a headless run rejects it
-    for denied in ("git push*", "curl*", "wget*", "ssh*", "oc *", "kubectl*", "podman*", "pip *"):
+    # Tests run only through the time-limited wrapper (#1196): bare pytest is denied, and of the
+    # task runner only the tasks that run no test are allowed (the rest fall to "*": ask, which a
+    # headless worker cannot answer), so `run-task.sh test` is not a way round the limit.
+    assert shell["mfr-test *"] == "allow" and shell["mfr-test"] == "allow"
+    tasks = {rule.removeprefix("sh scripts/tools/run-task.sh ") for rule, action in shell.items()
+             if rule.startswith("sh scripts/tools/run-task.sh ") and action == "allow"}
+    assert tasks == {"--list*", "qa:context*", "check-context*", "qa:lint*", "lint*", "qa:typecheck*", "typecheck*"}
+    for denied in ("git push*", "curl*", "wget*", "ssh*", "oc *", "kubectl*", "podman*", "pip *",
+                   "pytest*", "python3 -m pytest*", "python -m pytest*"):
         assert shell[denied] == "deny", denied
         assert all(action != "allow" for _, action in rules[rules.index((denied, "deny")) + 1:])
     assert config["permission"]["webfetch"] == "deny" and config["permission"]["websearch"] == "deny"
@@ -1262,6 +1274,47 @@ def test_wrapper_refuses_permission_skips_and_the_shared_service(tmp_path, args)
     done = _run_wrapper(tmp_path, *args)
     assert done.returncode == 2 and done.stdout == ""
     assert done.stderr.startswith("mfr-opencode: ")
+
+
+def _run_mfr_test(tmp_path, body, *args, **env):
+    fake = tmp_path / "fake-python"  # stands in for `python3`; receives "-m pytest <args>"
+    fake.write_text("#!/bin/sh\n" + body)
+    fake.chmod(0o755)
+    full = {"PATH": os.environ["PATH"], "MFR_TEST_PYTHON": str(fake), **env}
+    return subprocess.run([sys.executable, str(REPO / "images/devkit/bin/mfr-test"), *args], capture_output=True,
+                          text=True, env=full, check=False, stdin=subprocess.DEVNULL, timeout=60)
+
+
+def test_mfr_test_passes_pytest_arguments_and_its_exit_code_through(tmp_path):
+    done = _run_mfr_test(tmp_path, 'printf "%s\\n" "$@"; exit 5\n', "tests/test_x.py", "-q", "-k", "a b")
+    assert done.returncode == 5 and done.stderr == ""
+    assert done.stdout.splitlines() == ["-m", "pytest", "tests/test_x.py", "-q", "-k", "a b"]
+
+
+def test_mfr_test_stops_a_run_that_never_returns_and_its_children(tmp_path):
+    marker = tmp_path / "child.pid"
+    # The "test" starts a child and both sleep far past the limit, like a test awaiting forever.
+    body = f'sleep 300 &\necho $! > {marker}\nsleep 300\n'
+    done = _run_mfr_test(tmp_path, body, "tests/test_hang.py", MFR_TEST_LIMIT_S="1")
+    assert done.returncode == 124
+    assert done.stderr == "mfr-test: stopped at the 1 s limit; a test did not return\n"
+    child = int(marker.read_text())
+    for _ in range(50):  # the whole process group is ended, not only the runner
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("the hung test's child process survived the limit")
+
+
+@pytest.mark.parametrize("value", ["0", "3601", "ten", "-5", ""])
+def test_mfr_test_refuses_a_limit_outside_its_range_before_running_anything(tmp_path, value):
+    ran = tmp_path / "ran"
+    done = _run_mfr_test(tmp_path, f": > {ran}\n", MFR_TEST_LIMIT_S=value)
+    assert done.returncode == 2 and not ran.exists()
+    assert done.stderr == "mfr-test: MFR_TEST_LIMIT_S must be a whole number of seconds from 1 to 3600\n"
 
 
 @pytest.fixture
@@ -1309,8 +1362,20 @@ def test_workers_get_their_own_worktrees_and_run_mfr_opencode_under_hc(workers_r
     calls = ctx["log"].read_text().splitlines()
     # One serial warm-up turn on the fresh HOME before any worker starts (Podman trial).
     assert calls[0] == "mfr-opencode run Reply with the single word OK. Do not use any tool."
-    assert calls[1:] == [f"run --bg --name w-{i} --cwd {worktrees / f'w-{i}'} --no-parent -- mfr-opencode run {task}"
-                     for i, task in (("one", "Write RESULT.txt"), ("bad", "Fail on purpose"))]
+    briefs = worktrees / ".briefs"
+    start_line = ("Carry out the task in your instructions under the heading TASK BRIEF. It is the only task. "
+                  "If you lose track, re-read that block and continue. Start now.")
+    # The brief travels as instructions (sent on every step), never as the prompt (#1196); hc drops
+    # the caller's environment, so the per-worker config is passed through env.
+    assert calls[1:] == [f"run --bg --name w-{i} --cwd {worktrees / f'w-{i}'} --no-parent -- "
+                         f"env OPENCODE_CONFIG={briefs / f'w-{i}.json'} mfr-opencode run {start_line}"
+                         for i in ("one", "bad")]
+    assert (briefs / "w-one.md").read_text() == "TASK BRIEF\n\nWrite RESULT.txt\n"
+    assert json.loads((briefs / "w-one.json").read_text()) == {
+        "instructions": [str(briefs / "w-one.md")],
+        "tools": {"execute": False, "question": False, "subagent": False, "task": False}}
+    # The briefs live outside every worktree, so a worker cannot commit one.
+    assert _git(worktrees / "w-one", "status", "--porcelain") == ""
     branches = _git(ctx["repo"], "worktree", "list", "--porcelain")
     assert "branch refs/heads/agents/w-one" in branches and "branch refs/heads/agents/w-bad" in branches
     collected = _workers(ctx, "collect", "--tasks", str(ctx["tasks"]), "--logs", str(ctx["tmp"] / "logs"))
@@ -1326,6 +1391,25 @@ def test_workers_get_their_own_worktrees_and_run_mfr_opencode_under_hc(workers_r
     assert [c.split(" --cwd")[0] for c in ctx["log"].read_text().splitlines()] == ["run --bg --name w-two"]
 
 
+def test_a_second_start_with_the_same_name_leaves_the_first_workers_brief_alone(workers_repo):
+    ctx = workers_repo
+    assert _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"])).returncode == 0
+    brief = ctx["tmp"] / "agent-worktrees/.briefs/w-one.md"
+    before = brief.read_bytes()
+    ctx["log"].unlink()
+    ctx["tasks"].write_text("one\tA different task\nnew\tAnother\n")
+    again = _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"]))
+    assert again.returncode == 2
+    assert again.stderr == "mfr-agent-workers: worker w-one was already started here; use another --prefix or id\n"
+    # Nothing was written or started for any line of the refused batch.
+    assert brief.read_bytes() == before
+    assert not (ctx["tmp"] / "agent-worktrees/.briefs/w-new.md").exists()
+    assert not ctx["log"].exists() and "agents/w-new" not in _git(ctx["repo"], "branch", "--list")
+    # The next ordinary operation: another prefix starts both.
+    ok = _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"]), "--prefix", "x")
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+
 def test_a_failed_warm_up_starts_no_worker(workers_repo):
     ctx = workers_repo
     ctx["env"]["WARM_RC"] = "1"
@@ -1333,6 +1417,44 @@ def test_a_failed_warm_up_starts_no_worker(workers_repo):
     assert done.returncode == 2
     assert done.stderr == "mfr-agent-workers: the warm-up turn failed (rc 1); no worker was started\n"
     assert [c for c in ctx["log"].read_text().splitlines() if c.startswith("run ")] == []
+
+
+def test_a_task_can_name_a_brief_file_with_several_lines(workers_repo):
+    ctx = workers_repo
+    (ctx["tmp"] / "fix.md").write_text("TITLE: one\n\nPROBLEM: two\nlines\n")
+    ctx["tasks"].write_text("fix\t@fix.md\n")
+    done = _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"]))
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert (ctx["tmp"] / "agent-worktrees/.briefs/w-fix.md").read_text() == (
+        "TASK BRIEF\n\nTITLE: one\n\nPROBLEM: two\nlines\n")
+    # The next ordinary operation: collect needs only the ids, so it still works after the
+    # brief's source file is gone (review of #1227).
+    (ctx["tmp"] / "fix.md").unlink()
+    collected = _workers(ctx, "collect", "--tasks", str(ctx["tasks"]), "--logs", str(ctx["tmp"] / "logs"))
+    assert collected.returncode == 0, collected.stdout + collected.stderr
+    assert collected.stdout.splitlines()[-1] == "workers=1 failures=0"
+    # A brief that cannot be written starts nothing: no worktree, no branch, no worker.
+    ctx["log"].unlink()
+    (ctx["tmp"] / "fix.md").write_text("TITLE: again\n")
+    ctx["tasks"].write_text("late\t@fix.md\n")
+    blocked = ctx["tmp"] / "agent-worktrees/.briefs/w-late.json"  # the config cannot be written
+    blocked.mkdir()
+    refused = _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"]))
+    assert refused.returncode == 2
+    assert refused.stderr == "mfr-agent-workers: a worker brief could not be written; no worker was started\n"
+    assert not ctx["log"].exists() and "agents/w-late" not in _git(ctx["repo"], "branch", "--list")
+    blocked.rmdir()
+    # The refusal left no brief behind, so the same name starts once the cause is gone.
+    assert not (ctx["tmp"] / "agent-worktrees/.briefs/w-late.md").exists()
+    retried = _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"]))
+    assert retried.returncode == 0, retried.stdout + retried.stderr
+    for missing in ("gone\t@nope.md\n", "empty\t@empty.md\n"):
+        (ctx["tmp"] / "empty.md").write_text("\n")
+        ctx["tasks"].write_text(missing)
+        ctx["log"].unlink(missing_ok=True)
+        refused = _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"]))
+        assert refused.returncode == 2 and refused.stderr.startswith("mfr-agent-workers: tasks line 1 names ")
+        assert not ctx["log"].exists()
 
 
 @pytest.mark.parametrize("tasks", ["one Write it\n", "One\tx\n", "a\tx\na\ty\n", "# nothing\n"])

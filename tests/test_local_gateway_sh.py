@@ -969,3 +969,47 @@ def test_reasoning_off_launch_checks_only_the_embed_and_rerank_keys_and_next_def
     assert any("Bearer sk-test-llm" in " ".join(args)
                for args in (json.loads(line)[1] for line in (root / "calls.jsonl").read_text().splitlines()))
     assert "LLM_API_KEY=sk-test-llm" in (root / "gateway.env").read_text()
+
+
+# --- #1195: site-shaped gateway (no /tokenize, no argument allow-list) --------
+# sha256 of the default rendered config.yaml at c5259460 with the dummy keys:
+# the local shape, selected by default, is byte-identical to the script before
+# the switch existed.
+REFERENCE_CONFIG_SHA256 = "65bcb26b92174416da7d2b3270c00f04804620f544dd0ed3f09aeb5a8283bc9a"
+
+
+def _without_shape(name: str) -> bool:
+    return name == "GATEWAY_SHAPE"
+
+
+@pytest.mark.parametrize("value", [None, "", "local"])
+def test_local_shape_is_the_default_and_renders_the_reference_config(value):
+    import hashlib
+
+    text = _read_cfg(_render({"GATEWAY_SHAPE": value} if value else None, drop=_without_shape))
+    assert hashlib.sha256(text.encode()).hexdigest() == REFERENCE_CONFIG_SHA256
+    assert 'allowed_openai_params: ["reasoning_effort"]' in text and '"/tokenize"' in text
+
+
+def test_site_shape_drops_exactly_the_tokenize_route_and_the_argument_allow_list():
+    local = yaml.safe_load(_read_cfg(_render(drop=_without_shape)))
+    site_text = _read_cfg(_render({"GATEWAY_SHAPE": "site"}))
+    site = yaml.safe_load(site_text)
+    assert "allowed_openai_params" not in site_text and "tokenize" not in site_text
+    assert "drop_params" not in site_text  # nothing is silently rewritten either
+    reasoning = site["model_list"][0]["litellm_params"]
+    assert reasoning == {"model": "strict_openai/google/gemma-4-E4B-it-qat-mobile-ct",
+                         "api_base": "http://host.docker.internal:8000/v1", "api_key": "dummy"}
+    assert site["general_settings"]["pass_through_endpoints"] == [
+        {"path": "/v1/score", "target": "http://host.docker.internal:8002/v1/score", "methods": ["POST"]}]
+    # Everything else is the local shape: routes, keys, hooks, privacy settings.
+    local["model_list"][0]["litellm_params"].pop("allowed_openai_params")
+    local["general_settings"]["pass_through_endpoints"] = [
+        route for route in local["general_settings"]["pass_through_endpoints"] if route["path"] != "/tokenize"]
+    assert site == local
+
+
+@pytest.mark.parametrize("value", ["Site", "platform", "1", "off"])
+def test_shape_switch_accepts_only_local_or_site(value):
+    proc = _render({"GATEWAY_SHAPE": value})
+    assert proc.returncode == 1 and "GATEWAY_SHAPE must be local or site" in proc.stderr

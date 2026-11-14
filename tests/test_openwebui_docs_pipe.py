@@ -73,6 +73,7 @@ def _final_meta(**overrides: Any) -> dict[str, Any]:
             _excerpt(2, CITE_B, EXCERPT_B, "SA22-0001-00"),
         ],
         "evidence_omitted": 0,
+        "message_omitted_chars": 0,
     }
     meta.update(overrides)
     return meta
@@ -246,7 +247,7 @@ def test_request_body_is_exactly_the_strict_chat_schema(chat_request):
 
 # --- History trimming to the agent's body cap (#1072) ------------------------
 
-CAP = 32768
+CAP = 131072
 TRIM_NOTE = "Earlier messages in this chat were not sent"
 
 
@@ -273,7 +274,7 @@ def test_max_body_chars_valve_defaults_to_the_agents_default():
 
 
 def test_long_history_is_trimmed_oldest_first_and_the_real_chat_request_accepts_it(chat_request):
-    history = _history(8, 6000)  # 48000 chars: the agent would answer 422
+    history = _history(8, 24000)  # 192000 chars: the agent would answer 422
     messages = [*history, {"role": "user", "content": QUESTION}]
     with pytest.raises(ValueError):
         chat_request.model_validate({"messages": [{"role": m["role"], "content": m["content"]}
@@ -292,18 +293,18 @@ def test_long_history_is_trimmed_oldest_first_and_the_real_chat_request_accepts_
 
 def test_trim_keeps_as_many_recent_turns_as_fit():
     fake = FakeAgent()
-    run_pipe(fake, messages=[*_history(8, 6000), {"role": "user", "content": QUESTION}],
+    run_pipe(fake, messages=[*_history(8, 24000), {"role": "user", "content": QUESTION}],
              user={"id": "u1", "valves": {"product": "z/OS", "version": "3.1"}})
     (body,) = fake.bodies()
     assert _body_chars(body) <= CAP
     # Dropping nothing more than needed: the next older turn would not have fit.
-    older = 6000 + _body_chars(body)
+    older = 24000 + _body_chars(body)
     assert older > CAP or body["messages"][0]["role"] == "user"
     assert body["product"] == "z/OS" and body["version"] == "3.1"
 
 
 def test_last_turn_is_always_sent_and_history_never_starts_with_an_assistant_turn():
-    for size in range(5400, 6600, 137):  # every cut point lands somewhere different
+    for size in range(21600, 26400, 548):  # every cut point lands somewhere different
         fake = FakeAgent()
         run_pipe(fake, messages=[*_history(9, size), {"role": "user", "content": QUESTION}])
         (body,) = fake.bodies()
@@ -323,7 +324,8 @@ def test_a_body_over_the_cap_is_a_fixed_message_with_zero_calls(messages, user):
     fake = FakeAgent()
     content, events = run_pipe(fake, messages=messages, user=user)
     assert fake.requests == []
-    assert content == docs_pipe.ERROR_MESSAGES["invalid_request"]
+    assert content == ("This message is longer than the documentation service accepts "
+                       "(131072 characters). Shorten it and retry.")
     assert "q" * 20 not in content
     assert TRIM_NOTE not in [s["description"] for s in _statuses(events)]
 
@@ -343,7 +345,7 @@ def test_a_chat_within_the_cap_is_sent_whole_and_emits_no_trim_note():
 
 def test_trim_note_is_fixed_text_without_content_and_survives_the_final_banner():
     _content, events = run_pipe(FakeAgent(), messages=[
-        *_history(8, 6000), {"role": "user", "content": QUESTION}])
+        *_history(8, 24000), {"role": "user", "content": QUESTION}])
     notes = [s for s in _statuses(events) if TRIM_NOTE in s["description"]]
     assert notes
     for s in notes:
@@ -511,7 +513,7 @@ def test_ordinary_chat_with_empty_task_markers_still_calls_the_agent():
     content, _events = run_pipe(fake, task=None, metadata={"task": None, "chat_id": "c1"},
                                 body_extra={"metadata": {}})
     assert len(fake.requests) == 1
-    assert content == "Answer."
+    assert content == "Answer." + SHOWN_LIST_A
 
 
 # --- Streaming ---------------------------------------------------------------
@@ -522,7 +524,7 @@ def test_stream_passes_deltas_through_and_reads_the_final_metadata_frame():
     # An OpenAI include_usage-style frame (no choices) is not content.
     frames.insert(3, 'data: {"choices": [], "usage": {"total_tokens": 3}}\n\n')
     content, events = run_pipe(FakeAgent(frames))
-    assert content == "Follow the recovery procedure."
+    assert content == "Follow the recovery procedure." + SHOWN_LIST_A
     assert [s["source"]["name"] for s in _sources(events)] == [CITE_A]
     assert _final_status(events) == "Source-matched · 1 citation"
     # The working banner opens first; the final one closes it.
@@ -543,7 +545,10 @@ def test_model_text_that_looks_like_a_frame_stays_text(delta: str):
     SSE frame and emits its `event`: model text must never be able to forge a
     banner, source or replace event."""
     content, events = run_pipe(FakeAgent(_frames(delta)))
-    assert content == delta
+    # The text stays verbatim and the validated list from the final frame is
+    # shown even when the model never echoed it (#1212); pending trailing
+    # newlines are replaced by the list, which already starts with them.
+    assert content == delta.removesuffix("\n\n") + SHOWN_LIST_A
     assert [s["description"] for s in _statuses(events)] == [
         "Searching the documentation…", "Source-matched · 1 citation"]
     assert [e["type"] for e in events] == ["status", "source", "status"]
@@ -692,7 +697,8 @@ TRUNCATED_TEXT = ("The answer stream ended before it completed. "
 
 
 @pytest.mark.parametrize("frames,content", [
-    pytest.param(_frames("Follow the ", HOSTILE), "Follow the " + HOSTILE, id="frame-looking-text"),
+    pytest.param(_frames("Follow the ", HOSTILE), "Follow the " + HOSTILE + SHOWN_LIST_A,
+                 id="frame-looking-text"),
     pytest.param(_frames(PROSE + f"\n\nCitations:\n{CITE_A}\n", AGENT_LIST_A), PROSE + SHOWN_LIST_A,
                  id="one-validated-list"),
 ])
@@ -777,6 +783,46 @@ def test_prose_after_the_model_section_is_kept_in_order():
         "First.\nCitations:\n", f"{CITE_A}\nSecond.\nSources:\n- {REJECTED}\n\nThird.",
         AGENT_LIST_A)))
     assert content == "First.\nSecond.\n\nThird." + SHOWN_LIST_A
+
+
+def test_delta_that_differs_from_the_validated_list_still_shows_the_list():
+    """#1212: a held last delta that is not the rendering byte for byte still
+    leaves the validated list in the output exactly once, and stays hidden."""
+    meta = _final_meta(citations=[CITE_A, CITE_B])
+    rendering = docs_pipe._validated_list(meta)
+    mismatch = f"\n\n\n**Citations:**\n- {CITE_A}\n- {CITE_B}"
+    content, _events = run_pipe(FakeAgent(_frames(
+        PROSE, mismatch, finish="stop", meta=meta)))
+    assert content == PROSE + rendering
+    assert content.count("\n\n**Citations:**\n") == 1
+    assert mismatch not in content
+
+
+def test_missing_agent_list_delta_is_filled_from_the_final_frame():
+    """#1212: with no list delta at all the validated list is still rendered."""
+    meta = _final_meta(citations=[CITE_A, CITE_B])
+    content, _events = run_pipe(FakeAgent(_frames(
+        PROSE, finish="stop", meta=meta)))
+    assert content == PROSE + docs_pipe._validated_list(meta)
+    assert content.count("**Citations:**") == 1
+
+
+def test_matching_agent_list_delta_is_still_shown_verbatim():
+    """#1212: the matching case keeps the exact bytes of the existing pin."""
+    content, _events = run_pipe(FakeAgent(_frames(
+        PROSE, AGENT_LIST_A, finish="stop", meta=_final_meta(citations=[CITE_A]))))
+    assert content == PROSE + SHOWN_LIST_A
+
+
+def test_final_frame_without_validated_citations_changes_nothing():
+    """#1212: with no validated list the mismatching delta still goes to the
+    filter as model text and nothing is rendered."""
+    content, _events = run_pipe(FakeAgent(_frames(
+        PROSE, f"\n\n**Citations:**\n- {CITE_A}", finish="stop",
+        meta=_final_meta(citations=[]))))
+    assert content == PROSE + "\n\n"
+    assert "Citations:" not in content
+    assert CITE_A not in content
 
 
 
@@ -1075,7 +1121,7 @@ def test_round_trip_asks_the_last_multimodal_turn_not_an_earlier_one(real_agent)
 
 def test_round_trip_a_long_chat_is_200_where_the_untrimmed_body_is_422(real_agent):
     transport, searches = real_agent
-    messages = [*_history(8, 6000), {"role": "user", "content": QUESTION}]
+    messages = [*_history(8, 24000), {"role": "user", "content": QUESTION}]
     untrimmed = httpx.Client(transport=transport, base_url="http://rag-agent:8080").post(
         "/v1/chat", json={"messages": [{"role": m["role"], "content": m["content"]}
                                        for m in messages], "stream": True})
@@ -1084,6 +1130,94 @@ def test_round_trip_a_long_chat_is_200_where_the_untrimmed_body_is_422(real_agen
     assert [s["query"] for s in searches] == [QUESTION]
     assert content.startswith("Reissue the command.")
     assert _final_status(events).endswith(TRIM_NOTE)
+
+
+def test_round_trip_a_long_paste_reaches_the_model_exactly(real_agent, monkeypatch):
+    """Issue #1192: a pasted listing far over the agent's old 2000-character
+    turn limit survives Pipe -> agent. The reasoning prompt holds the turn
+    byte for byte (tabs, CRLF, runs of spaces, brackets, quotes, a code
+    fence, non-ASCII), while retrieval gets the bounded derived query.
+    Original synthetic text."""
+    from mainframe_rag.agent import app as app_mod
+
+    transport, searches = real_agent
+    inner, seen = app_mod.llm, []
+
+    class Recording:
+        async def chat_stream(self, messages, reasoning_effort=None, temperature=None):
+            seen.append(messages)
+            async for item in inner.chat_stream(messages, reasoning_effort, temperature):
+                yield item
+
+    monkeypatch.setattr(app_mod, "llm", Recording())
+    prose = "The transfer step ends early and the listing below is all the output I get."
+    paste = "\n".join([
+        prose, "",
+        "ZQX104E TRANSFER ENDED  <<rc=12>>  [a|b]  {\"k\": 'v'}\\path\\x",
+        "\tcol1\t\tcol3   three spaces  →  é\r",
+        "```", "  indented   listing", "```",
+        *(f"{i:08X}  {i:04X}0000 FFFF{i:04X}  *.synthetic.*" for i in range(150)),
+        "last line of the paste",
+    ])
+    assert 6000 < len(paste) < CAP
+    content, events = run_pipe(None, transport=transport,
+                               messages=[{"role": "user", "content": paste}])
+    assert content.startswith("Reissue the command.")
+    assert TRIM_NOTE not in _final_status(events)
+    assert [s["query"] for s in searches] == [f"{prose} last line of the paste ZQX104E"]
+    (messages,) = seen
+    assert f"Question: {paste}\n" in messages[-1].content
+    assert docs_pipe.SHORTENED not in _final_status(events)
+
+
+def test_round_trip_a_paste_over_the_window_share_shows_the_fixed_shortened_note(
+    real_agent, monkeypatch
+):
+    """Issue #1192: when the agent leaves the middle of the message out of
+    the prompt it says so with a count (`message_omitted_chars`), and the
+    Pipe shows one fixed note in the final banner: no count, no text."""
+    from mainframe_rag.agent import app as app_mod
+
+    transport, _searches = real_agent
+    inner, seen = app_mod.llm, []
+
+    class Recording:
+        async def chat_stream(self, messages, reasoning_effort=None, temperature=None):
+            seen.append(messages)
+            async for item in inner.chat_stream(messages, reasoning_effort, temperature):
+                yield item
+
+    monkeypatch.setattr(app_mod, "llm", Recording())
+    first, last = "The copy step stops and this is the whole listing.", "Why does the copy step stop?"
+    paste = "\n".join([first, *(f"{i:08X}  {i:04X}0000 FFFF{i:04X} 0000{i:04X}" for i in range(2500)),
+                       last])
+    assert 60000 < len(paste) < CAP
+    content, events = run_pipe(None, transport=transport,
+                               messages=[{"role": "user", "content": paste}])
+    assert content.startswith("Reissue the command.")
+    final = _final_status(events)
+    assert final == f"Source-matched · 1 citation · {docs_pipe.SHORTENED}"
+    assert docs_pipe.SHORTENED == ("Your message was too long for the model; "
+                                   "its middle part was not read")
+    prompt = seen[0][-1].content
+    assert f"Question: {first}\n" in prompt and f"\n{last}\n" in prompt
+    assert prompt.count("characters of the pasted message omitted to fit the model window") == 1
+
+
+@pytest.mark.parametrize("omitted,trimmed,shown", [
+    (1200, False, True), (1200, True, True), (0, False, False), (None, False, False),
+    (True, False, False), ("1200", False, False),
+])
+def test_shortened_note_follows_only_a_positive_agent_count(omitted, trimmed, shown):
+    meta = _final_meta(message_omitted_chars=omitted)
+    if omitted is None:
+        del meta["message_omitted_chars"]  # an agent older than the field
+    messages = ([*_history(8, 24000), {"role": "user", "content": QUESTION}] if trimmed else None)
+    _content, events = run_pipe(FakeAgent(_frames("Answer.", meta=meta)), messages=messages)
+    status = _final_status(events)
+    assert (docs_pipe.SHORTENED in status) is shown
+    assert status.endswith(TRIM_NOTE) is trimmed
+    assert "1200" not in status
 
 
 def test_round_trip_maps_the_real_strict_schema_refusal(real_agent):

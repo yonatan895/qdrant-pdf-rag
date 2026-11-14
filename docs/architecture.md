@@ -296,6 +296,7 @@ src/mainframe_rag/
     live_state.py     # Zowe live-state routing/fetch layer (ADR-0003, default-off)
     zowe_mcp.py       # Zowe MCP client (read-only tools; mock backend for sim)
     chat_turn.py      # One active-user boundary for chat routes, retrieval and prompts
+    user_message.py   # Long messages: derived retrieval query, token-budgeted prompt text (#1192)
     core_ports.py     # Typed operations supplied to the answer use case
     model_adapter.py  # Normalizes legacy chat/stream seams; never owns the shared client
     resources.py      # Per-request read-only view of lifespan-owned clients; retrieval wiring + core deps

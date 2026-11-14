@@ -200,7 +200,7 @@ def _fault(*_a, **_k):
     raise RuntimeError({_CANARY!r})
 
 
-app_mod._require_query_length = _fault  # first call on /v1/answer
+app_mod._require_message = _fault  # first call on /v1/answer
 app = app_mod.app
 """
 

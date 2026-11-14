@@ -65,8 +65,10 @@ from mainframe_rag.agent.answer_core import (
 from mainframe_rag.agent.chat_turn import (
     InvalidChatTurn,
     PreparedChatTurn,
+    RequestTooLarge,
     is_unsearchable_query,
     prepare_chat_turn,
+    too_large_message,
 )
 from mainframe_rag.agent.evidence import (
     PUBLIC_FAILURES,
@@ -102,6 +104,7 @@ from mainframe_rag.agent.sse import (
     output_final_payload,
 )
 from mainframe_rag.agent.tokenizer import build_tokenizer
+from mainframe_rag.agent.user_message import derive_retrieval_query
 from mainframe_rag.agent.zowe_mcp import build_zowe_mcp, probe_zowe_mcp
 from mainframe_rag.config import (
     QDRANT_CLIENT_KEEPALIVE_EXPIRY_S,
@@ -386,8 +389,9 @@ class AppError(Exception):
 
 def _require_query_length(request_id: str, query: str) -> None:
     """Fail closed on overlong (issue #87), blank or control-character
-    (issue #579) queries before any embed or retrieval work: one helper
-    serves both endpoints so the same fault maps to the same code on each.
+    (issue #579) /v1/search queries before any embed or retrieval work. The
+    answer path shares the blank/control refusal through `_require_message`
+    and has no query-length refusal (issue #1192).
     Code and message deliberately match the pydantic body-validation failure
     — such a query IS a validation failure, and no new client-visible shape
     is introduced. The query is only inspected, never normalised, and never
@@ -398,6 +402,40 @@ def _require_query_length(request_id: str, query: str) -> None:
     if len(query) > settings.query_max_chars:
         log.warning(json_log(request_id, "query_too_long", chars=len(query)))
         raise AppError(422, "invalid_request", "request body failed validation")
+    _require_embed_input(request_id, query)
+
+
+def _require_message(
+    request_id: str, message: str, splunk_context: str | None, *extra: str | None
+) -> None:
+    """Admit an answer-path message (issue #1192). Blank and control-character
+    messages are refused as on search. Length is refused only by the
+    request-size guard (`chat_max_body_chars` over the message plus the other
+    caller text), with a fixed message that states the limit. `splunk_context`
+    counts at no more than `splunk_context_max_chars`, the part that can reach
+    the prompt, so a caller with a large context stays accepted. A message over
+    `query_max_chars` is answered: retrieval gets the derived query, never the
+    raw text, and the embed-input bound is checked on that query. Counts are
+    logged, never text."""
+    if is_unsearchable_query(message):
+        log.warning(json_log(request_id, "query_unsearchable", chars=len(message)))
+        raise AppError(422, "invalid_request", "request body failed validation")
+    limit = settings.chat_max_body_chars
+    context = min(len(splunk_context or ""), settings.splunk_context_max_chars)
+    size = len(message) + context + sum(len(v) for v in extra if v)
+    if size > limit:
+        log.warning(json_log(request_id, "request_too_large", chars=size, limit=limit))
+        raise AppError(422, "invalid_request", too_large_message(limit))
+    _retrieval_query(request_id, message)
+
+
+def _retrieval_query(request_id: str, message: str) -> None:
+    """Embed-bound check on the retrieval query this message derives."""
+    query = derive_retrieval_query(message, settings)
+    if query != message:
+        log.info(
+            json_log(request_id, "long_message", chars=len(message), retrieval_chars=len(query))
+        )
     _require_embed_input(request_id, query)
 
 
@@ -425,10 +463,13 @@ def prepare_chat_request(
     """Map the common chat-input validation to the API/console error contract."""
     try:
         turn = prepare_chat_turn(messages, settings, splunk_context)
+    except RequestTooLarge as exc:
+        log.warning(json_log(request_id, "request_too_large", limit=exc.limit))
+        raise AppError(422, "invalid_request", too_large_message(exc.limit)) from exc
     except InvalidChatTurn as exc:
         log.warning(json_log(request_id, "invalid_chat_turn", reason=error_type(exc)))
         raise AppError(422, "invalid_request", "request body failed validation") from exc
-    _require_embed_input(request_id, turn.query)
+    _retrieval_query(request_id, turn.query)
     return turn
 
 
@@ -1133,6 +1174,10 @@ class AnswerResponse(BaseModel):
     # retrieval list. See docs/agent.md.
     supplied_evidence: list[SuppliedExcerpt] = Field(default_factory=list)
     evidence_omitted: int = 0
+    # Characters of the user's message left out of the prompt to fit the
+    # model window (issue #1192): 0 when the message was sent whole. A count
+    # only, never text. Clients show a fixed note when it is positive.
+    message_omitted_chars: int = 0
 
 
 class ChatRequest(BoundedRequestText):
@@ -1186,6 +1231,10 @@ class ChatCompletionsResponse(BaseModel):
     # retrieval list. See docs/agent.md.
     supplied_evidence: list[SuppliedExcerpt] = Field(default_factory=list)
     evidence_omitted: int = 0
+    # Characters of the user's message left out of the prompt to fit the
+    # model window (issue #1192): 0 when the message was sent whole. A count
+    # only, never text. Clients show a fixed note when it is positive.
+    message_omitted_chars: int = 0
 
 
 class HealthzResponse(BaseModel):
@@ -1316,11 +1365,17 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     _record_handler_error(request, "invalid_request")
+    # The request-size guard states its limit (issue #1192): the configured
+    # number only, read off the typed refusal, never any input text.
+    message = "request body failed validation"
+    for error in exc.errors():
+        cause = (error.get("ctx") or {}).get("error")
+        if isinstance(cause, RequestTooLarge):
+            message = too_large_message(cause.limit)
+            break
     return JSONResponse(
         status_code=422,
-        content=ErrorEnvelope(
-            code="invalid_request", message="request body failed validation"
-        ).model_dump(),
+        content=ErrorEnvelope(code="invalid_request", message=message).model_dump(),
     )
 
 
@@ -1849,6 +1904,7 @@ def _answer_metadata(output: AnswerCoreOutput, *, hits: list | None = None) -> d
         "script_review_required": output.script_review_required,
         "supplied_evidence": [e.model_dump() for e in output.supplied] if has_hits else [],
         "evidence_omitted": len(output.evidence.omitted_indices) if has_hits else 0,
+        "message_omitted_chars": output.message_omitted_chars if has_hits else 0,
     }
 
 
@@ -2062,7 +2118,7 @@ async def _answer_response(req, response, is_stream, owner):
     root_span = owner.span
     request_id = request.state.request_id
     started = owner.started
-    _require_query_length(request_id, req.query)
+    _require_message(request_id, req.query, req.splunk_context, req.product, req.version)
     _require_reasoning_model(request_id, "answer")
     # Serving gate before retrieval and before the root stream opens (issue
     # #391 F3/F4): the request binds to the validated physical generation.
@@ -2080,7 +2136,8 @@ async def _answer_response(req, response, is_stream, owner):
         # not created "as current" — the SSE generator outlives this block).
         with use_span(root_span, end_on_exit=False):
             found = await rsc.retrieve(
-                req.query, product=req.product, version=req.version, settings=bound
+                derive_retrieval_query(req.query, bound),
+                product=req.product, version=req.version, settings=bound,
             )
             hits, kind, timings = found.hits, found.kind, found.timings
     except Exception as exc:
