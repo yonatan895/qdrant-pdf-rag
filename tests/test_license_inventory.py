@@ -596,11 +596,11 @@ AMBIGUOUS_RPMS = {"cracklib", "cracklib-dicts", "gzip", "less", "libcbor", "libd
                   "libfdisk", "libfido2", "libpwquality", "libseccomp", "libutempter", "openssh",
                   "openssh-clients", "pam", "shadow-utils-subid", "util-linux", "util-linux-core"}
 ALL_LICENCES_REF = "https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6543481300"
-# The kit scope approval in force: the maintainer's decision of 2026-11-02 on #1181
-# (#1183 option A). It binds the scope with the two agent tools (#1172) and
-# diffutils (#1183); 854999ae… (#1118) is superseded.
-KIT_SCOPE_APPROVAL_REF = "https://github.com/yonatan895/qdrant-pdf-rag/pull/1181#issuecomment-6576583551"
-APPROVED_KIT_DIGEST = "32132abeedcae2772e2f08d540358fe859b7290f03aaf1e62ba05ee9460b5bc4"
+# The kit scope approval in force: the maintainer's decision of 2026-11-14 on #1228
+# (base image on the UBI 9.9 build, RPM set re-resolved). 32132abe… (#1181) and
+# 854999ae… (#1118) are superseded.
+KIT_SCOPE_APPROVAL_REF = "https://github.com/yonatan895/qdrant-pdf-rag/pull/1228#issuecomment-6875113278"
+APPROVED_KIT_DIGEST = "833299c98226a2cce008a6fa3e79b0091a349d7907037a62baf95c47c338cc9b"
 
 
 def test_repository_kit_record_passes_the_enforced_gate_at_the_approved_digest():

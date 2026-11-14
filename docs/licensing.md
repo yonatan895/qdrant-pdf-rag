@@ -17,7 +17,9 @@ first fresh-install release candidate on 2026-10-31 (#1118), bound to scope dige
 the approval is now recorded under the maintainer's 2026-10-31 blanket licence
 approval of every #1174 doc set
 ([#1174 comment](https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543)),
-bound to scope digest `2fcedf65…`. Any later dependency, pin or notice change voids it, and
+bound to scope digest `2fcedf65…`. The 2026-11-14 base image refresh (#1228) moved the
+scope again; the maintainer approved it the same day
+([#1228 comment](https://github.com/yonatan895/qdrant-pdf-rag/pull/1228#issuecomment-6875113278)), bound to scope digest `c535e932…`. Any later dependency, pin or notice change voids it, and
 `check --release` then fails until a new approval is recorded.
 Source of authority: #376 and its triage comments (19 and 24 September, 1 October
 2026): close on a documented owner disposition, never on CI alone.
@@ -124,8 +126,9 @@ The 2026-11-14 base refresh (UBI 9.9 digest `30a3131d…`, after the UBI reposit
 stopped serving 11 of the pinned builds) re-resolved the RPM set: 11 NEVRAs moved with
 unchanged `License` tags and `yajl` left the set (`crun` 1.29.1 no longer requires it).
 The kit scope digest is now `833299c98226a2cce008a6fa3e79b0091a349d7907037a62baf95c47c338cc9b`
-and the release scope digest moved with the base record, so `devkit.approval` and
-`release_approval` are stale until the maintainer records a decision for the new digests.
+and the release scope digest moved with the base record. The maintainer approved both
+new digests on 2026-11-14 ([#1228 comment](https://github.com/yonatan895/qdrant-pdf-rag/pull/1228#issuecomment-6875113278)), so `devkit.approval` and
+`release_approval` now bind them.
 
 The gate: `pack.sh` runs `license_inventory.py check --kit` before it pulls anything.
 `--kit` is the kit's `check --release`. It fails with fixed `FAIL` lines when:
