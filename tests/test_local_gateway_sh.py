@@ -1030,6 +1030,17 @@ def test_site_shape_drops_exactly_the_tokenize_route_and_the_argument_allow_list
     assert site == local
 
 
+def test_tokenize_switch_composes_with_the_site_shape():
+    """#1193 x #1195: GATEWAY_TOKENIZE only removes the /tokenize route. On the
+    site shape (route already absent) either value renders the site config;
+    on the local shape `off` keeps the argument allow-list."""
+    site = yaml.safe_load(_read_cfg(_render({"GATEWAY_SHAPE": "site"})))
+    for value in ("on", "off"):
+        assert yaml.safe_load(_read_cfg(_render({"GATEWAY_SHAPE": "site", "GATEWAY_TOKENIZE": value}))) == site
+    local_off = _read_cfg(_render({"GATEWAY_SHAPE": "local", "GATEWAY_TOKENIZE": "off"}))
+    assert 'allowed_openai_params: ["reasoning_effort"]' in local_off and "tokenize" not in local_off
+
+
 @pytest.mark.parametrize("value", ["Site", "platform", "1", "off"])
 def test_shape_switch_accepts_only_local_or_site(value):
     proc = _render({"GATEWAY_SHAPE": value})
