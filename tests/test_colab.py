@@ -536,6 +536,41 @@ def test_unbound_allocation_with_empty_listing_remains_unverified(lab):
     assert not any(kind == "colab" and argv[2] == "stop" for kind, argv in _events(root))
 
 
+def test_current_behaviour_pre_allocation_failure_leaves_cleanup_required(lab, tmp_path):
+    """A run failing before allocation parks the state in cleanup_required with no path
+    back to prepared: run refuses it, stop leaves it terminal, and only a fresh prepare
+    recovers (tracker #1211)."""
+    root, base_state, _ = lab
+    state = tmp_path / "burn-pre-alloc"
+    _prepare_new(base_state, state)
+    assert _manifest(state)["phase"] == "prepared"
+    # Deterministic failure before any allocation: the first version probe fails.
+    (root / "fail-calls.json").write_text(json.dumps({"version": [0]}), encoding="utf-8")
+
+    assert _run_fake(state) == 1
+    manifest = _manifest(state)
+    assert manifest["phase"] == "cleanup_required"
+    assert manifest["allocation_attempted"] is False
+    assert "allocation" not in manifest
+    assert "released" not in manifest
+    assert manifest["failure_type"] == "ToolFailure"
+    assert manifest["failure_reason"] == (
+        "local tool operation failed; details retained in private run state"
+    )
+    assert [event["event"] for event in manifest["events"]][-3:] == [
+        "run_approved",
+        "run_failed",
+        "cleanup_complete",
+    ]
+
+    # stop runs the same inert cleanup: exit 0, but the phase never returns to prepared.
+    assert _controller_call(["stop", "--state", str(state)]) == 0
+    assert _manifest(state)["phase"] == "cleanup_required"
+    # A second run is refused at the phase gate, exit 2, and the phase is unchanged.
+    assert _run_fake(state) == 2
+    assert _manifest(state)["phase"] == "cleanup_required"
+
+
 def test_generated_ssh_proxy_never_reallocates_pruned_session_then_next_run_works(lab, monkeypatch):
     root, state, _ = lab
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "proxy_session_pruned")
