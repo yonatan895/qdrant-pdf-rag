@@ -7,12 +7,14 @@ The endpoint lives at the SERVER ORIGIN: LLM_BASE_URL is .../v1, and vLLM
 serves /tokenize next to /v1, not under it (a LiteLLM front may not expose
 it at all). A failed call is logged as a warning and the instance answers
 from the in-process estimator. An endpoint that is not served or answers
-without a usable count (404/405/501, a 200 without a count, or any other
-non-transient non-200 such as 400/401/403) pins the estimator for the life
-of the instance. A transient failure (transport
+without a usable count (404/405/501, a 200 without a count) pins the
+estimator for the life of the instance. A transient failure (transport
 error, timeout, 408/429/5xx) downgrades only for TOKENIZE_RETRY_AFTER_S;
-then one call probes the endpoint again (issue #835). Never a silent
-per-call fallback, never repeated doomed RPCs. Callers plan prompt packing
+a refusal (400/401/403, any other 4xx, an unexpected 3xx) downgrades for
+the longer TOKENIZE_REFUSED_RETRY_AFTER_S without pinning. After either
+window one call probes the endpoint again, and a probe that works resumes
+remote counting (issue #835, #1214). Never a silent per-call fallback,
+never repeated doomed RPCs. Callers plan prompt packing
 with the estimator and use the real tokenizer only to verify the packed
 prompt (see answer.build_messages).
 """
@@ -43,6 +45,9 @@ _TOKEN_PATTERN = re.compile(r"\w+|[^\w\s]", re.UNICODE)
 # this long, then one call probes the endpoint again. An outage therefore
 # stalls at most one request per window by the call timeout.
 TOKENIZE_RETRY_AFTER_S = 60.0
+# Issue #1214: the endpoint answered but refused this kind of count request.
+# That is not permanent either: a long window passes before the next probe.
+TOKENIZE_REFUSED_RETRY_AFTER_S = 600.0
 # The endpoint answered but is not served: no window can make it usable.
 _ABSENT_STATUSES = frozenset({404, 405, 501})
 
@@ -73,13 +78,18 @@ class FallbackTokenizer:
 class VllmTokenizer:
     """Counts tokens via vLLM's /tokenize endpoint at the server origin.
 
-    A failure logs one warning and answers from the in-process estimator.
-    An endpoint that is not served or returns no usable count pins the
-    estimator for the life of this instance, so a LiteLLM front without
-    /tokenize costs exactly one failed request per process, never per
-    answer. A transient failure (transport error, timeout, 408, 429, 5xx)
-    downgrades for ``retry_after_s``; the first count after that claims one
-    probe, and success resumes remote counting (issue #835).
+    A failure logs one warning and answers from the in-process estimator, and
+    the outcome decides how long that lasts. An endpoint that is not served
+    (404, 405, 501) or a 200 that carries no usable count pins the estimator
+    for the life of this instance, so a LiteLLM front without /tokenize costs
+    exactly one failed request per process, never per answer. A transient
+    failure (transport error, timeout, 408, 429, 5xx other than 501)
+    downgrades for ``retry_after_s``. Any other refusal — 400, 401, 403,
+    another 4xx, an unexpected 3xx — opens the longer
+    ``refused_retry_after_s`` window instead of pinning, because one unusual
+    payload or a key that rotates must not cost remote counting for the rest
+    of the process. After either window the first count claims one probe, and
+    success resumes remote counting (issue #835, #1214).
 
     ``remote_confirmed`` describes the calling thread's most recent count,
     not the instance: a probe that succeeds on another thread must never
@@ -94,6 +104,7 @@ class VllmTokenizer:
         client: httpx2.Client | None = None,
         api_key: str | None = None,
         retry_after_s: float = TOKENIZE_RETRY_AFTER_S,
+        refused_retry_after_s: float = TOKENIZE_REFUSED_RETRY_AFTER_S,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._base_url = base_url.rstrip("/")
@@ -105,6 +116,7 @@ class VllmTokenizer:
         self._api_key = api_key
         self._fallback = FallbackTokenizer()
         self._retry_after_s = retry_after_s
+        self._refused_retry_after_s = refused_retry_after_s
         self._clock = clock
         # One tokenizer serves concurrent turns on worker threads: the lock
         # guards the downgrade state, and the per-thread flag records whether
@@ -191,38 +203,66 @@ class VllmTokenizer:
                     if count is not None:
                         self._recovered(url, probing)
                         return count
-            transient = status in (408, 429) or (status >= 500 and status not in _ABSENT_STATUSES)
-            self._downgrade(url, f"status {status}", transient=transient)
+                # A served endpoint that answers 200 without a count never
+                # grew this route: pin, even though the status is not 404.
+                self._downgrade(url, "no usable token count in response", mode="absent")
+                return None
+            # Three outcomes: an endpoint that is not served pins, a
+            # transient failure gets the short window, and any other
+            # refusal (400, 401, 403, other 4xx, unexpected 3xx) is only
+            # refused for now and gets the long window without pinning.
+            if status in _ABSENT_STATUSES:
+                self._downgrade(url, f"status {status}", mode="absent")
+            elif status in (408, 429) or status >= 500:
+                self._downgrade(url, f"status {status}", mode="transient")
+            else:
+                self._downgrade(url, f"status {status}", mode="refused")
         except Exception as exc:  # noqa: BLE001
-            self._downgrade(url, type(exc).__name__, transient=True)
+            self._downgrade(url, type(exc).__name__, mode="transient")
         return None
 
     def _recovered(self, url: str, probing: bool) -> None:
         with self._lock:
-            self._retry_at = None
+            # Only the probe that was waiting on the window closes it. A
+            # late success from a call that started before the downgrade
+            # must not clear a window that is still running, otherwise the
+            # pinned window would silently reopen on every in-flight call.
+            if probing or self._retry_at is None:
+                self._retry_at = None
         self._local.remote = True
         if probing:
             log.info("vLLM /tokenize at %s answers again; remote token counting resumed", url)
 
-    def _downgrade(self, url: str, reason: str, *, transient: bool) -> None:
-        with self._lock:
-            if transient:
-                self._retry_at = self._clock() + self._retry_after_s
-            else:
+    def _downgrade(self, url: str, reason: str, *, mode: str) -> None:
+        if mode == "absent":
+            with self._lock:
                 self._pinned = True
-        if transient:
-            log.warning(
-                "vLLM /tokenize failed at %s (%s); in-process token estimation for %.0f s",
-                url,
-                reason,
-                self._retry_after_s,
-            )
-        else:
             log.warning(
                 "vLLM /tokenize unusable at %s (%s); pinning in-process token estimation",
                 url,
                 reason,
             )
+            return
+        if mode == "refused":
+            retry_after = self._refused_retry_after_s
+            with self._lock:
+                self._retry_at = self._clock() + retry_after
+            log.warning(
+                "vLLM /tokenize refused at %s (%s); in-process token estimation "
+                "until the next probe in %.0f s",
+                url,
+                reason,
+                retry_after,
+            )
+            return
+        with self._lock:
+            self._retry_at = self._clock() + self._retry_after_s
+        log.warning(
+            "vLLM /tokenize failed at %s (%s); in-process token estimation for %.0f s",
+            url,
+            reason,
+            self._retry_after_s,
+        )
 
 
 def build_tokenizer(

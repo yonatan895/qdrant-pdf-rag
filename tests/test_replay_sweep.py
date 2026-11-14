@@ -1,10 +1,12 @@
 """Unit tests for scripts/replay_sweep.py (hermetic, no GPU/network)."""
 
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from scripts import replay_sweep
 from scripts.capture_pool import legs_to_record, replay_pool
 from scripts.replay_sweep import (
     HeadingJoinError,
@@ -364,3 +366,69 @@ def test_replay_pool_orders_legs_by_rank_and_defaults_optional_fields():
 def test_replay_schema_rejects_corrupt_capture(rows):
     with pytest.raises((ValueError, TypeError)):
         replay_pool(rows)  # type: ignore[arg-type]
+
+
+# ------------------------------------------------------------------ main's exit code
+
+
+def _sweep_result(label: str, failures: int | None = None, skipped: str | None = None) -> dict:
+    """One config's result exactly as ``run_config`` shapes it: a scored row
+    carries ``failures``; a skipped row reports the reason and no counts."""
+    if skipped is not None:
+        return {"label": label, "scoring": "doc", "skipped": skipped}
+    return {"label": label, "scoring": "doc", "failures": failures, "unmatched": 0, **summarize([]), "rows": []}
+
+
+@pytest.fixture
+def sweep_cli(tmp_path, monkeypatch):
+    """Drives ``main()`` for real with the dataset loading and scoring stubbed,
+    so the exit code comes from ``main()``'s own tally of the results it was given."""
+
+    def run(results: list[dict]) -> int:
+        pools = tmp_path / "pools.jsonl"
+        pools.write_text(json.dumps(_record(["P1"], docs={"P1": "D1"})) + "\n", encoding="utf-8")
+        golden = tmp_path / "golden.jsonl"
+        golden.write_text(json.dumps({"id": "q1", "query": "q", "expected_doc_ids": ["D1"],
+                                      "query_class": "syntax"}) + "\n", encoding="utf-8")
+        entries = [GoldenEntry(id="q1", query="q", expected_doc_ids=["D1"], query_class="syntax")]
+        monkeypatch.setattr(replay_sweep, "load_golden", lambda path: entries)
+        monkeypatch.setattr(replay_sweep, "candidate_configs", lambda settings: [SweepConfig(label="stub")])
+        monkeypatch.setattr("mainframe_rag.config.load_settings", lambda: _settings())
+        answers = iter(results)
+        monkeypatch.setattr(replay_sweep, "run_config", lambda *args, **kwargs: next(answers))
+        return replay_sweep.main(["--pools", str(pools), "--golden", str(golden)])
+
+    return run
+
+
+def test_main_exits_1_when_rows_failured(sweep_cli) -> None:
+    assert sweep_cli([_sweep_result("stub", failures=1)]) == 1
+
+
+def test_main_exits_0_when_no_failures(sweep_cli) -> None:
+    assert sweep_cli([_sweep_result("stub", failures=0)]) == 0
+
+
+def test_main_exits_0_when_configs_only_skipped(sweep_cli) -> None:
+    assert sweep_cli([_sweep_result("stub", skipped="pool depth 50 < prefetch 100")]) == 0
+
+
+def test_main_exits_1_over_a_captured_error_row_and_still_reports(tmp_path, monkeypatch, capsys):
+    """End to end over a real pools file: ``run_config`` counts the captured
+    error row, so ``main`` exits 1, and the table and ``--json`` still cover
+    every config (the exit code adds a signal, it withholds no artefact)."""
+    monkeypatch.delenv("VENUE", raising=False)
+    monkeypatch.setattr("mainframe_rag.config.load_settings", lambda: _settings())
+    pools = tmp_path / "pools.jsonl"
+    records = [_record(["P1"], docs={"P1": "D1"}), {"query": "broken", "error": "timeout"}]
+    pools.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    golden = tmp_path / "golden.jsonl"
+    golden.write_text(json.dumps({"id": "q1", "query": "q", "expected_doc_ids": ["D1"],
+                                  "query_class": "syntax"}) + "\n", encoding="utf-8")
+    out = tmp_path / "sweep.json"
+
+    assert replay_sweep.main(["--pools", str(pools), "--golden", str(golden), "--json", str(out)]) == 1
+    results = json.loads(out.read_text(encoding="utf-8"))
+    assert [r["label"] for r in results] == [c.label for c in candidate_configs(_settings())]
+    assert {(r["failures"], r["n"]) for r in results} == {(1, 1)}
+    assert len(capsys.readouterr().out.splitlines()) == 2 + len(results)

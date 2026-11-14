@@ -154,7 +154,7 @@ variables:
   # setup above). A project-level CI_PYTHON_IMAGE overrides this derived default
   # (YAML vars have the lowest precedence in GitLab). The digest is the one in
   # scripts/tools/devkit-pin.txt; tests/test_ci_gitlab_parity.py keeps them equal.
-  CI_PYTHON_IMAGE: "$CI_APPROVED_REGISTRY/qdrant-pdf-rag-devkit@sha256:c9d56c32148131a13f3e0a0d1ec824bc226cdb0361bd5f004e653e33cfa4d48e"
+  CI_PYTHON_IMAGE: "$CI_APPROVED_REGISTRY/qdrant-pdf-rag-devkit@sha256:46a09ef6ba7e6d0e875aa7e61f67c919018bc920afec35ca5043efcb66d27e1c"
 
 default:
   image: $CI_PYTHON_IMAGE

@@ -37,7 +37,7 @@ PROFILE_FILES = {
 PIP_VERSION = "26.2.2"
 BASE_IMAGE = (
     "registry.access.redhat.com/ubi9/python-314-minimal@sha256:"
-    "638914ba78de063c53cb179342518a0b39abe910cc7d36d8a434b7c4d4fa81fd"
+    "30a3131dd35d3af85092047a9ad8cd5b292563a6755332be4d35ac73f3559b11"
 )
 HASH = re.compile(r"[a-f0-9]{64}")
 NAME = re.compile(r"[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*")

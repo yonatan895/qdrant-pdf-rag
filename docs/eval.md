@@ -232,7 +232,11 @@ while `diagnostic_dualpath_enabled` remains default-off.
   model backend. Explicit `--golden`, `--check PATH`, and
   `--update-baseline PATH` remain authoritative.
   A bare `--check` requires the selected default baseline (missing means exit 2);
-  a bare `--update-baseline` explicitly records that default.
+  a bare `--update-baseline` explicitly records that default. A run with query
+  failures is never recorded: the script prints
+  `FAIL: refusing to record a baseline from a run with query failures (N failed)`
+  and leaves the baseline untouched, while the report, summary and run manifest
+  still record the failed run and its failures decide the exit code (1).
   Every report carries `representation`: the serving gate's own verdict on the
   configured collection (`agent.serving.resolve_published_generation`:
   representation contract and immutable publication). A servable run is
@@ -268,8 +272,13 @@ temp dir, stops sims it started unless `--keep-sim`). An existing server
 via `QDRANT_SIM_URL`/`QDRANT_URL` is reused; the environment is restored
 afterward.
 
-Fails on regressions **or** any query failure. `--rerank` flips reranking
-on for A/B runs (leg order stays `RERANK_ENDPOINT_ORDER`, default
+Fails on regressions **or** any query failure. `--update-baseline` records
+the run as the baseline only when it had no query failures; otherwise it
+prints `ERROR: --update-baseline refused: N query failures occurred; baseline
+file left unchanged: PATH`, leaves the baseline untouched, still writes
+`--out`/`--summary`/`--delta` and the report on stdout, and exits 1 (the
+same contract as `eval_retrieval.py` above, #1211/#1213). `--rerank`
+flips reranking on for A/B runs (leg order stays `RERANK_ENDPOINT_ORDER`, default
 `score_first` — there is no gate flag for the order, by design (#252):
 the gate forces hash mode, so leg-order numbers there would compare stub
 legs; gateway-order A/Bs run the same gate with the env var set, after
@@ -459,7 +468,24 @@ report. Missing/null required answer or citation fields are malformed, including
 on abstention cases. Per-case HTTP, transport or malformed-response errors remain rows,
 later cases still run, and any error makes the final exit nonzero. Existing
 rates retain their judged-row meanings; `metrics.queries` counts all selected
-cases and `metrics.errors` exposes unsuccessful ones.
+cases and `metrics.errors` exposes unsuccessful ones. The report also carries
+the coverage fields added under issue #1216, each counted over every selected
+case:
+
+- `total`: every case the run selected, the same count as `metrics.queries`;
+  judged, error and unjudged rows alike.
+- `unjudged`: rows with no pass, fail or error verdict, so
+  `judged + errors + unjudged == total`.
+- `error_rate`: `metrics.errors` divided by `total`; null on an empty run.
+- `judged_rate`: `metrics.judged` divided by `total`, the share of selected
+  cases that actually received a pass or fail verdict; null on an empty run.
+
+Every pass rate is over judged rows only: `unjudged` and `error` rows are in no
+rate denominator, so read the rates together with these fields rather than
+inferring coverage from the rate alone. Metrics from a run built before these
+fields exist — an older report file, for example — stay readable: without them
+the text summary prints the answer pass rate line in its previous shape, with
+the pass rate and its judged-row count only.
 
 HTTP reports and trend manifests record the target URL, observed fixed health
 fields and pre-scoring representation verdict. `/healthz` exposes no immutable
@@ -753,6 +779,12 @@ VENUE=rc sh scripts/tools/run-task.sh eval:capture-pool          # records into 
 #    identifier separately (the other kind at production), and reports both
 #    kinds per config. Dev pools only; adoption is a separate default change.
 ```
+
+**Exit status.** `replay_sweep.py` exits 1 when any pool row records a capture
+error (the rows that already made `capture_pool.py` exit 1, shown in the table's
+`fail` column); the table and `--json` are still written. It exits 2 when it
+refuses (frozen holdout outside RC, failed heading join) and 0 otherwise.
+Unmatched queries and skipped configs do not change the exit status.
 
 **Depth.** `DEPTH` (`--depth`, at most 200) records each leg deeper than
 production; the default records exactly the production prefetch, and a
