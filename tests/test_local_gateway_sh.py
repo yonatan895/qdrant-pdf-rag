@@ -609,6 +609,12 @@ def _transport_calls(lab):
     return [json.loads(line)[1] for line in path.read_text().splitlines()] if path.exists() else []
 
 
+def _collision_line(subnet: str, backend_ip: str) -> str:
+    # The failure line the script must print when a gateway network subnet
+    # contains a backend address; issue #1218 fixes this exact wording.
+    return f"gateway network subnet {subnet} contains backend address {backend_ip}; refusing"
+
+
 def test_transport_probe_uses_gateway_image_network_and_actual_addresses_without_services(gateway_transport):
     root, _, urls, hits = gateway_transport
     result = _transport_operation(gateway_transport)
@@ -914,11 +920,7 @@ def test_probe_refuses_created_transport_network_whose_subnet_contains_a_backend
     probe = _transport_operation(gateway_transport, FAKE_GATEWAY_SUBNET="127.0.0.0/24")
     assert probe.returncode != 0, probe.stdout
     assert probe.stdout == ""
-    assert "gateway network transport probe failed" in probe.stderr
-    assert TRANSPORT_NETWORK in probe.stderr
-    assert "127.0.0.0/24" in probe.stderr
-    assert "docker network create --subnet <cidr> " + TRANSPORT_NETWORK in probe.stderr
-    assert "127.0.0.2" not in probe.stderr
+    assert _collision_line("127.0.0.0/24", "127.0.0.2") in probe.stderr
     assert not any(url in probe.stderr for url in urls)
     calls = _transport_calls(gateway_transport)
     assert not any(argv[0] == "run" for argv in calls), calls
@@ -942,11 +944,7 @@ def test_probe_refuses_adopted_transport_network_subnet_collision_without_removi
     probe = _transport_operation(gateway_transport)
     assert probe.returncode != 0, probe.stdout
     assert probe.stdout == ""
-    assert "gateway network transport probe failed" in probe.stderr
-    assert TRANSPORT_NETWORK in probe.stderr
-    assert "127.0.0.0/24" in probe.stderr
-    assert "docker network create --subnet <cidr> " + TRANSPORT_NETWORK in probe.stderr
-    assert "127.0.0.2" not in probe.stderr
+    assert _collision_line("127.0.0.0/24", "127.0.0.2") in probe.stderr
     assert not any(url in probe.stderr for url in urls)
     calls = _transport_calls(gateway_transport)
     assert not any(argv[:2] == ["network", "create"] for argv in calls), calls
@@ -966,6 +964,61 @@ def test_probe_creates_transport_network_on_non_colliding_subnet(gateway_transpo
     assert any(argv[:2] == ["network", "create"] for argv in calls), calls
     assert any(argv[0] == "run" for argv in calls), calls
     assert TRANSPORT_NETWORK in json.loads((root / "networks.json").read_text())
+
+
+def test_probe_refuses_when_only_the_rerank_backend_address_collides(gateway_transport):
+    root, _, urls, _ = gateway_transport
+    probe = _transport_operation(
+        gateway_transport,
+        FAKE_GATEWAY_SUBNET="172.17.0.0/24",
+        GATEWAY_RERANK_URL="http://172.17.0.1:8002/v1",
+    )
+    assert probe.returncode != 0, probe.stdout
+    assert probe.stdout == ""
+    assert _collision_line("172.17.0.0/24", "172.17.0.1") in probe.stderr
+    assert not any(url in probe.stderr for url in urls)
+    calls = _transport_calls(gateway_transport)
+    assert not any(argv[0] == "run" for argv in calls), calls
+    assert ["network", "rm", CREATED_NETWORK_ID] in calls, calls
+    assert TRANSPORT_NETWORK not in json.loads((root / "networks.json").read_text())
+
+
+def test_serve_refuses_created_network_collision_and_starts_no_container(gateway_transport):
+    root, _, urls, _ = gateway_transport
+    serve = _transport_operation(gateway_transport, "serve", FAKE_GATEWAY_SUBNET="127.0.0.0/24")
+    assert serve.returncode != 0, serve.stdout
+    assert serve.stdout == ""
+    assert _collision_line("127.0.0.0/24", "127.0.0.2") in serve.stderr
+    assert not any(url in serve.stderr for url in urls)
+    calls = _transport_calls(gateway_transport)
+    assert any(argv[:2] == ["network", "create"] for argv in calls), calls
+    assert ["network", "rm", CREATED_NETWORK_ID] in calls, calls
+    assert not any(argv[0] == "run" for argv in calls), calls
+    assert TRANSPORT_NETWORK not in json.loads((root / "networks.json").read_text())
+
+
+def test_serve_refuses_adopted_network_collision_without_removing_it(gateway_transport):
+    root, _, urls, _ = gateway_transport
+    adopted_id = "d" * 64
+    (root / "networks.json").write_text(json.dumps({
+        TRANSPORT_NETWORK: {
+            "id": adopted_id,
+            "name": TRANSPORT_NETWORK,
+            "driver": "bridge",
+            "subnet": "127.0.0.0/24",
+        }
+    }))
+    serve = _transport_operation(gateway_transport, "serve")
+    assert serve.returncode != 0, serve.stdout
+    assert serve.stdout == ""
+    assert _collision_line("127.0.0.0/24", "127.0.0.2") in serve.stderr
+    assert not any(url in serve.stderr for url in urls)
+    calls = _transport_calls(gateway_transport)
+    assert not any(argv[:2] == ["network", "create"] for argv in calls), calls
+    assert not any(argv[:2] == ["network", "rm"] for argv in calls), calls
+    assert not any(argv[0] == "run" for argv in calls), calls
+    networks = json.loads((root / "networks.json").read_text())
+    assert networks[TRANSPORT_NETWORK]["id"] == adopted_id
 
 
 # --- #862: retrieval-only gateway (embed + rerank legs, no reasoning leg) ----
