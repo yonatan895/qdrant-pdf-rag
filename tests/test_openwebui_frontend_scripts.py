@@ -808,3 +808,39 @@ def test_purge_main_after_a_restart_clears_restored_failures_on_its_first_succes
     assert recorded["consecutive_failures"] == 0 and recorded["total_failures"] == 7
     assert recorded["last_error"] == "" and recorded["last_success"] > 1
     assert capsys.readouterr().out.startswith("chat purge ok: window 30 days,")
+
+
+@pytest.mark.parametrize("key", ["consecutive_failures", "total_failures"])
+@pytest.mark.parametrize("raw", ['"3"', "null", "2.0", "2.5", "-3", "true", "NaN"],
+                         ids=["string", "null", "float-whole", "float", "negative", "bool", "nan"])
+def test_purge_main_restarts_a_counter_that_is_not_a_non_negative_int(tmp_path, capsys, key, raw):
+    data, _db_path, conn = _db(tmp_path, chat_columns="id TEXT PRIMARY KEY")
+    conn.close()
+    # Not a file this script writes: a hand edit or a foreign tool.
+    (data / purge.STATUS_NAME).write_text(f'{{"{key}": {raw}}}')
+    assert purge.main(["--days", "30", "--data-dir", str(data), "--once"]) == 1
+    recorded = json.loads((data / purge.STATUS_NAME).read_text())
+    assert recorded["consecutive_failures"] == 1 and type(recorded["consecutive_failures"]) is int
+    assert recorded["total_failures"] == 1 and type(recorded["total_failures"]) is int
+    err = capsys.readouterr().err
+    assert err == "chat purge FAILED (schema); consecutive failures 1\n"
+
+
+def test_purge_main_keeps_a_valid_counter_beside_a_dropped_one(tmp_path, capsys):
+    data, _db_path, conn = _db(tmp_path, chat_columns="id TEXT PRIMARY KEY")
+    conn.close()
+    (data / purge.STATUS_NAME).write_text('{"consecutive_failures": 4, "total_failures": "x"}')
+    assert purge.main(["--days", "30", "--data-dir", str(data), "--once"]) == 1
+    recorded = json.loads((data / purge.STATUS_NAME).read_text())
+    assert recorded["consecutive_failures"] == 5 and recorded["total_failures"] == 1
+    assert "consecutive failures 5" in capsys.readouterr().err
+
+
+def test_purge_main_counts_a_status_file_too_deeply_nested_to_parse_as_empty(tmp_path, capsys):
+    data, _db_path, conn = _db(tmp_path, chat_columns="id TEXT PRIMARY KEY")
+    conn.close()
+    (data / purge.STATUS_NAME).write_text("[" * 100_000 + "]" * 100_000)
+    assert purge.main(["--days", "30", "--data-dir", str(data), "--once"]) == 1
+    recorded = json.loads((data / purge.STATUS_NAME).read_text())
+    assert recorded["consecutive_failures"] == 1 and recorded["total_failures"] == 1
+    assert capsys.readouterr().err == "chat purge FAILED (schema); consecutive failures 1\n"

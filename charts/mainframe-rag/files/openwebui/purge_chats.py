@@ -27,8 +27,9 @@ pin import changed it) or a timestamp that is not epoch seconds refuses to
 delete anything; a busy database, an upload that cannot be removed or an
 incomplete scrub is a failed run, retried after --retry-seconds. Each run writes counters to .mainframe-rag-purge.json
 next to the database and logs one fixed line of counts. On start the counters
-are loaded from that file, so a restart does not reset them; the next successful
-run sets consecutive_failures back to 0. Chat content, titles
+are loaded from that file, so a restart does not reset them (a counter that is
+not a non-negative integer starts again from 0); the next successful run sets
+consecutive_failures back to 0. Chat content, titles
 and identifiers are never logged. The table layout is Open WebUI v0.12.3's,
 pending #1073 qualification and re-qualified on every pin import (P1).
 Stdlib only: the image's own interpreter runs it.
@@ -48,6 +49,8 @@ DAY_S = 86400
 # about to be written is never taken.
 ORPHAN_GRACE_S = DAY_S
 STATUS_NAME = ".mainframe-rag-purge.json"
+# Status keys run_once increments; anything but a non-negative int restarts at 0.
+COUNTERS = ("consecutive_failures", "total_failures")
 PENDING_NAME = ".mainframe-rag-purge-pending"
 SHARED_PREFIX = "shared-"
 # Epoch seconds stay below this for centuries; milliseconds or nanoseconds do not.
@@ -232,12 +235,19 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
 
 def _read_status(path: Path) -> dict:
     """Counters written by the previous run; a missing, unreadable or
-    non-object status file counts as empty."""
+    non-object status file counts as empty, and a counter that is not a
+    non-negative int is dropped, so it starts again from 0."""
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return {}
-    return loaded if isinstance(loaded, dict) else {}
+    if not isinstance(loaded, dict):
+        return {}
+    for key in COUNTERS:
+        value = loaded.get(key)
+        if key in loaded and not (type(value) is int and value >= 0):
+            del loaded[key]
+    return loaded
 
 
 def _write_status(path: Path, status: dict) -> None:
