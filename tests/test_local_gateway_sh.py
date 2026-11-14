@@ -396,15 +396,20 @@ if args[:2] == ["network", "inspect"]:
     item = network(args[2])
     if item is None:
         sys.exit(1)
-    assert args[3:] == ["--format", "{{.Id}} {{.Driver}}"]
-    print(item["id"] + " " + item["driver"])
+    if args[3:] == ["--format", "{{.Id}} {{.Driver}}"]:
+        print(item["id"] + " " + item["driver"])
+    elif args[3:] == ["--format", "{{range .IPAM.Config}}{{.Subnet}} {{end}}"]:
+        print(item.get("subnet", ""))
+    else:
+        sys.exit(2)
 elif args[:2] == ["network", "create"]:
     if network(args[2]):
         sys.exit(1)
     count_path = root / "network-count"
     count = int(count_path.read_text()) + 1 if count_path.exists() else 1
     count_path.write_text(str(count))
-    networks[args[2]] = {"name": args[2], "id": f"{count:064x}", "driver": "bridge"}
+    networks[args[2]] = {"name": args[2], "id": f"{count:064x}", "driver": "bridge",
+                         "subnet": os.environ.get("FAKE_GATEWAY_SUBNET", "")}
     if os.environ.get("FAKE_GATEWAY_SCENARIO") == "replace-after-create":
         networks[args[2]]["id"] = "d" * 64
     state_path.write_text(json.dumps(networks))
@@ -895,6 +900,72 @@ def test_failed_gateway_log_destination_still_drains_without_exception_text(tmp_
     )
     assert result.returncode == 1
     assert result.stdout == b"" and result.stderr == b"Gateway host log capture failed.\n"
+
+
+# --- #1218: transport network whose subnet contains a backend address --------
+
+CREATED_NETWORK_ID = "0" * 63 + "1"
+
+
+def test_probe_refuses_created_transport_network_whose_subnet_contains_a_backend_address(
+    gateway_transport,
+):
+    root, _, urls, _ = gateway_transport
+    probe = _transport_operation(gateway_transport, FAKE_GATEWAY_SUBNET="127.0.0.0/24")
+    assert probe.returncode != 0, probe.stdout
+    assert probe.stdout == ""
+    assert "gateway network transport probe failed" in probe.stderr
+    assert TRANSPORT_NETWORK in probe.stderr
+    assert "127.0.0.0/24" in probe.stderr
+    assert "docker network create --subnet <cidr> " + TRANSPORT_NETWORK in probe.stderr
+    assert "127.0.0.2" not in probe.stderr
+    assert not any(url in probe.stderr for url in urls)
+    calls = _transport_calls(gateway_transport)
+    assert not any(argv[0] == "run" for argv in calls), calls
+    assert ["network", "rm", CREATED_NETWORK_ID] in calls, calls
+    assert TRANSPORT_NETWORK not in json.loads((root / "networks.json").read_text())
+
+
+def test_probe_refuses_adopted_transport_network_subnet_collision_without_removing_it(
+    gateway_transport,
+):
+    root, _, urls, _ = gateway_transport
+    adopted_id = "d" * 64
+    (root / "networks.json").write_text(json.dumps({
+        TRANSPORT_NETWORK: {
+            "id": adopted_id,
+            "name": TRANSPORT_NETWORK,
+            "driver": "bridge",
+            "subnet": "127.0.0.0/24",
+        }
+    }))
+    probe = _transport_operation(gateway_transport)
+    assert probe.returncode != 0, probe.stdout
+    assert probe.stdout == ""
+    assert "gateway network transport probe failed" in probe.stderr
+    assert TRANSPORT_NETWORK in probe.stderr
+    assert "127.0.0.0/24" in probe.stderr
+    assert "docker network create --subnet <cidr> " + TRANSPORT_NETWORK in probe.stderr
+    assert "127.0.0.2" not in probe.stderr
+    assert not any(url in probe.stderr for url in urls)
+    calls = _transport_calls(gateway_transport)
+    assert not any(argv[:2] == ["network", "create"] for argv in calls), calls
+    assert not any(argv[:2] == ["network", "rm"] for argv in calls), calls
+    assert not any(argv[0] == "run" for argv in calls), calls
+    networks = json.loads((root / "networks.json").read_text())
+    assert networks[TRANSPORT_NETWORK]["id"] == adopted_id
+
+
+def test_probe_creates_transport_network_on_non_colliding_subnet(gateway_transport):
+    root, _, _, _ = gateway_transport
+    probe = _transport_operation(gateway_transport, FAKE_GATEWAY_SUBNET="10.244.0.0/24")
+    assert probe.returncode == 0, probe.stderr
+    identity = json.loads(probe.stdout)
+    assert identity["network_name"] == TRANSPORT_NETWORK
+    calls = _transport_calls(gateway_transport)
+    assert any(argv[:2] == ["network", "create"] for argv in calls), calls
+    assert any(argv[0] == "run" for argv in calls), calls
+    assert TRANSPORT_NETWORK in json.loads((root / "networks.json").read_text())
 
 
 # --- #862: retrieval-only gateway (embed + rerank legs, no reasoning leg) ----

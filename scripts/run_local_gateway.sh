@@ -312,6 +312,43 @@ PY
     require_fresh_container_owner
     prepare_transport_network
     trap 'release_transport_network || true; exit 130' INT TERM
+    # The runtime picks the address pool for a network it created, and that pool
+    # can contain a backend's numeric IPv4 address; containers on such a network
+    # never reach the backend. Refuse before probing and name the subnet instead
+    # of reporting the generic transport probe failure that hides the cause.
+    _transport_subnets="$(gateway_docker network inspect "$PG_NET" --format \
+        '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null)" || _transport_subnets=""
+    _colliding_subnet=""
+    if [ -n "$_transport_subnets" ]; then
+        # shellcheck disable=SC2086  # word-splitting the space-separated subnets is intended
+        _colliding_subnet="$(python3 - "$GATEWAY_REASONING_URL" "$GATEWAY_EMBED_URL" \
+            $_transport_subnets <<'PY'
+import ipaddress
+import sys
+import urllib.parse
+
+backends = []
+for url in sys.argv[1:3]:
+    try:
+        backends.append(ipaddress.ip_address(urllib.parse.urlsplit(url).hostname or ""))
+    except ValueError:
+        pass
+for subnet in sys.argv[3:]:
+    try:
+        network = ipaddress.ip_network(subnet, strict=False)
+    except ValueError:
+        continue
+    if any(backend.version == network.version and backend in network for backend in backends):
+        print(subnet)
+        sys.exit(0)
+sys.exit(1)
+PY
+        )" || _colliding_subnet=""
+    fi
+    if [ -n "$_colliding_subnet" ]; then
+        release_transport_network || true
+        die "gateway network transport probe failed: transport network $PG_NET has subnet $_colliding_subnet that contains a backend address, so the probe could never reach it; pre-create the network with a different subnet (docker network create --subnet <cidr> $PG_NET)"
+    fi
     # Emit ownership before the potentially interrupted probe, so recovery can
     # release an owned network. This identity alone is never a passing result:
     # the caller must also require this operation's exit status to be zero.
