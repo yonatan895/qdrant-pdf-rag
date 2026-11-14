@@ -1526,6 +1526,8 @@ class Run:
                     return diagnostic
                 if diagnostic["stage"] == "failed":
                     raise LabError("remote runtime reported a failure")
+                if diagnostic["stage"] in ("stopping", "stopped"):
+                    raise LabError("remote runtime is shutting down")
             self.budget()
             time.sleep(self.config["poll_seconds"])
         raise LabError("remote readiness exceeded the run budget")

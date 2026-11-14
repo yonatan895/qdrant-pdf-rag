@@ -162,7 +162,9 @@ if name=='colab':
             if scenario=='bad_gpu': report.update(gpu_name='NVIDIA A100-SXM4-40GB',vram_mib=40960)
             path('/content/colab-preflight.json').write_text(json.dumps(report))
         else:
-            diagnostic({'stage':'transport_ready'})
+            stage={'stopping_runtime':'stopping','stopped_runtime':'stopped',
+                'failed_runtime':'failed'}.get(scenario)
+            diagnostic({'stage':stage or 'transport_ready'})
             lifetime=min(30,json.loads(path('/content/model-profile.json').read_text())['deadline_seconds'])
             assert type(lifetime) is int and lifetime>0
             until=time.monotonic()+lifetime
@@ -1457,6 +1459,33 @@ def test_slow_diagnostics_poll_is_not_ready_then_run_completes_and_next_run_work
     assert json.loads((root / "sessions.json").read_text()) == {}
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "success")
     assert _run_fake(_prepare_new(state, root / "ordinary-after-slow-poll")) == 0
+
+
+def test_stopping_runtime_ends_run_immediately(lab, monkeypatch):
+    """A remote stage of "stopping" ends the readiness wait at once."""
+    root, state, _ = lab
+    run = _prepare_new(state, root / "stopping-run", extra=("--deadline-seconds", "60"))
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "stopping_runtime")
+    assert _run_fake(run) == 1
+    assert _manifest(run)["failure_reason"] == "remote runtime is shutting down"
+
+
+def test_stopped_runtime_ends_run_immediately(lab, monkeypatch):
+    """A remote stage of "stopped" ends the readiness wait at once."""
+    root, state, _ = lab
+    run = _prepare_new(state, root / "stopped-run", extra=("--deadline-seconds", "60"))
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "stopped_runtime")
+    assert _run_fake(run) == 1
+    assert _manifest(run)["failure_reason"] == "remote runtime is shutting down"
+
+
+def test_failed_runtime_ends_run_with_the_failure_message(lab, monkeypatch):
+    """The pre-existing "failed" exit keeps its exact message."""
+    root, state, _ = lab
+    run = _prepare_new(state, root / "failed-run", extra=("--deadline-seconds", "60"))
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "failed_runtime")
+    assert _run_fake(run) == 1
+    assert _manifest(run)["failure_reason"] == "remote runtime reported a failure"
 
 
 def test_transient_budget_poll_failure_keeps_session_then_run_completes_and_next_run_works(lab):
