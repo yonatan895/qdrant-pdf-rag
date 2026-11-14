@@ -1341,6 +1341,25 @@ def test_workers_get_their_own_worktrees_and_run_mfr_opencode_under_hc(workers_r
     assert [c.split(" --cwd")[0] for c in ctx["log"].read_text().splitlines()] == ["run --bg --name w-two"]
 
 
+def test_a_second_start_with_the_same_name_leaves_the_first_workers_brief_alone(workers_repo):
+    ctx = workers_repo
+    assert _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"])).returncode == 0
+    brief = ctx["tmp"] / "agent-worktrees/.briefs/w-one.md"
+    before = brief.read_bytes()
+    ctx["log"].unlink()
+    ctx["tasks"].write_text("one\tA different task\nnew\tAnother\n")
+    again = _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"]))
+    assert again.returncode == 2
+    assert again.stderr == "mfr-agent-workers: worker w-one was already started here; use another --prefix or id\n"
+    # Nothing was written or started for any line of the refused batch.
+    assert brief.read_bytes() == before
+    assert not (ctx["tmp"] / "agent-worktrees/.briefs/w-new.md").exists()
+    assert not ctx["log"].exists() and "agents/w-new" not in _git(ctx["repo"], "branch", "--list")
+    # The next ordinary operation: another prefix starts both.
+    ok = _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"]), "--prefix", "x")
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+
 def test_a_failed_warm_up_starts_no_worker(workers_repo):
     ctx = workers_repo
     ctx["env"]["WARM_RC"] = "1"
@@ -1368,13 +1387,17 @@ def test_a_task_can_name_a_brief_file_with_several_lines(workers_repo):
     ctx["log"].unlink()
     (ctx["tmp"] / "fix.md").write_text("TITLE: again\n")
     ctx["tasks"].write_text("late\t@fix.md\n")
-    blocked = ctx["tmp"] / "agent-worktrees/.briefs/w-late.md"
+    blocked = ctx["tmp"] / "agent-worktrees/.briefs/w-late.json"  # the config cannot be written
     blocked.mkdir()
     refused = _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"]))
     assert refused.returncode == 2
     assert refused.stderr == "mfr-agent-workers: a worker brief could not be written; no worker was started\n"
     assert not ctx["log"].exists() and "agents/w-late" not in _git(ctx["repo"], "branch", "--list")
     blocked.rmdir()
+    # The refusal left no brief behind, so the same name starts once the cause is gone.
+    assert not (ctx["tmp"] / "agent-worktrees/.briefs/w-late.md").exists()
+    retried = _workers(ctx, "start", "--repo", str(ctx["repo"]), "--tasks", str(ctx["tasks"]))
+    assert retried.returncode == 0, retried.stdout + retried.stderr
     for missing in ("gone\t@nope.md\n", "empty\t@empty.md\n"):
         (ctx["tmp"] / "empty.md").write_text("\n")
         ctx["tasks"].write_text(missing)
