@@ -278,7 +278,8 @@ file). `mfr-agent-workers start` does not send the brief as the prompt: it write
 instructions and turns off the tools a worker does not need. OpenCode drops old turns
 long before the model's limit, so a brief sent as the first message is gone a few dozen
 steps in, and the worker then makes up a task from what is left. A one-line task cannot
-begin with `@`.
+begin with `@`. `start` refuses a name that already has a worktree or a brief, before it
+writes anything, so a repeated id never changes the brief of a worker that is running.
 
 Rules from running a hosted flash-class model, not the site model, on real fixes in this
 repository ([#1196](https://github.com/yonatan895/qdrant-pdf-rag/issues/1196)):

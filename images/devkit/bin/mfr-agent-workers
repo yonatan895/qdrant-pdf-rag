@@ -38,6 +38,7 @@ again from any shell. Messages are fixed text plus ids and exit codes.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -128,6 +129,10 @@ def write_brief(briefs: Path, name: str, task: str) -> Path:
         config.write_text(json.dumps({"instructions": [str(brief)],
                                       "tools": dict.fromkeys(WORKER_TOOLS_OFF, False)}) + "\n", encoding="utf-8")
     except OSError:
+        # Leave no half-written brief behind: it would read as "already started" next time.
+        for leftover in (brief, config):
+            with contextlib.suppress(OSError):
+                leftover.unlink()
         raise Refused("a worker brief could not be written; no worker was started") from None
     return config
 
@@ -146,6 +151,12 @@ def start(args: argparse.Namespace) -> int:
         briefs.mkdir(exist_ok=True)
     except OSError:
         raise Refused("the briefs directory could not be created; no worker was started") from None
+    # A name that already has a worktree or a brief belongs to an earlier start: writing its
+    # brief again would change the instructions of a worker that may still be running.
+    for ident, _ in work:
+        name = f"{args.prefix}-{ident}"
+        if (worktrees / name).exists() or (briefs / f"{name}.md").exists():
+            raise Refused(f"worker {name} was already started here; use another --prefix or id")
     configs = {ident: write_brief(briefs, f"{args.prefix}-{ident}", task) for ident, task in work}
     warm_up(repo)
     failed = 0
