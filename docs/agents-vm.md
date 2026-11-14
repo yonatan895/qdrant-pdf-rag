@@ -31,7 +31,7 @@ Decision owners: `images/devkit/agents/` (pins, licences, config, build verifier
 | OpenCode 2.2.5 | `/usr/local/bin/opencode` | `images/devkit/agents/opencode-pin.txt`: archive and binary digests; the licence is the v2.2.5 tag's `LICENSE` (the archive has none), kept as `opencode-LICENSE` |
 | Licence texts | `/usr/share/licenses/herdr-core/` and `/usr/share/licenses/opencode/` | the kit records `kit-tool:herdr-core` and `kit-tool:opencode` ([licensing](licensing.md#dev-kit)) |
 | Hardened config | `/etc/opencode/opencode.json`, OpenCode's managed config on Linux: root-owned, highest precedence | `images/devkit/agents/opencode.json` |
-| Wrappers | `mfr-opencode`, `mfr-agent-workers` | `images/devkit/bin/` |
+| Wrappers | `mfr-opencode`, `mfr-agent-workers`, `mfr-test` | `images/devkit/bin/` |
 
 Trust is HTTPS plus the pinned sha256 (maintainer decision: neither project signs its
 releases). The connected-side image build downloads each pinned origin in its
@@ -293,6 +293,13 @@ repository ([#1196](https://github.com/yonatan895/qdrant-pdf-rag/issues/1196)):
   answered another task, and one report of passing tests on a commit that fails. Before
   a branch leaves the VM, someone other than the worker runs the named tests at the
   commit and reads the diff, and the change gets its review.
+- **Tests run through `mfr-test`**, which is `python3 -m pytest` under a time limit
+  (`MFR_TEST_LIMIT_S`, default 600 s; exit 124 at the limit). The hardened config allows
+  it, denies bare `pytest`, and of the task runner allows a worker only `--list` and the
+  context, lint and typecheck tasks, so `run-task.sh test` is not a way round the limit. A worker cannot tell that a test never returns: one that
+  awaited forever held its worker for the rest of its hour, and on a host where test
+  runs share a lock it blocked every other worker for 21 minutes. A test that is
+  expected to hang on unfixed code needs its own timeout.
 - **A run that ends in a compaction error is retried as it is**; one that repeats the
   same reads for an hour is stopped and its task split.
 
