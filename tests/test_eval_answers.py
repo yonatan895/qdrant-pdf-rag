@@ -25,6 +25,7 @@ from mainframe_rag.eval.answers import (
     run_query,
     select_sample,
     summarize,
+    write_summary,
 )
 
 
@@ -708,6 +709,128 @@ def test_summarize_rates_and_counts() -> None:
     # No caller pool join in this tier: completeness stays None, never a
     # fabricated zero (issue #305).
     assert m["answer_completeness"] is None and m["answer_completeness_n"] == 0
+
+
+# ------------------------------------------------------------ coverage #1216
+def _coverage_results() -> list[dict]:
+    """2 pass + 1 fail + 3 error + 1 row the judge never gave a verdict for."""
+    rows = [
+        {"verdict": "pass", "expected_behavior": "answer", "query_class": "message_id",
+         "expected_complexity": None, "citations": ["a"], "citation_recall": 1.0,
+         "gold_retrieved": True, "verification_state": None, "why": "cited_explicit",
+         "zero_hits": False, "budget_verified": False, "units_omitted": 0},
+        {"verdict": "pass", "expected_behavior": "answer", "query_class": "message_id",
+         "expected_complexity": None, "citations": ["a", "b"], "citation_recall": 1.0,
+         "gold_retrieved": True, "verification_state": None, "why": "cited_explicit",
+         "zero_hits": False, "budget_verified": False, "units_omitted": 0},
+        {"verdict": "fail", "expected_behavior": "answer", "query_class": "message_id",
+         "expected_complexity": None, "citations": 0, "citation_recall": 0.0,
+         "gold_retrieved": False, "verification_state": None, "why": "unknown",
+         "zero_hits": False, "budget_verified": False, "units_omitted": 0},
+    ]
+    rows += [
+        {"verdict": "error", "expected_behavior": "answer", "query_class": "message_id",
+         "expected_complexity": None, "citations": 0, "citation_recall": 0.0,
+         "gold_retrieved": False, "verification_state": None, "why": "unknown",
+         "zero_hits": False, "budget_verified": False, "units_omitted": 0}
+        for _ in range(3)
+    ]
+    # The judge answered with something that is not a verdict at all.
+    rows.append(
+        {"verdict": None, "expected_behavior": "answer", "query_class": "message_id",
+         "expected_complexity": None, "citations": 0, "citation_recall": 0.0,
+         "gold_retrieved": False, "verification_state": None, "why": "unknown",
+         "zero_hits": False, "budget_verified": False, "units_omitted": 0}
+    )
+    return rows
+
+
+def test_summarize_counts_rows_the_pass_rate_does_not_cover() -> None:
+    m = summarize(_coverage_results())
+    assert m["total"] == 7
+    assert m["judged"] == 3
+    assert m["errors"] == 3
+    assert m["unjudged"] == 1
+    assert m["error_rate"] == 0.4286
+    assert m["judged_rate"] == 0.4286
+    # The rates themselves stay judged-only: an uncovered denominator must not
+    # move them (issue #1216 adds visibility, not a new definition).
+    assert m["answer_pass_rate"] == 0.6667
+
+
+def test_summarize_coverage_of_an_empty_run() -> None:
+    m = summarize([])
+    assert m["total"] == 0
+    assert m["unjudged"] == 0
+    assert m["error_rate"] is None
+    assert m["judged_rate"] is None
+
+
+def test_write_summary_shows_coverage_next_to_pass_rate(tmp_path) -> None:
+    rows = [
+        dict(row, id=f"MSG-{i}", query=f"question {i}")
+        for i, row in enumerate(_coverage_results(), start=1)
+    ]
+    metrics = summarize(rows)
+    path = tmp_path / "summary.md"
+    write_summary(path, rows, metrics)
+    rate_lines = [
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if "answer pass rate:" in line
+    ]
+    assert rate_lines == [
+        "- answer pass rate: 0.6667 (n=3) ; judged 3/7, errors 3, unjudged 1"
+    ]
+
+
+def test_summarize_leaves_the_existing_metrics_unchanged() -> None:
+    """Every metric this summary had before issue #1216 still holds the exact
+    value it produced for the same rows (baselines and pass rates compare
+    against these numbers). The #1195 measurement block has its own unknown
+    accounting and is compared separately by its own tests."""
+    # The same input as test_summarize_rates_and_counts above.
+    rows = [
+        {"verdict": "pass", "expected_behavior": "answer", "query_class": "message_id", "citations": ["a"]},
+        {"verdict": "fail", "expected_behavior": "answer", "query_class": "message_id", "citations": [], "warns": []},
+        {"verdict": "pass", "expected_behavior": "abstain", "query_class": "negative", "citations": [], "warns": ["w"]},
+        {"verdict": "error", "expected_behavior": "answer", "query_class": "syntax", "failures": ["HTTP 502 (upstream_error)"]},
+    ]
+    # Recorded from mainframe_rag.eval.answers at the parent commit of #1216.
+    before = {
+        "abstain_n": 1,
+        "abstain_pass_rate": 1.0,
+        "answer_completeness": None,
+        "answer_completeness_n": 0,
+        "answer_n": 2,
+        "answer_pass_rate": 0.5,
+        "budget_verified_n": 0,
+        "budget_verified_rate": None,
+        "by_class": {"message_id": {"n": 2, "pass": 1}, "negative": {"n": 1, "pass": 1}},
+        "by_complexity": {"unknown": {"n": 3, "pass": 2}},
+        "by_failure": {},
+        "by_verification_state": {"unknown": 3},
+        "by_why": {"cited_explicit": 1, "unknown": 2},
+        "citations_per_answer": 0.5,
+        "errors": 1,
+        "failures": 1,
+        "false_refusal_rate": 0.0,
+        "false_refusals": 0,
+        "inferred_citations": 0,
+        "inferred_index_off_gold": 0,
+        "judged": 3,
+        "queries": 4,
+        "state_mismatches": 0,
+        "units_omitted_total": 0,
+        "unsafe_answer_rate": 0.0,
+        "unsafe_answers": 0,
+        "warns": 1,
+        "zero_hits": 0,
+    }
+    metrics = {k: v for k, v in summarize(rows).items() if k != "measurement"}
+    assert set(metrics) - set(before) == {"error_rate", "judged_rate", "total", "unjudged"}
+    for key, value in before.items():
+        assert metrics[key] == value, key
 
 
 # ------------------------------------------------------- answer completeness #305
