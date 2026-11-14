@@ -287,7 +287,9 @@ async def _deltas(lines: AsyncIterator[str], final: dict[str, Any],
 
     Each delta is held until the next frame: when that frame is the terminal
     one and the held delta is exactly the agent's validated list for it, the
-    delta goes to `agent_list` instead (it is not model text)."""
+    delta goes to `agent_list` instead (it is not model text). Otherwise the
+    held delta stays model text and, when the terminal frame carries a
+    validated list, its rendering is appended to `agent_list` instead (#1212)."""
     finished = False
     held: str | None = None
     async for line in lines:
@@ -326,10 +328,14 @@ async def _deltas(lines: AsyncIterator[str], final: dict[str, Any],
             final.clear()
             final.update(choice)
             finished = True
-            if held is not None and held == _validated_list(final):
+            rendering = _validated_list(final)
+            if held is not None and held == rendering:
                 agent_list.append(held)
-            elif held is not None:
-                yield held
+            else:
+                if held is not None:
+                    yield held
+                if rendering is not None and not agent_list:
+                    agent_list.append(rendering)
             held = None
     if held is not None:
         yield held
