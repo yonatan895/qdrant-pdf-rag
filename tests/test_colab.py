@@ -1468,6 +1468,12 @@ def test_stopping_runtime_ends_run_immediately(lab, monkeypatch):
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "stopping_runtime")
     assert _run_fake(run) == 1
     assert _manifest(run)["failure_reason"] == "remote runtime is shutting down"
+    # The early exit takes the same cleanup as "failed": the owned session is released.
+    manifest = _manifest(run)
+    assert manifest["phase"] == "released" and manifest["released"] is True
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "success")
+    assert _run_fake(_prepare_new(state, root / "ordinary-after-stopping")) == 0
 
 
 def test_stopped_runtime_ends_run_immediately(lab, monkeypatch):
@@ -1477,6 +1483,10 @@ def test_stopped_runtime_ends_run_immediately(lab, monkeypatch):
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "stopped_runtime")
     assert _run_fake(run) == 1
     assert _manifest(run)["failure_reason"] == "remote runtime is shutting down"
+    # The early exit takes the same cleanup as "failed": the owned session is released.
+    manifest = _manifest(run)
+    assert manifest["phase"] == "released" and manifest["released"] is True
+    assert json.loads((root / "sessions.json").read_text()) == {}
 
 
 def test_failed_runtime_ends_run_with_the_failure_message(lab, monkeypatch):
@@ -1486,6 +1496,10 @@ def test_failed_runtime_ends_run_with_the_failure_message(lab, monkeypatch):
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "failed_runtime")
     assert _run_fake(run) == 1
     assert _manifest(run)["failure_reason"] == "remote runtime reported a failure"
+    # The "failed" early exit releases the owned session.
+    manifest = _manifest(run)
+    assert manifest["phase"] == "released" and manifest["released"] is True
+    assert json.loads((root / "sessions.json").read_text()) == {}
 
 
 def test_transient_budget_poll_failure_keeps_session_then_run_completes_and_next_run_works(lab):
