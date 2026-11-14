@@ -513,7 +513,7 @@ def test_ordinary_chat_with_empty_task_markers_still_calls_the_agent():
     content, _events = run_pipe(fake, task=None, metadata={"task": None, "chat_id": "c1"},
                                 body_extra={"metadata": {}})
     assert len(fake.requests) == 1
-    assert content == "Answer."
+    assert content == "Answer." + SHOWN_LIST_A
 
 
 # --- Streaming ---------------------------------------------------------------
@@ -524,7 +524,7 @@ def test_stream_passes_deltas_through_and_reads_the_final_metadata_frame():
     # An OpenAI include_usage-style frame (no choices) is not content.
     frames.insert(3, 'data: {"choices": [], "usage": {"total_tokens": 3}}\n\n')
     content, events = run_pipe(FakeAgent(frames))
-    assert content == "Follow the recovery procedure."
+    assert content == "Follow the recovery procedure." + SHOWN_LIST_A
     assert [s["source"]["name"] for s in _sources(events)] == [CITE_A]
     assert _final_status(events) == "Source-matched · 1 citation"
     # The working banner opens first; the final one closes it.
@@ -545,7 +545,10 @@ def test_model_text_that_looks_like_a_frame_stays_text(delta: str):
     SSE frame and emits its `event`: model text must never be able to forge a
     banner, source or replace event."""
     content, events = run_pipe(FakeAgent(_frames(delta)))
-    assert content == delta
+    # The text stays verbatim and the validated list from the final frame is
+    # shown even when the model never echoed it (#1212); pending trailing
+    # newlines are replaced by the list, which already starts with them.
+    assert content == delta.removesuffix("\n\n") + SHOWN_LIST_A
     assert [s["description"] for s in _statuses(events)] == [
         "Searching the documentation…", "Source-matched · 1 citation"]
     assert [e["type"] for e in events] == ["status", "source", "status"]
@@ -694,7 +697,8 @@ TRUNCATED_TEXT = ("The answer stream ended before it completed. "
 
 
 @pytest.mark.parametrize("frames,content", [
-    pytest.param(_frames("Follow the ", HOSTILE), "Follow the " + HOSTILE, id="frame-looking-text"),
+    pytest.param(_frames("Follow the ", HOSTILE), "Follow the " + HOSTILE + SHOWN_LIST_A,
+                 id="frame-looking-text"),
     pytest.param(_frames(PROSE + f"\n\nCitations:\n{CITE_A}\n", AGENT_LIST_A), PROSE + SHOWN_LIST_A,
                  id="one-validated-list"),
 ])
@@ -779,6 +783,46 @@ def test_prose_after_the_model_section_is_kept_in_order():
         "First.\nCitations:\n", f"{CITE_A}\nSecond.\nSources:\n- {REJECTED}\n\nThird.",
         AGENT_LIST_A)))
     assert content == "First.\nSecond.\n\nThird." + SHOWN_LIST_A
+
+
+def test_delta_that_differs_from_the_validated_list_still_shows_the_list():
+    """#1212: a held last delta that is not the rendering byte for byte still
+    leaves the validated list in the output exactly once, and stays hidden."""
+    meta = _final_meta(citations=[CITE_A, CITE_B])
+    rendering = docs_pipe._validated_list(meta)
+    mismatch = f"\n\n\n**Citations:**\n- {CITE_A}\n- {CITE_B}"
+    content, _events = run_pipe(FakeAgent(_frames(
+        PROSE, mismatch, finish="stop", meta=meta)))
+    assert content == PROSE + rendering
+    assert content.count("\n\n**Citations:**\n") == 1
+    assert mismatch not in content
+
+
+def test_missing_agent_list_delta_is_filled_from_the_final_frame():
+    """#1212: with no list delta at all the validated list is still rendered."""
+    meta = _final_meta(citations=[CITE_A, CITE_B])
+    content, _events = run_pipe(FakeAgent(_frames(
+        PROSE, finish="stop", meta=meta)))
+    assert content == PROSE + docs_pipe._validated_list(meta)
+    assert content.count("**Citations:**") == 1
+
+
+def test_matching_agent_list_delta_is_still_shown_verbatim():
+    """#1212: the matching case keeps the exact bytes of the existing pin."""
+    content, _events = run_pipe(FakeAgent(_frames(
+        PROSE, AGENT_LIST_A, finish="stop", meta=_final_meta(citations=[CITE_A]))))
+    assert content == PROSE + SHOWN_LIST_A
+
+
+def test_final_frame_without_validated_citations_changes_nothing():
+    """#1212: with no validated list the mismatching delta still goes to the
+    filter as model text and nothing is rendered."""
+    content, _events = run_pipe(FakeAgent(_frames(
+        PROSE, f"\n\n**Citations:**\n- {CITE_A}", finish="stop",
+        meta=_final_meta(citations=[]))))
+    assert content == PROSE + "\n\n"
+    assert "Citations:" not in content
+    assert CITE_A not in content
 
 
 
