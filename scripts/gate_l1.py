@@ -14,6 +14,9 @@ verification:
   6. Cleans up collections and stops the simulator container.
   7. Exits nonzero if any regression or query failure occurs, or 2 when the
      gate cannot be applied (missing/wrong-mode baseline, golden sha mismatch).
+     --update-baseline records the report as the baseline only when the run
+     had no query failures; otherwise the baseline is left untouched, the
+     reports are still written, and the exit code is 1.
 """
 
 from __future__ import annotations
@@ -302,7 +305,18 @@ def run_gate(
         if baseline_path.exists():
             baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
 
-        if update_baseline_flag:
+        if update_baseline_flag and report.get("failures", 0) > 0:
+            # A run with query failures must never become the new pin: an
+            # errored retrieval result is not a reference. The refusal
+            # withholds only the baseline write; the reports below still
+            # record the failed run and its failures decide the exit code
+            # (same contract as scripts/eval_retrieval.py, #1213).
+            print(
+                f"ERROR: --update-baseline refused: {report['failures']} query failures occurred; "
+                f"baseline file left unchanged: {baseline_path}",
+                file=sys.stderr,
+            )
+        elif update_baseline_flag:
             update_baseline(report, baseline_path)
             print(f"[*] baseline updated at {baseline_path}", file=sys.stderr)
             baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
