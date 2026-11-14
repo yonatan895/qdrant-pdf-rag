@@ -228,6 +228,16 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
         conn.close()
 
 
+def _read_status(path: Path) -> dict:
+    """Counters written by the previous run; a missing, unreadable or
+    non-object status file counts as empty."""
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
 def _write_status(path: Path, status: dict) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(status, sort_keys=True), encoding="utf-8")
@@ -274,7 +284,7 @@ def main(argv: list[str]) -> int:
         print("chat purge refused: --days must be 1..3650 and intervals positive", file=sys.stderr)
         return 2
     db = args.db or args.data_dir / "webui.db"
-    status: dict = {}
+    status = _read_status(args.data_dir / STATUS_NAME)
     while True:
         ok = run_once(db, args.data_dir, args.days, status, time.time())
         if args.once:

@@ -754,3 +754,44 @@ def test_purge_cli_once_exit_codes_and_window_bounds(tmp_path):
     for suffix in ("-wal", "-shm"):
         (data / f"webui.db{suffix}").unlink(missing_ok=True)
     assert purge.main(["--days", "30", "--data-dir", str(data), "--once"]) == 1
+
+
+def test_purge_main_resumes_its_counters_from_the_status_file(tmp_path, capsys):
+    data, db, conn = _db(tmp_path, chat_columns="id TEXT PRIMARY KEY")
+    status: dict = {}
+    assert purge.run_once(db, data, 30, status, NOW) is False
+    assert purge.run_once(db, data, 30, status, NOW + 1) is False
+    recorded = json.loads((data / purge.STATUS_NAME).read_text())
+    assert recorded["consecutive_failures"] == 2 and recorded["total_failures"] == 2
+    conn.close()
+    capsys.readouterr()
+    # A new process starts from an empty dict, like a pod restart.
+    assert purge.main(["--days", "30", "--data-dir", str(data), "--once"]) == 1
+    resumed = json.loads((data / purge.STATUS_NAME).read_text())
+    assert resumed["consecutive_failures"] == 3 and resumed["total_failures"] == 3
+    err = capsys.readouterr().err
+    assert "chat purge FAILED (schema); consecutive failures 3" in err
+
+
+def test_purge_main_counts_a_status_file_that_is_not_json_as_empty(tmp_path, capsys):
+    data, _db_path, conn = _db(tmp_path, chat_columns="id TEXT PRIMARY KEY")
+    conn.close()
+    (data / purge.STATUS_NAME).write_text("not json at all\n")
+    assert purge.main(["--days", "30", "--data-dir", str(data), "--once"]) == 1
+    recorded = json.loads((data / purge.STATUS_NAME).read_text())
+    assert recorded["consecutive_failures"] == 1 and recorded["total_failures"] == 1
+    err = capsys.readouterr().err
+    assert "chat purge FAILED (schema); consecutive failures 1" in err
+    assert "Traceback" not in err
+
+
+def test_purge_main_with_no_status_file_reports_a_fresh_success(tmp_path):
+    data, _db_path, conn = _db(tmp_path)
+    _seed(conn, data)
+    conn.close()
+    assert not (data / purge.STATUS_NAME).exists()
+    assert purge.main(["--days", "30", "--data-dir", str(data), "--once"]) == 0
+    recorded = json.loads((data / purge.STATUS_NAME).read_text())
+    assert recorded["consecutive_failures"] == 0
+    assert recorded["last_success"] and not recorded["last_error"]
+
