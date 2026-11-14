@@ -59,6 +59,9 @@ GATEWAY_TRANSPORT_NETWORK_ID="${GATEWAY_TRANSPORT_NETWORK_ID:-}"
 GATEWAY_TRANSPORT_NETWORK_CREATED="${GATEWAY_TRANSPORT_NETWORK_CREATED:-0}"
 GATEWAY_RUN_OWNER="${GATEWAY_RUN_OWNER:-}"
 GATEWAY_RUN_LABEL="io.mainframe-rag.gateway-run"
+# Private /24s requested, in order, for a network this script creates (#1218).
+# The runtime's own pool can hold a backend address; a fixed list, not a setting.
+GATEWAY_NETWORK_SUBNETS="10.213.17.0/24 10.213.18.0/24 172.29.217.0/24 192.168.217.0/24"
 GATEWAY_NETWORK_TARGET="$PG_NET"
 PG_PASSWORD="${PG_PASSWORD:-litellm-local-dev}"
 GATEWAY_RESET_KEYS="${GATEWAY_RESET_KEYS:-0}"
@@ -257,7 +260,23 @@ prepare_transport_network() {
         fi
     else
         [ -z "$GATEWAY_TRANSPORT_NETWORK_ID" ] || die "transport network identity changed"
-        _created_network_id="$(gateway_docker network create "$PG_NET" 2>/dev/null)" || die "transport network could not be prepared"
+        # Take the first candidate that holds no backend address and that the
+        # runtime accepts (it refuses one overlapping another network).
+        _created_network_id=""
+        for _candidate_subnet in $GATEWAY_NETWORK_SUBNETS; do
+            [ -z "$(backend_collision "$_candidate_subnet")" ] || continue
+            if _created_network_id="$(gateway_docker network create --subnet "$_candidate_subnet" \
+                "$PG_NET" 2>/dev/null)"; then
+                break
+            fi
+            _created_network_id=""
+        done
+        # A runtime that accepts none keeps its own pool; the backend check
+        # after this function still refuses a collision there.
+        if [ -z "$_created_network_id" ]; then
+            _created_network_id="$(gateway_docker network create "$PG_NET" 2>/dev/null)" || \
+                die "transport network could not be prepared"
+        fi
         _probe_created=1
         if ! _probe_network_id="$(transport_network_id)" || [ "$_probe_network_id" != "$_created_network_id" ]; then
             gateway_docker network rm "$_created_network_id" >/dev/null 2>&1 || true
@@ -271,12 +290,11 @@ prepare_transport_network() {
 
 # A bridge network whose subnet holds a backend address can never carry the
 # probe or the gateway to that backend, so refuse it before anything starts.
-check_network_backend_collision() {
-    _collision_network="$1"
-    shift
-    _collision_subnets="$(gateway_docker network inspect "$_collision_network" \
-        --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null)" || _collision_subnets=""
-    _collision_match="$(python3 - "$_collision_subnets" "$@" <<'PY'
+# backend_collision prints "<subnet> <address>" for the first IP-literal backend
+# host (reasoning, embedding, rerank URL) inside one of the whitespace-separated
+# subnets in $1, and nothing when none is.
+backend_collision() {
+    python3 - "$1" "$GATEWAY_REASONING_URL" "$GATEWAY_EMBED_URL" "$GATEWAY_RERANK_URL" <<'PY' || true
 import ipaddress
 import sys
 from urllib.parse import urlsplit
@@ -303,7 +321,12 @@ for url in sys.argv[2:]:
             sys.exit(0)
 sys.exit(1)
 PY
-    )" || _collision_match=""
+}
+
+check_network_backend_collision() {
+    _collision_subnets="$(gateway_docker network inspect "$1" \
+        --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null)" || _collision_subnets=""
+    _collision_match="$(backend_collision "$_collision_subnets")"
     [ -n "$_collision_match" ] || return 0
     _collision_subnet="${_collision_match% *}"
     _collision_backend="${_collision_match#* }"
@@ -355,8 +378,7 @@ PY
     require_fresh_container_owner
     prepare_transport_network
     trap 'release_transport_network || true; exit 130' INT TERM
-    check_network_backend_collision "$GATEWAY_TRANSPORT_NETWORK_ID" \
-        "$GATEWAY_REASONING_URL" "$GATEWAY_EMBED_URL" "$GATEWAY_RERANK_URL"
+    check_network_backend_collision "$GATEWAY_TRANSPORT_NETWORK_ID"
     # Emit ownership before the potentially interrupted probe, so recovery can
     # release an owned network. This identity alone is never a passing result:
     # the caller must also require this operation's exit status to be zero.
@@ -593,8 +615,7 @@ if [ "$GATEWAY_RESET_KEYS" = "1" ]; then
 fi
 
 prepare_transport_network
-check_network_backend_collision "$GATEWAY_TRANSPORT_NETWORK_ID" \
-    "$GATEWAY_REASONING_URL" "$GATEWAY_EMBED_URL" "$GATEWAY_RERANK_URL"
+check_network_backend_collision "$GATEWAY_TRANSPORT_NETWORK_ID"
 echo "==> Starting key-store postgres ($PG_NAME, volume $PG_VOLUME)"
 service_docker "$PG_MEMORY_MIB" -d --rm --name "$PG_NAME" --network "$GATEWAY_NETWORK_TARGET" \
     --label "$GATEWAY_RUN_LABEL=$GATEWAY_RUN_OWNER" \

@@ -8,6 +8,7 @@ external network, GPU, real gateway or model service is contacted.
 from __future__ import annotations
 
 import http.server
+import ipaddress
 import json
 import os
 import shutil
@@ -403,15 +404,24 @@ if args[:2] == ["network", "inspect"]:
     else:
         sys.exit(2)
 elif args[:2] == ["network", "create"]:
-    if network(args[2]):
+    name = args[-1]
+    assert len(args) == 3 or (len(args) == 5 and args[2] == "--subnet"), args
+    subnet = os.environ.get("FAKE_GATEWAY_SUBNET", "")
+    if len(args) == 5:
+        # A requested subnet the runtime refuses (an overlapping pool) fails
+        # the create; "all" models a runtime that accepts no requested subnet.
+        subnet = args[3]
+        refused = os.environ.get("FAKE_GATEWAY_REFUSE_SUBNETS", "").split()
+        if "all" in refused or subnet in refused:
+            sys.exit(1)
+    if network(name):
         sys.exit(1)
     count_path = root / "network-count"
     count = int(count_path.read_text()) + 1 if count_path.exists() else 1
     count_path.write_text(str(count))
-    networks[args[2]] = {"name": args[2], "id": f"{count:064x}", "driver": "bridge",
-                         "subnet": os.environ.get("FAKE_GATEWAY_SUBNET", "")}
+    networks[name] = {"name": name, "id": f"{count:064x}", "driver": "bridge", "subnet": subnet}
     if os.environ.get("FAKE_GATEWAY_SCENARIO") == "replace-after-create":
-        networks[args[2]]["id"] = "d" * 64
+        networks[name]["id"] = "d" * 64
     state_path.write_text(json.dumps(networks))
     print(f"{count:064x}")
 elif args[:2] == ["network", "ls"]:
@@ -917,7 +927,9 @@ def test_probe_refuses_created_transport_network_whose_subnet_contains_a_backend
     gateway_transport,
 ):
     root, _, urls, _ = gateway_transport
-    probe = _transport_operation(gateway_transport, FAKE_GATEWAY_SUBNET="127.0.0.0/24")
+    # The runtime accepts no requested subnet and its own pool holds the backend.
+    probe = _transport_operation(gateway_transport, FAKE_GATEWAY_SUBNET="127.0.0.0/24",
+                                 FAKE_GATEWAY_REFUSE_SUBNETS="all")
     assert probe.returncode != 0, probe.stdout
     assert probe.stdout == ""
     assert _collision_line("127.0.0.0/24", "127.0.0.2") in probe.stderr
@@ -954,16 +966,96 @@ def test_probe_refuses_adopted_transport_network_subnet_collision_without_removi
     assert networks[TRANSPORT_NETWORK]["id"] == adopted_id
 
 
-def test_probe_creates_transport_network_on_non_colliding_subnet(gateway_transport):
+def _requested_subnets(lab) -> list[str | None]:
+    # Every network create in call order: its --subnet, or None for the
+    # runtime's own address pool.
+    return [argv[3] if "--subnet" in argv else None
+            for argv in _transport_calls(lab) if argv[:2] == ["network", "create"]]
+
+
+def _assert_private_backend_free_24(subnet: str, backends: list[str]) -> None:
+    network = ipaddress.ip_network(subnet)
+    assert network.version == 4 and network.prefixlen == 24 and network.is_private, subnet
+    assert not any(ipaddress.ip_address(address) in network for address in backends), subnet
+
+
+def test_probe_creates_its_network_on_a_requested_backend_free_private_subnet(gateway_transport):
+    # The runtime's own pool would collide; the created network must not use it.
     root, _, _, _ = gateway_transport
-    probe = _transport_operation(gateway_transport, FAKE_GATEWAY_SUBNET="10.244.0.0/24")
+    probe = _transport_operation(gateway_transport, FAKE_GATEWAY_SUBNET="127.0.0.0/24")
     assert probe.returncode == 0, probe.stderr
     identity = json.loads(probe.stdout)
-    assert identity["network_name"] == TRANSPORT_NETWORK
-    calls = _transport_calls(gateway_transport)
-    assert any(argv[:2] == ["network", "create"] for argv in calls), calls
-    assert any(argv[0] == "run" for argv in calls), calls
-    assert TRANSPORT_NETWORK in json.loads((root / "networks.json").read_text())
+    assert identity["created"] is True and identity["network_id"] == CREATED_NETWORK_ID
+    requested = _requested_subnets(gateway_transport)
+    assert len(requested) == 1 and requested[0] is not None, requested
+    _assert_private_backend_free_24(requested[0], ["127.0.0.2"])
+    stored = json.loads((root / "networks.json").read_text())[TRANSPORT_NETWORK]
+    assert stored["subnet"] == requested[0]
+    runs = [argv for argv in _transport_calls(gateway_transport) if argv[0] == "run"]
+    assert len(runs) == 1 and runs[0][runs[0].index("--network") + 1] == CREATED_NETWORK_ID
+
+
+def test_created_network_skips_a_candidate_holding_a_backend_address(gateway_transport):
+    first = _transport_operation(gateway_transport)
+    assert first.returncode == 0, first.stderr
+    [preferred] = _requested_subnets(gateway_transport)
+    released = _transport_operation(gateway_transport, "transport-release",
+                                    GATEWAY_TRANSPORT_NETWORK_ID=CREATED_NETWORK_ID,
+                                    GATEWAY_TRANSPORT_NETWORK_CREATED="1")
+    assert released.returncode == 0, released.stderr
+    rerank_address = str(ipaddress.ip_network(preferred).network_address + 5)
+    before = len(_requested_subnets(gateway_transport))
+    second = _transport_operation(gateway_transport,
+                                  GATEWAY_RERANK_URL=f"http://{rerank_address}:8002/v1")
+    assert second.returncode == 0, second.stderr
+    requested = _requested_subnets(gateway_transport)[before:]
+    # The colliding candidate is never requested, not created and then removed.
+    assert len(requested) == 1 and requested[0] not in (None, preferred), requested
+    _assert_private_backend_free_24(requested[0], ["127.0.0.2", rerank_address])
+    assert json.loads(second.stdout)["created"] is True
+
+
+def test_created_network_takes_the_next_candidate_the_runtime_accepts(gateway_transport):
+    first = _transport_operation(gateway_transport)
+    assert first.returncode == 0, first.stderr
+    [preferred] = _requested_subnets(gateway_transport)
+    released = _transport_operation(gateway_transport, "transport-release",
+                                    GATEWAY_TRANSPORT_NETWORK_ID=CREATED_NETWORK_ID,
+                                    GATEWAY_TRANSPORT_NETWORK_CREATED="1")
+    assert released.returncode == 0, released.stderr
+    second = _transport_operation(gateway_transport, FAKE_GATEWAY_REFUSE_SUBNETS=preferred)
+    assert second.returncode == 0, second.stderr
+    requested = _requested_subnets(gateway_transport)[1:]
+    assert len(requested) == 2 and requested[0] == preferred and requested[1] not in (None, preferred)
+    _assert_private_backend_free_24(requested[1], ["127.0.0.2"])
+    # A refused request creates nothing: the accepted one is the second network.
+    assert json.loads(second.stdout)["network_id"] == "0" * 63 + "2"
+    networks = json.loads((gateway_transport[0] / "networks.json").read_text())
+    assert networks[TRANSPORT_NETWORK]["subnet"] == requested[1]
+
+
+def test_runtime_accepting_no_candidate_falls_back_to_its_pool_and_still_checks(gateway_transport):
+    probe = _transport_operation(gateway_transport, FAKE_GATEWAY_REFUSE_SUBNETS="all",
+                                 FAKE_GATEWAY_SUBNET="10.244.0.0/24")
+    assert probe.returncode == 0, probe.stderr
+    requested = _requested_subnets(gateway_transport)
+    assert requested[-1] is None and all(requested[:-1]), requested
+    assert len(requested) >= 2
+    assert json.loads(probe.stdout)["created"] is True
+
+
+def test_serve_creates_its_network_on_a_requested_backend_free_subnet(gateway_transport):
+    root, _, _, _ = gateway_transport
+    serve = _transport_operation(gateway_transport, "serve", FAKE_GATEWAY_SUBNET="127.0.0.0/24")
+    assert serve.returncode == 0, serve.stderr
+    requested = _requested_subnets(gateway_transport)
+    assert len(requested) == 1 and requested[0] is not None, requested
+    _assert_private_backend_free_24(requested[0], ["127.0.0.2"])
+    normal_runs = [argv for argv in _transport_calls(gateway_transport) if argv[0] == "run"]
+    assert len(normal_runs) == 2
+    assert all(argv[argv.index("--network") + 1] == CREATED_NETWORK_ID for argv in normal_runs)
+    # The created network is this run's to remove when serve ends.
+    assert TRANSPORT_NETWORK not in json.loads((root / "networks.json").read_text())
 
 
 def test_probe_refuses_when_only_the_rerank_backend_address_collides(gateway_transport):
@@ -971,6 +1063,7 @@ def test_probe_refuses_when_only_the_rerank_backend_address_collides(gateway_tra
     probe = _transport_operation(
         gateway_transport,
         FAKE_GATEWAY_SUBNET="172.17.0.0/24",
+        FAKE_GATEWAY_REFUSE_SUBNETS="all",
         GATEWAY_RERANK_URL="http://172.17.0.1:8002/v1",
     )
     assert probe.returncode != 0, probe.stdout
@@ -985,7 +1078,9 @@ def test_probe_refuses_when_only_the_rerank_backend_address_collides(gateway_tra
 
 def test_serve_refuses_created_network_collision_and_starts_no_container(gateway_transport):
     root, _, urls, _ = gateway_transport
-    serve = _transport_operation(gateway_transport, "serve", FAKE_GATEWAY_SUBNET="127.0.0.0/24")
+    # The runtime accepts no requested subnet and its own pool holds the backend.
+    serve = _transport_operation(gateway_transport, "serve", FAKE_GATEWAY_SUBNET="127.0.0.0/24",
+                                 FAKE_GATEWAY_REFUSE_SUBNETS="all")
     assert serve.returncode != 0, serve.stdout
     assert serve.stdout == ""
     assert _collision_line("127.0.0.0/24", "127.0.0.2") in serve.stderr
