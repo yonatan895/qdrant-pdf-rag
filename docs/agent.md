@@ -1615,8 +1615,9 @@ tokenizer share; a later named profile can carry its own instance.
   cap is never sent. This is deliberately not a cap on every generation: a
   long estimator-only prompt is uncapped, so the rule adds no new server
   refusal (and no new `502`) for a request the earlier code answered, and no
-  estimator-only answer gets less generation budget than the verified path or
-  the earlier code gives it. A prompt over
+  estimator-only answer gets a smaller cap than the verified path sends. A
+  sent cap is the #777 runaway bound: an answer longer than it ends as
+  `finish_reason: length`, exactly as on the verified path. A prompt over
   its limit is still `422 prompt_budget_exceeded` before any model call. Only
   the no-tokenizer character-packing path (offline and tests; serving always
   has a tokenizer) also sends no cap.

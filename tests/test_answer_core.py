@@ -578,7 +578,7 @@ def test_prompt_token_upper_bound_counts_utf8_bytes_and_template_overhead():
     # One byte more leaves room 4999: no cap, never a smaller one (S2-1201).
     (11229, False, 6000, None),
     # Medium prompt: upper bound 12028, room 4228 -> no cap (the earlier rule
-    # sent 4228, a budget the base never imposed).
+    # sent 4228, a cap smaller than the verified path's).
     (12000, False, 6000, None),
     # Upper bound 14528 leaves room 1728, below the 2000 answer reserve: no cap.
     (14500, False, 9000, None),
@@ -599,6 +599,18 @@ def test_output_cap_follows_the_byte_upper_bound(content_chars, verified, prompt
             _prompt_token_upper_bound(prepared.messages)
             + cap + settings.llm_token_safety_margin <= settings.llm_max_model_len
         )
+
+
+@pytest.mark.parametrize(("extra_bytes", "cap"), [(0, 7000), (1, None)])
+def test_estimator_only_complex_path_uses_its_own_thinking_reserve(extra_bytes, cap):
+    """The complex path's full cap is answer 2000 + complex thinking 5000 =
+    7000 (not the simple path's 5000): sent when the byte room is exactly 7000,
+    none one byte later, never the simple-path cap or a room-bounded one."""
+    settings = _settings(**_CAP_BUDGET)
+    upper = settings.llm_max_model_len - settings.llm_token_safety_margin - 7000
+    prepared = _prepared_prompt("x" * (upper - len(b"user") - 8 - 16 + extra_bytes))
+    assert _prompt_token_upper_bound(prepared.messages) == upper + extra_bytes
+    assert _output_cap(settings, "complex", prepared) == cap
 
 
 @pytest.mark.parametrize("complexity", ["simple", "complex"])
@@ -656,8 +668,9 @@ def test_default_spaced_hex_prompt_is_not_a_new_cap_refusal():
     is 35.5k bytes (review measured 4328 estimated against 27459 real for the
     same shape); the old ratio cap sent 10752 at this size, enough for a
     server's `prompt + max_tokens` check to refuse a request base answered
-    uncapped. The new cap is absent, or bounded by the prompt's bytes, so this
-    shape cannot become a new 502 because of the cap."""
+    uncapped. The new rule sends the full cap only when the prompt's bytes
+    leave room for it, so here it sends none and this shape cannot become a
+    new 502 because of the cap."""
     settings = _settings()  # window 32768, answer 2560, thinking 8192
     text = "ab12 " * 800  # 4000 characters of spaced hex
     hits = [

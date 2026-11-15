@@ -272,9 +272,11 @@ def _output_cap(settings: Settings, complexity: str, prepared: PreparedPrompt) -
     byte bound overstates real tokens (about 4x on the S2-1201 gate prompts),
     so a room-bounded cap of 3296 cut off a medium-effort answer the base
     completed uncapped (DIA-18, PR #1201 gate). With this rule an
-    estimator-only generation either gets exactly the verified path's budget
-    or runs uncapped as on the base, so the cap adds no new server refusal, no
-    new 502 and no answer shorter than the base's. A prompt over its limit was
+    estimator-only generation either gets exactly the verified path's cap
+    (the #777 runaway bound: an answer longer than that cap ends as `length`,
+    as it would on the verified path) or runs uncapped with the base's request
+    bytes. The cap adds no new server refusal and no new 502, and never a
+    budget smaller than the verified path's. A prompt over its limit was
     already refused as `prompt_budget_exceeded` before this point.
 
     None also on the no-tokenizer character-packing path
