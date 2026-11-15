@@ -267,13 +267,15 @@ def _output_cap(settings: Settings, complexity: str, prepared: PreparedPrompt) -
     An estimator-only count (a gateway without `/tokenize`, or a transient
     downgrade) cannot establish that bound, so the cap is priced against
     `_prompt_token_upper_bound(prepared.messages)` instead:
-    `room = window - upper_bound - safety`; if `room` is at least the answer
-    reserve, send `min(full, room)`, otherwise send no cap. This is
-    deliberately not a cap-on-every-generation rule: a long estimator-only
-    prompt runs uncapped, exactly as on the base, so the cap adds no new
-    server refusal (and no new 502 for a request the base answered). A prompt
-    over its limit was already refused as `prompt_budget_exceeded` before this
-    point.
+    `room = window - upper_bound - safety`; if the full cap fits in `room`,
+    send it, otherwise send no cap. Never a cap smaller than the full one: the
+    byte bound overstates real tokens (about 4x on the S2-1201 gate prompts),
+    so a room-bounded cap of 3296 cut off a medium-effort answer the base
+    completed uncapped (DIA-18, PR #1201 gate). With this rule an
+    estimator-only generation either gets exactly the verified path's budget
+    or runs uncapped as on the base, so the cap adds no new server refusal, no
+    new 502 and no answer shorter than the base's. A prompt over its limit was
+    already refused as `prompt_budget_exceeded` before this point.
 
     None also on the no-tokenizer character-packing path
     (`prompt_tokens is None`), which has no count to place a cap against
@@ -293,9 +295,7 @@ def _output_cap(settings: Settings, complexity: str, prepared: PreparedPrompt) -
         - _prompt_token_upper_bound(prepared.messages)
         - settings.llm_token_safety_margin
     )
-    if room < settings.llm_reserved_output_tokens:
-        return None
-    return min(full, room)
+    return full if room >= full else None
 
 
 async def _build_prepared_prompt(

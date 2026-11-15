@@ -573,9 +573,13 @@ def test_prompt_token_upper_bound_counts_utf8_bytes_and_template_overhead():
 @pytest.mark.parametrize(("content_chars", "verified", "prompt_tokens", "cap"), [
     # Short prompt: upper bound 1028, room 15228 -> the full priced cap.
     (1000, False, 1000, 5000),
-    # Medium prompt: upper bound 12028, room 4228 -> capped by the byte bound,
-    # still positive and provably inside the window.
-    (12000, False, 6000, 4228),
+    # Upper bound 11256 leaves room 5000, exactly the full cap: sent whole.
+    (11228, False, 6000, 5000),
+    # One byte more leaves room 4999: no cap, never a smaller one (S2-1201).
+    (11229, False, 6000, None),
+    # Medium prompt: upper bound 12028, room 4228 -> no cap (the earlier rule
+    # sent 4228, a budget the base never imposed).
+    (12000, False, 6000, None),
     # Upper bound 14528 leaves room 1728, below the 2000 answer reserve: no cap.
     (14500, False, 9000, None),
     # A server-verified count is exact and keeps the full cap.
@@ -584,16 +588,38 @@ def test_prompt_token_upper_bound_counts_utf8_bytes_and_template_overhead():
     (1000, False, None, None),
 ])
 def test_output_cap_follows_the_byte_upper_bound(content_chars, verified, prompt_tokens, cap):
-    """PR #1201 review B1: an estimator-only cap is priced from a quantity
-    that cannot undercount, or not sent at all."""
+    """PR #1201 review B1 and gate: an estimator-only cap is priced from a
+    quantity that cannot undercount, and is either the full cap or absent."""
     prepared = _prepared_prompt("x" * content_chars, verified=verified, prompt_tokens=prompt_tokens)
     settings = _settings(**_CAP_BUDGET)
     assert _output_cap(settings, "simple", prepared) == cap
     if cap is not None and not verified:
+        assert cap == 5000  # answer 2000 + simple thinking 3000, never less
         assert (
             _prompt_token_upper_bound(prepared.messages)
             + cap + settings.llm_token_safety_margin <= settings.llm_max_model_len
         )
+
+
+@pytest.mark.parametrize("complexity", ["simple", "complex"])
+def test_gate_dia18_shape_runs_uncapped_not_at_the_byte_room(complexity):
+    """PR #1201 eval gate (S2-1201), row DIA-18 on the estimator-only path:
+    7412 real tokens but a byte bound of 29344, so the earlier rule sent
+    32768 - 29344 - 128 = 3296 and a medium-effort answer the base completed
+    uncapped ended as `length` in both passes. With shipped defaults the full
+    cap does not fit that room, so no cap is sent, as on the base."""
+    settings = _settings()  # window 32768, margin 128, answer 2560
+    content = "d" * (29344 - len(b"user") - 8 - 16)
+    prepared = _prepared_prompt(content, prompt_tokens=7412)
+    assert _prompt_token_upper_bound(prepared.messages) == 29344
+    assert _output_cap(settings, complexity, prepared) is None
+    verified = _prepared_prompt(content, verified=True, prompt_tokens=7412)
+    thinking = (
+        settings.llm_thinking_reserve_tokens_complex
+        if complexity == "complex"
+        else settings.llm_thinking_reserve_tokens_simple
+    )
+    assert _output_cap(settings, complexity, verified) == settings.llm_reserved_output_tokens + thinking
 
 
 _LONG_PROSE = [ChatMessage(role="user", content="p" * 31000)]

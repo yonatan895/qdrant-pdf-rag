@@ -762,9 +762,9 @@ select `complex`. Default is `simple`.
   reproduces its earlier budget. Increasing a reserve leaves less space for
   excerpts and chat history. A server-verified prompt count also sends
   reserved output plus the path's thinking reserve as `max_tokens`
-  (`answer_core._output_cap`); an estimator-only prompt sends that cap only
-  when the prompt's byte upper bound plus the reserves fits the window, and
-  otherwise stays uncapped as before
+  (`answer_core._output_cap`); an estimator-only prompt sends that same full
+  cap only when the prompt's byte upper bound plus the full cap fits the
+  window, and otherwise stays uncapped as before, never with a smaller cap
   ([model request arguments and output cap](#model-request-arguments), #1193).
   Neither guarantees completion; `finish_reason=length` still produces
   `generation_incomplete`.
@@ -1059,7 +1059,7 @@ readers:
 | `answer_timeout_s` | 300.0 | reasoning client wait per model I/O (not a total on a stream; a buffered caller still gets a total), expiry is `504 model_timeout`; no transport retries, explicit fallback policy below; budgets in §6 |
 | `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | medium / medium / 0.2 | answer path (#917, was xhigh / xhigh from #777) |
 | `llm_reasoning_efforts` | `low,medium,xhigh` | served template's effort domain (Qwen3.8): console choices; both efforts above must be members (#748) |
-| `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 32768 / 2560 / 8192 / 128 / 1200 / 5.0 | tokenizer-path budgeting (#298, #777). `llm_max_model_len` must not exceed the served `--max-model-len`. With a server-verified prompt count the reserved output plus the path's thinking reserve is sent as `max_tokens` (prompt + cap stays inside the window minus the margin), so a runaway xhigh generation ends as `finish_reason: length` → `generation_incomplete`; an estimator-only prompt is capped only when its byte upper bound plus the reserves fits, otherwise it runs uncapped as before |
+| `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 32768 / 2560 / 8192 / 128 / 1200 / 5.0 | tokenizer-path budgeting (#298, #777). `llm_max_model_len` must not exceed the served `--max-model-len`. With a server-verified prompt count the reserved output plus the path's thinking reserve is sent as `max_tokens` (prompt + cap stays inside the window minus the margin), so a runaway xhigh generation ends as `finish_reason: length` → `generation_incomplete`; an estimator-only prompt gets the same full cap only when its byte upper bound plus that cap fits, otherwise it runs uncapped as before (never a smaller cap) |
 | `llm_extra_body` / `llm_effort_transport` | empty / `top_level` | [model request arguments](#model-request-arguments) (#1193): one JSON object merged into every chat request by `_chat_body`; how the effort travels (`top_level`, `chat_template`, `none`). Both validated at startup; unset sends the earlier request |
 | `llm_thinking_reserve_tokens_simple` | 8192 | reasoning headroom in single-turn and chat prompt budgets (provisional for xhigh, #777); environment input `LLM_THINKING_RESERVE_TOKENS_SIMPLE` |
 | `llm_stream` | `false` | TTFT measurement and streaming recovery policy for server-side reasoning calls (the wire is a stream either way, #868) |
@@ -1569,6 +1569,15 @@ tokenizer share; a later named profile can carry its own instance.
   `chat_template_kwargs`) or `none` (not sent). A thinking switch is a static
   template argument and goes into `LLM_EXTRA_BODY`, for example
   `{"chat_template_kwargs": {"enable_thinking": false}}`.
+- **Not through the local/CI gateway:** the LiteLLM gateway that
+  `run_local_gateway.sh` renders answers every chat request carrying
+  `chat_template_kwargs` with HTTP 500 from its adapter, before the model sees
+  it (S2-1201 probe, 2026-11-15), while its `/tokenize` passthrough accepts the
+  same arguments. So `LLM_EXTRA_BODY` with template arguments and
+  `LLM_EFFORT_TRANSPORT=chat_template` end as `502 upstream_error` on that
+  gateway; the defaults send no template arguments and are unaffected. Check
+  a site gateway with `probe_gateway.py --probe-args` before setting either.
+  The adapter fix is tracked in #1247.
 - **Refused at startup, never per request** (`Settings` validation; messages
   name the field, not the supplied text): a value that is not one JSON object
   with unique, nonempty keys and finite numbers, or is longer than 4096
@@ -1599,12 +1608,15 @@ tokenizer share; a later named profile can carry its own instance.
   bounded above by a quantity that cannot undercount: the UTF-8 byte length of
   every message's role and content, plus a fixed per-message and total
   overhead for chat-template special tokens (one token is at least one byte).
-  If `window − upper_bound − llm_token_safety_margin` is at least
-  `llm_reserved_output_tokens`, the cap is that room, at most the verified
-  cap. Otherwise no cap is sent and the prompt runs exactly as it did before
-  this change. This is deliberately not a cap on every generation: a long
-  estimator-only prompt is uncapped, so the rule adds no new server refusal
-  (and no new `502`) for a request the earlier code answered. A prompt over
+  If `window − upper_bound − llm_token_safety_margin` is at least the full
+  cap (answer reserve plus the path's thinking reserve), the full cap is sent,
+  the same one the verified path sends. Otherwise no cap is sent and the
+  prompt runs exactly as it did before this change; a smaller, room-bounded
+  cap is never sent. This is deliberately not a cap on every generation: a
+  long estimator-only prompt is uncapped, so the rule adds no new server
+  refusal (and no new `502`) for a request the earlier code answered, and no
+  estimator-only answer gets less generation budget than the verified path or
+  the earlier code gives it. A prompt over
   its limit is still `422 prompt_budget_exceeded` before any model call. Only
   the no-tokenizer character-packing path (offline and tests; serving always
   has a tokenizer) also sends no cap.
@@ -1614,7 +1626,12 @@ tokenizer share; a later named profile can carry its own instance.
   `real prompt + cap = 38211 > 32768`, so a request the base answered uncapped
   could be refused. That is why the estimator-only cap is priced against the
   byte upper bound: whenever a cap is sent, `real prompt + cap <= window −
-  margin` holds; otherwise none is sent. Measured undercounts on original
+  margin` holds; otherwise none is sent. The bound overstates real tokens
+  (about 4x on the S2-1201 gate prompts), so a cap sized to the leftover room
+  is too small: in that gate the earlier room-bounded rule sent 3296 for a
+  7412-token prompt (byte bound 29344) and cut off a medium-effort answer the
+  base completed uncapped (DIA-18, `finish_reason: length` in both passes).
+  Hence full cap or none. Measured undercounts on original
   synthetic text with two tokenizer families (2026-11-13): prose +2%, JCL +35
   to +41%, tables +47 to +53%, message lines about +140%, hex dumps about 8
   times. None can break the bound because a token is at least one byte. A
@@ -1639,7 +1656,7 @@ tokenizer share; a later named profile can carry its own instance.
 | Buffered `achat` / `_chat_sync` without `LLM_STREAM` | One streamed request assembled into the buffered result (#868); no recovery POST, as before. An upstream error or malformed frame, a missing `[DONE]` or a missing explicit finish is `TruncatedStreamError`; an empty `stop` completion is an empty result; `length`/`content_filter` is returned as that finish. Total wait is `answer_timeout_s`, expiry `model_timeout` |
 | Buffered `achat` / `_chat_sync` with `LLM_STREAM` | Empty content *with a `stop` finish*, caught stream/protocol failures, missing `[DONE]`, upstream error/malformed frame, or missing explicit finish lead to one non-streaming POST; accumulated content is discarded, even if a prefix was buffered. The POST must itself carry an explicit finish, have no top-level error, and have valid string content (issue #365). Never recovered (issue #868): a stream that ended with an explicit non-`stop` finish (`length`, `content_filter`) and no content is returned as that finish, and an `httpx` timeout (`answer_timeout_s` spent) propagates as `model_timeout` instead of starting a second ask |
 | Client-visible `chat_stream` | No-content (`stop` finish) or pre-output stream failure (malformed first frame, pre-output error, missing finish/done before any emitted token) can make one non-streaming ask; malformed/rejected/empty/no-finish fallback fails. Missing `[DONE]`, an upstream error frame, a malformed frame, or `[DONE]` without an explicit finish after actually emitted content raises truncation; no replay after those tokens. The shared core applies the same gate to the terminal `done` item itself: a falsy/missing `done` finish, or a token-only stream with no `done`, raises truncation and never synthesizes `stop` (issue #365). A validated stream with zero content deltas and an explicit non-`stop` finish ends with that `done` and no recovery POST (issue #868); timeouts propagate |
-| Tokenizer | Plan locally, verify whole messages per trim round with the generation's template arguments (#1193). No per-chunk RPCs; gateway may lack `/tokenize` (the generation is then capped only when the prompt's byte upper bound plus the reserves fits, otherwise not at all). Three outcomes (issue #1214). An endpoint that is not served or gives no usable count (404/405/501, a 200 without a usable count) warns once and pins the estimator until restart. A transient failure (transport error, timeout, 408/429/5xx other than 501) warns and uses the estimator for `TOKENIZE_RETRY_AFTER_S` (60 s). Any other refusal (400/401/403, any other 4xx, an unexpected 3xx) warns once naming the status and uses the estimator for the long `TOKENIZE_REFUSED_RETRY_AFTER_S` (600 s) window, never pinning: one unusual payload or a rotated key must not disable remote counting for the life of the process. In either window the first count after it expires is the one probe, and a probe success resumes remote counts (issue #835). `budget_verified` reads the counting thread's own last count, so a probe on another thread never confirms an estimated prompt |
+| Tokenizer | Plan locally, verify whole messages per trim round with the generation's template arguments (#1193). No per-chunk RPCs; gateway may lack `/tokenize` (the generation then gets the full cap only when the prompt's byte upper bound plus that cap fits, otherwise no cap). Three outcomes (issue #1214). An endpoint that is not served or gives no usable count (404/405/501, a 200 without a usable count) warns once and pins the estimator until restart. A transient failure (transport error, timeout, 408/429/5xx other than 501) warns and uses the estimator for `TOKENIZE_RETRY_AFTER_S` (60 s). Any other refusal (400/401/403, any other 4xx, an unexpected 3xx) warns once naming the status and uses the estimator for the long `TOKENIZE_REFUSED_RETRY_AFTER_S` (600 s) window, never pinning: one unusual payload or a rotated key must not disable remote counting for the life of the process. In either window the first count after it expires is the one probe, and a probe success resumes remote counts (issue #835). `budget_verified` reads the counting thread's own last count, so a probe on another thread never confirms an estimated prompt |
 | Embed/context/health pools | Bounded Settings connect-only retries, no generic POST replay policy |
 | Rerank | Configured score/rerank endpoint order plus alternate endpoint fallback; exhaustion fails closed; a batch rejected on both legs with HTTP 4xx (not 5xx/transport/shape) is re-scored once with passages cut to `RERANK_RETRY_PASSAGE_MAX_CHARS` (2000), and a failing retry fails closed (issue #664); [retrieval](retrieval.md) owns dispatch |
 | Condensation | Optional reasoning call; failure returns the raw latest query, not a fabricated condensed result |
