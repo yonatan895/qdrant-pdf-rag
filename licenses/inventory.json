@@ -1554,7 +1554,7 @@
             "hypothesis/LICENSE.txt"
           ],
           "set": "hypothesis",
-          "sha256": "c87db521ffd2c8a5e3abf2a2407fe6bd1db8ce4c6ef984e8d96135251fbaec70",
+          "sha256": "9528770daf05ea595970e9c8b6e47e028d8e64a3dc380b13aa824cac7160fc69",
           "url": "https://codeload.github.com/HypothesisWorks/hypothesis/tar.gz/929e5fbdba0aacd87732bbac0db36a1d68db5afe"
         }
       },
