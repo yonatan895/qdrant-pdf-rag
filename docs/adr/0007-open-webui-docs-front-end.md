@@ -128,7 +128,11 @@ Pipe is provisioned and the admin role is limited to the team.
   re-encrypt TLS and a Service CA certificate. The Route-exposure preflight
   refuses any other Route in front of its Service. The agent stays anonymous
   to Open WebUI users (#373), which is safe because the docs corpus is read by
-  everyone.
+  everyone. Residual, pending a maintainer decision (#1255): v0.12.3 lets an
+  admin grant the no-auth "anyone" read on a chat share link even with open
+  sharing off. That link then opens without sign-in for anyone who can reach
+  the Route. The proxy cannot tell a signed-in request apart, so the bound is
+  the admin role limit (S3).
   Scopes include `groups` and `offline_access`: without a refresh token Open
   WebUI deletes the session near expiry and may fall back to an older
   session's token, so the IdP must permit the refresh scope (the real IdP
@@ -144,8 +148,20 @@ Pipe is provisioned and the admin role is limited to the team.
   30 days. It then reclaims the freed database pages, so the text is gone
   from the file. The pattern is ADR-0005/#804: failures are retried and
   counted and are never reported as success. Proof: the stored rows are gone,
-  then the next ordinary chat succeeds. Users may delete their own chats. Chat
-  sharing and admin export are off.
+  then the next ordinary chat succeeds. Users may delete their own chats. Admin
+  export is off. Chat share links are a site value, off by default (#1255).
+  A link stays inside the instance: it opens only after sign-in, for its owner
+  and the users or groups the owner grants, or every signed-in user when the
+  site allows it; the no-auth "anyone" grant is pinned off for users (see R3
+  for the admin residual) and community sharing stays off. A share is a
+  separate snapshot copy (`shared_chat` in v0.12.3). The purge deletes it with
+  its chat, and on its own once the snapshot is older than 30 days even while
+  the chat lives on; that chat is left unshared, with its share grants removed.
+  Temporary chats are never saved: v0.12.3 writes no chat row for a
+  temporary chat id (source reading; live proof is the #1255 combined
+  acceptance). A site may enforce them; the server then refuses to create or
+  import a chat for every non-admin user. Admins are exempt, and chats saved
+  earlier stay until the purge.
 - **S3 Protected copies and admin access.** PVC backups hold manual excerpts
   and pasted incident text. They are protected records that never leave the
   enterprise. They follow the same 30-day window: the purge job also removes

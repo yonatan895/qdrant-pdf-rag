@@ -255,6 +255,20 @@ spec:
               value: "false"
             - name: ENABLE_ADMIN_EXPORT
               value: "false"
+            # Share links (S2, #1255): site values, inside the instance only. The
+            # no-auth "anyone" grant stays off for users (R3); the purge removes
+            # snapshots with their chat or once older than the window.
+            - name: USER_PERMISSIONS_CHAT_SHARE
+              value: {{ $o.chats.share | toString | quote }}
+            - name: USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING
+              value: {{ $o.chats.shareWithAllUsers | toString | quote }}
+            - name: USER_PERMISSIONS_CHAT_ALLOW_OPEN_SHARING
+              value: "false"
+            # Temporary chats are never saved; enforcing them is a site value.
+            - name: USER_PERMISSIONS_CHAT_TEMPORARY
+              value: "true"
+            - name: USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED
+              value: {{ $o.chats.temporaryEnforced | toString | quote }}
             # No content in logs (S4).
             - name: GLOBAL_LOG_LEVEL
               value: INFO

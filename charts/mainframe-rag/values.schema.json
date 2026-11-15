@@ -410,6 +410,16 @@
           "description": "Chat retention window in days (maintainer decision 2026-10-24: 30), enforced by the purge sidecar. Required when enabled."
         },
         "storageSize": { "type": "string", "pattern": "^[1-9][0-9]*(Mi|Gi|Ti)$" },
+        "chats": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Chat share links and temporary chats (ADR-0007 S2, #1255). A share link without sign-in is not a site choice.",
+          "properties": {
+            "share": { "type": "boolean" },
+            "shareWithAllUsers": { "type": "boolean" },
+            "temporaryEnforced": { "type": "boolean" }
+          }
+        },
         "oidc": {
           "type": "object",
           "additionalProperties": false,

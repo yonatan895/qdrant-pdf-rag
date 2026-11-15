@@ -1994,8 +1994,9 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
 **Retention (ADR-0007 S2).** The window is `OPENWEBUI_RETENTION_DAYS` (`openwebui.retentionDays`),
 default **30 days** (maintainer decision 2026-10-24). An explicit null fails the render.
 - The chat-purge sidecar runs hourly. In one transaction it deletes the chats last updated before
-  the window, their shared snapshots and stale snapshots, every row that references a deleted
-  chat by `chat_id`, and file records with their uploads. Deletion runs with `secure_delete`;
+  the window, their share-link snapshots and every snapshot older than the window (a chat that
+  lives on is left unshared: its link stops working and its share grants go), every row that
+  references a deleted chat by `chat_id`, and file records with their uploads. Deletion runs with `secure_delete`;
   the sidecar then truncates the WAL and runs `VACUUM`, so the text is gone from the claim's
   files. Users may also delete their own chats.
 - An unexpected table layout or a timestamp that is not epoch seconds refuses to delete
@@ -2007,6 +2008,23 @@ default **30 days** (maintainer decision 2026-10-24). An explicit null fails the
 - Backups of `rag-openwebui-data` hold chat text. They are protected records that never leave
   the enterprise, and their retention follows the same window: at most 30 days plus one backup
   cycle.
+
+**Share links and temporary chats (ADR-0007 S2, #1255).** Chart values under `openwebui.chats`,
+all off by default; there is no `airgap.env` key for them yet.
+- `share` (`USER_PERMISSIONS_CHAT_SHARE`): users may share a chat as a link `/s/<token>`. The link
+  is a snapshot copy of the chat, opens only after sign-in, and only for its owner and the users or
+  groups the owner grants in the share dialog. `shareWithAllUsers`
+  (`USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING`) also lets the owner open it to every signed-in
+  user. The no-auth "anyone" grant (`USER_PERMISSIONS_CHAT_ALLOW_OPEN_SHARING`) is pinned off;
+  Open WebUI v0.12.3 still lets an admin set it (ADR-0007 R3 residual). Community sharing stays
+  off. A snapshot is purged with its chat, or on its own once it is older than the window.
+- Temporary chats (`USER_PERMISSIONS_CHAT_TEMPORARY`, pinned on) are never saved: the server
+  writes no chat row for a `temporary:` chat id. `temporaryEnforced`
+  (`USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED`) makes every non-admin chat temporary: the server
+  refuses to create or import a chat. Admins are exempt, and chats saved earlier stay until the
+  purge. To enforce for one group only, leave this off and set the group's permission in the
+  Open WebUI admin UI; v0.12.3 combines group permissions most-permissive, so any one group that
+  enforces it enforces it for its members.
 
 **Patch policy and advisory switch-off (ADR-0007 P1).** The maintainer owns patching. Agents
 prepare a monthly import of the latest upstream release as a dedicated pin-bump PR, carrying the

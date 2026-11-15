@@ -174,6 +174,8 @@ ALLOWED = [
     "/api/tasks/stop/x", "/api/v1/auths/", "/api/v1/auths/api_key", "/api/v1/chats/list?page=1",
     "/api/v1/users/user/settings", "/api/v1/models/list", "/api/v1/groups/",
     "/api/v1/functions/id/mainframe_rag_docs", "/api/v1/functions/create", "/api/v1/configs/banners",
+    # Share-link view (#1255): the SPA shell; its data is under /api/v1/chats/share/.
+    "/s/3f2a", "/api/v1/chats/share/3f2a",
     # Encoded spellings of ALLOWED paths still work, and are forwarded unchanged.
     "/api/v1/ch%61ts/list", "/api/v1%2Fchats/list", "/api/v1/chats/a%20b?x=1%2F2",
     # Merged slashes: nginx decides on the merged path; the raw line is forwarded.
@@ -195,6 +197,7 @@ BLOCKED_OTHER = [
     "/api/v1/utils/code/execute", "/api/v1/utils/db/download", "/openai/chat/completions",
     "/ollama/api/chat", "/docs", "/openapi.json", "/api/version/updates", "/api/v1/pipelines/",
     "/api/v1/scim/v2/Users", "/api/v1/chatsX", "/oauthx", "/health/x", "/api", "/api/", "/api/v1/",
+    "/sx", "/share", "/%73x",
 ]
 
 
