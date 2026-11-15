@@ -2004,10 +2004,12 @@ chats. Upgrading from the single model:
 - The model id `mainframe_rag_docs` is gone; its grant row stays in the database unused. Open
   WebUI shows a model only with its own read grant, so ordinary users see **no** Rosetta model
   until an admin grants each entry (step 5). Grant all entries in the same change window.
-- A chat started before the upgrade still names `mainframe_rag_docs`. On opening it, v0.12.3
-  drops a model id it does not list and selects `DEFAULT_MODELS` (`Chat.svelte` `loadChat`), so
-  the next message, or a regenerated answer, goes through the default entry. API callers must
-  use the new ids: the old one is "Model not found".
+- A chat started before the upgrade still names `mainframe_rag_docs`. Once the user is granted
+  the entries (previous item), v0.12.3 drops on opening it a model id it does not list and
+  selects `DEFAULT_MODELS` (`Chat.svelte` `loadChat`; source reading, not yet observed live), so
+  the next message, or a regenerated answer, goes through the default entry. With no model
+  granted the old id stays selected and the chat cannot send. API callers must use the new ids:
+  the old one is "Model not found".
 - Every entry shares the Pipe's `TIMEOUT_S` and the agent's request deadline (270 s, sized at
   medium effort). A thorough (`xhigh`) answer may end as the fixed deadline text; a site whose
   `LLM_REASONING_EFFORTS` lacks an entry's effort shows a fixed "does not offer this answer depth"

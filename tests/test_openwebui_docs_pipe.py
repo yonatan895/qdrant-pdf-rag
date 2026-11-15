@@ -534,8 +534,8 @@ def test_pipe_lists_the_answer_depths_with_the_default_first():
     pytest.param(f"{FUNCTION_ID}.quick", "low", id="quick"),
     pytest.param(f"{FUNCTION_ID}.thorough", "xhigh", id="thorough"),
     pytest.param(f"{FUNCTION_ID}.standard", None, id="standard"),
-    # The single-model id every chat before #1255 stored, and anything else:
-    # the agent's configured default, never a refusal.
+    # Defensive: an id without a known depth gets the agent's configured
+    # default, never a refusal (v0.12.3 itself refuses an unlisted id).
     pytest.param(FUNCTION_ID, None, id="pre-1255-model-id"),
     pytest.param(f"{FUNCTION_ID}.retired", None, id="unknown-entry"),
     pytest.param(f"other.{FUNCTION_ID}.quick", None, id="foreign-prefix"),
@@ -1202,6 +1202,12 @@ def test_round_trip_a_long_chat_is_200_where_the_untrimmed_body_is_422(real_agen
     assert [s["query"] for s in searches] == [QUESTION]
     assert content.startswith("Reissue the command.")
     assert _final_status(events).endswith(TRIM_NOTE)
+    # A depth's effort is not counted by the real ChatRequest bound (#1255).
+    content, events = run_pipe(None, transport=transport, messages=messages,
+                               body_extra={"model": f"{FUNCTION_ID}.quick"})
+    assert content.startswith("Reissue the command.")
+    assert _final_status(events).endswith(TRIM_NOTE)
+    assert transport.efforts[-1] == "low"
 
 
 def test_round_trip_a_long_paste_reaches_the_model_exactly(real_agent, monkeypatch):
@@ -1304,8 +1310,10 @@ def test_round_trip_maps_the_real_strict_schema_refusal(real_agent):
 
 def test_round_trip_each_depth_reaches_the_model_at_its_effort(real_agent, monkeypatch):
     """#1255 producer to consumer: the entry the user picked selects the effort
-    the real agent sends to the model; the default entry and a pre-upgrade chat
-    (model id `mainframe_rag_docs`) keep the configured default."""
+    the real agent sends to the model; the default entry keeps the configured
+    default. The bare Function id is a defensive case only: v0.12.3 refuses an
+    unlisted model id before any Pipe call (main.py), and a pre-upgrade chat
+    reaches the Pipe through the frontend's DEFAULT_MODELS fallback instead."""
     from mainframe_rag.agent import app as app_mod
 
     monkeypatch.setattr(app_mod.settings, "llm_reasoning_efforts", "low,medium,xhigh")
