@@ -1983,7 +1983,10 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
    the Pipe ConfigMap changes, and the kubelet refreshes the mounted files about once a minute,
    so deploy first waits up to 180 s until the mounted Pipe and installer both hash to this
    release's files. If they still differ, it installs nothing and fails: wait a minute, then
-   re-run. The installer then runs inside the pod with the key on stdin. It refuses a mounted Pipe whose sha256 differs from the
+   re-run. If the files cannot be read in the pod at all (exec refused, pod not running), it
+   fails with kubectl's error instead. A rollback to a release without this wait (2cd8f67d)
+   can still end with the installer's `mounted docs Pipe does not match the repository file`
+   refusal; re-run deploy after a minute. The installer then runs inside the pod with the key on stdin. It refuses a mounted Pipe whose sha256 differs from the
    repository file, sends the key only to the pod's own serving certificate, proves it is an
    admin key on the admin-only Function listing (a refused key, including a non-admin one,
    fails there and nothing is written), creates the Function when the listing lacks it (v0.12.3

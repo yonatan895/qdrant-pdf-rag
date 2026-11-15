@@ -112,6 +112,7 @@ case "$*" in
     # release's files), later ones the repository files, like a kubelet catching up.
     n=$(cat "$OWUI_MOUNT_READS" 2>/dev/null || echo 0); n=$((n + 1))
     [ -z "${{OWUI_MOUNT_READS:-}}" ] || echo "$n" > "$OWUI_MOUNT_READS"
+    [ "${{OWUI_MOUNT_EXEC_FAIL:-}}" != 1 ] || {{ echo 'Error from server (Forbidden): pods "rag-openwebui-0" is forbidden: User "site-user" cannot create resource "pods/exec" in API group "" in the namespace "ns"' >&2; exit 1; }}
     dir="$PWD/charts/mainframe-rag/files/openwebui"
     [ "$n" -gt "${{OWUI_MOUNT_STALE:-0}}" ] || dir="$OWUI_MOUNT_STALE_DIR"
     while [ "$1" != "--" ]; do shift; done; shift
@@ -1537,6 +1538,20 @@ def test_openwebui_pipe_mount_that_never_catches_up_fails_without_installing(tre
     assert _mount_reads(tree) >= 2
     assert "/opt/mainframe-rag/openwebui/provision_pipe.py" not in _helm_log(tree)
     assert "docs Pipe installed" not in r.stdout
+
+
+def test_openwebui_pipe_mount_that_cannot_be_read_says_so_with_kubectl_s_error(tree):
+    """Review N1: an exec that never succeeds (RBAC, pod not running) is not a
+    stale mount; the operator sees kubectl's own error, and nothing is installed."""
+    r = _owui_deploy(tree, *_stale_mount(tree, stale_reads=0, wait="2", poll="1"),
+                     ("OWUI_MOUNT_EXEC_FAIL", "1"))
+    assert r.returncode != 0
+    assert ("the docs Pipe files could not be read in the Open WebUI pod within 2 s; nothing "
+            "was installed. Fix what kubectl reports, then re-run airgap:deploy. kubectl: Error from "
+            'server (Forbidden): pods "rag-openwebui-0" is forbidden') in r.stderr
+    assert "differs from this release" not in r.stderr
+    assert "/opt/mainframe-rag/openwebui/provision_pipe.py" not in _helm_log(tree)
+    assert OWUI_ADMIN_KEY not in r.stdout + r.stderr
 
 
 def test_openwebui_pipe_mount_already_current_installs_without_waiting(tree):

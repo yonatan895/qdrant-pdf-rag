@@ -1191,22 +1191,36 @@ $_inst"
 for name in ("docs_pipe.py", "provision_pipe.py"):
     try:
         with open(sys.argv[1] + "/" + name, "rb") as f:
-            print(hashlib.sha256(f.read()).hexdigest())
+            print("mfr-pipe-sha", hashlib.sha256(f.read()).hexdigest())
     except OSError:
-        print("unreadable")'
+        print("mfr-pipe-sha unreadable")'
     _start=$(date +%s)
     _said=""
+    _read=""
+    _err=""
     while :; do
-        _seen=$($KC -n "$NAMESPACE" exec deploy/rag-openwebui -c openwebui -- \
-            python3 -I -c "$_hash_py" /opt/mainframe-rag/openwebui 2>/dev/null) || _seen=""
+        # One capture of both streams: the hashes are the tagged lines, so a
+        # client warning on stderr cannot spoil a successful read. A failed
+        # exec keeps its output: kubectl's error (the command carries no key).
+        if _out=$($KC -n "$NAMESPACE" exec deploy/rag-openwebui -c openwebui -- \
+            python3 -I -c "$_hash_py" /opt/mainframe-rag/openwebui 2>&1); then
+            _read=1
+            _seen=$(printf '%s\n' "$_out" | sed -n 's/^mfr-pipe-sha //p')
+        else
+            _err=$(printf '%s\n' "$_out" | tail -n 3 | tr '\n' ' ')
+            _seen=""
+        fi
         [ "$_seen" != "$_want" ] || break
         _waited=$(( $(date +%s) - _start ))
-        [ "$_waited" -lt "$_wait" ] ||
+        if [ "$_waited" -ge "$_wait" ]; then
+            [ -n "$_read" ] ||
+                die "the docs Pipe files could not be read in the Open WebUI pod within $_wait s; nothing was installed. Fix what kubectl reports, then re-run airgap:deploy. kubectl: ${_err:-no output}"
             die "the Open WebUI pod still mounts a docs Pipe or installer that differs from this release after $_wait s; nothing was installed. Wait a minute, then re-run airgap:deploy"
+        fi
         [ -n "$_said" ] || { echo "==> waiting for the Open WebUI pod to see the new docs Pipe (ConfigMap mounts refresh about once a minute; up to $_wait s)"; _said=1; }
         sleep "$_poll"
     done
-    unset _inst _want _wait _poll _hash_py _start _said _seen _waited
+    unset _inst _want _wait _poll _hash_py _start _said _seen _waited _read _err _out
 }
 
 # Issue #1074 (ADR-0007 V2): install the repository docs Pipe through the
