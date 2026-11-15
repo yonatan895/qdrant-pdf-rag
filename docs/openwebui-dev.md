@@ -70,7 +70,7 @@ Every rule in `checks.py` has a counterexample in
 | arbitrary non-root UID | `id` in the container equals the namespace UID, group 0, not the image `USER`; every container has the restricted shape |
 | zero egress | the pod's CoreDNS queries name only the IdP and the agent; real sockets from the pod reach the agent and the IdP and fail to reach 1.1.1.1, 8.8.8.8, the API server, Qdrant, the gateway and a pod in another namespace; the lane's shared boundary policy excludes the Open WebUI pod, and the suite fails if any policy but the chart's selects it for egress |
 | no vector store or uploads after use | `inspect_data.py` in the pod after answers: no vector paths or tables, no `uploads/`, no retrieval rows |
-| Rosetta model only | both users list exactly `mainframe_rag_docs`; IdP group claim mapped; signup and password login refused |
+| Rosetta models only | both users list exactly the docs Pipe's entries `mainframe_rag_docs.standard`, `.quick`, `.thorough` (#1255); IdP group claim mapped; signup and password login refused |
 | citations | one saved turn has finished, text, and source events with documents (the Pipe's source chips) |
 | C1 admin edits | a live admin config edit takes effect, never reaches the `config` table and is gone after a restart |
 | restart persistence (RWO) | chats, the Rosetta Function bytes (sha256 equal to the repository Pipe) and the grant survive a Recreate rollout; the next chat answers |

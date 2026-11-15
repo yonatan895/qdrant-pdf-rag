@@ -6,6 +6,7 @@ Operator-to-render round trips also live in test_map_values and airgap suites.
 """
 import hashlib
 import json
+import re
 
 import pytest
 import yaml
@@ -1131,7 +1132,7 @@ OWUI_KEYS = {
 OWUI_ENV_NAMES = {
     "ANONYMIZED_TELEMETRY", "API_KEYS_ALLOWED_ENDPOINTS", "AUDIT_LOG_LEVEL",
     "BYPASS_EMBEDDING_AND_RETRIEVAL", "BYPASS_MODEL_ACCESS_CONTROL", "CORS_ALLOW_ORIGIN", "DATA_DIR",
-    "DO_NOT_TRACK", "ENABLE_ADMIN_CHAT_ACCESS", "ENABLE_ADMIN_EXPORT", "ENABLE_API_KEYS",
+    "DEFAULT_MODELS", "DO_NOT_TRACK", "ENABLE_ADMIN_CHAT_ACCESS", "ENABLE_ADMIN_EXPORT", "ENABLE_API_KEYS",
     "ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS", "ENABLE_AUTOCOMPLETE_GENERATION", "ENABLE_CHANNELS",
     "ENABLE_CODE_EXECUTION", "ENABLE_CODE_INTERPRETER", "ENABLE_COMMUNITY_SHARING",
     "ENABLE_DIRECT_CONNECTIONS", "ENABLE_DIRECT_INTEGRATIONS", "ENABLE_EVALUATION_ARENA_MODELS",
@@ -1386,6 +1387,9 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         # task model, audio, scopes, CORS and the narrow admin-only API key.
         "ENABLE_TOOLS": "false", "ENABLE_DIRECT_INTEGRATIONS": "false",
         "BYPASS_MODEL_ACCESS_CONTROL": "false", "TASK_MODEL": "",
+        # #1255: the docs Pipe's default answer depth, the model new chats and
+        # chats whose stored model id is gone fall back to.
+        "DEFAULT_MODELS": "mainframe_rag_docs.standard",
         "USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS": "false",
         "USER_PERMISSIONS_FEATURES_NOTES": "false",
         "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION": "false",
@@ -1780,6 +1784,19 @@ def test_openwebui_refuses_to_enable_without_the_repository_docs_pipe(tmp_path):
     values = _owui_values()
     r = _helm_template_with_values(values, chart=chart)
     assert r.returncode != 0 and "docs Pipe (#1072)" in r.stderr
+
+
+def test_openwebui_default_model_is_the_pipes_default_answer_depth(owui_chart):
+    """#1255: DEFAULT_MODELS names the docs Pipe's first entry as Open WebUI v0.12.3
+    ids it (`<Function id>.<entry id>`), so a renamed or reordered entry cannot leave
+    the default pointing at a model that does not exist."""
+    from integrations.openwebui import docs_pipe
+
+    provision = (CHART / "files" / "openwebui" / "provision_pipe.py").read_text(encoding="utf-8")
+    (pipe_id,) = re.findall(r'^PIPE_ID = "([a-z_]+)"$', provision, flags=re.MULTILINE)
+    dep = _owui(owui_chart)["Deployment", "rag-openwebui"]
+    default = env_map(dep, "openwebui")["DEFAULT_MODELS"]["value"]
+    assert default == f"{pipe_id}.{docs_pipe.Pipe().pipes()[0]['id']}"
 
 
 def test_openwebui_chart_pipe_is_byte_identical_to_the_repository_pipe():

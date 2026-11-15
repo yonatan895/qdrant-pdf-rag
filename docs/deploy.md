@@ -1740,12 +1740,13 @@ PrometheusRule (it would depend on user-workload monitoring, which ADR-0006 repl
 **Naming (maintainer decision 2026-10-26, #1070).** *Rosetta* is the site-facing name of the docs
 assistant: the Open WebUI model users pick, the Route host (suggested example
 `rosetta.apps.<cluster-domain>`, a placeholder), the AD FS client name and the user docs. Code
-identifiers stay `mainframe_rag`, `mainframe-rag` and the Pipe/model ID `mainframe_rag_docs`; Open
+identifiers stay `mainframe_rag`, `mainframe-rag` and the Pipe (Function) ID `mainframe_rag_docs`; Open
 WebUI's own branding stays unmodified (ADR-0007 L1) and the console keeps its title.
 
 Open WebUI is the main docs platform and is **on by default** (maintainer decision 2026-10-26,
 ADR-0008); the console stays the frozen fallback. It is a front end for the docs corpus and a
-client of the agent: its only model is the repository docs Pipe (#1072) over `/v1/chat`. It
+client of the agent: its only models are the repository docs Pipe's (#1072) answer-depth entries
+over `/v1/chat` (#1255, [answer depth](#owui-answer-depth)). It
 holds no gateway key and no model connection, and it does no retrieval of its own. The image pin
 is recorded in `images.txt`; the 2026-10-24 Kind trials are interim and partial
 (runs 1-2 of the #1073 qualification, not a clean pass; open residuals are listed
@@ -1987,9 +1988,30 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
    answers an absent Function with 401, so a 401 on the Function itself never decides) or
    updates it, reads it back by hash and activates it. Until the key exists, deploy prints
    `docs Pipe NOT installed` and the front end offers no model.
-5. Give all signed-in users read access to the Rosetta model in the Open WebUI admin UI (the
-   default visibility is a #1073 trial item). Then sign in as an ordinary user and ask one
+5. Give all signed-in users read access to each Rosetta model (one per answer depth, below) in
+   the Open WebUI admin UI (the default visibility is a #1073 trial item). Then sign in as an ordinary user and ask one
    question: citations show as source chips, and the console still works.
+
+<a id="owui-answer-depth"></a>
+**Answer depth (#1255).** The docs Pipe is an Open WebUI manifold: one Function whose entries
+v0.12.3 lists as the models `mainframe_rag_docs.standard` "Rosetta", `mainframe_rag_docs.quick`
+"Rosetta – quick" and `mainframe_rag_docs.thorough` "Rosetta – thorough" (names and efforts are a
+proposal pending the maintainer). Each sends the agent the effort its entry maps to
+([Pipe contract](agent.md#openwebui-docs-pipe)); the default entry sends none, so it answers
+exactly as the single model did. `DEFAULT_MODELS` (chart, fixed) selects the default entry for new
+chats. Upgrading from the single model:
+
+- The model id `mainframe_rag_docs` is gone; its grant row stays in the database unused. Open
+  WebUI shows a model only with its own read grant, so ordinary users see **no** Rosetta model
+  until an admin grants each entry (step 5). Grant all entries in the same change window.
+- A chat started before the upgrade still names `mainframe_rag_docs`. On opening it, v0.12.3
+  drops a model id it does not list and selects `DEFAULT_MODELS` (`Chat.svelte` `loadChat`), so
+  the next message, or a regenerated answer, goes through the default entry. API callers must
+  use the new ids: the old one is "Model not found".
+- Every entry shares the Pipe's `TIMEOUT_S` and the agent's request deadline (270 s, sized at
+  medium effort). A thorough (`xhigh`) answer may end as the fixed deadline text; a site whose
+  `LLM_REASONING_EFFORTS` lacks an entry's effort shows a fixed "does not offer this answer depth"
+  text for it.
 
 **Retention (ADR-0007 S2).** The window is `OPENWEBUI_RETENTION_DAYS` (`openwebui.retentionDays`),
 default **30 days** (maintainer decision 2026-10-24). An explicit null fails the render.
@@ -2049,7 +2071,7 @@ for p in /api/v1/files/ /api/v1/files /API/v1/files/ //api/v1/files/ /api/v1/./f
 done
 ```
 
-Then sign in and open a chat: a conversation must answer through the Rosetta model.
+Then sign in and open a chat: a conversation must answer through each Rosetta model.
 
 **Re-audit the allow-list on every Open WebUI import (ADR-0007 P1).** Each import PR must (1) list
 the router prefixes and handlers of the new release (`main.py` `include_router`, each

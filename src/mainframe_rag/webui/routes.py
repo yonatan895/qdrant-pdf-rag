@@ -94,13 +94,10 @@ def _offered_efforts() -> tuple[ReasoningEffort, ...]:
 
 def _require_offered_effort(effort: ReasoningEffort | None) -> None:
     """Refuse an effort the served template does not accept (#748) before
-    any model call, so it is never reported as a model outage."""
+    any model call; the same rule as /v1/chat (#1255)."""
     from mainframe_rag.agent import app as app_mod
 
-    if effort is not None and effort not in _offered_efforts():
-        raise app_mod.AppError(
-            422, "unsupported_reasoning_effort", "the reasoning effort is not offered by this deployment"
-        )
+    app_mod.require_offered_effort(effort)
 
 
 def _require_ui() -> None:

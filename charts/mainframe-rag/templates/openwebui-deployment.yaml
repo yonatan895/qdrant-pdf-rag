@@ -235,6 +235,10 @@ spec:
               value: "false"
             - name: ENABLE_MESSAGE_RATING
               value: "false"
+            # The docs Pipe's default answer depth (#1255, docs_pipe.py DEPTHS, first
+            # entry): new chats and chats whose stored model id is gone use it.
+            - name: DEFAULT_MODELS
+              value: "mainframe_rag_docs.standard"
             # Task calls off: the docs model is never a task model (V2).
             - name: TASK_MODEL
               value: ""

@@ -466,7 +466,7 @@ provision() {
     if [ "$DRYRUN" = 1 ]; then
         plan "provision: owui-admin signs in, creates an API key (STATE/admin-api-key, mode 600)"
         plan "provision: kubectl exec -i deploy/rag-openwebui -c openwebui -- python3 /opt/mainframe-rag/openwebui/provision_pipe.py <pipe sha256> < admin-api-key"
-        plan "provision: groups internal-team and docs-readers; Rosetta model (mainframe_rag_docs) read grant to both; team-user and docs-user sign in"
+        plan "provision: groups internal-team and docs-readers; Rosetta models (mainframe_rag_docs.standard/.quick/.thorough) read grant to both; team-user and docs-user sign in"
         return 0
     fi
     provision_live

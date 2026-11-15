@@ -56,8 +56,10 @@ Pipe is provisioned and the admin role is limited to the team.
 - **V2 Answers only through the agent.** Open WebUI holds no gateway or LiteLLM
   key. It has no OpenAI or Ollama connections, so the default connections are
   off. Direct connections, user-created models and user Tools/Functions are
-  off, and the Pipelines server is not deployed. The only model is the docs
-  Pipe. Its Functions are repository files installed by the deploy step, with
+  off, and the Pipelines server is not deployed. The only models are the docs
+  Pipe's entries: one Function, whose answer-depth entries Open WebUI lists as
+  models `mainframe_rag_docs.<depth>`, each answering only through the agent
+  (amended for #1255; proposal pending the maintainer). Its Functions are repository files installed by the deploy step, with
   their hash checked against the repository. Community Functions and
   frontmatter pip installs are refused. Task features (titles, tags,
   follow-ups, autocomplete, query generation) are off. The Pipe also answers

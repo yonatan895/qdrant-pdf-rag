@@ -46,7 +46,15 @@ USERS = {
     "other-user": ("other-team", "7c1f3e52-0000-4000-8000-000000000004"),
 }
 EMAIL_DOMAIN = "trial.test"
-DOCS_MODEL = "mainframe_rag_docs"  # provision_pipe.py PIPE_ID
+DOCS_FUNCTION = "mainframe_rag_docs"  # provision_pipe.py PIPE_ID
+# The docs Pipe's answer-depth entries (#1255, docs_pipe.py DEPTHS) as Open WebUI v0.12.3
+# models: `<Function id>.<entry id>`, with the entry's display name. The first is the default.
+DOCS_MODELS = (
+    (f"{DOCS_FUNCTION}.standard", "Rosetta"),
+    (f"{DOCS_FUNCTION}.quick", "Rosetta \N{EN DASH} quick"),
+    (f"{DOCS_FUNCTION}.thorough", "Rosetta \N{EN DASH} thorough"),
+)
+DOCS_MODEL = DOCS_MODELS[0][0]  # the model the harness chats with
 DOCS_GROUPS = ("internal-team", "docs-readers")
 # The site acceptance list (docs/deploy.md, allow-list proxy, #1083): each must be 403
 # "denied" from the proxy sidecar. The null-byte form is sent percent-encoded.
@@ -195,7 +203,7 @@ class Session:
         return self.api(user, "GET", f"/api/v1/chats/{chat_id}")[0]
 
     def function_sha256(self) -> str | None:
-        status, fn = self.api(ADMIN, "GET", f"/api/v1/functions/id/{DOCS_MODEL}")
+        status, fn = self.api(ADMIN, "GET", f"/api/v1/functions/id/{DOCS_FUNCTION}")
         if status != 200 or not isinstance(fn, dict):
             return None
         import hashlib
@@ -448,10 +456,12 @@ def cmd_access(state: str) -> None:
         out({"groups_created": created, "missing": missing})
         sys.exit(1)
     grants = [{"principal_type": "group", "principal_id": ids[g], "permission": "read"} for g in DOCS_GROUPS]
-    status = s.api(ADMIN, "POST", "/api/v1/models/model/access/update",
-                   {"id": DOCS_MODEL, "name": "Rosetta", "access_grants": grants})[0]
-    out({"groups_created": created, "groups": sorted(DOCS_GROUPS), "docs_model_access_update": status})
-    if status != 200:
+    # One row per entry, under the entry's own name: a row's name replaces the entry's.
+    statuses = {model: s.api(ADMIN, "POST", "/api/v1/models/model/access/update",
+                             {"id": model, "name": name, "access_grants": grants})[0]
+                for model, name in DOCS_MODELS}
+    out({"groups_created": created, "groups": sorted(DOCS_GROUPS), "docs_model_access_update": statuses})
+    if any(status != 200 for status in statuses.values()):
         sys.exit(1)
 
 
@@ -461,7 +471,7 @@ def cmd_smoke(state: str) -> None:
     for user in ("team-user", "docs-user"):
         login = s.login(user)
         entry = {**login, **(s.whoami(user) if login.get("signed_in") else {})}
-        entry["docs_only"] = entry.get("models") == [DOCS_MODEL]
+        entry["docs_only"] = entry.get("models") == sorted(m for m, _name in DOCS_MODELS)
         entry["group_ok"] = USERS[user][0] in entry.get("groups", [])
         # group_ok is part of ok: the IdP group claim must map to the Open WebUI group (N8 of #1095).
         report["ok"] &= (bool(login.get("signed_in")) and entry["docs_only"] and entry["group_ok"]

@@ -58,6 +58,8 @@ ERROR_MESSAGES: dict[str, str] = {
     "not_found": _REJECTED,
     "method_not_allowed": _REJECTED,
     "http_error": _REJECTED,
+    "unsupported_reasoning_effort": "This deployment does not offer this answer depth. "
+                                    "Choose another Rosetta model and retry.",
 }
 UNREACHABLE = ("The documentation service could not be reached. Retry; if it persists, "
                "contact the operators.")
@@ -75,6 +77,21 @@ TOO_LONG = ("This message is longer than the documentation service accepts "
             "({limit} characters). Shorten it and retry.")
 NO_EXCERPT = "Excerpt text is not available in this response."
 TASK_REPLY = "Docs question"
+
+# Answer depths (#1255): the manifold entries Open WebUI shows as models,
+# `<Function id>.<id>` (v0.12.3 functions.py get_function_models). The id is
+# stored in chats and model grants, so it never changes; the name is what
+# users see. The effort is one the agent offers (LLM_REASONING_EFFORTS); None
+# omits the field, so the agent's configured simple/complex effort applies.
+# The first entry is the default: DEFAULT_MODELS in the chart names it, and an
+# unknown entry or a pre-#1255 chat's single-model id gets it. Names and the
+# default are a proposal pending the maintainer's decision (#1255).
+DEPTHS: tuple[tuple[str, str, str | None], ...] = (
+    ("standard", "Rosetta", None),
+    ("quick", "Rosetta \N{EN DASH} quick", "low"),
+    ("thorough", "Rosetta \N{EN DASH} thorough", "xhigh"),
+)
+_DEPTH_EFFORTS = {depth: effort for depth, _name, effort in DEPTHS}
 
 WORKING = "Searching the documentation…"
 FAILED = "Request failed"
@@ -190,6 +207,15 @@ def build_request(messages: object, user_valves: object) -> dict[str, Any] | Non
         if value := _valve(user_valves, name):
             body[name] = value
     return body
+
+
+def depth_effort(model: object) -> str | None:
+    """The agent effort for the selected model id `<Function id>.<depth>`; None
+    (the agent default) for the default depth, an unknown depth, or an id
+    without one, such as the single-model id chats stored before #1255."""
+    if not isinstance(model, str) or "." not in model:
+        return None
+    return _DEPTH_EFFORTS.get(model.split(".", 1)[1])
 
 
 def fit_request(request: dict[str, Any], max_chars: int) -> tuple[dict[str, Any] | None, bool]:
@@ -501,6 +527,10 @@ class Pipe:
         # Tests inject a fake agent here; Open WebUI never sets it.
         self._transport: httpx.AsyncBaseTransport | None = None
 
+    def pipes(self) -> list[dict[str, str]]:
+        """The answer depths as Open WebUI manifold entries (#1255)."""
+        return [{"id": depth, "name": name} for depth, name, _effort in DEPTHS]
+
     async def pipe(
         self,
         body: dict[str, Any],
@@ -518,6 +548,8 @@ class Pipe:
         request = build_request(body.get("messages"), user_valves)
         if request is None:
             return NO_TEXT_TURN
+        if effort := depth_effort(body.get("model")):
+            request["reasoning_effort"] = effort
         request, trimmed = fit_request(request, self.valves.MAX_BODY_CHARS)
         if request is None:
             return TOO_LONG.format(limit=self.valves.MAX_BODY_CHARS)

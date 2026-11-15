@@ -14,7 +14,9 @@ import json
 import re
 from dataclasses import dataclass, field
 
-DOCS_MODEL = "mainframe_rag_docs"
+DOCS_FUNCTION = "mainframe_rag_docs"
+# The docs Pipe's answer-depth entries as Open WebUI models (#1255), sorted as whoami lists them.
+DOCS_MODELS = sorted(f"{DOCS_FUNCTION}.{entry}" for entry in ("standard", "quick", "thorough"))
 # restricted-v2 assigns UIDs from the namespace range; Kind stand-ins use this one.
 UID_RANGE_START = 1000700000
 # The names an Open WebUI pod may resolve: the IdP and the agent Service (search-domain
@@ -163,8 +165,8 @@ def check_data_dir(report: dict) -> Verdict:
 
 # ------------------------------------------------------------------ sign-in and models
 def check_models(users: dict[str, list[str]]) -> Verdict:
-    """Each signed-in user sees exactly the Rosetta model."""
-    bad = {u: m for u, m in users.items() if m != [DOCS_MODEL]}
+    """Each signed-in user sees exactly the Rosetta models (the docs Pipe's entries)."""
+    bad = {u: m for u, m in users.items() if sorted(m) != DOCS_MODELS}
     return _v("docs-model-only", bool(users) and not bad, users=sorted(users), unexpected=bad)
 
 
@@ -294,10 +296,10 @@ def check_persistence(before: dict, after: dict) -> Verdict:
     """Restart on the RWO claim: chats, the Rosetta Function bytes and the model grant survived."""
     lost = sorted(set(before["chat_ids"]) - set(after["chat_ids"]))
     ok = (not lost and before["function_sha256"] == after["function_sha256"] and bool(after["function_sha256"])
-          and after["models"] == [DOCS_MODEL] and after["pod_uid"] != before["pod_uid"])
+          and after["models"] == DOCS_MODELS and after["pod_uid"] != before["pod_uid"])
     return _v("restart-persistence", ok, chats_before=len(before["chat_ids"]), chats_after=len(after["chat_ids"]),
               chats_lost=len(lost), function_unchanged=before["function_sha256"] == after["function_sha256"],
-              docs_only_after=after["models"] == [DOCS_MODEL], pod_replaced=after["pod_uid"] != before["pod_uid"])
+              docs_only_after=after["models"] == DOCS_MODELS, pod_replaced=after["pod_uid"] != before["pod_uid"])
 
 
 def check_function_hash(stored_sha256: str | None, repo_sha256: str) -> Verdict:
@@ -387,10 +389,10 @@ def check_rollback_on(before: dict, after: dict, repo_sha256: str, next_chat_ok:
     lost = sorted(set(before["chat_ids"]) - set(after["chat_ids"]))
     kept = bool(before["claim_uid"]) and after["claim_uid"] == before["claim_uid"]
     ok = (bool(before["chat_ids"]) and not lost and kept and after["function_sha256"] == repo_sha256
-          and after["models"] == [DOCS_MODEL] and next_chat_ok)
+          and after["models"] == DOCS_MODELS and next_chat_ok)
     return _v("rollback-on", ok, chats_before=len(before["chat_ids"]), chats_lost=len(lost), claim_kept=kept,
               pipe_is_repository=after["function_sha256"] == repo_sha256,
-              docs_only=after["models"] == [DOCS_MODEL], next_chat_answered=next_chat_ok)
+              docs_only=after["models"] == DOCS_MODELS, next_chat_answered=next_chat_ok)
 
 
 def overall(verdicts: list[Verdict]) -> bool:

@@ -96,9 +96,61 @@ def test_pod_security_restricted_shape():
     assert not checks.check_pod_security({"spec": {"containers": []}}).ok
 
 
+def test_harness_model_ids_are_the_pipe_entries():
+    """#1255: the docs Pipe is a manifold, so Open WebUI v0.12.3 shows one model per
+    entry, `<Function id>.<entry id>` (functions.py get_function_models), and the
+    single-model id `mainframe_rag_docs` is gone. The harness grants, chats and
+    checks exactly those ids; the default entry is the one chats use."""
+    from integrations.openwebui import docs_pipe
+
+    spec = importlib.util.spec_from_file_location(
+        "owui_provision_pipe", ROOT / "charts" / "mainframe-rag" / "files" / "openwebui" / "provision_pipe.py")
+    provision = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(provision)
+    entries = [(f"{provision.PIPE_ID}.{e['id']}", e["name"]) for e in docs_pipe.Pipe().pipes()]
+    assert client.DOCS_FUNCTION == checks.DOCS_FUNCTION == provision.PIPE_ID
+    assert list(client.DOCS_MODELS) == entries
+    assert client.DOCS_MODEL == entries[0][0] == "mainframe_rag_docs.standard"
+    assert sorted(i for i, _name in entries) == checks.DOCS_MODELS
+
+
+def test_access_grants_every_entry_under_its_own_name(monkeypatch, capsys):
+    """The grant call creates the model row, and v0.12.3 shows a row's name over the
+    entry's (utils/models.py get_all_models): one shared name would show every
+    depth as the same model."""
+    calls = []
+
+    class FakeSession:
+        def __init__(self, _state):
+            pass
+
+        def login(self, _user):
+            return {"signed_in": True}
+
+        def group_ids(self):
+            return {g: f"gid-{g}" for g in client.DOCS_GROUPS}
+
+        def api(self, user, method, path, body=None):
+            calls.append((user, method, path, body))
+            return 200, {}
+
+    monkeypatch.setattr(client, "Session", FakeSession)
+    client.cmd_access("unused-state")
+    grants = [{"principal_type": "group", "principal_id": f"gid-{g}", "permission": "read"}
+              for g in client.DOCS_GROUPS]
+    assert [(c[1], c[2], c[3]) for c in calls] == [
+        ("POST", "/api/v1/models/model/access/update", {"id": i, "name": n, "access_grants": grants})
+        for i, n in client.DOCS_MODELS]
+    assert json.loads(capsys.readouterr().out)["docs_model_access_update"] == {
+        i: 200 for i, _n in client.DOCS_MODELS}
+
+
 def test_models_groups_and_sso_only():
-    assert checks.check_models({"a": [checks.DOCS_MODEL], "b": [checks.DOCS_MODEL]}).ok
-    assert not checks.check_models({"a": [checks.DOCS_MODEL, "other"]}).ok
+    assert checks.check_models({"a": checks.DOCS_MODELS, "b": list(checks.DOCS_MODELS)}).ok
+    assert not checks.check_models({"a": [*checks.DOCS_MODELS, "other"]}).ok
+    # The pre-#1255 single model alone is a failed upgrade (no depth entries).
+    assert not checks.check_models({"a": [checks.DOCS_FUNCTION]}).ok
+    assert not checks.check_models({"a": checks.DOCS_MODELS[:1]}).ok
     assert not checks.check_models({"a": []}).ok and not checks.check_models({}).ok
     assert checks.check_groups({"a": ["internal-team"]}, {"a": "internal-team"}).ok
     assert not checks.check_groups({"a": []}, {"a": "internal-team"}).ok
@@ -212,7 +264,7 @@ def test_admin_edit_must_take_effect_not_persist_and_revert():
 
 
 def _snap(**over):
-    base = {"chat_ids": ["a", "b"], "function_sha256": "f" * 64, "models": [checks.DOCS_MODEL], "pod_uid": "u1"}
+    base = {"chat_ids": ["a", "b"], "function_sha256": "f" * 64, "models": checks.DOCS_MODELS, "pod_uid": "u1"}
     return {**base, **over}
 
 
@@ -390,7 +442,7 @@ def test_rollback_off_needs_every_object_gone_the_same_claim_and_the_console():
 def test_rollback_on_needs_the_kept_claim_its_chats_the_grant_the_pipe_and_a_next_chat():
     sha = "a" * 64
     before = {"chat_ids": ["a", "b"], "claim_uid": "pvc-1"}
-    after = {"chat_ids": ["a", "b", "c"], "claim_uid": "pvc-1", "function_sha256": sha, "models": [checks.DOCS_MODEL]}
+    after = {"chat_ids": ["a", "b", "c"], "claim_uid": "pvc-1", "function_sha256": sha, "models": checks.DOCS_MODELS}
     assert checks.check_rollback_on(before, after, sha, True).ok
     for bad in ({"chat_ids": ["a"]}, {"claim_uid": "pvc-2"}, {"function_sha256": None},
                 {"function_sha256": "b" * 64}, {"models": []}):

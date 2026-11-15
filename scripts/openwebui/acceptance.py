@@ -285,7 +285,7 @@ class Acceptance:
         before = {
             "chat_ids": self.s.chat_ids("docs-user"),
             "function_sha256": self.s.function_sha256(),
-            "models": [client.DOCS_MODEL],
+            "models": checks.DOCS_MODELS,
             "pod_uid": pod_info()["uid"],
         }
         self.add(checks.check_function_hash(before["function_sha256"], self.repo_sha()))
