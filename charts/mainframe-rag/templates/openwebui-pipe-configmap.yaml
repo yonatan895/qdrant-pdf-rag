@@ -6,11 +6,16 @@ installer inside the Open WebUI pod, which refuses a mounted Pipe whose hash
 differs from the repository file and verifies the stored Function content by
 hash after the install. Community Functions are never installed. The same
 ConfigMap carries the chat retention purge run by the chat-purge sidecar.
+With openwebui.ratings.enabled it also carries the rating Action (#1255); the
+installer installs it only when it is mounted (its hash is the installer's
+ACTION_SHA256) and removes it when it is not.
 */ -}}
 {{- if include "mainframe-rag.openwebuiEnabled" . }}
 {{- $pipe := .Files.Get "files/openwebui/docs_pipe.py" }}
 {{- $installer := .Files.Get "files/openwebui/provision_pipe.py" }}
 {{- $purge := .Files.Get "files/openwebui/purge_chats.py" }}
+{{- $ratings := (.Values.openwebui.ratings | default dict).enabled }}
+{{- $action := .Files.Get "files/openwebui/rating_action.py" }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -22,8 +27,14 @@ metadata:
     mainframe-rag/docs-pipe-sha256: {{ sha256sum $pipe | quote }}
     mainframe-rag/provision-pipe-sha256: {{ sha256sum $installer | quote }}
     mainframe-rag/purge-chats-sha256: {{ sha256sum $purge | quote }}
+    {{- if $ratings }}
+    mainframe-rag/rating-action-sha256: {{ sha256sum $action | quote }}
+    {{- end }}
 data:
   docs_pipe.py: {{ $pipe | quote }}
   provision_pipe.py: {{ $installer | quote }}
   purge_chats.py: {{ $purge | quote }}
+  {{- if $ratings }}
+  rating_action.py: {{ $action | quote }}
+  {{- end }}
 {{- end }}

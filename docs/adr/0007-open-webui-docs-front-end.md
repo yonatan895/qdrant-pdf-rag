@@ -70,6 +70,22 @@ Pipe is provisioned and the admin role is limited to the team.
   Function is present, and the Pipe never declares `__oauth_token__`,
   `__request__` or any `__user__`-style parameter it does not use; a test
   inspects its `pipe()` signature. A new parameter is a recorded decision.
+  *(Amendment proposed, #1255; maintainer decision pending.)* With
+  `openwebui.ratings.enabled` (default off), the repository Function set is the
+  docs Pipe plus the repository rating Action (`rating_action.py`): two message
+  buttons that post a rating to the agent's `/v1/feedback` (ADR-0005). Each
+  Function is hash-checked. The Pipe's expected hash comes from the deploy
+  step, and the Action's is a constant of the installer, pinned by a test to
+  the repository file. The installer makes the Action active and global, and
+  it removes the Action when ratings are off. It still refuses every other
+  Function. The Action declares only `body`, `__id__`, `__event_emitter__`
+  and `__event_call__`; a test pins its signature. It emits only toasts and
+  an input prompt, which Open WebUI does not save, and returns nothing. It
+  makes no model call and calls no host but the agent. With ratings on, the
+  Pipe ends each completed answer with an "Answer reference" line carrying
+  the agent's request id. That line is the only message field the Action can
+  read, and the Pipe drops it from the history it sends back. Agent requests
+  still equal user turns: a rating is not an answer request.
   Proof: over a multi-turn trial, agent requests equal user turns.
 - **V3 Contract fidelity.** The Pipe sends exactly the agent's `ChatRequest`
   shape. It renders validated citations with their supplied excerpts as source
@@ -113,7 +129,9 @@ Pipe is provisioned and the admin role is limited to the team.
   path. The list is the Docs pilot's need: the SPA shell and assets, sign-in
   and the OIDC callback, socket.io, health, chats, models, the Pipe's chat
   completions, the account and admin APIs and the Pipe installer's
-  `/api/v1/functions`. **Re-audited on every import (P1)**: list each router's
+  `/api/v1/functions`, plus, proposed with ratings (#1255), the rating Action's
+  two buttons `/api/chat/actions/mainframe_rag_rating.(up|down)` (the handler
+  is server-enforced: an active Action the model surfaces). **Re-audited on every import (P1)**: list each router's
   handlers, sort them into server-enforced and UI-only, and re-run the browser
   trace; a path is added deliberately, never by default. Proof: the nginx
   config test runs the real pinned image against every encoded variant, and the
@@ -235,7 +253,9 @@ the pilot. The console remains the only supported front end.
   built-in ratings and evaluations are off. Answer records still reach the
   feedback service through `/v1/chat` as before. Open WebUI ratings wait for a
   UI-agnostic rating route, which would amend ADR-0003's POST set. Telemetry
-  still holds no content.
+  still holds no content. *(Proposed, #1255: that route is `/v1/feedback`,
+  and the repository rating Action posts to it (V2). Ratings are stored only
+  by the feedback service, with no rater identity: D5 stays deferred.)*
 - **Reading of "no LangChain / second vector DB / new orchestration
   framework":** these rules bind this repository's code, dependencies and
   answer path. A pinned, unmodified third-party image may contain such

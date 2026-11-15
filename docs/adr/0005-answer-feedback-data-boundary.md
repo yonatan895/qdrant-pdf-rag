@@ -82,3 +82,15 @@
   so enabling it without the agent NetworkPolicy is refused. Disabling it keeps
   the claim and its content, unpurged until the operator deletes the claim.
   Rater attribution stays deferred (D5).
+- **Amends (proposed, #1255; maintainer decision pending): Open WebUI ratings.**
+  A third inbound rating route, `POST /v1/feedback`, takes the same bounded
+  rating as `/ui/feedback` with the same validation, fixed codes and store call.
+  It does not depend on the console (`UI_ENABLED`), so it is UI-agnostic. Open
+  WebUI's repository rating Action (ADR-0007 V2) posts to it without a
+  credential, the same way the docs Pipe calls `/v1/chat`. The ADR-0003 POST
+  set gains this route. The rating, its reason and the answer reference are
+  stored only by the feedback service. Open WebUI's own message ratings and
+  evaluations stay off (`ENABLE_MESSAGE_RATING=false`, `/api/v1/evaluations`
+  blocked at the proxy). The Action writes nothing to Open WebUI's database.
+  Rater attribution stays deferred (D5): the agent port cannot prove a
+  user identity that Open WebUI asserts, so neither route accepts one.

@@ -174,6 +174,8 @@ ALLOWED = [
     "/api/tasks/stop/x", "/api/v1/auths/", "/api/v1/auths/api_key", "/api/v1/chats/list?page=1",
     "/api/v1/users/user/settings", "/api/v1/models/list", "/api/v1/groups/",
     "/api/v1/functions/id/mainframe_rag_docs", "/api/v1/functions/create", "/api/v1/configs/banners",
+    "/api/chat/actions/mainframe_rag_rating.up", "/api/chat/actions/mainframe_rag_rating.down",
+    "/api/chat/actions/mainframe_rag_rating%2Edown",
     # Encoded spellings of ALLOWED paths still work, and are forwarded unchanged.
     "/api/v1/ch%61ts/list", "/api/v1%2Fchats/list", "/api/v1/chats/a%20b?x=1%2F2",
     # Merged slashes: nginx decides on the merged path; the raw line is forwarded.
@@ -195,6 +197,9 @@ BLOCKED_OTHER = [
     "/api/v1/utils/code/execute", "/api/v1/utils/db/download", "/openai/chat/completions",
     "/ollama/api/chat", "/docs", "/openapi.json", "/api/version/updates", "/api/v1/pipelines/",
     "/api/v1/scim/v2/Users", "/api/v1/chatsX", "/oauthx", "/health/x", "/api", "/api/", "/api/v1/",
+    "/api/chat/actions/community_x.up", "/api/chat/%61ctions/community_x", "/api/chat/actions/",
+    "/api/chat/actions/mainframe_rag_rating", "/api/chat/actions/mainframe_rag_rating%2Esideways",
+    "/api/chat/actions/mainframe_rag_rating.up%2Fx",
 ]
 
 

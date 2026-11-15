@@ -18,6 +18,7 @@ description: The documentation corpus through the agent's /v1/chat, with its val
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
@@ -116,6 +117,18 @@ _FENCES = ("```", "~~~")
 INFERRED = "Inferred citations — bracket provenance, not grounding"
 SCRIPT_REVIEW = "Human review required — draft script, not certified executable"
 
+# Open WebUI ratings (#1255): Open WebUI keeps no message field a rating
+# Action can read except the content, so with the chart's ratings switch on
+# (RAG_ANSWER_REFERENCE=true) a completed answer ends with this line carrying
+# the agent's request id (its chunk id is `chatcmpl-<id>`). The rating Action
+# (rating_action.py) reads it back with the same pattern; a test pins the two.
+# The wording is a proposal (maintainer decision, #1255).
+REFERENCE_ENV = "RAG_ANSWER_REFERENCE"
+REFERENCE_LINE = "\n\nAnswer reference: `{request_id}`"
+REFERENCE_RE = re.compile(r"\n\nAnswer reference: `([0-9a-f]{12})`[ \t\r\n]*\Z")
+_CHUNK_ID = re.compile(r"chatcmpl-([0-9a-f]{12})\Z")
+_REQUEST_ID_KEY = "__request_id"  # set on `final` by _deltas, never by the agent
+
 
 class _Failure(Exception):
     """A fixed user-visible failure; carries the fixed text, never upstream text."""
@@ -183,6 +196,9 @@ def build_request(messages: object, user_valves: object) -> dict[str, Any] | Non
     turns: list[dict[str, str]] = []
     for message in items:
         role, text = message.get("role"), _text(message.get("content"))
+        if role == "assistant":
+            # The reference line is display state, not part of the answer.
+            text = REFERENCE_RE.sub("", text)
         if role in ("user", "assistant") and text:
             turns.append({"role": role, "content": text})
     body: dict[str, Any] = {"messages": turns, "stream": True}
@@ -327,6 +343,10 @@ async def _deltas(lines: AsyncIterator[str], final: dict[str, Any],
         if choice.get("finish_reason") is not None:
             final.clear()
             final.update(choice)
+            final.pop(_REQUEST_ID_KEY, None)  # only the chunk id may set it
+            chunk_id = frame.get("id")
+            if isinstance(chunk_id, str) and (match := _CHUNK_ID.match(chunk_id)):
+                final[_REQUEST_ID_KEY] = match.group(1)
             finished = True
             rendering = _validated_list(final)
             if held is not None and held == rendering:
@@ -567,8 +587,14 @@ class Pipe:
                         yield text
             if text := shown.close():
                 yield text
-            # The validated list replaces any pending line ends: it brings its own.
-            if text := (agent_list[0] if agent_list else shown.newlines()):
+            # The validated list and the reference line replace any pending
+            # line ends: they bring their own.
+            request_id = final.get(_REQUEST_ID_KEY)
+            reference = (REFERENCE_LINE.format(request_id=request_id)
+                         if os.environ.get(REFERENCE_ENV) == "true" and isinstance(request_id, str)
+                         else "")
+            pending = "" if reference else shown.newlines()
+            if text := (agent_list[0] if agent_list else pending) + reference:
                 yield text
             for source in _source_events(final):
                 await event(source)

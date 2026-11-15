@@ -111,8 +111,11 @@ def _server(state, key_file, cert_file):
                 if body["id"] in state.functions:
                     return self._reply(400, {"detail": "id taken"})
                 content = body["content"] + ("#x" if state.mangle_content else "")
+                # Open WebUI sets the type from the module's class (utils/plugin.py).
+                ftype = "action" if "class Action" in body["content"] else "pipe"
                 state.functions[body["id"]] = {"id": body["id"], "name": body["name"],
-                                               "content": content, "is_active": False}
+                                               "type": ftype, "content": content,
+                                               "is_active": False, "is_global": False}
                 return self._reply(200, state.functions[body["id"]])
             if method == "POST" and self.path.startswith(prefix):
                 fid, _, action = self.path[len(prefix):].partition("/")
@@ -123,7 +126,12 @@ def _server(state, key_file, cert_file):
                     fn["content"] = body["content"]
                 elif action == "toggle":
                     fn["is_active"] = not fn["is_active"]
+                elif action == "toggle/global":
+                    fn["is_global"] = not fn.get("is_global", False)
                 return self._reply(200, fn)
+            if method == "DELETE" and self.path.startswith(prefix) and self.path.endswith("/delete"):
+                fid = self.path[len(prefix):-len("/delete")]
+                return self._reply(200, state.functions.pop(fid, None) is not None)
             return self._reply(404, {"detail": "no route"})
 
         def do_GET(self):
@@ -131,6 +139,9 @@ def _server(state, key_file, cert_file):
 
         def do_POST(self):
             self._handle("POST")
+
+        def do_DELETE(self):
+            self._handle("DELETE")
 
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -292,6 +303,139 @@ def test_installer_main_reads_the_key_from_stdin_only(owui, capsys, monkeypatch)
     out = capsys.readouterr().out
     assert out == f"docs Pipe installed: Function mainframe_rag_docs active, sha256 {PIPE_SHA}\n"
     assert KEY not in out and PIPE not in out
+
+
+# ------------------------------------------------- rating Action (#1255)
+
+ACTION_FILE = FILES / "rating_action.py"
+ACTION = ACTION_FILE.read_text(encoding="utf-8")
+ACTION_ID = "mainframe_rag_rating"
+
+
+def test_installer_pins_the_repository_rating_action_by_hash():
+    """deploy.sh passes only the Pipe's hash (scripts/airgap/common.sh, owned by
+    #1253): the Action's expected hash is a constant of the installer, which
+    ships in the same ConfigMap, and must be the repository file's."""
+    assert hashlib.sha256(ACTION_FILE.read_bytes()).hexdigest() == provision.ACTION_SHA256
+    assert provision.ACTION_ID == ACTION_ID
+
+
+def test_repository_functions_survive_open_webuis_import_rewrite():
+    """Open WebUI v0.12.3 rewrites `from utils|apps|main|config` anywhere in a
+    Function's text before storing it (utils/plugin.py replace_imports): the
+    stored hash would never match, so neither file may contain them."""
+    for name in ("docs_pipe.py", "rating_action.py"):
+        text = (FILES / name).read_text(encoding="utf-8")
+        assert not [w for w in ("from utils", "from apps", "from main", "from config") if w in text]
+
+
+def test_installer_installs_the_rating_action_active_and_global(owui):
+    """A Function-backed model shows only global (or model-attached) Actions,
+    and Open WebUI refuses a non-admin an Action the model does not surface
+    (utils/models.py, utils/actions.py): the Action must be active and global."""
+    state, client, _ = owui
+    lines = provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    sha = provision.ACTION_SHA256
+    assert lines == [
+        f"docs Pipe installed: Function mainframe_rag_docs active, sha256 {PIPE_SHA}",
+        f"rating Action installed: Function {ACTION_ID} active and global, sha256 {sha}",
+    ]
+    stored = state.functions[ACTION_ID]
+    assert hashlib.sha256(stored["content"].encode()).hexdigest() == sha
+    assert (stored["type"], stored["is_active"], stored["is_global"]) == ("action", True, True)
+    assert state.functions["mainframe_rag_docs"].get("is_global", False) is False
+    state.requests.clear()
+    lines = provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    assert lines[1].startswith("rating Action unchanged:") and _writes(state) == []
+    # Switched off or made non-global in the admin UI: converged back, never toggled away.
+    stored["is_active"] = stored["is_global"] = False
+    provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    assert (stored["is_active"], stored["is_global"]) == (True, True)
+
+
+def test_installer_updates_a_drifted_rating_action(owui):
+    state, client, _ = owui
+    provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    state.functions[ACTION_ID]["content"] = "class Action: pass  # edited in the admin UI\n"
+    state.requests.clear()
+    lines = provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    assert lines[1].startswith("rating Action updated:")
+    assert _writes(state) == [("POST", f"/api/v1/functions/id/{ACTION_ID}/update")]
+    assert state.functions[ACTION_ID]["content"] == ACTION
+
+
+def test_installer_refuses_a_mounted_action_that_is_not_the_repository_file(owui):
+    state, client, _ = owui
+    with pytest.raises(provision.ProvisionError,
+                       match="mounted rating Action does not match the repository file"):
+        provision.provision(client, PIPE, PIPE_SHA, ACTION + "# tampered\n")
+    assert state.requests == []
+
+
+def test_installer_refuses_a_stored_action_that_differs_after_the_write(owui):
+    state, client, _ = owui
+    provision.provision(client, PIPE, PIPE_SHA)
+    state.mangle_content = True
+    with pytest.raises(provision.ProvisionError, match="does not match the repository Action"):
+        provision.provision(client, PIPE, PIPE_SHA, ACTION)
+
+
+@pytest.mark.parametrize("fid,ftype", [("mainframe_rag_docs", "action"), (ACTION_ID, "pipe")])
+def test_installer_refuses_a_repository_id_holding_the_wrong_kind(owui, fid, ftype):
+    """An admin-created Function under a repository id but of another kind
+    (a Pipe named like the Action, or the reverse) is never adopted."""
+    state, client, _ = owui
+    state.functions[fid] = {"id": fid, "name": "X", "type": ftype, "content": "c",
+                            "is_active": True, "is_global": False}
+    with pytest.raises(provision.ProvisionError, match=f"Function {fid} is not a"):
+        provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    assert _writes(state) == []
+
+
+def test_installer_removes_the_rating_action_when_ratings_are_off(owui):
+    """Ratings on, then off: the chart stops mounting the Action and the next
+    deploy converges the Function set back to the docs Pipe alone, then the
+    next ordinary run is a no-op."""
+    state, client, _ = owui
+    provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    state.requests.clear()
+    lines = provision.provision(client, PIPE, PIPE_SHA)
+    assert lines == [f"docs Pipe unchanged: Function mainframe_rag_docs active, sha256 {PIPE_SHA}",
+                     f"rating Action removed: Function {ACTION_ID} (ratings are off)"]
+    assert [(m, p) for m, p, _ in state.requests if m != "GET"] == [
+        ("DELETE", f"/api/v1/functions/id/{ACTION_ID}/delete")]
+    assert set(state.functions) == {"mainframe_rag_docs"}
+    state.requests.clear()
+    assert provision.provision(client, PIPE, PIPE_SHA) == [
+        f"docs Pipe unchanged: Function mainframe_rag_docs active, sha256 {PIPE_SHA}"]
+    assert [m for m, _, _ in state.requests if m != "GET"] == []
+
+
+def test_installer_still_refuses_any_function_outside_the_repository_set(owui):
+    state, client, _ = owui
+    state.functions["community_x"] = {"id": "community_x", "name": "X", "type": "action",
+                                      "content": "c", "is_active": True, "is_global": True}
+    with pytest.raises(provision.ProvisionError, match="a Function other than the repository docs Pipe"):
+        provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    assert _writes(state) == [] and "community_x" in state.functions
+
+
+def test_installer_main_installs_the_action_only_when_it_is_mounted(owui, capsys, monkeypatch):
+    state, client, tmp_path = owui
+    (tmp_path / "docs_pipe.py").write_text(PIPE, encoding="utf-8")
+    monkeypatch.setattr(provision, "MOUNT", tmp_path)
+    monkeypatch.setattr(provision, "CERT", tmp_path / "rag-openwebui.crt")
+    monkeypatch.setattr(provision, "PORT", client._port)
+    monkeypatch.setattr("sys.stdin", io.StringIO(KEY + "\n"))
+    assert provision.main([PIPE_SHA]) == 0
+    assert ACTION_ID not in state.functions
+    (tmp_path / "rating_action.py").write_text(ACTION, encoding="utf-8")
+    monkeypatch.setattr("sys.stdin", io.StringIO(KEY + "\n"))
+    assert provision.main([PIPE_SHA]) == 0
+    assert state.functions[ACTION_ID]["is_global"] is True
+    out = capsys.readouterr().out
+    assert "rating Action installed" in out and KEY not in out and ACTION not in out
 
 
 # ------------------------------------------------------------ IdP CA trust step

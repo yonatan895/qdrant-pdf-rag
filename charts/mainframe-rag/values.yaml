@@ -268,6 +268,14 @@ openwebui:
   # Public Route host; the OIDC redirect URI is https://<host>/oauth/oidc/callback.
   host: ""
   retentionDays: 30
+  # Thumbs up/down on answers (#1255), default off; requires feedback.enabled.
+  # Ratings go only to the agent's POST /v1/feedback and the feedback store
+  # (ADR-0005); Open WebUI's own ratings stay off. On: the docs Pipe ends each
+  # answer with an "Answer reference" line, and deploy.sh installs the
+  # repository rating Action (hash-checked) next to the docs Pipe. Off again:
+  # the next deploy removes the Action.
+  ratings:
+    enabled: false
   storageSize: 10Gi
   oidc:
     # https://<idp>/.well-known/openid-configuration of the identity team's client.

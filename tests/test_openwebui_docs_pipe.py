@@ -1038,7 +1038,90 @@ def test_open_webui_pin_and_install_header():
     assert fields["title"] == "Rosetta"
     assert "requirements" not in fields
     imports = set(re.findall(r"^(?:from|import) (\w+)", source, flags=re.MULTILINE))
-    assert imports <= {"__future__", "collections", "json", "re", "typing", "httpx", "pydantic"}
+    # `os` reads only the chart's RAG_ANSWER_REFERENCE switch (#1255).
+    assert imports <= {"__future__", "collections", "json", "os", "re", "typing", "httpx",
+                       "pydantic"}
+
+
+# --- Answer reference for Open WebUI ratings (#1255) -------------------------
+
+RID = "0123456789ab"
+# The line the rating Action reads the agent's request id from, spelled out.
+REFERENCE = "\n\nAnswer reference: `0123456789ab`"
+
+
+def _ref_frames(*deltas: str, chunk_id: str = f"chatcmpl-{RID}") -> list[str]:
+    frames = [format_openai_chunk(chunk_id, "m", delta_content=d) for d in deltas]
+    frames.append(format_openai_chunk(chunk_id, "m", finish_reason="stop", extra=_final_meta()))
+    frames.append(format_openai_done())
+    return frames
+
+
+@pytest.fixture
+def references_on(monkeypatch):
+    monkeypatch.setenv("RAG_ANSWER_REFERENCE", "true")
+
+
+@pytest.mark.parametrize("stream", [True, False])
+def test_answer_reference_is_the_last_line_when_ratings_are_on(references_on, stream):
+    """The agent's request id reaches the stream only as the chunk id
+    (`chatcmpl-<id>`); Open WebUI keeps no field an Action can read except the
+    message content, so the Pipe appends one fixed line after the answer."""
+    content, events = run_pipe(FakeAgent(_ref_frames("Answer.")), stream=stream)
+    assert content == "Answer." + SHOWN_LIST_A + REFERENCE
+    assert _final_status(events) == "Source-matched · 1 citation"
+
+
+def test_no_answer_reference_by_default():
+    """Ratings off (the default): the Pipe's output is unchanged."""
+    content, _ = run_pipe(FakeAgent(_ref_frames("Answer.")))
+    assert content == "Answer." + SHOWN_LIST_A
+
+
+@pytest.mark.parametrize("value", ["", "false", "1", "TRUE "])
+def test_answer_reference_switch_is_exactly_true(monkeypatch, value):
+    monkeypatch.setenv("RAG_ANSWER_REFERENCE", value)
+    content, _ = run_pipe(FakeAgent(_ref_frames("Answer.")))
+    assert "Answer reference" not in content
+
+
+@pytest.mark.parametrize("frames", [
+    pytest.param(_ref_frames("Answer.", chunk_id="chatcmpl-x"), id="not-an-agent-id"),
+    pytest.param(_ref_frames("Answer.", chunk_id=f"other-{RID}"), id="no-chatcmpl-prefix"),
+    pytest.param(_ref_frames("Answer.", chunk_id=f"chatcmpl-{RID}0"), id="13-hex"),
+    pytest.param([format_openai_chunk("chatcmpl-x", "m", finish_reason="stop",
+                                      extra={**_final_meta(), "__request_id": RID}),
+                   format_openai_done()], id="id-key-in-the-agent-metadata"),
+    pytest.param(_ref_frames("Answer.")[:-1], id="no-done"),
+    pytest.param([*_ref_frames("Answer.")[:1],
+                  format_openai_error("upstream_error", "x"), format_openai_done()], id="error-frame"),
+])
+def test_no_answer_reference_without_a_finished_agent_answer(references_on, frames):
+    """Only a completed answer with the agent's 12-hex id gets a reference: a
+    failed or truncated one is not recorded as an answer, so it is not rateable."""
+    content, _ = run_pipe(FakeAgent(frames))
+    assert "Answer reference" not in content
+
+
+def test_answer_reference_never_follows_a_failure_text(references_on):
+    content, _ = run_pipe(FakeAgent(status=502, body=b'{"code":"upstream_error","message":"x"}'))
+    assert "Answer reference" not in content
+
+
+def test_history_drops_the_trailing_reference_line_from_answers_only():
+    """The reference is Open WebUI display state, not the answer: the agent
+    gets the assistant turn as it produced it. A user turn, or a reference
+    that is not the last line, is sent unchanged."""
+    quoted = "Is `Answer reference: `0123456789ab`` an id?" + REFERENCE
+    request = docs_pipe.build_request(_messages(
+        ("user", "First question"),
+        ("assistant", "First answer." + REFERENCE),
+        ("assistant", "Mid" + REFERENCE + "\n\nmore text"),
+        ("user", quoted),
+    ), None)
+    assert request is not None
+    assert [t["content"] for t in request["messages"]] == [
+        "First question", "First answer.", "Mid" + REFERENCE + "\n\nmore text", quoted]
 
 
 # --- Real agent round trip ---------------------------------------------------
@@ -1104,6 +1187,24 @@ def test_round_trip_through_the_real_agent(real_agent):
     assert source["source"] == {"name": CITE_A, "id": "SA22-0000-00"}
     assert source["document"] == [EXCERPT_A]
     assert _final_status(events) == "Source-matched · 1 citation"
+
+
+def test_round_trip_reference_is_the_agents_recorded_request_id(real_agent, monkeypatch):
+    """Producer to consumer: the id in the reference line is exactly the real
+    agent's request id for this answer (its chunk id, its X-Request-ID)."""
+    monkeypatch.setenv("RAG_ANSWER_REFERENCE", "true")
+    transport, _ = real_agent
+    seen: list[str] = []
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        response = transport.handle_request(request)
+        seen.extend(re.findall(r'"id": "chatcmpl-([0-9a-f]{12})"', response.content.decode()))
+        return response
+
+    content, _ = run_pipe(None, transport=httpx.MockTransport(capture))
+    assert seen and len(set(seen)) == 1
+    assert content.endswith(f"\n\nAnswer reference: `{seen[0]}`")
+    assert content.count("Answer reference") == 1
 
 
 def test_round_trip_asks_the_last_multimodal_turn_not_an_earlier_one(real_agent):

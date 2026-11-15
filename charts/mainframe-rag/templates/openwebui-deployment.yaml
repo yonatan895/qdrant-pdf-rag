@@ -235,6 +235,12 @@ spec:
               value: "false"
             - name: ENABLE_MESSAGE_RATING
               value: "false"
+            {{- if (.Values.openwebui.ratings | default dict).enabled }}
+            # Ratings go to the agent's feedback store only (#1255): the docs
+            # Pipe adds the answer reference the rating Action reads.
+            - name: RAG_ANSWER_REFERENCE
+              value: "true"
+            {{- end }}
             # Task calls off: the docs model is never a task model (V2).
             - name: TASK_MODEL
               value: ""

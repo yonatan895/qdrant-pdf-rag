@@ -20,6 +20,14 @@ key arrives on stdin, never in argv, the environment or the pod spec.
      listing, never by a 401 on the Function itself.
   4. The Function is switched active when it is not (a toggle is applied only
      after reading the current state, so a repeat run converges).
+  5. Ratings (#1255): when the chart mounts rating_action.py, the repository
+     rating Action is converged the same way, plus switched global (a
+     Function-backed model shows only global Actions). Its expected sha256 is
+     ACTION_SHA256 below, pinned by a test to the repository file, because
+     deploy.sh passes only the Pipe's hash. When the Action is not mounted
+     (ratings off) an installed one is deleted. Any Function outside this
+     repository set is still refused, and a repository id holding another
+     kind of Function is never adopted.
 
 Output and errors are fixed texts plus Open WebUI's HTTP status; response
 bodies, the key and the Pipe content are never printed. The Open WebUI
@@ -38,6 +46,11 @@ from pathlib import Path
 PIPE_ID = "mainframe_rag_docs"
 PIPE_NAME = "Rosetta"
 PIPE_DESCRIPTION = "Documentation corpus through the mainframe-rag agent"
+ACTION_ID = "mainframe_rag_rating"
+ACTION_NAME = "Rosetta rating"
+ACTION_DESCRIPTION = "Rate a Rosetta answer; stored by the agent's feedback store only"
+# sha256 of charts/mainframe-rag/files/openwebui/rating_action.py (a test pins it).
+ACTION_SHA256 = "4053f91ce37492712c455bd17440443d92afb091fd0d3a64c1aacea097c40abe"
 MOUNT = Path("/opt/mainframe-rag/openwebui")
 CERT = Path("/etc/tls/private/tls.crt")
 HOST = "127.0.0.1"
@@ -119,34 +132,44 @@ class Client:
 
 
 LIST_PATH = "/api/v1/functions/list"
+# The repository Function set: id -> Open WebUI type, and the word in messages.
+KINDS = {PIPE_ID: "pipe", ACTION_ID: "action"}
+LABELS = {PIPE_ID: "Pipe", ACTION_ID: "Action"}
 
 
-def _installed(client: Client) -> bool:
-    """List the Functions through the admin-only listing and say whether the docs
-    Pipe is among them. The listing has no not-found answer, so its 401/403 is the
-    key's refusal (unknown key, non-admin key, or API keys not allowed there).
+def _listing(client: Client) -> dict[str, str]:
+    """List the Functions through the admin-only listing: {id: type}. The listing
+    has no not-found answer, so its 401/403 is the key's refusal (unknown key,
+    non-admin key, or API keys not allowed there).
 
     Every Function can read the user's access and ID tokens (__oauth_token__),
-    so the hash-checked docs Pipe is the only Function that may exist (ADR-0007
-    V2). Another one is refused by name-free fixed text: remove it, then re-run."""
+    so only the hash-checked repository Functions may exist (ADR-0007 V2): the
+    docs Pipe and, with ratings, the rating Action. Another one is refused by
+    name-free fixed text: remove it, then re-run."""
     status, document = client.call("GET", LIST_PATH)
     if status in (401, 403):
         raise ProvisionError(f"GET {LIST_PATH} refused the admin API key (HTTP {status})")
     if status != 200 or not isinstance(document, list):
         raise ProvisionError(f"cannot list Functions (HTTP {status})")
-    if any(not isinstance(item, dict) or item.get("id") != PIPE_ID for item in document):
-        raise ProvisionError("a Function other than the repository docs Pipe is installed; only the "
-                             "hash-checked docs Pipe may exist (Functions can read user tokens): "
-                             "remove it and re-run; nothing was installed")
-    return bool(document)
+    if any(not isinstance(item, dict) or item.get("id") not in KINDS for item in document):
+        raise ProvisionError("a Function other than the repository docs Pipe and rating Action is "
+                             "installed; only the hash-checked repository Functions may exist "
+                             "(Functions can read user tokens): remove it and re-run; nothing "
+                             "was installed")
+    listed = {str(item["id"]): str(item.get("type") or KINDS[item["id"]]) for item in document}
+    for fid, kind in listed.items():
+        if kind != KINDS[fid]:
+            raise ProvisionError(f"Function {fid} is not a {KINDS[fid]}; remove it and re-run; "
+                                 "nothing was installed")
+    return listed
 
 
-def _function(client: Client) -> dict:
-    """Read the docs Pipe the listing showed or the write just stored: any
-    non-200 here (v0.12.3 answers an absent Function with 401) is a failure."""
-    status, document = client.call("GET", f"/api/v1/functions/id/{PIPE_ID}")
+def _function(client: Client, fid: str) -> dict:
+    """Read a Function the listing showed or the write just stored: any non-200
+    here (v0.12.3 answers an absent Function with 401) is a failure."""
+    status, document = client.call("GET", f"/api/v1/functions/id/{fid}")
     if status != 200 or not isinstance(document, dict):
-        raise ProvisionError(f"cannot read Function {PIPE_ID} (HTTP {status})")
+        raise ProvisionError(f"cannot read Function {fid} (HTTP {status})")
     return document
 
 
@@ -155,38 +178,72 @@ def _stored_sha(document: dict) -> str:
     return sha256_hex(content.encode("utf-8")) if isinstance(content, str) else ""
 
 
-def provision(client: Client, source: str, expected: str) -> list[str]:
-    """Converge the Function to the repository Pipe; return fixed status lines."""
-    if sha256_hex(source.encode("utf-8")) != expected:
-        raise ProvisionError("mounted docs Pipe does not match the repository file "
-                             "(sha256 differs); nothing was installed")
-    form = {"id": PIPE_ID, "name": PIPE_NAME, "content": source,
-            "meta": {"description": PIPE_DESCRIPTION, "manifest": {}}}
-    current = _function(client) if _installed(client) else None
+def _switch_on(client: Client, fid: str, field: str, path: str, what: str) -> dict:
+    """Toggle `field` on when it is off; toggles flip, so read the state first."""
+    stored = _function(client, fid)
+    if stored.get(field) is not True:
+        status, _ = client.call("POST", f"/api/v1/functions/id/{fid}/{path}")
+        if status != 200:
+            raise ProvisionError(f"cannot make Function {fid} {what} (HTTP {status})")
+        stored = _function(client, fid)
+        if stored.get(field) is not True:
+            raise ProvisionError(f"Function {fid} is not {what} after the switch")
+    return stored
+
+
+def _converge(client: Client, fid: str, form: dict, expected: str, listed: dict[str, str]) -> str:
+    """Create or update one repository Function to its expected content, read it
+    back by hash and kind, and return the action word."""
+    current = _function(client, fid) if fid in listed else None
     if current is None:
         status, _ = client.call("POST", "/api/v1/functions/create", form)
         action = "installed"
     elif _stored_sha(current) != expected:
-        status, _ = client.call("POST", f"/api/v1/functions/id/{PIPE_ID}/update", form)
+        status, _ = client.call("POST", f"/api/v1/functions/id/{fid}/update", form)
         action = "updated"
     else:
         status, action = 200, "unchanged"
     if status != 200:
-        raise ProvisionError(f"cannot write Function {PIPE_ID} (HTTP {status})")
-    stored = _function(client)
+        raise ProvisionError(f"cannot write Function {fid} (HTTP {status})")
+    stored = _function(client, fid)
     if _stored_sha(stored) != expected:
-        raise ProvisionError(f"stored Function {PIPE_ID} does not match the repository "
-                             "Pipe after the write")
-    if not _installed(client):
-        raise ProvisionError(f"Function {PIPE_ID} is missing from the listing after the write")
-    if stored.get("is_active") is not True:
-        status, _ = client.call("POST", f"/api/v1/functions/id/{PIPE_ID}/toggle")
-        if status != 200:
-            raise ProvisionError(f"cannot activate Function {PIPE_ID} (HTTP {status})")
-        stored = _function(client)
-        if stored.get("is_active") is not True:
-            raise ProvisionError(f"Function {PIPE_ID} is not active after activation")
-    return [f"docs Pipe {action}: Function {PIPE_ID} active, sha256 {expected}"]
+        raise ProvisionError(f"stored Function {fid} does not match the repository "
+                             f"{LABELS[fid]} after the write")
+    if stored.get("type", KINDS[fid]) != KINDS[fid]:
+        raise ProvisionError(f"Function {fid} is not a {KINDS[fid]} after the write")
+    if fid not in _listing(client):
+        raise ProvisionError(f"Function {fid} is missing from the listing after the write")
+    _switch_on(client, fid, "is_active", "toggle", "active")
+    return action
+
+
+def provision(client: Client, source: str, expected: str, action: str | None = None) -> list[str]:
+    """Converge the Functions to the repository set; return fixed status lines.
+    `action` is the mounted rating Action, or None when ratings are off."""
+    if sha256_hex(source.encode("utf-8")) != expected:
+        raise ProvisionError("mounted docs Pipe does not match the repository file "
+                             "(sha256 differs); nothing was installed")
+    if action is not None and sha256_hex(action.encode("utf-8")) != ACTION_SHA256:
+        raise ProvisionError("mounted rating Action does not match the repository file "
+                             "(sha256 differs); nothing was installed")
+    listed = _listing(client)
+    form = {"id": PIPE_ID, "name": PIPE_NAME, "content": source,
+            "meta": {"description": PIPE_DESCRIPTION, "manifest": {}}}
+    done = _converge(client, PIPE_ID, form, expected, listed)
+    lines = [f"docs Pipe {done}: Function {PIPE_ID} active, sha256 {expected}"]
+    if action is not None:
+        form = {"id": ACTION_ID, "name": ACTION_NAME, "content": action,
+                "meta": {"description": ACTION_DESCRIPTION, "manifest": {}}}
+        done = _converge(client, ACTION_ID, form, ACTION_SHA256, listed)
+        _switch_on(client, ACTION_ID, "is_global", "toggle/global", "global")
+        lines.append(f"rating Action {done}: Function {ACTION_ID} active and global, "
+                     f"sha256 {ACTION_SHA256}")
+    elif ACTION_ID in listed:
+        status, _ = client.call("DELETE", f"/api/v1/functions/id/{ACTION_ID}/delete")
+        if status != 200 or ACTION_ID in _listing(client):
+            raise ProvisionError(f"cannot remove Function {ACTION_ID} (HTTP {status})")
+        lines.append(f"rating Action removed: Function {ACTION_ID} (ratings are off)")
+    return lines
 
 
 def main(argv: list[str]) -> int:
@@ -199,9 +256,13 @@ def main(argv: list[str]) -> int:
         try:
             source = (MOUNT / "docs_pipe.py").read_text(encoding="utf-8")
             pinned = leaf_der(CERT.read_text(encoding="ascii"))
+            # Mounted only with openwebui.ratings.enabled (#1255).
+            action_file = MOUNT / "rating_action.py"
+            action = action_file.read_text(encoding="utf-8") if action_file.exists() else None
         except (OSError, UnicodeDecodeError, ValueError):
-            raise ProvisionError("cannot read the mounted docs Pipe or serving certificate") from None
-        for line in provision(Client(key, pinned, HOST, PORT), source, argv[0]):
+            raise ProvisionError("cannot read the mounted docs Pipe, rating Action or serving "
+                                 "certificate") from None
+        for line in provision(Client(key, pinned, HOST, PORT), source, argv[0], action):
             print(line)
     except ProvisionError as exc:
         print(f"FAIL: docs Pipe provisioning refused: {exc}", file=sys.stderr)

@@ -101,6 +101,9 @@ window, no repository-owned docs Pipe (#1072).
 {{- define "mainframe-rag.openwebuiEnabled" -}}
 {{- if .Values.openwebui.enabled -}}
 {{- $o := .Values.openwebui -}}
+{{- if and ($o.ratings | default dict).enabled (not .Values.feedback.enabled) -}}
+{{- fail "openwebui.ratings.enabled=true requires feedback.enabled=true: Open WebUI ratings are stored only by the agent's feedback store (ADR-0005)" -}}
+{{- end -}}
 {{- $oidc := $o.oidc | default dict -}}
 {{- $egress := $o.idpEgress | default dict -}}
 {{- $missing := list -}}

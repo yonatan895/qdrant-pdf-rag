@@ -1987,6 +1987,11 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
    answers an absent Function with 401, so a 401 on the Function itself never decides) or
    updates it, reads it back by hash and activates it. Until the key exists, deploy prints
    `docs Pipe NOT installed` and the front end offers no model.
+   With `openwebui.ratings.enabled` (#1255, default off, requires the feedback store) the same
+   run also installs the hash-checked rating Action, active and global, and prints
+   `rating Action installed`. Turned off again, the next run deletes it and prints `rating
+   Action removed`. No `airgap.env` key sets it yet (see the PR's not-implemented list).
+   Contract: [Open WebUI ratings](agent.md#openwebui-ratings).
 5. Give all signed-in users read access to the Rosetta model in the Open WebUI admin UI (the
    default visibility is a #1073 trial item). Then sign in as an ordinary user and ask one
    question: citations show as source chips, and the console still works.

@@ -1668,6 +1668,47 @@ def test_openwebui_pipe_configmap_carries_the_repository_files_and_their_hashes(
     }
 
 
+RATINGS_ON = {**FEEDBACK_ON, "openwebui": {"ratings": {"enabled": True}}}
+
+
+def test_openwebui_ratings_are_off_by_default_and_change_nothing(owui_chart):
+    """#1255: with ratings off (the default) the Pipe ConfigMap and the pod
+    environment are exactly the docs-only ones."""
+    with open(CHART / "values.yaml", encoding="utf-8") as f:
+        assert yaml.safe_load(f)["openwebui"]["ratings"] == {"enabled": False}
+    docs = _owui(owui_chart)
+    assert set(docs["ConfigMap", "rag-openwebui-pipe"]["data"]) == {
+        "docs_pipe.py", "provision_pipe.py", "purge_chats.py"}
+    env = env_map(docs["Deployment", "rag-openwebui"], "openwebui")
+    assert "RAG_ANSWER_REFERENCE" not in env
+    assert docs == _owui(owui_chart, {"openwebui": {"ratings": {"enabled": False}}})
+
+
+def test_openwebui_ratings_ship_the_repository_action_and_the_reference_switch(owui_chart):
+    import hashlib
+
+    docs = _owui(owui_chart, RATINGS_ON)
+    cm = docs["ConfigMap", "rag-openwebui-pipe"]
+    action = (CHART / "files" / "openwebui" / "rating_action.py").read_text(encoding="utf-8")
+    assert cm["data"]["rating_action.py"] == action
+    assert cm["metadata"]["annotations"]["mainframe-rag/rating-action-sha256"] == (
+        hashlib.sha256(action.encode()).hexdigest())
+    env = env_map(docs["Deployment", "rag-openwebui"], "openwebui")
+    assert env["RAG_ANSWER_REFERENCE"] == {"name": "RAG_ANSWER_REFERENCE", "value": "true"}
+    # Open WebUI's own ratings and evaluations stay off: ratings live in the
+    # agent's feedback store only (ADR-0005).
+    assert env["ENABLE_MESSAGE_RATING"]["value"] == "false"
+    assert set(env) == OWUI_ENV_NAMES | {"RAG_ANSWER_REFERENCE"}
+
+
+def test_openwebui_ratings_require_the_feedback_store():
+    values = _owui_values({"ratings": {"enabled": True}})
+    r = _helm_template_with_values(values)
+    assert r.returncode != 0
+    assert ("openwebui.ratings.enabled=true requires feedback.enabled=true: Open WebUI ratings "
+            "are stored only by the agent's feedback store (ADR-0005)") in r.stderr
+
+
 ALLOWED_PATHS = [
     "/", "/c/3f2a", "/auth", "/admin/users", "/_app/immutable/chunks/a.js", "/static/loader.js",
     "/favicon.png", "/manifest.json", "/health", "/health/db", "/oauth/oidc/login",
@@ -1677,6 +1718,7 @@ ALLOWED_PATHS = [
     "/api/v1/users/user/settings", "/api/v1/models/list", "/api/v1/groups/",
     "/api/v1/functions/id/mainframe_rag_docs", "/api/v1/functions/create",
     "/api/v1/configs/banners",
+    "/api/chat/actions/mainframe_rag_rating.up", "/api/chat/actions/mainframe_rag_rating.down",
 ]
 DENIED_PATHS = [
     "/api/v1/files/", "/api/v1/files", "/api/v1/files/abc/content", "/api/v1/retrieval/process/text",
@@ -1688,6 +1730,10 @@ DENIED_PATHS = [
     "/ollama/api/chat", "/docs", "/openapi.json", "/api/version/updates", "/api/changelog",
     "/api/chat", "/api/v1", "/api/v1/", "/api/", "/api", "/api/v1/chatsX", "/api/v1/auths_x",
     "/API/v1/files/", "/api/v1/files/../files/", "/ws", "/oauthx", "/health/x",
+    # Only the repository rating Action's two buttons (#1255).
+    "/api/chat/actions/", "/api/chat/actions/community_x", "/api/chat/actions/community_x.up",
+    "/api/chat/actions/mainframe_rag_rating", "/api/chat/actions/mainframe_rag_rating.sideways",
+    "/api/chat/actions/mainframe_rag_rating.up/x", "/api/chat/actions/mainframe_rag_ratingXup",
 ]
 
 
