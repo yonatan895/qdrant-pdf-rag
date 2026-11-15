@@ -1471,6 +1471,36 @@ sh scripts/tools/run-task.sh airgap:validate
 sh scripts/tools/run-task.sh airgap:pipeline          # or: sh scripts/airgap/pipeline.sh --skip-load
 ```
 
+<a id="upgrade-without-reingest"></a>
+**Upgrade without re-ingest.** When B keeps A's representation (same
+`RULES_VERSION_PIN`, embedding model, revision and dimensions, sparse model and
+weights: the release notes say so), B serves A's published data as is. The
+publication record binds a random build id and a fingerprint of those inputs,
+not the release commit. Do not run `airgap:pipeline` for this upgrade: with
+`CORPUS_PVC` set it always runs the ingest stage (`--skip-ingest` exists only on
+`scripts/airgap/pipeline.sh`). From B's workspace, with A's `airgap.env` values:
+
+```sh
+sh scripts/tools/run-task.sh airgap:validate   # go/no-go line below
+sh scripts/tools/run-task.sh airgap:load
+sh scripts/tools/run-task.sh airgap:deploy
+$KC -n "$NS" exec deploy/rag-agent -c agent -- python3 /app/scripts/probe_gateway.py
+sh scripts/tools/run-task.sh airgap:smoke
+```
+
+- **Go/no-go:** `airgap:validate` must print `==> Stored layout: <alias> is an
+  alias with a build-bound publication`. Any `E_` refusal stops the upgrade;
+  nothing was changed.
+- **Before deploy:** take step 1's snapshot (the only protection against a
+  forced re-ingest if data is ever damaged), keep A's workspace and
+  `airgap.env` for step 4, and confirm A's image tags are still in the
+  registry (registry tag expiry would break step 4).
+- **Keep the ingest work claim.** It holds the ingest inventory; a later
+  ingest against the live generation without it refuses ("fails verification
+  … operator intervention required").
+- Qdrant should not restart when its image and values are unchanged; the agent
+  rolls to B's image.
+
 Deploy refuses before any cluster change when the chart or any registry image is
 not the packed one (`deploy.md` image identity), then checks the running
 `imageID`s. The agent's startup refuses an incompatible or pending existing

@@ -570,7 +570,18 @@ checksums **after**.
   `--tmpdir /work/tmp` in `SKOPEO_ARGS` (for example
   `SKOPEO_ARGS="--authfile /work/auth.json --tmpdir /work/tmp"`); `load.sh`
   refuses before the first push unless that directory exists, is writable and
-  has room for the largest member (at least 0.3 GB). A site
+  has room for the largest member (at least 0.3 GB).
+- Bastion load, as run at the site on 2026-11-03 (release 2cd8f67d):
+  - Create every registry repository a release adds (compare its
+    `images.txt` with the registry) and give the push robot Write on it
+    before `airgap:load`; the push of a missing repository fails.
+  - Set `SKOPEO_ARGS` uncommented in `airgap.env`, for example
+    `SKOPEO_ARGS="--dest-cert-dir /work/registry-ca --dest-authfile /run/mfr-session/private/auth.json --tmpdir /work/tmp"`
+    (registry CA, session credential, work tmpdir).
+  - In every new bastion shell, run `. /run/mfr-session/private/env` first.
+  - The bastion and dev kit images have no text editor: prepare
+    `airgap.env` and notes outside and copy them in.
+- A site
   `containers-policy.json` passed with `--policy` that admits only the
   `docker-archive` transport must also admit `oci-archive` (same
   `insecureAcceptAnything` scope: bundle trust is the signed checksum list,
