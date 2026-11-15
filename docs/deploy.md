@@ -2040,9 +2040,10 @@ image as `openwebui-proxy-image.tar`) as its only listener. Open WebUI listens o
 (`merge_slashes on`), forwards the original request line, and answers `403 denied` for
 everything outside the allow-list. Access logs are off.
 
-Chat folders (`ENABLE_FOLDERS=true`, #1255) pass by uuid4 folder id: list and create, read,
-delete, rename and settings, move, expand, mark read, and the owner's chat list
-(`/{id}/shared/chats`, which the folder page uses). Folder sharing stays off. The proxy refuses
+Chat folders (`ENABLE_FOLDERS=true`, #1255) pass: the folder page `/folders/<id>`, and the folder
+API by id (hex and hyphens; v0.12.3 ids are uuid4) for list and create, read, delete, rename and
+settings, move, expand, mark read, and the owner's chat list (`/{id}/shared/chats`, which the
+folder page uses). Folder sharing stays off. The proxy refuses
 the grant route `/api/v1/folders/{id}/access/update`, which v0.12.3 does not gate on
 `USER_PERMISSIONS_FOLDERS_ALLOW_SHARING`, and the shared-folder list `/api/v1/folders/shared`
 (the sidebar treats that refusal as an empty list). A folder's system prompt reaches the docs

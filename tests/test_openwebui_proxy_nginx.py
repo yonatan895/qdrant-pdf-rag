@@ -180,7 +180,7 @@ ALLOWED = [
     # Merged slashes: nginx decides on the merged path; the raw line is forwarded.
     "/api//v1/chats/",
     # Chat folders (#1255), by a uuid4 folder id; the query string is not part of $uri.
-    "/api/v1/folders/", f"/api/v1/folders/{FOLDER_ID}?delete_contents=true",
+    f"/folders/{FOLDER_ID}", "/api/v1/folders/", f"/api/v1/folders/{FOLDER_ID}?delete_contents=true",
     f"/api/v1/folders/{FOLDER_ID}/update/parent", f"/api/v1/folders/{FOLDER_ID}/shared/chats?page=1",
 ]
 

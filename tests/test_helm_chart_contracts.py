@@ -1153,9 +1153,9 @@ OWUI_ENV_NAMES = {
     "TASK_MODEL", "USER_PERMISSIONS_CHAT_CALL", "USER_PERMISSIONS_CHAT_FILE_UPLOAD",
     "USER_PERMISSIONS_CHAT_STT", "USER_PERMISSIONS_CHAT_TTS", "USER_PERMISSIONS_FEATURES_API_KEYS",
     "USER_PERMISSIONS_FEATURES_CODE_INTERPRETER", "USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS",
-    "USER_PERMISSIONS_FEATURES_FOLDERS", "USER_PERMISSIONS_FOLDERS_ALLOW_SHARING",
-    "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION", "USER_PERMISSIONS_FEATURES_MEMORIES",
-    "USER_PERMISSIONS_FEATURES_NOTES", "USER_PERMISSIONS_FEATURES_WEB_SEARCH",
+    "USER_PERMISSIONS_FEATURES_FOLDERS", "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION",
+    "USER_PERMISSIONS_FEATURES_MEMORIES", "USER_PERMISSIONS_FEATURES_NOTES",
+    "USER_PERMISSIONS_FEATURES_WEB_SEARCH", "USER_PERMISSIONS_FOLDERS_ALLOW_SHARING",
     "USER_PERMISSIONS_WORKSPACE_KNOWLEDGE_ACCESS", "USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS",
     "USER_PERMISSIONS_WORKSPACE_TOOLS_ACCESS", "UVICORN_WORKERS", "VECTOR_DB", "WEBUI_AUTH",
     "WEBUI_SECRET_KEY", "WEBUI_URL", "WHISPER_MODEL_AUTO_UPDATE",
@@ -1392,6 +1392,13 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION": "false",
         "USER_PERMISSIONS_CHAT_STT": "false", "USER_PERMISSIONS_CHAT_TTS": "false",
         "USER_PERMISSIONS_CHAT_CALL": "false",
+        # Chat folders on, folder sharing off (#1255); a folder's knowledge
+        # entries stay inert while uploads, knowledge, notes and query
+        # generation stay off (ADR-0007 V1).
+        "ENABLE_FOLDERS": "true", "USER_PERMISSIONS_FEATURES_FOLDERS": "true",
+        "USER_PERMISSIONS_FOLDERS_ALLOW_SHARING": "false", "ENABLE_NOTES": "false",
+        "USER_PERMISSIONS_WORKSPACE_KNOWLEDGE_ACCESS": "false",
+        "ENABLE_RETRIEVAL_QUERY_GENERATION": "false",
         "OAUTH_SCOPES": "openid email profile groups offline_access",
         "CORS_ALLOW_ORIGIN": "https://docs.apps.example.internal",
         "ENABLE_API_KEYS": "true", "USER_PERMISSIONS_FEATURES_API_KEYS": "false",
@@ -1680,9 +1687,9 @@ ALLOWED_PATHS = [
     "/api/v1/users/user/settings", "/api/v1/models/list", "/api/v1/groups/",
     "/api/v1/functions/id/mainframe_rag_docs", "/api/v1/functions/create",
     "/api/v1/configs/banners",
-    # Chat folders (#1255): list/create, read/delete one, rename/data, move,
-    # expand, mark read, and the owner's folder chat list.
-    "/api/v1/folders/", "/api/v1/folders", f"/api/v1/folders/{FOLDER_ID}",
+    # Chat folders (#1255): the folder page, list/create, read/delete one,
+    # rename/settings, move, expand, mark read, and the owner's folder chat list.
+    f"/folders/{FOLDER_ID}", "/api/v1/folders/", "/api/v1/folders", f"/api/v1/folders/{FOLDER_ID}",
     f"/api/v1/folders/{FOLDER_ID}/update", f"/api/v1/folders/{FOLDER_ID}/update/parent",
     f"/api/v1/folders/{FOLDER_ID}/update/expanded", f"/api/v1/folders/{FOLDER_ID}/read",
     f"/api/v1/folders/{FOLDER_ID}/shared/chats",
@@ -1697,8 +1704,8 @@ DENIED_PATHS = [
     "/ollama/api/chat", "/docs", "/openapi.json", "/api/version/updates", "/api/changelog",
     "/api/chat", "/api/v1", "/api/v1/", "/api/", "/api", "/api/v1/chatsX", "/api/v1/auths_x",
     "/API/v1/files/", "/api/v1/files/../files/", "/ws", "/oauthx", "/health/x",
-    # Folder sharing stays off (#1255, ADR-0007 S2): granting access, the
-    # shared-with-me list, and anything but the routes the sidebar needs.
+    # Folder sharing stays off (#1255, ADR-0007 S2): the grant route (its only
+    # writer in v0.12.3), the shared-folder list, and any other folder route.
     f"/api/v1/folders/{FOLDER_ID}/access/update", "/api/v1/folders/shared",
     "/api/v1/folders/shared/chats", f"/api/v1/folders/{FOLDER_ID}/update/x",
     f"/api/v1/folders/{FOLDER_ID}/shared", f"/api/v1/folders/{FOLDER_ID}/chats",
@@ -1718,24 +1725,6 @@ def _allow_regexes():
     assert re.search(r"^\s*default\s+0;\s*$", block, re.MULTILINE), "deny must be the default"
     assert entries, "no allow-list entries"
     return [re.compile(e) for e in entries]
-
-
-def test_openwebui_chat_folders_are_on_and_folder_sharing_is_off(owui_chart):
-    """#1255: chat folders organise a user's own chats. Sharing stays off
-    (ADR-0007 S2): the permission is pinned off and the proxy refuses the
-    grant route, the only writer of folder access grants in v0.12.3."""
-    env = env_map(_owui(owui_chart)["Deployment", "rag-openwebui"], "openwebui")
-    plain = {k: v["value"] for k, v in env.items() if "value" in v}
-    assert plain["ENABLE_FOLDERS"] == "true"
-    assert plain["USER_PERMISSIONS_FEATURES_FOLDERS"] == "true"
-    assert plain["USER_PERMISSIONS_FOLDERS_ALLOW_SHARING"] == "false"
-    # What keeps a folder's knowledge entries inert stays in force.
-    for key in ("USER_PERMISSIONS_CHAT_FILE_UPLOAD", "USER_PERMISSIONS_WORKSPACE_KNOWLEDGE_ACCESS",
-                "USER_PERMISSIONS_FEATURES_NOTES", "ENABLE_NOTES", "ENABLE_RETRIEVAL_QUERY_GENERATION"):
-        assert plain[key] == "false", key
-    assert plain["BYPASS_EMBEDDING_AND_RETRIEVAL"] == "true"
-    rules = _allow_regexes()
-    assert not any(r.search(f"/api/v1/folders/{FOLDER_ID}/access/update") for r in rules)
 
 
 def test_openwebui_proxy_allow_list_admits_exactly_the_pilot_paths():

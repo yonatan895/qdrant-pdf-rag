@@ -252,8 +252,8 @@ _FOLDER_TURNS = [{"role": "user", "content": "first question"},
 
 
 @pytest.mark.parametrize("system", [
-    # No system turn yet: the folder prompt is inserted as messages[0].
-    pytest.param({"role": "system", "content": FOLDER_PROMPT}, id="inserted"),
+    # (With no system turn yet the folder prompt is inserted as messages[0];
+    # test_request_body_is_exactly_the_strict_chat_schema covers that shape.)
     # A chat or user system prompt already at messages[0]: the folder prompt is
     # prepended to it (string content).
     pytest.param({"role": "system", "content": f"{FOLDER_PROMPT}\nchat system prompt"}, id="merged"),
@@ -267,12 +267,11 @@ def test_a_folder_system_prompt_never_reaches_the_agent(system: dict[str, Any]):
     utils/middleware.py process_chat_payload through apply_system_prompt_to_body,
     whose add_or_update_system_message (utils/misc.py) only ever inserts or
     updates the role:system turn at messages[0]. The Pipe drops system turns,
-    so the folder prompt stays inert (ADR-0007 V2/V3, #1255)."""
+    so the folder prompt stays inert (ADR-0007 V1, V3; #1255)."""
     fake = FakeAgent()
     run_pipe(fake, messages=[system, *_FOLDER_TURNS])
     (body,) = fake.bodies()
     assert body == {"messages": _FOLDER_TURNS, "stream": True}
-    assert "Folder prompt" not in json.dumps(body)
 
 
 # --- History trimming to the agent's body cap (#1072) ------------------------
