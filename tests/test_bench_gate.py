@@ -418,3 +418,59 @@ def test_required_measurements_have_positive_integer_request_counts(tmp_path, en
     with pytest.raises(ValueError):
         update_baseline(result, tmp_path / "reference.json")
     assert not (tmp_path / "reference.json").exists()
+
+
+class _FakeQdrant:
+    """Alias + collection state of a Qdrant after one bench ingest pass."""
+
+    def __init__(self, collection: str) -> None:
+        live = f"{collection}__gen0123"
+        self.aliases = {collection: live}
+        self.collections = {live, f"{collection}__completions", "unrelated", f"{collection}x"}
+
+    def get(self, url, timeout):
+        class R:
+            def __init__(self, body):
+                self._body = body
+
+            def json(self):
+                return {"result": self._body}
+
+        if url.endswith("/aliases"):
+            return R({"aliases": [{"alias_name": a, "collection_name": c} for a, c in self.aliases.items()]})
+        return R({"collections": [{"name": n} for n in sorted(self.collections)]})
+
+    def post(self, url, json, timeout):
+        for action in json["actions"]:
+            self.aliases.pop(action["delete_alias"]["alias_name"])
+        return self._ok()
+
+    def delete(self, url, timeout):
+        self.collections.remove(url.rsplit("/", 1)[1])
+        return self._ok()
+
+    @staticmethod
+    def _ok():
+        class R:
+            def raise_for_status(self):
+                return None
+
+        return R()
+
+
+def test_wipe_removes_the_alias_and_every_generation_of_the_bench_collection(monkeypatch):
+    """A repeated pass must start from an empty Qdrant for its collection:
+    the alias, the live generation and the completions collection all go,
+    so the next ingest does not find a live generation without inventory
+    (the 2026-11-15 `--repeats 3` re-baseline refusal). Other collections,
+    including a name that merely shares the prefix without `__`, stay."""
+    from scripts import benchmark
+
+    fake = _FakeQdrant("bench")
+    monkeypatch.setattr(benchmark.httpx2, "get", fake.get)
+    monkeypatch.setattr(benchmark.httpx2, "post", fake.post)
+    monkeypatch.setattr(benchmark.httpx2, "delete", fake.delete)
+    deleted = benchmark.wipe_collection("http://q", "bench")
+    assert deleted == ["bench__completions", "bench__gen0123"]
+    assert fake.aliases == {}
+    assert fake.collections == {"unrelated", "benchx"}

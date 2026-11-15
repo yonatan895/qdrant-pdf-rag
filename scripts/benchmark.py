@@ -306,6 +306,31 @@ def _wait_agent(agent: subprocess.Popen, log, timeout_s: float = 30.0) -> str:
     raise RuntimeError("agent /healthz never became ready")
 
 
+def wipe_collection(url: str, collection: str) -> list[str]:
+    """Remove everything an earlier pass's ingest left for `collection`.
+
+    Ingest publishes a generation (`<collection>__gen…`) behind the alias
+    `<collection>` plus `<collection>__completions`; `run_ingest` also deletes
+    the inventory. Deleting only `<collection>` misses the alias and the live
+    generation, so the next pass finds a live generation with no inventory and
+    ingest refuses it ("fails verification ... operator intervention
+    required"), as the first `--repeats 3` re-baseline did on 2026-11-15.
+    Returns the collections deleted."""
+    aliases = httpx2.get(f"{url}/aliases", timeout=10.0).json()["result"]["aliases"]
+    actions = [
+        {"delete_alias": {"alias_name": a["alias_name"]}}
+        for a in aliases
+        if a["alias_name"] == collection
+    ]
+    if actions:
+        httpx2.post(f"{url}/collections/aliases", json={"actions": actions}, timeout=10.0).raise_for_status()
+    names = [c["name"] for c in httpx2.get(f"{url}/collections", timeout=10.0).json()["result"]["collections"]]
+    doomed = sorted(n for n in names if n == collection or n.startswith(f"{collection}__"))
+    for name in doomed:
+        httpx2.delete(f"{url}/collections/{name}", timeout=10.0).raise_for_status()
+    return doomed
+
+
 def measure_once(
     sim: QdrantSim, collection: str, corpus_root: Path,
     concurrency: int, search_s: float, answer_s: float,
@@ -313,8 +338,7 @@ def measure_once(
     """One clean measurement pass: wipe the collection (a stale bench
     collection from an earlier pass would inflate the disk/RAM footprint
     being measured), ingest, snapshot Qdrant footprints, run the load."""
-    httpx2.delete(f"{sim.url}/collections/{collection}", timeout=10.0)
-    httpx2.delete(f"{sim.url}/collections/{collection}__completions", timeout=10.0)
+    wipe_collection(sim.url, collection)
     ingest = run_ingest(corpus_root, sim.url, collection)
     qdrant = qdrant_stats(sim, collection)
     agent = run_agent_phase(sim.url, collection, concurrency, search_s, answer_s)
