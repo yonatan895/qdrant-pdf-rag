@@ -174,7 +174,9 @@ dev profiles. No other pin moved and no transitive package was added.
 opentelemetry-api 1.45.2 is the first patched release for GHSA-mf5v-w3w3-f6cg
 (quadratic traceparent matching in `TraceContextTextMapPropagator.extract`, which
 `tracing.parent_context` calls for every request); it also ignores a traceparent
-over 512 characters, which now starts a new root.
+over 512 characters, which now starts a new root. The SDK release also adds a
+default limit of 2000 label combinations per metric
+([observability](observability.md#inbound-trace-context)).
 
 ## Reproduce, refresh and roll back
 
