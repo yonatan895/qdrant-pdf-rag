@@ -62,7 +62,15 @@ enabled. A `tracestate` longer than 512 characters (repeated headers combined,
 names matched case-insensitively) is discarded before the SDK parses it, whose
 parser is quadratic on whitespace runs (GHSA-xcq7-p3pf-p88h). `traceparent` is
 kept, so the trace still joins the caller's; shorter values propagate
-unchanged. Header contents are never logged.
+unchanged. Since OpenTelemetry 1.45.2 (GHSA-mf5v-w3w3-f6cg, #1250) the SDK
+itself ignores a `traceparent` longer than 512 characters, so such a request
+starts a new root trace and the SDK logs one fixed warning line. Header
+contents are never logged.
+
+The 1.45.2 SDK also applies a default limit of 2000 label combinations per
+metric; further combinations are folded into one overflow series. The agent's
+labels are fixed vocabularies (`agent/metrics.py`), so a process is expected to
+stay far below it.
 
 ## Backend status
 

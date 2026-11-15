@@ -1348,6 +1348,18 @@ def test_parent_context_bounds_oversized_tracestate(pad):
     assert len(_tracestate_of(ctx)) == 0
 
 
+def test_parent_context_pathological_traceparent_starts_root_quickly():
+    """GHSA-mf5v-w3w3-f6cg: opentelemetry-api <1.45.2 matched traceparent with
+    `(-.*)?[ \\t]*$`, quadratic when a trailing field is followed by a newline
+    and more text. Measured on 1.45.1 at 100,000 spaces: ~16 s; on 1.45.2
+    (512-character cap before the regex): under 1 ms. A new root, quickly."""
+    value = _traceparent() + "-" + " " * 100_000 + "\nx"
+    start = time.perf_counter()
+    ctx = tracing_mod.parent_context({"traceparent": value})
+    assert time.perf_counter() - start < 2.0
+    assert not _remote_context(ctx).is_valid
+
+
 def test_parent_context_oversized_tracestate_skips_otel_parse(monkeypatch):
     # Version-independent: the unguarded parser must never see the value.
     def boom(*_a, **_k):

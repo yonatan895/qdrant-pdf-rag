@@ -596,11 +596,11 @@ AMBIGUOUS_RPMS = {"cracklib", "cracklib-dicts", "gzip", "less", "libcbor", "libd
                   "libfdisk", "libfido2", "libpwquality", "libseccomp", "libutempter", "openssh",
                   "openssh-clients", "pam", "shadow-utils-subid", "util-linux", "util-linux-core"}
 ALL_LICENCES_REF = "https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6543481300"
-# The kit scope approval in force: the maintainer's decision of 2026-11-14 on #1228
-# (base image on the UBI 9.9 build, RPM set re-resolved). 32132abe… (#1181) and
-# 854999ae… (#1118) are superseded.
-KIT_SCOPE_APPROVAL_REF = "https://github.com/yonatan895/qdrant-pdf-rag/pull/1228#issuecomment-6875113278"
-APPROVED_KIT_DIGEST = "833299c98226a2cce008a6fa3e79b0091a349d7907037a62baf95c47c338cc9b"
+# The kit scope approval in force: the maintainer's decision of 2026-11-15 on #1250
+# (OpenTelemetry 1.45.1/0.66b1 -> 1.45.2/0.66b2). 833299c9… (#1228), 32132abe…
+# (#1181) and 854999ae… (#1118) are superseded.
+KIT_SCOPE_APPROVAL_REF = "https://github.com/yonatan895/qdrant-pdf-rag/pull/1250#issuecomment-6898865253"
+APPROVED_KIT_DIGEST = "0c4f16f9a6dfee431160ab100547d2d3729a48c5dd1495068357a6f1106a2fb0"
 
 
 def test_repository_kit_record_passes_the_enforced_gate_at_the_approved_digest():
