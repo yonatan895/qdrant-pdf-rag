@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 DOCS_FUNCTION = "mainframe_rag_docs"
 # The docs Pipe's answer-depth entries as Open WebUI models (#1255), sorted as whoami lists them.
 DOCS_MODELS = sorted(f"{DOCS_FUNCTION}.{entry}" for entry in ("standard", "quick", "thorough"))
+DOCS_DEFAULT = f"{DOCS_FUNCTION}.standard"  # the chart's DEFAULT_MODELS
 # restricted-v2 assigns UIDs from the namespace range; Kind stand-ins use this one.
 UID_RANGE_START = 1000700000
 # The names an Open WebUI pod may resolve: the IdP and the agent Service (search-domain
@@ -195,6 +196,21 @@ def check_answer(chat: dict, name: str = "answer-citations") -> Verdict:
               status_events=chat.get("status_events", 0), source_chips=chat.get("source_chips", 0),
               source_documents=chat.get("source_documents", 0),
               **{k: chat[k] for k in TIMING_KEYS if k in chat})
+
+
+def check_legacy_chat(listed: list[str], default_models: str | None, turn: dict) -> Verdict:
+    """#1255 upgrade: a chat stored before the docs Pipe became a manifold names the bare
+    Function id, which is no longer a model. On opening it v0.12.3 drops an unlisted id and
+    selects the configured default (Chat.svelte loadChat, resolveDefaultModelIds), so the
+    next turn answers only if the bare id is gone, the default is the listed default entry,
+    and a turn on that stored chat, sent with the default, completes with sources. The
+    frontend selection itself is browser behaviour (the pilot browser trace)."""
+    default_ok = default_models == DOCS_DEFAULT and DOCS_DEFAULT in listed
+    turn_ok = (turn.get("completion_status") == 200 and turn.get("chat_models") == [DOCS_FUNCTION]
+               and turn.get("model") == DOCS_DEFAULT and check_answer(turn).ok)
+    ok = DOCS_FUNCTION not in listed and default_ok and turn_ok
+    return _v("legacy-chat-answers", ok, bare_id_listed=DOCS_FUNCTION in listed, default_ok=default_ok,
+              turn_ok=turn_ok, done=bool(turn.get("done")), source_chips=turn.get("source_chips", 0))
 
 
 # ------------------------------------------------------------------ slow model (#1118)

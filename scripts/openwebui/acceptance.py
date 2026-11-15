@@ -373,6 +373,7 @@ class Acceptance:
         self.revocation()
         self.pod_identity()
         self.add(self._first_answer())
+        self.add(self.legacy_chat())
         self.blocked_paths()
         self.data_dir_after_use()
         self.console("before-restart")
@@ -389,6 +390,16 @@ class Acceptance:
 
     def _first_answer(self) -> checks.Verdict:
         return checks.check_answer(self.ask(self.canary1))
+
+    def legacy_chat(self) -> checks.Verdict:
+        """#1255: a chat stored with the pre-manifold model id, continued with the model the
+        frontend resolves for it (the served default_models)."""
+        listed = self.s.whoami("docs-user").get("models", [])
+        status, config = self.s.api("docs-user", "GET", "/api/config")
+        default = (config or {}).get("default_models") if status == 200 else None
+        turn = self.s.chat("docs-user", default or client.DOCS_MODEL, self.question(self.canary1 + "l"),
+                           chat_models=[client.DOCS_FUNCTION])
+        return checks.check_legacy_chat(listed, default, turn)
 
     # -------------------------------------------------------------- operator lane (#1118 B3)
     def repo_sha(self) -> str:

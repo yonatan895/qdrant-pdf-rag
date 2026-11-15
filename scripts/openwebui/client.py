@@ -12,7 +12,7 @@ Commands:
   dex-config STATE HASHES        print the Dex config (HASHES: one bcrypt hash per USERS line)
   login STATE USER               sign in; print role, groups and visible models
   api-key STATE                  admin: create an API key into STATE/admin-api-key (mode 600)
-  access STATE                   admin: create the groups, grant the Rosetta model to them
+  access STATE                   admin: create the groups, grant each Rosetta model (answer depth) to them
   smoke STATE                    both users: sign in, models, one docs question, blocked paths
   health STATE                   Open WebUI /health through the router and Dex discovery
 
@@ -280,20 +280,24 @@ class Session:
             "model": model, "stream": True, "messages": [{"role": "user", "content": text}]}, timeout=360)
         return {"path": "api-stream", "completion_status": status, **timing}
 
-    def chat(self, user: str, model: str, text: str, session_id: str | None = None) -> dict:
+    def chat(self, user: str, model: str, text: str, session_id: str | None = None,
+             chat_models: list[str] | None = None) -> dict:
         """One saved turn. Without session_id this is the API path for a saved chat: Open
         WebUI answers on this request when the turn is complete. With one it is the
         browser's path: Open WebUI answers the request at once and runs the turn as a
         background task that saves the message as it streams (the browser also gets socket
-        events, which this client does not read)."""
+        events, which this client does not read). chat_models is the model list stored on
+        the chat record (default [model]); a different one stands in for a chat saved with
+        another model, such as the pre-#1255 bare Function id."""
         uid, aid = str(uuid.uuid4()), str(uuid.uuid4())
+        chat_models = chat_models or [model]
         now = int(time.time())
         umsg = {"id": uid, "parentId": None, "childrenIds": [aid], "role": "user", "content": text,
                 "timestamp": now, "models": [model]}
         amsg = {"id": aid, "parentId": uid, "childrenIds": [], "role": "assistant", "content": "",
                 "model": model, "modelName": model, "modelIdx": 0, "timestamp": now}
         status, created = self.api(user, "POST", "/api/v1/chats/new", {"chat": {
-            "title": "Hands-on smoke", "models": [model], "params": {},
+            "title": "Hands-on smoke", "models": chat_models, "params": {},
             "history": {"messages": {uid: umsg, aid: amsg}, "currentId": aid},
             "messages": [umsg, amsg], "tags": [], "timestamp": now * 1000}})
         if status != 200:
@@ -321,6 +325,7 @@ class Session:
         # Timings are seconds from the completion request; saved_content_s and done_s are
         # polled every 3 s, so each is at most 3 s late.
         return {**timing, "chat_id": chat_id, "completion_status": status, "done": message.get("done"),
+                "chat_models": (((stored or {}).get("chat") or {}).get("models")), "model": model,
                 "content_chars": len(message.get("content") or ""),
                 "status_events": len(message.get("statusHistory") or []),
                 "source_chips": len(sources),

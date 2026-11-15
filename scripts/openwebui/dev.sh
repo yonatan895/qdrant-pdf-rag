@@ -19,7 +19,7 @@
 # deploy      local CA and certificates, Dex users, render the working tree's chart
 #             (Open WebUI objects) and Pipe plus the Kind stand-ins, apply
 # relay       host relay (Kind gateway -> 127.0.0.1:$LOCAL_AGENT_PORT), no idle timeout
-# provision   admin API key, the chart's Pipe installer, groups, Rosetta model grants
+# provision   admin API key, the chart's Pipe installer, groups, Rosetta model (answer depth) grants
 # smoke       both users sign in, Rosetta-only models, one question with source chips,
 #             the allow-list's blocked paths answer 403 from the proxy sidecar
 # ready       run the startup checks (health, smoke) and write STATE/READY.md (mode 600):

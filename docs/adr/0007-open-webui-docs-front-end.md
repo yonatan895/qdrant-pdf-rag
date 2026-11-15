@@ -5,7 +5,8 @@
   (default-on, release gates; the conditions below stay); amended by
   [ADR-0010](0010-team-tools-on-open-webui.md) for team tools (the decision
   paragraph, V2, R2, one no-go item and the framework reading, as its table
-  lists).
+  lists). V2 wording amended for the docs Pipe's answer-depth entries
+  (#1255, pending the maintainer's decision on that PR).
   Accepting this record does not enable anything: the chart component stays
   off by default (superseded by ADR-0008: default on), and a site enables it only after every condition below
   passes. Amends [ADR-0004](0004-operator-console-htmx.md) and

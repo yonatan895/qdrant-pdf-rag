@@ -145,6 +145,31 @@ def test_access_grants_every_entry_under_its_own_name(monkeypatch, capsys):
         i: 200 for i, _n in client.DOCS_MODELS}
 
 
+def _legacy(**over):
+    """A chat stored before #1255 (chat.models = the bare Function id), continued
+    after the upgrade with the model the v0.12.3 frontend resolves for it."""
+    base = {"listed": list(checks.DOCS_MODELS), "default_models": "mainframe_rag_docs.standard",
+            "turn": {"done": True, "content_chars": 40, "source_chips": 1, "source_documents": 1,
+                     "completion_status": 200, "chat_models": ["mainframe_rag_docs"],
+                     "model": "mainframe_rag_docs.standard"}}
+    return {**base, **over}
+
+
+def test_legacy_chat_answers_through_the_default_entry():
+    assert checks.check_legacy_chat(**_legacy()).ok
+    for bad in (
+        {"listed": [*checks.DOCS_MODELS, "mainframe_rag_docs"]},  # the bare id is still a model
+        {"default_models": None},  # no default: the frontend falls to the first listed model
+        {"default_models": "mainframe_rag_docs"},  # a default that is not listed
+        {"listed": []},  # no grant yet: the frontend keeps the old id and cannot send
+    ):
+        assert not checks.check_legacy_chat(**_legacy(**bad)).ok, bad
+    for turn in ({"done": False}, {"content_chars": 0}, {"source_chips": 0}, {"completion_status": 400},
+                 {"chat_models": ["mainframe_rag_docs.standard"]},  # not a pre-#1255 chat
+                 {"model": "mainframe_rag_docs.quick"}):  # not the model the frontend resolves
+        assert not checks.check_legacy_chat(**_legacy(turn={**_legacy()["turn"], **turn})).ok, turn
+
+
 def test_models_groups_and_sso_only():
     assert checks.check_models({"a": checks.DOCS_MODELS, "b": list(checks.DOCS_MODELS)}).ok
     assert not checks.check_models({"a": [*checks.DOCS_MODELS, "other"]}).ok

@@ -1631,37 +1631,50 @@ def test_answer_dispatches_reasoning_effort_by_complexity(client, monkeypatch):
     assert fake.last_temperature == 0.2
 
 
-def test_chat_reasoning_effort_is_offered_only_and_omitted_keeps_the_configured_default(
-        client, monkeypatch):
-    """#1255: /v1/chat takes an optional `reasoning_effort` (the docs Pipe's
-    answer depths). An offered effort reaches the model verbatim; an omitted
-    one keeps the configured simple/complex choice; an effort outside
-    LLM_REASONING_EFFORTS is the console's fixed 422 before retrieval or any
-    model call (#748); a value outside the vocabulary is invalid_request."""
-    fake = FakeLLM()
-    search = MagicMockSearch()
+@pytest.fixture
+def effort_client(client, monkeypatch):
+    """/v1/chat with Qwen3.8's effort domain (no `high`) and a medium simple default."""
+    fake, search = FakeLLM(), MagicMockSearch()
     monkeypatch.setattr(app_mod, "llm", fake)
     monkeypatch.setattr(app_mod, "retrieve_search", search.search)
     monkeypatch.setattr(app_mod.settings, "llm_reasoning_efforts", "low,medium,xhigh")
     monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_simple", "medium")
-    turn = {"messages": [{"role": "user", "content": "IEA500I"}]}
+    return client, fake, search
 
-    assert client.post("/v1/chat", json={**turn, "reasoning_effort": "low"}).status_code == 200
-    assert fake.last_reasoning_effort == "low"
-    assert client.post("/v1/chat", json={**turn, "reasoning_effort": "xhigh"}).status_code == 200
-    assert fake.last_reasoning_effort == "xhigh"
-    assert client.post("/v1/chat", json=turn).status_code == 200
-    assert fake.last_reasoning_effort == "medium"
 
-    calls, searches = fake.calls, len(search.calls)
-    for stream in (False, True):
-        refused = client.post("/v1/chat", json={**turn, "stream": stream, "reasoning_effort": "high"})
-        assert refused.status_code == 422
-        assert refused.json() == {"code": "unsupported_reasoning_effort",
-                                  "message": "the reasoning effort is not offered by this deployment"}
-    invalid = client.post("/v1/chat", json={**turn, "reasoning_effort": "max"})
+_CHAT_TURN = {"messages": [{"role": "user", "content": "IEA500I"}]}
+
+
+@pytest.mark.parametrize("extra,sent", [
+    ({"reasoning_effort": "low"}, "low"),
+    ({"reasoning_effort": "xhigh"}, "xhigh"),
+    ({}, "medium"),  # omitted: the configured simple effort, unchanged
+])
+def test_chat_offered_effort_reaches_the_model_verbatim(effort_client, extra, sent):
+    """#1255: /v1/chat takes an optional `reasoning_effort` (the docs Pipe's
+    answer depths); an offered one reaches the model verbatim."""
+    client, fake, _search = effort_client
+    assert client.post("/v1/chat", json={**_CHAT_TURN, **extra}).status_code == 200
+    assert fake.last_reasoning_effort == sent
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_chat_unoffered_effort_is_the_fixed_422_before_retrieval(effort_client, stream):
+    """An effort outside LLM_REASONING_EFFORTS is the console's fixed refusal
+    (#748), before retrieval or any model call."""
+    client, fake, search = effort_client
+    refused = client.post("/v1/chat", json={**_CHAT_TURN, "stream": stream, "reasoning_effort": "high"})
+    assert refused.status_code == 422
+    assert refused.json() == {"code": "unsupported_reasoning_effort",
+                              "message": "the reasoning effort is not offered by this deployment"}
+    assert (fake.calls, search.calls) == (0, [])
+
+
+def test_chat_effort_outside_the_vocabulary_is_invalid_request(effort_client):
+    client, fake, search = effort_client
+    invalid = client.post("/v1/chat", json={**_CHAT_TURN, "reasoning_effort": "max"})
     assert invalid.status_code == 422 and invalid.json()["code"] == "invalid_request"
-    assert (fake.calls, len(search.calls)) == (calls, searches)
+    assert (fake.calls, search.calls) == (0, [])
 
 
 @pytest.mark.parametrize("stream,query,field", [

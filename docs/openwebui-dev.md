@@ -72,6 +72,7 @@ Every rule in `checks.py` has a counterexample in
 | no vector store or uploads after use | `inspect_data.py` in the pod after answers: no vector paths or tables, no `uploads/`, no retrieval rows |
 | Rosetta models only | both users list exactly the docs Pipe's entries `mainframe_rag_docs.standard`, `.quick`, `.thorough` (#1255); IdP group claim mapped; signup and password login refused |
 | citations | one saved turn has finished, text, and source events with documents (the Pipe's source chips) |
+| legacy chat (#1255) | a chat stored with the pre-manifold model id `mainframe_rag_docs` is no longer listed, `/api/config` serves `default_models` = `mainframe_rag_docs.standard`, and a turn on that chat sent with the default answers with source chips. The browser's own switch to the default (`Chat.svelte` `loadChat`) is the pilot browser trace |
 | C1 admin edits | a live admin config edit takes effect, never reaches the `config` table and is gone after a restart |
 | restart persistence (RWO) | chats, the Rosetta Function bytes (sha256 equal to the repository Pipe) and the grant survive a Recreate rollout; the next chat answers |
 | retention purge (S2) | an aged chat and an orphan upload are removed by the chart's own `purge_chats.py`, the canary is gone from every file on the claim, a fresh chat survives, and the next ordinary chat answers |

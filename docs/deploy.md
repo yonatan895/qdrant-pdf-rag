@@ -2008,8 +2008,11 @@ chats. Upgrading from the single model:
   the entries (previous item), v0.12.3 drops on opening it a model id it does not list and
   selects `DEFAULT_MODELS` (`Chat.svelte` `loadChat`; source reading, not yet observed live), so
   the next message, or a regenerated answer, goes through the default entry. With no model
-  granted the old id stays selected and the chat cannot send. API callers must use the new ids:
-  the old one is "Model not found".
+  granted the old id stays selected and the chat cannot send. "Continue response" on an
+  answer saved before the upgrade looks up that answer's own model id, finds none and does
+  nothing; send a new message instead. API callers must use the new ids: the old one is "Model
+  not found". The dev acceptance check `legacy-chat-answers` covers the server side
+  ([checks](openwebui-dev.md)); the browser's switch is part of the pilot browser trace.
 - Every entry shares the Pipe's `TIMEOUT_S` and the agent's request deadline (270 s, sized at
   medium effort). A thorough (`xhigh`) answer may end as the fixed deadline text; a site whose
   `LLM_REASONING_EFFORTS` lacks an entry's effort shows a fixed "does not offer this answer depth"

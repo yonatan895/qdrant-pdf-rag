@@ -1308,7 +1308,14 @@ def test_round_trip_maps_the_real_strict_schema_refusal(real_agent):
     assert content == ERROR_CASES[0][2]
 
 
-def test_round_trip_each_depth_reaches_the_model_at_its_effort(real_agent, monkeypatch):
+@pytest.mark.parametrize("model,effort", [
+    pytest.param(f"{FUNCTION_ID}.quick", "low", id="quick"),
+    pytest.param(f"{FUNCTION_ID}.thorough", "xhigh", id="thorough"),
+    pytest.param(f"{FUNCTION_ID}.standard", "medium", id="standard"),
+    pytest.param(FUNCTION_ID, "medium", id="bare-function-id"),
+])
+def test_round_trip_each_depth_reaches_the_model_at_its_effort(real_agent, monkeypatch,
+                                                               model: str, effort: str):
     """#1255 producer to consumer: the entry the user picked selects the effort
     the real agent sends to the model; the default entry keeps the configured
     default. The bare Function id is a defensive case only: v0.12.3 refuses an
@@ -1320,12 +1327,10 @@ def test_round_trip_each_depth_reaches_the_model_at_its_effort(real_agent, monke
     monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_simple", "medium")
     monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_complex", "medium")
     transport, _searches = real_agent
-    for model in (f"{FUNCTION_ID}.quick", f"{FUNCTION_ID}.thorough", f"{FUNCTION_ID}.standard",
-                  FUNCTION_ID):
-        content, events = run_pipe(None, transport=transport, body_extra={"model": model})
-        assert content == f"Reissue the command.\n\n**Citations:**\n- {CITE_A}"
-        assert _final_status(events) == "Source-matched · 1 citation"
-    assert transport.efforts == ["low", "xhigh", "medium", "medium"]
+    content, events = run_pipe(None, transport=transport, body_extra={"model": model})
+    assert content == f"Reissue the command.\n\n**Citations:**\n- {CITE_A}"
+    assert _final_status(events) == "Source-matched · 1 citation"
+    assert transport.efforts == [effort]
 
 
 def test_round_trip_a_depth_the_deployment_does_not_offer_is_a_fixed_message(

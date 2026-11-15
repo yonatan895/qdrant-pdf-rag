@@ -5,7 +5,8 @@ docs Pipe). One replica, Recreate, one uvicorn worker: SQLite has one writer
 and a rollout must never run two. restricted-v2 assigns UID and volume group
 (no fixed IDs, no anyuid); the image is the hardened derived slim image
 (#1073). The pod holds no gateway key and no model connection: the docs Pipe
-over the agent (#1072) is the only model.
+over the agent (#1072) is the only Function; its answer-depth entries
+(#1255) are the only models.
 
 The environment is the ADR-0007 condition set (V1 vector store, V2 answer
 path, R2 offline, R3 identity, S2-S4 storage, audit and sharing). Variable

@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 from pydantic import BaseModel, Field
@@ -86,12 +86,18 @@ TASK_REPLY = "Docs question"
 # The first entry is the default: DEFAULT_MODELS in the chart names it, and an
 # unknown entry or a pre-#1255 chat's single-model id gets it. Names and the
 # default are a proposal pending the maintainer's decision (#1255).
-DEPTHS: tuple[tuple[str, str, str | None], ...] = (
-    ("standard", "Rosetta", None),
-    ("quick", "Rosetta \N{EN DASH} quick", "low"),
-    ("thorough", "Rosetta \N{EN DASH} thorough", "xhigh"),
+class Depth(NamedTuple):
+    id: str
+    name: str
+    effort: str | None
+
+
+DEPTHS: tuple[Depth, ...] = (
+    Depth("standard", "Rosetta", None),
+    Depth("quick", "Rosetta \N{EN DASH} quick", "low"),
+    Depth("thorough", "Rosetta \N{EN DASH} thorough", "xhigh"),
 )
-_DEPTH_EFFORTS = {depth: effort for depth, _name, effort in DEPTHS}
+_DEPTH_EFFORTS = {depth.id: depth.effort for depth in DEPTHS}
 
 WORKING = "Searching the documentation…"
 FAILED = "Request failed"
@@ -529,7 +535,7 @@ class Pipe:
 
     def pipes(self) -> list[dict[str, str]]:
         """The answer depths as Open WebUI manifold entries (#1255)."""
-        return [{"id": depth, "name": name} for depth, name, _effort in DEPTHS]
+        return [{"id": depth.id, "name": depth.name} for depth in DEPTHS]
 
     async def pipe(
         self,
