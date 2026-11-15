@@ -1757,7 +1757,7 @@ only; the PR lints and types this file directly.
 | Verification | One final `status` event (`done: true`) in the console's wording: "Source-matched · N citation(s)" only for `accepted` with non-inferred citations; otherwise "Insufficient evidence — not operational guidance", "Unverified draft — no eligible citation", "Incomplete generation — output was cut off", or "Unverified — verification state unknown" for anything else. Inferred citations and `script_review_required` append their fixed warnings. Abstention text is the agent's own content; banners never enter the message content, so they are not sent back as history |
 | Errors | An error envelope's stable `code` selects a fixed message (`invalid_request`, `prompt_budget_exceeded`, `upstream_error`, `model_timeout`, `deadline_exceeded`, `overloaded`, `not_configured`, `representation_unavailable`, `internal`; `not_found`/`method_not_allowed`/`http_error` = configuration). An in-stream error frame uses the same table and the incomplete banner. Unknown codes, non-JSON bodies, transport failures and any internal fault give one fixed "could not be reached" text: the agent's `message`, upstream bodies and exception text are never shown, and the Pipe never raises into Open WebUI (which would display the exception) |
 | History trim | Open WebUI resends the whole chat each turn, so the Pipe fits the body to the agent's cap before sending, counted as the agent counts it (`chat_body_chars`: message characters plus `product` plus `version`, not JSON bytes). It drops the oldest turns first, then any leading assistant turn (history never starts with an answer to a dropped question); the last user turn is always kept. If that turn alone exceeds the cap, the Pipe returns its fixed too-long text, which states the valve's limit, and makes no agent call. When turns were dropped it emits the fixed status "Earlier messages in this chat were not sent" (no content) and appends it to the final banner. When the agent reports `message_omitted_chars` > 0 the final banner also carries the fixed note "Your message was too long for the model; its middle part was not read" (no count, no text). The agent has no turn-count cap on the request, so the character cap is the only limit. A long last turn under the cap is sent whole and unchanged; the agent answers it ([long messages](#long-messages)) |
-| Answer reference | Only with `RAG_ANSWER_REFERENCE=true` in Open WebUI's environment (the chart sets it with `openwebui.ratings.enabled`, #1255): a completed answer (finish frame plus `[DONE]`) whose chunk id is the agent's `chatcmpl-<12-hex request id>` ends with the fixed line ``Answer reference: `<id>` `` after the validated list. This is the only message field Open WebUI hands the [rating Action](#openwebui-ratings). A failed or truncated answer gets none. When the Pipe builds the next request it removes that line from the end of assistant turns, so the agent sees its own answer. Off (the default), the output is unchanged |
+| Answer reference | Only with `RAG_ANSWER_REFERENCE=true` in Open WebUI's environment (the chart sets it with `openwebui.ratings.enabled`, #1255): a completed answer (finish frame plus `[DONE]`) whose chunk id is the agent's `chatcmpl-<12-hex request id>` ends with the fixed line ``Answer reference: `<id>` `` after the validated list. This is the only message field Open WebUI hands the [rating Action](#openwebui-ratings). A failed or truncated answer gets none. Off (the default), the answer output is unchanged. Whether the switch is on or off, the Pipe removes that exact trailing line from assistant turns when it builds a request, so the agent sees its own answer, including in chats from before ratings were turned off |
 | Tasks | Background task calls (title, tags, follow-ups, summaries), detected by `__task__`, `__metadata__["task"]`, or a `task`/`metadata.task` body key, return the fixed text `Docs question` and never call the agent |
 | Allowed calls | One `POST {AGENT_URL}/v1/chat` per question. No tools, no model calls, no other host, `trust_env=False` (no proxy environment), no redirects (a 3xx is the fixed "could not be reached" text), no forwarded identity headers, no logging |
 
@@ -1798,8 +1798,8 @@ events as documented.
 <a id="openwebui-ratings"></a>
 ## Open WebUI ratings (#1255, proposed)
 
-**Status:** code and tests only. Default off, and the merge is held until after the release
-candidate. Maintainer decisions are pending in the PR. **Decision owners:**
+**Status:** code and tests only, default off; not yet run on a live Open WebUI (#1255).
+**Decision owners:**
 [ADR-0005](adr/0005-answer-feedback-data-boundary.md) (store, D5) and
 [ADR-0007 V2](adr/0007-open-webui-docs-front-end.md). **Code:**
 [`integrations/openwebui/rating_action.py`](../integrations/openwebui/rating_action.py)
@@ -1813,7 +1813,10 @@ through the real `/v1/chat` and `/v1/feedback`.
   (ADR-0005).
 - **What is stored, and where.** One rating per answer: `good` or `bad`, the reason as
   `comment`, and no `reasons` codes. It goes to `POST /v1/feedback` and from there only to the
-  feedback store. No rater identity is recorded (D5). Open WebUI's own ratings stay off
+  feedback store. No rater identity is recorded (D5). The answer reference itself is part of the
+  saved Open WebUI message, so the chat history (30-day retention) links that request id to the
+  chat owner. Like the console, ratings are unauthenticated: anyone who knows a request id, for
+  example by editing a message's reference, can replace that answer's rating. Open WebUI's own ratings stay off
   (`ENABLE_MESSAGE_RATING=false`). The Action writes nothing to Open WebUI's database: it emits
   only `notification` events and one `input` event call, neither of which Open WebUI v0.12.3
   saves, and it returns None. Saved event types (`status`, `message`, `replace`, `embeds`,

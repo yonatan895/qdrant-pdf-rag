@@ -1355,7 +1355,7 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
     assert pod_vols[proxy_vols["/tmp"]] == {"name": proxy_vols["/tmp"], "emptyDir": {}}
     assert proxy_vols["/tmp"] != next(m["name"] for m in container["volumeMounts"] if m["mountPath"] == "/tmp")
     assert dep["spec"]["template"]["metadata"]["annotations"]["checksum/proxy-config"] == hashlib.sha256(
-        (CHART / "files" / "openwebui" / "proxy.nginx.conf").read_bytes()).hexdigest()
+        _proxy_conf_without_ratings().encode()).hexdigest()
     env = env_map(dep, "openwebui")
     plain = {k: v["value"] for k, v in env.items() if "value" in v}
     for key, value in {
@@ -1786,13 +1786,36 @@ def test_openwebui_proxy_config_matches_the_decoded_uri_and_forwards_the_origina
     assert "client_max_body_size 1m;" in conf
 
 
-def test_openwebui_proxy_configmap_carries_the_repository_config(owui_chart):
-    docs = _owui(owui_chart)
+RATINGS_ALLOW = (
+    "        # The repository rating Action's two buttons only (#1255): the handler\n"
+    "        # checks the Function is an active, surfaced Action; its id is fixed.\n"
+    "        ~^/api/chat/actions/mainframe_rag_rating\\.(up|down)$ 1;\n"
+)
+
+
+def _proxy_conf_without_ratings():
+    """The allow-list as rendered with ratings off (the default): the file
+    without its one rating Action block (#1255)."""
+    conf = _proxy_conf()
+    assert conf.count(RATINGS_ALLOW) == 1
+    return conf.replace(RATINGS_ALLOW, "")
+
+
+@pytest.mark.parametrize("ratings", [False, True])
+def test_openwebui_proxy_configmap_carries_the_repository_config(owui_chart, ratings):
+    """Ratings on: the repository file verbatim. Off (the default): the same
+    file without the rating Action block, so no /api/chat/actions path is
+    admitted (E1) and the pod's proxy checksum follows the rendered text."""
+    extra = RATINGS_ON if ratings else None
+    docs = _owui(owui_chart, extra)
     cm = docs["ConfigMap", "rag-openwebui-proxy"]
-    text = _proxy_conf()
+    text = _proxy_conf() if ratings else _proxy_conf_without_ratings()
+    assert ("/api/chat/actions" in text) is ratings
     assert cm["data"] == {"nginx.conf": text}
     assert cm["metadata"]["annotations"] == {
         "mainframe-rag/proxy-config-sha256": hashlib.sha256(text.encode()).hexdigest()}
+    annotations = docs["Deployment", "rag-openwebui"]["spec"]["template"]["metadata"]["annotations"]
+    assert annotations["checksum/proxy-config"] == hashlib.sha256(text.encode()).hexdigest()
     # Not rendered (and the default render unchanged) when the front end is off.
     default = run_new_template({}, chart=owui_chart)
     assert ("ConfigMap", "rag-openwebui-proxy") not in default

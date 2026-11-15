@@ -47,7 +47,7 @@ spec:
         app: rag-openwebui
       annotations:
         # A changed allow-list rolls the pod.
-        checksum/proxy-config: {{ .Files.Get "files/openwebui/proxy.nginx.conf" | sha256sum | quote }}
+        checksum/proxy-config: {{ include "mainframe-rag.openwebuiProxyConf" . | sha256sum | quote }}
         {{- if $idpCA }}
         # A changed IdP CA rolls the pod (the init step reads it at start).
         checksum/idp-ca: {{ printf "%s%s" $idpCA (.Files.Get "files/openwebui/ca_trust.py") | sha256sum | quote }}

@@ -130,8 +130,9 @@ Pipe is provisioned and the admin role is limited to the team.
   and the OIDC callback, socket.io, health, chats, models, the Pipe's chat
   completions, the account and admin APIs and the Pipe installer's
   `/api/v1/functions`, plus, proposed with ratings (#1255), the rating Action's
-  two buttons `/api/chat/actions/mainframe_rag_rating.(up|down)` (the handler
-  is server-enforced: an active Action the model surfaces). **Re-audited on every import (P1)**: list each router's
+  two buttons `/api/chat/actions/mainframe_rag_rating.(up|down)`, rendered
+  only while ratings are on (the handler is server-enforced: an active Action
+  the model surfaces). **Re-audited on every import (P1)**: list each router's
   handlers, sort them into server-enforced and UI-only, and re-run the browser
   trace; a path is added deliberately, never by default. Proof: the nginx
   config test runs the real pinned image against every encoded variant, and the

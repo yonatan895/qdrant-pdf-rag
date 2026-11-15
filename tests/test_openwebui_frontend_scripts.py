@@ -412,6 +412,22 @@ def test_installer_removes_the_rating_action_when_ratings_are_off(owui):
     assert [m for m, _, _ in state.requests if m != "GET"] == []
 
 
+def test_installer_reinstalls_the_rating_action_after_ratings_return(owui):
+    """On, off, on: the Action deleted by the off run is created again, active
+    and global, and the run after that is a no-op."""
+    state, client, _ = owui
+    provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    provision.provision(client, PIPE, PIPE_SHA)
+    assert ACTION_ID not in state.functions
+    lines = provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    assert lines[1].startswith("rating Action installed:")
+    stored = state.functions[ACTION_ID]
+    assert (stored["type"], stored["is_active"], stored["is_global"]) == ("action", True, True)
+    state.requests.clear()
+    provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    assert _writes(state) == []
+
+
 def test_installer_still_refuses_any_function_outside_the_repository_set(owui):
     state, client, _ = owui
     state.functions["community_x"] = {"id": "community_x", "name": "X", "type": "action",

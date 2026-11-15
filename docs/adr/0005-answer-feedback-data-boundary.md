@@ -88,8 +88,12 @@
   It does not depend on the console (`UI_ENABLED`), so it is UI-agnostic. Open
   WebUI's repository rating Action (ADR-0007 V2) posts to it without a
   credential, the same way the docs Pipe calls `/v1/chat`. The ADR-0003 POST
-  set gains this route. The rating, its reason and the answer reference are
-  stored only by the feedback service. Open WebUI's own message ratings and
+  set gains this route. The rating and its reason are stored only by the
+  feedback service. The answer reference (the agent request id) is also shown
+  in the Open WebUI message, so Open WebUI's chat history (ADR-0007 S2/S3)
+  holds it next to the chat owner: an operator with database access can join
+  a rating to an Open WebUI user through it. That is a de facto attribution
+  path, and accepting it is part of this decision. Open WebUI's own message ratings and
   evaluations stay off (`ENABLE_MESSAGE_RATING=false`, `/api/v1/evaluations`
   blocked at the proxy). The Action writes nothing to Open WebUI's database.
   Rater attribution stays deferred (D5): the agent port cannot prove a
