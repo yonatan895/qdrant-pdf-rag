@@ -1193,3 +1193,29 @@ provision_openwebui_pipe() {
         die "docs Pipe was not installed into Open WebUI (see the installer refusal above); the front end has no verified model"
     unset _pipe_sha _key_b64
 }
+
+# Issue #1255: converge Open WebUI's shared prompt templates (the chat `/`
+# commands) to the repository file through the hash-checked installer inside the
+# pod, after the Pipe. Same admin key, on stdin only. The installer and
+# prompts.json ride ConfigMap rag-openwebui-pipe, whose mount can trail the
+# release (#1252): the installer refuses a mounted copy that is not this
+# release's, and an absent one fails the exec; either way nothing is changed
+# and a re-run converges.
+provision_openwebui_prompts() {
+    [ "${AIRGAP_DRYRUN:-0}" != "1" ] || { echo "[dryrun] shared prompts would be converged in Open WebUI"; return 0; }
+    _prompts_sha=$(sha256sum charts/mainframe-rag/files/openwebui/prompts.json | awk '{print $1}') ||
+        die "cannot hash the repository shared prompts"
+    _prompts_inst_sha=$(sha256sum charts/mainframe-rag/files/openwebui/provision_prompts.py | awk '{print $1}') ||
+        die "cannot hash the repository shared-prompt installer"
+    _key_b64=$($KC -n "$NAMESPACE" get secret "$OPENWEBUI_SECRET" -o "jsonpath={.data['admin-api-key']}" 2>/dev/null) || _key_b64=""
+    if [ -z "$_key_b64" ]; then
+        echo "==> Notice: shared prompts NOT provisioned: Secret $OPENWEBUI_SECRET has no admin-api-key yet (see the docs Pipe notice above)."
+        unset _prompts_sha _prompts_inst_sha _key_b64
+        return 0
+    fi
+    printf '%s' "$_key_b64" | base64 -d 2>/dev/null |
+        $KC -n "$NAMESPACE" exec -i deploy/rag-openwebui -c openwebui -- \
+            python3 /opt/mainframe-rag/openwebui/provision_prompts.py "$_prompts_sha" "$_prompts_inst_sha" ||
+        die "shared prompts were not provisioned in Open WebUI (see the installer refusal above; a mounted file that trails the release clears within a minute): re-run airgap:deploy"
+    unset _prompts_sha _prompts_inst_sha _key_b64
+}

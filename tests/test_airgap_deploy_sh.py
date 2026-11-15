@@ -99,6 +99,10 @@ case "$*" in
   *'get route.route.openshift.io/rag-agent '*'-o json'*)
     [ "${{ROUTE_LIVE_FILE:-}}" != "" ] || exit 1
     cat "$ROUTE_LIVE_FILE" ;;
+  *'exec -i deploy/rag-openwebui '*'provision_prompts.py'*)
+    tee "${{OWUI_PROMPTS_EXEC_STDIN:-/dev/null}}" >/dev/null
+    [ "${{OWUI_PROMPTS_EXEC_FAIL:-}}" != 1 ] || {{ echo 'FAIL: shared prompt provisioning refused: x' >&2; exit 1; }}
+    echo 'shared prompts converged: 0 managed' ;;
   *'get route.route.openshift.io/rag-openwebui '*'-o json'*)
     [ "${{OWUI_ROUTE_LIVE_FILE:-}}" != "" ] || exit 1
     cat "$OWUI_ROUTE_LIVE_FILE" ;;
@@ -1485,6 +1489,39 @@ def test_openwebui_installer_refusal_fails_the_deploy(tree):
     r = _owui_deploy(tree, ("OWUI_EXEC_FAIL", "1"))
     assert r.returncode != 0
     assert "docs Pipe was not installed" in r.stderr
+
+
+def test_openwebui_deploy_converges_the_shared_prompts_after_the_pipe(tree):
+    """#1255: the in-pod installer gets the repository hashes of prompts.json and
+    of itself in argv and the admin key on stdin only, after the Pipe."""
+    import hashlib
+
+    files = tree[0] / "charts" / "mainframe-rag" / "files" / "openwebui"
+    r = _owui_deploy(tree, ("OWUI_PROMPTS_EXEC_STDIN", str(tree[0] / "prompts-stdin.txt")))
+    assert r.returncode == 0, r.stderr
+    shas = [hashlib.sha256((files / name).read_bytes()).hexdigest()
+            for name in ("prompts.json", "provision_prompts.py")]
+    log = _helm_log(tree)
+    call = f"python3\n/opt/mainframe-rag/openwebui/provision_prompts.py\n{shas[0]}\n{shas[1]}"
+    assert call in log
+    assert log.index(call) > log.index("/opt/mainframe-rag/openwebui/provision_pipe.py")
+    assert (tree[0] / "prompts-stdin.txt").read_text() == OWUI_ADMIN_KEY
+    assert OWUI_ADMIN_KEY not in log and OWUI_ADMIN_KEY not in r.stdout + r.stderr
+    assert "shared prompts converged" in r.stdout
+
+
+def test_openwebui_without_an_admin_key_says_the_shared_prompts_are_not_provisioned(tree):
+    r = _owui_deploy(tree, admin_key=False)
+    assert r.returncode == 0, r.stderr
+    assert "shared prompts NOT provisioned" in r.stdout
+    assert "provision_prompts.py" not in _helm_log(tree)
+
+
+def test_openwebui_shared_prompt_refusal_fails_the_deploy_with_a_rerun_hint(tree):
+    r = _owui_deploy(tree, ("OWUI_PROMPTS_EXEC_FAIL", "1"))
+    assert r.returncode != 0
+    assert "shared prompts were not provisioned" in r.stderr
+    assert "re-run airgap:deploy" in r.stderr
 
 
 def test_openwebui_missing_secret_key_refuses_before_mutation(tree):

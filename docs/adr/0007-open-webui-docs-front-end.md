@@ -113,7 +113,13 @@ Pipe is provisioned and the admin role is limited to the team.
   path. The list is the Docs pilot's need: the SPA shell and assets, sign-in
   and the OIDC callback, socket.io, health, chats, models, the Pipe's chat
   completions, the account and admin APIs and the Pipe installer's
-  `/api/v1/functions`. **Re-audited on every import (P1)**: list each router's
+  `/api/v1/functions`. Shared prompts (#1255, maintainer decision pending):
+  users read the repository's `/` commands through `GET /api/v1/prompts/` and
+  cannot create or import a prompt (both permissions pinned off). The prompt
+  installer runs in the pod; its list and write paths are admitted only from
+  the pod's loopback source, so no Route client reaches a prompt write. The
+  admin API key is honoured only on `/api/v1/functions` and `/api/v1/prompts`.
+  **Re-audited on every import (P1)**: list each router's
   handlers, sort them into server-enforced and UI-only, and re-run the browser
   trace; a path is added deliberately, never by default. Proof: the nginx
   config test runs the real pinned image against every encoded variant, and the
