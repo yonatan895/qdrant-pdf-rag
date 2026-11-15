@@ -4692,8 +4692,8 @@
     }
   ],
   "release_approval": {
-    "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/pull/1228#issuecomment-6875113278",
-    "approved_digest": "c535e932f642782e037f486d56dd583d510e7d53cf03fd369ff22506b0acaca4"
+    "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/pull/1249#issuecomment-6898301508",
+    "approved_digest": "abd9d185f3cc06bce1a8e3449499cdc981b2da355e6c96ef377627951648899f"
   },
   "schema_version": 1
 }
