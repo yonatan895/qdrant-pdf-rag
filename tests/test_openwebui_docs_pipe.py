@@ -245,6 +245,36 @@ def test_request_body_is_exactly_the_strict_chat_schema(chat_request):
     assert fake.requests[0].url == httpx.URL("http://rag-agent:8080/v1/chat")
 
 
+FOLDER_PROMPT = "Folder prompt: answer as a pirate"
+_FOLDER_TURNS = [{"role": "user", "content": "first question"},
+                 {"role": "assistant", "content": "first answer"},
+                 {"role": "user", "content": QUESTION}]
+
+
+@pytest.mark.parametrize("system", [
+    # No system turn yet: the folder prompt is inserted as messages[0].
+    pytest.param({"role": "system", "content": FOLDER_PROMPT}, id="inserted"),
+    # A chat or user system prompt already at messages[0]: the folder prompt is
+    # prepended to it (string content).
+    pytest.param({"role": "system", "content": f"{FOLDER_PROMPT}\nchat system prompt"}, id="merged"),
+    # The same merge on list content: every text part gets the prompt prepended.
+    pytest.param({"role": "system", "content": [
+        {"type": "text", "text": f"{FOLDER_PROMPT}\nchat system prompt"},
+        {"type": "text", "text": f"{FOLDER_PROMPT}\nsecond part"}]}, id="list-content"),
+])
+def test_a_folder_system_prompt_never_reaches_the_agent(system: dict[str, Any]):
+    """Open WebUI v0.12.3 applies a chat folder's `data.system_prompt` in
+    utils/middleware.py process_chat_payload through apply_system_prompt_to_body,
+    whose add_or_update_system_message (utils/misc.py) only ever inserts or
+    updates the role:system turn at messages[0]. The Pipe drops system turns,
+    so the folder prompt stays inert (ADR-0007 V2/V3, #1255)."""
+    fake = FakeAgent()
+    run_pipe(fake, messages=[system, *_FOLDER_TURNS])
+    (body,) = fake.bodies()
+    assert body == {"messages": _FOLDER_TURNS, "stream": True}
+    assert "Folder prompt" not in json.dumps(body)
+
+
 # --- History trimming to the agent's body cap (#1072) ------------------------
 
 CAP = 131072

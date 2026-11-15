@@ -167,6 +167,7 @@ def _request(port: int, method: str, target: str, headers: dict | None = None) -
     return status, body.decode("latin-1")
 
 
+FOLDER_ID = "0b9d6f3e-6c1a-4f43-9a51-2d3c8e7f1a00"
 ALLOWED = [
     "/", "/c/3f2a", "/auth", "/admin/users", "/_app/immutable/a.js", "/static/loader.js", "/favicon.png",
     "/health", "/health/db", "/oauth/oidc/login", "/oauth/oidc/callback?code=x&state=y", "/ws/socket.io/?EIO=4",
@@ -178,6 +179,9 @@ ALLOWED = [
     "/api/v1/ch%61ts/list", "/api/v1%2Fchats/list", "/api/v1/chats/a%20b?x=1%2F2",
     # Merged slashes: nginx decides on the merged path; the raw line is forwarded.
     "/api//v1/chats/",
+    # Chat folders (#1255), by a uuid4 folder id; the query string is not part of $uri.
+    "/api/v1/folders/", f"/api/v1/folders/{FOLDER_ID}?delete_contents=true",
+    f"/api/v1/folders/{FOLDER_ID}/update/parent", f"/api/v1/folders/{FOLDER_ID}/shared/chats?page=1",
 ]
 
 BLOCKED_FILES = [
@@ -195,6 +199,10 @@ BLOCKED_OTHER = [
     "/api/v1/utils/code/execute", "/api/v1/utils/db/download", "/openai/chat/completions",
     "/ollama/api/chat", "/docs", "/openapi.json", "/api/version/updates", "/api/v1/pipelines/",
     "/api/v1/scim/v2/Users", "/api/v1/chatsX", "/oauthx", "/health/x", "/api", "/api/", "/api/v1/",
+    # Folder sharing stays off (#1255): the grant route and the shared-with-me list.
+    f"/api/v1/folders/{FOLDER_ID}/access/update", f"/api/v1/folders/{FOLDER_ID}/%61ccess/update",
+    f"/api/v1/folders/{FOLDER_ID}/update/../access/update", "/api/v1/folders/shared",
+    "/api/v1/folders/%73hared", "/api/v1/folders/shared?x=1",
 ]
 
 

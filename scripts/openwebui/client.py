@@ -56,6 +56,7 @@ BLOCKED = (
     "/api/v1/chats/%2e%2e/files/", "/api/v1/%2566iles/", "/api/v1/files%00",
     "/api/v1/retrieval/process/text", "/api/v1/knowledge/", "/api/v1/audio/transcriptions",
     "/openai/chat/completions", "/ollama/api/chat", "/api/v1/utils/code/execute",
+    "/api/v1/folders/shared", "/api/v1/folders/00000000-0000-4000-8000-000000000000/access/update",
 )
 
 OWUI_URL = os.environ.get("OWUI_URL", "https://owui.localhost").rstrip("/")

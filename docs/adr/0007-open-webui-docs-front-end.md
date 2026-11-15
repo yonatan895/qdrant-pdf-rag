@@ -5,7 +5,7 @@
   (default-on, release gates; the conditions below stay); amended by
   [ADR-0010](0010-team-tools-on-open-webui.md) for team tools (the decision
   paragraph, V2, R2, one no-go item and the framework reading, as its table
-  lists).
+  lists); amended for chat folders (#1255: V1, E1, S2, S3).
   Accepting this record does not enable anything: the chart component stays
   off by default (superseded by ADR-0008: default on), and a site enables it only after every condition below
   passes. Amends [ADR-0004](0004-operator-console-htmx.md) and
@@ -53,6 +53,19 @@ Pipe is provisioned and the admin role is limited to the team.
   memory attempts, then an inspection of the data directory. It must contain
   no vector-store directory or file, and no uploaded files. A non-empty store
   is an acceptance failure.
+  **Chat folders** are on (#1255) to organise a user's own chats. A folder
+  carries a system prompt, knowledge entries, default models, an icon and a
+  background image (v0.12.3 `routers/folders.py`, `utils/middleware.py`).
+  None of them reaches the vector store or the agent. The system prompt
+  becomes the system turn at `messages[0]`, which the Pipe drops (a Pipe test
+  pins the inserted, merged and list-content shapes). Knowledge entries
+  (files, collections, notes) resolve to nothing because none can exist:
+  uploads, knowledge and notes are off and E1 refuses their routes. Admins
+  skip v0.12.3's folder-entry access check (`get_accessible_folder_files`),
+  so for them E1 alone keeps the entries empty. The only model a folder
+  default can name is the Pipe. The proof battery adds a folder with a system
+  prompt and a knowledge entry, then a chat in it: the agent request holds
+  user and assistant turns only, and the data directory is unchanged.
 - **V2 Answers only through the agent.** Open WebUI holds no gateway or LiteLLM
   key. It has no OpenAI or Ollama connections, so the default connections are
   off. Direct connections, user-created models and user Tools/Functions are
@@ -112,8 +125,10 @@ Pipe is provisioned and the admin role is limited to the team.
   request line is forwarded unchanged so nginx and uvicorn decide on the same
   path. The list is the Docs pilot's need: the SPA shell and assets, sign-in
   and the OIDC callback, socket.io, health, chats, models, the Pipe's chat
-  completions, the account and admin APIs and the Pipe installer's
-  `/api/v1/functions`. **Re-audited on every import (P1)**: list each router's
+  completions, the account and admin APIs, the Pipe installer's
+  `/api/v1/functions`, and chat folders by uuid4 id, without the folder
+  grant route `/access/update` or the shared-with-me list `/shared` (#1255).
+  **Re-audited on every import (P1)**: list each router's
   handlers, sort them into server-enforced and UI-only, and re-run the browser
   trace; a path is added deliberately, never by default. Proof: the nginx
   config test runs the real pinned image against every encoded variant, and the
@@ -145,13 +160,23 @@ Pipe is provisioned and the admin role is limited to the team.
   from the file. The pattern is ADR-0005/#804: failures are retried and
   counted and are never reported as success. Proof: the stored rows are gone,
   then the next ordinary chat succeeds. Users may delete their own chats. Chat
-  sharing and admin export are off.
+  sharing and admin export are off. Folder sharing is off too
+  (`USER_PERMISSIONS_FOLDERS_ALLOW_SHARING=false`). v0.12.3 does not check
+  that permission on the grant route, so E1 refuses
+  `/api/v1/folders/{id}/access/update`, the only writer of folder access
+  grants. With no grant, a folder and its chats stay visible to the owner
+  only (and to admins, S3). **Folder rows are outside the window** (#1255, maintainer decision
+  pending). The purge removes chats in a folder as usual, but it does not
+  delete folders. A folder's name, system prompt text, icon and background
+  image (a data URL in the row) stay until the user deletes the folder. They
+  also stay in PVC backups under S3.
 - **S3 Protected copies and admin access.** PVC backups hold manual excerpts
   and pasted incident text. They are protected records that never leave the
   enterprise. They follow the same 30-day window: the purge job also removes
   backups older than 30 days. Admin chat access is off, but that toggle only
   hides chats in the UI. Admins, in-process Functions and anyone with access
-  to the PVC or the DB can still read them. This is an accepted residual, kept
+  to the PVC or the DB can still read them. That includes, through the folder
+  API, any folder's settings and its chat titles, given the folder id. This is an accepted residual, kept
   small by limiting the admin role to the named owners through an IdP group.
   Encryption at rest, if required, comes from the storage class, because Open
   WebUI provides none. The maintainer, as corpus owner, accepted chat

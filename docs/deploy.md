@@ -2007,6 +2007,10 @@ default **30 days** (maintainer decision 2026-10-24). An explicit null fails the
 - Backups of `rag-openwebui-data` hold chat text. They are protected records that never leave
   the enterprise, and their retention follows the same window: at most 30 days plus one backup
   cycle.
+- Chat folders (#1255) are not purged. Chats inside a folder age out like any other chat, but
+  the folder row stays until its owner deletes it, with its name, system prompt text, icon and
+  background image. Whether the purge should remove folders is a maintainer decision
+  (ADR-0007 S2).
 
 **Patch policy and advisory switch-off (ADR-0007 P1).** The maintainer owns patching. Agents
 prepare a monthly import of the latest upstream release as a dedicated pin-bump PR, carrying the
@@ -2036,6 +2040,15 @@ image as `openwebui-proxy-image.tar`) as its only listener. Open WebUI listens o
 (`merge_slashes on`), forwards the original request line, and answers `403 denied` for
 everything outside the allow-list. Access logs are off.
 
+Chat folders (`ENABLE_FOLDERS=true`, #1255) pass by uuid4 folder id: list and create, read,
+delete, rename and settings, move, expand, mark read, and the owner's chat list
+(`/{id}/shared/chats`, which the folder page uses). Folder sharing stays off. The proxy refuses
+the grant route `/api/v1/folders/{id}/access/update`, which v0.12.3 does not gate on
+`USER_PERMISSIONS_FOLDERS_ALLOW_SHARING`, and the shared-folder list `/api/v1/folders/shared`
+(the sidebar treats that refusal as an empty list). A folder's system prompt reaches the docs
+Pipe as a system turn, and the Pipe drops it. Its knowledge entries resolve to nothing, because
+no file, knowledge collection or note can exist (ADR-0007 V1).
+
 Site acceptance, with `$C` a signed-in user's session cookie and `$H` the Route host. Every
 request must return `403` (or `400` for the null byte) and must store nothing:
 
@@ -2044,7 +2057,9 @@ for p in /api/v1/files/ /api/v1/files /API/v1/files/ //api/v1/files/ /api/v1/./f
          /api/v1/%66iles/ /api/v1%2Ffiles/ /api/v1/files%2F /%61pi/v1/files/ \
          /api/v1/chats/%2e%2e/files/ /api/v1/%2566iles/ /api/v1/files%00 \
          /api/v1/retrieval/process/text /api/v1/knowledge/ /api/v1/audio/transcriptions \
-         /openai/chat/completions /ollama/api/chat /api/v1/utils/code/execute; do
+         /openai/chat/completions /ollama/api/chat /api/v1/utils/code/execute \
+         /api/v1/folders/shared \
+         /api/v1/folders/00000000-0000-4000-8000-000000000000/access/update; do
   printf '%s ' "$p"; curl -sk -o /dev/null -w '%{http_code}\n' -X POST -b "$C" "https://$H$p"
 done
 ```

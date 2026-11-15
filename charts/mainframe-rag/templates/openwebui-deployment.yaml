@@ -175,7 +175,16 @@ spec:
               value: "false"
             - name: ENABLE_CHANNELS
               value: "false"
+            # Chat folders organise a user's own chats (#1255). What a folder
+            # carries stays inert: its system prompt is a system turn the Pipe
+            # drops, its knowledge needs files, collections or notes that
+            # nothing can create (V1, E1). Folder sharing is off: no grant
+            # permission, and the proxy refuses the grant route (S2).
             - name: ENABLE_FOLDERS
+              value: "true"
+            - name: USER_PERMISSIONS_FEATURES_FOLDERS
+              value: "true"
+            - name: USER_PERMISSIONS_FOLDERS_ALLOW_SHARING
               value: "false"
             - name: ENABLE_CODE_INTERPRETER
               value: "false"
