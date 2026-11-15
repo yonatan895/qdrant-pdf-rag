@@ -1491,6 +1491,13 @@ sh scripts/tools/run-task.sh airgap:smoke
 - **Go/no-go:** `airgap:validate` must print `==> Stored layout: <alias> is an
   alias with a build-bound publication`. Any `E_` refusal stops the upgrade;
   nothing was changed.
+- **Docs Pipe mount lag:** the Open WebUI pod does not roll when the Pipe
+  changes, and the kubelet refreshes the mounted Pipe about once a minute. A
+  deploy that ends with `FAIL: docs Pipe provisioning refused: mounted docs Pipe
+  does not match the repository file` has finished everything except the
+  Pipe install: wait about a minute, then re-run `airgap:deploy`. Once #1252 is fixed, deploy waits for
+  the mount itself. A rollback to 2cd8f67d uses that release's deploy, which
+  does not wait.
 - **Before deploy:** take step 1's snapshot (the only protection against a
   forced re-ingest if data is ever damaged), keep A's workspace and
   `airgap.env` for step 4, and confirm A's image tags are still in the
@@ -1500,6 +1507,10 @@ sh scripts/tools/run-task.sh airgap:smoke
   … operator intervention required").
 - Qdrant should not restart when its image and values are unchanged; the agent
   rolls to B's image.
+- Rehearsal (2026-11-15, Kind, 2cd8f67d to 419625a5, upgrade, rollback and
+  re-upgrade): validate 1 s, load 17 s, deploy about 30 s. Alias, points,
+  publication record, claims and the Qdrant pod were unchanged at every
+  step, and no ingest Job ran.
 
 Deploy refuses before any cluster change when the chart or any registry image is
 not the packed one (`deploy.md` image identity), then checks the running
