@@ -1,36 +1,36 @@
 {
   "_meta": {
-    "note": "Re-baseline via `sh scripts/tools/run-task.sh eval:bench-baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/benchmark.py GATED_METRICS.",
+    "note": "per-metric noise floor (scripts/benchmark.py aggregate_runs) over three --update-baseline --repeats 3 captures on 2026-11-15: runs 43741394315, 43744478619, 43744491411 (branch chore/bench-baseline-qdrant-1192)",
     "env": {
       "cpu_count": 4,
-      "mem_total_mb": 15989.7,
-      "kernel": "6.17.0-1022-azure",
-      "python": "3.14.7",
-      "qdrant_image": "docker.io/qdrant/qdrant:v1.19.0-unprivileged",
+      "mem_total_mb": 15700.7,
+      "kernel": "7.0.0-1019-azure",
+      "python": "3.14.8",
+      "qdrant_image": "docker.io/qdrant/qdrant:v1.19.2-unprivileged",
       "docs": 30
     },
     "capture": {
       "repeats": 3,
       "policy": "noise floor: min latency/footprint, max errors/throughput"
     },
-    "updated": "2026-09-14"
+    "updated": "2026-11-15"
   },
   "ingest": {
-    "peak_rss_mb": 180.2
+    "peak_rss_mb": 221.7
   },
   "qdrant": {
-    "mem_mb": 100.4,
-    "disk_mb": 2.9
+    "mem_mb": 45.4,
+    "disk_mb": 2.5
   },
   "agent": {
     "search": {
       "latency_ms": {
-        "p95": 55.67
+        "p95": 54.07
       }
     },
     "answer": {
       "latency_ms": {
-        "p95": 77.24
+        "p95": 79.62
       }
     }
   }
