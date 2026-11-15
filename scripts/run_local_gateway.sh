@@ -45,6 +45,11 @@
 # the reasoning route, so the agent's prompt counts are unverified and an
 # argument outside the OpenAI chat schema is not forwarded on this gateway's
 # say-so. Routing, keys, /v1/score and the strict-finish handler are unchanged.
+# GATEWAY_TOKENIZE=off (default on; #1193) leaves out the /tokenize
+# pass-through only, like a platform gateway that does not serve it: the agent
+# then counts with its estimator and sends the estimator-only output cap.
+# GATEWAY_SHAPE=site leaves it out as well; GATEWAY_TOKENIZE=off keeps the
+# local argument allow-list.
 # Never a product path; never in CI or the air gap.
 
 set -eu
@@ -89,6 +94,7 @@ GATEWAY_LLM_KEY="${GATEWAY_LLM_KEY:-}"
 GATEWAY_EMBED_KEY="${GATEWAY_EMBED_KEY:-}"
 GATEWAY_RERANK_KEY="${GATEWAY_RERANK_KEY:-}"
 GATEWAY_REASONING="${GATEWAY_REASONING:-on}"
+GATEWAY_TOKENIZE="${GATEWAY_TOKENIZE:-on}"
 GATEWAY_SHAPE="${GATEWAY_SHAPE:-local}"
 GATEWAY_DRYRUN="${GATEWAY_DRYRUN:-0}"
 # LiteLLM --detailed_debug logs full request bodies (prompts with manual
@@ -144,6 +150,10 @@ esac
 case "$GATEWAY_REASONING" in
     on|off) ;;
     *) die "GATEWAY_REASONING must be on or off, got '$GATEWAY_REASONING'" ;;
+esac
+case "$GATEWAY_TOKENIZE" in
+    on|off) ;;
+    *) die "GATEWAY_TOKENIZE must be on or off" ;;
 esac
 case "$GATEWAY_SHAPE" in
     local|site) ;;
@@ -567,7 +577,7 @@ general_settings:
   master_key: ${GATEWAY_MASTER_KEY}
   pass_through_endpoints:
 EOF
-if [ "$GATEWAY_REASONING" = on ] && [ "$GATEWAY_SHAPE" = local ]; then
+if [ "$GATEWAY_REASONING" = on ] && [ "$GATEWAY_SHAPE" = local ] && [ "$GATEWAY_TOKENIZE" = on ]; then
     cat >> "${CFG_DIR}/config.yaml" <<EOF
     - path: "/tokenize"
       target: "${TOKENIZE_TARGET}"

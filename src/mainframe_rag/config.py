@@ -19,6 +19,8 @@ from opentelemetry import propagate
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from mainframe_rag.model_args import EffortTransport, ModelRequestArgs, parse_body_fields
+
 # Dense dimension of the hashed embedder. Fixed so CI never depends on the
 # vLLM team's DENSE_DIM; prod always overrides via embed_mode=vllm + DENSE_DIM.
 HASH_EMBED_DIM = 256
@@ -335,6 +337,20 @@ class Settings(BaseSettings):
     # Qwen3.8 template needs "low,medium,xhigh" (the default since #777).
     llm_reasoning_efforts: str = Field(default="low,medium,xhigh")
     llm_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    # Model request arguments (#1193). The served model and its chat template
+    # are platform-owned and can change, so nothing is assumed about them:
+    # LLM_EXTRA_BODY is one JSON object of extra chat-request body fields
+    # (sampling parameters, chat_template_kwargs, ...) merged into every chat
+    # request; LLM_EFFORT_TRANSPORT selects how the effort travels: top_level
+    # (`reasoning_effort`, the default and the pre-#1193 bytes), chat_template
+    # (`chat_template_kwargs.reasoning_effort`) or none (not sent). Both unset
+    # send exactly the earlier request. Validated at startup, never per
+    # request: model/messages/stream/stream_options are protected, and
+    # max_tokens/max_completion_tokens/temperature/reasoning_effort are
+    # refused because their own settings own them. The /tokenize count renders
+    # the same template arguments (model_args.ModelRequestArgs).
+    llm_extra_body: str = Field(default="")
+    llm_effort_transport: EffortTransport = Field(default="top_level")
 
     # Context budgeting via tokenizer accounting:
     # budget = max_model_len - reserved_output_tokens - measured_system_prompt - safety_margin
@@ -342,7 +358,9 @@ class Settings(BaseSettings):
     # model's native 262144 is not served). With a server-verified prompt
     # count, the answer reserve plus the path's thinking reserve is also sent
     # as max_tokens, so a runaway generation ends as `length` instead of
-    # running to the window (answer_core._output_cap).
+    # running to the window (answer_core._output_cap). An estimator-only count
+    # sends a cap only when the prompt's byte upper bound plus the reserves
+    # fits the window; otherwise it stays uncapped as before.
     # Visible answers reached 2331 tokens in #759, above the old 1536 reserve.
     llm_max_model_len: int = Field(default=32768, ge=512, le=131072)
     llm_reserved_output_tokens: int = Field(default=2560, ge=128, le=16384)
@@ -537,6 +555,21 @@ class Settings(BaseSettings):
             if getattr(self, name) not in efforts:
                 raise ValueError(f"{name.upper()} must be one of LLM_REASONING_EFFORTS")
         return self
+
+    @model_validator(mode="after")
+    def _model_request_args_are_valid(self) -> Settings:
+        """Fail closed at startup (#1193): a refused extra body never reaches
+        a request. Messages name fields, not supplied values."""
+        self.model_request_args()
+        return self
+
+    def model_request_args(self) -> ModelRequestArgs:
+        """The configured extra body and effort transport as the one value
+        the chat-body builder and the tokenizer share."""
+        return ModelRequestArgs(
+            extra_body=parse_body_fields(self.llm_extra_body, name="LLM_EXTRA_BODY"),
+            effort_transport=self.llm_effort_transport,
+        )
 
     def reasoning_efforts(self) -> tuple[ReasoningEffort, ...]:
         """Declared efforts in ascending vocabulary order; refuses unknown,

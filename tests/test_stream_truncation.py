@@ -1320,3 +1320,45 @@ async def test_json_only_backend_read_keeps_the_total_wait():
         llm = HttpxLLMClient(Settings(**_settings_kwargs(answer_timeout_s=0.3)), client=http)
         with pytest.raises(httpx2.ReadTimeout):
             await llm.achat(_HI)
+
+
+# Issue #1193: the bytes that cross a real socket, through the real httpx
+# serializer. The expected bodies are written out by hand.
+_WIRE_LEGACY_STREAM = (
+    b'{"model":"trial-reasoning-model","messages":[{"role":"user","content":"hi"}],'
+    b'"reasoning_effort":"low","temperature":0.2,"max_tokens":64,'
+    b'"stream":true,"stream_options":{"include_usage":true}}'
+)
+_WIRE_ARGUMENTS_STREAM = (
+    b'{"model":"trial-reasoning-model","messages":[{"role":"user","content":"hi"}],'
+    b'"temperature":0.2,"max_tokens":64,'
+    b'"top_k":20,"chat_template_kwargs":{"enable_thinking":true,"reasoning_effort":"low"},'
+    b'"stream":true,"stream_options":{"include_usage":true}}'
+)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("entry", ["achat", "sync", "chat_stream"])
+@pytest.mark.parametrize(("overrides", "wire"), [
+    ({}, _WIRE_LEGACY_STREAM),
+    ({"llm_extra_body": '{"top_k": 20, "chat_template_kwargs": {"enable_thinking": true}}',
+      "llm_effort_transport": "chat_template"}, _WIRE_ARGUMENTS_STREAM),
+], ids=["unset", "arguments"])
+async def test_request_bytes_on_the_socket(entry, overrides, wire, monkeypatch):
+    """Unset model arguments put the pre-#1193 bytes on the wire; configured
+    ones arrive merged, nested object intact, on every entry point."""
+    for name in ("LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT"):
+        monkeypatch.delenv(name, raising=False)
+    with SlowOpenAIUpstream(stream="answer", post="stall") as upstream:
+        llm = _socket_llm(upstream, answer_timeout_s=5.0, **overrides)
+        kwargs = {"reasoning_effort": "low", "temperature": 0.2, "max_tokens": 64}
+        if entry == "chat_stream":
+            items = [item async for item in llm.chat_stream(_HI, **kwargs)]
+            assert items[-1]["finish_reason"] == "stop"
+        elif entry == "sync":
+            assert (await asyncio.to_thread(llm.chat, _HI, **kwargs)).finish_reason == "stop"
+        else:
+            assert (await llm.achat(_HI, **kwargs)).finish_reason == "stop"
+        await llm.aclose()
+        llm.close()
+    assert [request["raw"] for request in upstream.requests] == [wire]

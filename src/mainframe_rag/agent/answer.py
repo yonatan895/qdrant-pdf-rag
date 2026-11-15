@@ -39,6 +39,7 @@ from mainframe_rag.ingest.chunk import (
     units_for_text,
 )
 from mainframe_rag.logs import error_type
+from mainframe_rag.model_args import DEFAULT_MODEL_REQUEST_ARGS, ModelRequestArgs
 from mainframe_rag.ports import (
     ChatMessage,
     ChatResult,
@@ -853,12 +854,16 @@ class PreparedPrompt:
     consumes `.evidence`; `.messages` is what the model sees.
     `budget_verified` (issue #368) is True only when a remote (non-fallback)
     tokenizer measured the final messages inside the window: the char-packing
-    and estimator paths report unverified, never confirmed, compliance."""
+    and estimator paths report unverified, never confirmed, compliance.
+    `prompt_tokens` (issue #1193) is the final messages' count from that same
+    tokenizer, measured or estimated as `budget_verified` says; None on the
+    no-tokenizer character-packing path, which counts nothing."""
 
     messages: list[ChatMessage]
     evidence: PromptEvidence
     budget_verified: bool = False
     supplied: tuple[SuppliedExcerpt, ...] = ()
+    prompt_tokens: int | None = None
     # Characters of the user's message left out of the prompt to fit the
     # window (issue #1192); 0 when the message was sent whole. A count only.
     message_omitted_chars: int = 0
@@ -1511,6 +1516,7 @@ def _build_prompt(
         budget_verified = verified_clean and bool(
             getattr(tokenizer, "remote_confirmed", False)
         )
+        prompt_tokens: int | None = used
         # verified_clean means the last count fit; that count is only
         # confirmation when the tokenizer measured remotely (issue #368):
         # estimator-only verification reports estimated, never confirmed.
@@ -1519,6 +1525,7 @@ def _build_prompt(
         # (reports budget_verified=False; production serving always supplies
         # a tokenizer, so this offline/test path never raises budget errors).
         budget_verified = False
+        prompt_tokens = None
         total_chars = 0
         for i, hit in enumerate(hits, 1):
             text = hit.text.strip()
@@ -1561,6 +1568,7 @@ def _build_prompt(
         evidence=_prompt_evidence(packed, len(hits)),
         budget_verified=budget_verified,
         supplied=_supplied_excerpts(packed),
+        prompt_tokens=prompt_tokens,
         message_omitted_chars=message_omitted,
     )
 
@@ -1646,19 +1654,23 @@ def _chat_body(
     *,
     stream: bool,
     max_tokens: int | None = None,
+    args: ModelRequestArgs = DEFAULT_MODEL_REQUEST_ARGS,
 ) -> dict[str, Any]:
     """Single builder for chat-completion request bodies: model + messages,
-    optional reasoning_effort/temperature/max_tokens, and the streaming flags
-    (stream + usage ask). Every chat path (achat, chat_stream, _chat_sync,
-    stream and fallback legs) funnels through here so a request-shape change
-    cannot diverge copies."""
+    optional reasoning_effort/temperature/max_tokens, the configured model
+    request arguments (#1193: the effort transport and the extra body fields,
+    validated at startup so they cannot replace a field built here), and the
+    streaming flags (stream + usage ask). Every chat path (achat, chat_stream,
+    _chat_sync, stream and fallback legs) funnels through here so a
+    request-shape change cannot diverge copies. With default `args` the body
+    is byte-identical to the pre-#1193 one."""
     body: dict[str, Any] = {"model": model, "messages": serialized}
-    if reasoning_effort:
-        body["reasoning_effort"] = reasoning_effort
+    body.update(args.effort_fields(reasoning_effort))
     if temperature is not None:
         body["temperature"] = temperature
     if max_tokens is not None:
         body["max_tokens"] = max_tokens
+    body.update(args.extra_fields(reasoning_effort))
     if stream:
         body["stream"] = True
         body["stream_options"] = {"include_usage": True}
@@ -1842,6 +1854,9 @@ class HttpxLLMClient:
         client: Any = None,
     ) -> None:
         self._settings = settings
+        # Resolved once (#1193): validated with the Settings, shared with the
+        # tokenizer so the count and the generation render the same template.
+        self._request_args: ModelRequestArgs = settings.model_request_args()
         self._client = client
         self._cached_sync_client: httpx2.Client | None = None
         self._cached_async_client: httpx2.AsyncClient | None = None
@@ -1968,17 +1983,17 @@ class HttpxLLMClient:
         base_url, model = assert_reasoning_model(self._settings)
         headers = bearer_auth_headers(self._settings.llm_api_key)
         serialized = [m.model_dump() for m in messages]
-        body = _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=False)
+        body = _chat_body(model, serialized, reasoning_effort, temperature, args=self._request_args, max_tokens=max_tokens, stream=False)
         if not getattr(self._settings, "llm_stream", False):
             return await self._achat_buffered_over_stream(
                 base_url,
                 headers,
-                _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=True),
+                _chat_body(model, serialized, reasoning_effort, temperature, args=self._request_args, max_tokens=max_tokens, stream=True),
             )
         try:
             t0 = time.monotonic()
             state = _SseStreamState()
-            body_stream = _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=True)
+            body_stream = _chat_body(model, serialized, reasoning_effort, temperature, args=self._request_args, max_tokens=max_tokens, stream=True)
             async with self._stream_http(
                 "POST",
                 f"{base_url.rstrip('/')}/chat/completions",
@@ -2038,7 +2053,7 @@ class HttpxLLMClient:
         base_url, model = assert_reasoning_model(self._settings)
         headers = bearer_auth_headers(self._settings.llm_api_key)
         serialized = [m.model_dump() for m in messages]
-        body = _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=True)
+        body = _chat_body(model, serialized, reasoning_effort, temperature, args=self._request_args, max_tokens=max_tokens, stream=True)
 
         t0 = time.monotonic()
         state = _SseStreamState()
@@ -2094,7 +2109,7 @@ class HttpxLLMClient:
             # Issue #363: the fallback must re-ask with stream=False. Reusing
             # the streaming body makes a spec-compliant backend answer SSE,
             # which resp.json() cannot parse.
-            fallback_body = _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=False)
+            fallback_body = _chat_body(model, serialized, reasoning_effort, temperature, args=self._request_args, max_tokens=max_tokens, stream=False)
             resp = await self._async_http().post(
                 f"{base_url.rstrip('/')}/chat/completions",
                 json=fallback_body,
@@ -2140,7 +2155,7 @@ class HttpxLLMClient:
         base_url, model = assert_reasoning_model(self._settings)
         headers = bearer_auth_headers(self._settings.llm_api_key)
         serialized = [m.model_dump() for m in messages]
-        body = _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=False)
+        body = _chat_body(model, serialized, reasoning_effort, temperature, args=self._request_args, max_tokens=max_tokens, stream=False)
         if not getattr(self._settings, "llm_stream", False) and hasattr(self._sync_http(), "stream"):
             # Issue #868: read the buffered answer from the streamed wire so
             # an abandoned call is visible to the engine through the gateway.
@@ -2153,7 +2168,7 @@ class HttpxLLMClient:
             with self._sync_http().stream(
                 "POST",
                 f"{base_url.rstrip('/')}/chat/completions",
-                json=_chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=True),
+                json=_chat_body(model, serialized, reasoning_effort, temperature, args=self._request_args, max_tokens=max_tokens, stream=True),
                 headers=headers,
             ) as stream_resp:
                 stream_resp.raise_for_status()
@@ -2172,7 +2187,7 @@ class HttpxLLMClient:
                 return _chat_result_from_response(json.loads(json_body))
             return _buffered_result_from_stream(state)
         if getattr(self._settings, "llm_stream", False) and hasattr(self._sync_http(), "stream"):
-            body_stream = _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=True)
+            body_stream = _chat_body(model, serialized, reasoning_effort, temperature, args=self._request_args, max_tokens=max_tokens, stream=True)
             try:
                 t0 = time.monotonic()
                 state = _SseStreamState()

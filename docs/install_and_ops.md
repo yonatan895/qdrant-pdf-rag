@@ -676,6 +676,13 @@ sh scripts/tools/run-task.sh airgap:deploy
 oc -n "$NAMESPACE" exec deploy/rag-agent -c agent -- \
   python3 /app/scripts/probe_gateway.py --require-reasoning --stream
 
+# 3a. Optional (#1193): which request arguments the served model honours
+# (effort, thinking on/off) and its tokens per second. One JSON row per
+# candidate, no prompt or answer text; set the result with LLM_EXTRA_BODY /
+# LLM_EFFORT_TRANSPORT (docs/agent.md#model-request-arguments).
+oc -n "$NAMESPACE" exec deploy/rag-agent -c agent -- \
+  python3 /app/scripts/probe_gateway.py --probe-args
+
 # 4. Only after that probe passes:
 sh scripts/tools/run-task.sh airgap:ingest
 sh scripts/tools/run-task.sh airgap:smoke

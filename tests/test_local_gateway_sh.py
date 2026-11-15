@@ -1274,6 +1274,27 @@ def test_reasoning_leg_is_on_by_default_and_explicit_on_is_identical(value):
     assert explicit == baseline and "gemma-4-E4B" in explicit and '"/tokenize"' in explicit
 
 
+def test_tokenize_off_leaves_out_only_the_tokenize_passthrough():
+    """Issue #1193: the platform-gateway shape (no /tokenize) for the
+    estimator-only lane; everything else renders as with the default."""
+    baseline = yaml.safe_load(_read_cfg(_render()))
+    assert yaml.safe_load(_read_cfg(_render({"GATEWAY_TOKENIZE": "on"}))) == baseline
+    without = yaml.safe_load(_read_cfg(_render({"GATEWAY_TOKENIZE": "off"})))
+    routes = without["general_settings"]["pass_through_endpoints"]
+    assert [route["path"] for route in baseline["general_settings"]["pass_through_endpoints"]] == [
+        "/tokenize", "/v1/score"]
+    assert [route["path"] for route in routes] == ["/v1/score"]
+    without["general_settings"]["pass_through_endpoints"].insert(
+        0, baseline["general_settings"]["pass_through_endpoints"][0])
+    assert without == baseline
+
+
+@pytest.mark.parametrize("value", ["false", "OFF", "0"])
+def test_tokenize_switch_accepts_only_on_or_off(value):
+    proc = _render({"GATEWAY_TOKENIZE": value})
+    assert proc.returncode == 1 and "GATEWAY_TOKENIZE must be on or off" in proc.stderr
+
+
 @pytest.mark.parametrize("value", ["false", "OFF", "0", "no"])
 def test_reasoning_switch_accepts_only_on_or_off(value):
     proc = _render({"GATEWAY_REASONING": value})
@@ -1356,6 +1377,17 @@ def test_site_shape_drops_exactly_the_tokenize_route_and_the_argument_allow_list
     local["general_settings"]["pass_through_endpoints"] = [
         route for route in local["general_settings"]["pass_through_endpoints"] if route["path"] != "/tokenize"]
     assert site == local
+
+
+def test_tokenize_switch_composes_with_the_site_shape():
+    """#1193 x #1195: GATEWAY_TOKENIZE only removes the /tokenize route. On the
+    site shape (route already absent) either value renders the site config;
+    on the local shape `off` keeps the argument allow-list."""
+    site = yaml.safe_load(_read_cfg(_render({"GATEWAY_SHAPE": "site"})))
+    for value in ("on", "off"):
+        assert yaml.safe_load(_read_cfg(_render({"GATEWAY_SHAPE": "site", "GATEWAY_TOKENIZE": value}))) == site
+    local_off = _read_cfg(_render({"GATEWAY_SHAPE": "local", "GATEWAY_TOKENIZE": "off"}))
+    assert 'allowed_openai_params: ["reasoning_effort"]' in local_off and "tokenize" not in local_off
 
 
 @pytest.mark.parametrize("value", ["Site", "platform", "1", "off"])

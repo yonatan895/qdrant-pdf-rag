@@ -68,12 +68,16 @@ spec:
               value: {{ .Values.models.reasoning.baseUrl | quote }}
             - name: LLM_MODEL_REASONING
               value: {{ .Values.models.reasoning.model | quote }}
-            {{- $reasoningEnv := dict "maxModelLen" "LLM_MAX_MODEL_LEN" "reservedOutputTokens" "LLM_RESERVED_OUTPUT_TOKENS" "thinkingReserveTokensSimple" "LLM_THINKING_RESERVE_TOKENS_SIMPLE" "thinkingReserveTokensComplex" "LLM_THINKING_RESERVE_TOKENS_COMPLEX" "reasoningEffortSimple" "LLM_REASONING_EFFORT_SIMPLE" "reasoningEffortComplex" "LLM_REASONING_EFFORT_COMPLEX" "reasoningEfforts" "LLM_REASONING_EFFORTS" "stream" "LLM_STREAM" }}
+            {{- $reasoningEnv := dict "maxModelLen" "LLM_MAX_MODEL_LEN" "reservedOutputTokens" "LLM_RESERVED_OUTPUT_TOKENS" "thinkingReserveTokensSimple" "LLM_THINKING_RESERVE_TOKENS_SIMPLE" "thinkingReserveTokensComplex" "LLM_THINKING_RESERVE_TOKENS_COMPLEX" "reasoningEffortSimple" "LLM_REASONING_EFFORT_SIMPLE" "reasoningEffortComplex" "LLM_REASONING_EFFORT_COMPLEX" "reasoningEfforts" "LLM_REASONING_EFFORTS" "stream" "LLM_STREAM" "effortTransport" "LLM_EFFORT_TRANSPORT" }}
             {{- range $field, $name := $reasoningEnv }}
             {{- if hasKey $.Values.models.reasoning $field }}
             - name: {{ $name }}
               value: {{ index $.Values.models.reasoning $field | toString | quote }}
             {{- end }}
+            {{- end }}
+            {{- with .Values.models.reasoning.extraBody }}
+            - name: LLM_EXTRA_BODY
+              value: {{ toJson . | quote }}
             {{- end }}
             {{- if hasKey .Values "requestDeadlineSeconds" }}
             - name: REQUEST_DEADLINE_S

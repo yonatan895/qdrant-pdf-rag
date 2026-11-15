@@ -254,8 +254,10 @@ own values are applied: every `LLM_*` name plus `PROMPT_*`, `RRF_*`,
 `RETRIEVE_MAX_*`, `CHAT_*`, `ZOWE_MCP_*` and the explicit answer/retrieval/
 request names in `scripts/colab.py` (`AMBIENT_AGENT_NAMES`). Those names are
 never read from the caller at run time; a value changed after `prepare` refuses
-the run, and a prepared `--agent-env` value or the lane's own value wins. An
-ambient `GATEWAY_SHAPE` is likewise ignored. A `prepare` without these flags
+the run, and a prepared `--agent-env` value or the lane's own value wins. The
+gateway render switches `GATEWAY_SHAPE`, `GATEWAY_TOKENIZE` and
+`GATEWAY_REASONING` are likewise never inherited: the prepared shape and the
+lane's own values apply. A `prepare` without these flags
 writes the manifest it always wrote (the tests pin the default profile and
 gateway configuration to their digests at `c5259460`).
 

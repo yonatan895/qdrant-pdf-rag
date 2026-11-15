@@ -323,7 +323,8 @@ class SlowOpenAIUpstream:
       "token_then_stall"      - one content delta, then silence
       "answer"                - a complete `stop` answer
       "trickle"               - a reasoning delta every `step_s`, never finishing
-    It records every request body and notices when the client closes the
+    It records every request body (parsed, and `raw` as the bytes that
+    crossed the socket) and notices when the client closes the
     connection while the script is still running, which is how a real model
     server learns that its caller gave up. Test-only; no shared state between
     instances."""
@@ -405,13 +406,14 @@ class SlowOpenAIUpstream:
             for line in head.split(b"\r\n"):
                 if line.lower().startswith(b"content-length:"):
                     length = int(line.split(b":")[1])
-            body = json.loads(await reader.readexactly(length))
+            raw = await reader.readexactly(length)
+            body = json.loads(raw)
         except (asyncio.IncompleteReadError, ConnectionError):
             writer.close()
             return
         is_stream = bool(body.get("stream"))
         with self._changed:
-            self.requests.append({"stream": is_stream, "body": body})
+            self.requests.append({"stream": is_stream, "body": body, "raw": raw})
             self._changed.notify_all()
         script = self.scripts[is_stream]
         # EOF on the read side while a script is running = the caller left.

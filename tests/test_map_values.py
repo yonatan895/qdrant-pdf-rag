@@ -12,6 +12,7 @@ only); the helm round-trip skips without helm.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -47,6 +48,7 @@ MAPPER_KEYS = [
     "LLM_MAX_MODEL_LEN", "LLM_RESERVED_OUTPUT_TOKENS",
     "LLM_THINKING_RESERVE_TOKENS_SIMPLE", "LLM_THINKING_RESERVE_TOKENS_COMPLEX",
     "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS", "LLM_STREAM",
+    "LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT",
     "REQUEST_DEADLINE_S", "REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S",
     "RERANK_ENABLED", "RERANK_BASE_URL", "RERANK_MODEL", "RERANK_ENDPOINT_ORDER",
     "GATEWAY_API_KEY_SECRET", "GATEWAY_API_KEY_SECRET_KEY", "GATEWAY_CA_CONFIGMAP", "PULL_SECRET",
@@ -626,6 +628,121 @@ def test_effort_outside_served_set_fails_before_artifact(monkeypatch, mapper_env
     assert result.returncode != 0
     assert f"{field} must be one of LLM_REASONING_EFFORTS" in result.stderr
     assert not output.exists()
+
+
+def _rendered_agent_env(output):
+    rendered = subprocess.run(
+        [str(REPO / ".tools/bin/helm"), "template", "app", str(CHART), "-f", str(output),
+         "--namespace", "ns", "--show-only", "templates/agent-deployment.yaml"],
+        capture_output=True, text=True, check=False,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    agent = yaml.safe_load(rendered.stdout)["spec"]["template"]["spec"]["containers"][0]
+    return {entry["name"]: entry.get("value") for entry in agent["env"]}
+
+
+# Operator text chosen to break a careless serializer: YAML-significant keys,
+# quotes, a backslash, a non-BMP character, an escaped-backslash look-alike of
+# a surrogate pair, nested objects and every JSON scalar type.
+_HOSTILE_EXTRA_BODY = {
+    "top_k": 20, "repetition_penalty": 1.05, "stop": ["</done>", "a\"b", "c\\d", "\U0001F600", "\\ud83d\\ude00"],
+    "key: with #yaml {chars}": True, "- dash": None,
+    "chat_template_kwargs": {"enable_thinking": False, "nested": {"budget": 256, "list": [1, 2.5, None, "x"]}},
+}
+
+
+@pytest.mark.parametrize("transport", ["chat_template", "none", "top_level"])
+def test_model_request_arguments_round_trip_to_the_agent_settings(monkeypatch, mapper_env, transport):
+    """Issue #1193, producer to consumer: the operator's JSON text -> values
+    mapper -> chart render -> pod environment -> Settings yields the same
+    arguments, exactly, across delimiters and nesting."""
+    from mainframe_rag.config import Settings
+
+    monkeypatch.setenv("LLM_EXTRA_BODY", "  " + json.dumps(_HOSTILE_EXTRA_BODY) + " ")
+    monkeypatch.setenv("LLM_EFFORT_TRANSPORT", transport)
+    result, output = mapper_env()
+    assert result.returncode == 0, result.stderr
+    pod = _rendered_agent_env(output)
+    settings = Settings(_env_file=None, llm_extra_body=pod["LLM_EXTRA_BODY"],
+                        llm_effort_transport=pod["LLM_EFFORT_TRANSPORT"])
+    args = settings.model_request_args()
+    assert args.extra_body == _HOSTILE_EXTRA_BODY and args.effort_transport == transport
+
+
+def test_unset_model_request_arguments_render_no_environment(monkeypatch, mapper_env):
+    for name in ("LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setenv("LLM_EXTRA_BODY", " {} ")  # an empty object is no arguments
+    result, output = mapper_env()
+    assert result.returncode == 0, result.stderr
+    assert not {"LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT"} & set(_rendered_agent_env(output))
+
+
+_REFUSED_MODEL_ARGUMENTS = [
+    *[({"LLM_EXTRA_BODY": json.dumps({key: 1})}, key) for key in ("model", "messages", "stream", "stream_options")],
+    ({"LLM_EXTRA_BODY": '{"max_tokens": 9}'}, "LLM_RESERVED_OUTPUT_TOKENS"),
+    ({"LLM_EXTRA_BODY": '{"max_completion_tokens": 9}'}, "LLM_RESERVED_OUTPUT_TOKENS"),
+    ({"LLM_EXTRA_BODY": '{"temperature": 1.5}'}, "LLM_TEMPERATURE"),
+    ({"LLM_EXTRA_BODY": '{"reasoning_effort": "low"}'}, "LLM_EFFORT_TRANSPORT"),
+    ({"LLM_EXTRA_BODY": '{"chat_template_kwargs": {"reasoning_effort": "low"}}'}, "LLM_EFFORT_TRANSPORT=none"),
+    ({"LLM_EXTRA_BODY": '{"chat_template_kwargs": {"reasoning_effort": "low"}}',
+      "LLM_EFFORT_TRANSPORT": "chat_template"}, "LLM_EFFORT_TRANSPORT=none"),
+    ({"LLM_EXTRA_BODY": '{"chat_template_kwargs": "unsupported-private-value"}'}, "chat_template_kwargs must be"),
+    ({"LLM_EXTRA_BODY": '["unsupported-private-value"]'}, "one JSON object"),
+    ({"LLM_EXTRA_BODY": '{"top_k": 1, "top_k": 2}'}, "unique"),
+    ({"LLM_EXTRA_BODY": '{"": 1}'}, "nonempty keys"),
+    ({"LLM_EXTRA_BODY": '{"top_p": NaN}'}, "finite"),
+    ({"LLM_EXTRA_BODY": '{"top_p": 1e999}'}, "finite"),
+    ({"LLM_EXTRA_BODY": '{"stop": "\\ud83d"}'}, "one JSON object"),
+    ({"LLM_EXTRA_BODY": '{"unsupported-private-value": '}, "one JSON object"),
+    ({"LLM_EXTRA_BODY": json.dumps({"pad": "x" * 4096})}, "at most 4096"),
+    ({"LLM_EFFORT_TRANSPORT": "unsupported-private-value"}, "top_level"),
+]
+
+
+@pytest.mark.parametrize(("selected", "named"), _REFUSED_MODEL_ARGUMENTS)
+def test_refused_model_request_arguments_fail_in_preflight_as_at_startup(monkeypatch, mapper_env, selected, named):
+    """The bastion preflight cannot import the application's validator; both
+    refuse the same selections with the same field-only message (#1193)."""
+    from pydantic import ValidationError
+
+    from mainframe_rag.config import Settings
+
+    for name, value in selected.items():
+        monkeypatch.setenv(name, value)
+    result, output = mapper_env()
+    assert result.returncode != 0 and not output.exists()
+    assert named in result.stderr and "unsupported-private-value" not in result.stderr + result.stdout
+    with pytest.raises(ValidationError) as caught:
+        Settings(_env_file=None, **{name.lower(): value for name, value in selected.items()})
+    message = "; ".join(error["msg"] for error in caught.value.errors())
+    assert named in message
+
+
+@pytest.mark.parametrize(("name", "bad"), [
+    # Helm reads numbers as 64-bit floats: a larger integer would be changed in transit.
+    ("LLM_EXTRA_BODY", '{"seed": 9007199254740993}'),
+])
+def test_model_argument_values_the_chart_cannot_carry_are_refused(monkeypatch, mapper_env, name, bad):
+    monkeypatch.setenv(name, bad)
+    result, output = mapper_env()
+    assert result.returncode != 0 and not output.exists()
+    assert name in result.stderr and "unsupported-private-value" not in result.stderr + result.stdout
+
+
+def test_preflight_model_argument_mirror_matches_the_application():
+    from scripts.airgap import model_config
+
+    from mainframe_rag import model_args
+
+    assert set(model_config.EXTRA_BODY_PROTECTED_KEYS) == model_args.PROTECTED_BODY_KEYS
+    assert model_config.EXTRA_BODY_OWNED_KEYS == model_args.OWNED_BODY_KEYS
+    assert model_config.EXTRA_BODY_MAX_CHARS == model_args.EXTRA_BODY_MAX_CHARS
+    assert model_config.EFFORT_TRANSPORTS == model_args.EFFORT_TRANSPORTS
+    schema = json.loads((CHART / "values.schema.json").read_text())["properties"]["models"]["properties"]["reasoning"]
+    refused = set(schema["properties"]["extraBody"]["propertyNames"]["not"]["enum"])
+    assert refused == model_args.PROTECTED_BODY_KEYS | set(model_args.OWNED_BODY_KEYS)
+    assert tuple(schema["properties"]["effortTransport"]["enum"]) == model_args.EFFORT_TRANSPORTS
 
 
 def test_preflight_effort_mirror_matches_settings():
