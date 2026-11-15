@@ -163,6 +163,21 @@ For a fixed synthetic query and document set, `SparseTextEmbedding` produced
 byte-identical BM25 document and query vectors under fastembed 0.8.0/Pillow
 12.3.0 and 0.9.1/Pillow 13.0.0 (#895).
 
+## OpenTelemetry (GHSA-mf5v-w3w3-f6cg)
+
+The nine OpenTelemetry distributions move as one set, because the SDK and
+exporters pin the API and each other exactly: the `1.45.x` line (`api`, `sdk`,
+`proto`, `exporter-otlp-proto-common`, `exporter-otlp-proto-http`) to 1.45.2 and
+the `0.66bN` line (`semantic-conventions`, `exporter-prometheus`,
+`exporter-http-transport`, `exporter-otlp-common`) to 0.66b2, in the runtime and
+dev profiles. No other pin moved and no transitive package was added.
+opentelemetry-api 1.45.2 is the first patched release for GHSA-mf5v-w3w3-f6cg
+(quadratic traceparent matching in `TraceContextTextMapPropagator.extract`, which
+`tracing.parent_context` calls for every request); it also ignores a traceparent
+over 512 characters, which now starts a new root. The SDK release also adds a
+default limit of 2000 label combinations per metric
+([observability](observability.md#inbound-trace-context)).
+
 ## Reproduce, refresh and roll back
 
 Generation uses the existing pip 26.2.2 report format, not a new package manager.

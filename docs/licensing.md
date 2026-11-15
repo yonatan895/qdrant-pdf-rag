@@ -19,7 +19,10 @@ approval of every #1174 doc set
 ([#1174 comment](https://github.com/yonatan895/qdrant-pdf-rag/issues/1174#issuecomment-6548012543)),
 bound to scope digest `2fcedf65…`. The 2026-11-14 base image refresh (#1228) moved the
 scope again; the maintainer approved it the same day
-([#1228 comment](https://github.com/yonatan895/qdrant-pdf-rag/pull/1228#issuecomment-6875113278)), bound to scope digest `c535e932…`. Any later dependency, pin or notice change voids it, and
+([#1228 comment](https://github.com/yonatan895/qdrant-pdf-rag/pull/1228#issuecomment-6875113278)), bound to scope digest `c535e932…`. It moved twice on 2026-11-15, each approved
+the same day: the Hypothesis reference-docs archive re-pin (#1249, `abd9d185…`) and the
+OpenTelemetry 1.45.2 security bump
+([#1250 comment](https://github.com/yonatan895/qdrant-pdf-rag/pull/1250#issuecomment-6898865253)), bound to scope digest `6785f462…`. Any later dependency, pin or notice change voids it, and
 `check --release` then fails until a new approval is recorded.
 Source of authority: #376 and its triage comments (19 and 24 September, 1 October
 2026): close on a documented owner disposition, never on CI alone.
@@ -128,7 +131,10 @@ unchanged `License` tags and `yajl` left the set (`crun` 1.29.1 no longer requir
 The kit scope digest is now `833299c98226a2cce008a6fa3e79b0091a349d7907037a62baf95c47c338cc9b`
 and the release scope digest moved with the base record. The maintainer approved both
 new digests on 2026-11-14 ([#1228 comment](https://github.com/yonatan895/qdrant-pdf-rag/pull/1228#issuecomment-6875113278)), so `devkit.approval` and
-`release_approval` now bind them.
+`release_approval` now bind them. The 2026-11-15 OpenTelemetry bump (#1250) moved the
+kit scope digest to `0c4f16f9a6dfee431160ab100547d2d3729a48c5dd1495068357a6f1106a2fb0`;
+the maintainer approved it the same day
+([#1250 comment](https://github.com/yonatan895/qdrant-pdf-rag/pull/1250#issuecomment-6898865253)).
 
 The gate: `pack.sh` runs `license_inventory.py check --kit` before it pulls anything.
 `--kit` is the kit's `check --release`. It fails with fixed `FAIL` lines when:
