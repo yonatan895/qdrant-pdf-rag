@@ -1979,8 +1979,11 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
    and then the running pod's digest (`check_pod_images`, role `openwebui`), waits for the
    rollout (schema migrations at first start), and verifies the Route.
 4. First admin: a member of an admin role signs in once, creates an API key in Open WebUI, and
-   adds it to the Secret as `admin-api-key`. Re-run `airgap:deploy`. The installer then runs
-   inside the pod with the key on stdin. It refuses a mounted Pipe whose sha256 differs from the
+   adds it to the Secret as `admin-api-key`. Re-run `airgap:deploy`. The pod does not roll when
+   the Pipe ConfigMap changes, and the kubelet refreshes the mounted files about once a minute,
+   so deploy first waits up to 180 s until the mounted Pipe and installer both hash to this
+   release's files. If they still differ, it installs nothing and fails: wait a minute, then
+   re-run. The installer then runs inside the pod with the key on stdin. It refuses a mounted Pipe whose sha256 differs from the
    repository file, sends the key only to the pod's own serving certificate, proves it is an
    admin key on the admin-only Function listing (a refused key, including a non-admin one,
    fails there and nothing is written), creates the Function when the listing lacks it (v0.12.3

@@ -106,6 +106,17 @@ case "$*" in
     [ "${{DELETE_FAIL:-}}" != 1 ] || exit 1 ;;
   *'admin-api-key'*)
     printf '%s' "${{OWUI_ADMIN_KEY_B64:-}}" ;;
+  *'exec deploy/rag-openwebui '*)
+    # The mount check (#1252): runs the deploy's own hash code against a stand-in
+    # mount. The first $OWUI_MOUNT_STALE reads see $OWUI_MOUNT_STALE_DIR (the old
+    # release's files), later ones the repository files, like a kubelet catching up.
+    n=$(cat "$OWUI_MOUNT_READS" 2>/dev/null || echo 0); n=$((n + 1))
+    [ -z "${{OWUI_MOUNT_READS:-}}" ] || echo "$n" > "$OWUI_MOUNT_READS"
+    dir="$PWD/charts/mainframe-rag/files/openwebui"
+    [ "$n" -gt "${{OWUI_MOUNT_STALE:-0}}" ] || dir="$OWUI_MOUNT_STALE_DIR"
+    while [ "$1" != "--" ]; do shift; done; shift
+    [ "$1 $2 $3" = "python3 -I -c" ] || {{ echo "unexpected mount check: $*" >&2; exit 1; }}
+    exec python3 -I -c "$4" "$dir" ;;
   *'exec -i deploy/rag-openwebui '*)
     tee "${{OWUI_EXEC_STDIN:-/dev/null}}" >/dev/null
     [ "${{OWUI_EXEC_FAIL:-}}" != 1 ] || {{ echo 'FAIL: docs Pipe provisioning refused: x' >&2; exit 1; }}
@@ -1479,6 +1490,61 @@ def test_openwebui_without_an_admin_key_says_the_pipe_is_not_installed(tree):
     assert r.returncode == 0, r.stderr
     assert "docs Pipe NOT installed" in r.stdout
     assert "exec" not in _helm_log(tree).split()
+
+
+def _stale_mount(tree, *, stale_reads, wait="9", poll="1", stale_file="docs_pipe.py"):
+    """The old release's Pipe files as the pod still sees them for `stale_reads`
+    reads: `stale_file` differs from this release, the other one already matches."""
+    root = tree[0]
+    stale = root / "stale-mount"
+    stale.mkdir()
+    (root / "charts/mainframe-rag/files/openwebui/docs_pipe.py").write_text(OWUI_PIPE)
+    for name in ("docs_pipe.py", "provision_pipe.py"):
+        shutil.copy(root / "charts/mainframe-rag/files/openwebui" / name, stale)
+    with (stale / stale_file).open("a") as f:
+        f.write("# old release\n")
+    return (("OWUI_MOUNT_STALE_DIR", str(stale)), ("OWUI_MOUNT_STALE", str(stale_reads)),
+            ("OWUI_MOUNT_READS", str(root / "mount-reads.txt")),
+            ("AIRGAP_TEST_PIPE_MOUNT_WAIT_S", wait), ("AIRGAP_TEST_PIPE_MOUNT_POLL_S", poll))
+
+
+def _mount_reads(tree):
+    path = tree[0] / "mount-reads.txt"
+    return int(path.read_text()) if path.exists() else 0
+
+
+def test_openwebui_pipe_install_waits_for_the_mount_to_catch_up(tree):
+    """Rehearsal 2026-11-15: after a Helm upgrade the kubelet showed the old Pipe
+    for 51 s; the deploy must wait for the new files, then install them."""
+    r = _owui_deploy(tree, *_stale_mount(tree, stale_reads=2))
+    assert r.returncode == 0, r.stderr
+    assert _mount_reads(tree) == 3
+    assert "waiting for the Open WebUI pod to see the new docs Pipe" in r.stdout
+    assert "docs Pipe installed" in r.stdout
+    log = _helm_log(tree)
+    assert log.index("/opt/mainframe-rag/openwebui/provision_pipe.py") > log.rindex("exec\ndeploy/rag-openwebui")
+
+
+@pytest.mark.parametrize("stale_file", ["docs_pipe.py", "provision_pipe.py"])
+def test_openwebui_pipe_mount_that_never_catches_up_fails_without_installing(tree, stale_file):
+    """The installer is mounted from the same ConfigMap: a stale installer (the
+    old release's checks) is refused like a stale Pipe."""
+    r = _owui_deploy(tree, *_stale_mount(tree, stale_reads=1000, wait="2", poll="1",
+                                         stale_file=stale_file))
+    assert r.returncode != 0
+    assert ("the Open WebUI pod still mounts a docs Pipe or installer that differs from "
+            "this release after 2 s; nothing was installed. Wait a minute, then re-run airgap:deploy") in r.stderr
+    assert _mount_reads(tree) >= 2
+    assert "/opt/mainframe-rag/openwebui/provision_pipe.py" not in _helm_log(tree)
+    assert "docs Pipe installed" not in r.stdout
+
+
+def test_openwebui_pipe_mount_already_current_installs_without_waiting(tree):
+    r = _owui_deploy(tree, *_stale_mount(tree, stale_reads=0))
+    assert r.returncode == 0, r.stderr
+    assert _mount_reads(tree) == 1
+    assert "waiting for the Open WebUI pod" not in r.stdout
+    assert "docs Pipe installed" in r.stdout
 
 
 def test_openwebui_installer_refusal_fails_the_deploy(tree):

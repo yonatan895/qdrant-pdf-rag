@@ -1172,6 +1172,43 @@ verify_openwebui_route() {
     echo "==> Route rag-openwebui verified: Service rag-openwebui port https, reencrypt, HTTP redirected, host and destination CA match"
 }
 
+# The rag-openwebui pod mounts the Pipe and its installer from the
+# rag-openwebui-pipe ConfigMap and does not roll when that ConfigMap changes.
+# After an upgrade the kubelet keeps serving the previous release's files
+# until its next sync (51 s in the 2026-11-15 rehearsal), so wait until both
+# mounted files hash to this release's files before running the installer:
+# the installer itself is one of them (#1252). $1 = repository docs Pipe sha256.
+wait_openwebui_pipe_mount() {
+    _inst=$(sha256sum charts/mainframe-rag/files/openwebui/provision_pipe.py | awk '{print $1}')
+    [ "${#_inst}" -eq 64 ] || die "cannot hash the repository docs Pipe installer"
+    _want="$1
+$_inst"
+    _wait=${AIRGAP_TEST_PIPE_MOUNT_WAIT_S:-180}  # test-only overrides
+    _poll=${AIRGAP_TEST_PIPE_MOUNT_POLL_S:-3}
+    case "$_wait$_poll" in *[!0-9]*|'') die "pipe mount wait overrides must be whole seconds" ;; esac
+    [ "$_poll" -ge 1 ] || _poll=1
+    _hash_py='import hashlib, sys
+for name in ("docs_pipe.py", "provision_pipe.py"):
+    try:
+        with open(sys.argv[1] + "/" + name, "rb") as f:
+            print(hashlib.sha256(f.read()).hexdigest())
+    except OSError:
+        print("unreadable")'
+    _start=$(date +%s)
+    _said=""
+    while :; do
+        _seen=$($KC -n "$NAMESPACE" exec deploy/rag-openwebui -c openwebui -- \
+            python3 -I -c "$_hash_py" /opt/mainframe-rag/openwebui 2>/dev/null) || _seen=""
+        [ "$_seen" != "$_want" ] || break
+        _waited=$(( $(date +%s) - _start ))
+        [ "$_waited" -lt "$_wait" ] ||
+            die "the Open WebUI pod still mounts a docs Pipe or installer that differs from this release after $_wait s; nothing was installed. Wait a minute, then re-run airgap:deploy"
+        [ -n "$_said" ] || { echo "==> waiting for the Open WebUI pod to see the new docs Pipe (ConfigMap mounts refresh about once a minute; up to $_wait s)"; _said=1; }
+        sleep "$_poll"
+    done
+    unset _inst _want _wait _poll _hash_py _start _said _seen _waited
+}
+
 # Issue #1074 (ADR-0007 V2): install the repository docs Pipe through the
 # hash-checked installer inside the Open WebUI pod. The admin API key comes
 # from the operator Secret (optional key admin-api-key) and reaches the pod on
@@ -1187,6 +1224,7 @@ provision_openwebui_pipe() {
         unset _pipe_sha _key_b64
         return 0
     fi
+    wait_openwebui_pipe_mount "$_pipe_sha"
     printf '%s' "$_key_b64" | base64 -d 2>/dev/null |
         $KC -n "$NAMESPACE" exec -i deploy/rag-openwebui -c openwebui -- \
             python3 /opt/mainframe-rag/openwebui/provision_pipe.py "$_pipe_sha" ||
