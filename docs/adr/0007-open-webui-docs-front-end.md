@@ -129,10 +129,12 @@ Pipe is provisioned and the admin role is limited to the team.
   refuses any other Route in front of its Service. The agent stays anonymous
   to Open WebUI users (#373), which is safe because the docs corpus is read by
   everyone. Residual, pending a maintainer decision (#1255): v0.12.3 lets an
-  admin grant the no-auth "anyone" read on a chat share link even with open
-  sharing off. That link then opens without sign-in for anyone who can reach
-  the Route. The proxy cannot tell a signed-in request apart, so the bound is
-  the admin role limit (S3).
+  admin grant the no-auth "anyone" read on a chat share link, or turn open
+  sharing on for a group in the admin UI (group permissions combine
+  most-permissive over the chart's defaults), even with open sharing off.
+  Such a link opens without sign-in for anyone who can reach the Route. The
+  proxy cannot tell a signed-in request apart, so the bound is the admin role
+  limit (S3).
   Scopes include `groups` and `offline_access`: without a refresh token Open
   WebUI deletes the session near expiry and may fall back to an older
   session's token, so the IdP must permit the refresh scope (the real IdP
@@ -149,19 +151,23 @@ Pipe is provisioned and the admin role is limited to the team.
   from the file. The pattern is ADR-0005/#804: failures are retried and
   counted and are never reported as success. Proof: the stored rows are gone,
   then the next ordinary chat succeeds. Users may delete their own chats. Admin
-  export is off. Chat share links are a site value, off by default (#1255).
-  A link stays inside the instance: it opens only after sign-in, for its owner
-  and the users or groups the owner grants, or every signed-in user when the
-  site allows it; the no-auth "anyone" grant is pinned off for users (see R3
-  for the admin residual) and community sharing stays off. A share is a
-  separate snapshot copy (`shared_chat` in v0.12.3). The purge deletes it with
-  its chat, and on its own once the snapshot is older than 30 days even while
-  the chat lives on; that chat is left unshared, with its share grants removed.
-  Temporary chats are never saved: v0.12.3 writes no chat row for a
+  export is off. Chat share links are a site value, off by default (#1255);
+  the chart sets the default user permissions, and an admin can still change
+  a group's permissions in the admin UI (see R3). A link stays inside the
+  instance: it opens only after sign-in, for its owner and the users or groups
+  the owner grants, or every signed-in user when the site allows it. The
+  no-auth "anyone" grant is off in the default permissions (see R3 for what
+  an admin can still do), and community sharing stays off. A share is a
+  separate snapshot copy (`shared_chat` in v0.12.3), unless the owner picks
+  v0.12.3's "continue" mode: grantees then read and write the owner's live
+  chat, which stays under the owner's retention. The purge deletes a snapshot
+  with its chat, and on its own once the snapshot is older than 30 days even
+  while the chat lives on; that chat is left unshared, with its share grants
+  removed. Temporary chats are never saved: v0.12.3 writes no chat row for a
   temporary chat id (source reading; live proof is the #1255 combined
   acceptance). A site may enforce them; the server then refuses to create or
-  import a chat for every non-admin user. Admins are exempt, and chats saved
-  earlier stay until the purge.
+  import a chat for every non-admin user. Admins are exempt, and a chat saved
+  earlier can still be continued and stays until the purge.
 - **S3 Protected copies and admin access.** PVC backups hold manual excerpts
   and pasted incident text. They are protected records that never leave the
   enterprise. They follow the same 30-day window: the purge job also removes

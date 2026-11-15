@@ -537,7 +537,8 @@ def test_purge_counts_a_share_snapshot_of_unknown_age_as_expired(tmp_path):
     data, db, conn = _db(tmp_path)
     conn.execute(SHARED_CHAT_DDL)
     conn.execute("INSERT INTO chat VALUES ('c', 'u', 't', '{}', 0, ?, 'tok')", (NOW,))
-    conn.execute("INSERT INTO shared_chat VALUES ('tok', 'c', 'u', 't', '{}', NULL, NULL)")
+    # created_at is not the age: a recent one does not save a NULL-age snapshot.
+    conn.execute("INSERT INTO shared_chat VALUES ('tok', 'c', 'u', 't', '{}', ?, NULL)", (NOW,))
     assert purge.purge(db, data, 30, NOW)["snapshots"] == 1
     assert conn.execute("SELECT count(*) FROM shared_chat").fetchone() == (0,)
     assert conn.execute("SELECT id, share_id FROM chat").fetchall() == [("c", None)]

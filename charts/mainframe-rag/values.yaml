@@ -270,18 +270,20 @@ openwebui:
   retentionDays: 30
   storageSize: 10Gi
   # Chat share links and temporary chats (ADR-0007 S2, #1255). Off by default;
-  # turning either on is the site's (maintainer's) decision.
+  # turning either on is the site's (maintainer's) decision. These set the
+  # default user permissions; an admin can still change a group's in the UI.
   chats:
     # Share links inside this instance (USER_PERMISSIONS_CHAT_SHARE). A link opens
     # only after sign-in, for its owner and the users or groups the owner grants;
-    # a link without sign-in is never offered. The snapshot is purged with its
-    # chat, or once it is older than retentionDays.
+    # the no-sign-in grant stays off for users (ADR-0007 R3 admin residual). The
+    # snapshot is purged with its chat, or once it is older than retentionDays.
     share: false
     # Let a sharer open a link to every signed-in user of the instance
     # (USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING). Needs share.
     shareWithAllUsers: false
-    # Temporary chats (never saved) stay available. true: every non-admin chat is
-    # temporary; the server refuses to save one (USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED).
+    # Temporary chats (never saved) stay available. true: non-admins cannot start a
+    # saved chat; the server refuses to create or import one; chats saved before
+    # stay until the purge (USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED).
     temporaryEnforced: false
   oidc:
     # https://<idp>/.well-known/openid-configuration of the identity team's client.

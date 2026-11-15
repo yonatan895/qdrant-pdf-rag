@@ -1151,10 +1151,10 @@ OWUI_ENV_NAMES = {
     "OPENID_REDIRECT_URI", "RAG_EMBEDDING_MODEL_AUTO_UPDATE", "RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE",
     "RAG_RERANKING_MODEL_AUTO_UPDATE", "RAG_RERANKING_MODEL_TRUST_REMOTE_CODE", "SCARF_NO_ANALYTICS",
     "TASK_MODEL", "USER_PERMISSIONS_CHAT_CALL", "USER_PERMISSIONS_CHAT_FILE_UPLOAD",
-    "USER_PERMISSIONS_CHAT_STT", "USER_PERMISSIONS_CHAT_TTS", "USER_PERMISSIONS_FEATURES_API_KEYS",
-    "USER_PERMISSIONS_CHAT_SHARE", "USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING",
-    "USER_PERMISSIONS_CHAT_ALLOW_OPEN_SHARING", "USER_PERMISSIONS_CHAT_TEMPORARY",
-    "USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED",
+    "USER_PERMISSIONS_CHAT_ALLOW_OPEN_SHARING", "USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING",
+    "USER_PERMISSIONS_CHAT_SHARE", "USER_PERMISSIONS_CHAT_STT", "USER_PERMISSIONS_CHAT_TEMPORARY",
+    "USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED", "USER_PERMISSIONS_CHAT_TTS",
+    "USER_PERMISSIONS_FEATURES_API_KEYS",
     "USER_PERMISSIONS_FEATURES_CODE_INTERPRETER", "USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS",
     "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION", "USER_PERMISSIONS_FEATURES_MEMORIES",
     "USER_PERMISSIONS_FEATURES_NOTES", "USER_PERMISSIONS_FEATURES_WEB_SEARCH",
@@ -1777,30 +1777,29 @@ def test_openwebui_retention_defaults_to_30_days_and_cannot_be_unset(owui_chart)
     assert r.returncode != 0 and "retentionDays" in r.stderr
 
 
-def test_openwebui_chat_sharing_and_temporary_chats_are_site_values_off_by_default(owui_chart):
+OWUI_CHAT_ENV = {"share": "USER_PERMISSIONS_CHAT_SHARE",
+                 "shareWithAllUsers": "USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING",
+                 "temporaryEnforced": "USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED"}
+
+
+@pytest.mark.parametrize("enabled", [None, *OWUI_CHAT_ENV])
+def test_openwebui_chat_sharing_and_temporary_chats_are_site_values_off_by_default(owui_chart, enabled):
     """#1255 (ADR-0007 S2, R3): share links and temporary-chat enforcement are
-    site values, off by default. A share link never opens without sign-in: the
-    no-auth "anyone" grant stays pinned off. Temporary chats stay available."""
+    site values, off by default, each reaching only its own variable. The
+    no-auth "anyone" grant stays pinned off and temporary chats available."""
     with open(CHART / "values.yaml", encoding="utf-8") as f:
         assert yaml.safe_load(f)["openwebui"]["chats"] == {
             "share": False, "shareWithAllUsers": False, "temporaryEnforced": False}
-    pinned = {"USER_PERMISSIONS_CHAT_ALLOW_OPEN_SHARING": "false",
-              "USER_PERMISSIONS_CHAT_TEMPORARY": "true"}
-    env = env_map(_owui(owui_chart)["Deployment", "rag-openwebui"], "openwebui")
-    assert {k: env[k]["value"] for k in (*pinned, "USER_PERMISSIONS_CHAT_SHARE",
-                                         "USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING",
-                                         "USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED")} == {
-        **pinned, "USER_PERMISSIONS_CHAT_SHARE": "false",
-        "USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING": "false",
-        "USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED": "false"}
-    on = {"chats": {"share": True, "shareWithAllUsers": True, "temporaryEnforced": True}}
-    env = env_map(_owui(owui_chart, {"openwebui": on})["Deployment", "rag-openwebui"], "openwebui")
-    assert {k: env[k]["value"] for k in (*pinned, "USER_PERMISSIONS_CHAT_SHARE",
-                                         "USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING",
-                                         "USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED")} == {
-        **pinned, "USER_PERMISSIONS_CHAT_SHARE": "true",
-        "USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING": "true",
-        "USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED": "true"}
+    extra = {"openwebui": {"chats": {enabled: True}}} if enabled else None
+    env = env_map(_owui(owui_chart, extra)["Deployment", "rag-openwebui"], "openwebui")
+    expected = {"USER_PERMISSIONS_CHAT_SHARE": "false",
+                "USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING": "false",
+                "USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED": "false",
+                "USER_PERMISSIONS_CHAT_ALLOW_OPEN_SHARING": "false",
+                "USER_PERMISSIONS_CHAT_TEMPORARY": "true"}
+    if enabled:
+        expected[OWUI_CHAT_ENV[enabled]] = "true"
+    assert {k: env[k]["value"] for k in expected} == expected
 
 
 def test_openwebui_refuses_to_enable_without_the_repository_docs_pipe(tmp_path):

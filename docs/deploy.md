@@ -2011,18 +2011,22 @@ default **30 days** (maintainer decision 2026-10-24). An explicit null fails the
 
 **Share links and temporary chats (ADR-0007 S2, #1255).** Chart values under `openwebui.chats`,
 all off by default; there is no `airgap.env` key for them yet.
+- These values set the default user permissions. An admin can still change a group's permissions
+  in the Open WebUI admin UI, and v0.12.3 combines them most-permissive over the defaults.
 - `share` (`USER_PERMISSIONS_CHAT_SHARE`): users may share a chat as a link `/s/<token>`. The link
   is a snapshot copy of the chat, opens only after sign-in, and only for its owner and the users or
-  groups the owner grants in the share dialog. `shareWithAllUsers`
+  groups the owner grants in the share dialog. In v0.12.3's "continue" mode, the owner instead lets
+  grantees read and write the live chat. `shareWithAllUsers`
   (`USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING`) also lets the owner open it to every signed-in
-  user. The no-auth "anyone" grant (`USER_PERMISSIONS_CHAT_ALLOW_OPEN_SHARING`) is pinned off;
-  Open WebUI v0.12.3 still lets an admin set it (ADR-0007 R3 residual). Community sharing stays
-  off. A snapshot is purged with its chat, or on its own once it is older than the window.
+  user. The no-auth "anyone" grant (`USER_PERMISSIONS_CHAT_ALLOW_OPEN_SHARING`) is pinned off in
+  the defaults; an admin can still grant it, or enable it for a group (ADR-0007 R3 residual).
+  Community sharing stays off. A snapshot is purged with its chat, or on its own once it is older
+  than the window.
 - Temporary chats (`USER_PERMISSIONS_CHAT_TEMPORARY`, pinned on) are never saved: the server
   writes no chat row for a `temporary:` chat id. `temporaryEnforced`
-  (`USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED`) makes every non-admin chat temporary: the server
-  refuses to create or import a chat. Admins are exempt, and chats saved earlier stay until the
-  purge. To enforce for one group only, leave this off and set the group's permission in the
+  (`USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED`) stops non-admins from starting a saved chat: the
+  server refuses to create or import one. Admins are exempt, and a chat saved earlier can still be
+  continued and stays until the purge. To enforce for one group only, leave this off and set the group's permission in the
   Open WebUI admin UI; v0.12.3 combines group permissions most-permissive, so any one group that
   enforces it enforces it for its members.
 

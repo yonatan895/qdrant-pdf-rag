@@ -168,17 +168,17 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
                      "(SELECT id FROM purge_chat))",
                      (SHARED_PREFIX + "%", cutoff, len(SHARED_PREFIX) + 1))
         (total,) = conn.execute("SELECT count(*) FROM purge_chat").fetchone()
-        shared = 0
+        share_snapshots = 0
         if has_shares:
             # A share snapshot goes with its purged chat, and on its own once the
             # snapshot is older than the window (S2) even while the chat lives
             # on. The surviving chat is left unshared the way upstream unsharing
             # leaves it: share_id cleared and its share grants removed, so a
             # later share does not inherit them. Its updated_at is not touched.
-            # The columns are nullable: a snapshot of unknown age counts as expired.
+            # updated_at is nullable: a snapshot of unknown age counts as expired.
             conn.execute("CREATE TEMP TABLE purge_share(id TEXT PRIMARY KEY, chat_id TEXT)")
             conn.execute("INSERT INTO purge_share SELECT id, chat_id FROM shared_chat "
-                         "WHERE coalesce(updated_at, created_at, 0) < ? "
+                         "WHERE coalesce(updated_at, 0) < ? "
                          "OR chat_id IN (SELECT id FROM purge_chat)", (cutoff,))
             if has_grants:
                 conn.execute("DELETE FROM access_grant WHERE resource_type = 'shared_chat' AND "
@@ -188,7 +188,7 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
                 conn.execute("UPDATE chat SET share_id = NULL WHERE share_id IN "
                              "(SELECT id FROM purge_share)")
             cur = conn.execute("DELETE FROM shared_chat WHERE id IN (SELECT id FROM purge_share)")
-            shared = max(cur.rowcount, 0)
+            share_snapshots = max(cur.rowcount, 0)
         files = 0
         orphans = 0
         if has_files:
@@ -236,7 +236,7 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
                         continue
                     _unlink(entry)
                     orphans += 1
-        if total or shared or files or linked:
+        if total or share_snapshots or files or linked:
             # Before the commit: a crash between commit and scrub still leaves
             # the marker, so the next run finishes the job.
             _mark_pending(data_dir)
@@ -255,8 +255,8 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
                 raise PurgeError("checkpoint-busy")
             (data_dir / PENDING_NAME).unlink()
             _fsync_dir(data_dir)
-        return {"chats": chats, "snapshots": total - chats + shared, "linked_rows": linked, "files": files,
-                "orphans": orphans}
+        return {"chats": chats, "snapshots": total - chats + share_snapshots, "linked_rows": linked,
+                "files": files, "orphans": orphans}
     except sqlite3.OperationalError as exc:
         code = "busy" if "locked" in str(exc) or "busy" in str(exc) else "sqlite"
         raise PurgeError(code) from None
