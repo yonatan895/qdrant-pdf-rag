@@ -2369,6 +2369,7 @@ async def prepare_chat_core(
     core_input.hits = found.hits
     core_input.query_kind = found.kind
     core_input.timings = found.timings
+    core_input.search_query = search_query
     return core_input, deps, llm_model
 
 

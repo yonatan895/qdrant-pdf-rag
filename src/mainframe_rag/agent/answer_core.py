@@ -98,6 +98,10 @@ class AnswerCoreInput:
     query_kind: str | None = None
     timings: dict[str, int] | None = None
     reasoning_effort: ReasoningEffort | None = None
+    # What retrieval searched for this turn (issue #1268), set with the hits:
+    # the condensed query of a chat follow-up. None means the message's own
+    # derived retrieval query, the only search a non-chat turn makes.
+    search_query: str | None = None
 
 
 @dataclass
@@ -329,6 +333,14 @@ async def _build_prepared_prompt(
     ):
         if input_data.is_chat and input_data.messages:
             build_chat_fn = deps.build_chat_messages_fn or build_chat_messages
+            # Only a search that differs from the message's own retrieval
+            # query is passed (issue #1268), so every other call is unchanged.
+            searched = _search_text(input_data, settings)
+            extra = (
+                {"search_query": searched}
+                if searched != derive_retrieval_query(input_data.query, settings)
+                else {}
+            )
             return await asyncio.to_thread(
                 build_chat_fn,
                 input_data.messages,
@@ -348,6 +360,7 @@ async def _build_prepared_prompt(
                 order=settings.prompt_order,
                 reasoning_effort=effort,
                 temperature=temperature,
+                **extra,
             )
         build_msg_fn = deps.build_messages_fn or build_messages
         return await asyncio.to_thread(
@@ -452,16 +465,29 @@ def _finalize_answer(
 
 async def _retrieve_inputs(
     source: AnswerCoreInput, deps: AnswerCoreDeps, parent_span: trace.Span | None,
-) -> RetrievalResult:
+) -> tuple[AnswerCoreInput, RetrievalResult]:
+    """The retrieval leg, or the hits a route already retrieved; returns the
+    input carrying the query that was searched (issue #1268)."""
     if source.hits is not None:
-        return RetrievalResult(source.hits, source.query_kind or "unknown", source.timings or {})
+        return source, RetrievalResult(
+            source.hits, source.query_kind or "unknown", source.timings or {}
+        )
     query = await resolve_search_query(source, deps, parent_span)
     try:
-        return await deps.retrieve(
+        found = await deps.retrieve(
             query, product=source.product, version=source.version, settings=deps.settings,
         )
     except Exception as exc:
         raise RetrievalError(exc) from exc
+    return replace(source, search_query=query), found
+
+
+def _search_text(input_data: AnswerCoreInput, settings: Settings) -> str:
+    """What retrieval searched: the condensed query a chat route recorded, else
+    the message's own derived retrieval query (issue #1192, #1268)."""
+    if input_data.search_query is not None:
+        return input_data.search_query
+    return derive_retrieval_query(input_data.query, settings)
 
 
 def _empty_output(query: str, kind: str, timings: dict[str, int], complexity: str) -> AnswerCoreOutput:
@@ -499,13 +525,14 @@ async def execute_answer_core(
     _base_url, llm_model = assert_reasoning_model(settings)
     root_ctx = trace.set_span_in_context(parent_span) if parent_span is not None else None
 
-    retrieved = await _retrieve_inputs(input_data, deps, parent_span)
+    input_data, retrieved = await _retrieve_inputs(input_data, deps, parent_span)
     hits, kind, timings = retrieved.hits, retrieved.kind, retrieved.timings
 
     classify_fn = deps.classify_query_complexity_fn or classify_query_complexity
     # Complexity and the no-hits wording read what retrieval searched, which
-    # is the message itself within `query_max_chars` (issue #1192).
-    search_text = derive_retrieval_query(input_data.query, settings)
+    # is the message itself within `query_max_chars` (issue #1192) unless a
+    # chat follow-up was condensed (issue #1268).
+    search_text = _search_text(input_data, settings)
     complexity = classify_fn(search_text)
 
     if not hits:
@@ -580,13 +607,14 @@ async def execute_answer_core_stream(
     _base_url, llm_model = assert_reasoning_model(settings)
     root_ctx = trace.set_span_in_context(parent_span) if parent_span is not None else None
 
-    retrieved = await _retrieve_inputs(input_data, deps, parent_span)
+    input_data, retrieved = await _retrieve_inputs(input_data, deps, parent_span)
     hits, kind, timings = retrieved.hits, retrieved.kind, retrieved.timings
 
     classify_fn = deps.classify_query_complexity_fn or classify_query_complexity
     # Complexity and the no-hits wording read what retrieval searched, which
-    # is the message itself within `query_max_chars` (issue #1192).
-    search_text = derive_retrieval_query(input_data.query, settings)
+    # is the message itself within `query_max_chars` (issue #1192) unless a
+    # chat follow-up was condensed (issue #1268).
+    search_text = _search_text(input_data, settings)
     complexity = classify_fn(search_text)
 
     # 2. Empty hits short-circuit: only the terminal record is yielded. The

@@ -167,9 +167,14 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   pruned from prior assistant turns. Follow-up turns condense only when
   `CHAT_CONDENSE_ENABLED=true` (default off): one low-effort reasoning call
   rewrites the latest turn into a standalone search query (last 4 non-system
-  turns, 1000 chars each), bypasses the LLM entirely when the turn already
-  carries a message/member identifier or abend code, and falls back to the raw
-  latest text on any failure. The condensation A/B and its default-flip
+  turns, each cut at `chat_max_prior_turn_chars`), bypasses the LLM entirely
+  when the turn already carries a message/member identifier or abend code, and
+  falls back to the raw latest text on any failure and on an empty rewrite or
+  one whose effective (acronym-expanded) text exceeds `retrieval_query_limit`
+  (#1268). The condensed query drives retrieval and the retrieval-derived
+  prompt decisions (complexity, the resolved-code note, identifier anchoring in
+  packing, the no-hits wording); the question the model reads stays the user's
+  own words, and with condensation off or bypassed the prompt is unchanged. The condensation A/B and its default-flip
   decision live in `docs/eval.md` (`sh scripts/tools/run-task.sh eval:chat`).
 - `GET /ui` — operator console (ADR-0004), a thin adapter over the same core:
   Jinja2 shell + HTMX form/fragment + SSE stream (`/ui/chat`, `/ui/chat/stream`,

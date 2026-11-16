@@ -330,6 +330,174 @@ async def test_condense_query_direct_bypass():
     assert res_abend == "We encountered abend S0C4 in step 1"
 
 
+class _RewriteLLM:
+    """Condensation returns `rewrite`; any other call is a refusal to answer."""
+
+    def __init__(self, rewrite: str):
+        self.rewrite = rewrite
+        self.prompts: list[list[ChatMessage]] = []
+
+    def chat(self, messages, reasoning_effort=None, temperature=None):
+        self.prompts.append(messages)
+        return ChatResult(content=self.rewrite, finish_reason="stop", usage=TokenUsage())
+
+
+def _condense_settings(**overrides):
+    from mainframe_rag.config import Settings
+
+    return Settings(_env_file=None, embed_mode="hash", allow_hash_mode=True, **overrides)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("cut", [None, 2500])
+async def test_condense_query_cuts_prior_turns_at_the_history_setting(cut):
+    """Issue #1268: condensation cuts each prior turn at
+    `chat_max_prior_turn_chars` (default 1000), the same cap the answer
+    prompt applies, so the `history4000` arm reaches the rewrite too."""
+    settings = _condense_settings(**({} if cut is None else {"chat_max_prior_turn_chars": cut}))
+    expected = 1000 if cut is None else cut
+    prior = "".join(chr(ord("a") + i % 26) for i in range(4000))
+    llm = _RewriteLLM("rewritten query")
+    messages = [
+        ChatMessage(role="user", content=prior),
+        ChatMessage(role="assistant", content="An earlier answer"),
+        ChatMessage(role="user", content="What should the operator do next?"),
+    ]
+    assert await condense_query(llm, messages, settings) == "rewritten query"  # type: ignore[arg-type]
+    prompt = llm.prompts[0][-1].content
+    assert f"User: {prior[:expected]}\n" in prompt
+    assert prior[: expected + 1] not in prompt
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("acronyms", [False, True])
+async def test_condense_query_falls_back_to_the_follow_up_on_an_over_long_rewrite(acronyms):
+    """Issue #1268: a rewrite is used only when retrieval can search it whole:
+    its effective text (after acronym expansion when on) fits
+    `retrieval_query_limit`. An over-long or empty rewrite searches the
+    follow-up's own text instead of reaching the embed-input refusal."""
+    from mainframe_rag.agent.user_message import retrieval_query_limit
+    from mainframe_rag.retrieve.rewrite import expand_query
+
+    settings = _condense_settings(acronym_expansion_enabled=acronyms)
+    limit = retrieval_query_limit(settings)
+    active = "What should the operator do next?"
+    messages = [
+        ChatMessage(role="user", content="What does IEA500I mean?"),
+        ChatMessage(role="assistant", content="An earlier answer"),
+        ChatMessage(role="user", content=active),
+    ]
+    fits = ("IOS recovery steps " * 400)[:limit].strip()
+    while len(expand_query(fits) if acronyms else fits) > limit:
+        fits = fits[: len(fits) - 10].strip()
+    assert await condense_query(_RewriteLLM(fits), messages, settings) == fits  # type: ignore[arg-type]
+    for rewrite in ("x" * (limit + 1), "", "  "):
+        assert await condense_query(_RewriteLLM(rewrite), messages, settings) == active  # type: ignore[arg-type]
+    if acronyms:
+        # Within the limit as written, over it once expanded.
+        grown = "RACF " + "a" * (limit - 10)
+        assert len(grown) <= limit < len(expand_query(grown))
+        assert await condense_query(_RewriteLLM(grown), messages, settings) == active  # type: ignore[arg-type]
+
+
+_PRIOR_TURNS = [
+    {"role": "user", "content": "What does IEA500I mean?"},
+    {"role": "assistant", "content": "An earlier answer"},
+]
+
+
+def _final_prompt(chat_client, stream: bool) -> list[ChatMessage]:
+    calls = chat_client.fake_llm.stream_calls if stream else chat_client.fake_llm.chat_calls
+    return calls[-1]["messages"]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("condense", [False, True])
+def test_condensed_query_drives_packing_while_the_model_sees_the_literal_message(
+    chat_client, monkeypatch, condense, stream
+):
+    """Issue #1268: with condensation on, the retrieval-derived prompt
+    decisions (complexity, the resolved-code note, identifier anchoring) read
+    the condensed query that retrieval searched; the question the model reads
+    stays the user's literal words, and the rewrite itself is never shown."""
+    from mainframe_rag.agent.answer import SYSTEM_PROMPT, SYSTEM_PROMPT_COMPLEX_EXTENSION
+
+    monkeypatch.setattr(app_mod.settings, "chat_condense_enabled", condense)
+    rewrite = "abend SAFB recovery procedure"
+    original_chat = chat_client.fake_llm.chat
+
+    def chat(messages, **kwargs):
+        result = original_chat(messages, **kwargs)
+        if "rephrase the follow-up" in messages[0].content:
+            return ChatResult(content=rewrite, finish_reason="stop", usage=TokenUsage())
+        return result
+
+    monkeypatch.setattr(chat_client.fake_llm, "chat", chat)
+    active = "What should the operator do next?"
+    result = chat_client.post("/v1/chat", json={
+        "messages": [*_PRIOR_TURNS, {"role": "user", "content": active}], "stream": stream})
+    assert result.status_code == 200
+    assert [c["query"] for c in chat_client.mock_search.calls] == [rewrite if condense else active]
+    prompt = _final_prompt(chat_client, stream)
+    user = prompt[-1].content
+    assert f"Question: {active}\n" in user
+    assert rewrite not in "\n".join(m.content for m in prompt)
+    if condense:
+        assert prompt[0].content == SYSTEM_PROMPT + SYSTEM_PROMPT_COMPLEX_EXTENSION
+        assert f"Question: {active}\nResolved system code: SAFB = AFB\n" in user
+    else:
+        assert prompt[0].content == SYSTEM_PROMPT
+        assert "Resolved system code" not in user
+
+
+@pytest.mark.parametrize("message", ["What should the operator do next?", "IEA500I " + "x" * 2500])
+def test_chat_builder_search_query_of_the_literal_message_changes_nothing(message):
+    """Issue #1268: passing the literal message's own retrieval query as the
+    search query builds the same prompt and manifest as not passing it."""
+    from mainframe_rag.agent.tokenizer import FallbackTokenizer
+    from mainframe_rag.agent.user_message import derive_retrieval_query
+
+    settings = _condense_settings()
+    messages = [ChatMessage(role=m["role"], content=m["content"]) for m in _PRIOR_TURNS]
+    messages.append(ChatMessage(role="user", content=message))
+    for tokenizer in (None, FallbackTokenizer()):
+        base = build_chat_messages(messages, [_hit()], settings=settings, tokenizer=tokenizer)
+        same = build_chat_messages(messages, [_hit()], settings=settings, tokenizer=tokenizer,
+                                   search_query=derive_retrieval_query(message, settings))
+        assert same == base
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_condense_bypass_keeps_the_chat_prompt_byte_identical(chat_client, monkeypatch, stream):
+    """Issue #1268: a follow-up condensation bypasses (it names an
+    identifier) searches and packs exactly as with condensation off."""
+    active = "And what does abend S0C4 mean here?"
+    payload = {"messages": [*_PRIOR_TURNS, {"role": "user", "content": active}], "stream": stream}
+    prompts = []
+    for condense in (False, True):
+        monkeypatch.setattr(app_mod.settings, "chat_condense_enabled", condense)
+        assert chat_client.post("/v1/chat", json=payload).status_code == 200
+        prompts.append(_final_prompt(chat_client, stream))
+    assert [c["query"] for c in chat_client.mock_search.calls] == [active, active]
+    assert prompts[0] == prompts[1]
+    assert "Resolved system code: S0C4 = 0C4" in prompts[0][-1].content
+
+
+def test_condensed_no_hits_wording_names_what_retrieval_searched(chat_client, monkeypatch):
+    """Issue #1268: the no-hits answer reads the query retrieval searched, as
+    the core already documents (#1192): a condensed follow-up that named an
+    identifier says which one carried no excerpts."""
+    monkeypatch.setattr(app_mod.settings, "chat_condense_enabled", True)
+    chat_client.mock_search.return_hits = False
+    payload = {"messages": [*_PRIOR_TURNS, {"role": "user", "content": "How do I fix that?"}]}
+    body = chat_client.post("/v1/chat", json=payload).json()
+    assert body["choices"][0]["message"]["content"] == "No manual excerpts carry IEA500I."
+    monkeypatch.setattr(app_mod.settings, "chat_condense_enabled", False)
+    body = chat_client.post("/v1/chat", json=payload).json()
+    assert body["choices"][0]["message"]["content"] == (
+        "No supporting manual excerpts were found for this question.")
+
+
 # ---------------------------------------------------------------------------
 # Answer verification states on chat surfaces (issue #365)
 # ---------------------------------------------------------------------------

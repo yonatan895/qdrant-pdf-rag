@@ -35,6 +35,9 @@ class PromptBuilder[T](Protocol):
         order: Literal["retrieval", "stable_cache"],
         reasoning_effort: str | None = None,
         temperature: float | None = None,
+        # Chat only, and only when the search differs from the message's own
+        # retrieval query (issue #1268); never passed otherwise.
+        search_query: str | None = None,
     ) -> PreparedPrompt: ...
 
 
