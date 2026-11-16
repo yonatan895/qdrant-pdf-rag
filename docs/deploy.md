@@ -2065,6 +2065,12 @@ default **30 days** (maintainer decision 2026-10-24). An explicit null fails the
 - Backups of `rag-openwebui-data` hold chat text. They are protected records that never leave
   the enterprise, and their retention follows the same window: at most 30 days plus one backup
   cycle.
+- Stale chat folders (#1255) go in the same transaction: a folder last updated before the window
+  (or of unknown age) that, after the run's chat deletions, no chat or other row names in
+  `folder_id` and no folder names as its parent. Nested stale folders go in the same run, leaves
+  first, counted as `folders`. Renaming, moving, expanding or collapsing a folder refreshes its
+  age; filing a chat in it does not. A folder in use, and its ancestors, keep their name, system
+  prompt text, icon and background image (ADR-0007 S2).
 
 **Share links and temporary chats (ADR-0007 S2, #1255).** Chart values under `openwebui.chats`,
 all off by default; there is no `airgap.env` key for them yet.
@@ -2115,6 +2121,16 @@ image as `openwebui-proxy-image.tar`) as its only listener. Open WebUI listens o
 (`merge_slashes on`), forwards the original request line, and answers `403 denied` for
 everything outside the allow-list. Access logs are off.
 
+Chat folders (`ENABLE_FOLDERS=true`, #1255) pass: the folder page `/folders/<id>`, and the folder
+API by id (hex and hyphens; v0.12.3 ids are uuid4) for list and create, read, delete, rename and
+settings, move, expand, mark read, and the owner's chat list (`/{id}/shared/chats`, which the
+folder page uses). Folder sharing stays off. The proxy refuses
+the grant route `/api/v1/folders/{id}/access/update`, which v0.12.3 does not gate on
+`USER_PERMISSIONS_FOLDERS_ALLOW_SHARING`, and the shared-folder list `/api/v1/folders/shared`
+(the sidebar treats that refusal as an empty list). A folder's system prompt reaches the docs
+Pipe as a system turn, and the Pipe drops it. Its knowledge entries resolve to nothing, because
+no file, knowledge collection or note can exist (ADR-0007 V1).
+
 Site acceptance, with `$C` a signed-in user's session cookie and `$H` the Route host. Every
 request must return `403` (or `400` for the null byte) and must store nothing:
 
@@ -2124,7 +2140,9 @@ for p in /api/v1/files/ /api/v1/files /API/v1/files/ //api/v1/files/ /api/v1/./f
          /api/v1/chats/%2e%2e/files/ /api/v1/%2566iles/ /api/v1/files%00 \
          /api/v1/retrieval/process/text /api/v1/knowledge/ /api/v1/audio/transcriptions \
          /openai/chat/completions /ollama/api/chat /api/v1/utils/code/execute \
-         /api/v1/prompts/create /api/v1/prompts/list; do
+         /api/v1/prompts/create /api/v1/prompts/list \
+         /api/v1/folders/shared \
+         /api/v1/folders/00000000-0000-4000-8000-000000000000/access/update; do
   printf '%s ' "$p"; curl -sk -o /dev/null -w '%{http_code}\n' -X POST -b "$C" "https://$H$p"
 done
 ```

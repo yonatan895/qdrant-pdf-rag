@@ -5,8 +5,9 @@
   (default-on, release gates; the conditions below stay); amended by
   [ADR-0010](0010-team-tools-on-open-webui.md) for team tools (the decision
   paragraph, V2, R2, one no-go item and the framework reading, as its table
-  lists). V2 wording amended for the docs Pipe's answer-depth entries
-  (#1255, maintainer decision 2026-11-16).
+  lists); amended for chat folders (#1255: V1, E1, S2, S3). V2 wording
+  amended for the docs Pipe's answer-depth entries (#1255, maintainer
+  decision 2026-11-16).
   Accepting this record does not enable anything: the chart component stays
   off by default (superseded by ADR-0008: default on), and a site enables it only after every condition below
   passes. Amends [ADR-0004](0004-operator-console-htmx.md) and
@@ -54,6 +55,21 @@ Pipe is provisioned and the admin role is limited to the team.
   memory attempts, then an inspection of the data directory. It must contain
   no vector-store directory or file, and no uploaded files. A non-empty store
   is an acceptance failure.
+  **Chat folders** are on (#1255) to organise a user's own chats. A folder
+  carries a system prompt, knowledge entries, default models, an icon and a
+  background image (v0.12.3 `routers/folders.py`, `utils/middleware.py`).
+  None of them reaches the vector store or the agent. The system prompt
+  becomes the system turn at `messages[0]`, which the Pipe drops (Pipe tests
+  pin the inserted, merged and list-content shapes). Knowledge entries
+  (files, collections, notes) resolve to nothing because none can exist:
+  uploads, knowledge and notes are off and E1 refuses their routes. The same
+  holds when a chat outside the folder attaches it through the `#` or `@`
+  picker. Admins skip v0.12.3's folder-entry access check
+  (`get_accessible_folder_files`), so for them E1 alone keeps the entries
+  empty. The only model a folder default can name is the Pipe. Pending
+  acceptance step (#1255, not yet in the battery): a folder with a system
+  prompt and a knowledge entry, then a chat in it; the agent request holds
+  user and assistant turns only, and the data directory is unchanged.
 - **V2 Answers only through the agent.** Open WebUI holds no gateway or LiteLLM
   key. It has no OpenAI or Ollama connections, so the default connections are
   off. Direct connections, user-created models and user Tools/Functions are
@@ -132,7 +148,10 @@ Pipe is provisioned and the admin role is limited to the team.
   path. The list is the Docs pilot's need: the SPA shell and assets, sign-in
   and the OIDC callback, socket.io, health, chats, models, the Pipe's chat
   completions, the account and admin APIs and the Pipe installer's
-  `/api/v1/functions`, plus, with ratings (#1255), the rating Action's
+  `/api/v1/functions`, chat folders (the `/folders/<id>` page and the
+  folder API by id) without the folder grant route `/access/update` or the
+  shared-folder list `/shared` (#1255), plus, with ratings (#1255), the
+  rating Action's
   two buttons `/api/chat/actions/mainframe_rag_rating.(up|down)`, rendered
   only while ratings are on (the handler is server-enforced: an active Action
   the model surfaces). Shared prompts (#1255, maintainer decision 2026-11-16):
@@ -197,13 +216,36 @@ Pipe is provisioned and the admin role is limited to the team.
   acceptance). A site may enforce them; the server then refuses to create or
   import a chat for every non-admin user. Admins are exempt, and a chat saved
   earlier can still be continued and stays until the purge.
+  Folder sharing is off too
+  (`USER_PERMISSIONS_FOLDERS_ALLOW_SHARING=false`). v0.12.3 does not check
+  that permission on the grant route, so E1 refuses
+  `/api/v1/folders/{id}/access/update`, the only writer of folder access
+  grants. With no grant, a folder and its chats stay visible to the owner
+  only (and to admins, S3). **Stale folders are purged** (#1255, maintainer
+  decision 2026-11-16). A folder goes when three things hold after the
+  run's chat deletions. Its own `updated_at` is older than the window (a
+  NULL age counts as stale, as for a share snapshot). No row of any table
+  names it in `folder_id` (`chat` in v0.12.3, also `automation`). No folder
+  names it as `parent_id`. Leaves go first and the run repeats until none
+  is left, so a stale nested chain goes in one run. Deleted folders count
+  as `folders` and arm the same scrub. In v0.12.3, renaming, editing
+  settings, moving, expanding or collapsing a folder refreshes its age;
+  filing or removing a chat does not. A folder in use, and each of its
+  ancestors, keeps its name, system prompt text, icon and background image
+  (a data URL in the row) until it is unused and aged or the user deletes
+  it. These also stay in PVC backups under S3. A `parent_id` cycle never
+  becomes a leaf and is kept. v0.12.3 refuses to file a chat under a folder
+  that no longer exists (`has_folder_write_access`).
 - **S3 Protected copies and admin access.** PVC backups hold manual excerpts
   and pasted incident text. They are protected records that never leave the
   enterprise. They follow the same 30-day window: the purge job also removes
   backups older than 30 days. Admin chat access is off, but that toggle only
   hides chats in the UI. Admins, in-process Functions and anyone with access
-  to the PVC or the DB can still read them. This is an accepted residual, kept
-  small by limiting the admin role to the named owners through an IdP group.
+  to the PVC or the DB can still read them. Given a folder id, the folder API
+  also lets an admin read and change any folder's settings, list its chat
+  titles, add subfolders, and delete it with its chats (#1255). This is an
+  accepted residual, kept small by limiting the admin role to the named
+  owners through an IdP group.
   Encryption at rest, if required, comes from the storage class, because Open
   WebUI provides none. The maintainer, as corpus owner, accepted chat
   content on the PVC and in backups under these rules (2026-10-24). If that

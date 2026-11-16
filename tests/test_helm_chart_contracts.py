@@ -1221,8 +1221,9 @@ OWUI_ENV_NAMES = {
     "USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED", "USER_PERMISSIONS_CHAT_TTS",
     "USER_PERMISSIONS_FEATURES_API_KEYS",
     "USER_PERMISSIONS_FEATURES_CODE_INTERPRETER", "USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS",
-    "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION", "USER_PERMISSIONS_FEATURES_MEMORIES",
-    "USER_PERMISSIONS_FEATURES_NOTES", "USER_PERMISSIONS_FEATURES_WEB_SEARCH",
+    "USER_PERMISSIONS_FEATURES_FOLDERS", "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION",
+    "USER_PERMISSIONS_FEATURES_MEMORIES", "USER_PERMISSIONS_FEATURES_NOTES",
+    "USER_PERMISSIONS_FEATURES_WEB_SEARCH", "USER_PERMISSIONS_FOLDERS_ALLOW_SHARING",
     "USER_PERMISSIONS_WORKSPACE_KNOWLEDGE_ACCESS", "USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS",
     "USER_PERMISSIONS_WORKSPACE_PROMPTS_ACCESS", "USER_PERMISSIONS_WORKSPACE_PROMPTS_IMPORT",
     "USER_PERMISSIONS_WORKSPACE_TOOLS_ACCESS", "UVICORN_WORKERS", "VECTOR_DB", "WEBUI_AUTH",
@@ -1466,6 +1467,13 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         # ADR-0007 S2: sharing is off. v0.12.3 defaults it to True, and its
         # snapshots sit outside the 30-day purge.
         "USER_PERMISSIONS_CHAT_SHARE": "false",
+        # Chat folders on, folder sharing off (#1255); a folder's knowledge
+        # entries stay inert while uploads, knowledge, notes and query
+        # generation stay off (ADR-0007 V1).
+        "ENABLE_FOLDERS": "true", "USER_PERMISSIONS_FEATURES_FOLDERS": "true",
+        "USER_PERMISSIONS_FOLDERS_ALLOW_SHARING": "false", "ENABLE_NOTES": "false",
+        "USER_PERMISSIONS_WORKSPACE_KNOWLEDGE_ACCESS": "false",
+        "ENABLE_RETRIEVAL_QUERY_GENERATION": "false",
         "OAUTH_SCOPES": "openid email profile groups offline_access",
         "CORS_ALLOW_ORIGIN": "https://docs.apps.example.internal",
         "ENABLE_API_KEYS": "true", "USER_PERMISSIONS_FEATURES_API_KEYS": "false",
@@ -1796,6 +1804,8 @@ def test_openwebui_ratings_require_the_feedback_store():
             "are stored only by the agent's feedback store (ADR-0005)") in r.stderr
 
 
+# Open WebUI v0.12.3 folder ids are str(uuid.uuid4()) (models/folders.py).
+FOLDER_ID = "0b9d6f3e-6c1a-4f43-9a51-2d3c8e7f1a00"
 ALLOWED_PATHS = [
     "/", "/c/3f2a", "/auth", "/admin/users", "/_app/immutable/chunks/a.js", "/static/loader.js",
     "/favicon.png", "/manifest.json", "/health", "/health/db", "/oauth/oidc/login",
@@ -1808,12 +1818,18 @@ ALLOWED_PATHS = [
     # Share-link view (#1255): the SPA shell only; its data is /api/v1/chats/share/<id>.
     "/s", "/s/3f2a", "/api/v1/chats/share/3f2a", "/api/v1/chats/3f2a/share",
     "/api/chat/actions/mainframe_rag_rating.up", "/api/chat/actions/mainframe_rag_rating.down",
+    # Chat folders (#1255): the folder page, list/create, read/delete one,
+    # rename/settings, move, expand, mark read, and the owner's folder chat list.
+    f"/folders/{FOLDER_ID}", "/api/v1/folders/", "/api/v1/folders", f"/api/v1/folders/{FOLDER_ID}",
+    f"/api/v1/folders/{FOLDER_ID}/update", f"/api/v1/folders/{FOLDER_ID}/update/parent",
+    f"/api/v1/folders/{FOLDER_ID}/update/expanded", f"/api/v1/folders/{FOLDER_ID}/read",
+    f"/api/v1/folders/{FOLDER_ID}/shared/chats",
 ]
 DENIED_PATHS = [
     "/api/v1/files/", "/api/v1/files", "/api/v1/files/abc/content", "/api/v1/retrieval/process/text",
     "/api/v1/retrieval/config", "/api/v1/knowledge/", "/api/v1/knowledge/create", "/api/v1/audio/transcriptions",
     "/api/v1/images/generations", "/api/v1/memories/add", "/api/v1/notes/", "/api/v1/channels/",
-    "/api/v1/folders/", "/api/v1/utils/code/execute", "/api/v1/utils/db/download", "/api/v1/pipelines/",
+    "/api/v1/utils/code/execute", "/api/v1/utils/db/download", "/api/v1/pipelines/",
     "/api/v1/scim/v2/Users", "/api/v1/terminals/", "/api/v1/search", "/api/v1/skills/",
     "/api/v1/evaluations/feedbacks", "/api/v1/automations/", "/openai/chat/completions",
     "/ollama/api/chat", "/docs", "/openapi.json", "/api/version/updates", "/api/changelog",
@@ -1824,6 +1840,12 @@ DENIED_PATHS = [
     "/api/chat/actions/", "/api/chat/actions/community_x", "/api/chat/actions/community_x.up",
     "/api/chat/actions/mainframe_rag_rating", "/api/chat/actions/mainframe_rag_rating.sideways",
     "/api/chat/actions/mainframe_rag_rating.up/x", "/api/chat/actions/mainframe_rag_ratingXup",
+    # Folder sharing stays off (#1255, ADR-0007 S2): the grant route (its only
+    # writer in v0.12.3), the shared-folder list, and any other folder route.
+    f"/api/v1/folders/{FOLDER_ID}/access/update", "/api/v1/folders/shared",
+    "/api/v1/folders/shared/chats", f"/api/v1/folders/{FOLDER_ID}/update/x",
+    f"/api/v1/folders/{FOLDER_ID}/shared", f"/api/v1/folders/{FOLDER_ID}/chats",
+    "/api/v1/foldersX", "/api/v1/folders/ABC", "/api/v1/folders/a/b",
 ]
 
 
