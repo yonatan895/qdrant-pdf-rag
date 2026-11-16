@@ -133,7 +133,8 @@
                 "chat_template_kwargs": { "type": "object" }
               }
             },
-            "effortTransport": { "type": "string", "enum": ["top_level", "chat_template", "none"] }
+            "effortTransport": { "type": "string", "enum": ["top_level", "chat_template", "none"] },
+            "tokenCountSource": { "type": "string", "enum": ["tokenize", "completion_usage", "auto", "estimate"] }
           },
           "allOf": [
             {

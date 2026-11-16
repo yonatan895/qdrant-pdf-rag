@@ -44,8 +44,12 @@ EXTRA_BODY_OWNED_KEYS = {
 EFFORT_TRANSPORT_KEY = "LLM_EFFORT_TRANSPORT"
 EFFORT_TRANSPORTS = ("top_level", "chat_template", "none")
 MODEL_ARGUMENT_ENV_KEYS = (EXTRA_BODY_KEY, EFFORT_TRANSPORT_KEY)
+# Prompt-count source (#1266). Mirrors config.TOKEN_COUNT_SOURCES; a test pins
+# both sides. Empty keeps the application default (tokenize).
+TOKEN_COUNT_SOURCE_KEY = "LLM_TOKEN_COUNT_SOURCE"
+TOKEN_COUNT_SOURCES = ("tokenize", "completion_usage", "auto", "estimate")
 REASONING_ENV_KEYS = (*REASONING_INTEGER_FIELDS, *REASONING_EFFORT_FIELDS, "LLM_REASONING_EFFORTS", "LLM_STREAM",
-                      *MODEL_ARGUMENT_ENV_KEYS)
+                      *MODEL_ARGUMENT_ENV_KEYS, TOKEN_COUNT_SOURCE_KEY)
 
 # Request admission and total deadline (#374 handoff, #843 D1). Empty keeps the
 # chart default (deadline 270; admission 4/4/30, #843); zero is an explicit selection. Limits match config.Settings and the
@@ -520,6 +524,11 @@ def reasoning_overrides(values: Mapping[str, str]) -> dict[str, object]:
             raise ValueError(f"{name} must be one of LLM_REASONING_EFFORTS")
     if values.get("LLM_STREAM", "") != "":
         result["stream"] = parse_strict_bool("LLM_STREAM", values["LLM_STREAM"], False)
+    source = values.get(TOKEN_COUNT_SOURCE_KEY, "")
+    if source != "":
+        if source not in TOKEN_COUNT_SOURCES:
+            raise ValueError(f"{TOKEN_COUNT_SOURCE_KEY} must be tokenize, completion_usage, auto or estimate")
+        result["tokenCountSource"] = source
     return result
 
 
