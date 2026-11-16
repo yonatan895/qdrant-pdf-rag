@@ -210,10 +210,6 @@ spec:
               value: "false"
             - name: USER_PERMISSIONS_CHAT_CALL
               value: "false"
-            # Sharing is off (ADR-0007 S2). Upstream defaults it to True, and a
-            # share snapshot is a separate row the 30-day purge does not cover.
-            - name: USER_PERMISSIONS_CHAT_SHARE
-              value: "false"
             # Answers only through the agent (V2): no model connections, no
             # user tools, the Pipe Function is the only extension.
             - name: ENABLE_OPENAI_API
@@ -259,6 +255,20 @@ spec:
               value: "false"
             - name: ENABLE_ADMIN_EXPORT
               value: "false"
+            # Share links (S2, #1255): site values, inside the instance only. The
+            # no-auth "anyone" grant stays off for users (R3); the purge removes
+            # snapshots with their chat or once older than the window.
+            - name: USER_PERMISSIONS_CHAT_SHARE
+              value: {{ $o.chats.share | toString | quote }}
+            - name: USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING
+              value: {{ $o.chats.shareWithAllUsers | toString | quote }}
+            - name: USER_PERMISSIONS_CHAT_ALLOW_OPEN_SHARING
+              value: "false"
+            # Temporary chats are never saved; enforcing them is a site value.
+            - name: USER_PERMISSIONS_CHAT_TEMPORARY
+              value: "true"
+            - name: USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED
+              value: {{ $o.chats.temporaryEnforced | toString | quote }}
             # No content in logs (S4).
             - name: GLOBAL_LOG_LEVEL
               value: INFO

@@ -458,6 +458,115 @@ def test_purge_deletes_expired_chats_snapshots_links_and_files_and_reclaims_the_
                                               "files": 0, "orphans": 0}
 
 
+# Open WebUI v0.12.3 keeps a share link's snapshot in its own table (migration
+# c1d2e3f4a5b6 moved the legacy "shared-<chat id>" chat rows there) and who may
+# open it in access_grant rows keyed by the ORIGINAL chat id (models/
+# shared_chats.py, models/access_grants.py at tag v0.12.3).
+SHARED_CHAT_DDL = ("CREATE TABLE shared_chat (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL "
+                   "REFERENCES chat(id) ON DELETE CASCADE, user_id TEXT NOT NULL, title TEXT, "
+                   "chat JSON, created_at BIGINT, updated_at BIGINT)")
+ACCESS_GRANT_DDL = ("CREATE TABLE access_grant (id TEXT PRIMARY KEY, resource_type TEXT NOT NULL, "
+                    "resource_id TEXT NOT NULL, principal_type TEXT NOT NULL, "
+                    "principal_id TEXT NOT NULL, permission TEXT NOT NULL, created_at BIGINT NOT NULL, "
+                    "UNIQUE (resource_type, resource_id, principal_type, principal_id, permission))")
+CANARY_SNAPSHOT = "CANARY-AGED-SNAPSHOT-TEXT"
+
+
+def _seed_shares(conn):
+    old, new = NOW - 31 * DAY, NOW - 29 * DAY
+    conn.execute(SHARED_CHAT_DDL)
+    conn.execute(ACCESS_GRANT_DDL)
+    conn.executemany("INSERT INTO chat VALUES (?, ?, ?, ?, ?, ?, ?)", [
+        # Purged chat whose share was refreshed inside the window.
+        ("gone", "u1", "t", json.dumps({"m": CANARY_OLD}), old, old, "tok-gone"),
+        # Live chat (continued yesterday) whose share was taken 31 days ago.
+        ("live", "u1", "t", json.dumps({"m": "LIVE-TEXT"}), old, NOW - DAY, "tok-aged"),
+        # Live chat with a fresh share: everything stays.
+        ("fresh", "u2", "t", json.dumps({"m": "FRESH-TEXT"}), new, new, "tok-fresh"),
+    ])
+    conn.executemany("INSERT INTO shared_chat VALUES (?, ?, ?, ?, ?, ?, ?)", [
+        ("tok-gone", "gone", "u1", "snap", json.dumps({"m": CANARY_OLD}), new, new),
+        ("tok-aged", "live", "u1", "snap", json.dumps({"m": CANARY_SNAPSHOT}), old, old),
+        ("tok-fresh", "fresh", "u2", "snap", json.dumps({"m": "FRESH-SNAP"}), new, new),
+    ])
+    conn.executemany("INSERT INTO access_grant VALUES (?, ?, ?, ?, ?, 'read', ?)", [
+        ("g1", "shared_chat", "gone", "group", "grp-a", new),
+        ("g2", "shared_chat", "live", "user", "u9", old),
+        ("g3", "shared_chat", "fresh", "user", "*", new),
+        # Not a share grant: never touched by the chat purge.
+        ("g4", "model", "live", "group", "grp-a", old),
+    ])
+
+
+def test_purge_removes_v0123_share_snapshots_of_purged_chats_and_aged_snapshots(tmp_path):
+    """S2: a share snapshot goes with its purged chat AND when the snapshot
+    itself is older than the window, even while its chat lives on. The live
+    chat is unshared the way upstream unsharing leaves it (share_id cleared,
+    its share grants removed) and its own last update is untouched."""
+    data, db, conn = _db(tmp_path)
+    _seed_shares(conn)
+    counts = purge.purge(db, data, 30, NOW)
+    assert counts == {"chats": 1, "snapshots": 2, "linked_rows": 0, "files": 0, "orphans": 0}
+    assert {r[0] for r in conn.execute("SELECT id FROM chat")} == {"live", "fresh"}
+    assert [r[0] for r in conn.execute("SELECT id FROM shared_chat")] == ["tok-fresh"]
+    assert dict(conn.execute("SELECT id, share_id FROM chat")) == {"live": None, "fresh": "tok-fresh"}
+    assert conn.execute("SELECT updated_at FROM chat WHERE id = 'live'").fetchone() == (NOW - DAY,)
+    assert {r[0] for r in conn.execute("SELECT id FROM access_grant")} == {"g3", "g4"}
+    conn.close()
+    for path in data.iterdir():
+        if path.is_file():
+            body = path.read_bytes()
+            assert CANARY_OLD.encode() not in body and CANARY_SNAPSHOT.encode() not in body, path.name
+    # The next ordinary operation: the owner shares the live chat again.
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO shared_chat VALUES ('tok-new', 'live', 'u1', 'snap', '{}', ?, ?)",
+                 (NOW, NOW))
+    conn.execute("UPDATE chat SET share_id = 'tok-new' WHERE id = 'live'")
+    conn.commit()
+    conn.close()
+    # A repeat run converges and keeps the new share.
+    assert purge.purge(db, data, 30, NOW) == {"chats": 0, "snapshots": 0, "linked_rows": 0,
+                                              "files": 0, "orphans": 0}
+    conn = sqlite3.connect(db)
+    assert {r[0] for r in conn.execute("SELECT id FROM shared_chat")} == {"tok-new", "tok-fresh"}
+
+
+def test_purge_counts_a_share_snapshot_of_unknown_age_as_expired(tmp_path):
+    """shared_chat timestamps are nullable in v0.12.3: a snapshot whose age is
+    unknown must not outlive the window by escaping the comparison."""
+    data, db, conn = _db(tmp_path)
+    conn.execute(SHARED_CHAT_DDL)
+    conn.execute("INSERT INTO chat VALUES ('c', 'u', 't', '{}', 0, ?, 'tok')", (NOW,))
+    # created_at is not the age: a recent one does not save a NULL-age snapshot.
+    conn.execute("INSERT INTO shared_chat VALUES ('tok', 'c', 'u', 't', '{}', ?, NULL)", (NOW,))
+    assert purge.purge(db, data, 30, NOW)["snapshots"] == 1
+    assert conn.execute("SELECT count(*) FROM shared_chat").fetchone() == (0,)
+    assert conn.execute("SELECT id, share_id FROM chat").fetchall() == [("c", None)]
+
+
+@pytest.mark.parametrize("ddl", [
+    "CREATE TABLE shared_chat (id TEXT PRIMARY KEY, user_id TEXT, chat JSON, updated_at BIGINT)",
+    "CREATE TABLE shared_chat (id TEXT PRIMARY KEY, chat_id TEXT, user_id TEXT, chat JSON)",
+])
+def test_purge_refuses_an_unexpected_share_table_and_deletes_nothing(tmp_path, ddl):
+    data, db, conn = _db(tmp_path)
+    conn.execute(ddl)
+    conn.execute("INSERT INTO chat VALUES ('old', 'u', 't', '{}', 0, ?, NULL)", (NOW - 90 * DAY,))
+    with pytest.raises(purge.PurgeError, match="^schema$"):
+        purge.purge(db, data, 30, NOW)
+    assert conn.execute("SELECT count(*) FROM chat").fetchone() == (1,)
+
+
+def test_purge_refuses_share_timestamps_that_are_not_epoch_seconds(tmp_path):
+    data, db, conn = _db(tmp_path)
+    conn.execute(SHARED_CHAT_DDL)
+    conn.execute("INSERT INTO chat VALUES ('c', 'u', 't', '{}', 0, ?, 'tok')", (NOW - 90 * DAY,))
+    conn.execute("INSERT INTO shared_chat VALUES ('tok', 'c', 'u', 't', '{}', 0, ?)", (NOW * 1000,))
+    with pytest.raises(purge.PurgeError, match="^timestamp-unit$"):
+        purge.purge(db, data, 30, NOW)
+    assert conn.execute("SELECT count(*) FROM shared_chat").fetchone() == (1,)
+
+
 def test_purge_reclaims_freed_pages_so_the_file_shrinks(tmp_path):
     data, db, conn = _db(tmp_path)
     old = NOW - 60 * DAY

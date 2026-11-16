@@ -1178,7 +1178,10 @@ OWUI_ENV_NAMES = {
     "OPENID_REDIRECT_URI", "RAG_EMBEDDING_MODEL_AUTO_UPDATE", "RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE",
     "RAG_RERANKING_MODEL_AUTO_UPDATE", "RAG_RERANKING_MODEL_TRUST_REMOTE_CODE", "SCARF_NO_ANALYTICS",
     "TASK_MODEL", "USER_PERMISSIONS_CHAT_CALL", "USER_PERMISSIONS_CHAT_FILE_UPLOAD",
-    "USER_PERMISSIONS_CHAT_SHARE", "USER_PERMISSIONS_CHAT_STT", "USER_PERMISSIONS_CHAT_TTS", "USER_PERMISSIONS_FEATURES_API_KEYS",
+    "USER_PERMISSIONS_CHAT_ALLOW_OPEN_SHARING", "USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING",
+    "USER_PERMISSIONS_CHAT_SHARE", "USER_PERMISSIONS_CHAT_STT", "USER_PERMISSIONS_CHAT_TEMPORARY",
+    "USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED", "USER_PERMISSIONS_CHAT_TTS",
+    "USER_PERMISSIONS_FEATURES_API_KEYS",
     "USER_PERMISSIONS_FEATURES_CODE_INTERPRETER", "USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS",
     "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION", "USER_PERMISSIONS_FEATURES_MEMORIES",
     "USER_PERMISSIONS_FEATURES_NOTES", "USER_PERMISSIONS_FEATURES_WEB_SEARCH",
@@ -1707,6 +1710,8 @@ ALLOWED_PATHS = [
     "/api/v1/users/user/settings", "/api/v1/models/list", "/api/v1/groups/",
     "/api/v1/functions/id/mainframe_rag_docs", "/api/v1/functions/create",
     "/api/v1/configs/banners",
+    # Share-link view (#1255): the SPA shell only; its data is /api/v1/chats/share/<id>.
+    "/s", "/s/3f2a", "/api/v1/chats/share/3f2a", "/api/v1/chats/3f2a/share",
 ]
 DENIED_PATHS = [
     "/api/v1/files/", "/api/v1/files", "/api/v1/files/abc/content", "/api/v1/retrieval/process/text",
@@ -1718,6 +1723,7 @@ DENIED_PATHS = [
     "/ollama/api/chat", "/docs", "/openapi.json", "/api/version/updates", "/api/changelog",
     "/api/chat", "/api/v1", "/api/v1/", "/api/", "/api", "/api/v1/chatsX", "/api/v1/auths_x",
     "/API/v1/files/", "/api/v1/files/../files/", "/ws", "/oauthx", "/health/x",
+    "/sx", "/s3f2a", "/share", "/S/3f2a",
 ]
 
 
@@ -1801,6 +1807,31 @@ def test_openwebui_retention_defaults_to_30_days_and_cannot_be_unset(owui_chart)
     assert r.returncode != 0 and "retentionDays" in r.stderr
 
 
+OWUI_CHAT_ENV = {"share": "USER_PERMISSIONS_CHAT_SHARE",
+                 "shareWithAllUsers": "USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING",
+                 "temporaryEnforced": "USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED"}
+
+
+@pytest.mark.parametrize("enabled", [None, *OWUI_CHAT_ENV])
+def test_openwebui_chat_sharing_and_temporary_chats_are_site_values_off_by_default(owui_chart, enabled):
+    """#1255 (ADR-0007 S2, R3): share links and temporary-chat enforcement are
+    site values, off by default, each reaching only its own variable. The
+    no-auth "anyone" grant stays pinned off and temporary chats available."""
+    with open(CHART / "values.yaml", encoding="utf-8") as f:
+        assert yaml.safe_load(f)["openwebui"]["chats"] == {
+            "share": False, "shareWithAllUsers": False, "temporaryEnforced": False}
+    extra = {"openwebui": {"chats": {enabled: True}}} if enabled else None
+    env = env_map(_owui(owui_chart, extra)["Deployment", "rag-openwebui"], "openwebui")
+    expected = {"USER_PERMISSIONS_CHAT_SHARE": "false",
+                "USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING": "false",
+                "USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED": "false",
+                "USER_PERMISSIONS_CHAT_ALLOW_OPEN_SHARING": "false",
+                "USER_PERMISSIONS_CHAT_TEMPORARY": "true"}
+    if enabled:
+        expected[OWUI_CHAT_ENV[enabled]] = "true"
+    assert {k: env[k]["value"] for k in expected} == expected
+
+
 def test_openwebui_refuses_to_enable_without_the_repository_docs_pipe(tmp_path):
     """A chart without the Pipe file fails closed when enabled (#1072)."""
     import shutil
@@ -1847,6 +1878,10 @@ def test_openwebui_chart_pipe_is_byte_identical_to_the_repository_pipe():
     ({"idpEgress": {"cidrs": ["10.0.0.0/8"], "port": 0}}, "openwebui"),
     ({"replicas": 2}, "openwebui"),
     ({"extra": 1}, "openwebui"),
+    ({"chats": {"share": "yes"}}, "openwebui"),
+    ({"chats": {"temporaryEnforced": 1}}, "openwebui"),
+    # Sign-in-free share links are not a site choice (R3): no value exists for them.
+    ({"chats": {"openSharing": True}}, "openwebui"),
 ])
 def test_openwebui_schema_refuses_invalid_selection(owui_chart, patch, needle):
     r = _helm_template_with_values(_owui_values(patch), chart=owui_chart)
