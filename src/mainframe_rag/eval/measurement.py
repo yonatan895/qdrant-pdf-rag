@@ -12,9 +12,14 @@ Every value here is a count, a duration or an identifier. No question,
 answer or reasoning text enters a field this module produces: the SSE reader
 keeps only the terminal `final` object (which the caller already receives on
 the JSON path) and drops token deltas after noting when the first arrived.
+The chat reader (issue #1191) hands its concatenated deltas to the caller's
+judge instead, because the chat stream has no other answer field; the
+summaries below never read them.
 
 Sources, none of which changes the agent's response contract:
   - `/v1/answer` SSE `final`: `finish_reason`, `ttft_ms`, `usage`.
+  - `/v1/chat` SSE terminal chunk: `finish_reason` only (no `usage`, no
+    `ttft_ms`).
   - `/v1/answer` JSON `Server-Timing`: `llm` and, with `LLM_STREAM`, `ttft`.
   - the in-process answer log line (unchanged, in-process mode only).
 """
@@ -130,14 +135,17 @@ def decode_tps(
 
 @dataclass(frozen=True)
 class StreamOutcome:
-    """One consumed `/v1/answer` stream. Exactly one of `final`, `failure`
-    and `response` is set: the validated terminal object, a fixed failure
-    label, or the non-200 response for the caller's envelope reader."""
+    """One consumed `/v1/answer` or `/v1/chat` stream. Exactly one of
+    `final`, `failure` and `response` is set: the validated terminal object,
+    a fixed failure label, or the non-200 response for the caller's envelope
+    reader. `content` is the concatenated chat deltas (chat only: the chat
+    terminal chunk carries no answer field), held for the caller's judge."""
 
     final: dict[str, Any] | None = None
     failure: str | None = None
     response: Any = None
     first_token_ms: int | None = None
+    content: str | None = None
 
 
 def _final_counts(final: dict[str, Any]) -> bool:
@@ -208,6 +216,80 @@ def read_answer_stream(
             if not _final_counts(payload):
                 return StreamOutcome(failure=STREAM_MALFORMED, first_token_ms=first_token_ms)
             return StreamOutcome(final=payload, first_token_ms=first_token_ms)
+    return StreamOutcome(failure=STREAM_INCOMPLETE, first_token_ms=first_token_ms)
+
+
+def read_chat_stream(
+    client: Any, body: dict[str, Any], clock: Callable[[], float] = time.monotonic,
+    frames: list[str] | None = None,
+) -> StreamOutcome:
+    """POST `/v1/chat` with `stream: true` and consume the OpenAI-style chunks
+    the Open WebUI Pipe reads (docs/agent.md section 3).
+
+    Complete only with a chunk carrying a non-null `finish_reason` (the
+    terminal chunk, whose `choices[0]` holds the answer metadata) and then
+    `data: [DONE]`, as the Pipe requires. An error frame is a failure even
+    though `[DONE]` follows it. Content deltas are concatenated into
+    `content` because the chat stream has no other answer field; the
+    terminal chunk carries no `usage` and no `ttft_ms`. A `frames` list
+    receives every `data:` line as read (issue #1268: the two-turn eval
+    replays them through the Open WebUI Pipe)."""
+    started = clock()
+    first_token_ms: int | None = None
+    parts: list[str] = []
+    terminal: dict[str, Any] | None = None
+    with client.stream("POST", "/v1/chat", json=body) as response:
+        if response.status_code != 200:
+            response.read()
+            return StreamOutcome(response=response)
+        seen = 0
+        for line in response.iter_lines():
+            seen += len(line) + 1
+            if seen > MAX_STREAM_CHARS:
+                return StreamOutcome(failure=STREAM_OVERSIZE, first_token_ms=first_token_ms)
+            if not line.startswith("data:"):
+                continue  # blank separators, `:` keepalives, other fields
+            if frames is not None:
+                frames.append(line)
+            raw = line[5:].strip()
+            if raw == "[DONE]":
+                if terminal is None:
+                    break
+                return StreamOutcome(final=terminal, first_token_ms=first_token_ms,
+                                     content="".join(parts))
+            try:
+                payload = json.loads(raw)
+            except ValueError:
+                return StreamOutcome(failure=STREAM_MALFORMED, first_token_ms=first_token_ms)
+            if not isinstance(payload, dict):
+                return StreamOutcome(failure=STREAM_MALFORMED, first_token_ms=first_token_ms)
+            if "error" in payload:
+                error = payload["error"]
+                code = error.get("code") if isinstance(error, dict) else None
+                label = code if isinstance(code, str) and _CODE_RE.fullmatch(code) else "?"
+                return StreamOutcome(
+                    failure=f"{STREAM_FAILED} ({label})", first_token_ms=first_token_ms
+                )
+            choices = payload.get("choices")
+            choice = choices[0] if isinstance(choices, list) and choices else None
+            if (
+                terminal is not None or not isinstance(choice, dict)
+                or not isinstance(choice.get("delta"), dict)
+            ):
+                return StreamOutcome(failure=STREAM_MALFORMED, first_token_ms=first_token_ms)
+            text = choice["delta"].get("content")
+            if text is not None:
+                if not isinstance(text, str):
+                    return StreamOutcome(failure=STREAM_MALFORMED, first_token_ms=first_token_ms)
+                if text and first_token_ms is None:
+                    first_token_ms = int((clock() - started) * 1000)
+                parts.append(text)
+            finish = choice.get("finish_reason")
+            if finish is not None:
+                if not isinstance(finish, str) or not finish:
+                    return StreamOutcome(failure=STREAM_MALFORMED, first_token_ms=first_token_ms)
+                # The chunk id (`chatcmpl-<request_id>`) rides beside the choice.
+                terminal = {**choice, "chunk_id": payload.get("id")}
     return StreamOutcome(failure=STREAM_INCOMPLETE, first_token_ms=first_token_ms)
 
 
@@ -316,9 +398,9 @@ def repeat_spread(
     })
     spread: dict[str, Any] = {}
     for path in paths:
-        spread[path] = _spread([_lookup(metrics, path) for metrics in per_repeat])
+        spread[path] = value_spread([_lookup(metrics, path) for metrics in per_repeat])
     for cls in classes:
-        spread[f"pass_rate_by_class.{cls}"] = _spread([
+        spread[f"pass_rate_by_class.{cls}"] = value_spread([
             ((_lookup(metrics, "measurement.hardware_independent.pass_rate_by_class") or {})
              .get(cls) or {}).get("rate")
             for metrics in per_repeat
@@ -333,7 +415,8 @@ def repeat_spread(
     }
 
 
-def _spread(values: list[Any]) -> dict[str, Any]:
+def value_spread(values: list[Any]) -> dict[str, Any]:
+    """Min, max, mean and range of the known numbers among per-repeat values."""
     known = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
     if not known:
         return {"values": values, "min": None, "max": None, "mean": None, "range": None}

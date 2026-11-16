@@ -172,7 +172,7 @@ from mainframe_rag.agent.answer import (
     is_abstention,
     is_refusal,
 )
-from mainframe_rag.config import load_settings
+from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.eval.datasets import (
     DatasetError,
     VenueError,  # noqa: F401 — compatibility export
@@ -182,14 +182,20 @@ from mainframe_rag.eval.datasets import (
     resolve_golden_paths,
 )
 from mainframe_rag.eval.measurement import (
+    STREAM_INCOMPLETE,
+    STREAM_MALFORMED,
+    STREAM_OVERSIZE,
     decode_tps,
+    distribution,
     is_count,
     measurement_summary,
     parse_server_timing,
     read_answer_stream,
+    read_chat_stream,
     repeat_spread,
     sample_identity,
     stream_signals,
+    value_spread,
 )
 
 
@@ -350,9 +356,7 @@ def judge(
         )
 
     if judge_gold:
-        for s in entry.get("gold_must_contain") or []:
-            if str(s).lower() not in body.lower():
-                failures.append(f"missing required substring: {s!r}")
+        failures.extend(missing_gold(entry, body))
         for s in entry.get("gold_must_not_contain") or []:
             if str(s).lower() in body.lower():
                 failures.append(f"forbidden substring present: {s!r}")
@@ -364,6 +368,13 @@ def judge(
                 failures.append(f"identifier not cited or mentioned: {ident!r}")
 
     return ("fail" if failures else "pass"), failures, warns
+
+
+def missing_gold(entry: dict[str, Any], body: str) -> list[str]:
+    """The required-substring failures of one answer body: case-folded
+    literal checks, one per missing `gold_must_contain` string."""
+    return [f"missing required substring: {s!r}"
+            for s in entry.get("gold_must_contain") or [] if str(s).lower() not in body.lower()]
 
 
 def select_sample(entries: list[dict[str, Any]], max_queries: int) -> list[dict[str, Any]]:
@@ -549,6 +560,227 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     return metrics
 
 
+def _mean(values: list[Any]) -> float | None:
+    known = [v for v in values if _number_or_none(v) is not None]
+    return round(sum(known) / len(known), 4) if known else None
+
+
+def _turn_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Follow-up metrics for one turn (issue #1268), evidence first. Every
+    rate states its denominator; a row without the signal stays out of it."""
+    judged = [r for r in rows if r.get("verdict") in ("pass", "fail")]
+    known = [r for r in judged if type(r.get("evidence_gold_hit")) is bool]
+    hit = sum(1 for r in known if r["evidence_gold_hit"])
+    recall = [r.get("evidence_citation_recall") for r in judged
+              if r.get("evidence_citation_recall") is not None]
+    # Precision has no value on a row without citations: its own denominator.
+    precision = [r.get("evidence_citation_precision") for r in judged
+                 if r.get("evidence_citation_precision") is not None]
+    labels: Counter = Counter()
+    for r in rows:
+        labels.update(export_failure_label(str(f)) for f in r.get("failures") or [])
+    passed = sum(1 for r in judged if r["verdict"] == "pass")
+    return {
+        "n": len(rows), "judged": len(judged),
+        "errors": sum(1 for r in rows if r.get("verdict") == "error"),
+        "evidence_n": len(known), "evidence_gold_hit": hit,
+        "evidence_gold_hit_rate": round(hit / len(known), 4) if known else None,
+        "zero_hits": sum(1 for r in judged if r.get("path") == "zero_hits"),
+        # Same rule and name as summarize()'s false_refusals.
+        "false_refusals": sum(1 for r in judged if "explicit refusal on an answer-tier query"
+                              in (r.get("failures") or [])),
+        "by_verification_state": dict(sorted(Counter(
+            str(r.get("verification_state") or "unknown") for r in judged).items())),
+        "citation_n": len(recall),
+        "citation_precision_n": len(precision),
+        "citation_precision_mean": _mean(precision),
+        "citation_recall_mean": _mean(recall),
+        "pass": passed,
+        "pass_rate": round(passed / len(judged), 4) if judged else None,
+        "by_failure": dict(sorted(labels.items())),
+    }
+
+
+def turn_breakdown(results: list[dict[str, Any]], repeats: int,
+                   cut: int | None = None) -> dict[str, Any]:
+    """Metrics by turn over the follow-up sessions (issue #1268). Turn 1 is
+    the openers of the rows that got a follow-up, so both turns cover the
+    same sessions; `vs_opener` pairs each follow-up with its own opener by
+    (id, repeat) on the evidence gold hit. Pure."""
+    def key(row: dict[str, Any]) -> tuple[str, int]:
+        return str(row.get("id")), int(row.get("repeat") or 1)
+
+    follow = [r for r in results if r.get("turn") == 2]
+    sessions = {key(r) for r in follow}
+    openers = [r for r in results if r.get("turn") == 1 and key(r) in sessions]
+    first, second = _turn_block(openers), _turn_block(follow)
+    chars = sorted(r["prior_answer_chars"] for r in follow
+                   if is_count(r.get("prior_answer_chars")))
+    if cut is None:
+        cut = Settings.model_fields["chat_max_prior_turn_chars"].default
+    second["prior_answer_chars"] = {
+        "n": len(chars), "p50": chars[len(chars) // 2] if chars else None,
+        "max": chars[-1] if chars else None, "cut_chars": cut,
+        "over_cut": sum(1 for c in chars if c > cut),
+    }
+    opener_hit = {key(r): r.get("evidence_gold_hit") for r in openers}
+    pairs: Counter = Counter()
+    for r in follow:
+        before, after = opener_hit.get(key(r)), r.get("evidence_gold_hit")
+        if type(before) is not bool or type(after) is not bool:
+            pairs["unknown"] += 1
+        else:
+            pairs[{(True, True): "kept", (True, False): "lost",
+                   (False, True): "gained", (False, False): "neither"}[(before, after)]] += 1
+    second["vs_opener"] = {name: pairs.get(name, 0)
+                           for name in ("kept", "lost", "gained", "neither", "unknown")}
+    if repeats > 1:
+        for block, rows in ((first, openers), (second, follow)):
+            per = [_turn_block([r for r in rows if int(r.get("repeat") or 1) == n])
+                   for n in range(1, repeats + 1)]
+            block["repeats"] = {
+                name: value_spread([p[name] for p in per])
+                for name in ("evidence_gold_hit_rate", "pass_rate", "citation_recall_mean")
+            }
+    return {"1": first, "2": second}
+
+
+def _pair_state(before: Any, after: Any) -> str:
+    if type(before) is not bool or type(after) is not bool:
+        return "unknown"
+    return {(True, True): "kept", (True, False): "lost",
+            (False, True): "gained", (False, False): "neither"}[(before, after)]
+
+
+_PAIR_STATES = ("kept", "lost", "gained", "neither", "unknown")
+
+
+def switch_deltas(results: list[dict[str, Any]], switched: list[dict[str, Any]]) -> dict[str, Any]:
+    """Each topic-switch follow-up against the same question asked as a
+    turn-1 opener in the same repeat (issue #1268): pass, evidence gold hit
+    and verification state, counted per pair. Pure."""
+    single = {(str(r.get("id")), int(r.get("repeat") or 1)): r
+              for r in results if r.get("turn") == 1}
+    passes: Counter = Counter()
+    evidence: Counter = Counter()
+    states: Counter = Counter()
+    moves: Counter = Counter()
+
+    def verdict(row: dict[str, Any] | None) -> bool | None:
+        if row is None or row.get("verdict") not in ("pass", "fail"):
+            return None
+        return bool(row["verdict"] == "pass")
+
+    for r in switched:
+        alone = single.get((str(r.get("switch_id")), int(r.get("repeat") or 1)))
+        passes[_pair_state(verdict(alone), verdict(r))] += 1
+        evidence[_pair_state((alone or {}).get("evidence_gold_hit"), r.get("evidence_gold_hit"))] += 1
+        if verdict(alone) is None or verdict(r) is None:
+            states["unknown"] += 1
+            continue
+        before = _state_or_none((alone or {}).get("verification_state")) or "unknown"
+        after = _state_or_none(r.get("verification_state")) or "unknown"
+        states["same" if before == after else "changed"] += 1
+        if before != after:
+            moves[f"{before}>{after}"] += 1
+    return {
+        "n": len(switched),
+        "pass": {name: passes.get(name, 0) for name in _PAIR_STATES},
+        "evidence_gold_hit": {name: evidence.get(name, 0) for name in _PAIR_STATES},
+        "verification_state": {name: states.get(name, 0) for name in ("same", "changed", "unknown")},
+        "verification_moves": dict(sorted(moves.items())),
+    }
+
+
+def exposure_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Shares of follow-ups whose history answer exceeds the declared cap,
+    and where the appended citation list lies against it. Pure."""
+    from mainframe_rag.eval.follow_up import CITATION_LIST_STATES
+
+    known = [r for r in rows if type(r.get("history_over_cap")) is bool]
+    over = sum(1 for r in known if r["history_over_cap"])
+    lists = Counter(str(r.get("citation_list_cut")) for r in known)
+    cut = lists.get("partial", 0) + lists.get("cut", 0)
+    return {
+        "n": len(known), "over_cap": over,
+        "over_cap_share": round(over / len(known), 4) if known else None,
+        "citation_list": {name: lists.get(name, 0) for name in sorted(CITATION_LIST_STATES)},
+        "citation_list_cut_share": round(cut / len(known), 4) if known else None,
+    }
+
+
+def restate_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Class-B follow-ups (issue #1268): declines, and the opener's gold
+    strings by where they lie against the declared cut, crossed with whether
+    the follow-up's packed evidence holds an opener gold doc. The evidence
+    side is a doc-level proxy: `supplied_evidence` carries doc ids, not
+    excerpt text, so it says the doc was there, not the string. Pure."""
+    from mainframe_rag.eval.follow_up import GOLD_POSITIONS
+
+    judged = [r for r in rows if r.get("verdict") in ("pass", "fail")]
+    split = {position: {side: {"n": 0, "found": 0}
+                        for side in ("in_evidence", "not_in_evidence", "unknown")}
+             for position in GOLD_POSITIONS}
+    for r in judged:
+        hit = r.get("evidence_gold_hit")
+        side = "unknown" if type(hit) is not bool else "in_evidence" if hit else "not_in_evidence"
+        for position, counts in (r.get("gold_split") or {}).items():
+            if position in split:
+                split[position][side]["n"] += _count_or_none(counts.get("n")) or 0
+                split[position][side]["found"] += _count_or_none(counts.get("found")) or 0
+    declines = sum(1 for r in judged if r.get("restate_declined") is True)
+    return {
+        "n": len(judged),
+        "declines": declines,
+        "decline_rate": round(declines / len(judged), 4) if judged else None,
+        "gold_n": sum(_count_or_none(r.get("gold_n")) or 0 for r in judged),
+        "gold_found_n": sum(_count_or_none(r.get("gold_found_n")) or 0 for r in judged),
+        "gold_split": split,
+    }
+
+
+def _timing(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per-arm cost of one turn and kind. The chat stream carries no
+    server ttft and no usage: those stay None."""
+    return {
+        "elapsed_ms": distribution([r.get("elapsed_ms") for r in rows
+                                    if r.get("verdict") in ("pass", "fail")]),
+        "client_first_token_ms": distribution([r.get("client_first_token_ms") for r in rows
+                                               if r.get("verdict") in ("pass", "fail")]),
+        "ttft_ms": None, "total_tokens": None,
+    }
+
+
+def kind_breakdown(results: list[dict[str, Any]], repeats: int, plan: FollowUpPlan
+                   ) -> dict[str, Any]:
+    """`metrics.by_turn` under `--follow-up` (issue #1268): turn x kind.
+    Kinds are never pooled (their verdicts mean different things). Turn 1
+    of a kind is the openers that got that kind; `vs_opener` is dropped for
+    `switch`, whose question and gold differ from its opener's, and replaced
+    by `vs_single`, the same question asked as an opener. Pure."""
+    from mainframe_rag.eval.follow_up import RESTATE_FOLLOW_UPS
+
+    first: dict[str, Any] = {}
+    second: dict[str, Any] = {}
+    openers = [r for r in results if r.get("turn") == 1]
+    for kind in plan.kinds:
+        follow = [r for r in results if r.get("turn") == 2 and r.get("follow_up_kind") == kind]
+        block = turn_breakdown([*openers, *follow], repeats, plan.prior_cap)
+        sessions = {(str(r.get("id")), int(r.get("repeat") or 1)) for r in follow}
+        block["1"]["timing"] = _timing([r for r in openers if (str(r.get("id")),
+                                        int(r.get("repeat") or 1)) in sessions])
+        block["2"]["timing"] = _timing(follow)
+        block["2"]["exposure"] = exposure_summary(follow)
+        block["2"]["skipped"] = dict(sorted(plan.skipped[kind].items()))
+        if kind == "switch":
+            block["2"].pop("vs_opener")
+            block["2"]["vs_single"] = switch_deltas(results, follow)
+        if kind in RESTATE_FOLLOW_UPS:
+            block["2"]["restate"] = restate_summary(follow)
+        first[kind], second[kind] = block["1"], block["2"]
+    return {"1": first, "2": second}
+
+
 def error_code(resp: Any) -> str:
     """Stable error code of a non-200 /v1/answer response (issue #307).
 
@@ -594,6 +826,213 @@ def apply_pool_join(
     row["citation_recall"] = recall
 
 
+def apply_evidence(
+    row: dict[str, Any], entry: dict[str, Any], supplied: list[dict[str, Any]]
+) -> None:
+    """Evidence fields from what the agent packed for this turn (issue
+    #1268): the terminal chunk's `supplied_evidence`, already validated by
+    `chat_answer_body`. Not a separate search: a follow-up searched with its
+    own words would hide what condensation changes. An empty list (the
+    zero-hits path) is a known miss; citations map to doc ids through the
+    same entries the agent validated them against."""
+    from mainframe_rag.eval.judging import precision_recall
+
+    doc_ids = list(dict.fromkeys(str(item["doc_id"]) for item in supplied))
+    by_citation = {str(item["citation"]): str(item["doc_id"]) for item in supplied}
+    gold = {str(d) for d in (entry.get("expected_doc_ids") or [])}
+    cited = {by_citation[c] for c in row.get("citations") or [] if c in by_citation}
+    precision, recall = precision_recall(cited, gold)
+    row.update(
+        evidence_doc_ids=doc_ids,
+        evidence_gold_hit=bool(gold & set(doc_ids)) if gold else None,
+        evidence_cited_doc_ids=sorted(cited),
+        evidence_citation_precision=precision,
+        evidence_citation_recall=recall,
+    )
+
+
+# Turn-2 failures before any follow-up request is made (issue #1268).
+OPENER_NOT_ANSWERED = "opener not answered"
+HISTORY_FAILED = "follow-up history failed"
+# A class-B follow-up the agent declined (issue #1268).
+RESTATE_DECLINED = "follow-up declined"
+
+
+def has_follow_up(entry: dict[str, Any]) -> bool:
+    """Only answer rows with gold docs get a second turn: a trap row has no
+    topic to follow, and without gold docs the evidence hit is undefined."""
+    return entry.get("expected_behavior") == "answer" and bool(entry.get("expected_doc_ids"))
+
+
+def follow_up_entry(
+    entry: dict[str, Any], kind: str = "anaphoric", partner: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """The judged entry of the second turn, by follow-up kind.
+
+    anaphoric: the opener's id, class and gold docs with the class follow-up
+    as its question. The opener's gold substrings, identifier and expected
+    state are written for the opener's question and are not carried: turn 2
+    is judged structurally only.
+    switch: the partner row itself (its question and all of its gold),
+    under the opener's id: the session is the opener's.
+    restate/summary: a class-B follow-up with the opener's gold docs and
+    gold substrings (`judge_restate`)."""
+    from mainframe_rag.eval.follow_up import RESTATE_FOLLOW_UPS, follow_up_for
+
+    if kind == "switch":
+        assert partner is not None
+        return {**partner, "id": entry["id"]}
+    follow = {
+        "id": entry["id"], "query": follow_up_for(entry.get("query_class")),
+        "query_class": entry["query_class"], "expected_behavior": "answer",
+        "expected_doc_ids": list(entry.get("expected_doc_ids") or []),
+        "trap_type": entry.get("trap_type"), "domain": entry.get("domain"),
+    }
+    if kind in RESTATE_FOLLOW_UPS:
+        follow.update(query=RESTATE_FOLLOW_UPS[kind],
+                      gold_must_contain=list(entry.get("gold_must_contain") or []))
+    return follow
+
+
+class FollowUpPlan:
+    """What `--follow-up` asks after each opener (issue #1268): the kinds in
+    session order, the switch partner entries by opener id, and the
+    operator-declared prior-turn cap. Skips are counted per kind and reason,
+    since a skipped follow-up has no row."""
+
+    def __init__(self, kinds: tuple[str, ...], partners: dict[str, dict[str, Any]],
+                 prior_cap: int) -> None:
+        self.kinds = kinds
+        self.partners = partners
+        self.prior_cap = prior_cap
+        self.skipped: dict[str, Counter] = {kind: Counter() for kind in kinds}
+
+
+def _skip_reason(kind: str, entry: dict[str, Any], opener: dict[str, Any],
+                 plan: FollowUpPlan) -> str | None:
+    """Why this opener gets no follow-up of this kind, or None."""
+    from mainframe_rag.eval.follow_up import RESTATE_FOLLOW_UPS
+
+    if kind == "switch" and str(entry["id"]) not in plan.partners:
+        return "no_partner"
+    if kind in RESTATE_FOLLOW_UPS:
+        # Restating needs something to restate: gold strings, found in turn 1.
+        if not entry.get("gold_must_contain"):
+            return "no_gold_strings"
+        if opener.get("verdict") != "pass":
+            return "opener_not_passed"
+    return None
+
+
+def judge_restate(row: dict[str, Any], entry: dict[str, Any]) -> None:
+    """Class-B verdict: the opener's gold substrings in the follow-up answer
+    (`missing_gold`, as `judge`), and no decline. The agent answers from
+    fresh excerpts only, so an uncited restatement is the product rule, not
+    a failure. A decline (the structured decline, a whole-response refusal
+    or the zero-hits path) fails even when it names a gold string, and is
+    counted apart. Unlike `judge`, the zero-hits path is judged too: the
+    user got no restatement."""
+    answer = str(row.get("answer") or "")
+    missing = missing_gold(entry, answer)
+    gold_n = len(entry.get("gold_must_contain") or [])
+    declined = row.get("path") == "zero_hits" or is_abstention(answer, row.get("citations") or [])
+    row.update(
+        verdict="fail" if missing or declined else "pass",
+        failures=[*missing, *([RESTATE_DECLINED] if declined else [])],
+        warns=[w for w in row.get("warns") or [] if not str(w).startswith("zero-hits path")],
+        # A decline restates nothing, even when it names a gold string.
+        restate_declined=declined, gold_n=gold_n,
+        gold_found_n=0 if declined else gold_n - len(missing),
+    )
+
+
+def _annotate_history(row: dict[str, Any], entry: dict[str, Any], kind: str,
+                      request: dict[str, Any], cap: int) -> None:
+    """Exposure of the history as sent, and for class B where each opener
+    gold string lies against the cut and whether this answer has it."""
+    from mainframe_rag.eval.follow_up import (
+        GOLD_POSITIONS,
+        RESTATE_FOLLOW_UPS,
+        gold_positions,
+        history_answer,
+        history_exposure,
+        history_view,
+    )
+
+    view = history_view(history_answer(request))
+    over, citation_list = history_exposure(view, cap)
+    row.update(history_over_cap=over, citation_list_cut=citation_list)
+    if kind in RESTATE_FOLLOW_UPS and row.get("verdict") in ("pass", "fail"):
+        gold = [str(s) for s in entry.get("gold_must_contain") or []]
+        answer = str(row.get("answer") or "").lower()
+        split = {name: {"n": 0, "found": 0} for name in GOLD_POSITIONS}
+        for s, position in zip(gold, gold_positions(view, gold, cap), strict=True):
+            split[position]["n"] += 1
+            split[position]["found"] += int(s.lower() in answer and not row.get("restate_declined"))
+        row["gold_split"] = split
+
+
+def run_follow_ups(
+    client: Any, entry: dict[str, Any], opener: dict[str, Any], frames: list[str],
+    pipe_mod: Any, temperature: float | None, plan: FollowUpPlan | None = None,
+) -> list[dict[str, Any]]:
+    """Turn 2 of one session, once per follow-up kind: each with the history
+    the Open WebUI Pipe would send after the opener (`eval.follow_up`). All
+    kinds branch off the same opener and kept answer. Without a plan (no
+    `--follow-up`): the anaphoric follow-up alone, rows as before."""
+    from mainframe_rag.eval.follow_up import (
+        RESTATE_FOLLOW_UPS,
+        kept_answer,
+        prior_answer_chars,
+        second_turn_request,
+    )
+
+    jobs: list[tuple[str, dict[str, Any]]] = []
+    for kind in (("anaphoric",) if plan is None else plan.kinds):
+        reason = None if plan is None else _skip_reason(kind, entry, opener, plan)
+        if reason is not None:
+            assert plan is not None
+            plan.skipped[kind][reason] += 1
+            continue
+        partner = None if plan is None else plan.partners.get(str(entry["id"]))
+        jobs.append((kind, follow_up_entry(entry, kind, partner)))
+    rows: list[dict[str, Any]] = []
+    answered = opener.get("verdict") in ("pass", "fail")
+    kept: str | None = None
+    if answered and jobs:
+        try:
+            kept = kept_answer(pipe_mod, entry["query"], frames)
+        except Exception:  # noqa: BLE001 — the Pipe is a boundary; a fixed label only
+            kept = None
+    for kind, follow in jobs:
+        request = None
+        if kept is not None:
+            try:
+                request = second_turn_request(pipe_mod, entry["query"], kept, follow["query"])
+            except Exception:  # noqa: BLE001 — as above
+                request = None
+        if not answered or request is None:
+            # No follow-up call: the opener errored, or the Pipe would make none.
+            row = _base_row(follow, temperature)
+            row.update(verdict="error", failures=[OPENER_NOT_ANSWERED if not answered
+                                                  else HISTORY_FAILED],
+                       elapsed_ms=0, turn=2)
+        else:
+            row = run_query(client, follow, None, None, temperature=temperature, stream=True,
+                            endpoint="chat", chat_body=request, evidence=True)
+            row.update(turn=2, prior_answer_chars=prior_answer_chars(request))
+            if plan is not None and kind in RESTATE_FOLLOW_UPS and row.get("verdict") in ("pass", "fail"):
+                judge_restate(row, follow)
+        if plan is not None:
+            row.update(follow_up_kind=kind,
+                       switch_id=(plan.partners[str(entry["id"])]["id"] if kind == "switch"
+                                  else None))
+            if request is not None:
+                _annotate_history(row, follow, kind, request, plan.prior_cap)
+        rows.append(row)
+    return rows
+
+
 def _fetch_pool(client: Any, query: str) -> list[dict[str, Any]] | None:
     """Sibling /v1/search pool (limit 8, same call the answer retrieval
     makes). None on any failure: a missing pool is a missing signal, not an
@@ -611,6 +1050,63 @@ def _fetch_pool(client: Any, query: str) -> list[dict[str, Any]] | None:
         return None
 
 
+def chat_answer_body(content: str, terminal: dict[str, Any]) -> str | None:
+    """The answer body of one `/v1/chat` stream (issue #1191), or None when
+    the terminal chunk's evidence fields are malformed.
+
+    The chat stream carries the model's raw output as deltas, then the
+    validated `**Citations:**` list as one more delta; it has no parsed
+    answer field. The body `/v1/answer` returns is `parse_answer` over that
+    raw output with the prompt's supplied evidence, and the terminal chunk
+    carries that evidence (`supplied_evidence`: prompt label, citation, doc
+    id). So the body here is the agent's own parser over the same inputs:
+    one rule, not a second citation regex. Citations, provenance and the
+    verification state still come from the terminal chunk, as the server
+    computed them. Without supplied evidence (the zero-hits answer) the
+    content is the agent's canned text and is used as it is."""
+    from mainframe_rag.agent.answer import EvidenceEntry, PromptEvidence, parse_answer
+
+    citations, supplied = terminal.get("citations"), terminal.get("supplied_evidence")
+    if (
+        not isinstance(citations, list) or any(not isinstance(c, str) for c in citations)
+        or not isinstance(supplied, list)
+    ):
+        return None
+    entries = []
+    for item in supplied:
+        index = item.get("index") if isinstance(item, dict) else None
+        cite = item.get("citation") if isinstance(item, dict) else None
+        doc_id = item.get("doc_id") if isinstance(item, dict) else None
+        if type(index) is not int or not isinstance(cite, str) or not isinstance(doc_id, str):
+            return None
+        entries.append(EvidenceEntry(
+            prompt_index=index, chunk_id="", doc_id=doc_id, cite=cite, truncated=False,
+            included_chars=0, source_chars=0, est_tokens=0,
+        ))
+    if citations:
+        listed = "\n\n**Citations:**\n" + "\n".join(f"- {c}" for c in citations)
+        content = content.removesuffix(listed)
+    if not entries:
+        return content
+    return parse_answer(content, PromptEvidence(entries=tuple(entries))).answer
+
+
+def _chat_answer_data(terminal: dict[str, Any], answer: str) -> dict[str, Any]:
+    """The answer-shaped object `_judge_response` reads, from the chat
+    terminal chunk. Fields the chunk lacks stay absent, never invented."""
+    chunk_id = terminal.get("chunk_id")
+    data: dict[str, Any] = {
+        key: terminal[key]
+        for key in ("citations", "citations_inferred", "inferred_indices",
+                    "verification_state", "script", "script_review_required")
+        if key in terminal
+    }
+    data["answer"] = answer
+    if isinstance(chunk_id, str):
+        data["request_id"] = chunk_id.removeprefix("chatcmpl-")
+    return data
+
+
 def run_query(
     client: Any,
     entry: dict[str, Any],
@@ -618,6 +1114,10 @@ def run_query(
     hits: list[dict[str, Any]] | None = None,
     temperature: float | None = 0.0,
     stream: bool = False,
+    endpoint: str = "answer",
+    chat_body: dict[str, Any] | None = None,
+    frames: list[str] | None = None,
+    evidence: bool = False,
 ) -> dict[str, Any]:
     """One live /v1/answer call + verdict. Records everything the report and
     the manifest need, including the failure detail (the answer body is the
@@ -631,27 +1131,32 @@ def run_query(
 
     stream=True (issue #1195) sends the same request with `stream: true` and
     judges the SSE `final`, which carries the same answer fields plus the
-    finish reason, token usage and `ttft_ms`. Token deltas are not kept."""
+    finish reason, token usage and `ttft_ms`. Token deltas are not kept.
+
+    endpoint="chat" (issue #1191) sends the question as a single-turn
+    streaming `/v1/chat` request, as the Open WebUI Pipe does, and judges the
+    terminal chunk plus the body `chat_answer_body` derives. That stream has
+    no `usage` and no `ttft_ms`: those row fields stay None (unknown).
+
+    Two-turn mode (issue #1268): `chat_body` replaces the single-turn chat
+    messages (the Pipe's follow-up request; `temperature` is still added),
+    `frames` receives the stream's `data:` lines for the Pipe replay, and
+    `evidence` adds the `evidence_*` fields read off the terminal chunk's
+    `supplied_evidence`."""
     t0 = time.monotonic()
-    row: dict[str, Any] = {
-        "id": entry["id"],
-        "query": entry["query"],
-        "query_class": entry["query_class"],
-        "expected_behavior": entry["expected_behavior"],
-        # The sampling temperature this row ran under (issue #596): report
-        # and manifest readers need it to interpret before/after deltas.
-        "temperature": temperature,
-        # Opt-in acceptance state (issue #365): None on pre-state entries, so
-        # the report can count mismatches without guessing from failures.
-        "expected_verification_state": entry.get("expected_verification_state"),
-        "trap_type": entry.get("trap_type"),
-        "domain": entry.get("domain"),
-    }
+    row = _base_row(entry, temperature)
     body: dict[str, Any] = {"query": entry["query"], "temperature": temperature}
     measured: dict[str, Any] = {}
     outcome = None
     try:
-        if stream:
+        if endpoint == "chat":
+            request = (dict(chat_body) if chat_body is not None else {
+                "messages": [{"role": "user", "content": entry["query"]}], "stream": True,
+            })
+            outcome = read_chat_stream(client, {**request, "temperature": temperature},
+                                       frames=frames)
+            resp = outcome.response
+        elif stream:
             outcome = read_answer_stream(client, {**body, "stream": True})
             resp = outcome.response
         else:
@@ -665,6 +1170,20 @@ def run_query(
         # `final`, or a `final` without valid counts is never a judged answer.
         row.update(verdict="error", failures=[outcome.failure], elapsed_ms=elapsed_ms)
         return row
+    if endpoint == "chat" and outcome is not None and outcome.final is not None:
+        answer = chat_answer_body(outcome.content or "", outcome.final)
+        if answer is None:
+            row.update(verdict="error", failures=[STREAM_MALFORMED], elapsed_ms=elapsed_ms)
+            return row
+        measured = {"finish_reason": outcome.final["finish_reason"],
+                    "client_first_token_ms": outcome.first_token_ms}
+        row = _judge_response(
+            row, entry, _chat_answer_data(outcome.final, answer), elapsed_ms,
+            answer_signals, hits, measured,
+        )
+        if evidence and row.get("verdict") in ("pass", "fail"):
+            apply_evidence(row, entry, outcome.final["supplied_evidence"])
+        return row
     if outcome is not None and outcome.final is not None:
         measured = stream_signals(outcome.final)
         measured["client_first_token_ms"] = outcome.first_token_ms
@@ -676,6 +1195,36 @@ def run_query(
         return _judge_response(
             row, entry, outcome.final, elapsed_ms, answer_signals, hits, measured
         )
+    return _judge_http_response(row, entry, resp, elapsed_ms, answer_signals, hits)
+
+
+def _base_row(entry: dict[str, Any], temperature: float | None) -> dict[str, Any]:
+    """The request-independent row fields every outcome carries."""
+    return {
+        "id": entry["id"],
+        "query": entry["query"],
+        "query_class": entry["query_class"],
+        "expected_behavior": entry["expected_behavior"],
+        # The sampling temperature this row ran under (issue #596): report
+        # and manifest readers need it to interpret before/after deltas.
+        "temperature": temperature,
+        # Opt-in acceptance state (issue #365): None on pre-state entries, so
+        # the report can count mismatches without guessing from failures.
+        "expected_verification_state": entry.get("expected_verification_state"),
+        "trap_type": entry.get("trap_type"),
+        "domain": entry.get("domain"),
+    }
+
+
+def _judge_http_response(
+    row: dict[str, Any],
+    entry: dict[str, Any],
+    resp: Any,
+    elapsed_ms: int,
+    answer_signals: dict[str, dict[str, Any]] | None,
+    hits: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """A buffered /v1/answer response, or a non-200 stream response."""
     if resp.status_code != 200:
         # The error envelope is the agent's fixed client contract; str(exc)
         # and upstream bodies never reach the client, so do not expect them.
@@ -939,6 +1488,318 @@ def inferred_index_off_gold(row: dict[str, Any]) -> bool:
     return True
 
 
+# ------------------------------------------------ served coverage (#1191)
+# `GET /v1/sources` lists the served build's sources (docs/agent.md section 1).
+_SOURCES_PAGE_LIMIT = 200
+# A guard against a cursor that never ends: 1,000 pages of 200 sources.
+_SOURCES_MAX_PAGES = 1000
+COVERAGE_STATES = ("all", "some", "none", "not_applicable", "unknown")
+
+
+def _sources_page(client: Any, cursor: str | None) -> tuple[dict[str, Any] | None, str | None]:
+    """One validated `/v1/sources` page, or a fixed reason label. Only the
+    build id, the doc ids and the cursor are read."""
+    params: dict[str, Any] = {"limit": _SOURCES_PAGE_LIMIT}
+    if cursor is not None:
+        params["cursor"] = cursor
+    try:
+        response = client.get("/v1/sources", params=params)
+    except Exception:  # noqa: BLE001 — coverage is observational, never fatal
+        return None, "request_failed"
+    if response.status_code != 200:
+        return None, f"http_{response.status_code}"
+    try:
+        body = response.json()
+    except ValueError:
+        return None, "malformed"
+    sources = body.get("sources") if isinstance(body, dict) else None
+    if (
+        not isinstance(body, dict) or not isinstance(body.get("build_id"), str)
+        or not body["build_id"] or not isinstance(sources, list)
+        or any(not isinstance(s, dict) or not isinstance(s.get("doc_id"), str) for s in sources)
+        or not (body.get("next_cursor") is None or isinstance(body.get("next_cursor"), str))
+    ):
+        return None, "malformed"
+    return {"build_id": body["build_id"], "doc_ids": [s["doc_id"] for s in sources],
+            "next_cursor": body.get("next_cursor")}, None
+
+
+def fetch_coverage(client: Any) -> dict[str, Any]:
+    """The doc ids the deployed build serves, from every `/v1/sources` page.
+
+    `status` is "known" only after a complete walk of one build. A 503 (a
+    build published without a catalog), an agent older than the endpoint, a
+    transport error, a malformed page, a build change between pages or the
+    page cap all give "unknown" with a fixed `reason`: coverage is never a
+    failure and never touches a verdict or the exit code."""
+    doc_ids: set[str] = set()
+    build_id: str | None = None
+    cursor: str | None = None
+    pages = 0
+    while True:
+        if pages >= _SOURCES_MAX_PAGES:
+            return _coverage("unknown", "page_cap", build_id, pages)
+        page, reason = _sources_page(client, cursor)
+        if page is None:
+            return _coverage("unknown", reason, build_id, pages)
+        pages += 1
+        if build_id is None:
+            build_id = page["build_id"]
+        elif page["build_id"] != build_id:
+            return _coverage("unknown", "build_changed", build_id, pages)
+        doc_ids.update(page["doc_ids"])
+        cursor = page["next_cursor"]
+        if cursor is None:
+            return _coverage("known", None, build_id, pages, frozenset(doc_ids))
+
+
+def _coverage(status: str, reason: str | None, build_id: str | None, pages: int,
+              doc_ids: frozenset[str] = frozenset()) -> dict[str, Any]:
+    return {"status": status, "reason": reason, "build_id": build_id, "pages": pages,
+            "doc_ids": doc_ids}
+
+
+def apply_coverage(row: dict[str, Any], entry: dict[str, Any], coverage: dict[str, Any]) -> None:
+    """Mark whether the row's expected docs are served: all, some, none,
+    not_applicable (the row names no expected doc) or unknown (no complete
+    listing). The match is on the exact doc id, edition included, so content
+    served under another edition reads as not served."""
+    expected = {str(d) for d in (entry.get("expected_doc_ids") or [])}
+    if not expected:
+        row.update(coverage="not_applicable", expected_served=0)
+        return
+    if coverage["status"] != "known":
+        row.update(coverage="unknown", expected_served=None)
+        return
+    served = len(expected & coverage["doc_ids"])
+    state = "all" if served == len(expected) else "some" if served else "none"
+    row.update(coverage=state, expected_served=served)
+
+
+def coverage_summary(coverage: dict[str, Any], results: list[dict[str, Any]],
+                     build_id_end: str | None) -> dict[str, Any]:
+    """Counts per coverage state over the distinct rows (a repeated row
+    counts once). The served doc-id list itself is not reported."""
+    seen: dict[str, str] = {}
+    for row in results:
+        seen.setdefault(str(row.get("id")), str(row.get("coverage") or "unknown"))
+    counts = Counter(seen.values())
+    return {
+        "status": coverage["status"], "reason": coverage["reason"],
+        "build_id": coverage["build_id"], "build_id_end": build_id_end,
+        "pages": coverage["pages"],
+        "sources_n": len(coverage["doc_ids"]) if coverage["status"] == "known" else None,
+        "rows": {state: counts.get(state, 0) for state in COVERAGE_STATES},
+    }
+
+
+def _served_build_id(client: Any) -> str | None:
+    """The build id the first sources page names now (end-of-run check)."""
+    page, _ = _sources_page(client, None)
+    return page["build_id"] if page is not None else None
+
+
+# --------------------------------------------------- text-free export (#1191)
+# What may leave an air-gapped site (maintainer decision 2026-11-16): row ids,
+# verdicts, verification states, fixed failure labels, token counts, timings,
+# finish reasons and doc ids. Question, answer, citation, excerpt and failure
+# text never do. Every value below is copied by an explicit rule; nothing is
+# copied by default.
+EXPORT_SCHEMA = "eval_answers_export/1"
+
+# The agent's stable error codes (docs/agent.md section 2 and the stream
+# contract). Any other code is reported as "?".
+_ERROR_CODES = frozenset({
+    "deadline_exceeded", "evidence_budget_exceeded", "http_error", "internal",
+    "invalid_request", "method_not_allowed", "model_timeout", "not_configured", "not_found",
+    "overloaded", "prompt_budget_exceeded", "qdrant_unready", "representation_unavailable",
+    "unsupported_reasoning_effort", "upstream_error",
+})
+_FIXED_FAILURE_LABELS = frozenset({
+    "empty answer body", "explicit refusal on an answer-tier query",
+    "zero validated citations", "only inferred citations …", "trap answered",
+    "missing required substring", "forbidden substring present",
+    "identifier not cited or mentioned", "request error", "malformed answer response",
+    "malformed inferred_indices in response", "unknown verification_state in response",
+    STREAM_INCOMPLETE, STREAM_MALFORMED, STREAM_OVERSIZE,
+    "agent health request failed", "malformed agent health response",
+    "agent health is not servable",
+    OPENER_NOT_ANSWERED, HISTORY_FAILED, RESTATE_DECLINED,
+})
+# OpenAI-compatible finish reasons; any other value is reported as "other".
+_FINISH_REASONS = frozenset({"stop", "length", "content_filter", "tool_calls", "abort"})
+_FIXED_WARN_LABELS = frozenset({
+    "hedged abstention", "silent abstention", "zero-hits path", "zero prompt tokens",
+})
+_CODED_FAILURE_RE = re.compile(r"(HTTP \d{3}|stream error) \((.*)\)", re.DOTALL)
+_STATE_FAILURE_RE = re.compile(r"verification state (?:…|None) != expected (?:…|None)")
+_HEALTH_HTTP_RE = re.compile(r"agent health returned HTTP \d{3}")
+_LABEL_RE = re.compile(r"[a-z_]{1,32}")
+_BUILD_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+
+
+def export_failure_label(failure: str) -> str:
+    """A failure string as a label from a closed set; "other" otherwise.
+    Coded failures keep their status and a known code only."""
+    coded = _CODED_FAILURE_RE.fullmatch(failure)
+    if coded is not None:
+        code = coded.group(2)
+        return f"{coded.group(1)} ({code if code in _ERROR_CODES else '?'})"
+    label = failure_bucket(failure)
+    if (
+        label in _FIXED_FAILURE_LABELS or _STATE_FAILURE_RE.fullmatch(label)
+        or _HEALTH_HTTP_RE.fullmatch(label)
+    ):
+        return label
+    return "other"
+
+
+def _export_warn_label(warn: str) -> str:
+    label = failure_bucket(warn)
+    return label if label in _FIXED_WARN_LABELS else "other"
+
+
+def _count_or_none(value: Any) -> int | None:
+    return value if is_count(value) else None
+
+
+def _number_or_none(value: Any) -> float | int | None:
+    if type(value) is int or (type(value) is float and math.isfinite(value)):
+        return value
+    return None
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    return value if type(value) is bool else None
+
+
+def _doc_ids_or_none(value: Any) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    return [str(d) for d in value]
+
+
+def _state_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value in VERIFICATION_STATES else None
+
+
+def export_row(row: dict[str, Any]) -> dict[str, Any]:
+    """One result row reduced to the exportable fields."""
+    finish = row.get("finish_reason")
+    citations = row.get("citations")
+    indices = row.get("inferred_indices")
+    exported = {
+        "id": str(row.get("id")),
+        "repeat": row.get("repeat") if is_count(row.get("repeat")) else 1,
+        "query_class": str(row.get("query_class")),
+        "expected_behavior": str(row.get("expected_behavior")),
+        "verdict": row.get("verdict") if row.get("verdict") in ("pass", "fail", "error") else "error",
+        "failures": [export_failure_label(str(f)) for f in row.get("failures") or []],
+        "warns": [_export_warn_label(str(w)) for w in row.get("warns") or []],
+        "verification_state": _state_or_none(row.get("verification_state")),
+        "expected_verification_state": _state_or_none(row.get("expected_verification_state")),
+        "finish_reason": (None if finish is None
+                          else finish if finish in _FINISH_REASONS else "other"),
+        "path": row.get("path") if row.get("path") in ("llm", "zero_hits") else None,
+        "why": why_mode(row),
+        "citations_n": len(citations) if isinstance(citations, list) else None,
+        "citations_inferred": _bool_or_none(row.get("citations_inferred")),
+        "inferred_n": len(indices) if isinstance(indices, list) else None,
+        "script_review_required": _bool_or_none(row.get("script_review_required")),
+        "abstention_zeroed": _bool_or_none(row.get("abstention_zeroed")),
+        **{key: _count_or_none(row.get(key)) for key in (
+            "prompt_tokens", "completion_tokens", "reasoning_tokens", "total_tokens",
+            "elapsed_ms", "ttft_ms", "llm_ms", "client_first_token_ms")},
+        "decode_tps": _number_or_none(row.get("decode_tps")),
+        "gold_retrieved": _bool_or_none(row.get("gold_retrieved")),
+        "expected_doc_ids": _doc_ids_or_none(row.get("expected_doc_ids")),
+        "hit_doc_ids": _doc_ids_or_none(row.get("hit_doc_ids")),
+        "cited_doc_ids": _doc_ids_or_none(row.get("cited_doc_ids")),
+        "citation_precision": _number_or_none(row.get("citation_precision")),
+        "citation_recall": _number_or_none(row.get("citation_recall")),
+        "coverage": row.get("coverage") if row.get("coverage") in COVERAGE_STATES else None,
+        "expected_served": _count_or_none(row.get("expected_served")),
+    }
+    if "turn" in row:
+        # Two-turn rows only (issue #1268): single-turn rows keep their keys.
+        exported.update(
+            turn=2 if row["turn"] == 2 else 1,
+            prior_answer_chars=_count_or_none(row.get("prior_answer_chars")),
+            evidence_doc_ids=_doc_ids_or_none(row.get("evidence_doc_ids")),
+            evidence_gold_hit=_bool_or_none(row.get("evidence_gold_hit")),
+            evidence_cited_doc_ids=_doc_ids_or_none(row.get("evidence_cited_doc_ids")),
+            evidence_citation_precision=_number_or_none(row.get("evidence_citation_precision")),
+            evidence_citation_recall=_number_or_none(row.get("evidence_citation_recall")),
+        )
+    if "follow_up_kind" in row:
+        # `--follow-up` runs only (issue #1268); turn-1 rows carry None.
+        from mainframe_rag.eval.follow_up import (
+            CITATION_LIST_STATES,
+            FOLLOW_UP_KINDS,
+            GOLD_POSITIONS,
+        )
+
+        kind, switch_id, split = row["follow_up_kind"], row.get("switch_id"), row.get("gold_split")
+        cut = row.get("citation_list_cut")
+        exported.update(
+            follow_up_kind=kind if kind in FOLLOW_UP_KINDS else None,
+            switch_id=None if switch_id is None else str(switch_id),
+            history_over_cap=_bool_or_none(row.get("history_over_cap")),
+            citation_list_cut=cut if cut in CITATION_LIST_STATES else None,
+            restate_declined=_bool_or_none(row.get("restate_declined")),
+            gold_n=_count_or_none(row.get("gold_n")),
+            gold_found_n=_count_or_none(row.get("gold_found_n")),
+            gold_split=None if not isinstance(split, dict) else {
+                position: {name: _count_or_none((split.get(position) or {}).get(name))
+                           for name in ("n", "found")}
+                for position in GOLD_POSITIONS},
+        )
+    return exported
+
+
+def build_export(report: dict[str, Any], evaluator_git_sha: str, timestamp: str) -> dict[str, Any]:
+    """The whole export: the manifest's aggregate blocks plus text-free rows.
+
+    `metrics` is the report's own block with two exceptions: `by_failure` is
+    recounted from the exported labels (a bucket of free text becomes
+    "other"), and `by_complexity` keys outside the fixed label shape become
+    "other". The agent URL is left out (it may name a site host)."""
+    results = report["results"]
+    rows = [export_row(row) for row in results]
+    metrics = json.loads(json.dumps(report["metrics"]))
+    by_failure: Counter = Counter()
+    for raw, exported in zip(results, rows, strict=True):
+        # Two-turn runs: the top-level block covers turn 1; `by_turn` has its own.
+        if raw.get("verdict") in ("pass", "fail") and raw.get("turn") != 2:
+            by_failure.update(exported["failures"])
+    metrics["by_failure"] = dict(sorted(by_failure.items()))
+    complexity: dict[str, dict[str, int]] = {}
+    for key, block in (metrics.get("by_complexity") or {}).items():
+        target = complexity.setdefault(key if _LABEL_RE.fullmatch(key) else "other",
+                                       {"n": 0, "pass": 0})
+        target["n"] += block["n"]
+        target["pass"] += block["pass"]
+    metrics["by_complexity"] = complexity
+    params = {key: value for key, value in report["params"].items() if key != "agent_url"}
+    coverage = report.get("coverage")
+    if coverage is not None:
+        coverage = dict(coverage)
+        for key in ("build_id", "build_id_end"):
+            value = coverage.get(key)
+            coverage[key] = value if isinstance(value, str) and _BUILD_ID_RE.fullmatch(value) else None
+    return {
+        "schema": EXPORT_SCHEMA,
+        "timestamp": timestamp,
+        "evaluator_git_sha": evaluator_git_sha,
+        "params": params,
+        "metrics": metrics,
+        "healthz": (report.get("deployment") or {}).get("healthz"),
+        "representation": report.get("representation"),
+        "coverage": coverage,
+        "rows": rows,
+    }
+
+
 def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, Any]) -> None:
     """Human-readable markdown summary: metrics table + every failure with
     its detail so the report is self-contained."""
@@ -995,12 +1856,16 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
             lines.append(f"| {mode} | {count} |")
         lines.append(f"- inferred indices off gold: {metrics.get('inferred_index_off_gold')}")
     lines.append("")
+    lines.extend(_turn_lines(metrics))
     lines.extend(_measurement_lines(metrics))
     fails = [r for r in results if r.get("verdict") in ("fail", "error")]
     if fails:
         lines.append("## Failures")
         for r in fails:
-            lines.append(f"### {r['id']} ({r['verdict']}, {r['expected_behavior']})")
+            turn = f" turn {r['turn']}" if "turn" in r else ""
+            if r.get("follow_up_kind"):
+                turn += f" {r['follow_up_kind']}"
+            lines.append(f"### {r['id']}{turn} ({r['verdict']}, {r['expected_behavior']})")
             lines.append(f"- query: {r['query']}")
             for f in r.get("failures") or []:
                 lines.append(f"- FAIL: {f}")
@@ -1010,6 +1875,93 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
             lines.append(f"- answer (truncated): {body}")
             lines.append("")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _turn_lines(metrics: dict[str, Any]) -> list[str]:
+    """The two-turn block (issue #1268): evidence first, verdicts last.
+    Above this section every metric covers turn 1 only."""
+    by_turn = metrics.get("by_turn")
+    if not by_turn:
+        return []
+    if "n" not in by_turn["1"]:
+        return _kind_lines(by_turn)
+    first, second = by_turn["1"], by_turn["2"]
+    lines = ["## By turn (follow-up sessions; the metrics above cover turn 1 only)", "",
+             "| metric | turn 1 | turn 2 |", "|---|---|---|"]
+    for name in ("n", "errors", "evidence_n", "evidence_gold_hit", "evidence_gold_hit_rate",
+                 "zero_hits", "false_refusals", "citation_n", "citation_precision_n",
+                 "citation_precision_mean",
+                 "citation_recall_mean", "pass", "pass_rate"):
+        lines.append(f"| {name} | {first[name]} | {second[name]} |")
+    states = sorted({*first["by_verification_state"], *second["by_verification_state"]})
+    for state in states:
+        lines.append(f"| state {state} | {first['by_verification_state'].get(state, 0)} "
+                     f"| {second['by_verification_state'].get(state, 0)} |")
+    pairs, chars = second["vs_opener"], second["prior_answer_chars"]
+    lines += ["", "- follow-up vs its opener (evidence gold hit): "
+              + ", ".join(f"{k}={v}" for k, v in pairs.items()),
+              (f"- prior answer chars: n={chars['n']} p50={chars['p50']} max={chars['max']}, "
+               f"over the {chars['cut_chars']}-char prior-turn cut: {chars['over_cut']}"),
+              ("- turn-2 pass is structural only (body, no refusal, explicit validated "
+               "citations); the opener's gold substrings and expected state are not applied"),
+              ""]
+    for turn, block in (("1", first), ("2", second)):
+        for name, spread in (block.get("repeats") or {}).items():
+            lines.append(f"- turn {turn} {name} over repeats: min {spread['min']} "
+                         f"max {spread['max']} range {spread['range']}")
+    lines.append("")
+    return lines
+
+
+_KIND_ROWS = ("n", "errors", "evidence_n", "evidence_gold_hit", "evidence_gold_hit_rate",
+              "zero_hits", "false_refusals", "citation_n", "citation_recall_mean",
+              "pass", "pass_rate")
+_KIND_READING = {
+    "anaphoric": "structural pass (body, no refusal, explicit validated citations)",
+    "switch": "the switched-to row's full gold verdict",
+}
+_CLASS_B_READING = "the opener's gold substrings and no decline, after a passed opener"
+
+
+def _kind_lines(by_turn: dict[str, Any]) -> list[str]:
+    """`--follow-up` runs: one table per kind, turn 1 (its openers) against
+    turn 2, then the kind's own counts. Kinds are never pooled."""
+    lines = ["## By turn and follow-up kind (the metrics above cover turn 1 only)", ""]
+    for kind, second in by_turn["2"].items():
+        first = by_turn["1"][kind]
+        lines += [f"### {kind}: turn-2 pass is {_KIND_READING.get(kind, _CLASS_B_READING)}", "",
+                  "| metric | turn 1 | turn 2 |", "|---|---|---|"]
+        lines += [f"| {name} | {first[name]} | {second[name]} |" for name in _KIND_ROWS]
+        for name in ("elapsed_ms", "client_first_token_ms"):
+            lines.append(f"| {name} p50 | {first['timing'][name]['p50']} "
+                         f"| {second['timing'][name]['p50']} |")
+        exposure = second["exposure"]
+        lines += ["", (f"- history over the declared {second['prior_answer_chars']['cut_chars']}"
+                       f"-char cut: {exposure['over_cap']}/{exposure['n']}; citation list: "
+                       + ", ".join(f"{k}={v}" for k, v in exposure["citation_list"].items()))]
+        if second["skipped"]:
+            lines.append("- skipped: " + ", ".join(f"{k}={v}" for k, v in second["skipped"].items()))
+        if "vs_opener" in second:
+            lines.append("- vs its opener (evidence gold hit): "
+                         + ", ".join(f"{k}={v}" for k, v in second["vs_opener"].items()))
+        if "vs_single" in second:
+            single = second["vs_single"]
+            for name in ("pass", "evidence_gold_hit", "verification_state"):
+                lines.append(f"- vs the same question alone ({name}): "
+                             + ", ".join(f"{k}={v}" for k, v in single[name].items()))
+        if "restate" in second:
+            restate = second["restate"]
+            lines.append(f"- declines: {restate['declines']} (rate {restate['decline_rate']}); "
+                         f"gold strings found {restate['gold_found_n']}/{restate['gold_n']}")
+            for position, sides in restate["gold_split"].items():
+                lines.append(f"- {position}: " + ", ".join(
+                    f"{side} {c['found']}/{c['n']}" for side, c in sides.items()))
+        for turn, block in (("1", first), ("2", second)):
+            for name, spread in (block.get("repeats") or {}).items():
+                lines.append(f"- turn {turn} {name} over repeats: min {spread['min']} "
+                             f"max {spread['max']} range {spread['range']}")
+        lines.append("")
+    return lines
 
 
 def _measurement_lines(metrics: dict[str, Any]) -> list[str]:
@@ -1077,6 +2029,45 @@ def _subset(raw: str) -> int:
     return value
 
 
+_ARM_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,31}")
+
+
+def _arm(raw: str) -> str:
+    """Operator-declared arm label (issue #1268). The agent does not report
+    whether it condenses, so the export carries the operator's declaration;
+    a fixed shape keeps it text-free."""
+    if not _ARM_RE.fullmatch(raw):
+        raise argparse.ArgumentTypeError(
+            "arm must be 1-32 characters of a-z, 0-9, '.', '_' or '-', starting with a letter or digit")
+    return raw
+
+
+def _follow_up_kinds(raw: str) -> tuple[str, ...]:
+    """`all` or a comma list of follow-up kinds, returned in session order."""
+    from mainframe_rag.eval.follow_up import FOLLOW_UP_KINDS
+
+    names = FOLLOW_UP_KINDS if raw == "all" else tuple(raw.split(","))
+    if not names or any(name not in FOLLOW_UP_KINDS for name in names):
+        raise argparse.ArgumentTypeError(
+            f"follow-up must be 'all' or a comma list of {', '.join(FOLLOW_UP_KINDS)}")
+    return tuple(kind for kind in FOLLOW_UP_KINDS if kind in names)
+
+
+def _prior_cap(raw: str) -> int:
+    # The agent's own bounds for chat_max_prior_turn_chars.
+    field = Settings.model_fields["chat_max_prior_turn_chars"]
+    low = next(m.ge for m in field.metadata if hasattr(m, "ge"))
+    high = next(m.le for m in field.metadata if hasattr(m, "le"))
+    message = f"prior cap must be an integer from {low} to {high}"
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(message) from None
+    if not low <= value <= high:
+        raise argparse.ArgumentTypeError(message)
+    return value
+
+
 def select_subset(entries: list[dict[str, Any]], size: int) -> list[dict[str, Any]]:
     """Sweep subset (issue #1195): the default sampler's class-interleaved
     round-robin, refused when the size cannot hold one row of every class.
@@ -1121,12 +2112,65 @@ def main(argv: list[str] | None = None) -> int:
                              "report the per-metric spread; more than one pass is a sweep and "
                              "needs an explicit non-holdout --golden under VENUE=rc "
                              "(default 1)")
+    parser.add_argument("--endpoint", choices=("answer", "chat"), default="answer",
+                        help="answer: POST /v1/answer (default). chat: each question as a "
+                             "single-turn POST /v1/chat, the route the Open WebUI Pipe calls; "
+                             "needs --stream, because the Pipe streams (issue #1191)")
+    parser.add_argument("--coverage", action="store_true",
+                        help="page GET /v1/sources once, record its build_id and mark per row "
+                             "whether all, some or none of expected_doc_ids are served; a 503 "
+                             "or an older agent is 'unknown', never a failure")
+    parser.add_argument("--export", type=Path, default=None,
+                        help="text-free JSON for leaving an air-gapped site: params, metrics, "
+                             "health, coverage and per-row ids, labels, counts and timings; "
+                             "no question, answer, citation or failure text")
+    parser.add_argument("--turns", type=int, choices=(1, 2), default=1,
+                        help="2: after each answer row with gold docs, ask its class follow-up "
+                             "with the history the Open WebUI Pipe would send, and score the "
+                             "follow-up from the evidence the agent packed (issue #1268; needs "
+                             "--endpoint chat --stream and --arm; default 1)")
+    parser.add_argument("--arm", type=_arm, default=None,
+                        help="with --turns 2: the operator's label for the deployed setting "
+                             "under test, e.g. condense-off or condense-on (recorded in params)")
+    parser.add_argument("--follow-up", type=_follow_up_kinds, default=None,
+                        help="with --turns 2: which follow-ups each opener gets, 'all' or a comma "
+                             "list of anaphoric (the class follow-up), switch (another sampled "
+                             "row's question), restate and summary (about the previous answer); "
+                             "rows and metrics then carry the kind (default: anaphoric only, "
+                             "output as before)")
+    parser.add_argument("--prior-cap", type=_prior_cap, default=None,
+                        help="with --follow-up: the deployed CHAT_MAX_PRIOR_TURN_CHARS as the "
+                             "operator declares it (the agent does not report it); default 1000, "
+                             "the agent default (recorded in params)")
     args = parser.parse_args(argv)
     if args.stream and args.agent_url is None:
         parser.error("--stream needs --agent-url: the in-process client buffers the response, "
                      "so its first-token time would be the total time")
+    if args.endpoint == "chat" and not args.stream:
+        parser.error("--endpoint chat streams like the Open WebUI Pipe: add --stream "
+                     "(which needs --agent-url)")
     if args.subset is not None and args.all:
         parser.error("--subset and --all are exclusive")
+    two_turn = args.turns == 2
+    if two_turn and args.endpoint != "chat":
+        parser.error("--turns 2 sends the follow-up over /v1/chat: add --endpoint chat --stream")
+    if two_turn != (args.arm is not None):
+        parser.error("--arm labels a --turns 2 run: pass both or neither")
+    if args.follow_up is not None and not two_turn:
+        parser.error("--follow-up chooses the second turns: add --turns 2")
+    if args.prior_cap is not None and args.follow_up is None:
+        parser.error("--prior-cap is read by --follow-up: add it")
+    pipe_mod: Any = None
+    pipe_sha256: str | None = None
+    if two_turn:
+        from mainframe_rag.eval.follow_up import PipeUnavailable, load_pipe
+
+        try:
+            pipe_mod, pipe_sha256 = load_pipe()
+        except PipeUnavailable as exc:
+            print(f"FAIL: {exc} (integrations/openwebui/docs_pipe.py in the evaluator "
+                  "checkout)", file=sys.stderr)
+            return 2
 
     try:
         # Venue rule (issue #268): dev defaults to the golden set only; the
@@ -1160,6 +2204,19 @@ def main(argv: list[str] | None = None) -> int:
     # Whole passes, not row-by-row repeats: drift during a session (cache
     # warmth, co-tenant load) lands on every row equally (issue #1195).
     passes = [(number, entry) for number in range(1, args.repeats + 1) for entry in sample]
+    plan: FollowUpPlan | None = None
+    if args.follow_up is not None:
+        from mainframe_rag.eval.follow_up import switch_pairs
+
+        # Pairs are drawn from the follow-up rows of this sample, so every
+        # switched-to question is also asked as an opener in the same pass.
+        eligible = [entry for entry in sample if has_follow_up(entry)]
+        by_id = {str(entry["id"]): entry for entry in eligible}
+        pairs = switch_pairs(eligible) if "switch" in args.follow_up else {}
+        plan = FollowUpPlan(
+            args.follow_up, {opener: by_id[partner] for opener, partner in pairs.items()},
+            Settings.model_fields["chat_max_prior_turn_chars"].default
+            if args.prior_cap is None else args.prior_cap)
 
     results: list[dict[str, Any]] = []
     deployment: dict[str, Any] | None = None
@@ -1187,44 +2244,94 @@ def main(argv: list[str] | None = None) -> int:
             stack.callback(logging.getLogger("agent").removeHandler, capture)
             client = stack.enter_context(TestClient(app_mod.app))
             signals = capture.signals
+        coverage: dict[str, Any] | None = None
+        build_id_end: str | None = None
+        if args.coverage:
+            coverage = (fetch_coverage(client) if health_error is None
+                        else _coverage("unknown", "not_run", None, 0))
+            print(f"[*] coverage: {coverage['status']} ({coverage['reason'] or 'complete'}), "
+                  f"{coverage['pages']} page(s), {len(coverage['doc_ids'])} served doc id(s)",
+                  file=sys.stderr)
         if health_error is not None:
             print(f"FAIL: {health_error}", file=sys.stderr)
             results = [dict(entry, temperature=args.temperature, verdict="error",
                             failures=[health_error], elapsed_ms=0) for _, entry in passes]
+            if two_turn:
+                for row in results:
+                    row["turn"] = 1
+                    if plan is not None:
+                        row.update(follow_up_kind=None, switch_id=None)
+            if coverage is not None:
+                for row, (_, entry) in zip(results, passes, strict=True):
+                    apply_coverage(row, entry, coverage)
         else:
             for i, (number, entry) in enumerate(passes, 1):
                 pool = _fetch_pool(client, entry["query"])
+                frames: list[str] | None = [] if two_turn else None
                 row = run_query(
                     client, entry, signals, pool, temperature=args.temperature,
-                    stream=args.stream,
+                    stream=args.stream, endpoint=args.endpoint,
+                    frames=frames, evidence=two_turn,
                 )
                 if pool is not None:
                     apply_pool_join(row, entry, pool)
-                if args.repeats > 1:
-                    row["repeat"] = number
-                results.append(row)
-                marker = row.get("verdict", "?").upper()
-                print(
-                    f"[{i:>3}/{len(passes)}] {marker:5s} {row['id']:8s} "
-                    f"{row['query'][:58]}",
-                    file=sys.stderr,
-                )
-                for f in row.get("failures") or []:
-                    print(f"        FAIL {f}", file=sys.stderr)
+                session = [row]
+                if two_turn:
+                    row["turn"] = 1
+                    if plan is not None:
+                        row.update(follow_up_kind=None, switch_id=None)
+                    if has_follow_up(entry):
+                        session.extend(run_follow_ups(client, entry, row, frames or [],
+                                                      pipe_mod, args.temperature, plan))
+                for turn_row in session:
+                    if coverage is not None:
+                        # A switch row is judged on its partner's docs.
+                        judged_entry = (plan.partners[str(entry["id"])]
+                                        if plan is not None
+                                        and turn_row.get("follow_up_kind") == "switch"
+                                        else entry)
+                        apply_coverage(turn_row, judged_entry, coverage)
+                    if args.repeats > 1:
+                        turn_row["repeat"] = number
+                    results.append(turn_row)
+                    marker = turn_row.get("verdict", "?").upper()
+                    turn = f" t{turn_row['turn']}" if "turn" in turn_row else ""
+                    if turn_row.get("follow_up_kind"):
+                        turn += f" {turn_row['follow_up_kind']}"
+                    print(
+                        f"[{i:>3}/{len(passes)}] {marker:5s} {turn_row['id']:8s}{turn} "
+                        f"{turn_row['query'][:58]}",
+                        file=sys.stderr,
+                    )
+                    for f in turn_row.get("failures") or []:
+                        print(f"        FAIL {f}", file=sys.stderr)
+            if coverage is not None and coverage["status"] == "known":
+                # A build that moved during the run splits the rows between builds.
+                build_id_end = _served_build_id(client)
 
-    metrics = summarize(results)
+    # Two-turn runs (issue #1268): the existing blocks cover turn 1, so they
+    # read as a single-turn chat run over the same sample; turn 2 is `by_turn`.
+    openers = [r for r in results if r.get("turn") != 2]
+    metrics = summarize(openers)
     if args.repeats > 1 and health_error is None:
         # Pooled metrics above; per-pass metrics only feed the spread.
         metrics["repeats"] = repeat_spread(
-            [summarize([r for r in results if r.get("repeat") == number])
+            [summarize([r for r in openers if r.get("repeat") == number])
              for number in range(1, args.repeats + 1)],
-            results,
+            openers,
         )
+    if plan is not None:
+        metrics["by_turn"] = kind_breakdown(results, args.repeats, plan)
+    elif two_turn:
+        metrics["by_turn"] = turn_breakdown(results, args.repeats)
     params: dict[str, Any] = {
         "temperature": args.temperature,
         # Measurement identity (issue #1195): which rows, in which order, how
         # often and over which transport. Ids are hashed, never listed here.
         "transport": "sse" if args.stream else "json",
+        # Issue #1191: which route answered, and whether coverage was read.
+        "endpoint": args.endpoint,
+        "coverage": args.coverage,
         "repeats": args.repeats,
         "sample": {
             "mode": "subset" if args.subset is not None else "all" if args.all else "default",
@@ -1234,6 +2341,24 @@ def main(argv: list[str] | None = None) -> int:
             "datasets": datasets,
         },
     }
+    if two_turn:
+        from mainframe_rag.eval.follow_up import follow_ups_sha256
+
+        params.update(turns=2, arm=args.arm, follow_ups_sha256=follow_ups_sha256(),
+                      pipe_sha256=pipe_sha256)
+    if plan is not None:
+        from mainframe_rag.eval.follow_up import restate_follow_ups_sha256, switch_pairs_sha256
+
+        switching = "switch" in plan.kinds
+        params.update(
+            follow_up=list(plan.kinds), prior_cap=plan.prior_cap,
+            restate_follow_ups_sha256=restate_follow_ups_sha256(),
+            switch_pairs_sha256=(switch_pairs_sha256(
+                [str(entry["id"]) for entry in sample],
+                {opener: str(partner["id"]) for opener, partner in plan.partners.items()})
+                if switching else None),
+            switch_pairs_n=len(plan.partners) if switching else None,
+        )
     report: dict[str, Any] = {"metrics": metrics, "results": results, "params": params}
     if deployment is not None:
         params.update(agent_url=args.agent_url, request_timeout=args.request_timeout)
@@ -1242,12 +2367,27 @@ def main(argv: list[str] | None = None) -> int:
             "servable": health_error is None,
             "outcome": (deployment["healthz"] or {}).get("representation", "unknown"),
         }
+    if coverage is not None:
+        report["coverage"] = coverage_summary(coverage, results, build_id_end)
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
     if args.summary:
         args.summary.parent.mkdir(parents=True, exist_ok=True)
         write_summary(args.summary, results, metrics)
+    if args.export:
+        from mainframe_rag.manifest import get_git_sha
+
+        export = build_export(
+            report,
+            # The evaluator's own checkout, wherever the working directory is.
+            get_git_sha(Path(__file__).resolve().parents[3]),
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        )
+        args.export.parent.mkdir(parents=True, exist_ok=True)
+        args.export.write_text(json.dumps(export, indent=1, ensure_ascii=True) + "\n",
+                               encoding="utf-8")
+        print(f"export written: {len(export['rows'])} row(s), no text fields", file=sys.stderr)
 
     # Trend manifests stay in gitignored evals/runs/. Only in-process runs
     # may use the shared local Settings/Qdrant identity helper.
@@ -1265,7 +2405,10 @@ def main(argv: list[str] | None = None) -> int:
     # Fail closed: structural FAILs and stack errors both gate the exit code.
     if health_error is not None:
         return 2
-    return 0 if metrics["failures"] == 0 and metrics["errors"] == 0 else 1
+    clean = metrics["failures"] == 0 and metrics["errors"] == 0
+    if two_turn:
+        clean = clean and not any(r.get("verdict") in ("fail", "error") for r in results)
+    return 0 if clean else 1
 
 
 if __name__ == "__main__":

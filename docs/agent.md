@@ -764,7 +764,9 @@ select `complex`. Default is `simple`.
   `llm_thinking_reserve_tokens_simple` accounts for simple-path reasoning separately
   from `llm_thinking_reserve_tokens_complex`; setting the simple reserve to `0`
   reproduces its earlier budget. Increasing a reserve leaves less space for
-  excerpts and chat history. A server-verified prompt count also sends
+  excerpts and chat history. A server-verified prompt count (`/tokenize`, or a
+  1-token completion's `usage.prompt_tokens`; see
+  [token count sources](#token-count-sources), #1266) also sends
   reserved output plus the path's thinking reserve as `max_tokens`
   (`answer_core._output_cap`); an estimator-only prompt sends that same full
   cap only when the prompt's byte upper bound plus the full cap fits the
@@ -928,7 +930,8 @@ async pool on `FEEDBACK_TIMEOUT_S` (issue #780; closed after a bounded drain).
   buffered and fallback-stream completions require `ChatResult` — bare
   strings are rejected (`TypeError`), never normalized.
 - Health timeouts are split from traffic timeouts (5s Qdrant, 10s embed);
-  the tokenizer RPC gets 5s.
+  the tokenizer RPC gets 5s (`llm_tokenize_timeout_s`; it also bounds a
+  completion-usage count, prefill included, #1266).
 
 ## 6a. Request admission, total deadline and embed-input bound (issue #374)
 
@@ -975,7 +978,7 @@ immediate 503 (row in `docs/eval.md` section 10).
   `--limit-concurrency` (a connection-level limit cannot choose the client
   semantics and would also drop probes).
 - **Deadline** (`request_deadline_s` > 0): one budget from handler entry
-  (queue wait included; body decoding/framework validation precedes it) across condense/embed/search/rerank/tokenize/model
+  (queue wait included; body decoding/framework validation precedes it) across condense/embed/search/rerank/tokenize (or completion-usage count)/model
   legs, exact storage reads and any permitted fallback. For SSE it also
   covers actual ASGI response sends, including receiver backpressure; the
   request-identity middleware is direct ASGI, with no intervening body queue.
@@ -1064,6 +1067,7 @@ readers:
 | `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | medium / medium / 0.2 | answer path (#917, was xhigh / xhigh from #777) |
 | `llm_reasoning_efforts` | `low,medium,xhigh` | served template's effort domain (Qwen3.8): console choices; both efforts above must be members (#748) |
 | `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 32768 / 2560 / 8192 / 128 / 1200 / 5.0 | tokenizer-path budgeting (#298, #777). `llm_max_model_len` must not exceed the served `--max-model-len`. With a server-verified prompt count the reserved output plus the path's thinking reserve is sent as `max_tokens` (prompt + cap stays inside the window minus the margin), so a runaway xhigh generation ends as `finish_reason: length` → `generation_incomplete`; an estimator-only prompt gets the same full cap only when its byte upper bound plus that cap fits, otherwise it runs uncapped as before (never a smaller cap) |
+| `llm_token_count_source` | `tokenize` | [token count sources](#token-count-sources) (#1266): `tokenize` (`/tokenize`, else the estimator; the behaviour before #1266), `completion_usage` (a 1-token completion's `usage.prompt_tokens`), `auto` (per count: `/tokenize` until pinned as not served, then completion usage until pinned, else the estimator; a startup check names the source), `estimate` (never ask the server) |
 | `llm_extra_body` / `llm_effort_transport` | empty / `top_level` | [model request arguments](#model-request-arguments) (#1193): one JSON object merged into every chat request by `_chat_body`; how the effort travels (`top_level`, `chat_template`, `none`). Both validated at startup; unset sends the earlier request |
 | `llm_thinking_reserve_tokens_simple` | 8192 | reasoning headroom in single-turn and chat prompt budgets (provisional for xhigh, #777); environment input `LLM_THINKING_RESERVE_TOKENS_SIMPLE` |
 | `llm_stream` | `false` | TTFT measurement and streaming recovery policy for server-side reasoning calls (the wire is a stream either way, #868) |
@@ -1606,9 +1610,14 @@ tokenizer share; a later named profile can carry its own instance.
   template are not sent to `/tokenize`.
 - **Output cap:** with a server-verified count the cap is the answer reserve
   plus the path's thinking reserve, as before, and it bounds
-  `real prompt + cap <= window − llm_token_safety_margin`. With an
-  estimator-only count (a gateway without `/tokenize`, or the transient
-  downgrade window) the estimate is never trusted for the cap. The prompt is
+  `real prompt + cap <= window − llm_token_safety_margin`. A count is
+  server-verified from one of two sources, `/tokenize` or a 1-token
+  completion's `usage.prompt_tokens` (#1266,
+  [token count sources](#token-count-sources)); the estimator is the third
+  source and never verifies. With an
+  estimator-only count (a gateway without `/tokenize` and no completion-usage
+  count selected, or a downgrade window of either) the estimate is never
+  trusted for the cap. The prompt is
   bounded above by a quantity that cannot undercount: the UTF-8 byte length of
   every message's role and content, plus a fixed per-message and total
   overhead for chat-template special tokens (one token is at least one byte).
@@ -1641,7 +1650,8 @@ tokenizer share; a later named profile can carry its own instance.
   to +41%, tables +47 to +53%, message lines about +140%, hex dumps about 8
   times. None can break the bound because a token is at least one byte. A
   refusal reaches the client as the fixed `502 upstream_error`, never upstream
-  text. Serve `/tokenize` to get the full cap on long prompts.
+  text. Serve `/tokenize`, or select the completion-usage count
+  (`LLM_TOKEN_COUNT_SOURCE`), to get the full cap on long prompts.
 - **Discovery:** `probe_gateway.py --probe-args`, run in the agent pod, sends
   one fixed synthetic prompt under each candidate argument set (no arguments,
   the configured request, each served effort on both transports, the two common
@@ -1661,7 +1671,7 @@ tokenizer share; a later named profile can carry its own instance.
 | Buffered `achat` / `_chat_sync` without `LLM_STREAM` | One streamed request assembled into the buffered result (#868); no recovery POST, as before. An upstream error or malformed frame, a missing `[DONE]` or a missing explicit finish is `TruncatedStreamError`; an empty `stop` completion is an empty result; `length`/`content_filter` is returned as that finish. Total wait is `answer_timeout_s`, expiry `model_timeout` |
 | Buffered `achat` / `_chat_sync` with `LLM_STREAM` | Empty content *with a `stop` finish*, caught stream/protocol failures, missing `[DONE]`, upstream error/malformed frame, or missing explicit finish lead to one non-streaming POST; accumulated content is discarded, even if a prefix was buffered. The POST must itself carry an explicit finish, have no top-level error, and have valid string content (issue #365). Never recovered (issue #868): a stream that ended with an explicit non-`stop` finish (`length`, `content_filter`) and no content is returned as that finish, and an `httpx` timeout (`answer_timeout_s` spent) propagates as `model_timeout` instead of starting a second ask |
 | Client-visible `chat_stream` | No-content (`stop` finish) or pre-output stream failure (malformed first frame, pre-output error, missing finish/done before any emitted token) can make one non-streaming ask; malformed/rejected/empty/no-finish fallback fails. Missing `[DONE]`, an upstream error frame, a malformed frame, or `[DONE]` without an explicit finish after actually emitted content raises truncation; no replay after those tokens. The shared core applies the same gate to the terminal `done` item itself: a falsy/missing `done` finish, or a token-only stream with no `done`, raises truncation and never synthesizes `stop` (issue #365). A validated stream with zero content deltas and an explicit non-`stop` finish ends with that `done` and no recovery POST (issue #868); timeouts propagate |
-| Tokenizer | Plan locally, verify whole messages per trim round with the generation's template arguments (#1193). No per-chunk RPCs; gateway may lack `/tokenize` (the generation then gets the full cap only when the prompt's byte upper bound plus that cap fits, otherwise no cap). Three outcomes (issue #1214). An endpoint that is not served or gives no usable count (404/405/501, a 200 without a usable count) warns once and pins the estimator until restart. A transient failure (transport error, timeout, 408/429/5xx other than 501) warns and uses the estimator for `TOKENIZE_RETRY_AFTER_S` (60 s). Any other refusal (400/401/403, any other 4xx, an unexpected 3xx) warns once naming the status and uses the estimator for the long `TOKENIZE_REFUSED_RETRY_AFTER_S` (600 s) window, never pinning: one unusual payload or a rotated key must not disable remote counting for the life of the process. In either window the first count after it expires is the one probe, and a probe success resumes remote counts (issue #835). `budget_verified` reads the counting thread's own last count, so a probe on another thread never confirms an estimated prompt |
+| Tokenizer | Plan locally, verify whole messages per trim round with the generation's template arguments (#1193), from the source `LLM_TOKEN_COUNT_SOURCE` selects ([token count sources](#token-count-sources), #1266); the completion-usage count follows the same three outcomes. No per-chunk RPCs; gateway may lack `/tokenize` (the generation then gets the full cap only when the prompt's byte upper bound plus that cap fits, otherwise no cap). Three outcomes (issue #1214). An endpoint that is not served or gives no usable count (404/405/501, a 200 without a usable count) warns once and pins the estimator until restart. A transient failure (transport error, timeout, 408/429/5xx other than 501) warns and uses the estimator for `TOKENIZE_RETRY_AFTER_S` (60 s). Any other refusal (400/401/403, any other 4xx, an unexpected 3xx) warns once naming the status and uses the estimator for the long `TOKENIZE_REFUSED_RETRY_AFTER_S` (600 s) window, never pinning: one unusual payload or a rotated key must not disable remote counting for the life of the process. In either window the first count after it expires is the one probe, and a probe success resumes remote counts (issue #835). `budget_verified` reads the counting thread's own last count, so a probe on another thread never confirms an estimated prompt |
 | Embed/context/health pools | Bounded Settings connect-only retries, no generic POST replay policy |
 | Rerank | Configured score/rerank endpoint order plus alternate endpoint fallback; exhaustion fails closed; a batch rejected on both legs with HTTP 4xx (not 5xx/transport/shape) is re-scored once with passages cut to `RERANK_RETRY_PASSAGE_MAX_CHARS` (2000), and a failing retry fails closed (issue #664); [retrieval](retrieval.md) owns dispatch |
 | Condensation | Optional reasoning call; failure returns the raw latest query, not a fabricated condensed result |
@@ -1686,6 +1696,62 @@ The approved local/CI gateway-only LiteLLM adapter exception is owned by
 [deployment policy](deploy.md#deployment-policy); production gateway protection
 remains the platform team's responsibility.
 
+
+<a id="token-count-sources"></a>
+### Token count sources (#1266)
+
+The prompt builder verifies the packed prompt with one whole-message count
+per trim round (normally one round per answer); planning and long-message
+fitting stay estimator-only. `LLM_TOKEN_COUNT_SOURCE` selects where that
+count comes from (`tokenizer.build_tokenizer`):
+
+- **`tokenize` (default):** vLLM `/tokenize` at the server origin with the
+  generation's template arguments; else the estimator. This is the behaviour
+  before #1266.
+- **`completion_usage`:** for a gateway without `/tokenize`. The packed
+  request is sent as a non-streaming chat completion with `max_tokens: 1`, and
+  `usage.prompt_tokens` is the count (the server's own template-aware prompt
+  length). The completion content is never read. The body comes from
+  `model_args.chat_request_body`, the builder of the generation itself, with
+  the same model, messages, effort transport, `LLM_EXTRA_BODY` and the
+  request's temperature, so it differs from the sent generation only in
+  `max_tokens` and the streaming flags
+  (`test_completion_usage_count_body_equals_the_sent_body`). Text counts
+  for packing never send a completion.
+- **`auto`:** `/tokenize` if it counts; otherwise the completion-usage count
+  if it confirms a usable `usage.prompt_tokens`; otherwise the estimator
+  (`tokenizer.AutoTokenizer`). The choice is made per count: `/tokenize` in a
+  transient or refused window answers from the estimator and keeps
+  re-probing, as `tokenize` does; once its own rules pin it as not served,
+  the same count moves on to the completion, which follows its own rules. So
+  a gateway that was down at startup cannot leave the process estimating for
+  life. A startup check in the lifespan (off the event loop, one fixed
+  synthetic message, warn-only, never a refusal to start) front-loads that
+  discovery and logs the source the next count will ask. A `/tokenize` that
+  keeps refusing (401/403) is not "not served" and never moves on.
+- **`estimate`:** never asks the server; every count is estimated and never
+  verified.
+
+**Failures.** The completion-usage count follows the pin and retry rules of
+`/tokenize` (#835, #1214; table below): 404/405/501, or a 200 whose
+`usage.prompt_tokens` is missing or not a positive integer, pins the
+estimator; 408/429/5xx and transport errors open the 60 s window; any other
+refusal opens the 600 s window. A prompt over the served window is answered
+`400` by a completion where `/tokenize` would still count it, so it opens the
+600 s window. A failed count answers from the estimator for that call and logs
+one warning with a fixed message (source, URL, status or error type), never
+request content.
+
+**Cost, deadline and admission.** One extra request per verification round.
+With prefix caching the generation reuses the counted prefix when the gateway
+routes both to the same replica (measurements: #1266), so the net cost is
+about one short round trip and one decoded token. The count runs inside the prompt build: it
+holds the request's admission slot, counts against `REQUEST_DEADLINE_S` like
+the `/tokenize` call, and its own wait is bounded by `LLM_TOKENIZE_TIMEOUT_S`
+(not `ANSWER_TIMEOUT_S`). It also counts against any gateway rate limit or
+quota per request. `probe_gateway.py --probe-count` checks the source on a
+running stack: `usage.prompt_tokens` present and stable, larger with one more
+message, and a cold and a warm count timed. It prints numbers only.
 
 ### Exact local prompt counting
 
