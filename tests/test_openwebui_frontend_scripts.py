@@ -1150,18 +1150,23 @@ def test_purge_scrubs_the_text_of_a_deleted_folder_when_nothing_else_is_deleted(
             assert CANARY_FOLDER.encode() not in path.read_bytes(), path.name
 
 
-def test_purge_counts_a_folder_of_unknown_age_as_stale(tmp_path):
+def test_purge_never_deletes_a_folder_of_unknown_age(tmp_path):
     """The v0.12.3 model declares folder.updated_at nullable (only the
-    migration makes it NOT NULL): a folder of unknown age goes once it is
-    unused, as a share snapshot of unknown age does, and stays while in use."""
+    migration makes it NOT NULL). Maintainer decision 2026-11-16 (F-b): a
+    folder of unknown age is never purged, used or not, as the chat and file
+    purges keep rows of unknown age. Its aged parent therefore keeps a child
+    and stays; an aged unused folder beside them still goes, and the next run
+    converges."""
     data, db, conn = _folder_db(tmp_path, FOLDER_DDL.replace("updated_at BIGINT NOT NULL",
                                                              "updated_at BIGINT"))
     _folder(conn, "unknown", None, None)
-    _folder(conn, "unknown-used", None, None)
-    conn.execute("INSERT INTO chat VALUES ('c', 'u1', 't', '{}', ?, ?, NULL, 'unknown-used')",
-                 (NOW, NOW))
+    _folder(conn, "aged-parent", None, NOW - 31 * DAY)
+    _folder(conn, "unknown-kid", "aged-parent", None)
+    _folder(conn, "aged", None, NOW - 31 * DAY)
     assert purge.purge(db, data, 30, NOW)["folders"] == 1
-    assert _folder_ids(conn) == {"unknown-used"}
+    assert _folder_ids(conn) == {"unknown", "aged-parent", "unknown-kid"}
+    assert purge.purge(db, data, 30, NOW)["folders"] == 0
+    assert _folder_ids(conn) == {"unknown", "aged-parent", "unknown-kid"}
 
 
 @pytest.mark.parametrize("chat_columns,folder_ddl", [

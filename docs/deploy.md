@@ -2066,8 +2066,9 @@ default **30 days** (maintainer decision 2026-10-24). An explicit null fails the
   the enterprise, and their retention follows the same window: at most 30 days plus one backup
   cycle.
 - Stale chat folders (#1255) go in the same transaction: a folder last updated before the window
-  (or of unknown age) that, after the run's chat deletions, no chat or other row names in
-  `folder_id` and no folder names as its parent. Nested stale folders go in the same run, leaves
+  that, after the run's chat deletions, no chat or other row (an automation, for example) names in
+  `folder_id` and no folder names as its parent. A folder of unknown age (NULL `updated_at`) is
+  never purged, like a chat or file of unknown age (maintainer decision 2026-11-16). Nested stale folders go in the same run, leaves
   first, counted as `folders`. Renaming, moving, expanding or collapsing a folder refreshes its
   age; filing a chat in it does not. A folder in use, and its ancestors, keep their name, system
   prompt text, icon and background image (ADR-0007 S2).
