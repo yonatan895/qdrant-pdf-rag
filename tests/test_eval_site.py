@@ -1,6 +1,6 @@
 """Site measurement for the answer eval (issue #1191): the `/v1/chat`
-endpoint, served-corpus coverage, the text-free export, and the RC client
-reading the 2cd8f67d agent's wire.
+endpoint, served-corpus coverage, the text-free export, the RC client
+reading the 2cd8f67d agent's wire, and the corpus coverage check.
 
 The CLI runs over an inert HTTP boundary (`httpx2.MockTransport`) whose
 chat frames come from the agent's own SSE formatters. Two tests drive the
@@ -1285,3 +1285,247 @@ def test_a_switch_row_covers_the_docs_of_the_question_it_asked(site_eval):
     rows = {(r["id"], r["turn"]): r for r in json.loads(export)["rows"]}
     assert (rows[("A", 1)]["coverage"], rows[("A", 2)]["coverage"]) == ("none", "all")
     assert (rows[("B", 1)]["coverage"], rows[("B", 2)]["coverage"]) == ("all", "none")
+
+
+# ------------------------------------------------- corpus coverage check (#1191)
+# `python -m mainframe_rag.eval.coverage` compares the served catalog with the
+# wishlist and reports only wishlist items, statuses and public form numbers.
+# All numbers and titles below are synthetic.
+
+PRIVATE_IDS = ("acme-jes2-runbook", "acme-pd-notes", "kb201234", "SITE-SECRET-01")
+SYNTHETIC_WISHLIST = {"schema": "corpus_wishlist/1", "items": [
+    {"id": "num", "category": "hardware_language_reference", "title": "Numbered Principles",
+     "priority": 1, "match": "doc_number", "doc_numbers": ["SA99-0001"],
+     "title_keywords": [["numbered principles"]]},
+    {"id": "miss", "category": "hlasm_library", "title": "Missing Reference",
+     "priority": 2, "match": "doc_number", "doc_numbers": ["SA99-0002"]},
+    {"id": "amb", "category": "language_tool_library", "title": "Assembler Guide",
+     "priority": 2, "match": "title", "title_keywords": [["synthetic", "assembler guide"]]},
+    {"id": "one", "category": "language_tool_library", "title": "Toolkit Handbook",
+     "priority": 3, "match": "title", "title_keywords": [["toolkit handbook"]]},
+    {"id": "many", "category": "redbook", "title": "Synthetic Series",
+     "priority": 1, "match": "title", "title_keywords": [["synthetic series"]],
+     "expect_many": True},
+    {"id": "rb-jes2", "category": "redbook", "title": "JES2 Redbooks",
+     "priority": 2, "match": "title", "title_keywords": [["jes2"]],
+     "doc_id_prefixes": ["SG24", "REDP"], "expect_many": True},
+    {"id": "pd", "category": "practitioner", "title": "Problem Determination",
+     "priority": 3, "match": "title", "title_keywords": [["problem determination"]],
+     "expect_many": True},
+    {"id": "renum", "category": "language_tool_library", "title": "Renumbered Handbook",
+     "priority": 2, "match": "doc_number", "doc_numbers": ["SA99-0005"],
+     "title_keywords": [["toolkit handbook"]]},
+]}
+SYNTHETIC_CATALOG = [
+    ("SA99-0001-13", "Numbered Principles of Operation, Thirteenth Edition"),
+    ("SA99-0001-12", "Numbered Principles of Operation, Twelfth Edition"),
+    ("SC99-1111-00", "Synthetic Assembler Guide"),
+    ("SC99-2222-01", "Synthetic Assembler Guide for Experts"),
+    ("GC99-0003-01", "Toolkit Handbook"),
+    ("SG24-9001-00", "Synthetic Series Volume 1"),
+    ("SG24-9002-00", "Synthetic Series Volume 2"),
+    ("sg249999", "JES2 Synthetic Redbook"),
+    ("acme-jes2-runbook", "ACME JES2 Runbook"),
+    ("acme-pd-notes", "ACME Problem Determination Notes"),
+    ("kb201234", "KB Problem Determination Checklist"),
+    ("SITE-SECRET-01", "Secret Site Procedures"),
+]
+
+
+def _catalog_agent(entries, per_page=200, build="b-1"):
+    import httpx2
+
+    def respond(request):
+        assert request.url.path == "/v1/sources"
+        cursor = request.url.params.get("cursor")
+        start = 0 if cursor is None else int(cursor.removeprefix("ls1.p"))
+        chunk = entries[start:start + per_page]
+        nxt = f"ls1.p{start + per_page}" if start + per_page < len(entries) else None
+        return httpx2.Response(200, json={
+            "request_id": "x", "build_id": build, "next_cursor": nxt,
+            "sources": [{"doc_id": d, "title": t, "source_revision": f"r|{d}"} for d, t in chunk]})
+
+    return respond
+
+
+@pytest.fixture
+def corpus_check(tmp_path, monkeypatch, capsys):
+    """The real coverage CLI over an inert HTTP boundary; returns status,
+    stdout, stderr, the parsed --out file (or None) and the requests."""
+    import httpx2
+
+    from mainframe_rag.eval import coverage
+
+    real_client = httpx2.Client
+
+    def run(respond, wishlist=SYNTHETIC_WISHLIST):
+        calls: list = []
+
+        def record(request):
+            calls.append(request)
+            return respond(request)
+
+        monkeypatch.setattr(httpx2, "Client", lambda **kw: real_client(
+            transport=httpx2.MockTransport(record), **kw))
+        args = ["--agent-url", "http://deployed-agent:8087"]
+        if wishlist is not None:
+            path = tmp_path / "wishlist.json"
+            path.write_text(json.dumps(wishlist))
+            args += ["--wishlist", str(path)]
+        out = tmp_path / "coverage.json"
+        out.unlink(missing_ok=True)
+        status = coverage.main([*args, "--out", str(out)])
+        captured = capsys.readouterr()
+        data = json.loads(out.read_text()) if out.exists() else None
+        return status, captured.out, captured.err, data, calls
+
+    return run
+
+
+def test_coverage_check_reports_present_missing_and_ambiguous(corpus_check):
+    status, out, _, data, _ = corpus_check(_catalog_agent(SYNTHETIC_CATALOG))
+    assert status == 0
+    assert data["schema"] == "corpus_coverage/1"
+    rows = {r["id"]: r for r in data["items"]}
+    assert list(rows) == [i["id"] for i in SYNTHETIC_WISHLIST["items"]]
+    # Two editions of one form number are one present document.
+    assert rows["num"] == {"id": "num", "title": "Numbered Principles",
+                           "category": "hardware_language_reference", "priority": 1,
+                           "status": "present", "matched_by": "doc_number",
+                           "doc_ids": ["SA99-0001-12", "SA99-0001-13"], "other_matches": 0}
+    assert (rows["miss"]["status"], rows["miss"]["matched_by"], rows["miss"]["doc_ids"]) == (
+        "missing", None, [])
+    # Two form-number families behind one single-book title: ambiguous.
+    assert (rows["amb"]["status"], rows["amb"]["doc_ids"]) == (
+        "ambiguous", ["SC99-1111-00", "SC99-2222-01"])
+    assert (rows["one"]["status"], rows["one"]["matched_by"], rows["one"]["doc_ids"]) == (
+        "present", "title", ["GC99-0003-01"])
+    assert (rows["many"]["status"], rows["many"]["doc_ids"]) == (
+        "present", ["SG24-9001-00", "SG24-9002-00"])
+    # The prefix keeps the site's own JES2 runbook out of the Redbook item.
+    assert (rows["rb-jes2"]["status"], rows["rb-jes2"]["doc_ids"],
+            rows["rb-jes2"]["other_matches"]) == ("present", ["sg249999"], 0)
+    # Matched documents without a printed public number (a site stem that
+    # merely contains digits included) are counted, never named.
+    assert (rows["pd"]["status"], rows["pd"]["doc_ids"], rows["pd"]["other_matches"]) == (
+        "present", [], 2)
+    # A numbered item whose number is absent but whose title keywords hit
+    # another book is ambiguous, never present.
+    assert (rows["renum"]["status"], rows["renum"]["matched_by"], rows["renum"]["doc_ids"]) == (
+        "ambiguous", "title", ["GC99-0003-01"])
+    assert data["counts"] == {"present": 5, "missing": 1, "ambiguous": 2}
+    lines = out.splitlines()
+    assert any(line.split()[:3] == ["num", "1", "present"] for line in lines)
+    assert any(line.split()[:3] == ["miss", "2", "missing"] for line in lines)
+    assert any(line.split()[:3] == ["amb", "2", "ambiguous"] for line in lines)
+
+
+def test_coverage_check_never_reports_what_the_wishlist_did_not_name(corpus_check):
+    """Unmatched entries, title-matched private entries, the build id and
+    every catalog title stay out of stdout, stderr and the export."""
+    status, out, err, data, _ = corpus_check(_catalog_agent(SYNTHETIC_CATALOG, build="build-77"))
+    assert status == 0
+    blob = out + err + json.dumps(data)
+    for doc_id in PRIVATE_IDS:
+        assert doc_id not in blob
+    wishlist_titles = {i["title"] for i in SYNTHETIC_WISHLIST["items"]}
+    for _, title in SYNTHETIC_CATALOG:
+        if title not in wishlist_titles:
+            assert title not in blob
+    assert "build-77" not in blob
+
+
+def test_coverage_check_pages_the_whole_catalog(corpus_check):
+    status, _, _, data, calls = corpus_check(_catalog_agent(SYNTHETIC_CATALOG, per_page=4))
+    assert status == 0
+    assert [c.url.params.get("cursor") for c in calls] == [None, "ls1.p4", "ls1.p8"]
+    assert {c.url.params.get("limit") for c in calls} == {"200"}
+    rows = {r["id"]: r["status"] for r in data["items"]}
+    assert rows["rb-jes2"] == "present"  # second page
+    assert rows["pd"] == "present"  # its documents are on the last page
+
+
+def test_coverage_check_matches_by_number_without_a_title(corpus_check):
+    import httpx2
+
+    def respond(request):
+        return httpx2.Response(200, json={"request_id": "x", "build_id": "b-1", "next_cursor": None,
+                                          "sources": [{"doc_id": "SA99-0001-13"}]})
+
+    status, _, _, data, _ = corpus_check(respond)
+    assert status == 0
+    assert data["items"][0]["status"] == "present"
+
+
+def _unreadable(kind):
+    import httpx2
+
+    def respond(request):
+        if kind == "no_catalog":
+            return httpx2.Response(503, json={"code": "sources_unavailable", "message": "m"})
+        if kind == "malformed":
+            return httpx2.Response(200, json={"sources": "nope"})
+        if kind == "transport":
+            raise httpx2.ConnectError("refused")
+        build = "b-1" if request.url.params.get("cursor") is None else "b-2"
+        return httpx2.Response(200, json={
+            "request_id": "x", "build_id": build,
+            "next_cursor": "ls1.p1" if build == "b-1" else None,
+            "sources": [{"doc_id": "SA99-0001-13", "title": "t"}]})
+
+    return respond
+
+
+@pytest.mark.parametrize(("kind", "reason"), [
+    ("no_catalog", "http_503"), ("malformed", "malformed"),
+    ("transport", "request_failed"), ("build_changed", "build_changed"),
+])
+def test_coverage_check_fails_closed_when_the_catalog_is_unreadable(corpus_check, kind, reason):
+    status, out, err, data, _ = corpus_check(_unreadable(kind))
+    assert status == 1
+    assert out == "" and data is None  # no partial table, no export
+    assert err == f"error: the agent's source catalog could not be read ({reason})\n"
+
+
+def test_coverage_check_refuses_an_invalid_wishlist_before_any_request(corpus_check):
+    bad = {"schema": "corpus_wishlist/1", "items": [
+        {"id": "x", "category": "hlasm_library", "title": "X", "priority": 1,
+         "match": "title", "doc_numbers": ["SA99-0001"]}]}
+    status, out, err, data, calls = corpus_check(_catalog_agent(SYNTHETIC_CATALOG), wishlist=bad)
+    assert status == 2 and out == "" and data is None and calls == []
+    assert err.startswith("error: invalid wishlist: ")
+
+
+def test_coverage_check_reads_the_2cd8f67d_catalog(corpus_check):
+    """The site's current agent: its captured catalog pages carry titles."""
+    status, out, err, data, calls = corpus_check(_capture_agent("hits"))
+    assert status == 0
+    assert len(calls) == len(CAPTURE["sources_pages"])
+    assert {r["status"] for r in data["items"]} == {"missing"}
+    guide = {"schema": "corpus_wishlist/1", "items": [
+        {"id": "guide", "category": "practitioner", "title": "A Guide", "priority": 1,
+         "match": "title", "title_keywords": [["synthetic guide"]]}]}
+    status, out, err, data, _ = corpus_check(_capture_agent("hits"), wishlist=guide)
+    assert status == 0
+    assert data["items"] == [{"id": "guide", "title": "A Guide", "category": "practitioner",
+                              "priority": 1, "status": "present", "matched_by": "title",
+                              "doc_ids": [], "other_matches": 1}]
+    blob = out + err + json.dumps(data)
+    for page in CAPTURE["sources_pages"]:
+        for source in page["body"]["sources"]:
+            assert source["doc_id"] not in blob and source["title"] not in blob
+
+
+def test_shipped_wishlist_is_valid_and_runs_by_default(corpus_check):
+    from mainframe_rag.eval import coverage
+
+    items = coverage.load_wishlist(coverage.DEFAULT_WISHLIST)
+    ids = [i["id"] for i in items]
+    assert {i["category"] for i in items} == set(coverage.CATEGORIES)
+    numbers = [n for i in items for n in i.get("doc_numbers", [])]
+    assert len(numbers) == len(set(numbers))
+    status, _, _, data, _ = corpus_check(
+        _catalog_agent([("SITE-SECRET-01", "Secret Site Procedures")]), wishlist=None)
+    assert status == 0
+    assert [r["id"] for r in data["items"]] == ids
+    assert {r["status"] for r in data["items"]} == {"missing"}

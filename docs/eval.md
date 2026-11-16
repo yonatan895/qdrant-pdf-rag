@@ -950,6 +950,48 @@ differs from A2. Classes with 10 rows or fewer (table, negative, the abstain
 rows) are read in aggregate only. The paired per-row comparison runs on the
 connected side from the exports and is not part of this tool.
 
+### Corpus coverage check
+
+Issue #1191. A read-only check of which publicly available documents the
+deployed corpus holds, so the maintainer fetches only the missing ones.
+`evals/corpus-wishlist.json` lists titles and identifiers only, never document
+text. Each item matches by IBM form number (`match: doc_number`, the number
+without its edition, confirmed against IBM's public library) or by
+whole-word, case-insensitive title keywords (`match: title`). A
+`doc_id_prefixes` field limits title matches to Redbook numbers. The check
+pages `GET /v1/sources` with the answer eval's `fetch_coverage`. Run it from
+the bastion pod through the same port-forward as above:
+
+```sh
+oc -n "$NS" port-forward svc/rag-agent 8087:8080 &   # keep it running
+WS=/work/<candidate>/qdrant-pdf-rag                  # any workspace with this tool
+PYTHONPATH="$WS/src" python3 -m mainframe_rag.eval.coverage \
+  --agent-url http://127.0.0.1:8087 \
+  --wishlist "$WS/evals/corpus-wishlist.json" --out coverage.json
+```
+
+- Each item is `present`, `missing` or `ambiguous`.
+  - A number hit is `present`.
+  - A `match: title` item hit on one form-number family is `present`; its
+    editions count as one family. Hits on several families are `ambiguous`,
+    unless the item is a series (`expect_many`).
+  - A numbered item found only by its title keywords is `ambiguous`. It may
+    be a sibling book or a renumbered edition.
+- The table and `--out` hold only these fields:
+  - the wishlist's ids, titles, categories and priorities, and the statuses;
+  - the doc ids that matched a wishlist number;
+  - title-matched doc ids printed as a public IBM form number
+    (`SA22-7832-13`) or Redbook number. Any other matched doc id is only
+    counted (`other_matches`).
+
+  Catalog titles, unmatched doc ids, the build id and catalog sizes are
+  never printed or written, so the output may leave the gap after the usual
+  review.
+- The exit status is 0 for any completed run. It is 1 when the catalog
+  cannot be read (no catalog, transport error, malformed page, or a build
+  change mid-walk): a fixed message is printed and no table. It is 2 for an
+  invalid wishlist or `--out` path.
+
 ### Failure taxonomy (#830)
 
 `scripts/answer_taxonomy.py` gives every golden row one primary failure class.
