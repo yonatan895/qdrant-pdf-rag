@@ -208,6 +208,11 @@ def test_follow_up_mode_is_a_text_free_root_attribute(
     spans = exporter.get_finished_spans()
     root = next(s for s in spans if s.name == "v1.chat")
     assert root.attributes["rag.followup_mode"] == mode
+    # A first turn is no follow-up: its root span keeps its earlier shape.
+    exporter.clear()
+    assert c.post("/v1/chat", json={"messages": messages[-1:]}).status_code == 200
+    first = next(s for s in exporter.get_finished_spans() if s.name == "v1.chat")
+    assert "rag.followup_mode" not in first.attributes
     assert CANARY_QUERY not in _span_text(spans)
     assert CANARY_QUERY not in "\n".join(_formatted_logs(caplog))
 

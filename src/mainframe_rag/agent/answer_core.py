@@ -220,7 +220,7 @@ async def plan_search(
     """The one owner of what a turn searches, for the core retrieval branch
     and every chat route alike. Condensation and anchoring cannot both be on
     (Settings refuses the pair, issue #1268). The mode is set on
-    `parent_span` for chat turns as a fixed label, never text."""
+    `parent_span` for chat follow-up turns as a fixed label, never text."""
     input_data = _prepare_chat_input(input_data, deps.settings)
     literal = derive_retrieval_query(input_data.query, deps.settings)
     query = await resolve_search_query(input_data, deps, parent_span)
@@ -228,7 +228,8 @@ async def plan_search(
     mode: FollowUpMode = (
         "anchored" if anchor is not None else "condensed" if query != literal else "literal"
     )
-    if parent_span is not None and input_data.is_chat:
+    # Follow-up turns only: a first turn's root span keeps its shape.
+    if parent_span is not None and input_data.is_chat and len(input_data.messages or []) > 1:
         parent_span.set_attribute("rag.followup_mode", mode)
     return SearchPlan(mode, query, anchor)
 

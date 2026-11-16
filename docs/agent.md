@@ -187,7 +187,7 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   the antecedent's manuals are fresh evidence, prior turns stay context.
   Condensation and anchoring are exclusive: Settings refuses both true at
   startup with a fixed message, and the mapper, preflight and chart schema
-  refuse the pair first. The chat root span carries
+  refuse the pair first. A follow-up's chat root span carries
   `rag.followup_mode` = `literal` | `condensed` | `anchored` (never text). The condensation A/B and its default-flip
   decision live in `docs/eval.md` (`sh scripts/tools/run-task.sh eval:chat`).
 - `GET /ui` — operator console (ADR-0004), a thin adapter over the same core:
