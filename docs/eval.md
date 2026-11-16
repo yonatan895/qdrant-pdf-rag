@@ -605,6 +605,9 @@ Flags (defaults are unchanged without them):
 | `--stream` | HTTP mode only. Sends the same request with `stream: true` and judges the SSE `final`, which already carries `finish_reason`, `ttft_ms` and `usage` ([agent contract](agent.md), §3 Streaming). Rows gain finish reason, token counts, `ttft_ms`, the client-side `client_first_token_ms` and `decode_tps`. Token deltas and the `final`'s retrieval hits are not kept. An `error` event, a stream that ends without `final`, or a `final` without valid counts is an error row with a fixed label. The in-process client buffers the whole response, so the flag is refused without `--agent-url`; in-process rows keep their answer-log join |
 | `--subset N` | The default sampler's round-robin (sorted classes, sorted ids, one row per class per round), so every cutoff of its order keeps every class. Refused (exit 2, no request) when `N` is below the class count, and refused before any read when the resolved dataset contains the frozen holdout: a sweep needs an explicit non-holdout `--golden`. Exclusive with `--all`. `params.sample` records the mode, row count, class count, a SHA-256 over the ordered ids, and the resolved datasets' basenames + SHA-256, so two arms can prove they ran the same rows over the same splits |
 | `--repeats R` | 1–10 whole passes over the sample (pass 1 over every row, then pass 2, ...), so drift within a session lands on every row equally. Rows carry `repeat`; `metrics` pools all passes; `metrics.repeats` gives, per metric, the per-pass values with min, max, mean and range, plus `verdict_flips` (entry ids judged differently across passes). More than one pass is a sweep, so the same non-holdout `--golden` rule applies |
+| `--endpoint chat` | Issue #1191. Each question goes as a single-turn streaming `POST /v1/chat` (`messages: [{role: user, content}]`, `stream: true`, `temperature`), the route the Open WebUI Pipe calls. Needs `--stream`. `params.endpoint` records `answer` (default) or `chat`; `params.transport` still means `json`/`sse`. Differences are listed under [chat rows](#chat-rows) |
+| `--coverage` | Issue #1191. Before the rows, pages `GET /v1/sources` (limit 200) once and records its `build_id`; after the rows, reads the first page again as `build_id_end`. Each row gets `coverage` (`all`, `some` or `none` of its `expected_doc_ids` served; `not_applicable` when it names none; `unknown`) and `expected_served`; `report.coverage` holds the counts per state over distinct rows, `pages` and `sources_n`. The match is on the exact doc id, edition included. A 503 (a build published without a catalog), a 404, a transport error, a malformed page, a build change between pages or 1,000 pages give `status: unknown` with a fixed `reason`. Coverage never changes a verdict or the exit code |
+| `--export PATH` | Issue #1191. A JSON file built by whitelist for leaving an air-gapped site: `params` (without `agent_url`), `metrics`, `healthz`, `representation`, `coverage` and one row per result with id, repeat, class, behaviour, verdict, failure and warn labels, verification states, finish reason, path, citation-WHY mode, citation and inferred-index counts, token counts, timings, `gold_retrieved`, expected/hit/cited doc ids, citation precision/recall and coverage. Failure labels come from a closed set (anything else is `other`; an error code outside the agent's stable codes is `?`), finish reasons outside the OpenAI set are `other`, and a `build_id` of an unexpected shape is null. No question, answer, citation, excerpt, script or failure text. `tests/test_eval_site.py` seeds canaries into every text field and checks the export bytes |
 
 Without `--stream`, the JSON request is unchanged: the row still records the
 model-leg `llm_ms` (and `ttft_ms` when the agent runs with `LLM_STREAM`) from
@@ -645,6 +648,121 @@ the concurrency step varies the served `--max-num-seqs` and drives load with
 the load tools (§8), reading this eval's hardware-independent group for the
 quality side. A live Colab session has not run this protocol yet; one is
 required before it gates a change.
+
+<a id="chat-rows"></a>
+**Chat rows (`--endpoint chat`).** The chat stream ([agent contract](agent.md),
+§3) ends with a chunk whose `choices[0]` carries `finish_reason`, `citations`,
+`citations_inferred`, `inferred_indices`, `verification_state`, the script
+flag and `supplied_evidence`, then `[DONE]`. The row is judged by the same
+`judge()` on those fields. Differences from `/v1/answer` rows:
+
+- **Body.** The stream has no answer field: its deltas are the model's raw
+  output followed by the validated `**Citations:**` list. The eval drops that
+  list and runs the agent's own `parse_answer` over the rest with the
+  terminal chunk's `supplied_evidence`, which is how the agent derives the
+  `/v1/answer` body. `tests/test_eval_site.py` checks through the real app
+  that both endpoints give the same body, citations, state and verdict for the
+  same model output. Against an older agent this is the RC's parser over that
+  agent's output.
+- **Unavailable, recorded as null (never a failure or a zero):** token counts,
+  `ttft_ms` and `decode_tps` (the chat chunks carry no `usage` and no
+  `ttft_ms`). Truncation still comes from `finish_reason`;
+  `client_first_token_ms` is the first content delta.
+- **Completion.** A terminal chunk and `[DONE]` are both required, as in the
+  Pipe; an error frame is an error row (`stream error (<code>)`) although
+  `[DONE]` follows it.
+- **Not measured.** The eval sends `temperature`; the Pipe sends none, so the
+  agent's configured default applies to users. The Pipe's own rendering
+  (hiding the model's citation section, banners) is not scored.
+
+<a id="at-a-site"></a>
+### At a site (before/after an upgrade)
+
+Issue #1191; maintainer decisions of 2026-11-16. Measures answer quality on
+the site's own model before and after an in-place upgrade, with the
+candidate's eval against both builds. Code reaches the site only inside the
+release bundle, so the instrument is the candidate's checkout.
+
+**Where.** The bastion pod (devkit image, Python 3.14 with the dev lock),
+through `oc port-forward` with the operator's namespace session. The Route is
+not usable (OAuth port; the eval refuses credentials and redirects). No
+cluster object changes.
+
+1. Bootstrap the candidate's workspace before deploying it
+   ([upgrade step 3](install_and_ops.md#upgrade-and-recovery-runbook-issue-272): fresh workspace, `bootstrap.sh`),
+   so the same eval runs against the old build first.
+2. Forward the agent and run the module directly, from a scratch working
+   directory (the run manifest goes to `<cwd>/evals/runs/`):
+
+```sh
+oc -n "$NS" port-forward svc/rag-agent 8087:8080 &   # keep it running
+WS=/work/<candidate>/qdrant-pdf-rag                  # the candidate workspace
+mkdir -p /work/site-eval && cd /work/site-eval
+run() {  # $1 = session label, $2 = endpoint, then extra flags
+  label=$1 endpoint=$2; shift 2
+  PYTHONPATH="$WS/src" python3 -m mainframe_rag.eval.answers \
+    --agent-url http://127.0.0.1:8087 --golden "$WS/evals/golden.jsonl" \
+    --stream --temperature 0 --request-timeout 600 --coverage \
+    --endpoint "$endpoint" \
+    --out "$label-$endpoint.json" --summary "$label-$endpoint.md" \
+    --export "$label-$endpoint.export.json" "$@" 2>"$label-$endpoint.log"
+}
+run T0 answer --subset 24            # timed 24-row run first
+run A1 answer --all --repeats 2      # then the full session, both endpoints
+run A1 chat --all --repeats 2
+```
+
+- Always pass `--golden evals/golden.jsonl` explicitly. Never the holdout:
+  `--repeats` refuses it anyway.
+- `--request-timeout` must exceed the deployed `REQUEST_DEADLINE_S` (the
+  chart ships 270 s), so the agent's own deadline, not the client, ends a
+  slow answer.
+- Run off-hours: a 503 from user traffic is an error row.
+- Time the 24-row run first. A session is 127 rows × 2 repeats × 2 endpoints,
+  so the two endpoints double its cost. If the full session does not fit, the
+  fallback is `--subset 24 --repeats 3`, which only catches gross changes.
+
+**Session plan.** All at temperature 0, both endpoints, same flags:
+
+| Session | Build | When |
+|---|---|---|
+| A1 | old (2cd8f67d) | the day before the upgrade |
+| A2 | old | just before deploying |
+| B1 | candidate | after the post-deploy smoke |
+| B2 | candidate | the next day |
+| C | candidate | after B2: one pass at `--temperature 0.2 --repeats 1`, both endpoints; it confirms, it never decides |
+
+A1 against A2 is the noise between sessions on an unchanged build. Check that
+`coverage.build_id` equals `build_id_end` in every export, that both A
+sessions name the same build, and that `params.sample.ids_sha256` and the
+dataset sha256 match across all sessions.
+
+**What may leave the gap.** Only the `*.export.json` files and a receipt: the
+old and candidate commit SHAs, the agent image digests, the model name and the
+non-secret `LLM_*` and `REQUEST_*` values. Review each export before it
+leaves; this prints 0 when no golden question appears in it (a doc_number
+question that is itself part of a doc id is skipped, since doc ids may leave):
+
+```sh
+python3 - "$WS/evals/golden.jsonl" A1-answer.export.json <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+ids = " ".join(d for row in rows for d in row.get("expected_doc_ids") or [])
+text = open(sys.argv[2]).read()
+print(sum(row["query"] in text and row["query"] not in ids for row in rows))
+PY
+```
+
+`--out`, `--summary`, the stderr log and `evals/runs/` stay in the gap: they
+hold questions, answers, citations and failure text.
+
+**Decision rule.** The [protocol above](#measurement-protocol)
+applies: decide on the hardware-independent group only, and a difference
+smaller than the range either arm shows across its own repeats is noise. At a
+site, a change is also claimed only when B differs from A by more than A1
+differs from A2. Classes with 10 rows or fewer (table, negative, the abstain
+rows) are read in aggregate only. The paired per-row comparison runs on the
+connected side from the exports and is not part of this tool.
 
 ### Failure taxonomy (#830)
 

@@ -182,11 +182,15 @@ from mainframe_rag.eval.datasets import (
     resolve_golden_paths,
 )
 from mainframe_rag.eval.measurement import (
+    STREAM_INCOMPLETE,
+    STREAM_MALFORMED,
+    STREAM_OVERSIZE,
     decode_tps,
     is_count,
     measurement_summary,
     parse_server_timing,
     read_answer_stream,
+    read_chat_stream,
     repeat_spread,
     sample_identity,
     stream_signals,
@@ -611,6 +615,63 @@ def _fetch_pool(client: Any, query: str) -> list[dict[str, Any]] | None:
         return None
 
 
+def chat_answer_body(content: str, terminal: dict[str, Any]) -> str | None:
+    """The answer body of one `/v1/chat` stream (issue #1191), or None when
+    the terminal chunk's evidence fields are malformed.
+
+    The chat stream carries the model's raw output as deltas, then the
+    validated `**Citations:**` list as one more delta; it has no parsed
+    answer field. The body `/v1/answer` returns is `parse_answer` over that
+    raw output with the prompt's supplied evidence, and the terminal chunk
+    carries that evidence (`supplied_evidence`: prompt label, citation, doc
+    id). So the body here is the agent's own parser over the same inputs:
+    one rule, not a second citation regex. Citations, provenance and the
+    verification state still come from the terminal chunk, as the server
+    computed them. Without supplied evidence (the zero-hits answer) the
+    content is the agent's canned text and is used as it is."""
+    from mainframe_rag.agent.answer import EvidenceEntry, PromptEvidence, parse_answer
+
+    citations, supplied = terminal.get("citations"), terminal.get("supplied_evidence")
+    if (
+        not isinstance(citations, list) or any(not isinstance(c, str) for c in citations)
+        or not isinstance(supplied, list)
+    ):
+        return None
+    entries = []
+    for item in supplied:
+        index = item.get("index") if isinstance(item, dict) else None
+        cite = item.get("citation") if isinstance(item, dict) else None
+        doc_id = item.get("doc_id") if isinstance(item, dict) else None
+        if type(index) is not int or not isinstance(cite, str) or not isinstance(doc_id, str):
+            return None
+        entries.append(EvidenceEntry(
+            prompt_index=index, chunk_id="", doc_id=doc_id, cite=cite, truncated=False,
+            included_chars=0, source_chars=0, est_tokens=0,
+        ))
+    if citations:
+        listed = "\n\n**Citations:**\n" + "\n".join(f"- {c}" for c in citations)
+        content = content.removesuffix(listed)
+    if not entries:
+        return content
+    return parse_answer(content, PromptEvidence(entries=tuple(entries))).answer
+
+
+def _chat_answer_data(terminal: dict[str, Any], answer: str) -> dict[str, Any]:
+    """The answer-shaped object `_judge_response` reads, from the chat
+    terminal chunk. Fields the chunk lacks stay absent, never invented."""
+    chunk_id = terminal.get("chunk_id")
+    data: dict[str, Any] = {
+        key: terminal[key]
+        for key in ("citations", "citations_inferred", "inferred_indices",
+                    "verification_state", "script", "script_review_required")
+        if key in terminal
+    }
+    data["answer"] = answer
+    if isinstance(chunk_id, str):
+        data["request_id"] = chunk_id.removeprefix("chatcmpl-")
+    return data
+
+
 def run_query(
     client: Any,
     entry: dict[str, Any],
@@ -618,6 +679,7 @@ def run_query(
     hits: list[dict[str, Any]] | None = None,
     temperature: float | None = 0.0,
     stream: bool = False,
+    endpoint: str = "answer",
 ) -> dict[str, Any]:
     """One live /v1/answer call + verdict. Records everything the report and
     the manifest need, including the failure detail (the answer body is the
@@ -631,7 +693,12 @@ def run_query(
 
     stream=True (issue #1195) sends the same request with `stream: true` and
     judges the SSE `final`, which carries the same answer fields plus the
-    finish reason, token usage and `ttft_ms`. Token deltas are not kept."""
+    finish reason, token usage and `ttft_ms`. Token deltas are not kept.
+
+    endpoint="chat" (issue #1191) sends the question as a single-turn
+    streaming `/v1/chat` request, as the Open WebUI Pipe does, and judges the
+    terminal chunk plus the body `chat_answer_body` derives. That stream has
+    no `usage` and no `ttft_ms`: those row fields stay None (unknown)."""
     t0 = time.monotonic()
     row: dict[str, Any] = {
         "id": entry["id"],
@@ -651,7 +718,13 @@ def run_query(
     measured: dict[str, Any] = {}
     outcome = None
     try:
-        if stream:
+        if endpoint == "chat":
+            outcome = read_chat_stream(client, {
+                "messages": [{"role": "user", "content": entry["query"]}],
+                "stream": True, "temperature": temperature,
+            })
+            resp = outcome.response
+        elif stream:
             outcome = read_answer_stream(client, {**body, "stream": True})
             resp = outcome.response
         else:
@@ -665,6 +738,17 @@ def run_query(
         # `final`, or a `final` without valid counts is never a judged answer.
         row.update(verdict="error", failures=[outcome.failure], elapsed_ms=elapsed_ms)
         return row
+    if endpoint == "chat" and outcome is not None and outcome.final is not None:
+        answer = chat_answer_body(outcome.content or "", outcome.final)
+        if answer is None:
+            row.update(verdict="error", failures=[STREAM_MALFORMED], elapsed_ms=elapsed_ms)
+            return row
+        measured = {"finish_reason": outcome.final["finish_reason"],
+                    "client_first_token_ms": outcome.first_token_ms}
+        return _judge_response(
+            row, entry, _chat_answer_data(outcome.final, answer), elapsed_ms,
+            answer_signals, hits, measured,
+        )
     if outcome is not None and outcome.final is not None:
         measured = stream_signals(outcome.final)
         measured["client_first_token_ms"] = outcome.first_token_ms
@@ -939,6 +1023,281 @@ def inferred_index_off_gold(row: dict[str, Any]) -> bool:
     return True
 
 
+# ------------------------------------------------ served coverage (#1191)
+# `GET /v1/sources` lists the served build's sources (docs/agent.md section 1).
+_SOURCES_PAGE_LIMIT = 200
+# A guard against a cursor that never ends: 1,000 pages of 200 sources.
+_SOURCES_MAX_PAGES = 1000
+COVERAGE_STATES = ("all", "some", "none", "not_applicable", "unknown")
+
+
+def _sources_page(client: Any, cursor: str | None) -> tuple[dict[str, Any] | None, str | None]:
+    """One validated `/v1/sources` page, or a fixed reason label. Only the
+    build id, the doc ids and the cursor are read."""
+    params: dict[str, Any] = {"limit": _SOURCES_PAGE_LIMIT}
+    if cursor is not None:
+        params["cursor"] = cursor
+    try:
+        response = client.get("/v1/sources", params=params)
+    except Exception:  # noqa: BLE001 — coverage is observational, never fatal
+        return None, "request_failed"
+    if response.status_code != 200:
+        return None, f"http_{response.status_code}"
+    try:
+        body = response.json()
+    except ValueError:
+        return None, "malformed"
+    sources = body.get("sources") if isinstance(body, dict) else None
+    if (
+        not isinstance(body, dict) or not isinstance(body.get("build_id"), str)
+        or not body["build_id"] or not isinstance(sources, list)
+        or any(not isinstance(s, dict) or not isinstance(s.get("doc_id"), str) for s in sources)
+        or not (body.get("next_cursor") is None or isinstance(body.get("next_cursor"), str))
+    ):
+        return None, "malformed"
+    return {"build_id": body["build_id"], "doc_ids": [s["doc_id"] for s in sources],
+            "next_cursor": body.get("next_cursor")}, None
+
+
+def fetch_coverage(client: Any) -> dict[str, Any]:
+    """The doc ids the deployed build serves, from every `/v1/sources` page.
+
+    `status` is "known" only after a complete walk of one build. A 503 (a
+    build published without a catalog), an agent older than the endpoint, a
+    transport error, a malformed page, a build change between pages or the
+    page cap all give "unknown" with a fixed `reason`: coverage is never a
+    failure and never touches a verdict or the exit code."""
+    doc_ids: set[str] = set()
+    build_id: str | None = None
+    cursor: str | None = None
+    pages = 0
+    while True:
+        if pages >= _SOURCES_MAX_PAGES:
+            return _coverage("unknown", "page_cap", build_id, pages)
+        page, reason = _sources_page(client, cursor)
+        if page is None:
+            return _coverage("unknown", reason, build_id, pages)
+        pages += 1
+        if build_id is None:
+            build_id = page["build_id"]
+        elif page["build_id"] != build_id:
+            return _coverage("unknown", "build_changed", build_id, pages)
+        doc_ids.update(page["doc_ids"])
+        cursor = page["next_cursor"]
+        if cursor is None:
+            return _coverage("known", None, build_id, pages, frozenset(doc_ids))
+
+
+def _coverage(status: str, reason: str | None, build_id: str | None, pages: int,
+              doc_ids: frozenset[str] = frozenset()) -> dict[str, Any]:
+    return {"status": status, "reason": reason, "build_id": build_id, "pages": pages,
+            "doc_ids": doc_ids}
+
+
+def apply_coverage(row: dict[str, Any], entry: dict[str, Any], coverage: dict[str, Any]) -> None:
+    """Mark whether the row's expected docs are served: all, some, none,
+    not_applicable (the row names no expected doc) or unknown (no complete
+    listing). The match is on the exact doc id, edition included, so content
+    served under another edition reads as not served."""
+    expected = {str(d) for d in (entry.get("expected_doc_ids") or [])}
+    if not expected:
+        row.update(coverage="not_applicable", expected_served=0)
+        return
+    if coverage["status"] != "known":
+        row.update(coverage="unknown", expected_served=None)
+        return
+    served = len(expected & coverage["doc_ids"])
+    state = "all" if served == len(expected) else "some" if served else "none"
+    row.update(coverage=state, expected_served=served)
+
+
+def coverage_summary(coverage: dict[str, Any], results: list[dict[str, Any]],
+                     build_id_end: str | None) -> dict[str, Any]:
+    """Counts per coverage state over the distinct rows (a repeated row
+    counts once). The served doc-id list itself is not reported."""
+    seen: dict[str, str] = {}
+    for row in results:
+        seen.setdefault(str(row.get("id")), str(row.get("coverage") or "unknown"))
+    counts = Counter(seen.values())
+    return {
+        "status": coverage["status"], "reason": coverage["reason"],
+        "build_id": coverage["build_id"], "build_id_end": build_id_end,
+        "pages": coverage["pages"],
+        "sources_n": len(coverage["doc_ids"]) if coverage["status"] == "known" else None,
+        "rows": {state: counts.get(state, 0) for state in COVERAGE_STATES},
+    }
+
+
+def _served_build_id(client: Any) -> str | None:
+    """The build id the first sources page names now (end-of-run check)."""
+    page, _ = _sources_page(client, None)
+    return page["build_id"] if page is not None else None
+
+
+# --------------------------------------------------- text-free export (#1191)
+# What may leave an air-gapped site (maintainer decision 2026-11-16): row ids,
+# verdicts, verification states, fixed failure labels, token counts, timings,
+# finish reasons and doc ids. Question, answer, citation, excerpt and failure
+# text never do. Every value below is copied by an explicit rule; nothing is
+# copied by default.
+EXPORT_SCHEMA = "eval_answers_export/1"
+
+# The agent's stable error codes (docs/agent.md section 2 and the stream
+# contract). Any other code is reported as "?".
+_ERROR_CODES = frozenset({
+    "deadline_exceeded", "evidence_budget_exceeded", "http_error", "internal",
+    "invalid_request", "method_not_allowed", "model_timeout", "not_configured", "not_found",
+    "overloaded", "prompt_budget_exceeded", "qdrant_unready", "representation_unavailable",
+    "unsupported_reasoning_effort", "upstream_error",
+})
+_FIXED_FAILURE_LABELS = frozenset({
+    "empty answer body", "explicit refusal on an answer-tier query",
+    "zero validated citations", "only inferred citations …", "trap answered",
+    "missing required substring", "forbidden substring present",
+    "identifier not cited or mentioned", "request error", "malformed answer response",
+    "malformed inferred_indices in response", "unknown verification_state in response",
+    STREAM_INCOMPLETE, STREAM_MALFORMED, STREAM_OVERSIZE,
+    "agent health request failed", "malformed agent health response",
+    "agent health is not servable",
+})
+# OpenAI-compatible finish reasons; any other value is reported as "other".
+_FINISH_REASONS = frozenset({"stop", "length", "content_filter", "tool_calls", "abort"})
+_FIXED_WARN_LABELS = frozenset({
+    "hedged abstention", "silent abstention", "zero-hits path", "zero prompt tokens",
+})
+_CODED_FAILURE_RE = re.compile(r"(HTTP \d{3}|stream error) \((.*)\)", re.DOTALL)
+_STATE_FAILURE_RE = re.compile(r"verification state (?:…|None) != expected (?:…|None)")
+_HEALTH_HTTP_RE = re.compile(r"agent health returned HTTP \d{3}")
+_LABEL_RE = re.compile(r"[a-z_]{1,32}")
+_BUILD_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+
+
+def export_failure_label(failure: str) -> str:
+    """A failure string as a label from a closed set; "other" otherwise.
+    Coded failures keep their status and a known code only."""
+    coded = _CODED_FAILURE_RE.fullmatch(failure)
+    if coded is not None:
+        code = coded.group(2)
+        return f"{coded.group(1)} ({code if code in _ERROR_CODES else '?'})"
+    label = failure_bucket(failure)
+    if (
+        label in _FIXED_FAILURE_LABELS or _STATE_FAILURE_RE.fullmatch(label)
+        or _HEALTH_HTTP_RE.fullmatch(label)
+    ):
+        return label
+    return "other"
+
+
+def _export_warn_label(warn: str) -> str:
+    label = failure_bucket(warn)
+    return label if label in _FIXED_WARN_LABELS else "other"
+
+
+def _count_or_none(value: Any) -> int | None:
+    return value if is_count(value) else None
+
+
+def _number_or_none(value: Any) -> float | int | None:
+    if type(value) is int or (type(value) is float and math.isfinite(value)):
+        return value
+    return None
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    return value if type(value) is bool else None
+
+
+def _doc_ids_or_none(value: Any) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    return [str(d) for d in value]
+
+
+def _state_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value in VERIFICATION_STATES else None
+
+
+def export_row(row: dict[str, Any]) -> dict[str, Any]:
+    """One result row reduced to the exportable fields."""
+    finish = row.get("finish_reason")
+    citations = row.get("citations")
+    indices = row.get("inferred_indices")
+    return {
+        "id": str(row.get("id")),
+        "repeat": row.get("repeat") if is_count(row.get("repeat")) else 1,
+        "query_class": str(row.get("query_class")),
+        "expected_behavior": str(row.get("expected_behavior")),
+        "verdict": row.get("verdict") if row.get("verdict") in ("pass", "fail", "error") else "error",
+        "failures": [export_failure_label(str(f)) for f in row.get("failures") or []],
+        "warns": [_export_warn_label(str(w)) for w in row.get("warns") or []],
+        "verification_state": _state_or_none(row.get("verification_state")),
+        "expected_verification_state": _state_or_none(row.get("expected_verification_state")),
+        "finish_reason": (None if finish is None
+                          else finish if finish in _FINISH_REASONS else "other"),
+        "path": row.get("path") if row.get("path") in ("llm", "zero_hits") else None,
+        "why": why_mode(row),
+        "citations_n": len(citations) if isinstance(citations, list) else None,
+        "citations_inferred": _bool_or_none(row.get("citations_inferred")),
+        "inferred_n": len(indices) if isinstance(indices, list) else None,
+        "script_review_required": _bool_or_none(row.get("script_review_required")),
+        "abstention_zeroed": _bool_or_none(row.get("abstention_zeroed")),
+        **{key: _count_or_none(row.get(key)) for key in (
+            "prompt_tokens", "completion_tokens", "reasoning_tokens", "total_tokens",
+            "elapsed_ms", "ttft_ms", "llm_ms", "client_first_token_ms")},
+        "decode_tps": _number_or_none(row.get("decode_tps")),
+        "gold_retrieved": _bool_or_none(row.get("gold_retrieved")),
+        "expected_doc_ids": _doc_ids_or_none(row.get("expected_doc_ids")),
+        "hit_doc_ids": _doc_ids_or_none(row.get("hit_doc_ids")),
+        "cited_doc_ids": _doc_ids_or_none(row.get("cited_doc_ids")),
+        "citation_precision": _number_or_none(row.get("citation_precision")),
+        "citation_recall": _number_or_none(row.get("citation_recall")),
+        "coverage": row.get("coverage") if row.get("coverage") in COVERAGE_STATES else None,
+        "expected_served": _count_or_none(row.get("expected_served")),
+    }
+
+
+def build_export(report: dict[str, Any], evaluator_git_sha: str, timestamp: str) -> dict[str, Any]:
+    """The whole export: the manifest's aggregate blocks plus text-free rows.
+
+    `metrics` is the report's own block with two exceptions: `by_failure` is
+    recounted from the exported labels (a bucket of free text becomes
+    "other"), and `by_complexity` keys outside the fixed label shape become
+    "other". The agent URL is left out (it may name a site host)."""
+    results = report["results"]
+    rows = [export_row(row) for row in results]
+    metrics = json.loads(json.dumps(report["metrics"]))
+    by_failure: Counter = Counter()
+    for raw, exported in zip(results, rows, strict=True):
+        if raw.get("verdict") in ("pass", "fail"):
+            by_failure.update(exported["failures"])
+    metrics["by_failure"] = dict(sorted(by_failure.items()))
+    complexity: dict[str, dict[str, int]] = {}
+    for key, block in (metrics.get("by_complexity") or {}).items():
+        target = complexity.setdefault(key if _LABEL_RE.fullmatch(key) else "other",
+                                       {"n": 0, "pass": 0})
+        target["n"] += block["n"]
+        target["pass"] += block["pass"]
+    metrics["by_complexity"] = complexity
+    params = {key: value for key, value in report["params"].items() if key != "agent_url"}
+    coverage = report.get("coverage")
+    if coverage is not None:
+        coverage = dict(coverage)
+        for key in ("build_id", "build_id_end"):
+            value = coverage.get(key)
+            coverage[key] = value if isinstance(value, str) and _BUILD_ID_RE.fullmatch(value) else None
+    return {
+        "schema": EXPORT_SCHEMA,
+        "timestamp": timestamp,
+        "evaluator_git_sha": evaluator_git_sha,
+        "params": params,
+        "metrics": metrics,
+        "healthz": (report.get("deployment") or {}).get("healthz"),
+        "representation": report.get("representation"),
+        "coverage": coverage,
+        "rows": rows,
+    }
+
+
 def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, Any]) -> None:
     """Human-readable markdown summary: metrics table + every failure with
     its detail so the report is self-contained."""
@@ -1121,10 +1480,25 @@ def main(argv: list[str] | None = None) -> int:
                              "report the per-metric spread; more than one pass is a sweep and "
                              "needs an explicit non-holdout --golden under VENUE=rc "
                              "(default 1)")
+    parser.add_argument("--endpoint", choices=("answer", "chat"), default="answer",
+                        help="answer: POST /v1/answer (default). chat: each question as a "
+                             "single-turn POST /v1/chat, the route the Open WebUI Pipe calls; "
+                             "needs --stream, because the Pipe streams (issue #1191)")
+    parser.add_argument("--coverage", action="store_true",
+                        help="page GET /v1/sources once, record its build_id and mark per row "
+                             "whether all, some or none of expected_doc_ids are served; a 503 "
+                             "or an older agent is 'unknown', never a failure")
+    parser.add_argument("--export", type=Path, default=None,
+                        help="text-free JSON for leaving an air-gapped site: params, metrics, "
+                             "health, coverage and per-row ids, labels, counts and timings; "
+                             "no question, answer, citation or failure text")
     args = parser.parse_args(argv)
     if args.stream and args.agent_url is None:
         parser.error("--stream needs --agent-url: the in-process client buffers the response, "
                      "so its first-token time would be the total time")
+    if args.endpoint == "chat" and not args.stream:
+        parser.error("--endpoint chat streams like the Open WebUI Pipe: add --stream "
+                     "(which needs --agent-url)")
     if args.subset is not None and args.all:
         parser.error("--subset and --all are exclusive")
 
@@ -1187,19 +1561,32 @@ def main(argv: list[str] | None = None) -> int:
             stack.callback(logging.getLogger("agent").removeHandler, capture)
             client = stack.enter_context(TestClient(app_mod.app))
             signals = capture.signals
+        coverage: dict[str, Any] | None = None
+        build_id_end: str | None = None
+        if args.coverage:
+            coverage = (fetch_coverage(client) if health_error is None
+                        else _coverage("unknown", "not_run", None, 0))
+            print(f"[*] coverage: {coverage['status']} ({coverage['reason'] or 'complete'}), "
+                  f"{coverage['pages']} page(s), {len(coverage['doc_ids'])} served doc id(s)",
+                  file=sys.stderr)
         if health_error is not None:
             print(f"FAIL: {health_error}", file=sys.stderr)
             results = [dict(entry, temperature=args.temperature, verdict="error",
                             failures=[health_error], elapsed_ms=0) for _, entry in passes]
+            if coverage is not None:
+                for row, (_, entry) in zip(results, passes, strict=True):
+                    apply_coverage(row, entry, coverage)
         else:
             for i, (number, entry) in enumerate(passes, 1):
                 pool = _fetch_pool(client, entry["query"])
                 row = run_query(
                     client, entry, signals, pool, temperature=args.temperature,
-                    stream=args.stream,
+                    stream=args.stream, endpoint=args.endpoint,
                 )
                 if pool is not None:
                     apply_pool_join(row, entry, pool)
+                if coverage is not None:
+                    apply_coverage(row, entry, coverage)
                 if args.repeats > 1:
                     row["repeat"] = number
                 results.append(row)
@@ -1211,6 +1598,9 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 for f in row.get("failures") or []:
                     print(f"        FAIL {f}", file=sys.stderr)
+            if coverage is not None and coverage["status"] == "known":
+                # A build that moved during the run splits the rows between builds.
+                build_id_end = _served_build_id(client)
 
     metrics = summarize(results)
     if args.repeats > 1 and health_error is None:
@@ -1225,6 +1615,9 @@ def main(argv: list[str] | None = None) -> int:
         # Measurement identity (issue #1195): which rows, in which order, how
         # often and over which transport. Ids are hashed, never listed here.
         "transport": "sse" if args.stream else "json",
+        # Issue #1191: which route answered, and whether coverage was read.
+        "endpoint": args.endpoint,
+        "coverage": args.coverage,
         "repeats": args.repeats,
         "sample": {
             "mode": "subset" if args.subset is not None else "all" if args.all else "default",
@@ -1242,12 +1635,27 @@ def main(argv: list[str] | None = None) -> int:
             "servable": health_error is None,
             "outcome": (deployment["healthz"] or {}).get("representation", "unknown"),
         }
+    if coverage is not None:
+        report["coverage"] = coverage_summary(coverage, results, build_id_end)
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
     if args.summary:
         args.summary.parent.mkdir(parents=True, exist_ok=True)
         write_summary(args.summary, results, metrics)
+    if args.export:
+        from mainframe_rag.manifest import get_git_sha
+
+        export = build_export(
+            report,
+            # The evaluator's own checkout, wherever the working directory is.
+            get_git_sha(Path(__file__).resolve().parents[3]),
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        )
+        args.export.parent.mkdir(parents=True, exist_ok=True)
+        args.export.write_text(json.dumps(export, indent=1, ensure_ascii=True) + "\n",
+                               encoding="utf-8")
+        print(f"export written: {len(export['rows'])} row(s), no text fields", file=sys.stderr)
 
     # Trend manifests stay in gitignored evals/runs/. Only in-process runs
     # may use the shared local Settings/Qdrant identity helper.

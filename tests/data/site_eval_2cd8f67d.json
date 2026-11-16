@@ -1,0 +1,193 @@
+{
+ "_comment": "Wire shapes of the 2cd8f67d agent (issue #1191), captured by driving that commit's real app in-process with its own test doubles and a stub model: /healthz, /v1/sources pages (limit 1) and a build without a catalog, and the /v1/answer and /v1/chat SSE streams on the hits, zero-hits and mid-stream failure paths. All values are synthetic test data; no manual text.",
+ "source_sha": "2cd8f67d3c56f6253cf1f7e508b19536e7fc197a",
+ "healthz": {
+  "status": 200,
+  "body": {
+   "status": "ok",
+   "qdrant": true,
+   "embed": null,
+   "representation": "compatible",
+   "rerank": null
+  }
+ },
+ "sources_pages": [
+  {
+   "status": 200,
+   "params": {
+    "limit": 1
+   },
+   "body": {
+    "request_id": "c208af59cba5",
+    "build_id": "00000000-0000-4000-8000-00000000000a",
+    "sources": [
+     {
+      "source_revision": "unknown|||cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "source_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "doc_id": "OTHER-02",
+      "title": "Other Manual",
+      "product": null,
+      "version": null,
+      "chunk_count": 1,
+      "physical_pages": {
+       "first": 5,
+       "last": 5
+      },
+      "page_labels": {
+       "first": null,
+       "last": null
+      },
+      "indexed_pages": 1
+     }
+    ],
+    "next_cursor": "ls1.AAAAAAAAQACAAAAAAAAACo1y6QwJdVdRs9pAm1LbCf8"
+   }
+  },
+  {
+   "status": 200,
+   "params": {
+    "limit": 1,
+    "cursor": "ls1.AAAAAAAAQACAAAAAAAAACo1y6QwJdVdRs9pAm1LbCf8"
+   },
+   "body": {
+    "request_id": "76f6b0078246",
+    "build_id": "00000000-0000-4000-8000-00000000000a",
+    "sources": [
+     {
+      "source_revision": "synthetic|guide|2|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "source_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "doc_id": "SYN-0001-00",
+      "title": "Synthetic Guide",
+      "product": "synthos",
+      "version": "2",
+      "chunk_count": 4,
+      "physical_pages": {
+       "first": 1,
+       "last": 10
+      },
+      "page_labels": {
+       "first": "1",
+       "last": "10"
+      },
+      "indexed_pages": 10
+     }
+    ],
+    "next_cursor": "ls1.AAAAAAAAQACAAAAAAAAACuzSIddnzlRHmaYV3JvIQzs"
+   }
+  },
+  {
+   "status": 200,
+   "params": {
+    "limit": 1,
+    "cursor": "ls1.AAAAAAAAQACAAAAAAAAACuzSIddnzlRHmaYV3JvIQzs"
+   },
+   "body": {
+    "request_id": "0018147de456",
+    "build_id": "00000000-0000-4000-8000-00000000000a",
+    "sources": [
+     {
+      "source_revision": "synthetic|guide|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "doc_id": "SYN-0001-00",
+      "title": "Synthetic Guide",
+      "product": "synthos",
+      "version": "1",
+      "chunk_count": 1,
+      "physical_pages": {
+       "first": 3,
+       "last": 4
+      },
+      "page_labels": {
+       "first": "iii",
+       "last": "iv"
+      },
+      "indexed_pages": 2
+     }
+    ],
+    "next_cursor": null
+   }
+  }
+ ],
+ "answer_hits": {
+  "request": {
+   "query": "Which step runs the synthetic program?",
+   "temperature": 0.0,
+   "stream": true
+  },
+  "status": 200,
+  "content_type": "text/event-stream; charset=utf-8",
+  "raw": "event: token\ndata: {\"type\": \"token\", \"delta\": \"Step two runs the synthetic program [1].\\n\\n\", \"token\": \"Step two runs the synthetic program [1].\\n\\n\"}\n\nevent: token\ndata: {\"type\": \"token\", \"delta\": \"Citations:\\n- SYN-0001-00 Synthetic Reference, Guide > Steps, p. iii\\n\", \"token\": \"Citations:\\n- SYN-0001-00 Synthetic Reference, Guide > Steps, p. iii\\n\"}\n\nevent: final\ndata: {\"type\": \"final\", \"request_id\": \"6e4d0469a4c5\", \"answer\": \"Step two runs the synthetic program [1].\", \"citations\": [\"SYN-0001-00 Synthetic Reference, Guide > Steps, p. iii\"], \"citations_inferred\": false, \"inferred_indices\": [], \"verification_state\": \"accepted\", \"script\": null, \"script_lang\": null, \"script_review_required\": false, \"supplied_evidence\": [{\"index\": 1, \"citation\": \"SYN-0001-00 Synthetic Reference, Guide > Steps, p. iii\", \"duplicate_citation\": false, \"product\": \"z/OS\", \"version\": \"9.9\", \"doc_id\": \"SYN-0001-00\", \"title\": \"Synthetic Reference\", \"heading\": \"Guide > Steps\", \"page_label\": \"iii\", \"pdf_page_start\": null, \"pdf_page_end\": null, \"start_char\": 0, \"end_char\": 36, \"source_chars\": 36, \"truncated_start\": false, \"truncated_end\": false, \"text_clipped\": false, \"text\": \"Step two runs the synthetic program.\"}], \"evidence_omitted\": 0, \"query_kind\": \"semantic\", \"hits\": [{\"chunk_id\": \"abc123\", \"score\": 0.42, \"cite\": \"SYN-0001-00 Synthetic Reference, Guide > Steps, p. iii\", \"heading\": \"Guide > Steps\", \"text\": \"Step two runs the synthetic program.\", \"doc_id\": \"SYN-0001-00\", \"title\": \"Synthetic Reference\", \"page_label\": \"iii\", \"chunk_type\": \"message\", \"message_ids\": [\"IEA500I\"], \"product\": \"z/OS\", \"version\": \"9.9\", \"rerank_score\": null, \"units\": null, \"page_start\": null, \"page_end\": null}], \"finish_reason\": \"stop\", \"ttft_ms\": 30, \"usage\": {\"prompt_tokens\": 900, \"completion_tokens\": 300, \"reasoning_tokens\": 100, \"total_tokens\": 1200}}\n\n"
+ },
+ "chat_hits": {
+  "request": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Which step runs the synthetic program?"
+    }
+   ],
+   "stream": true,
+   "temperature": 0.0
+  },
+  "status": 200,
+  "content_type": "text/event-stream; charset=utf-8",
+  "raw": "data: {\"id\": \"chatcmpl-05e87a6faa8e\", \"object\": \"chat.completion.chunk\", \"created\": 1794780782, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Step two runs the synthetic program [1].\\n\\n\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"chatcmpl-05e87a6faa8e\", \"object\": \"chat.completion.chunk\", \"created\": 1794780782, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Citations:\\n- SYN-0001-00 Synthetic Reference, Guide > Steps, p. iii\\n\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"chatcmpl-05e87a6faa8e\", \"object\": \"chat.completion.chunk\", \"created\": 1794780782, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"\\n\\n**Citations:**\\n- SYN-0001-00 Synthetic Reference, Guide > Steps, p. iii\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"chatcmpl-05e87a6faa8e\", \"object\": \"chat.completion.chunk\", \"created\": 1794780782, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\", \"citations\": [\"SYN-0001-00 Synthetic Reference, Guide > Steps, p. iii\"], \"citations_inferred\": false, \"inferred_indices\": [], \"hits\": [{\"chunk_id\": \"abc123\", \"score\": 0.42, \"cite\": \"SYN-0001-00 Synthetic Reference, Guide > Steps, p. iii\", \"heading\": \"Guide > Steps\", \"text\": \"Step two runs the synthetic program.\", \"doc_id\": \"SYN-0001-00\", \"title\": \"Synthetic Reference\", \"page_label\": \"iii\", \"chunk_type\": \"message\", \"message_ids\": [\"IEA500I\"], \"product\": \"z/OS\", \"version\": \"9.9\", \"rerank_score\": null, \"units\": null, \"page_start\": null, \"page_end\": null}], \"verification_state\": \"accepted\", \"script\": null, \"script_lang\": null, \"script_review_required\": false, \"supplied_evidence\": [{\"index\": 1, \"citation\": \"SYN-0001-00 Synthetic Reference, Guide > Steps, p. iii\", \"duplicate_citation\": false, \"product\": \"z/OS\", \"version\": \"9.9\", \"doc_id\": \"SYN-0001-00\", \"title\": \"Synthetic Reference\", \"heading\": \"Guide > Steps\", \"page_label\": \"iii\", \"pdf_page_start\": null, \"pdf_page_end\": null, \"start_char\": 0, \"end_char\": 36, \"source_chars\": 36, \"truncated_start\": false, \"truncated_end\": false, \"text_clipped\": false, \"text\": \"Step two runs the synthetic program.\"}], \"evidence_omitted\": 0}]}\n\ndata: [DONE]\n\n"
+ },
+ "answer_zero_hits": {
+  "request": {
+   "query": "Which step runs the synthetic program?",
+   "temperature": 0.0,
+   "stream": true
+  },
+  "status": 200,
+  "content_type": "text/event-stream; charset=utf-8",
+  "raw": "event: final\ndata: {\"type\": \"final\", \"request_id\": \"2d5df3384c2e\", \"answer\": \"No supporting manual excerpts were found for this question.\", \"citations\": [], \"citations_inferred\": false, \"inferred_indices\": [], \"verification_state\": \"insufficient_evidence\", \"script\": null, \"script_lang\": null, \"script_review_required\": false, \"supplied_evidence\": [], \"evidence_omitted\": 0, \"query_kind\": \"semantic\", \"hits\": [], \"finish_reason\": \"stop\", \"ttft_ms\": null, \"usage\": {\"prompt_tokens\": 0, \"completion_tokens\": 0, \"reasoning_tokens\": 0, \"total_tokens\": 0}}\n\n"
+ },
+ "chat_zero_hits": {
+  "request": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Which step runs the synthetic program?"
+    }
+   ],
+   "stream": true,
+   "temperature": 0.0
+  },
+  "status": 200,
+  "content_type": "text/event-stream; charset=utf-8",
+  "raw": "data: {\"id\": \"chatcmpl-b4cd41d67237\", \"object\": \"chat.completion.chunk\", \"created\": 1794780782, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"No supporting manual excerpts were found for this question.\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"chatcmpl-b4cd41d67237\", \"object\": \"chat.completion.chunk\", \"created\": 1794780782, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\", \"citations\": [], \"citations_inferred\": false, \"inferred_indices\": [], \"hits\": [], \"verification_state\": \"insufficient_evidence\", \"script\": null, \"script_lang\": null, \"script_review_required\": false, \"supplied_evidence\": [], \"evidence_omitted\": 0}]}\n\ndata: [DONE]\n\n"
+ },
+ "answer_failure": {
+  "request": {
+   "query": "Which step runs the synthetic program?",
+   "temperature": 0.0,
+   "stream": true
+  },
+  "status": 200,
+  "content_type": "text/event-stream; charset=utf-8",
+  "raw": "event: token\ndata: {\"type\": \"token\", \"delta\": \"Step two runs the synthetic program [1].\\n\\n\", \"token\": \"Step two runs the synthetic program [1].\\n\\n\"}\n\nevent: error\ndata: {\"type\": \"error\", \"code\": \"upstream_error\", \"message\": \"stream failed\", \"verification_state\": \"generation_incomplete\"}\n\n"
+ },
+ "chat_failure": {
+  "request": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Which step runs the synthetic program?"
+    }
+   ],
+   "stream": true,
+   "temperature": 0.0
+  },
+  "status": 200,
+  "content_type": "text/event-stream; charset=utf-8",
+  "raw": "data: {\"id\": \"chatcmpl-3ff17b0748f9\", \"object\": \"chat.completion.chunk\", \"created\": 1794780782, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Step two runs the synthetic program [1].\\n\\n\"}, \"finish_reason\": null}]}\n\ndata: {\"error\": {\"code\": \"upstream_error\", \"message\": \"stream failed\"}, \"verification_state\": \"generation_incomplete\"}\n\ndata: [DONE]\n\n"
+ },
+ "sources_no_catalog": {
+  "status": 503,
+  "body": {
+   "code": "sources_unavailable",
+   "message": "the requested sources are not available"
+  }
+ }
+}
