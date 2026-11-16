@@ -1762,8 +1762,10 @@ def test_openwebui_ratings_are_off_by_default_and_change_nothing(owui_chart):
     with open(CHART / "values.yaml", encoding="utf-8") as f:
         assert yaml.safe_load(f)["openwebui"]["ratings"] == {"enabled": False}
     docs = _owui(owui_chart)
+    # The shared prompt files (#1259) ride the same ConfigMap unconditionally.
     assert set(docs["ConfigMap", "rag-openwebui-pipe"]["data"]) == {
-        "docs_pipe.py", "provision_pipe.py", "purge_chats.py"}
+        "docs_pipe.py", "provision_pipe.py", "purge_chats.py",
+        "prompts.json", "provision_prompts.py"}
     env = env_map(docs["Deployment", "rag-openwebui"], "openwebui")
     assert "RAG_ANSWER_REFERENCE" not in env
     assert docs == _owui(owui_chart, {"openwebui": {"ratings": {"enabled": False}}})
