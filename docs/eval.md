@@ -789,8 +789,10 @@ seams the evaluator drives (`Pipe._transport`, `build_request`, `fit_request`,
   evidence hit and rate, zero hits, refusals, verification states, citation
   precision/recall, the structural pass rate, `vs_opener` (kept, lost,
   gained, neither per session), `prior_answer_chars` (how many kept answers
-  exceed the agent's default 1000-character prior-turn cut,
-  `chat_max_prior_turn_chars`, which is not an operator input) and, with
+  exceed the application's default 1000-character prior-turn cut,
+  `chat_max_prior_turn_chars`; the count always uses that default, so an arm
+  that sets the operator input `CHAT_MAX_PRIOR_TURN_CHARS` (#1268) must read it
+  against its own cut) and, with
   `--repeats`, the spread per repeat. An opener that errored gives a turn-2
   error row (`opener not answered`), and a Pipe that cannot build the history
   gives `follow-up history failed`; both are counted, not dropped. The exit
@@ -896,13 +898,13 @@ run H-history4000 chat --all --repeats 2 --turns 2 --follow-up all --arm history
 ```
 
 - `baseline`: all three settings off or at their defaults.
-- `condense`: `CHAT_CONDENSE_ENABLED=true` (an operator input today).
-- `anchored`: `CHAT_FOLLOWUP_ANCHOR_ENABLED=true`, after #1271 (the
-  follow-up handling flags; the name may change there). Skip the arm until
-  the deployed build has it.
-- `history4000`: `CHAT_MAX_PRIOR_TURN_CHARS=4000` with `--prior-cap 4000`,
-  after #1271 makes `chat_max_prior_turn_chars` an operator input (today it
-  has no `airgap.env` key and no chart value). Skip the arm until then.
+- `condense`: `CHAT_CONDENSE_ENABLED=true`.
+- `anchored`: `CHAT_FOLLOWUP_ANCHOR_ENABLED=true` (#1271). Condense and
+  anchoring together are refused at deploy and at startup, so revert
+  condense first. The deployed build must include #1271; an older build
+  has no such setting, so skip the arm there.
+- `history4000`: `CHAT_MAX_PRIOR_TURN_CHARS=4000` with `--prior-cap 4000`
+  (an operator input since #1271; skip the arm on an older build).
   Never pass `--prior-cap` that differs from the deployed value.
 
 Cost: per answer row with expected docs, an arm asks one opener and up to

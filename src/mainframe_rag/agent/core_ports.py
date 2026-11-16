@@ -11,6 +11,10 @@ from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage, ChatResult, Tokenizer, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
 
+# Hits one agent retrieval returns (/v1/search, /v1/answer, /v1/chat and the
+# console); an anchored follow-up's fused legs are cut to it too (#1268).
+RETRIEVAL_HIT_LIMIT = 8
+
 
 @dataclass(frozen=True)
 class RetrievalResult:
@@ -35,6 +39,9 @@ class PromptBuilder[T](Protocol):
         order: Literal["retrieval", "stable_cache"],
         reasoning_effort: str | None = None,
         temperature: float | None = None,
+        # Chat only, and only when the search differs from the message's own
+        # retrieval query (issue #1268); never passed otherwise.
+        search_query: str | None = None,
     ) -> PreparedPrompt: ...
 
 

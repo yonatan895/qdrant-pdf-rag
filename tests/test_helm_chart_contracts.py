@@ -502,12 +502,45 @@ def test_chart_preserves_positive_operator_dimension_and_worker_range():
     ("stream", False, "LLM_STREAM"),
     ("effortTransport", "chat_template", "LLM_EFFORT_TRANSPORT"),
     ("effortTransport", "none", "LLM_EFFORT_TRANSPORT"),
+    ("chatMaxPriorTurnChars", 4000, "CHAT_MAX_PRIOR_TURN_CHARS"),
+    ("chatMaxTurns", 50, "CHAT_MAX_TURNS"),
+    ("followupAnchorEnabled", True, "CHAT_FOLLOWUP_ANCHOR_ENABLED"),
+    ("followupAnchorEnabled", False, "CHAT_FOLLOWUP_ANCHOR_ENABLED"),
 ])
 def test_direct_chart_optional_budget_limits_reach_pod(field, value, environment):
     rendered = run_new_template({"models": {"reasoning": {field: value}}})
     pod = env_map(rendered["Deployment", "rag-agent"])
-    expected = "false" if value is False else str(value)
+    expected = str(value).lower() if isinstance(value, bool) else str(value)
     assert pod[environment]["value"] == expected
+
+
+def test_chat_history_limits_are_optional_pod_inputs_bounded_like_settings():
+    """Issue #1268: the chat history caps are operator inputs. Unset renders
+    neither variable (the default pod keeps the Settings defaults); the schema
+    bounds are exactly the Settings bounds, so a value the chart accepts the
+    pod accepts."""
+    from mainframe_rag.config import Settings
+
+    default = env_map(run_new_template({})["Deployment", "rag-agent"])
+    assert not {"CHAT_MAX_PRIOR_TURN_CHARS", "CHAT_MAX_TURNS", "CHAT_FOLLOWUP_ANCHOR_ENABLED"} & set(default)
+    schema = json.loads((CHART / "values.schema.json").read_text())
+    reasoning = schema["properties"]["models"]["properties"]["reasoning"]["properties"]
+    for field, setting in (("chatMaxPriorTurnChars", "chat_max_prior_turn_chars"),
+                           ("chatMaxTurns", "chat_max_turns")):
+        bounds = {type(m).__name__: m for m in Settings.model_fields[setting].metadata}
+        assert (reasoning[field]["minimum"], reasoning[field]["maximum"]) == (bounds["Ge"].ge, bounds["Le"].le)
+
+
+def test_direct_chart_refuses_condense_and_anchor_together():
+    """Issue #1268: a direct Helm caller cannot render both follow-up modes;
+    either one alone, or anchoring with condensation explicitly off, renders."""
+    result = _helm_template_with_values(set_path(set_path(
+        base_values(), "models.reasoning.condenseEnabled", True), "models.reasoning.followupAnchorEnabled", True))
+    assert result.returncode != 0
+    for one in ({"condenseEnabled": True, "followupAnchorEnabled": False},
+                {"condenseEnabled": False, "followupAnchorEnabled": True}):
+        pod = env_map(run_new_template({"models": {"reasoning": one}})["Deployment", "rag-agent"])
+        assert pod["CHAT_CONDENSE_ENABLED"]["value"] == str(one["condenseEnabled"]).lower()
 
 
 def test_model_request_arguments_reach_the_pod_as_settings_accept_them():
@@ -596,6 +629,10 @@ def test_token_count_source_reaches_the_pod_as_settings_accept_it():
     ("models.reasoning.reasoningEfforts", "low, medium"),
     ("models.reasoning.reasoningEfforts", ""),
     ("models.reasoning.stream", "true"),
+    ("models.reasoning.chatMaxPriorTurnChars", 199), ("models.reasoning.chatMaxPriorTurnChars", 5001),
+    ("models.reasoning.chatMaxPriorTurnChars", "4000"),
+    ("models.reasoning.chatMaxTurns", 0), ("models.reasoning.chatMaxTurns", 51),
+    ("models.reasoning.followupAnchorEnabled", "true"),
     ("models.reasoning.tokenCountSource", "usage"), ("models.reasoning.tokenCountSource", ""),
     ("models.reasoning.tokenCountSource", "Tokenize"),
     ("requestDeadlineSeconds", -1), ("requestDeadlineSeconds", 3601),

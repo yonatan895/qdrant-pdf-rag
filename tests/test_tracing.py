@@ -445,7 +445,7 @@ def test_condense_failure_terminal_log_joins_root(terminal_telemetry, monkeypatc
     async def fail_condense(*args, **kwargs):
         raise RuntimeError("synthetic escaped condense failure")
 
-    monkeypatch.setattr(app_mod, "resolve_search_query", fail_condense)
+    # The chat routes reach condensation through answer_core.plan_search (#1268).
     monkeypatch.setattr(answer_core_mod, "resolve_search_query", fail_condense)
     response = _post_terminal(client, path, stream)
     assert response.status_code == 502

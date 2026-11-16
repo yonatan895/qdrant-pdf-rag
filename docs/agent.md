@@ -167,9 +167,33 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   pruned from prior assistant turns. Follow-up turns condense only when
   `CHAT_CONDENSE_ENABLED=true` (default off): one low-effort reasoning call
   rewrites the latest turn into a standalone search query (last 4 non-system
-  turns, 1000 chars each), bypasses the LLM entirely when the turn already
-  carries a message/member identifier or abend code, and falls back to the raw
-  latest text on any failure. The condensation A/B and its default-flip
+  turns, each cut at `chat_max_prior_turn_chars`), bypasses the LLM entirely
+  when the turn already carries a message/member identifier or abend code, and
+  falls back to the raw latest text on any failure and on an empty rewrite or
+  one whose effective (acronym-expanded) text exceeds `retrieval_query_limit`
+  (#1268). The condensed query drives retrieval and the retrieval-derived
+  prompt decisions (complexity, the resolved-code note, identifier anchoring in
+  packing, the no-hits wording); the question the model reads stays the user's
+  own words, and with condensation off or bypassed the prompt is unchanged.
+  `CHAT_FOLLOWUP_ANCHOR_ENABLED=true` (default off, #1268) instead searches an
+  identifier-free follow-up twice, as written and as the previous user
+  message's retrieval query, with no model call. The two ranked lists
+  interleave literal-first, a chunk found by both keeps its first place, and
+  the result is cut to one retrieval's hit count (8); the query kind is the literal leg's, the leg timings add, and
+  either leg failing is the one retrieval failure. It is skipped on the first
+  turn, when the active message names an identifier or abend code (the
+  condensation bypass), when either message screens as a trap, or when both
+  search the same text. The retrieval-derived prompt decisions read both
+  searched texts (antecedent first), as they read a condensed query:
+  complexity (system-prompt extension, effort, budgets), the resolved-code
+  note (it may name an antecedent code, e.g. `SAFB = AFB`), identifier
+  anchoring in packing, and the no-hits wording (it may name an antecedent
+  identifier). The question stays the literal follow-up; the antecedent's
+  manuals are fresh evidence, prior turns stay context.
+  Condensation and anchoring are exclusive: Settings refuses both true at
+  startup with a fixed message, and the mapper, preflight and chart schema
+  refuse the pair first. A follow-up's chat root span carries
+  `rag.followup_mode` = `literal` | `condensed` | `anchored` (never text). The condensation A/B and its default-flip
   decision live in `docs/eval.md` (`sh scripts/tools/run-task.sh eval:chat`).
 - `GET /ui` — operator console (ADR-0004), a thin adapter over the same core:
   Jinja2 shell + HTMX form/fragment + SSE stream (`/ui/chat`, `/ui/chat/stream`,
@@ -221,8 +245,8 @@ before any retrieval), retrieves under the root span (same `502` as
 search), classifies complexity, short-circuits empty hits (§3), builds the
 prompt, and either chats once (JSON) or streams (SSE). `chat` runs the same
 assertion and retrieval (hardcoded `limit=8` for both endpoints), resolving
-the follow-up search query through `resolve_search_query` first so the
-condense gate cannot be honored on one path only. Both console routes run
+the follow-up search through `plan_search` / `retrieve_planned` first so the
+condensation and anchoring gates cannot be honored on one path only. Both console routes run
 this chat path through `prepare_chat_core` (issue #985): the form maps core
 faults like chat JSON, the stream shares the answer/chat SSE loop, and a fault
 records the same outcome and log level on every chat route. The SSE generators hold
@@ -1055,8 +1079,9 @@ readers:
 | `prompt_max_chunk_chars` / `prompt_max_chunk_chars_complex` | 4000 / 4000 | per-type packing caps |
 | `query_max_chars` / `splunk_context_max_chars` | 2000 / 4000 (truncate+suffix) | `/v1/search` query and `product`/`version` length guard (422); on answer and chat the longest message searched as written ([long messages](#long-messages)) / prompt packing |
 | `chat_condense_enabled` | `false` | follow-up condensation gate (`resolve_search_query`) |
+| `chat_followup_anchor_enabled` | `false` | antecedent-anchored follow-up retrieval (`plan_search`, #1268); operator input `CHAT_FOLLOWUP_ANCHOR_ENABLED`, exclusive with condensation |
 | `chat_max_body_chars` | 131072 (422, message states the limit) | request-size guard for `/v1/answer`, `/v1/chat` and `/ui` (abuse protection; shared `chat_body_chars` helper); the Pipe valve `MAX_BODY_CHARS` must match |
-| `chat_max_turns` / `chat_max_prior_turn_chars` | 10 / 1000 | chat history packing caps |
+| `chat_max_turns` / `chat_max_prior_turn_chars` | 10 / 1000 | chat history packing caps; operator inputs `CHAT_MAX_TURNS` / `CHAT_MAX_PRIOR_TURN_CHARS` (#1268; unset renders no variable) |
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
 | `llm_base_url` / `llm_model_reasoning` / `llm_api_key` | unset (answer stays disabled; key unset = keyless) | per-request assertion, LLM client, tokenizer |
 | `answer_timeout_s` | 300.0 | reasoning client wait per model I/O (not a total on a stream; a buffered caller still gets a total), expiry is `504 model_timeout`; no transport retries, explicit fallback policy below; budgets in §6 |
@@ -1765,7 +1790,9 @@ passthrough, the platform-gateway shape for the estimator-only lane (#1193);
 `GATEWAY_SHAPE=site` (#1195) also omits it and drops the argument allow-list.
 
 The Helm operator input `CHAT_CONDENSE_ENABLED` maps to
-`models.reasoning.condenseEnabled`; both default to false. Explicit local
+`models.reasoning.condenseEnabled`; both default to false. `CHAT_MAX_TURNS` and
+`CHAT_MAX_PRIOR_TURN_CHARS` map to `models.reasoning.chatMaxTurns` and
+`chatMaxPriorTurnChars` and render only when set (#1268). Explicit local
 follow-up acceptance is described in [the real-corpus runbook](local-real-corpus.md).
 
 
