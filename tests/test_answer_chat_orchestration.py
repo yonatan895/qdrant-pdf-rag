@@ -243,6 +243,11 @@ def start(monkeypatch, synthetic_pdf, servable_representation_gate):
     with contextlib.ExitStack() as stack:
 
         def run(scenario):
+            # The goldens predate #1274's `auto` default, whose warn-only
+            # lifespan check probes the fake gateway and logs one line. The
+            # explicit old source reproduces them byte for byte; the check
+            # itself is pinned in tests/test_tokenizer.py.
+            monkeypatch.setenv("LLM_TOKEN_COUNT_SOURCE", "tokenize")
             timeline = stack.enter_context(_timeline(monkeypatch))
             llm = _scenario(monkeypatch, scenario)
             client = stack.enter_context(

@@ -219,8 +219,11 @@ requests. Do not overlap probes with single-sequence interactive reasoning.
 For pronoun-only follow-ups such as "What is the purpose of that parameter?",
 explicitly set `CHAT_CONDENSE_ENABLED=true` in this local profile's protected
 operator inputs and redeploy. Helm maps it to
-`models.reasoning.condenseEnabled`. The application/chart default remains false;
-with it off, retrieval uses the latest question literally. Enabling it adds a
+`models.reasoning.condenseEnabled`. The application/chart default remains false.
+With it off, a follow-up is searched as written and, by default since #1274,
+also as the previous user message (`CHAT_FOLLOWUP_ANCHOR_ENABLED`, no model
+call). Setting condensation true with the anchor unset turns anchoring off;
+setting both true is refused. Enabling condensation adds a
 reasoning call and needs its own latency/quality acceptance; a fallback to the
 raw question can still produce insufficient evidence.
 

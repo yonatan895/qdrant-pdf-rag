@@ -319,13 +319,13 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "llm_token_safety_margin": 128,
     "llm_max_chunk_tokens_narrative": 1200,
     "llm_tokenize_timeout_s": 5.0,
-    "llm_token_count_source": "tokenize",  # #1266: today's /tokenize-then-estimator
+    "llm_token_count_source": "auto",  # #1274, was tokenize (#1266)
     "llm_stream": False,
     "chat_condense_enabled": False,
-    "chat_followup_anchor_enabled": False,
+    "chat_followup_anchor_enabled": True,  # #1274, was False (#1268)
     "chat_max_body_chars": 131072,
     "chat_max_turns": 10,
-    "chat_max_prior_turn_chars": 1000,
+    "chat_max_prior_turn_chars": 4000,  # #1274, was 1000
     "ui_enabled": False,
     "feedback_enabled": False,
     "feedback_url": None,
@@ -575,13 +575,53 @@ def test_two_cpu_quota_bounds_the_default_not_an_explicit_count(tmp_path, monkey
     assert resolve_workers(None, Settings(_env_file=None)) == 8
 
 
+@pytest.mark.parametrize("source", ["env", "kwargs"])
+def test_explicit_condensation_turns_the_anchor_default_off(monkeypatch, source):
+    """Issue #1274: anchoring is on by default, so a deployment that sets
+    only CHAT_CONDENSE_ENABLED=true (as before #1274) keeps starting and
+    condenses; the anchor default yields to the explicit condense. Only an
+    explicit pair is refused (next test)."""
+    monkeypatch.delenv("CHAT_FOLLOWUP_ANCHOR_ENABLED", raising=False)
+    if source == "env":
+        monkeypatch.setenv("CHAT_CONDENSE_ENABLED", "true")
+        settings = Settings(_env_file=None)
+    else:
+        monkeypatch.delenv("CHAT_CONDENSE_ENABLED", raising=False)
+        settings = Settings(_env_file=None, chat_condense_enabled=True)
+    assert (settings.chat_condense_enabled, settings.chat_followup_anchor_enabled) == (True, False)
+    # An explicit anchor=false beside condense is the same state, not a conflict.
+    monkeypatch.setenv("CHAT_CONDENSE_ENABLED", "true")
+    monkeypatch.setenv("CHAT_FOLLOWUP_ANCHOR_ENABLED", "false")
+    settings = Settings(_env_file=None)
+    assert (settings.chat_condense_enabled, settings.chat_followup_anchor_enabled) == (True, False)
+    # Condense explicitly off leaves the anchor default on.
+    monkeypatch.setenv("CHAT_CONDENSE_ENABLED", "false")
+    monkeypatch.delenv("CHAT_FOLLOWUP_ANCHOR_ENABLED")
+    settings = Settings(_env_file=None)
+    assert (settings.chat_condense_enabled, settings.chat_followup_anchor_enabled) == (False, True)
+
+
+def test_explicit_condensation_from_an_env_file_turns_the_anchor_default_off(tmp_path, monkeypatch):
+    """The same rule through the dotenv source (a local profile's file)."""
+    monkeypatch.delenv("CHAT_CONDENSE_ENABLED", raising=False)
+    monkeypatch.delenv("CHAT_FOLLOWUP_ANCHOR_ENABLED", raising=False)
+    env = tmp_path / ".env"
+    env.write_text("CHAT_CONDENSE_ENABLED=true\n", encoding="utf-8")
+    settings = Settings(_env_file=env)
+    assert (settings.chat_condense_enabled, settings.chat_followup_anchor_enabled) == (True, False)
+    env.write_text("CHAT_CONDENSE_ENABLED=true\nCHAT_FOLLOWUP_ANCHOR_ENABLED=true\n", encoding="utf-8")
+    with pytest.raises(ValidationError) as exc:
+        Settings(_env_file=env)
+    assert CHAT_FOLLOWUP_MODES_CONFLICT in str(exc.value)
+
+
 def test_condensation_and_anchoring_cannot_both_be_enabled(monkeypatch):
     """Issue #1268: the two follow-up modes are exclusive arms of one A/B;
-    both on refuses at startup with a fixed message (the mapper and chart
-    refuse the same pair before a pod starts)."""
+    both explicitly on refuses at startup with a fixed message (the mapper
+    and chart refuse the same pair before a pod starts)."""
     from pydantic import ValidationError
 
-    assert Settings(_env_file=None).chat_followup_anchor_enabled is False
+    assert Settings(_env_file=None).chat_followup_anchor_enabled is True  # #1274
     assert Settings(_env_file=None, chat_followup_anchor_enabled=True).chat_condense_enabled is False
     monkeypatch.setenv("CHAT_CONDENSE_ENABLED", "true")
     monkeypatch.setenv("CHAT_FOLLOWUP_ANCHOR_ENABLED", "true")

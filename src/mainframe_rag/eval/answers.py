@@ -2140,8 +2140,9 @@ def main(argv: list[str] | None = None) -> int:
                              "output as before)")
     parser.add_argument("--prior-cap", type=_prior_cap, default=None,
                         help="with --follow-up: the deployed CHAT_MAX_PRIOR_TURN_CHARS as the "
-                             "operator declares it (the agent does not report it); default 1000, "
-                             "the agent default (recorded in params)")
+                             "operator declares it (the agent does not report it); default "
+                             f"{Settings.model_fields['chat_max_prior_turn_chars'].default}, the "
+                             "agent default (recorded in params)")
     args = parser.parse_args(argv)
     if args.stream and args.agent_url is None:
         parser.error("--stream needs --agent-url: the in-process client buffers the response, "

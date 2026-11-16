@@ -396,22 +396,27 @@ class Settings(BaseSettings):
     # auto: /tokenize until it is pinned as not served, then completion_usage
     # under its own pin rules, chosen per count (a warn-only startup check
     # names the source); both pinned is the estimator. estimate: never ask the
-    # server. Every count is bounded by LLM_TOKENIZE_TIMEOUT_S.
-    llm_token_count_source: TokenCountSource = Field(default="tokenize")
+    # server. Every count is bounded by LLM_TOKENIZE_TIMEOUT_S. Default auto
+    # since #1274 (was tokenize): where /tokenize is served nothing changes;
+    # where it is not, each verified count is one 1-token completion call.
+    llm_token_count_source: TokenCountSource = Field(default="auto")
     llm_stream: bool = Field(default=False, description="Stream chat completions to measure TTFT")
 
     # Multi-turn chat engine and operator console
     chat_condense_enabled: bool = False
-    # Antecedent-anchored follow-up retrieval (issue #1268, default off): an
-    # identifier-free chat follow-up is also searched as the previous user
-    # message, with no model call. Exclusive with condensation.
-    chat_followup_anchor_enabled: bool = False
+    # Antecedent-anchored follow-up retrieval (issue #1268; default on since
+    # #1274): an identifier-free chat follow-up is also searched as the
+    # previous user message, with no model call. Exclusive with condensation:
+    # an explicit CHAT_CONDENSE_ENABLED=true turns this default off, and only
+    # both set true explicitly is refused (_one_follow_up_mode).
+    chat_followup_anchor_enabled: bool = True
     # Request-size guard for /v1/answer, /v1/chat and /ui (issue #1192): abuse
     # protection only, the one length refusal on those paths. The Open WebUI
     # Pipe valve MAX_BODY_CHARS must carry the same value.
     chat_max_body_chars: int = Field(default=131072, ge=1000, le=1048576)
     chat_max_turns: int = Field(default=10, ge=1, le=50)
-    chat_max_prior_turn_chars: int = Field(default=1000, ge=200, le=5000)
+    # Characters kept of each prior chat message (#1268; 4000 since #1274, was 1000).
+    chat_max_prior_turn_chars: int = Field(default=4000, ge=200, le=5000)
     ui_enabled: bool = False
 
     # Console answer feedback (issue #780). Off by default: no record, no
@@ -563,8 +568,16 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _one_follow_up_mode(self) -> Settings:
+        """One follow-up mode (#1268). Anchoring is on by default (#1274), so
+        an explicit condense with the anchor left unset turns the anchor
+        default off: a deployment that enabled condensation before #1274
+        keeps starting and condensing. Both set true explicitly is refused.
+        Every source (init, environment, dotenv) marks a field it supplies as
+        set, so `model_fields_set` tells a default from an explicit value."""
         if self.chat_condense_enabled and self.chat_followup_anchor_enabled:
-            raise ValueError(CHAT_FOLLOWUP_MODES_CONFLICT)
+            if "chat_followup_anchor_enabled" in self.model_fields_set:
+                raise ValueError(CHAT_FOLLOWUP_MODES_CONFLICT)
+            object.__setattr__(self, "chat_followup_anchor_enabled", False)
         return self
 
     @model_validator(mode="after")

@@ -1517,6 +1517,27 @@ sh scripts/tools/run-task.sh airgap:smoke
   forced re-ingest if data is ever damaged), keep A's workspace and
   `airgap.env` for step 4, and confirm A's image tags are still in the
   registry (registry tag expiry would break step 4).
+<a id="upgrade-1274-defaults"></a>
+- **Behaviour changes from #1274 (answer-quality defaults on).** No
+  re-ingest. Each change is one `airgap.env` line to keep the old behaviour,
+  with no new release ([deploy.md](deploy.md#default-changes-1274) owns the
+  details):
+
+  | Setting | New default | Keep the old behaviour |
+  |---|---|---|
+  | Follow-up anchoring: an identifier-free follow-up is also searched as the previous user message | on | `CHAT_FOLLOWUP_ANCHOR_ENABLED=false` |
+  | Characters kept of each prior chat message | 4000 | `CHAT_MAX_PRIOR_TURN_CHARS=1000` |
+  | Prompt count source | `auto` | `LLM_TOKEN_COUNT_SOURCE=tokenize` |
+  | Open WebUI ratings | on wherever the feedback store is on (`FEEDBACK_ENABLED=true`; the store stays opt-in) | `OPENWEBUI_RATINGS_ENABLED=false` |
+
+  - `CHAT_CONDENSE_ENABLED=true` with the anchor unset keeps condensing: it
+    turns the anchoring default off. Both set true is refused.
+  - **Quota:** where the gateway does not serve `/tokenize`, `auto` adds
+    about one short gateway call per answer (a 1-token completion that counts
+    the prompt). Confirm the reasoning key's rate limit and quota allow it
+    before the upgrade, or keep `LLM_TOKEN_COUNT_SOURCE=tokenize`. Step 0 of
+    the [site eval](eval.md#at-a-site) (`probe_gateway.py --probe-count`)
+    shows which source this gateway uses.
 - **Keep the `ingest-work` PVC.** It holds the ingest inventory; a later
   ingest against the live generation without it refuses ("fails verification
   … operator intervention required").

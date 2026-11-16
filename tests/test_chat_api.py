@@ -272,8 +272,18 @@ def test_chat_configured_xhigh_reaches_model(chat_client, monkeypatch, path, str
         assert response.json()["choices"][0]["finish_reason"] == "stop"
 
 
-def test_build_chat_messages_pruning_and_cap():
-    huge_prev_answer = "Here is the explanation.\n" + ("x" * 2000) + "\nRetrieved manual excerpts:\n[1] Chunk\n[2] Chunk2"
+@pytest.mark.parametrize("cut", [None, 1000, 4000])
+def test_build_chat_messages_pruning_and_cap(cut):
+    """Prior turns are pruned of pasted excerpts and cut at
+    chat_max_prior_turn_chars: the default (None: 4000 since #1274, the
+    Settings default also without Settings), or an explicit value; an
+    explicit 1000 is the cut before #1274."""
+    from mainframe_rag.config import Settings
+
+    settings = None if cut is None else Settings(_env_file=None, chat_max_prior_turn_chars=cut)
+    limit = Settings.model_fields["chat_max_prior_turn_chars"].default if cut is None else cut
+    assert limit in (1000, 4000)
+    huge_prev_answer = "Here is the explanation.\n" + ("x" * 5000) + "\nRetrieved manual excerpts:\n[1] Chunk\n[2] Chunk2"
     past_messages = [
         ChatMessage(role="user", content="Explain IEA500I"),
         ChatMessage(
@@ -283,7 +293,7 @@ def test_build_chat_messages_pruning_and_cap():
         ChatMessage(role="user", content="How do I resolve it?"),
     ]
     hits = [_hit()]
-    prepared = build_chat_messages(past_messages, hits)
+    prepared = build_chat_messages(past_messages, hits, settings=settings)
     assembled = prepared.messages
 
     assert len(assembled) == 4  # system, user (prior), assistant (prior), user (active)
@@ -298,7 +308,7 @@ def test_build_chat_messages_pruning_and_cap():
     assert "Retrieved manual excerpts:" not in assembled[2].content
     # Verify history was capped
     assert "[history truncated]" in assembled[2].content
-    assert len(assembled[2].content) <= 1100
+    assert assembled[2].content == huge_prev_answer[:limit] + " ... [history truncated]"
 
     # Active user message contains the fresh excerpts
     assert assembled[3].role == "user"
@@ -349,14 +359,15 @@ def _condense_settings(**overrides):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("cut", [None, 2500])
+@pytest.mark.parametrize("cut", [None, 1000, 2500])
 async def test_condense_query_cuts_prior_turns_at_the_history_setting(cut):
     """Issue #1268: condensation cuts each prior turn at
-    `chat_max_prior_turn_chars` (default 1000), the same cap the answer
-    prompt applies, so the `history4000` arm reaches the rewrite too."""
+    `chat_max_prior_turn_chars` (default 4000 since #1274, was 1000), the
+    same cap the answer prompt applies, so a history arm reaches the rewrite
+    too."""
     settings = _condense_settings(**({} if cut is None else {"chat_max_prior_turn_chars": cut}))
-    expected = 1000 if cut is None else cut
-    prior = "".join(chr(ord("a") + i % 26) for i in range(4000))
+    expected = 4000 if cut is None else cut
+    prior = "".join(chr(ord("a") + i % 26) for i in range(6000))
     llm = _RewriteLLM("rewritten query")
     messages = [
         ChatMessage(role="user", content=prior),
@@ -423,6 +434,10 @@ def test_condensed_query_drives_packing_while_the_model_sees_the_literal_message
     from mainframe_rag.agent.answer import SYSTEM_PROMPT, SYSTEM_PROMPT_COMPLEX_EXTENSION
 
     monkeypatch.setattr(app_mod.settings, "chat_condense_enabled", condense)
+    # The condense A/B against the literal search (before #1274): anchoring,
+    # on by default since #1274, is pinned off (a patched attribute skips the
+    # Settings rule that turns it off beside an explicit condense).
+    monkeypatch.setattr(app_mod.settings, "chat_followup_anchor_enabled", False)
     rewrite = "abend SAFB recovery procedure"
     original_chat = chat_client.fake_llm.chat
 
@@ -488,6 +503,10 @@ def test_condensed_no_hits_wording_names_what_retrieval_searched(chat_client, mo
     the core already documents (#1192): a condensed follow-up that named an
     identifier says which one carried no excerpts."""
     monkeypatch.setattr(app_mod.settings, "chat_condense_enabled", True)
+    # The condense A/B against the literal search (before #1274): anchoring,
+    # on by default since #1274, is pinned off (a patched attribute skips the
+    # Settings rule that turns it off beside an explicit condense).
+    monkeypatch.setattr(app_mod.settings, "chat_followup_anchor_enabled", False)
     chat_client.mock_search.return_hits = False
     payload = {"messages": [*_PRIOR_TURNS, {"role": "user", "content": "How do I fix that?"}]}
     body = chat_client.post("/v1/chat", json=payload).json()
@@ -499,15 +518,19 @@ def test_condensed_no_hits_wording_names_what_retrieval_searched(chat_client, mo
 
 
 @pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("anchor", [False, True])
+@pytest.mark.parametrize("anchor", [False, True, None], ids=["off", "on", "default"])
 def test_chat_follow_up_anchoring_searches_the_previous_user_message(
     chat_client, monkeypatch, anchor, stream
 ):
     """Issue #1268: with CHAT_FOLLOWUP_ANCHOR_ENABLED, /v1/chat searches an
     identifier-free follow-up as written and as the previous user message (no
     model call); off, it searches the follow-up only. The question the model
-    reads is the literal follow-up either way."""
-    monkeypatch.setattr(app_mod.settings, "chat_followup_anchor_enabled", anchor)
+    reads is the literal follow-up either way. Unset (None) is on since #1274."""
+    if anchor is None:
+        assert app_mod.settings.chat_followup_anchor_enabled is True
+        anchor = True
+    else:
+        monkeypatch.setattr(app_mod.settings, "chat_followup_anchor_enabled", anchor)
     active = "What should the operator do next?"
     result = chat_client.post("/v1/chat", json={
         "messages": [*_PRIOR_TURNS, {"role": "user", "content": active}], "stream": stream})
@@ -639,6 +662,10 @@ def test_chat_condensation_uses_only_history_before_normalized_user(
     chat_client, monkeypatch, mode, stream
 ):
     monkeypatch.setattr(app_mod.settings, "chat_condense_enabled", mode != "off")
+    # The condense A/B against the literal search (before #1274): anchoring,
+    # on by default since #1274, is pinned off (a patched attribute skips the
+    # Settings rule that turns it off beside an explicit condense).
+    monkeypatch.setattr(app_mod.settings, "chat_followup_anchor_enabled", False)
     original_chat = chat_client.fake_llm.chat
 
     def chat(messages, **kwargs):

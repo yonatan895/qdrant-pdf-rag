@@ -87,6 +87,7 @@ MAXIMAL_INPUT = {
     "OPENWEBUI_OIDC_PROVIDER_URL": "https://idp.example.invalid/.well-known/openid-configuration",
     "OPENWEBUI_OIDC_CLIENT_ID": "client", "OPENWEBUI_OIDC_ALLOWED_ROLES": "users",
     "OPENWEBUI_OIDC_ADMIN_ROLES": "admins", "OPENWEBUI_IDP_EGRESS_CIDRS": "192.0.2.0/24",
+    "OPENWEBUI_RATINGS_ENABLED": "true",
     "LLM_BASE_URL": "http://llm.example.invalid/v1", "LLM_MODEL_REASONING": "reasoner",
     "CHAT_CONDENSE_ENABLED": "true", "CHAT_MAX_TURNS": "10", "CHAT_MAX_PRIOR_TURN_CHARS": "1000",
     "CHAT_FOLLOWUP_ANCHOR_ENABLED": "false",

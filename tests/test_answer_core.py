@@ -565,15 +565,39 @@ async def test_anchored_excerpt_is_supplied_evidence_an_answer_can_cite(order, e
 
 
 @pytest.mark.anyio
-async def test_anchoring_off_by_default_keeps_one_literal_retrieval():
+async def test_anchoring_explicitly_off_keeps_one_literal_retrieval_and_the_old_prompt():
+    """Issue #1274: CHAT_FOLLOWUP_ANCHOR_ENABLED=false is the behaviour before
+    the default flip: one literal retrieval, and the follow-up is
+    searched as written only."""
     search = _LegSearch({_FOLLOW_UP: [_anchor_hit("L1", "DOC-L")]})
     llm = CoreFakeLLM()
-    deps = _deps(_settings(), llm, search)
+    deps = _deps(_settings(chat_followup_anchor_enabled=False), llm, search)
     source = AnswerCoreInput(query=_FOLLOW_UP, messages=_follow_up_messages(), is_chat=True)
     assert (await plan_search(source, deps)).mode == "literal"
     output = await execute_answer_core(source, deps)
     assert search.queries == [_FOLLOW_UP]
     assert [h.chunk_id for h in output.hits] == ["L1"]
+
+
+@pytest.mark.anyio
+async def test_anchoring_is_on_by_default():
+    """Issue #1274: with no setting, an identifier-free follow-up is searched
+    as written and as the previous user message, exactly as an explicit
+    CHAT_FOLLOWUP_ANCHOR_ENABLED=true does (same plan, legs and prompt)."""
+    results = []
+    for settings in (_settings(), _settings(chat_followup_anchor_enabled=True)):
+        search = _LegSearch({_FOLLOW_UP: [_anchor_hit("L1", "DOC-L")],
+                             _OPENER: [_anchor_hit("A1", "DOC-A")]})
+        llm = CoreFakeLLM()
+        deps = _deps(settings, llm, search)
+        source = AnswerCoreInput(query=_FOLLOW_UP, messages=_follow_up_messages(), is_chat=True)
+        plan = await plan_search(source, deps)
+        output = await execute_answer_core(source, deps)
+        results.append((plan, search.queries, [h.chunk_id for h in output.hits],
+                        [(m.role, m.content) for m in llm.calls[-1]["messages"]]))
+    assert results[0][0].mode == "anchored"
+    assert results[0][1] == [_FOLLOW_UP, _OPENER]
+    assert results[0] == results[1]
 
 
 @pytest.mark.anyio

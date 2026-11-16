@@ -256,16 +256,24 @@ def test_chat_and_answer_rows_agree_on_the_same_model_output(
 
 
 
-@pytest.mark.parametrize(("condense", "gold_hit"), [
-    pytest.param("false", False, id="off"), pytest.param("true", True, id="on")])
+@pytest.mark.parametrize(("env", "gold_hit"), [
+    # Both modes off: the behaviour before #1274's default flip.
+    pytest.param({"CHAT_CONDENSE_ENABLED": "false", "CHAT_FOLLOWUP_ANCHOR_ENABLED": "false"}, False,
+                 id="off"),
+    # Condense on with the anchor unset (#1274): the anchor default yields.
+    pytest.param({"CHAT_CONDENSE_ENABLED": "true"}, True, id="on"),
+    # Nothing set (#1274): anchored, the opener is searched as a second leg.
+    pytest.param({}, True, id="default-anchored"),
+])
 def test_two_turn_evidence_follows_the_real_agents_condense_setting(
-    monkeypatch, servable_representation_gate, condense, gold_hit,
+    monkeypatch, servable_representation_gate, env, gold_hit,
 ):
     """Through the real app (#1268): the agent accepts the Pipe-shaped turn-2
-    body, and the follow-up's evidence hit moves with CHAT_CONDENSE_ENABLED
+    body, and the follow-up's evidence hit moves with the follow-up mode
     because it is read from what the agent packed. The search double returns
     the gold doc only for a query that names the message id; the model double
-    condenses the follow-up into such a query."""
+    condenses the follow-up into such a query, and the anchored leg searches
+    the opener, which names it."""
     from mainframe_rag.eval.answers import run_follow_ups, run_query
     from mainframe_rag.eval.follow_up import load_pipe
     from mainframe_rag.ports import ChatResult, TokenUsage
@@ -290,17 +298,24 @@ def test_two_turn_evidence_follows_the_real_agents_condense_setting(
          "usage": TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15)},
     ))
     frames: list[str] = []
-    with agent_client(monkeypatch, llm=llm, search=search,
-                      env={"CHAT_CONDENSE_ENABLED": condense}) as client:
+    for name in ("CHAT_CONDENSE_ENABLED", "CHAT_FOLLOWUP_ANCHOR_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
+    with agent_client(monkeypatch, llm=llm, search=search, env=env) as client:
         opener = run_query(client, _entry(), stream=True, endpoint="chat", frames=frames,
                            evidence=True)
         [follow] = run_follow_ups(client, _entry(), opener, frames, load_pipe()[0], 0.0)
     assert opener["verdict"] != "error" and follow["verdict"] != "error", follow["failures"]
     assert opener["evidence_gold_hit"] is True
     assert follow["evidence_gold_hit"] is gold_hit
-    assert follow["evidence_doc_ids"] == (["SA22-0000-00"] if gold_hit else [OTHER_DOC])
-    assert searched == [_entry()["query"], "IEA500I recovery procedure" if gold_hit
-                        else FOLLOW_UPS["message_id"]]
+    expected = {"off": [FOLLOW_UPS["message_id"]], "on": ["IEA500I recovery procedure"],
+                "default-anchored": [FOLLOW_UPS["message_id"], _entry()["query"]]}
+    mode = ("off" if env.get("CHAT_FOLLOWUP_ANCHOR_ENABLED") == "false"
+            else "on" if env else "default-anchored")
+    assert searched == [_entry()["query"], *expected[mode]]
+    if mode != "default-anchored":
+        assert follow["evidence_doc_ids"] == (["SA22-0000-00"] if gold_hit else [OTHER_DOC])
+    else:
+        assert "SA22-0000-00" in follow["evidence_doc_ids"]
     assert follow["prior_answer_chars"] > 0
 
 
@@ -520,6 +535,36 @@ def test_export_carries_no_question_answer_citation_or_failure_text(site_eval, e
     assert data["coverage"]["build_id"] is None and data["coverage"]["status"] == "known"
     assert data["params"]["endpoint"] == endpoint and "agent_url" not in data["params"]
     assert data["metrics"]["by_failure"]["missing required substring"] == 2
+
+
+@pytest.mark.parametrize("endpoint", ["answer", "chat"])
+def test_single_turn_export_does_not_follow_the_prior_turn_default(site_eval, monkeypatch, endpoint):
+    """Issue #1274: the --prior-cap default follows the agent's
+    chat_max_prior_turn_chars default (1000 -> 4000). A single-turn run
+    reads neither: its requests and its export, timings aside, are the same
+    under the old and the new default, and carry no prior_cap."""
+    from mainframe_rag.config import Settings
+
+    def run():
+        _, _, export, calls = site_eval(_canary_agent(endpoint), _canary_entries(),
+                                        ["--endpoint", endpoint, "--stream", "--coverage"])
+        data = json.loads(export)
+        for row in data["rows"]:
+            for key in ("elapsed_ms", "ttft_ms", "llm_ms", "client_first_token_ms", "decode_tps"):
+                row.pop(key)
+        data.pop("timestamp")
+        data["params"].pop("generated_at", None)
+        return data, [(c.method, str(c.url), c.content) for c in calls]
+
+    field = Settings.model_fields["chat_max_prior_turn_chars"]
+    assert field.default == 4000
+    new_export, new_calls = run()
+    monkeypatch.setattr(field, "default", 1000)
+    old_export, old_calls = run()
+    assert "prior_cap" not in new_export["params"]
+    assert "by_turn" not in new_export["metrics"]
+    assert old_calls == new_calls
+    assert json.dumps(old_export, sort_keys=True) == json.dumps(new_export, sort_keys=True)
 
 
 def test_export_of_a_health_failure_holds_no_golden_text(site_eval):
@@ -979,7 +1024,7 @@ def test_every_kind_branches_off_the_same_opener_history(site_eval):
     assert timing["ttft_ms"] is None and timing["total_tokens"] is None
     params = report["params"]
     assert params["follow_up"] == ["anaphoric", "switch", "restate", "summary"]
-    assert (params["prior_cap"], params["switch_pairs_n"]) == (1000, 2)
+    assert (params["prior_cap"], params["switch_pairs_n"]) == (4000, 2)  # #1274: was 1000
     assert status == 0, [r["failures"] for r in report["results"]]
 
 
@@ -1105,12 +1150,17 @@ def test_restate_is_scored_on_the_openers_gold_and_declines_are_counted(site_eva
     assert status == 1
 
 
-@pytest.mark.parametrize(("cap", "split", "citations"), [
-    pytest.param([], ({"n": 1, "found": 1}, {"n": 1, "found": 0}), "cut", id="cap1000"),
-    pytest.param(["--prior-cap", "4000"], ({"n": 2, "found": 1}, {"n": 0, "found": 0}), "kept",
-                 id="cap4000"),
+_CUT_1000 = ({"n": 1, "found": 1}, {"n": 1, "found": 0})
+_KEPT_4000 = ({"n": 2, "found": 1}, {"n": 0, "found": 0})
+
+
+@pytest.mark.parametrize(("cap", "cut", "split", "citations"), [
+    pytest.param(["--prior-cap", "1000"], 1000, _CUT_1000, "cut", id="cap1000"),
+    pytest.param(["--prior-cap", "4000"], 4000, _KEPT_4000, "kept", id="cap4000"),
+    # #1274: the default follows the agent default, 4000 (was 1000).
+    pytest.param([], 4000, _KEPT_4000, "kept", id="default"),
 ])
-def test_restate_gold_is_split_at_the_declared_prior_turn_cut(site_eval, cap, split, citations):
+def test_restate_gold_is_split_at_the_declared_prior_turn_cut(site_eval, cap, cut, split, citations):
     """A long opener answer: one gold string in the kept head, one past the
     declared cut. The restatement has only the first; its evidence holds the
     gold doc (the doc-level proxy). Exposure flags the cut citation list."""
@@ -1125,11 +1175,12 @@ def test_restate_gold_is_split_at_the_declared_prior_turn_cut(site_eval, cap, sp
                                      [*TWO_TURN, "--follow-up", "restate", *cap])
     row = _kind_rows(report)[("MSG-01", 2, "restate")]
     assert (row["gold_split"]["before_cut"], row["gold_split"]["after_cut"]) == split
-    assert row["history_over_cap"] is (not cap) and row["citation_list_cut"] == citations
+    assert row["history_over_cap"] is (cut == 1000) and row["citation_list_cut"] == citations
     block = report["metrics"]["by_turn"]["2"]["restate"]
     assert block["restate"]["gold_split"]["before_cut"]["in_evidence"] == split[0]
-    assert block["exposure"]["over_cap"] == (0 if cap else 1)
-    assert block["prior_answer_chars"]["cut_chars"] == (4000 if cap else 1000)
+    assert block["exposure"]["over_cap"] == (1 if cut == 1000 else 0)
+    assert block["prior_answer_chars"]["cut_chars"] == cut
+    assert report["params"]["prior_cap"] == cut
     assert json.loads(export)["rows"][1]["gold_split"]["after_cut"] == split[1]
 
 

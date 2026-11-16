@@ -544,6 +544,28 @@ def test_direct_chart_refuses_condense_and_anchor_together():
         assert pod["CHAT_CONDENSE_ENABLED"]["value"] == str(one["condenseEnabled"]).lower()
 
 
+@pytest.mark.parametrize("reasoning,want", [
+    ({}, (False, True)),
+    ({"condenseEnabled": True}, (True, False)),
+    ({"condenseEnabled": True, "followupAnchorEnabled": False}, (True, False)),
+    ({"followupAnchorEnabled": False}, (False, False)),
+], ids=["default", "condense-only", "condense-anchor-off", "anchor-off"])
+def test_condense_only_render_starts_a_condensing_pod(monkeypatch, reasoning, want):
+    """Issue #1274: anchoring is on by default. A release that sets only
+    condenseEnabled=true (as before #1274) still renders, and the pod's
+    Settings resolve it to condensation with the anchor default off, so the
+    upgrade does not start refusing at startup."""
+    from mainframe_rag.config import Settings
+
+    pod = env_map(run_new_template({"models": {"reasoning": reasoning}})["Deployment", "rag-agent"])
+    for name in ("CHAT_CONDENSE_ENABLED", "CHAT_FOLLOWUP_ANCHOR_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
+        if name in pod:
+            monkeypatch.setenv(name, pod[name]["value"])
+    settings = Settings(_env_file=None)
+    assert (settings.chat_condense_enabled, settings.chat_followup_anchor_enabled) == want
+
+
 def test_model_request_arguments_reach_the_pod_as_settings_accept_them():
     """Issue #1193: the chart's extraBody object arrives as the JSON text the
     application validates, nested object intact; unset renders neither
@@ -605,7 +627,7 @@ def test_token_count_source_reaches_the_pod_as_settings_accept_it():
     from mainframe_rag.config import TOKEN_COUNT_SOURCES, Settings
 
     assert "LLM_TOKEN_COUNT_SOURCE" not in env_map(run_new_template({})["Deployment", "rag-agent"])
-    assert Settings(_env_file=None).llm_token_count_source == "tokenize"
+    assert Settings(_env_file=None).llm_token_count_source == "auto"  # #1274, was tokenize
     schema = json.loads((CHART / "values.schema.json").read_text())
     enum = schema["properties"]["models"]["properties"]["reasoning"]["properties"]["tokenCountSource"]["enum"]
     assert tuple(enum) == TOKEN_COUNT_SOURCES
@@ -1764,11 +1786,40 @@ def test_openwebui_pipe_configmap_carries_the_repository_files_and_their_hashes(
 RATINGS_ON = {**FEEDBACK_ON, "openwebui": {"ratings": {"enabled": True}}}
 
 
-def test_openwebui_ratings_are_off_by_default_and_change_nothing(owui_chart):
-    """#1255: with ratings off (the default) the Pipe ConfigMap and the pod
-    environment are exactly the docs-only ones."""
+def _ratings_shipped(docs) -> bool:
+    """Whether a render carries ratings, by every surface the switch drives:
+    the Action in the Pipe ConfigMap, the answer reference in the pod and the
+    proxy allow-list."""
+    surfaces = (
+        "rating_action.py" in docs["ConfigMap", "rag-openwebui-pipe"]["data"],
+        "RAG_ANSWER_REFERENCE" in env_map(docs["Deployment", "rag-openwebui"], "openwebui"),
+        "/api/chat/actions" in docs["ConfigMap", "rag-openwebui-proxy"]["data"]["nginx.conf"],
+    )
+    assert len(set(surfaces)) == 1, surfaces
+    return surfaces[0]
+
+
+@pytest.mark.parametrize(("extra", "shipped"), [
+    (None, False),  # feedback store off (its default): no ratings
+    (FEEDBACK_ON, True),  # #1274: unset follows the feedback store
+    ({**FEEDBACK_ON, "openwebui": {"ratings": {"enabled": False}}}, False),  # explicit off
+    (RATINGS_ON, True),  # explicit on, with the store
+], ids=["default", "feedback-on", "feedback-on-ratings-off", "explicit-on"])
+def test_openwebui_ratings_follow_the_feedback_store_unless_set(owui_chart, extra, shipped):
+    """#1274: ratings are on wherever the feedback store is on, unless
+    openwebui.ratings.enabled is set; an explicit false (Helm's `default`
+    would read it as unset) keeps them off beside the store."""
     with open(CHART / "values.yaml", encoding="utf-8") as f:
-        assert yaml.safe_load(f)["openwebui"]["ratings"] == {"enabled": False}
+        assert yaml.safe_load(f)["openwebui"]["ratings"] == {}
+    docs = _owui(owui_chart, extra)
+    assert _ratings_shipped(docs) is shipped
+    if extra is FEEDBACK_ON:
+        assert docs == _owui(owui_chart, RATINGS_ON)
+
+
+def test_openwebui_ratings_are_off_without_the_feedback_store_and_change_nothing(owui_chart):
+    """#1255: with ratings off (the default without the feedback store) the
+    Pipe ConfigMap and the pod environment are exactly the docs-only ones."""
     docs = _owui(owui_chart)
     # The shared prompt files (#1259) ride the same ConfigMap unconditionally.
     assert set(docs["ConfigMap", "rag-openwebui-pipe"]["data"]) == {

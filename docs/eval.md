@@ -683,6 +683,36 @@ the site's own model before and after an in-place upgrade, with the
 candidate's eval against both builds. Code reaches the site only inside the
 release bundle, so the instrument is the candidate's checkout.
 
+Since #1274 the answer-quality features are on by default: follow-up
+anchoring (`CHAT_FOLLOWUP_ANCHOR_ENABLED`), a 4000-character prior-turn cut
+(`CHAT_MAX_PRIOR_TURN_CHARS`), the `auto` prompt count
+(`LLM_TOKEN_COUNT_SOURCE`) and the 262144-token window default
+(`LLM_MAX_MODEL_LEN`). No pre-merge evidence exists for them on the site
+model; this visit is the deciding measurement. The release's defaults are
+the baseline. Each [ablation arm](#site-ablation-arms) switches one feature
+off in `airgap.env`. A feature that hurts stays off in `airgap.env`, with no
+new release; flipping its code default back is a later decision.
+
+**Step 0, before any session or arm.** Record the deployed `LLM_*` values
+(the receipt below), then run the two probes in the agent pod:
+
+```sh
+oc -n "$NS" get deploy rag-agent \
+  -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' \
+  | grep -E '^(LLM_|CHAT_|REQUEST_)' | grep -v -E 'KEY|SECRET'   # unset = the default
+oc -n "$NS" exec deploy/rag-agent -c agent -- python3 /app/scripts/probe_gateway.py --probe-args
+oc -n "$NS" exec deploy/rag-agent -c agent -- python3 /app/scripts/probe_gateway.py --probe-count
+```
+
+`--probe-args` shows, per argument set, whether the served model honours the
+reasoning effort: compare `reasoning_tokens` across the effort candidates. If
+answers come back with near-zero reasoning tokens at every effort, the effort
+may not be reaching the model. When an argument set moves the reasoning
+tokens, an effort arm follows the ablations (`LLM_EXTRA_BODY` /
+`LLM_EFFORT_TRANSPORT`, [model request arguments](agent.md#model-request-arguments)).
+`--probe-count` says whether `/tokenize` or the completion-usage count serves
+this gateway, which decides what the `count-tokenize` arm can change.
+
 **Where.** The bastion pod (devkit image, Python 3.14 with the dev lock),
 through `oc port-forward` with the operator's namespace session. The Route is
 not usable (OAuth port; the eval refuses credentials and redirects). No
@@ -726,13 +756,17 @@ run A1 chat --all --repeats 2
 
 | Session | Build | When |
 |---|---|---|
-| A1 | old (2cd8f67d) | the day before the upgrade |
+| A1 | old (f117160c) | the day before the upgrade |
 | A2 | old | just before deploying |
 | B1 | candidate | after the post-deploy smoke |
 | B2 | candidate | the next day |
 | C | candidate | after B2: one pass at `--temperature 0.2 --repeats 1`, both endpoints; it confirms, it never decides |
 
-A1 against A2 is the noise between sessions on an unchanged build. Check that
+A is the release before #1274 (f117160c, every feature off); B is this
+release with its defaults. A1 against A2 is the noise between sessions on an
+unchanged build. A follow-up run (`--turns 2`) against f117160c passes
+`--prior-cap 1000`, its deployed default; the eval's own default is the
+candidate agent's 4000. Check that
 `coverage.build_id` equals `build_id_end` in every export, that both A
 sessions name the same build, and that `params.sample.ids_sha256` and the
 dataset sha256 match across all sessions.
@@ -789,8 +823,9 @@ seams the evaluator drives (`Pipe._transport`, `build_request`, `fit_request`,
   evidence hit and rate, zero hits, refusals, verification states, citation
   precision/recall, the structural pass rate, `vs_opener` (kept, lost,
   gained, neither per session), `prior_answer_chars` (how many kept answers
-  exceed the application's default 1000-character prior-turn cut,
-  `chat_max_prior_turn_chars`; the count always uses that default, so an arm
+  exceed the application's default prior-turn cut,
+  `chat_max_prior_turn_chars`, 4000 since #1274 and 1000 before; without
+  `--follow-up` the count always uses that default, so an arm
   that sets the operator input `CHAT_MAX_PRIOR_TURN_CHARS` (#1268) must read it
   against its own cut) and, with
   `--repeats`, the spread per repeat. An opener that errored gives a turn-2
@@ -848,7 +883,8 @@ the run is the anaphoric run above and its output is unchanged.
   evidence holds an opener gold doc. That evidence side is a doc-level
   proxy: `supplied_evidence` carries doc ids, not excerpt text.
 - **Prior-turn cut.** The agent does not report `chat_max_prior_turn_chars`,
-  so `--prior-cap` declares it (200-5000, default 1000, the agent default;
+  so `--prior-cap` declares it (200-5000, default the agent default: 4000
+  since #1274, 1000 before;
   recorded as `params.prior_cap`). Exposure per turn-2 row:
   `history_over_cap`, and `citation_list_cut` (`kept`, `partial`, `cut` or
   `absent`): where the Pipe's appended `**Citations:**` list lies against
@@ -874,56 +910,73 @@ the run is the anaphoric run above and its output is unchanged.
   fails or errors. Class-B rows fail whenever a gold string is not restated,
   so with `--follow-up` an exit of 1 is expected. It is not the arm signal.
 
-**Follow-up arms (one visit).** The four arms run on one build, after the
-A/B sessions or on a quiet day. Each arm changes one setting from the
-baseline, with a redeploy before each arm; the previous arm's setting is
-reverted first. Every arm uses the run function above (temperature 0,
-`--coverage`) with the same sample flags:
+<a id="site-ablation-arms"></a>
+**Ablation arms (one visit).** The arms run on the candidate build, after
+the B sessions or on a quiet day. The baseline is the release's defaults
+(nothing below set in `airgap.env`). Each arm switches one feature off with
+one `airgap.env` line and a redeploy; the previous arm's line is removed
+first. Every arm uses the run function above (temperature 0, `--coverage`)
+with the same sample flags:
 
 ```sh
 show() {  # the deployed value of one agent setting (empty = unset, the default)
   oc -n "$NS" get deploy rag-agent -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"$1\")].value}"; echo
 }
-for v in CHAT_CONDENSE_ENABLED CHAT_FOLLOWUP_ANCHOR_ENABLED CHAT_MAX_PRIOR_TURN_CHARS; do show $v; done
+vals() { for v in CHAT_CONDENSE_ENABLED CHAT_FOLLOWUP_ANCHOR_ENABLED CHAT_MAX_PRIOR_TURN_CHARS LLM_TOKEN_COUNT_SOURCE; do show $v; done; }
+vals   # all empty: the defaults (anchoring on, 4000, auto)
 run H-baseline chat --all --repeats 2 --turns 2 --follow-up all --arm baseline
-# airgap.env: CHAT_CONDENSE_ENABLED=true; `sh scripts/tools/run-task.sh airgap:deploy`;
-# wait for the rollout; show the three values again, then:
-run H-condense chat --all --repeats 2 --turns 2 --follow-up all --arm condense
-# revert it; CHAT_FOLLOWUP_ANCHOR_ENABLED=true; deploy; show:
-run H-anchored chat --all --repeats 2 --turns 2 --follow-up all --arm anchored
-# revert it; CHAT_MAX_PRIOR_TURN_CHARS=4000; deploy; show:
-run H-history4000 chat --all --repeats 2 --turns 2 --follow-up all --arm history4000 \
-  --prior-cap 4000
-# revert it and deploy: the site ends on its baseline values.
+# airgap.env: CHAT_FOLLOWUP_ANCHOR_ENABLED=false; `sh scripts/tools/run-task.sh airgap:deploy`;
+# wait for the rollout; vals, then:
+run H-anchor-off chat --all --repeats 2 --turns 2 --follow-up all --arm anchor-off
+# remove it; CHAT_MAX_PRIOR_TURN_CHARS=1000; deploy; vals:
+run H-history1000 chat --all --repeats 2 --turns 2 --follow-up all --arm history1000 \
+  --prior-cap 1000
+# remove it; LLM_TOKEN_COUNT_SOURCE=tokenize; deploy; vals:
+run K-count-tokenize answer --all --repeats 2
+run K-count-tokenize chat --all --repeats 2
+# remove it and deploy: the site ends on the release defaults.
 ```
 
-- `baseline`: all three settings off or at their defaults.
-- `condense`: `CHAT_CONDENSE_ENABLED=true`.
-- `anchored`: `CHAT_FOLLOWUP_ANCHOR_ENABLED=true` (#1271). Condense and
-  anchoring together are refused at deploy and at startup, so revert
-  condense first. The deployed build must include #1271; an older build
-  has no such setting, so skip the arm there.
-- `history4000`: `CHAT_MAX_PRIOR_TURN_CHARS=4000` with `--prior-cap 4000`
-  (an operator input since #1271; skip the arm on an older build).
-  Never pass `--prior-cap` that differs from the deployed value.
+| Arm | `airgap.env` line | Compare with |
+|---|---|---|
+| `anchor-off` | `CHAT_FOLLOWUP_ANCHOR_ENABLED=false` | `H-baseline` |
+| `history1000` | `CHAT_MAX_PRIOR_TURN_CHARS=1000`, run with `--prior-cap 1000` | `H-baseline` |
+| `count-tokenize` | `LLM_TOKEN_COUNT_SOURCE=tokenize` | B2 (same flags, same build) |
+
+- `--prior-cap` must equal the deployed cut: omit it on every arm but
+  `history1000` (the default is the agent default, 4000), and never pass a
+  value that differs from the deployed one.
+- `count-tokenize` changes only where `/tokenize` is not served (step 0's
+  `--probe-count`); where it is served, `auto` already counts with it and the
+  arm can be skipped. It acts on single-turn answers, so it runs the session
+  flags, not the follow-up flags. Compare `verification_state`,
+  `finish_reason` and the budget fields with B2.
+- The answer depth settings (hit limit and `RETRIEVE_MAX_CHUNKS_PER_DOC`)
+  get a `depth-8-3` arm once their release carries them.
+- Condensation is no longer an arm. `CHAT_CONDENSE_ENABLED=true` still works
+  and turns the anchoring default off; setting both true is refused at deploy
+  and at startup.
+- Before the window default rose to 262144 (#1274), `LLM_MAX_MODEL_LEN` was
+  32768. Record the deployed value in step 0; it must not exceed the served
+  window.
 
 Cost: per answer row with expected docs, an arm asks one opener and up to
 four follow-ups. Class-B follow-ups go only to passed openers with gold
 strings. Time the baseline arm on `--subset 24` first. If `--all
---repeats 2` does not fit four arms, run every arm with the same
+--repeats 2` does not fit every arm, run every arm with the same
 `--subset 24 --repeats 3`.
 
 Reading the arms. First check that `params.sample.ids_sha256`,
 `follow_ups_sha256`, `restate_follow_ups_sha256`, `switch_pairs_sha256` and
-`pipe_sha256` are equal across the four exports, and that `prior_cap` differs
-only in `history4000`. Then compare each kind on its own signal:
+`pipe_sha256` are equal across the follow-up exports, and that `prior_cap`
+differs only in `history1000`. Then compare each kind on its own signal:
 
 - `anaphoric`: `by_turn["2"]["anaphoric"]`: `evidence_gold_hit_rate` and
   `vs_opener`.
 - `switch`: `vs_single`: `lost` against `gained` for pass and evidence.
   Gains on anaphoric that come with more switch losses are a trade.
 - `restate`/`summary`: `pass_rate`, `restate.declines` and
-  `restate.gold_split` (`after_cut` found should move only with a larger
+  `restate.gold_split` (`after_cut` found should move only with a smaller
   cap).
 - `exposure.over_cap_share` and `citation_list_cut_share` per arm.
 - `timing` p50 per turn and kind is the arm's cost on this host

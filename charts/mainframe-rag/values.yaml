@@ -279,14 +279,17 @@ openwebui:
   # Public Route host; the OIDC redirect URI is https://<host>/oauth/oidc/callback.
   host: ""
   retentionDays: 30
-  # Thumbs up/down on answers (#1255), default off; requires feedback.enabled.
+  # Thumbs up/down on answers (#1255). enabled unset (the default since
+  # #1274) follows feedback.enabled: on wherever the feedback store is on.
+  # true requires feedback.enabled; false keeps ratings off beside the store.
   # Ratings go only to the agent's POST /v1/feedback and the feedback store
   # (ADR-0005); Open WebUI's own ratings stay off. On: the docs Pipe ends each
   # answer with an "Answer reference" line, and deploy.sh installs the
   # repository rating Action (hash-checked) next to the docs Pipe. Off again:
-  # the next deploy removes the Action.
-  ratings:
-    enabled: false
+  # the next deploy removes the Action. One helper decides for every
+  # template: mainframe-rag.openwebuiRatings.
+  ratings: {}
+    # enabled: false
   storageSize: 10Gi
   # Chat share links and temporary chats (ADR-0007 S2, #1255). Off by default;
   # turning either on is the site's (maintainer's) decision. These set the

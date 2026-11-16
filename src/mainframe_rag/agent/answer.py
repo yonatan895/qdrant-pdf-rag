@@ -2380,7 +2380,9 @@ _ABEND_RE = re.compile(
     r"\b(?:abend\s*=?\s*(?=[0-9a-f]*\d)[su]?[0-9a-f]{3,4}|[su](?=[0-9a-f]{0,3}\d)[0-9a-f]{3,4})\b",
     re.IGNORECASE,
 )
-_MAX_PRIOR_TURN_CHARS = 1000
+# Without Settings (direct callers) the prior-turn cut is the Settings
+# default, one owner (#1274: 4000, was 1000).
+_MAX_PRIOR_TURN_CHARS: int = Settings.model_fields["chat_max_prior_turn_chars"].default
 
 
 def names_identifier(text: str) -> bool:

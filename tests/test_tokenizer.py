@@ -398,6 +398,7 @@ def test_build_tokenizer_dispatch():
     s_vllm = Settings(
         llm_base_url="http://localhost:8000/v1",
         llm_model_reasoning="mock-model",
+        llm_token_count_source="tokenize",  # the default before #1274
         _env_file=None,
     )
     assert isinstance(build_tokenizer(s_vllm), VllmTokenizer)
@@ -710,7 +711,7 @@ def test_completion_count_without_a_request_temperature_sends_the_configured_one
     assert json.loads(calls[0].content)["temperature"] == 0.7
 
 
-# Source selection (#1266). The default keeps the pre-#1266 behaviour.
+# Source selection (#1266). The default is auto since #1274 (was tokenize, the pre-#1266 behaviour).
 
 def _routes(tokenize, completion):
     """Mock gateway: /tokenize and /v1/chat/completions answer as told."""
@@ -736,11 +737,41 @@ def test_build_tokenizer_selects_the_configured_source_without_traffic(source, e
     assert type(tok) is expected and calls == []
 
 
-def test_default_source_is_tokenize_with_estimator_fallback():
-    assert type(build_tokenizer(Settings(_env_file=None, **_COUNT_SETTINGS))) is VllmTokenizer
+def test_default_source_is_auto_with_estimator_fallback():
+    """Issue #1274: the default source is `auto` (was `tokenize`): the
+    default build runs auto's startup check, exactly as an explicit `auto`
+    does; without a reasoning model every source is the estimator."""
+    from mainframe_rag.agent.tokenizer import AutoTokenizer
+
+    assert Settings(_env_file=None).llm_token_count_source == "auto"
+    seen = []
+    for explicit in ({}, {"llm_token_count_source": "auto"}):
+        calls, client = _routes(httpx2.Response(404), _usage_reply(9))
+        with client:
+            tok = build_tokenizer(Settings(_env_file=None, **_COUNT_SETTINGS, **explicit), client)
+            assert type(tok) is AutoTokenizer
+            tok.count_messages([ChatMessage(role="user", content="q")])
+        seen.append(calls)
+    assert seen[0] == seen[1] == ["/tokenize", "/v1/chat/completions", "/v1/chat/completions"]
     assert type(build_tokenizer(Settings(_env_file=None))) is FallbackTokenizer
     assert type(build_tokenizer(Settings(_env_file=None, llm_token_count_source="completion_usage"))) is (
         FallbackTokenizer)
+
+
+def test_explicit_tokenize_source_sends_what_the_old_default_sent():
+    """Issue #1274: LLM_TOKEN_COUNT_SOURCE=tokenize restores the behaviour
+    before the default flip: no startup traffic, /tokenize per count, the
+    estimator (and no completion) while it is not served."""
+    for reply, expected in ((httpx2.Response(200, json={"count": 9}), 9), (httpx2.Response(404), None)):
+        calls, client = _routes(reply, _usage_reply(9))
+        with client:
+            tok = build_tokenizer(
+                Settings(_env_file=None, **_COUNT_SETTINGS, llm_token_count_source="tokenize"), client)
+            assert type(tok) is VllmTokenizer and calls == []
+            messages = [ChatMessage(role="user", content="q")]
+            count = tok.count_messages(messages)
+        assert calls == ["/tokenize"]
+        assert count == (expected if expected is not None else FallbackTokenizer().count_messages(messages))
 
 
 # (startup /tokenize, startup completion, startup paths, the path a request
