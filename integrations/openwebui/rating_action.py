@@ -46,7 +46,7 @@ REFERENCE_RE = re.compile(r"\n\nAnswer reference: `([0-9a-f]{12})`[ \t\r\n]*\Z")
 RATINGS: dict[str, str] = {"up": "good", "down": "bad"}
 REASON_MAX_CHARS = 2000  # the store's COMMENT_MAX_CHARS; a test pins it
 
-# Fixed user-visible texts (a proposal; the wording is a maintainer decision,
+# Fixed user-visible texts (wording approved by the maintainer 2026-11-16,
 # #1255). The agent's error `message` is never shown: only its `code` selects.
 RECORDED = "Thanks, your rating was recorded."
 NOT_RATEABLE = "This answer cannot be rated: it has no answer reference."

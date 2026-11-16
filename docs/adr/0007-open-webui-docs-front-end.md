@@ -70,7 +70,7 @@ Pipe is provisioned and the admin role is limited to the team.
   Function is present, and the Pipe never declares `__oauth_token__`,
   `__request__` or any `__user__`-style parameter it does not use; a test
   inspects its `pipe()` signature. A new parameter is a recorded decision.
-  *(Amendment proposed, #1255; maintainer decision pending.)* With
+  *(Amended, #1255; maintainer decision 2026-11-16.)* With
   `openwebui.ratings.enabled` (default off), the repository Function set is the
   docs Pipe plus the repository rating Action (`rating_action.py`): two message
   buttons that post a rating to the agent's `/v1/feedback` (ADR-0005). Each
@@ -129,7 +129,7 @@ Pipe is provisioned and the admin role is limited to the team.
   path. The list is the Docs pilot's need: the SPA shell and assets, sign-in
   and the OIDC callback, socket.io, health, chats, models, the Pipe's chat
   completions, the account and admin APIs and the Pipe installer's
-  `/api/v1/functions`, plus, proposed with ratings (#1255), the rating Action's
+  `/api/v1/functions`, plus, with ratings (#1255), the rating Action's
   two buttons `/api/chat/actions/mainframe_rag_rating.(up|down)`, rendered
   only while ratings are on (the handler is server-enforced: an active Action
   the model surfaces). **Re-audited on every import (P1)**: list each router's
@@ -254,9 +254,14 @@ the pilot. The console remains the only supported front end.
   built-in ratings and evaluations are off. Answer records still reach the
   feedback service through `/v1/chat` as before. Open WebUI ratings wait for a
   UI-agnostic rating route, which would amend ADR-0003's POST set. Telemetry
-  still holds no content. *(Proposed, #1255: that route is `/v1/feedback`,
-  and the repository rating Action posts to it (V2). Ratings are stored only
-  by the feedback service, with no rater identity: D5 stays deferred.)*
+  still holds no content. *(Amended, #1255, maintainer decision 2026-11-16:
+  that route is `/v1/feedback`, and the repository rating Action posts to it
+  (V2). Ratings are stored only by the feedback service, with no rater
+  identity: D5 stays deferred. Two residuals are accepted with the visible
+  "Answer reference" line: Open WebUI's chat history holds the reference next
+  to the chat owner, a de facto attribution path for an operator with
+  database access; and ratings are unauthenticated, so a user who knows an
+  answer's request id can replace its rating.)*
 - **Reading of "no LangChain / second vector DB / new orchestration
   framework":** these rules bind this repository's code, dependencies and
   answer path. A pinned, unmodified third-party image may contain such

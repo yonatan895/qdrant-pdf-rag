@@ -82,7 +82,7 @@
   so enabling it without the agent NetworkPolicy is refused. Disabling it keeps
   the claim and its content, unpurged until the operator deletes the claim.
   Rater attribution stays deferred (D5).
-- **Amends (proposed, #1255; maintainer decision pending): Open WebUI ratings.**
+- **Amends (accepted, maintainer 2026-11-16, #1255): Open WebUI ratings.**
   A third inbound rating route, `POST /v1/feedback`, takes the same bounded
   rating as `/ui/feedback` with the same validation, fixed codes and store call.
   It does not depend on the console (`UI_ENABLED`), so it is UI-agnostic. Open
@@ -93,7 +93,11 @@
   in the Open WebUI message, so Open WebUI's chat history (ADR-0007 S2/S3)
   holds it next to the chat owner: an operator with database access can join
   a rating to an Open WebUI user through it. That is a de facto attribution
-  path, and accepting it is part of this decision. Open WebUI's own message ratings and
+  path, and accepting it is part of this decision (residual, maintainer
+  2026-11-16: the visible reference line stays). Ratings are unauthenticated,
+  like the console's: a user who knows an answer's request id, for example by
+  editing a message's reference line, can replace that answer's rating
+  (residual, accepted with the same decision). Open WebUI's own message ratings and
   evaluations stay off (`ENABLE_MESSAGE_RATING=false`, `/api/v1/evaluations`
   blocked at the proxy). The Action writes nothing to Open WebUI's database.
   Rater attribution stays deferred (D5): the agent port cannot prove a

@@ -50,7 +50,7 @@ ACTION_ID = "mainframe_rag_rating"
 ACTION_NAME = "Rosetta rating"
 ACTION_DESCRIPTION = "Rate a Rosetta answer; stored by the agent's feedback store only"
 # sha256 of charts/mainframe-rag/files/openwebui/rating_action.py (a test pins it).
-ACTION_SHA256 = "4053f91ce37492712c455bd17440443d92afb091fd0d3a64c1aacea097c40abe"
+ACTION_SHA256 = "c32b82c2ae7d6527fb02ed12fe4dd039c96726a44f258b364112470e800af8ce"
 MOUNT = Path("/opt/mainframe-rag/openwebui")
 CERT = Path("/etc/tls/private/tls.crt")
 HOST = "127.0.0.1"

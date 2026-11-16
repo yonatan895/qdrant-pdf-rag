@@ -345,7 +345,7 @@ retention: [observability](observability.md#data-tiers).
 - **Ratings:** `POST /ui/feedback {request_id, rating, reasons, comment}` from
   the streaming console, and `POST /ui/feedback/form` (form-encoded) from the
   fallback console, with the same validation and codes. `POST /v1/feedback`
-  (#1255, proposed) is the same JSON route without the console: it does not
+  (#1255) is the same JSON route without the console: it does not
   need `UI_ENABLED` and answers with the same status, `{"status": "recorded"}`
   or fixed `{code, message}`. Open WebUI's rating Action posts to it
   ([Open WebUI ratings](#openwebui-ratings)). An htmx request gets the
@@ -1862,7 +1862,7 @@ and v0.12.3 passes `__task__`/`__metadata__` and renders `source` and `status`
 events as documented.
 
 <a id="openwebui-ratings"></a>
-## Open WebUI ratings (#1255, proposed)
+## Open WebUI ratings (#1255)
 
 **Status:** code and tests only, default off; not yet run on a live Open WebUI (#1255).
 **Decision owners:**
