@@ -38,6 +38,22 @@ not a probe failure; the mode exits 1 only when the `baseline` candidate
 
     kubectl -n mainframe-rag exec deploy/rag-agent -- \
         python3 /app/scripts/probe_gateway.py --probe-args
+
+Count probe (`--probe-count`, issue #1266): whether this gateway can count
+a prompt through a 1-token completion's `usage.prompt_tokens`
+(`LLM_TOKEN_COUNT_SOURCE=completion_usage`). One fixed synthetic prompt of
+about 10k tokens (25k characters), led by a per-run nonce so the first count is cold, is
+counted with the application's own count body (model, effort transport,
+extra body, temperature, `max_tokens` 1) three times: twice unchanged (the
+cold and the warm count, timed) and once with one more turn. It prints one
+JSON row of numbers and flags and a summary line, and exits 0 only when the
+count is present, stable and grows with the extra turn. Never prompt text,
+completion text, a key or upstream error text. Each count waits at most
+LLM_TOKENIZE_TIMEOUT_S, the application's count timeout (`--timeout`
+overrides).
+
+    kubectl -n mainframe-rag exec deploy/rag-agent -- \
+        python3 /app/scripts/probe_gateway.py --probe-count
 """
 
 from __future__ import annotations
@@ -46,6 +62,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import sys
 import time
 from pathlib import Path
@@ -55,6 +72,7 @@ import httpx2
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from mainframe_rag.agent.tokenizer import count_request_body, usage_prompt_tokens
 from mainframe_rag.config import Settings, bearer_auth_headers, load_settings
 from mainframe_rag.model_args import parse_body_fields
 
@@ -587,11 +605,89 @@ def run_arg_probe(settings: Settings, args: argparse.Namespace, parser: argparse
     return 1 if failed else 0
 
 
+# Count probe (#1266): original fixed text of about 10k tokens (250 lines of
+# about 100 characters; 400 lines counted 16037 on a Gemma tokenizer).
+COUNT_PROBE_LINES = 250
+COUNT_PROBE_LINE = (
+    "Synthetic count probe line {:05d}: a batch window opens at 06:10 and one job "
+    "starts every 45 minutes until 09:00.\n"
+)
+
+
+def count_probe_messages(nonce: str) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """The probe's base messages and the same with one more turn. The nonce
+    leads the prompt, so no earlier run's prefix cache can serve the cold
+    count. A whole turn (assistant then user) keeps role alternation valid
+    for templates that enforce it."""
+    base = [
+        {"role": "system", "content": f"Count probe run {nonce}. Answer briefly."},
+        {"role": "user", "content": "".join(COUNT_PROBE_LINE.format(i) for i in range(COUNT_PROBE_LINES))},
+    ]
+    more = [*base, {"role": "assistant", "content": "Noted."},
+            {"role": "user", "content": "One more synthetic line to count."}]
+    return base, more
+
+
+def _count_once(settings: Settings, messages: list[dict[str, str]], timeout: float) -> dict[str, Any]:
+    """One count with the application's count body: status, count, elapsed
+    ms, and an error type name (never upstream text)."""
+    assert settings.llm_base_url and settings.llm_model_reasoning
+    body = count_request_body(
+        settings.llm_model_reasoning, messages, settings.llm_reasoning_effort_simple,
+        settings.llm_temperature, settings.model_request_args(),
+    )
+    t0 = time.monotonic()
+    result: dict[str, Any] = {"status": None, "count": None, "ms": None, "error": None}
+    try:
+        resp = httpx2.post(
+            f"{settings.llm_base_url.rstrip('/')}/chat/completions",
+            json=body, timeout=timeout, headers=bearer_auth_headers(settings.llm_api_key),
+        )
+        result["status"] = resp.status_code
+        if resp.status_code == 200:
+            result["count"] = usage_prompt_tokens(resp.json())
+    except (httpx2.HTTPError, OSError, ValueError) as exc:
+        result["error"] = type(exc).__name__
+    result["ms"] = round((time.monotonic() - t0) * 1000, 1)
+    return result
+
+
+def run_count_probe(settings: Settings, timeout: float) -> int:
+    """`--probe-count`: one JSON row of numbers and flags, then a summary."""
+    if not settings.llm_base_url or not settings.llm_model_reasoning:
+        print("COUNT PROBE FAILED: LLM_BASE_URL / LLM_MODEL_REASONING not configured")
+        return 1
+    base, more = count_probe_messages(secrets.token_hex(8))
+    cold = _count_once(settings, base, timeout)
+    warm = _count_once(settings, base, timeout)
+    plus = _count_once(settings, more, timeout)
+    usable = all(r["count"] is not None for r in (cold, warm, plus))
+    row = {
+        "status": cold["status"],
+        "usable": usable,
+        "stable": usable and cold["count"] == warm["count"],
+        "grows": usable and plus["count"] > warm["count"],
+        "prompt_tokens_cold": cold["count"],
+        "prompt_tokens_warm": warm["count"],
+        "prompt_tokens_plus_one": plus["count"],
+        "cold_ms": cold["ms"],
+        "warm_ms": warm["ms"],
+        "plus_one_ms": plus["ms"],
+    }
+    errors = sorted({r["error"] for r in (cold, warm, plus) if r["error"]})
+    if errors:
+        row["error"] = ",".join(errors)
+    print(json.dumps(row, sort_keys=True), flush=True)
+    passed = row["usable"] and row["stable"] and row["grows"]
+    print(f"COUNT PROBE {'PASSED' if passed else 'FAILED'}")
+    return 0 if passed else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Probe gateway model legs before cutover.")
     parser.add_argument("--timeout", type=float, default=None,
                         help=f"per-request timeout in seconds (default {PROBE_TIMEOUT_S:g}; "
-                             f"{ARG_PROBE_TIMEOUT_S:g} with --probe-args)")
+                             f"{ARG_PROBE_TIMEOUT_S:g} with --probe-args; LLM_TOKENIZE_TIMEOUT_S with --probe-count)")
     parser.add_argument(
         "--max-tokens", type=completion_budget,
         default=None,
@@ -607,12 +703,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--only", action="append", default=[], metavar="NAME[,NAME]",
                         help="run only these candidates, in this order")
     parser.add_argument("--no-builtin", action="store_true", help="skip the built-in candidates")
+    parser.add_argument("--probe-count", action="store_true",
+                        help="count probe: usage.prompt_tokens of a 1-token completion, stable and growing (#1266)")
     parser.add_argument("--stream", action="store_true", help="require a successful chat stream ending in [DONE]")
     parser.add_argument("--require-reasoning", action="store_true", help="fail when reasoning is not configured")
     parser.add_argument("--require-tokenizer", action="store_true", help="require chat-template-aware model token counts")
     parser.add_argument("--models", action="store_true", help="list served model ids and exit")
     args = parser.parse_args(argv)
-    if args.max_tokens is None and not args.probe_args:
+    if args.probe_count and (args.probe_args or args.models or args.stream or args.require_reasoning
+                             or args.require_tokenizer or args.max_tokens is not None):
+        parser.error("--probe-count cannot be combined with other probe modes, readiness requirements"
+                     " or --max-tokens")
+    if args.max_tokens is None and not args.probe_args and not args.probe_count:
         # The readiness budget's environment default, validated like the flag.
         try:
             args.max_tokens = completion_budget(os.environ.get("GATEWAY_PROBE_MAX_TOKENS") or str(PROBE_MAX_TOKENS))
@@ -628,6 +730,11 @@ def main(argv: list[str] | None = None) -> int:
     settings = load_settings()
     if args.probe_args:
         return run_arg_probe(settings, args, parser)
+    if args.probe_count:
+        # The application's own count timeout unless overridden: a count the
+        # agent would time out on must not pass here.
+        return run_count_probe(
+            settings, args.timeout if args.timeout is not None else settings.llm_tokenize_timeout_s)
     if args.timeout is None:
         args.timeout = PROBE_TIMEOUT_S
     failures = 0
