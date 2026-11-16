@@ -6,9 +6,12 @@ as the SQLite database (the ADR-0005/#804 purge pattern):
   purge_chats.py --days N [--once] [--interval-seconds S] [--retry-seconds S]
 
 Each run deletes, in one transaction, every chat whose last update is older
-than N days, the shared snapshots of those chats (and stale snapshots), the
-rows of every other table that reference a deleted chat by `chat_id`, and
-file records older than the window, the files attached to a purged chat that no
+than N days, the share-link snapshots of those chats and every snapshot whose
+own last update is older than N days (v0.12.3 `shared_chat` rows; a surviving
+chat is left unshared: `share_id` cleared and its `shared_chat` access grants
+removed, its own last update untouched; legacy `shared-<chat id>` chat rows
+likewise), the rows of every other table that reference a deleted chat by
+`chat_id`, and file records older than the window, the files attached to a purged chat that no
 surviving chat still references (even when the file's own row is recent), and
 orphaned uploads: regular files under uploads/ that no `file` row names and
 that are older than a day. The bytes in uploads/ go with their rows. The uploads are
@@ -21,6 +24,12 @@ deleted text is gone from the files on the claim. A durable marker
 owed; it is removed only after a checkpoint that was not blocked by a reader,
 the vacuum and a second clean checkpoint. While it exists every run repeats
 the scrub, even with nothing new to delete, and fails until it completes.
+
+Stale folders (#1255) go in the same transaction, after the chat deletions: a
+folder whose own last update is older than N days (or unknown), that no row of
+any table names in `folder_id` (chat, automation) and no folder names as its
+parent. Leaves go first, repeated until none is left, so a stale nested chain
+goes in one run; a folder still in use and its ancestors stay.
 
 Fail closed and counted, never reported as success: an unexpected schema (a
 pin import changed it) or a timestamp that is not epoch seconds refuses to
@@ -119,13 +128,39 @@ def _mark_pending(data_dir: Path) -> None:
     _fsync_dir(data_dir)
 
 
+def _purge_folders(conn: sqlite3.Connection, tables: list[str], cutoff: int) -> int:
+    """Delete stale folders, leaves first, until none is left; returns the count.
+
+    Stale: the folder's own updated_at is older than the cutoff (NULL counts as
+    older, as for a share snapshot), no row of any other table names it in
+    folder_id and no folder names it as parent_id. Run after the chat
+    deletions, so a folder whose last chat went this run goes too. A parent
+    becomes a leaf once its stale children are gone, so the loop takes a whole
+    stale chain; a parent_id cycle never becomes a leaf and is kept.
+    """
+    # NOT IN over a set holding NULL matches nothing: every subquery drops NULLs.
+    in_use = "".join(f" AND id NOT IN (SELECT folder_id FROM {_quote(table)} "
+                     "WHERE folder_id IS NOT NULL)"
+                     for table in tables
+                     if table != "folder" and "folder_id" in _columns(conn, table))
+    deleted = 0
+    while True:
+        cur = conn.execute("DELETE FROM folder WHERE coalesce(updated_at, 0) < ? AND id NOT IN "
+                           "(SELECT parent_id FROM folder WHERE parent_id IS NOT NULL)" + in_use,
+                           (cutoff,))
+        if cur.rowcount <= 0:
+            return deleted
+        deleted += cur.rowcount
+
+
 def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float = 30.0) -> dict:
     """One retention run. Returns counts; raises PurgeError on any failure."""
     if days < 1:
         raise PurgeError("bad-window")
     if not db.exists():
         # Open WebUI has not created its database yet: nothing is stored.
-        return {"chats": 0, "snapshots": 0, "linked_rows": 0, "files": 0, "orphans": 0}
+        return {"chats": 0, "snapshots": 0, "linked_rows": 0, "files": 0, "orphans": 0,
+                "folders": 0}
     cutoff = int(now) - days * DAY_S
     uploads = (data_dir / "uploads").resolve()
     try:
@@ -137,9 +172,29 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
         if "chat" not in tables or not {"id", "user_id", "updated_at"} <= _columns(conn, "chat"):
             raise PurgeError("schema")
         _check_epoch(conn, "chat")
+        # v0.12.3 keeps share-link snapshots in shared_chat (one per shared chat,
+        # keyed by the share token) and who may open them in access_grant rows
+        # keyed by the ORIGINAL chat id. A shared_chat table without the columns
+        # the purge reads is an unexpected schema.
+        has_shares = "shared_chat" in tables
+        if has_shares:
+            if not {"id", "chat_id", "updated_at"} <= _columns(conn, "shared_chat"):
+                raise PurgeError("schema")
+            _check_epoch(conn, "shared_chat")
+        has_grants = "access_grant" in tables and {"resource_type", "resource_id"} <= _columns(
+            conn, "access_grant")
         has_files = "file" in tables and {"id", "path", "updated_at"} <= _columns(conn, "file")
         if has_files:
             _check_epoch(conn, "file")
+        # v0.12.3 files a chat under a folder by chat.folder_id. A folder table
+        # without the columns the purge reads, or with no chat.folder_id to tell
+        # which folders are in use, is an unexpected schema.
+        has_folders = "folder" in tables
+        if has_folders:
+            if not ({"id", "parent_id", "updated_at"} <= _columns(conn, "folder")
+                    and "folder_id" in _columns(conn, "chat")):
+                raise PurgeError("schema")
+            _check_epoch(conn, "folder")
         conn.execute("PRAGMA secure_delete = ON")
         conn.execute("PRAGMA temp_store = MEMORY")
         conn.execute("BEGIN IMMEDIATE")
@@ -154,6 +209,27 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
                      "(SELECT id FROM purge_chat))",
                      (SHARED_PREFIX + "%", cutoff, len(SHARED_PREFIX) + 1))
         (total,) = conn.execute("SELECT count(*) FROM purge_chat").fetchone()
+        share_snapshots = 0
+        if has_shares:
+            # A share snapshot goes with its purged chat, and on its own once the
+            # snapshot is older than the window (S2) even while the chat lives
+            # on. The surviving chat is left unshared the way upstream unsharing
+            # leaves it: share_id cleared and its share grants removed, so a
+            # later share does not inherit them. Its updated_at is not touched.
+            # updated_at is nullable: a snapshot of unknown age counts as expired.
+            conn.execute("CREATE TEMP TABLE purge_share(id TEXT PRIMARY KEY, chat_id TEXT)")
+            conn.execute("INSERT INTO purge_share SELECT id, chat_id FROM shared_chat "
+                         "WHERE coalesce(updated_at, 0) < ? "
+                         "OR chat_id IN (SELECT id FROM purge_chat)", (cutoff,))
+            if has_grants:
+                conn.execute("DELETE FROM access_grant WHERE resource_type = 'shared_chat' AND "
+                             "(resource_id IN (SELECT chat_id FROM purge_share) "
+                             "OR resource_id IN (SELECT id FROM purge_chat))")
+            if "share_id" in _columns(conn, "chat"):
+                conn.execute("UPDATE chat SET share_id = NULL WHERE share_id IN "
+                             "(SELECT id FROM purge_share)")
+            cur = conn.execute("DELETE FROM shared_chat WHERE id IN (SELECT id FROM purge_share)")
+            share_snapshots = max(cur.rowcount, 0)
         files = 0
         orphans = 0
         if has_files:
@@ -180,6 +256,7 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
                                    "(SELECT id FROM purge_chat)")
                 linked += max(cur.rowcount, 0)
         conn.execute("DELETE FROM chat WHERE id IN (SELECT id FROM purge_chat)")
+        folders = _purge_folders(conn, tables, cutoff) if has_folders else 0
         if has_files:
             for table in tables:
                 if table != "file" and "file_id" in _columns(conn, table):
@@ -201,7 +278,7 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
                         continue
                     _unlink(entry)
                     orphans += 1
-        if total or files or linked:
+        if total or share_snapshots or files or linked or folders:
             # Before the commit: a crash between commit and scrub still leaves
             # the marker, so the next run finishes the job.
             _mark_pending(data_dir)
@@ -220,8 +297,8 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
                 raise PurgeError("checkpoint-busy")
             (data_dir / PENDING_NAME).unlink()
             _fsync_dir(data_dir)
-        return {"chats": chats, "snapshots": total - chats, "linked_rows": linked, "files": files,
-                "orphans": orphans}
+        return {"chats": chats, "snapshots": total - chats + share_snapshots, "linked_rows": linked,
+                "files": files, "orphans": orphans, "folders": folders}
     except sqlite3.OperationalError as exc:
         code = "busy" if "locked" in str(exc) or "busy" in str(exc) else "sqlite"
         raise PurgeError(code) from None
@@ -272,7 +349,8 @@ def run_once(db: Path, data_dir: Path, days: int, status: dict, now: float,
         status.update(consecutive_failures=0, last_success=int(now), last_counts=counts,
                       last_error="")
         print("chat purge ok: window {} days, chats {chats}, snapshots {snapshots}, "
-              "linked rows {linked_rows}, files {files}, orphan uploads {orphans}".format(days, **counts),
+              "linked rows {linked_rows}, files {files}, orphan uploads {orphans}, "
+              "folders {folders}".format(days, **counts),
               flush=True)
         ok = True
     status["window_days"] = days

@@ -1759,12 +1759,13 @@ PrometheusRule (it would depend on user-workload monitoring, which ADR-0006 repl
 **Naming (maintainer decision 2026-10-26, #1070).** *Rosetta* is the site-facing name of the docs
 assistant: the Open WebUI model users pick, the Route host (suggested example
 `rosetta.apps.<cluster-domain>`, a placeholder), the AD FS client name and the user docs. Code
-identifiers stay `mainframe_rag`, `mainframe-rag` and the Pipe/model ID `mainframe_rag_docs`; Open
+identifiers stay `mainframe_rag`, `mainframe-rag` and the Pipe (Function) ID `mainframe_rag_docs`; Open
 WebUI's own branding stays unmodified (ADR-0007 L1) and the console keeps its title.
 
 Open WebUI is the main docs platform and is **on by default** (maintainer decision 2026-10-26,
 ADR-0008); the console stays the frozen fallback. It is a front end for the docs corpus and a
-client of the agent: its only model is the repository docs Pipe (#1072) over `/v1/chat`. It
+client of the agent: its only models are the repository docs Pipe's (#1072) answer-depth entries
+over `/v1/chat` (#1255, [answer depth](#owui-answer-depth)). It
 holds no gateway key and no model connection, and it does no retrieval of its own. The image pin
 is recorded in `images.txt`; the 2026-10-24 Kind trials are interim and partial
 (runs 1-2 of the #1073 qualification, not a clean pass; open residuals are listed
@@ -2012,15 +2013,48 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
    answers an absent Function with 401, so a 401 on the Function itself never decides) or
    updates it, reads it back by hash and activates it. Until the key exists, deploy prints
    `docs Pipe NOT installed` and the front end offers no model.
-5. Give all signed-in users read access to the Rosetta model in the Open WebUI admin UI (the
-   default visibility is a #1073 trial item). Then sign in as an ordinary user and ask one
+   With `openwebui.ratings.enabled` (#1255, default off, requires the feedback store) the same
+   run also installs the hash-checked rating Action, active and global, and prints
+   `rating Action installed`. Turned off again, the next run deletes it and prints `rating
+   Action removed`. It is a chart value only: no `airgap.env` key sets it yet (#1255).
+   Contract: [Open WebUI ratings](agent.md#openwebui-ratings).
+5. Give all signed-in users read access to each Rosetta model (one per answer depth, below) in
+   the Open WebUI admin UI (the default visibility is a #1073 trial item). Then sign in as an ordinary user and ask one
    question: citations show as source chips, and the console still works.
+
+<a id="owui-answer-depth"></a>
+**Answer depth (#1255).** The docs Pipe is an Open WebUI manifold: one Function whose entries
+v0.12.3 lists as the models `mainframe_rag_docs.standard` "Rosetta", `mainframe_rag_docs.quick`
+"Rosetta – quick" (`low`) and `mainframe_rag_docs.thorough` "Rosetta – thorough" (`xhigh`; maintainer
+decision 2026-11-16). Each sends the agent the effort its entry maps to
+([Pipe contract](agent.md#openwebui-docs-pipe)); the default entry sends none, so it answers
+exactly as the single model did. `DEFAULT_MODELS` (chart, fixed) selects the default entry for new
+chats. Upgrading from the single model:
+
+- The model id `mainframe_rag_docs` is gone; its grant row stays in the database unused. Open
+  WebUI shows a model only with its own read grant, so ordinary users see **no** Rosetta model
+  until an admin grants each entry (step 5). Grant all entries in the same change window.
+- A chat started before the upgrade still names `mainframe_rag_docs`. Once the user is granted
+  the entries (previous item), v0.12.3 drops on opening it a model id it does not list and
+  selects `DEFAULT_MODELS` (`Chat.svelte` `loadChat`; source reading, not yet observed live), so
+  the next message, or a regenerated answer, goes through the default entry. With no model
+  granted the old id stays selected and the chat cannot send. "Continue response" on an
+  answer saved before the upgrade looks up that answer's own model id, finds none and does
+  nothing; send a new message instead. API callers must use the new ids: the old one is "Model
+  not found". The dev acceptance check `legacy-chat-answers` covers the server side
+  ([checks](openwebui-dev.md)); the browser's switch is part of the pilot browser trace.
+- Every entry shares the Pipe's `TIMEOUT_S` and the agent's request deadline (270 s, sized at
+  medium effort). A thorough (`xhigh`) answer may end as the fixed deadline text: measure that
+  in the site eval before users are told about thorough. A site whose
+  `LLM_REASONING_EFFORTS` lacks an entry's effort shows a fixed "does not offer this answer depth"
+  text for it.
 
 **Retention (ADR-0007 S2).** The window is `OPENWEBUI_RETENTION_DAYS` (`openwebui.retentionDays`),
 default **30 days** (maintainer decision 2026-10-24). An explicit null fails the render.
 - The chat-purge sidecar runs hourly. In one transaction it deletes the chats last updated before
-  the window, their shared snapshots and stale snapshots, every row that references a deleted
-  chat by `chat_id`, and file records with their uploads. Deletion runs with `secure_delete`;
+  the window, their share-link snapshots and every snapshot older than the window (a chat that
+  lives on is left unshared: its link stops working and its share grants go), every row that
+  references a deleted chat by `chat_id`, and file records with their uploads. Deletion runs with `secure_delete`;
   the sidecar then truncates the WAL and runs `VACUUM`, so the text is gone from the claim's
   files. Users may also delete their own chats.
 - An unexpected table layout or a timestamp that is not epoch seconds refuses to delete
@@ -2032,6 +2066,33 @@ default **30 days** (maintainer decision 2026-10-24). An explicit null fails the
 - Backups of `rag-openwebui-data` hold chat text. They are protected records that never leave
   the enterprise, and their retention follows the same window: at most 30 days plus one backup
   cycle.
+- Stale chat folders (#1255) go in the same transaction: a folder last updated before the window
+  (or of unknown age) that, after the run's chat deletions, no chat or other row names in
+  `folder_id` and no folder names as its parent. Nested stale folders go in the same run, leaves
+  first, counted as `folders`. Renaming, moving, expanding or collapsing a folder refreshes its
+  age; filing a chat in it does not. A folder in use, and its ancestors, keep their name, system
+  prompt text, icon and background image (ADR-0007 S2).
+
+**Share links and temporary chats (ADR-0007 S2, #1255).** Chart values under `openwebui.chats`,
+all off by default; there is no `airgap.env` key for them yet.
+- These values set the default user permissions. An admin can still change a group's permissions
+  in the Open WebUI admin UI, and v0.12.3 combines them most-permissive over the defaults.
+- `share` (`USER_PERMISSIONS_CHAT_SHARE`): users may share a chat as a link `/s/<token>`. The link
+  is a snapshot copy of the chat, opens only after sign-in, and only for its owner and the users or
+  groups the owner grants in the share dialog. In v0.12.3's "continue" mode, the owner instead lets
+  grantees read and write the live chat. `shareWithAllUsers`
+  (`USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING`) also lets the owner open it to every signed-in
+  user. The no-auth "anyone" grant (`USER_PERMISSIONS_CHAT_ALLOW_OPEN_SHARING`) is pinned off in
+  the defaults; an admin can still grant it, or enable it for a group (ADR-0007 R3 residual).
+  Community sharing stays off. A snapshot is purged with its chat, or on its own once it is older
+  than the window.
+- Temporary chats (`USER_PERMISSIONS_CHAT_TEMPORARY`, pinned on) are never saved: the server
+  writes no chat row for a `temporary:` chat id. `temporaryEnforced`
+  (`USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED`) stops non-admins from starting a saved chat: the
+  server refuses to create or import one. Admins are exempt, and a chat saved earlier can still be
+  continued and stays until the purge. To enforce for one group only, leave this off and set the group's permission in the
+  Open WebUI admin UI; v0.12.3 combines group permissions most-permissive, so any one group that
+  enforces it enforces it for its members.
 
 **Patch policy and advisory switch-off (ADR-0007 P1).** The maintainer owns patching. Agents
 prepare a monthly import of the latest upstream release as a dedicated pin-bump PR, carrying the
@@ -2061,6 +2122,16 @@ image as `openwebui-proxy-image.tar`) as its only listener. Open WebUI listens o
 (`merge_slashes on`), forwards the original request line, and answers `403 denied` for
 everything outside the allow-list. Access logs are off.
 
+Chat folders (`ENABLE_FOLDERS=true`, #1255) pass: the folder page `/folders/<id>`, and the folder
+API by id (hex and hyphens; v0.12.3 ids are uuid4) for list and create, read, delete, rename and
+settings, move, expand, mark read, and the owner's chat list (`/{id}/shared/chats`, which the
+folder page uses). Folder sharing stays off. The proxy refuses
+the grant route `/api/v1/folders/{id}/access/update`, which v0.12.3 does not gate on
+`USER_PERMISSIONS_FOLDERS_ALLOW_SHARING`, and the shared-folder list `/api/v1/folders/shared`
+(the sidebar treats that refusal as an empty list). A folder's system prompt reaches the docs
+Pipe as a system turn, and the Pipe drops it. Its knowledge entries resolve to nothing, because
+no file, knowledge collection or note can exist (ADR-0007 V1).
+
 Site acceptance, with `$C` a signed-in user's session cookie and `$H` the Route host. Every
 request must return `403` (or `400` for the null byte) and must store nothing:
 
@@ -2069,12 +2140,15 @@ for p in /api/v1/files/ /api/v1/files /API/v1/files/ //api/v1/files/ /api/v1/./f
          /api/v1/%66iles/ /api/v1%2Ffiles/ /api/v1/files%2F /%61pi/v1/files/ \
          /api/v1/chats/%2e%2e/files/ /api/v1/%2566iles/ /api/v1/files%00 \
          /api/v1/retrieval/process/text /api/v1/knowledge/ /api/v1/audio/transcriptions \
-         /openai/chat/completions /ollama/api/chat /api/v1/utils/code/execute; do
+         /openai/chat/completions /ollama/api/chat /api/v1/utils/code/execute \
+         /api/v1/prompts/create /api/v1/prompts/list \
+         /api/v1/folders/shared \
+         /api/v1/folders/00000000-0000-4000-8000-000000000000/access/update; do
   printf '%s ' "$p"; curl -sk -o /dev/null -w '%{http_code}\n' -X POST -b "$C" "https://$H$p"
 done
 ```
 
-Then sign in and open a chat: a conversation must answer through the Rosetta model.
+Then sign in and open a chat: a conversation must answer through each Rosetta model.
 
 **Re-audit the allow-list on every Open WebUI import (ADR-0007 P1).** Each import PR must (1) list
 the router prefixes and handlers of the new release (`main.py` `include_router`, each
@@ -2085,12 +2159,30 @@ curl checks above; and (5) re-run a browser trace of the pilot flows (sign-in, c
 pages, Pipe install) to catch a path the UI newly needs. A UI error on a denied path is the
 signal to decide, not to widen the list by default.
 
-**Admin API key (installer).** The Pipe installer needs one admin key. The chart sets
-`ENABLE_API_KEYS=true`, `USER_PERMISSIONS_FEATURES_API_KEYS=false` (users cannot create keys;
-admins bypass the permission) and `ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS=true` with
-`API_KEYS_ALLOWED_ENDPOINTS=/api/v1/functions`, so a key works only on the Functions API.
-Rotate or delete the key after an install if you prefer: `deploy.sh` prints the explicit
-not-done notice without it. The settings are pending #1073 run-2 qualification.
+**Admin API key (installer).** The Pipe and shared-prompt installers need one admin key. The
+chart sets `ENABLE_API_KEYS=true`, `USER_PERMISSIONS_FEATURES_API_KEYS=false` (users cannot
+create keys; admins bypass the permission) and `ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS=true` with
+`API_KEYS_ALLOWED_ENDPOINTS=/api/v1/functions,/api/v1/prompts`, so a key works only on the
+Functions and Prompts APIs. Rotate or delete the key after an install if you prefer: `deploy.sh`
+prints the explicit not-done notices without it. The settings are pending #1073 run-2
+qualification.
+
+**Shared prompts (#1255).** The chat `/` commands are repository-owned templates in
+`charts/mainframe-rag/files/openwebui/prompts.json` (`{"prompts": [{"command", "name",
+"content"}]}`; commands are lowercase words joined by hyphens, plain text only). To change them,
+edit the file and re-run `airgap:deploy`; an empty list removes them all. After the docs Pipe,
+deploy runs `provision_prompts.py` in the pod with the admin key on stdin and the repository
+hashes of the file and of itself. It refuses a mounted copy that is not this release's (the
+ConfigMap mount can trail the release by a minute: wait, then re-run) and an invalid file, proves
+the key on the admin-only Function listing, and then converges: it creates, updates and removes
+the prompts it manages (marked in their metadata) and never writes any other prompt. A
+repository command held by a prompt it does not manage fails the deploy before any write. Every
+signed-in user gets read access only. Users cannot create or import prompts
+(`USER_PERMISSIONS_WORKSPACE_PROMPTS_ACCESS` and `_IMPORT` are pinned to `false`; stored XSS
+through prompts was CVE-2025-64495). The proxy admits the installer's prompt calls only from the
+pod's loopback (ADR-0007 E1), so the Route reaches no prompt write and the admin workspace
+cannot edit them either. The listing shows users the installing admin as the owner. Without the
+admin key deploy prints `shared prompts NOT provisioned`.
 
 **Requirements.** The Route API (OpenShift; deploy refuses the front end without it) and an
 enforcing CNI. The Kind lanes do not enable the front end yet: an e2e run with it enabled needs

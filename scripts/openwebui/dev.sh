@@ -19,7 +19,7 @@
 # deploy      local CA and certificates, Dex users, render the working tree's chart
 #             (Open WebUI objects) and Pipe plus the Kind stand-ins, apply
 # relay       host relay (Kind gateway -> 127.0.0.1:$LOCAL_AGENT_PORT), no idle timeout
-# provision   admin API key, the chart's Pipe installer, groups, Rosetta model grants
+# provision   admin API key, the chart's Pipe installer, groups, Rosetta model (answer depth) grants
 # smoke       both users sign in, Rosetta-only models, one question with source chips,
 #             the allow-list's blocked paths answer 403 from the proxy sidecar
 # ready       run the startup checks (health, smoke) and write STATE/READY.md (mode 600):
@@ -466,7 +466,7 @@ provision() {
     if [ "$DRYRUN" = 1 ]; then
         plan "provision: owui-admin signs in, creates an API key (STATE/admin-api-key, mode 600)"
         plan "provision: kubectl exec -i deploy/rag-openwebui -c openwebui -- python3 /opt/mainframe-rag/openwebui/provision_pipe.py <pipe sha256> < admin-api-key"
-        plan "provision: groups internal-team and docs-readers; Rosetta model (mainframe_rag_docs) read grant to both; team-user and docs-user sign in"
+        plan "provision: groups internal-team and docs-readers; Rosetta models (mainframe_rag_docs.standard/.quick/.thorough) read grant to both; team-user and docs-user sign in"
         return 0
     fi
     provision_live

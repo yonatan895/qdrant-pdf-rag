@@ -245,6 +245,35 @@ def test_request_body_is_exactly_the_strict_chat_schema(chat_request):
     assert fake.requests[0].url == httpx.URL("http://rag-agent:8080/v1/chat")
 
 
+FOLDER_PROMPT = "Folder prompt: answer as a pirate"
+_FOLDER_TURNS = [{"role": "user", "content": "first question"},
+                 {"role": "assistant", "content": "first answer"},
+                 {"role": "user", "content": QUESTION}]
+
+
+@pytest.mark.parametrize("system", [
+    # (With no system turn yet the folder prompt is inserted as messages[0];
+    # test_request_body_is_exactly_the_strict_chat_schema covers that shape.)
+    # A chat or user system prompt already at messages[0]: the folder prompt is
+    # prepended to it (string content).
+    pytest.param({"role": "system", "content": f"{FOLDER_PROMPT}\nchat system prompt"}, id="merged"),
+    # The same merge on list content: every text part gets the prompt prepended.
+    pytest.param({"role": "system", "content": [
+        {"type": "text", "text": f"{FOLDER_PROMPT}\nchat system prompt"},
+        {"type": "text", "text": f"{FOLDER_PROMPT}\nsecond part"}]}, id="list-content"),
+])
+def test_a_folder_system_prompt_never_reaches_the_agent(system: dict[str, Any]):
+    """Open WebUI v0.12.3 applies a chat folder's `data.system_prompt` in
+    utils/middleware.py process_chat_payload through apply_system_prompt_to_body,
+    whose add_or_update_system_message (utils/misc.py) only ever inserts or
+    updates the role:system turn at messages[0]. The Pipe drops system turns,
+    so the folder prompt stays inert (ADR-0007 V1, V3; #1255)."""
+    fake = FakeAgent()
+    run_pipe(fake, messages=[system, *_FOLDER_TURNS])
+    (body,) = fake.bodies()
+    assert body == {"messages": _FOLDER_TURNS, "stream": True}
+
+
 # --- History trimming to the agent's body cap (#1072) ------------------------
 
 CAP = 131072
@@ -506,6 +535,71 @@ def test_task_calls_never_reach_the_agent(marker: dict[str, Any]):
     assert fake.requests == []
     assert content == "Docs question"
     assert events == []
+
+
+# --- Answer depth (#1255) ----------------------------------------------------
+
+# The Function id the installer uses (provision_pipe.py PIPE_ID): Open WebUI
+# v0.12.3 names a manifold entry `<function id>.<entry id>` (functions.py
+# get_function_models) and passes that id as `body["model"]`.
+FUNCTION_ID = "mainframe_rag_docs"
+
+
+def test_pipe_lists_the_answer_depths_with_the_default_first():
+    """The manifold entries Open WebUI shows as models: the default depth
+    first (the first-available fallback for a chat whose model id is gone).
+    The class has no `name` attribute, which v0.12.3 would prefix to every
+    entry name."""
+    pipe = docs_pipe.Pipe()
+    assert pipe.pipes() == [
+        {"id": "standard", "name": "Rosetta"},
+        {"id": "quick", "name": "Rosetta \N{EN DASH} quick"},
+        {"id": "thorough", "name": "Rosetta \N{EN DASH} thorough"},
+    ]
+    assert not hasattr(pipe, "name")
+
+
+@pytest.mark.parametrize("model,effort", [
+    pytest.param(f"{FUNCTION_ID}.quick", "low", id="quick"),
+    pytest.param(f"{FUNCTION_ID}.thorough", "xhigh", id="thorough"),
+    pytest.param(f"{FUNCTION_ID}.standard", None, id="standard"),
+    # Defensive: an id without a known depth gets the agent's configured
+    # default, never a refusal (v0.12.3 itself refuses an unlisted id).
+    pytest.param(FUNCTION_ID, None, id="pre-1255-model-id"),
+    pytest.param(f"{FUNCTION_ID}.retired", None, id="unknown-entry"),
+    pytest.param(f"other.{FUNCTION_ID}.quick", None, id="foreign-prefix"),
+    pytest.param(None, None, id="no-model"),
+    pytest.param(["quick"], None, id="not-a-string"),
+])
+def test_answer_depth_selects_the_agent_effort(model: Any, effort: str | None, chat_request):
+    fake = FakeAgent()
+    content, _events = run_pipe(fake, body_extra={"model": model})
+    assert content.startswith("Answer.")
+    (body,) = fake.bodies()
+    if effort is None:
+        assert "reasoning_effort" not in body
+    else:
+        assert body["reasoning_effort"] == effort
+    validated = chat_request.model_validate(body)
+    assert validated.model_dump(exclude_unset=True) == body
+
+
+def test_answer_depth_never_counts_against_the_body_cap():
+    """The agent's cap (chat_body_chars) counts messages, product and version,
+    not the effort; a trimmed request keeps the selected depth."""
+    fake = FakeAgent()
+    messages = [*_history(8, 24000), {"role": "user", "content": QUESTION}]
+    run_pipe(fake, messages=messages, body_extra={"model": f"{FUNCTION_ID}.quick"})
+    (body,) = fake.bodies()
+    assert body["reasoning_effort"] == "low"
+    assert _body_chars(body) <= CAP < sum(len(m["content"]) for m in messages)
+
+
+def test_task_calls_from_any_depth_never_reach_the_agent():
+    fake = FakeAgent()
+    content, _events = run_pipe(fake, task="title_generation",
+                                body_extra={"model": f"{FUNCTION_ID}.thorough"})
+    assert content == "Docs question" and fake.requests == []
 
 
 def test_ordinary_chat_with_empty_task_markers_still_calls_the_agent():
@@ -990,6 +1084,8 @@ ERROR_CASES = [
      "administrator to check the Rosetta Pipe configuration.")),
     ("http_error", 400, ("The documentation service rejected the request. Ask an administrator "
      "to check the Rosetta Pipe configuration.")),
+    ("unsupported_reasoning_effort", 422, ("This deployment does not offer this answer depth. "
+     "Choose another Rosetta model and retry.")),
 ]
 UNREACHABLE = ("The documentation service could not be reached. Retry; if it persists, "
                "contact the operators.")
@@ -1074,7 +1170,90 @@ def test_open_webui_pin_and_install_header():
     assert fields["title"] == "Rosetta"
     assert "requirements" not in fields
     imports = set(re.findall(r"^(?:from|import) (\w+)", source, flags=re.MULTILINE))
-    assert imports <= {"__future__", "collections", "json", "re", "typing", "httpx", "pydantic"}
+    # `os` reads only the chart's RAG_ANSWER_REFERENCE switch (#1255).
+    assert imports <= {"__future__", "collections", "json", "os", "re", "typing", "httpx",
+                       "pydantic"}
+
+
+# --- Answer reference for Open WebUI ratings (#1255) -------------------------
+
+RID = "0123456789ab"
+# The line the rating Action reads the agent's request id from, spelled out.
+REFERENCE = "\n\nAnswer reference: `0123456789ab`"
+
+
+def _ref_frames(*deltas: str, chunk_id: str = f"chatcmpl-{RID}") -> list[str]:
+    frames = [format_openai_chunk(chunk_id, "m", delta_content=d) for d in deltas]
+    frames.append(format_openai_chunk(chunk_id, "m", finish_reason="stop", extra=_final_meta()))
+    frames.append(format_openai_done())
+    return frames
+
+
+@pytest.fixture
+def references_on(monkeypatch):
+    monkeypatch.setenv("RAG_ANSWER_REFERENCE", "true")
+
+
+@pytest.mark.parametrize("stream", [True, False])
+def test_answer_reference_is_the_last_line_when_ratings_are_on(references_on, stream):
+    """The agent's request id reaches the stream only as the chunk id
+    (`chatcmpl-<id>`); Open WebUI keeps no field an Action can read except the
+    message content, so the Pipe appends one fixed line after the answer."""
+    content, events = run_pipe(FakeAgent(_ref_frames("Answer.")), stream=stream)
+    assert content == "Answer." + SHOWN_LIST_A + REFERENCE
+    assert _final_status(events) == "Source-matched · 1 citation"
+
+
+def test_no_answer_reference_by_default():
+    """Ratings off (the default): the Pipe's output is unchanged."""
+    content, _ = run_pipe(FakeAgent(_ref_frames("Answer.")))
+    assert content == "Answer." + SHOWN_LIST_A
+
+
+@pytest.mark.parametrize("value", ["", "false", "1", "TRUE "])
+def test_answer_reference_switch_is_exactly_true(monkeypatch, value):
+    monkeypatch.setenv("RAG_ANSWER_REFERENCE", value)
+    content, _ = run_pipe(FakeAgent(_ref_frames("Answer.")))
+    assert "Answer reference" not in content
+
+
+@pytest.mark.parametrize("frames", [
+    pytest.param(_ref_frames("Answer.", chunk_id="chatcmpl-x"), id="not-an-agent-id"),
+    pytest.param(_ref_frames("Answer.", chunk_id=f"other-{RID}"), id="no-chatcmpl-prefix"),
+    pytest.param(_ref_frames("Answer.", chunk_id=f"chatcmpl-{RID}0"), id="13-hex"),
+    pytest.param([format_openai_chunk("chatcmpl-x", "m", finish_reason="stop",
+                                      extra={**_final_meta(), "__request_id": RID}),
+                   format_openai_done()], id="id-key-in-the-agent-metadata"),
+    pytest.param(_ref_frames("Answer.")[:-1], id="no-done"),
+    pytest.param([*_ref_frames("Answer.")[:1],
+                  format_openai_error("upstream_error", "x"), format_openai_done()], id="error-frame"),
+])
+def test_no_answer_reference_without_a_finished_agent_answer(references_on, frames):
+    """Only a completed answer with the agent's 12-hex id gets a reference: a
+    failed or truncated one is not recorded as an answer, so it is not rateable."""
+    content, _ = run_pipe(FakeAgent(frames))
+    assert "Answer reference" not in content
+
+
+def test_answer_reference_never_follows_a_failure_text(references_on):
+    content, _ = run_pipe(FakeAgent(status=502, body=b'{"code":"upstream_error","message":"x"}'))
+    assert "Answer reference" not in content
+
+
+def test_history_drops_the_trailing_reference_line_from_answers_only():
+    """The reference is Open WebUI display state, not the answer: the agent
+    gets the assistant turn as it produced it. A user turn, or a reference
+    that is not the last line, is sent unchanged."""
+    quoted = "Is `Answer reference: `0123456789ab`` an id?" + REFERENCE
+    request = docs_pipe.build_request(_messages(
+        ("user", "First question"),
+        ("assistant", "First answer." + REFERENCE),
+        ("assistant", "Mid" + REFERENCE + "\n\nmore text"),
+        ("user", quoted),
+    ), None)
+    assert request is not None
+    assert [t["content"] for t in request["messages"]] == [
+        "First question", "First answer.", "Mid" + REFERENCE + "\n\nmore text", quoted]
 
 
 # --- Real agent round trip ---------------------------------------------------
@@ -1108,8 +1287,11 @@ def real_agent(monkeypatch, servable_representation_gate):
                         message_ids=("IEA500I",))
         return [hit], "identifier", {"embed_ms": 1, "qdrant_ms": 2}
 
+    efforts: list[str | None] = []
+
     class FakeLLM:
         async def chat_stream(self, messages, reasoning_effort=None, temperature=None):
+            efforts.append(reasoning_effort)
             yield {"type": "token", "delta": "Reissue the command.\n\n", "ttft_ms": 3}
             yield {"type": "token", "delta": f"Citations:\n- {CITE_A}\n"}
             yield {"type": "done", "finish_reason": "stop", "ttft_ms": 3,
@@ -1126,7 +1308,9 @@ def real_agent(monkeypatch, servable_representation_gate):
             return httpx.Response(resp.status_code, content=resp.content,
                                   headers={"content-type": resp.headers["content-type"]})
 
-        yield httpx.MockTransport(forward), searches
+        transport = httpx.MockTransport(forward)
+        transport.efforts = efforts  # type: ignore[attr-defined]  # the effort each model call got
+        yield transport, searches
 
 
 def test_round_trip_through_the_real_agent(real_agent):
@@ -1140,6 +1324,24 @@ def test_round_trip_through_the_real_agent(real_agent):
     assert source["source"] == {"name": CITE_A, "id": "SA22-0000-00"}
     assert source["document"] == [EXCERPT_A]
     assert _final_status(events) == "Source-matched · 1 citation"
+
+
+def test_round_trip_reference_is_the_agents_recorded_request_id(real_agent, monkeypatch):
+    """Producer to consumer: the id in the reference line is exactly the real
+    agent's request id for this answer (its chunk id, its X-Request-ID)."""
+    monkeypatch.setenv("RAG_ANSWER_REFERENCE", "true")
+    transport, _ = real_agent
+    seen: list[str] = []
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        response = transport.handle_request(request)
+        seen.extend(re.findall(r'"id": "chatcmpl-([0-9a-f]{12})"', response.content.decode()))
+        return response
+
+    content, _ = run_pipe(None, transport=httpx.MockTransport(capture))
+    assert seen and len(set(seen)) == 1
+    assert content.endswith(f"\n\nAnswer reference: `{seen[0]}`")
+    assert content.count("Answer reference") == 1
 
 
 def test_round_trip_asks_the_last_multimodal_turn_not_an_earlier_one(real_agent):
@@ -1166,6 +1368,12 @@ def test_round_trip_a_long_chat_is_200_where_the_untrimmed_body_is_422(real_agen
     assert [s["query"] for s in searches] == [QUESTION]
     assert content.startswith("Reissue the command.")
     assert _final_status(events).endswith(TRIM_NOTE)
+    # A depth's effort is not counted by the real ChatRequest bound (#1255).
+    content, events = run_pipe(None, transport=transport, messages=messages,
+                               body_extra={"model": f"{FUNCTION_ID}.quick"})
+    assert content.startswith("Reissue the command.")
+    assert _final_status(events).endswith(TRIM_NOTE)
+    assert transport.efforts[-1] == "low"
 
 
 def test_round_trip_a_long_paste_reaches_the_model_exactly(real_agent, monkeypatch):
@@ -1264,3 +1472,46 @@ def test_round_trip_maps_the_real_strict_schema_refusal(real_agent):
                                 user={"id": "u1", "valves": {"product": "z" * 100_000}})
     assert searches == []
     assert content == ERROR_CASES[0][2]
+
+
+@pytest.mark.parametrize("model,effort", [
+    pytest.param(f"{FUNCTION_ID}.quick", "low", id="quick"),
+    pytest.param(f"{FUNCTION_ID}.thorough", "xhigh", id="thorough"),
+    pytest.param(f"{FUNCTION_ID}.standard", "medium", id="standard"),
+    pytest.param(FUNCTION_ID, "medium", id="bare-function-id"),
+])
+def test_round_trip_each_depth_reaches_the_model_at_its_effort(real_agent, monkeypatch,
+                                                               model: str, effort: str):
+    """#1255 producer to consumer: the entry the user picked selects the effort
+    the real agent sends to the model; the default entry keeps the configured
+    default. The bare Function id is a defensive case only: v0.12.3 refuses an
+    unlisted model id before any Pipe call (main.py), and a pre-upgrade chat
+    reaches the Pipe through the frontend's DEFAULT_MODELS fallback instead."""
+    from mainframe_rag.agent import app as app_mod
+
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_efforts", "low,medium,xhigh")
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_simple", "medium")
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_complex", "medium")
+    transport, _searches = real_agent
+    content, events = run_pipe(None, transport=transport, body_extra={"model": model})
+    assert content == f"Reissue the command.\n\n**Citations:**\n- {CITE_A}"
+    assert _final_status(events) == "Source-matched · 1 citation"
+    assert transport.efforts == [effort]
+
+
+def test_round_trip_a_depth_the_deployment_does_not_offer_is_a_fixed_message(
+        real_agent, monkeypatch):
+    """A site whose template has no xhigh (LLM_REASONING_EFFORTS) refuses the
+    thorough entry before retrieval or any model call; the Pipe shows its fixed
+    text, never the agent's message."""
+    from mainframe_rag.agent import app as app_mod
+
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_efforts", "low,medium,high")
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_simple", "medium")
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_complex", "medium")
+    transport, searches = real_agent
+    content, events = run_pipe(None, transport=transport,
+                               body_extra={"model": f"{FUNCTION_ID}.thorough"})
+    assert content == ERROR_CASES[-1][2]
+    assert _final_status(events) == "Request failed"
+    assert searches == [] and transport.efforts == []

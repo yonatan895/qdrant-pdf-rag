@@ -422,6 +422,8 @@ else
 fi
 # #1074: the docs Pipe is the front end's only model; install it hash-checked.
 [ "$OPENWEBUI_ENABLED" != "true" ] || provision_openwebui_pipe
+# #1255: the shared prompt templates (chat `/` commands), repository-owned.
+[ "$OPENWEBUI_ENABLED" != "true" ] || provision_openwebui_prompts
 if [ "$AGENT_ROUTE" = "true" ]; then
     echo "Route rag-agent -> svc port oauth, reencrypt, timeout 300s"
 fi

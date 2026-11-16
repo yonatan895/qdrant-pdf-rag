@@ -111,8 +111,11 @@ def _server(state, key_file, cert_file):
                 if body["id"] in state.functions:
                     return self._reply(400, {"detail": "id taken"})
                 content = body["content"] + ("#x" if state.mangle_content else "")
+                # Open WebUI sets the type from the module's class (utils/plugin.py).
+                ftype = "action" if "class Action" in body["content"] else "pipe"
                 state.functions[body["id"]] = {"id": body["id"], "name": body["name"],
-                                               "content": content, "is_active": False}
+                                               "type": ftype, "content": content,
+                                               "is_active": False, "is_global": False}
                 return self._reply(200, state.functions[body["id"]])
             if method == "POST" and self.path.startswith(prefix):
                 fid, _, action = self.path[len(prefix):].partition("/")
@@ -123,7 +126,12 @@ def _server(state, key_file, cert_file):
                     fn["content"] = body["content"]
                 elif action == "toggle":
                     fn["is_active"] = not fn["is_active"]
+                elif action == "toggle/global":
+                    fn["is_global"] = not fn.get("is_global", False)
                 return self._reply(200, fn)
+            if method == "DELETE" and self.path.startswith(prefix) and self.path.endswith("/delete"):
+                fid = self.path[len(prefix):-len("/delete")]
+                return self._reply(200, state.functions.pop(fid, None) is not None)
             return self._reply(404, {"detail": "no route"})
 
         def do_GET(self):
@@ -131,6 +139,9 @@ def _server(state, key_file, cert_file):
 
         def do_POST(self):
             self._handle("POST")
+
+        def do_DELETE(self):
+            self._handle("DELETE")
 
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -294,6 +305,155 @@ def test_installer_main_reads_the_key_from_stdin_only(owui, capsys, monkeypatch)
     assert KEY not in out and PIPE not in out
 
 
+# ------------------------------------------------- rating Action (#1255)
+
+ACTION_FILE = FILES / "rating_action.py"
+ACTION = ACTION_FILE.read_text(encoding="utf-8")
+ACTION_ID = "mainframe_rag_rating"
+
+
+def test_installer_pins_the_repository_rating_action_by_hash():
+    """deploy.sh passes only the Pipe's hash (scripts/airgap/common.sh, owned by
+    #1253): the Action's expected hash is a constant of the installer, which
+    ships in the same ConfigMap, and must be the repository file's."""
+    assert hashlib.sha256(ACTION_FILE.read_bytes()).hexdigest() == provision.ACTION_SHA256
+    assert provision.ACTION_ID == ACTION_ID
+
+
+def test_repository_functions_survive_open_webuis_import_rewrite():
+    """Open WebUI v0.12.3 rewrites `from utils|apps|main|config` anywhere in a
+    Function's text before storing it (utils/plugin.py replace_imports): the
+    stored hash would never match, so neither file may contain them."""
+    for name in ("docs_pipe.py", "rating_action.py"):
+        text = (FILES / name).read_text(encoding="utf-8")
+        assert not [w for w in ("from utils", "from apps", "from main", "from config") if w in text]
+
+
+def test_installer_installs_the_rating_action_active_and_global(owui):
+    """A Function-backed model shows only global (or model-attached) Actions,
+    and Open WebUI refuses a non-admin an Action the model does not surface
+    (utils/models.py, utils/actions.py): the Action must be active and global."""
+    state, client, _ = owui
+    lines = provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    sha = provision.ACTION_SHA256
+    assert lines == [
+        f"docs Pipe installed: Function mainframe_rag_docs active, sha256 {PIPE_SHA}",
+        f"rating Action installed: Function {ACTION_ID} active and global, sha256 {sha}",
+    ]
+    stored = state.functions[ACTION_ID]
+    assert hashlib.sha256(stored["content"].encode()).hexdigest() == sha
+    assert (stored["type"], stored["is_active"], stored["is_global"]) == ("action", True, True)
+    assert state.functions["mainframe_rag_docs"].get("is_global", False) is False
+    state.requests.clear()
+    lines = provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    assert lines[1].startswith("rating Action unchanged:") and _writes(state) == []
+    # Switched off or made non-global in the admin UI: converged back, never toggled away.
+    stored["is_active"] = stored["is_global"] = False
+    provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    assert (stored["is_active"], stored["is_global"]) == (True, True)
+
+
+def test_installer_updates_a_drifted_rating_action(owui):
+    state, client, _ = owui
+    provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    state.functions[ACTION_ID]["content"] = "class Action: pass  # edited in the admin UI\n"
+    state.requests.clear()
+    lines = provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    assert lines[1].startswith("rating Action updated:")
+    assert _writes(state) == [("POST", f"/api/v1/functions/id/{ACTION_ID}/update")]
+    assert state.functions[ACTION_ID]["content"] == ACTION
+
+
+def test_installer_refuses_a_mounted_action_that_is_not_the_repository_file(owui):
+    state, client, _ = owui
+    with pytest.raises(provision.ProvisionError,
+                       match="mounted rating Action does not match the repository file"):
+        provision.provision(client, PIPE, PIPE_SHA, ACTION + "# tampered\n")
+    assert state.requests == []
+
+
+def test_installer_refuses_a_stored_action_that_differs_after_the_write(owui):
+    state, client, _ = owui
+    provision.provision(client, PIPE, PIPE_SHA)
+    state.mangle_content = True
+    with pytest.raises(provision.ProvisionError, match="does not match the repository Action"):
+        provision.provision(client, PIPE, PIPE_SHA, ACTION)
+
+
+@pytest.mark.parametrize("fid,ftype", [("mainframe_rag_docs", "action"), (ACTION_ID, "pipe")])
+def test_installer_refuses_a_repository_id_holding_the_wrong_kind(owui, fid, ftype):
+    """An admin-created Function under a repository id but of another kind
+    (a Pipe named like the Action, or the reverse) is never adopted."""
+    state, client, _ = owui
+    state.functions[fid] = {"id": fid, "name": "X", "type": ftype, "content": "c",
+                            "is_active": True, "is_global": False}
+    with pytest.raises(provision.ProvisionError, match=f"Function {fid} is not a"):
+        provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    assert _writes(state) == []
+
+
+def test_installer_removes_the_rating_action_when_ratings_are_off(owui):
+    """Ratings on, then off: the chart stops mounting the Action and the next
+    deploy converges the Function set back to the docs Pipe alone, then the
+    next ordinary run is a no-op."""
+    state, client, _ = owui
+    provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    state.requests.clear()
+    lines = provision.provision(client, PIPE, PIPE_SHA)
+    assert lines == [f"docs Pipe unchanged: Function mainframe_rag_docs active, sha256 {PIPE_SHA}",
+                     f"rating Action removed: Function {ACTION_ID} (ratings are off)"]
+    assert [(m, p) for m, p, _ in state.requests if m != "GET"] == [
+        ("DELETE", f"/api/v1/functions/id/{ACTION_ID}/delete")]
+    assert set(state.functions) == {"mainframe_rag_docs"}
+    state.requests.clear()
+    assert provision.provision(client, PIPE, PIPE_SHA) == [
+        f"docs Pipe unchanged: Function mainframe_rag_docs active, sha256 {PIPE_SHA}"]
+    assert [m for m, _, _ in state.requests if m != "GET"] == []
+
+
+def test_installer_reinstalls_the_rating_action_after_ratings_return(owui):
+    """On, off, on: the Action deleted by the off run is created again, active
+    and global, and the run after that is a no-op."""
+    state, client, _ = owui
+    provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    provision.provision(client, PIPE, PIPE_SHA)
+    assert ACTION_ID not in state.functions
+    lines = provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    assert lines[1].startswith("rating Action installed:")
+    stored = state.functions[ACTION_ID]
+    assert (stored["type"], stored["is_active"], stored["is_global"]) == ("action", True, True)
+    state.requests.clear()
+    provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    assert _writes(state) == []
+
+
+def test_installer_still_refuses_any_function_outside_the_repository_set(owui):
+    state, client, _ = owui
+    state.functions["community_x"] = {"id": "community_x", "name": "X", "type": "action",
+                                      "content": "c", "is_active": True, "is_global": True}
+    with pytest.raises(provision.ProvisionError, match="a Function other than the repository docs Pipe"):
+        provision.provision(client, PIPE, PIPE_SHA, ACTION)
+    assert _writes(state) == [] and "community_x" in state.functions
+
+
+def test_installer_main_installs_the_action_only_when_it_is_mounted(owui, capsys, monkeypatch):
+    state, client, tmp_path = owui
+    (tmp_path / "docs_pipe.py").write_text(PIPE, encoding="utf-8")
+    monkeypatch.setattr(provision, "MOUNT", tmp_path)
+    monkeypatch.setattr(provision, "CERT", tmp_path / "rag-openwebui.crt")
+    monkeypatch.setattr(provision, "PORT", client._port)
+    monkeypatch.setattr("sys.stdin", io.StringIO(KEY + "\n"))
+    assert provision.main([PIPE_SHA]) == 0
+    assert ACTION_ID not in state.functions
+    (tmp_path / "rating_action.py").write_text(ACTION, encoding="utf-8")
+    monkeypatch.setattr("sys.stdin", io.StringIO(KEY + "\n"))
+    assert provision.main([PIPE_SHA]) == 0
+    assert state.functions[ACTION_ID]["is_global"] is True
+    out = capsys.readouterr().out
+    assert "rating Action installed" in out and KEY not in out and ACTION not in out
+
+
 # ------------------------------------------------------------ IdP CA trust step
 
 def _ca(tmp_path, name):
@@ -436,7 +596,8 @@ def test_purge_deletes_expired_chats_snapshots_links_and_files_and_reclaims_the_
     data, db, conn = _db(tmp_path)
     inside, outside = _seed(conn, data)
     counts = purge.purge(db, data, 30, NOW)
-    assert counts == {"chats": 2, "snapshots": 2, "linked_rows": 3, "files": 2, "orphans": 0}
+    assert counts == {"chats": 2, "snapshots": 2, "linked_rows": 3, "files": 2, "orphans": 0,
+                      "folders": 0}
     ids = {row[0] for row in conn.execute("SELECT id FROM chat")}
     assert ids == {"new-1", "s-new"}
     assert [r[0] for r in conn.execute("SELECT id FROM chat_message")] == ["m3"]
@@ -455,7 +616,117 @@ def test_purge_deletes_expired_chats_snapshots_links_and_files_and_reclaims_the_
     assert conn.execute("SELECT count(*) FROM chat").fetchone() == (3,)
     # A repeat run converges: nothing left to delete.
     assert purge.purge(db, data, 30, NOW) == {"chats": 0, "snapshots": 0, "linked_rows": 0,
-                                              "files": 0, "orphans": 0}
+                                              "files": 0, "orphans": 0, "folders": 0}
+
+
+# Open WebUI v0.12.3 keeps a share link's snapshot in its own table (migration
+# c1d2e3f4a5b6 moved the legacy "shared-<chat id>" chat rows there) and who may
+# open it in access_grant rows keyed by the ORIGINAL chat id (models/
+# shared_chats.py, models/access_grants.py at tag v0.12.3).
+SHARED_CHAT_DDL = ("CREATE TABLE shared_chat (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL "
+                   "REFERENCES chat(id) ON DELETE CASCADE, user_id TEXT NOT NULL, title TEXT, "
+                   "chat JSON, created_at BIGINT, updated_at BIGINT)")
+ACCESS_GRANT_DDL = ("CREATE TABLE access_grant (id TEXT PRIMARY KEY, resource_type TEXT NOT NULL, "
+                    "resource_id TEXT NOT NULL, principal_type TEXT NOT NULL, "
+                    "principal_id TEXT NOT NULL, permission TEXT NOT NULL, created_at BIGINT NOT NULL, "
+                    "UNIQUE (resource_type, resource_id, principal_type, principal_id, permission))")
+CANARY_SNAPSHOT = "CANARY-AGED-SNAPSHOT-TEXT"
+
+
+def _seed_shares(conn):
+    old, new = NOW - 31 * DAY, NOW - 29 * DAY
+    conn.execute(SHARED_CHAT_DDL)
+    conn.execute(ACCESS_GRANT_DDL)
+    conn.executemany("INSERT INTO chat VALUES (?, ?, ?, ?, ?, ?, ?)", [
+        # Purged chat whose share was refreshed inside the window.
+        ("gone", "u1", "t", json.dumps({"m": CANARY_OLD}), old, old, "tok-gone"),
+        # Live chat (continued yesterday) whose share was taken 31 days ago.
+        ("live", "u1", "t", json.dumps({"m": "LIVE-TEXT"}), old, NOW - DAY, "tok-aged"),
+        # Live chat with a fresh share: everything stays.
+        ("fresh", "u2", "t", json.dumps({"m": "FRESH-TEXT"}), new, new, "tok-fresh"),
+    ])
+    conn.executemany("INSERT INTO shared_chat VALUES (?, ?, ?, ?, ?, ?, ?)", [
+        ("tok-gone", "gone", "u1", "snap", json.dumps({"m": CANARY_OLD}), new, new),
+        ("tok-aged", "live", "u1", "snap", json.dumps({"m": CANARY_SNAPSHOT}), old, old),
+        ("tok-fresh", "fresh", "u2", "snap", json.dumps({"m": "FRESH-SNAP"}), new, new),
+    ])
+    conn.executemany("INSERT INTO access_grant VALUES (?, ?, ?, ?, ?, 'read', ?)", [
+        ("g1", "shared_chat", "gone", "group", "grp-a", new),
+        ("g2", "shared_chat", "live", "user", "u9", old),
+        ("g3", "shared_chat", "fresh", "user", "*", new),
+        # Not a share grant: never touched by the chat purge.
+        ("g4", "model", "live", "group", "grp-a", old),
+    ])
+
+
+def test_purge_removes_v0123_share_snapshots_of_purged_chats_and_aged_snapshots(tmp_path):
+    """S2: a share snapshot goes with its purged chat AND when the snapshot
+    itself is older than the window, even while its chat lives on. The live
+    chat is unshared the way upstream unsharing leaves it (share_id cleared,
+    its share grants removed) and its own last update is untouched."""
+    data, db, conn = _db(tmp_path)
+    _seed_shares(conn)
+    counts = purge.purge(db, data, 30, NOW)
+    assert counts == {"chats": 1, "snapshots": 2, "linked_rows": 0, "files": 0, "orphans": 0,
+                      "folders": 0}
+    assert {r[0] for r in conn.execute("SELECT id FROM chat")} == {"live", "fresh"}
+    assert [r[0] for r in conn.execute("SELECT id FROM shared_chat")] == ["tok-fresh"]
+    assert dict(conn.execute("SELECT id, share_id FROM chat")) == {"live": None, "fresh": "tok-fresh"}
+    assert conn.execute("SELECT updated_at FROM chat WHERE id = 'live'").fetchone() == (NOW - DAY,)
+    assert {r[0] for r in conn.execute("SELECT id FROM access_grant")} == {"g3", "g4"}
+    conn.close()
+    for path in data.iterdir():
+        if path.is_file():
+            body = path.read_bytes()
+            assert CANARY_OLD.encode() not in body and CANARY_SNAPSHOT.encode() not in body, path.name
+    # The next ordinary operation: the owner shares the live chat again.
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO shared_chat VALUES ('tok-new', 'live', 'u1', 'snap', '{}', ?, ?)",
+                 (NOW, NOW))
+    conn.execute("UPDATE chat SET share_id = 'tok-new' WHERE id = 'live'")
+    conn.commit()
+    conn.close()
+    # A repeat run converges and keeps the new share.
+    assert purge.purge(db, data, 30, NOW) == {"chats": 0, "snapshots": 0, "linked_rows": 0,
+                                              "files": 0, "orphans": 0, "folders": 0}
+    conn = sqlite3.connect(db)
+    assert {r[0] for r in conn.execute("SELECT id FROM shared_chat")} == {"tok-new", "tok-fresh"}
+
+
+def test_purge_counts_a_share_snapshot_of_unknown_age_as_expired(tmp_path):
+    """shared_chat timestamps are nullable in v0.12.3: a snapshot whose age is
+    unknown must not outlive the window by escaping the comparison."""
+    data, db, conn = _db(tmp_path)
+    conn.execute(SHARED_CHAT_DDL)
+    conn.execute("INSERT INTO chat VALUES ('c', 'u', 't', '{}', 0, ?, 'tok')", (NOW,))
+    # created_at is not the age: a recent one does not save a NULL-age snapshot.
+    conn.execute("INSERT INTO shared_chat VALUES ('tok', 'c', 'u', 't', '{}', ?, NULL)", (NOW,))
+    assert purge.purge(db, data, 30, NOW)["snapshots"] == 1
+    assert conn.execute("SELECT count(*) FROM shared_chat").fetchone() == (0,)
+    assert conn.execute("SELECT id, share_id FROM chat").fetchall() == [("c", None)]
+
+
+@pytest.mark.parametrize("ddl", [
+    "CREATE TABLE shared_chat (id TEXT PRIMARY KEY, user_id TEXT, chat JSON, updated_at BIGINT)",
+    "CREATE TABLE shared_chat (id TEXT PRIMARY KEY, chat_id TEXT, user_id TEXT, chat JSON)",
+])
+def test_purge_refuses_an_unexpected_share_table_and_deletes_nothing(tmp_path, ddl):
+    data, db, conn = _db(tmp_path)
+    conn.execute(ddl)
+    conn.execute("INSERT INTO chat VALUES ('old', 'u', 't', '{}', 0, ?, NULL)", (NOW - 90 * DAY,))
+    with pytest.raises(purge.PurgeError, match="^schema$"):
+        purge.purge(db, data, 30, NOW)
+    assert conn.execute("SELECT count(*) FROM chat").fetchone() == (1,)
+
+
+def test_purge_refuses_share_timestamps_that_are_not_epoch_seconds(tmp_path):
+    data, db, conn = _db(tmp_path)
+    conn.execute(SHARED_CHAT_DDL)
+    conn.execute("INSERT INTO chat VALUES ('c', 'u', 't', '{}', 0, ?, 'tok')", (NOW - 90 * DAY,))
+    conn.execute("INSERT INTO shared_chat VALUES ('tok', 'c', 'u', 't', '{}', 0, ?)", (NOW * 1000,))
+    with pytest.raises(purge.PurgeError, match="^timestamp-unit$"):
+        purge.purge(db, data, 30, NOW)
+    assert conn.execute("SELECT count(*) FROM shared_chat").fetchone() == (1,)
 
 
 def test_purge_reclaims_freed_pages_so_the_file_shrinks(tmp_path):
@@ -628,7 +899,7 @@ def test_current_behaviour_one_undeletable_upload_blocks_the_whole_purge(tmp_pat
     (blocked / "part").unlink()
     blocked.rmdir()
     assert purge.purge(db, data, 30, NOW) == {
-        "chats": 2, "snapshots": 0, "linked_rows": 2, "files": 2, "orphans": 0
+        "chats": 2, "snapshots": 0, "linked_rows": 2, "files": 2, "orphans": 0, "folders": 0
     }
     assert conn.execute("SELECT COUNT(*) FROM chat").fetchone()[0] == 1
     conn.close()
@@ -713,11 +984,221 @@ def test_purge_orphan_unlink_failure_is_a_failed_run_retried_next_time(tmp_path,
     assert purge.run_once(db, data, 30, status, NOW + 1) is True and not stale.exists()
 
 
+# Open WebUI v0.12.3's folder table as its migrations leave it in SQLite
+# (c69f45358db4 creates it with the composite key, 4ace53fd72c8 turns the
+# timestamps into NOT NULL epoch-second BIGINTs, d31026856c01 adds data). A chat
+# is filed by chat.folder_id; an automation row may name a folder too
+# (models/folders.py, chats.py, automations.py at tag v0.12.3).
+FOLDER_DDL = ("CREATE TABLE folder (id TEXT NOT NULL, parent_id TEXT, user_id TEXT NOT NULL, "
+              "name TEXT NOT NULL, items JSON, meta JSON, is_expanded BOOLEAN NOT NULL, "
+              "created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, data JSON, "
+              "PRIMARY KEY (id, user_id))")
+FOLDER_CHAT_COLUMNS = ("id TEXT PRIMARY KEY, user_id TEXT, title TEXT, chat TEXT, "
+                       "created_at INTEGER, updated_at INTEGER, share_id TEXT, folder_id TEXT")
+AUTOMATION_DDL = ("CREATE TABLE automation (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, "
+                  "folder_id TEXT, name TEXT NOT NULL, data JSON NOT NULL, "
+                  "created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL)")
+CANARY_FOLDER = "CANARY-STALE-FOLDER-TEXT"
+
+
+def _folder(conn, folder_id, parent_id, updated_at, name="f"):
+    """A folder row carrying its name, system prompt and background image."""
+    conn.execute("INSERT INTO folder VALUES (?, ?, 'u1', ?, NULL, ?, 0, ?, ?, ?)", (
+        folder_id, parent_id, name,
+        json.dumps({"background_image_url": f"data:text/plain,{name}"}),
+        NOW - 90 * DAY, updated_at, json.dumps({"system_prompt": f"prompt {name}"})))
+
+
+def _folder_db(tmp_path, folder_ddl=FOLDER_DDL):
+    data, db, conn = _db(tmp_path, chat_columns=FOLDER_CHAT_COLUMNS)
+    conn.execute(folder_ddl)
+    return data, db, conn
+
+
+def _folder_ids(conn):
+    return {row[0] for row in conn.execute("SELECT id FROM folder")}
+
+
+def test_purge_deletes_stale_folders_until_none_is_left_and_keeps_folders_in_use(tmp_path):
+    """S2 (#1256 decision 1b): a folder goes once its own last update is older
+    than the window AND no chat or other row files anything under it AND no
+    child folder names it, judged after this run's chat deletions. Leaves go
+    first, repeated in the same run, so a whole stale chain goes at once."""
+    data, db, conn = _folder_db(tmp_path)
+    conn.execute(AUTOMATION_DDL)
+    old, cutoff = NOW - 31 * DAY, NOW - 30 * DAY
+    for folder_id, parent_id, updated_at, name in [
+        ("gone", None, old, CANARY_FOLDER),  # its only chat is purged this run
+        ("a", None, old, CANARY_FOLDER),  # stale chain a -> b -> c, no chats
+        ("b", "a", old, CANARY_FOLDER),
+        ("c", "b", old, CANARY_FOLDER),
+        ("used", None, old, "USED"),  # holds a live chat
+        ("used-kid", "used", old, CANARY_FOLDER),  # stale child of an in-use parent
+        ("holder", None, old, "HOLDER"),  # stale age, but its child holds a live chat
+        ("holder-kid", "holder", old, "HOLDER-KID"),
+        ("new-empty", None, NOW - DAY, "NEW"),  # created yesterday, still empty
+        ("at-cutoff", None, cutoff, "AT"),  # updated exactly at the cutoff
+        ("parent-of-new", None, old, "PARENT"),  # stale age, child is recent
+        ("new-kid", "parent-of-new", NOW - DAY, "NEW-KID"),
+        ("auto", None, old, "AUTO"),  # named by an automation row
+    ]:
+        _folder(conn, folder_id, parent_id, updated_at, name)
+    conn.executemany("INSERT INTO chat VALUES (?, 'u1', 't', '{}', ?, ?, NULL, ?)", [
+        ("c-old", old, old, "gone"),
+        ("c-live", old, NOW - DAY, "used"),
+        ("c-kid", old, NOW - DAY, "holder-kid"),
+        # A surviving chat outside every folder: a NULL folder_id must not
+        # make the in-use test match nothing.
+        ("c-root", old, NOW - DAY, None),
+    ])
+    conn.execute("INSERT INTO automation VALUES ('job', 'u1', 'auto', 'n', '{}', ?, ?)", (old, old))
+    kept = {"used", "holder", "holder-kid", "new-empty", "at-cutoff", "parent-of-new", "new-kid",
+            "auto"}
+    assert purge.purge(db, data, 30, NOW) == {"chats": 1, "snapshots": 0, "linked_rows": 0,
+                                              "files": 0, "orphans": 0, "folders": 5}
+    assert _folder_ids(conn) == kept
+    assert {row[0] for row in conn.execute("SELECT id FROM chat")} == {"c-live", "c-kid", "c-root"}
+    conn.close()
+    for path in data.iterdir():
+        if path.is_file():
+            assert CANARY_FOLDER.encode() not in path.read_bytes(), path.name
+    # The next ordinary operations: a new folder, a chat filed in it and one
+    # filed in a kept folder. The next ordinary run converges and keeps them.
+    conn = sqlite3.connect(db)
+    _folder(conn, "next", None, NOW, "NEXT")
+    conn.executemany("INSERT INTO chat VALUES (?, 'u1', 't', '{}', ?, ?, NULL, ?)", [
+        ("c-next", NOW, NOW, "next"), ("c-more", NOW, NOW, "used")])
+    conn.commit()
+    assert purge.purge(db, data, 30, NOW) == {"chats": 0, "snapshots": 0, "linked_rows": 0,
+                                              "files": 0, "orphans": 0, "folders": 0}
+    assert _folder_ids(conn) == kept | {"next"}
+    assert {row[0] for row in conn.execute("SELECT id FROM chat")} == {
+        "c-live", "c-kid", "c-root", "c-next", "c-more"}
+    assert not (data / purge.PENDING_NAME).exists()
+
+
+def test_purge_runs_the_share_and_folder_rules_together_and_converges(tmp_path):
+    """Train #1255 (#1257 x #1256): both purge extensions run in one
+    transaction. An aged snapshot of a live chat goes, a folder emptied by this
+    run's chat deletion goes, the live chat's folder stays; both counts arm one
+    scrub, the canaries leave every file, the next run converges, and the next
+    ordinary chat filed in a new folder survives."""
+    old = NOW - 31 * DAY
+    data, db, conn = _folder_db(tmp_path)
+    conn.execute(SHARED_CHAT_DDL)
+    conn.execute(ACCESS_GRANT_DDL)
+    _folder(conn, "in-use", None, old, "IN-USE")
+    _folder(conn, "emptied", None, old, CANARY_FOLDER)
+    conn.executemany("INSERT INTO chat VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [
+        ("live", "u1", "t", json.dumps({"m": "LIVE-TEXT"}), old, NOW - DAY, "tok-aged", "in-use"),
+        ("gone", "u1", "t", json.dumps({"m": CANARY_OLD}), old, old, None, "emptied"),
+    ])
+    conn.execute("INSERT INTO shared_chat VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 ("tok-aged", "live", "u1", "snap", json.dumps({"m": CANARY_SNAPSHOT}), old, old))
+    conn.execute("INSERT INTO access_grant VALUES (?, ?, ?, ?, ?, 'read', ?)",
+                 ("g1", "shared_chat", "live", "user", "u9", old))
+    conn.commit()
+    assert purge.purge(db, data, 30, NOW) == {"chats": 1, "snapshots": 1, "linked_rows": 0,
+                                              "files": 0, "orphans": 0, "folders": 1}
+    assert _folder_ids(conn) == {"in-use"}
+    assert {r[0] for r in conn.execute("SELECT id FROM chat")} == {"live"}
+    assert conn.execute("SELECT count(*) FROM shared_chat").fetchone() == (0,)
+    assert conn.execute("SELECT share_id FROM chat WHERE id = 'live'").fetchone() == (None,)
+    assert conn.execute("SELECT count(*) FROM access_grant").fetchone() == (0,)
+    conn.close()
+    assert not (data / purge.PENDING_NAME).exists()
+    for path in data.iterdir():
+        if path.is_file():
+            body = path.read_bytes()
+            for canary in (CANARY_OLD, CANARY_SNAPSHOT, CANARY_FOLDER):
+                assert canary.encode() not in body, (canary, path.name)
+    assert purge.purge(db, data, 30, NOW) == {"chats": 0, "snapshots": 0, "linked_rows": 0,
+                                              "files": 0, "orphans": 0, "folders": 0}
+    conn = sqlite3.connect(db)
+    _folder(conn, "next", None, NOW, "NEXT")
+    conn.execute("INSERT INTO chat VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                 ("c-next", "u1", "t", "{}", NOW, NOW, None, "next"))
+    conn.commit()
+    assert purge.purge(db, data, 30, NOW) == {"chats": 0, "snapshots": 0, "linked_rows": 0,
+                                              "files": 0, "orphans": 0, "folders": 0}
+    assert _folder_ids(conn) == {"in-use", "next"}
+    conn.close()
+
+
+def test_purge_scrubs_the_text_of_a_deleted_folder_when_nothing_else_is_deleted(tmp_path):
+    """Folder deletions alone arm the scrub: while a reader pins the WAL the run
+    fails and the scrub stays owed; once it can run, the name, system prompt
+    and background image of a stale folder are gone from every file on the claim."""
+    data, db, conn = _folder_db(tmp_path)
+    _folder(conn, "stale", None, NOW - 31 * DAY, CANARY_FOLDER)
+    _folder(conn, "fresh", None, NOW, "FRESH")
+    reader = sqlite3.connect(db, isolation_level=None)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM folder").fetchone()
+    with pytest.raises(purge.PurgeError, match="^checkpoint-busy$"):
+        purge.purge(db, data, 30, NOW, busy_timeout_s=0.05)
+    assert (data / purge.PENDING_NAME).exists()
+    reader.execute("ROLLBACK")
+    reader.close()
+    assert _folder_ids(conn) == {"fresh"}  # the row went in the failed run; the scrub remained
+    assert purge.purge(db, data, 30, NOW) == {"chats": 0, "snapshots": 0, "linked_rows": 0,
+                                              "files": 0, "orphans": 0, "folders": 0}
+    conn.close()
+    assert not (data / purge.PENDING_NAME).exists()
+    for path in data.iterdir():
+        if path.is_file():
+            assert CANARY_FOLDER.encode() not in path.read_bytes(), path.name
+
+
+def test_purge_counts_a_folder_of_unknown_age_as_stale(tmp_path):
+    """The v0.12.3 model declares folder.updated_at nullable (only the
+    migration makes it NOT NULL): a folder of unknown age goes once it is
+    unused, as a share snapshot of unknown age does, and stays while in use."""
+    data, db, conn = _folder_db(tmp_path, FOLDER_DDL.replace("updated_at BIGINT NOT NULL",
+                                                             "updated_at BIGINT"))
+    _folder(conn, "unknown", None, None)
+    _folder(conn, "unknown-used", None, None)
+    conn.execute("INSERT INTO chat VALUES ('c', 'u1', 't', '{}', ?, ?, NULL, 'unknown-used')",
+                 (NOW, NOW))
+    assert purge.purge(db, data, 30, NOW)["folders"] == 1
+    assert _folder_ids(conn) == {"unknown-used"}
+
+
+@pytest.mark.parametrize("chat_columns,folder_ddl", [
+    (FOLDER_CHAT_COLUMNS, FOLDER_DDL.replace("parent_id TEXT, ", "")),
+    (FOLDER_CHAT_COLUMNS, FOLDER_DDL.replace("updated_at BIGINT NOT NULL, ", "")),
+    (FOLDER_CHAT_COLUMNS, FOLDER_DDL.replace("(id TEXT NOT NULL", "(folder_key TEXT NOT NULL")
+                                    .replace("PRIMARY KEY (id,", "PRIMARY KEY (folder_key,")),
+    # A folder table but no chat.folder_id: which folders are in use is unknown.
+    (FOLDER_CHAT_COLUMNS.replace(", folder_id TEXT", ""), FOLDER_DDL),
+], ids=["no-parent-id", "no-updated-at", "no-id", "no-chat-folder-id"])
+def test_purge_refuses_an_unexpected_folder_schema_and_deletes_nothing(tmp_path, chat_columns,
+                                                                       folder_ddl):
+    data, db, conn = _db(tmp_path, chat_columns=chat_columns)
+    conn.execute(folder_ddl)
+    conn.execute("INSERT INTO chat (id, user_id, updated_at) VALUES ('old', 'u', ?)",
+                 (NOW - 90 * DAY,))
+    with pytest.raises(purge.PurgeError, match="^schema$"):
+        purge.purge(db, data, 30, NOW)
+    assert conn.execute("SELECT count(*) FROM chat").fetchone() == (1,)
+
+
+def test_purge_refuses_folder_timestamps_that_are_not_epoch_seconds(tmp_path):
+    data, db, conn = _folder_db(tmp_path)
+    _folder(conn, "ms", None, NOW * 1000)
+    _folder(conn, "old", None, NOW - 90 * DAY)
+    conn.execute("INSERT INTO chat VALUES ('c', 'u', 't', '{}', 0, ?, NULL, NULL)", (NOW - 90 * DAY,))
+    with pytest.raises(purge.PurgeError, match="^timestamp-unit$"):
+        purge.purge(db, data, 30, NOW)
+    assert _folder_ids(conn) == {"ms", "old"}
+    assert conn.execute("SELECT count(*) FROM chat").fetchone() == (1,)
+
+
 def test_purge_before_open_webui_created_its_database_is_an_empty_success(tmp_path):
     data = tmp_path / "data"
     data.mkdir()
     assert purge.purge(data / "webui.db", data, 30, NOW) == {
-        "chats": 0, "snapshots": 0, "linked_rows": 0, "files": 0, "orphans": 0}
+        "chats": 0, "snapshots": 0, "linked_rows": 0, "files": 0, "orphans": 0, "folders": 0}
     assert not (data / "webui.db").exists()
 
 
@@ -740,7 +1221,7 @@ def test_purge_runs_are_counted_and_failures_never_report_success(tmp_path, caps
     assert recorded["last_success"] == NOW + 2 and recorded["last_counts"]["chats"] == 1
     out = capsys.readouterr().out
     assert out == ("chat purge ok: window 30 days, chats 1, snapshots 0, linked rows 0, "
-                   "files 0, orphan uploads 0\n")
+                   "files 0, orphan uploads 0, folders 0\n")
 
 
 def test_purge_cli_once_exit_codes_and_window_bounds(tmp_path):

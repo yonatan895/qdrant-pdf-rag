@@ -250,17 +250,22 @@ async def test_unreachable_service_is_unavailable_and_logs_no_text(caplog):
 
 
 RID = "0123456789ab"
+# The JSON rating routes: the console's and the UI-agnostic one Open WebUI's
+# rating Action posts to (#1255). Same model, outcomes and fixed codes.
+JSON_RATING_ROUTES = ["/ui/feedback", "/v1/feedback"]
 
 
+@pytest.mark.parametrize("route", JSON_RATING_ROUTES)
 @pytest.mark.parametrize("outcome,status,code", [
     ("ok", 201, None),
     ("unknown", 404, "unknown_answer"),
     ("invalid", 422, "invalid_request"),
     ("unavailable", 503, "feedback_unavailable"),
 ])
-def test_console_rating_maps_store_outcomes_to_fixed_responses(feedback_client, outcome, status, code):
+def test_console_rating_maps_store_outcomes_to_fixed_responses(feedback_client, outcome, status, code,
+                                                               route):
     RecordingFeedback.instances[0].outcome = outcome
-    response = feedback_client.post("/ui/feedback", json={
+    response = feedback_client.post(route, json={
         "request_id": RID, "rating": "bad", "reasons": ["incomplete"], "comment": "SYNTHETIC"})
     assert response.status_code == status
     if code is not None:
@@ -270,13 +275,16 @@ def test_console_rating_maps_store_outcomes_to_fixed_responses(feedback_client, 
         RID, "bad", ["incomplete"], "SYNTHETIC")
 
 
-def test_rater_is_never_taken_from_a_forwarded_header(feedback_client):
+@pytest.mark.parametrize("route", JSON_RATING_ROUTES)
+def test_rater_is_never_taken_from_a_forwarded_header(feedback_client, route):
     """The agent port is reachable without the OAuth proxy, so a forwarded
     user header proves nothing: no rater is recorded (deferred to PR B)."""
-    feedback_client.post("/ui/feedback", json={"request_id": RID, "rating": "good"},
-                         headers={"X-Forwarded-User": "operator-a"})
+    feedback_client.post(route, json={"request_id": RID, "rating": "good"},
+                         headers={"X-Forwarded-User": "operator-a",
+                                  "X-OpenWebUI-User-Id": "owui-user-a"})
     forwarded = RecordingFeedback.instances[0].ratings[-1].model_dump()
     assert "rater" not in forwarded and "operator-a" not in json.dumps(forwarded)
+    assert "owui-user-a" not in json.dumps(forwarded)
 
 
 @pytest.mark.parametrize("route", ["json", "form"])
@@ -344,15 +352,41 @@ def test_no_js_rating_opens_a_full_page_and_keeps_the_console(feedback_client):
     assert "Rated: good" in rated.text
 
 
+@pytest.mark.parametrize("route", JSON_RATING_ROUTES)
 @pytest.mark.parametrize("body", [
     {"request_id": "not-an-id", "rating": "good"},
     {"request_id": RID, "rating": "excellent"},
     {"request_id": RID, "rating": "good", "answer": "client-supplied answer text"},
+    {"request_id": RID, "rating": "good", "rater": "owui-user-a"},
     {"request_id": RID, "rating": "good", "comment": "x" * 2001},
+    {"request_id": RID, "rating": "bad", "reasons": ["wrong", "wrong"]},
 ])
-def test_invalid_console_rating_never_reaches_the_store(feedback_client, body):
-    assert feedback_client.post("/ui/feedback", json=body).status_code == 422
+def test_invalid_console_rating_never_reaches_the_store(feedback_client, body, route):
+    response = feedback_client.post(route, json=body)
+    assert (response.status_code, response.json()["code"]) == (422, "invalid_request")
     assert RecordingFeedback.instances[0].ratings == []
+
+
+def test_ui_agnostic_rating_route_works_with_the_console_disabled(monkeypatch, synthetic_pdf,
+                                                                 servable_representation_gate):
+    """Open WebUI's rating Action (#1255) posts to /v1/feedback, which does not
+    depend on the console: with UI_ENABLED off /ui/feedback is a fixed 404 and
+    /v1/feedback still forwards the rating, and says feedback_disabled exactly
+    like the console route when feedback is off."""
+    monkeypatch.setenv("FEEDBACK_ENABLED", "true")
+    monkeypatch.setenv("FEEDBACK_URL", "http://feedback.internal")
+    monkeypatch.setenv("FEEDBACK_API_KEY", "feedback-test-token")
+    RecordingFeedback.instances = []
+    monkeypatch.setattr(app_mod, "FeedbackClient", RecordingFeedback)
+    for client in _client(monkeypatch, ui_enabled=False, synthetic_pdf=synthetic_pdf):
+        assert client.post("/ui/feedback", json={"request_id": RID, "rating": "good"}).status_code == 404
+        response = client.post("/v1/feedback", json={"request_id": RID, "rating": "good"})
+        assert (response.status_code, response.json()) == (201, {"status": "recorded"})
+        [rating] = RecordingFeedback.instances[0].ratings
+        assert (rating.request_id, rating.rating) == (RID, "good")
+        monkeypatch.setattr(app_mod, "feedback", None)
+        response = client.post("/v1/feedback", json={"request_id": RID, "rating": "good"})
+        assert (response.status_code, response.json()["code"]) == (404, "feedback_disabled")
 
 
 def test_console_page_offers_rating_only_when_enabled(feedback_client, monkeypatch, synthetic_pdf,

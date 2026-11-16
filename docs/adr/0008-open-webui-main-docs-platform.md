@@ -74,6 +74,8 @@
 - No condition is weakened. Passing a gate means Open WebUI behaves as the
   condition states, not that a setting exists.
 - The Pipe is the only model. Open WebUI never reaches Qdrant or a gateway.
+  Read with #1255: the Pipe's answer-depth entries are its models, one
+  Function, every entry answering only through the agent.
   Amended by [ADR-0010](0010-team-tools-on-open-webui.md): the Pipe is the
   only Docs model, and Open WebUI reaches LiteLLM and the team-tool gateways
   only for Team models.

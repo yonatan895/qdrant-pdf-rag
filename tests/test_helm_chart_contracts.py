@@ -6,6 +6,7 @@ Operator-to-render round trips also live in test_map_values and airgap suites.
 """
 import hashlib
 import json
+import re
 
 import pytest
 import yaml
@@ -1204,7 +1205,7 @@ OWUI_KEYS = {
 OWUI_ENV_NAMES = {
     "ANONYMIZED_TELEMETRY", "API_KEYS_ALLOWED_ENDPOINTS", "AUDIT_LOG_LEVEL",
     "BYPASS_EMBEDDING_AND_RETRIEVAL", "BYPASS_MODEL_ACCESS_CONTROL", "CORS_ALLOW_ORIGIN", "DATA_DIR",
-    "DO_NOT_TRACK", "ENABLE_ADMIN_CHAT_ACCESS", "ENABLE_ADMIN_EXPORT", "ENABLE_API_KEYS",
+    "DEFAULT_MODELS", "DO_NOT_TRACK", "ENABLE_ADMIN_CHAT_ACCESS", "ENABLE_ADMIN_EXPORT", "ENABLE_API_KEYS",
     "ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS", "ENABLE_AUTOCOMPLETE_GENERATION", "ENABLE_CHANNELS",
     "ENABLE_CODE_EXECUTION", "ENABLE_CODE_INTERPRETER", "ENABLE_COMMUNITY_SHARING",
     "ENABLE_DIRECT_CONNECTIONS", "ENABLE_DIRECT_INTEGRATIONS", "ENABLE_EVALUATION_ARENA_MODELS",
@@ -1224,11 +1225,16 @@ OWUI_ENV_NAMES = {
     "OPENID_REDIRECT_URI", "RAG_EMBEDDING_MODEL_AUTO_UPDATE", "RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE",
     "RAG_RERANKING_MODEL_AUTO_UPDATE", "RAG_RERANKING_MODEL_TRUST_REMOTE_CODE", "SCARF_NO_ANALYTICS",
     "TASK_MODEL", "USER_PERMISSIONS_CHAT_CALL", "USER_PERMISSIONS_CHAT_FILE_UPLOAD",
-    "USER_PERMISSIONS_CHAT_SHARE", "USER_PERMISSIONS_CHAT_STT", "USER_PERMISSIONS_CHAT_TTS", "USER_PERMISSIONS_FEATURES_API_KEYS",
+    "USER_PERMISSIONS_CHAT_ALLOW_OPEN_SHARING", "USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING",
+    "USER_PERMISSIONS_CHAT_SHARE", "USER_PERMISSIONS_CHAT_STT", "USER_PERMISSIONS_CHAT_TEMPORARY",
+    "USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED", "USER_PERMISSIONS_CHAT_TTS",
+    "USER_PERMISSIONS_FEATURES_API_KEYS",
     "USER_PERMISSIONS_FEATURES_CODE_INTERPRETER", "USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS",
-    "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION", "USER_PERMISSIONS_FEATURES_MEMORIES",
-    "USER_PERMISSIONS_FEATURES_NOTES", "USER_PERMISSIONS_FEATURES_WEB_SEARCH",
+    "USER_PERMISSIONS_FEATURES_FOLDERS", "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION",
+    "USER_PERMISSIONS_FEATURES_MEMORIES", "USER_PERMISSIONS_FEATURES_NOTES",
+    "USER_PERMISSIONS_FEATURES_WEB_SEARCH", "USER_PERMISSIONS_FOLDERS_ALLOW_SHARING",
     "USER_PERMISSIONS_WORKSPACE_KNOWLEDGE_ACCESS", "USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS",
+    "USER_PERMISSIONS_WORKSPACE_PROMPTS_ACCESS", "USER_PERMISSIONS_WORKSPACE_PROMPTS_IMPORT",
     "USER_PERMISSIONS_WORKSPACE_TOOLS_ACCESS", "UVICORN_WORKERS", "VECTOR_DB", "WEBUI_AUTH",
     "WEBUI_SECRET_KEY", "WEBUI_URL", "WHISPER_MODEL_AUTO_UPDATE",
 }
@@ -1428,7 +1434,7 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
     assert pod_vols[proxy_vols["/tmp"]] == {"name": proxy_vols["/tmp"], "emptyDir": {}}
     assert proxy_vols["/tmp"] != next(m["name"] for m in container["volumeMounts"] if m["mountPath"] == "/tmp")
     assert dep["spec"]["template"]["metadata"]["annotations"]["checksum/proxy-config"] == hashlib.sha256(
-        (CHART / "files" / "openwebui" / "proxy.nginx.conf").read_bytes()).hexdigest()
+        _proxy_conf_without_ratings().encode()).hexdigest()
     env = env_map(dep, "openwebui")
     plain = {k: v["value"] for k, v in env.items() if "value" in v}
     for key, value in {
@@ -1459,6 +1465,9 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         # task model, audio, scopes, CORS and the narrow admin-only API key.
         "ENABLE_TOOLS": "false", "ENABLE_DIRECT_INTEGRATIONS": "false",
         "BYPASS_MODEL_ACCESS_CONTROL": "false", "TASK_MODEL": "",
+        # #1255: the docs Pipe's default answer depth, the model new chats and
+        # chats whose stored model id is gone fall back to.
+        "DEFAULT_MODELS": "mainframe_rag_docs.standard",
         "USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS": "false",
         "USER_PERMISSIONS_FEATURES_NOTES": "false",
         "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION": "false",
@@ -1467,11 +1476,23 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         # ADR-0007 S2: sharing is off. v0.12.3 defaults it to True, and its
         # snapshots sit outside the 30-day purge.
         "USER_PERMISSIONS_CHAT_SHARE": "false",
+        # Chat folders on, folder sharing off (#1255); a folder's knowledge
+        # entries stay inert while uploads, knowledge, notes and query
+        # generation stay off (ADR-0007 V1).
+        "ENABLE_FOLDERS": "true", "USER_PERMISSIONS_FEATURES_FOLDERS": "true",
+        "USER_PERMISSIONS_FOLDERS_ALLOW_SHARING": "false", "ENABLE_NOTES": "false",
+        "USER_PERMISSIONS_WORKSPACE_KNOWLEDGE_ACCESS": "false",
+        "ENABLE_RETRIEVAL_QUERY_GENERATION": "false",
         "OAUTH_SCOPES": "openid email profile groups offline_access",
         "CORS_ALLOW_ORIGIN": "https://docs.apps.example.internal",
         "ENABLE_API_KEYS": "true", "USER_PERMISSIONS_FEATURES_API_KEYS": "false",
         "ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS": "true",
-        "API_KEYS_ALLOWED_ENDPOINTS": "/api/v1/functions",
+        # The installers' APIs only: the docs Pipe and the shared prompts (#1255).
+        "API_KEYS_ALLOWED_ENDPOINTS": "/api/v1/functions,/api/v1/prompts",
+        # Shared prompts are repository-owned (#1255): users cannot create or
+        # import one (v0.12.3 create accepts either permission; CVE-2025-64495).
+        "USER_PERMISSIONS_WORKSPACE_PROMPTS_ACCESS": "false",
+        "USER_PERMISSIONS_WORKSPACE_PROMPTS_IMPORT": "false",
     }.items():
         assert plain.get(key) == value, key
     assert "PGVECTOR_DB_URL" not in env and "OPENAI_API_KEY" not in env
@@ -1736,14 +1757,64 @@ def test_openwebui_pipe_configmap_carries_the_repository_files_and_their_hashes(
     cm = _owui(owui_chart)["ConfigMap", "rag-openwebui-pipe"]
     installer = (CHART / "files" / "openwebui" / "provision_pipe.py").read_text(encoding="utf-8")
     purge = (CHART / "files" / "openwebui" / "purge_chats.py").read_text(encoding="utf-8")
-    assert cm['data'] == {'docs_pipe.py': OWUI_PIPE, 'provision_pipe.py': installer, 'purge_chats.py': purge}
+    shared = (CHART / "files" / "openwebui" / "prompts.json").read_text(encoding="utf-8")
+    prompts_installer = (CHART / "files" / "openwebui" / "provision_prompts.py").read_text(encoding="utf-8")
+    assert cm['data'] == {'docs_pipe.py': OWUI_PIPE, 'provision_pipe.py': installer, 'purge_chats.py': purge,
+                          'prompts.json': shared, 'provision_prompts.py': prompts_installer}
     assert cm["metadata"]["annotations"] == {
         "mainframe-rag/docs-pipe-sha256": hashlib.sha256(OWUI_PIPE.encode()).hexdigest(),
         "mainframe-rag/provision-pipe-sha256": hashlib.sha256(installer.encode()).hexdigest(),
         "mainframe-rag/purge-chats-sha256": hashlib.sha256(purge.encode()).hexdigest(),
+        "mainframe-rag/shared-prompts-sha256": hashlib.sha256(shared.encode()).hexdigest(),
+        "mainframe-rag/provision-prompts-sha256": hashlib.sha256(prompts_installer.encode()).hexdigest(),
     }
 
 
+RATINGS_ON = {**FEEDBACK_ON, "openwebui": {"ratings": {"enabled": True}}}
+
+
+def test_openwebui_ratings_are_off_by_default_and_change_nothing(owui_chart):
+    """#1255: with ratings off (the default) the Pipe ConfigMap and the pod
+    environment are exactly the docs-only ones."""
+    with open(CHART / "values.yaml", encoding="utf-8") as f:
+        assert yaml.safe_load(f)["openwebui"]["ratings"] == {"enabled": False}
+    docs = _owui(owui_chart)
+    # The shared prompt files (#1259) ride the same ConfigMap unconditionally.
+    assert set(docs["ConfigMap", "rag-openwebui-pipe"]["data"]) == {
+        "docs_pipe.py", "provision_pipe.py", "purge_chats.py",
+        "prompts.json", "provision_prompts.py"}
+    env = env_map(docs["Deployment", "rag-openwebui"], "openwebui")
+    assert "RAG_ANSWER_REFERENCE" not in env
+    assert docs == _owui(owui_chart, {"openwebui": {"ratings": {"enabled": False}}})
+
+
+def test_openwebui_ratings_ship_the_repository_action_and_the_reference_switch(owui_chart):
+    import hashlib
+
+    docs = _owui(owui_chart, RATINGS_ON)
+    cm = docs["ConfigMap", "rag-openwebui-pipe"]
+    action = (CHART / "files" / "openwebui" / "rating_action.py").read_text(encoding="utf-8")
+    assert cm["data"]["rating_action.py"] == action
+    assert cm["metadata"]["annotations"]["mainframe-rag/rating-action-sha256"] == (
+        hashlib.sha256(action.encode()).hexdigest())
+    env = env_map(docs["Deployment", "rag-openwebui"], "openwebui")
+    assert env["RAG_ANSWER_REFERENCE"] == {"name": "RAG_ANSWER_REFERENCE", "value": "true"}
+    # Open WebUI's own ratings and evaluations stay off: ratings live in the
+    # agent's feedback store only (ADR-0005).
+    assert env["ENABLE_MESSAGE_RATING"]["value"] == "false"
+    assert set(env) == OWUI_ENV_NAMES | {"RAG_ANSWER_REFERENCE"}
+
+
+def test_openwebui_ratings_require_the_feedback_store():
+    values = _owui_values({"ratings": {"enabled": True}})
+    r = _helm_template_with_values(values)
+    assert r.returncode != 0
+    assert ("openwebui.ratings.enabled=true requires feedback.enabled=true: Open WebUI ratings "
+            "are stored only by the agent's feedback store (ADR-0005)") in r.stderr
+
+
+# Open WebUI v0.12.3 folder ids are str(uuid.uuid4()) (models/folders.py).
+FOLDER_ID = "0b9d6f3e-6c1a-4f43-9a51-2d3c8e7f1a00"
 ALLOWED_PATHS = [
     "/", "/c/3f2a", "/auth", "/admin/users", "/_app/immutable/chunks/a.js", "/static/loader.js",
     "/favicon.png", "/manifest.json", "/health", "/health/db", "/oauth/oidc/login",
@@ -1753,17 +1824,37 @@ ALLOWED_PATHS = [
     "/api/v1/users/user/settings", "/api/v1/models/list", "/api/v1/groups/",
     "/api/v1/functions/id/mainframe_rag_docs", "/api/v1/functions/create",
     "/api/v1/configs/banners",
+    # Share-link view (#1255): the SPA shell only; its data is /api/v1/chats/share/<id>.
+    "/s", "/s/3f2a", "/api/v1/chats/share/3f2a", "/api/v1/chats/3f2a/share",
+    "/api/chat/actions/mainframe_rag_rating.up", "/api/chat/actions/mainframe_rag_rating.down",
+    # Chat folders (#1255): the folder page, list/create, read/delete one,
+    # rename/settings, move, expand, mark read, and the owner's folder chat list.
+    f"/folders/{FOLDER_ID}", "/api/v1/folders/", "/api/v1/folders", f"/api/v1/folders/{FOLDER_ID}",
+    f"/api/v1/folders/{FOLDER_ID}/update", f"/api/v1/folders/{FOLDER_ID}/update/parent",
+    f"/api/v1/folders/{FOLDER_ID}/update/expanded", f"/api/v1/folders/{FOLDER_ID}/read",
+    f"/api/v1/folders/{FOLDER_ID}/shared/chats",
 ]
 DENIED_PATHS = [
     "/api/v1/files/", "/api/v1/files", "/api/v1/files/abc/content", "/api/v1/retrieval/process/text",
     "/api/v1/retrieval/config", "/api/v1/knowledge/", "/api/v1/knowledge/create", "/api/v1/audio/transcriptions",
     "/api/v1/images/generations", "/api/v1/memories/add", "/api/v1/notes/", "/api/v1/channels/",
-    "/api/v1/folders/", "/api/v1/utils/code/execute", "/api/v1/utils/db/download", "/api/v1/pipelines/",
+    "/api/v1/utils/code/execute", "/api/v1/utils/db/download", "/api/v1/pipelines/",
     "/api/v1/scim/v2/Users", "/api/v1/terminals/", "/api/v1/search", "/api/v1/skills/",
     "/api/v1/evaluations/feedbacks", "/api/v1/automations/", "/openai/chat/completions",
     "/ollama/api/chat", "/docs", "/openapi.json", "/api/version/updates", "/api/changelog",
     "/api/chat", "/api/v1", "/api/v1/", "/api/", "/api", "/api/v1/chatsX", "/api/v1/auths_x",
     "/API/v1/files/", "/api/v1/files/../files/", "/ws", "/oauthx", "/health/x",
+    "/sx", "/s3f2a", "/share", "/S/3f2a",
+    # Only the repository rating Action's two buttons (#1255).
+    "/api/chat/actions/", "/api/chat/actions/community_x", "/api/chat/actions/community_x.up",
+    "/api/chat/actions/mainframe_rag_rating", "/api/chat/actions/mainframe_rag_rating.sideways",
+    "/api/chat/actions/mainframe_rag_rating.up/x", "/api/chat/actions/mainframe_rag_ratingXup",
+    # Folder sharing stays off (#1255, ADR-0007 S2): the grant route (its only
+    # writer in v0.12.3), the shared-folder list, and any other folder route.
+    f"/api/v1/folders/{FOLDER_ID}/access/update", "/api/v1/folders/shared",
+    "/api/v1/folders/shared/chats", f"/api/v1/folders/{FOLDER_ID}/update/x",
+    f"/api/v1/folders/{FOLDER_ID}/shared", f"/api/v1/folders/{FOLDER_ID}/chats",
+    "/api/v1/foldersX", "/api/v1/folders/ABC", "/api/v1/folders/a/b",
 ]
 
 
@@ -1776,17 +1867,67 @@ def _allow_regexes():
     conf = _proxy_conf()
     block = re.search(r"map \$uri \$owui_allowed \{(.*?)\n    \}", conf, re.DOTALL).group(1)
     entries = re.findall(r"^\s*~(\S+)\s+1;\s*$", block, re.MULTILINE)
-    assert re.search(r"^\s*default\s+0;\s*$", block, re.MULTILINE), "deny must be the default"
+    # Anything the Route list does not admit falls to the installer map, whose
+    # own default is deny (#1255): deny stays the default for every client.
+    assert re.search(r"^\s*default\s+\$owui_installer_allowed;\s*$", block, re.MULTILINE), \
+        "unlisted paths must fall to the loopback installer map"
     assert entries, "no allow-list entries"
     return [re.compile(e) for e in entries]
 
 
+def _installer_regexes():
+    import re
+    conf = _proxy_conf()
+    block = re.search(r'map "\$remote_addr \$uri" \$owui_installer_allowed \{(.*?)\n    \}',
+                      conf, re.DOTALL).group(1)
+    lines = [line.strip() for line in block.strip().splitlines() if line.strip() and
+             not line.strip().startswith("#")]
+    assert lines[0] == "default 0;", "deny must be the installer map's default"
+    entries = [re.fullmatch(r'"~(\^127\\\.0\\\.0\\\.1 /\S+)" 1;', line) for line in lines[1:]]
+    assert entries and all(entries), "every installer entry is anchored on the loopback source"
+    return [re.compile(m.group(1)) for m in entries]
+
+
+def _proxy_admits(remote, uri):
+    """nginx's decision: the Route allow-list, else the loopback installer map."""
+    return (any(r.search(uri) for r in _allow_regexes())
+            or any(r.search(f"{remote} {uri}") for r in _installer_regexes()))
+
+
+ROUTE_PEER = "10.128.2.17"  # the OpenShift router; never a loopback source
+PROMPT_ID = "0b6f9a52-3c1d-4e8f-9a7b-2d4c6e8f0a1b"
+INSTALLER_PROMPT_PATHS = [
+    "/api/v1/prompts/list", "/api/v1/prompts/create", f"/api/v1/prompts/id/{PROMPT_ID}/update",
+    f"/api/v1/prompts/id/{PROMPT_ID}/toggle", f"/api/v1/prompts/id/{PROMPT_ID}/delete",
+]
+NEVER_PROMPT_PATHS = [
+    "/api/v1/prompts/tags", f"/api/v1/prompts/id/{PROMPT_ID}", f"/api/v1/prompts/id/{PROMPT_ID}/history",
+    f"/api/v1/prompts/id/{PROMPT_ID}/access/update", f"/api/v1/prompts/id/{PROMPT_ID}/update/meta",
+    f"/api/v1/prompts/id/{PROMPT_ID}/update/version", "/api/v1/prompts/id/x/update",
+    "/api/v1/prompts/create/x", "/api/v1/prompts/listx", "/api/v1/prompts//create",
+]
+
+
 def test_openwebui_proxy_allow_list_admits_exactly_the_pilot_paths():
-    rules = _allow_regexes()
-    for path in ALLOWED_PATHS:
-        assert any(r.search(path) for r in rules), path
-    for path in DENIED_PATHS:
-        assert not any(r.search(path) for r in rules), path
+    for remote in (ROUTE_PEER, "127.0.0.1"):
+        for path in ALLOWED_PATHS:
+            assert _proxy_admits(remote, path), (remote, path)
+        for path in DENIED_PATHS + NEVER_PROMPT_PATHS:
+            assert not _proxy_admits(remote, path), (remote, path)
+
+
+def test_openwebui_proxy_admits_the_prompt_writes_only_from_the_pod_loopback():
+    """#1255: the chat `/` menu reads only GET /api/v1/prompts/ (already listed).
+    The shared-prompt installer runs in the pod and connects from 127.0.0.1; its
+    list/create/update/toggle/delete calls are admitted for that source only, so
+    no Route client (users or the admin UI) reaches a prompt write."""
+    assert _proxy_admits(ROUTE_PEER, "/api/v1/prompts/")
+    for path in INSTALLER_PROMPT_PATHS:
+        assert _proxy_admits("127.0.0.1", path), path
+        for remote in (ROUTE_PEER, "127.0.0.2", "10.0.0.1"):
+            assert not _proxy_admits(remote, path), (remote, path)
+    # The source is a prefix of the decided string: a path cannot carry it.
+    assert not _proxy_admits(ROUTE_PEER, "/x 127.0.0.1 /api/v1/prompts/create")
 
 
 def test_openwebui_proxy_config_matches_the_decoded_uri_and_forwards_the_original_uri():
@@ -1816,13 +1957,36 @@ def test_openwebui_proxy_config_matches_the_decoded_uri_and_forwards_the_origina
     assert "client_max_body_size 1m;" in conf
 
 
-def test_openwebui_proxy_configmap_carries_the_repository_config(owui_chart):
-    docs = _owui(owui_chart)
+RATINGS_ALLOW = (
+    "        # The repository rating Action's two buttons only (#1255): the handler\n"
+    "        # checks the Function is an active, surfaced Action; its id is fixed.\n"
+    "        ~^/api/chat/actions/mainframe_rag_rating\\.(up|down)$ 1;\n"
+)
+
+
+def _proxy_conf_without_ratings():
+    """The allow-list as rendered with ratings off (the default): the file
+    without its one rating Action block (#1255)."""
+    conf = _proxy_conf()
+    assert conf.count(RATINGS_ALLOW) == 1
+    return conf.replace(RATINGS_ALLOW, "")
+
+
+@pytest.mark.parametrize("ratings", [False, True])
+def test_openwebui_proxy_configmap_carries_the_repository_config(owui_chart, ratings):
+    """Ratings on: the repository file verbatim. Off (the default): the same
+    file without the rating Action block, so no /api/chat/actions path is
+    admitted (E1) and the pod's proxy checksum follows the rendered text."""
+    extra = RATINGS_ON if ratings else None
+    docs = _owui(owui_chart, extra)
     cm = docs["ConfigMap", "rag-openwebui-proxy"]
-    text = _proxy_conf()
+    text = _proxy_conf() if ratings else _proxy_conf_without_ratings()
+    assert ("/api/chat/actions" in text) is ratings
     assert cm["data"] == {"nginx.conf": text}
     assert cm["metadata"]["annotations"] == {
         "mainframe-rag/proxy-config-sha256": hashlib.sha256(text.encode()).hexdigest()}
+    annotations = docs["Deployment", "rag-openwebui"]["spec"]["template"]["metadata"]["annotations"]
+    assert annotations["checksum/proxy-config"] == hashlib.sha256(text.encode()).hexdigest()
     # Not rendered (and the default render unchanged) when the front end is off.
     default = run_new_template({}, chart=owui_chart)
     assert ("ConfigMap", "rag-openwebui-proxy") not in default
@@ -1847,6 +2011,31 @@ def test_openwebui_retention_defaults_to_30_days_and_cannot_be_unset(owui_chart)
     assert r.returncode != 0 and "retentionDays" in r.stderr
 
 
+OWUI_CHAT_ENV = {"share": "USER_PERMISSIONS_CHAT_SHARE",
+                 "shareWithAllUsers": "USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING",
+                 "temporaryEnforced": "USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED"}
+
+
+@pytest.mark.parametrize("enabled", [None, *OWUI_CHAT_ENV])
+def test_openwebui_chat_sharing_and_temporary_chats_are_site_values_off_by_default(owui_chart, enabled):
+    """#1255 (ADR-0007 S2, R3): share links and temporary-chat enforcement are
+    site values, off by default, each reaching only its own variable. The
+    no-auth "anyone" grant stays pinned off and temporary chats available."""
+    with open(CHART / "values.yaml", encoding="utf-8") as f:
+        assert yaml.safe_load(f)["openwebui"]["chats"] == {
+            "share": False, "shareWithAllUsers": False, "temporaryEnforced": False}
+    extra = {"openwebui": {"chats": {enabled: True}}} if enabled else None
+    env = env_map(_owui(owui_chart, extra)["Deployment", "rag-openwebui"], "openwebui")
+    expected = {"USER_PERMISSIONS_CHAT_SHARE": "false",
+                "USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING": "false",
+                "USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED": "false",
+                "USER_PERMISSIONS_CHAT_ALLOW_OPEN_SHARING": "false",
+                "USER_PERMISSIONS_CHAT_TEMPORARY": "true"}
+    if enabled:
+        expected[OWUI_CHAT_ENV[enabled]] = "true"
+    assert {k: env[k]["value"] for k in expected} == expected
+
+
 def test_openwebui_refuses_to_enable_without_the_repository_docs_pipe(tmp_path):
     """A chart without the Pipe file fails closed when enabled (#1072)."""
     import shutil
@@ -1856,6 +2045,19 @@ def test_openwebui_refuses_to_enable_without_the_repository_docs_pipe(tmp_path):
     values = _owui_values()
     r = _helm_template_with_values(values, chart=chart)
     assert r.returncode != 0 and "docs Pipe (#1072)" in r.stderr
+
+
+def test_openwebui_default_model_is_the_pipes_default_answer_depth(owui_chart):
+    """#1255: DEFAULT_MODELS names the docs Pipe's first entry as Open WebUI v0.12.3
+    ids it (`<Function id>.<entry id>`), so a renamed or reordered entry cannot leave
+    the default pointing at a model that does not exist."""
+    from integrations.openwebui import docs_pipe
+
+    provision = (CHART / "files" / "openwebui" / "provision_pipe.py").read_text(encoding="utf-8")
+    (pipe_id,) = re.findall(r'^PIPE_ID = "([a-z_]+)"$', provision, flags=re.MULTILINE)
+    dep = _owui(owui_chart)["Deployment", "rag-openwebui"]
+    default = env_map(dep, "openwebui")["DEFAULT_MODELS"]["value"]
+    assert default == f"{pipe_id}.{docs_pipe.Pipe().pipes()[0]['id']}"
 
 
 def test_openwebui_chart_pipe_is_byte_identical_to_the_repository_pipe():
@@ -1893,6 +2095,10 @@ def test_openwebui_chart_pipe_is_byte_identical_to_the_repository_pipe():
     ({"idpEgress": {"cidrs": ["10.0.0.0/8"], "port": 0}}, "openwebui"),
     ({"replicas": 2}, "openwebui"),
     ({"extra": 1}, "openwebui"),
+    ({"chats": {"share": "yes"}}, "openwebui"),
+    ({"chats": {"temporaryEnforced": 1}}, "openwebui"),
+    # Sign-in-free share links are not a site choice (R3): no value exists for them.
+    ({"chats": {"openSharing": True}}, "openwebui"),
 ])
 def test_openwebui_schema_refuses_invalid_selection(owui_chart, patch, needle):
     r = _helm_template_with_values(_owui_values(patch), chart=owui_chart)

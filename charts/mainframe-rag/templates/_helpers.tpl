@@ -101,6 +101,9 @@ window, no repository-owned docs Pipe (#1072).
 {{- define "mainframe-rag.openwebuiEnabled" -}}
 {{- if .Values.openwebui.enabled -}}
 {{- $o := .Values.openwebui -}}
+{{- if and ($o.ratings | default dict).enabled (not .Values.feedback.enabled) -}}
+{{- fail "openwebui.ratings.enabled=true requires feedback.enabled=true: Open WebUI ratings are stored only by the agent's feedback store (ADR-0005)" -}}
+{{- end -}}
 {{- $oidc := $o.oidc | default dict -}}
 {{- $egress := $o.idpEgress | default dict -}}
 {{- $missing := list -}}
@@ -151,4 +154,25 @@ The ca-trust init step then loads every certificate (files/openwebui/ca_trust.py
 {{- end -}}
 true
 {{- end -}}
+{{- end -}}
+
+{{/*
+The Open WebUI allow-list proxy config (ADR-0007 E1): the repository file
+files/openwebui/proxy.nginx.conf verbatim when openwebui.ratings.enabled, and
+otherwise the same file without the rating Action block (#1255), so the
+default allow-list admits no /api/chat/actions path. Tests pin that the block
+occurs exactly once in the file.
+*/}}
+{{- define "mainframe-rag.openwebuiProxyConf" -}}
+{{- $conf := .Files.Get "files/openwebui/proxy.nginx.conf" -}}
+{{- if not (.Values.openwebui.ratings | default dict).enabled -}}
+{{- $conf = replace (include "mainframe-rag.openwebuiRatingsAllow" .) "" $conf -}}
+{{- end -}}
+{{- $conf -}}
+{{- end -}}
+
+{{- define "mainframe-rag.openwebuiRatingsAllow" -}}
+{{- print "        # The repository rating Action's two buttons only (#1255): the handler\n" -}}
+{{- print "        # checks the Function is an active, surfaced Action; its id is fixed.\n" -}}
+{{- print "        ~^/api/chat/actions/mainframe_rag_rating\\.(up|down)$ 1;\n" -}}
 {{- end -}}

@@ -14,7 +14,10 @@ import json
 import re
 from dataclasses import dataclass, field
 
-DOCS_MODEL = "mainframe_rag_docs"
+DOCS_FUNCTION = "mainframe_rag_docs"
+# The docs Pipe's answer-depth entries as Open WebUI models (#1255), sorted as whoami lists them.
+DOCS_MODELS = sorted(f"{DOCS_FUNCTION}.{entry}" for entry in ("standard", "quick", "thorough"))
+DOCS_DEFAULT = f"{DOCS_FUNCTION}.standard"  # the chart's DEFAULT_MODELS
 # restricted-v2 assigns UIDs from the namespace range; Kind stand-ins use this one.
 UID_RANGE_START = 1000700000
 # The names an Open WebUI pod may resolve: the IdP and the agent Service (search-domain
@@ -163,8 +166,8 @@ def check_data_dir(report: dict) -> Verdict:
 
 # ------------------------------------------------------------------ sign-in and models
 def check_models(users: dict[str, list[str]]) -> Verdict:
-    """Each signed-in user sees exactly the Rosetta model."""
-    bad = {u: m for u, m in users.items() if m != [DOCS_MODEL]}
+    """Each signed-in user sees exactly the Rosetta models (the docs Pipe's entries)."""
+    bad = {u: m for u, m in users.items() if sorted(m) != DOCS_MODELS}
     return _v("docs-model-only", bool(users) and not bad, users=sorted(users), unexpected=bad)
 
 
@@ -193,6 +196,21 @@ def check_answer(chat: dict, name: str = "answer-citations") -> Verdict:
               status_events=chat.get("status_events", 0), source_chips=chat.get("source_chips", 0),
               source_documents=chat.get("source_documents", 0),
               **{k: chat[k] for k in TIMING_KEYS if k in chat})
+
+
+def check_legacy_chat(listed: list[str], default_models: str | None, turn: dict) -> Verdict:
+    """#1255 upgrade: a chat stored before the docs Pipe became a manifold names the bare
+    Function id, which is no longer a model. On opening it v0.12.3 drops an unlisted id and
+    selects the configured default (Chat.svelte loadChat, resolveDefaultModelIds), so the
+    next turn answers only if the bare id is gone, the default is the listed default entry,
+    and a turn on that stored chat, sent with the default, completes with sources. The
+    frontend selection itself is browser behaviour (the pilot browser trace)."""
+    default_ok = default_models == DOCS_DEFAULT and DOCS_DEFAULT in listed
+    turn_ok = (turn.get("completion_status") == 200 and turn.get("chat_models") == [DOCS_FUNCTION]
+               and turn.get("model") == DOCS_DEFAULT and check_answer(turn).ok)
+    ok = DOCS_FUNCTION not in listed and default_ok and turn_ok
+    return _v("legacy-chat-answers", ok, bare_id_listed=DOCS_FUNCTION in listed, default_ok=default_ok,
+              turn_ok=turn_ok, done=bool(turn.get("done")), source_chips=turn.get("source_chips", 0))
 
 
 # ------------------------------------------------------------------ slow model (#1118)
@@ -294,10 +312,10 @@ def check_persistence(before: dict, after: dict) -> Verdict:
     """Restart on the RWO claim: chats, the Rosetta Function bytes and the model grant survived."""
     lost = sorted(set(before["chat_ids"]) - set(after["chat_ids"]))
     ok = (not lost and before["function_sha256"] == after["function_sha256"] and bool(after["function_sha256"])
-          and after["models"] == [DOCS_MODEL] and after["pod_uid"] != before["pod_uid"])
+          and after["models"] == DOCS_MODELS and after["pod_uid"] != before["pod_uid"])
     return _v("restart-persistence", ok, chats_before=len(before["chat_ids"]), chats_after=len(after["chat_ids"]),
               chats_lost=len(lost), function_unchanged=before["function_sha256"] == after["function_sha256"],
-              docs_only_after=after["models"] == [DOCS_MODEL], pod_replaced=after["pod_uid"] != before["pod_uid"])
+              docs_only_after=after["models"] == DOCS_MODELS, pod_replaced=after["pod_uid"] != before["pod_uid"])
 
 
 def check_function_hash(stored_sha256: str | None, repo_sha256: str) -> Verdict:
@@ -387,10 +405,10 @@ def check_rollback_on(before: dict, after: dict, repo_sha256: str, next_chat_ok:
     lost = sorted(set(before["chat_ids"]) - set(after["chat_ids"]))
     kept = bool(before["claim_uid"]) and after["claim_uid"] == before["claim_uid"]
     ok = (bool(before["chat_ids"]) and not lost and kept and after["function_sha256"] == repo_sha256
-          and after["models"] == [DOCS_MODEL] and next_chat_ok)
+          and after["models"] == DOCS_MODELS and next_chat_ok)
     return _v("rollback-on", ok, chats_before=len(before["chat_ids"]), chats_lost=len(lost), claim_kept=kept,
               pipe_is_repository=after["function_sha256"] == repo_sha256,
-              docs_only=after["models"] == [DOCS_MODEL], next_chat_answered=next_chat_ok)
+              docs_only=after["models"] == DOCS_MODELS, next_chat_answered=next_chat_ok)
 
 
 def overall(verdicts: list[Verdict]) -> bool:
