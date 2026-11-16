@@ -767,8 +767,9 @@ WebUI Pipe would send. The evaluator runs its own checkout's
 answer is the model prose without its own citations section, followed by the
 agent's validated `**Citations:**` list (source events are not part of the
 message). The turn-2 body is the Pipe's `build_request`/`fit_request` plus
-`temperature`, as on every chat row. A missing Pipe file refuses the run
-(exit 2).
+`temperature`, as on every chat row. A missing Pipe file, or one without the
+seams the evaluator drives (`Pipe._transport`, `build_request`, `fit_request`,
+`DEFAULT_MAX_BODY_CHARS`), refuses the run (exit 2) before any request.
 
 - Turn-2 retrieval is read from the terminal chunk's `supplied_evidence`
   (what the agent packed), never from a search of the follow-up text.
@@ -785,9 +786,11 @@ message). The turn-2 body is the Pipe's `build_request`/`fit_request` plus
   evidence hit and rate, zero hits, refusals, verification states, citation
   precision/recall, the structural pass rate, `vs_opener` (kept, lost,
   gained, neither per session), `prior_answer_chars` (how many kept answers
-  exceed the agent's 1000-character prior-turn cut) and, with `--repeats`,
-  the spread per repeat. An opener that errored gives a turn-2 error row
-  (`opener not answered`), so it is counted, not dropped.
+  exceed the agent's default 1000-character prior-turn cut,
+  `chat_max_prior_turn_chars`, which is not an operator input) and, with
+  `--repeats`, the spread per repeat. An opener that errored gives a turn-2
+  error row (`opener not answered`), and a Pipe that cannot build the history
+  gives `follow-up history failed`; both are counted, not dropped.
 - Export rows gain `turn`, `prior_answer_chars` and the `evidence_*` fields;
   params gain `turns`, `arm`, `follow_ups_sha256` and `pipe_sha256`. Without
   `--turns 2` neither the export nor the report changes.

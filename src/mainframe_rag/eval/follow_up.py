@@ -73,6 +73,11 @@ def load_pipe(path: Path | None = None) -> tuple[ModuleType, str]:
             raise PipeUnavailable("Open WebUI Pipe not loadable")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        # The seams this module drives; a Pipe without them refuses here,
+        # not as a history failure on every follow-up row.
+        if not (hasattr(module.Pipe(), "_transport") and callable(module.build_request)
+                and callable(module.fit_request) and type(module.DEFAULT_MAX_BODY_CHARS) is int):
+            raise PipeUnavailable("Open WebUI Pipe not loadable")
     except PipeUnavailable:
         raise
     except Exception:  # noqa: BLE001 — a fixed message, never the import error text

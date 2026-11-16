@@ -255,6 +255,55 @@ def test_chat_and_answer_rows_agree_on_the_same_model_output(
     assert {k: chat[k] for k in keys} == {k: answer[k] for k in keys}
 
 
+
+@pytest.mark.parametrize(("condense", "gold_hit"), [
+    pytest.param("false", False, id="off"), pytest.param("true", True, id="on")])
+def test_two_turn_evidence_follows_the_real_agents_condense_setting(
+    monkeypatch, servable_representation_gate, condense, gold_hit,
+):
+    """Through the real app (#1268): the agent accepts the Pipe-shaped turn-2
+    body, and the follow-up's evidence hit moves with CHAT_CONDENSE_ENABLED
+    because it is read from what the agent packed. The search double returns
+    the gold doc only for a query that names the message id; the model double
+    condenses the follow-up into such a query."""
+    from mainframe_rag.eval.answers import run_follow_up, run_query
+    from mainframe_rag.eval.follow_up import load_pipe
+    from mainframe_rag.ports import ChatResult, TokenUsage
+    from tests.helpers_agent_local import StreamStubLLM, agent_client, agent_hit
+
+    gold = agent_hit(text="IEA500I reports a rejected command.")
+    other = agent_hit(text="Generic recovery steps.", doc_id=OTHER_DOC, chunk_id="def456",
+                      heading="Chapter 9 > Recovery")
+    searched: list[str] = []
+
+    def search(_qdrant, _embedder, _collection, query, **kwargs):
+        searched.append(query)
+        return [gold if "IEA500I" in query else other], "identifier", {"embed_ms": 1, "qdrant_ms": 1}
+
+    class CondensingLLM(StreamStubLLM):
+        def chat(self, *args, **kwargs):
+            return ChatResult(content="IEA500I recovery procedure")
+
+    llm = CondensingLLM((
+        {"type": "token", "delta": "The command was rejected [1].", "ttft_ms": 5},
+        {"type": "done", "finish_reason": "stop", "ttft_ms": 5,
+         "usage": TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15)},
+    ))
+    frames: list[str] = []
+    with agent_client(monkeypatch, llm=llm, search=search,
+                      env={"CHAT_CONDENSE_ENABLED": condense}) as client:
+        opener = run_query(client, _entry(), stream=True, endpoint="chat", frames=frames,
+                           evidence=True)
+        follow = run_follow_up(client, _entry(), opener, frames, load_pipe()[0], 0.0)
+    assert opener["verdict"] != "error" and follow["verdict"] != "error", follow["failures"]
+    assert opener["evidence_gold_hit"] is True
+    assert follow["evidence_gold_hit"] is gold_hit
+    assert follow["evidence_doc_ids"] == (["SA22-0000-00"] if gold_hit else [OTHER_DOC])
+    assert searched == [_entry()["query"], "IEA500I recovery procedure" if gold_hit
+                        else FOLLOW_UPS["message_id"]]
+    assert follow["prior_answer_chars"] > 0
+
+
 # ------------------------------------------------------------- coverage
 
 
@@ -597,6 +646,7 @@ TWO_TURN_ROW_KEYS = EXPORT_ROW_KEYS | {
 OTHER_DOC = "SC28-9999-00"
 OTHER_CITE = "SC28-9999-00 Other Reference, Chapter 9 > Something, p. 9-1"
 TWO_TURN = ["--endpoint", "chat", "--stream", "--turns", "2", "--arm", "condense-off"]
+ZERO_HITS = "No supporting manual excerpts were found for this question."
 
 
 def _two_turn_agent(turns: dict[tuple[str, int], bytes], pool: dict[str, list[str]] | None = None):
@@ -743,9 +793,6 @@ def test_only_answer_rows_with_gold_get_a_follow_up(site_eval):
     assert status == 1
 
 
-ZERO_HITS = "No supporting manual excerpts were found for this question."
-
-
 def test_two_turn_export_carries_no_question_answer_or_follow_up_text(site_eval):
     c = CANARIES
     opener = _entry(query=f"{c['query']} one")
@@ -804,24 +851,49 @@ def test_two_turn_flags_are_refused_when_inconsistent(site_eval, extra):
     assert exc.value.code == 2
 
 
-def test_two_turn_needs_the_pipe_in_the_evaluator_checkout(tmp_path, monkeypatch):
+def test_two_turn_needs_the_pipe_in_the_evaluator_checkout(tmp_path, monkeypatch, capsys):
+    """No Pipe file, no run: refused before any agent request (exit 2)."""
+    import httpx2
+
     from mainframe_rag.eval import answers, follow_up
 
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(follow_up, "PIPE_PATH", tmp_path / "missing.py")
+    real_client = httpx2.Client
+    monkeypatch.setattr(httpx2, "Client", lambda **kw: real_client(transport=httpx2.MockTransport(
+        lambda request: pytest.fail("no agent request without the Pipe")), **kw))
     golden = tmp_path / "g.jsonl"
     golden.write_text(json.dumps(_entry()) + "\n")
     assert answers.main(["--agent-url", "http://deployed-agent:8087", "--golden", str(golden),
                          *TWO_TURN]) == 2
+    assert "FAIL: Open WebUI Pipe not loadable" in capsys.readouterr().err
+    assert not (tmp_path / "evals").exists()
 
 
-@pytest.mark.parametrize("query_class", [*sorted(FOLLOW_UPS), "default"])
-def test_follow_ups_name_no_identifier(query_class):
-    """condense_query skips the rewrite when the latest turn names a message
-    id, member or abend code: such a follow-up would measure nothing."""
-    from mainframe_rag.agent.answer import _ABEND_RE
-    from mainframe_rag.retrieve.filters import parse_query
+def test_a_pipe_failure_is_a_fixed_turn_two_error(site_eval, monkeypatch):
+    """The Pipe is a boundary: if building the history fails, the follow-up
+    is an error row with a fixed label and no turn-2 request is sent."""
+    from mainframe_rag.eval import follow_up
 
-    text = FOLLOW_UPS.get(query_class, DEFAULT_FOLLOW_UP)
-    assert query_class == "default" or text != DEFAULT_FOLLOW_UP
-    assert not parse_query(text).has_identifiers
-    assert not _ABEND_RE.search(text)
+    def broken(*args, **kwargs):
+        raise RuntimeError("history text that must not reach the export")
+
+    monkeypatch.setattr(follow_up, "kept_answer", broken)
+    agent = _two_turn_agent({(_entry()["query"], 1): chat_stream("Rejected [1].")})
+    status, _, export, calls = site_eval(agent, [_entry()], TWO_TURN)
+    rows = {r["turn"]: r for r in json.loads(export)["rows"]}
+    assert rows[2]["failures"] == ["follow-up history failed"] and rows[1]["verdict"] == "pass"
+    assert len(_chat_bodies(calls)) == 1 and b"must not reach" not in export and status == 1
+
+
+def test_two_turn_health_failure_records_openers_only(site_eval):
+    """An unservable agent: every sampled row is a turn-1 error, no follow-up."""
+    import httpx2
+
+    def respond(request):
+        assert request.url.path == "/healthz"
+        return httpx2.Response(503, json={**HEALTH, "status": "degraded"})
+
+    status, report, export, _ = site_eval(respond, [_entry()], TWO_TURN)
+    assert status == 2 and [r["turn"] for r in json.loads(export)["rows"]] == [1]
+    assert report["metrics"]["by_turn"]["2"]["n"] == 0

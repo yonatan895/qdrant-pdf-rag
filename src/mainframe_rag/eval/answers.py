@@ -194,8 +194,8 @@ from mainframe_rag.eval.measurement import (
     repeat_spread,
     sample_identity,
     stream_signals,
+    value_spread,
 )
-from mainframe_rag.eval.measurement import _spread as repeat_value_spread
 
 
 def _agent_url(raw: str) -> str:
@@ -555,7 +555,7 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _mean(values: list[Any]) -> float | None:
-    known = [v for v in values if type(v) in (int, float)]
+    known = [v for v in values if _number_or_none(v) is not None]
     return round(sum(known) / len(known), 4) if known else None
 
 
@@ -577,8 +577,9 @@ def _turn_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "evidence_n": len(known), "evidence_gold_hit": hit,
         "evidence_gold_hit_rate": round(hit / len(known), 4) if known else None,
         "zero_hits": sum(1 for r in judged if r.get("path") == "zero_hits"),
-        "abstained": sum(1 for r in judged if "explicit refusal on an answer-tier query"
-                         in (r.get("failures") or [])),
+        # Same rule and name as summarize()'s false_refusals.
+        "false_refusals": sum(1 for r in judged if "explicit refusal on an answer-tier query"
+                              in (r.get("failures") or [])),
         "by_verification_state": dict(sorted(Counter(
             str(r.get("verification_state") or "unknown") for r in judged).items())),
         "citation_n": len(recall),
@@ -626,7 +627,7 @@ def turn_breakdown(results: list[dict[str, Any]], repeats: int) -> dict[str, Any
             per = [_turn_block([r for r in rows if int(r.get("repeat") or 1) == n])
                    for n in range(1, repeats + 1)]
             block["repeats"] = {
-                name: repeat_value_spread([p[name] for p in per])
+                name: value_spread([p[name] for p in per])
                 for name in ("evidence_gold_hit_rate", "pass_rate", "citation_recall_mean")
             }
     return {"1": first, "2": second}
@@ -705,7 +706,6 @@ def apply_evidence(
 # Turn-2 failures before any follow-up request is made (issue #1268).
 OPENER_NOT_ANSWERED = "opener not answered"
 HISTORY_FAILED = "follow-up history failed"
-NOT_SENDABLE = "follow-up not sendable"
 
 
 def has_follow_up(entry: dict[str, Any]) -> bool:
@@ -750,12 +750,10 @@ def run_follow_up(
         kept = kept_answer(pipe_mod, entry["query"], frames)
         request = second_turn_request(pipe_mod, entry["query"], kept, follow["query"])
     except Exception:  # noqa: BLE001 — the Pipe is a boundary; a fixed label only
-        request, failure = None, HISTORY_FAILED
-    else:
-        failure = NOT_SENDABLE
-    if request is None:
+        request = None
+    if request is None:  # the Pipe would make no follow-up call
         row = _base_row(follow, temperature)
-        row.update(verdict="error", failures=[failure], elapsed_ms=0, turn=2)
+        row.update(verdict="error", failures=[HISTORY_FAILED], elapsed_ms=0, turn=2)
         return row
     row = run_query(client, follow, None, None, temperature=temperature, stream=True,
                     endpoint="chat", chat_body=request, evidence=True)
@@ -1354,7 +1352,7 @@ _FIXED_FAILURE_LABELS = frozenset({
     STREAM_INCOMPLETE, STREAM_MALFORMED, STREAM_OVERSIZE,
     "agent health request failed", "malformed agent health response",
     "agent health is not servable",
-    OPENER_NOT_ANSWERED, HISTORY_FAILED, NOT_SENDABLE,
+    OPENER_NOT_ANSWERED, HISTORY_FAILED,
 })
 # OpenAI-compatible finish reasons; any other value is reported as "other".
 _FINISH_REASONS = frozenset({"stop", "length", "content_filter", "tool_calls", "abort"})
@@ -1592,7 +1590,7 @@ def _turn_lines(metrics: dict[str, Any]) -> list[str]:
     lines = ["## By turn (follow-up sessions; the metrics above cover turn 1 only)", "",
              "| metric | turn 1 | turn 2 |", "|---|---|---|"]
     for name in ("n", "errors", "evidence_n", "evidence_gold_hit", "evidence_gold_hit_rate",
-                 "zero_hits", "abstained", "citation_n", "citation_precision_mean",
+                 "zero_hits", "false_refusals", "citation_n", "citation_precision_mean",
                  "citation_recall_mean", "pass", "pass_rate"):
         lines.append(f"| {name} | {first[name]} | {second[name]} |")
     states = sorted({*first["by_verification_state"], *second["by_verification_state"]})

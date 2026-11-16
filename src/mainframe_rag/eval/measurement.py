@@ -398,9 +398,9 @@ def repeat_spread(
     })
     spread: dict[str, Any] = {}
     for path in paths:
-        spread[path] = _spread([_lookup(metrics, path) for metrics in per_repeat])
+        spread[path] = value_spread([_lookup(metrics, path) for metrics in per_repeat])
     for cls in classes:
-        spread[f"pass_rate_by_class.{cls}"] = _spread([
+        spread[f"pass_rate_by_class.{cls}"] = value_spread([
             ((_lookup(metrics, "measurement.hardware_independent.pass_rate_by_class") or {})
              .get(cls) or {}).get("rate")
             for metrics in per_repeat
@@ -415,7 +415,8 @@ def repeat_spread(
     }
 
 
-def _spread(values: list[Any]) -> dict[str, Any]:
+def value_spread(values: list[Any]) -> dict[str, Any]:
+    """Min, max, mean and range of the known numbers among per-repeat values."""
     known = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
     if not known:
         return {"values": values, "min": None, "max": None, "mean": None, "range": None}
