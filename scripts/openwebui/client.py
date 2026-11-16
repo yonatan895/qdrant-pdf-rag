@@ -305,7 +305,7 @@ class Session:
             return {"chat_create": status}
         chat_id = created["id"]
         # The model list as stored at creation: Open WebUI may rewrite it on the turn.
-        models_created = ((created or {}).get("chat") or {}).get("models")
+        models_created = (created.get("chat") or {}).get("models")
         t0 = time.monotonic()
         status, timing = self._post_timed(user, "/api/chat/completions", {
             "model": model, "stream": True, "messages": [{"role": "user", "content": text}],

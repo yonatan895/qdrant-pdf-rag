@@ -213,7 +213,8 @@ def check_legacy_chat(listed: list[str], default_models: str | None, turn: dict)
                and turn.get("model") == DOCS_DEFAULT and check_answer(turn).ok)
     ok = DOCS_FUNCTION not in listed and default_ok and turn_ok
     return _v("legacy-chat-answers", ok, bare_id_listed=DOCS_FUNCTION in listed, default_ok=default_ok,
-              turn_ok=turn_ok, done=bool(turn.get("done")), source_chips=turn.get("source_chips", 0))
+              turn_ok=turn_ok, done=bool(turn.get("done")), source_chips=turn.get("source_chips", 0),
+              models_created=turn.get("chat_models_created"), models_after=turn.get("chat_models"))
 
 
 # ------------------------------------------------------------------ slow model (#1118)
