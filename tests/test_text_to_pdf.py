@@ -598,10 +598,14 @@ def test_long_member_page_split_keeps_columns(tmp_path, monkeypatch):
     statement whose blanks ingest would strip."""
     monkeypatch.setattr(t2p, "MAX_LINES_PER_PAGE", 50)
     monkeypatch.setattr(t2p, "SPLIT_SEARCH_LINES", 20)
-    lines = [f"         LA    1,{i}" if i % 10 else f"* SECTION {i}" for i in range(1, 121)]
+    lines = [f"         LA    1,{i}" if i % 45 else f"* SECTION {i}" for i in range(120)]
     result = convert_library(tmp_path, {"ZZBIG": "\n".join(lines) + "\n"})
     parsed, chunks = ingest(result.path)
-    assert parsed.page_count == t2p.COVER_PAGES + 3
+    # 120 lines, at most 50 per page: pages start at "* SECTION 0", "* SECTION 45"
+    # and "* SECTION 90" instead of the indented lines 50 and 100.
+    first_member_page = parsed.toc[0][2]
+    assert parsed.page_count - first_member_page + 1 == 3
+    assert [c.text.split("\n")[0] for c in chunks if c.ordinal == 0] == [lines[0]]
     chunk_lines = [ln for c in chunks for ln in c.text.split("\n")]
     assert set(chunk_lines) <= set(lines)
 
