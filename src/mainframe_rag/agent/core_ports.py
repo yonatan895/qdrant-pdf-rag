@@ -34,6 +34,7 @@ class PromptBuilder[T](Protocol):
         complexity: str, tokenizer: Tokenizer | None, settings: Settings,
         order: Literal["retrieval", "stable_cache"],
         reasoning_effort: str | None = None,
+        temperature: float | None = None,
     ) -> PreparedPrompt: ...
 
 

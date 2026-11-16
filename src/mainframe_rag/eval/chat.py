@@ -49,21 +49,16 @@ from mainframe_rag.eval.datasets import (
     require_rc_for_collection,
     require_rc_for_golden,
 )
+from mainframe_rag.eval.follow_up import (  # noqa: F401 — one owner (issue #1268); re-exported
+    DEFAULT_FOLLOW_UP,
+    FOLLOW_UPS,
+    follow_up_for,
+)
 from mainframe_rag.eval.retrieval import SEARCH_LIMIT, score_entry, serving_generation
 from mainframe_rag.manifest import write_run_manifest
 from mainframe_rag.ports import ChatMessage
 from mainframe_rag.retrieve.query import search as retrieve_search
 
-FOLLOW_UPS: dict[str, str] = {
-    "message_id": "What does it mean and how do I resolve it?",
-    "syntax": "What are the parameters for this?",
-    "diagnostic": "How do I recover from it?",
-    "doc_number": "What does this document cover?",
-    "comparative": "How do the options compare?",
-    "version": "What is the difference for my release?",
-    "table": "Where is this laid out?",
-}
-DEFAULT_FOLLOW_UP = "Tell me more about this."
 ASSISTANT_PLACEHOLDER = "The relevant manual section was retrieved for your question."
 
 ARM_LITERAL = "literal"
@@ -71,7 +66,7 @@ ARM_CONDENSED = "condensed"
 
 
 def follow_up_query(entry: GoldenEntry) -> str:
-    return FOLLOW_UPS.get(entry.query_class or "", DEFAULT_FOLLOW_UP)
+    return follow_up_for(entry.query_class)
 
 
 def session_messages(entry: GoldenEntry) -> list[ChatMessage]:

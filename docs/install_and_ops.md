@@ -683,6 +683,13 @@ oc -n "$NAMESPACE" exec deploy/rag-agent -c agent -- \
 oc -n "$NAMESPACE" exec deploy/rag-agent -c agent -- \
   python3 /app/scripts/probe_gateway.py --probe-args
 
+# 3b. Optional (#1266), for a gateway without /tokenize: whether a 1-token
+# completion's usage.prompt_tokens counts the prompt (present, stable, larger
+# with one more turn) and a cold and a warm count time. Numbers only. Select
+# the source with LLM_TOKEN_COUNT_SOURCE (docs/agent.md#token-count-sources).
+oc -n "$NAMESPACE" exec deploy/rag-agent -c agent -- \
+  python3 /app/scripts/probe_gateway.py --probe-count
+
 # 4. Only after that probe passes:
 sh scripts/tools/run-task.sh airgap:ingest
 sh scripts/tools/run-task.sh airgap:smoke
@@ -1470,6 +1477,55 @@ B (`bootstrap.sh`, never advance A's workspace), then:
 sh scripts/tools/run-task.sh airgap:validate
 sh scripts/tools/run-task.sh airgap:pipeline          # or: sh scripts/airgap/pipeline.sh --skip-load
 ```
+
+<a id="upgrade-without-reingest"></a>
+**Upgrade without re-ingest.** When B keeps A's representation (same
+`RULES_VERSION_PIN`, embedding model, revision and dimensions, sparse model and
+weights: the release notes say so), B serves A's published data as is. The
+publication record binds a random build id and a fingerprint of those inputs,
+not the release commit. Do not run `airgap:pipeline` for this upgrade: with
+`CORPUS_PVC` set it always runs the ingest stage (`--skip-ingest` exists only on
+`scripts/airgap/pipeline.sh`). From B's workspace, with A's `airgap.env` values
+except `IMAGE_SHA`: leave it empty (B's checkout supplies it) or set B's sha.
+`airgap:validate` refuses any other value (`IMAGE_SHA=… does not match packed
+MANIFEST sha`) before any change.
+
+```sh
+sh scripts/tools/run-task.sh airgap:validate   # go/no-go line below
+sh scripts/tools/run-task.sh airgap:load
+sh scripts/tools/run-task.sh airgap:deploy
+$KC -n "$NS" exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py \
+    --max-tokens "${GATEWAY_PROBE_MAX_TOKENS:-16}"   # as airgap:pipeline runs it
+sh scripts/tools/run-task.sh airgap:smoke
+```
+
+- **Go/no-go:** `airgap:validate` must exit 0 and print `==> Stored layout:
+  <alias> is an alias with a build-bound publication`. Any non-zero exit stops
+  the upgrade; validate changed nothing. The line proves the alias and its
+  build binding only. That B's representation equals A's rests on the release
+  notes, and the agent checks it again at startup, after deploy.
+- **Docs Pipe mount lag:** the Open WebUI pod does not roll when the Pipe
+  changes, and the kubelet refreshes the mounted Pipe about once a minute. A
+  deploy that ends with `FAIL: docs Pipe provisioning refused: mounted docs Pipe
+  does not match the repository file` has finished everything except the
+  Pipe install: wait about a minute, then re-run `airgap:deploy`. Releases
+  that include #1253 wait up to 180 s automatically and, if the mount is
+  still stale, end with `the Open WebUI pod still mounts a docs Pipe or
+  installer that differs from this release`; the remedy is the same. A
+  rollback to 2cd8f67d does not wait.
+- **Before deploy:** take step 1's snapshot (the only protection against a
+  forced re-ingest if data is ever damaged), keep A's workspace and
+  `airgap.env` for step 4, and confirm A's image tags are still in the
+  registry (registry tag expiry would break step 4).
+- **Keep the `ingest-work` PVC.** It holds the ingest inventory; a later
+  ingest against the live generation without it refuses ("fails verification
+  … operator intervention required").
+- Qdrant should not restart when its image and values are unchanged; the agent
+  rolls to B's image.
+- Rehearsal (2026-11-15, Kind, 2cd8f67d to 419625a5, upgrade, rollback and
+  re-upgrade): validate 1 s, load 17 s, deploy about 30 s. Alias, points,
+  publication record, claims and the Qdrant pod were unchanged at every
+  step, and no ingest Job ran.
 
 Deploy refuses before any cluster change when the chart or any registry image is
 not the packed one (`deploy.md` image identity), then checks the running
