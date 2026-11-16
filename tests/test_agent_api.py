@@ -1654,6 +1654,13 @@ CODING_REQUESTS = [
     "Give me an example REXX exec that reads a data set",
     # A message identifier stays a lookup unless code is produced or pasted.
     "Fix this JCL, it fails with IEFC452I:\n//S1 EXEC PGM=MYPROG",
+    "What is wrong with my REXX exec?",
+    "Please review JCL below for errors:\n//S1 EXEC PGM=IEFBR14",
+    "//MYJOB JOB\n//S1 EXEC PGM=MYPROG\nwhy does it fail",
+    "Code a JCL step that sorts a file",
+    "How do I code a GETMAIN macro in HLASM?",
+    "I need a REXX script that lists data sets",
+    "Translate this program",
 ]
 NON_CODING_REQUESTS = [
     "What does IEA500I mean?",
@@ -1682,6 +1689,9 @@ NON_CODING_REQUESTS = [
     # A message lookup whose only coding marker is the message's own text.
     "How do I fix IEFC452I JOB NOT RUN - JCL ERROR?",
     "How do I debug IEF453I in my JCL?",
+    # "code" after return/reason/condition is a noun, never the verb.
+    "What condition code the step returns in JCL?",
+    "Which return code the REXX exec sets is documented?",
 ]
 
 

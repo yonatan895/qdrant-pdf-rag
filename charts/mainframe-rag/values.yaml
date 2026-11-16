@@ -106,7 +106,8 @@ models:
     # Exclusive with condenseEnabled (the schema refuses both true).
     # followupAnchorEnabled: false
     # Coding mode (#1276); absent keeps the Settings default (on). false
-    # restores the pre-#1276 prompts for every request.
+    # restores the pre-#1276 prompts and complexity for every request (the
+    # c/hlasm/asm/metalc/clist fence handling is not part of the setting).
     # codingModeEnabled: true
     # Empty model disables /v1/answer; when set, baseUrl is required.
     baseUrl: ""

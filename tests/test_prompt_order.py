@@ -715,7 +715,7 @@ def test_coding_extension_states_the_required_rules():
 
     for needle in ("cite the excerpt", "General guidance (not from the manuals):",
                    "never decline a coding request", "`VERIFY: <item>`",
-                   "fenced code block with a language tag", "Pre-production checklist:",
+                   "fenced code block tagged with its language", "Pre-production checklist:",
                    "only when no excerpt covers the language", "takes precedence"):
         assert needle in ext, needle
 

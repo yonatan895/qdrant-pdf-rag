@@ -2323,3 +2323,29 @@ async def test_core_chat_coding_turn_gets_the_coding_prompt(order, stream):
     assert "strictly" not in messages[-1][1]
     assert effort == _settings().llm_reasoning_effort_complex
     assert output.complexity == "complex"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_core_anchored_lookup_after_a_coding_turn_is_not_a_coding_turn(stream):
+    """The decision reads the user's own message only: an anchored follow-up
+    also searches the previous (coding) message, which must not carry the
+    coding prompt into a plain lookup."""
+    from mainframe_rag.agent.answer import SYSTEM_PROMPT
+
+    def retrieve(*_args, **_kwargs):
+        return [_hit()], "nl", {}
+
+    llm = CoreFakeLLM()
+    deps = _deps(_settings(chat_followup_anchor_enabled=True), llm, retrieve)
+    follow_up = "What does that parameter mean?"
+    source = AnswerCoreInput(query=follow_up, is_chat=True, messages=[
+        ChatMessage(role="user", content=_CODING_REQUEST),
+        ChatMessage(role="assistant", content="Here is the program."),
+        ChatMessage(role="user", content=follow_up)])
+    if stream:
+        output = [e async for e in execute_answer_core_stream(source, deps)][-1]["output"]
+    else:
+        output = await execute_answer_core(source, deps)
+    assert llm.calls[-1]["messages"][0].content == SYSTEM_PROMPT
+    assert output.complexity == "simple"

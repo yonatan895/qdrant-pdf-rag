@@ -652,7 +652,7 @@ async def execute_answer_core(
     # Coding mode (issue #1276) is decided once here, from the operator
     # setting and the turn's own text, and routes the turn to the complex
     # path; with the setting off every turn keeps the classifier's result.
-    coding = coding_mode_applies(input_data.query, search_text, settings)
+    coding = coding_mode_applies(input_data.query, settings)
     complexity = "complex" if coding else classify_fn(search_text)
 
     if not hits:
@@ -738,7 +738,7 @@ async def execute_answer_core_stream(
     # Coding mode (issue #1276) is decided once here, from the operator
     # setting and the turn's own text, and routes the turn to the complex
     # path; with the setting off every turn keeps the classifier's result.
-    coding = coding_mode_applies(input_data.query, search_text, settings)
+    coding = coding_mode_applies(input_data.query, settings)
     complexity = "complex" if coding else classify_fn(search_text)
 
     # 2. Empty hits short-circuit: only the terminal record is yielded. The

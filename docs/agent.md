@@ -696,17 +696,23 @@ select `complex`. Default is `simple`.
 Coding mode (#1276, `answer_coding_mode_enabled`, default **on** by maintainer
 decision 2026-11-16; operator input `ANSWER_CODING_MODE_ENABLED`). Both
 executors decide it once per turn, next to the complexity call:
-`coding_mode_applies(message, search_text, settings)` is true when the setting
-is on and `is_coding_request` holds for the user's message or the searched text
-(a condensed follow-up). The classifier is deterministic, word-bounded and needs
-both a coding intent and a marker. Intents: producing code (write, generate,
-create, rewrite, convert, refactor; draft or translate followed by a
-determiner; "show/give/provide me a sample/example/template") or repairing and
-reading it (fix, debug; review or correct followed by a determiner; "explain
-this", "what does this", "what's wrong with", "why does my"). Markers: JCL, jobstream, REXX, CLIST, HLASM, assembler, Metal C, CSECT/DSECT,
+`coding_mode_applies(message, settings)` is true when the setting is on and
+`is_coding_request` holds for the user's own message (the active chat message).
+The searched text is not read: an anchored follow-up also searches the previous
+message, which would carry an earlier coding turn into a plain lookup, and a
+follow-up without its own marker ("now add error handling") is not a coding
+turn. The classifier is deterministic, word-bounded and needs both a coding
+intent and a marker. Intents: producing code (write, generate, create, rewrite,
+convert, refactor; draft, translate or code followed by a determiner, "code"
+never after return/reason/condition/completion/abend/error; "how do I code";
+"I need a/an"; "show/give/provide me a sample/example/template") or repairing
+and reading it (fix, debug; review or correct followed by a determiner;
+"explain this", "what does this", "what's/what is wrong with", "why does my").
+With pasted code a looser ask is enough (review, check, why, wrong, fails,
+error, abend, help, improve). Markers: JCL, jobstream, REXX, CLIST, HLASM, assembler, Metal C, CSECT/DSECT,
 PROCLIB, EXEC, macro, PROC, a cataloged or in-stream procedure, C as a language
 ("C program", "in C"), "this/my code", a generic program/routine/script as the
-verb's object, or pasted code (a fence, a `//name JOB|EXEC|DD|PROC` line, a
+object of any of those verbs (or of need/want), or pasted code (a fence, a `//name JOB|EXEC|DD|PROC` line, a
 `/* REXX` header). A marker alone (a message or syntax lookup) or an intent
 alone (fix a reason code) is not a coding request, and a message naming a
 message identifier stays a lookup unless it asks to produce code or pastes

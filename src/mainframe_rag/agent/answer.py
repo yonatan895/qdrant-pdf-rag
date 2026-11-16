@@ -510,26 +510,39 @@ def classify_query_complexity(query: str) -> str:
 # ("What is the JCL DISP parameter?") or a diagnostic ("How do I fix reason
 # code 0C?"). Word-bounded patterns over the case-folded text: a bare
 # substring match on "c", "exec" or "code" would fire on almost anything.
-# Words that are also nouns or adjectives (review, draft, translate, correct)
-# count only in verb position, before a determiner; "sample" and "example"
-# count only when asked for ("show me a sample").
+# Words that are also nouns or adjectives (review, draft, translate, correct,
+# code) count only in verb position, before a determiner; "sample" and
+# "example" count only when asked for ("show me a sample").
 _NOT_A_VERB = r"(?![\s-]+(?:error|protect|pack|packs|level|failure)s?\b)"
 _DETERMINER = r"(?:a|an|the|this|these|that|my|our|following)\b"
 # Producing code: write, generate, convert, ... or asking for an example.
+_PRODUCE_VERBS = ("write", "writing", "generate", "create", "rewrite", "convert", "refactor")
+_PRODUCE_VERBS_BEFORE_OBJECT = ("draft", "translate", "code")
 _CODING_PRODUCE_RE = re.compile(
-    r"\b(?:write|writing|generate|create|rewrite|convert|refactor)\b" + _NOT_A_VERB
-    + r"|\b(?:draft|translate)\s+(?:me\s+)?" + _DETERMINER
+    r"\b(?:" + "|".join(_PRODUCE_VERBS) + r")\b" + _NOT_A_VERB
+    # "code" after return/reason/condition/completion/abend/error is a noun.
+    + r"|\b(?<!return\s)(?<!reason\s)(?<!condition\s)(?<!completion\s)(?<!abend\s)(?<!error\s)"
+    + r"(?:" + "|".join(_PRODUCE_VERBS_BEFORE_OBJECT) + r")\s+(?:me\s+|up\s+)?" + _DETERMINER
+    + r"|\bhow\s+(?:do|can|should|would)\s+(?:i|we|you)\s+code\b"
+    + r"|\b(?:i|we)\s+(?:need|want)\s+(?:a|an|some)\b"
     + r"|\b(?:show|give|provide|send)\s+(?:me\s+|us\s+)?(?:(?:a|an|some)\s+)?"
     r"(?:sample|example|skeleton|template)s?\b",
 )
 # Repairing or reading code: fix, debug, review, explain this, ...
+_REPAIR_VERBS = ("fix", "debug")
+_REPAIR_VERBS_BEFORE_OBJECT = ("review", "correct")
 _CODING_REPAIR_RE = re.compile(
-    r"\b(?:fix|debug)\b" + _NOT_A_VERB
-    + r"|\b(?:review|correct)\s+(?:me\s+)?" + _DETERMINER
+    r"\b(?:" + "|".join(_REPAIR_VERBS) + r")\b" + _NOT_A_VERB
+    + r"|\b(?:" + "|".join(_REPAIR_VERBS_BEFORE_OBJECT) + r")\s+(?:me\s+)?" + _DETERMINER
     + r"|\bexplain\s+(?:this|these|the\s+following|my)\b"
     r"|\bwhat\s+(?:does|do)\s+(?:this|these|the\s+following)\b"
-    r"|\bwhat'?s\s+wrong\s+with\b"
+    r"|\bwhat(?:'?s|\s+is)\s+wrong\s+with\b"
     r"|\bwhy\s+(?:does|doesn'?t|do|don'?t|is|isn'?t)\s+(?:this|my)\b",
+)
+# Beside pasted code, a looser ask is enough: "review JCL below", "why does
+# it fail", "check this".
+_PASTED_ASK_RE = re.compile(
+    r"\b(?:review|check|correct|explain|why|wrong|fails?|failing|error|errors|abend|help|improve)\b"
 )
 _CODING_MARKER_RE = re.compile(
     r"\b(?:jcl|jobstream|rexx|clist|hlasm|assembler|metal[\s-]?c|csect|dsect|proclib)\b"
@@ -539,13 +552,15 @@ _CODING_MARKER_RE = re.compile(
     r"|\b(?:this|the\s+following|my|sample|example|source)\s+code\b|\bcode\s+(?:block|snippet|sample|fragment)\b",
 )
 # A generic artefact ("program", "script") is a marker only as the object of
-# the coding verb, at most two words after it: "write a batch program" is a
-# coding request, "write a SCHEDxx PPT entry that gives a program ..." is not.
+# a coding verb (every verb above), at most two words after it: "write a
+# batch program" is a coding request, "write a SCHEDxx PPT entry that gives a
+# program ..." is not.
 _CODING_OBJECT_RE = re.compile(
-    r"\b(?:write|generate|create|draft|rewrite|convert|fix|debug|review|correct|refactor)"
+    r"\b(?:" + "|".join((*_PRODUCE_VERBS, *_PRODUCE_VERBS_BEFORE_OBJECT, *_REPAIR_VERBS,
+                         *_REPAIR_VERBS_BEFORE_OBJECT, "need", "want")) + r")"
     # Every optional slot ends in its own \s+ after a non-space token, so no
     # two whitespace runs compete for one gap (linear on a 128 KiB message).
-    r"\s+(?:me\s+)?(?:(?:a|an|the|this|my|our|that|these)\s+)?(?:[\w/-]+\s+){0,2}"
+    r"\s+(?:me\s+)?(?:(?:a|an|the|this|my|our|that|these|some)\s+)?(?:[\w/-]+\s+){0,2}"
     r"(?:program|programs|routine|subroutine|script|scripts)\b"
     r"(?!\s+(?:check|interrupt|object|call|management|properties)s?\b)",
 )
@@ -564,23 +579,25 @@ def is_coding_request(query: str) -> bool:
     code: "How do I fix IEFC452I JOB NOT RUN - JCL ERROR?" is a message
     lookup, "Write a REXX exec that replies to IEA500I" is a coding request."""
     text = query.casefold()
-    pasted = _PASTED_CODE_RE.search(text) is not None
+    if _PASTED_CODE_RE.search(text) is not None:
+        return (_CODING_PRODUCE_RE.search(text) is not None
+                or _CODING_REPAIR_RE.search(text) is not None
+                or _PASTED_ASK_RE.search(text) is not None)
     produce = _CODING_PRODUCE_RE.search(text) is not None
     if not produce and _CODING_REPAIR_RE.search(text) is None:
         return False
-    if not pasted and _CODING_MARKER_RE.search(text) is None and _CODING_OBJECT_RE.search(text) is None:
+    if _CODING_MARKER_RE.search(text) is None and _CODING_OBJECT_RE.search(text) is None:
         return False
-    return produce or pasted or not find_message_ids(query)
+    return produce or not find_message_ids(query)
 
 
-def coding_mode_applies(message: str, search_text: str, settings: Settings | None) -> bool:
+def coding_mode_applies(message: str, settings: Settings) -> bool:
     """Coding mode for one turn (issue #1276): the operator setting is on and
-    the user's message, or the text retrieval searched for it (a condensed
-    follow-up), is a coding request. The one decision both executors make;
-    the prompt builder only receives it."""
-    if settings is None or not settings.answer_coding_mode_enabled:
-        return False
-    return is_coding_request(message) or is_coding_request(search_text)
+    the user's own message is a coding request. The searched text is not
+    read: an anchored follow-up searches the previous message too, which
+    would carry an earlier coding turn into a plain lookup. The one decision
+    both executors make; the prompt builder only receives it."""
+    return settings.answer_coding_mode_enabled and is_coding_request(message)
 
 
 SYSTEM_PROMPT_COMPLEX_EXTENSION = (
@@ -607,11 +624,11 @@ SYSTEM_PROMPT_COMPLEX_EXTENSION = (
 # and 5 instead of leaving two readings, and avoids REFUSAL_MARKERS phrasing
 # so an echoed VERIFY note cannot read as a refusal.
 SYSTEM_PROMPT_CODING_EXTENSION = (
-    "\nCoding Protocol (this request asks for code; for this reply it refines rules 1, 2, 4 and 5 above and takes precedence over them where they differ):\n"
+    "\nCoding Protocol (this request asks for code; for this reply it refines rules 1, 2, 4 and 5 and the synthesis protocol above, and takes precedence over them where they differ):\n"
     "1. Manual facts: take statements, macros, keywords, operands, parameters, return codes and limits from the excerpts, and cite the excerpt each one comes from. Never invent a keyword, macro, operand or parameter.\n"
     "2. General practice: you may add general programming practice (program structure, error and return-code handling, restartability, reentrancy, comments). Label it 'General guidance (not from the manuals):' and cite nothing for it.\n"
     "3. Gaps: never decline a coding request only because the excerpts lack a verbatim example or do not cover every element. Write the code; where the excerpts do not confirm an element, mark it with a comment `VERIFY: <item>` instead of guessing. Use the rule 4 decline line only when no excerpt covers the language or facility the request is about.\n"
-    "4. Format: put each job, program or fragment in a fenced code block with a language tag (jcl, rexx, hlasm or c), then explain how it maps to the cited syntax.\n"
+    "4. Format: put each job, program or fragment in a fenced code block tagged with its language (for example jcl, rexx, hlasm or c), then explain how it maps to the cited syntax.\n"
     "5. Before the 'Citations:' section, end with a short 'Pre-production checklist:' of what to confirm before production use, including every VERIFY item.\n"
 )
 

@@ -2389,7 +2389,10 @@ exclusive with `CHAT_CONDENSE_ENABLED` (preflight, the mapper and the chart
 schema refuse both true; the pod's Settings would too). `ANSWER_CODING_MODE_ENABLED`
 (#1276) maps to `models.reasoning.codingModeEnabled` and renders only when set;
 unset keeps the pod's on default, and `ANSWER_CODING_MODE_ENABLED=false` in
-`airgap.env` is the one-line per-site revert (the `coding-off` arm). Site follow-up arms:
+`airgap.env` is the one-line per-site revert of the coding prompts and the
+coding route to the complex path (the `coding-off` arm). It does not revert the
+#1276 code-fence tags (`c`, `metalc`, `asm`, `hlasm`, `assembler`, `clist` kept
+as `script`), which apply to every answer. Site follow-up arms:
 `condense` = `CHAT_CONDENSE_ENABLED=true`, `anchored` =
 `CHAT_FOLLOWUP_ANCHOR_ENABLED=true`, `history4000` =
 `CHAT_MAX_PRIOR_TURN_CHARS=4000`; redeploy between arms. Enable it deliberately when qualifying pronoun-only
