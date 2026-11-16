@@ -42,8 +42,9 @@ from mainframe_rag.agent.answer import (
 from mainframe_rag.agent.chat_turn import (
     chat_body_chars as chat_body_chars,  # noqa: PLC0414 — preserve the existing helper import
 )
-from mainframe_rag.agent.chat_turn import prepare_chat_turn
+from mainframe_rag.agent.chat_turn import is_unsearchable_query, prepare_chat_turn
 from mainframe_rag.agent.core_ports import (
+    RETRIEVAL_HIT_LIMIT,
     AnswerModel,
     ModelDone,
     ModelToken,
@@ -191,16 +192,20 @@ def _anchor_query(input_data: AnswerCoreInput, settings: Settings) -> str | None
     """The previous user message's retrieval query when the active chat
     follow-up should be anchored to it, else None. Follow-ups only; never when
     the active message names an identifier (the condensation bypass), when
-    either message screens as a trap, or when both search the same text."""
+    either message screens as a trap, when the antecedent is one the active
+    turn would refuse, or when both search the same text."""
     messages = input_data.messages or []
     if not (input_data.is_chat and settings.chat_followup_anchor_enabled and len(messages) > 1):
         return None
     literal = derive_retrieval_query(input_data.query, settings)
     if names_identifier(literal) or screen_query(literal) == "trap":
         return None
-    earlier = next((m.content.strip() for m in reversed(messages[:-1]) if m.role == "user"), "")
-    if not earlier:
+    earlier = next((m.content for m in reversed(messages[:-1]) if m.role == "user"), "")
+    # The antecedent never passed the active-turn check: one the active turn
+    # would refuse (blank, control characters) is not searched.
+    if is_unsearchable_query(earlier):
         return None
+    earlier = earlier.strip()
     anchor = derive_retrieval_query(earlier, settings)
     if anchor == literal or screen_query(anchor) == "trap":
         return None
@@ -230,10 +235,11 @@ async def plan_search(
 
 def _fuse_by_rank(literal: RetrievalResult, anchored: RetrievalResult) -> RetrievalResult:
     """Interleave two ranked lists, the literal leg first, keeping a chunk at
-    its first place, cut to what one retrieval returns. Rank, not score:
-    rerank and RRF scores of different queries are not comparable. The query
-    kind is the literal leg's (the user's own question class); timings add."""
-    limit = max(len(literal.hits), len(anchored.hits))
+    its first place, cut to what one retrieval returns (`RETRIEVAL_HIT_LIMIT`,
+    or a longer leg's length). Rank, not score: rerank and RRF scores of
+    different queries are not comparable. The query kind is the literal leg's
+    (the user's own question class); timings add."""
+    limit = max(RETRIEVAL_HIT_LIMIT, len(literal.hits), len(anchored.hits))
     seen: set[str] = set()
     hits: list[SearchHit] = []
     for pair in zip_longest(literal.hits, anchored.hits):

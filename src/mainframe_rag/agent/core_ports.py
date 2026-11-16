@@ -11,6 +11,10 @@ from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage, ChatResult, Tokenizer, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
 
+# Hits one agent retrieval returns (/v1/search, /v1/answer, /v1/chat and the
+# console); an anchored follow-up's fused legs are cut to it too (#1268).
+RETRIEVAL_HIT_LIMIT = 8
+
 
 @dataclass(frozen=True)
 class RetrievalResult:
