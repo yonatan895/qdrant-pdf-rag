@@ -1172,23 +1172,31 @@ verify_openwebui_route() {
     echo "==> Route rag-openwebui verified: Service rag-openwebui port https, reencrypt, HTTP redirected, host and destination CA match"
 }
 
-# The rag-openwebui pod mounts the Pipe and its installer from the
-# rag-openwebui-pipe ConfigMap and does not roll when that ConfigMap changes.
-# After an upgrade the kubelet keeps serving the previous release's files
-# until its next sync (51 s in the 2026-11-15 rehearsal), so wait until both
-# mounted files hash to this release's files before running the installer:
-# the installer itself is one of them (#1252). $1 = repository docs Pipe sha256.
+# The rag-openwebui pod mounts the Pipe, the shared prompts and their
+# installers from the rag-openwebui-pipe ConfigMap and does not roll when that
+# ConfigMap changes. After an upgrade the kubelet keeps serving the previous
+# release's files until its next sync (51 s in the 2026-11-15 rehearsal), so
+# wait until every mounted file the deploy installs from hashes to this
+# release's file before running any installer: the installers are among them
+# (#1252). The kubelet swaps the whole projection at once, so a release that
+# changes only prompts.json is waited for too (#1259 review B1).
+# $1 = repository docs Pipe sha256.
 wait_openwebui_pipe_mount() {
-    _inst=$(sha256sum charts/mainframe-rag/files/openwebui/provision_pipe.py | awk '{print $1}')
-    [ "${#_inst}" -eq 64 ] || die "cannot hash the repository docs Pipe installer"
-    _want="$1
-$_inst"
+    _want=$1
+    for _f in charts/mainframe-rag/files/openwebui/provision_pipe.py \
+              charts/mainframe-rag/files/openwebui/prompts.json \
+              charts/mainframe-rag/files/openwebui/provision_prompts.py; do
+        _h=$(sha256sum "$_f" | awk '{print $1}')
+        [ "${#_h}" -eq 64 ] || die "cannot hash the repository file $_f"
+        _want="$_want
+$_h"
+    done
     _wait=${AIRGAP_TEST_PIPE_MOUNT_WAIT_S:-180}  # test-only overrides
     _poll=${AIRGAP_TEST_PIPE_MOUNT_POLL_S:-3}
     case "$_wait$_poll" in *[!0-9]*|'') die "pipe mount wait overrides must be whole seconds" ;; esac
     [ "$_poll" -ge 1 ] || _poll=1
     _hash_py='import hashlib, sys
-for name in ("docs_pipe.py", "provision_pipe.py"):
+for name in ("docs_pipe.py", "provision_pipe.py", "prompts.json", "provision_prompts.py"):
     try:
         with open(sys.argv[1] + "/" + name, "rb") as f:
             print("mfr-pipe-sha", hashlib.sha256(f.read()).hexdigest())
@@ -1215,12 +1223,12 @@ for name in ("docs_pipe.py", "provision_pipe.py"):
         if [ "$_waited" -ge "$_wait" ]; then
             [ -n "$_read" ] ||
                 die "the docs Pipe files could not be read in the Open WebUI pod within $_wait s; nothing was installed. Fix what kubectl reports, then re-run airgap:deploy. kubectl: ${_err:-no output}"
-            die "the Open WebUI pod still mounts a docs Pipe or installer that differs from this release after $_wait s; nothing was installed. Wait a minute, then re-run airgap:deploy"
+            die "the Open WebUI pod still mounts docs Pipe or shared-prompt files that differ from this release after $_wait s; nothing was installed. Wait a minute, then re-run airgap:deploy"
         fi
         [ -n "$_said" ] || { echo "==> waiting for the Open WebUI pod to see the new docs Pipe (ConfigMap mounts refresh about once a minute; up to $_wait s)"; _said=1; }
         sleep "$_poll"
     done
-    unset _inst _want _wait _poll _hash_py _start _said _seen _waited _read _err _out
+    unset _f _h _want _wait _poll _hash_py _start _said _seen _waited _read _err _out
 }
 
 # Issue #1074 (ADR-0007 V2): install the repository docs Pipe through the
@@ -1250,9 +1258,10 @@ provision_openwebui_pipe() {
 # commands) to the repository file through the hash-checked installer inside the
 # pod, after the Pipe. Same admin key, on stdin only. The installer and
 # prompts.json ride ConfigMap rag-openwebui-pipe, whose mount can trail the
-# release (#1252): the installer refuses a mounted copy that is not this
-# release's, and an absent one fails the exec; either way nothing is changed
-# and a re-run converges.
+# release (#1252): provision_openwebui_pipe has already waited for this
+# release's projection of both (wait_openwebui_pipe_mount). The installer
+# still refuses a mounted copy that is not this release's, and an absent one
+# fails the exec; either way nothing is changed and a re-run converges.
 provision_openwebui_prompts() {
     [ "${AIRGAP_DRYRUN:-0}" != "1" ] || { echo "[dryrun] shared prompts would be converged in Open WebUI"; return 0; }
     _prompts_sha=$(sha256sum charts/mainframe-rag/files/openwebui/prompts.json | awk '{print $1}') ||

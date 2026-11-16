@@ -1514,6 +1514,13 @@ def test_openwebui_without_an_admin_key_says_the_pipe_is_not_installed(tree):
     assert "exec" not in _helm_log(tree).split()
 
 
+# Every file of ConfigMap rag-openwebui-pipe the deploy installs from. The kubelet
+# swaps the whole projection at once, so one wait over all of them covers the Pipe
+# and the shared prompts (#1259 review B1: a release that changes only prompts.json
+# leaves the Pipe files equal, so a Pipe-only wait passed on the old projection).
+MOUNTED_FILES = ("docs_pipe.py", "provision_pipe.py", "prompts.json", "provision_prompts.py")
+
+
 def _stale_mount(tree, *, stale_reads, wait="9", poll="1", stale_file="docs_pipe.py"):
     """The old release's Pipe files as the pod still sees them for `stale_reads`
     reads: `stale_file` differs from this release, the other one already matches."""
@@ -1521,7 +1528,7 @@ def _stale_mount(tree, *, stale_reads, wait="9", poll="1", stale_file="docs_pipe
     stale = root / "stale-mount"
     stale.mkdir()
     (root / "charts/mainframe-rag/files/openwebui/docs_pipe.py").write_text(OWUI_PIPE)
-    for name in ("docs_pipe.py", "provision_pipe.py"):
+    for name in MOUNTED_FILES:
         shutil.copy(root / "charts/mainframe-rag/files/openwebui" / name, stale)
     with (stale / stale_file).open("a") as f:
         f.write("# old release\n")
@@ -1547,18 +1554,33 @@ def test_openwebui_pipe_install_waits_for_the_mount_to_catch_up(tree):
     assert log.index("/opt/mainframe-rag/openwebui/provision_pipe.py") > log.rindex("exec\ndeploy/rag-openwebui")
 
 
-@pytest.mark.parametrize("stale_file", ["docs_pipe.py", "provision_pipe.py"])
+@pytest.mark.parametrize("stale_file", MOUNTED_FILES)
 def test_openwebui_pipe_mount_that_never_catches_up_fails_without_installing(tree, stale_file):
-    """The installer is mounted from the same ConfigMap: a stale installer (the
-    old release's checks) is refused like a stale Pipe."""
+    """The installers and the prompt file are mounted from the same ConfigMap: a
+    stale one (the old release's checks or templates) is refused like a stale Pipe."""
     r = _owui_deploy(tree, *_stale_mount(tree, stale_reads=1000, wait="2", poll="1",
                                          stale_file=stale_file))
     assert r.returncode != 0
-    assert ("the Open WebUI pod still mounts a docs Pipe or installer that differs from "
+    assert ("the Open WebUI pod still mounts docs Pipe or shared-prompt files that differ from "
             "this release after 2 s; nothing was installed. Wait a minute, then re-run airgap:deploy") in r.stderr
     assert _mount_reads(tree) >= 2
     assert "/opt/mainframe-rag/openwebui/provision_pipe.py" not in _helm_log(tree)
+    assert "/opt/mainframe-rag/openwebui/provision_prompts.py" not in _helm_log(tree)
     assert "docs Pipe installed" not in r.stdout
+
+
+def test_openwebui_prompt_only_change_waits_for_the_mount_before_the_prompt_installer(tree):
+    """#1259 review B1: a release that changes only prompts.json keeps the Pipe
+    files equal. The deploy still waits for the new projection, then runs the
+    prompt installer once on it, and succeeds without a re-run."""
+    r = _owui_deploy(tree, *_stale_mount(tree, stale_reads=2, stale_file="prompts.json"))
+    assert r.returncode == 0, r.stderr
+    assert _mount_reads(tree) == 3
+    assert "waiting for the Open WebUI pod to see the new docs Pipe" in r.stdout
+    assert "shared prompts converged" in r.stdout
+    log = _helm_log(tree)
+    assert log.count("/opt/mainframe-rag/openwebui/provision_prompts.py") == 1
+    assert log.index("/opt/mainframe-rag/openwebui/provision_prompts.py") > log.rindex("exec\ndeploy/rag-openwebui")
 
 
 def test_openwebui_pipe_mount_that_cannot_be_read_says_so_with_kubectl_s_error(tree):
