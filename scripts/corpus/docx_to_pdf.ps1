@@ -14,9 +14,12 @@
 
     Source documents are opened read-only and closed without saving. Word is
     quit in a finally block. Per file it warns about: no Heading 1-3 style in
-    use, an empty Title, a Title containing a comma, and a stem that is not a
-    usable doc id. Exit codes: 0 all converted, 1 some files failed or were
-    skipped, 3 Word is not available.
+    use, an empty Title, a Title containing a comma or a page mark, a stem that
+    is not a usable doc id, and an IBM form number in the text (within the
+    first four pages ingest takes it as the doc id). These are early warnings:
+    run `python -m mainframe_rag.tools.text_to_pdf check` on the PDFs before
+    placing them in the corpus; it applies ingest's own rules. Exit codes: 0
+    all converted, 1 some files failed or were skipped, 3 Word is not available.
 
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File docx_to_pdf.ps1 -SourceDir D:\docs\word -OutDir D:\docs\pdf
@@ -42,8 +45,11 @@ $wdAlertsNone = 0
 $wdFindStop = 0
 # WdBuiltinStyle ids for Heading 1-3: language-independent, unlike style names.
 $HeadingStyleIds = @(-2, -3, -4)
-# The citation shape for a filename-stem doc id (src/mainframe_rag/agent/cites.py).
+# Early warnings only: `python -m mainframe_rag.tools.text_to_pdf check` on the
+# PDFs applies ingest's own rules and is the gate before the corpus.
 $StemPattern = '^[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)+$'
+$PageMarkPattern = '\b[Pp]{1,2}\.'
+$FormNumberPattern = '\b[A-Z]{2,4}\d{2}-\d{4}(?:-\d{2})?\b'
 
 function Get-DocumentTitle($Document) {
     # BuiltInDocumentProperties needs late binding from PowerShell.
@@ -115,8 +121,11 @@ try {
             $title = Get-DocumentTitle $doc
             if ($title -eq '') {
                 Write-Warning "$($file.Name): empty Title property; ingest would take the first line of page 1 as the title"
-            } elseif ($title.Contains(',')) {
-                Write-Warning "$($file.Name): the Title contains a comma, which breaks citations; remove it"
+            } elseif ($title.Contains(',') -or $title -cmatch $PageMarkPattern) {
+                Write-Warning "$($file.Name): the Title contains a comma or a page mark (p.), which breaks citations; remove it"
+            }
+            if ($doc.Content.Text -cmatch $FormNumberPattern) {
+                Write-Warning "$($file.Name): the text names an IBM form number; within the first four pages ingest takes it as the doc id (run text_to_pdf check on the PDF)"
             }
             if (-not (Test-HeadingStyleUsed $doc)) {
                 Write-Warning "$($file.Name): no Heading 1-3 style in use; the PDF gets no bookmarks and citations no heading path"

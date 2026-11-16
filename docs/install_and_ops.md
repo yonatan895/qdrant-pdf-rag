@@ -974,7 +974,11 @@ Rules for all three:
   digits joined by `-`, `_` or `.`, with at least two parts and no IBM form
   number, e.g. `SITE-MACLIB-SYSA-20261117`. A new export or version gets a new
   name. Ingest treats changed bytes under the same name as a new revision of
-  the same document.
+  the same document. One exception: if an IBM form number (`SA23-1385-07`)
+  appears anywhere in a PDF's first four pages, ingest takes that number as
+  the doc id instead of the file name, and the document is filed as that IBM
+  manual. The converter's cover pages prevent this. For Word documents, run
+  the check below and move such references past page 4.
 - **The title has no comma and no page mark** (`p.`, `pp.`). The comma
   separates citation fields. The converter refuses such a title, and the Word
   script warns. A Word document needs its Title property set (File > Info >
@@ -1033,8 +1037,14 @@ Library options:
   no date, and the same input always gives the same sha256.
 
 Tabs are expanded to 8 columns, trailing blanks and leading or trailing blank
-records are dropped, and in Markdown typographic quotes, dashes, ellipses and
-arrows become ASCII. The converter refuses:
+records are dropped. In Markdown:
+
+- typographic quotes, dashes, ellipses and arrows become ASCII;
+- fenced code, indented code and tables are kept verbatim;
+- H4 and deeper headings become bold lines;
+- thematic breaks (`---`) are dropped.
+
+The converter refuses underlined (setext) headings, and also:
 
 - characters outside printable Latin-1, which the PDF base fonts cannot carry;
 - inputs over the size caps (8 MiB per member, 256 MiB per library, 20,000
@@ -1054,8 +1064,10 @@ header and footer, which ingest removes as page chrome, so no source line
 removed. A member starts a new page, and the page grows with it (up to 1,000
 lines), so its citation reads `<doc id> <title>, <member>, p. PDF n`. Columns
 are kept in chunk text with one exception: ingest strips the leading blanks
-of the first line of each paragraph, that is a member's first line and any
-line after a blank record.
+of the first line of each paragraph. That affects a member's first line, any
+line after a blank record, and the first line of a continuation page. A
+member longer than 1,000 lines is split, where possible, before a column-1
+line (a label or comment) so that its continuation pages lose nothing.
 
 **Word documents** (`docx_to_pdf.ps1`, PowerShell 5.1 on Windows with Word):
 
@@ -1069,12 +1081,26 @@ structure tags and the document properties, which carry the Title. It warns
 about:
 
 - a missing Heading 1-3 style;
-- an empty Title or one with a comma;
+- an empty Title or one with a comma or page mark;
 - a file stem that is not a usable doc id;
+- an IBM form number in the text;
 - a `.doc` and `.docx` with the same stem, which it skips.
 
 It never overwrites a PDF without `-Force`. Exit codes: 1 when a file failed
 or was skipped, 3 when Word is not available.
+
+The warnings are early hints. Before placing Word PDFs in the corpus, check
+them with ingest's own parser:
+
+```bash
+python3 -m mainframe_rag.tools.text_to_pdf check /work/docs/pdf/*.pdf
+```
+
+The check prints one line per file with the doc id and bookmark count. It
+exits 2 if any file has a problem: a doc id other than the file stem, a title
+or bookmark with a comma, a page mark or a form number, or an unusable file
+name. Missing bookmarks and headings that ingest skips by name are reported
+as notices.
 
 **3. Place and ingest.** Copy the PDFs into their layout folders on the corpus
 volume, the same way as manuals, then run the ordinary ingest
@@ -1086,7 +1112,7 @@ files are parsed and embedded.
 `INGEST_RETIRE_DOCS=SITE-MACLIB-SYSA-20260501` in `airgap.env` for that one
 ingest run, then clear it. A file missing from the walk is not a removal
 instruction: without the retirement the publication refuses
-([ingest §9](ingest.md)).
+([ingest §9](ingest.md#9-orchestration-run_ingestpy-inventorypy)).
 
 ### 4.6 Verification & Smoke Testing
 

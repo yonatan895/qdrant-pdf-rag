@@ -48,6 +48,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
+from typing import NamedTuple
 
 import pymupdf
 
@@ -86,17 +87,26 @@ SEQUENCE_COLUMNS = (73, 80)
 # the file stem; the cover keeps source text out of that window.
 COVER_PAGES = 4
 MAX_LINES_PER_PAGE = 1000
+SPLIT_SEARCH_LINES = 200
 MARGIN = 36.0
 PAGE_WIDTH_MIN = 612.0
 PAGE_HEIGHT_MIN = 792.0
 PROSE_WRAP_WIDTH = PAGE_WIDTH_MIN - 2 * MARGIN
 GAP = 12.0
-CODE = ("cour", 9.0, 11.0)
-PROSE = ("helv", 10.0, 12.0)
-BOLD = ("hebo", 10.0, 12.0)
-H2 = ("hebo", 13.0, 17.0)
-H3 = ("hebo", 11.5, 15.0)
-GUARD = ("helv", 8.0, 10.0)
+
+
+class Style(NamedTuple):
+    font: str  # a PDF base-14 font name as PyMuPDF spells it
+    size: float
+    leading: float
+
+
+CODE = Style("cour", 9.0, 11.0)
+PROSE = Style("helv", 10.0, 12.0)
+BOLD = Style("hebo", 10.0, 12.0)
+H2 = Style("hebo", 13.0, 17.0)
+H3 = Style("hebo", 11.5, 15.0)
+GUARD = Style("helv", 8.0, 10.0)
 CREATOR = "mainframe-rag text_to_pdf"
 
 # PDS member names: 1-8 characters, A-Z 0-9 @ # $, not starting with a digit.
@@ -126,8 +136,11 @@ _SECRET_RE = re.compile(
 )
 _NOT_LITERAL = ("&", "$", "%", "<", "{", "*", "(")
 
-_HEADING_RE = re.compile(r"(#{1,6})\s+(.*?)\s*#*\s*$")
+_HEADING_RE = re.compile(r"(#{1,6})\s+(.*?)(?:\s+#+)?\s*$")
 _FENCE_RE = re.compile(r"(`{3,}|~{3,})")
+_SETEXT_RE = re.compile(r"\s{0,3}(?:=+|-+)\s*")
+_INDENTED_CODE = "    "
+_BREAK_RE = re.compile(r"\s{0,3}([-*_])(?:\s*\1){2,}\s*")
 _LIST_RE = re.compile(r"\s*(?:[-*+]|\d{1,3}[.)])\s+")
 
 
@@ -139,7 +152,7 @@ class ConversionError(Exception):
 @dataclass(frozen=True, slots=True)
 class Line:
     text: str
-    style: tuple[str, float, float]  # font, size, leading
+    style: Style
 
 
 @dataclass(slots=True)
@@ -182,11 +195,12 @@ def _check_chars(text: str, where: str) -> None:
             )
 
 
-def check_cite_field(value: str, what: str, doc_id: str, limit: int = TITLE_MAX_CHARS) -> None:
+def check_cite_field(value: str, what: str, doc_id: str) -> None:
     """Refuse a title or bookmark the citation would change or misread: a
     comma (the cite's field separator), a page mark ("p. 5"), an IBM form
     number, control or non-Latin-1 characters, stray whitespace, or more than
-    `limit` characters. The citation sanitizer itself is the oracle."""
+    TITLE_MAX_CHARS (ingest's bound on a title or bookmark). The citation
+    sanitizer itself is the oracle."""
     if not value or not any(ch.isalnum() for ch in value):
         raise ConversionError(f"{what} is empty or has no letter or digit")
     _check_chars(value, what)
@@ -198,8 +212,8 @@ def check_cite_field(value: str, what: str, doc_id: str, limit: int = TITLE_MAX_
         raise ConversionError(f"{what} contains an IBM form number")
     if " > " in value:
         raise ConversionError(f"{what} contains ' > ', the heading path separator")
-    if len(value) > limit:
-        raise ConversionError(f"{what} is longer than {limit} characters")
+    if len(value) > TITLE_MAX_CHARS:
+        raise ConversionError(f"{what} is longer than {TITLE_MAX_CHARS} characters")
     if _cite_part(clean_cite_field(value, CITE_TITLE_MAX_CHARS), doc_id) != value:
         raise ConversionError(f"{what} would change in a citation (spacing or characters)")
 
@@ -232,6 +246,14 @@ def _secret_lines(lines: Sequence[str]) -> list[int]:
                 found.append(number)
                 break
     return found
+
+
+def _refuse_secrets(places: list[str]) -> None:
+    raise ConversionError(
+        "possible literal credentials at " + ", ".join(places[:20])
+        + (" ..." if len(places) > 20 else "")
+        + "; remove them, or review and rerun with --allow-secret-like"
+    )
 
 
 def _decode(raw: bytes, encoding: str, where: str) -> list[str]:
@@ -299,13 +321,31 @@ def _member_lines(raw: bytes, name: str, encoding: str, columns: int, strip_sequ
     return lines
 
 
+def _page_split(lines: list[str], start: int) -> int:
+    """End of the page that starts at `start`. Ingest strips the leading
+    blanks of a page's first line, so a page that must be split ends, where
+    the last SPLIT_SEARCH_LINES lines allow it, before a line that starts in
+    column 1 (a label or comment) or that follows a blank record anyway."""
+    end = start + MAX_LINES_PER_PAGE
+    if end >= len(lines):
+        return len(lines)
+    for cut in range(end, end - SPLIT_SEARCH_LINES, -1):
+        if lines[cut] and (not lines[cut][0].isspace() or not lines[cut - 1]):
+            return cut
+    return end
+
+
 def _code_pages(lines: list[str], bookmarks: list[tuple[int, str]]) -> list[Page]:
-    """One member or code block as pages: blank records render as a single
-    space so they stay paragraph breaks in the extracted text."""
-    pages = []
-    for start in range(0, max(len(lines), 1), MAX_LINES_PER_PAGE):
-        chunk = lines[start : start + MAX_LINES_PER_PAGE]
-        pages.append(Page([Line(text or " ", CODE) for text in chunk], bookmarks if start == 0 else []))
+    """One member as pages: blank records render as a single space so they
+    stay paragraph breaks in the extracted text."""
+    pages = [Page([], bookmarks)]
+    start = 0
+    while start < len(lines):
+        end = _page_split(lines, start)
+        if pages[-1].lines:
+            pages.append(Page())
+        pages[-1].lines.extend(Line(text or " ", CODE) for text in lines[start:end])
+        start = end
     return pages
 
 
@@ -321,7 +361,7 @@ def plan_library(
     allow_secret_like: bool = False,
 ) -> Plan:
     check_stem(stem)
-    check_cite_field(title, "title", stem, CITE_TITLE_MAX_CHARS)
+    check_cite_field(title, "title", stem)
     if not 1 <= columns <= MAX_COLUMNS:
         raise ConversionError(f"--columns must be 1-{MAX_COLUMNS}")
     if strip_sequence and columns != SEQUENCE_COLUMNS[1]:
@@ -352,19 +392,15 @@ def plan_library(
             notices.append(f"member {name} is empty (bookmarked, no chunks)")
         pages.extend(_code_pages(lines, [(1, bookmark)]))
     if secrets and not allow_secret_like:
-        raise ConversionError(
-            "possible literal credentials at " + ", ".join(secrets[:20])
-            + (" ..." if len(secrets) > 20 else "")
-            + "; remove them, or review and rerun with --allow-secret-like"
-        )
+        _refuse_secrets(secrets)
     return Plan(stem, title, f"Converted member library, {len(files)} members, one bookmark per member",
                 tuple(pages), tuple(notices))
 
 
 # --- Markdown documents -----------------------------------------------------
-def _wrap(text: str, style: tuple[str, float, float], width: float, indent: str = "") -> list[str]:
+def _wrap(text: str, style: Style, width: float, indent: str = "") -> list[str]:
     """Greedy word wrap measured in the rendering font. Deterministic."""
-    font, size, _ = style
+    font, size = style.font, style.size
 
     def fits(candidate: str) -> bool:
         return pymupdf.get_text_length(candidate, fontname=font, fontsize=size) <= width
@@ -400,13 +436,9 @@ def plan_markdown(src: Path, *, encoding: str = "utf-8", allow_secret_like: bool
     lines = [ln.translate(MARKDOWN_PUNCTUATION) for ln in _decode(src.read_bytes(), encoding, src.name)]
     for number, line in enumerate(lines, 1):
         _check_chars(line, f"{src.name} line {number}")
-    secrets = _secret_lines(lines)
+    secrets = [f"{src.name}:{n}" for n in _secret_lines(lines)]
     if secrets and not allow_secret_like:
-        raise ConversionError(
-            f"possible literal credentials at {src.name} lines "
-            + ", ".join(map(str, secrets[:20]))
-            + "; remove them, or review and rerun with --allow-secret-like"
-        )
+        _refuse_secrets(secrets)
 
     title: str | None = None
     pages: list[Page] = []
@@ -420,7 +452,7 @@ def plan_markdown(src: Path, *, encoding: str = "utf-8", allow_secret_like: bool
     fence_line = 0
     code_block: list[str] = []
     paths: set[str] = set()
-    table: list[str] = []  # consecutive Markdown table rows, kept verbatim
+    verbatim: list[str] = []  # consecutive table rows or indented code lines
 
     def add(new: list[Line]) -> None:
         nonlocal page
@@ -433,10 +465,10 @@ def plan_markdown(src: Path, *, encoding: str = "utf-8", allow_secret_like: bool
             page.lines.append(line)
 
     def flush() -> None:
-        nonlocal prose, prose_style, prose_indent, last_was_heading, table
-        if table:
-            add([Line(t, CODE) for t in table])
-            table = []
+        nonlocal prose, prose_style, prose_indent, last_was_heading, verbatim
+        if verbatim:
+            add([Line(t, CODE) for t in verbatim])
+            verbatim = []
             last_was_heading = False
         if prose:
             add([Line(t, prose_style) for t in _wrap(" ".join(prose), prose_style, PROSE_WRAP_WIDTH, prose_indent)])
@@ -455,14 +487,19 @@ def plan_markdown(src: Path, *, encoding: str = "utf-8", allow_secret_like: bool
                 continue
             code_block.append(raw.rstrip())
             continue
+        if title is None and raw.strip() and not raw.startswith("# "):
+            raise ConversionError(f"{where}: the document must start with one H1 (# Title)")
         if fenced := _FENCE_RE.match(raw.strip()):
             flush()
             fence = fenced.group(1)
             code_block = []
             fence_line = number
             continue
-        if title is None and raw.strip() and not raw.startswith("# "):
-            raise ConversionError(f"{where}: the document must start with one H1 (# Title)")
+        if prose and _SETEXT_RE.fullmatch(raw):
+            raise ConversionError(f"{where}: an underlined (setext) heading; write it as ## or ###")
+        if not prose and not verbatim and _BREAK_RE.fullmatch(raw):
+            flush()
+            continue
         heading = _HEADING_RE.fullmatch(raw)
         if heading:
             flush()
@@ -470,7 +507,7 @@ def plan_markdown(src: Path, *, encoding: str = "utf-8", allow_secret_like: bool
             if level == 1:
                 if title is not None:
                     raise ConversionError(f"{where}: a second H1; the document has one title")
-                check_cite_field(text, f"{where} H1 (the title)", stem, CITE_TITLE_MAX_CHARS)
+                check_cite_field(text, f"{where} H1 (the title)", stem)
                 title = text
                 continue
             if level <= 3:
@@ -497,12 +534,13 @@ def plan_markdown(src: Path, *, encoding: str = "utf-8", allow_secret_like: bool
         if not raw.strip():
             flush()
             continue
-        if raw.lstrip().startswith("|"):
+        # Table rows and indented code blocks are kept verbatim (columns).
+        if raw.lstrip().startswith("|") or (raw.startswith(_INDENTED_CODE) and (verbatim or not prose)):
             if prose:
                 flush()
-            table.append(raw.rstrip())
+            verbatim.append(raw.rstrip())
             continue
-        if table:
+        if verbatim:
             flush()
         if _LIST_RE.match(raw):
             flush()
@@ -530,8 +568,8 @@ def _guard_lines(plan: Plan) -> list[str]:
     return lines
 
 
-def _width(text: str, style: tuple[str, float, float]) -> float:
-    return float(pymupdf.get_text_length(text, fontname=style[0], fontsize=style[1]))
+def _width(text: str, style: Style) -> float:
+    return float(pymupdf.get_text_length(text, fontname=style.font, fontsize=style.size))
 
 
 def _creation_stamp(value: str | None) -> str:
@@ -555,27 +593,27 @@ def render(plan: Plan, creation_date: str | None = None) -> tuple[bytes, list[li
     widths = [_width(t, GUARD) for t in guard]
     widths += [_width(line.text, line.style) for page in plan.pages for line in page.lines]
     page_width = max(PAGE_WIDTH_MIN, 2 * MARGIN + max(widths))
-    guard_height = EDGE_LINES * GUARD[2]
+    guard_height = EDGE_LINES * GUARD.leading
     doc = pymupdf.open()
     toc: list[list[int | str]] = []
     expected: list[list[str]] = []
     for index in range(total):
         content = plan.pages[index - cover] if index >= cover else Page()
-        body = sum(line.style[2] for line in content.lines)
+        body = sum(line.style.leading for line in content.lines)
         height = max(PAGE_HEIGHT_MIN, 2 * MARGIN + 2 * guard_height + 2 * GAP + body)
         page = doc.new_page(width=page_width, height=height)
         y = MARGIN
         for text in guard:
-            y += GUARD[2]
-            page.insert_text((MARGIN, y), text, fontname=GUARD[0], fontsize=GUARD[1])
+            y += GUARD.leading
+            page.insert_text((MARGIN, y), text, fontname=GUARD.font, fontsize=GUARD.size)
         y += GAP
         for line in content.lines:
-            y += line.style[2]
-            page.insert_text((MARGIN, y), line.text, fontname=line.style[0], fontsize=line.style[1])
+            y += line.style.leading
+            page.insert_text((MARGIN, y), line.text, fontname=line.style.font, fontsize=line.style.size)
         y = height - MARGIN - guard_height
         for text in reversed(guard):
-            y += GUARD[2]
-            page.insert_text((MARGIN, y), text, fontname=GUARD[0], fontsize=GUARD[1])
+            y += GUARD.leading
+            page.insert_text((MARGIN, y), text, fontname=GUARD.font, fontsize=GUARD.size)
         toc.extend([level, title, index + 1] for level, title in content.bookmarks)
         expected.append([line.text for line in content.lines])
     doc.set_toc(toc)
@@ -695,6 +733,57 @@ def write_pdf(
     return Result(final, digest, len(expected), bookmarks, chunks, tuple(notices))
 
 
+# --- Checking existing PDFs (Word exports) ---------------------------------
+def check_pdf(path: Path) -> tuple[str, int, list[str], list[str]]:
+    """What ingest would make of an existing PDF, e.g. one exported from Word:
+    (doc id, bookmark count, problems, notices). A problem is a doc id other
+    than the file stem (a form number in the first four pages wins), a title
+    or bookmark the citation would change or misread, or an unusable stem."""
+    if path.suffix.lower() != ".pdf" or not path.is_file() or path.is_symlink():
+        raise ConversionError(f"{path.name!r}: not a regular .pdf file")
+    problems: list[str] = []
+    notices: list[str] = []
+    try:
+        check_stem(path.stem)
+    except ConversionError as exc:
+        problems.append(str(exc))
+    parsed = parse_pdf(path)
+    if parsed.doc_id != path.stem:
+        problems.append(
+            "ingest takes an IBM form number from the first four pages as the doc id instead "
+            "of the file stem; move that reference past page 4"
+        )
+    for what, value in [("title", parsed.title)] + [
+        (f"bookmark {n}", title) for n, (_, title, _) in enumerate(parsed.toc, 1)
+    ]:
+        try:
+            check_cite_field(value, what, parsed.doc_id)
+        except ConversionError as exc:
+            problems.append(str(exc))
+        if what != "title" and skipped_by_outline_rules(value):
+            notices.append(f"{what} is a heading ingest skips by name; its text joins the previous section")
+    if not parsed.toc:
+        notices.append("no bookmarks: citations get no heading path (use the Heading 1-3 styles)")
+    return parsed.doc_id, len(parsed.toc), problems, notices
+
+
+def _check_main(paths: Sequence[Path]) -> int:
+    status = 0
+    for path in paths:
+        try:
+            doc_id, bookmarks, problems, notices = check_pdf(path)
+        except ConversionError as exc:
+            print(f"text_to_pdf: refused: {exc}", file=sys.stderr)
+            status = 2
+            continue
+        for notice in notices:
+            print(f"text_to_pdf: notice: {path.name}: {notice}", file=sys.stderr)
+        status = 2 if problems else status
+        print(json.dumps({"file": path.name, "doc_id": doc_id, "bookmarks": bookmarks,
+                          "problems": problems}, sort_keys=True))
+    return status
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m mainframe_rag.tools.text_to_pdf",
@@ -723,11 +812,15 @@ def _parser() -> argparse.ArgumentParser:
                      help="bookmark file names as they are instead of PDS member names")
     md = sub.add_parser("markdown", parents=[common], help="one Markdown document, one PDF")
     md.add_argument("--src", type=Path, required=True, help="the .md file; its stem is the doc id")
+    check = sub.add_parser("check", help="what ingest reads from existing PDFs (e.g. Word exports)")
+    check.add_argument("pdfs", type=Path, nargs="+", help="PDF files to check")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.kind == "check":
+        return _check_main(args.pdfs)
     try:
         if args.kind == "library":
             plan = plan_library(
