@@ -636,9 +636,8 @@ def test_markdown_indented_code_is_verbatim(tmp_path):
             "    //DD1     DD *\n\nAfter.\n")
     result = convert_guide(tmp_path, text, "HOUSE-AI-DRAFT-IND")
     _, chunks = ingest(result.path)
-    # Kept line by line with their columns (the block's first line loses its
-    # indent to make_chunks' paragraph strip, as everywhere).
-    assert chunks[0].text == "Jobs\n\nRun this:\n\n//STEP1   EXEC PGM=X\n    //DD1     DD *\n\nAfter."
+    # Line by line, columns kept, the 4-space Markdown indent removed.
+    assert chunks[0].text == "Jobs\n\nRun this:\n\n//STEP1   EXEC PGM=X\n//DD1     DD *\n\nAfter."
 
 
 def test_markdown_thematic_break_is_dropped(tmp_path):

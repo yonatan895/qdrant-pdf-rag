@@ -534,11 +534,13 @@ def plan_markdown(src: Path, *, encoding: str = "utf-8", allow_secret_like: bool
         if not raw.strip():
             flush()
             continue
-        # Table rows and indented code blocks are kept verbatim (columns).
+        # Table rows and indented code blocks are kept verbatim (columns);
+        # the 4-space indent of indented code is Markdown markup, not code.
         if raw.lstrip().startswith("|") or (raw.startswith(_INDENTED_CODE) and (verbatim or not prose)):
             if prose:
                 flush()
-            verbatim.append(raw.rstrip())
+            code = raw.removeprefix(_INDENTED_CODE) if raw.startswith(_INDENTED_CODE) else raw
+            verbatim.append(code.rstrip())
             continue
         if verbatim:
             flush()
