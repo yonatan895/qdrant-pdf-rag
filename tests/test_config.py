@@ -196,7 +196,7 @@ def test_chat_bounds_are_enforced():
     ("answer_hit_limit", 1, 32), ("retrieve_max_chunks_per_doc", 1, 10),
 ])
 def test_answer_depth_bounds_are_enforced(field, low, high):
-    """Issue #1191: the answer depth operator inputs accept exactly their
+    """Issue #1191: the retrieval depth operator inputs accept exactly their
     documented range (the air-gap mapper and chart schema mirror it)."""
     for value in (low, high):
         assert getattr(Settings(_env_file=None, **{field: value}), field) == value

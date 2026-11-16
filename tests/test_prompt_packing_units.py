@@ -963,12 +963,12 @@ def test_depth_16_by_5_packs_every_excerpt_under_the_default_window(chat, comple
     assert settings.llm_max_model_len == 32768
     chunk = settings.prompt_max_chunk_chars
     hits = _depth_hits(16, settings.retrieve_max_chunks_per_doc, chunk)
-    kwargs = dict(
-        max_chunk_chars=chunk, tokenizer=FallbackTokenizer(), settings=settings,
-        complexity=complexity,
-        max_chunk_chars_narrative=(
+    kwargs = {
+        "max_chunk_chars": chunk, "tokenizer": FallbackTokenizer(), "settings": settings,
+        "complexity": complexity,
+        "max_chunk_chars_narrative": (
             settings.prompt_max_chunk_chars_complex if complexity == "complex" else None),
-    )
+    }
     if chat:
         history = [ChatMessage(role=role, content="p" * settings.chat_max_prior_turn_chars)
                    for role in ("user", "assistant") * 2]

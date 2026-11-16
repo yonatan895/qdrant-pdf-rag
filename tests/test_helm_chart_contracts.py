@@ -528,7 +528,7 @@ def test_chat_history_limits_are_optional_pod_inputs_bounded_like_settings():
                 "ANSWER_HIT_LIMIT", "RETRIEVE_MAX_CHUNKS_PER_DOC"} & set(default)
     schema = json.loads((CHART / "values.schema.json").read_text())
     reasoning = schema["properties"]["models"]["properties"]["reasoning"]["properties"]
-    # The answer depth inputs (#1191) follow the same rule.
+    # The retrieval depth inputs (#1191) follow the same rule.
     for field, setting in (("chatMaxPriorTurnChars", "chat_max_prior_turn_chars"),
                            ("chatMaxTurns", "chat_max_turns"),
                            ("answerHitLimit", "answer_hit_limit"),

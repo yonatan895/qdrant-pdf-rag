@@ -614,7 +614,7 @@ def test_chat_history_limits_reach_rendered_agent(monkeypatch, mapper_env):
 
 
 def test_answer_depth_reaches_rendered_agent(monkeypatch, mapper_env):
-    """Issue #1191: the answer depth inputs cross the mapper into the pod
+    """Issue #1191: the retrieval depth inputs cross the mapper into the pod
     exactly; the limits the mapper enforces are the Settings limits."""
     from scripts.airgap import model_config
 

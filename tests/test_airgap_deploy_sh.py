@@ -343,7 +343,7 @@ def test_refused_model_request_arguments_stop_the_deploy_before_helm(tree):
     assert not (root / "dist/agent-rendered.yaml").exists()
 
 
-# Chat follow-up (#1268) and answer depth (#1191) operator inputs: selected vs
+# Chat follow-up (#1268) and retrieval depth (#1191) operator inputs: selected vs
 # a conflicting alternate.
 _CHAT_FOLLOWUP_SELECTED = {"CHAT_MAX_PRIOR_TURN_CHARS": "4000", "CHAT_MAX_TURNS": "12",
                            "CHAT_FOLLOWUP_ANCHOR_ENABLED": "true",
