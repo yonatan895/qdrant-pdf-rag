@@ -128,7 +128,7 @@ Pipe is provisioned and the admin role is limited to the team.
   re-encrypt TLS and a Service CA certificate. The Route-exposure preflight
   refuses any other Route in front of its Service. The agent stays anonymous
   to Open WebUI users (#373), which is safe because the docs corpus is read by
-  everyone. Residual, pending a maintainer decision (#1255): v0.12.3 lets an
+  everyone. Residual, accepted by the maintainer 2026-11-16 (#1255): v0.12.3 lets an
   admin grant the no-auth "anyone" read on a chat share link, or turn open
   sharing on for a group in the admin UI (group permissions combine
   most-permissive over the chart's defaults), even with open sharing off.
@@ -160,7 +160,8 @@ Pipe is provisioned and the admin role is limited to the team.
   an admin can still do), and community sharing stays off. A share is a
   separate snapshot copy (`shared_chat` in v0.12.3), unless the owner picks
   v0.12.3's "continue" mode: grantees then read and write the owner's live
-  chat, which stays under the owner's retention. The purge deletes a snapshot
+  chat, which stays under the owner's retention (accepted by the maintainer
+  2026-11-16, #1255). The purge deletes a snapshot
   with its chat, and on its own once the snapshot is older than 30 days even
   while the chat lives on; that chat is left unshared, with its share grants
   removed. Temporary chats are never saved: v0.12.3 writes no chat row for a
