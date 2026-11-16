@@ -747,11 +747,11 @@ skipped, since doc ids may leave):
 ```sh
 PYTHONPATH="$WS/src" python3 - "$WS/evals/golden.jsonl" A1-answer.export.json <<'PY'
 import json, sys
-from mainframe_rag.eval.follow_up import DEFAULT_FOLLOW_UP, FOLLOW_UPS
+from mainframe_rag.eval.follow_up import every_follow_up_text
 rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
 ids = " ".join(d for row in rows for d in row.get("expected_doc_ids") or [])
 text = open(sys.argv[2]).read()
-asked = [row["query"] for row in rows] + [*FOLLOW_UPS.values(), DEFAULT_FOLLOW_UP]
+asked = [row["query"] for row in rows] + every_follow_up_text()
 print(sum(query in text and query not in ids for query in asked))
 PY
 ```
@@ -806,27 +806,141 @@ seams the evaluator drives (`Pipe._transport`, `build_request`, `fit_request`,
   before each arm, as below. `answer_taxonomy.py` takes single-turn reports
   only (it refuses a repeated row id).
 
-The condense comparison is two arms on one build, after the A/B sessions or
-on a quiet day, with the same flags and the run function above:
+**Follow-up kinds.** Follow-ups fail in three ways: a follow-up that needs
+new evidence (A), one about the previous answer itself (B), and a change of
+topic that the history should not disturb (C). `--follow-up` (needs
+`--turns 2`) takes `all` or a comma list of the kinds below. Every kind
+branches off the same turn-1 opener and the same kept answer, so each
+eligible row costs one opener plus one call per kind. Without `--follow-up`
+the run is the anaphoric run above and its output is unchanged.
+
+| Kind | Class | Turn 2 asks | Who gets it | Turn-2 pass means |
+|---|---|---|---|---|
+| `anaphoric` | A | the class follow-up | every answer row with expected docs | structural pass, as above |
+| `switch` | C | another sampled row's own question | the same rows, when a partner exists | that row's full gold verdict |
+| `restate` | B | to repeat the exact command, message or name from the last answer | openers that passed and have `gold_must_contain` | every opener gold string in the answer |
+| `summary` | B | to sum up the last answer in three bullets | the same as `restate` | the same as `restate` |
+
+- **Pairing (switch).** The partner is the next eligible row in sample order,
+  wrapping around, that shares no expected doc id with the opener. No seed is
+  used, so the same sample always pairs the same way. The partner is also
+  asked as an opener in the same pass. `vs_single` compares each switched
+  question with that same question asked alone in the same repeat: pass,
+  evidence gold hit and verification state are reported as kept, lost,
+  gained, neither or unknown (either side errored), and state changes as
+  `from>to` counts. A switch row's `coverage` is that of the question it
+  asked. This measures
+  harm from history, condensation or anchoring. A switched question may
+  name an identifier, so condensation is bypassed for it, exactly as for a
+  user's new standalone question.
+- **Class B.** `restate` and `summary` pass when the answer holds every
+  opener gold substring (case-folded, the judge's rule) and is not a
+  decline. The agent answers from fresh excerpts only, so an uncited
+  restatement is the product rule and is not a failure. A decline (the
+  zero-hits path, the agent's structured decline or a whole-response
+  refusal) fails as `follow-up declined`, even when it names a gold string,
+  and is counted in `restate.declines` (over `restate.n` judged rows); its
+  gold strings count in `n` but never as `found`. Each gold
+  string is placed against the prior-turn cut in the history answer as sent
+  (stripped, pasted excerpts dropped, as the agent does):
+  `before_cut` (wholly inside the kept head), `after_cut`, or
+  `not_in_history`. It is crossed with whether the follow-up's packed
+  evidence holds an opener gold doc. That evidence side is a doc-level
+  proxy: `supplied_evidence` carries doc ids, not excerpt text.
+- **Prior-turn cut.** The agent does not report `chat_max_prior_turn_chars`,
+  so `--prior-cap` declares it (200-5000, default 1000, the agent default;
+  recorded as `params.prior_cap`). Exposure per turn-2 row:
+  `history_over_cap`, and `citation_list_cut` (`kept`, `partial`, `cut` or
+  `absent`): where the Pipe's appended `**Citations:**` list lies against
+  the cut. A test pins this model to the agent's own prompt builder.
+- **Skips.** Turn-2 rows exist only for follow-ups that were asked. Skips are
+  counted per kind in `skipped`: `no_partner`, `no_gold_strings` and
+  `opener_not_passed`. Class-B denominators depend on turn-1 outcomes, so
+  read `n` beside every rate. An errored opener still gives `opener not
+  answered` rows for `anaphoric` and `switch`.
+- **Output.** `metrics.by_turn` becomes turn x kind: `by_turn["1"][kind]`
+  covers the openers that got that kind and `by_turn["2"][kind]` covers its
+  follow-ups. Kinds are never pooled. Each block also carries `timing`
+  (`elapsed_ms` and `client_first_token_ms` distributions; `ttft_ms` and
+  `total_tokens` are None, because the chat stream carries neither). Turn-2
+  blocks carry `exposure` and `skipped`, plus `vs_single` (switch) or
+  `restate` (class B). Every export row gains `follow_up_kind` (None on turn
+  1), `switch_id`, `history_over_cap`, `citation_list_cut`,
+  `restate_declined`, `gold_n`, `gold_found_n` and `gold_split` (counts
+  only; None where they do not apply). Params gain
+  `follow_up`, `prior_cap`, `restate_follow_ups_sha256`,
+  `switch_pairs_sha256` and `switch_pairs_n`.
+- **Exit code.** The rule is unchanged: 1 when any row of any turn or kind
+  fails or errors. Class-B rows fail whenever a gold string is not restated,
+  so with `--follow-up` an exit of 1 is expected. It is not the arm signal.
+
+**Follow-up arms (one visit).** The four arms run on one build, after the
+A/B sessions or on a quiet day. Each arm changes one setting from the
+baseline, with a redeploy before each arm; the previous arm's setting is
+reverted first. Every arm uses the run function above (temperature 0,
+`--coverage`) with the same sample flags:
 
 ```sh
-oc -n "$NS" get deploy rag-agent \
-  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="CHAT_CONDENSE_ENABLED")].value}'
-run F-off chat --all --repeats 2 --turns 2 --arm condense-off  # A: value false
-# set CHAT_CONDENSE_ENABLED=true in airgap.env, re-run
-# `sh scripts/tools/run-task.sh airgap:deploy`, wait for the rollout,
-# check the value again (true), then:
-run F-on chat --all --repeats 2 --turns 2 --arm condense-on    # B: value true
+show() {  # the deployed value of one agent setting (empty = unset, the default)
+  oc -n "$NS" get deploy rag-agent -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"$1\")].value}"; echo
+}
+for v in CHAT_CONDENSE_ENABLED CHAT_FOLLOWUP_ANCHOR_ENABLED CHAT_MAX_PRIOR_TURN_CHARS; do show $v; done
+run H-baseline chat --all --repeats 2 --turns 2 --follow-up all --arm baseline
+# airgap.env: CHAT_CONDENSE_ENABLED=true; `sh scripts/tools/run-task.sh airgap:deploy`;
+# wait for the rollout; show the three values again, then:
+run H-condense chat --all --repeats 2 --turns 2 --follow-up all --arm condense
+# revert it; CHAT_FOLLOWUP_ANCHOR_ENABLED=true; deploy; show:
+run H-anchored chat --all --repeats 2 --turns 2 --follow-up all --arm anchored
+# revert it; CHAT_MAX_PRIOR_TURN_CHARS=4000; deploy; show:
+run H-history4000 chat --all --repeats 2 --turns 2 --follow-up all --arm history4000 \
+  --prior-cap 4000
+# revert it and deploy: the site ends on its baseline values.
 ```
 
-A session is about twice a single-turn chat session (one follow-up per answer
-row with expected docs). If it does not fit, use `--subset 24 --repeats 3` on
-both arms.
-Compare `by_turn["2"].evidence_gold_hit_rate` and `vs_opener` between the
-arms; a difference inside either arm's repeat range is noise. Only the two
-`*.export.json` files leave the gap (review them as above); the stderr log,
-`--out` and `--summary` hold the follow-up and the answers and stay. Any
+- `baseline`: all three settings off or at their defaults.
+- `condense`: `CHAT_CONDENSE_ENABLED=true` (an operator input today).
+- `anchored`: `CHAT_FOLLOWUP_ANCHOR_ENABLED=true`, after #1271 (the
+  follow-up handling flags; the name may change there). Skip the arm until
+  the deployed build has it.
+- `history4000`: `CHAT_MAX_PRIOR_TURN_CHARS=4000` with `--prior-cap 4000`,
+  after #1271 makes `chat_max_prior_turn_chars` an operator input (today it
+  has no `airgap.env` key and no chart value). Skip the arm until then.
+  Never pass `--prior-cap` that differs from the deployed value.
+
+Cost: per answer row with expected docs, an arm asks one opener and up to
+four follow-ups. Class-B follow-ups go only to passed openers with gold
+strings. Time the baseline arm on `--subset 24` first. If `--all
+--repeats 2` does not fit four arms, run every arm with the same
+`--subset 24 --repeats 3`.
+
+Reading the arms. First check that `params.sample.ids_sha256`,
+`follow_ups_sha256`, `restate_follow_ups_sha256`, `switch_pairs_sha256` and
+`pipe_sha256` are equal across the four exports, and that `prior_cap` differs
+only in `history4000`. Then compare each kind on its own signal:
+
+- `anaphoric`: `by_turn["2"]["anaphoric"]`: `evidence_gold_hit_rate` and
+  `vs_opener`.
+- `switch`: `vs_single`: `lost` against `gained` for pass and evidence.
+  Gains on anaphoric that come with more switch losses are a trade.
+- `restate`/`summary`: `pass_rate`, `restate.declines` and
+  `restate.gold_split` (`after_cut` found should move only with a larger
+  cap).
+- `exposure.over_cap_share` and `citation_list_cut_share` per arm.
+- `timing` p50 per turn and kind is the arm's cost on this host
+  (hardware-dependent; never the deciding signal).
+
+A difference inside either arm's own repeat range is noise. The export's
+`repeats` blocks give that range for the evidence hit, pass rate and
+citation recall only; for `vs_single`, `restate.declines` and `gold_split`,
+recount each repeat from the export rows (`repeat`, `follow_up_kind`,
+`switch_id`, `verdict`, `evidence_gold_hit`, `gold_split`). Only the four
+`*.export.json` files leave the gap (review each as above); the stderr log,
+`--out` and `--summary` hold questions, follow-ups and answers and stay. Any
 default change after the comparison is a separate maintainer decision.
+
+The earlier two-arm condense comparison (`--arm condense-off`/`condense-on`
+without `--follow-up`) remains valid. Its exports keep the anaphoric-only
+shape.
 
 **Decision rule.** The [protocol above](#measurement-protocol)
 applies: decide on the hardware-independent group only, and a difference
