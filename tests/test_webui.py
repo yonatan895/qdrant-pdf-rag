@@ -834,6 +834,23 @@ def test_ui_stream_retrieval_and_prompt_use_same_active_user(ui_client, monkeypa
     assert all("LATER_NON_USER" not in m.content for m in prompt)
 
 
+@pytest.mark.parametrize("path", ["/ui/chat/stream", "/ui/chat"])
+def test_ui_follow_up_anchoring_matches_the_chat_route(ui_client, monkeypatch, path):
+    """Issue #1268: the console shares prepare_chat_core, so an anchored
+    follow-up searches the follow-up and the previous user message there too."""
+    monkeypatch.setattr(app_mod.settings, "chat_followup_anchor_enabled", True)
+    earlier = [{"role": "user", "content": "What does IEA500I mean?"},
+               {"role": "assistant", "content": "Earlier answer"}]
+    active = "What should the operator do next?"
+    if path == "/ui/chat":
+        result = ui_client.post(path, data={"message": active, "messages": json.dumps(earlier)},
+                                headers={"HX-Request": "true"})
+    else:
+        result = ui_client.post(path, json={"messages": [*earlier, {"role": "user", "content": active}]})
+    assert result.status_code == 200
+    assert [c["query"] for c in ui_client.mock_search.calls] == [active, "What does IEA500I mean?"]
+
+
 @pytest.mark.parametrize("messages", [
     pytest.param([{"role": "assistant", "content": "No user question was supplied"}], id="missing-user"),
     pytest.param([{"role": "user", "content": " \t\n "}, {"role": "assistant", "content": "Short tail"}], id="blank"),

@@ -29,7 +29,9 @@ from mainframe_rag.agent.tokenizer import estimate_tokens
 from mainframe_rag.agent.user_message import (
     MESSAGE_WINDOW_SHARE,
     derive_retrieval_query,
+    effective_retrieval_text,
     fit_message,
+    retrieval_query_limit,
 )
 from mainframe_rag.config import Settings, bearer_auth_headers
 from mainframe_rag.ingest.chunk import (
@@ -1246,6 +1248,7 @@ def build_messages(
     *,
     reasoning_effort: str | None = None,
     temperature: float | None = None,
+    search_query: str | None = None,
 ) -> PreparedPrompt:
     return _build_prompt(
         query,
@@ -1263,6 +1266,7 @@ def build_messages(
         order=order,
         reasoning_effort=reasoning_effort,
         temperature=temperature,
+        search_query=search_query,
     )
 
 
@@ -1319,6 +1323,7 @@ def _build_prompt(
     history: list[ChatMessage] | None = None,
     reasoning_effort: str | None = None,
     temperature: float | None = None,
+    search_query: str | None = None,
 ) -> PreparedPrompt:
     is_chat = history is not None
     # Retention policy (issue #633), identical for planning and recount: the
@@ -1329,8 +1334,13 @@ def _build_prompt(
     older_turns: list[list[ChatMessage]] = history_turns[:-1]
     # The message is prompt content; identifier anchoring, the resolved-code
     # note and complexity read what retrieval searched (issue #1192). The two
-    # are the same string for every message within `query_max_chars`.
-    search_text = derive_retrieval_query(query, settings) if settings is not None else query
+    # are the same string for every message within `query_max_chars`. A chat
+    # follow-up whose search was condensed passes that query (issue #1268);
+    # the message the model reads stays the user's own words.
+    if search_query is not None:
+        search_text = search_query
+    else:
+        search_text = derive_retrieval_query(query, settings) if settings is not None else query
     if complexity is None:
         complexity = classify_query_complexity(search_text)
 
@@ -2373,6 +2383,15 @@ _ABEND_RE = re.compile(
 _MAX_PRIOR_TURN_CHARS = 1000
 
 
+def names_identifier(text: str) -> bool:
+    """The follow-up bypass shared by condensation and anchoring (issue
+    #1268): a turn that names a message, member or document identifier or an
+    abend code is searched as written."""
+    from mainframe_rag.retrieve.filters import parse_query
+
+    return parse_query(text).has_identifiers or bool(_ABEND_RE.search(text))
+
+
 async def condense_query(
     llm: LLMClient,
     messages: list[ChatMessage],
@@ -2389,15 +2408,15 @@ async def condense_query(
     latest_text = (
         derive_retrieval_query(turn.query, settings) if settings is not None else turn.query
     )
-    from mainframe_rag.retrieve.filters import parse_query
-
     # Heuristic bypass: If message contains explicit codes (e.g. IEE400I, S0C4, DFS058I), search directly
-    if parse_query(latest_text).has_identifiers or bool(_ABEND_RE.search(latest_text)):
+    if names_identifier(latest_text):
         return latest_text
 
+    # Each prior turn is cut at the answer prompt's per-turn cap (issue #1268).
+    cut = settings.chat_max_prior_turn_chars if settings is not None else _MAX_PRIOR_TURN_CHARS
     history_turns = []
     for m in turn.history[-4:]:
-        history_turns.append(f"{m.role.capitalize()}: {m.content[:_MAX_PRIOR_TURN_CHARS]}")
+        history_turns.append(f"{m.role.capitalize()}: {m.content[:cut]}")
 
     if not history_turns:
         return latest_text
@@ -2424,8 +2443,17 @@ async def condense_query(
         res = await maybe_await(llm.chat(prompt, reasoning_effort=effort, temperature=temp))
         condensed = as_chat_result(res).content.strip()
         condensed = re.sub(r'^(Standalone (search )?query:|"|\')\s*', "", condensed, flags=re.IGNORECASE)
-        condensed = condensed.strip('"\'')
-        return condensed or latest_text
+        condensed = condensed.strip('"\'').strip()
+        # A rewrite is searched only when retrieval can take it whole: its
+        # effective text fits `retrieval_query_limit` (issue #1268). An empty
+        # or over-long rewrite searches the follow-up's own text instead of
+        # reaching the embed-input refusal.
+        if not condensed or (
+            settings is not None
+            and len(effective_retrieval_text(condensed, settings)) > retrieval_query_limit(settings)
+        ):
+            return latest_text
+        return condensed
     except Exception as exc:  # noqa: BLE001 — coreference fallback must not abort chat
         log.warning("query condensation failed (%s); using raw latest text", error_type(exc))
         return latest_text
@@ -2448,6 +2476,7 @@ def build_chat_messages(
     *,
     reasoning_effort: str | None = None,
     temperature: float | None = None,
+    search_query: str | None = None,
 ) -> PreparedPrompt:
     """Build multi-turn chat prompt messages + supplied-evidence manifest.
 
@@ -2502,4 +2531,5 @@ def build_chat_messages(
         history=prior_messages,
         reasoning_effort=reasoning_effort,
         temperature=temperature,
+        search_query=search_query,
     )

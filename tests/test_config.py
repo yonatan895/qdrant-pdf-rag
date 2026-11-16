@@ -5,7 +5,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from mainframe_rag.config import Settings
+from mainframe_rag.config import CHAT_FOLLOWUP_MODES_CONFLICT, Settings
 
 
 def test_reasoning_model_required():
@@ -322,6 +322,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "llm_token_count_source": "tokenize",  # #1266: today's /tokenize-then-estimator
     "llm_stream": False,
     "chat_condense_enabled": False,
+    "chat_followup_anchor_enabled": False,
     "chat_max_body_chars": 131072,
     "chat_max_turns": 10,
     "chat_max_prior_turn_chars": 1000,
@@ -572,3 +573,18 @@ def test_two_cpu_quota_bounds_the_default_not_an_explicit_count(tmp_path, monkey
     monkeypatch.setattr(multiprocessing, "cpu_count", lambda: 64)  # the node
     monkeypatch.setenv("INGEST_WORKERS", "8")
     assert resolve_workers(None, Settings(_env_file=None)) == 8
+
+
+def test_condensation_and_anchoring_cannot_both_be_enabled(monkeypatch):
+    """Issue #1268: the two follow-up modes are exclusive arms of one A/B;
+    both on refuses at startup with a fixed message (the mapper and chart
+    refuse the same pair before a pod starts)."""
+    from pydantic import ValidationError
+
+    assert Settings(_env_file=None).chat_followup_anchor_enabled is False
+    assert Settings(_env_file=None, chat_followup_anchor_enabled=True).chat_condense_enabled is False
+    monkeypatch.setenv("CHAT_CONDENSE_ENABLED", "true")
+    monkeypatch.setenv("CHAT_FOLLOWUP_ANCHOR_ENABLED", "true")
+    with pytest.raises(ValidationError) as exc:
+        Settings(_env_file=None)
+    assert CHAT_FOLLOWUP_MODES_CONFLICT in str(exc.value)

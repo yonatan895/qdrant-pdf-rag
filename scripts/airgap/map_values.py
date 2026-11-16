@@ -44,6 +44,7 @@ try:
         request_overrides,
         require_in_place_retired,
         require_no_retired_keys,
+        require_one_follow_up_mode,
         validate_model_config,
     )
 except ModuleNotFoundError:
@@ -63,6 +64,7 @@ except ModuleNotFoundError:
         request_overrides,
         require_in_place_retired,
         require_no_retired_keys,
+        require_one_follow_up_mode,
         validate_model_config,
     )
 
@@ -234,6 +236,7 @@ def build_values(deploy_only: bool = False) -> dict:
     model_config["EMBED_BASE_URL"] = embed_base
     try:
         validate_model_config(model_config)
+        require_one_follow_up_mode({**model_config, "CHAT_CONDENSE_ENABLED": env("CHAT_CONDENSE_ENABLED")})
     except ValueError as exc:
         die(str(exc))
     if not env("EMBED_MODEL_REVISION"):

@@ -176,14 +176,16 @@ def derive_retrieval_query(message: str, settings: Settings) -> str:
     room = limit - (len(suffix) + 1 if suffix else 0)
     for _ in range(_FIT_ROUNDS):
         query = " ".join(part for part in (_select_prose(lines, room), suffix) if part)
-        over = len(_effective(query, settings)) - limit
+        over = len(effective_retrieval_text(query, settings)) - limit
         if over <= 0:
             return query
         room -= over
     return suffix or _cut_at_word(lines[0], limit // 2)
 
 
-def _effective(query: str, settings: Settings) -> str:
+def effective_retrieval_text(query: str, settings: Settings) -> str:
+    """The text retrieval embeds for `query`: acronym-expanded when expansion
+    is on. Its length is what `retrieval_query_limit` bounds."""
     return expand_query(query) if settings.acronym_expansion_enabled else query
 
 

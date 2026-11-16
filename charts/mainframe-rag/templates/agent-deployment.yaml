@@ -75,6 +75,13 @@ spec:
               value: {{ index $.Values.models.reasoning $field | toString | quote }}
             {{- end }}
             {{- end }}
+            {{- $chatEnv := dict "chatMaxTurns" "CHAT_MAX_TURNS" "chatMaxPriorTurnChars" "CHAT_MAX_PRIOR_TURN_CHARS" "followupAnchorEnabled" "CHAT_FOLLOWUP_ANCHOR_ENABLED" }}
+            {{- range $field, $name := $chatEnv }}
+            {{- if hasKey $.Values.models.reasoning $field }}
+            - name: {{ $name }}
+              value: {{ index $.Values.models.reasoning $field | toString | quote }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.models.reasoning.extraBody }}
             - name: LLM_EXTRA_BODY
               value: {{ toJson . | quote }}

@@ -92,7 +92,7 @@ restores the snapshot over whatever the file assigned; empty stays unset
   defaults to the former); the corpus PVC is not.
 - Operator booleans `UI_ENABLED`, `CONTEXTUAL_EMBED_ENABLED`,
   `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `INGEST_AUTHORIZE_FROM_CATALOG`,
-  `CHAT_CONDENSE_ENABLED`, `LLM_STREAM`
+  `CHAT_CONDENSE_ENABLED`, `CHAT_FOLLOWUP_ANCHOR_ENABLED`, `LLM_STREAM`
   `FEEDBACK_ENABLED`, `OPENWEBUI_ENABLED` and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
   accept only `true/1/yes` or `false/0/no` (any case; unset keeps the
   default). `INGEST_ALIAS_PUBLISH` may only be unset or true: in-place ingest
@@ -155,8 +155,10 @@ restores the snapshot over whatever the file assigned; empty stays unset
   the application default `tokenize`.
 - Optional application budgets (`LLM_MAX_MODEL_LEN`, `LLM_RESERVED_OUTPUT_TOKENS`,
   `LLM_THINKING_RESERVE_TOKENS_SIMPLE` / `COMPLEX`), reasoning efforts
-  (`LLM_REASONING_EFFORT_SIMPLE` / `COMPLEX`) and `LLM_STREAM` follow that same
-  precedence/export path into `models.reasoning` and the rendered agent pod.
+  (`LLM_REASONING_EFFORT_SIMPLE` / `COMPLEX`), `LLM_STREAM` and the chat history
+  caps (`CHAT_MAX_TURNS` 1..50, `CHAT_MAX_PRIOR_TURN_CHARS` 200..5000, #1268)
+  follow that same precedence/export path into `models.reasoning` and the
+  rendered agent pod.
   `model_config.reasoning_overrides` enforces the existing Settings integer bounds,
   the `low/medium/high/xhigh` effort domain, `LLM_REASONING_EFFORTS` membership
   of both efforts (explicit or default, #748) and strict streaming booleans; chart
@@ -2360,7 +2362,16 @@ loader/environment acceptance remains an explicit audit item under #397.
 
 `CHAT_CONDENSE_ENABLED` is an explicit boolean operator input mapped to Helm
 `models.reasoning.condenseEnabled` and the agent environment. It preserves the
-application's false default. Enable it deliberately when qualifying pronoun-only
+application's false default. The chat history caps `CHAT_MAX_TURNS` and
+`CHAT_MAX_PRIOR_TURN_CHARS` (#1268) map to `models.reasoning.chatMaxTurns` and
+`chatMaxPriorTurnChars`; unset renders neither variable, so the pod keeps the
+application defaults (10 and 1000). `CHAT_FOLLOWUP_ANCHOR_ENABLED` maps to
+`models.reasoning.followupAnchorEnabled` and renders only when set; it is
+exclusive with `CHAT_CONDENSE_ENABLED` (preflight, the mapper and the chart
+schema refuse both true; the pod's Settings would too). Site follow-up arms:
+`condense` = `CHAT_CONDENSE_ENABLED=true`, `anchored` =
+`CHAT_FOLLOWUP_ANCHOR_ENABLED=true`, `history4000` =
+`CHAT_MAX_PRIOR_TURN_CHARS=4000`; redeploy between arms. Enable it deliberately when qualifying pronoun-only
 console follow-ups; require a grounded answer after the extra reasoning call.
 The local gateway's authenticated `/tokenize` passthrough enforces the per-leg
 key's model allowlist. Use `probe_gateway.py --require-tokenizer --stream
