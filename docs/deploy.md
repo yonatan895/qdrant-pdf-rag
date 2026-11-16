@@ -150,8 +150,10 @@ restores the snapshot over whatever the file assigned; empty stays unset
   numbers as 64-bit floats. Unset renders neither variable.
 - Optional application budgets (`LLM_MAX_MODEL_LEN`, `LLM_RESERVED_OUTPUT_TOKENS`,
   `LLM_THINKING_RESERVE_TOKENS_SIMPLE` / `COMPLEX`), reasoning efforts
-  (`LLM_REASONING_EFFORT_SIMPLE` / `COMPLEX`) and `LLM_STREAM` follow that same
-  precedence/export path into `models.reasoning` and the rendered agent pod.
+  (`LLM_REASONING_EFFORT_SIMPLE` / `COMPLEX`), `LLM_STREAM` and the chat history
+  caps (`CHAT_MAX_TURNS` 1..50, `CHAT_MAX_PRIOR_TURN_CHARS` 200..5000, #1268)
+  follow that same precedence/export path into `models.reasoning` and the
+  rendered agent pod.
   `model_config.reasoning_overrides` enforces the existing Settings integer bounds,
   the `low/medium/high/xhigh` effort domain, `LLM_REASONING_EFFORTS` membership
   of both efforts (explicit or default, #748) and strict streaming booleans; chart
@@ -2281,7 +2283,10 @@ loader/environment acceptance remains an explicit audit item under #397.
 
 `CHAT_CONDENSE_ENABLED` is an explicit boolean operator input mapped to Helm
 `models.reasoning.condenseEnabled` and the agent environment. It preserves the
-application's false default. Enable it deliberately when qualifying pronoun-only
+application's false default. The chat history caps `CHAT_MAX_TURNS` and
+`CHAT_MAX_PRIOR_TURN_CHARS` (#1268) map to `models.reasoning.chatMaxTurns` and
+`chatMaxPriorTurnChars`; unset renders neither variable, so the pod keeps the
+application defaults (10 and 1000). Enable it deliberately when qualifying pronoun-only
 console follow-ups; require a grounded answer after the extra reasoning call.
 The local gateway's authenticated `/tokenize` passthrough enforces the per-leg
 key's model allowlist. Use `probe_gateway.py --require-tokenizer --stream

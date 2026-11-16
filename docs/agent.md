@@ -1053,7 +1053,7 @@ readers:
 | `query_max_chars` / `splunk_context_max_chars` | 2000 / 4000 (truncate+suffix) | `/v1/search` query and `product`/`version` length guard (422); on answer and chat the longest message searched as written ([long messages](#long-messages)) / prompt packing |
 | `chat_condense_enabled` | `false` | follow-up condensation gate (`resolve_search_query`) |
 | `chat_max_body_chars` | 131072 (422, message states the limit) | request-size guard for `/v1/answer`, `/v1/chat` and `/ui` (abuse protection; shared `chat_body_chars` helper); the Pipe valve `MAX_BODY_CHARS` must match |
-| `chat_max_turns` / `chat_max_prior_turn_chars` | 10 / 1000 | chat history packing caps |
+| `chat_max_turns` / `chat_max_prior_turn_chars` | 10 / 1000 | chat history packing caps; operator inputs `CHAT_MAX_TURNS` / `CHAT_MAX_PRIOR_TURN_CHARS` (#1268; unset renders no variable) |
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
 | `llm_base_url` / `llm_model_reasoning` / `llm_api_key` | unset (answer stays disabled; key unset = keyless) | per-request assertion, LLM client, tokenizer |
 | `answer_timeout_s` | 300.0 | reasoning client wait per model I/O (not a total on a stream; a buffered caller still gets a total), expiry is `504 model_timeout`; no transport retries, explicit fallback policy below; budgets in §6 |
@@ -1699,7 +1699,9 @@ passthrough, the platform-gateway shape for the estimator-only lane (#1193);
 `GATEWAY_SHAPE=site` (#1195) also omits it and drops the argument allow-list.
 
 The Helm operator input `CHAT_CONDENSE_ENABLED` maps to
-`models.reasoning.condenseEnabled`; both default to false. Explicit local
+`models.reasoning.condenseEnabled`; both default to false. `CHAT_MAX_TURNS` and
+`CHAT_MAX_PRIOR_TURN_CHARS` map to `models.reasoning.chatMaxTurns` and
+`chatMaxPriorTurnChars` and render only when set (#1268). Explicit local
 follow-up acceptance is described in [the real-corpus runbook](local-real-corpus.md).
 
 

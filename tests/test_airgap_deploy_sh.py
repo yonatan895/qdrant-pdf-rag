@@ -326,6 +326,43 @@ def test_refused_model_request_arguments_stop_the_deploy_before_helm(tree):
     assert not (root / "dist/agent-rendered.yaml").exists()
 
 
+# Chat follow-up operator inputs (#1268): selected vs a conflicting alternate.
+_CHAT_FOLLOWUP_SELECTED = {"CHAT_MAX_PRIOR_TURN_CHARS": "4000", "CHAT_MAX_TURNS": "12"}
+_CHAT_FOLLOWUP_ALTERNATE = {"CHAT_MAX_PRIOR_TURN_CHARS": "200", "CHAT_MAX_TURNS": "1"}
+
+
+@pytest.mark.parametrize("source", ["file", "environment"])
+def test_chat_followup_inputs_operator_precedence_reaches_rendered_pod(tree, source):
+    """Issue #1268 through real common.sh (operator keys and both export
+    lists), mapper and Helm: each chat follow-up input reaches the Deployment
+    from the file, and an explicit environment value beats the file. The Task
+    bridge for these keys is the Verifier's (taskfiles/ are not edited here)."""
+    root, _log = tree
+    file_values = {
+        "INTERNAL_REGISTRY": "reg.internal", "NAMESPACE": "ns",
+        "STORAGE_CLASS": "standard", "IMAGE_SHA": IMAGE_SHA,
+        "EMBED_MODEL": "embed", "DENSE_DIM": "64", "EMBED_MODEL_REVISION": "rev-1",
+        "EMBED_BASE_URL": "http://vllm:8000/v1", "OPENWEBUI_ENABLED": "false",
+        **(_CHAT_FOLLOWUP_SELECTED if source == "file" else _CHAT_FOLLOWUP_ALTERNATE),
+    }
+    env_file = root / "airgap.env"
+    env_file.write_text("".join(f"{key}={value}\n" for key, value in file_values.items()))
+    overrides = _CHAT_FOLLOWUP_SELECTED if source == "environment" else {}
+    result = _run(tree, ("AIRGAP_ENV", str(env_file)), *overrides.items())
+    assert result.returncode == 0, result.stderr
+    pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
+    assert {name: pod.get(name) for name in _CHAT_FOLLOWUP_SELECTED} == _CHAT_FOLLOWUP_SELECTED
+
+
+def test_unset_chat_followup_inputs_add_no_pod_variable(tree):
+    """Defaults unchanged (#1268): unset renders none of the variables."""
+    root, _log = tree
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
+    assert not set(_CHAT_FOLLOWUP_SELECTED) & set(pod)
+
+
 def test_pull_secret_bad_name_fails_closed(tree):
     r = _run(tree, ("PULL_SECRET", "a&b"))
     assert r.returncode != 0

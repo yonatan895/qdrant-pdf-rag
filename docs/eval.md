@@ -789,8 +789,10 @@ seams the evaluator drives (`Pipe._transport`, `build_request`, `fit_request`,
   evidence hit and rate, zero hits, refusals, verification states, citation
   precision/recall, the structural pass rate, `vs_opener` (kept, lost,
   gained, neither per session), `prior_answer_chars` (how many kept answers
-  exceed the agent's default 1000-character prior-turn cut,
-  `chat_max_prior_turn_chars`, which is not an operator input) and, with
+  exceed the application's default 1000-character prior-turn cut,
+  `chat_max_prior_turn_chars`; the count always uses that default, so an arm
+  that sets the operator input `CHAT_MAX_PRIOR_TURN_CHARS` (#1268) must read it
+  against its own cut) and, with
   `--repeats`, the spread per repeat. An opener that errored gives a turn-2
   error row (`opener not answered`), and a Pipe that cannot build the history
   gives `follow-up history failed`; both are counted, not dropped. The exit

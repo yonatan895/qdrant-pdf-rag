@@ -17,6 +17,9 @@ REASONING_INTEGER_FIELDS = {
     "LLM_RESERVED_OUTPUT_TOKENS": ("reservedOutputTokens", 128, 16384),
     "LLM_THINKING_RESERVE_TOKENS_SIMPLE": ("thinkingReserveTokensSimple", 0, 16384),
     "LLM_THINKING_RESERVE_TOKENS_COMPLEX": ("thinkingReserveTokensComplex", 0, 16384),
+    # Chat history caps (#1268): prior turns kept, characters kept per prior turn.
+    "CHAT_MAX_TURNS": ("chatMaxTurns", 1, 50),
+    "CHAT_MAX_PRIOR_TURN_CHARS": ("chatMaxPriorTurnChars", 200, 5000),
 }
 REASONING_EFFORT_FIELDS = {
     "LLM_REASONING_EFFORT_SIMPLE": "reasoningEffortSimple",
