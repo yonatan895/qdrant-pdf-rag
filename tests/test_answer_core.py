@@ -762,6 +762,83 @@ async def test_token_count_and_generation_share_the_template_arguments(transport
         assert all(body["chat_template_kwargs"] == sent for body in tokenized)
     assert bodies[0].get("top_k") == extra.get("top_k")
 
+def _usage_counter_client(counted: list, prompt_tokens):
+    """A gateway without /tokenize that reports `usage.prompt_tokens` for a
+    1-token completion (#1266); records each count body."""
+
+    def respond(request):
+        assert request.url.path == "/v1/chat/completions"
+        counted.append(json.loads(request.content))
+        tokens = prompt_tokens.pop(0) if isinstance(prompt_tokens, list) else prompt_tokens
+        return httpx2.Response(200, json={
+            "choices": [{"message": {"content": "x"}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": tokens, "completion_tokens": 1}})
+
+    return httpx2.Client(transport=httpx2.MockTransport(respond))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("transport", "extra"), [
+    ("top_level", {}),
+    ("chat_template", {"chat_template_kwargs": {"enable_thinking": True}}),
+    ("none", {"chat_template_kwargs": {"thinking_budget": 256}, "top_k": 20}),
+    ("top_level", {"chat_template_kwargs": {"enable_thinking": False}, "repetition_penalty": 1.05}),
+])
+@pytest.mark.parametrize("mode", ["post", "stream"])
+@pytest.mark.parametrize("is_chat", [False, True])
+@pytest.mark.parametrize("temperature", [None, 0.65])
+async def test_completion_usage_count_body_equals_the_sent_body(transport, extra, mode, is_chat, temperature):
+    """#1266: the counted body is the sent generation body minus `max_tokens`
+    and the streaming flags, end to end through the real client and the real
+    counter, per-request temperature included. One count per answer; the
+    confirmed count is a verified budget, so the full cap is sent."""
+    from mainframe_rag.agent.tokenizer import build_tokenizer
+
+    settings = _settings(llm_stream=False, llm_effort_transport=transport, llm_extra_body=json.dumps(extra),
+                         llm_reasoning_effort_simple="low", llm_token_count_source="completion_usage",
+                         **_CAP_BUDGET)
+    llm_transport = _answer_transport()
+    deps = _deps(settings, HttpxLLMClient(settings, client=llm_transport), lambda *_a, **_k: ([_hit()], "nl", {}))
+    input_data = AnswerCoreInput(
+        query="IEA500I", temperature=temperature, is_chat=is_chat,
+        messages=[ChatMessage(role="user", content="IEA500I")] if is_chat else None)
+    counted: list = []
+    with _usage_counter_client(counted, 900) as client:
+        deps.tokenizer = build_tokenizer(settings, client)
+        if mode == "stream":
+            output = [event async for event in execute_answer_core_stream(input_data, deps)][-1]["output"]
+        else:
+            output = await execute_answer_core(input_data, deps)
+    sent = llm_transport.stream_bodies
+    assert len(counted) == 1 and len(sent) == 1
+    limits = {"max_tokens", "stream", "stream_options"}
+    assert {k: v for k, v in counted[0].items() if k not in limits} == {
+        k: v for k, v in sent[0].items() if k not in limits}
+    assert counted[0]["max_tokens"] == 1 and not {"stream", "stream_options"} & counted[0].keys()
+    assert sent[0]["temperature"] == (temperature if temperature is not None else settings.llm_temperature)
+    assert output.budget_verified and sent[0]["max_tokens"] == 5000
+
+
+@pytest.mark.anyio
+async def test_completion_usage_count_recounts_only_inside_the_trim_bound():
+    """A count over the verify limit trims and recounts, as /tokenize does:
+    each verification round is one completion, the rounds stay bounded, and
+    the final count is the one that fits (#1266)."""
+    from mainframe_rag.agent.tokenizer import build_tokenizer
+
+    settings = _settings(llm_stream=False, llm_token_count_source="completion_usage", **_CAP_BUDGET)
+    hits = [_hit().model_copy(update={"chunk_id": f"c{i}", "text": _hit().text + f" extra {i}"}) for i in range(3)]
+    llm_transport = _answer_transport()
+    deps = _deps(settings, HttpxLLMClient(settings, client=llm_transport), lambda *_a, **_k: (hits, "nl", {}))
+    counted: list = []
+    # Simple-path verify limit: 16384 - 2000 - 3000 - 128 = 11256.
+    with _usage_counter_client(counted, [11300, 11000]) as client:
+        deps.tokenizer = build_tokenizer(settings, client)
+        output = await execute_answer_core(AnswerCoreInput(query="IEA500I"), deps)
+    assert len(counted) == 2 and output.budget_verified
+    assert counted[1]["messages"] == llm_transport.stream_bodies[0]["messages"]
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("effort,source,mode,is_chat,qf", [
     # Every transport carries the selected effort, from a setting and from a per-request override.

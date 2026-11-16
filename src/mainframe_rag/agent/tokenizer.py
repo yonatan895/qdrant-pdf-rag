@@ -17,6 +17,13 @@ remote counting (issue #835, #1214). Never a silent per-call fallback,
 never repeated doomed RPCs. Callers plan prompt packing
 with the estimator and use the real tokenizer only to verify the packed
 prompt (see answer.build_messages).
+
+A gateway without /tokenize can still count (#1266): CompletionUsageTokenizer
+sends the packed request as a non-streaming chat completion with
+`max_tokens=1`, built by the generation's own body builder, and reads
+`usage.prompt_tokens`, the server's template-aware count. It follows the same
+pin and retry rules. `LLM_TOKEN_COUNT_SOURCE` selects the source
+(build_tokenizer); docs/agent.md#token-count-sources owns the contract.
 """
 
 from __future__ import annotations
@@ -31,7 +38,7 @@ from typing import TYPE_CHECKING, Any
 import httpx2
 
 from mainframe_rag.config import bearer_auth_headers
-from mainframe_rag.model_args import DEFAULT_MODEL_REQUEST_ARGS, ModelRequestArgs
+from mainframe_rag.model_args import DEFAULT_MODEL_REQUEST_ARGS, ModelRequestArgs, chat_request_body
 from mainframe_rag.ports import ChatMessage
 
 if TYPE_CHECKING:
@@ -76,13 +83,14 @@ class FallbackTokenizer:
         return sum(estimate_tokens(f"{m.role}\n{m.content}") for m in messages)
 
 
-class VllmTokenizer:
-    """Counts tokens via vLLM's /tokenize endpoint at the server origin.
+class _RemoteCount:
+    """The pin and retry state machine one remote count source runs (#835,
+    #1214), shared by VllmTokenizer and CompletionUsageTokenizer.
 
     A failure logs one warning and answers from the in-process estimator, and
     the outcome decides how long that lasts. An endpoint that is not served
     (404, 405, 501) or a 200 that carries no usable count pins the estimator
-    for the life of this instance, so a LiteLLM front without /tokenize costs
+    for the life of this instance, so a gateway without the route costs
     exactly one failed request per process, never per answer. A transient
     failure (transport error, timeout, 408, 429, 5xx other than 501)
     downgrades for ``retry_after_s``. Any other refusal — 400, 401, 403,
@@ -94,28 +102,23 @@ class VllmTokenizer:
 
     ``remote_confirmed`` describes the calling thread's most recent count,
     not the instance: a probe that succeeds on another thread must never
-    certify a count this thread took from the estimator.
+    certify a count this thread took from the estimator. Log lines carry the
+    source label, the URL and a fixed reason, never request content.
     """
+
+    # Names the source in the fixed log lines.
+    _label = "remote token count"
 
     def __init__(
         self,
-        base_url: str,
-        model: str,
-        timeout_s: float = 5.0,
-        client: httpx2.Client | None = None,
-        api_key: str | None = None,
-        retry_after_s: float = TOKENIZE_RETRY_AFTER_S,
-        refused_retry_after_s: float = TOKENIZE_REFUSED_RETRY_AFTER_S,
-        clock: Callable[[], float] = time.monotonic,
-        request_args: ModelRequestArgs = DEFAULT_MODEL_REQUEST_ARGS,
+        *,
+        timeout_s: float,
+        client: httpx2.Client | None,
+        api_key: str | None,
+        retry_after_s: float,
+        refused_retry_after_s: float,
+        clock: Callable[[], float],
     ) -> None:
-        self._base_url = base_url.rstrip("/")
-        # vLLM serves /tokenize at the server root; /v1/tokenize is a 404.
-        self._origin = self._base_url.removesuffix("/v1")
-        self._model = model
-        # The generation's own arguments (#1193): the count must render the
-        # template the generation renders, extra-body arguments included.
-        self._request_args = request_args
         self._timeout_s = timeout_s
         self._client = client
         self._api_key = api_key
@@ -133,52 +136,18 @@ class VllmTokenizer:
 
     @property
     def remote_confirmed(self) -> bool:
-        """True when this thread's most recent count came from /tokenize
+        """True when this thread's most recent count came from the server
         (issue #368): only then does a prompt-size verdict confirm
         compliance. Estimator counts, and a thread that has not counted,
         read False."""
         return bool(getattr(self._local, "remote", False))
 
-    def count_tokens(self, text: str) -> int:
-        self._local.remote = False
-        if not text:
-            return 0
-        count = self._remote_count({"model": self._model, "prompt": text})
-        if count is not None:
-            return count
-        return self._fallback.count_tokens(text)
-
-    def count_messages(
-        self, messages: list[ChatMessage], *, reasoning_effort: str | None = None
-    ) -> int:
-        """Chat-template-aware count: what /tokenize reports for the message
-        list is what actually consumes max_model_len."""
-        self._local.remote = False
-        if not messages:
-            return 0
-        payload: dict[str, Any] = {
-            "model": self._model,
-            "messages": [m.model_dump() for m in messages],
-            "add_generation_prompt": True,
-            "add_special_tokens": False,
-        }
-        # /tokenize takes the template arguments explicitly, so it gets the
-        # ones this generation sends (#1193): on the default top-level
-        # transport the server forwards the selected effort and enables
-        # thinking; on the others exactly the request's chat_template_kwargs,
-        # extra-body arguments included. Keep them local to this call: one
-        # tokenizer serves concurrent turns.
-        template_kwargs = self._request_args.template_kwargs(reasoning_effort)
-        if template_kwargs:
-            payload["chat_template_kwargs"] = template_kwargs
-        count = self._remote_count(payload)
-        if count is not None:
-            return count
-        return self._fallback.count_messages(messages, reasoning_effort=reasoning_effort)
-
-    def _remote_count(self, payload: dict[str, Any]) -> int | None:
-        """One /tokenize call, or None for the estimator: the endpoint is
-        pinned off, inside a retry window, or this call failed."""
+    def _remote_count(
+        self, url: str, payload: dict[str, Any], parse: Callable[[Any], int | None]
+    ) -> int | None:
+        """One count call, or None for the estimator: the endpoint is pinned
+        off, inside a retry window, or this call failed. ``parse`` maps a 200
+        body to a count, or None when it carries no usable one."""
         with self._lock:
             if self._pinned:
                 return None
@@ -191,7 +160,6 @@ class VllmTokenizer:
                 # Claim the probe: concurrent counts keep the estimator
                 # instead of each paying the call timeout.
                 self._retry_at = now + self._retry_after_s
-        url = f"{self._origin}/tokenize"
         headers = bearer_auth_headers(self._api_key)
         try:
             if self._client is not None:
@@ -200,16 +168,10 @@ class VllmTokenizer:
                 resp = httpx2.post(url, json=payload, timeout=self._timeout_s, headers=headers)
             status = resp.status_code
             if status == 200:
-                data = resp.json()
-                if isinstance(data, dict):
-                    count = None
-                    if type(data.get("count")) is int and data["count"] >= 0:
-                        count = data["count"]
-                    elif "count" not in data and isinstance(data.get("tokens"), list):
-                        count = len(data["tokens"])
-                    if count is not None:
-                        self._recovered(url, probing)
-                        return count
+                count = parse(resp.json())
+                if count is not None:
+                    self._recovered(url, probing)
+                    return count
                 # A served endpoint that answers 200 without a count never
                 # grew this route: pin, even though the status is not 404.
                 self._downgrade(url, "no usable token count in response", mode="absent")
@@ -238,14 +200,15 @@ class VllmTokenizer:
                 self._retry_at = None
         self._local.remote = True
         if probing:
-            log.info("vLLM /tokenize at %s answers again; remote token counting resumed", url)
+            log.info("%s at %s answers again; remote token counting resumed", self._label, url)
 
     def _downgrade(self, url: str, reason: str, *, mode: str) -> None:
         if mode == "absent":
             with self._lock:
                 self._pinned = True
             log.warning(
-                "vLLM /tokenize unusable at %s (%s); pinning in-process token estimation",
+                "%s unusable at %s (%s); pinning in-process token estimation",
+                self._label,
                 url,
                 reason,
             )
@@ -255,8 +218,9 @@ class VllmTokenizer:
             with self._lock:
                 self._retry_at = self._clock() + retry_after
             log.warning(
-                "vLLM /tokenize refused at %s (%s); in-process token estimation "
+                "%s refused at %s (%s); in-process token estimation "
                 "until the next probe in %.0f s",
+                self._label,
                 url,
                 reason,
                 retry_after,
@@ -265,24 +229,286 @@ class VllmTokenizer:
         with self._lock:
             self._retry_at = self._clock() + self._retry_after_s
         log.warning(
-            "vLLM /tokenize failed at %s (%s); in-process token estimation for %.0f s",
+            "%s failed at %s (%s); in-process token estimation for %.0f s",
+            self._label,
             url,
             reason,
             self._retry_after_s,
         )
 
 
-def build_tokenizer(
-    settings: Settings, client: httpx2.Client | None = None
-) -> Tokenizer:
-    """Builds a tokenizer configured for the served reasoning model."""
-    if settings.llm_base_url and settings.llm_model_reasoning:
-        return VllmTokenizer(
+def _tokenize_count(data: Any) -> int | None:
+    """A /tokenize body's count: `count` when it is a non-negative int,
+    else the length of `tokens` when no `count` key exists."""
+    if isinstance(data, dict):
+        if type(data.get("count")) is int and data["count"] >= 0:
+            return int(data["count"])
+        if "count" not in data and isinstance(data.get("tokens"), list):
+            return len(data["tokens"])
+    return None
+
+
+def usage_prompt_tokens(data: Any) -> int | None:
+    """A chat completion's `usage.prompt_tokens` when it is a positive int
+    (a rendered chat template is never empty). The completion content is
+    never read."""
+    usage = data.get("usage") if isinstance(data, dict) else None
+    count = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+    if type(count) is int and count > 0:
+        return count
+    return None
+
+
+class VllmTokenizer(_RemoteCount):
+    """Counts tokens via vLLM's /tokenize endpoint at the server origin,
+    under the pin and retry rules of ``_RemoteCount`` (issue #835, #1214)."""
+
+    _label = "vLLM /tokenize"
+
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        timeout_s: float = 5.0,
+        client: httpx2.Client | None = None,
+        api_key: str | None = None,
+        retry_after_s: float = TOKENIZE_RETRY_AFTER_S,
+        refused_retry_after_s: float = TOKENIZE_REFUSED_RETRY_AFTER_S,
+        clock: Callable[[], float] = time.monotonic,
+        request_args: ModelRequestArgs = DEFAULT_MODEL_REQUEST_ARGS,
+    ) -> None:
+        super().__init__(
+            timeout_s=timeout_s,
+            client=client,
+            api_key=api_key,
+            retry_after_s=retry_after_s,
+            refused_retry_after_s=refused_retry_after_s,
+            clock=clock,
+        )
+        self._base_url = base_url.rstrip("/")
+        # vLLM serves /tokenize at the server root; /v1/tokenize is a 404.
+        self._origin = self._base_url.removesuffix("/v1")
+        self._model = model
+        # The generation's own arguments (#1193): the count must render the
+        # template the generation renders, extra-body arguments included.
+        self._request_args = request_args
+
+    def count_tokens(self, text: str) -> int:
+        self._local.remote = False
+        if not text:
+            return 0
+        count = self._remote_count(
+            f"{self._origin}/tokenize", {"model": self._model, "prompt": text}, _tokenize_count
+        )
+        if count is not None:
+            return count
+        return self._fallback.count_tokens(text)
+
+    def count_messages(
+        self, messages: list[ChatMessage], *, reasoning_effort: str | None = None
+    ) -> int:
+        """Chat-template-aware count: what /tokenize reports for the message
+        list is what actually consumes max_model_len."""
+        self._local.remote = False
+        if not messages:
+            return 0
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "messages": [m.model_dump() for m in messages],
+            "add_generation_prompt": True,
+            "add_special_tokens": False,
+        }
+        # /tokenize takes the template arguments explicitly, so it gets the
+        # ones this generation sends (#1193): on the default top-level
+        # transport the server forwards the selected effort and enables
+        # thinking; on the others exactly the request's chat_template_kwargs,
+        # extra-body arguments included. Keep them local to this call: one
+        # tokenizer serves concurrent turns.
+        template_kwargs = self._request_args.template_kwargs(reasoning_effort)
+        if template_kwargs:
+            payload["chat_template_kwargs"] = template_kwargs
+        count = self._remote_count(f"{self._origin}/tokenize", payload, _tokenize_count)
+        if count is not None:
+            return count
+        return self._fallback.count_messages(messages, reasoning_effort=reasoning_effort)
+
+
+# The count completion decodes one token; its content is never read.
+COUNT_MAX_TOKENS = 1
+
+
+def count_request_body(
+    model: str,
+    serialized: list[dict[str, Any]],
+    reasoning_effort: str | None,
+    temperature: float | None,
+    args: ModelRequestArgs = DEFAULT_MODEL_REQUEST_ARGS,
+) -> dict[str, Any]:
+    """The completion-usage count body (#1266): the generation's own body
+    from `chat_request_body`, non-streaming, with `max_tokens=1`."""
+    return chat_request_body(
+        model, serialized, reasoning_effort, temperature,
+        stream=False, max_tokens=COUNT_MAX_TOKENS, args=args,
+    )
+
+
+class CompletionUsageTokenizer(_RemoteCount):
+    """Counts a packed prompt by sending it as a non-streaming chat
+    completion with ``max_tokens=1`` and reading ``usage.prompt_tokens``
+    (issue #1266), for a gateway that serves no /tokenize.
+
+    The body comes from ``model_args.chat_request_body``, the generation's
+    own builder, with the same model, messages, effort transport, extra body
+    and temperature: it differs from the sent generation only in
+    ``max_tokens`` and the streaming flags, so the count renders exactly the
+    template the generation renders. Only whole-prompt verification sends it
+    (``count_messages``, answer.build_messages); ``count_tokens`` prices
+    loose text for packing and always answers from the estimator, so a
+    packing loop never sends a completion. Pin and retry rules are those of
+    ``_RemoteCount``; ``LLM_TOKENIZE_TIMEOUT_S`` bounds each call.
+    """
+
+    _label = "completion usage count"
+    # Capability (#1266): the prompt builder passes the request's own
+    # temperature so the counted body equals the sent one. Duck-typed like
+    # ``supports_max_tokens``, so other tokenizers keep their signature.
+    counts_request_temperature = True
+
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        timeout_s: float = 5.0,
+        client: httpx2.Client | None = None,
+        api_key: str | None = None,
+        retry_after_s: float = TOKENIZE_RETRY_AFTER_S,
+        refused_retry_after_s: float = TOKENIZE_REFUSED_RETRY_AFTER_S,
+        clock: Callable[[], float] = time.monotonic,
+        request_args: ModelRequestArgs = DEFAULT_MODEL_REQUEST_ARGS,
+        temperature: float | None = None,
+    ) -> None:
+        super().__init__(
+            timeout_s=timeout_s,
+            client=client,
+            api_key=api_key,
+            retry_after_s=retry_after_s,
+            refused_retry_after_s=refused_retry_after_s,
+            clock=clock,
+        )
+        self._url = f"{base_url.rstrip('/')}/chat/completions"
+        self._model = model
+        self._request_args = request_args
+        # LLM_TEMPERATURE: what the generation sends when the request names
+        # no temperature of its own.
+        self._temperature = temperature
+
+    @classmethod
+    def from_settings(
+        cls,
+        settings: Settings,
+        client: httpx2.Client | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> CompletionUsageTokenizer:
+        if not settings.llm_base_url or not settings.llm_model_reasoning:
+            raise ValueError("completion usage counts need LLM_BASE_URL and LLM_MODEL_REASONING")
+        return cls(
             base_url=settings.llm_base_url,
             model=settings.llm_model_reasoning,
             timeout_s=settings.llm_tokenize_timeout_s,
             client=client,
             api_key=settings.llm_api_key,
+            clock=clock,
             request_args=settings.model_request_args(),
+            temperature=settings.llm_temperature,
         )
-    return FallbackTokenizer()
+
+    def count_tokens(self, text: str) -> int:
+        """Loose text is priced by the estimator, never by a completion."""
+        self._local.remote = False
+        return self._fallback.count_tokens(text)
+
+    def count_messages(
+        self,
+        messages: list[ChatMessage],
+        *,
+        reasoning_effort: str | None = None,
+        temperature: float | None = None,
+    ) -> int:
+        self._local.remote = False
+        if not messages:
+            return 0
+        body = count_request_body(
+            self._model,
+            [m.model_dump() for m in messages],
+            reasoning_effort,
+            temperature if temperature is not None else self._temperature,
+            self._request_args,
+        )
+        count = self._remote_count(self._url, body, usage_prompt_tokens)
+        if count is not None:
+            return count
+        return self._fallback.count_messages(messages, reasoning_effort=reasoning_effort)
+
+
+# Fixed synthetic prompt for the `auto` startup check: no request content.
+_STARTUP_CHECK_MESSAGES = [ChatMessage(role="user", content="token count source check")]
+
+
+def _vllm_tokenizer(settings: Settings, client: httpx2.Client | None) -> VllmTokenizer:
+    assert settings.llm_base_url and settings.llm_model_reasoning
+    return VllmTokenizer(
+        base_url=settings.llm_base_url,
+        model=settings.llm_model_reasoning,
+        timeout_s=settings.llm_tokenize_timeout_s,
+        client=client,
+        api_key=settings.llm_api_key,
+        request_args=settings.model_request_args(),
+    )
+
+
+def _select_auto(settings: Settings, client: httpx2.Client | None) -> Tokenizer:
+    """`auto` (#1266): one startup count per source, warn-only, never a
+    refusal to start. /tokenize when it counts. /tokenize in a transient or
+    refused window stays selected with that window, as the `tokenize` source
+    behaves. Only a /tokenize pinned as not served moves on to the
+    completion-usage count: selected when it counts, the estimator when it is
+    pinned too, and kept with its own retry window after a transient
+    failure, so a startup blip pins nothing for the process."""
+    effort = settings.llm_reasoning_effort_simple
+    tokenize = _vllm_tokenizer(settings, client)
+    tokenize.count_messages(_STARTUP_CHECK_MESSAGES, reasoning_effort=effort)
+    if tokenize.remote_confirmed or not tokenize._pinned:
+        tokenize._local.remote = False
+        log.info(
+            "token count source: /tokenize (%s at startup)",
+            "confirmed" if tokenize.remote_confirmed else "retry window",
+        )
+        return tokenize
+    usage = CompletionUsageTokenizer.from_settings(settings, client)
+    usage.count_messages(_STARTUP_CHECK_MESSAGES, reasoning_effort=effort)
+    if usage._pinned:
+        log.warning("token count source: estimator (neither /tokenize nor completion usage counts)")
+        return FallbackTokenizer()
+    log.info(
+        "token count source: completion usage (%s at startup)",
+        "confirmed" if usage.remote_confirmed else "retry window",
+    )
+    usage._local.remote = False
+    return usage
+
+
+def build_tokenizer(
+    settings: Settings, client: httpx2.Client | None = None
+) -> Tokenizer:
+    """Builds the prompt counter LLM_TOKEN_COUNT_SOURCE selects (#1266) for
+    the served reasoning model; without one, the estimator. Only `auto`
+    sends anything here (its startup check); the lifespan runs this off the
+    event loop."""
+    source = settings.llm_token_count_source
+    if source == "estimate" or not (settings.llm_base_url and settings.llm_model_reasoning):
+        return FallbackTokenizer()
+    if source == "completion_usage":
+        return CompletionUsageTokenizer.from_settings(settings, client)
+    if source == "auto":
+        return _select_auto(settings, client)
+    return _vllm_tokenizer(settings, client)

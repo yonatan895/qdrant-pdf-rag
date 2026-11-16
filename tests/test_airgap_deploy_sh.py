@@ -295,10 +295,10 @@ def test_model_request_arguments_operator_precedence_reaches_rendered_pod(tree, 
     root, _log = tree
     selected = {
         "LLM_EXTRA_BODY": '{"top_k": 20, "stop": ["a b", "c\\"d"], "chat_template_kwargs": {"enable_thinking": false}}',
-        "LLM_EFFORT_TRANSPORT": "chat_template",
+        "LLM_EFFORT_TRANSPORT": "chat_template", "LLM_TOKEN_COUNT_SOURCE": "completion_usage",
     }
     alternate = {
-        "LLM_EXTRA_BODY": '{"top_k": 1}', "LLM_EFFORT_TRANSPORT": "none",
+        "LLM_EXTRA_BODY": '{"top_k": 1}', "LLM_EFFORT_TRANSPORT": "none", "LLM_TOKEN_COUNT_SOURCE": "estimate",
     }
     file_values = {
         "INTERNAL_REGISTRY": "reg.internal", "NAMESPACE": "ns",
@@ -315,6 +315,23 @@ def test_model_request_arguments_operator_precedence_reaches_rendered_pod(tree, 
     pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
     assert json.loads(pod["LLM_EXTRA_BODY"]) == json.loads(selected["LLM_EXTRA_BODY"])
     assert pod["LLM_EFFORT_TRANSPORT"] == "chat_template"
+    assert pod["LLM_TOKEN_COUNT_SOURCE"] == "completion_usage"  # #1266
+
+
+def test_unset_token_count_source_adds_no_pod_variable(tree):
+    """The shipped default does not change (#1266): unset renders no variable."""
+    root, _log = tree
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
+    assert "LLM_TOKEN_COUNT_SOURCE" not in pod
+
+
+def test_refused_token_count_source_stops_the_deploy_before_helm(tree):
+    result = _run(tree, ("LLM_TOKEN_COUNT_SOURCE", "unsupported-private-value"))
+    assert result.returncode != 0
+    assert "LLM_TOKEN_COUNT_SOURCE must be tokenize, completion_usage, auto or estimate" in result.stderr
+    assert "unsupported-private-value" not in result.stderr + result.stdout
 
 
 def test_refused_model_request_arguments_stop_the_deploy_before_helm(tree):

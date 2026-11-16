@@ -39,7 +39,7 @@ from mainframe_rag.ingest.chunk import (
     units_for_text,
 )
 from mainframe_rag.logs import error_type
-from mainframe_rag.model_args import DEFAULT_MODEL_REQUEST_ARGS, ModelRequestArgs
+from mainframe_rag.model_args import DEFAULT_MODEL_REQUEST_ARGS, ModelRequestArgs, chat_request_body
 from mainframe_rag.ports import (
     ChatMessage,
     ChatResult,
@@ -1245,6 +1245,7 @@ def build_messages(
     order: Literal["retrieval", "stable_cache"] = "retrieval",
     *,
     reasoning_effort: str | None = None,
+    temperature: float | None = None,
 ) -> PreparedPrompt:
     return _build_prompt(
         query,
@@ -1261,6 +1262,7 @@ def build_messages(
         settings=settings,
         order=order,
         reasoning_effort=reasoning_effort,
+        temperature=temperature,
     )
 
 
@@ -1316,6 +1318,7 @@ def _build_prompt(
     *,
     history: list[ChatMessage] | None = None,
     reasoning_effort: str | None = None,
+    temperature: float | None = None,
 ) -> PreparedPrompt:
     is_chat = history is not None
     # Retention policy (issue #633), identical for planning and recount: the
@@ -1410,7 +1413,15 @@ def _build_prompt(
         long message as the estimator does, so the message's own priced
         surplus is added back (0 for a message within `query_max_chars`)."""
         assert tokenizer is not None
-        used = tokenizer.count_messages(messages, reasoning_effort=reasoning_effort)
+        # A completion-usage count (#1266) sends the request's own
+        # temperature, so its body equals the generation's; other
+        # tokenizers keep their signature.
+        if getattr(tokenizer, "counts_request_temperature", False) is True:
+            used = tokenizer.count_messages(  # type: ignore[call-arg]
+                messages, reasoning_effort=reasoning_effort, temperature=temperature
+            )
+        else:
+            used = tokenizer.count_messages(messages, reasoning_effort=reasoning_effort)
         if message_drift and not getattr(tokenizer, "remote_confirmed", False):
             used += message_drift
         return used
@@ -1656,25 +1667,12 @@ def _chat_body(
     max_tokens: int | None = None,
     args: ModelRequestArgs = DEFAULT_MODEL_REQUEST_ARGS,
 ) -> dict[str, Any]:
-    """Single builder for chat-completion request bodies: model + messages,
-    optional reasoning_effort/temperature/max_tokens, the configured model
-    request arguments (#1193: the effort transport and the extra body fields,
-    validated at startup so they cannot replace a field built here), and the
-    streaming flags (stream + usage ask). Every chat path (achat, chat_stream,
-    _chat_sync, stream and fallback legs) funnels through here so a
-    request-shape change cannot diverge copies. With default `args` the body
-    is byte-identical to the pre-#1193 one."""
-    body: dict[str, Any] = {"model": model, "messages": serialized}
-    body.update(args.effort_fields(reasoning_effort))
-    if temperature is not None:
-        body["temperature"] = temperature
-    if max_tokens is not None:
-        body["max_tokens"] = max_tokens
-    body.update(args.extra_fields(reasoning_effort))
-    if stream:
-        body["stream"] = True
-        body["stream_options"] = {"include_usage": True}
-    return body
+    """The generation's chat-completion body: `model_args.chat_request_body`,
+    the one builder the completion-usage count shares (#1266)."""
+    return chat_request_body(
+        model, serialized, reasoning_effort, temperature,
+        stream=stream, max_tokens=max_tokens, args=args,
+    )
 
 
 @dataclass
@@ -2449,6 +2447,7 @@ def build_chat_messages(
     order: Literal["retrieval", "stable_cache"] = "retrieval",
     *,
     reasoning_effort: str | None = None,
+    temperature: float | None = None,
 ) -> PreparedPrompt:
     """Build multi-turn chat prompt messages + supplied-evidence manifest.
 
@@ -2502,4 +2501,5 @@ def build_chat_messages(
         order=order,
         history=prior_messages,
         reasoning_effort=reasoning_effort,
+        temperature=temperature,
     )

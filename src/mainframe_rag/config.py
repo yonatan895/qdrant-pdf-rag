@@ -60,6 +60,9 @@ def qdrant_pool_limits(url: str) -> httpx2.Limits:
 # verbatim; LLM_REASONING_EFFORTS declares the subset the served template accepts.
 ReasoningEffort = Literal["low", "medium", "high", "xhigh"]
 REASONING_EFFORTS: tuple[ReasoningEffort, ...] = get_args(ReasoningEffort)
+# Prompt-count sources (#1266), see Settings.llm_token_count_source.
+TokenCountSource = Literal["tokenize", "completion_usage", "auto", "estimate"]
+TOKEN_COUNT_SOURCES: tuple[TokenCountSource, ...] = get_args(TokenCountSource)
 
 
 # cgroup mount and this process's membership file (#840).
@@ -380,6 +383,15 @@ class Settings(BaseSettings):
     # Complex-path narrative cap above the largest chunk (~1150 tokens, #777).
     llm_max_chunk_tokens_narrative: int = Field(default=1200, ge=50, le=2048)
     llm_tokenize_timeout_s: float = Field(default=5.0, gt=0.0, le=60.0)
+    # Where the verified prompt count comes from (#1266; agent/tokenizer.py,
+    # docs/agent.md#token-count-sources). tokenize: the server's /tokenize,
+    # else the estimator (the behaviour before #1266). completion_usage:
+    # `usage.prompt_tokens` of a non-streaming 1-token chat completion built
+    # by the generation's own body builder, for a gateway without /tokenize.
+    # auto: /tokenize when served, else completion_usage when a startup check
+    # confirms a usable count, else the estimator. estimate: never ask the
+    # server. Every count is bounded by LLM_TOKENIZE_TIMEOUT_S.
+    llm_token_count_source: TokenCountSource = Field(default="tokenize")
     llm_stream: bool = Field(default=False, description="Stream chat completions to measure TTFT")
 
     # Multi-turn chat engine and operator console

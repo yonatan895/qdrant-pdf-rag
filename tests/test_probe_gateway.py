@@ -649,3 +649,131 @@ def test_readiness_chat_sends_the_configured_model_arguments(monkeypatch, transp
     assert {k: v for k, v in body.items() if k not in ("model", "messages", "temperature", "max_tokens")} == expected
     if transport is None:
         assert list(body) == ["model", "messages", "temperature", "max_tokens", "reasoning_effort"]
+
+
+# ---------------------------------------------------------------------------
+# `--probe-count` (issue #1266): the completion-usage count on a running stack.
+# ---------------------------------------------------------------------------
+
+class CountGateway(FakeGateway):
+    """A gateway without /tokenize whose 1-token completion reports
+    `usage.prompt_tokens` from the request: a deterministic function of the
+    messages, so equal requests count equal and a longer one counts more.
+    `counts` overrides the reported values in order."""
+
+    def __init__(self, counts=None, usage=True, status=200):
+        super().__init__([])
+        self.counts = list(counts or [])
+        self.usage = usage
+        self.status = status
+
+    def post(self, url, json=None, timeout=None, headers=None):
+        self.calls.append(("POST", url, headers))
+        self.bodies.append((url, json))
+        if url.endswith("/tokenize"):
+            return SimpleResp(url, "POST", 404, {})
+        tokens = self.counts.pop(0) if self.counts else sum(
+            len(m["content"]) // 4 + 4 for m in json["messages"])
+        payload = {"choices": [{"message": {"content": "PRIVATE-COMPLETION"}, "finish_reason": "length"}]}
+        if self.usage:
+            payload["usage"] = {"prompt_tokens": tokens, "completion_tokens": 1}
+        return SimpleResp(url, "POST", self.status, payload)
+
+
+def _count_probe(monkeypatch, capsys, gateway, argv=(), **env):
+    _env(monkeypatch, **{"GATEWAY_PROBE_MAX_TOKENS": None, "LLM_EXTRA_BODY": None,
+                         "LLM_EFFORT_TRANSPORT": None, **env})
+    monkeypatch.setattr(probe_mod, "httpx2", gateway)
+    rc = main(["--probe-count", *argv])
+    lines = capsys.readouterr().out.strip().splitlines()
+    return rc, json.loads(lines[0]), lines[-1]
+
+
+def _number_or_flag(value):
+    return value is None or isinstance(value, (bool, int, float))
+
+
+def test_count_probe_reports_a_stable_growing_count_with_numbers_only(monkeypatch, capsys):
+    gateway = CountGateway()
+    rc, row, summary = _count_probe(monkeypatch, capsys, gateway)
+    assert rc == 0 and summary.startswith("COUNT PROBE PASSED")
+    assert row["stable"] is True and row["grows"] is True
+    assert row["prompt_tokens_cold"] == row["prompt_tokens_warm"] < row["prompt_tokens_plus_one"]
+    assert row["prompt_tokens_cold"] >= 9000  # a ~10k-token prompt
+    assert all(_number_or_flag(value) for value in row.values())
+    completions = [body for url, body in gateway.bodies if url.endswith("/chat/completions")]
+    assert len(completions) == 3 and completions[0] == completions[1]
+    assert completions[2]["messages"][:2] == completions[0]["messages"]
+    assert len(completions[2]["messages"]) == len(completions[0]["messages"]) + 2
+    for body in completions:
+        assert body["max_tokens"] == 1 and "stream" not in body
+        # The application's own request arguments (#1193, unset: top-level effort).
+        assert body["reasoning_effort"] == "medium" and body["temperature"] == 0.2
+
+
+def test_count_probe_cold_prompt_is_new_on_every_run(monkeypatch, capsys):
+    """A per-run nonce leads the prompt, so a later run's cold count is not
+    served from the prefix cache of the run before."""
+    first, second = CountGateway(), CountGateway()
+    _count_probe(monkeypatch, capsys, first)
+    _count_probe(monkeypatch, capsys, second)
+    cold = [g.bodies[0][1]["messages"][0]["content"] for g in (first, second)]
+    assert cold[0] != cold[1]
+
+
+def test_count_probe_sends_the_configured_model_arguments(monkeypatch, capsys):
+    gateway = CountGateway()
+    rc, _row, _summary = _count_probe(
+        monkeypatch, capsys, gateway, LLM_EFFORT_TRANSPORT="chat_template",
+        LLM_EXTRA_BODY='{"chat_template_kwargs": {"enable_thinking": true}, "top_k": 20}')
+    body = gateway.bodies[0][1]
+    assert rc == 0 and "reasoning_effort" not in body and body["top_k"] == 20
+    assert body["chat_template_kwargs"] == {"enable_thinking": True, "reasoning_effort": "medium"}
+
+
+@pytest.mark.parametrize(("gateway", "failed"), [
+    (lambda: CountGateway(usage=False), "usable"),
+    (lambda: CountGateway(counts=[9100, 9101, 9200]), "stable"),
+    (lambda: CountGateway(counts=[9100, 9100, 9100]), "grows"),
+    (lambda: CountGateway(status=404), "usable"),
+], ids=["no-usage", "unstable", "not-growing", "not-served"])
+def test_count_probe_fails_without_a_usable_stable_count(monkeypatch, capsys, gateway, failed):
+    rc, row, summary = _count_probe(monkeypatch, capsys, gateway())
+    assert rc == 1 and summary.startswith("COUNT PROBE FAILED")
+    assert row[failed] is False
+    assert all(_number_or_flag(value) for value in row.values())
+
+
+def test_count_probe_reports_a_transport_error_by_type_only(monkeypatch, capsys):
+    gateway = CountGateway()
+
+    def refuse(url, json=None, timeout=None, headers=None):
+        raise httpx2.ConnectError("PRIVATE upstream detail")
+
+    monkeypatch.setattr(gateway, "post", refuse)
+    _env(monkeypatch, GATEWAY_PROBE_MAX_TOKENS=None)
+    monkeypatch.setattr(probe_mod, "httpx2", gateway)
+    rc = main(["--probe-count"])
+    out = capsys.readouterr().out
+    assert rc == 1 and "PRIVATE" not in out and "COUNT PROBE FAILED" in out
+
+
+def test_count_probe_requires_a_reasoning_model(monkeypatch, capsys):
+    _env(monkeypatch, LLM_MODEL_REASONING=None, GATEWAY_PROBE_MAX_TOKENS=None)
+    fake = FakeGateway([])
+    monkeypatch.setattr(probe_mod, "httpx2", fake)
+    assert main(["--probe-count"]) == 1
+    assert "not configured" in capsys.readouterr().out and fake.calls == []
+
+
+@pytest.mark.parametrize("argv", [
+    ["--probe-args"], ["--models"], ["--stream"], ["--require-reasoning"], ["--require-tokenizer"],
+    ["--candidate", "x={}"], ["--max-tokens", "8"],
+])
+def test_count_probe_is_exclusive(monkeypatch, capsys, argv):
+    _env(monkeypatch, GATEWAY_PROBE_MAX_TOKENS=None)
+    fake = FakeGateway([])
+    monkeypatch.setattr(probe_mod, "httpx2", fake)
+    with pytest.raises(SystemExit) as exc:
+        main(["--probe-count", *argv])
+    assert exc.value.code == 2 and fake.calls == []
