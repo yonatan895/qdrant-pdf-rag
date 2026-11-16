@@ -307,7 +307,7 @@ for line in sys.stdin.read().split():
     ( umask 077; $PYH dex-config "$STATE" "$STATE/hashes.txt" > "$STATE/dex-config.yaml" )
 }
 
-provision_live() {  # admin API key, the chart's Pipe installer, groups, Rosetta model grants, both users sign in
+provision_live() {  # admin API key, the chart's Pipe installer, groups, Rosetta model (answer depth) grants, both users sign in
     $PYH api-key "$STATE"
     k -n "$APP_NS" exec -i deploy/rag-openwebui -c openwebui -- \
         python3 /opt/mainframe-rag/openwebui/provision_pipe.py "$(cat "$STATE/render/pipe.sha256")" < "$STATE/admin-api-key"

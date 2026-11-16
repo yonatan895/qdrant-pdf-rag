@@ -5,7 +5,9 @@
   (default-on, release gates; the conditions below stay); amended by
   [ADR-0010](0010-team-tools-on-open-webui.md) for team tools (the decision
   paragraph, V2, R2, one no-go item and the framework reading, as its table
-  lists).
+  lists); amended for chat folders (#1255: V1, E1, S2, S3). V2 wording
+  amended for the docs Pipe's answer-depth entries (#1255, maintainer
+  decision 2026-11-16).
   Accepting this record does not enable anything: the chart component stays
   off by default (superseded by ADR-0008: default on), and a site enables it only after every condition below
   passes. Amends [ADR-0004](0004-operator-console-htmx.md) and
@@ -53,11 +55,28 @@ Pipe is provisioned and the admin role is limited to the team.
   memory attempts, then an inspection of the data directory. It must contain
   no vector-store directory or file, and no uploaded files. A non-empty store
   is an acceptance failure.
+  **Chat folders** are on (#1255) to organise a user's own chats. A folder
+  carries a system prompt, knowledge entries, default models, an icon and a
+  background image (v0.12.3 `routers/folders.py`, `utils/middleware.py`).
+  None of them reaches the vector store or the agent. The system prompt
+  becomes the system turn at `messages[0]`, which the Pipe drops (Pipe tests
+  pin the inserted, merged and list-content shapes). Knowledge entries
+  (files, collections, notes) resolve to nothing because none can exist:
+  uploads, knowledge and notes are off and E1 refuses their routes. The same
+  holds when a chat outside the folder attaches it through the `#` or `@`
+  picker. Admins skip v0.12.3's folder-entry access check
+  (`get_accessible_folder_files`), so for them E1 alone keeps the entries
+  empty. The only model a folder default can name is the Pipe. Pending
+  acceptance step (#1255, not yet in the battery): a folder with a system
+  prompt and a knowledge entry, then a chat in it; the agent request holds
+  user and assistant turns only, and the data directory is unchanged.
 - **V2 Answers only through the agent.** Open WebUI holds no gateway or LiteLLM
   key. It has no OpenAI or Ollama connections, so the default connections are
   off. Direct connections, user-created models and user Tools/Functions are
-  off, and the Pipelines server is not deployed. The only model is the docs
-  Pipe. Its Functions are repository files installed by the deploy step, with
+  off, and the Pipelines server is not deployed. The only models are the docs
+  Pipe's entries: one Function, whose answer-depth entries Open WebUI lists as
+  models `mainframe_rag_docs.<depth>`, each answering only through the agent
+  (amended for #1255; maintainer decision 2026-11-16). Its Functions are repository files installed by the deploy step, with
   their hash checked against the repository. Community Functions and
   frontmatter pip installs are refused. Task features (titles, tags,
   follow-ups, autocomplete, query generation) are off. The Pipe also answers
@@ -70,6 +89,22 @@ Pipe is provisioned and the admin role is limited to the team.
   Function is present, and the Pipe never declares `__oauth_token__`,
   `__request__` or any `__user__`-style parameter it does not use; a test
   inspects its `pipe()` signature. A new parameter is a recorded decision.
+  *(Amended, #1255; maintainer decision 2026-11-16.)* With
+  `openwebui.ratings.enabled` (default off), the repository Function set is the
+  docs Pipe plus the repository rating Action (`rating_action.py`): two message
+  buttons that post a rating to the agent's `/v1/feedback` (ADR-0005). Each
+  Function is hash-checked. The Pipe's expected hash comes from the deploy
+  step, and the Action's is a constant of the installer, pinned by a test to
+  the repository file. The installer makes the Action active and global, and
+  it removes the Action when ratings are off. It still refuses every other
+  Function. The Action declares only `body`, `__id__`, `__event_emitter__`
+  and `__event_call__`; a test pins its signature. It emits only toasts and
+  an input prompt, which Open WebUI does not save, and returns nothing. It
+  makes no model call and calls no host but the agent. With ratings on, the
+  Pipe ends each completed answer with an "Answer reference" line carrying
+  the agent's request id. That line is the only message field the Action can
+  read, and the Pipe drops it from the history it sends back. Agent requests
+  still equal user turns: a rating is not an answer request.
   Proof: over a multi-turn trial, agent requests equal user turns.
 - **V3 Contract fidelity.** The Pipe sends exactly the agent's `ChatRequest`
   shape. It renders validated citations with their supplied excerpts as source
@@ -113,7 +148,19 @@ Pipe is provisioned and the admin role is limited to the team.
   path. The list is the Docs pilot's need: the SPA shell and assets, sign-in
   and the OIDC callback, socket.io, health, chats, models, the Pipe's chat
   completions, the account and admin APIs and the Pipe installer's
-  `/api/v1/functions`. **Re-audited on every import (P1)**: list each router's
+  `/api/v1/functions`, chat folders (the `/folders/<id>` page and the
+  folder API by id) without the folder grant route `/access/update` or the
+  shared-folder list `/shared` (#1255), plus, with ratings (#1255), the
+  rating Action's
+  two buttons `/api/chat/actions/mainframe_rag_rating.(up|down)`, rendered
+  only while ratings are on (the handler is server-enforced: an active Action
+  the model surfaces). Shared prompts (#1255, maintainer decision 2026-11-16):
+  users read the repository's `/` commands through `GET /api/v1/prompts/` and
+  cannot create or import a prompt (both permissions pinned off). The prompt
+  installer runs in the pod; its list and write paths are admitted only from
+  the pod's loopback source, so no Route client reaches a prompt write. The
+  admin API key is honoured only on `/api/v1/functions` and `/api/v1/prompts`.
+  **Re-audited on every import (P1)**: list each router's
   handlers, sort them into server-enforced and UI-only, and re-run the browser
   trace; a path is added deliberately, never by default. Proof: the nginx
   config test runs the real pinned image against every encoded variant, and the
@@ -128,7 +175,13 @@ Pipe is provisioned and the admin role is limited to the team.
   re-encrypt TLS and a Service CA certificate. The Route-exposure preflight
   refuses any other Route in front of its Service. The agent stays anonymous
   to Open WebUI users (#373), which is safe because the docs corpus is read by
-  everyone.
+  everyone. Residual, accepted by the maintainer 2026-11-16 (#1255): v0.12.3 lets an
+  admin grant the no-auth "anyone" read on a chat share link, or turn open
+  sharing on for a group in the admin UI (group permissions combine
+  most-permissive over the chart's defaults), even with open sharing off.
+  Such a link opens without sign-in for anyone who can reach the Route. The
+  proxy cannot tell a signed-in request apart, so the bound is the admin role
+  limit (S3).
   Scopes include `groups` and `offline_access`: without a refresh token Open
   WebUI deletes the session near expiry and may fall back to an older
   session's token, so the IdP must permit the refresh scope (the real IdP
@@ -144,15 +197,55 @@ Pipe is provisioned and the admin role is limited to the team.
   30 days. It then reclaims the freed database pages, so the text is gone
   from the file. The pattern is ADR-0005/#804: failures are retried and
   counted and are never reported as success. Proof: the stored rows are gone,
-  then the next ordinary chat succeeds. Users may delete their own chats. Chat
-  sharing and admin export are off.
+  then the next ordinary chat succeeds. Users may delete their own chats. Admin
+  export is off. Chat share links are a site value, off by default (#1255);
+  the chart sets the default user permissions, and an admin can still change
+  a group's permissions in the admin UI (see R3). A link stays inside the
+  instance: it opens only after sign-in, for its owner and the users or groups
+  the owner grants, or every signed-in user when the site allows it. The
+  no-auth "anyone" grant is off in the default permissions (see R3 for what
+  an admin can still do), and community sharing stays off. A share is a
+  separate snapshot copy (`shared_chat` in v0.12.3), unless the owner picks
+  v0.12.3's "continue" mode: grantees then read and write the owner's live
+  chat, which stays under the owner's retention (accepted by the maintainer
+  2026-11-16, #1255). The purge deletes a snapshot
+  with its chat, and on its own once the snapshot is older than 30 days even
+  while the chat lives on; that chat is left unshared, with its share grants
+  removed. Temporary chats are never saved: v0.12.3 writes no chat row for a
+  temporary chat id (source reading; live proof is the #1255 combined
+  acceptance). A site may enforce them; the server then refuses to create or
+  import a chat for every non-admin user. Admins are exempt, and a chat saved
+  earlier can still be continued and stays until the purge.
+  Folder sharing is off too
+  (`USER_PERMISSIONS_FOLDERS_ALLOW_SHARING=false`). v0.12.3 does not check
+  that permission on the grant route, so E1 refuses
+  `/api/v1/folders/{id}/access/update`, the only writer of folder access
+  grants. With no grant, a folder and its chats stay visible to the owner
+  only (and to admins, S3). **Stale folders are purged** (#1255, maintainer
+  decision 2026-11-16). A folder goes when three things hold after the
+  run's chat deletions. Its own `updated_at` is older than the window (a
+  NULL age counts as stale, as for a share snapshot). No row of any table
+  names it in `folder_id` (`chat` in v0.12.3, also `automation`). No folder
+  names it as `parent_id`. Leaves go first and the run repeats until none
+  is left, so a stale nested chain goes in one run. Deleted folders count
+  as `folders` and arm the same scrub. In v0.12.3, renaming, editing
+  settings, moving, expanding or collapsing a folder refreshes its age;
+  filing or removing a chat does not. A folder in use, and each of its
+  ancestors, keeps its name, system prompt text, icon and background image
+  (a data URL in the row) until it is unused and aged or the user deletes
+  it. These also stay in PVC backups under S3. A `parent_id` cycle never
+  becomes a leaf and is kept. v0.12.3 refuses to file a chat under a folder
+  that no longer exists (`has_folder_write_access`).
 - **S3 Protected copies and admin access.** PVC backups hold manual excerpts
   and pasted incident text. They are protected records that never leave the
   enterprise. They follow the same 30-day window: the purge job also removes
   backups older than 30 days. Admin chat access is off, but that toggle only
   hides chats in the UI. Admins, in-process Functions and anyone with access
-  to the PVC or the DB can still read them. This is an accepted residual, kept
-  small by limiting the admin role to the named owners through an IdP group.
+  to the PVC or the DB can still read them. Given a folder id, the folder API
+  also lets an admin read and change any folder's settings, list its chat
+  titles, add subfolders, and delete it with its chats (#1255). This is an
+  accepted residual, kept small by limiting the admin role to the named
+  owners through an IdP group.
   Encryption at rest, if required, comes from the storage class, because Open
   WebUI provides none. The maintainer, as corpus owner, accepted chat
   content on the PVC and in backups under these rules (2026-10-24). If that
@@ -235,7 +328,14 @@ the pilot. The console remains the only supported front end.
   built-in ratings and evaluations are off. Answer records still reach the
   feedback service through `/v1/chat` as before. Open WebUI ratings wait for a
   UI-agnostic rating route, which would amend ADR-0003's POST set. Telemetry
-  still holds no content.
+  still holds no content. *(Amended, #1255, maintainer decision 2026-11-16:
+  that route is `/v1/feedback`, and the repository rating Action posts to it
+  (V2). Ratings are stored only by the feedback service, with no rater
+  identity: D5 stays deferred. Two residuals are accepted with the visible
+  "Answer reference" line: Open WebUI's chat history holds the reference next
+  to the chat owner, a de facto attribution path for an operator with
+  database access; and ratings are unauthenticated, so a user who knows an
+  answer's request id can replace its rating.)*
 - **Reading of "no LangChain / second vector DB / new orchestration
   framework":** these rules bind this repository's code, dependencies and
   answer path. A pinned, unmodified third-party image may contain such

@@ -129,7 +129,7 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
 - `POST /v1/chat` (native) and `POST /v1/chat/completions` (OpenAI-compatible
   alias) — `ChatRequest{messages (client-managed history; min 1, roles
   `system`/`user`/`assistant`, `extra="forbid"`), product?, version?,
-  splunk_context?, stream?, temperature?, model?, max_tokens?}`. At least one
+  splunk_context?, stream?, temperature?, model?, max_tokens?, reasoning_effort?}`. At least one
    `user`-role message is required (missing user turn is a body-validation
    failure: `422 invalid_request` / `request body failed validation`, issue
    #314). `agent/chat_turn.prepare_chat_turn` owns active-turn normalization
@@ -152,7 +152,12 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
    `Settings.llm_temperature`; `model` is accepted for OpenAI compatibility but
    ignored — inference always uses `Settings.llm_model_reasoning`, and the
   response `model` field reports that reasoning model (issue #313); `max_tokens` is
-  accepted and ignored (token limits are server-side). The response is
+  accepted and ignored (token limits are server-side). `reasoning_effort`
+  (#1255, the Open WebUI docs Pipe's answer depths) is one of `low`, `medium`,
+  `high`, `xhigh` and must be in `LLM_REASONING_EFFORTS`, else the fixed
+  `422 unsupported_reasoning_effort` before retrieval or any model call; it reaches
+  the model verbatim, and omitted keeps the configured simple/complex effort
+  ([effort](#http-model-contract)). The response is
   `ChatCompletionsResponse{id: "chatcmpl-<request_id>", created, model,
   choices[], usage, citations, citations_inferred, inferred_indices, hits,
   verification_state, script, script_lang, script_review_required,
@@ -368,7 +373,11 @@ retention: [observability](observability.md#data-tiers).
   `FEEDBACK_DRAIN_TIMEOUT_S` and counts whatever is left as dropped.
 - **Ratings:** `POST /ui/feedback {request_id, rating, reasons, comment}` from
   the streaming console, and `POST /ui/feedback/form` (form-encoded) from the
-  fallback console, with the same validation and codes. An htmx request gets the
+  fallback console, with the same validation and codes. `POST /v1/feedback`
+  (#1255) is the same JSON route without the console: it does not
+  need `UI_ENABLED` and answers with the same status, `{"status": "recorded"}`
+  or fixed `{code, message}`. Open WebUI's rating Action posts to it
+  ([Open WebUI ratings](#openwebui-ratings)). An htmx request gets the
   result text for the form's status slot, always status 200 like the `/ui/chat`
   banner (htmx 1.9 never swaps a 4xx/5xx); the form stays, so a failed rating
   can be retried. A native post without JS opens in a new tab, so the console
@@ -530,7 +539,7 @@ status (`/ui` failures render HTML banners instead, §1):
 | `feedback_unavailable` / `feedback is temporarily unavailable` | 503 | `/ui/feedback`: the feedback service is unreachable, times out or answers an unexpected status (type logged only) |
 | `invalid_request` / `the rating is invalid` | 422 | `/ui/feedback`: the feedback service refused the rating shape. The form fallback `/ui/feedback/form` renders the same fixed texts: status 200 text for the htmx status slot, a full page with the real status for a native post |
 | `prompt_budget_exceeded` / `prompt exceeds the model token budget` | 422 | Irreducible token-budget overflow (issue #368): fixed content alone exceeds the window with nothing left to trim, or (issue #634) hits were retrieved but final packing supplied no usable excerpt (atomic-unit omission, verification trimming, whitespace-only text); the second case is the `EvidenceBudgetExceeded` subtype, logged/spanned under that type but identical on the wire; raised before any model call on JSON/chat, as an `error` event (no `final`) on already-open streams; `/ui/chat` renders its fixed banner |
-| `unsupported_reasoning_effort` / `the reasoning effort is not offered by this deployment` | 422 | Console only (#748): the requested effort is outside `LLM_REASONING_EFFORTS`; refused before any model call. `/ui/chat` renders its fixed banner; `/ui/chat/stream` returns this envelope |
+| `unsupported_reasoning_effort` / `the reasoning effort is not offered by this deployment` | 422 | Console (#748) and `/v1/chat*` (#1255): the requested effort is outside `LLM_REASONING_EFFORTS`; refused before retrieval or any model call. `/ui/chat` renders its fixed banner; `/ui/chat/stream` and `/v1/chat*` return this envelope |
 | `metrics_unavailable` / `metrics are not available` | 503 | `/metrics` scrape failure while enabled |
 | `not_found` / `not found` | 404 | Unknown route |
 | `method_not_allowed` / `method not allowed` | 405 | Wrong method |
@@ -1576,8 +1585,9 @@ air-gap preflight refuse a simple/complex effort outside it, naming the field
 renders exactly these choices (`xhigh` as "Extra high") and refuses any other
 before a model call: `/ui/chat` shows a fixed banner and `/ui/chat/stream`
 returns `422 unsupported_reasoning_effort`. A stale saved browser choice keeps
-the server's default; no effort is remapped. There is still no public
-answer/chat request field. Tokenizer requests retain their existing message and
+the server's default; no effort is remapped. `/v1/chat*` takes the same optional
+`reasoning_effort` under the same refusal (#1255, for the Open WebUI docs Pipe's
+answer depths); `/v1/answer` has no effort field. Tokenizer requests retain their existing message and
 generation flags; this change does not establish effort-dependent token counts.
 
 <a id="model-request-arguments"></a>
@@ -1827,8 +1837,9 @@ the documented Pipe interface against a fake agent built from the agent's own
 SSE formatters and `SuppliedExcerpt`, plus a round trip through the real app.
 
 The Pipe is one admin-installed Open WebUI Function that shows the docs corpus
-as one model, **Docs**. It is a stateless translator over the streaming
-`POST /v1/chat` (§1, §3). The agent API is unchanged. The target version is
+as one model per answer depth (a manifold, #1255). It is a stateless translator over the streaming
+`POST /v1/chat` (§1, §3); the only agent field it adds is the depth's optional
+`reasoning_effort`. The target version is
 pinned: Open WebUI **v0.12.3**, in `OPEN_WEBUI_VERSION` and the
 `required_open_webui_version` frontmatter, kept equal by a test. The file
 imports only the standard library, `httpx` and `pydantic`, and its
@@ -1839,13 +1850,15 @@ only; the PR lints and types this file directly.
 
 | Concern | Behaviour |
 |---|---|
-| Request | Only `ChatRequest` fields: `messages` (only `user`/`assistant` turns as plain text: a string, or the text parts of an Open WebUI content list joined by newlines; system prompts, image and file parts, tool turns and every other Open WebUI key are dropped), `stream: true`, and `product`/`version` from the per-user **UserValves** only when set (trimmed, blank = not sent). The last message is the question: unless it is a user turn with text, the Pipe returns a fixed hint and makes no agent call, never asking an earlier turn in its place |
+| Request | Only `ChatRequest` fields: `messages` (only `user`/`assistant` turns as plain text: a string, or the text parts of an Open WebUI content list joined by newlines; system prompts, image and file parts, tool turns and every other Open WebUI key are dropped), `stream: true`, `reasoning_effort` only for a depth that sets one (below), and `product`/`version` from the per-user **UserValves** only when set (trimmed, blank = not sent). The last message is the question: unless it is a user turn with text, the Pipe returns a fixed hint and makes no agent call, never asking an earlier turn in its place |
+| Answer depth | `pipes()` returns the `DEPTHS` entries; Open WebUI v0.12.3 shows each as the model `mainframe_rag_docs.<id>` under the entry's name (`functions.py` `get_function_models`) and passes that id as `body["model"]`. Maintainer decision 2026-11-16 (#1255): `standard` "Rosetta" (no effort sent: the agent's configured simple/complex effort, unchanged behaviour), `quick` "Rosetta – quick" (`low`) and `thorough` "Rosetta – thorough" (`xhigh`, deliberately: the default `LLM_REASONING_EFFORTS` offers it). The first entry is the default (chart `DEFAULT_MODELS`). An unknown entry or an id without one also sends no effort (defensive: v0.12.3 refuses an unlisted model id before the Pipe; chats that stored the pre-#1255 id `mainframe_rag_docs` reach the Pipe through Open WebUI's default-model fallback, [upgrade](deploy.md#owui-answer-depth)). An effort the deployment does not offer (`LLM_REASONING_EFFORTS`) is the agent's `422 unsupported_reasoning_effort` and the Pipe's fixed text. No per-depth timeout exists: every depth shares `TIMEOUT_S` and the agent's request deadline, which was sized at medium effort ([§6a](#6a-request-admission-total-deadline-and-embed-input-bound-issue-374)) |
 | Answer text | Prose deltas stream through in order. The model's own citations section (answer prompt rule 7) is unvalidated, so the Pipe hides it (#1098): a header alone on its line, as `cites.py` recognizes it (`Citations:`, or the `Sources:`/`References:` aliases), starts a section; a `Citations:` section takes citation and bullet lines, an alias section only citation lines; a blank line after a citation, or any other line, ends it and the text is prose again (an alias header followed by prose is kept). A citation here is any line with a `, ` gap before a `, p. ` tail, a superset of the agent's shape test, which needs the supplied doc ids, so such a line right after a `Citations:` header is hidden even where `cites.py` keeps it as prose. Fenced code is never touched, so a raw section inside a prose fence still shows (the agent unwraps those). Both divergences were accepted by the maintainer 2026-10-25. Only the undecided current line is held: at most 64 characters outside a section, where a line that cannot be a header streams at once, and 2048 inside one, past which it is prose; each delta is also held until the next frame. When the terminal frame carries a validated `**Citations:**` list the Pipe shows that list, spelled exactly as `_chat_final_frames` spells it for that frame's `citations`, and it follows the prose unchanged: a held last delta equal to that list is used as the list, not shown as model text, and any other last delta stays model text while the list is rendered from the terminal frame's `citations`; with no validated list none is shown. The header and list-marker patterns are copies of `cites.py`'s, pinned equal by a test. Each delta is yielded as an OpenAI chunk dict, never a raw string, because Open WebUI forwards a yielded string that starts with `data:` as an SSE frame and emits its `event`: model text cannot forge a banner, source or replace event. A non-streaming call gets one string. Tokens are provisional ([answer states](#answer-contract)): the banner arrives only after the terminal frame |
 | Completion | Complete only with a non-null `finish_reason` frame **and** `[DONE]`. A missing finish, a missing `[DONE]` or a malformed frame appends the fixed "stream ended before it completed" text with the incomplete banner |
 | Citations | One `source` event per validated citation in the terminal frame: `source{name: citation, id: doc_id}`, `document[]` = the `supplied_evidence[].text` entries carrying that citation (the excerpt the prompt actually held, never a new search), parallel `metadata[]` with `[index] citation`, doc id, page label, product, version and `label` (`source-matched`, or `inferred, not grounding` when `citations_inferred`). No URLs: a name or id that Open WebUI could render as a link (a scheme such as `http:` or `javascript:`, a bare `http` prefix, `//` or `www.`) is prefixed with `Citation: `. Supplied but uncited excerpts are not sources |
 | Verification | One final `status` event (`done: true`) in the console's wording: "Source-matched · N citation(s)" only for `accepted` with non-inferred citations; otherwise "Insufficient evidence — not operational guidance", "Unverified draft — no eligible citation", "Incomplete generation — output was cut off", or "Unverified — verification state unknown" for anything else. Inferred citations and `script_review_required` append their fixed warnings. Abstention text is the agent's own content; banners never enter the message content, so they are not sent back as history |
-| Errors | An error envelope's stable `code` selects a fixed message (`invalid_request`, `prompt_budget_exceeded`, `upstream_error`, `model_timeout`, `deadline_exceeded`, `overloaded`, `not_configured`, `representation_unavailable`, `internal`; `not_found`/`method_not_allowed`/`http_error` = configuration). An in-stream error frame uses the same table and the incomplete banner. Unknown codes, non-JSON bodies, transport failures and any internal fault give one fixed "could not be reached" text: the agent's `message`, upstream bodies and exception text are never shown, and the Pipe never raises into Open WebUI (which would display the exception) |
+| Errors | An error envelope's stable `code` selects a fixed message (`invalid_request`, `prompt_budget_exceeded`, `upstream_error`, `model_timeout`, `deadline_exceeded`, `overloaded`, `not_configured`, `representation_unavailable`, `internal`, `unsupported_reasoning_effort`; `not_found`/`method_not_allowed`/`http_error` = configuration). An in-stream error frame uses the same table and the incomplete banner. Unknown codes, non-JSON bodies, transport failures and any internal fault give one fixed "could not be reached" text: the agent's `message`, upstream bodies and exception text are never shown, and the Pipe never raises into Open WebUI (which would display the exception) |
 | History trim | Open WebUI resends the whole chat each turn, so the Pipe fits the body to the agent's cap before sending, counted as the agent counts it (`chat_body_chars`: message characters plus `product` plus `version`, not JSON bytes). It drops the oldest turns first, then any leading assistant turn (history never starts with an answer to a dropped question); the last user turn is always kept. If that turn alone exceeds the cap, the Pipe returns its fixed too-long text, which states the valve's limit, and makes no agent call. When turns were dropped it emits the fixed status "Earlier messages in this chat were not sent" (no content) and appends it to the final banner. When the agent reports `message_omitted_chars` > 0 the final banner also carries the fixed note "Your message was too long for the model; its middle part was not read" (no count, no text). The agent has no turn-count cap on the request, so the character cap is the only limit. A long last turn under the cap is sent whole and unchanged; the agent answers it ([long messages](#long-messages)) |
+| Answer reference | Only with `RAG_ANSWER_REFERENCE=true` in Open WebUI's environment (the chart sets it with `openwebui.ratings.enabled`, #1255): a completed answer (finish frame plus `[DONE]`) whose chunk id is the agent's `chatcmpl-<12-hex request id>` ends with the fixed line ``Answer reference: `<id>` `` after the validated list. This is the only message field Open WebUI hands the [rating Action](#openwebui-ratings). A failed or truncated answer gets none. Off (the default), the answer output is unchanged. Whether the switch is on or off, the Pipe removes that exact trailing line from assistant turns when it builds a request, so the agent sees its own answer, including in chats from before ratings were turned off |
 | Tasks | Background task calls (title, tags, follow-ups, summaries), detected by `__task__`, `__metadata__["task"]`, or a `task`/`metadata.task` body key, return the fixed text `Docs question` and never call the agent |
 | Allowed calls | One `POST {AGENT_URL}/v1/chat` per question. No tools, no model calls, no other host, `trust_env=False` (no proxy environment), no redirects (a 3xx is the fixed "could not be reached" text), no forwarded identity headers, no logging |
 
@@ -1868,9 +1881,10 @@ WebUI user is anonymous to the agent (#373).
    admin key, then `POST /api/v1/functions/id/docs/toggle` to enable it.
 3. Set `AGENT_URL` (Function valves, or
    `POST /api/v1/functions/id/docs/valves/update`).
-4. Model settings for Docs: no tools, no knowledge, and web search, code
-   interpreter, file upload and memory off. Keep the `citations` capability on
-   so source events render. Grant access to the docs group.
+4. Model settings for each Rosetta entry (one model per answer depth): no
+   tools, no knowledge, and web search, code interpreter, file upload and memory
+   off. Keep the `citations` capability on so source events render. Grant each
+   entry to the docs group.
 5. Point `TASK_MODEL_EXTERNAL` at a platform model or turn the generation
    tasks off. The Pipe's fixed task reply is the backstop, not the setting.
 6. Integrity: `GET /api/v1/functions/id/docs` and compare the sha256 of its
@@ -1882,6 +1896,50 @@ frontmatter together and rerun the Pipe tests against the new Pipe interface.
 Assumptions still to prove on the pinned image (#1073): `httpx` ships in it,
 and v0.12.3 passes `__task__`/`__metadata__` and renders `source` and `status`
 events as documented.
+
+<a id="openwebui-ratings"></a>
+## Open WebUI ratings (#1255)
+
+**Status:** code and tests only, default off; not yet run on a live Open WebUI (#1255).
+**Decision owners:**
+[ADR-0005](adr/0005-answer-feedback-data-boundary.md) (store, D5) and
+[ADR-0007 V2](adr/0007-open-webui-docs-front-end.md). **Code:**
+[`integrations/openwebui/rating_action.py`](../integrations/openwebui/rating_action.py)
+(chart copy pinned equal). **Evidence:**
+[Action tests](../tests/test_openwebui_rating_action.py), including a round trip from the Pipe
+through the real `/v1/chat` and `/v1/feedback`.
+
+- **What users see.** Two buttons under every answer, "Good answer" and "Bad answer". A bad
+  answer asks for an optional short reason (at most 2000 characters). A toast reports the
+  outcome. Cancelling the reason dialog rates nothing. Re-rating replaces the earlier rating
+  (ADR-0005).
+- **What is stored, and where.** One rating per answer: `good` or `bad`, the reason as
+  `comment`, and no `reasons` codes. It goes to `POST /v1/feedback` and from there only to the
+  feedback store. No rater identity is recorded (D5). The answer reference itself is part of the
+  saved Open WebUI message, so the chat history (30-day retention) links that request id to the
+  chat owner. Like the console, ratings are unauthenticated: anyone who knows a request id, for
+  example by editing a message's reference, can replace that answer's rating. Open WebUI's own ratings stay off
+  (`ENABLE_MESSAGE_RATING=false`). The Action writes nothing to Open WebUI's database: it emits
+  only `notification` events and one `input` event call, neither of which Open WebUI v0.12.3
+  saves, and it returns None. Saved event types (`status`, `message`, `replace`, `embeds`,
+  `files`, `source`) and a returned `messages` would be merged into the chat.
+- **Which answer.** The browser sends the Action the chat's messages up to the clicked one
+  (`content`, not `statusHistory` or `usage`). So the Action reads the agent's request id from
+  the Pipe's trailing [answer reference](#openwebui-docs-pipe) line. It requires the last
+  message to be the clicked assistant turn. Without a reference it shows a fixed "cannot be
+  rated" toast and makes no call.
+- **Calls and texts.** One `POST {AGENT_URL}/v1/feedback` per click: no credential, like the
+  Pipe; `trust_env=False`; no redirects; timeout `TIMEOUT_S` (default 10 s). Only the agent's
+  `code` selects a fixed toast (`unknown_answer`, `invalid_request`, `feedback_disabled`; any
+  other outcome is "temporarily unavailable"). It never raises into Open WebUI, which would save
+  the exception text as the message's error, and it does no logging.
+- **Arguments.** Only `body`, `__id__` (`up`/`down`), `__event_emitter__` and
+  `__event_call__`; a test pins the signature (ADR-0007 V2).
+- **Install.** `openwebui.ratings.enabled` (requires `feedback.enabled`) mounts the Action and
+  sets `RAG_ANSWER_REFERENCE=true`. The installer (`provision_pipe.py`) converges the Function
+  set to the docs Pipe plus the Action: hash-checked against `ACTION_SHA256`, active and global
+  (a Function-backed model shows only global Actions). With ratings off it deletes the Action.
+  The proxy admits only `/api/chat/actions/mainframe_rag_rating.(up|down)`.
 
 <a id="source-observations"></a>
 ## Source observations (live z/OS state)

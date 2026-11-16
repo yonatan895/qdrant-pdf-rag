@@ -12,7 +12,7 @@ Commands:
   dex-config STATE HASHES        print the Dex config (HASHES: one bcrypt hash per USERS line)
   login STATE USER               sign in; print role, groups and visible models
   api-key STATE                  admin: create an API key into STATE/admin-api-key (mode 600)
-  access STATE                   admin: create the groups, grant the Rosetta model to them
+  access STATE                   admin: create the groups, grant each Rosetta model (answer depth) to them
   smoke STATE                    both users: sign in, models, one docs question, blocked paths
   health STATE                   Open WebUI /health through the router and Dex discovery
 
@@ -46,7 +46,15 @@ USERS = {
     "other-user": ("other-team", "7c1f3e52-0000-4000-8000-000000000004"),
 }
 EMAIL_DOMAIN = "trial.test"
-DOCS_MODEL = "mainframe_rag_docs"  # provision_pipe.py PIPE_ID
+DOCS_FUNCTION = "mainframe_rag_docs"  # provision_pipe.py PIPE_ID
+# The docs Pipe's answer-depth entries (#1255, docs_pipe.py DEPTHS) as Open WebUI v0.12.3
+# models: `<Function id>.<entry id>`, with the entry's display name. The first is the default.
+DOCS_MODELS = (
+    (f"{DOCS_FUNCTION}.standard", "Rosetta"),
+    (f"{DOCS_FUNCTION}.quick", "Rosetta \N{EN DASH} quick"),
+    (f"{DOCS_FUNCTION}.thorough", "Rosetta \N{EN DASH} thorough"),
+)
+DOCS_MODEL = DOCS_MODELS[0][0]  # the model the harness chats with
 DOCS_GROUPS = ("internal-team", "docs-readers")
 # The site acceptance list (docs/deploy.md, allow-list proxy, #1083): each must be 403
 # "denied" from the proxy sidecar. The null-byte form is sent percent-encoded.
@@ -56,6 +64,7 @@ BLOCKED = (
     "/api/v1/chats/%2e%2e/files/", "/api/v1/%2566iles/", "/api/v1/files%00",
     "/api/v1/retrieval/process/text", "/api/v1/knowledge/", "/api/v1/audio/transcriptions",
     "/openai/chat/completions", "/ollama/api/chat", "/api/v1/utils/code/execute",
+    "/api/v1/folders/shared", "/api/v1/folders/00000000-0000-4000-8000-000000000000/access/update",
 )
 
 OWUI_URL = os.environ.get("OWUI_URL", "https://owui.localhost").rstrip("/")
@@ -195,7 +204,7 @@ class Session:
         return self.api(user, "GET", f"/api/v1/chats/{chat_id}")[0]
 
     def function_sha256(self) -> str | None:
-        status, fn = self.api(ADMIN, "GET", f"/api/v1/functions/id/{DOCS_MODEL}")
+        status, fn = self.api(ADMIN, "GET", f"/api/v1/functions/id/{DOCS_FUNCTION}")
         if status != 200 or not isinstance(fn, dict):
             return None
         import hashlib
@@ -272,20 +281,24 @@ class Session:
             "model": model, "stream": True, "messages": [{"role": "user", "content": text}]}, timeout=360)
         return {"path": "api-stream", "completion_status": status, **timing}
 
-    def chat(self, user: str, model: str, text: str, session_id: str | None = None) -> dict:
+    def chat(self, user: str, model: str, text: str, session_id: str | None = None,
+             chat_models: list[str] | None = None) -> dict:
         """One saved turn. Without session_id this is the API path for a saved chat: Open
         WebUI answers on this request when the turn is complete. With one it is the
         browser's path: Open WebUI answers the request at once and runs the turn as a
         background task that saves the message as it streams (the browser also gets socket
-        events, which this client does not read)."""
+        events, which this client does not read). chat_models is the model list stored on
+        the chat record (default [model]); a different one stands in for a chat saved with
+        another model, such as the pre-#1255 bare Function id."""
         uid, aid = str(uuid.uuid4()), str(uuid.uuid4())
+        chat_models = chat_models or [model]
         now = int(time.time())
         umsg = {"id": uid, "parentId": None, "childrenIds": [aid], "role": "user", "content": text,
                 "timestamp": now, "models": [model]}
         amsg = {"id": aid, "parentId": uid, "childrenIds": [], "role": "assistant", "content": "",
                 "model": model, "modelName": model, "modelIdx": 0, "timestamp": now}
         status, created = self.api(user, "POST", "/api/v1/chats/new", {"chat": {
-            "title": "Hands-on smoke", "models": [model], "params": {},
+            "title": "Hands-on smoke", "models": chat_models, "params": {},
             "history": {"messages": {uid: umsg, aid: amsg}, "currentId": aid},
             "messages": [umsg, amsg], "tags": [], "timestamp": now * 1000}})
         if status != 200:
@@ -313,6 +326,7 @@ class Session:
         # Timings are seconds from the completion request; saved_content_s and done_s are
         # polled every 3 s, so each is at most 3 s late.
         return {**timing, "chat_id": chat_id, "completion_status": status, "done": message.get("done"),
+                "chat_models": (((stored or {}).get("chat") or {}).get("models")), "model": model,
                 "content_chars": len(message.get("content") or ""),
                 "status_events": len(message.get("statusHistory") or []),
                 "source_chips": len(sources),
@@ -448,10 +462,12 @@ def cmd_access(state: str) -> None:
         out({"groups_created": created, "missing": missing})
         sys.exit(1)
     grants = [{"principal_type": "group", "principal_id": ids[g], "permission": "read"} for g in DOCS_GROUPS]
-    status = s.api(ADMIN, "POST", "/api/v1/models/model/access/update",
-                   {"id": DOCS_MODEL, "name": "Rosetta", "access_grants": grants})[0]
-    out({"groups_created": created, "groups": sorted(DOCS_GROUPS), "docs_model_access_update": status})
-    if status != 200:
+    # One row per entry, under the entry's own name: a row's name replaces the entry's.
+    statuses = {model: s.api(ADMIN, "POST", "/api/v1/models/model/access/update",
+                             {"id": model, "name": name, "access_grants": grants})[0]
+                for model, name in DOCS_MODELS}
+    out({"groups_created": created, "groups": sorted(DOCS_GROUPS), "docs_model_access_update": statuses})
+    if any(status != 200 for status in statuses.values()):
         sys.exit(1)
 
 
@@ -461,7 +477,7 @@ def cmd_smoke(state: str) -> None:
     for user in ("team-user", "docs-user"):
         login = s.login(user)
         entry = {**login, **(s.whoami(user) if login.get("signed_in") else {})}
-        entry["docs_only"] = entry.get("models") == [DOCS_MODEL]
+        entry["docs_only"] = entry.get("models") == sorted(m for m, _name in DOCS_MODELS)
         entry["group_ok"] = USERS[user][0] in entry.get("groups", [])
         # group_ok is part of ok: the IdP group claim must map to the Open WebUI group (N8 of #1095).
         report["ok"] &= (bool(login.get("signed_in")) and entry["docs_only"] and entry["group_ok"]

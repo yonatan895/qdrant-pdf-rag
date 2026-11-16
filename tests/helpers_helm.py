@@ -168,6 +168,11 @@ def run_new_job_only(extra_values: dict, namespace: str = "ns") -> dict:
 def env_map(deployment: dict, container: str = "agent") -> dict:
     containers = deployment["spec"]["template"]["spec"]["containers"]
     c = next(x for x in containers if x["name"] == container)
+    names = [e["name"] for e in c.get("env", [])]
+    # Kubernetes keeps the last of two same-named entries, so a duplicate would
+    # silently override a pin (two merges both adding one name).
+    duplicates = sorted({n for n in names if names.count(n) > 1})
+    assert not duplicates, f"duplicate env names in {container}: {duplicates}"
     return {e["name"]: e for e in c.get("env", [])}
 
 def container_map(deployment: dict) -> dict:

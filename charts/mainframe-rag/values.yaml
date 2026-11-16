@@ -279,7 +279,31 @@ openwebui:
   # Public Route host; the OIDC redirect URI is https://<host>/oauth/oidc/callback.
   host: ""
   retentionDays: 30
+  # Thumbs up/down on answers (#1255), default off; requires feedback.enabled.
+  # Ratings go only to the agent's POST /v1/feedback and the feedback store
+  # (ADR-0005); Open WebUI's own ratings stay off. On: the docs Pipe ends each
+  # answer with an "Answer reference" line, and deploy.sh installs the
+  # repository rating Action (hash-checked) next to the docs Pipe. Off again:
+  # the next deploy removes the Action.
+  ratings:
+    enabled: false
   storageSize: 10Gi
+  # Chat share links and temporary chats (ADR-0007 S2, #1255). Off by default;
+  # turning either on is the site's (maintainer's) decision. These set the
+  # default user permissions; an admin can still change a group's in the UI.
+  chats:
+    # Share links inside this instance (USER_PERMISSIONS_CHAT_SHARE). A link opens
+    # only after sign-in, for its owner and the users or groups the owner grants;
+    # the no-sign-in grant stays off for users (ADR-0007 R3 admin residual). The
+    # snapshot is purged with its chat, or once it is older than retentionDays.
+    share: false
+    # Let a sharer open a link to every signed-in user of the instance
+    # (USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING). Needs share.
+    shareWithAllUsers: false
+    # Temporary chats (never saved) stay available. true: non-admins cannot start a
+    # saved chat; the server refuses to create or import one; chats saved before
+    # stay until the purge (USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED).
+    temporaryEnforced: false
   oidc:
     # https://<idp>/.well-known/openid-configuration of the identity team's client.
     providerUrl: ""

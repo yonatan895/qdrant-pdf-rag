@@ -18,9 +18,10 @@ description: The documentation corpus through the agent's /v1/chat, with its val
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 from pydantic import BaseModel, Field
@@ -58,6 +59,8 @@ ERROR_MESSAGES: dict[str, str] = {
     "not_found": _REJECTED,
     "method_not_allowed": _REJECTED,
     "http_error": _REJECTED,
+    "unsupported_reasoning_effort": "This deployment does not offer this answer depth. "
+                                    "Choose another Rosetta model and retry.",
 }
 UNREACHABLE = ("The documentation service could not be reached. Retry; if it persists, "
                "contact the operators.")
@@ -75,6 +78,29 @@ TOO_LONG = ("This message is longer than the documentation service accepts "
             "({limit} characters). Shorten it and retry.")
 NO_EXCERPT = "Excerpt text is not available in this response."
 TASK_REPLY = "Docs question"
+
+# Answer depths (#1255): the manifold entries Open WebUI shows as models,
+# `<Function id>.<id>` (v0.12.3 functions.py get_function_models). The id is
+# stored in chats and model grants, so it never changes; the name is what
+# users see. The effort is one the agent offers (LLM_REASONING_EFFORTS); None
+# omits the field, so the agent's configured simple/complex effort applies.
+# The first entry is the default: DEFAULT_MODELS in the chart names it, and an
+# unknown entry or a pre-#1255 chat's single-model id gets it. Ids, names,
+# efforts and the default: maintainer decision 2026-11-16 (#1255). Thorough is
+# xhigh on purpose: the default LLM_REASONING_EFFORTS offers it; some thorough
+# answers may reach the 270 s request deadline (the site eval measures that).
+class Depth(NamedTuple):
+    id: str
+    name: str
+    effort: str | None
+
+
+DEPTHS: tuple[Depth, ...] = (
+    Depth("standard", "Rosetta", None),
+    Depth("quick", "Rosetta \N{EN DASH} quick", "low"),
+    Depth("thorough", "Rosetta \N{EN DASH} thorough", "xhigh"),
+)
+_DEPTH_EFFORTS = {depth.id: depth.effort for depth in DEPTHS}
 
 WORKING = "Searching the documentation…"
 FAILED = "Request failed"
@@ -115,6 +141,18 @@ HOLD_MAX_CHARS = 2048  # a longer undecided line inside a section is prose
 _FENCES = ("```", "~~~")
 INFERRED = "Inferred citations — bracket provenance, not grounding"
 SCRIPT_REVIEW = "Human review required — draft script, not certified executable"
+
+# Open WebUI ratings (#1255): Open WebUI keeps no message field a rating
+# Action can read except the content, so with the chart's ratings switch on
+# (RAG_ANSWER_REFERENCE=true) a completed answer ends with this line carrying
+# the agent's request id (its chunk id is `chatcmpl-<id>`). The rating Action
+# (rating_action.py) reads it back with the same pattern; a test pins the two.
+# The wording is a proposal (maintainer decision, #1255).
+REFERENCE_ENV = "RAG_ANSWER_REFERENCE"
+REFERENCE_LINE = "\n\nAnswer reference: `{request_id}`"
+REFERENCE_RE = re.compile(r"\n\nAnswer reference: `([0-9a-f]{12})`[ \t\r\n]*\Z")
+_CHUNK_ID = re.compile(r"chatcmpl-([0-9a-f]{12})\Z")
+_REQUEST_ID_KEY = "__request_id"  # set on `final` by _deltas, never by the agent
 
 
 class _Failure(Exception):
@@ -183,6 +221,9 @@ def build_request(messages: object, user_valves: object) -> dict[str, Any] | Non
     turns: list[dict[str, str]] = []
     for message in items:
         role, text = message.get("role"), _text(message.get("content"))
+        if role == "assistant":
+            # The reference line is display state, not part of the answer.
+            text = REFERENCE_RE.sub("", text)
         if role in ("user", "assistant") and text:
             turns.append({"role": role, "content": text})
     body: dict[str, Any] = {"messages": turns, "stream": True}
@@ -190,6 +231,15 @@ def build_request(messages: object, user_valves: object) -> dict[str, Any] | Non
         if value := _valve(user_valves, name):
             body[name] = value
     return body
+
+
+def depth_effort(model: object) -> str | None:
+    """The agent effort for the selected model id `<Function id>.<depth>`; None
+    (the agent default) for the default depth, an unknown depth, or an id
+    without one, such as the single-model id chats stored before #1255."""
+    if not isinstance(model, str) or "." not in model:
+        return None
+    return _DEPTH_EFFORTS.get(model.split(".", 1)[1])
 
 
 def fit_request(request: dict[str, Any], max_chars: int) -> tuple[dict[str, Any] | None, bool]:
@@ -327,6 +377,10 @@ async def _deltas(lines: AsyncIterator[str], final: dict[str, Any],
         if choice.get("finish_reason") is not None:
             final.clear()
             final.update(choice)
+            final.pop(_REQUEST_ID_KEY, None)  # only the chunk id may set it
+            chunk_id = frame.get("id")
+            if isinstance(chunk_id, str) and (match := _CHUNK_ID.match(chunk_id)):
+                final[_REQUEST_ID_KEY] = match.group(1)
             finished = True
             rendering = _validated_list(final)
             if held is not None and held == rendering:
@@ -501,6 +555,10 @@ class Pipe:
         # Tests inject a fake agent here; Open WebUI never sets it.
         self._transport: httpx.AsyncBaseTransport | None = None
 
+    def pipes(self) -> list[dict[str, str]]:
+        """The answer depths as Open WebUI manifold entries (#1255)."""
+        return [{"id": depth.id, "name": depth.name} for depth in DEPTHS]
+
     async def pipe(
         self,
         body: dict[str, Any],
@@ -518,6 +576,8 @@ class Pipe:
         request = build_request(body.get("messages"), user_valves)
         if request is None:
             return NO_TEXT_TURN
+        if effort := depth_effort(body.get("model")):
+            request["reasoning_effort"] = effort
         request, trimmed = fit_request(request, self.valves.MAX_BODY_CHARS)
         if request is None:
             return TOO_LONG.format(limit=self.valves.MAX_BODY_CHARS)
@@ -567,8 +627,14 @@ class Pipe:
                         yield text
             if text := shown.close():
                 yield text
-            # The validated list replaces any pending line ends: it brings its own.
-            if text := (agent_list[0] if agent_list else shown.newlines()):
+            # The validated list and the reference line replace any pending
+            # line ends: they bring their own.
+            request_id = final.get(_REQUEST_ID_KEY)
+            reference = (REFERENCE_LINE.format(request_id=request_id)
+                         if os.environ.get(REFERENCE_ENV) == "true" and isinstance(request_id, str)
+                         else "")
+            pending = "" if reference else shown.newlines()
+            if text := (agent_list[0] if agent_list else pending) + reference:
                 yield text
             for source in _source_events(final):
                 await event(source)
