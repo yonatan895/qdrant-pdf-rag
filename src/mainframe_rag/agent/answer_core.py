@@ -14,7 +14,7 @@ import time
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, replace
 from itertools import zip_longest
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 from opentelemetry import trace
 from opentelemetry.context import Context
@@ -428,7 +428,7 @@ async def _build_prepared_prompt(
     settings = deps.settings
     # Passed only when it fires (issue #1276), like search_query, so a
     # non-coding call keeps its exact keyword set.
-    coding_kw = {"coding": True} if coding else {}
+    coding_kw: dict[str, Any] = {"coding": True} if coding else {}
     max_context = (
         settings.prompt_max_context_chars_complex
         if complexity == "complex"
