@@ -93,7 +93,7 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - Operator booleans `UI_ENABLED`, `CONTEXTUAL_EMBED_ENABLED`,
   `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `INGEST_AUTHORIZE_FROM_CATALOG`,
   `CHAT_CONDENSE_ENABLED`, `CHAT_FOLLOWUP_ANCHOR_ENABLED`, `LLM_STREAM`
-  `FEEDBACK_ENABLED`, `OPENWEBUI_ENABLED` and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
+  `FEEDBACK_ENABLED`, `OPENWEBUI_ENABLED`, `ANSWER_CODING_MODE_ENABLED` (unset keeps the pod's **true** default) and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
   accept only `true/1/yes` or `false/0/no` (any case; unset keeps the
   default). `INGEST_ALIAS_PUBLISH` may only be unset or true: in-place ingest
   was retired (#360) and an explicit false fails closed.
@@ -2386,7 +2386,10 @@ application's false default. The chat history caps `CHAT_MAX_TURNS` and
 application defaults (10 and 1000). `CHAT_FOLLOWUP_ANCHOR_ENABLED` maps to
 `models.reasoning.followupAnchorEnabled` and renders only when set; it is
 exclusive with `CHAT_CONDENSE_ENABLED` (preflight, the mapper and the chart
-schema refuse both true; the pod's Settings would too). Site follow-up arms:
+schema refuse both true; the pod's Settings would too). `ANSWER_CODING_MODE_ENABLED`
+(#1276) maps to `models.reasoning.codingModeEnabled` and renders only when set;
+unset keeps the pod's on default, and `ANSWER_CODING_MODE_ENABLED=false` in
+`airgap.env` is the one-line per-site revert (the `coding-off` arm). Site follow-up arms:
 `condense` = `CHAT_CONDENSE_ENABLED=true`, `anchored` =
 `CHAT_FOLLOWUP_ANCHOR_ENABLED=true`, `history4000` =
 `CHAT_MAX_PRIOR_TURN_CHARS=4000`; redeploy between arms. Enable it deliberately when qualifying pronoun-only

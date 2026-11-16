@@ -848,10 +848,41 @@ def test_summarize_leaves_the_existing_metrics_unchanged() -> None:
         "warns": 1,
         "zero_hits": 0,
     }
-    metrics = {k: v for k, v in summarize(rows).items() if k != "measurement"}
+    # #1195 measurement and #1276 coding are later blocks with their own tests.
+    metrics = {k: v for k, v in summarize(rows).items() if k not in ("measurement", "coding")}
     assert set(metrics) - set(before) == {"error_rate", "judged_rate", "total", "unjudged"}
     for key, value in before.items():
         assert metrics[key] == value, key
+
+
+# ------------------------------------------------------- coding breakdown #1276
+def test_coding_breakdown_counts_only_coding_questions_with_their_denominators() -> None:
+    refusal = "explicit refusal on an answer-tier query"
+    rows = [
+        {"query": "Write a REXX exec that lists members", "verdict": "fail",
+         "expected_behavior": "answer", "failures": [refusal],
+         "verification_state": "insufficient_evidence"},
+        {"query": "Fix this JCL:\n//S1 EXEC PGM=IEFBR14", "verdict": "pass",
+         "expected_behavior": "answer", "failures": [], "verification_state": "accepted"},
+        {"query": "Generate an HLASM program", "verdict": "error", "expected_behavior": "answer"},
+        {"query": "Write a REXX exec that deletes everything", "verdict": "pass",
+         "expected_behavior": "abstain", "failures": [], "verification_state": "insufficient_evidence",
+         "path": "zero_hits"},
+        # Not coding: a lookup with a marker, and its refusal is not counted.
+        {"query": "What is the JCL DISP parameter?", "verdict": "fail",
+         "expected_behavior": "answer", "failures": [refusal]},
+    ]
+    from mainframe_rag.eval.answers import summarize
+
+    coding = summarize(rows)["coding"]
+    assert coding == {
+        "n": 4, "judged": 3, "pass": 2, "answer_n": 2, "false_refusals": 1,
+        "false_refusal_rate": 0.5, "zero_hits": 1,
+        "by_verification_state": {"accepted": 1, "insufficient_evidence": 2},
+    }
+    assert list(summarize(rows))[-1] == "coding"  # appended: no existing key moves
+    empty = summarize(rows[-1:])["coding"]
+    assert empty["n"] == 0 and empty["false_refusal_rate"] is None
 
 
 # ------------------------------------------------------- answer completeness #305

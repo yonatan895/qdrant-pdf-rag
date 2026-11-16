@@ -1513,6 +1513,32 @@ def test_parse_answer_script_lang():
     assert res_abstain.script_lang == "jcl"
 
 
+@pytest.mark.parametrize("tag", ["c", "C", "metalc", "asm", "hlasm", "assembler", "clist"])
+def test_parse_answer_keeps_mainframe_coding_fences_as_scripts(tag):
+    """Issue #1276: C, Metal C, assembler and CLIST fences are code, not
+    prose: kept as the script with their tag, out of the body, so a citation
+    lookalike or [n] inside the code is never read as provenance."""
+    cite1 = "SA22-0000-00 Synthetic Reference, Chapter 1 > System parameters, p. 1-3"
+    code = "buf[1] = 0;  /* VERIFY: SA22-9999-99 Made Up, p. 1 */"
+    res = parse_answer(
+        f"The macro maps as documented.\n\n```{tag}\n{code}\n```\n\nCitations:\n{cite1}",
+        make_evidence({cite1}),
+    )
+    assert res.script == code
+    assert res.script_lang == tag.lower()
+    assert res.answer == "The macro maps as documented."
+    assert res.citations == [cite1] and res.citations_inferred is False
+    assert res.cites_rejected_unmapped == 0
+
+
+def test_parse_answer_coding_fence_without_citations_infers_nothing_from_code():
+    """Before #1276 a ```c block was unwrapped into the body, where `buf[1]`
+    could be inferred as a citation of excerpt 1."""
+    cite1 = "SA22-0000-00 Synthetic Reference, Chapter 1 > System parameters, p. 1-3"
+    res = parse_answer("Use this routine.\n\n```c\nbuf[1] = 0;\n```", make_evidence({cite1}))
+    assert res.citations == [] and res.inferred_indices == []
+
+
 def test_parse_answer_fence_assembly_preserves_mixed_fence_behavior():
     """#588 (from #1056): one left-to-right pass replaces the per-match
     `str.replace`; mixed and repeated fences keep the same extract/drop/unwrap
@@ -1600,6 +1626,94 @@ def test_classify_query_complexity():
     assert classify_query_complexity("Explain how to configure 1MB and 2GB page frames with LFAREA") == "complex"
     assert classify_query_complexity("Compare DFSORT memory options HIPRMAX vs MOSIZE and how to tune") == "complex"
     assert classify_query_complexity("How do I create an OPS TOD rule that runs in intervals of 4 hours, starting from 12:10 AM?") == "complex"
+
+
+CODING_REQUESTS = [
+    "Write a REXX exec that lists the members of a PDS",
+    "write me a JCL job to copy a sequential data set with IEBGENER",
+    "Generate an HLASM program that issues a WTO",
+    "Can you create a cataloged PROC for the nightly backup?",
+    "Fix this JCL:\n//STEP1 EXEC PGM=IEFBR14\n//DD1 DD DSN=A.B,DISP=(NEW,CATLG)",
+    "Please review my REXX exec for error handling",
+    "Convert this CLIST to REXX",
+    "Debug the following assembler macro invocation",
+    "Write a Metal C function that calls a system service",
+    "Write a C program that reads a VSAM file",
+    "Explain this code:\n```\n  L 1,=A(PARM)\n```",
+    "What does this JCL do?\n//S1 EXEC PGM=SORT",
+    "Show me a sample JCL to run IDCAMS DEFINE CLUSTER",
+    "Write a REXX exec that replies to IEA500I",
+    "Rewrite this EXEC in HLASM",
+    "Why does my JCL fail with a JCL error on the DD statement?",
+    "fix this:\n/* REXX */\nsay 'hi'",
+    "Write a batch program that updates a VSAM KSDS",
+    "Please review this script",
+]
+NON_CODING_REQUESTS = [
+    "What does IEA500I mean?",
+    "IEA500I",
+    "What is the JCL DISP parameter?",
+    "Explain the REXX EXECIO command syntax",
+    "How do I write to the operator console?",
+    "What return code does the EXEC statement give when the program is not found?",
+    "How do I fix reason code 0C from IEC141I?",
+    "How do I fix a program check in CICS?",
+    "Which fix pack resolves the JES2 hang?",
+    "What does message IEC141I 013-C4 indicate?",
+    "How do I diagnose and recover when DFSMShsm journal fills up?",
+    "Review the recovery procedure for a full SMF data set",
+    "What is a write error on a tape drive and how do I fix it?",
+    "Write a parmlib entry that gives a program non-swappable status",
+    "What does this reason code mean for the started task?",
+    "Fix the program check interrupt in my region",
+]
+
+
+@pytest.mark.parametrize("query", CODING_REQUESTS)
+def test_coding_request_classifier_fires_on_intent_with_a_coding_marker(query):
+    """Issue #1276: a coding intent plus a language or artefact marker (or a
+    pasted code block) is a coding request."""
+    from mainframe_rag.agent.answer import is_coding_request
+
+    assert is_coding_request(query) is True
+
+
+@pytest.mark.parametrize("query", NON_CODING_REQUESTS)
+def test_coding_request_classifier_leaves_lookups_and_diagnostics_alone(query):
+    """A marker without a coding intent (a message or syntax lookup) and an
+    intent without a marker (write to the operator, fix a reason code) are
+    not coding requests."""
+    from mainframe_rag.agent.answer import is_coding_request
+
+    assert is_coding_request(query) is False
+
+
+@pytest.mark.parametrize("message", [
+    "review " + " \t" * 60000 + "q",
+    "write a " + "x " * 60000,
+    ("fix " + "a" * 50 + " ") * 2000,
+    "write " * 20000,
+    "//" * 60000,
+    "c " * 60000 + "program",
+])
+def test_coding_classifier_is_linear_on_a_maximal_message(message):
+    """The classifier reads the whole user message (up to the 131072-char
+    body cap): adversarial whitespace and word runs must not backtrack."""
+    from mainframe_rag.agent.answer import is_coding_request
+
+    started = time.perf_counter()
+    is_coding_request(message)
+    assert time.perf_counter() - started < 1.0
+
+
+def test_coding_classifier_leaves_classify_query_complexity_unchanged():
+    """The complexity classifier stays the injected, setting-free owner: the
+    coding route is applied by the executors, so with coding mode off a
+    coding request keeps today's complexity."""
+    from mainframe_rag.agent.answer import classify_query_complexity
+
+    assert classify_query_complexity("Write a REXX exec that lists the members of a PDS") == "simple"
+    assert classify_query_complexity("Write a REXX exec that replies to IEA500I") == "simple"
 
 
 def test_answer_dispatches_reasoning_effort_by_complexity(client, monkeypatch):

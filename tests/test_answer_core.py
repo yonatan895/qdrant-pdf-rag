@@ -2144,3 +2144,118 @@ def test_derived_query_keeps_the_question_when_pasted_lines_read_as_prose():
     query = derive_retrieval_query("\n".join([opening, *log, question, closing]), settings)
     assert query.startswith(opening) and query.endswith(closing)
     assert query.index(opening) < query.index("worker 0 ") < query.index(question)
+
+
+# ------------------------------------------------- coding mode (issue #1276)
+
+_CODING_REQUEST = "Write an HLASM program that issues a WTO"
+
+
+async def _coding_core(content, *, stream=False, enabled=True, query=_CODING_REQUEST, hits=True):
+    def retrieve(*_args, **_kwargs):
+        return ([_hit()] if hits else []), "nl", {}
+
+    llm = CoreFakeLLM()
+    llm.content = content
+    deps = _deps(_settings(answer_coding_mode_enabled=enabled), llm, retrieve)
+    source = AnswerCoreInput(query=query)
+    if stream:
+        events = [event async for event in execute_answer_core_stream(source, deps)]
+        output = events[-1]["output"]
+    else:
+        output = await execute_answer_core(source, deps)
+    return output, llm
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_core_routes_a_coding_request_to_the_complex_coding_prompt_only_when_enabled(
+    stream, enabled
+):
+    """The executors decide coding mode once: on, a coding request takes the
+    complex path (effort, prompt) with the coding extension; off, it keeps
+    the classifier's simple path and the pre-#1276 prompt."""
+    from mainframe_rag.agent.answer import SYSTEM_PROMPT, SYSTEM_PROMPT_CODING_EXTENSION
+
+    settings = _settings()
+    output, llm = await _coding_core(f"Done.\nCitations:\n{_hit().cite}", stream=stream,
+                                     enabled=enabled)
+    system = llm.calls[0]["messages"][0].content
+    user = llm.calls[0]["messages"][-1].content
+    if enabled:
+        assert output.complexity == "complex"
+        assert llm.calls[0]["reasoning_effort"] == settings.llm_reasoning_effort_complex
+        assert system.endswith(SYSTEM_PROMPT_CODING_EXTENSION)
+        assert "strictly" not in user
+    else:
+        assert output.complexity == "simple"
+        assert llm.calls[0]["reasoning_effort"] == settings.llm_reasoning_effort_simple
+        assert system == SYSTEM_PROMPT
+        assert "Please answer based strictly" in user
+
+
+@pytest.mark.anyio
+async def test_core_leaves_a_lookup_on_its_path_with_coding_mode_on():
+    from mainframe_rag.agent.answer import SYSTEM_PROMPT
+
+    output, llm = await _coding_core(f"Done.\nCitations:\n{_hit().cite}",
+                                     query="What is the JCL DISP parameter?")
+    assert output.complexity == "simple"
+    assert llm.calls[0]["messages"][0].content == SYSTEM_PROMPT
+
+
+_HLASM = "```hlasm\nHELLO    CSECT\n         WTO   'HELLO'  VERIFY: routing codes\n```"
+_CHECKLIST = "Pre-production checklist:\n- VERIFY: routing codes"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "content,citations,state,abstained_script",
+    [
+        # Code, cited mapping prose, VERIFY items and the checklist: grounded.
+        (f"The WTO macro [1] writes the message.\n{_HLASM}\n{_CHECKLIST}\nCitations:\n{{cite}}",
+         ["{cite}"], "accepted", False),
+        # A partial-coverage caveat beside real content is not an abstention.
+        (("The excerpts describe WTO but not every operand. The WTO macro writes the "
+          f"message.\n{_HLASM}\n{_CHECKLIST}\nCitations:\n{{cite}}"),
+         ["{cite}"], "accepted", False),
+        # Code without any supporting citation stays a draft.
+        (f"The WTO macro writes the message.\n{_HLASM}\n{_CHECKLIST}", [], "unverified_draft",
+         False),
+        # Inferred-only provenance stays a draft.
+        (f"The WTO macro [1] writes the message.\n{_HLASM}\n{_CHECKLIST}", ["{cite}"],
+         "unverified_draft", False),
+        # Code alone, no prose: a human-review draft, whatever it cites.
+        (f"{_HLASM}\nCitations:\n{{cite}}", ["{cite}"], "unverified_draft", False),
+        # Characterization (same as jcl/rexx today): a refusal-only body beside
+        # a script is an abstention; citations are zeroed, the script is kept.
+        (f"The excerpts do not contain a WTO example.\n{_HLASM}\nCitations:\n{{cite}}", [],
+         "insufficient_evidence", True),
+    ],
+)
+async def test_core_coding_turn_verification_states_stay_honest(
+    content, citations, state, abstained_script
+):
+    cite = _hit().cite
+    output, _llm = await _coding_core(content.format(cite=cite))
+    assert output.verification_state == state
+    assert output.citations == [c.format(cite=cite) for c in citations]
+    assert output.script is not None and "VERIFY: routing codes" in output.script
+    assert output.script_lang == "hlasm"
+    assert output.script_review_required is True
+    assert "CSECT" not in output.answer
+    if abstained_script:
+        assert output.citations == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_core_coding_request_without_hits_makes_no_model_call(stream):
+    """The zero-hits short circuit holds on a coding turn: no excerpts, no
+    generation, the fixed no-hits answer, insufficient_evidence."""
+    output, llm = await _coding_core("unused", stream=stream, hits=False)
+    assert llm.calls == []
+    assert output.answer == "No supporting manual excerpts were found for this question."
+    assert output.verification_state == "insufficient_evidence"
+    assert output.complexity == "complex"

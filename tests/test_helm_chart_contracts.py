@@ -507,12 +507,28 @@ def test_chart_preserves_positive_operator_dimension_and_worker_range():
     ("chatMaxTurns", 50, "CHAT_MAX_TURNS"),
     ("followupAnchorEnabled", True, "CHAT_FOLLOWUP_ANCHOR_ENABLED"),
     ("followupAnchorEnabled", False, "CHAT_FOLLOWUP_ANCHOR_ENABLED"),
+    ("codingModeEnabled", True, "ANSWER_CODING_MODE_ENABLED"),
+    ("codingModeEnabled", False, "ANSWER_CODING_MODE_ENABLED"),
 ])
 def test_direct_chart_optional_budget_limits_reach_pod(field, value, environment):
     rendered = run_new_template({"models": {"reasoning": {field: value}}})
     pod = env_map(rendered["Deployment", "rag-agent"])
     expected = str(value).lower() if isinstance(value, bool) else str(value)
     assert pod[environment]["value"] == expected
+
+
+def test_coding_mode_off_reaches_the_pod_settings_and_unset_renders_nothing(monkeypatch):
+    """Issue #1276: the one-line revert crosses the chart into Settings as
+    false; an unset value renders no variable, so the pod keeps the on
+    default and unset manifests are unchanged."""
+    from mainframe_rag.config import Settings
+
+    default = env_map(run_new_template({})["Deployment", "rag-agent"])
+    assert "ANSWER_CODING_MODE_ENABLED" not in default
+    pod = env_map(run_new_template({"models": {"reasoning": {"codingModeEnabled": False}}})[
+        "Deployment", "rag-agent"])
+    monkeypatch.setenv("ANSWER_CODING_MODE_ENABLED", pod["ANSWER_CODING_MODE_ENABLED"]["value"])
+    assert Settings(_env_file=None).answer_coding_mode_enabled is False
 
 
 def test_chat_history_limits_are_optional_pod_inputs_bounded_like_settings():

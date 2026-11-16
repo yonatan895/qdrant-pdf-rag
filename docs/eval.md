@@ -942,6 +942,28 @@ The earlier two-arm condense comparison (`--arm condense-off`/`condense-on`
 without `--follow-up`) remains valid. Its exports keep the anaphoric-only
 shape.
 
+**Coding mode (issue #1276).** Every report and export carries
+`metrics.coding`: the rows whose question the agent's own classifier
+(`is_coding_request`) marks as a coding request, derived on the evaluator side
+from the question, so the old build, the candidate and the arm below count the
+same rows. It holds counts only: `n`, `judged`, `pass`, `answer_n`,
+`false_refusals` and `false_refusal_rate` (same rule as the top-level false
+refusals; denominator `answer_n`), `zero_hits` and `by_verification_state`.
+The pinned `evals/golden.jsonl` has two such rows (SYN-30, SYN-35), too few to
+read: the coding refusal rate needs 10–20 coding questions (JCL, REXX, HLASM,
+Metal C) written by the team for the graded eval (#1191 D3); golden.jsonl is
+not edited for this.
+
+- `coding-off`: one single-turn session on the candidate build with
+  `ANSWER_CODING_MODE_ENABLED=false` in `airgap.env`, redeployed, then the
+  same `run` lines as B1 (both endpoints, `--all --repeats 2`, or the
+  session's agreed subset), labelled `D-coding-off`. Revert the line and
+  redeploy afterwards. Compare `metrics.coding` and `by_class.syntax`
+  against B1/B2 under the decision rule below; the rest of the metrics must
+  not move beyond B1 against B2, because with coding mode off only coding
+  requests change. The old build (A sessions) predates the setting and is
+  already the coding-off prompt with the old fence handling.
+
 **Decision rule.** The [protocol above](#measurement-protocol)
 applies: decide on the hardware-independent group only, and a difference
 smaller than the range either arm shows across its own repeats is noise. At a

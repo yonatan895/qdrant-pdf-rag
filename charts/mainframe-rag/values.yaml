@@ -105,6 +105,9 @@ models:
     # Antecedent-anchored follow-up retrieval (#1268); absent keeps it off.
     # Exclusive with condenseEnabled (the schema refuses both true).
     # followupAnchorEnabled: false
+    # Coding mode (#1276); absent keeps the Settings default (on). false
+    # restores the pre-#1276 prompts for every request.
+    # codingModeEnabled: true
     # Empty model disables /v1/answer; when set, baseUrl is required.
     baseUrl: ""
     model: ""

@@ -170,6 +170,7 @@ from mainframe_rag.agent.answer import (
     VERIFICATION_STATES,
     has_answer_body,
     is_abstention,
+    is_coding_request,
     is_refusal,
 )
 from mainframe_rag.config import Settings, load_settings
@@ -557,7 +558,36 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     metrics["unjudged"] = total - len(judged) - metrics["errors"]
     metrics["error_rate"] = round(metrics["errors"] / total, 4) if total else None
     metrics["judged_rate"] = round(len(judged) / total, 4) if total else None
+    # Coding requests (issue #1276), appended last so no key order moves.
+    metrics["coding"] = coding_breakdown(results)
     return metrics
+
+
+def coding_breakdown(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Counts for the rows whose question is a coding request (issue #1276).
+
+    The class is derived on the evaluator side from each row's question with
+    the agent's own deterministic classifier, never from a dataset field, so
+    the old build, the candidate and a `coding-off` arm count the same rows.
+    Text-free: counts, rates with their denominators and state labels only.
+    The refusal rule is summarize()'s false-refusal rule."""
+    rows = [r for r in results if is_coding_request(str(r.get("query") or ""))]
+    judged = [r for r in rows if r.get("verdict") in ("pass", "fail")]
+    answer_rows = [r for r in judged if r.get("expected_behavior") == "answer"]
+    refusals = sum(1 for r in answer_rows
+                   if "explicit refusal on an answer-tier query" in (r.get("failures") or []))
+    passed = sum(1 for r in judged if r["verdict"] == "pass")
+    return {
+        "n": len(rows),
+        "judged": len(judged),
+        "pass": passed,
+        "answer_n": len(answer_rows),
+        "false_refusals": refusals,
+        "false_refusal_rate": round(refusals / len(answer_rows), 4) if answer_rows else None,
+        "zero_hits": sum(1 for r in judged if r.get("path") == "zero_hits"),
+        "by_verification_state": dict(sorted(Counter(
+            str(r.get("verification_state") or "unknown") for r in judged).items())),
+    }
 
 
 def _mean(values: list[Any]) -> float | None:
@@ -1837,6 +1867,13 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
         f"(n={metrics.get('answer_completeness_n')}: expected docs retrieved; share whose "
         "validated citations cover all of them; None = caller had no pool join)"
     )
+    coding = metrics.get("coding")
+    if coding:
+        lines.append(
+            f"- coding requests (#1276): {coding['n']} rows, pass {coding['pass']}/{coding['judged']}, "
+            f"false refusals {coding['false_refusals']} "
+            f"(rate {coding['false_refusal_rate']}, n={coding['answer_n']})"
+        )
     lines.append("")
     lines.append("| class | n | pass |")
     lines.append("|---|---|---|")

@@ -693,6 +693,38 @@ otherwise multi-step configuration phrasing, comparisons (`versus`, `vs`,
 (`rule, interval, parameter, parmlib, jcl, policy, threshold, journal`)
 select `complex`. Default is `simple`.
 
+Coding mode (#1276, `answer_coding_mode_enabled`, default **on** by maintainer
+decision 2026-11-16; operator input `ANSWER_CODING_MODE_ENABLED`). Both
+executors decide it once per turn, next to the complexity call:
+`coding_mode_applies(message, search_text, settings)` is true when the setting
+is on and `is_coding_request` holds for the user's message or the searched text
+(a condensed follow-up). The classifier is deterministic, word-bounded and needs
+both a coding intent (write, generate, create, draft, rewrite, convert,
+translate, port, refactor, fix, debug, review, correct; "explain this", "what
+does this", "what's wrong with", "why does my"; sample/example/template) and a
+marker: JCL, jobstream, REXX, CLIST, HLASM, assembler, Metal C, CSECT/DSECT,
+PROCLIB, EXEC, macro, PROC, a cataloged or in-stream procedure, C as a language
+("C program", "in C"), "this/my code", a generic program/routine/script as the
+verb's object, or pasted code (a fence, a `//name JOB|EXEC|DD|PROC` line, a
+`/* REXX` header). A marker alone (a message or syntax lookup) or an intent
+alone (fix a reason code) is not a coding request. A coding turn:
+
+- is `complex` (effort, context, thinking reserve, output cap), overriding the
+  injected `classify_query_complexity`, which itself is unchanged;
+- gets `SYSTEM_PROMPT + SYSTEM_PROMPT_COMPLEX_EXTENSION +
+  SYSTEM_PROMPT_CODING_EXTENSION`, a coding tail without "strictly", and under
+  `stable_cache` the `STABLE_CACHE_INSTRUCTIONS_CODING` block;
+- keeps every verification rule: no new state, `accepted` still needs
+  validated explicit citations, inferred-only or uncited code stays
+  `unverified_draft`, empty hits still short-circuit with no model call, and a
+  refusal-only body beside a script is still an abstention (citations zeroed,
+  script kept, as for JCL/REXX).
+
+The builders receive `coding=True` only from the executors (passed only when it
+fires, like `search_query`), so with the setting off, or for any other turn,
+every prompt keeps its pre-#1276 bytes (`tests/test_prompt_order.py` pins the
+constants' hashes and on/off equality).
+
 - Defaults (#777 sizing for Qwen3.8-27B at a 32768-token window; effort
   changed to `medium` by #917, maintainer decision 2026-10-23, basis in
   [eval.md](eval.md) and #932): `medium` effort on both paths; complex adds the extended system prompt. Temperature
@@ -869,7 +901,8 @@ hits omitted by budget packing, and the tail's example cite, are rejected:
   lines only — inline mentions (`refer to SA22-… for details`), dimensions
   (`3.5 inches`), and table pipes survive.
 - Fenced code blocks in `SCRIPT_LANGS` (`jcl, rexx, sh, bash, shell,
-  python, py, yaml, yml, json, ops, rule, parmlib`) become `script` (joined,
+  python, py, yaml, yml, json, ops, rule, parmlib, c, metalc, asm, hlasm,
+  assembler, clist`; the last six from #1276) become `script` (joined,
   removed from body) and pass through **unvalidated** — cite-like lines
   inside code are kept; `thought`/`thinking` fences are dropped; other
   fences unwrap to body. Validating scripts would corrupt JCL/REXX;
@@ -1092,6 +1125,7 @@ readers:
 | `chat_max_body_chars` | 131072 (422, message states the limit) | request-size guard for `/v1/answer`, `/v1/chat` and `/ui` (abuse protection; shared `chat_body_chars` helper); the Pipe valve `MAX_BODY_CHARS` must match |
 | `chat_max_turns` / `chat_max_prior_turn_chars` | 10 / 1000 | chat history packing caps; operator inputs `CHAT_MAX_TURNS` / `CHAT_MAX_PRIOR_TURN_CHARS` (#1268; unset renders no variable) |
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
+| `answer_coding_mode_enabled` | `true` (#1276) | coding mode: coding requests take the complex path and the coding prompt extension ([prompt assembly](#4-prompt-assembly-and-budgets)); operator input `ANSWER_CODING_MODE_ENABLED`, unset renders no variable |
 | `llm_base_url` / `llm_model_reasoning` / `llm_api_key` | unset (answer stays disabled; key unset = keyless) | per-request assertion, LLM client, tokenizer |
 | `answer_timeout_s` | 300.0 | reasoning client wait per model I/O (not a total on a stream; a buffered caller still gets a total), expiry is `504 model_timeout`; no transport retries, explicit fallback policy below; budgets in §6 |
 | `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | medium / medium / 0.2 | answer path (#917, was xhigh / xhigh from #777) |
@@ -1855,7 +1889,7 @@ only; the PR lints and types this file directly.
 | Answer text | Prose deltas stream through in order. The model's own citations section (answer prompt rule 7) is unvalidated, so the Pipe hides it (#1098): a header alone on its line, as `cites.py` recognizes it (`Citations:`, or the `Sources:`/`References:` aliases), starts a section; a `Citations:` section takes citation and bullet lines, an alias section only citation lines; a blank line after a citation, or any other line, ends it and the text is prose again (an alias header followed by prose is kept). A citation here is any line with a `, ` gap before a `, p. ` tail, a superset of the agent's shape test, which needs the supplied doc ids, so such a line right after a `Citations:` header is hidden even where `cites.py` keeps it as prose. Fenced code is never touched, so a raw section inside a prose fence still shows (the agent unwraps those). Both divergences were accepted by the maintainer 2026-10-25. Only the undecided current line is held: at most 64 characters outside a section, where a line that cannot be a header streams at once, and 2048 inside one, past which it is prose; each delta is also held until the next frame. When the terminal frame carries a validated `**Citations:**` list the Pipe shows that list, spelled exactly as `_chat_final_frames` spells it for that frame's `citations`, and it follows the prose unchanged: a held last delta equal to that list is used as the list, not shown as model text, and any other last delta stays model text while the list is rendered from the terminal frame's `citations`; with no validated list none is shown. The header and list-marker patterns are copies of `cites.py`'s, pinned equal by a test. Each delta is yielded as an OpenAI chunk dict, never a raw string, because Open WebUI forwards a yielded string that starts with `data:` as an SSE frame and emits its `event`: model text cannot forge a banner, source or replace event. A non-streaming call gets one string. Tokens are provisional ([answer states](#answer-contract)): the banner arrives only after the terminal frame |
 | Completion | Complete only with a non-null `finish_reason` frame **and** `[DONE]`. A missing finish, a missing `[DONE]` or a malformed frame appends the fixed "stream ended before it completed" text with the incomplete banner |
 | Citations | One `source` event per validated citation in the terminal frame: `source{name: citation, id: doc_id}`, `document[]` = the `supplied_evidence[].text` entries carrying that citation (the excerpt the prompt actually held, never a new search), parallel `metadata[]` with `[index] citation`, doc id, page label, product, version and `label` (`source-matched`, or `inferred, not grounding` when `citations_inferred`). No URLs: a name or id that Open WebUI could render as a link (a scheme such as `http:` or `javascript:`, a bare `http` prefix, `//` or `www.`) is prefixed with `Citation: `. Supplied but uncited excerpts are not sources |
-| Verification | One final `status` event (`done: true`) in the console's wording: "Source-matched · N citation(s)" only for `accepted` with non-inferred citations; otherwise "Insufficient evidence — not operational guidance", "Unverified draft — no eligible citation", "Incomplete generation — output was cut off", or "Unverified — verification state unknown" for anything else. Inferred citations and `script_review_required` append their fixed warnings. Abstention text is the agent's own content; banners never enter the message content, so they are not sent back as history |
+| Verification | One final `status` event (`done: true`) in the console's wording: "Source-matched · N citation(s)" only for `accepted` with non-inferred citations, with " (incl. house guidance)" appended when a validated citation's supplied doc id starts with `HOUSE-` (#1276: AI-drafted house guides, `HOUSE-AI-DRAFT-<topic>` / `HOUSE-REVIEWED-<topic>`; that source entry's name gains " (house guidance)" and its label ", house guidance"); otherwise "Insufficient evidence — not operational guidance", "Unverified draft — no eligible citation", "Incomplete generation — output was cut off", or "Unverified — verification state unknown" for anything else. Inferred citations and `script_review_required` append their fixed warnings. Abstention text is the agent's own content; banners never enter the message content, so they are not sent back as history |
 | Errors | An error envelope's stable `code` selects a fixed message (`invalid_request`, `prompt_budget_exceeded`, `upstream_error`, `model_timeout`, `deadline_exceeded`, `overloaded`, `not_configured`, `representation_unavailable`, `internal`, `unsupported_reasoning_effort`; `not_found`/`method_not_allowed`/`http_error` = configuration). An in-stream error frame uses the same table and the incomplete banner. Unknown codes, non-JSON bodies, transport failures and any internal fault give one fixed "could not be reached" text: the agent's `message`, upstream bodies and exception text are never shown, and the Pipe never raises into Open WebUI (which would display the exception) |
 | History trim | Open WebUI resends the whole chat each turn, so the Pipe fits the body to the agent's cap before sending, counted as the agent counts it (`chat_body_chars`: message characters plus `product` plus `version`, not JSON bytes). It drops the oldest turns first, then any leading assistant turn (history never starts with an answer to a dropped question); the last user turn is always kept. If that turn alone exceeds the cap, the Pipe returns its fixed too-long text, which states the valve's limit, and makes no agent call. When turns were dropped it emits the fixed status "Earlier messages in this chat were not sent" (no content) and appends it to the final banner. When the agent reports `message_omitted_chars` > 0 the final banner also carries the fixed note "Your message was too long for the model; its middle part was not read" (no count, no text). The agent has no turn-count cap on the request, so the character cap is the only limit. A long last turn under the cap is sent whole and unchanged; the agent answers it ([long messages](#long-messages)) |
 | Answer reference | Only with `RAG_ANSWER_REFERENCE=true` in Open WebUI's environment (the chart sets it with `openwebui.ratings.enabled`, #1255): a completed answer (finish frame plus `[DONE]`) whose chunk id is the agent's `chatcmpl-<12-hex request id>` ends with the fixed line ``Answer reference: `<id>` `` after the validated list. This is the only message field Open WebUI hands the [rating Action](#openwebui-ratings). A failed or truncated answer gets none. Off (the default), the answer output is unchanged. Whether the switch is on or off, the Pipe removes that exact trailing line from assistant turns when it builds a request, so the agent sees its own answer, including in chats from before ratings were turned off |

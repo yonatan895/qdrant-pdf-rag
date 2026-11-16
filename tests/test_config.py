@@ -288,6 +288,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "query_max_chars": 2000,
     "splunk_context_max_chars": 4000,
     "prompt_order": "retrieval",
+    "answer_coding_mode_enabled": True,  # #1276: on by default (maintainer, 2026-11-16)
     "dense_query_prefix": (
         "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: "
     ),
@@ -573,6 +574,15 @@ def test_two_cpu_quota_bounds_the_default_not_an_explicit_count(tmp_path, monkey
     monkeypatch.setattr(multiprocessing, "cpu_count", lambda: 64)  # the node
     monkeypatch.setenv("INGEST_WORKERS", "8")
     assert resolve_workers(None, Settings(_env_file=None)) == 8
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("false", False), ("0", False), ("true", True)])
+def test_coding_mode_is_on_by_default_and_one_env_line_turns_it_off(monkeypatch, raw, expected):
+    """Issue #1276: coding mode ships on; a site reverts it with one
+    ANSWER_CODING_MODE_ENABLED line in airgap.env."""
+    assert Settings(_env_file=None).answer_coding_mode_enabled is True
+    monkeypatch.setenv("ANSWER_CODING_MODE_ENABLED", raw)
+    assert Settings(_env_file=None).answer_coding_mode_enabled is expected
 
 
 def test_condensation_and_anchoring_cannot_both_be_enabled(monkeypatch):
