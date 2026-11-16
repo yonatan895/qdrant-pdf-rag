@@ -172,7 +172,7 @@ from mainframe_rag.agent.answer import (
     is_abstention,
     is_refusal,
 )
-from mainframe_rag.config import load_settings
+from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.eval.datasets import (
     DatasetError,
     VenueError,  # noqa: F401 — compatibility export
@@ -194,6 +194,7 @@ from mainframe_rag.eval.measurement import (
     repeat_spread,
     sample_identity,
     stream_signals,
+    value_spread,
 )
 
 
@@ -553,6 +554,89 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     return metrics
 
 
+def _mean(values: list[Any]) -> float | None:
+    known = [v for v in values if _number_or_none(v) is not None]
+    return round(sum(known) / len(known), 4) if known else None
+
+
+def _turn_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Follow-up metrics for one turn (issue #1268), evidence first. Every
+    rate states its denominator; a row without the signal stays out of it."""
+    judged = [r for r in rows if r.get("verdict") in ("pass", "fail")]
+    known = [r for r in judged if type(r.get("evidence_gold_hit")) is bool]
+    hit = sum(1 for r in known if r["evidence_gold_hit"])
+    recall = [r.get("evidence_citation_recall") for r in judged
+              if r.get("evidence_citation_recall") is not None]
+    # Precision has no value on a row without citations: its own denominator.
+    precision = [r.get("evidence_citation_precision") for r in judged
+                 if r.get("evidence_citation_precision") is not None]
+    labels: Counter = Counter()
+    for r in rows:
+        labels.update(export_failure_label(str(f)) for f in r.get("failures") or [])
+    passed = sum(1 for r in judged if r["verdict"] == "pass")
+    return {
+        "n": len(rows), "judged": len(judged),
+        "errors": sum(1 for r in rows if r.get("verdict") == "error"),
+        "evidence_n": len(known), "evidence_gold_hit": hit,
+        "evidence_gold_hit_rate": round(hit / len(known), 4) if known else None,
+        "zero_hits": sum(1 for r in judged if r.get("path") == "zero_hits"),
+        # Same rule and name as summarize()'s false_refusals.
+        "false_refusals": sum(1 for r in judged if "explicit refusal on an answer-tier query"
+                              in (r.get("failures") or [])),
+        "by_verification_state": dict(sorted(Counter(
+            str(r.get("verification_state") or "unknown") for r in judged).items())),
+        "citation_n": len(recall),
+        "citation_precision_n": len(precision),
+        "citation_precision_mean": _mean(precision),
+        "citation_recall_mean": _mean(recall),
+        "pass": passed,
+        "pass_rate": round(passed / len(judged), 4) if judged else None,
+        "by_failure": dict(sorted(labels.items())),
+    }
+
+
+def turn_breakdown(results: list[dict[str, Any]], repeats: int) -> dict[str, Any]:
+    """Metrics by turn over the follow-up sessions (issue #1268). Turn 1 is
+    the openers of the rows that got a follow-up, so both turns cover the
+    same sessions; `vs_opener` pairs each follow-up with its own opener by
+    (id, repeat) on the evidence gold hit. Pure."""
+    def key(row: dict[str, Any]) -> tuple[str, int]:
+        return str(row.get("id")), int(row.get("repeat") or 1)
+
+    follow = [r for r in results if r.get("turn") == 2]
+    sessions = {key(r) for r in follow}
+    openers = [r for r in results if r.get("turn") == 1 and key(r) in sessions]
+    first, second = _turn_block(openers), _turn_block(follow)
+    chars = sorted(r["prior_answer_chars"] for r in follow
+                   if is_count(r.get("prior_answer_chars")))
+    cut = Settings.model_fields["chat_max_prior_turn_chars"].default
+    second["prior_answer_chars"] = {
+        "n": len(chars), "p50": chars[len(chars) // 2] if chars else None,
+        "max": chars[-1] if chars else None, "cut_chars": cut,
+        "over_cut": sum(1 for c in chars if c > cut),
+    }
+    opener_hit = {key(r): r.get("evidence_gold_hit") for r in openers}
+    pairs: Counter = Counter()
+    for r in follow:
+        before, after = opener_hit.get(key(r)), r.get("evidence_gold_hit")
+        if type(before) is not bool or type(after) is not bool:
+            pairs["unknown"] += 1
+        else:
+            pairs[{(True, True): "kept", (True, False): "lost",
+                   (False, True): "gained", (False, False): "neither"}[(before, after)]] += 1
+    second["vs_opener"] = {name: pairs.get(name, 0)
+                           for name in ("kept", "lost", "gained", "neither", "unknown")}
+    if repeats > 1:
+        for block, rows in ((first, openers), (second, follow)):
+            per = [_turn_block([r for r in rows if int(r.get("repeat") or 1) == n])
+                   for n in range(1, repeats + 1)]
+            block["repeats"] = {
+                name: value_spread([p[name] for p in per])
+                for name in ("evidence_gold_hit_rate", "pass_rate", "citation_recall_mean")
+            }
+    return {"1": first, "2": second}
+
+
 def error_code(resp: Any) -> str:
     """Stable error code of a non-200 /v1/answer response (issue #307).
 
@@ -596,6 +680,89 @@ def apply_pool_join(
     row["unmatched_citations"] = unmatched
     row["citation_precision"] = precision
     row["citation_recall"] = recall
+
+
+def apply_evidence(
+    row: dict[str, Any], entry: dict[str, Any], supplied: list[dict[str, Any]]
+) -> None:
+    """Evidence fields from what the agent packed for this turn (issue
+    #1268): the terminal chunk's `supplied_evidence`, already validated by
+    `chat_answer_body`. Not a separate search: a follow-up searched with its
+    own words would hide what condensation changes. An empty list (the
+    zero-hits path) is a known miss; citations map to doc ids through the
+    same entries the agent validated them against."""
+    from mainframe_rag.eval.judging import precision_recall
+
+    doc_ids = list(dict.fromkeys(str(item["doc_id"]) for item in supplied))
+    by_citation = {str(item["citation"]): str(item["doc_id"]) for item in supplied}
+    gold = {str(d) for d in (entry.get("expected_doc_ids") or [])}
+    cited = {by_citation[c] for c in row.get("citations") or [] if c in by_citation}
+    precision, recall = precision_recall(cited, gold)
+    row.update(
+        evidence_doc_ids=doc_ids,
+        evidence_gold_hit=bool(gold & set(doc_ids)) if gold else None,
+        evidence_cited_doc_ids=sorted(cited),
+        evidence_citation_precision=precision,
+        evidence_citation_recall=recall,
+    )
+
+
+# Turn-2 failures before any follow-up request is made (issue #1268).
+OPENER_NOT_ANSWERED = "opener not answered"
+HISTORY_FAILED = "follow-up history failed"
+
+
+def has_follow_up(entry: dict[str, Any]) -> bool:
+    """Only answer rows with gold docs get a second turn: a trap row has no
+    topic to follow, and without gold docs the evidence hit is undefined."""
+    return entry.get("expected_behavior") == "answer" and bool(entry.get("expected_doc_ids"))
+
+
+def follow_up_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """The judged entry of the second turn: the opener's id, class and gold
+    docs with the class follow-up as its question. The opener's gold
+    substrings, identifier and expected state are written for the opener's
+    question and are not carried: turn 2 is judged structurally only."""
+    from mainframe_rag.eval.follow_up import follow_up_for
+
+    return {
+        "id": entry["id"], "query": follow_up_for(entry.get("query_class")),
+        "query_class": entry["query_class"], "expected_behavior": "answer",
+        "expected_doc_ids": list(entry.get("expected_doc_ids") or []),
+        "trap_type": entry.get("trap_type"), "domain": entry.get("domain"),
+    }
+
+
+def run_follow_up(
+    client: Any, entry: dict[str, Any], opener: dict[str, Any], frames: list[str],
+    pipe_mod: Any, temperature: float | None,
+) -> dict[str, Any]:
+    """Turn 2 of one session: the follow-up with the history the Open WebUI
+    Pipe would send after the opener (`eval.follow_up`)."""
+    from mainframe_rag.eval.follow_up import (
+        kept_answer,
+        prior_answer_chars,
+        second_turn_request,
+    )
+
+    follow = follow_up_entry(entry)
+    if opener.get("verdict") not in ("pass", "fail"):
+        row = _base_row(follow, temperature)
+        row.update(verdict="error", failures=[OPENER_NOT_ANSWERED], elapsed_ms=0, turn=2)
+        return row
+    try:
+        kept = kept_answer(pipe_mod, entry["query"], frames)
+        request = second_turn_request(pipe_mod, entry["query"], kept, follow["query"])
+    except Exception:  # noqa: BLE001 — the Pipe is a boundary; a fixed label only
+        request = None
+    if request is None:  # the Pipe would make no follow-up call
+        row = _base_row(follow, temperature)
+        row.update(verdict="error", failures=[HISTORY_FAILED], elapsed_ms=0, turn=2)
+        return row
+    row = run_query(client, follow, None, None, temperature=temperature, stream=True,
+                    endpoint="chat", chat_body=request, evidence=True)
+    row.update(turn=2, prior_answer_chars=prior_answer_chars(request))
+    return row
 
 
 def _fetch_pool(client: Any, query: str) -> list[dict[str, Any]] | None:
@@ -680,6 +847,9 @@ def run_query(
     temperature: float | None = 0.0,
     stream: bool = False,
     endpoint: str = "answer",
+    chat_body: dict[str, Any] | None = None,
+    frames: list[str] | None = None,
+    evidence: bool = False,
 ) -> dict[str, Any]:
     """One live /v1/answer call + verdict. Records everything the report and
     the manifest need, including the failure detail (the answer body is the
@@ -698,31 +868,25 @@ def run_query(
     endpoint="chat" (issue #1191) sends the question as a single-turn
     streaming `/v1/chat` request, as the Open WebUI Pipe does, and judges the
     terminal chunk plus the body `chat_answer_body` derives. That stream has
-    no `usage` and no `ttft_ms`: those row fields stay None (unknown)."""
+    no `usage` and no `ttft_ms`: those row fields stay None (unknown).
+
+    Two-turn mode (issue #1268): `chat_body` replaces the single-turn chat
+    messages (the Pipe's follow-up request; `temperature` is still added),
+    `frames` receives the stream's `data:` lines for the Pipe replay, and
+    `evidence` adds the `evidence_*` fields read off the terminal chunk's
+    `supplied_evidence`."""
     t0 = time.monotonic()
-    row: dict[str, Any] = {
-        "id": entry["id"],
-        "query": entry["query"],
-        "query_class": entry["query_class"],
-        "expected_behavior": entry["expected_behavior"],
-        # The sampling temperature this row ran under (issue #596): report
-        # and manifest readers need it to interpret before/after deltas.
-        "temperature": temperature,
-        # Opt-in acceptance state (issue #365): None on pre-state entries, so
-        # the report can count mismatches without guessing from failures.
-        "expected_verification_state": entry.get("expected_verification_state"),
-        "trap_type": entry.get("trap_type"),
-        "domain": entry.get("domain"),
-    }
+    row = _base_row(entry, temperature)
     body: dict[str, Any] = {"query": entry["query"], "temperature": temperature}
     measured: dict[str, Any] = {}
     outcome = None
     try:
         if endpoint == "chat":
-            outcome = read_chat_stream(client, {
-                "messages": [{"role": "user", "content": entry["query"]}],
-                "stream": True, "temperature": temperature,
+            request = (dict(chat_body) if chat_body is not None else {
+                "messages": [{"role": "user", "content": entry["query"]}], "stream": True,
             })
+            outcome = read_chat_stream(client, {**request, "temperature": temperature},
+                                       frames=frames)
             resp = outcome.response
         elif stream:
             outcome = read_answer_stream(client, {**body, "stream": True})
@@ -745,10 +909,13 @@ def run_query(
             return row
         measured = {"finish_reason": outcome.final["finish_reason"],
                     "client_first_token_ms": outcome.first_token_ms}
-        return _judge_response(
+        row = _judge_response(
             row, entry, _chat_answer_data(outcome.final, answer), elapsed_ms,
             answer_signals, hits, measured,
         )
+        if evidence and row.get("verdict") in ("pass", "fail"):
+            apply_evidence(row, entry, outcome.final["supplied_evidence"])
+        return row
     if outcome is not None and outcome.final is not None:
         measured = stream_signals(outcome.final)
         measured["client_first_token_ms"] = outcome.first_token_ms
@@ -760,6 +927,36 @@ def run_query(
         return _judge_response(
             row, entry, outcome.final, elapsed_ms, answer_signals, hits, measured
         )
+    return _judge_http_response(row, entry, resp, elapsed_ms, answer_signals, hits)
+
+
+def _base_row(entry: dict[str, Any], temperature: float | None) -> dict[str, Any]:
+    """The request-independent row fields every outcome carries."""
+    return {
+        "id": entry["id"],
+        "query": entry["query"],
+        "query_class": entry["query_class"],
+        "expected_behavior": entry["expected_behavior"],
+        # The sampling temperature this row ran under (issue #596): report
+        # and manifest readers need it to interpret before/after deltas.
+        "temperature": temperature,
+        # Opt-in acceptance state (issue #365): None on pre-state entries, so
+        # the report can count mismatches without guessing from failures.
+        "expected_verification_state": entry.get("expected_verification_state"),
+        "trap_type": entry.get("trap_type"),
+        "domain": entry.get("domain"),
+    }
+
+
+def _judge_http_response(
+    row: dict[str, Any],
+    entry: dict[str, Any],
+    resp: Any,
+    elapsed_ms: int,
+    answer_signals: dict[str, dict[str, Any]] | None,
+    hits: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """A buffered /v1/answer response, or a non-200 stream response."""
     if resp.status_code != 200:
         # The error envelope is the agent's fixed client contract; str(exc)
         # and upstream bodies never reach the client, so do not expect them.
@@ -1159,6 +1356,7 @@ _FIXED_FAILURE_LABELS = frozenset({
     STREAM_INCOMPLETE, STREAM_MALFORMED, STREAM_OVERSIZE,
     "agent health request failed", "malformed agent health response",
     "agent health is not servable",
+    OPENER_NOT_ANSWERED, HISTORY_FAILED,
 })
 # OpenAI-compatible finish reasons; any other value is reported as "other".
 _FINISH_REASONS = frozenset({"stop", "length", "content_filter", "tool_calls", "abort"})
@@ -1222,7 +1420,7 @@ def export_row(row: dict[str, Any]) -> dict[str, Any]:
     finish = row.get("finish_reason")
     citations = row.get("citations")
     indices = row.get("inferred_indices")
-    return {
+    exported = {
         "id": str(row.get("id")),
         "repeat": row.get("repeat") if is_count(row.get("repeat")) else 1,
         "query_class": str(row.get("query_class")),
@@ -1254,6 +1452,18 @@ def export_row(row: dict[str, Any]) -> dict[str, Any]:
         "coverage": row.get("coverage") if row.get("coverage") in COVERAGE_STATES else None,
         "expected_served": _count_or_none(row.get("expected_served")),
     }
+    if "turn" in row:
+        # Two-turn rows only (issue #1268): single-turn rows keep their keys.
+        exported.update(
+            turn=2 if row["turn"] == 2 else 1,
+            prior_answer_chars=_count_or_none(row.get("prior_answer_chars")),
+            evidence_doc_ids=_doc_ids_or_none(row.get("evidence_doc_ids")),
+            evidence_gold_hit=_bool_or_none(row.get("evidence_gold_hit")),
+            evidence_cited_doc_ids=_doc_ids_or_none(row.get("evidence_cited_doc_ids")),
+            evidence_citation_precision=_number_or_none(row.get("evidence_citation_precision")),
+            evidence_citation_recall=_number_or_none(row.get("evidence_citation_recall")),
+        )
+    return exported
 
 
 def build_export(report: dict[str, Any], evaluator_git_sha: str, timestamp: str) -> dict[str, Any]:
@@ -1268,7 +1478,8 @@ def build_export(report: dict[str, Any], evaluator_git_sha: str, timestamp: str)
     metrics = json.loads(json.dumps(report["metrics"]))
     by_failure: Counter = Counter()
     for raw, exported in zip(results, rows, strict=True):
-        if raw.get("verdict") in ("pass", "fail"):
+        # Two-turn runs: the top-level block covers turn 1; `by_turn` has its own.
+        if raw.get("verdict") in ("pass", "fail") and raw.get("turn") != 2:
             by_failure.update(exported["failures"])
     metrics["by_failure"] = dict(sorted(by_failure.items()))
     complexity: dict[str, dict[str, int]] = {}
@@ -1354,12 +1565,14 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
             lines.append(f"| {mode} | {count} |")
         lines.append(f"- inferred indices off gold: {metrics.get('inferred_index_off_gold')}")
     lines.append("")
+    lines.extend(_turn_lines(metrics))
     lines.extend(_measurement_lines(metrics))
     fails = [r for r in results if r.get("verdict") in ("fail", "error")]
     if fails:
         lines.append("## Failures")
         for r in fails:
-            lines.append(f"### {r['id']} ({r['verdict']}, {r['expected_behavior']})")
+            turn = f" turn {r['turn']}" if "turn" in r else ""
+            lines.append(f"### {r['id']}{turn} ({r['verdict']}, {r['expected_behavior']})")
             lines.append(f"- query: {r['query']}")
             for f in r.get("failures") or []:
                 lines.append(f"- FAIL: {f}")
@@ -1369,6 +1582,40 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
             lines.append(f"- answer (truncated): {body}")
             lines.append("")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _turn_lines(metrics: dict[str, Any]) -> list[str]:
+    """The two-turn block (issue #1268): evidence first, verdicts last.
+    Above this section every metric covers turn 1 only."""
+    by_turn = metrics.get("by_turn")
+    if not by_turn:
+        return []
+    first, second = by_turn["1"], by_turn["2"]
+    lines = ["## By turn (follow-up sessions; the metrics above cover turn 1 only)", "",
+             "| metric | turn 1 | turn 2 |", "|---|---|---|"]
+    for name in ("n", "errors", "evidence_n", "evidence_gold_hit", "evidence_gold_hit_rate",
+                 "zero_hits", "false_refusals", "citation_n", "citation_precision_n",
+                 "citation_precision_mean",
+                 "citation_recall_mean", "pass", "pass_rate"):
+        lines.append(f"| {name} | {first[name]} | {second[name]} |")
+    states = sorted({*first["by_verification_state"], *second["by_verification_state"]})
+    for state in states:
+        lines.append(f"| state {state} | {first['by_verification_state'].get(state, 0)} "
+                     f"| {second['by_verification_state'].get(state, 0)} |")
+    pairs, chars = second["vs_opener"], second["prior_answer_chars"]
+    lines += ["", "- follow-up vs its opener (evidence gold hit): "
+              + ", ".join(f"{k}={v}" for k, v in pairs.items()),
+              (f"- prior answer chars: n={chars['n']} p50={chars['p50']} max={chars['max']}, "
+               f"over the {chars['cut_chars']}-char prior-turn cut: {chars['over_cut']}"),
+              ("- turn-2 pass is structural only (body, no refusal, explicit validated "
+               "citations); the opener's gold substrings and expected state are not applied"),
+              ""]
+    for turn, block in (("1", first), ("2", second)):
+        for name, spread in (block.get("repeats") or {}).items():
+            lines.append(f"- turn {turn} {name} over repeats: min {spread['min']} "
+                         f"max {spread['max']} range {spread['range']}")
+    lines.append("")
+    return lines
 
 
 def _measurement_lines(metrics: dict[str, Any]) -> list[str]:
@@ -1436,6 +1683,19 @@ def _subset(raw: str) -> int:
     return value
 
 
+_ARM_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,31}")
+
+
+def _arm(raw: str) -> str:
+    """Operator-declared arm label (issue #1268). The agent does not report
+    whether it condenses, so the export carries the operator's declaration;
+    a fixed shape keeps it text-free."""
+    if not _ARM_RE.fullmatch(raw):
+        raise argparse.ArgumentTypeError(
+            "arm must be 1-32 characters of a-z, 0-9, '.', '_' or '-', starting with a letter or digit")
+    return raw
+
+
 def select_subset(entries: list[dict[str, Any]], size: int) -> list[dict[str, Any]]:
     """Sweep subset (issue #1195): the default sampler's class-interleaved
     round-robin, refused when the size cannot hold one row of every class.
@@ -1492,6 +1752,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="text-free JSON for leaving an air-gapped site: params, metrics, "
                              "health, coverage and per-row ids, labels, counts and timings; "
                              "no question, answer, citation or failure text")
+    parser.add_argument("--turns", type=int, choices=(1, 2), default=1,
+                        help="2: after each answer row with gold docs, ask its class follow-up "
+                             "with the history the Open WebUI Pipe would send, and score the "
+                             "follow-up from the evidence the agent packed (issue #1268; needs "
+                             "--endpoint chat --stream and --arm; default 1)")
+    parser.add_argument("--arm", type=_arm, default=None,
+                        help="with --turns 2: the operator's label for the deployed setting "
+                             "under test, e.g. condense-off or condense-on (recorded in params)")
     args = parser.parse_args(argv)
     if args.stream and args.agent_url is None:
         parser.error("--stream needs --agent-url: the in-process client buffers the response, "
@@ -1501,6 +1769,22 @@ def main(argv: list[str] | None = None) -> int:
                      "(which needs --agent-url)")
     if args.subset is not None and args.all:
         parser.error("--subset and --all are exclusive")
+    two_turn = args.turns == 2
+    if two_turn and args.endpoint != "chat":
+        parser.error("--turns 2 sends the follow-up over /v1/chat: add --endpoint chat --stream")
+    if two_turn != (args.arm is not None):
+        parser.error("--arm labels a --turns 2 run: pass both or neither")
+    pipe_mod: Any = None
+    pipe_sha256: str | None = None
+    if two_turn:
+        from mainframe_rag.eval.follow_up import PipeUnavailable, load_pipe
+
+        try:
+            pipe_mod, pipe_sha256 = load_pipe()
+        except PipeUnavailable as exc:
+            print(f"FAIL: {exc} (integrations/openwebui/docs_pipe.py in the evaluator "
+                  "checkout)", file=sys.stderr)
+            return 2
 
     try:
         # Venue rule (issue #268): dev defaults to the golden set only; the
@@ -1573,43 +1857,61 @@ def main(argv: list[str] | None = None) -> int:
             print(f"FAIL: {health_error}", file=sys.stderr)
             results = [dict(entry, temperature=args.temperature, verdict="error",
                             failures=[health_error], elapsed_ms=0) for _, entry in passes]
+            if two_turn:
+                for row in results:
+                    row["turn"] = 1
             if coverage is not None:
                 for row, (_, entry) in zip(results, passes, strict=True):
                     apply_coverage(row, entry, coverage)
         else:
             for i, (number, entry) in enumerate(passes, 1):
                 pool = _fetch_pool(client, entry["query"])
+                frames: list[str] | None = [] if two_turn else None
                 row = run_query(
                     client, entry, signals, pool, temperature=args.temperature,
                     stream=args.stream, endpoint=args.endpoint,
+                    frames=frames, evidence=two_turn,
                 )
                 if pool is not None:
                     apply_pool_join(row, entry, pool)
-                if coverage is not None:
-                    apply_coverage(row, entry, coverage)
-                if args.repeats > 1:
-                    row["repeat"] = number
-                results.append(row)
-                marker = row.get("verdict", "?").upper()
-                print(
-                    f"[{i:>3}/{len(passes)}] {marker:5s} {row['id']:8s} "
-                    f"{row['query'][:58]}",
-                    file=sys.stderr,
-                )
-                for f in row.get("failures") or []:
-                    print(f"        FAIL {f}", file=sys.stderr)
+                session = [row]
+                if two_turn:
+                    row["turn"] = 1
+                    if has_follow_up(entry):
+                        session.append(run_follow_up(client, entry, row, frames or [],
+                                                     pipe_mod, args.temperature))
+                for turn_row in session:
+                    if coverage is not None:
+                        apply_coverage(turn_row, entry, coverage)
+                    if args.repeats > 1:
+                        turn_row["repeat"] = number
+                    results.append(turn_row)
+                    marker = turn_row.get("verdict", "?").upper()
+                    turn = f" t{turn_row['turn']}" if "turn" in turn_row else ""
+                    print(
+                        f"[{i:>3}/{len(passes)}] {marker:5s} {turn_row['id']:8s}{turn} "
+                        f"{turn_row['query'][:58]}",
+                        file=sys.stderr,
+                    )
+                    for f in turn_row.get("failures") or []:
+                        print(f"        FAIL {f}", file=sys.stderr)
             if coverage is not None and coverage["status"] == "known":
                 # A build that moved during the run splits the rows between builds.
                 build_id_end = _served_build_id(client)
 
-    metrics = summarize(results)
+    # Two-turn runs (issue #1268): the existing blocks cover turn 1, so they
+    # read as a single-turn chat run over the same sample; turn 2 is `by_turn`.
+    openers = [r for r in results if r.get("turn") != 2]
+    metrics = summarize(openers)
     if args.repeats > 1 and health_error is None:
         # Pooled metrics above; per-pass metrics only feed the spread.
         metrics["repeats"] = repeat_spread(
-            [summarize([r for r in results if r.get("repeat") == number])
+            [summarize([r for r in openers if r.get("repeat") == number])
              for number in range(1, args.repeats + 1)],
-            results,
+            openers,
         )
+    if two_turn:
+        metrics["by_turn"] = turn_breakdown(results, args.repeats)
     params: dict[str, Any] = {
         "temperature": args.temperature,
         # Measurement identity (issue #1195): which rows, in which order, how
@@ -1627,6 +1929,11 @@ def main(argv: list[str] | None = None) -> int:
             "datasets": datasets,
         },
     }
+    if two_turn:
+        from mainframe_rag.eval.follow_up import follow_ups_sha256
+
+        params.update(turns=2, arm=args.arm, follow_ups_sha256=follow_ups_sha256(),
+                      pipe_sha256=pipe_sha256)
     report: dict[str, Any] = {"metrics": metrics, "results": results, "params": params}
     if deployment is not None:
         params.update(agent_url=args.agent_url, request_timeout=args.request_timeout)
@@ -1673,7 +1980,10 @@ def main(argv: list[str] | None = None) -> int:
     # Fail closed: structural FAILs and stack errors both gate the exit code.
     if health_error is not None:
         return 2
-    return 0 if metrics["failures"] == 0 and metrics["errors"] == 0 else 1
+    clean = metrics["failures"] == 0 and metrics["errors"] == 0
+    if two_turn:
+        clean = clean and not any(r.get("verdict") in ("fail", "error") for r in results)
+    return 0 if clean else 1
 
 
 if __name__ == "__main__":
