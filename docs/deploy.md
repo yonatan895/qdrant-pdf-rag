@@ -2397,8 +2397,8 @@ behaviour before #1274.
 | `ANSWER_HIT_LIMIT` (#1191) | 8 | 16 | `ANSWER_HIT_LIMIT=8` |
 | `RETRIEVE_MAX_CHUNKS_PER_DOC` (also `/v1/search`) | 3 | 5 | `RETRIEVE_MAX_CHUNKS_PER_DOC=3` |
 
-- **Window.** 32768 was the Colab stand-in's window; the production model
-  serves 262144. The default assumes a served window of at least 256k: a
+- **Window.** 32768 was the Colab stand-in's window. The 262144 default
+  assumes a served window of at least 256k: a
   site whose model serves less sets `LLM_MAX_MODEL_LEN` to it. Excerpt
   caps, reserves and the request-size guard are unchanged, so prompts do
   not grow with the window except a long pasted message, which is kept

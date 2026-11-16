@@ -281,8 +281,7 @@ def test_build_chat_messages_pruning_and_cap(cut):
     from mainframe_rag.config import Settings
 
     settings = None if cut is None else Settings(_env_file=None, chat_max_prior_turn_chars=cut)
-    limit = Settings.model_fields["chat_max_prior_turn_chars"].default if cut is None else cut
-    assert limit in (1000, 4000)
+    limit = 4000 if cut is None else cut  # #1274 default, independent of the field
     huge_prev_answer = "Here is the explanation.\n" + ("x" * 5000) + "\nRetrieved manual excerpts:\n[1] Chunk\n[2] Chunk2"
     past_messages = [
         ChatMessage(role="user", content="Explain IEA500I"),

@@ -63,9 +63,9 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   `Settings.llm_temperature` (0.0–2.0, no inf/NaN; out-of-range 422s before
   retrieval); omitted means the configured default. The chat routes accept
   the same bounded override.
-  Retrieval always runs
-  with a hardcoded `limit=8` (tuning the search `limit` does not change
-  answers); the JSON response deliberately omits `query_kind`, `hits`,
+  Retrieval runs
+  with `answer_hit_limit` hits (`ANSWER_HIT_LIMIT`, 16 by default since
+  #1274; tuning the search `limit` does not change answers); the JSON response deliberately omits `query_kind`, `hits`,
   `usage`, `finish_reason`, and `ttft` (those live on spans, logs, and the
   SSE `final` event). `citations_inferred` is the provenance flag (issue
   #269): true when every returned cite was mapped from bare bracket markers
@@ -249,7 +249,7 @@ guard, asserts the reasoning model is configured (`503 not_configured`,
 before any retrieval), retrieves under the root span (same `502` as
 search), classifies complexity, short-circuits empty hits (§3), builds the
 prompt, and either chats once (JSON) or streams (SSE). `chat` runs the same
-assertion and retrieval (hardcoded `limit=8` for both endpoints), resolving
+assertion and retrieval (`answer_hit_limit` for both endpoints), resolving
 the follow-up search through `plan_search` / `retrieve_planned` first so the
 condensation and anchoring gates cannot be honored on one path only. Both console routes run
 this chat path through `prepare_chat_core` (issue #985): the form maps core
@@ -694,8 +694,8 @@ otherwise multi-step configuration phrasing, comparisons (`versus`, `vs`,
 select `complex`. Default is `simple`.
 
 - Defaults (#777 sizing for Qwen3.8-27B at a 32768-token window, the
-  Colab stand-in's; since #1274 the window default is the production
-  model's 262144, and the excerpt caps and reserves below are unchanged; effort
+  Colab stand-in's; since #1274 the window default is 262144, which assumes
+  the served model's window is at least that, and the excerpt caps and reserves below are unchanged; effort
   changed to `medium` by #917, maintainer decision 2026-10-23, basis in
   [eval.md](eval.md) and #932): `medium` effort on both paths; complex adds the extended system prompt. Temperature
   0.2 both. Both paths take whole chunks (4000 chars per excerpt, 32000 chars

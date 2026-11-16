@@ -540,8 +540,8 @@ def test_chat_history_limits_are_optional_pod_inputs_bounded_like_settings():
 
 
 def test_window_bounds_are_the_settings_bounds_everywhere():
-    """Issue #1274: the window default and ceiling are 262144 (the production
-    model's served window); the chart schema and the air-gap mapper accept
+    """Issue #1274: the window default and ceiling are 262144 (the default
+    assumes a served window at least that large); the chart schema and the air-gap mapper accept
     exactly the Settings range, so a value one accepts the pod accepts."""
     from scripts.airgap import model_config
 
@@ -1845,6 +1845,13 @@ def test_openwebui_ratings_follow_the_feedback_store_unless_set(owui_chart, extr
     assert _ratings_shipped(docs) is shipped
     if extra is FEEDBACK_ON:
         assert docs == _owui(owui_chart, RATINGS_ON)
+    if extra is not None and not shipped:
+        # Explicit false beside the store renders the Open WebUI objects
+        # exactly as the docs-only front end does (the pre-#1274 default).
+        docs_only = _owui(owui_chart)
+        for key in (("ConfigMap", "rag-openwebui-pipe"), ("ConfigMap", "rag-openwebui-proxy"),
+                    ("Deployment", "rag-openwebui")):
+            assert docs[key] == docs_only[key], key
 
 
 def test_openwebui_ratings_are_off_without_the_feedback_store_and_change_nothing(owui_chart):

@@ -370,9 +370,9 @@ class Settings(BaseSettings):
 
     # Context budgeting via tokenizer accounting:
     # budget = max_model_len - reserved_output_tokens - measured_system_prompt - safety_margin
-    # Must not exceed the served window. Default 262144 since #1274, the
-    # production model's served window (was 32768, the Colab stand-in's,
-    # #777); a lane or site serving less sets its window. With a server-verified prompt
+    # Must not exceed the served window. Default 262144 since #1274, which
+    # assumes the reasoning model serves at least that (was 32768, the Colab
+    # stand-in's, #777); a lane or site serving less sets its window. With a server-verified prompt
     # count, the answer reserve plus the path's thinking reserve is also sent
     # as max_tokens, so a runaway generation ends as `length` instead of
     # running to the window (answer_core._output_cap). An estimator-only count

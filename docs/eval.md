@@ -337,7 +337,8 @@ verdict.
   paired-CI primary metric: that would let a first-rank gain promote while
   recall@5 and MRR are flat, and would hold every baseline recorded before
   the key ("no paired values"), so primary metrics and thresholds are unchanged.
-- **L1 metrics:** `L1_LIMIT=8` (matches the answer path's retrieval depth);
+- **L1 metrics:** `L1_LIMIT=8` (the answer path's retrieval depth before
+  #1274, which made it 16; the gate's own cutoff, unchanged);
   recall@1/@5/@8, MRR@8, shared nDCG@8 helper (no @3 here, unlike the
   eval); abstain rows contribute traps only; trap precision divides by all
   rows. recall@1 (#837) is reported per class, overall and per query and is
@@ -712,7 +713,10 @@ may not be reaching the model. When an argument set moves the reasoning
 tokens, an effort arm follows the ablations (`LLM_EXTRA_BODY` /
 `LLM_EFFORT_TRANSPORT`, [model request arguments](agent.md#model-request-arguments)).
 `--probe-count` says whether `/tokenize` or the completion-usage count serves
-this gateway, which decides what the `count-tokenize` arm can change.
+this gateway, which decides what the `count-tokenize` arm can change. It
+exists from #1266 on: on f117160c run `--probe-args` only, and run
+`--probe-count` after the candidate is deployed, before the first B
+session.
 
 **Where.** The bastion pod (devkit image, Python 3.14 with the dev lock),
 through `oc port-forward` with the operator's namespace session. The Route is
@@ -738,9 +742,9 @@ run() {  # $1 = session label, $2 = endpoint, then extra flags
     --out "$label-$endpoint.json" --summary "$label-$endpoint.md" \
     --export "$label-$endpoint.export.json" "$@" 2>"$label-$endpoint.log"
 }
-run T0 answer --subset 24            # timed 24-row run first
-run A1 answer --all --repeats 2      # then the full session, both endpoints
-run A1 chat --all --repeats 2
+run T0 answer --subset 24 --hit-limit 8   # timed 24-row run first (on f117160c)
+run A1 answer --all --repeats 2 --hit-limit 8   # the full session, both endpoints
+run A1 chat --all --repeats 2 --hit-limit 8
 ```
 
 - Always pass `--golden evals/golden.jsonl` explicitly. Never the holdout:
@@ -765,9 +769,14 @@ run A1 chat --all --repeats 2
 
 A is the release before #1274 (f117160c, every feature off); B is this
 release with its defaults. A1 against A2 is the noise between sessions on an
-unchanged build. A follow-up run (`--turns 2`) against f117160c passes
-`--prior-cap 1000`, its deployed default; the eval's own default is the
-candidate agent's 4000. Check that
+unchanged build. Every A run passes `--hit-limit 8`: f117160c retrieves
+8 hits per answer, and the eval's own default is the candidate agent's
+16, so without it the A sibling pool (`gold_retrieved`, citation recall)
+would be deeper than the answer it scores. The B runs pass neither flag.
+A follow-up run (`--turns 2`) against f117160c also passes
+`--prior-cap 1000`, its deployed cut (the candidate's default is 4000).
+Check that `params.hit_limit` is 8 in every A export and absent in every
+B export, that
 `coverage.build_id` equals `build_id_end` in every export, that both A
 sessions name the same build, and that `params.sample.ids_sha256` and the
 dataset sha256 match across all sessions.

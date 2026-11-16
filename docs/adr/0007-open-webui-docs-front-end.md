@@ -90,7 +90,10 @@ Pipe is provisioned and the admin role is limited to the team.
   `__request__` or any `__user__`-style parameter it does not use; a test
   inspects its `pipe()` signature. A new parameter is a recorded decision.
   *(Amended, #1255; maintainer decision 2026-11-16.)* With
-  `openwebui.ratings.enabled` (default off), the repository Function set is the
+  ratings on (`openwebui.ratings.enabled`; off by default until #1274, which
+  turned it on wherever the feedback store is on, maintainer decision
+  2026-11-16; an explicit false or `OPENWEBUI_RATINGS_ENABLED=false` keeps it
+  off), the repository Function set is the
   docs Pipe plus the repository rating Action (`rating_action.py`): two message
   buttons that post a rating to the agent's `/v1/feedback` (ADR-0005). Each
   Function is hash-checked. The Pipe's expected hash comes from the deploy
