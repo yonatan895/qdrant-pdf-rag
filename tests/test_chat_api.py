@@ -498,6 +498,28 @@ def test_condensed_no_hits_wording_names_what_retrieval_searched(chat_client, mo
         "No supporting manual excerpts were found for this question.")
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("anchor", [False, True])
+def test_chat_follow_up_anchoring_searches_the_previous_user_message(
+    chat_client, monkeypatch, anchor, stream
+):
+    """Issue #1268: with CHAT_FOLLOWUP_ANCHOR_ENABLED, /v1/chat searches an
+    identifier-free follow-up as written and as the previous user message (no
+    model call); off, it searches the follow-up only. The question the model
+    reads is the literal follow-up either way."""
+    monkeypatch.setattr(app_mod.settings, "chat_followup_anchor_enabled", anchor)
+    active = "What should the operator do next?"
+    result = chat_client.post("/v1/chat", json={
+        "messages": [*_PRIOR_TURNS, {"role": "user", "content": active}], "stream": stream})
+    assert result.status_code == 200
+    opener = _PRIOR_TURNS[0]["content"]
+    assert [c["query"] for c in chat_client.mock_search.calls] == (
+        [active, opener] if anchor else [active])
+    calls = chat_client.fake_llm.stream_calls if stream else chat_client.fake_llm.chat_calls
+    assert len(calls) == 1  # the answer only: anchoring makes no model call
+    assert f"Question: {active}\n" in calls[0]["messages"][-1].content
+
+
 # ---------------------------------------------------------------------------
 # Answer verification states on chat surfaces (issue #365)
 # ---------------------------------------------------------------------------

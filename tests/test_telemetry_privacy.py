@@ -183,6 +183,35 @@ def test_success_hides_canaries_from_logs_and_spans(client, caplog, monkeypatch)
     assert root.attributes["rag.hits"] == 1
 
 
+@pytest.mark.parametrize("anchor,condense,active,mode", [
+    (False, False, CANARY_QUERY, "literal"),
+    (True, False, CANARY_QUERY, "anchored"),
+    (True, False, f"{CANARY_QUERY} IEA500I", "literal"),
+    (False, True, CANARY_QUERY, "condensed"),
+])
+def test_follow_up_mode_is_a_text_free_root_attribute(
+    client, caplog, monkeypatch, anchor, condense, active, mode
+):
+    """Issue #1268: the chat root span names which follow-up mode ran, from a
+    fixed vocabulary, never the follow-up or antecedent text."""
+    c, exporter = client
+    monkeypatch.setattr(app_mod.settings, "chat_followup_anchor_enabled", anchor)
+    monkeypatch.setattr(app_mod.settings, "chat_condense_enabled", condense)
+    messages = [
+        {"role": "user", "content": f"{CANARY_QUERY} opener"},
+        {"role": "assistant", "content": "Original synthetic answer"},
+        {"role": "user", "content": active},
+    ]
+    with caplog.at_level(logging.INFO):
+        resp = c.post("/v1/chat", json={"messages": messages})
+    assert resp.status_code == 200
+    spans = exporter.get_finished_spans()
+    root = next(s for s in spans if s.name == "v1.chat")
+    assert root.attributes["rag.followup_mode"] == mode
+    assert CANARY_QUERY not in _span_text(spans)
+    assert CANARY_QUERY not in "\n".join(_formatted_logs(caplog))
+
+
 def test_failure_hides_canaries_but_keeps_error_type(client, caplog, monkeypatch):
     c, exporter = client
     monkeypatch.setattr(

@@ -49,7 +49,7 @@ MAPPER_KEYS = [
     "LLM_THINKING_RESERVE_TOKENS_SIMPLE", "LLM_THINKING_RESERVE_TOKENS_COMPLEX",
     "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS", "LLM_STREAM",
     "LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT", "LLM_TOKEN_COUNT_SOURCE", "CHAT_MAX_PRIOR_TURN_CHARS", "CHAT_MAX_TURNS",
-    "REQUEST_DEADLINE_S", "REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S",
+    "CHAT_FOLLOWUP_ANCHOR_ENABLED", "REQUEST_DEADLINE_S", "REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S",
     "RERANK_ENABLED", "RERANK_BASE_URL", "RERANK_MODEL", "RERANK_ENDPOINT_ORDER",
     "GATEWAY_API_KEY_SECRET", "GATEWAY_API_KEY_SECRET_KEY", "GATEWAY_CA_CONFIGMAP", "PULL_SECRET",
     "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_ENDPOINT_RESOLVED", "OTEL_TRACING_ENABLED",
@@ -554,6 +554,35 @@ def test_chat_condensation_operator_mapping(monkeypatch, mapper_env, raw, want):
     assert mapped(mapper_env)["models"]["reasoning"]["condenseEnabled"] is want
 
 
+@pytest.mark.parametrize("raw,want", [("", None), ("true", True), ("no", False)])
+def test_follow_up_anchoring_operator_mapping(monkeypatch, mapper_env, raw, want):
+    """Issue #1268: unset writes no key (the pod keeps the false default);
+    an explicit spelling is carried as a boolean, explicit false included."""
+    monkeypatch.setenv("CHAT_FOLLOWUP_ANCHOR_ENABLED", raw)
+    assert mapped(mapper_env)["models"]["reasoning"].get("followupAnchorEnabled") is want
+
+
+@pytest.mark.parametrize("anchor,condense", [("true", "true"), ("1", "yes")])
+def test_condense_and_anchor_together_fail_without_artifact(monkeypatch, mapper_env, anchor, condense):
+    """Issue #1268: the follow-up modes are exclusive; the mapper refuses the
+    pair with the application's fixed message before any values are written."""
+    from scripts.airgap import model_config
+
+    from mainframe_rag.config import CHAT_FOLLOWUP_MODES_CONFLICT
+
+    assert model_config.CHAT_FOLLOWUP_MODES_CONFLICT == CHAT_FOLLOWUP_MODES_CONFLICT
+    monkeypatch.setenv("CHAT_FOLLOWUP_ANCHOR_ENABLED", anchor)
+    monkeypatch.setenv("CHAT_CONDENSE_ENABLED", condense)
+    result, output = mapper_env()
+    assert result.returncode != 0
+    assert CHAT_FOLLOWUP_MODES_CONFLICT in result.stderr
+    assert not output.exists()
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        model_config.validate_operator_booleans(
+            {"CHAT_FOLLOWUP_ANCHOR_ENABLED": anchor, "CHAT_CONDENSE_ENABLED": condense})
+    model_config.validate_operator_booleans({"CHAT_FOLLOWUP_ANCHOR_ENABLED": anchor})
+
+
 def test_chat_history_limits_reach_rendered_agent(monkeypatch, mapper_env):
     """Issue #1268: the chat history caps cross the mapper into the pod
     exactly; the limits the mapper enforces are the Settings limits."""
@@ -632,6 +661,7 @@ def test_selected_model_budgets_reach_rendered_agent(monkeypatch, mapper_env, st
     ("LLM_STREAM", "unsupported-private-value"),
     ("CHAT_MAX_PRIOR_TURN_CHARS", "199"), ("CHAT_MAX_PRIOR_TURN_CHARS", "5001"),
     ("CHAT_MAX_PRIOR_TURN_CHARS", "4000.0"), ("CHAT_MAX_TURNS", "0"), ("CHAT_MAX_TURNS", "51"),
+    ("CHAT_FOLLOWUP_ANCHOR_ENABLED", "unsupported-private-value"),
 ])
 def test_model_budget_invalid_selection_fails_without_artifact(monkeypatch, mapper_env, name, bad):
     monkeypatch.setenv(name, bad)
@@ -830,7 +860,8 @@ def test_empty_model_budget_inputs_preserve_application_defaults(monkeypatch, ma
     for name in ("LLM_MAX_MODEL_LEN", "LLM_RESERVED_OUTPUT_TOKENS",
                  "LLM_THINKING_RESERVE_TOKENS_SIMPLE", "LLM_THINKING_RESERVE_TOKENS_COMPLEX",
                  "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS",
-                 "LLM_STREAM", "LLM_TOKEN_COUNT_SOURCE", "CHAT_MAX_PRIOR_TURN_CHARS", "CHAT_MAX_TURNS"):
+                 "LLM_STREAM", "LLM_TOKEN_COUNT_SOURCE", "CHAT_MAX_PRIOR_TURN_CHARS", "CHAT_MAX_TURNS",
+                 "CHAT_FOLLOWUP_ANCHOR_ENABLED"):
         monkeypatch.setenv(name, "")
     result, output = mapper_env()
     assert result.returncode == 0, result.stderr

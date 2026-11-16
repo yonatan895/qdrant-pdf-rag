@@ -92,7 +92,7 @@ restores the snapshot over whatever the file assigned; empty stays unset
   defaults to the former); the corpus PVC is not.
 - Operator booleans `UI_ENABLED`, `CONTEXTUAL_EMBED_ENABLED`,
   `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `INGEST_AUTHORIZE_FROM_CATALOG`,
-  `CHAT_CONDENSE_ENABLED`, `LLM_STREAM`
+  `CHAT_CONDENSE_ENABLED`, `CHAT_FOLLOWUP_ANCHOR_ENABLED`, `LLM_STREAM`
   `FEEDBACK_ENABLED`, `OPENWEBUI_ENABLED` and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
   accept only `true/1/yes` or `false/0/no` (any case; unset keeps the
   default). `INGEST_ALIAS_PUBLISH` may only be unset or true: in-place ingest
@@ -2291,7 +2291,13 @@ loader/environment acceptance remains an explicit audit item under #397.
 application's false default. The chat history caps `CHAT_MAX_TURNS` and
 `CHAT_MAX_PRIOR_TURN_CHARS` (#1268) map to `models.reasoning.chatMaxTurns` and
 `chatMaxPriorTurnChars`; unset renders neither variable, so the pod keeps the
-application defaults (10 and 1000). Enable it deliberately when qualifying pronoun-only
+application defaults (10 and 1000). `CHAT_FOLLOWUP_ANCHOR_ENABLED` maps to
+`models.reasoning.followupAnchorEnabled` and renders only when set; it is
+exclusive with `CHAT_CONDENSE_ENABLED` (preflight, the mapper and the chart
+schema refuse both true; the pod's Settings would too). Site follow-up arms:
+`condense` = `CHAT_CONDENSE_ENABLED=true`, `anchored` =
+`CHAT_FOLLOWUP_ANCHOR_ENABLED=true`, `history4000` =
+`CHAT_MAX_PRIOR_TURN_CHARS=4000`; redeploy between arms. Enable it deliberately when qualifying pronoun-only
 console follow-ups; require a grounded answer after the extra reasoning call.
 The local gateway's authenticated `/tokenize` passthrough enforces the per-leg
 key's model allowlist. Use `probe_gateway.py --require-tokenizer --stream

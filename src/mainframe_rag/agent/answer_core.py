@@ -13,6 +13,7 @@ import logging
 import time
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, replace
+from itertools import zip_longest
 from typing import Literal, TypedDict
 
 from opentelemetry import trace
@@ -34,6 +35,7 @@ from mainframe_rag.agent.answer import (
     build_messages,
     classify_query_complexity,
     condense_query,
+    names_identifier,
     parse_answer,
     verification_state_for,
 )
@@ -55,6 +57,7 @@ from mainframe_rag.logs import error_type
 from mainframe_rag.ports import ChatMessage, Tokenizer, TokenUsage
 from mainframe_rag.retrieve.filters import parse_query
 from mainframe_rag.retrieve.query import SearchHit
+from mainframe_rag.retrieve.screen import screen_query
 from mainframe_rag.tracing import bind_module_tracer, start_as_current_span
 
 VALID_REASONING_EFFORTS: frozenset[ReasoningEffort] = frozenset(REASONING_EFFORTS)
@@ -161,6 +164,104 @@ async def resolve_search_query(
         with start_as_current_span(tracer, "chat.condense", kind=SpanKind.CLIENT, context=ctx):
             return await condense_query(deps.llm, input_data.messages, deps.settings)
     return derive_retrieval_query(input_data.query, deps.settings)
+
+
+type FollowUpMode = Literal["literal", "condensed", "anchored"]
+
+
+@dataclass(frozen=True)
+class SearchPlan:
+    """What one turn searches (issue #1268). `query` is always searched (the
+    message's own retrieval query, or its condensation); `anchor`, set only in
+    `anchored` mode, is the previous user message's retrieval query, searched
+    as a second leg. `mode` is the text-free label the root span carries."""
+
+    mode: FollowUpMode
+    query: str
+    anchor: str | None = None
+
+    @property
+    def search_text(self) -> str:
+        """What the prompt's retrieval-derived decisions read: every searched
+        text, the antecedent first."""
+        return f"{self.anchor}\n{self.query}" if self.anchor is not None else self.query
+
+
+def _anchor_query(input_data: AnswerCoreInput, settings: Settings) -> str | None:
+    """The previous user message's retrieval query when the active chat
+    follow-up should be anchored to it, else None. Follow-ups only; never when
+    the active message names an identifier (the condensation bypass), when
+    either message screens as a trap, or when both search the same text."""
+    messages = input_data.messages or []
+    if not (input_data.is_chat and settings.chat_followup_anchor_enabled and len(messages) > 1):
+        return None
+    literal = derive_retrieval_query(input_data.query, settings)
+    if names_identifier(literal) or screen_query(literal) == "trap":
+        return None
+    earlier = next((m.content.strip() for m in reversed(messages[:-1]) if m.role == "user"), "")
+    if not earlier:
+        return None
+    anchor = derive_retrieval_query(earlier, settings)
+    if anchor == literal or screen_query(anchor) == "trap":
+        return None
+    return anchor
+
+
+async def plan_search(
+    input_data: AnswerCoreInput,
+    deps: AnswerCoreDeps,
+    parent_span: trace.Span | None = None,
+) -> SearchPlan:
+    """The one owner of what a turn searches, for the core retrieval branch
+    and every chat route alike. Condensation and anchoring cannot both be on
+    (Settings refuses the pair, issue #1268). The mode is set on
+    `parent_span` for chat turns as a fixed label, never text."""
+    input_data = _prepare_chat_input(input_data, deps.settings)
+    literal = derive_retrieval_query(input_data.query, deps.settings)
+    query = await resolve_search_query(input_data, deps, parent_span)
+    anchor = _anchor_query(input_data, deps.settings)
+    mode: FollowUpMode = (
+        "anchored" if anchor is not None else "condensed" if query != literal else "literal"
+    )
+    if parent_span is not None and input_data.is_chat:
+        parent_span.set_attribute("rag.followup_mode", mode)
+    return SearchPlan(mode, query, anchor)
+
+
+def _fuse_by_rank(literal: RetrievalResult, anchored: RetrievalResult) -> RetrievalResult:
+    """Interleave two ranked lists, the literal leg first, keeping a chunk at
+    its first place, cut to what one retrieval returns. Rank, not score:
+    rerank and RRF scores of different queries are not comparable. The query
+    kind is the literal leg's (the user's own question class); timings add."""
+    limit = max(len(literal.hits), len(anchored.hits))
+    seen: set[str] = set()
+    hits: list[SearchHit] = []
+    for pair in zip_longest(literal.hits, anchored.hits):
+        for hit in pair:
+            if hit is not None and hit.chunk_id not in seen:
+                seen.add(hit.chunk_id)
+                hits.append(hit)
+    timings = dict(literal.timings)
+    for key, value in anchored.timings.items():
+        timings[key] = timings.get(key, 0) + value
+    return RetrievalResult(hits[:limit], literal.kind, timings)
+
+
+async def retrieve_planned(
+    plan: SearchPlan, source: AnswerCoreInput, deps: AnswerCoreDeps,
+) -> RetrievalResult:
+    """Run a plan's retrieval: one search, or for an anchored follow-up the
+    literal leg then the antecedent leg, fused. Either leg failing fails the
+    turn as one retrieval failure does."""
+    found = await deps.retrieve(
+        plan.query, product=source.product, version=source.version, settings=deps.settings,
+    )
+    if plan.anchor is None:
+        return found
+    anchored = await deps.retrieve(
+        plan.anchor, product=source.product, version=source.version, settings=deps.settings,
+    )
+    return _fuse_by_rank(found, anchored)
 
 
 @dataclass
@@ -472,19 +573,18 @@ async def _retrieve_inputs(
         return source, RetrievalResult(
             source.hits, source.query_kind or "unknown", source.timings or {}
         )
-    query = await resolve_search_query(source, deps, parent_span)
+    plan = await plan_search(source, deps, parent_span)
     try:
-        found = await deps.retrieve(
-            query, product=source.product, version=source.version, settings=deps.settings,
-        )
+        found = await retrieve_planned(plan, source, deps)
     except Exception as exc:
         raise RetrievalError(exc) from exc
-    return replace(source, search_query=query), found
+    return replace(source, search_query=plan.search_text), found
 
 
 def _search_text(input_data: AnswerCoreInput, settings: Settings) -> str:
-    """What retrieval searched: the condensed query a chat route recorded, else
-    the message's own derived retrieval query (issue #1192, #1268)."""
+    """What retrieval searched: the condensed or anchored search text a chat
+    turn recorded, else the message's own derived retrieval query (issue
+    #1192, #1268)."""
     if input_data.search_query is not None:
         return input_data.search_query
     return derive_retrieval_query(input_data.query, settings)

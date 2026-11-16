@@ -344,8 +344,10 @@ def test_refused_model_request_arguments_stop_the_deploy_before_helm(tree):
 
 
 # Chat follow-up operator inputs (#1268): selected vs a conflicting alternate.
-_CHAT_FOLLOWUP_SELECTED = {"CHAT_MAX_PRIOR_TURN_CHARS": "4000", "CHAT_MAX_TURNS": "12"}
-_CHAT_FOLLOWUP_ALTERNATE = {"CHAT_MAX_PRIOR_TURN_CHARS": "200", "CHAT_MAX_TURNS": "1"}
+_CHAT_FOLLOWUP_SELECTED = {"CHAT_MAX_PRIOR_TURN_CHARS": "4000", "CHAT_MAX_TURNS": "12",
+                           "CHAT_FOLLOWUP_ANCHOR_ENABLED": "true"}
+_CHAT_FOLLOWUP_ALTERNATE = {"CHAT_MAX_PRIOR_TURN_CHARS": "200", "CHAT_MAX_TURNS": "1",
+                            "CHAT_FOLLOWUP_ANCHOR_ENABLED": "false"}
 
 
 @pytest.mark.parametrize("source", ["file", "environment"])
@@ -378,6 +380,14 @@ def test_unset_chat_followup_inputs_add_no_pod_variable(tree):
     assert result.returncode == 0, result.stderr
     pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
     assert not set(_CHAT_FOLLOWUP_SELECTED) & set(pod)
+
+
+def test_condense_and_anchor_together_stop_the_deploy_before_helm(tree):
+    root, _log = tree
+    result = _run(tree, ("CHAT_CONDENSE_ENABLED", "true"), ("CHAT_FOLLOWUP_ANCHOR_ENABLED", "true"))
+    assert result.returncode != 0
+    assert "CHAT_CONDENSE_ENABLED and CHAT_FOLLOWUP_ANCHOR_ENABLED are mutually exclusive" in result.stderr
+    assert not (root / "dist/agent-rendered.yaml").exists()
 
 
 def test_pull_secret_bad_name_fails_closed(tree):

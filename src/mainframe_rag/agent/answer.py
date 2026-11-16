@@ -2383,6 +2383,15 @@ _ABEND_RE = re.compile(
 _MAX_PRIOR_TURN_CHARS = 1000
 
 
+def names_identifier(text: str) -> bool:
+    """The follow-up bypass shared by condensation and anchoring (issue
+    #1268): a turn that names a message, member or document identifier or an
+    abend code is searched as written."""
+    from mainframe_rag.retrieve.filters import parse_query
+
+    return parse_query(text).has_identifiers or bool(_ABEND_RE.search(text))
+
+
 async def condense_query(
     llm: LLMClient,
     messages: list[ChatMessage],
@@ -2399,10 +2408,8 @@ async def condense_query(
     latest_text = (
         derive_retrieval_query(turn.query, settings) if settings is not None else turn.query
     )
-    from mainframe_rag.retrieve.filters import parse_query
-
     # Heuristic bypass: If message contains explicit codes (e.g. IEE400I, S0C4, DFS058I), search directly
-    if parse_query(latest_text).has_identifiers or bool(_ABEND_RE.search(latest_text)):
+    if names_identifier(latest_text):
         return latest_text
 
     # Each prior turn is cut where the answer prompt cuts it (issue #1268).

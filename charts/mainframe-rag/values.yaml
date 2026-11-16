@@ -102,6 +102,9 @@ models:
     # prior messages kept, and characters kept of each prior message.
     # chatMaxTurns: 10
     # chatMaxPriorTurnChars: 1000
+    # Antecedent-anchored follow-up retrieval (#1268); absent keeps it off.
+    # Exclusive with condenseEnabled (the schema refuses both true).
+    # followupAnchorEnabled: false
     # Empty model disables /v1/answer; when set, baseUrl is required.
     baseUrl: ""
     model: ""
