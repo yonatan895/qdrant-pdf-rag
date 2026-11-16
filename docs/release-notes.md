@@ -104,3 +104,27 @@ accepts only `origin: upstream` under the same anchor rules, and
 `scripts/devkit/install.sh` refuses an upstream anchor that is the gap key
 (compared as keys, so a PEM and a DER copy of one key are refused). Both anchors are listed, commented out, in
 `airgap.env.example`. Nothing is removed.
+
+## 2026-11-17 GH#1255 Open WebUI answer depth: grant each Rosetta entry
+
+The docs Pipe is now a manifold. Open WebUI lists three models instead of one:
+`mainframe_rag_docs.standard` "Rosetta" (the default and the old behaviour),
+`mainframe_rag_docs.quick` "Rosetta – quick" (`low` effort) and
+`mainframe_rag_docs.thorough` "Rosetta – thorough" (`xhigh` effort, which the
+default `LLM_REASONING_EFFORTS` offers). The old model id `mainframe_rag_docs`
+is gone, and its read grant does not carry over. In the same change window as
+the upgrade, the site admin does the following
+([deploy step 5](deploy.md#owui-answer-depth)):
+
+1. Run `airgap:deploy` as usual. It installs the new Pipe; no new
+   `airgap.env` key is needed.
+2. In the Open WebUI admin UI, grant read access to all three entries to the
+   same users or groups that had the old Rosetta model. Until then, ordinary
+   users see no model.
+3. As an ordinary user, open a chat started before the upgrade. It switches
+   to "Rosetta"; send one question and check the citations.
+
+API callers that used `mainframe_rag_docs` must switch to an entry id. Some
+thorough answers may end at the 270 s request deadline: measure this in the
+site eval before telling users about thorough. Nothing is removed from the
+extension surface.
