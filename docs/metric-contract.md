@@ -95,7 +95,7 @@ rejections, which leave no trace — see below):
 
 - `v1.search`: `rag.query_kind`, `rag.hits`, `rag.limit`
 - `v1.answer`: plus `rag.stream`, `rag.evidence`, `rag.citations`, `rag.has_script`
-- `v1.chat`, `ui.chat`: `rag.stream`, `rag.followup_mode` on follow-up turns (`literal` | `condensed` | `anchored`, #1268; a fixed label, never text) (empty-hit runs also set `rag.query_kind`/`rag.hits: 0` on the root)
+- `v1.chat`, `ui.chat`: `rag.stream`, `rag.followup_mode` on follow-up turns (`literal` | `condensed` | `anchored`, #1268; a fixed label, never text; `literal` also covers a condensation that bypassed or fell back, `condensed` only a searched rewrite; anchored retrieval timings are the two legs' sums) (empty-hit runs also set `rag.query_kind`/`rag.hits: 0` on the root)
 
 Stage tags used by the queries: `retrieve.search` (`rag.query_kind`,
 `rag.split_mode`, `rag.hits`, `rag.rerank_active`), `llm.chat`

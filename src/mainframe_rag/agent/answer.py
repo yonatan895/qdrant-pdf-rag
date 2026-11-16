@@ -2412,7 +2412,7 @@ async def condense_query(
     if names_identifier(latest_text):
         return latest_text
 
-    # Each prior turn is cut where the answer prompt cuts it (issue #1268).
+    # Each prior turn is cut at the answer prompt's per-turn cap (issue #1268).
     cut = settings.chat_max_prior_turn_chars if settings is not None else _MAX_PRIOR_TURN_CHARS
     history_turns = []
     for m in turn.history[-4:]:

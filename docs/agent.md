@@ -183,8 +183,13 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   either leg failing is the one retrieval failure. It is skipped on the first
   turn, when the active message names an identifier or abend code (the
   condensation bypass), when either message screens as a trap, or when both
-  search the same text. Packing reads both searched texts (antecedent first);
-  the antecedent's manuals are fresh evidence, prior turns stay context.
+  search the same text. The retrieval-derived prompt decisions read both
+  searched texts (antecedent first), as they read a condensed query:
+  complexity (system-prompt extension, effort, budgets), the resolved-code
+  note (it may name an antecedent code, e.g. `SAFB = AFB`), identifier
+  anchoring in packing, and the no-hits wording (it may name an antecedent
+  identifier). The question stays the literal follow-up; the antecedent's
+  manuals are fresh evidence, prior turns stay context.
   Condensation and anchoring are exclusive: Settings refuses both true at
   startup with a fixed message, and the mapper, preflight and chart schema
   refuse the pair first. A follow-up's chat root span carries

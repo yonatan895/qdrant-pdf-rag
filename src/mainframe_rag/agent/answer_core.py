@@ -443,6 +443,8 @@ async def _build_prepared_prompt(
             build_chat_fn = deps.build_chat_messages_fn or build_chat_messages
             # Only a search that differs from the message's own retrieval
             # query is passed (issue #1268), so every other call is unchanged.
+            # Both sides derive from the same prepared query: a literal plan's
+            # search_text is exactly derive_retrieval_query(query).
             searched = _search_text(input_data, settings)
             extra = (
                 {"search_query": searched}
