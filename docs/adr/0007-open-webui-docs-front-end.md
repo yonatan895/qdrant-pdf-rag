@@ -168,11 +168,21 @@ Pipe is provisioned and the admin role is limited to the team.
   that permission on the grant route, so E1 refuses
   `/api/v1/folders/{id}/access/update`, the only writer of folder access
   grants. With no grant, a folder and its chats stay visible to the owner
-  only (and to admins, S3). **Folder rows are outside the window** (#1255,
-  maintainer decision pending). The purge removes chats in a folder as
-  usual, but it does not delete folders. A folder's name, system prompt
-  text, icon and background image (a data URL in the row) stay until the
-  user deletes the folder. They also stay in PVC backups under S3.
+  only (and to admins, S3). **Stale folders are purged** (#1255, maintainer
+  decision 2026-11-16). A folder goes when three things hold after the
+  run's chat deletions. Its own `updated_at` is older than the window (a
+  NULL age counts as stale, as for a share snapshot). No row of any table
+  names it in `folder_id` (`chat` in v0.12.3, also `automation`). No folder
+  names it as `parent_id`. Leaves go first and the run repeats until none
+  is left, so a stale nested chain goes in one run. Deleted folders count
+  as `folders` and arm the same scrub. In v0.12.3, renaming, editing
+  settings, moving, expanding or collapsing a folder refreshes its age;
+  filing or removing a chat does not. A folder in use, and each of its
+  ancestors, keeps its name, system prompt text, icon and background image
+  (a data URL in the row) until it is unused and aged or the user deletes
+  it. These also stay in PVC backups under S3. A `parent_id` cycle never
+  becomes a leaf and is kept. v0.12.3 refuses to file a chat under a folder
+  that no longer exists (`has_folder_write_access`).
 - **S3 Protected copies and admin access.** PVC backups hold manual excerpts
   and pasted incident text. They are protected records that never leave the
   enterprise. They follow the same 30-day window: the purge job also removes

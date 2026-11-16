@@ -2029,10 +2029,12 @@ default **30 days** (maintainer decision 2026-10-24). An explicit null fails the
 - Backups of `rag-openwebui-data` hold chat text. They are protected records that never leave
   the enterprise, and their retention follows the same window: at most 30 days plus one backup
   cycle.
-- Chat folders (#1255) are not purged. Chats inside a folder age out like any other chat, but
-  the folder row stays until its owner deletes it, with its name, system prompt text, icon and
-  background image. Whether the purge should remove folders is a maintainer decision
-  (ADR-0007 S2).
+- Stale chat folders (#1255) go in the same transaction: a folder last updated before the window
+  (or of unknown age) that, after the run's chat deletions, no chat or other row names in
+  `folder_id` and no folder names as its parent. Nested stale folders go in the same run, leaves
+  first, counted as `folders`. Renaming, moving, expanding or collapsing a folder refreshes its
+  age; filing a chat in it does not. A folder in use, and its ancestors, keep their name, system
+  prompt text, icon and background image (ADR-0007 S2).
 
 **Patch policy and advisory switch-off (ADR-0007 P1).** The maintainer owns patching. Agents
 prepare a monthly import of the latest upstream release as a dedicated pin-bump PR, carrying the
