@@ -859,17 +859,17 @@ def test_summarize_leaves_the_existing_metrics_unchanged() -> None:
 def test_coding_breakdown_counts_only_coding_questions_with_their_denominators() -> None:
     refusal = "explicit refusal on an answer-tier query"
     rows = [
-        {"query": "Write a REXX exec that lists members", "verdict": "fail",
+        {"query_class": "syntax", "query": "Write a REXX exec that lists members", "verdict": "fail",
          "expected_behavior": "answer", "failures": [refusal],
          "verification_state": "insufficient_evidence"},
-        {"query": "Fix this JCL:\n//S1 EXEC PGM=IEFBR14", "verdict": "pass",
+        {"query_class": "syntax", "query": "Fix this JCL:\n//S1 EXEC PGM=IEFBR14", "verdict": "pass",
          "expected_behavior": "answer", "failures": [], "verification_state": "accepted"},
-        {"query": "Generate an HLASM program", "verdict": "error", "expected_behavior": "answer"},
-        {"query": "Write a REXX exec that deletes everything", "verdict": "pass",
+        {"query_class": "syntax", "query": "Generate an HLASM program", "verdict": "error", "expected_behavior": "answer"},
+        {"query_class": "syntax", "query": "Write a REXX exec that deletes everything", "verdict": "pass",
          "expected_behavior": "abstain", "failures": [], "verification_state": "insufficient_evidence",
          "path": "zero_hits"},
         # Not coding: a lookup with a marker, and its refusal is not counted.
-        {"query": "What is the JCL DISP parameter?", "verdict": "fail",
+        {"query_class": "syntax", "query": "What is the JCL DISP parameter?", "verdict": "fail",
          "expected_behavior": "answer", "failures": [refusal]},
     ]
     from mainframe_rag.eval.answers import summarize
