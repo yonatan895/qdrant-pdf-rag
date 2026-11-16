@@ -825,15 +825,19 @@ the run is the anaphoric run above and its output is unchanged.
   asked as an opener in the same pass. `vs_single` compares each switched
   question with that same question asked alone in the same repeat: pass,
   evidence gold hit and verification state are reported as kept, lost,
-  gained or neither, and state changes as `from>to` counts. This measures
+  gained, neither or unknown (either side errored), and state changes as
+  `from>to` counts. A switch row's `coverage` is that of the question it
+  asked. This measures
   harm from history, condensation or anchoring. A switched question may
   name an identifier, so condensation is bypassed for it, exactly as for a
   user's new standalone question.
-- **Class B.** `restate` and `summary` are judged on the opener's gold
-  substrings only (case-folded, like the judge). The agent answers from fresh
-  excerpts only, so an uncited restatement is the product rule and is not a
-  failure. A decline (the zero-hits path, the agent's structured decline or
-  a whole-response refusal) is counted in `restate.declines`. Each gold
+- **Class B.** `restate` and `summary` pass when the answer holds every
+  opener gold substring (case-folded, the judge's rule) and is not a
+  decline. The agent answers from fresh excerpts only, so an uncited
+  restatement is the product rule and is not a failure. A decline (the
+  zero-hits path, the agent's structured decline or a whole-response
+  refusal) fails as `follow-up declined`, even when it names a gold string,
+  and is counted in `restate.declines` (over `restate.n` judged rows). Each gold
   string is placed against the prior-turn cut in the history answer as sent
   (stripped, pasted excerpts dropped, as the agent does):
   `before_cut` (wholly inside the kept head), `after_cut`, or
@@ -857,9 +861,10 @@ the run is the anaphoric run above and its output is unchanged.
   (`elapsed_ms` and `client_first_token_ms` distributions; `ttft_ms` and
   `total_tokens` are None, because the chat stream carries neither). Turn-2
   blocks carry `exposure` and `skipped`, plus `vs_single` (switch) or
-  `restate` (class B). Every row gains `follow_up_kind` (None on turn 1),
-  `switch_id`, `history_over_cap`, `citation_list_cut`, `restate_declined`,
-  `gold_n`, `gold_found_n` and `gold_split` (counts only). Params gain
+  `restate` (class B). Every export row gains `follow_up_kind` (None on turn
+  1), `switch_id`, `history_over_cap`, `citation_list_cut`,
+  `restate_declined`, `gold_n`, `gold_found_n` and `gold_split` (counts
+  only; None where they do not apply). Params gain
   `follow_up`, `prior_cap`, `restate_follow_ups_sha256`,
   `switch_pairs_sha256` and `switch_pairs_n`.
 - **Exit code.** The rule is unchanged: 1 when any row of any turn or kind

@@ -1010,6 +1010,9 @@ def test_switch_pairs_are_deterministic_and_never_share_a_gold_doc(docs, expecte
     assert switch_pairs([dict(r) for r in rows]) == expected
     ids = [r["id"] for r in rows]
     assert switch_pairs_sha256(ids, expected) == switch_pairs_sha256(ids, switch_pairs(rows))
+    # A different pairing is a different identity.
+    assert switch_pairs_sha256(["A", "B", "C"], {"A": "B"}) != switch_pairs_sha256(
+        ["A", "B", "C"], {"A": "C"})
 
 
 def test_switch_is_scored_against_the_same_question_asked_alone(site_eval):
@@ -1086,6 +1089,14 @@ def test_restate_is_scored_on_the_openers_gold_and_declines_are_counted(site_eva
                      "last answer.", "path": "llm", "citations": [], "warns": []}
     judge_restate(row, kept)
     assert row["restate_declined"] is True and row["verdict"] == "fail"
+    # A decline that happens to name every gold string is still no restatement.
+    named = {"answer": "Nothing in the supplied excerpts answers this question about "
+                       "rejected reenter.", "path": "llm", "citations": [], "warns": []}
+    judge_restate(named, kept)
+    assert (named["verdict"], named["gold_found_n"]) == ("fail", 2)
+    assert named["failures"] == ["follow-up declined"]
+    assert exported[("KEPT", "summary")]["failures"] == [
+        "missing required substring", "missing required substring", "follow-up declined"]
     assert status == 1
 
 
@@ -1211,3 +1222,61 @@ def test_kind_health_failure_records_openers_with_the_kind_keys(site_eval):
     assert status == 2 and [r["turn"] for r in rows] == [1]
     assert set(rows[0]) == KIND_ROW_KEYS and rows[0]["follow_up_kind"] is None
     assert report["metrics"]["by_turn"]["2"]["switch"]["n"] == 0
+
+
+def test_an_errored_opener_and_a_lone_row_are_counted_per_kind(site_eval, tmp_path):
+    """An errored opener: anaphoric and switch get a fixed `opener not
+    answered` row (switch then compares as unknown), class B is skipped as
+    `opener_not_passed`. A row without a partner is a `no_partner` skip. The
+    summary renders the turn x kind tables."""
+    import httpx2
+
+    broken = _entry(id="BROKEN", query="What does IEA503I report?", gold_must_contain=["x"])
+    fine = _entry(id="FINE", expected_doc_ids=[OTHER_DOC])
+    lone = _entry(id="LONE", query="What does IEA504I report?", expected_doc_ids=[OTHER_DOC])
+
+    def respond(request):
+        if request.url.path == "/v1/chat" and b"IEA503I" in request.content:
+            return httpx2.Response(503, json={"code": "overloaded", "message": "x"})
+        return _kind_agent({(fine["query"], None): chat_stream("Rejected [1]."),
+                            (fine["query"], FOLLOW_UPS["message_id"]): chat_stream("Again [1]."),
+                            (fine["query"], broken["query"]): chat_stream("Rejected [1].")})(request)
+
+    summary = tmp_path / "summary.md"
+    status, report, _, _ = site_eval(respond, [broken, fine],
+                                     [*KINDS, "--summary", str(summary)])
+    rows = _kind_rows(report)
+    for kind in ("anaphoric", "switch"):
+        assert rows[("BROKEN", 2, kind)]["failures"] == ["opener not answered"]
+    by_turn = report["metrics"]["by_turn"]["2"]
+    assert by_turn["restate"]["skipped"] == {"opener_not_passed": 1, "no_gold_strings": 1}
+    assert by_turn["switch"]["vs_single"]["pass"]["unknown"] == 2  # one errored side each
+    text = summary.read_text()
+    assert "### switch: turn-2 pass is" in text and "- skipped: " in text and status == 1
+    _, alone, _, _ = site_eval(_kind_agent({(lone["query"], None): chat_stream("Rejected [1].")}),
+                               [lone], [*TWO_TURN, "--follow-up", "switch"])
+    assert alone["metrics"]["by_turn"]["2"]["switch"]["skipped"] == {"no_partner": 1}
+    assert alone["params"]["switch_pairs_n"] == 0
+
+
+def test_a_switch_row_covers_the_docs_of_the_question_it_asked(site_eval):
+    """Coverage of a switch row is its asked row's expected docs, served or
+    not, never its opener's (the two share no doc by construction)."""
+    import httpx2
+
+    first = _entry(id="A")
+    second = _entry(id="B", query="What does IEA501I report?", expected_doc_ids=[OTHER_DOC])
+    chat = _kind_agent({(q, f): chat_stream("Rejected [1].")
+                        for q in (first["query"], second["query"])
+                        for f in (None, first["query"], second["query"])})
+
+    def respond(request):
+        if request.url.path == "/v1/sources":
+            return httpx2.Response(200, json=_sources_page([OTHER_DOC]))
+        return chat(request)
+
+    _, _, export, _ = site_eval(respond, [first, second],
+                                [*TWO_TURN, "--follow-up", "switch", "--coverage"])
+    rows = {(r["id"], r["turn"]): r for r in json.loads(export)["rows"]}
+    assert (rows[("A", 1)]["coverage"], rows[("A", 2)]["coverage"]) == ("none", "all")
+    assert (rows[("B", 1)]["coverage"], rows[("B", 2)]["coverage"]) == ("all", "none")

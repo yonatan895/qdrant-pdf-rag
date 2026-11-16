@@ -356,9 +356,7 @@ def judge(
         )
 
     if judge_gold:
-        for s in entry.get("gold_must_contain") or []:
-            if str(s).lower() not in body.lower():
-                failures.append(f"missing required substring: {s!r}")
+        failures.extend(missing_gold(entry, body))
         for s in entry.get("gold_must_not_contain") or []:
             if str(s).lower() in body.lower():
                 failures.append(f"forbidden substring present: {s!r}")
@@ -370,6 +368,13 @@ def judge(
                 failures.append(f"identifier not cited or mentioned: {ident!r}")
 
     return ("fail" if failures else "pass"), failures, warns
+
+
+def missing_gold(entry: dict[str, Any], body: str) -> list[str]:
+    """The required-substring failures of one answer body: case-folded
+    literal checks, one per missing `gold_must_contain` string."""
+    return [f"missing required substring: {s!r}"
+            for s in entry.get("gold_must_contain") or [] if str(s).lower() not in body.lower()]
 
 
 def select_sample(entries: list[dict[str, Any]], max_queries: int) -> list[dict[str, Any]]:
@@ -725,6 +730,7 @@ def restate_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 split[position][side]["found"] += _count_or_none(counts.get("found")) or 0
     declines = sum(1 for r in judged if r.get("restate_declined") is True)
     return {
+        "n": len(judged),
         "declines": declines,
         "decline_rate": round(declines / len(judged), 4) if judged else None,
         "gold_n": sum(_count_or_none(r.get("gold_n")) or 0 for r in judged),
@@ -752,6 +758,8 @@ def kind_breakdown(results: list[dict[str, Any]], repeats: int, plan: FollowUpPl
     of a kind is the openers that got that kind; `vs_opener` is dropped for
     `switch`, whose question and gold differ from its opener's, and replaced
     by `vs_single`, the same question asked as an opener. Pure."""
+    from mainframe_rag.eval.follow_up import RESTATE_FOLLOW_UPS
+
     first: dict[str, Any] = {}
     second: dict[str, Any] = {}
     openers = [r for r in results if r.get("turn") == 1]
@@ -767,7 +775,7 @@ def kind_breakdown(results: list[dict[str, Any]], repeats: int, plan: FollowUpPl
         if kind == "switch":
             block["2"].pop("vs_opener")
             block["2"]["vs_single"] = switch_deltas(results, follow)
-        if kind in ("restate", "summary"):
+        if kind in RESTATE_FOLLOW_UPS:
             block["2"]["restate"] = restate_summary(follow)
         first[kind], second[kind] = block["1"], block["2"]
     return {"1": first, "2": second}
@@ -846,6 +854,8 @@ def apply_evidence(
 # Turn-2 failures before any follow-up request is made (issue #1268).
 OPENER_NOT_ANSWERED = "opener not answered"
 HISTORY_FAILED = "follow-up history failed"
+# A class-B follow-up the agent declined (issue #1268).
+RESTATE_DECLINED = "follow-up declined"
 
 
 def has_follow_up(entry: dict[str, Any]) -> bool:
@@ -901,9 +911,11 @@ class FollowUpPlan:
 def _skip_reason(kind: str, entry: dict[str, Any], opener: dict[str, Any],
                  plan: FollowUpPlan) -> str | None:
     """Why this opener gets no follow-up of this kind, or None."""
+    from mainframe_rag.eval.follow_up import RESTATE_FOLLOW_UPS
+
     if kind == "switch" and str(entry["id"]) not in plan.partners:
         return "no_partner"
-    if kind in ("restate", "summary"):
+    if kind in RESTATE_FOLLOW_UPS:
         # Restating needs something to restate: gold strings, found in turn 1.
         if not entry.get("gold_must_contain"):
             return "no_gold_strings"
@@ -914,21 +926,21 @@ def _skip_reason(kind: str, entry: dict[str, Any], opener: dict[str, Any],
 
 def judge_restate(row: dict[str, Any], entry: dict[str, Any]) -> None:
     """Class-B verdict: the opener's gold substrings in the follow-up answer
-    (case-folded, as `judge`), and nothing else. The agent answers from
+    (`missing_gold`, as `judge`), and no decline. The agent answers from
     fresh excerpts only, so an uncited restatement is the product rule, not
-    a failure; a decline (the structured decline, a whole-response refusal
-    or the zero-hits path) is counted apart. Unlike `judge`, the zero-hits
-    path is judged too: the user got no restatement."""
+    a failure. A decline (the structured decline, a whole-response refusal
+    or the zero-hits path) fails even when it names a gold string, and is
+    counted apart. Unlike `judge`, the zero-hits path is judged too: the
+    user got no restatement."""
     answer = str(row.get("answer") or "")
-    missing = [s for s in entry.get("gold_must_contain") or [] if str(s).lower() not in answer.lower()]
+    missing = missing_gold(entry, answer)
     gold_n = len(entry.get("gold_must_contain") or [])
+    declined = row.get("path") == "zero_hits" or is_abstention(answer, row.get("citations") or [])
     row.update(
-        verdict="fail" if missing else "pass",
-        failures=[f"missing required substring: {s!r}" for s in missing],
+        verdict="fail" if missing or declined else "pass",
+        failures=[*missing, *([RESTATE_DECLINED] if declined else [])],
         warns=[w for w in row.get("warns") or [] if not str(w).startswith("zero-hits path")],
-        restate_declined=(row.get("path") == "zero_hits"
-                          or is_abstention(answer, row.get("citations") or [])),
-        gold_n=gold_n, gold_found_n=gold_n - len(missing),
+        restate_declined=declined, gold_n=gold_n, gold_found_n=gold_n - len(missing),
     )
 
 
@@ -938,6 +950,7 @@ def _annotate_history(row: dict[str, Any], entry: dict[str, Any], kind: str,
     gold string lies against the cut and whether this answer has it."""
     from mainframe_rag.eval.follow_up import (
         GOLD_POSITIONS,
+        RESTATE_FOLLOW_UPS,
         gold_positions,
         history_answer,
         history_exposure,
@@ -947,7 +960,7 @@ def _annotate_history(row: dict[str, Any], entry: dict[str, Any], kind: str,
     view = history_view(history_answer(request))
     over, citation_list = history_exposure(view, cap)
     row.update(history_over_cap=over, citation_list_cut=citation_list)
-    if kind in ("restate", "summary") and row.get("verdict") in ("pass", "fail"):
+    if kind in RESTATE_FOLLOW_UPS and row.get("verdict") in ("pass", "fail"):
         gold = [str(s) for s in entry.get("gold_must_contain") or []]
         answer = str(row.get("answer") or "").lower()
         split = {name: {"n": 0, "found": 0} for name in GOLD_POSITIONS}
@@ -966,6 +979,7 @@ def run_follow_ups(
     kinds branch off the same opener and kept answer. Without a plan (no
     `--follow-up`): the anaphoric follow-up alone, rows as before."""
     from mainframe_rag.eval.follow_up import (
+        RESTATE_FOLLOW_UPS,
         kept_answer,
         prior_answer_chars,
         second_turn_request,
@@ -1005,7 +1019,7 @@ def run_follow_ups(
             row = run_query(client, follow, None, None, temperature=temperature, stream=True,
                             endpoint="chat", chat_body=request, evidence=True)
             row.update(turn=2, prior_answer_chars=prior_answer_chars(request))
-            if plan is not None and kind in ("restate", "summary") and row.get("verdict") in ("pass", "fail"):
+            if plan is not None and kind in RESTATE_FOLLOW_UPS and row.get("verdict") in ("pass", "fail"):
                 judge_restate(row, follow)
         if plan is not None:
             row.update(follow_up_kind=kind,
@@ -1608,7 +1622,7 @@ _FIXED_FAILURE_LABELS = frozenset({
     STREAM_INCOMPLETE, STREAM_MALFORMED, STREAM_OVERSIZE,
     "agent health request failed", "malformed agent health response",
     "agent health is not servable",
-    OPENER_NOT_ANSWERED, HISTORY_FAILED,
+    OPENER_NOT_ANSWERED, HISTORY_FAILED, RESTATE_DECLINED,
 })
 # OpenAI-compatible finish reasons; any other value is reported as "other".
 _FINISH_REASONS = frozenset({"stop", "length", "content_filter", "tool_calls", "abort"})
@@ -1903,9 +1917,8 @@ _KIND_ROWS = ("n", "errors", "evidence_n", "evidence_gold_hit", "evidence_gold_h
 _KIND_READING = {
     "anaphoric": "structural pass (body, no refusal, explicit validated citations)",
     "switch": "the switched-to row's full gold verdict",
-    "restate": "the opener's gold substrings only, after a passed opener",
-    "summary": "the opener's gold substrings only, after a passed opener",
 }
+_CLASS_B_READING = "the opener's gold substrings and no decline, after a passed opener"
 
 
 def _kind_lines(by_turn: dict[str, Any]) -> list[str]:
@@ -1914,7 +1927,7 @@ def _kind_lines(by_turn: dict[str, Any]) -> list[str]:
     lines = ["## By turn and follow-up kind (the metrics above cover turn 1 only)", ""]
     for kind, second in by_turn["2"].items():
         first = by_turn["1"][kind]
-        lines += [f"### {kind}: turn-2 pass is {_KIND_READING.get(kind, kind)}", "",
+        lines += [f"### {kind}: turn-2 pass is {_KIND_READING.get(kind, _CLASS_B_READING)}", "",
                   "| metric | turn 1 | turn 2 |", "|---|---|---|"]
         lines += [f"| {name} | {first[name]} | {second[name]} |" for name in _KIND_ROWS]
         for name in ("elapsed_ms", "client_first_token_ms"):
@@ -2270,7 +2283,12 @@ def main(argv: list[str] | None = None) -> int:
                                                       pipe_mod, args.temperature, plan))
                 for turn_row in session:
                     if coverage is not None:
-                        apply_coverage(turn_row, entry, coverage)
+                        # A switch row is judged on its partner's docs.
+                        judged_entry = (plan.partners[str(entry["id"])]
+                                        if plan is not None
+                                        and turn_row.get("follow_up_kind") == "switch"
+                                        else entry)
+                        apply_coverage(turn_row, judged_entry, coverage)
                     if args.repeats > 1:
                         turn_row["repeat"] = number
                     results.append(turn_row)
