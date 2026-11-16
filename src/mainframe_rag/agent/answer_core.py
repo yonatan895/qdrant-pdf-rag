@@ -307,6 +307,7 @@ async def _build_prepared_prompt(
     complexity: str,
     effort: str,
     root_ctx: Context | None,
+    temperature: float | None = None,
 ) -> PreparedPrompt:
     """One prompt-build owner for the JSON and streaming executors: identical
     budget inputs, identical evidence manifest, one prompt.build span."""
@@ -346,6 +347,7 @@ async def _build_prepared_prompt(
                 settings=settings,
                 order=settings.prompt_order,
                 reasoning_effort=effort,
+                temperature=temperature,
             )
         build_msg_fn = deps.build_messages_fn or build_messages
         return await asyncio.to_thread(
@@ -366,6 +368,7 @@ async def _build_prepared_prompt(
             settings=settings,
             order=settings.prompt_order,
             reasoning_effort=effort,
+            temperature=temperature,
         )
 
 
@@ -508,15 +511,18 @@ async def execute_answer_core(
     if not hits:
         return _empty_output(search_text, kind, timings, complexity)
 
-    # 3. Prompt building (shared with the streaming executor)
+    # 3. Prompt building (shared with the streaming executor). The temperature is resolved first:
+    # a completion-usage count (#1266) sends the generation's own body.
     effort = _resolve_reasoning_effort(input_data, settings, complexity)
-    prepared = await _build_prepared_prompt(input_data, deps, hits, complexity, effort, root_ctx)
-    _require_supplied_evidence(prepared, len(hits))
-
-    # 4. LLM inference
     temperature = (
         input_data.temperature if input_data.temperature is not None else settings.llm_temperature
     )
+    prepared = await _build_prepared_prompt(
+        input_data, deps, hits, complexity, effort, root_ctx, temperature
+    )
+    _require_supplied_evidence(prepared, len(hits))
+
+    # 4. LLM inference
     t0 = time.monotonic()
     with start_as_current_span(
         tracer,
@@ -591,15 +597,18 @@ async def execute_answer_core_stream(
         yield {"type": "final", "output": _empty_output(search_text, kind, timings, complexity)}
         return
 
-    # 3. Prompt building (shared with the buffered executor)
+    # 3. Prompt building (shared with the buffered executor). The temperature is resolved first:
+    # a completion-usage count (#1266) sends the generation's own body.
     effort = _resolve_reasoning_effort(input_data, settings, complexity)
-    prepared = await _build_prepared_prompt(input_data, deps, hits, complexity, effort, root_ctx)
-    _require_supplied_evidence(prepared, len(hits))
-
-    # 4. LLM streaming
     temperature = (
         input_data.temperature if input_data.temperature is not None else settings.llm_temperature
     )
+    prepared = await _build_prepared_prompt(
+        input_data, deps, hits, complexity, effort, root_ctx, temperature
+    )
+    _require_supplied_evidence(prepared, len(hits))
+
+    # 4. LLM streaming
     t0 = time.monotonic()
     ttft_ms: int | None = None
     content_parts: list[str] = []
