@@ -69,6 +69,19 @@ if ($Oc.StartsWith((Get-Item -LiteralPath $Kit).FullName.TrimEnd('\') + '\', [St
 $Oras         = Join-Path $Kit 'oras.exe'
 ```
 
+From the first site run (2026-11-03):
+
+- Create the `$Registry` repository first and give the `$Robot` account write
+  (create) access to it; a push to a missing repository fails with 401.
+- Set `$Registry` to the full repository path (`host/org/repository`), not the
+  host alone.
+- The bastion image does not trust the site registry CA: set
+  `$InstallArgs = @('--registry-ca-dir', '/work/registry-ca')` with the site CA
+  bundle in that directory.
+- Keep your notes outside the kit directory. `install.sh` refuses a kit whose
+  member bytes differ from the signed ones, including this file; restore an
+  edited member from the transferred copy.
+
 ## 2. Push the image with oras.exe
 
 The image is an OCI layout directory, pushed by the digest the kit MANIFEST

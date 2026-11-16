@@ -319,6 +319,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "llm_token_safety_margin": 128,
     "llm_max_chunk_tokens_narrative": 1200,
     "llm_tokenize_timeout_s": 5.0,
+    "llm_token_count_source": "tokenize",  # #1266: today's /tokenize-then-estimator
     "llm_stream": False,
     "chat_condense_enabled": False,
     "chat_max_body_chars": 131072,
@@ -464,6 +465,23 @@ def test_fixed_template_effort_is_accepted_when_no_effort_is_sent(monkeypatch):
                         llm_extra_body='{"chat_template_kwargs": {"reasoning_effort": "minimal"}}')
     assert settings.model_request_args().extra_fields("high") == {
         "chat_template_kwargs": {"reasoning_effort": "minimal"}}
+
+
+@pytest.mark.parametrize("source", ["tokenize", "completion_usage", "auto", "estimate"])
+def test_token_count_source_round_trips_from_the_environment(monkeypatch, source):
+    """Issue #1266: the count source is one of four fixed values."""
+    monkeypatch.setenv("LLM_TOKEN_COUNT_SOURCE", source)
+    assert Settings(_env_file=None).llm_token_count_source == source
+
+
+def test_unknown_token_count_source_stops_startup(monkeypatch):
+    from pydantic import ValidationError
+
+    monkeypatch.setenv("LLM_TOKEN_COUNT_SOURCE", "private-text")
+    with pytest.raises(ValidationError) as caught:
+        Settings(_env_file=None)
+    message = "; ".join(error["msg"] for error in caught.value.errors())
+    assert "completion_usage" in message and "private-text" not in message
 
 
 def test_every_setting_default_is_pinned(tmp_path, monkeypatch):

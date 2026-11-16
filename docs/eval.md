@@ -605,6 +605,9 @@ Flags (defaults are unchanged without them):
 | `--stream` | HTTP mode only. Sends the same request with `stream: true` and judges the SSE `final`, which already carries `finish_reason`, `ttft_ms` and `usage` ([agent contract](agent.md), §3 Streaming). Rows gain finish reason, token counts, `ttft_ms`, the client-side `client_first_token_ms` and `decode_tps`. Token deltas and the `final`'s retrieval hits are not kept. An `error` event, a stream that ends without `final`, or a `final` without valid counts is an error row with a fixed label. The in-process client buffers the whole response, so the flag is refused without `--agent-url`; in-process rows keep their answer-log join |
 | `--subset N` | The default sampler's round-robin (sorted classes, sorted ids, one row per class per round), so every cutoff of its order keeps every class. Refused (exit 2, no request) when `N` is below the class count, and refused before any read when the resolved dataset contains the frozen holdout: a sweep needs an explicit non-holdout `--golden`. Exclusive with `--all`. `params.sample` records the mode, row count, class count, a SHA-256 over the ordered ids, and the resolved datasets' basenames + SHA-256, so two arms can prove they ran the same rows over the same splits |
 | `--repeats R` | 1–10 whole passes over the sample (pass 1 over every row, then pass 2, ...), so drift within a session lands on every row equally. Rows carry `repeat`; `metrics` pools all passes; `metrics.repeats` gives, per metric, the per-pass values with min, max, mean and range, plus `verdict_flips` (entry ids judged differently across passes). More than one pass is a sweep, so the same non-holdout `--golden` rule applies |
+| `--endpoint chat` | Issue #1191. Each question goes as a single-turn streaming `POST /v1/chat` (`messages: [{role: user, content}]`, `stream: true`, `temperature`), the route the Open WebUI Pipe calls. Needs `--stream`. `params.endpoint` records `answer` (default) or `chat`; `params.transport` still means `json`/`sse`. Differences are listed under [chat rows](#chat-rows) |
+| `--coverage` | Issue #1191. Before the rows, pages `GET /v1/sources` (limit 200) once and records its `build_id`; after the rows, reads the first page again as `build_id_end`. Each row gets `coverage` (`all`, `some` or `none` of its `expected_doc_ids` served; `not_applicable` when it names none; `unknown`) and `expected_served`; `report.coverage` holds the counts per state over distinct rows, `pages` and `sources_n`. The match is on the exact doc id, edition included. A 503 (a build published without a catalog), a 404, a transport error, a malformed page, a build change between pages or 1,000 pages give `status: unknown` with a fixed `reason`. Coverage never changes a verdict or the exit code |
+| `--export PATH` | Issue #1191. A JSON file built by whitelist for leaving an air-gapped site: `params` (without `agent_url`), `metrics`, `healthz`, `representation`, `coverage` and one row per result with id, repeat, class, behaviour, verdict, failure and warn labels, verification states, finish reason, path, citation-WHY mode, citation and inferred-index counts, token counts, timings, `gold_retrieved`, expected/hit/cited doc ids, citation precision/recall and coverage. Failure labels come from a closed set (anything else is `other`; an error code outside the agent's stable codes is `?`), finish reasons outside the OpenAI set are `other`, and a `build_id` of an unexpected shape is null. No question, answer, citation, excerpt, script or failure text. `tests/test_eval_site.py` seeds canaries into every text field and checks the export bytes |
 
 Without `--stream`, the JSON request is unchanged: the row still records the
 model-leg `llm_ms` (and `ttft_ms` when the agent runs with `LLM_STREAM`) from
@@ -645,6 +648,305 @@ the concurrency step varies the served `--max-num-seqs` and drives load with
 the load tools (§8), reading this eval's hardware-independent group for the
 quality side. A live Colab session has not run this protocol yet; one is
 required before it gates a change.
+
+<a id="chat-rows"></a>
+**Chat rows (`--endpoint chat`).** The chat stream ([agent contract](agent.md),
+§3) ends with a chunk whose `choices[0]` carries `finish_reason`, `citations`,
+`citations_inferred`, `inferred_indices`, `verification_state`, the script
+flag and `supplied_evidence`, then `[DONE]`. The row is judged by the same
+`judge()` on those fields. Differences from `/v1/answer` rows:
+
+- **Body.** The stream has no answer field: its deltas are the model's raw
+  output followed by the validated `**Citations:**` list. The eval drops that
+  list and runs the agent's own `parse_answer` over the rest with the
+  terminal chunk's `supplied_evidence`, which is how the agent derives the
+  `/v1/answer` body. `tests/test_eval_site.py` checks through the real app
+  that both endpoints give the same body, citations, state and verdict for the
+  same model output. Against an older agent this is the RC's parser over that
+  agent's output.
+- **Unavailable, recorded as null (never a failure or a zero):** token counts,
+  `ttft_ms` and `decode_tps` (the chat chunks carry no `usage` and no
+  `ttft_ms`). Truncation still comes from `finish_reason`;
+  `client_first_token_ms` is the first content delta.
+- **Completion.** A terminal chunk and `[DONE]` are both required, as in the
+  Pipe; an error frame is an error row (`stream error (<code>)`) although
+  `[DONE]` follows it.
+- **Not measured.** The eval sends `temperature`; the Pipe sends none, so the
+  agent's configured default applies to users. The Pipe's own rendering
+  (hiding the model's citation section, banners) is not scored.
+
+<a id="at-a-site"></a>
+### At a site (before/after an upgrade)
+
+Issue #1191; maintainer decisions of 2026-11-16. Measures answer quality on
+the site's own model before and after an in-place upgrade, with the
+candidate's eval against both builds. Code reaches the site only inside the
+release bundle, so the instrument is the candidate's checkout.
+
+**Where.** The bastion pod (devkit image, Python 3.14 with the dev lock),
+through `oc port-forward` with the operator's namespace session. The Route is
+not usable (OAuth port; the eval refuses credentials and redirects). No
+cluster object changes.
+
+1. Bootstrap the candidate's workspace before deploying it
+   ([upgrade step 3](install_and_ops.md#upgrade-and-recovery-runbook-issue-272): fresh workspace, `bootstrap.sh`),
+   so the same eval runs against the old build first.
+2. Forward the agent and run the module directly, from a scratch working
+   directory (the run manifest goes to `<cwd>/evals/runs/`):
+
+```sh
+oc -n "$NS" port-forward svc/rag-agent 8087:8080 &   # keep it running
+WS=/work/<candidate>/qdrant-pdf-rag                  # the candidate workspace
+mkdir -p /work/site-eval && cd /work/site-eval
+run() {  # $1 = session label, $2 = endpoint, then extra flags
+  label=$1 endpoint=$2; shift 2
+  PYTHONPATH="$WS/src" python3 -m mainframe_rag.eval.answers \
+    --agent-url http://127.0.0.1:8087 --golden "$WS/evals/golden.jsonl" \
+    --stream --temperature 0 --request-timeout 600 --coverage \
+    --endpoint "$endpoint" \
+    --out "$label-$endpoint.json" --summary "$label-$endpoint.md" \
+    --export "$label-$endpoint.export.json" "$@" 2>"$label-$endpoint.log"
+}
+run T0 answer --subset 24            # timed 24-row run first
+run A1 answer --all --repeats 2      # then the full session, both endpoints
+run A1 chat --all --repeats 2
+```
+
+- Always pass `--golden evals/golden.jsonl` explicitly. Never the holdout:
+  `--repeats` refuses it anyway.
+- `--request-timeout` must exceed the deployed `REQUEST_DEADLINE_S` (the
+  chart ships 270 s), so the agent's own deadline, not the client, ends a
+  slow answer.
+- Run off-hours: a 503 from user traffic is an error row.
+- Time the 24-row run first. A session is 127 rows × 2 repeats × 2 endpoints,
+  so the two endpoints double its cost. If the full session does not fit, the
+  fallback is `--subset 24 --repeats 3`, which only catches gross changes.
+
+**Session plan.** All at temperature 0, both endpoints, same flags:
+
+| Session | Build | When |
+|---|---|---|
+| A1 | old (2cd8f67d) | the day before the upgrade |
+| A2 | old | just before deploying |
+| B1 | candidate | after the post-deploy smoke |
+| B2 | candidate | the next day |
+| C | candidate | after B2: one pass at `--temperature 0.2 --repeats 1`, both endpoints; it confirms, it never decides |
+
+A1 against A2 is the noise between sessions on an unchanged build. Check that
+`coverage.build_id` equals `build_id_end` in every export, that both A
+sessions name the same build, and that `params.sample.ids_sha256` and the
+dataset sha256 match across all sessions.
+
+**What may leave the gap.** Only the `*.export.json` files and a receipt: the
+old and candidate commit SHAs, the agent image digests, the model name and the
+non-secret `LLM_*` and `REQUEST_*` values. Review each export before it
+leaves; this prints 0 when no golden question and no follow-up question
+appears in it (a doc_number question that is itself part of a doc id is
+skipped, since doc ids may leave):
+
+```sh
+PYTHONPATH="$WS/src" python3 - "$WS/evals/golden.jsonl" A1-answer.export.json <<'PY'
+import json, sys
+from mainframe_rag.eval.follow_up import every_follow_up_text
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+ids = " ".join(d for row in rows for d in row.get("expected_doc_ids") or [])
+text = open(sys.argv[2]).read()
+asked = [row["query"] for row in rows] + every_follow_up_text()
+print(sum(query in text and query not in ids for query in asked))
+PY
+```
+
+`--out`, `--summary`, the stderr log and `evals/runs/` stay in the gap: they
+hold questions, answers, citations and failure text.
+
+**Follow-up answers (issue #1268).** `--turns 2` (needs `--endpoint chat
+--stream` and `--arm`) adds a second turn after every answer row that has
+expected docs; trap and gold-less rows end after turn 1. Turn 2 is the class
+follow-up from `mainframe_rag/eval/follow_up.py` (one owner, shared with
+`eval.chat`; none names a message id, member or abend code, so
+`condense_query` never bypasses the rewrite), sent with the history the Open
+WebUI Pipe would send. The evaluator runs its own checkout's
+`integrations/openwebui/docs_pipe.py` on the recorded turn-1 frames: the kept
+answer is the model prose without its own citations section, followed by the
+agent's validated `**Citations:**` list (source events are not part of the
+message). The turn-2 body is the Pipe's `build_request`/`fit_request` plus
+`temperature`, as on every chat row. A missing Pipe file, or one without the
+seams the evaluator drives (`Pipe._transport`, `build_request`, `fit_request`,
+`DEFAULT_MAX_BODY_CHARS`), refuses the run (exit 2) before any request.
+
+- Turn-2 retrieval is read from the terminal chunk's `supplied_evidence`
+  (what the agent packed), never from a search of the follow-up text.
+  `evidence_gold_hit` is that set against the opener's `expected_doc_ids`; an
+  empty set (zero hits) is a known miss. Turn-2 citations map to doc ids
+  through the same entries (`evidence_citation_precision`/`_recall`).
+- Turn-2 pass/fail is structural only (a body, no refusal, explicit validated
+  citations). The opener's gold substrings, identifier and expected state are
+  written for the opener's question and are not applied: read the evidence
+  hit, `vs_opener`, the path and the verification states first.
+- The existing metric blocks cover turn 1 only, so they read like a
+  single-turn chat run over the same sample. `metrics.by_turn` compares the
+  openers that got a follow-up (`"1"`) with their follow-ups (`"2"`):
+  evidence hit and rate, zero hits, refusals, verification states, citation
+  precision/recall, the structural pass rate, `vs_opener` (kept, lost,
+  gained, neither per session), `prior_answer_chars` (how many kept answers
+  exceed the agent's default 1000-character prior-turn cut,
+  `chat_max_prior_turn_chars`, which is not an operator input) and, with
+  `--repeats`, the spread per repeat. An opener that errored gives a turn-2
+  error row (`opener not answered`), and a Pipe that cannot build the history
+  gives `follow-up history failed`; both are counted, not dropped. The exit
+  code covers both turns: 1 when any row of either turn fails or errors, even
+  when the turn-1 blocks report no failure.
+- Export rows gain `turn`, `prior_answer_chars` and the `evidence_*` fields;
+  params gain `turns`, `arm`, `follow_ups_sha256` and `pipe_sha256`. Without
+  `--turns 2` neither the export nor the report changes.
+- The agent does not report whether it condenses, so `--arm` is the
+  operator's declaration (1-32 of `a-z 0-9 . _ -`). Check the deployed value
+  before each arm, as below. `answer_taxonomy.py` takes single-turn reports
+  only (it refuses a repeated row id).
+
+**Follow-up kinds.** Follow-ups fail in three ways: a follow-up that needs
+new evidence (A), one about the previous answer itself (B), and a change of
+topic that the history should not disturb (C). `--follow-up` (needs
+`--turns 2`) takes `all` or a comma list of the kinds below. Every kind
+branches off the same turn-1 opener and the same kept answer, so each
+eligible row costs one opener plus one call per kind. Without `--follow-up`
+the run is the anaphoric run above and its output is unchanged.
+
+| Kind | Class | Turn 2 asks | Who gets it | Turn-2 pass means |
+|---|---|---|---|---|
+| `anaphoric` | A | the class follow-up | every answer row with expected docs | structural pass, as above |
+| `switch` | C | another sampled row's own question | the same rows, when a partner exists | that row's full gold verdict |
+| `restate` | B | to repeat the exact command, message or name from the last answer | openers that passed and have `gold_must_contain` | every opener gold string in the answer |
+| `summary` | B | to sum up the last answer in three bullets | the same as `restate` | the same as `restate` |
+
+- **Pairing (switch).** The partner is the next eligible row in sample order,
+  wrapping around, that shares no expected doc id with the opener. No seed is
+  used, so the same sample always pairs the same way. The partner is also
+  asked as an opener in the same pass. `vs_single` compares each switched
+  question with that same question asked alone in the same repeat: pass,
+  evidence gold hit and verification state are reported as kept, lost,
+  gained, neither or unknown (either side errored), and state changes as
+  `from>to` counts. A switch row's `coverage` is that of the question it
+  asked. This measures
+  harm from history, condensation or anchoring. A switched question may
+  name an identifier, so condensation is bypassed for it, exactly as for a
+  user's new standalone question.
+- **Class B.** `restate` and `summary` pass when the answer holds every
+  opener gold substring (case-folded, the judge's rule) and is not a
+  decline. The agent answers from fresh excerpts only, so an uncited
+  restatement is the product rule and is not a failure. A decline (the
+  zero-hits path, the agent's structured decline or a whole-response
+  refusal) fails as `follow-up declined`, even when it names a gold string,
+  and is counted in `restate.declines` (over `restate.n` judged rows); its
+  gold strings count in `n` but never as `found`. Each gold
+  string is placed against the prior-turn cut in the history answer as sent
+  (stripped, pasted excerpts dropped, as the agent does):
+  `before_cut` (wholly inside the kept head), `after_cut`, or
+  `not_in_history`. It is crossed with whether the follow-up's packed
+  evidence holds an opener gold doc. That evidence side is a doc-level
+  proxy: `supplied_evidence` carries doc ids, not excerpt text.
+- **Prior-turn cut.** The agent does not report `chat_max_prior_turn_chars`,
+  so `--prior-cap` declares it (200-5000, default 1000, the agent default;
+  recorded as `params.prior_cap`). Exposure per turn-2 row:
+  `history_over_cap`, and `citation_list_cut` (`kept`, `partial`, `cut` or
+  `absent`): where the Pipe's appended `**Citations:**` list lies against
+  the cut. A test pins this model to the agent's own prompt builder.
+- **Skips.** Turn-2 rows exist only for follow-ups that were asked. Skips are
+  counted per kind in `skipped`: `no_partner`, `no_gold_strings` and
+  `opener_not_passed`. Class-B denominators depend on turn-1 outcomes, so
+  read `n` beside every rate. An errored opener still gives `opener not
+  answered` rows for `anaphoric` and `switch`.
+- **Output.** `metrics.by_turn` becomes turn x kind: `by_turn["1"][kind]`
+  covers the openers that got that kind and `by_turn["2"][kind]` covers its
+  follow-ups. Kinds are never pooled. Each block also carries `timing`
+  (`elapsed_ms` and `client_first_token_ms` distributions; `ttft_ms` and
+  `total_tokens` are None, because the chat stream carries neither). Turn-2
+  blocks carry `exposure` and `skipped`, plus `vs_single` (switch) or
+  `restate` (class B). Every export row gains `follow_up_kind` (None on turn
+  1), `switch_id`, `history_over_cap`, `citation_list_cut`,
+  `restate_declined`, `gold_n`, `gold_found_n` and `gold_split` (counts
+  only; None where they do not apply). Params gain
+  `follow_up`, `prior_cap`, `restate_follow_ups_sha256`,
+  `switch_pairs_sha256` and `switch_pairs_n`.
+- **Exit code.** The rule is unchanged: 1 when any row of any turn or kind
+  fails or errors. Class-B rows fail whenever a gold string is not restated,
+  so with `--follow-up` an exit of 1 is expected. It is not the arm signal.
+
+**Follow-up arms (one visit).** The four arms run on one build, after the
+A/B sessions or on a quiet day. Each arm changes one setting from the
+baseline, with a redeploy before each arm; the previous arm's setting is
+reverted first. Every arm uses the run function above (temperature 0,
+`--coverage`) with the same sample flags:
+
+```sh
+show() {  # the deployed value of one agent setting (empty = unset, the default)
+  oc -n "$NS" get deploy rag-agent -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"$1\")].value}"; echo
+}
+for v in CHAT_CONDENSE_ENABLED CHAT_FOLLOWUP_ANCHOR_ENABLED CHAT_MAX_PRIOR_TURN_CHARS; do show $v; done
+run H-baseline chat --all --repeats 2 --turns 2 --follow-up all --arm baseline
+# airgap.env: CHAT_CONDENSE_ENABLED=true; `sh scripts/tools/run-task.sh airgap:deploy`;
+# wait for the rollout; show the three values again, then:
+run H-condense chat --all --repeats 2 --turns 2 --follow-up all --arm condense
+# revert it; CHAT_FOLLOWUP_ANCHOR_ENABLED=true; deploy; show:
+run H-anchored chat --all --repeats 2 --turns 2 --follow-up all --arm anchored
+# revert it; CHAT_MAX_PRIOR_TURN_CHARS=4000; deploy; show:
+run H-history4000 chat --all --repeats 2 --turns 2 --follow-up all --arm history4000 \
+  --prior-cap 4000
+# revert it and deploy: the site ends on its baseline values.
+```
+
+- `baseline`: all three settings off or at their defaults.
+- `condense`: `CHAT_CONDENSE_ENABLED=true` (an operator input today).
+- `anchored`: `CHAT_FOLLOWUP_ANCHOR_ENABLED=true`, after #1271 (the
+  follow-up handling flags; the name may change there). Skip the arm until
+  the deployed build has it.
+- `history4000`: `CHAT_MAX_PRIOR_TURN_CHARS=4000` with `--prior-cap 4000`,
+  after #1271 makes `chat_max_prior_turn_chars` an operator input (today it
+  has no `airgap.env` key and no chart value). Skip the arm until then.
+  Never pass `--prior-cap` that differs from the deployed value.
+
+Cost: per answer row with expected docs, an arm asks one opener and up to
+four follow-ups. Class-B follow-ups go only to passed openers with gold
+strings. Time the baseline arm on `--subset 24` first. If `--all
+--repeats 2` does not fit four arms, run every arm with the same
+`--subset 24 --repeats 3`.
+
+Reading the arms. First check that `params.sample.ids_sha256`,
+`follow_ups_sha256`, `restate_follow_ups_sha256`, `switch_pairs_sha256` and
+`pipe_sha256` are equal across the four exports, and that `prior_cap` differs
+only in `history4000`. Then compare each kind on its own signal:
+
+- `anaphoric`: `by_turn["2"]["anaphoric"]`: `evidence_gold_hit_rate` and
+  `vs_opener`.
+- `switch`: `vs_single`: `lost` against `gained` for pass and evidence.
+  Gains on anaphoric that come with more switch losses are a trade.
+- `restate`/`summary`: `pass_rate`, `restate.declines` and
+  `restate.gold_split` (`after_cut` found should move only with a larger
+  cap).
+- `exposure.over_cap_share` and `citation_list_cut_share` per arm.
+- `timing` p50 per turn and kind is the arm's cost on this host
+  (hardware-dependent; never the deciding signal).
+
+A difference inside either arm's own repeat range is noise. The export's
+`repeats` blocks give that range for the evidence hit, pass rate and
+citation recall only; for `vs_single`, `restate.declines` and `gold_split`,
+recount each repeat from the export rows (`repeat`, `follow_up_kind`,
+`switch_id`, `verdict`, `evidence_gold_hit`, `gold_split`). Only the four
+`*.export.json` files leave the gap (review each as above); the stderr log,
+`--out` and `--summary` hold questions, follow-ups and answers and stay. Any
+default change after the comparison is a separate maintainer decision.
+
+The earlier two-arm condense comparison (`--arm condense-off`/`condense-on`
+without `--follow-up`) remains valid. Its exports keep the anaphoric-only
+shape.
+
+**Decision rule.** The [protocol above](#measurement-protocol)
+applies: decide on the hardware-independent group only, and a difference
+smaller than the range either arm shows across its own repeats is noise. At a
+site, a change is also claimed only when B differs from A by more than A1
+differs from A2. Classes with 10 rows or fewer (table, negative, the abstain
+rows) are read in aggregate only. The paired per-row comparison runs on the
+connected side from the exports and is not part of this tool.
 
 ### Failure taxonomy (#830)
 

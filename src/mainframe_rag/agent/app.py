@@ -886,7 +886,9 @@ async def lifespan(_app: FastAPI):
         # own connection pool with its own (long) timeout. LLM env stays
         # request-time fail-fast (assert_reasoning_model in /v1/answer).
         embedder = build_embedder(settings, http_sync)
-        tokenizer = build_tokenizer(settings, http_sync)
+        # Off the event loop: LLM_TOKEN_COUNT_SOURCE=auto runs its startup
+        # count check here (#1266; warn-only, never a refusal to start).
+        tokenizer = await asyncio.to_thread(build_tokenizer, settings, http_sync)
         reranker = build_reranker(settings, http_sync)
         rerank_health = None
         if reranker is not None:

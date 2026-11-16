@@ -562,6 +562,31 @@ def test_direct_chart_refuses_model_request_arguments_the_application_refuses(ex
             Settings(_env_file=None, llm_extra_body=json.dumps(extra), llm_effort_transport=transport or "top_level")
 
 
+def test_token_count_source_reaches_the_pod_as_settings_accept_it():
+    """Issue #1266: unset renders no LLM_TOKEN_COUNT_SOURCE, so the default pod
+    keeps the Settings default; each schema value renders verbatim and
+    round-trips through Settings; the schema enum is exactly the application's."""
+    from pydantic import ValidationError
+
+    from mainframe_rag.config import TOKEN_COUNT_SOURCES, Settings
+
+    assert "LLM_TOKEN_COUNT_SOURCE" not in env_map(run_new_template({})["Deployment", "rag-agent"])
+    assert Settings(_env_file=None).llm_token_count_source == "tokenize"
+    schema = json.loads((CHART / "values.schema.json").read_text())
+    enum = schema["properties"]["models"]["properties"]["reasoning"]["properties"]["tokenCountSource"]["enum"]
+    assert tuple(enum) == TOKEN_COUNT_SOURCES
+    for source in TOKEN_COUNT_SOURCES:
+        pod = env_map(run_new_template({"models": {"reasoning": {"tokenCountSource": source}}})[
+            "Deployment", "rag-agent"])
+        value = pod["LLM_TOKEN_COUNT_SOURCE"]["value"]
+        assert value == source
+        assert Settings(_env_file=None, llm_token_count_source=value).llm_token_count_source == source
+    # What the schema refuses (test_direct_chart_refuses_invalid_values), Settings refuses too.
+    for bad in ("usage", "", "Tokenize"):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, llm_token_count_source=bad)
+
+
 @pytest.mark.parametrize("path,bad", [
     ("models.reasoning.maxModelLen", 511), ("models.reasoning.maxModelLen", "16384"),
     ("models.reasoning.reservedOutputTokens", 127),
@@ -571,6 +596,8 @@ def test_direct_chart_refuses_model_request_arguments_the_application_refuses(ex
     ("models.reasoning.reasoningEfforts", "low, medium"),
     ("models.reasoning.reasoningEfforts", ""),
     ("models.reasoning.stream", "true"),
+    ("models.reasoning.tokenCountSource", "usage"), ("models.reasoning.tokenCountSource", ""),
+    ("models.reasoning.tokenCountSource", "Tokenize"),
     ("requestDeadlineSeconds", -1), ("requestDeadlineSeconds", 3601),
     ("requestDeadlineSeconds", "300"), ("requestDeadlineSeconds", 1.5),
     ("requestMaxConcurrent", -1), ("requestMaxConcurrent", 1001), ("requestMaxConcurrent", "2"),
@@ -1151,7 +1178,7 @@ OWUI_ENV_NAMES = {
     "OPENID_REDIRECT_URI", "RAG_EMBEDDING_MODEL_AUTO_UPDATE", "RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE",
     "RAG_RERANKING_MODEL_AUTO_UPDATE", "RAG_RERANKING_MODEL_TRUST_REMOTE_CODE", "SCARF_NO_ANALYTICS",
     "TASK_MODEL", "USER_PERMISSIONS_CHAT_CALL", "USER_PERMISSIONS_CHAT_FILE_UPLOAD",
-    "USER_PERMISSIONS_CHAT_STT", "USER_PERMISSIONS_CHAT_TTS", "USER_PERMISSIONS_FEATURES_API_KEYS",
+    "USER_PERMISSIONS_CHAT_SHARE", "USER_PERMISSIONS_CHAT_STT", "USER_PERMISSIONS_CHAT_TTS", "USER_PERMISSIONS_FEATURES_API_KEYS",
     "USER_PERMISSIONS_FEATURES_CODE_INTERPRETER", "USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS",
     "USER_PERMISSIONS_FEATURES_FOLDERS", "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION",
     "USER_PERMISSIONS_FEATURES_MEMORIES", "USER_PERMISSIONS_FEATURES_NOTES",
@@ -1392,6 +1419,9 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION": "false",
         "USER_PERMISSIONS_CHAT_STT": "false", "USER_PERMISSIONS_CHAT_TTS": "false",
         "USER_PERMISSIONS_CHAT_CALL": "false",
+        # ADR-0007 S2: sharing is off. v0.12.3 defaults it to True, and its
+        # snapshots sit outside the 30-day purge.
+        "USER_PERMISSIONS_CHAT_SHARE": "false",
         # Chat folders on, folder sharing off (#1255); a folder's knowledge
         # entries stay inert while uploads, knowledge, notes and query
         # generation stay off (ADR-0007 V1).
