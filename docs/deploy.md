@@ -2043,8 +2043,9 @@ chats. Upgrading from the single model:
   not found". The dev acceptance check `legacy-chat-answers` covers the server side
   ([checks](openwebui-dev.md)); the browser's switch is part of the pilot browser trace.
 - Every entry shares the Pipe's `TIMEOUT_S` and the agent's request deadline (270 s, sized at
-  medium effort). A thorough (`xhigh`) answer may end as the fixed deadline text: measure that
-  in the site eval before users are told about thorough. A site whose
+  medium effort). A thorough (`xhigh`) answer may end as the fixed deadline text. Thorough is
+  granted and visible from the upgrade on; the site eval measures how often it hits the deadline
+  afterwards (maintainer decision 2026-11-16). A site whose
   `LLM_REASONING_EFFORTS` lacks an entry's effort shows a fixed "does not offer this answer depth"
   text for it.
 

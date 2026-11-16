@@ -126,6 +126,7 @@ following ([deploy step 5](deploy.md#owui-answer-depth)):
    to "Rosetta"; send one question and check the citations.
 
 API callers that used `mainframe_rag_docs` must switch to an entry id. Some
-thorough answers may end at the 270 s request deadline: measure this in the
-site eval before telling users about thorough. Nothing is removed from the
+thorough answers may end at the 270 s request deadline; thorough is visible
+from the upgrade on, and the site eval measures how often that happens
+afterwards. Nothing is removed from the
 extension surface.
