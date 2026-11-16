@@ -683,6 +683,13 @@ oc -n "$NAMESPACE" exec deploy/rag-agent -c agent -- \
 oc -n "$NAMESPACE" exec deploy/rag-agent -c agent -- \
   python3 /app/scripts/probe_gateway.py --probe-args
 
+# 3b. Optional (#1266), for a gateway without /tokenize: whether a 1-token
+# completion's usage.prompt_tokens counts the prompt (present, stable, larger
+# with one more turn) and a cold and a warm count time. Numbers only. Select
+# the source with LLM_TOKEN_COUNT_SOURCE (docs/agent.md#token-count-sources).
+oc -n "$NAMESPACE" exec deploy/rag-agent -c agent -- \
+  python3 /app/scripts/probe_gateway.py --probe-count
+
 # 4. Only after that probe passes:
 sh scripts/tools/run-task.sh airgap:ingest
 sh scripts/tools/run-task.sh airgap:smoke

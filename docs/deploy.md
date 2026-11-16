@@ -148,6 +148,11 @@ restores the snapshot over whatever the file assigned; empty stays unset
   The mapper writes the object as one JSON flow mapping, never as block keys
   built from operator text, and refuses integers beyond 2^53 because Helm reads
   numbers as 64-bit floats. Unset renders neither variable.
+- `LLM_TOKEN_COUNT_SOURCE` (#1266; `tokenize`, `completion_usage`, `auto`,
+  `estimate`; [semantics](agent.md#token-count-sources)) follows the same path
+  into `models.reasoning.tokenCountSource`; `model_config.reasoning_overrides`
+  and the chart schema refuse other values. Unset renders no variable and keeps
+  the application default `tokenize`.
 - Optional application budgets (`LLM_MAX_MODEL_LEN`, `LLM_RESERVED_OUTPUT_TOKENS`,
   `LLM_THINKING_RESERVE_TOKENS_SIMPLE` / `COMPLEX`), reasoning efforts
   (`LLM_REASONING_EFFORT_SIMPLE` / `COMPLEX`) and `LLM_STREAM` follow that same
