@@ -705,18 +705,22 @@ turn. The classifier is deterministic, word-bounded and needs both a coding
 intent and a marker. Intents: producing code (write, generate, create, rewrite,
 convert, refactor; draft, translate or code followed by a determiner, "code"
 never after return/reason/condition/completion/abend/error; "how do I code";
-"I need a/an"; "show/give/provide me a sample/example/template") or repairing
+"I need/want a" followed within two words by the artefact ("a REXX script", never
+"a list of the JCL parameters"); "show/give/provide me a sample/example/template") or repairing
 and reading it (fix, debug; review or correct followed by a determiner;
 "explain this", "what does this", "what's/what is wrong with", "why does my").
-With pasted code a looser ask is enough (review, check, why, wrong, fails,
-error, abend, help, improve). Markers: JCL, jobstream, REXX, CLIST, HLASM, assembler, Metal C, CSECT/DSECT,
+With pasted code-shaped lines (a `//name JOB|EXEC|DD|PROC` line or a `/* REXX`
+header) a looser ask is enough (review, check, why, wrong, fails, error, abend,
+help, improve); a bare fence is only a marker, since operators also fence
+console output, so it needs a real intent and keeps the message-id rule.
+Markers: JCL, jobstream, REXX, CLIST, HLASM, assembler, Metal C, CSECT/DSECT,
 PROCLIB, EXEC, macro, PROC, a cataloged or in-stream procedure, C as a language
 ("C program", "in C"), "this/my code", a generic program/routine/script as the
-object of any of those verbs (or of need/want), or pasted code (a fence, a `//name JOB|EXEC|DD|PROC` line, a
-`/* REXX` header). A marker alone (a message or syntax lookup) or an intent
+object of any of those verbs, or pasted code (code-shaped lines or a fenced
+block). A marker alone (a message or syntax lookup) or an intent
 alone (fix a reason code) is not a coding request, and a message naming a
 message identifier stays a lookup unless it asks to produce code or pastes
-code ("How do I fix IEFC452I ... JCL ERROR?" keeps the message-id rule;
+code-shaped lines ("How do I fix IEFC452I ... JCL ERROR?" keeps the message-id rule;
 "Write a REXX exec that replies to IEA500I" is coding). A coding turn:
 
 - is `complex` (effort, context, thinking reserve, output cap), overriding the

@@ -1661,6 +1661,8 @@ CODING_REQUESTS = [
     "How do I code a GETMAIN macro in HLASM?",
     "I need a REXX script that lists data sets",
     "Translate this program",
+    "I need a JCL job that copies a data set",
+    "Fix this code:\n```\n         L     1,=A(PARM)\n```",
 ]
 NON_CODING_REQUESTS = [
     "What does IEA500I mean?",
@@ -1692,6 +1694,12 @@ NON_CODING_REQUESTS = [
     # "code" after return/reason/condition is a noun, never the verb.
     "What condition code the step returns in JCL?",
     "Which return code the REXX exec sets is documented?",
+    # "need/want" counts only when the wanted thing is the artefact.
+    "I need a list of the JCL DD parameters",
+    "We need an explanation of IEF453I JCL ERROR",
+    "I want a summary of the REXX EXECIO command",
+    # A fenced console message is not code: the message-id rule holds.
+    "Why do I get this?\n```\nIEF453I MYJOB - JOB FAILED - JCL ERROR\n```",
 ]
 
 

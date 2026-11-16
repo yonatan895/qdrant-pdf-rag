@@ -524,7 +524,11 @@ _CODING_PRODUCE_RE = re.compile(
     + r"|\b(?<!return\s)(?<!reason\s)(?<!condition\s)(?<!completion\s)(?<!abend\s)(?<!error\s)"
     + r"(?:" + "|".join(_PRODUCE_VERBS_BEFORE_OBJECT) + r")\s+(?:me\s+|up\s+)?" + _DETERMINER
     + r"|\bhow\s+(?:do|can|should|would)\s+(?:i|we|you)\s+code\b"
-    + r"|\b(?:i|we)\s+(?:need|want)\s+(?:a|an|some)\b"
+    # "I need a REXX script", never "I need a list of the JCL parameters":
+    # the wanted thing itself is the artefact, within two words.
+    + r"|\b(?:i|we)\s+(?:need|want)\s+(?:a|an|some)\s+(?:[\w/-]+\s+){0,2}"
+    r"(?:program|programs|routine|subroutine|script|scripts|exec|execs|jcl|job|proc|procs"
+    r"|macro|macros|clist|jobstream|csect)\b"
     + r"|\b(?:show|give|provide|send)\s+(?:me\s+|us\s+)?(?:(?:a|an|some)\s+)?"
     r"(?:sample|example|skeleton|template)s?\b",
 )
@@ -557,17 +561,18 @@ _CODING_MARKER_RE = re.compile(
 # program ..." is not.
 _CODING_OBJECT_RE = re.compile(
     r"\b(?:" + "|".join((*_PRODUCE_VERBS, *_PRODUCE_VERBS_BEFORE_OBJECT, *_REPAIR_VERBS,
-                         *_REPAIR_VERBS_BEFORE_OBJECT, "need", "want")) + r")"
+                         *_REPAIR_VERBS_BEFORE_OBJECT)) + r")"
     # Every optional slot ends in its own \s+ after a non-space token, so no
     # two whitespace runs compete for one gap (linear on a 128 KiB message).
     r"\s+(?:me\s+)?(?:(?:a|an|the|this|my|our|that|these|some)\s+)?(?:[\w/-]+\s+){0,2}"
     r"(?:program|programs|routine|subroutine|script|scripts)\b"
     r"(?!\s+(?:check|interrupt|object|call|management|properties)s?\b)",
 )
-# Pasted code: a fence, a JCL statement line, or a REXX comment header.
-_PASTED_CODE_RE = re.compile(
-    r"```|^//[^\s*]*\s+(?:job|exec|dd|proc)\b|/\*\s*rexx\b", re.MULTILINE
-)
+# Pasted code: a JCL statement line or a REXX comment header. A bare fence
+# is weaker (operators also fence console output): it is a marker only, so it
+# needs a real coding intent and keeps the message-id rule.
+_PASTED_CODE_RE = re.compile(r"^//[^\s*]*\s+(?:job|exec|dd|proc)\b|/\*\s*rexx\b", re.MULTILINE)
+_FENCE_RE_MARKER = re.compile(r"```")
 
 
 def is_coding_request(query: str) -> bool:
@@ -576,8 +581,10 @@ def is_coding_request(query: str) -> bool:
 
     A message naming a message identifier keeps the complexity rule's
     "message-ID queries stay simple" unless it asks to produce code or pastes
-    code: "How do I fix IEFC452I JOB NOT RUN - JCL ERROR?" is a message
-    lookup, "Write a REXX exec that replies to IEA500I" is a coding request."""
+    code-shaped lines: "How do I fix IEFC452I JOB NOT RUN - JCL ERROR?" is a
+    message lookup, "Write a REXX exec that replies to IEA500I" is a coding
+    request, and a fenced console message with "why do I get this?" stays a
+    lookup."""
     text = query.casefold()
     if _PASTED_CODE_RE.search(text) is not None:
         return (_CODING_PRODUCE_RE.search(text) is not None
@@ -586,7 +593,8 @@ def is_coding_request(query: str) -> bool:
     produce = _CODING_PRODUCE_RE.search(text) is not None
     if not produce and _CODING_REPAIR_RE.search(text) is None:
         return False
-    if _CODING_MARKER_RE.search(text) is None and _CODING_OBJECT_RE.search(text) is None:
+    if all(pattern.search(text) is None
+           for pattern in (_CODING_MARKER_RE, _CODING_OBJECT_RE, _FENCE_RE_MARKER)):
         return False
     return produce or not find_message_ids(query)
 
