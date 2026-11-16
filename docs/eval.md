@@ -756,6 +756,68 @@ PY
 `--out`, `--summary`, the stderr log and `evals/runs/` stay in the gap: they
 hold questions, answers, citations and failure text.
 
+**Follow-up answers (issue #1268).** `--turns 2` (needs `--endpoint chat
+--stream` and `--arm`) adds a second turn after every answer row that has
+expected docs; trap and gold-less rows end after turn 1. Turn 2 is the class
+follow-up from `mainframe_rag/eval/follow_up.py` (one owner, shared with
+`eval.chat`; none names a message id, member or abend code, so
+`condense_query` never bypasses the rewrite), sent with the history the Open
+WebUI Pipe would send. The evaluator runs its own checkout's
+`integrations/openwebui/docs_pipe.py` on the recorded turn-1 frames: the kept
+answer is the model prose without its own citations section, followed by the
+agent's validated `**Citations:**` list (source events are not part of the
+message). The turn-2 body is the Pipe's `build_request`/`fit_request` plus
+`temperature`, as on every chat row. A missing Pipe file refuses the run
+(exit 2).
+
+- Turn-2 retrieval is read from the terminal chunk's `supplied_evidence`
+  (what the agent packed), never from a search of the follow-up text.
+  `evidence_gold_hit` is that set against the opener's `expected_doc_ids`; an
+  empty set (zero hits) is a known miss. Turn-2 citations map to doc ids
+  through the same entries (`evidence_citation_precision`/`_recall`).
+- Turn-2 pass/fail is structural only (a body, no refusal, explicit validated
+  citations). The opener's gold substrings, identifier and expected state are
+  written for the opener's question and are not applied: read the evidence
+  hit, `vs_opener`, the path and the verification states first.
+- The existing metric blocks cover turn 1 only, so they read like a
+  single-turn chat run over the same sample. `metrics.by_turn` compares the
+  openers that got a follow-up (`"1"`) with their follow-ups (`"2"`):
+  evidence hit and rate, zero hits, refusals, verification states, citation
+  precision/recall, the structural pass rate, `vs_opener` (kept, lost,
+  gained, neither per session), `prior_answer_chars` (how many kept answers
+  exceed the agent's 1000-character prior-turn cut) and, with `--repeats`,
+  the spread per repeat. An opener that errored gives a turn-2 error row
+  (`opener not answered`), so it is counted, not dropped.
+- Export rows gain `turn`, `prior_answer_chars` and the `evidence_*` fields;
+  params gain `turns`, `arm`, `follow_ups_sha256` and `pipe_sha256`. Without
+  `--turns 2` neither the export nor the report changes.
+- The agent does not report whether it condenses, so `--arm` is the
+  operator's declaration (1-32 of `a-z 0-9 . _ -`). Check the deployed value
+  before each arm, as below. `answer_taxonomy.py` takes single-turn reports
+  only (it refuses a repeated row id).
+
+The condense comparison is two arms on one build, after the A/B sessions or
+on a quiet day, with the same flags and the run function above:
+
+```sh
+oc -n "$NS" get deploy rag-agent \
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="CHAT_CONDENSE_ENABLED")].value}'
+run F-off chat --all --repeats 2 --turns 2 --arm condense-off  # A: value false
+# set CHAT_CONDENSE_ENABLED=true in airgap.env, re-run
+# `sh scripts/tools/run-task.sh airgap:deploy`, wait for the rollout,
+# check the value again (true), then:
+run F-on chat --all --repeats 2 --turns 2 --arm condense-on    # B: value true
+```
+
+A session is about twice a single-turn chat session (one follow-up per answer
+row with expected docs). If it does not fit, use `--subset 24 --repeats 3` on
+both arms.
+Compare `by_turn["2"].evidence_gold_hit_rate` and `vs_opener` between the
+arms; a difference inside either arm's repeat range is noise. Only the two
+`*.export.json` files leave the gap (review them as above); the stderr log,
+`--out` and `--summary` hold the follow-up and the answers and stay. Any
+default change after the comparison is a separate maintainer decision.
+
 **Decision rule.** The [protocol above](#measurement-protocol)
 applies: decide on the hardware-independent group only, and a difference
 smaller than the range either arm shows across its own repeats is noise. At a

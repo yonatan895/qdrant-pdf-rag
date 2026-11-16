@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from mainframe_rag.agent.sse import format_openai_chunk, format_openai_done, format_openai_error
+from mainframe_rag.eval.follow_up import DEFAULT_FOLLOW_UP, FOLLOW_UPS
 
 HEALTH = {"status": "ok", "qdrant": True, "embed": True,
           "representation": "compatible", "rerank": None}
@@ -585,3 +586,242 @@ def test_rc_client_reads_the_2cd8f67d_zero_hits_and_failure(site_eval, endpoint)
                                      ["--endpoint", endpoint, "--stream"])
     assert status == 1
     assert report["results"][0]["failures"] == ["stream error (upstream_error)"]
+
+
+# ------------------------------------------------------------- two turns (#1268)
+
+TWO_TURN_ROW_KEYS = EXPORT_ROW_KEYS | {
+    "turn", "prior_answer_chars", "evidence_doc_ids", "evidence_gold_hit",
+    "evidence_cited_doc_ids", "evidence_citation_precision", "evidence_citation_recall",
+}
+OTHER_DOC = "SC28-9999-00"
+OTHER_CITE = "SC28-9999-00 Other Reference, Chapter 9 > Something, p. 9-1"
+TWO_TURN = ["--endpoint", "chat", "--stream", "--turns", "2", "--arm", "condense-off"]
+
+
+def _two_turn_agent(turns: dict[tuple[str, int], bytes], pool: dict[str, list[str]] | None = None):
+    """A fake agent for two-turn sessions: the chat stream is chosen by the
+    opener question and the number of messages; the search pool by query."""
+    import httpx2
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        body = json.loads(request.content)
+        if request.url.path == "/v1/search":
+            docs = (pool or {}).get(body["query"], [])
+            return httpx2.Response(200, json={"hits": [{"doc_id": d} for d in docs]})
+        assert request.url.path == "/v1/chat"
+        messages = body["messages"]
+        return _sse(turns[(messages[0]["content"], len(messages))])
+
+    return respond
+
+
+def _chat_bodies(calls) -> list[dict]:
+    return [json.loads(c.content) for c in calls if c.url.path == "/v1/chat"]
+
+
+def _pipe_session(turn_one: bytes, question: str, follow_up: str) -> tuple[str, list[dict]]:
+    """Independent expectation: the real Open WebUI Pipe, streamed as Open
+    WebUI consumes it, for the opener and then for [question, the answer it
+    kept, follow-up]. Returns the kept answer and the agent bodies it sent."""
+    import asyncio
+
+    import httpx
+    from integrations.openwebui import docs_pipe
+
+    sent: list[dict] = []
+
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, content=turn_one, headers={"content-type": "text/event-stream"})
+
+    async def emit(_event):
+        return None
+
+    async def turn(messages):
+        pipe = docs_pipe.Pipe()
+        pipe._transport = httpx.MockTransport(handler)
+        result = await pipe.pipe({"model": "docs", "stream": True, "messages": messages},
+                                 __user__={"id": "u1"}, __event_emitter__=emit,
+                                 __task__=None, __metadata__={})
+        return "".join([item["choices"][0]["delta"]["content"] async for item in result])
+
+    kept = asyncio.run(turn([{"role": "user", "content": question}]))
+    asyncio.run(turn([{"role": "user", "content": question},
+                      {"role": "assistant", "content": kept},
+                      {"role": "user", "content": follow_up}]))
+    return kept, sent
+
+
+def test_two_turn_bodies_are_what_the_pipe_sends(site_eval):
+    """Turn 1 is the Pipe's request; turn 2 carries the answer as Open WebUI
+    keeps it from the Pipe (the model's own citations section hidden, the
+    validated list kept in the content) and the class follow-up. The eval's
+    one addition is `temperature`, as on every chat row."""
+    opener = _entry()
+    turn_one = chat_stream("IEA500I reports a rejected command [1].\n\n",
+                           f"Citations:\n- {CITE}\n")
+    agent = _two_turn_agent({(opener["query"], 1): turn_one, (opener["query"], 3): chat_stream(
+        "It means the command was rejected; reenter it [1].")})
+    status, report, _, calls = site_eval(agent, [opener], TWO_TURN)
+    assert status == 0, report["results"]
+    kept, sent = _pipe_session(turn_one, opener["query"], FOLLOW_UPS["message_id"])
+    bodies = _chat_bodies(calls)
+    assert bodies == [{**sent[0], "temperature": 0.0}, {**sent[1], "temperature": 0.0}]
+    assert bodies[1]["messages"][1] == {"role": "assistant", "content": kept}
+    assert kept.endswith(f"\n\n**Citations:**\n- {CITE}") and kept.count("Citations:") == 1
+    first, second = report["results"]
+    assert (first["turn"], second["turn"]) == (1, 2)
+    assert second["query"] == FOLLOW_UPS["message_id"] and second["verdict"] == "pass"
+    assert second["prior_answer_chars"] == len(kept) and "prior_answer_chars" not in first
+
+
+def test_turn_two_signals_come_from_supplied_evidence_not_the_search_pool(site_eval):
+    """The follow-up is never searched on its own words. Its evidence hit is
+    the agent's packed evidence: a pool full of gold cannot make a miss a
+    hit, and an empty pool cannot hide a hit."""
+    lost, gained = _entry(id="LOST", query="What does IEA500I report?"), _entry(
+        id="GAINED", query="What does IEA501I report?")
+    gold, other = [_supplied()], [_supplied(cite=OTHER_CITE, doc_id=OTHER_DOC)]
+    agent = _two_turn_agent({
+        (lost["query"], 1): chat_stream("Rejected [1].", supplied=gold),
+        (lost["query"], 3): chat_stream("Other [1].", citations=(OTHER_CITE,), supplied=other),
+        (gained["query"], 1): chat_stream("Other [1].", citations=(OTHER_CITE,), supplied=other),
+        (gained["query"], 3): chat_stream("Rejected [1].", supplied=gold),
+    }, pool={lost["query"]: ["SA22-0000-00"], gained["query"]: [OTHER_DOC]})
+    status, report, export, calls = site_eval(agent, [lost, gained], TWO_TURN)
+    searched = [json.loads(c.content)["query"] for c in calls if c.url.path == "/v1/search"]
+    assert sorted(searched) == sorted([lost["query"], gained["query"]])
+    rows = {(r["id"], r["turn"]): r for r in report["results"]}
+    assert rows[("LOST", 1)]["evidence_gold_hit"] is True
+    assert rows[("LOST", 2)]["evidence_gold_hit"] is False
+    assert rows[("LOST", 2)]["evidence_doc_ids"] == [OTHER_DOC]
+    assert rows[("LOST", 2)]["evidence_citation_recall"] == 0.0
+    assert rows[("GAINED", 2)]["evidence_gold_hit"] is True
+    assert rows[("GAINED", 2)]["evidence_cited_doc_ids"] == ["SA22-0000-00"]
+    assert rows[("GAINED", 2)]["evidence_citation_precision"] == 1.0
+    for row_id in ("LOST", "GAINED"):  # no pool for the follow-up
+        assert rows[(row_id, 2)]["hit_doc_ids"] is None
+        assert rows[(row_id, 2)]["gold_retrieved"] is None
+    second = report["metrics"]["by_turn"]["2"]
+    assert (second["evidence_n"], second["evidence_gold_hit"]) == (2, 1)
+    assert second["vs_opener"] == {"kept": 0, "lost": 1, "gained": 1, "neither": 0, "unknown": 0}
+    exported = {(r["id"], r["turn"]): r for r in json.loads(export)["rows"]}
+    assert exported[("LOST", 2)]["evidence_gold_hit"] is False
+    assert exported[("GAINED", 2)]["evidence_doc_ids"] == ["SA22-0000-00"]
+    # The existing blocks cover the openers only.
+    assert report["metrics"]["queries"] == 2 and status == 0
+
+
+def test_only_answer_rows_with_gold_get_a_follow_up(site_eval):
+    """Trap and gold-less rows end after turn 1; an opener that errored gives
+    a turn-2 error row with a fixed label, so it is counted, not dropped."""
+    import httpx2
+
+    trap = _entry(id="TRAP", query="What does IEA999I report?", expected_behavior="abstain",
+                  expected_doc_ids=[], expected_verification_state="insufficient_evidence")
+    nogold = _entry(id="NOGOLD", query="What does IEA502I report?", expected_doc_ids=[])
+    broken = _entry(id="BROKEN", query="What does IEA503I report?")
+
+    def respond(request):
+        if request.url.path == "/v1/chat" and b"IEA503I" in request.content:
+            return httpx2.Response(503, json={"code": "overloaded", "message": "x"})
+        return _two_turn_agent({
+            (trap["query"], 1): chat_stream(ZERO_HITS, citations=(), supplied=[]),
+            (nogold["query"], 1): chat_stream("Rejected [1]."),
+        })(request)
+
+    status, report, export, _ = site_eval(respond, [trap, nogold, broken], TWO_TURN)
+    turns = sorted((r["id"], r["turn"]) for r in report["results"])
+    assert turns == [("BROKEN", 1), ("BROKEN", 2), ("NOGOLD", 1), ("TRAP", 1)]
+    exported = {(r["id"], r["turn"]): r for r in json.loads(export)["rows"]}
+    assert exported[("BROKEN", 2)]["failures"] == ["opener not answered"]
+    assert exported[("BROKEN", 2)]["verdict"] == "error"
+    assert report["metrics"]["by_turn"]["2"]["by_failure"] == {"opener not answered": 1}
+    assert status == 1
+
+
+ZERO_HITS = "No supporting manual excerpts were found for this question."
+
+
+def test_two_turn_export_carries_no_question_answer_or_follow_up_text(site_eval):
+    c = CANARIES
+    opener = _entry(query=f"{c['query']} one")
+    agent = _two_turn_agent({
+        (opener["query"], 1): chat_stream(f"IEA500I {c['answer']} rejected [1]."),
+        (opener["query"], 3): chat_stream(f"{c['delta']} again [1]."),
+    })
+    status, report, export, _ = site_eval(agent, [opener], [*TWO_TURN, "--repeats", "2"])
+    raw = json.dumps(report)
+    assert c["answer"] in raw and c["delta"] in raw and FOLLOW_UPS["message_id"] in raw
+    text = export.decode("utf-8")
+    for canary in (*CANARIES.values(), *FOLLOW_UPS.values(), DEFAULT_FOLLOW_UP, CITE):
+        assert canary.lower() not in text.lower(), canary
+    data = json.loads(text)
+    assert len(data["rows"]) == 4 and all(set(r) == TWO_TURN_ROW_KEYS for r in data["rows"])
+    params = data["params"]
+    assert (params["turns"], params["arm"]) == (2, "condense-off")
+    assert len(params["follow_ups_sha256"]) == 64 and len(params["pipe_sha256"]) == 64
+    by_turn = data["metrics"]["by_turn"]
+    assert by_turn["2"]["evidence_gold_hit_rate"] == 1.0
+    assert by_turn["2"]["repeats"]["evidence_gold_hit_rate"]["range"] == 0
+    assert data["metrics"]["queries"] == 2 and status == 0
+
+
+def test_single_turn_run_is_unchanged_by_the_two_turn_mode(site_eval):
+    """`--turns 1` is the default: same rows, same keys, no new params."""
+    def normal(export: bytes) -> dict:
+        data = json.loads(export)
+        data.pop("timestamp")
+        for row in data["rows"]:
+            for key in ("elapsed_ms", "client_first_token_ms"):
+                row.pop(key)
+        return data
+
+    agent = _two_turn_agent({(_entry()["query"], 1): chat_stream("Rejected [1].")})
+    _, report, plain, _ = site_eval(agent, [_entry()], ["--endpoint", "chat", "--stream"])
+    _, _, explicit, calls = site_eval(agent, [_entry()],
+                                      ["--endpoint", "chat", "--stream", "--turns", "1"])
+    assert normal(plain) == normal(explicit)
+    data = json.loads(plain)
+    assert not {"turns", "arm"} & set(data["params"]) and "by_turn" not in data["metrics"]
+    assert all(set(r) == EXPORT_ROW_KEYS for r in data["rows"])
+    assert "turn" not in report["results"][0] and len(_chat_bodies(calls)) == 1
+
+
+@pytest.mark.parametrize("extra", [
+    pytest.param(["--stream", "--turns", "2", "--arm", "a"], id="answer-endpoint"),
+    pytest.param(["--endpoint", "chat", "--stream", "--turns", "2"], id="no-arm"),
+    pytest.param(["--endpoint", "chat", "--stream", "--arm", "a"], id="arm-alone"),
+    pytest.param(["--endpoint", "chat", "--stream", "--turns", "2", "--arm", "Off Arm"],
+                 id="bad-arm"),
+])
+def test_two_turn_flags_are_refused_when_inconsistent(site_eval, extra):
+    with pytest.raises(SystemExit) as exc:
+        site_eval(lambda r: pytest.fail("no request"), [_entry()], extra)
+    assert exc.value.code == 2
+
+
+def test_two_turn_needs_the_pipe_in_the_evaluator_checkout(tmp_path, monkeypatch):
+    from mainframe_rag.eval import answers, follow_up
+
+    monkeypatch.setattr(follow_up, "PIPE_PATH", tmp_path / "missing.py")
+    golden = tmp_path / "g.jsonl"
+    golden.write_text(json.dumps(_entry()) + "\n")
+    assert answers.main(["--agent-url", "http://deployed-agent:8087", "--golden", str(golden),
+                         *TWO_TURN]) == 2
+
+
+@pytest.mark.parametrize("query_class", [*sorted(FOLLOW_UPS), "default"])
+def test_follow_ups_name_no_identifier(query_class):
+    """condense_query skips the rewrite when the latest turn names a message
+    id, member or abend code: such a follow-up would measure nothing."""
+    from mainframe_rag.agent.answer import _ABEND_RE
+    from mainframe_rag.retrieve.filters import parse_query
+
+    text = FOLLOW_UPS.get(query_class, DEFAULT_FOLLOW_UP)
+    assert query_class == "default" or text != DEFAULT_FOLLOW_UP
+    assert not parse_query(text).has_identifiers
+    assert not _ABEND_RE.search(text)

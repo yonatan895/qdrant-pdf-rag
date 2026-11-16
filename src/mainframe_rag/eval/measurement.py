@@ -220,7 +220,8 @@ def read_answer_stream(
 
 
 def read_chat_stream(
-    client: Any, body: dict[str, Any], clock: Callable[[], float] = time.monotonic
+    client: Any, body: dict[str, Any], clock: Callable[[], float] = time.monotonic,
+    frames: list[str] | None = None,
 ) -> StreamOutcome:
     """POST `/v1/chat` with `stream: true` and consume the OpenAI-style chunks
     the Open WebUI Pipe reads (docs/agent.md section 3).
@@ -230,7 +231,9 @@ def read_chat_stream(
     `data: [DONE]`, as the Pipe requires. An error frame is a failure even
     though `[DONE]` follows it. Content deltas are concatenated into
     `content` because the chat stream has no other answer field; the
-    terminal chunk carries no `usage` and no `ttft_ms`."""
+    terminal chunk carries no `usage` and no `ttft_ms`. A `frames` list
+    receives every `data:` line as read (issue #1268: the two-turn eval
+    replays them through the Open WebUI Pipe)."""
     started = clock()
     first_token_ms: int | None = None
     parts: list[str] = []
@@ -246,6 +249,8 @@ def read_chat_stream(
                 return StreamOutcome(failure=STREAM_OVERSIZE, first_token_ms=first_token_ms)
             if not line.startswith("data:"):
                 continue  # blank separators, `:` keepalives, other fields
+            if frames is not None:
+                frames.append(line)
             raw = line[5:].strip()
             if raw == "[DONE]":
                 if terminal is None:
