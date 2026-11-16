@@ -186,6 +186,7 @@ from mainframe_rag.eval.measurement import (
     STREAM_MALFORMED,
     STREAM_OVERSIZE,
     decode_tps,
+    distribution,
     is_count,
     measurement_summary,
     parse_server_timing,
@@ -355,9 +356,7 @@ def judge(
         )
 
     if judge_gold:
-        for s in entry.get("gold_must_contain") or []:
-            if str(s).lower() not in body.lower():
-                failures.append(f"missing required substring: {s!r}")
+        failures.extend(missing_gold(entry, body))
         for s in entry.get("gold_must_not_contain") or []:
             if str(s).lower() in body.lower():
                 failures.append(f"forbidden substring present: {s!r}")
@@ -369,6 +368,13 @@ def judge(
                 failures.append(f"identifier not cited or mentioned: {ident!r}")
 
     return ("fail" if failures else "pass"), failures, warns
+
+
+def missing_gold(entry: dict[str, Any], body: str) -> list[str]:
+    """The required-substring failures of one answer body: case-folded
+    literal checks, one per missing `gold_must_contain` string."""
+    return [f"missing required substring: {s!r}"
+            for s in entry.get("gold_must_contain") or [] if str(s).lower() not in body.lower()]
 
 
 def select_sample(entries: list[dict[str, Any]], max_queries: int) -> list[dict[str, Any]]:
@@ -595,7 +601,8 @@ def _turn_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def turn_breakdown(results: list[dict[str, Any]], repeats: int) -> dict[str, Any]:
+def turn_breakdown(results: list[dict[str, Any]], repeats: int,
+                   cut: int | None = None) -> dict[str, Any]:
     """Metrics by turn over the follow-up sessions (issue #1268). Turn 1 is
     the openers of the rows that got a follow-up, so both turns cover the
     same sessions; `vs_opener` pairs each follow-up with its own opener by
@@ -609,7 +616,8 @@ def turn_breakdown(results: list[dict[str, Any]], repeats: int) -> dict[str, Any
     first, second = _turn_block(openers), _turn_block(follow)
     chars = sorted(r["prior_answer_chars"] for r in follow
                    if is_count(r.get("prior_answer_chars")))
-    cut = Settings.model_fields["chat_max_prior_turn_chars"].default
+    if cut is None:
+        cut = Settings.model_fields["chat_max_prior_turn_chars"].default
     second["prior_answer_chars"] = {
         "n": len(chars), "p50": chars[len(chars) // 2] if chars else None,
         "max": chars[-1] if chars else None, "cut_chars": cut,
@@ -634,6 +642,142 @@ def turn_breakdown(results: list[dict[str, Any]], repeats: int) -> dict[str, Any
                 name: value_spread([p[name] for p in per])
                 for name in ("evidence_gold_hit_rate", "pass_rate", "citation_recall_mean")
             }
+    return {"1": first, "2": second}
+
+
+def _pair_state(before: Any, after: Any) -> str:
+    if type(before) is not bool or type(after) is not bool:
+        return "unknown"
+    return {(True, True): "kept", (True, False): "lost",
+            (False, True): "gained", (False, False): "neither"}[(before, after)]
+
+
+_PAIR_STATES = ("kept", "lost", "gained", "neither", "unknown")
+
+
+def switch_deltas(results: list[dict[str, Any]], switched: list[dict[str, Any]]) -> dict[str, Any]:
+    """Each topic-switch follow-up against the same question asked as a
+    turn-1 opener in the same repeat (issue #1268): pass, evidence gold hit
+    and verification state, counted per pair. Pure."""
+    single = {(str(r.get("id")), int(r.get("repeat") or 1)): r
+              for r in results if r.get("turn") == 1}
+    passes: Counter = Counter()
+    evidence: Counter = Counter()
+    states: Counter = Counter()
+    moves: Counter = Counter()
+
+    def verdict(row: dict[str, Any] | None) -> bool | None:
+        if row is None or row.get("verdict") not in ("pass", "fail"):
+            return None
+        return bool(row["verdict"] == "pass")
+
+    for r in switched:
+        alone = single.get((str(r.get("switch_id")), int(r.get("repeat") or 1)))
+        passes[_pair_state(verdict(alone), verdict(r))] += 1
+        evidence[_pair_state((alone or {}).get("evidence_gold_hit"), r.get("evidence_gold_hit"))] += 1
+        if verdict(alone) is None or verdict(r) is None:
+            states["unknown"] += 1
+            continue
+        before = _state_or_none((alone or {}).get("verification_state")) or "unknown"
+        after = _state_or_none(r.get("verification_state")) or "unknown"
+        states["same" if before == after else "changed"] += 1
+        if before != after:
+            moves[f"{before}>{after}"] += 1
+    return {
+        "n": len(switched),
+        "pass": {name: passes.get(name, 0) for name in _PAIR_STATES},
+        "evidence_gold_hit": {name: evidence.get(name, 0) for name in _PAIR_STATES},
+        "verification_state": {name: states.get(name, 0) for name in ("same", "changed", "unknown")},
+        "verification_moves": dict(sorted(moves.items())),
+    }
+
+
+def exposure_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Shares of follow-ups whose history answer exceeds the declared cap,
+    and where the appended citation list lies against it. Pure."""
+    from mainframe_rag.eval.follow_up import CITATION_LIST_STATES
+
+    known = [r for r in rows if type(r.get("history_over_cap")) is bool]
+    over = sum(1 for r in known if r["history_over_cap"])
+    lists = Counter(str(r.get("citation_list_cut")) for r in known)
+    cut = lists.get("partial", 0) + lists.get("cut", 0)
+    return {
+        "n": len(known), "over_cap": over,
+        "over_cap_share": round(over / len(known), 4) if known else None,
+        "citation_list": {name: lists.get(name, 0) for name in sorted(CITATION_LIST_STATES)},
+        "citation_list_cut_share": round(cut / len(known), 4) if known else None,
+    }
+
+
+def restate_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Class-B follow-ups (issue #1268): declines, and the opener's gold
+    strings by where they lie against the declared cut, crossed with whether
+    the follow-up's packed evidence holds an opener gold doc. The evidence
+    side is a doc-level proxy: `supplied_evidence` carries doc ids, not
+    excerpt text, so it says the doc was there, not the string. Pure."""
+    from mainframe_rag.eval.follow_up import GOLD_POSITIONS
+
+    judged = [r for r in rows if r.get("verdict") in ("pass", "fail")]
+    split = {position: {side: {"n": 0, "found": 0}
+                        for side in ("in_evidence", "not_in_evidence", "unknown")}
+             for position in GOLD_POSITIONS}
+    for r in judged:
+        hit = r.get("evidence_gold_hit")
+        side = "unknown" if type(hit) is not bool else "in_evidence" if hit else "not_in_evidence"
+        for position, counts in (r.get("gold_split") or {}).items():
+            if position in split:
+                split[position][side]["n"] += _count_or_none(counts.get("n")) or 0
+                split[position][side]["found"] += _count_or_none(counts.get("found")) or 0
+    declines = sum(1 for r in judged if r.get("restate_declined") is True)
+    return {
+        "n": len(judged),
+        "declines": declines,
+        "decline_rate": round(declines / len(judged), 4) if judged else None,
+        "gold_n": sum(_count_or_none(r.get("gold_n")) or 0 for r in judged),
+        "gold_found_n": sum(_count_or_none(r.get("gold_found_n")) or 0 for r in judged),
+        "gold_split": split,
+    }
+
+
+def _timing(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per-arm cost of one turn and kind. The chat stream carries no
+    server ttft and no usage: those stay None."""
+    return {
+        "elapsed_ms": distribution([r.get("elapsed_ms") for r in rows
+                                    if r.get("verdict") in ("pass", "fail")]),
+        "client_first_token_ms": distribution([r.get("client_first_token_ms") for r in rows
+                                               if r.get("verdict") in ("pass", "fail")]),
+        "ttft_ms": None, "total_tokens": None,
+    }
+
+
+def kind_breakdown(results: list[dict[str, Any]], repeats: int, plan: FollowUpPlan
+                   ) -> dict[str, Any]:
+    """`metrics.by_turn` under `--follow-up` (issue #1268): turn x kind.
+    Kinds are never pooled (their verdicts mean different things). Turn 1
+    of a kind is the openers that got that kind; `vs_opener` is dropped for
+    `switch`, whose question and gold differ from its opener's, and replaced
+    by `vs_single`, the same question asked as an opener. Pure."""
+    from mainframe_rag.eval.follow_up import RESTATE_FOLLOW_UPS
+
+    first: dict[str, Any] = {}
+    second: dict[str, Any] = {}
+    openers = [r for r in results if r.get("turn") == 1]
+    for kind in plan.kinds:
+        follow = [r for r in results if r.get("turn") == 2 and r.get("follow_up_kind") == kind]
+        block = turn_breakdown([*openers, *follow], repeats, plan.prior_cap)
+        sessions = {(str(r.get("id")), int(r.get("repeat") or 1)) for r in follow}
+        block["1"]["timing"] = _timing([r for r in openers if (str(r.get("id")),
+                                        int(r.get("repeat") or 1)) in sessions])
+        block["2"]["timing"] = _timing(follow)
+        block["2"]["exposure"] = exposure_summary(follow)
+        block["2"]["skipped"] = dict(sorted(plan.skipped[kind].items()))
+        if kind == "switch":
+            block["2"].pop("vs_opener")
+            block["2"]["vs_single"] = switch_deltas(results, follow)
+        if kind in RESTATE_FOLLOW_UPS:
+            block["2"]["restate"] = restate_summary(follow)
+        first[kind], second[kind] = block["1"], block["2"]
     return {"1": first, "2": second}
 
 
@@ -710,6 +854,8 @@ def apply_evidence(
 # Turn-2 failures before any follow-up request is made (issue #1268).
 OPENER_NOT_ANSWERED = "opener not answered"
 HISTORY_FAILED = "follow-up history failed"
+# A class-B follow-up the agent declined (issue #1268).
+RESTATE_DECLINED = "follow-up declined"
 
 
 def has_follow_up(entry: dict[str, Any]) -> bool:
@@ -718,51 +864,173 @@ def has_follow_up(entry: dict[str, Any]) -> bool:
     return entry.get("expected_behavior") == "answer" and bool(entry.get("expected_doc_ids"))
 
 
-def follow_up_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    """The judged entry of the second turn: the opener's id, class and gold
-    docs with the class follow-up as its question. The opener's gold
-    substrings, identifier and expected state are written for the opener's
-    question and are not carried: turn 2 is judged structurally only."""
-    from mainframe_rag.eval.follow_up import follow_up_for
+def follow_up_entry(
+    entry: dict[str, Any], kind: str = "anaphoric", partner: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """The judged entry of the second turn, by follow-up kind.
 
-    return {
+    anaphoric: the opener's id, class and gold docs with the class follow-up
+    as its question. The opener's gold substrings, identifier and expected
+    state are written for the opener's question and are not carried: turn 2
+    is judged structurally only.
+    switch: the partner row itself (its question and all of its gold),
+    under the opener's id: the session is the opener's.
+    restate/summary: a class-B follow-up with the opener's gold docs and
+    gold substrings (`judge_restate`)."""
+    from mainframe_rag.eval.follow_up import RESTATE_FOLLOW_UPS, follow_up_for
+
+    if kind == "switch":
+        assert partner is not None
+        return {**partner, "id": entry["id"]}
+    follow = {
         "id": entry["id"], "query": follow_up_for(entry.get("query_class")),
         "query_class": entry["query_class"], "expected_behavior": "answer",
         "expected_doc_ids": list(entry.get("expected_doc_ids") or []),
         "trap_type": entry.get("trap_type"), "domain": entry.get("domain"),
     }
+    if kind in RESTATE_FOLLOW_UPS:
+        follow.update(query=RESTATE_FOLLOW_UPS[kind],
+                      gold_must_contain=list(entry.get("gold_must_contain") or []))
+    return follow
 
 
-def run_follow_up(
-    client: Any, entry: dict[str, Any], opener: dict[str, Any], frames: list[str],
-    pipe_mod: Any, temperature: float | None,
-) -> dict[str, Any]:
-    """Turn 2 of one session: the follow-up with the history the Open WebUI
-    Pipe would send after the opener (`eval.follow_up`)."""
+class FollowUpPlan:
+    """What `--follow-up` asks after each opener (issue #1268): the kinds in
+    session order, the switch partner entries by opener id, and the
+    operator-declared prior-turn cap. Skips are counted per kind and reason,
+    since a skipped follow-up has no row."""
+
+    def __init__(self, kinds: tuple[str, ...], partners: dict[str, dict[str, Any]],
+                 prior_cap: int) -> None:
+        self.kinds = kinds
+        self.partners = partners
+        self.prior_cap = prior_cap
+        self.skipped: dict[str, Counter] = {kind: Counter() for kind in kinds}
+
+
+def _skip_reason(kind: str, entry: dict[str, Any], opener: dict[str, Any],
+                 plan: FollowUpPlan) -> str | None:
+    """Why this opener gets no follow-up of this kind, or None."""
+    from mainframe_rag.eval.follow_up import RESTATE_FOLLOW_UPS
+
+    if kind == "switch" and str(entry["id"]) not in plan.partners:
+        return "no_partner"
+    if kind in RESTATE_FOLLOW_UPS:
+        # Restating needs something to restate: gold strings, found in turn 1.
+        if not entry.get("gold_must_contain"):
+            return "no_gold_strings"
+        if opener.get("verdict") != "pass":
+            return "opener_not_passed"
+    return None
+
+
+def judge_restate(row: dict[str, Any], entry: dict[str, Any]) -> None:
+    """Class-B verdict: the opener's gold substrings in the follow-up answer
+    (`missing_gold`, as `judge`), and no decline. The agent answers from
+    fresh excerpts only, so an uncited restatement is the product rule, not
+    a failure. A decline (the structured decline, a whole-response refusal
+    or the zero-hits path) fails even when it names a gold string, and is
+    counted apart. Unlike `judge`, the zero-hits path is judged too: the
+    user got no restatement."""
+    answer = str(row.get("answer") or "")
+    missing = missing_gold(entry, answer)
+    gold_n = len(entry.get("gold_must_contain") or [])
+    declined = row.get("path") == "zero_hits" or is_abstention(answer, row.get("citations") or [])
+    row.update(
+        verdict="fail" if missing or declined else "pass",
+        failures=[*missing, *([RESTATE_DECLINED] if declined else [])],
+        warns=[w for w in row.get("warns") or [] if not str(w).startswith("zero-hits path")],
+        # A decline restates nothing, even when it names a gold string.
+        restate_declined=declined, gold_n=gold_n,
+        gold_found_n=0 if declined else gold_n - len(missing),
+    )
+
+
+def _annotate_history(row: dict[str, Any], entry: dict[str, Any], kind: str,
+                      request: dict[str, Any], cap: int) -> None:
+    """Exposure of the history as sent, and for class B where each opener
+    gold string lies against the cut and whether this answer has it."""
     from mainframe_rag.eval.follow_up import (
+        GOLD_POSITIONS,
+        RESTATE_FOLLOW_UPS,
+        gold_positions,
+        history_answer,
+        history_exposure,
+        history_view,
+    )
+
+    view = history_view(history_answer(request))
+    over, citation_list = history_exposure(view, cap)
+    row.update(history_over_cap=over, citation_list_cut=citation_list)
+    if kind in RESTATE_FOLLOW_UPS and row.get("verdict") in ("pass", "fail"):
+        gold = [str(s) for s in entry.get("gold_must_contain") or []]
+        answer = str(row.get("answer") or "").lower()
+        split = {name: {"n": 0, "found": 0} for name in GOLD_POSITIONS}
+        for s, position in zip(gold, gold_positions(view, gold, cap), strict=True):
+            split[position]["n"] += 1
+            split[position]["found"] += int(s.lower() in answer and not row.get("restate_declined"))
+        row["gold_split"] = split
+
+
+def run_follow_ups(
+    client: Any, entry: dict[str, Any], opener: dict[str, Any], frames: list[str],
+    pipe_mod: Any, temperature: float | None, plan: FollowUpPlan | None = None,
+) -> list[dict[str, Any]]:
+    """Turn 2 of one session, once per follow-up kind: each with the history
+    the Open WebUI Pipe would send after the opener (`eval.follow_up`). All
+    kinds branch off the same opener and kept answer. Without a plan (no
+    `--follow-up`): the anaphoric follow-up alone, rows as before."""
+    from mainframe_rag.eval.follow_up import (
+        RESTATE_FOLLOW_UPS,
         kept_answer,
         prior_answer_chars,
         second_turn_request,
     )
 
-    follow = follow_up_entry(entry)
-    if opener.get("verdict") not in ("pass", "fail"):
-        row = _base_row(follow, temperature)
-        row.update(verdict="error", failures=[OPENER_NOT_ANSWERED], elapsed_ms=0, turn=2)
-        return row
-    try:
-        kept = kept_answer(pipe_mod, entry["query"], frames)
-        request = second_turn_request(pipe_mod, entry["query"], kept, follow["query"])
-    except Exception:  # noqa: BLE001 — the Pipe is a boundary; a fixed label only
+    jobs: list[tuple[str, dict[str, Any]]] = []
+    for kind in (("anaphoric",) if plan is None else plan.kinds):
+        reason = None if plan is None else _skip_reason(kind, entry, opener, plan)
+        if reason is not None:
+            assert plan is not None
+            plan.skipped[kind][reason] += 1
+            continue
+        partner = None if plan is None else plan.partners.get(str(entry["id"]))
+        jobs.append((kind, follow_up_entry(entry, kind, partner)))
+    rows: list[dict[str, Any]] = []
+    answered = opener.get("verdict") in ("pass", "fail")
+    kept: str | None = None
+    if answered and jobs:
+        try:
+            kept = kept_answer(pipe_mod, entry["query"], frames)
+        except Exception:  # noqa: BLE001 — the Pipe is a boundary; a fixed label only
+            kept = None
+    for kind, follow in jobs:
         request = None
-    if request is None:  # the Pipe would make no follow-up call
-        row = _base_row(follow, temperature)
-        row.update(verdict="error", failures=[HISTORY_FAILED], elapsed_ms=0, turn=2)
-        return row
-    row = run_query(client, follow, None, None, temperature=temperature, stream=True,
-                    endpoint="chat", chat_body=request, evidence=True)
-    row.update(turn=2, prior_answer_chars=prior_answer_chars(request))
-    return row
+        if kept is not None:
+            try:
+                request = second_turn_request(pipe_mod, entry["query"], kept, follow["query"])
+            except Exception:  # noqa: BLE001 — as above
+                request = None
+        if not answered or request is None:
+            # No follow-up call: the opener errored, or the Pipe would make none.
+            row = _base_row(follow, temperature)
+            row.update(verdict="error", failures=[OPENER_NOT_ANSWERED if not answered
+                                                  else HISTORY_FAILED],
+                       elapsed_ms=0, turn=2)
+        else:
+            row = run_query(client, follow, None, None, temperature=temperature, stream=True,
+                            endpoint="chat", chat_body=request, evidence=True)
+            row.update(turn=2, prior_answer_chars=prior_answer_chars(request))
+            if plan is not None and kind in RESTATE_FOLLOW_UPS and row.get("verdict") in ("pass", "fail"):
+                judge_restate(row, follow)
+        if plan is not None:
+            row.update(follow_up_kind=kind,
+                       switch_id=(plan.partners[str(entry["id"])]["id"] if kind == "switch"
+                                  else None))
+            if request is not None:
+                _annotate_history(row, follow, kind, request, plan.prior_cap)
+        rows.append(row)
+    return rows
 
 
 def _fetch_pool(client: Any, query: str) -> list[dict[str, Any]] | None:
@@ -1356,7 +1624,7 @@ _FIXED_FAILURE_LABELS = frozenset({
     STREAM_INCOMPLETE, STREAM_MALFORMED, STREAM_OVERSIZE,
     "agent health request failed", "malformed agent health response",
     "agent health is not servable",
-    OPENER_NOT_ANSWERED, HISTORY_FAILED,
+    OPENER_NOT_ANSWERED, HISTORY_FAILED, RESTATE_DECLINED,
 })
 # OpenAI-compatible finish reasons; any other value is reported as "other".
 _FINISH_REASONS = frozenset({"stop", "length", "content_filter", "tool_calls", "abort"})
@@ -1462,6 +1730,29 @@ def export_row(row: dict[str, Any]) -> dict[str, Any]:
             evidence_cited_doc_ids=_doc_ids_or_none(row.get("evidence_cited_doc_ids")),
             evidence_citation_precision=_number_or_none(row.get("evidence_citation_precision")),
             evidence_citation_recall=_number_or_none(row.get("evidence_citation_recall")),
+        )
+    if "follow_up_kind" in row:
+        # `--follow-up` runs only (issue #1268); turn-1 rows carry None.
+        from mainframe_rag.eval.follow_up import (
+            CITATION_LIST_STATES,
+            FOLLOW_UP_KINDS,
+            GOLD_POSITIONS,
+        )
+
+        kind, switch_id, split = row["follow_up_kind"], row.get("switch_id"), row.get("gold_split")
+        cut = row.get("citation_list_cut")
+        exported.update(
+            follow_up_kind=kind if kind in FOLLOW_UP_KINDS else None,
+            switch_id=None if switch_id is None else str(switch_id),
+            history_over_cap=_bool_or_none(row.get("history_over_cap")),
+            citation_list_cut=cut if cut in CITATION_LIST_STATES else None,
+            restate_declined=_bool_or_none(row.get("restate_declined")),
+            gold_n=_count_or_none(row.get("gold_n")),
+            gold_found_n=_count_or_none(row.get("gold_found_n")),
+            gold_split=None if not isinstance(split, dict) else {
+                position: {name: _count_or_none((split.get(position) or {}).get(name))
+                           for name in ("n", "found")}
+                for position in GOLD_POSITIONS},
         )
     return exported
 
@@ -1572,6 +1863,8 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
         lines.append("## Failures")
         for r in fails:
             turn = f" turn {r['turn']}" if "turn" in r else ""
+            if r.get("follow_up_kind"):
+                turn += f" {r['follow_up_kind']}"
             lines.append(f"### {r['id']}{turn} ({r['verdict']}, {r['expected_behavior']})")
             lines.append(f"- query: {r['query']}")
             for f in r.get("failures") or []:
@@ -1590,6 +1883,8 @@ def _turn_lines(metrics: dict[str, Any]) -> list[str]:
     by_turn = metrics.get("by_turn")
     if not by_turn:
         return []
+    if "n" not in by_turn["1"]:
+        return _kind_lines(by_turn)
     first, second = by_turn["1"], by_turn["2"]
     lines = ["## By turn (follow-up sessions; the metrics above cover turn 1 only)", "",
              "| metric | turn 1 | turn 2 |", "|---|---|---|"]
@@ -1615,6 +1910,57 @@ def _turn_lines(metrics: dict[str, Any]) -> list[str]:
             lines.append(f"- turn {turn} {name} over repeats: min {spread['min']} "
                          f"max {spread['max']} range {spread['range']}")
     lines.append("")
+    return lines
+
+
+_KIND_ROWS = ("n", "errors", "evidence_n", "evidence_gold_hit", "evidence_gold_hit_rate",
+              "zero_hits", "false_refusals", "citation_n", "citation_recall_mean",
+              "pass", "pass_rate")
+_KIND_READING = {
+    "anaphoric": "structural pass (body, no refusal, explicit validated citations)",
+    "switch": "the switched-to row's full gold verdict",
+}
+_CLASS_B_READING = "the opener's gold substrings and no decline, after a passed opener"
+
+
+def _kind_lines(by_turn: dict[str, Any]) -> list[str]:
+    """`--follow-up` runs: one table per kind, turn 1 (its openers) against
+    turn 2, then the kind's own counts. Kinds are never pooled."""
+    lines = ["## By turn and follow-up kind (the metrics above cover turn 1 only)", ""]
+    for kind, second in by_turn["2"].items():
+        first = by_turn["1"][kind]
+        lines += [f"### {kind}: turn-2 pass is {_KIND_READING.get(kind, _CLASS_B_READING)}", "",
+                  "| metric | turn 1 | turn 2 |", "|---|---|---|"]
+        lines += [f"| {name} | {first[name]} | {second[name]} |" for name in _KIND_ROWS]
+        for name in ("elapsed_ms", "client_first_token_ms"):
+            lines.append(f"| {name} p50 | {first['timing'][name]['p50']} "
+                         f"| {second['timing'][name]['p50']} |")
+        exposure = second["exposure"]
+        lines += ["", (f"- history over the declared {second['prior_answer_chars']['cut_chars']}"
+                       f"-char cut: {exposure['over_cap']}/{exposure['n']}; citation list: "
+                       + ", ".join(f"{k}={v}" for k, v in exposure["citation_list"].items()))]
+        if second["skipped"]:
+            lines.append("- skipped: " + ", ".join(f"{k}={v}" for k, v in second["skipped"].items()))
+        if "vs_opener" in second:
+            lines.append("- vs its opener (evidence gold hit): "
+                         + ", ".join(f"{k}={v}" for k, v in second["vs_opener"].items()))
+        if "vs_single" in second:
+            single = second["vs_single"]
+            for name in ("pass", "evidence_gold_hit", "verification_state"):
+                lines.append(f"- vs the same question alone ({name}): "
+                             + ", ".join(f"{k}={v}" for k, v in single[name].items()))
+        if "restate" in second:
+            restate = second["restate"]
+            lines.append(f"- declines: {restate['declines']} (rate {restate['decline_rate']}); "
+                         f"gold strings found {restate['gold_found_n']}/{restate['gold_n']}")
+            for position, sides in restate["gold_split"].items():
+                lines.append(f"- {position}: " + ", ".join(
+                    f"{side} {c['found']}/{c['n']}" for side, c in sides.items()))
+        for turn, block in (("1", first), ("2", second)):
+            for name, spread in (block.get("repeats") or {}).items():
+                lines.append(f"- turn {turn} {name} over repeats: min {spread['min']} "
+                             f"max {spread['max']} range {spread['range']}")
+        lines.append("")
     return lines
 
 
@@ -1696,6 +2042,32 @@ def _arm(raw: str) -> str:
     return raw
 
 
+def _follow_up_kinds(raw: str) -> tuple[str, ...]:
+    """`all` or a comma list of follow-up kinds, returned in session order."""
+    from mainframe_rag.eval.follow_up import FOLLOW_UP_KINDS
+
+    names = FOLLOW_UP_KINDS if raw == "all" else tuple(raw.split(","))
+    if not names or any(name not in FOLLOW_UP_KINDS for name in names):
+        raise argparse.ArgumentTypeError(
+            f"follow-up must be 'all' or a comma list of {', '.join(FOLLOW_UP_KINDS)}")
+    return tuple(kind for kind in FOLLOW_UP_KINDS if kind in names)
+
+
+def _prior_cap(raw: str) -> int:
+    # The agent's own bounds for chat_max_prior_turn_chars.
+    field = Settings.model_fields["chat_max_prior_turn_chars"]
+    low = next(m.ge for m in field.metadata if hasattr(m, "ge"))
+    high = next(m.le for m in field.metadata if hasattr(m, "le"))
+    message = f"prior cap must be an integer from {low} to {high}"
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(message) from None
+    if not low <= value <= high:
+        raise argparse.ArgumentTypeError(message)
+    return value
+
+
 def select_subset(entries: list[dict[str, Any]], size: int) -> list[dict[str, Any]]:
     """Sweep subset (issue #1195): the default sampler's class-interleaved
     round-robin, refused when the size cannot hold one row of every class.
@@ -1760,6 +2132,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--arm", type=_arm, default=None,
                         help="with --turns 2: the operator's label for the deployed setting "
                              "under test, e.g. condense-off or condense-on (recorded in params)")
+    parser.add_argument("--follow-up", type=_follow_up_kinds, default=None,
+                        help="with --turns 2: which follow-ups each opener gets, 'all' or a comma "
+                             "list of anaphoric (the class follow-up), switch (another sampled "
+                             "row's question), restate and summary (about the previous answer); "
+                             "rows and metrics then carry the kind (default: anaphoric only, "
+                             "output as before)")
+    parser.add_argument("--prior-cap", type=_prior_cap, default=None,
+                        help="with --follow-up: the deployed CHAT_MAX_PRIOR_TURN_CHARS as the "
+                             "operator declares it (the agent does not report it); default 1000, "
+                             "the agent default (recorded in params)")
     args = parser.parse_args(argv)
     if args.stream and args.agent_url is None:
         parser.error("--stream needs --agent-url: the in-process client buffers the response, "
@@ -1774,6 +2156,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--turns 2 sends the follow-up over /v1/chat: add --endpoint chat --stream")
     if two_turn != (args.arm is not None):
         parser.error("--arm labels a --turns 2 run: pass both or neither")
+    if args.follow_up is not None and not two_turn:
+        parser.error("--follow-up chooses the second turns: add --turns 2")
+    if args.prior_cap is not None and args.follow_up is None:
+        parser.error("--prior-cap is read by --follow-up: add it")
     pipe_mod: Any = None
     pipe_sha256: str | None = None
     if two_turn:
@@ -1818,6 +2204,19 @@ def main(argv: list[str] | None = None) -> int:
     # Whole passes, not row-by-row repeats: drift during a session (cache
     # warmth, co-tenant load) lands on every row equally (issue #1195).
     passes = [(number, entry) for number in range(1, args.repeats + 1) for entry in sample]
+    plan: FollowUpPlan | None = None
+    if args.follow_up is not None:
+        from mainframe_rag.eval.follow_up import switch_pairs
+
+        # Pairs are drawn from the follow-up rows of this sample, so every
+        # switched-to question is also asked as an opener in the same pass.
+        eligible = [entry for entry in sample if has_follow_up(entry)]
+        by_id = {str(entry["id"]): entry for entry in eligible}
+        pairs = switch_pairs(eligible) if "switch" in args.follow_up else {}
+        plan = FollowUpPlan(
+            args.follow_up, {opener: by_id[partner] for opener, partner in pairs.items()},
+            Settings.model_fields["chat_max_prior_turn_chars"].default
+            if args.prior_cap is None else args.prior_cap)
 
     results: list[dict[str, Any]] = []
     deployment: dict[str, Any] | None = None
@@ -1860,6 +2259,8 @@ def main(argv: list[str] | None = None) -> int:
             if two_turn:
                 for row in results:
                     row["turn"] = 1
+                    if plan is not None:
+                        row.update(follow_up_kind=None, switch_id=None)
             if coverage is not None:
                 for row, (_, entry) in zip(results, passes, strict=True):
                     apply_coverage(row, entry, coverage)
@@ -1877,17 +2278,26 @@ def main(argv: list[str] | None = None) -> int:
                 session = [row]
                 if two_turn:
                     row["turn"] = 1
+                    if plan is not None:
+                        row.update(follow_up_kind=None, switch_id=None)
                     if has_follow_up(entry):
-                        session.append(run_follow_up(client, entry, row, frames or [],
-                                                     pipe_mod, args.temperature))
+                        session.extend(run_follow_ups(client, entry, row, frames or [],
+                                                      pipe_mod, args.temperature, plan))
                 for turn_row in session:
                     if coverage is not None:
-                        apply_coverage(turn_row, entry, coverage)
+                        # A switch row is judged on its partner's docs.
+                        judged_entry = (plan.partners[str(entry["id"])]
+                                        if plan is not None
+                                        and turn_row.get("follow_up_kind") == "switch"
+                                        else entry)
+                        apply_coverage(turn_row, judged_entry, coverage)
                     if args.repeats > 1:
                         turn_row["repeat"] = number
                     results.append(turn_row)
                     marker = turn_row.get("verdict", "?").upper()
                     turn = f" t{turn_row['turn']}" if "turn" in turn_row else ""
+                    if turn_row.get("follow_up_kind"):
+                        turn += f" {turn_row['follow_up_kind']}"
                     print(
                         f"[{i:>3}/{len(passes)}] {marker:5s} {turn_row['id']:8s}{turn} "
                         f"{turn_row['query'][:58]}",
@@ -1910,7 +2320,9 @@ def main(argv: list[str] | None = None) -> int:
              for number in range(1, args.repeats + 1)],
             openers,
         )
-    if two_turn:
+    if plan is not None:
+        metrics["by_turn"] = kind_breakdown(results, args.repeats, plan)
+    elif two_turn:
         metrics["by_turn"] = turn_breakdown(results, args.repeats)
     params: dict[str, Any] = {
         "temperature": args.temperature,
@@ -1934,6 +2346,19 @@ def main(argv: list[str] | None = None) -> int:
 
         params.update(turns=2, arm=args.arm, follow_ups_sha256=follow_ups_sha256(),
                       pipe_sha256=pipe_sha256)
+    if plan is not None:
+        from mainframe_rag.eval.follow_up import restate_follow_ups_sha256, switch_pairs_sha256
+
+        switching = "switch" in plan.kinds
+        params.update(
+            follow_up=list(plan.kinds), prior_cap=plan.prior_cap,
+            restate_follow_ups_sha256=restate_follow_ups_sha256(),
+            switch_pairs_sha256=(switch_pairs_sha256(
+                [str(entry["id"]) for entry in sample],
+                {opener: str(partner["id"]) for opener, partner in plan.partners.items()})
+                if switching else None),
+            switch_pairs_n=len(plan.partners) if switching else None,
+        )
     report: dict[str, Any] = {"metrics": metrics, "results": results, "params": params}
     if deployment is not None:
         params.update(agent_url=args.agent_url, request_timeout=args.request_timeout)

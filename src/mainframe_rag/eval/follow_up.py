@@ -20,7 +20,23 @@ History
     Pipe keeps that list in the content; its source events go to the
     emitter, not the message). The second-turn request is the Pipe's
     `build_request` and `fit_request` over [question, kept answer,
-    follow-up]."""
+    follow-up].
+
+Follow-up kinds (`eval.answers --follow-up`)
+    `anaphoric` is the class follow-up above (refers back, needs new
+    evidence). `switch` asks another sampled row's own question instead (a
+    topic switch; `switch_pairs`). `restate` and `summary` ask about the
+    previous answer itself (`RESTATE_FOLLOW_UPS`). Every kind branches off
+    the same opener and the same kept answer.
+
+History as the agent sees it
+    The agent strips each prior message, drops a pasted excerpts block and
+    cuts what is left to `chat_max_prior_turn_chars`, keeping the head
+    (`agent.answer.build_chat_messages`). The evaluator cannot read the
+    deployed value, so the cap is the operator's declaration
+    (`--prior-cap`); `history_view`, `history_exposure` and `gold_positions`
+    apply it to the assistant message of the fitted request, the history as
+    sent. A test pins `history_view` to the agent's own prompt builder."""
 
 from __future__ import annotations
 
@@ -43,6 +59,20 @@ FOLLOW_UPS: dict[str, str] = {
 }
 DEFAULT_FOLLOW_UP = "Tell me more about this."
 
+# Follow-ups about the previous answer itself (class B). Like the class
+# follow-ups they name no identifier, so condensation is never bypassed.
+RESTATE_FOLLOW_UPS: dict[str, str] = {
+    "restate": "Repeat the exact command, message or name from your last answer.",
+    "summary": "Sum up your last answer in three short bullet points.",
+}
+# Every follow-up kind, in the order a session asks them.
+FOLLOW_UP_KINDS: tuple[str, ...] = ("anaphoric", "switch", *RESTATE_FOLLOW_UPS)
+# Where the appended citation list lies against the prior-turn cut.
+CITATION_LIST_STATES = frozenset({"absent", "kept", "partial", "cut"})
+# Where a gold string lies in the history as the agent sees it.
+GOLD_POSITIONS: tuple[str, ...] = ("before_cut", "after_cut", "not_in_history")
+_CITATIONS_MARK = "**Citations:**"
+
 # The evaluator's checkout root (src/mainframe_rag/eval/ -> repo root).
 PIPE_PATH = Path(__file__).resolve().parents[3] / "integrations" / "openwebui" / "docs_pipe.py"
 
@@ -60,6 +90,85 @@ def follow_ups_sha256() -> str:
     payload = json.dumps({"by_class": FOLLOW_UPS, "default": DEFAULT_FOLLOW_UP},
                          sort_keys=True, ensure_ascii=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def restate_follow_ups_sha256() -> str:
+    """Identity of the class-B follow-ups, apart from `follow_ups_sha256` so
+    a run without `--follow-up` keeps its params."""
+    payload = json.dumps(RESTATE_FOLLOW_UPS, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def every_follow_up_text() -> list[str]:
+    """Every canned follow-up the evaluator can ask, for export reviews."""
+    return [*FOLLOW_UPS.values(), DEFAULT_FOLLOW_UP, *RESTATE_FOLLOW_UPS.values()]
+
+
+def switch_pairs(eligible: list[dict[str, Any]]) -> dict[str, str]:
+    """Topic-switch partner per opener id: the next row after it in sample
+    order (wrapping around) that shares no expected doc id with it. No seed:
+    the same sample always pairs the same way. An opener with no such row
+    is left out (it gets no switch turn)."""
+    pairs: dict[str, str] = {}
+    for i, entry in enumerate(eligible):
+        gold = {str(d) for d in entry.get("expected_doc_ids") or []}
+        for step in range(1, len(eligible)):
+            other = eligible[(i + step) % len(eligible)]
+            if not gold & {str(d) for d in other.get("expected_doc_ids") or []}:
+                pairs[str(entry["id"])] = str(other["id"])
+                break
+    return pairs
+
+
+def switch_pairs_sha256(sample_ids: list[str], pairs: dict[str, str]) -> str:
+    """Identity of the pairing, so two arms can prove they switched alike."""
+    payload = json.dumps([[i, pairs[i]] for i in sample_ids if i in pairs], ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def history_answer(request: dict[str, Any]) -> str:
+    """The assistant message of a two-turn request as sent ("" when the
+    Pipe dropped it)."""
+    sent = [m["content"] for m in request["messages"][:-1] if m["role"] == "assistant"]
+    return sent[-1] if sent else ""
+
+
+def history_view(content: str) -> str:
+    """One prior assistant message before the agent's cut: stripped, a
+    pasted excerpts block dropped (the agent's own steps, in its order)."""
+    from mainframe_rag.agent.answer import EXCERPTS_HEADER
+
+    text = content.strip()
+    if EXCERPTS_HEADER in text:
+        text = text.split(EXCERPTS_HEADER)[0].strip()
+    return text
+
+
+def history_exposure(view: str, cap: int) -> tuple[bool, str]:
+    """Whether the history answer exceeds the cap, and where its appended
+    `**Citations:**` list lies against the cut: kept whole, partly cut, cut
+    entirely, or absent."""
+    start = view.rfind(_CITATIONS_MARK)
+    if start < 0:
+        state = "absent"
+    elif len(view) <= cap:
+        state = "kept"
+    else:
+        state = "cut" if start >= cap else "partial"
+    return len(view) > cap, state
+
+
+def gold_positions(view: str, gold: list[str], cap: int) -> list[str]:
+    """Per gold string (case-folded, as the judge matches): wholly inside
+    the kept head, present but not wholly inside it, or not in the history."""
+    hay = view.lower()
+    positions = []
+    for s in gold:
+        needle = str(s).lower()
+        at = hay.find(needle)
+        positions.append("not_in_history" if at < 0
+                         else "before_cut" if at + len(needle) <= cap else "after_cut")
+    return positions
 
 
 def load_pipe(path: Path | None = None) -> tuple[ModuleType, str]:
