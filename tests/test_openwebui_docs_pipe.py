@@ -508,6 +508,71 @@ def test_task_calls_never_reach_the_agent(marker: dict[str, Any]):
     assert events == []
 
 
+# --- Answer depth (#1255) ----------------------------------------------------
+
+# The Function id the installer uses (provision_pipe.py PIPE_ID): Open WebUI
+# v0.12.3 names a manifold entry `<function id>.<entry id>` (functions.py
+# get_function_models) and passes that id as `body["model"]`.
+FUNCTION_ID = "mainframe_rag_docs"
+
+
+def test_pipe_lists_the_answer_depths_with_the_default_first():
+    """The manifold entries Open WebUI shows as models: the default depth
+    first (the first-available fallback for a chat whose model id is gone).
+    The class has no `name` attribute, which v0.12.3 would prefix to every
+    entry name."""
+    pipe = docs_pipe.Pipe()
+    assert pipe.pipes() == [
+        {"id": "standard", "name": "Rosetta"},
+        {"id": "quick", "name": "Rosetta \N{EN DASH} quick"},
+        {"id": "thorough", "name": "Rosetta \N{EN DASH} thorough"},
+    ]
+    assert not hasattr(pipe, "name")
+
+
+@pytest.mark.parametrize("model,effort", [
+    pytest.param(f"{FUNCTION_ID}.quick", "low", id="quick"),
+    pytest.param(f"{FUNCTION_ID}.thorough", "xhigh", id="thorough"),
+    pytest.param(f"{FUNCTION_ID}.standard", None, id="standard"),
+    # Defensive: an id without a known depth gets the agent's configured
+    # default, never a refusal (v0.12.3 itself refuses an unlisted id).
+    pytest.param(FUNCTION_ID, None, id="pre-1255-model-id"),
+    pytest.param(f"{FUNCTION_ID}.retired", None, id="unknown-entry"),
+    pytest.param(f"other.{FUNCTION_ID}.quick", None, id="foreign-prefix"),
+    pytest.param(None, None, id="no-model"),
+    pytest.param(["quick"], None, id="not-a-string"),
+])
+def test_answer_depth_selects_the_agent_effort(model: Any, effort: str | None, chat_request):
+    fake = FakeAgent()
+    content, _events = run_pipe(fake, body_extra={"model": model})
+    assert content.startswith("Answer.")
+    (body,) = fake.bodies()
+    if effort is None:
+        assert "reasoning_effort" not in body
+    else:
+        assert body["reasoning_effort"] == effort
+    validated = chat_request.model_validate(body)
+    assert validated.model_dump(exclude_unset=True) == body
+
+
+def test_answer_depth_never_counts_against_the_body_cap():
+    """The agent's cap (chat_body_chars) counts messages, product and version,
+    not the effort; a trimmed request keeps the selected depth."""
+    fake = FakeAgent()
+    messages = [*_history(8, 24000), {"role": "user", "content": QUESTION}]
+    run_pipe(fake, messages=messages, body_extra={"model": f"{FUNCTION_ID}.quick"})
+    (body,) = fake.bodies()
+    assert body["reasoning_effort"] == "low"
+    assert _body_chars(body) <= CAP < sum(len(m["content"]) for m in messages)
+
+
+def test_task_calls_from_any_depth_never_reach_the_agent():
+    fake = FakeAgent()
+    content, _events = run_pipe(fake, task="title_generation",
+                                body_extra={"model": f"{FUNCTION_ID}.thorough"})
+    assert content == "Docs question" and fake.requests == []
+
+
 def test_ordinary_chat_with_empty_task_markers_still_calls_the_agent():
     fake = FakeAgent()
     content, _events = run_pipe(fake, task=None, metadata={"task": None, "chat_id": "c1"},
@@ -954,6 +1019,8 @@ ERROR_CASES = [
      "administrator to check the Rosetta Pipe configuration.")),
     ("http_error", 400, ("The documentation service rejected the request. Ask an administrator "
      "to check the Rosetta Pipe configuration.")),
+    ("unsupported_reasoning_effort", 422, ("This deployment does not offer this answer depth. "
+     "Choose another Rosetta model and retry.")),
 ]
 UNREACHABLE = ("The documentation service could not be reached. Retry; if it persists, "
                "contact the operators.")
@@ -1155,8 +1222,11 @@ def real_agent(monkeypatch, servable_representation_gate):
                         message_ids=("IEA500I",))
         return [hit], "identifier", {"embed_ms": 1, "qdrant_ms": 2}
 
+    efforts: list[str | None] = []
+
     class FakeLLM:
         async def chat_stream(self, messages, reasoning_effort=None, temperature=None):
+            efforts.append(reasoning_effort)
             yield {"type": "token", "delta": "Reissue the command.\n\n", "ttft_ms": 3}
             yield {"type": "token", "delta": f"Citations:\n- {CITE_A}\n"}
             yield {"type": "done", "finish_reason": "stop", "ttft_ms": 3,
@@ -1173,7 +1243,9 @@ def real_agent(monkeypatch, servable_representation_gate):
             return httpx.Response(resp.status_code, content=resp.content,
                                   headers={"content-type": resp.headers["content-type"]})
 
-        yield httpx.MockTransport(forward), searches
+        transport = httpx.MockTransport(forward)
+        transport.efforts = efforts  # type: ignore[attr-defined]  # the effort each model call got
+        yield transport, searches
 
 
 def test_round_trip_through_the_real_agent(real_agent):
@@ -1231,6 +1303,12 @@ def test_round_trip_a_long_chat_is_200_where_the_untrimmed_body_is_422(real_agen
     assert [s["query"] for s in searches] == [QUESTION]
     assert content.startswith("Reissue the command.")
     assert _final_status(events).endswith(TRIM_NOTE)
+    # A depth's effort is not counted by the real ChatRequest bound (#1255).
+    content, events = run_pipe(None, transport=transport, messages=messages,
+                               body_extra={"model": f"{FUNCTION_ID}.quick"})
+    assert content.startswith("Reissue the command.")
+    assert _final_status(events).endswith(TRIM_NOTE)
+    assert transport.efforts[-1] == "low"
 
 
 def test_round_trip_a_long_paste_reaches_the_model_exactly(real_agent, monkeypatch):
@@ -1329,3 +1407,46 @@ def test_round_trip_maps_the_real_strict_schema_refusal(real_agent):
                                 user={"id": "u1", "valves": {"product": "z" * 100_000}})
     assert searches == []
     assert content == ERROR_CASES[0][2]
+
+
+@pytest.mark.parametrize("model,effort", [
+    pytest.param(f"{FUNCTION_ID}.quick", "low", id="quick"),
+    pytest.param(f"{FUNCTION_ID}.thorough", "xhigh", id="thorough"),
+    pytest.param(f"{FUNCTION_ID}.standard", "medium", id="standard"),
+    pytest.param(FUNCTION_ID, "medium", id="bare-function-id"),
+])
+def test_round_trip_each_depth_reaches_the_model_at_its_effort(real_agent, monkeypatch,
+                                                               model: str, effort: str):
+    """#1255 producer to consumer: the entry the user picked selects the effort
+    the real agent sends to the model; the default entry keeps the configured
+    default. The bare Function id is a defensive case only: v0.12.3 refuses an
+    unlisted model id before any Pipe call (main.py), and a pre-upgrade chat
+    reaches the Pipe through the frontend's DEFAULT_MODELS fallback instead."""
+    from mainframe_rag.agent import app as app_mod
+
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_efforts", "low,medium,xhigh")
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_simple", "medium")
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_complex", "medium")
+    transport, _searches = real_agent
+    content, events = run_pipe(None, transport=transport, body_extra={"model": model})
+    assert content == f"Reissue the command.\n\n**Citations:**\n- {CITE_A}"
+    assert _final_status(events) == "Source-matched · 1 citation"
+    assert transport.efforts == [effort]
+
+
+def test_round_trip_a_depth_the_deployment_does_not_offer_is_a_fixed_message(
+        real_agent, monkeypatch):
+    """A site whose template has no xhigh (LLM_REASONING_EFFORTS) refuses the
+    thorough entry before retrieval or any model call; the Pipe shows its fixed
+    text, never the agent's message."""
+    from mainframe_rag.agent import app as app_mod
+
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_efforts", "low,medium,high")
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_simple", "medium")
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_complex", "medium")
+    transport, searches = real_agent
+    content, events = run_pipe(None, transport=transport,
+                               body_extra={"model": f"{FUNCTION_ID}.thorough"})
+    assert content == ERROR_CASES[-1][2]
+    assert _final_status(events) == "Request failed"
+    assert searches == [] and transport.efforts == []

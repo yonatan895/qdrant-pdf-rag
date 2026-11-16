@@ -5,7 +5,8 @@
   (default-on, release gates; the conditions below stay); amended by
   [ADR-0010](0010-team-tools-on-open-webui.md) for team tools (the decision
   paragraph, V2, R2, one no-go item and the framework reading, as its table
-  lists).
+  lists). V2 wording amended for the docs Pipe's answer-depth entries
+  (#1255, maintainer decision 2026-11-16).
   Accepting this record does not enable anything: the chart component stays
   off by default (superseded by ADR-0008: default on), and a site enables it only after every condition below
   passes. Amends [ADR-0004](0004-operator-console-htmx.md) and
@@ -56,8 +57,10 @@ Pipe is provisioned and the admin role is limited to the team.
 - **V2 Answers only through the agent.** Open WebUI holds no gateway or LiteLLM
   key. It has no OpenAI or Ollama connections, so the default connections are
   off. Direct connections, user-created models and user Tools/Functions are
-  off, and the Pipelines server is not deployed. The only model is the docs
-  Pipe. Its Functions are repository files installed by the deploy step, with
+  off, and the Pipelines server is not deployed. The only models are the docs
+  Pipe's entries: one Function, whose answer-depth entries Open WebUI lists as
+  models `mainframe_rag_docs.<depth>`, each answering only through the agent
+  (amended for #1255; maintainer decision 2026-11-16). Its Functions are repository files installed by the deploy step, with
   their hash checked against the repository. Community Functions and
   frontmatter pip installs are refused. Task features (titles, tags,
   follow-ups, autocomplete, query generation) are off. The Pipe also answers

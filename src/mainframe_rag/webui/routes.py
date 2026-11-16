@@ -92,17 +92,6 @@ def _offered_efforts() -> tuple[ReasoningEffort, ...]:
     return app_mod.settings.reasoning_efforts()
 
 
-def _require_offered_effort(effort: ReasoningEffort | None) -> None:
-    """Refuse an effort the served template does not accept (#748) before
-    any model call, so it is never reported as a model outage."""
-    from mainframe_rag.agent import app as app_mod
-
-    if effort is not None and effort not in _offered_efforts():
-        raise app_mod.AppError(
-            422, "unsupported_reasoning_effort", "the reasoning effort is not offered by this deployment"
-        )
-
-
 def _require_ui() -> None:
     """Fail closed on every /ui path while the console is disabled. The
     import is lazy: app.py imports this router, so a module-level import of
@@ -595,7 +584,7 @@ async def _run_turn(req: UiChatRequest, owner):
     the fixed banner."""
     from mainframe_rag.agent import app as app_mod
 
-    _require_offered_effort(req.reasoning_effort)
+    app_mod.require_offered_effort(req.reasoning_effort)
     core_input, deps, llm_model = await app_mod.prepare_chat_core(
         owner,
         req.messages,
@@ -753,7 +742,7 @@ async def _console_stream_response(req, owner):
     from mainframe_rag.agent import app as app_mod
 
     request_id = owner.request.state.request_id
-    _require_offered_effort(req.reasoning_effort)
+    app_mod.require_offered_effort(req.reasoning_effort)
     # Every refusal and retrieval fault before the stream opens (the serving
     # gate included, issues #391 F3/F4) is the same stable JSON envelope
     # /v1/chat returns, never an SSE error frame after a committed 200.

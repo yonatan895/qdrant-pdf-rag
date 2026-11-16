@@ -1197,6 +1197,10 @@ class ChatRequest(BoundedRequestText):
     splunk_context: str | None = None
     product: str | None = None
     version: str | None = None
+    # Optional answer depth (#1255, the Open WebUI docs Pipe's entries): one of
+    # LLM_REASONING_EFFORTS, sent to the model verbatim; omitted keeps the
+    # configured simple/complex effort. Same refusal as the console (#748).
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class ChatMessageResponse(BaseModel):
@@ -1802,6 +1806,16 @@ def _require_reasoning_model(request_id: str, action: str) -> None:
         raise AppError(503, "not_configured", "reasoning model is not configured") from exc
 
 
+def require_offered_effort(effort: ReasoningEffort | None) -> None:
+    """Refuse an effort the served template does not accept (#748) before
+    any retrieval or model call, so it is never reported as a model outage.
+    Shared by /v1/chat* (#1255) and the console routes."""
+    if effort is not None and effort not in settings.reasoning_efforts():
+        raise AppError(
+            422, "unsupported_reasoning_effort", "the reasoning effort is not offered by this deployment"
+        )
+
+
 def _embed_input_refusal(owner: _RequestSpan, endpoint: str, exc: Exception) -> AppError | None:
     """The embedder refused an over-bound input before calling the model
     (issue #374): a request-body fault, not an upstream one — the same fixed
@@ -2388,6 +2402,7 @@ async def _chat_response(req, response, owner):
     root_span = owner.span
     request_id = owner.request.state.request_id
     started = owner.started
+    require_offered_effort(req.reasoning_effort)
     core_input, deps, llm_model = await prepare_chat_core(
         owner,
         req.messages,
@@ -2395,6 +2410,7 @@ async def _chat_response(req, response, owner):
         product=req.product,
         version=req.version,
         temperature=req.temperature,
+        reasoning_effort=req.reasoning_effort,
     )
     hits, kind, timings = core_input.hits, core_input.query_kind, core_input.timings
     is_stream = req.stream
