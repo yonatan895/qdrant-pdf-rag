@@ -10,9 +10,11 @@ storage write.
 
 What leaves the process (docs/eval.md, Corpus coverage check): wishlist ids,
 titles, categories and priorities, a status per item, the doc ids that
-matched a wishlist form number, and title-matched doc ids printed as a
-public IBM form number (`SA22-7832-13`) or Redbook number. Any other matched
-doc id is only counted (`other_matches`). Catalog titles, unmatched doc ids,
+matched a wishlist form number, and title-matched doc ids of a Redbook or
+Redpaper number (`SG24-6366-02`, `sg246366`, `REDP-5123`). Any other
+title-matched doc id is only counted (`other_matches`): a form-number shape
+alone does not prove a public book, since ingest mints that shape from any
+site filename or vendor PDF. Catalog titles, unmatched doc ids,
 the build id and catalog sizes are never printed or written, so the site's
 private documents stay in the gap.
 
@@ -62,14 +64,15 @@ _ITEM_KEYS = frozenset({"id", "category", "title", "priority", "match", "doc_num
 _ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 _NUMBER_RE = re.compile(r"[A-Z]{2,4}\d{2}-\d{4}")  # a form number, no edition suffix
 _PREFIX_RE = re.compile(r"[A-Za-z0-9]{1,8}")
-# A title-matched doc id is reported by name only in the printed shape of an
-# IBM form number (upper case, hyphenated) or a Redbook/Redpaper number, so
-# a site stem such as "kb201234" stays a count. A number hit is the
-# wishlist's own number by construction and is always reported.
-_PUBLIC_ID_RE = re.compile(
-    r"[A-Z]{2,4}\d{2}-\d{4}(?:-\d{2})?|(?i:SG24|REDP)-?\d{4}(?:-?\d{2})?")
-# The family of such an id: hyphens dropped, edition removed.
-_FAMILY_RE = re.compile(r"([A-Z]{2,4}\d{6}|REDP\d{4})(?:\d{2})?")
+# A title-matched doc id is reported by name only as a Redbook or Redpaper
+# number. A generic form-number shape is not enough: ingest derives it from
+# any site filename (`OPS01-0042.pdf`) or vendor PDF, so such ids stay a
+# count. A number hit is the wishlist's own number by construction and is
+# always reported.
+_PUBLIC_ID_RE = re.compile(r"(?i:SG24|REDP)-?\d{4}(?:-?\d{2})?")
+# The family of an id: hyphens dropped, edition removed (REDP first, so its
+# edition is not read as part of the number).
+_FAMILY_RE = re.compile(r"(REDP\d{4}|[A-Z]{2,4}\d{6})(?:\d{2})?")
 _REASON_RE = re.compile(r"[a-z0-9_]{1,32}")
 
 
@@ -262,13 +265,13 @@ def main(argv: list[str] | None = None) -> int:
 
     report = coverage_report(items, build_catalog(served["doc_ids"], served["titles"]),
                              wishlist_sha256)
+    sys.stdout.write(format_table(report))
     if args.out is not None:
         try:
             args.out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         except OSError:
             print("error: the --out file cannot be written", file=sys.stderr)
             return 2
-    sys.stdout.write(format_table(report))
     return 0
 
 

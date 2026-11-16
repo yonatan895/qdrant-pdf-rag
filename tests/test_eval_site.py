@@ -1292,7 +1292,7 @@ def test_a_switch_row_covers_the_docs_of_the_question_it_asked(site_eval):
 # wishlist and reports only wishlist items, statuses and public form numbers.
 # All numbers and titles below are synthetic.
 
-PRIVATE_IDS = ("acme-jes2-runbook", "acme-pd-notes", "kb201234", "SITE-SECRET-01")
+PRIVATE_IDS = ("acme-jes2-runbook", "acme-pd-notes", "kb201234", "OPS01-0042", "SITE-SECRET-01")
 SYNTHETIC_WISHLIST = {"schema": "corpus_wishlist/1", "items": [
     {"id": "num", "category": "hardware_language_reference", "title": "Numbered Principles",
      "priority": 1, "match": "doc_number", "doc_numbers": ["SA99-0001"],
@@ -1315,6 +1315,8 @@ SYNTHETIC_WISHLIST = {"schema": "corpus_wishlist/1", "items": [
     {"id": "renum", "category": "language_tool_library", "title": "Renumbered Handbook",
      "priority": 2, "match": "doc_number", "doc_numbers": ["SA99-0005"],
      "title_keywords": [["toolkit handbook"]]},
+    {"id": "rp", "category": "redbook", "title": "Redpaper Handbook",
+     "priority": 3, "match": "title", "title_keywords": [["redpaper handbook"]]},
 ]}
 SYNTHETIC_CATALOG = [
     ("SA99-0001-13", "Numbered Principles of Operation, Thirteenth Edition"),
@@ -1325,9 +1327,13 @@ SYNTHETIC_CATALOG = [
     ("SG24-9001-00", "Synthetic Series Volume 1"),
     ("SG24-9002-00", "Synthetic Series Volume 2"),
     ("sg249999", "JES2 Synthetic Redbook"),
+    ("REDP-9004-00", "Redpaper Handbook"),
+    ("REDP-9004-01", "Redpaper Handbook, Second Edition"),
     ("acme-jes2-runbook", "ACME JES2 Runbook"),
     ("acme-pd-notes", "ACME Problem Determination Notes"),
     ("kb201234", "KB Problem Determination Checklist"),
+    # A site file named like a form number (ingest keeps that shape).
+    ("OPS01-0042", "OPS Problem Determination Handbook"),
     ("SITE-SECRET-01", "Secret Site Procedures"),
 ]
 
@@ -1395,25 +1401,30 @@ def test_coverage_check_reports_present_missing_and_ambiguous(corpus_check):
                            "doc_ids": ["SA99-0001-12", "SA99-0001-13"], "other_matches": 0}
     assert (rows["miss"]["status"], rows["miss"]["matched_by"], rows["miss"]["doc_ids"]) == (
         "missing", None, [])
-    # Two form-number families behind one single-book title: ambiguous.
-    assert (rows["amb"]["status"], rows["amb"]["doc_ids"]) == (
-        "ambiguous", ["SC99-1111-00", "SC99-2222-01"])
-    assert (rows["one"]["status"], rows["one"]["matched_by"], rows["one"]["doc_ids"]) == (
-        "present", "title", ["GC99-0003-01"])
+    # Two form-number families behind one single-book title: ambiguous. A
+    # title-matched id is named only as a Redbook/Redpaper number, since a
+    # form-number shape alone can be a site file name; the rest are counted.
+    assert (rows["amb"]["status"], rows["amb"]["doc_ids"], rows["amb"]["other_matches"]) == (
+        "ambiguous", [], 2)
+    assert (rows["one"]["status"], rows["one"]["matched_by"], rows["one"]["doc_ids"],
+            rows["one"]["other_matches"]) == ("present", "title", [], 1)
     assert (rows["many"]["status"], rows["many"]["doc_ids"]) == (
         "present", ["SG24-9001-00", "SG24-9002-00"])
+    # Two Redpaper editions are one family.
+    assert (rows["rp"]["status"], rows["rp"]["doc_ids"]) == (
+        "present", ["REDP-9004-00", "REDP-9004-01"])
     # The prefix keeps the site's own JES2 runbook out of the Redbook item.
     assert (rows["rb-jes2"]["status"], rows["rb-jes2"]["doc_ids"],
             rows["rb-jes2"]["other_matches"]) == ("present", ["sg249999"], 0)
-    # Matched documents without a printed public number (a site stem that
-    # merely contains digits included) are counted, never named.
+    # Site documents (a stem with digits, a file named like a form number)
+    # are counted, never named.
     assert (rows["pd"]["status"], rows["pd"]["doc_ids"], rows["pd"]["other_matches"]) == (
-        "present", [], 2)
+        "present", [], 3)
     # A numbered item whose number is absent but whose title keywords hit
     # another book is ambiguous, never present.
-    assert (rows["renum"]["status"], rows["renum"]["matched_by"], rows["renum"]["doc_ids"]) == (
-        "ambiguous", "title", ["GC99-0003-01"])
-    assert data["counts"] == {"present": 5, "missing": 1, "ambiguous": 2}
+    assert (rows["renum"]["status"], rows["renum"]["matched_by"], rows["renum"]["doc_ids"],
+            rows["renum"]["other_matches"]) == ("ambiguous", "title", [], 1)
+    assert data["counts"] == {"present": 6, "missing": 1, "ambiguous": 2}
     lines = out.splitlines()
     assert any(line.split()[:3] == ["num", "1", "present"] for line in lines)
     assert any(line.split()[:3] == ["miss", "2", "missing"] for line in lines)
@@ -1438,11 +1449,30 @@ def test_coverage_check_never_reports_what_the_wishlist_did_not_name(corpus_chec
 def test_coverage_check_pages_the_whole_catalog(corpus_check):
     status, _, _, data, calls = corpus_check(_catalog_agent(SYNTHETIC_CATALOG, per_page=4))
     assert status == 0
-    assert [c.url.params.get("cursor") for c in calls] == [None, "ls1.p4", "ls1.p8"]
+    assert [c.url.params.get("cursor") for c in calls] == [None, "ls1.p4", "ls1.p8", "ls1.p12"]
     assert {c.url.params.get("limit") for c in calls} == {"200"}
-    rows = {r["id"]: r["status"] for r in data["items"]}
-    assert rows["rb-jes2"] == "present"  # second page
-    assert rows["pd"] == "present"  # its documents are on the last page
+    rows = {r["id"]: r for r in data["items"]}
+    assert rows["rb-jes2"]["status"] == "present"  # second page
+    assert rows["pd"]["other_matches"] == 3  # third and fourth pages
+
+
+def test_coverage_check_prints_the_table_when_the_export_cannot_be_written(
+        tmp_path, monkeypatch, capsys):
+    import httpx2
+
+    from mainframe_rag.eval import coverage
+
+    real_client = httpx2.Client
+    monkeypatch.setattr(httpx2, "Client", lambda **kw: real_client(
+        transport=httpx2.MockTransport(_catalog_agent(SYNTHETIC_CATALOG)), **kw))
+    wishlist = tmp_path / "wishlist.json"
+    wishlist.write_text(json.dumps(SYNTHETIC_WISHLIST))
+    status = coverage.main(["--agent-url", "http://deployed-agent:8087",
+                            "--wishlist", str(wishlist), "--out", str(tmp_path)])
+    captured = capsys.readouterr()
+    assert status == 2
+    assert any(line.split()[:3] == ["num", "1", "present"] for line in captured.out.splitlines())
+    assert captured.err == "error: the --out file cannot be written\n"
 
 
 def test_coverage_check_matches_by_number_without_a_title(corpus_check):

@@ -980,17 +980,24 @@ PYTHONPATH="$WS/src" python3 -m mainframe_rag.eval.coverage \
 - The table and `--out` hold only these fields:
   - the wishlist's ids, titles, categories and priorities, and the statuses;
   - the doc ids that matched a wishlist number;
-  - title-matched doc ids printed as a public IBM form number
-    (`SA22-7832-13`) or Redbook number. Any other matched doc id is only
-    counted (`other_matches`).
+  - title-matched doc ids of a Redbook or Redpaper number (`SG24-6366-02`,
+    `sg246366`). Any other title-matched doc id is only counted
+    (`other_matches`). A form-number shape alone proves nothing, because
+    ingest derives one from any site file name or vendor PDF.
 
   Catalog titles, unmatched doc ids, the build id and catalog sizes are
   never printed or written, so the output may leave the gap after the usual
   review.
+- A book is matched under the doc id ingest gave it
+  ([ingest §2](ingest.md#2-parsing-and-metadata-ibm_pdfpy)). IBM file names
+  such as `dz9zs006.pdf` take the most frequent form number of the first
+  pages, and that can be a cited book's number. So `missing` or a number
+  hit is a fetch guide, not proof of absence or presence.
 - The exit status is 0 for any completed run. It is 1 when the catalog
   cannot be read (no catalog, transport error, malformed page, or a build
   change mid-walk): a fixed message is printed and no table. It is 2 for an
-  invalid wishlist or `--out` path.
+  invalid wishlist (before any request) or an `--out` file that cannot be
+  written (after the table).
 
 ### Failure taxonomy (#830)
 
