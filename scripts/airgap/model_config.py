@@ -17,6 +17,9 @@ REASONING_INTEGER_FIELDS = {
     "LLM_RESERVED_OUTPUT_TOKENS": ("reservedOutputTokens", 128, 16384),
     "LLM_THINKING_RESERVE_TOKENS_SIMPLE": ("thinkingReserveTokensSimple", 0, 16384),
     "LLM_THINKING_RESERVE_TOKENS_COMPLEX": ("thinkingReserveTokensComplex", 0, 16384),
+    # Chat history caps (#1268): prior turns kept, characters kept per prior turn.
+    "CHAT_MAX_TURNS": ("chatMaxTurns", 1, 50),
+    "CHAT_MAX_PRIOR_TURN_CHARS": ("chatMaxPriorTurnChars", 200, 5000),
 }
 REASONING_EFFORT_FIELDS = {
     "LLM_REASONING_EFFORT_SIMPLE": "reasoningEffortSimple",
@@ -41,8 +44,19 @@ EXTRA_BODY_OWNED_KEYS = {
 EFFORT_TRANSPORT_KEY = "LLM_EFFORT_TRANSPORT"
 EFFORT_TRANSPORTS = ("top_level", "chat_template", "none")
 MODEL_ARGUMENT_ENV_KEYS = (EXTRA_BODY_KEY, EFFORT_TRANSPORT_KEY)
+# Prompt-count source (#1266). Mirrors config.TOKEN_COUNT_SOURCES; a test pins
+# both sides. Empty keeps the application default (tokenize).
+TOKEN_COUNT_SOURCE_KEY = "LLM_TOKEN_COUNT_SOURCE"
+TOKEN_COUNT_SOURCES = ("tokenize", "completion_usage", "auto", "estimate")
+# Antecedent-anchored follow-up retrieval (#1268): optional boolean, exclusive
+# with CHAT_CONDENSE_ENABLED. The refusal mirrors config.CHAT_FOLLOWUP_MODES_CONFLICT
+# (a test pins both sides).
+FOLLOWUP_ANCHOR_KEY = "CHAT_FOLLOWUP_ANCHOR_ENABLED"
+CHAT_FOLLOWUP_MODES_CONFLICT = (
+    "CHAT_CONDENSE_ENABLED and CHAT_FOLLOWUP_ANCHOR_ENABLED are mutually exclusive; enable at most one"
+)
 REASONING_ENV_KEYS = (*REASONING_INTEGER_FIELDS, *REASONING_EFFORT_FIELDS, "LLM_REASONING_EFFORTS", "LLM_STREAM",
-                      *MODEL_ARGUMENT_ENV_KEYS)
+                      *MODEL_ARGUMENT_ENV_KEYS, TOKEN_COUNT_SOURCE_KEY, FOLLOWUP_ANCHOR_KEY)
 
 # Request admission and total deadline (#374 handoff, #843 D1). Empty keeps the
 # chart default (deadline 270; admission 4/4/30, #843); zero is an explicit selection. Limits match config.Settings and the
@@ -69,7 +83,7 @@ MODEL_CONFIG_KEYS = (
 OPERATOR_BOOL_KEYS = (
     "UI_ENABLED", "CONTEXTUAL_EMBED_ENABLED", "INGEST_ALIAS_PUBLISH",
     "INGEST_REINGEST", "INGEST_AUTHORIZE_FROM_CATALOG", "CHAT_CONDENSE_ENABLED", "LLM_STREAM", "AGENT_NETWORK_POLICY",
-    "FEEDBACK_ENABLED", "OPENWEBUI_ENABLED",
+    "FEEDBACK_ENABLED", "OPENWEBUI_ENABLED", "CHAT_FOLLOWUP_ANCHOR_ENABLED",
 )
 
 # Agent ingress NetworkPolicy (issue #373): default ON; the allow-list names
@@ -379,6 +393,15 @@ def validate_operator_booleans(values: Mapping[str, str]) -> None:
     for name in OPERATOR_BOOL_KEYS:
         parse_strict_bool(name, values.get(name, ""), False)
     require_in_place_retired(values.get("INGEST_ALIAS_PUBLISH", ""))
+    require_one_follow_up_mode(values)
+
+
+def require_one_follow_up_mode(values: Mapping[str, str]) -> None:
+    """Condensation and anchoring are exclusive arms (#1268); the pod would
+    refuse the pair at startup, so preflight and the mapper refuse it first."""
+    if (parse_strict_bool("CHAT_CONDENSE_ENABLED", values.get("CHAT_CONDENSE_ENABLED", ""), False)
+            and parse_strict_bool(FOLLOWUP_ANCHOR_KEY, values.get(FOLLOWUP_ANCHOR_KEY, ""), False)):
+        raise ValueError(CHAT_FOLLOWUP_MODES_CONFLICT)
 
 
 class JsonObject(dict):
@@ -517,6 +540,13 @@ def reasoning_overrides(values: Mapping[str, str]) -> dict[str, object]:
             raise ValueError(f"{name} must be one of LLM_REASONING_EFFORTS")
     if values.get("LLM_STREAM", "") != "":
         result["stream"] = parse_strict_bool("LLM_STREAM", values["LLM_STREAM"], False)
+    if values.get(FOLLOWUP_ANCHOR_KEY, "") != "":
+        result["followupAnchorEnabled"] = parse_strict_bool(FOLLOWUP_ANCHOR_KEY, values[FOLLOWUP_ANCHOR_KEY], False)
+    source = values.get(TOKEN_COUNT_SOURCE_KEY, "")
+    if source != "":
+        if source not in TOKEN_COUNT_SOURCES:
+            raise ValueError(f"{TOKEN_COUNT_SOURCE_KEY} must be tokenize, completion_usage, auto or estimate")
+        result["tokenCountSource"] = source
     return result
 
 

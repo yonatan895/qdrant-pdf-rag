@@ -13,6 +13,7 @@ import logging
 import time
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, replace
+from itertools import zip_longest
 from typing import Literal, TypedDict
 
 from opentelemetry import trace
@@ -34,14 +35,16 @@ from mainframe_rag.agent.answer import (
     build_messages,
     classify_query_complexity,
     condense_query,
+    names_identifier,
     parse_answer,
     verification_state_for,
 )
 from mainframe_rag.agent.chat_turn import (
     chat_body_chars as chat_body_chars,  # noqa: PLC0414 — preserve the existing helper import
 )
-from mainframe_rag.agent.chat_turn import prepare_chat_turn
+from mainframe_rag.agent.chat_turn import is_unsearchable_query, prepare_chat_turn
 from mainframe_rag.agent.core_ports import (
+    RETRIEVAL_HIT_LIMIT,
     AnswerModel,
     ModelDone,
     ModelToken,
@@ -55,6 +58,7 @@ from mainframe_rag.logs import error_type
 from mainframe_rag.ports import ChatMessage, Tokenizer, TokenUsage
 from mainframe_rag.retrieve.filters import parse_query
 from mainframe_rag.retrieve.query import SearchHit
+from mainframe_rag.retrieve.screen import screen_query
 from mainframe_rag.tracing import bind_module_tracer, start_as_current_span
 
 VALID_REASONING_EFFORTS: frozenset[ReasoningEffort] = frozenset(REASONING_EFFORTS)
@@ -98,6 +102,10 @@ class AnswerCoreInput:
     query_kind: str | None = None
     timings: dict[str, int] | None = None
     reasoning_effort: ReasoningEffort | None = None
+    # What retrieval searched for this turn (issue #1268), set with the hits:
+    # the condensed query of a chat follow-up. None means the message's own
+    # derived retrieval query, the only search a non-chat turn makes.
+    search_query: str | None = None
 
 
 @dataclass
@@ -157,6 +165,110 @@ async def resolve_search_query(
         with start_as_current_span(tracer, "chat.condense", kind=SpanKind.CLIENT, context=ctx):
             return await condense_query(deps.llm, input_data.messages, deps.settings)
     return derive_retrieval_query(input_data.query, deps.settings)
+
+
+type FollowUpMode = Literal["literal", "condensed", "anchored"]
+
+
+@dataclass(frozen=True)
+class SearchPlan:
+    """What one turn searches (issue #1268). `query` is always searched (the
+    message's own retrieval query, or its condensation); `anchor`, set only in
+    `anchored` mode, is the previous user message's retrieval query, searched
+    as a second leg. `mode` is the text-free label the root span carries."""
+
+    mode: FollowUpMode
+    query: str
+    anchor: str | None = None
+
+    @property
+    def search_text(self) -> str:
+        """What the prompt's retrieval-derived decisions read: every searched
+        text, the antecedent first."""
+        return f"{self.anchor}\n{self.query}" if self.anchor is not None else self.query
+
+
+def _anchor_query(input_data: AnswerCoreInput, settings: Settings) -> str | None:
+    """The previous user message's retrieval query when the active chat
+    follow-up should be anchored to it, else None. Follow-ups only; never when
+    the active message names an identifier (the condensation bypass), when
+    either message screens as a trap, when the antecedent is one the active
+    turn would refuse, or when both search the same text."""
+    messages = input_data.messages or []
+    if not (input_data.is_chat and settings.chat_followup_anchor_enabled and len(messages) > 1):
+        return None
+    literal = derive_retrieval_query(input_data.query, settings)
+    if names_identifier(literal) or screen_query(literal) == "trap":
+        return None
+    earlier = next((m.content for m in reversed(messages[:-1]) if m.role == "user"), "")
+    # The antecedent never passed the active-turn check: one the active turn
+    # would refuse (blank, control characters) is not searched.
+    if is_unsearchable_query(earlier):
+        return None
+    earlier = earlier.strip()
+    anchor = derive_retrieval_query(earlier, settings)
+    if anchor == literal or screen_query(anchor) == "trap":
+        return None
+    return anchor
+
+
+async def plan_search(
+    input_data: AnswerCoreInput,
+    deps: AnswerCoreDeps,
+    parent_span: trace.Span | None = None,
+) -> SearchPlan:
+    """The one owner of what a turn searches, for the core retrieval branch
+    and every chat route alike. Condensation and anchoring cannot both be on
+    (Settings refuses the pair, issue #1268). The mode is set on
+    `parent_span` for chat follow-up turns as a fixed label, never text."""
+    input_data = _prepare_chat_input(input_data, deps.settings)
+    literal = derive_retrieval_query(input_data.query, deps.settings)
+    query = await resolve_search_query(input_data, deps, parent_span)
+    anchor = _anchor_query(input_data, deps.settings)
+    mode: FollowUpMode = (
+        "anchored" if anchor is not None else "condensed" if query != literal else "literal"
+    )
+    # Follow-up turns only: a first turn's root span keeps its shape.
+    if parent_span is not None and input_data.is_chat and len(input_data.messages or []) > 1:
+        parent_span.set_attribute("rag.followup_mode", mode)
+    return SearchPlan(mode, query, anchor)
+
+
+def _fuse_by_rank(literal: RetrievalResult, anchored: RetrievalResult) -> RetrievalResult:
+    """Interleave two ranked lists, the literal leg first, keeping a chunk at
+    its first place, cut to what one retrieval returns (`RETRIEVAL_HIT_LIMIT`,
+    or a longer leg's length). Rank, not score: rerank and RRF scores of
+    different queries are not comparable. The query kind is the literal leg's
+    (the user's own question class); timings add."""
+    limit = max(RETRIEVAL_HIT_LIMIT, len(literal.hits), len(anchored.hits))
+    seen: set[str] = set()
+    hits: list[SearchHit] = []
+    for pair in zip_longest(literal.hits, anchored.hits):
+        for hit in pair:
+            if hit is not None and hit.chunk_id not in seen:
+                seen.add(hit.chunk_id)
+                hits.append(hit)
+    timings = dict(literal.timings)
+    for key, value in anchored.timings.items():
+        timings[key] = timings.get(key, 0) + value
+    return RetrievalResult(hits[:limit], literal.kind, timings)
+
+
+async def retrieve_planned(
+    plan: SearchPlan, source: AnswerCoreInput, deps: AnswerCoreDeps,
+) -> RetrievalResult:
+    """Run a plan's retrieval: one search, or for an anchored follow-up the
+    literal leg then the antecedent leg, fused. Either leg failing fails the
+    turn as one retrieval failure does."""
+    found = await deps.retrieve(
+        plan.query, product=source.product, version=source.version, settings=deps.settings,
+    )
+    if plan.anchor is None:
+        return found
+    anchored = await deps.retrieve(
+        plan.anchor, product=source.product, version=source.version, settings=deps.settings,
+    )
+    return _fuse_by_rank(found, anchored)
 
 
 @dataclass
@@ -307,6 +419,7 @@ async def _build_prepared_prompt(
     complexity: str,
     effort: str,
     root_ctx: Context | None,
+    temperature: float | None = None,
 ) -> PreparedPrompt:
     """One prompt-build owner for the JSON and streaming executors: identical
     budget inputs, identical evidence manifest, one prompt.build span."""
@@ -328,6 +441,16 @@ async def _build_prepared_prompt(
     ):
         if input_data.is_chat and input_data.messages:
             build_chat_fn = deps.build_chat_messages_fn or build_chat_messages
+            # Only a search that differs from the message's own retrieval
+            # query is passed (issue #1268), so every other call is unchanged.
+            # Both sides derive from the same prepared query: a literal plan's
+            # search_text is exactly derive_retrieval_query(query).
+            searched = _search_text(input_data, settings)
+            extra = (
+                {"search_query": searched}
+                if searched != derive_retrieval_query(input_data.query, settings)
+                else {}
+            )
             return await asyncio.to_thread(
                 build_chat_fn,
                 input_data.messages,
@@ -346,6 +469,8 @@ async def _build_prepared_prompt(
                 settings=settings,
                 order=settings.prompt_order,
                 reasoning_effort=effort,
+                temperature=temperature,
+                **extra,
             )
         build_msg_fn = deps.build_messages_fn or build_messages
         return await asyncio.to_thread(
@@ -366,6 +491,7 @@ async def _build_prepared_prompt(
             settings=settings,
             order=settings.prompt_order,
             reasoning_effort=effort,
+            temperature=temperature,
         )
 
 
@@ -449,16 +575,28 @@ def _finalize_answer(
 
 async def _retrieve_inputs(
     source: AnswerCoreInput, deps: AnswerCoreDeps, parent_span: trace.Span | None,
-) -> RetrievalResult:
+) -> tuple[AnswerCoreInput, RetrievalResult]:
+    """The retrieval leg, or the hits a route already retrieved; returns the
+    input carrying the query that was searched (issue #1268)."""
     if source.hits is not None:
-        return RetrievalResult(source.hits, source.query_kind or "unknown", source.timings or {})
-    query = await resolve_search_query(source, deps, parent_span)
-    try:
-        return await deps.retrieve(
-            query, product=source.product, version=source.version, settings=deps.settings,
+        return source, RetrievalResult(
+            source.hits, source.query_kind or "unknown", source.timings or {}
         )
+    plan = await plan_search(source, deps, parent_span)
+    try:
+        found = await retrieve_planned(plan, source, deps)
     except Exception as exc:
         raise RetrievalError(exc) from exc
+    return replace(source, search_query=plan.search_text), found
+
+
+def _search_text(input_data: AnswerCoreInput, settings: Settings) -> str:
+    """What retrieval searched: the condensed or anchored search text a chat
+    turn recorded, else the message's own derived retrieval query (issue
+    #1192, #1268)."""
+    if input_data.search_query is not None:
+        return input_data.search_query
+    return derive_retrieval_query(input_data.query, settings)
 
 
 def _empty_output(query: str, kind: str, timings: dict[str, int], complexity: str) -> AnswerCoreOutput:
@@ -496,27 +634,31 @@ async def execute_answer_core(
     _base_url, llm_model = assert_reasoning_model(settings)
     root_ctx = trace.set_span_in_context(parent_span) if parent_span is not None else None
 
-    retrieved = await _retrieve_inputs(input_data, deps, parent_span)
+    input_data, retrieved = await _retrieve_inputs(input_data, deps, parent_span)
     hits, kind, timings = retrieved.hits, retrieved.kind, retrieved.timings
 
     classify_fn = deps.classify_query_complexity_fn or classify_query_complexity
     # Complexity and the no-hits wording read what retrieval searched, which
-    # is the message itself within `query_max_chars` (issue #1192).
-    search_text = derive_retrieval_query(input_data.query, settings)
+    # is the message itself within `query_max_chars` (issue #1192) unless a
+    # chat follow-up was condensed (issue #1268).
+    search_text = _search_text(input_data, settings)
     complexity = classify_fn(search_text)
 
     if not hits:
         return _empty_output(search_text, kind, timings, complexity)
 
-    # 3. Prompt building (shared with the streaming executor)
+    # 3. Prompt building (shared with the streaming executor). The temperature is resolved first:
+    # a completion-usage count (#1266) sends the generation's own body.
     effort = _resolve_reasoning_effort(input_data, settings, complexity)
-    prepared = await _build_prepared_prompt(input_data, deps, hits, complexity, effort, root_ctx)
-    _require_supplied_evidence(prepared, len(hits))
-
-    # 4. LLM inference
     temperature = (
         input_data.temperature if input_data.temperature is not None else settings.llm_temperature
     )
+    prepared = await _build_prepared_prompt(
+        input_data, deps, hits, complexity, effort, root_ctx, temperature
+    )
+    _require_supplied_evidence(prepared, len(hits))
+
+    # 4. LLM inference
     t0 = time.monotonic()
     with start_as_current_span(
         tracer,
@@ -574,13 +716,14 @@ async def execute_answer_core_stream(
     _base_url, llm_model = assert_reasoning_model(settings)
     root_ctx = trace.set_span_in_context(parent_span) if parent_span is not None else None
 
-    retrieved = await _retrieve_inputs(input_data, deps, parent_span)
+    input_data, retrieved = await _retrieve_inputs(input_data, deps, parent_span)
     hits, kind, timings = retrieved.hits, retrieved.kind, retrieved.timings
 
     classify_fn = deps.classify_query_complexity_fn or classify_query_complexity
     # Complexity and the no-hits wording read what retrieval searched, which
-    # is the message itself within `query_max_chars` (issue #1192).
-    search_text = derive_retrieval_query(input_data.query, settings)
+    # is the message itself within `query_max_chars` (issue #1192) unless a
+    # chat follow-up was condensed (issue #1268).
+    search_text = _search_text(input_data, settings)
     complexity = classify_fn(search_text)
 
     # 2. Empty hits short-circuit: only the terminal record is yielded. The
@@ -591,15 +734,18 @@ async def execute_answer_core_stream(
         yield {"type": "final", "output": _empty_output(search_text, kind, timings, complexity)}
         return
 
-    # 3. Prompt building (shared with the buffered executor)
+    # 3. Prompt building (shared with the buffered executor). The temperature is resolved first:
+    # a completion-usage count (#1266) sends the generation's own body.
     effort = _resolve_reasoning_effort(input_data, settings, complexity)
-    prepared = await _build_prepared_prompt(input_data, deps, hits, complexity, effort, root_ctx)
-    _require_supplied_evidence(prepared, len(hits))
-
-    # 4. LLM streaming
     temperature = (
         input_data.temperature if input_data.temperature is not None else settings.llm_temperature
     )
+    prepared = await _build_prepared_prompt(
+        input_data, deps, hits, complexity, effort, root_ctx, temperature
+    )
+    _require_supplied_evidence(prepared, len(hits))
+
+    # 4. LLM streaming
     t0 = time.monotonic()
     ttft_ms: int | None = None
     content_parts: list[str] = []

@@ -60,7 +60,8 @@ from mainframe_rag.agent.answer_core import (
     LLMChatError,
     execute_answer_core,
     execute_answer_core_stream,
-    resolve_search_query,
+    plan_search,
+    retrieve_planned,
 )
 from mainframe_rag.agent.chat_turn import (
     InvalidChatTurn,
@@ -886,7 +887,9 @@ async def lifespan(_app: FastAPI):
         # own connection pool with its own (long) timeout. LLM env stays
         # request-time fail-fast (assert_reasoning_model in /v1/answer).
         embedder = build_embedder(settings, http_sync)
-        tokenizer = build_tokenizer(settings, http_sync)
+        # Off the event loop: LLM_TOKEN_COUNT_SOURCE=auto runs its startup
+        # count check here (#1266; warn-only, never a refusal to start).
+        tokenizer = await asyncio.to_thread(build_tokenizer, settings, http_sync)
         reranker = build_reranker(settings, http_sync)
         rerank_health = None
         if reranker is not None:
@@ -2357,16 +2360,15 @@ async def prepare_chat_core(
 
     try:
         with use_span(owner.span, end_on_exit=False):
-            search_query = await resolve_search_query(core_input, deps, parent_span=owner.span)
-            found = await rsc.retrieve(
-                search_query, product=product, version=version, settings=deps.settings,
-            )
+            plan = await plan_search(core_input, deps, parent_span=owner.span)
+            found = await retrieve_planned(plan, core_input, deps)
     except Exception as exc:
         raise _retrieval_failed(owner, owner.endpoint, f"{owner.endpoint}_retrieval", exc) from exc
 
     core_input.hits = found.hits
     core_input.query_kind = found.kind
     core_input.timings = found.timings
+    core_input.search_query = plan.search_text
     return core_input, deps, llm_model
 
 

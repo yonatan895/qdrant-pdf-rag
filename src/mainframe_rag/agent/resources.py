@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from mainframe_rag.agent.answer_core import AnswerCoreDeps
-from mainframe_rag.agent.core_ports import RetrievalResult
+from mainframe_rag.agent.core_ports import RETRIEVAL_HIT_LIMIT, RetrievalResult
 from mainframe_rag.agent.model_adapter import ModelAdapter
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import (
@@ -44,7 +44,7 @@ class AgentResources:
 
     async def retrieve(
         self, query: str, *, product: str | None, version: str | None,
-        settings: Settings, limit: int = 8,
+        settings: Settings, limit: int = RETRIEVAL_HIT_LIMIT,
     ) -> RetrievalResult:
         """The one retrieval wiring for /v1/search, /v1/answer, /v1/chat and the
         console. `settings` carries the validated physical collection."""

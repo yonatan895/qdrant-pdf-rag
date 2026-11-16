@@ -17,7 +17,7 @@ from mainframe_rag.eval.chat import (
     session_messages,
 )
 from mainframe_rag.eval.datasets import GoldenEntry
-from mainframe_rag.eval.follow_up import FOLLOW_UPS
+from mainframe_rag.eval.follow_up import FOLLOW_UPS, RESTATE_FOLLOW_UPS
 
 
 def _entry(entry_id: str = "g-1", query_class: str = "message_id") -> GoldenEntry:
@@ -160,14 +160,15 @@ def test_evaluate_sessions_preserves_both_arms_and_condensation_accounting(monke
     assert report["summary"]["delta_recall@1"] == 0.0
 
 
-@pytest.mark.parametrize("query_class", [*sorted(FOLLOW_UPS), "default"])
+@pytest.mark.parametrize("query_class", [*sorted(FOLLOW_UPS), "default", *RESTATE_FOLLOW_UPS])
 def test_follow_ups_name_no_identifier(query_class):
     """condense_query skips the rewrite when the latest turn names a message
-    id, member or abend code: such a follow-up would measure nothing."""
+    id, member or abend code: such a follow-up would measure nothing. The
+    class-B follow-ups (restate, summary) are held to the same rule."""
     from mainframe_rag.agent.answer import _ABEND_RE  # the predicate condense_query applies
     from mainframe_rag.retrieve.filters import parse_query
 
-    text = FOLLOW_UPS.get(query_class, DEFAULT_FOLLOW_UP)
+    text = RESTATE_FOLLOW_UPS.get(query_class) or FOLLOW_UPS.get(query_class, DEFAULT_FOLLOW_UP)
     assert query_class == "default" or text != DEFAULT_FOLLOW_UP
     assert not parse_query(text).has_identifiers
     assert not _ABEND_RE.search(text)

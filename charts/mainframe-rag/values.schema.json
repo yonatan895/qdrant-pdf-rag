@@ -109,10 +109,17 @@
         "reasoning": {
           "type": "object",
           "additionalProperties": false,
+          "not": {
+            "required": ["condenseEnabled", "followupAnchorEnabled"],
+            "properties": { "condenseEnabled": { "const": true }, "followupAnchorEnabled": { "const": true } }
+          },
           "properties": {
             "baseUrl": { "type": "string" },
             "model": { "type": "string" },
             "condenseEnabled": { "type": "boolean" },
+            "chatMaxTurns": { "type": "integer", "minimum": 1, "maximum": 50 },
+            "chatMaxPriorTurnChars": { "type": "integer", "minimum": 200, "maximum": 5000 },
+            "followupAnchorEnabled": { "type": "boolean" },
             "maxModelLen": { "type": "integer", "minimum": 512, "maximum": 131072 },
             "reservedOutputTokens": { "type": "integer", "minimum": 128, "maximum": 16384 },
             "thinkingReserveTokensSimple": { "type": "integer", "minimum": 0, "maximum": 16384 },
@@ -131,7 +138,8 @@
                 "chat_template_kwargs": { "type": "object" }
               }
             },
-            "effortTransport": { "type": "string", "enum": ["top_level", "chat_template", "none"] }
+            "effortTransport": { "type": "string", "enum": ["top_level", "chat_template", "none"] },
+            "tokenCountSource": { "type": "string", "enum": ["tokenize", "completion_usage", "auto", "estimate"] }
           },
           "allOf": [
             {

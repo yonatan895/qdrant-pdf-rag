@@ -10,6 +10,7 @@ import pytest
 from mainframe_rag.agent.tokenizer import (
     TOKENIZE_REFUSED_RETRY_AFTER_S,
     TOKENIZE_RETRY_AFTER_S,
+    CompletionUsageTokenizer,
     FallbackTokenizer,
     VllmTokenizer,
     build_tokenizer,
@@ -528,3 +529,312 @@ def test_chat_token_count_renders_the_generations_template_arguments(transport, 
         # Top-level effort is mapped by the server; configured arguments match.
         assert generation.get("chat_template_kwargs") == extra.get("chat_template_kwargs")
         assert generation.get("reasoning_effort") == effort
+
+
+# ---------------------------------------------------------------------------
+# Completion-usage counts (issue #1266): a gateway without /tokenize still
+# reports `usage.prompt_tokens` for a 1-token chat completion.
+# ---------------------------------------------------------------------------
+
+_COUNT_SETTINGS = {"llm_base_url": "http://synthetic/v1", "llm_model_reasoning": "reasoning"}
+
+
+def _usage_reply(prompt_tokens=321, content="never read"):
+    return httpx2.Response(200, json={
+        "choices": [{"message": {"content": content}, "finish_reason": "length"}],
+        "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": 1, "total_tokens": 322},
+    })
+
+
+def _usage_counter(respond, clock=None, **settings):
+    calls: list = []
+
+    def record(request):
+        calls.append(request)
+        reply = respond(request)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    client = httpx2.Client(transport=httpx2.MockTransport(record))
+    resolved = Settings(_env_file=None, **{**_COUNT_SETTINGS, "llm_token_count_source": "completion_usage",
+                                         **settings})
+    counter = CompletionUsageTokenizer.from_settings(resolved, client, clock=clock or _Clock())
+    return counter, calls, client
+
+
+def test_completion_usage_count_reads_prompt_tokens_not_content():
+    counter, calls, client = _usage_counter(lambda request: _usage_reply(321))
+    messages = [ChatMessage(role="user", content="synthetic question")]
+    with client:
+        assert counter.count_messages(messages, reasoning_effort="low") == 321
+        assert counter.remote_confirmed is True
+    assert [str(call.url) for call in calls] == ["http://synthetic/v1/chat/completions"]
+    body = json.loads(calls[0].content)
+    assert body["max_tokens"] == 1 and "stream" not in body and "stream_options" not in body
+    assert body["messages"] == [m.model_dump() for m in messages]
+
+
+def test_completion_usage_text_counts_never_send_a_request():
+    """Packing (fit_message) counts text in a loop: those stay estimator-only,
+    so the completion is sent once per verification, never per packing step."""
+    counter, calls, client = _usage_counter(lambda request: _usage_reply())
+    with client:
+        assert counter.count_tokens("synthetic text to price") == estimate_tokens("synthetic text to price")
+        assert counter.remote_confirmed is False
+    assert calls == []
+
+
+def test_completion_usage_count_sends_the_reasoning_key():
+    counter, calls, client = _usage_counter(lambda request: _usage_reply(), llm_api_key="sk-test-llm")
+    with client:
+        counter.count_messages([ChatMessage(role="user", content="q")])
+    assert calls[0].headers["authorization"] == "Bearer sk-test-llm"
+
+
+@pytest.mark.parametrize("reply", [
+    httpx2.Response(404), httpx2.Response(405), httpx2.Response(501),
+    httpx2.Response(200, json={"choices": []}),
+    httpx2.Response(200, json={"usage": {}}),
+    httpx2.Response(200, json={"usage": {"prompt_tokens": 0}}),
+    httpx2.Response(200, json={"usage": {"prompt_tokens": -3}}),
+    httpx2.Response(200, json={"usage": {"prompt_tokens": True}}),
+    httpx2.Response(200, json={"usage": {"prompt_tokens": "12"}}),
+    httpx2.Response(200, json={"usage": {"prompt_tokens": 12.0}}),
+    httpx2.Response(200, json=["not", "an", "object"]),
+], ids=["404", "405", "501", "no-usage", "empty-usage", "zero", "negative", "bool", "string", "float",
+        "list"])
+def test_unusable_completion_usage_pins_the_estimator(reply, caplog):
+    """No usable prompt_tokens is a gateway that cannot count this way: one
+    warning with a fixed message, then the estimator for the process."""
+    clock = _Clock()
+    counter, calls, client = _usage_counter(lambda request: reply, clock=clock)
+    secret = "synthetic-private-question"
+    messages = [ChatMessage(role="user", content=secret)]
+    with client, caplog.at_level(logging.WARNING, logger="agent.tokenizer"):
+        assert counter.count_messages(messages) == FallbackTokenizer().count_messages(messages)
+        clock.now += TOKENIZE_REFUSED_RETRY_AFTER_S + 1
+        assert counter.count_messages(messages) == FallbackTokenizer().count_messages(messages)
+        assert counter.remote_confirmed is False
+    assert len(calls) == 1 and counter._pinned is True
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "pinning in-process token estimation" in warnings[0]
+    assert secret not in warnings[0]
+
+
+@pytest.mark.parametrize("failure", [
+    httpx2.Response(503), httpx2.Response(429), httpx2.Response(408),
+    httpx2.ReadTimeout("slow"), httpx2.ConnectError("refused"),
+], ids=["503", "429", "408", "read-timeout", "connect-error"])
+def test_transient_completion_count_failure_recovers_after_the_window(failure, caplog):
+    """#835 semantics: the estimator answers inside the window, one probe
+    after it, and a success restores confirmed counts."""
+    replies = [failure]
+    clock = _Clock()
+    counter, calls, client = _usage_counter(
+        lambda request: replies.pop(0) if replies else _usage_reply(77), clock=clock)
+    messages = [ChatMessage(role="user", content="synthetic-private-question")]
+    estimate = FallbackTokenizer().count_messages(messages)
+    with client, caplog.at_level(logging.INFO, logger="agent.tokenizer"):
+        assert counter.count_messages(messages) == estimate and not counter.remote_confirmed
+        clock.now += TOKENIZE_RETRY_AFTER_S - 0.5
+        assert counter.count_messages(messages) == estimate
+        assert len(calls) == 1
+        clock.now += 1
+        assert counter.count_messages(messages) == 77 and counter.remote_confirmed
+        assert counter.count_messages(messages) == 77
+    assert len(calls) == 3
+    records = [r for r in caplog.records if r.name == "agent.tokenizer"]
+    assert [r.levelname for r in records] == ["WARNING", "INFO"]
+    assert all("synthetic-private-question" not in r.getMessage() for r in records)
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 422])
+def test_refused_completion_count_opens_the_long_window(status):
+    """#1214 semantics: a refusal (a prompt over the served window answers
+    400 here) is not a missing route: the long window, then one probe."""
+    replies = [httpx2.Response(status)]
+    clock = _Clock()
+    counter, calls, client = _usage_counter(
+        lambda request: replies.pop(0) if replies else _usage_reply(55), clock=clock)
+    messages = [ChatMessage(role="user", content="q")]
+    with client:
+        assert counter.count_messages(messages) == FallbackTokenizer().count_messages(messages)
+        clock.now += TOKENIZE_REFUSED_RETRY_AFTER_S - 1
+        counter.count_messages(messages)
+        assert len(calls) == 1 and counter._pinned is False
+        clock.now += 1
+        assert counter.count_messages(messages) == 55
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(("transport", "extra"), [
+    ("top_level", {}),
+    ("top_level", {"chat_template_kwargs": {"enable_thinking": False}, "top_k": 20}),
+    ("chat_template", {"chat_template_kwargs": {"enable_thinking": True}}),
+    ("none", {"chat_template_kwargs": {"reasoning_effort": "minimal"}, "repetition_penalty": 1.05}),
+])
+@pytest.mark.parametrize("effort", ["low", "xhigh", None])
+@pytest.mark.parametrize("temperature", [0.2, 0.9])
+def test_completion_count_body_is_the_generation_body_without_its_limits(transport, extra, effort, temperature):
+    """The count body is the generation's request (#1193 transport rules,
+    written out here independently of the builder) with `max_tokens: 1` and
+    no streaming flags. The end-to-end owner of "counted == sent" is
+    test_answer_core::test_completion_usage_count_body_equals_the_sent_body."""
+    counter, calls, client = _usage_counter(
+        lambda request: _usage_reply(), llm_effort_transport=transport, llm_extra_body=json.dumps(extra))
+    messages = [ChatMessage(role="system", content="s"), ChatMessage(role="user", content="q")]
+    with client:
+        counter.count_messages(messages, reasoning_effort=effort, temperature=temperature)
+    expected = {
+        "model": "reasoning",
+        "messages": [{"role": "system", "content": "s"}, {"role": "user", "content": "q"}],
+        "temperature": temperature,
+        "max_tokens": 1,
+        **{k: v for k, v in extra.items() if k != "chat_template_kwargs"},
+    }
+    kwargs = dict(extra.get("chat_template_kwargs", {}))
+    if effort and transport == "top_level":
+        expected["reasoning_effort"] = effort
+    if effort and transport == "chat_template":
+        kwargs["reasoning_effort"] = effort
+    if kwargs:
+        expected["chat_template_kwargs"] = kwargs
+    assert json.loads(calls[0].content) == expected
+
+
+def test_completion_count_without_a_request_temperature_sends_the_configured_one():
+    counter, calls, client = _usage_counter(lambda request: _usage_reply(), llm_temperature=0.7)
+    with client:
+        counter.count_messages([ChatMessage(role="user", content="q")])
+    assert json.loads(calls[0].content)["temperature"] == 0.7
+
+
+# Source selection (#1266). The default keeps the pre-#1266 behaviour.
+
+def _routes(tokenize, completion):
+    """Mock gateway: /tokenize and /v1/chat/completions answer as told."""
+    calls: list[str] = []
+
+    def respond(request):
+        calls.append(request.url.path)
+        reply = tokenize if request.url.path == "/tokenize" else completion
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    return calls, httpx2.Client(transport=httpx2.MockTransport(respond))
+
+
+@pytest.mark.parametrize(("source", "expected"), [
+    ("tokenize", VllmTokenizer), ("completion_usage", CompletionUsageTokenizer), ("estimate", FallbackTokenizer),
+])
+def test_build_tokenizer_selects_the_configured_source_without_traffic(source, expected):
+    calls, client = _routes(httpx2.Response(200, json={"count": 9}), _usage_reply(9))
+    with client:
+        tok = build_tokenizer(Settings(_env_file=None, **_COUNT_SETTINGS, llm_token_count_source=source), client)
+    assert type(tok) is expected and calls == []
+
+
+def test_default_source_is_tokenize_with_estimator_fallback():
+    assert type(build_tokenizer(Settings(_env_file=None, **_COUNT_SETTINGS))) is VllmTokenizer
+    assert type(build_tokenizer(Settings(_env_file=None))) is FallbackTokenizer
+    assert type(build_tokenizer(Settings(_env_file=None, llm_token_count_source="completion_usage"))) is (
+        FallbackTokenizer)
+
+
+# (startup /tokenize, startup completion, startup paths, the path a request
+# thread's count then takes, whether that count is confirmed)
+_AUTO_CASES = {
+    # /tokenize served: it counts, no completion is ever sent.
+    "tokenize-served": (httpx2.Response(200, json={"count": 9}), _usage_reply(),
+                        ["/tokenize"], "/tokenize", True),
+    # /tokenize not served, completion usage confirmed at startup.
+    "usage-confirmed": (httpx2.Response(404), _usage_reply(), ["/tokenize", "/v1/chat/completions"],
+                        "/v1/chat/completions", True),
+    # Neither: the estimator, without further traffic.
+    "neither": (httpx2.Response(404), httpx2.Response(200, json={"usage": {}}),
+                ["/tokenize", "/v1/chat/completions"], None, False),
+    # /tokenize unreachable right now (transient): its retry window, the
+    # estimator inside it, exactly as the tokenize source behaves.
+    "tokenize-transient": (httpx2.ConnectError("down"), _usage_reply(), ["/tokenize"], None, False),
+    # /tokenize absent and the completion failed transiently: the counter's
+    # own retry window; nothing is pinned by a startup blip.
+    "usage-transient": (httpx2.Response(404), httpx2.Response(503), ["/tokenize", "/v1/chat/completions"],
+                        None, False),
+}
+
+
+@pytest.mark.parametrize("case", list(_AUTO_CASES))
+def test_auto_source_startup_check(case, caplog):
+    tokenize, completion, startup_paths, next_path, confirmed = _AUTO_CASES[case]
+    calls, client = _routes(tokenize, completion)
+    with client, caplog.at_level(logging.INFO, logger="agent.tokenizer"):
+        tok = build_tokenizer(Settings(_env_file=None, **_COUNT_SETTINGS, llm_token_count_source="auto"), client)
+        assert calls == startup_paths
+        assert tok.remote_confirmed is False  # a request thread has not counted yet
+        tok.count_messages([ChatMessage(role="user", content="q")])
+        assert tok.remote_confirmed is confirmed
+    assert calls[len(startup_paths):] == ([next_path] if next_path else [])
+    selected = [r.getMessage() for r in caplog.records if "token count source" in r.getMessage()]
+    assert len(selected) == 1
+
+
+def test_auto_moves_to_usage_when_tokenize_turns_out_unserved_after_startup():
+    """Review S1 (#1266): the gateway is down at startup (/tokenize transient),
+    then answers 404 for /tokenize. The next probe pins /tokenize and `auto`
+    must move on to the completion count instead of estimating for life."""
+    clock = _Clock()
+    replies = {"/tokenize": [httpx2.ConnectError("down")]}
+    calls: list[str] = []
+
+    def respond(request):
+        calls.append(request.url.path)
+        if request.url.path == "/tokenize":
+            reply = replies["/tokenize"].pop(0) if replies["/tokenize"] else httpx2.Response(404)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+        return _usage_reply(88)
+
+    settings = Settings(_env_file=None, **_COUNT_SETTINGS, llm_token_count_source="auto")
+    messages = [ChatMessage(role="user", content="q")]
+    with httpx2.Client(transport=httpx2.MockTransport(respond)) as client:
+        tok = build_tokenizer(settings, client, clock=clock)
+        assert calls == ["/tokenize"]
+        assert tok.count_messages(messages) == FallbackTokenizer().count_messages(messages)
+        clock.now += TOKENIZE_RETRY_AFTER_S + 1
+        # The probe finds /tokenize not served: the same count moves on.
+        assert tok.count_messages(messages) == 88 and tok.remote_confirmed
+        assert tok.count_messages(messages) == 88 and tok.remote_confirmed
+    assert calls == ["/tokenize", "/tokenize", "/v1/chat/completions", "/v1/chat/completions"]
+
+
+def test_auto_passes_the_request_temperature_only_to_the_completion_count():
+    _calls, client = _routes(httpx2.Response(404), _usage_reply(5))
+    bodies: list = []
+    with client:
+        tok = build_tokenizer(Settings(_env_file=None, **_COUNT_SETTINGS, llm_token_count_source="auto"), client)
+        assert getattr(tok, "counts_request_temperature", False) is True
+        original = client.post
+
+        def capture(url, json=None, **kwargs):
+            bodies.append(json)
+            return original(url, json=json, **kwargs)
+
+        client.post = capture
+        tok.count_messages([ChatMessage(role="user", content="q")], temperature=0.55)
+    assert bodies[-1]["temperature"] == 0.55
+
+
+def test_auto_selected_usage_counter_counts_on_a_request_thread():
+    calls, client = _routes(httpx2.Response(404), _usage_reply(64))
+    with client:
+        tok = build_tokenizer(Settings(_env_file=None, **_COUNT_SETTINGS, llm_token_count_source="auto"), client)
+        result = {}
+        worker = threading.Thread(target=lambda: result.update(
+            n=tok.count_messages([ChatMessage(role="user", content="q")]), ok=tok.remote_confirmed))
+        worker.start()
+        worker.join()
+    assert result == {"n": 64, "ok": True}
+    assert calls == ["/tokenize", "/v1/chat/completions", "/v1/chat/completions"]

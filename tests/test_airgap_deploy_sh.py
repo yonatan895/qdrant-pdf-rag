@@ -295,10 +295,10 @@ def test_model_request_arguments_operator_precedence_reaches_rendered_pod(tree, 
     root, _log = tree
     selected = {
         "LLM_EXTRA_BODY": '{"top_k": 20, "stop": ["a b", "c\\"d"], "chat_template_kwargs": {"enable_thinking": false}}',
-        "LLM_EFFORT_TRANSPORT": "chat_template",
+        "LLM_EFFORT_TRANSPORT": "chat_template", "LLM_TOKEN_COUNT_SOURCE": "completion_usage",
     }
     alternate = {
-        "LLM_EXTRA_BODY": '{"top_k": 1}', "LLM_EFFORT_TRANSPORT": "none",
+        "LLM_EXTRA_BODY": '{"top_k": 1}', "LLM_EFFORT_TRANSPORT": "none", "LLM_TOKEN_COUNT_SOURCE": "estimate",
     }
     file_values = {
         "INTERNAL_REGISTRY": "reg.internal", "NAMESPACE": "ns",
@@ -315,6 +315,23 @@ def test_model_request_arguments_operator_precedence_reaches_rendered_pod(tree, 
     pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
     assert json.loads(pod["LLM_EXTRA_BODY"]) == json.loads(selected["LLM_EXTRA_BODY"])
     assert pod["LLM_EFFORT_TRANSPORT"] == "chat_template"
+    assert pod["LLM_TOKEN_COUNT_SOURCE"] == "completion_usage"  # #1266
+
+
+def test_unset_token_count_source_adds_no_pod_variable(tree):
+    """The shipped default does not change (#1266): unset renders no variable."""
+    root, _log = tree
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
+    assert "LLM_TOKEN_COUNT_SOURCE" not in pod
+
+
+def test_refused_token_count_source_stops_the_deploy_before_helm(tree):
+    result = _run(tree, ("LLM_TOKEN_COUNT_SOURCE", "unsupported-private-value"))
+    assert result.returncode != 0
+    assert "LLM_TOKEN_COUNT_SOURCE must be tokenize, completion_usage, auto or estimate" in result.stderr
+    assert "unsupported-private-value" not in result.stderr + result.stdout
 
 
 def test_refused_model_request_arguments_stop_the_deploy_before_helm(tree):
@@ -323,6 +340,53 @@ def test_refused_model_request_arguments_stop_the_deploy_before_helm(tree):
     assert result.returncode != 0
     assert "LLM_EXTRA_BODY must not set max_tokens" in result.stderr
     assert "unsupported-private-value" not in result.stderr + result.stdout
+    assert not (root / "dist/agent-rendered.yaml").exists()
+
+
+# Chat follow-up operator inputs (#1268): selected vs a conflicting alternate.
+_CHAT_FOLLOWUP_SELECTED = {"CHAT_MAX_PRIOR_TURN_CHARS": "4000", "CHAT_MAX_TURNS": "12",
+                           "CHAT_FOLLOWUP_ANCHOR_ENABLED": "true"}
+_CHAT_FOLLOWUP_ALTERNATE = {"CHAT_MAX_PRIOR_TURN_CHARS": "200", "CHAT_MAX_TURNS": "1",
+                            "CHAT_FOLLOWUP_ANCHOR_ENABLED": "false"}
+
+
+@pytest.mark.parametrize("source", ["file", "environment"])
+def test_chat_followup_inputs_operator_precedence_reaches_rendered_pod(tree, source):
+    """Issue #1268 through real common.sh (operator keys and both export
+    lists), mapper and Helm: each chat follow-up input reaches the Deployment
+    from the file, and an explicit environment value beats the file. The Task
+    bridge for these keys is the Verifier's (taskfiles/ are not edited here)."""
+    root, _log = tree
+    file_values = {
+        "INTERNAL_REGISTRY": "reg.internal", "NAMESPACE": "ns",
+        "STORAGE_CLASS": "standard", "IMAGE_SHA": IMAGE_SHA,
+        "EMBED_MODEL": "embed", "DENSE_DIM": "64", "EMBED_MODEL_REVISION": "rev-1",
+        "EMBED_BASE_URL": "http://vllm:8000/v1", "OPENWEBUI_ENABLED": "false",
+        **(_CHAT_FOLLOWUP_SELECTED if source == "file" else _CHAT_FOLLOWUP_ALTERNATE),
+    }
+    env_file = root / "airgap.env"
+    env_file.write_text("".join(f"{key}={value}\n" for key, value in file_values.items()))
+    overrides = _CHAT_FOLLOWUP_SELECTED if source == "environment" else {}
+    result = _run(tree, ("AIRGAP_ENV", str(env_file)), *overrides.items())
+    assert result.returncode == 0, result.stderr
+    pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
+    assert {name: pod.get(name) for name in _CHAT_FOLLOWUP_SELECTED} == _CHAT_FOLLOWUP_SELECTED
+
+
+def test_unset_chat_followup_inputs_add_no_pod_variable(tree):
+    """Defaults unchanged (#1268): unset renders none of the variables."""
+    root, _log = tree
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
+    assert not set(_CHAT_FOLLOWUP_SELECTED) & set(pod)
+
+
+def test_condense_and_anchor_together_stop_the_deploy_before_helm(tree):
+    root, _log = tree
+    result = _run(tree, ("CHAT_CONDENSE_ENABLED", "true"), ("CHAT_FOLLOWUP_ANCHOR_ENABLED", "true"))
+    assert result.returncode != 0
+    assert "CHAT_CONDENSE_ENABLED and CHAT_FOLLOWUP_ANCHOR_ENABLED are mutually exclusive" in result.stderr
     assert not (root / "dist/agent-rendered.yaml").exists()
 
 

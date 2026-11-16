@@ -29,7 +29,9 @@ from mainframe_rag.agent.tokenizer import estimate_tokens
 from mainframe_rag.agent.user_message import (
     MESSAGE_WINDOW_SHARE,
     derive_retrieval_query,
+    effective_retrieval_text,
     fit_message,
+    retrieval_query_limit,
 )
 from mainframe_rag.config import Settings, bearer_auth_headers
 from mainframe_rag.ingest.chunk import (
@@ -39,7 +41,7 @@ from mainframe_rag.ingest.chunk import (
     units_for_text,
 )
 from mainframe_rag.logs import error_type
-from mainframe_rag.model_args import DEFAULT_MODEL_REQUEST_ARGS, ModelRequestArgs
+from mainframe_rag.model_args import DEFAULT_MODEL_REQUEST_ARGS, ModelRequestArgs, chat_request_body
 from mainframe_rag.ports import (
     ChatMessage,
     ChatResult,
@@ -1245,6 +1247,8 @@ def build_messages(
     order: Literal["retrieval", "stable_cache"] = "retrieval",
     *,
     reasoning_effort: str | None = None,
+    temperature: float | None = None,
+    search_query: str | None = None,
 ) -> PreparedPrompt:
     return _build_prompt(
         query,
@@ -1261,6 +1265,8 @@ def build_messages(
         settings=settings,
         order=order,
         reasoning_effort=reasoning_effort,
+        temperature=temperature,
+        search_query=search_query,
     )
 
 
@@ -1316,6 +1322,8 @@ def _build_prompt(
     *,
     history: list[ChatMessage] | None = None,
     reasoning_effort: str | None = None,
+    temperature: float | None = None,
+    search_query: str | None = None,
 ) -> PreparedPrompt:
     is_chat = history is not None
     # Retention policy (issue #633), identical for planning and recount: the
@@ -1326,8 +1334,13 @@ def _build_prompt(
     older_turns: list[list[ChatMessage]] = history_turns[:-1]
     # The message is prompt content; identifier anchoring, the resolved-code
     # note and complexity read what retrieval searched (issue #1192). The two
-    # are the same string for every message within `query_max_chars`.
-    search_text = derive_retrieval_query(query, settings) if settings is not None else query
+    # are the same string for every message within `query_max_chars`. A chat
+    # follow-up whose search was condensed passes that query (issue #1268);
+    # the message the model reads stays the user's own words.
+    if search_query is not None:
+        search_text = search_query
+    else:
+        search_text = derive_retrieval_query(query, settings) if settings is not None else query
     if complexity is None:
         complexity = classify_query_complexity(search_text)
 
@@ -1410,7 +1423,15 @@ def _build_prompt(
         long message as the estimator does, so the message's own priced
         surplus is added back (0 for a message within `query_max_chars`)."""
         assert tokenizer is not None
-        used = tokenizer.count_messages(messages, reasoning_effort=reasoning_effort)
+        # A completion-usage count (#1266) sends the request's own
+        # temperature, so its body equals the generation's; other
+        # tokenizers keep their signature.
+        if getattr(tokenizer, "counts_request_temperature", False) is True:
+            used = tokenizer.count_messages(  # type: ignore[call-arg]
+                messages, reasoning_effort=reasoning_effort, temperature=temperature
+            )
+        else:
+            used = tokenizer.count_messages(messages, reasoning_effort=reasoning_effort)
         if message_drift and not getattr(tokenizer, "remote_confirmed", False):
             used += message_drift
         return used
@@ -1656,25 +1677,12 @@ def _chat_body(
     max_tokens: int | None = None,
     args: ModelRequestArgs = DEFAULT_MODEL_REQUEST_ARGS,
 ) -> dict[str, Any]:
-    """Single builder for chat-completion request bodies: model + messages,
-    optional reasoning_effort/temperature/max_tokens, the configured model
-    request arguments (#1193: the effort transport and the extra body fields,
-    validated at startup so they cannot replace a field built here), and the
-    streaming flags (stream + usage ask). Every chat path (achat, chat_stream,
-    _chat_sync, stream and fallback legs) funnels through here so a
-    request-shape change cannot diverge copies. With default `args` the body
-    is byte-identical to the pre-#1193 one."""
-    body: dict[str, Any] = {"model": model, "messages": serialized}
-    body.update(args.effort_fields(reasoning_effort))
-    if temperature is not None:
-        body["temperature"] = temperature
-    if max_tokens is not None:
-        body["max_tokens"] = max_tokens
-    body.update(args.extra_fields(reasoning_effort))
-    if stream:
-        body["stream"] = True
-        body["stream_options"] = {"include_usage": True}
-    return body
+    """The generation's chat-completion body: `model_args.chat_request_body`,
+    the one builder the completion-usage count shares (#1266)."""
+    return chat_request_body(
+        model, serialized, reasoning_effort, temperature,
+        stream=stream, max_tokens=max_tokens, args=args,
+    )
 
 
 @dataclass
@@ -2375,6 +2383,15 @@ _ABEND_RE = re.compile(
 _MAX_PRIOR_TURN_CHARS = 1000
 
 
+def names_identifier(text: str) -> bool:
+    """The follow-up bypass shared by condensation and anchoring (issue
+    #1268): a turn that names a message, member or document identifier or an
+    abend code is searched as written."""
+    from mainframe_rag.retrieve.filters import parse_query
+
+    return parse_query(text).has_identifiers or bool(_ABEND_RE.search(text))
+
+
 async def condense_query(
     llm: LLMClient,
     messages: list[ChatMessage],
@@ -2391,15 +2408,15 @@ async def condense_query(
     latest_text = (
         derive_retrieval_query(turn.query, settings) if settings is not None else turn.query
     )
-    from mainframe_rag.retrieve.filters import parse_query
-
     # Heuristic bypass: If message contains explicit codes (e.g. IEE400I, S0C4, DFS058I), search directly
-    if parse_query(latest_text).has_identifiers or bool(_ABEND_RE.search(latest_text)):
+    if names_identifier(latest_text):
         return latest_text
 
+    # Each prior turn is cut at the answer prompt's per-turn cap (issue #1268).
+    cut = settings.chat_max_prior_turn_chars if settings is not None else _MAX_PRIOR_TURN_CHARS
     history_turns = []
     for m in turn.history[-4:]:
-        history_turns.append(f"{m.role.capitalize()}: {m.content[:_MAX_PRIOR_TURN_CHARS]}")
+        history_turns.append(f"{m.role.capitalize()}: {m.content[:cut]}")
 
     if not history_turns:
         return latest_text
@@ -2426,8 +2443,17 @@ async def condense_query(
         res = await maybe_await(llm.chat(prompt, reasoning_effort=effort, temperature=temp))
         condensed = as_chat_result(res).content.strip()
         condensed = re.sub(r'^(Standalone (search )?query:|"|\')\s*', "", condensed, flags=re.IGNORECASE)
-        condensed = condensed.strip('"\'')
-        return condensed or latest_text
+        condensed = condensed.strip('"\'').strip()
+        # A rewrite is searched only when retrieval can take it whole: its
+        # effective text fits `retrieval_query_limit` (issue #1268). An empty
+        # or over-long rewrite searches the follow-up's own text instead of
+        # reaching the embed-input refusal.
+        if not condensed or (
+            settings is not None
+            and len(effective_retrieval_text(condensed, settings)) > retrieval_query_limit(settings)
+        ):
+            return latest_text
+        return condensed
     except Exception as exc:  # noqa: BLE001 — coreference fallback must not abort chat
         log.warning("query condensation failed (%s); using raw latest text", error_type(exc))
         return latest_text
@@ -2449,6 +2475,8 @@ def build_chat_messages(
     order: Literal["retrieval", "stable_cache"] = "retrieval",
     *,
     reasoning_effort: str | None = None,
+    temperature: float | None = None,
+    search_query: str | None = None,
 ) -> PreparedPrompt:
     """Build multi-turn chat prompt messages + supplied-evidence manifest.
 
@@ -2502,4 +2530,6 @@ def build_chat_messages(
         order=order,
         history=prior_messages,
         reasoning_effort=reasoning_effort,
+        temperature=temperature,
+        search_query=search_query,
     )

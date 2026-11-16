@@ -48,8 +48,8 @@ MAPPER_KEYS = [
     "LLM_MAX_MODEL_LEN", "LLM_RESERVED_OUTPUT_TOKENS",
     "LLM_THINKING_RESERVE_TOKENS_SIMPLE", "LLM_THINKING_RESERVE_TOKENS_COMPLEX",
     "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS", "LLM_STREAM",
-    "LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT",
-    "REQUEST_DEADLINE_S", "REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S",
+    "LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT", "LLM_TOKEN_COUNT_SOURCE", "CHAT_MAX_PRIOR_TURN_CHARS", "CHAT_MAX_TURNS",
+    "CHAT_FOLLOWUP_ANCHOR_ENABLED", "REQUEST_DEADLINE_S", "REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S",
     "RERANK_ENABLED", "RERANK_BASE_URL", "RERANK_MODEL", "RERANK_ENDPOINT_ORDER",
     "GATEWAY_API_KEY_SECRET", "GATEWAY_API_KEY_SECRET_KEY", "GATEWAY_CA_CONFIGMAP", "PULL_SECRET",
     "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_ENDPOINT_RESOLVED", "OTEL_TRACING_ENABLED",
@@ -554,6 +554,65 @@ def test_chat_condensation_operator_mapping(monkeypatch, mapper_env, raw, want):
     assert mapped(mapper_env)["models"]["reasoning"]["condenseEnabled"] is want
 
 
+@pytest.mark.parametrize("raw,want", [("", None), ("true", True), ("no", False)])
+def test_follow_up_anchoring_operator_mapping(monkeypatch, mapper_env, raw, want):
+    """Issue #1268: unset writes no key (the pod keeps the false default);
+    an explicit spelling is carried as a boolean, explicit false included."""
+    monkeypatch.setenv("CHAT_FOLLOWUP_ANCHOR_ENABLED", raw)
+    assert mapped(mapper_env)["models"]["reasoning"].get("followupAnchorEnabled") is want
+
+
+@pytest.mark.parametrize("anchor,condense", [("true", "true"), ("1", "yes")])
+def test_condense_and_anchor_together_fail_without_artifact(monkeypatch, mapper_env, anchor, condense):
+    """Issue #1268: the follow-up modes are exclusive; the mapper refuses the
+    pair with the application's fixed message before any values are written."""
+    from scripts.airgap import model_config
+
+    from mainframe_rag.config import CHAT_FOLLOWUP_MODES_CONFLICT
+
+    assert model_config.CHAT_FOLLOWUP_MODES_CONFLICT == CHAT_FOLLOWUP_MODES_CONFLICT
+    monkeypatch.setenv("CHAT_FOLLOWUP_ANCHOR_ENABLED", anchor)
+    monkeypatch.setenv("CHAT_CONDENSE_ENABLED", condense)
+    result, output = mapper_env()
+    assert result.returncode != 0
+    assert CHAT_FOLLOWUP_MODES_CONFLICT in result.stderr
+    assert not output.exists()
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        model_config.validate_operator_booleans(
+            {"CHAT_FOLLOWUP_ANCHOR_ENABLED": anchor, "CHAT_CONDENSE_ENABLED": condense})
+    model_config.validate_operator_booleans({"CHAT_FOLLOWUP_ANCHOR_ENABLED": anchor})
+
+
+def test_chat_history_limits_reach_rendered_agent(monkeypatch, mapper_env):
+    """Issue #1268: the chat history caps cross the mapper into the pod
+    exactly; the limits the mapper enforces are the Settings limits."""
+    from scripts.airgap import model_config
+
+    from mainframe_rag.config import Settings
+
+    selected = {"CHAT_MAX_PRIOR_TURN_CHARS": "4000", "CHAT_MAX_TURNS": "50"}
+    for name, value in selected.items():
+        monkeypatch.setenv(name, value)
+    result, output = mapper_env()
+    assert result.returncode == 0, result.stderr
+    reasoning = load_values(output)["models"]["reasoning"]
+    assert (reasoning["chatMaxPriorTurnChars"], reasoning["chatMaxTurns"]) == (4000, 50)
+    rendered = subprocess.run(
+        [str(REPO / ".tools/bin/helm"), "template", "app", str(CHART), "-f", str(output),
+         "--namespace", "ns", "--show-only", "templates/agent-deployment.yaml"],
+        capture_output=True, text=True, check=False,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    agent = yaml.safe_load(rendered.stdout)["spec"]["template"]["spec"]["containers"][0]
+    actual = {entry["name"]: entry.get("value") for entry in agent["env"]}
+    assert {name: actual.get(name) for name in selected} == selected
+    for name, setting in (("CHAT_MAX_PRIOR_TURN_CHARS", "chat_max_prior_turn_chars"),
+                          ("CHAT_MAX_TURNS", "chat_max_turns")):
+        bounds = {type(m).__name__: m for m in Settings.model_fields[setting].metadata}
+        _field, low, high = model_config.REASONING_INTEGER_FIELDS[name]
+        assert (low, high) == (bounds["Ge"].ge, bounds["Le"].le)
+
+
 @pytest.mark.parametrize("stream,simple_reserve,complex_effort,efforts", [
     ("true", "512", "medium", "low,medium,high"),
     ("false", "0", "xhigh", " xhigh, low,medium"),  # accepted spelling reaches the pod canonically
@@ -600,6 +659,9 @@ def test_selected_model_budgets_reach_rendered_agent(monkeypatch, mapper_env, st
     ("LLM_REASONING_EFFORTS", "unsupported-private-value"),
     ("LLM_REASONING_EFFORTS", "low,low,high"),
     ("LLM_STREAM", "unsupported-private-value"),
+    ("CHAT_MAX_PRIOR_TURN_CHARS", "199"), ("CHAT_MAX_PRIOR_TURN_CHARS", "5001"),
+    ("CHAT_MAX_PRIOR_TURN_CHARS", "4000.0"), ("CHAT_MAX_TURNS", "0"), ("CHAT_MAX_TURNS", "51"),
+    ("CHAT_FOLLOWUP_ANCHOR_ENABLED", "unsupported-private-value"),
 ])
 def test_model_budget_invalid_selection_fails_without_artifact(monkeypatch, mapper_env, name, bad):
     monkeypatch.setenv(name, bad)
@@ -669,6 +731,29 @@ def test_model_request_arguments_round_trip_to_the_agent_settings(monkeypatch, m
     assert args.extra_body == _HOSTILE_EXTRA_BODY and args.effort_transport == transport
 
 
+@pytest.mark.parametrize("source", ["tokenize", "completion_usage", "auto", "estimate"])
+def test_token_count_source_round_trips_to_the_agent_settings(monkeypatch, mapper_env, source):
+    """Issue #1266, producer to consumer: operator value -> values mapper ->
+    chart render -> pod environment -> Settings, exactly."""
+    from mainframe_rag.config import Settings
+
+    monkeypatch.setenv("LLM_TOKEN_COUNT_SOURCE", source)
+    result, output = mapper_env()
+    assert result.returncode == 0, result.stderr
+    assert load_values(output)["models"]["reasoning"]["tokenCountSource"] == source
+    pod = _rendered_agent_env(output)
+    assert Settings(_env_file=None, llm_token_count_source=pod["LLM_TOKEN_COUNT_SOURCE"]).llm_token_count_source == source
+
+
+def test_unset_token_count_source_renders_no_environment(monkeypatch, mapper_env):
+    """The shipped default does not change (#1266): unset or empty adds no pod variable."""
+    monkeypatch.setenv("LLM_TOKEN_COUNT_SOURCE", "")
+    result, output = mapper_env()
+    assert result.returncode == 0, result.stderr
+    assert "tokenCountSource" not in load_values(output)["models"]["reasoning"]
+    assert "LLM_TOKEN_COUNT_SOURCE" not in _rendered_agent_env(output)
+
+
 def test_unset_model_request_arguments_render_no_environment(monkeypatch, mapper_env):
     for name in ("LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT"):
         monkeypatch.setenv(name, "")
@@ -697,6 +782,7 @@ _REFUSED_MODEL_ARGUMENTS = [
     ({"LLM_EXTRA_BODY": '{"unsupported-private-value": '}, "one JSON object"),
     ({"LLM_EXTRA_BODY": json.dumps({"pad": "x" * 4096})}, "at most 4096"),
     ({"LLM_EFFORT_TRANSPORT": "unsupported-private-value"}, "top_level"),
+    ({"LLM_TOKEN_COUNT_SOURCE": "unsupported-private-value"}, "completion_usage"),
 ]
 
 
@@ -745,6 +831,17 @@ def test_preflight_model_argument_mirror_matches_the_application():
     assert tuple(schema["properties"]["effortTransport"]["enum"]) == model_args.EFFORT_TRANSPORTS
 
 
+def test_preflight_token_count_source_mirror_matches_settings():
+    """The bastion preflight cannot import pydantic; its #1266 mirror must not drift."""
+    from scripts.airgap import model_config
+
+    from mainframe_rag.config import TOKEN_COUNT_SOURCES
+
+    assert model_config.TOKEN_COUNT_SOURCES == TOKEN_COUNT_SOURCES
+    schema = json.loads((CHART / "values.schema.json").read_text())["properties"]["models"]["properties"]["reasoning"]
+    assert tuple(schema["properties"]["tokenCountSource"]["enum"]) == TOKEN_COUNT_SOURCES
+
+
 def test_preflight_effort_mirror_matches_settings():
     """The bastion preflight cannot import pydantic; its mirror must not drift (#748)."""
     from scripts.airgap import model_config
@@ -763,7 +860,8 @@ def test_empty_model_budget_inputs_preserve_application_defaults(monkeypatch, ma
     for name in ("LLM_MAX_MODEL_LEN", "LLM_RESERVED_OUTPUT_TOKENS",
                  "LLM_THINKING_RESERVE_TOKENS_SIMPLE", "LLM_THINKING_RESERVE_TOKENS_COMPLEX",
                  "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS",
-                 "LLM_STREAM"):
+                 "LLM_STREAM", "LLM_TOKEN_COUNT_SOURCE", "CHAT_MAX_PRIOR_TURN_CHARS", "CHAT_MAX_TURNS",
+                 "CHAT_FOLLOWUP_ANCHOR_ENABLED"):
         monkeypatch.setenv(name, "")
     result, output = mapper_env()
     assert result.returncode == 0, result.stderr

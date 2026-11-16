@@ -60,6 +60,14 @@ def qdrant_pool_limits(url: str) -> httpx2.Limits:
 # verbatim; LLM_REASONING_EFFORTS declares the subset the served template accepts.
 ReasoningEffort = Literal["low", "medium", "high", "xhigh"]
 REASONING_EFFORTS: tuple[ReasoningEffort, ...] = get_args(ReasoningEffort)
+# Prompt-count sources (#1266), see Settings.llm_token_count_source.
+TokenCountSource = Literal["tokenize", "completion_usage", "auto", "estimate"]
+TOKEN_COUNT_SOURCES: tuple[TokenCountSource, ...] = get_args(TokenCountSource)
+# The follow-up modes are exclusive arms of one A/B (issue #1268); the air-gap
+# mapper refuses the pair with this same text (a test pins both sides).
+CHAT_FOLLOWUP_MODES_CONFLICT = (
+    "CHAT_CONDENSE_ENABLED and CHAT_FOLLOWUP_ANCHOR_ENABLED are mutually exclusive; enable at most one"
+)
 
 
 # cgroup mount and this process's membership file (#840).
@@ -380,10 +388,24 @@ class Settings(BaseSettings):
     # Complex-path narrative cap above the largest chunk (~1150 tokens, #777).
     llm_max_chunk_tokens_narrative: int = Field(default=1200, ge=50, le=2048)
     llm_tokenize_timeout_s: float = Field(default=5.0, gt=0.0, le=60.0)
+    # Where the verified prompt count comes from (#1266; agent/tokenizer.py,
+    # docs/agent.md#token-count-sources). tokenize: the server's /tokenize,
+    # else the estimator (the behaviour before #1266). completion_usage:
+    # `usage.prompt_tokens` of a non-streaming 1-token chat completion built
+    # by the generation's own body builder, for a gateway without /tokenize.
+    # auto: /tokenize until it is pinned as not served, then completion_usage
+    # under its own pin rules, chosen per count (a warn-only startup check
+    # names the source); both pinned is the estimator. estimate: never ask the
+    # server. Every count is bounded by LLM_TOKENIZE_TIMEOUT_S.
+    llm_token_count_source: TokenCountSource = Field(default="tokenize")
     llm_stream: bool = Field(default=False, description="Stream chat completions to measure TTFT")
 
     # Multi-turn chat engine and operator console
     chat_condense_enabled: bool = False
+    # Antecedent-anchored follow-up retrieval (issue #1268, default off): an
+    # identifier-free chat follow-up is also searched as the previous user
+    # message, with no model call. Exclusive with condensation.
+    chat_followup_anchor_enabled: bool = False
     # Request-size guard for /v1/answer, /v1/chat and /ui (issue #1192): abuse
     # protection only, the one length refusal on those paths. The Open WebUI
     # Pipe valve MAX_BODY_CHARS must carry the same value.
@@ -538,6 +560,12 @@ class Settings(BaseSettings):
     # remains only so an explicit INGEST_ALIAS_PUBLISH=false fails closed
     # instead of being silently ignored.
     ingest_alias_publish: bool = True
+
+    @model_validator(mode="after")
+    def _one_follow_up_mode(self) -> Settings:
+        if self.chat_condense_enabled and self.chat_followup_anchor_enabled:
+            raise ValueError(CHAT_FOLLOWUP_MODES_CONFLICT)
+        return self
 
     @model_validator(mode="after")
     def _feedback_endpoint_when_enabled(self) -> Settings:
