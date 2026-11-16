@@ -189,7 +189,9 @@ def test_chat_zero_hits_stream_is_the_zero_hits_path(site_eval):
     ("data: {not json\n\n", "malformed answer stream"),
     ('data: {"choices": []}\n\n', "malformed answer stream"),
     (chat_stream("x", supplied=[{"index": "one"}]).decode(), "malformed answer stream"),
-])
+], ids=["stream-error-upstream", "stream-error-model-timeout", "stream-error-unknown-code",
+        "finish-without-done", "done-without-finish", "malformed-json", "empty-choices",
+        "malformed-supplied-evidence"])
 def test_chat_stream_failures_are_error_rows_and_the_next_case_runs(site_eval, body, failure):
     import httpx2
 
@@ -499,7 +501,9 @@ def test_export_of_a_health_failure_holds_no_golden_text(site_eval):
     ("request error: ConnectTimeout", "request error"),
     ("agent health returned HTTP 401", "agent health returned HTTP 401"),
     ("free text a future template forgot to quote", "other"),
-])
+], ids=["empty-body", "only-inferred", "trap-answered", "state-mismatch", "state-none",
+        "http-known-code", "http-unknown-code", "stream-error-known-code", "request-error",
+        "health-http", "free-text-other"])
 def test_export_failure_labels_are_a_closed_set(failure, label):
     from mainframe_rag.eval.answers import export_failure_label
 
