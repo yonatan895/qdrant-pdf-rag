@@ -677,23 +677,30 @@ def test_refused_completion_count_opens_the_long_window(status):
 @pytest.mark.parametrize("effort", ["low", "xhigh", None])
 @pytest.mark.parametrize("temperature", [0.2, 0.9])
 def test_completion_count_body_is_the_generation_body_without_its_limits(transport, extra, effort, temperature):
-    """The count is built by the generation's own body builder, so it can
-    never render another template: the counted body equals the streamed
-    generation body minus `max_tokens` and the streaming flags."""
-    from mainframe_rag.model_args import chat_request_body
-
+    """The count body is the generation's request (#1193 transport rules,
+    written out here independently of the builder) with `max_tokens: 1` and
+    no streaming flags. The end-to-end owner of "counted == sent" is
+    test_answer_core::test_completion_usage_count_body_equals_the_sent_body."""
     counter, calls, client = _usage_counter(
         lambda request: _usage_reply(), llm_effort_transport=transport, llm_extra_body=json.dumps(extra))
     messages = [ChatMessage(role="system", content="s"), ChatMessage(role="user", content="q")]
     with client:
         counter.count_messages(messages, reasoning_effort=effort, temperature=temperature)
-    counted = json.loads(calls[0].content)
-    sent = chat_request_body("reasoning", [m.model_dump() for m in messages], effort, temperature,
-                             stream=True, max_tokens=4096, args=counter._request_args)
-    limits = {"max_tokens", "stream", "stream_options"}
-    assert {k: v for k, v in counted.items() if k not in limits} == {
-        k: v for k, v in sent.items() if k not in limits}
-    assert counted["max_tokens"] == 1 and not limits - {"max_tokens"} & counted.keys()
+    expected = {
+        "model": "reasoning",
+        "messages": [{"role": "system", "content": "s"}, {"role": "user", "content": "q"}],
+        "temperature": temperature,
+        "max_tokens": 1,
+        **{k: v for k, v in extra.items() if k != "chat_template_kwargs"},
+    }
+    kwargs = dict(extra.get("chat_template_kwargs", {}))
+    if effort and transport == "top_level":
+        expected["reasoning_effort"] = effort
+    if effort and transport == "chat_template":
+        kwargs["reasoning_effort"] = effort
+    if kwargs:
+        expected["chat_template_kwargs"] = kwargs
+    assert json.loads(calls[0].content) == expected
 
 
 def test_completion_count_without_a_request_temperature_sends_the_configured_one():
@@ -736,36 +743,88 @@ def test_default_source_is_tokenize_with_estimator_fallback():
         FallbackTokenizer)
 
 
+# (startup /tokenize, startup completion, startup paths, the path a request
+# thread's count then takes, whether that count is confirmed)
 _AUTO_CASES = {
-    # /tokenize served: it wins, no completion is sent.
-    "tokenize-served": (httpx2.Response(200, json={"count": 9}), _usage_reply(), VllmTokenizer,
-                        ["/tokenize"]),
+    # /tokenize served: it counts, no completion is ever sent.
+    "tokenize-served": (httpx2.Response(200, json={"count": 9}), _usage_reply(),
+                        ["/tokenize"], "/tokenize", True),
     # /tokenize not served, completion usage confirmed at startup.
-    "usage-confirmed": (httpx2.Response(404), _usage_reply(), CompletionUsageTokenizer,
-                        ["/tokenize", "/v1/chat/completions"]),
-    # Neither: the estimator, for the process.
-    "neither": (httpx2.Response(404), httpx2.Response(200, json={"usage": {}}), FallbackTokenizer,
-                ["/tokenize", "/v1/chat/completions"]),
-    # /tokenize unreachable right now (transient): keep it with its retry
-    # window, exactly as the tokenize source behaves today.
-    "tokenize-transient": (httpx2.ConnectError("down"), _usage_reply(), VllmTokenizer, ["/tokenize"]),
-    # /tokenize absent and the completion failed transiently: the counter
-    # keeps its retry window; nothing is pinned by a startup blip.
-    "usage-transient": (httpx2.Response(404), httpx2.Response(503), CompletionUsageTokenizer,
-                        ["/tokenize", "/v1/chat/completions"]),
+    "usage-confirmed": (httpx2.Response(404), _usage_reply(), ["/tokenize", "/v1/chat/completions"],
+                        "/v1/chat/completions", True),
+    # Neither: the estimator, without further traffic.
+    "neither": (httpx2.Response(404), httpx2.Response(200, json={"usage": {}}),
+                ["/tokenize", "/v1/chat/completions"], None, False),
+    # /tokenize unreachable right now (transient): its retry window, the
+    # estimator inside it, exactly as the tokenize source behaves.
+    "tokenize-transient": (httpx2.ConnectError("down"), _usage_reply(), ["/tokenize"], None, False),
+    # /tokenize absent and the completion failed transiently: the counter's
+    # own retry window; nothing is pinned by a startup blip.
+    "usage-transient": (httpx2.Response(404), httpx2.Response(503), ["/tokenize", "/v1/chat/completions"],
+                        None, False),
 }
 
 
 @pytest.mark.parametrize("case", list(_AUTO_CASES))
 def test_auto_source_startup_check(case, caplog):
-    tokenize, completion, expected, paths = _AUTO_CASES[case]
+    tokenize, completion, startup_paths, next_path, confirmed = _AUTO_CASES[case]
     calls, client = _routes(tokenize, completion)
     with client, caplog.at_level(logging.INFO, logger="agent.tokenizer"):
         tok = build_tokenizer(Settings(_env_file=None, **_COUNT_SETTINGS, llm_token_count_source="auto"), client)
-    assert type(tok) is expected and calls == paths
-    assert tok.remote_confirmed is False  # a request thread has not counted yet
+        assert calls == startup_paths
+        assert tok.remote_confirmed is False  # a request thread has not counted yet
+        tok.count_messages([ChatMessage(role="user", content="q")])
+        assert tok.remote_confirmed is confirmed
+    assert calls[len(startup_paths):] == ([next_path] if next_path else [])
     selected = [r.getMessage() for r in caplog.records if "token count source" in r.getMessage()]
     assert len(selected) == 1
+
+
+def test_auto_moves_to_usage_when_tokenize_turns_out_unserved_after_startup():
+    """Review S1 (#1266): the gateway is down at startup (/tokenize transient),
+    then answers 404 for /tokenize. The next probe pins /tokenize and `auto`
+    must move on to the completion count instead of estimating for life."""
+    clock = _Clock()
+    replies = {"/tokenize": [httpx2.ConnectError("down")]}
+    calls: list[str] = []
+
+    def respond(request):
+        calls.append(request.url.path)
+        if request.url.path == "/tokenize":
+            reply = replies["/tokenize"].pop(0) if replies["/tokenize"] else httpx2.Response(404)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+        return _usage_reply(88)
+
+    settings = Settings(_env_file=None, **_COUNT_SETTINGS, llm_token_count_source="auto")
+    messages = [ChatMessage(role="user", content="q")]
+    with httpx2.Client(transport=httpx2.MockTransport(respond)) as client:
+        tok = build_tokenizer(settings, client, clock=clock)
+        assert calls == ["/tokenize"]
+        assert tok.count_messages(messages) == FallbackTokenizer().count_messages(messages)
+        clock.now += TOKENIZE_RETRY_AFTER_S + 1
+        # The probe finds /tokenize not served: the same count moves on.
+        assert tok.count_messages(messages) == 88 and tok.remote_confirmed
+        assert tok.count_messages(messages) == 88 and tok.remote_confirmed
+    assert calls == ["/tokenize", "/tokenize", "/v1/chat/completions", "/v1/chat/completions"]
+
+
+def test_auto_passes_the_request_temperature_only_to_the_completion_count():
+    _calls, client = _routes(httpx2.Response(404), _usage_reply(5))
+    bodies: list = []
+    with client:
+        tok = build_tokenizer(Settings(_env_file=None, **_COUNT_SETTINGS, llm_token_count_source="auto"), client)
+        assert getattr(tok, "counts_request_temperature", False) is True
+        original = client.post
+
+        def capture(url, json=None, **kwargs):
+            bodies.append(json)
+            return original(url, json=json, **kwargs)
+
+        client.post = capture
+        tok.count_messages([ChatMessage(role="user", content="q")], temperature=0.55)
+    assert bodies[-1]["temperature"] == 0.55
 
 
 def test_auto_selected_usage_counter_counts_on_a_request_thread():

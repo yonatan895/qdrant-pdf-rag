@@ -42,13 +42,15 @@ not a probe failure; the mode exits 1 only when the `baseline` candidate
 Count probe (`--probe-count`, issue #1266): whether this gateway can count
 a prompt through a 1-token completion's `usage.prompt_tokens`
 (`LLM_TOKEN_COUNT_SOURCE=completion_usage`). One fixed synthetic prompt of
-about 10k tokens, led by a per-run nonce so the first count is cold, is
+about 10k tokens (25k characters), led by a per-run nonce so the first count is cold, is
 counted with the application's own count body (model, effort transport,
 extra body, temperature, `max_tokens` 1) three times: twice unchanged (the
 cold and the warm count, timed) and once with one more turn. It prints one
 JSON row of numbers and flags and a summary line, and exits 0 only when the
 count is present, stable and grows with the extra turn. Never prompt text,
-completion text, a key or upstream error text.
+completion text, a key or upstream error text. Each count waits at most
+LLM_TOKENIZE_TIMEOUT_S, the application's count timeout (`--timeout`
+overrides).
 
     kubectl -n mainframe-rag exec deploy/rag-agent -- \
         python3 /app/scripts/probe_gateway.py --probe-count
@@ -603,10 +605,9 @@ def run_arg_probe(settings: Settings, args: argparse.Namespace, parser: argparse
     return 1 if failed else 0
 
 
-# Count probe (#1266): original fixed text, about 10k tokens in common
-# tokenizers (400 lines of about 100 characters).
-COUNT_PROBE_TIMEOUT_S = 60.0
-COUNT_PROBE_LINES = 400
+# Count probe (#1266): original fixed text of about 10k tokens (250 lines of
+# about 100 characters; 400 lines counted 16037 on a Gemma tokenizer).
+COUNT_PROBE_LINES = 250
 COUNT_PROBE_LINE = (
     "Synthetic count probe line {:05d}: a batch window opens at 06:10 and one job "
     "starts every 45 minutes until 09:00.\n"
@@ -730,7 +731,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.probe_args:
         return run_arg_probe(settings, args, parser)
     if args.probe_count:
-        return run_count_probe(settings, args.timeout if args.timeout is not None else COUNT_PROBE_TIMEOUT_S)
+        # The application's own count timeout unless overridden: a count the
+        # agent would time out on must not pass here.
+        return run_count_probe(
+            settings, args.timeout if args.timeout is not None else settings.llm_tokenize_timeout_s)
     if args.timeout is None:
         args.timeout = PROBE_TIMEOUT_S
     failures = 0

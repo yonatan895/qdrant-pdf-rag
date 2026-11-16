@@ -670,6 +670,7 @@ class CountGateway(FakeGateway):
     def post(self, url, json=None, timeout=None, headers=None):
         self.calls.append(("POST", url, headers))
         self.bodies.append((url, json))
+        self.timeouts = [*getattr(self, "timeouts", []), timeout]
         if url.endswith("/tokenize"):
             return SimpleResp(url, "POST", 404, {})
         tokens = self.counts.pop(0) if self.counts else sum(
@@ -699,7 +700,7 @@ def test_count_probe_reports_a_stable_growing_count_with_numbers_only(monkeypatc
     assert rc == 0 and summary.startswith("COUNT PROBE PASSED")
     assert row["stable"] is True and row["grows"] is True
     assert row["prompt_tokens_cold"] == row["prompt_tokens_warm"] < row["prompt_tokens_plus_one"]
-    assert row["prompt_tokens_cold"] >= 9000  # a ~10k-token prompt
+    assert sum(len(m["content"]) for m in gateway.bodies[0][1]["messages"]) >= 25000  # ~10k tokens
     assert all(_number_or_flag(value) for value in row.values())
     completions = [body for url, body in gateway.bodies if url.endswith("/chat/completions")]
     assert len(completions) == 3 and completions[0] == completions[1]
@@ -709,6 +710,14 @@ def test_count_probe_reports_a_stable_growing_count_with_numbers_only(monkeypatc
         assert body["max_tokens"] == 1 and "stream" not in body
         # The application's own request arguments (#1193, unset: top-level effort).
         assert body["reasoning_effort"] == "medium" and body["temperature"] == 0.2
+
+
+@pytest.mark.parametrize(("argv", "env", "expected"), [
+    ((), {}, 5.0), ((), {"LLM_TOKENIZE_TIMEOUT_S": "12"}, 12.0), (("--timeout", "30"), {}, 30.0)])
+def test_count_probe_waits_as_long_as_the_application_count(monkeypatch, capsys, argv, env, expected):
+    gateway = CountGateway()
+    _count_probe(monkeypatch, capsys, gateway, argv, **env)
+    assert gateway.timeouts == [expected] * 3
 
 
 def test_count_probe_cold_prompt_is_new_on_every_run(monkeypatch, capsys):

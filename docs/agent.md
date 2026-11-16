@@ -1715,14 +1715,16 @@ count comes from (`tokenizer.build_tokenizer`):
   (`test_completion_usage_count_body_equals_the_sent_body`). Text counts
   for packing never send a completion.
 - **`auto`:** `/tokenize` if it counts; otherwise the completion-usage count
-  if a startup check confirms a usable `usage.prompt_tokens`; otherwise the
-  estimator. The check runs once in the lifespan, off the event loop, on one
-  fixed synthetic message, and never stops the process from starting. A
-  `/tokenize` that fails transiently or is refused at startup stays selected
-  with its retry window (as `tokenize` behaves); only a `/tokenize` pinned as
-  not served moves on. A completion-usage check that fails transiently keeps
-  that source with its retry window; one pinned as unusable selects the
-  estimator. One log line names the selected source.
+  if it confirms a usable `usage.prompt_tokens`; otherwise the estimator
+  (`tokenizer.AutoTokenizer`). The choice is made per count: `/tokenize` in a
+  transient or refused window answers from the estimator and keeps
+  re-probing, as `tokenize` does; once its own rules pin it as not served,
+  the same count moves on to the completion, which follows its own rules. So
+  a gateway that was down at startup cannot leave the process estimating for
+  life. A startup check in the lifespan (off the event loop, one fixed
+  synthetic message, warn-only, never a refusal to start) front-loads that
+  discovery and logs the source the next count will ask. A `/tokenize` that
+  keeps refusing (401/403) is not "not served" and never moves on.
 - **`estimate`:** never asks the server; every count is estimated and never
   verified.
 
@@ -1738,9 +1740,8 @@ request content.
 
 **Cost, deadline and admission.** One extra request per verification round.
 With prefix caching the generation reuses the counted prefix when the gateway
-routes both to the same replica (site measurement 2026-11-16: a repeat is
-about 15 times faster than a cold count), so the net cost is about one short
-round trip and one decoded token. The count runs inside the prompt build: it
+routes both to the same replica (measurements: #1266), so the net cost is
+about one short round trip and one decoded token. The count runs inside the prompt build: it
 holds the request's admission slot, counts against `REQUEST_DEADLINE_S` like
 the `/tokenize` call, and its own wait is bounded by `LLM_TOKENIZE_TIMEOUT_S`
 (not `ANSWER_TIMEOUT_S`). It also counts against any gateway rate limit or

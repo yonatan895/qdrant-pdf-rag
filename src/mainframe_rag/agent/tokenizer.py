@@ -454,7 +454,9 @@ class CompletionUsageTokenizer(_RemoteCount):
 _STARTUP_CHECK_MESSAGES = [ChatMessage(role="user", content="token count source check")]
 
 
-def _vllm_tokenizer(settings: Settings, client: httpx2.Client | None) -> VllmTokenizer:
+def _vllm_tokenizer(
+    settings: Settings, client: httpx2.Client | None, clock: Callable[[], float] = time.monotonic
+) -> VllmTokenizer:
     assert settings.llm_base_url and settings.llm_model_reasoning
     return VllmTokenizer(
         base_url=settings.llm_base_url,
@@ -462,43 +464,98 @@ def _vllm_tokenizer(settings: Settings, client: httpx2.Client | None) -> VllmTok
         timeout_s=settings.llm_tokenize_timeout_s,
         client=client,
         api_key=settings.llm_api_key,
+        clock=clock,
         request_args=settings.model_request_args(),
     )
 
 
-def _select_auto(settings: Settings, client: httpx2.Client | None) -> Tokenizer:
-    """`auto` (#1266): one startup count per source, warn-only, never a
-    refusal to start. /tokenize when it counts. /tokenize in a transient or
-    refused window stays selected with that window, as the `tokenize` source
-    behaves. Only a /tokenize pinned as not served moves on to the
-    completion-usage count: selected when it counts, the estimator when it is
-    pinned too, and kept with its own retry window after a transient
-    failure, so a startup blip pins nothing for the process."""
-    effort = settings.llm_reasoning_effort_simple
-    tokenize = _vllm_tokenizer(settings, client)
-    tokenize.count_messages(_STARTUP_CHECK_MESSAGES, reasoning_effort=effort)
-    if tokenize.remote_confirmed or not tokenize._pinned:
-        tokenize._local.remote = False
-        log.info(
-            "token count source: /tokenize (%s at startup)",
-            "confirmed" if tokenize.remote_confirmed else "retry window",
+class AutoTokenizer:
+    """`LLM_TOKEN_COUNT_SOURCE=auto` (#1266): /tokenize while it is not
+    pinned as not served, then the completion-usage count.
+
+    The choice is made per count, not once: /tokenize in a transient or
+    refused window answers from the estimator, exactly as the `tokenize`
+    source does, and keeps re-probing; the moment its own rules pin it (404,
+    405, 501, a 200 without a count), the same count moves on to the
+    completion, which then follows its own pin and retry rules. A gateway
+    that was down at startup therefore cannot leave the process on the
+    estimator for life. The startup check only front-loads that discovery
+    and names the source in one log line."""
+
+    counts_request_temperature = True
+
+    def __init__(self, tokenize: VllmTokenizer, usage: CompletionUsageTokenizer) -> None:
+        self._tokenize = tokenize
+        self._usage = usage
+        self._local = threading.local()
+
+    @property
+    def remote_confirmed(self) -> bool:
+        """This thread's most recent count came from a server (#368)."""
+        return bool(getattr(self._local, "remote", False))
+
+    def source(self) -> str:
+        """The source the next count asks: tokenize, completion_usage, or
+        estimate when both are pinned."""
+        if not self._tokenize._pinned:
+            return "tokenize"
+        return "estimate" if self._usage._pinned else "completion_usage"
+
+    def count_tokens(self, text: str) -> int:
+        count = self._tokenize.count_tokens(text) if not self._tokenize._pinned else estimate_tokens(text)
+        self._local.remote = not self._tokenize._pinned and self._tokenize.remote_confirmed
+        return count
+
+    def count_messages(
+        self,
+        messages: list[ChatMessage],
+        *,
+        reasoning_effort: str | None = None,
+        temperature: float | None = None,
+    ) -> int:
+        if not self._tokenize._pinned:
+            count = self._tokenize.count_messages(messages, reasoning_effort=reasoning_effort)
+            if self._tokenize.remote_confirmed or not self._tokenize._pinned:
+                self._local.remote = self._tokenize.remote_confirmed
+                return count
+        count = self._usage.count_messages(
+            messages, reasoning_effort=reasoning_effort, temperature=temperature
         )
-        return tokenize
-    usage = CompletionUsageTokenizer.from_settings(settings, client)
-    usage.count_messages(_STARTUP_CHECK_MESSAGES, reasoning_effort=effort)
-    if usage._pinned:
-        log.warning("token count source: estimator (neither /tokenize nor completion usage counts)")
-        return FallbackTokenizer()
-    log.info(
-        "token count source: completion usage (%s at startup)",
-        "confirmed" if usage.remote_confirmed else "retry window",
+        self._local.remote = self._usage.remote_confirmed
+        return count
+
+
+def _select_auto(
+    settings: Settings, client: httpx2.Client | None, clock: Callable[[], float] = time.monotonic
+) -> AutoTokenizer:
+    """`auto` (#1266): one warn-only startup count, never a refusal to start,
+    on a fixed synthetic message; it asks /tokenize and, only when that is
+    pinned as not served, the completion count. One log line names the
+    source the next count will ask."""
+    auto = AutoTokenizer(
+        _vllm_tokenizer(settings, client, clock),
+        CompletionUsageTokenizer.from_settings(settings, client, clock),
     )
-    usage._local.remote = False
-    return usage
+    auto.count_messages(_STARTUP_CHECK_MESSAGES, reasoning_effort=settings.llm_reasoning_effort_simple)
+    confirmed = auto.remote_confirmed
+    # The check's own thread must not read as a confirmed request count.
+    auto._local.remote = False
+    source = auto.source()
+    if source == "estimate":
+        log.warning("token count source: estimator (neither /tokenize nor completion usage counts)")
+    else:
+        log.info(
+            "token count source: %s (%s at startup)",
+            source,
+            "confirmed" if confirmed else "retry window",
+        )
+    return auto
 
 
 def build_tokenizer(
-    settings: Settings, client: httpx2.Client | None = None
+    settings: Settings,
+    client: httpx2.Client | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> Tokenizer:
     """Builds the prompt counter LLM_TOKEN_COUNT_SOURCE selects (#1266) for
     the served reasoning model; without one, the estimator. Only `auto`
@@ -508,7 +565,7 @@ def build_tokenizer(
     if source == "estimate" or not (settings.llm_base_url and settings.llm_model_reasoning):
         return FallbackTokenizer()
     if source == "completion_usage":
-        return CompletionUsageTokenizer.from_settings(settings, client)
+        return CompletionUsageTokenizer.from_settings(settings, client, clock)
     if source == "auto":
-        return _select_auto(settings, client)
-    return _vllm_tokenizer(settings, client)
+        return _select_auto(settings, client, clock)
+    return _vllm_tokenizer(settings, client, clock)

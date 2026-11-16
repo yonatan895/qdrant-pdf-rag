@@ -767,6 +767,8 @@ def _usage_counter_client(counted: list, prompt_tokens):
     1-token completion (#1266); records each count body."""
 
     def respond(request):
+        if request.url.path == "/tokenize":
+            return httpx2.Response(404)  # a gateway without /tokenize
         assert request.url.path == "/v1/chat/completions"
         counted.append(json.loads(request.content))
         tokens = prompt_tokens.pop(0) if isinstance(prompt_tokens, list) else prompt_tokens
@@ -787,7 +789,9 @@ def _usage_counter_client(counted: list, prompt_tokens):
 @pytest.mark.parametrize("mode", ["post", "stream"])
 @pytest.mark.parametrize("is_chat", [False, True])
 @pytest.mark.parametrize("temperature", [None, 0.65])
-async def test_completion_usage_count_body_equals_the_sent_body(transport, extra, mode, is_chat, temperature):
+@pytest.mark.parametrize("source", ["completion_usage", "auto"])
+async def test_completion_usage_count_body_equals_the_sent_body(transport, extra, mode, is_chat, temperature,
+                                                                 source):
     """#1266: the counted body is the sent generation body minus `max_tokens`
     and the streaming flags, end to end through the real client and the real
     counter, per-request temperature included. One count per answer; the
@@ -795,7 +799,7 @@ async def test_completion_usage_count_body_equals_the_sent_body(transport, extra
     from mainframe_rag.agent.tokenizer import build_tokenizer
 
     settings = _settings(llm_stream=False, llm_effort_transport=transport, llm_extra_body=json.dumps(extra),
-                         llm_reasoning_effort_simple="low", llm_token_count_source="completion_usage",
+                         llm_reasoning_effort_simple="low", llm_token_count_source=source,
                          **_CAP_BUDGET)
     llm_transport = _answer_transport()
     deps = _deps(settings, HttpxLLMClient(settings, client=llm_transport), lambda *_a, **_k: ([_hit()], "nl", {}))
@@ -805,6 +809,7 @@ async def test_completion_usage_count_body_equals_the_sent_body(transport, extra
     counted: list = []
     with _usage_counter_client(counted, 900) as client:
         deps.tokenizer = build_tokenizer(settings, client)
+        counted.clear()  # `auto` checked the source at startup
         if mode == "stream":
             output = [event async for event in execute_answer_core_stream(input_data, deps)][-1]["output"]
         else:
