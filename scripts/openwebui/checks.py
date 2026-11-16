@@ -204,9 +204,12 @@ def check_legacy_chat(listed: list[str], default_models: str | None, turn: dict)
     selects the configured default (Chat.svelte loadChat, resolveDefaultModelIds), so the
     next turn answers only if the bare id is gone, the default is the listed default entry,
     and a turn on that stored chat, sent with the default, completes with sources. The
-    frontend selection itself is browser behaviour (the pilot browser trace)."""
+    chat is legacy by the model list it was created with; Open WebUI rewrites that list
+    to the turn's model on the turn (observed live, #1273), so the list read afterwards
+    does not decide. The frontend selection itself is browser behaviour (the pilot
+    browser trace)."""
     default_ok = default_models == DOCS_DEFAULT and DOCS_DEFAULT in listed
-    turn_ok = (turn.get("completion_status") == 200 and turn.get("chat_models") == [DOCS_FUNCTION]
+    turn_ok = (turn.get("completion_status") == 200 and turn.get("chat_models_created") == [DOCS_FUNCTION]
                and turn.get("model") == DOCS_DEFAULT and check_answer(turn).ok)
     ok = DOCS_FUNCTION not in listed and default_ok and turn_ok
     return _v("legacy-chat-answers", ok, bare_id_listed=DOCS_FUNCTION in listed, default_ok=default_ok,

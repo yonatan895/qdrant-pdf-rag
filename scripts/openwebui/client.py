@@ -304,6 +304,8 @@ class Session:
         if status != 200:
             return {"chat_create": status}
         chat_id = created["id"]
+        # The model list as stored at creation: Open WebUI may rewrite it on the turn.
+        models_created = ((created or {}).get("chat") or {}).get("models")
         t0 = time.monotonic()
         status, timing = self._post_timed(user, "/api/chat/completions", {
             "model": model, "stream": True, "messages": [{"role": "user", "content": text}],
@@ -326,6 +328,7 @@ class Session:
         # Timings are seconds from the completion request; saved_content_s and done_s are
         # polled every 3 s, so each is at most 3 s late.
         return {**timing, "chat_id": chat_id, "completion_status": status, "done": message.get("done"),
+                "chat_models_created": models_created,
                 "chat_models": (((stored or {}).get("chat") or {}).get("models")), "model": model,
                 "content_chars": len(message.get("content") or ""),
                 "status_events": len(message.get("statusHistory") or []),

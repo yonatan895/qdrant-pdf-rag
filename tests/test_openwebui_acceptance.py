@@ -146,11 +146,15 @@ def test_access_grants_every_entry_under_its_own_name(monkeypatch, capsys):
 
 
 def _legacy(**over):
-    """A chat stored before #1255 (chat.models = the bare Function id), continued
-    after the upgrade with the model the v0.12.3 frontend resolves for it."""
+    """A chat stored before #1255 (chat.models = the bare Function id when it was
+    created), continued after the upgrade with the model the v0.12.3 frontend
+    resolves for it. Live (#1273 proof, 2026-11-17): Open WebUI rewrites the
+    stored model list to the turn's model on that turn, so the record read
+    after the turn names the default entry."""
     base = {"listed": list(checks.DOCS_MODELS), "default_models": "mainframe_rag_docs.standard",
             "turn": {"done": True, "content_chars": 40, "source_chips": 1, "source_documents": 1,
-                     "completion_status": 200, "chat_models": ["mainframe_rag_docs"],
+                     "completion_status": 200, "chat_models_created": ["mainframe_rag_docs"],
+                     "chat_models": ["mainframe_rag_docs.standard"],
                      "model": "mainframe_rag_docs.standard"}}
     return {**base, **over}
 
@@ -165,7 +169,8 @@ def test_legacy_chat_answers_through_the_default_entry():
     ):
         assert not checks.check_legacy_chat(**_legacy(**bad)).ok, bad
     for turn in ({"done": False}, {"content_chars": 0}, {"source_chips": 0}, {"completion_status": 400},
-                 {"chat_models": ["mainframe_rag_docs.standard"]},  # not a pre-#1255 chat
+                 {"chat_models_created": ["mainframe_rag_docs.standard"]},  # not a pre-#1255 chat
+                 {"chat_models_created": None},  # the stored chat could not be read back
                  {"model": "mainframe_rag_docs.quick"}):  # not the model the frontend resolves
         assert not checks.check_legacy_chat(**_legacy(turn={**_legacy()["turn"], **turn})).ok, turn
 
