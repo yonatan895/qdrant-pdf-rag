@@ -2017,8 +2017,8 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
 <a id="owui-answer-depth"></a>
 **Answer depth (#1255).** The docs Pipe is an Open WebUI manifold: one Function whose entries
 v0.12.3 lists as the models `mainframe_rag_docs.standard` "Rosetta", `mainframe_rag_docs.quick`
-"Rosetta – quick" and `mainframe_rag_docs.thorough` "Rosetta – thorough" (names and efforts are a
-proposal pending the maintainer). Each sends the agent the effort its entry maps to
+"Rosetta – quick" (`low`) and `mainframe_rag_docs.thorough` "Rosetta – thorough" (`xhigh`; maintainer
+decision 2026-11-16). Each sends the agent the effort its entry maps to
 ([Pipe contract](agent.md#openwebui-docs-pipe)); the default entry sends none, so it answers
 exactly as the single model did. `DEFAULT_MODELS` (chart, fixed) selects the default entry for new
 chats. Upgrading from the single model:
@@ -2036,7 +2036,8 @@ chats. Upgrading from the single model:
   not found". The dev acceptance check `legacy-chat-answers` covers the server side
   ([checks](openwebui-dev.md)); the browser's switch is part of the pilot browser trace.
 - Every entry shares the Pipe's `TIMEOUT_S` and the agent's request deadline (270 s, sized at
-  medium effort). A thorough (`xhigh`) answer may end as the fixed deadline text; a site whose
+  medium effort). A thorough (`xhigh`) answer may end as the fixed deadline text: measure that
+  in the site eval before users are told about thorough. A site whose
   `LLM_REASONING_EFFORTS` lacks an entry's effort shows a fixed "does not offer this answer depth"
   text for it.
 

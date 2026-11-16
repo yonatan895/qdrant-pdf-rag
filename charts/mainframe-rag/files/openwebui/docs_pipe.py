@@ -84,8 +84,10 @@ TASK_REPLY = "Docs question"
 # users see. The effort is one the agent offers (LLM_REASONING_EFFORTS); None
 # omits the field, so the agent's configured simple/complex effort applies.
 # The first entry is the default: DEFAULT_MODELS in the chart names it, and an
-# unknown entry or a pre-#1255 chat's single-model id gets it. Names and the
-# default are a proposal pending the maintainer's decision (#1255).
+# unknown entry or a pre-#1255 chat's single-model id gets it. Ids, names,
+# efforts and the default: maintainer decision 2026-11-16 (#1255). Thorough is
+# xhigh on purpose: the default LLM_REASONING_EFFORTS offers it; some thorough
+# answers may reach the 270 s request deadline (the site eval measures that).
 class Depth(NamedTuple):
     id: str
     name: str

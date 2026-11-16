@@ -6,7 +6,7 @@
   [ADR-0010](0010-team-tools-on-open-webui.md) for team tools (the decision
   paragraph, V2, R2, one no-go item and the framework reading, as its table
   lists). V2 wording amended for the docs Pipe's answer-depth entries
-  (#1255, pending the maintainer's decision on that PR).
+  (#1255, maintainer decision 2026-11-16).
   Accepting this record does not enable anything: the chart component stays
   off by default (superseded by ADR-0008: default on), and a site enables it only after every condition below
   passes. Amends [ADR-0004](0004-operator-console-htmx.md) and
@@ -60,7 +60,7 @@ Pipe is provisioned and the admin role is limited to the team.
   off, and the Pipelines server is not deployed. The only models are the docs
   Pipe's entries: one Function, whose answer-depth entries Open WebUI lists as
   models `mainframe_rag_docs.<depth>`, each answering only through the agent
-  (amended for #1255; proposal pending the maintainer). Its Functions are repository files installed by the deploy step, with
+  (amended for #1255; maintainer decision 2026-11-16). Its Functions are repository files installed by the deploy step, with
   their hash checked against the repository. Community Functions and
   frontmatter pip installs are refused. Task features (titles, tags,
   follow-ups, autocomplete, query generation) are off. The Pipe also answers
