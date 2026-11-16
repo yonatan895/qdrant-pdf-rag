@@ -222,14 +222,78 @@ def second_turn_request(
     """The Pipe's request for the follow-up after [question, kept answer],
     fitted to its default body cap (the deployed agent's
     chat_max_body_chars default); None when the Pipe would make no call."""
-    messages = [{"role": "user", "content": question},
-                {"role": "assistant", "content": kept},
-                {"role": "user", "content": follow_up}]
-    request = pipe_mod.build_request(messages, None)
+    return history_request(pipe_mod, [{"role": "user", "content": question},
+                                      {"role": "assistant", "content": kept},
+                                      {"role": "user", "content": follow_up}])
+
+
+def history_request(pipe_mod: ModuleType, turns: list[dict[str, str]]) -> dict[str, Any] | None:
+    """The Pipe's request for a conversation (its last turn is the question),
+    fitted to its default body cap; None when the Pipe would make no call."""
+    request = pipe_mod.build_request(turns, None)
     if request is None:
         return None
     fitted, _trimmed = pipe_mod.fit_request(request, pipe_mod.DEFAULT_MAX_BODY_CHARS)
     return fitted
+
+
+# Fields a session row may carry for the structural judge, as on a golden row.
+_SESSION_JUDGE_FIELDS = ("expected_verification_state", "gold_must_contain",
+                         "gold_must_not_contain", "must_cite_identifier", "trap_type", "domain")
+
+
+class SessionError(ValueError):
+    """A malformed sessions file (fixed message: line number and rule only,
+    never turn text)."""
+
+
+def parse_sessions(raw: bytes) -> list[dict[str, Any]]:
+    """Fixed-history sessions (issue #1191, graded follow-up rows): one JSON
+    object per line with `id`, `query_class`, `expected_behavior`, optional
+    `expected_doc_ids` and judge fields, and `turns`: user and assistant turns
+    alternating, first and last a user turn, every content non-blank. The
+    assistant turns are authored text, so the last turn is asked on a fixed
+    history. The entry's `query` is the last user turn."""
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for number, line in enumerate(raw.decode("utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            raise SessionError(f"session line {number}: not JSON") from None
+        if not isinstance(record, dict):
+            raise SessionError(f"session line {number}: not an object")
+        rid, cls, behavior = (record.get(k) for k in ("id", "query_class", "expected_behavior"))
+        if not isinstance(rid, str) or not rid or rid in seen:
+            raise SessionError(f"session line {number}: missing or duplicate id")
+        if not isinstance(cls, str) or behavior not in ("answer", "abstain"):
+            raise SessionError(f"session line {number}: query_class/expected_behavior")
+        docs = record.get("expected_doc_ids") or []
+        if not isinstance(docs, list) or not all(isinstance(d, str) for d in docs):
+            raise SessionError(f"session line {number}: expected_doc_ids")
+        turns = record.get("turns")
+        if (
+            not isinstance(turns, list) or not turns or len(turns) % 2 == 0
+            or not all(isinstance(t, dict) and isinstance(t.get("content"), str)
+                       and t["content"].strip()
+                       and t.get("role") == ("user" if i % 2 == 0 else "assistant")
+                       for i, t in enumerate(turns))
+        ):
+            raise SessionError(
+                f"session line {number}: turns must alternate user/assistant, start and end "
+                "on a user turn, with non-blank text")
+        seen.add(rid)
+        entries.append({
+            "id": rid, "query": turns[-1]["content"], "query_class": cls,
+            "expected_behavior": behavior, "expected_doc_ids": list(docs),
+            **{k: record[k] for k in _SESSION_JUDGE_FIELDS if k in record},
+            "turns": [{"role": t["role"], "content": t["content"]} for t in turns],
+        })
+    if not entries:
+        raise SessionError("sessions file has no sessions")
+    return entries
 
 
 def prior_answer_chars(request: dict[str, Any]) -> int:
