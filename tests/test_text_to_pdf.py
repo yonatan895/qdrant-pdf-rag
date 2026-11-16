@@ -267,8 +267,8 @@ def test_shop_names_keep_the_file_name_and_stay_citation_safe(tmp_path):
     _, chunks = ingest(result.path)
     assert [c.heading_path for c in chunks] == ["build-step.rexx"]
     (tmp_path / "x").mkdir()
-    with pytest.raises(t2p.ConversionError, match="comma"):
-        convert_library(tmp_path / "x", {"a,b.rexx": "say 1\n"}, shop_names=True)
+    with pytest.raises(t2p.ConversionError, match="page mark"):
+        convert_library(tmp_path / "x", {"run p.1.rexx": "say 1\n"}, shop_names=True)
 
 
 @pytest.mark.parametrize("title, reason", [
@@ -512,7 +512,6 @@ def test_markdown_code_is_verbatim_and_prose_is_wrapped(tmp_path):
     ("# Title\n\n# Again\n", "second H1"),
     ("# Title\n\n### Early\n", "H3 before any H2"),
     ("# Title\n\n## Notices\n", "ingest skips"),
-    ("# Title\n\n## One, two\n", "comma"),
     ("# Title, with comma\n", "comma"),
     ("# Title\n\n```\nopen fence\n", "never closed"),
     ("# Title\n\nArrow \u21d2 here\n", "line 3: character U\\+21D2"),
@@ -662,31 +661,54 @@ def test_markdown_unsupported_structure_is_refused(tmp_path, text, reason):
 
 
 # --- check: existing PDFs (Word exports) ---------------------------------------
-def word_pdf_at(tmp_path: Path, name: str, page_one: str, bookmark: str = "1 Batch window") -> Path:
+def word_pdf_at(tmp_path: Path, name: str, page_one: str, bookmark: str = "1 Batch window",
+                title: str = "Site operations handbook") -> Path:
     path = tmp_path / f"{name}.pdf"
     doc = pymupdf.open()
     page = doc.new_page()
     page.insert_text((72, 72), page_one, fontname="helv", fontsize=11)
     doc.set_toc([[1, bookmark, 1]])
-    doc.set_metadata({"title": "Site operations handbook"})
+    doc.set_metadata({"title": title})
     doc.save(path)
     return path
 
 
-def test_check_accepts_a_clean_word_export(tmp_path):
-    path = word_pdf_at(tmp_path, "OPS-HANDBOOK-2026", "Batch window rules.")
+@pytest.mark.parametrize("bookmark, title", [
+    ("1 Batch window", "Site operations handbook"),
+    # Word's typographic punctuation: ingest reads it, only the renderer cannot.
+    ("What\u2019s new \u2013 2026", "Site handbook \u2013 What\u2019s new"),
+    # A comma inside a heading stays in the citation, as in IBM manual headings.
+    ("Batch, nightly", "Site operations handbook"),
+])
+def test_check_accepts_a_clean_word_export(tmp_path, bookmark, title):
+    path = word_pdf_at(tmp_path, "OPS-HANDBOOK-2026", "Batch window rules.", bookmark, title)
     assert t2p.check_pdf(path) == ("OPS-HANDBOOK-2026", 1, [], [])
 
 
-@pytest.mark.parametrize("name, page_one, bookmark, problem", [
-    ("OPS-HANDBOOK-2026", "See the site copy of ZZ23-1385-07.", "1 Batch window", "IBM form number"),
-    ("OPS-HANDBOOK-2026", "Batch window rules.", "Batch, nightly", "bookmark 1 contains a comma"),
-    ("HANDBOOK", "Batch window rules.", "1 Batch window", "output name must be"),
+@pytest.mark.parametrize("name, page_one, title, problem", [
+    ("OPS-HANDBOOK-2026", "See the site copy of ZZ23-1385-07.", "Site operations handbook", "IBM form number"),
+    ("OPS-HANDBOOK-2026", "Batch window rules.", "Site operations, handbook", "title contains a comma"),
+    ("OPS-HANDBOOK-2026", "Batch window rules.", "Site handbook p. 3", "drops part of the title"),
+    ("HANDBOOK", "Batch window rules.", "Site operations handbook", "output name must be"),
 ])
-def test_check_reports_what_ingest_would_misread(tmp_path, name, page_one, bookmark, problem):
-    path = word_pdf_at(tmp_path, name, page_one, bookmark)
+def test_check_reports_what_ingest_would_misread(tmp_path, name, page_one, title, problem):
+    path = word_pdf_at(tmp_path, name, page_one, title=title)
     _, _, problems, _ = t2p.check_pdf(path)
     assert any(problem in p for p in problems), problems
+
+
+def test_check_notes_a_bookmark_the_citation_shortens(tmp_path):
+    path = word_pdf_at(tmp_path, "OPS-HANDBOOK-2026", "Rules.", "Restart p. 4 rules")
+    _, _, problems, notices = t2p.check_pdf(path)
+    assert problems == [] and notices == ["bookmark 1: the citation drops a page mark or form number from it"]
+
+
+def test_markdown_heading_with_a_comma_is_cited_as_written(tmp_path):
+    result = convert_guide(tmp_path, "# Guide\n\n## Jobs, steps and procs\n\nBody.\n", "HOUSE-AI-DRAFT-COMMA")
+    parsed, chunks = ingest(result.path)
+    cite = format_citation(chunks[0].doc_id, parsed.title, chunks[0].heading_path, chunks[0].page_label,
+                           chunks[0].page_start, chunks[0].page_end)
+    assert cite == f"HOUSE-AI-DRAFT-COMMA Guide, Jobs, steps and procs, p. PDF {chunks[0].page_start + 1}"
 
 
 def test_cli_check_exit_codes(tmp_path, capsys):

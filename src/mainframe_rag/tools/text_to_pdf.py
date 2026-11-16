@@ -195,16 +195,24 @@ def _check_chars(text: str, where: str) -> None:
             )
 
 
-def check_cite_field(value: str, what: str, doc_id: str) -> None:
+def _cite_drops(value: str, doc_id: str) -> bool:
+    """True when the citation sanitizer would change this field: a page mark
+    or a foreign form number removed, spacing collapsed, characters dropped."""
+    cleaned = clean_cite_field(value, CITE_TITLE_MAX_CHARS)
+    return cleaned != value or _cite_part(cleaned, doc_id) != value
+
+
+def check_cite_field(value: str, what: str, doc_id: str, *, title: bool = False) -> None:
     """Refuse a title or bookmark the citation would change or misread: a
-    comma (the cite's field separator), a page mark ("p. 5"), an IBM form
-    number, control or non-Latin-1 characters, stray whitespace, or more than
-    TITLE_MAX_CHARS (ingest's bound on a title or bookmark). The citation
-    sanitizer itself is the oracle."""
+    page mark ("p. 5"), an IBM form number, control or non-Latin-1 characters,
+    stray whitespace, more than TITLE_MAX_CHARS (ingest's bound on a title or
+    bookmark), and in a title a comma (the brief's rule: the title is one
+    citation field). A comma inside a heading is kept by the citation as it
+    is in IBM manual headings today. The citation sanitizer is the oracle."""
     if not value or not any(ch.isalnum() for ch in value):
         raise ConversionError(f"{what} is empty or has no letter or digit")
     _check_chars(value, what)
-    if "," in value:
+    if title and "," in value:
         raise ConversionError(f"{what} contains a comma, which separates citation fields")
     if _CITE_PAGE_MARK_RE.search(value):
         raise ConversionError(f"{what} contains a page mark (p. or pp.)")
@@ -214,7 +222,7 @@ def check_cite_field(value: str, what: str, doc_id: str) -> None:
         raise ConversionError(f"{what} contains ' > ', the heading path separator")
     if len(value) > TITLE_MAX_CHARS:
         raise ConversionError(f"{what} is longer than {TITLE_MAX_CHARS} characters")
-    if _cite_part(clean_cite_field(value, CITE_TITLE_MAX_CHARS), doc_id) != value:
+    if _cite_drops(value, doc_id):
         raise ConversionError(f"{what} would change in a citation (spacing or characters)")
 
 
@@ -260,7 +268,10 @@ def _decode(raw: bytes, encoding: str, where: str) -> list[str]:
     try:
         text = raw.decode(encoding)
     except (UnicodeDecodeError, LookupError) as exc:
-        raise ConversionError(f"{where}: cannot decode as {encoding}") from exc
+        raise ConversionError(
+            f"{where}: cannot decode as {encoding}; pass --encoding (e.g. latin-1 or cp1252 for "
+            "an FTP ASCII export)"
+        ) from exc
     text = text.removeprefix("\ufeff").replace("\r\n", "\n")
     lines = text.split("\n")
     if lines and lines[-1] == "":
@@ -361,7 +372,7 @@ def plan_library(
     allow_secret_like: bool = False,
 ) -> Plan:
     check_stem(stem)
-    check_cite_field(title, "title", stem)
+    check_cite_field(title, "title", stem, title=True)
     if not 1 <= columns <= MAX_COLUMNS:
         raise ConversionError(f"--columns must be 1-{MAX_COLUMNS}")
     if strip_sequence and columns != SEQUENCE_COLUMNS[1]:
@@ -507,7 +518,7 @@ def plan_markdown(src: Path, *, encoding: str = "utf-8", allow_secret_like: bool
             if level == 1:
                 if title is not None:
                     raise ConversionError(f"{where}: a second H1; the document has one title")
-                check_cite_field(text, f"{where} H1 (the title)", stem)
+                check_cite_field(text, f"{where} H1 (the title)", stem, title=True)
                 title = text
                 continue
             if level <= 3:
@@ -740,7 +751,7 @@ def check_pdf(path: Path) -> tuple[str, int, list[str], list[str]]:
     """What ingest would make of an existing PDF, e.g. one exported from Word:
     (doc id, bookmark count, problems, notices). A problem is a doc id other
     than the file stem (a form number in the first four pages wins), a title
-    or bookmark the citation would change or misread, or an unusable stem."""
+    with a comma or with text the citation drops, or an unusable stem."""
     if path.suffix.lower() != ".pdf" or not path.is_file() or path.is_symlink():
         raise ConversionError(f"{path.name!r}: not a regular .pdf file")
     problems: list[str] = []
@@ -755,15 +766,17 @@ def check_pdf(path: Path) -> tuple[str, int, list[str], list[str]]:
             "ingest takes an IBM form number from the first four pages as the doc id instead "
             "of the file stem; move that reference past page 4"
         )
-    for what, value in [("title", parsed.title)] + [
-        (f"bookmark {n}", title) for n, (_, title, _) in enumerate(parsed.toc, 1)
-    ]:
-        try:
-            check_cite_field(value, what, parsed.doc_id)
-        except ConversionError as exc:
-            problems.append(str(exc))
-        if what != "title" and skipped_by_outline_rules(value):
-            notices.append(f"{what} is a heading ingest skips by name; its text joins the previous section")
+    # Ingest itself reads any Unicode the PDF carries, so only what changes
+    # or breaks the citation counts here, not the renderer's Latin-1 limit.
+    if "," in parsed.title or "\uff0c" in parsed.title:
+        problems.append("the title contains a comma, which separates citation fields")
+    elif _cite_drops(parsed.title, parsed.doc_id):
+        problems.append("the citation drops part of the title (a page mark or an IBM form number)")
+    for n, (_, heading, _) in enumerate(parsed.toc, 1):
+        if _cite_drops(heading, parsed.doc_id):
+            notices.append(f"bookmark {n}: the citation drops a page mark or form number from it")
+        if skipped_by_outline_rules(heading):
+            notices.append(f"bookmark {n} is a heading ingest skips by name; its text joins the previous section")
     if not parsed.toc:
         notices.append("no bookmarks: citations get no heading path (use the Heading 1-3 styles)")
     return parsed.doc_id, len(parsed.toc), problems, notices

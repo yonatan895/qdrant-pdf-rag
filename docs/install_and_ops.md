@@ -1098,9 +1098,10 @@ python3 -m mainframe_rag.tools.text_to_pdf check /work/docs/pdf/*.pdf
 
 The check prints one line per file with the doc id and bookmark count. It
 exits 2 if any file has a problem: a doc id other than the file stem, a title
-or bookmark with a comma, a page mark or a form number, or an unusable file
-name. Missing bookmarks and headings that ingest skips by name are reported
-as notices.
+with a comma, a page mark or a form number, or an unusable file name. These
+are reported as notices: missing bookmarks, headings that ingest skips by
+name, and headings with a page mark or form number, which the citation drops.
+Commas and typographic characters in headings are fine.
 
 **3. Place and ingest.** Copy the PDFs into their layout folders on the corpus
 volume, the same way as manuals, then run the ordinary ingest
