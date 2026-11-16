@@ -266,7 +266,7 @@ def test_two_turn_evidence_follows_the_real_agents_condense_setting(
     because it is read from what the agent packed. The search double returns
     the gold doc only for a query that names the message id; the model double
     condenses the follow-up into such a query."""
-    from mainframe_rag.eval.answers import run_follow_up, run_query
+    from mainframe_rag.eval.answers import run_follow_ups, run_query
     from mainframe_rag.eval.follow_up import load_pipe
     from mainframe_rag.ports import ChatResult, TokenUsage
     from tests.helpers_agent_local import StreamStubLLM, agent_client, agent_hit
@@ -294,7 +294,7 @@ def test_two_turn_evidence_follows_the_real_agents_condense_setting(
                       env={"CHAT_CONDENSE_ENABLED": condense}) as client:
         opener = run_query(client, _entry(), stream=True, endpoint="chat", frames=frames,
                            evidence=True)
-        follow = run_follow_up(client, _entry(), opener, frames, load_pipe()[0], 0.0)
+        [follow] = run_follow_ups(client, _entry(), opener, frames, load_pipe()[0], 0.0)
     assert opener["verdict"] != "error" and follow["verdict"] != "error", follow["failures"]
     assert opener["evidence_gold_hit"] is True
     assert follow["evidence_gold_hit"] is gold_hit
@@ -898,3 +898,307 @@ def test_two_turn_health_failure_records_openers_only(site_eval):
     status, report, export, _ = site_eval(respond, [_entry()], TWO_TURN)
     assert status == 2 and [r["turn"] for r in json.loads(export)["rows"]] == [1]
     assert report["metrics"]["by_turn"]["2"]["n"] == 0
+
+
+# ------------------------------------------------------- follow-up kinds (#1268)
+
+KIND_ROW_KEYS = TWO_TURN_ROW_KEYS | {
+    "follow_up_kind", "switch_id", "history_over_cap", "citation_list_cut",
+    "restate_declined", "gold_n", "gold_found_n", "gold_split",
+}
+KINDS = [*TWO_TURN, "--follow-up", "all"]
+
+
+def _kind_agent(turns: dict[tuple[str, str | None], bytes]):
+    """A fake agent for follow-up kinds: the chat stream is chosen by the
+    opener question and the follow-up text (None for the opener itself)."""
+    import httpx2
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        body = json.loads(request.content)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": []})
+        messages = body["messages"]
+        follow = messages[-1]["content"] if len(messages) == 3 else None
+        return _sse(turns[(messages[0]["content"], follow)])
+
+    return respond
+
+
+def _kind_rows(report) -> dict[tuple[str, int, str | None], dict]:
+    return {(r["id"], r["turn"], r.get("follow_up_kind")): r for r in report["results"]}
+
+
+def test_every_kind_branches_off_the_same_opener_history(site_eval):
+    """One turn-1 call per row, then one turn-2 call per kind in session
+    order, all over the same [question, kept answer]: anaphoric asks the
+    class follow-up, switch the partner's own question, restate and summary
+    the class-B wordings. The partner is also asked as an opener."""
+    from mainframe_rag.eval.follow_up import RESTATE_FOLLOW_UPS
+
+    first = _entry(id="A", query="What does IEA500I report?", gold_must_contain=["rejected"])
+    second = _entry(id="B", query="What does IEA501I report?", expected_doc_ids=[OTHER_DOC],
+                    expected_verification_state=None)
+    other = [_supplied(cite=OTHER_CITE, doc_id=OTHER_DOC)]
+    a_turn = chat_stream("Rejected [1].")
+    b_turn = chat_stream("Other [1].", citations=(OTHER_CITE,), supplied=other)
+    agent = _kind_agent({
+        (first["query"], None): a_turn, (second["query"], None): b_turn,
+        (first["query"], FOLLOW_UPS["message_id"]): chat_stream("Reenter it [1]."),
+        (first["query"], second["query"]): b_turn,
+        (first["query"], RESTATE_FOLLOW_UPS["restate"]): chat_stream("It was rejected [1]."),
+        (first["query"], RESTATE_FOLLOW_UPS["summary"]): chat_stream("- rejected [1]."),
+        (second["query"], FOLLOW_UPS["message_id"]): b_turn,
+        (second["query"], first["query"]): a_turn,
+    })
+    status, report, _, calls = site_eval(agent, [first, second], KINDS)
+    bodies = _chat_bodies(calls)
+    asked = [(b["messages"][0]["content"],
+              b["messages"][-1]["content"] if len(b["messages"]) == 3 else None) for b in bodies]
+    assert asked == [
+        (first["query"], None), (first["query"], FOLLOW_UPS["message_id"]),
+        (first["query"], second["query"]), (first["query"], RESTATE_FOLLOW_UPS["restate"]),
+        (first["query"], RESTATE_FOLLOW_UPS["summary"]),
+        (second["query"], None), (second["query"], FOLLOW_UPS["message_id"]),
+        (second["query"], first["query"]),
+    ]
+    histories = {json.dumps(b["messages"][:2]) for b in bodies[1:5]}
+    assert len(histories) == 1  # every kind sees the same kept answer
+    rows = _kind_rows(report)
+    assert rows[("A", 2, "switch")]["switch_id"] == "B"
+    assert rows[("B", 2, "switch")]["switch_id"] == "A"
+    assert rows[("A", 1, None)]["follow_up_kind"] is None
+    by_turn = report["metrics"]["by_turn"]
+    assert set(by_turn["2"]) == {"anaphoric", "switch", "restate", "summary"}
+    assert by_turn["2"]["restate"]["skipped"] == {"no_gold_strings": 1}  # B has none
+    assert by_turn["2"]["switch"]["n"] == 2 and "vs_opener" not in by_turn["2"]["switch"]
+    timing = by_turn["2"]["anaphoric"]["timing"]
+    assert timing["elapsed_ms"]["n"] == 2 and timing["client_first_token_ms"]["n"] == 2
+    assert timing["ttft_ms"] is None and timing["total_tokens"] is None
+    params = report["params"]
+    assert params["follow_up"] == ["anaphoric", "switch", "restate", "summary"]
+    assert (params["prior_cap"], params["switch_pairs_n"]) == (1000, 2)
+    assert status == 0, [r["failures"] for r in report["results"]]
+
+
+def test_an_explicit_anaphoric_kind_sends_what_the_default_sends(site_eval):
+    opener = _entry()
+    agent = _two_turn_agent({(opener["query"], 1): chat_stream("Rejected [1]."),
+                             (opener["query"], 3): chat_stream("Reenter it [1].")})
+    _, plain, _, plain_calls = site_eval(agent, [opener], TWO_TURN)
+    _, tagged, export, tagged_calls = site_eval(agent, [opener],
+                                                [*TWO_TURN, "--follow-up", "anaphoric"])
+    assert _chat_bodies(plain_calls) == _chat_bodies(tagged_calls)
+    assert [r["follow_up_kind"] for r in json.loads(export)["rows"]] == [None, "anaphoric"]
+    assert "follow_up_kind" not in plain["results"][1]
+    assert set(tagged["metrics"]["by_turn"]["2"]) == {"anaphoric"}
+
+
+@pytest.mark.parametrize(("docs", "expected"), [
+    pytest.param([["X"], ["Y"], ["Z"]], {"A": "B", "B": "C", "C": "A"}, id="next"),
+    pytest.param([["X"], ["X", "Q"], ["Y"]], {"A": "C", "B": "C", "C": "A"}, id="skip-shared"),
+    pytest.param([["X"], ["X"]], {}, id="all-shared"),
+    pytest.param([["X"]], {}, id="alone"),
+])
+def test_switch_pairs_are_deterministic_and_never_share_a_gold_doc(docs, expected):
+    from mainframe_rag.eval.follow_up import switch_pairs, switch_pairs_sha256
+
+    rows = [{"id": name, "expected_doc_ids": d} for name, d in zip("ABC", docs, strict=False)]
+    assert switch_pairs(rows) == expected
+    assert switch_pairs([dict(r) for r in rows]) == expected
+    ids = [r["id"] for r in rows]
+    assert switch_pairs_sha256(ids, expected) == switch_pairs_sha256(ids, switch_pairs(rows))
+
+
+def test_switch_is_scored_against_the_same_question_asked_alone(site_eval):
+    """Harm from history: the switched-to question with its full gold. Alone
+    it passes on its gold evidence; after the opener's history the agent
+    packs the opener's doc and declines, so pass, evidence and state move."""
+    first = _entry(id="A")
+    second = _entry(id="B", query="What does IEA501I report?", expected_doc_ids=[OTHER_DOC],
+                    gold_must_contain=["other"])
+    other = [_supplied(cite=OTHER_CITE, doc_id=OTHER_DOC)]
+    refusal = chat_stream("Nothing in the supplied excerpts answers this question about IEA501I.",
+                          citations=(), state="insufficient_evidence")
+    agent = _kind_agent({
+        (first["query"], None): chat_stream("Rejected [1]."),
+        (second["query"], None): chat_stream("Other [1].", citations=(OTHER_CITE,),
+                                             supplied=other),
+        (first["query"], second["query"]): refusal,
+        (second["query"], first["query"]): chat_stream("Rejected [1]."),
+    })
+    status, report, export, _ = site_eval(agent, [first, second],
+                                          [*TWO_TURN, "--follow-up", "switch"])
+    switched = _kind_rows(report)[("A", 2, "switch")]
+    assert switched["verdict"] == "fail" and switched["evidence_gold_hit"] is False
+    single = report["metrics"]["by_turn"]["2"]["switch"]["vs_single"]
+    assert single["pass"] == {"kept": 1, "lost": 1, "gained": 0, "neither": 0, "unknown": 0}
+    assert (single["evidence_gold_hit"]["lost"], single["evidence_gold_hit"]["kept"]) == (1, 1)
+    assert single["verification_state"] == {"same": 1, "changed": 1, "unknown": 0}
+    assert single["verification_moves"] == {"accepted>insufficient_evidence": 1}
+    assert {(r["id"], r["switch_id"]) for r in json.loads(export)["rows"]
+            if r["follow_up_kind"] == "switch"} == {("A", "B"), ("B", "A")}
+    assert status == 1
+
+
+def test_restate_is_scored_on_the_openers_gold_and_declines_are_counted(site_eval):
+    """Class B: only after a passed opener with gold strings; the verdict is
+    the opener's gold substrings alone (an uncited restatement is judged on
+    them); the zero-hits path and the structured decline are declines; a
+    failed opener is skipped and counted, never a row."""
+    from mainframe_rag.eval.answers import judge_restate
+    from mainframe_rag.eval.follow_up import RESTATE_FOLLOW_UPS
+
+    kept = _entry(id="KEPT", gold_must_contain=["rejected", "reenter"])
+    failed = _entry(id="FAILED", query="What does IEA502I report?", gold_must_contain=["missing"])
+    agent = _kind_agent({
+        (kept["query"], None): chat_stream("Rejected; reenter it [1]."),
+        (failed["query"], None): chat_stream("Rejected [1]."),
+        (kept["query"], RESTATE_FOLLOW_UPS["restate"]): chat_stream("It was rejected.",
+                                                                    citations=()),
+        (kept["query"], RESTATE_FOLLOW_UPS["summary"]): chat_stream(ZERO_HITS, citations=(),
+                                                                    supplied=[]),
+    })
+    status, report, export, calls = site_eval(agent, [kept, failed],
+                                              [*TWO_TURN, "--follow-up", "restate,summary"])
+    assert len(_chat_bodies(calls)) == 4
+    rows = _kind_rows(report)
+    restate, summary = rows[("KEPT", 2, "restate")], rows[("KEPT", 2, "summary")]
+    assert (restate["verdict"], restate["gold_n"], restate["gold_found_n"]) == ("fail", 2, 1)
+    assert restate["restate_declined"] is False
+    assert summary["restate_declined"] is True and summary["gold_found_n"] == 0
+    by_turn = report["metrics"]["by_turn"]["2"]
+    assert by_turn["restate"]["skipped"] == {"opener_not_passed": 1}
+    assert by_turn["restate"]["restate"]["declines"] == 0
+    assert by_turn["summary"]["restate"]["declines"] == 1
+    assert by_turn["restate"]["by_failure"] == {"missing required substring": 1}
+    exported = {(r["id"], r["follow_up_kind"]): r for r in json.loads(export)["rows"]}
+    assert exported[("KEPT", "restate")]["failures"] == ["missing required substring"]
+    assert exported[("KEPT", "summary")]["restate_declined"] is True
+    # The structured decline is a decline too, by the agent's own predicate.
+    row = {"answer": "Nothing in the supplied excerpts answers this question about your "
+                     "last answer.", "path": "llm", "citations": [], "warns": []}
+    judge_restate(row, kept)
+    assert row["restate_declined"] is True and row["verdict"] == "fail"
+    assert status == 1
+
+
+@pytest.mark.parametrize(("cap", "split", "citations"), [
+    pytest.param([], ({"n": 1, "found": 1}, {"n": 1, "found": 0}), "cut", id="cap1000"),
+    pytest.param(["--prior-cap", "4000"], ({"n": 2, "found": 1}, {"n": 0, "found": 0}), "kept",
+                 id="cap4000"),
+])
+def test_restate_gold_is_split_at_the_declared_prior_turn_cut(site_eval, cap, split, citations):
+    """A long opener answer: one gold string in the kept head, one past the
+    declared cut. The restatement has only the first; its evidence holds the
+    gold doc (the doc-level proxy). Exposure flags the cut citation list."""
+    from mainframe_rag.eval.follow_up import RESTATE_FOLLOW_UPS
+
+    opener = _entry(gold_must_contain=["rejected", "lategold"])
+    agent = _kind_agent({
+        (opener["query"], None): chat_stream("Rejected " + "x" * 1200 + " lategold [1]."),
+        (opener["query"], RESTATE_FOLLOW_UPS["restate"]): chat_stream("It was rejected [1]."),
+    })
+    _, report, export, _ = site_eval(agent, [opener],
+                                     [*TWO_TURN, "--follow-up", "restate", *cap])
+    row = _kind_rows(report)[("MSG-01", 2, "restate")]
+    assert (row["gold_split"]["before_cut"], row["gold_split"]["after_cut"]) == split
+    assert row["history_over_cap"] is (not cap) and row["citation_list_cut"] == citations
+    block = report["metrics"]["by_turn"]["2"]["restate"]
+    assert block["restate"]["gold_split"]["before_cut"]["in_evidence"] == split[0]
+    assert block["exposure"]["over_cap"] == (0 if cap else 1)
+    assert block["prior_answer_chars"]["cut_chars"] == (4000 if cap else 1000)
+    assert json.loads(export)["rows"][1]["gold_split"]["after_cut"] == split[1]
+
+
+@pytest.mark.parametrize(("view", "expected"), [
+    pytest.param("short\n\n**Citations:**\n- a", (False, "kept"), id="kept"),
+    pytest.param("x" * 990 + "\n\n**Citations:**\n- a", (True, "partial"), id="partial"),
+    pytest.param("x" * 1000 + "\n\n**Citations:**\n- a", (True, "cut"), id="cut"),
+    pytest.param("x" * 1200, (True, "absent"), id="absent"),
+])
+def test_history_exposure_places_the_citation_list_against_the_cap(view, expected):
+    from mainframe_rag.eval.follow_up import history_exposure
+
+    assert history_exposure(view, 1000) == expected
+
+
+@pytest.mark.parametrize("cap", [pytest.param(200, id="cap200"), pytest.param(1000, id="cap1000")])
+def test_history_view_is_what_the_agents_prompt_builder_keeps(cap):
+    """The evaluator's model of the prior-turn cut against the agent's own
+    `build_chat_messages`: the same kept head, and a string the evaluator
+    places before the cut is in the prompt while one after it is not."""
+    from mainframe_rag.agent.answer import EXCERPTS_HEADER, build_chat_messages
+    from mainframe_rag.config import Settings
+    from mainframe_rag.eval.follow_up import gold_positions, history_view
+    from mainframe_rag.ports import ChatMessage
+    from tests.helpers_agent_local import agent_hit
+
+    sent = ("  \n" + "headgold " + "y" * cap + " tailgold\n\n**Citations:**\n- c\n"
+            + EXCERPTS_HEADER + "\n[1] pasted excerpt\n")
+    settings = Settings(_env_file=None, llm_base_url="http://llm.internal/v1",
+                        llm_model_reasoning="test-reasoning-model", embed_mode="hash",
+                        allow_hash_mode=True, chat_max_prior_turn_chars=cap)
+    prepared = build_chat_messages(
+        [ChatMessage(role="user", content="An earlier question"),
+         ChatMessage(role="assistant", content=sent),
+         ChatMessage(role="user", content="And then?")], [agent_hit()], settings=settings)
+    prompt = next(m.content for m in prepared.messages if m.role == "assistant")
+    view = history_view(sent)
+    assert len(view) > cap and prompt == view[:cap] + " ... [history truncated]"
+    assert gold_positions(view, ["HEADGOLD", "tailgold", "absent"], cap) == [
+        "before_cut", "after_cut", "not_in_history"]
+    assert "headgold" in prompt and "tailgold" not in prompt
+
+
+def test_kind_export_carries_no_question_answer_gold_or_follow_up_text(site_eval):
+    from mainframe_rag.eval.follow_up import RESTATE_FOLLOW_UPS, every_follow_up_text
+
+    c = CANARIES
+    first = _entry(id="A", query=f"{c['query']} one", gold_must_contain=[c["gold"]])
+    second = _entry(id="B", query=f"{c['query']} two", expected_doc_ids=[OTHER_DOC])
+    answer = chat_stream(f"{c['answer']} {c['gold']} [1].")
+    turns = {(q, f): answer for q in (first["query"], second["query"])
+             for f in (None, FOLLOW_UPS["message_id"], *RESTATE_FOLLOW_UPS.values())}
+    turns.update({(first["query"], second["query"]): answer,
+                  (second["query"], first["query"]): answer})
+    status, report, export, _ = site_eval(_kind_agent(turns), [first, second],
+                                          [*KINDS, "--repeats", "2"])
+    raw = json.dumps(report)
+    assert c["gold"] in raw and RESTATE_FOLLOW_UPS["summary"] in raw
+    text = export.decode("utf-8")
+    for canary in (*CANARIES.values(), *every_follow_up_text(), CITE):
+        assert canary.lower() not in text.lower(), canary
+    data = json.loads(text)
+    assert all(set(r) == KIND_ROW_KEYS for r in data["rows"])
+    # Per repeat: 2 openers, 2 anaphoric, 2 switch, restate and summary for A only.
+    assert len(data["rows"]) == 2 * (2 + 2 + 2 + 1 + 1)
+    assert len(data["params"]["restate_follow_ups_sha256"]) == 64
+    assert len(data["params"]["switch_pairs_sha256"]) == 64
+
+
+@pytest.mark.parametrize("extra", [
+    pytest.param(["--endpoint", "chat", "--stream", "--follow-up", "all"], id="kind-alone"),
+    pytest.param([*TWO_TURN, "--prior-cap", "4000"], id="cap-alone"),
+    pytest.param([*TWO_TURN, "--follow-up", "anaphoric,other"], id="bad-kind"),
+    pytest.param([*KINDS, "--prior-cap", "100"], id="cap-range"),
+])
+def test_follow_up_flags_are_refused_when_inconsistent(site_eval, extra):
+    with pytest.raises(SystemExit) as exc:
+        site_eval(lambda r: pytest.fail("no request"), [_entry()], extra)
+    assert exc.value.code == 2
+
+
+def test_kind_health_failure_records_openers_with_the_kind_keys(site_eval):
+    import httpx2
+
+    def respond(request):
+        return httpx2.Response(503, json={**HEALTH, "status": "degraded"})
+
+    status, report, export, _ = site_eval(respond, [_entry()], KINDS)
+    rows = json.loads(export)["rows"]
+    assert status == 2 and [r["turn"] for r in rows] == [1]
+    assert set(rows[0]) == KIND_ROW_KEYS and rows[0]["follow_up_kind"] is None
+    assert report["metrics"]["by_turn"]["2"]["switch"]["n"] == 0
