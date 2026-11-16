@@ -2032,7 +2032,7 @@ chats. Upgrading from the single model:
 
 - The model id `mainframe_rag_docs` is gone; its grant row stays in the database unused. Open
   WebUI shows a model only with its own read grant, so ordinary users see **no** Rosetta model
-  until an admin grants each entry (step 5). Grant all entries in the same change window.
+  until an admin grants each entry (step 5). Grant all three entries right after the deploy (maintainer decision 2026-11-16).
 - A chat started before the upgrade still names `mainframe_rag_docs`. Once the user is granted
   the entries (previous item), v0.12.3 drops on opening it a model id it does not list and
   selects `DEFAULT_MODELS` (`Chat.svelte` `loadChat`; source reading, not yet observed live), so
