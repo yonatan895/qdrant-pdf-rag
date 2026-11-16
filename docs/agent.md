@@ -344,7 +344,11 @@ retention: [observability](observability.md#data-tiers).
   `FEEDBACK_DRAIN_TIMEOUT_S` and counts whatever is left as dropped.
 - **Ratings:** `POST /ui/feedback {request_id, rating, reasons, comment}` from
   the streaming console, and `POST /ui/feedback/form` (form-encoded) from the
-  fallback console, with the same validation and codes. An htmx request gets the
+  fallback console, with the same validation and codes. `POST /v1/feedback`
+  (#1255) is the same JSON route without the console: it does not
+  need `UI_ENABLED` and answers with the same status, `{"status": "recorded"}`
+  or fixed `{code, message}`. Open WebUI's rating Action posts to it
+  ([Open WebUI ratings](#openwebui-ratings)). An htmx request gets the
   result text for the form's status slot, always status 200 like the `/ui/chat`
   banner (htmx 1.9 never swaps a 4xx/5xx); the form stays, so a failed rating
   can be retried. A native post without JS opens in a new tab, so the console
@@ -1819,6 +1823,7 @@ only; the PR lints and types this file directly.
 | Verification | One final `status` event (`done: true`) in the console's wording: "Source-matched · N citation(s)" only for `accepted` with non-inferred citations; otherwise "Insufficient evidence — not operational guidance", "Unverified draft — no eligible citation", "Incomplete generation — output was cut off", or "Unverified — verification state unknown" for anything else. Inferred citations and `script_review_required` append their fixed warnings. Abstention text is the agent's own content; banners never enter the message content, so they are not sent back as history |
 | Errors | An error envelope's stable `code` selects a fixed message (`invalid_request`, `prompt_budget_exceeded`, `upstream_error`, `model_timeout`, `deadline_exceeded`, `overloaded`, `not_configured`, `representation_unavailable`, `internal`; `not_found`/`method_not_allowed`/`http_error` = configuration). An in-stream error frame uses the same table and the incomplete banner. Unknown codes, non-JSON bodies, transport failures and any internal fault give one fixed "could not be reached" text: the agent's `message`, upstream bodies and exception text are never shown, and the Pipe never raises into Open WebUI (which would display the exception) |
 | History trim | Open WebUI resends the whole chat each turn, so the Pipe fits the body to the agent's cap before sending, counted as the agent counts it (`chat_body_chars`: message characters plus `product` plus `version`, not JSON bytes). It drops the oldest turns first, then any leading assistant turn (history never starts with an answer to a dropped question); the last user turn is always kept. If that turn alone exceeds the cap, the Pipe returns its fixed too-long text, which states the valve's limit, and makes no agent call. When turns were dropped it emits the fixed status "Earlier messages in this chat were not sent" (no content) and appends it to the final banner. When the agent reports `message_omitted_chars` > 0 the final banner also carries the fixed note "Your message was too long for the model; its middle part was not read" (no count, no text). The agent has no turn-count cap on the request, so the character cap is the only limit. A long last turn under the cap is sent whole and unchanged; the agent answers it ([long messages](#long-messages)) |
+| Answer reference | Only with `RAG_ANSWER_REFERENCE=true` in Open WebUI's environment (the chart sets it with `openwebui.ratings.enabled`, #1255): a completed answer (finish frame plus `[DONE]`) whose chunk id is the agent's `chatcmpl-<12-hex request id>` ends with the fixed line ``Answer reference: `<id>` `` after the validated list. This is the only message field Open WebUI hands the [rating Action](#openwebui-ratings). A failed or truncated answer gets none. Off (the default), the answer output is unchanged. Whether the switch is on or off, the Pipe removes that exact trailing line from assistant turns when it builds a request, so the agent sees its own answer, including in chats from before ratings were turned off |
 | Tasks | Background task calls (title, tags, follow-ups, summaries), detected by `__task__`, `__metadata__["task"]`, or a `task`/`metadata.task` body key, return the fixed text `Docs question` and never call the agent |
 | Allowed calls | One `POST {AGENT_URL}/v1/chat` per question. No tools, no model calls, no other host, `trust_env=False` (no proxy environment), no redirects (a 3xx is the fixed "could not be reached" text), no forwarded identity headers, no logging |
 
@@ -1855,6 +1860,50 @@ frontmatter together and rerun the Pipe tests against the new Pipe interface.
 Assumptions still to prove on the pinned image (#1073): `httpx` ships in it,
 and v0.12.3 passes `__task__`/`__metadata__` and renders `source` and `status`
 events as documented.
+
+<a id="openwebui-ratings"></a>
+## Open WebUI ratings (#1255)
+
+**Status:** code and tests only, default off; not yet run on a live Open WebUI (#1255).
+**Decision owners:**
+[ADR-0005](adr/0005-answer-feedback-data-boundary.md) (store, D5) and
+[ADR-0007 V2](adr/0007-open-webui-docs-front-end.md). **Code:**
+[`integrations/openwebui/rating_action.py`](../integrations/openwebui/rating_action.py)
+(chart copy pinned equal). **Evidence:**
+[Action tests](../tests/test_openwebui_rating_action.py), including a round trip from the Pipe
+through the real `/v1/chat` and `/v1/feedback`.
+
+- **What users see.** Two buttons under every answer, "Good answer" and "Bad answer". A bad
+  answer asks for an optional short reason (at most 2000 characters). A toast reports the
+  outcome. Cancelling the reason dialog rates nothing. Re-rating replaces the earlier rating
+  (ADR-0005).
+- **What is stored, and where.** One rating per answer: `good` or `bad`, the reason as
+  `comment`, and no `reasons` codes. It goes to `POST /v1/feedback` and from there only to the
+  feedback store. No rater identity is recorded (D5). The answer reference itself is part of the
+  saved Open WebUI message, so the chat history (30-day retention) links that request id to the
+  chat owner. Like the console, ratings are unauthenticated: anyone who knows a request id, for
+  example by editing a message's reference, can replace that answer's rating. Open WebUI's own ratings stay off
+  (`ENABLE_MESSAGE_RATING=false`). The Action writes nothing to Open WebUI's database: it emits
+  only `notification` events and one `input` event call, neither of which Open WebUI v0.12.3
+  saves, and it returns None. Saved event types (`status`, `message`, `replace`, `embeds`,
+  `files`, `source`) and a returned `messages` would be merged into the chat.
+- **Which answer.** The browser sends the Action the chat's messages up to the clicked one
+  (`content`, not `statusHistory` or `usage`). So the Action reads the agent's request id from
+  the Pipe's trailing [answer reference](#openwebui-docs-pipe) line. It requires the last
+  message to be the clicked assistant turn. Without a reference it shows a fixed "cannot be
+  rated" toast and makes no call.
+- **Calls and texts.** One `POST {AGENT_URL}/v1/feedback` per click: no credential, like the
+  Pipe; `trust_env=False`; no redirects; timeout `TIMEOUT_S` (default 10 s). Only the agent's
+  `code` selects a fixed toast (`unknown_answer`, `invalid_request`, `feedback_disabled`; any
+  other outcome is "temporarily unavailable"). It never raises into Open WebUI, which would save
+  the exception text as the message's error, and it does no logging.
+- **Arguments.** Only `body`, `__id__` (`up`/`down`), `__event_emitter__` and
+  `__event_call__`; a test pins the signature (ADR-0007 V2).
+- **Install.** `openwebui.ratings.enabled` (requires `feedback.enabled`) mounts the Action and
+  sets `RAG_ANSWER_REFERENCE=true`. The installer (`provision_pipe.py`) converges the Function
+  set to the docs Pipe plus the Action: hash-checked against `ACTION_SHA256`, active and global
+  (a Function-backed model shows only global Actions). With ratings off it deletes the Action.
+  The proxy admits only `/api/chat/actions/mainframe_rag_rating.(up|down)`.
 
 <a id="source-observations"></a>
 ## Source observations (live z/OS state)

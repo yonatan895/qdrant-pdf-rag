@@ -94,6 +94,10 @@ REVIEWED: Mapping[tuple[str, str], tuple[str | None, str]] = {
         (None, 'a chart file common.sh names; it runs inside the Open WebUI image, not here'),
     ('charts/mainframe-rag/files/openwebui/docs_pipe.py', 'import pydantic'):
         (None, 'a chart file common.sh names; it runs inside the Open WebUI image, not here'),
+    ('charts/mainframe-rag/files/openwebui/rating_action.py', 'import httpx'):
+        (None, 'a chart file provision_pipe.py reads by name; it runs inside the Open WebUI image, not here'),
+    ('charts/mainframe-rag/files/openwebui/rating_action.py', 'import pydantic'):
+        (None, 'a chart file provision_pipe.py reads by name; it runs inside the Open WebUI image, not here'),
 }
 # Shell functions that run their arguments as a command: `run cmd args` is scanned as `cmd args`.
 WRAPPERS = frozenset({'run'})

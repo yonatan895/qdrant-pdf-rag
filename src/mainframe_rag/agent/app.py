@@ -143,6 +143,7 @@ from mainframe_rag.tracing import (
     start_span,
     use_span,
 )
+from mainframe_rag.webui.routes import UiFeedbackRequest, rating_response
 from mainframe_rag.webui.routes import router as webui_router
 
 log = logging.getLogger("agent")
@@ -2240,6 +2241,17 @@ async def _answer_response(req, response, is_stream, owner):
         media_type="text/event-stream",
         headers=headers,
     )
+
+
+@app.post("/v1/feedback", response_model=None)
+async def rate_answer(req: UiFeedbackRequest) -> JSONResponse:
+    """UI-agnostic rating of one recorded answer (#1255, ADR-0005 amendment of
+    ADR-0003): Open WebUI's repository rating Action posts here, with no
+    credential, like the docs Pipe's /v1/chat. Same body, validation, fixed
+    codes and store call as the console's /ui/feedback, but it does not need
+    the console (UI_ENABLED). No rater identity: a caller-asserted user proves
+    nothing on this port (ADR-0005 D5)."""
+    return await rating_response(feedback, req)
 
 
 @app.post("/v1/chat", response_model=None)

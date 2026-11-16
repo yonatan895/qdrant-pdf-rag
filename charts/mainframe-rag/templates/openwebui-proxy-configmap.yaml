@@ -1,10 +1,11 @@
 {{- /*
 Allow-list proxy config for the Open WebUI pod (ADR-0007 E1, #1074): the
 repository file charts/mainframe-rag/files/openwebui/proxy.nginx.conf, verbatim,
-with its sha256 recorded. Tests run this exact file in the pinned nginx image.
+with its sha256 recorded; with ratings off, without the rating Action block
+(#1255, openwebuiProxyConf). Tests run the full file in the pinned nginx image.
 */ -}}
 {{- if include "mainframe-rag.openwebuiEnabled" . }}
-{{- $conf := .Files.Get "files/openwebui/proxy.nginx.conf" }}
+{{- $conf := include "mainframe-rag.openwebuiProxyConf" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

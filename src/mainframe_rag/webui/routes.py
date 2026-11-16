@@ -810,14 +810,20 @@ async def ui_feedback(request: Request, req: UiFeedbackRequest) -> Response:
     client messages and stable codes. No rater identity is recorded: the agent
     port is reachable without the OAuth proxy, so a forwarded-user header
     proves nothing (attribution is deferred to the deployment, PR B)."""
-    client = _feedback_client()
+    return _secure(await rating_response(_feedback_client(), req))
+
+
+async def rating_response(client: Any, req: UiFeedbackRequest) -> JSONResponse:
+    """The JSON rating outcome shared by /ui/feedback and the UI-agnostic
+    /v1/feedback (#1255): forward to the feedback store, answer with one fixed
+    status, code and message per outcome. No rater identity in either."""
     if client is None:
-        return _secure(JSONResponse(status_code=404, content={
-            "code": "feedback_disabled", "message": _FEEDBACK_DISABLED_TEXT}))
+        return JSONResponse(status_code=404, content={
+            "code": "feedback_disabled", "message": _FEEDBACK_DISABLED_TEXT})
     status, code, message = await _rate(client, req)
     if code is None:
-        return _secure(JSONResponse(status_code=status, content={"status": "recorded"}))
-    return _secure(JSONResponse(status_code=status, content={"code": code, "message": message}))
+        return JSONResponse(status_code=status, content={"status": "recorded"})
+    return JSONResponse(status_code=status, content={"code": code, "message": message})
 
 
 @router.post("/feedback/form", response_class=HTMLResponse)

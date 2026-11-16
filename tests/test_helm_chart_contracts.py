@@ -1385,7 +1385,7 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
     assert pod_vols[proxy_vols["/tmp"]] == {"name": proxy_vols["/tmp"], "emptyDir": {}}
     assert proxy_vols["/tmp"] != next(m["name"] for m in container["volumeMounts"] if m["mountPath"] == "/tmp")
     assert dep["spec"]["template"]["metadata"]["annotations"]["checksum/proxy-config"] == hashlib.sha256(
-        (CHART / "files" / "openwebui" / "proxy.nginx.conf").read_bytes()).hexdigest()
+        _proxy_conf_without_ratings().encode()).hexdigest()
     env = env_map(dep, "openwebui")
     plain = {k: v["value"] for k, v in env.items() if "value" in v}
     for key, value in {
@@ -1701,6 +1701,47 @@ def test_openwebui_pipe_configmap_carries_the_repository_files_and_their_hashes(
     }
 
 
+RATINGS_ON = {**FEEDBACK_ON, "openwebui": {"ratings": {"enabled": True}}}
+
+
+def test_openwebui_ratings_are_off_by_default_and_change_nothing(owui_chart):
+    """#1255: with ratings off (the default) the Pipe ConfigMap and the pod
+    environment are exactly the docs-only ones."""
+    with open(CHART / "values.yaml", encoding="utf-8") as f:
+        assert yaml.safe_load(f)["openwebui"]["ratings"] == {"enabled": False}
+    docs = _owui(owui_chart)
+    assert set(docs["ConfigMap", "rag-openwebui-pipe"]["data"]) == {
+        "docs_pipe.py", "provision_pipe.py", "purge_chats.py"}
+    env = env_map(docs["Deployment", "rag-openwebui"], "openwebui")
+    assert "RAG_ANSWER_REFERENCE" not in env
+    assert docs == _owui(owui_chart, {"openwebui": {"ratings": {"enabled": False}}})
+
+
+def test_openwebui_ratings_ship_the_repository_action_and_the_reference_switch(owui_chart):
+    import hashlib
+
+    docs = _owui(owui_chart, RATINGS_ON)
+    cm = docs["ConfigMap", "rag-openwebui-pipe"]
+    action = (CHART / "files" / "openwebui" / "rating_action.py").read_text(encoding="utf-8")
+    assert cm["data"]["rating_action.py"] == action
+    assert cm["metadata"]["annotations"]["mainframe-rag/rating-action-sha256"] == (
+        hashlib.sha256(action.encode()).hexdigest())
+    env = env_map(docs["Deployment", "rag-openwebui"], "openwebui")
+    assert env["RAG_ANSWER_REFERENCE"] == {"name": "RAG_ANSWER_REFERENCE", "value": "true"}
+    # Open WebUI's own ratings and evaluations stay off: ratings live in the
+    # agent's feedback store only (ADR-0005).
+    assert env["ENABLE_MESSAGE_RATING"]["value"] == "false"
+    assert set(env) == OWUI_ENV_NAMES | {"RAG_ANSWER_REFERENCE"}
+
+
+def test_openwebui_ratings_require_the_feedback_store():
+    values = _owui_values({"ratings": {"enabled": True}})
+    r = _helm_template_with_values(values)
+    assert r.returncode != 0
+    assert ("openwebui.ratings.enabled=true requires feedback.enabled=true: Open WebUI ratings "
+            "are stored only by the agent's feedback store (ADR-0005)") in r.stderr
+
+
 ALLOWED_PATHS = [
     "/", "/c/3f2a", "/auth", "/admin/users", "/_app/immutable/chunks/a.js", "/static/loader.js",
     "/favicon.png", "/manifest.json", "/health", "/health/db", "/oauth/oidc/login",
@@ -1712,6 +1753,7 @@ ALLOWED_PATHS = [
     "/api/v1/configs/banners",
     # Share-link view (#1255): the SPA shell only; its data is /api/v1/chats/share/<id>.
     "/s", "/s/3f2a", "/api/v1/chats/share/3f2a", "/api/v1/chats/3f2a/share",
+    "/api/chat/actions/mainframe_rag_rating.up", "/api/chat/actions/mainframe_rag_rating.down",
 ]
 DENIED_PATHS = [
     "/api/v1/files/", "/api/v1/files", "/api/v1/files/abc/content", "/api/v1/retrieval/process/text",
@@ -1724,6 +1766,10 @@ DENIED_PATHS = [
     "/api/chat", "/api/v1", "/api/v1/", "/api/", "/api", "/api/v1/chatsX", "/api/v1/auths_x",
     "/API/v1/files/", "/api/v1/files/../files/", "/ws", "/oauthx", "/health/x",
     "/sx", "/s3f2a", "/share", "/S/3f2a",
+    # Only the repository rating Action's two buttons (#1255).
+    "/api/chat/actions/", "/api/chat/actions/community_x", "/api/chat/actions/community_x.up",
+    "/api/chat/actions/mainframe_rag_rating", "/api/chat/actions/mainframe_rag_rating.sideways",
+    "/api/chat/actions/mainframe_rag_rating.up/x", "/api/chat/actions/mainframe_rag_ratingXup",
 ]
 
 
@@ -1776,13 +1822,36 @@ def test_openwebui_proxy_config_matches_the_decoded_uri_and_forwards_the_origina
     assert "client_max_body_size 1m;" in conf
 
 
-def test_openwebui_proxy_configmap_carries_the_repository_config(owui_chart):
-    docs = _owui(owui_chart)
+RATINGS_ALLOW = (
+    "        # The repository rating Action's two buttons only (#1255): the handler\n"
+    "        # checks the Function is an active, surfaced Action; its id is fixed.\n"
+    "        ~^/api/chat/actions/mainframe_rag_rating\\.(up|down)$ 1;\n"
+)
+
+
+def _proxy_conf_without_ratings():
+    """The allow-list as rendered with ratings off (the default): the file
+    without its one rating Action block (#1255)."""
+    conf = _proxy_conf()
+    assert conf.count(RATINGS_ALLOW) == 1
+    return conf.replace(RATINGS_ALLOW, "")
+
+
+@pytest.mark.parametrize("ratings", [False, True])
+def test_openwebui_proxy_configmap_carries_the_repository_config(owui_chart, ratings):
+    """Ratings on: the repository file verbatim. Off (the default): the same
+    file without the rating Action block, so no /api/chat/actions path is
+    admitted (E1) and the pod's proxy checksum follows the rendered text."""
+    extra = RATINGS_ON if ratings else None
+    docs = _owui(owui_chart, extra)
     cm = docs["ConfigMap", "rag-openwebui-proxy"]
-    text = _proxy_conf()
+    text = _proxy_conf() if ratings else _proxy_conf_without_ratings()
+    assert ("/api/chat/actions" in text) is ratings
     assert cm["data"] == {"nginx.conf": text}
     assert cm["metadata"]["annotations"] == {
         "mainframe-rag/proxy-config-sha256": hashlib.sha256(text.encode()).hexdigest()}
+    annotations = docs["Deployment", "rag-openwebui"]["spec"]["template"]["metadata"]["annotations"]
+    assert annotations["checksum/proxy-config"] == hashlib.sha256(text.encode()).hexdigest()
     # Not rendered (and the default render unchanged) when the front end is off.
     default = run_new_template({}, chart=owui_chart)
     assert ("ConfigMap", "rag-openwebui-proxy") not in default

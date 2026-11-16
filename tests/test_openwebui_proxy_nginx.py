@@ -176,6 +176,8 @@ ALLOWED = [
     "/api/v1/functions/id/mainframe_rag_docs", "/api/v1/functions/create", "/api/v1/configs/banners",
     # Share-link view (#1255): the SPA shell; its data is under /api/v1/chats/share/.
     "/s/3f2a", "/api/v1/chats/share/3f2a",
+    "/api/chat/actions/mainframe_rag_rating.up", "/api/chat/actions/mainframe_rag_rating.down",
+    "/api/chat/actions/mainframe_rag_rating%2Edown",
     # Encoded spellings of ALLOWED paths still work, and are forwarded unchanged.
     "/api/v1/ch%61ts/list", "/api/v1%2Fchats/list", "/api/v1/chats/a%20b?x=1%2F2",
     # Merged slashes: nginx decides on the merged path; the raw line is forwarded.
@@ -198,6 +200,9 @@ BLOCKED_OTHER = [
     "/ollama/api/chat", "/docs", "/openapi.json", "/api/version/updates", "/api/v1/pipelines/",
     "/api/v1/scim/v2/Users", "/api/v1/chatsX", "/oauthx", "/health/x", "/api", "/api/", "/api/v1/",
     "/sx", "/share", "/%73x",
+    "/api/chat/actions/community_x.up", "/api/chat/%61ctions/community_x", "/api/chat/actions/",
+    "/api/chat/actions/mainframe_rag_rating", "/api/chat/actions/mainframe_rag_rating%2Esideways",
+    "/api/chat/actions/mainframe_rag_rating.up%2Fx",
 ]
 
 

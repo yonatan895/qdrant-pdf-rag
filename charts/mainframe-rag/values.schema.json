@@ -410,6 +410,12 @@
           "maximum": 3650,
           "description": "Chat retention window in days (maintainer decision 2026-10-24: 30), enforced by the purge sidecar. Required when enabled."
         },
+        "ratings": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Thumbs up/down through the repository rating Action and the agent's POST /v1/feedback (#1255). Requires feedback.enabled.",
+          "properties": { "enabled": { "type": "boolean" } }
+        },
         "storageSize": { "type": "string", "pattern": "^[1-9][0-9]*(Mi|Gi|Ti)$" },
         "chats": {
           "type": "object",
