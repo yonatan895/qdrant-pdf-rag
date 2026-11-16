@@ -837,7 +837,8 @@ the run is the anaphoric run above and its output is unchanged.
   restatement is the product rule and is not a failure. A decline (the
   zero-hits path, the agent's structured decline or a whole-response
   refusal) fails as `follow-up declined`, even when it names a gold string,
-  and is counted in `restate.declines` (over `restate.n` judged rows). Each gold
+  and is counted in `restate.declines` (over `restate.n` judged rows); its
+  gold strings count in `n` but never as `found`. Each gold
   string is placed against the prior-turn cut in the history answer as sent
   (stripped, pasted excerpts dropped, as the agent does):
   `before_cut` (wholly inside the kept head), `after_cut`, or
@@ -927,7 +928,11 @@ only in `history4000`. Then compare each kind on its own signal:
 - `timing` p50 per turn and kind is the arm's cost on this host
   (hardware-dependent; never the deciding signal).
 
-A difference inside either arm's own repeat range is noise. Only the four
+A difference inside either arm's own repeat range is noise. The export's
+`repeats` blocks give that range for the evidence hit, pass rate and
+citation recall only; for `vs_single`, `restate.declines` and `gold_split`,
+recount each repeat from the export rows (`repeat`, `follow_up_kind`,
+`switch_id`, `verdict`, `evidence_gold_hit`, `gold_split`). Only the four
 `*.export.json` files leave the gap (review each as above); the stderr log,
 `--out` and `--summary` hold questions, follow-ups and answers and stay. Any
 default change after the comparison is a separate maintainer decision.

@@ -940,7 +940,9 @@ def judge_restate(row: dict[str, Any], entry: dict[str, Any]) -> None:
         verdict="fail" if missing or declined else "pass",
         failures=[*missing, *([RESTATE_DECLINED] if declined else [])],
         warns=[w for w in row.get("warns") or [] if not str(w).startswith("zero-hits path")],
-        restate_declined=declined, gold_n=gold_n, gold_found_n=gold_n - len(missing),
+        # A decline restates nothing, even when it names a gold string.
+        restate_declined=declined, gold_n=gold_n,
+        gold_found_n=0 if declined else gold_n - len(missing),
     )
 
 
@@ -966,7 +968,7 @@ def _annotate_history(row: dict[str, Any], entry: dict[str, Any], kind: str,
         split = {name: {"n": 0, "found": 0} for name in GOLD_POSITIONS}
         for s, position in zip(gold, gold_positions(view, gold, cap), strict=True):
             split[position]["n"] += 1
-            split[position]["found"] += int(s.lower() in answer)
+            split[position]["found"] += int(s.lower() in answer and not row.get("restate_declined"))
         row["gold_split"] = split
 
 

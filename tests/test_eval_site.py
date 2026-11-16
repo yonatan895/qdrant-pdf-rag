@@ -1055,7 +1055,7 @@ def test_restate_is_scored_on_the_openers_gold_and_declines_are_counted(site_eva
     the opener's gold substrings alone (an uncited restatement is judged on
     them); the zero-hits path and the structured decline are declines; a
     failed opener is skipped and counted, never a row."""
-    from mainframe_rag.eval.answers import judge_restate
+    from mainframe_rag.eval.answers import _annotate_history, judge_restate
     from mainframe_rag.eval.follow_up import RESTATE_FOLLOW_UPS
 
     kept = _entry(id="KEPT", gold_must_contain=["rejected", "reenter"])
@@ -1093,8 +1093,13 @@ def test_restate_is_scored_on_the_openers_gold_and_declines_are_counted(site_eva
     named = {"answer": "Nothing in the supplied excerpts answers this question about "
                        "rejected reenter.", "path": "llm", "citations": [], "warns": []}
     judge_restate(named, kept)
-    assert (named["verdict"], named["gold_found_n"]) == ("fail", 2)
+    assert (named["verdict"], named["gold_n"], named["gold_found_n"]) == ("fail", 2, 0)
     assert named["failures"] == ["follow-up declined"]
+    _annotate_history(named, kept, "restate", {"messages": [
+        {"role": "user", "content": kept["query"]},
+        {"role": "assistant", "content": "Rejected; reenter it."},
+        {"role": "user", "content": RESTATE_FOLLOW_UPS["restate"]}]}, 1000)
+    assert named["gold_split"]["before_cut"] == {"n": 2, "found": 0}
     assert exported[("KEPT", "summary")]["failures"] == [
         "missing required substring", "missing required substring", "follow-up declined"]
     assert status == 1
