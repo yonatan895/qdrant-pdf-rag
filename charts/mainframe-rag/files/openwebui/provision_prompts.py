@@ -14,7 +14,7 @@ The admin API key arrives on stdin, never in argv, the environment or the pod sp
   1. This installer and the mounted prompts.json must hash to the sha256 that
      deploy.sh computed from the repository files. A ConfigMap mount trails the
      release by up to a minute (#1252), so a mismatch is refused with a re-run
-     message before the key is read.
+     message before the key is sent anywhere.
   2. The file is validated: an object {"prompts": [...]}, each entry exactly
      {command, name, content}; commands are lowercase words joined by hyphens,
      unique, and not one of the chat's built-in `/` commands; content holds no
