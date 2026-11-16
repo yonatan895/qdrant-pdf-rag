@@ -494,12 +494,13 @@ async def test_anchored_follow_up_fuses_both_legs_by_rank_to_one_retrieval_count
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("depth", [None, 4, 16])
+@pytest.mark.parametrize("depth", [None, 4, 8, 16])
 async def test_anchored_fusion_returns_no_more_than_one_retrieval(depth):
     """Two full legs fuse to one retrieval's hit count, `answer_hit_limit`
-    (8 by default, #1191 makes it an operator input): the top half of each,
-    alternating; a short leg leaves room for the other's next ranks."""
-    n = 8 if depth is None else depth
+    (16 by default since #1274, 8 before; #1191 makes it an operator input):
+    the top half of each, alternating; a short leg leaves room for the
+    other's next ranks."""
+    n = 16 if depth is None else depth
     full_l = [_anchor_hit(f"L{i}", "DOC-L") for i in range(n)]
     full_a = [_anchor_hit(f"A{i}", "DOC-A") for i in range(n)]
     source = AnswerCoreInput(query=_FOLLOW_UP, messages=_follow_up_messages(), is_chat=True)
@@ -1523,7 +1524,7 @@ async def test_use_case_runs_on_explicit_resources_and_borrows_the_model(stream,
     assert output.finish_reason == "stop" and output.hits
     (args, kwargs), = searched
     assert args[:3] == (qdrant, embedder, "physical_gen_1")
-    assert kwargs["reranker"] is reranker and kwargs["limit"] == 8
+    assert kwargs["reranker"] is reranker and kwargs["limit"] == bound.answer_hit_limit == 16  # #1274
     assert kwargs["settings"] is bound
     assert Model.closed == 0
     if async_edges:

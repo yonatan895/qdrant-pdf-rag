@@ -2394,6 +2394,8 @@ behaviour before #1274.
 | `LLM_TOKEN_COUNT_SOURCE` | `tokenize` | `auto` | `LLM_TOKEN_COUNT_SOURCE=tokenize` |
 | `OPENWEBUI_RATINGS_ENABLED` (chart `openwebui.ratings.enabled`) | off (no `airgap.env` key) | follows `FEEDBACK_ENABLED` | `OPENWEBUI_RATINGS_ENABLED=false` |
 | `LLM_MAX_MODEL_LEN` (ceiling 131072 -> 262144) | 32768 | 262144 | the served window, e.g. `LLM_MAX_MODEL_LEN=32768` |
+| `ANSWER_HIT_LIMIT` (#1191) | 8 | 16 | `ANSWER_HIT_LIMIT=8` |
+| `RETRIEVE_MAX_CHUNKS_PER_DOC` (also `/v1/search`) | 3 | 5 | `RETRIEVE_MAX_CHUNKS_PER_DOC=3` |
 
 - **Window.** 32768 was the Colab stand-in's window; the production model
   serves 262144. The default assumes a served window of at least 256k: a
@@ -2437,7 +2439,7 @@ inputs (#1191) `ANSWER_HIT_LIMIT` (hits per answer, chat and console
 retrieval; `/v1/search` keeps its caller's limit) and
 `RETRIEVE_MAX_CHUNKS_PER_DOC` (chunks kept per manual, `/v1/search` included)
 map to `models.reasoning.answerHitLimit` and `retrieveMaxChunksPerDoc`; unset
-renders neither, so the pod keeps 8 and 3. Enable condensation deliberately when qualifying pronoun-only
+renders neither, so the pod keeps the defaults, 16 and 5 since #1274 (8 and 3 before). Enable condensation deliberately when qualifying pronoun-only
 console follow-ups; require a grounded answer after the extra reasoning call.
 The local gateway's authenticated `/tokenize` passthrough enforces the per-leg
 key's model allowlist. Use `probe_gateway.py --require-tokenizer --stream

@@ -607,7 +607,7 @@ Flags (defaults are unchanged without them):
 | `--repeats R` | 1–10 whole passes over the sample (pass 1 over every row, then pass 2, ...), so drift within a session lands on every row equally. Rows carry `repeat`; `metrics` pools all passes; `metrics.repeats` gives, per metric, the per-pass values with min, max, mean and range, plus `verdict_flips` (entry ids judged differently across passes). More than one pass is a sweep, so the same non-holdout `--golden` rule applies |
 | `--endpoint chat` | Issue #1191. Each question goes as a single-turn streaming `POST /v1/chat` (`messages: [{role: user, content}]`, `stream: true`, `temperature`), the route the Open WebUI Pipe calls. Needs `--stream`. `params.endpoint` records `answer` (default) or `chat`; `params.transport` still means `json`/`sse`. Differences are listed under [chat rows](#chat-rows) |
 | `--coverage` | Issue #1191. Before the rows, pages `GET /v1/sources` (limit 200) once and records its `build_id`; after the rows, reads the first page again as `build_id_end`. Each row gets `coverage` (`all`, `some` or `none` of its `expected_doc_ids` served; `not_applicable` when it names none; `unknown`) and `expected_served`; `report.coverage` holds the counts per state over distinct rows, `pages` and `sources_n`. The match is on the exact doc id, edition included. A 503 (a build published without a catalog), a 404, a transport error, a malformed page, a build change between pages or 1,000 pages give `status: unknown` with a fixed `reason`. Coverage never changes a verdict or the exit code |
-| `--hit-limit N` | Issue #1191. The deployed `ANSWER_HIT_LIMIT` as the operator declares it (the agent does not report it; 1–32, the agent's bounds): the sibling `/v1/search` pool behind `gold_retrieved`, `hit_doc_ids` and citation precision/recall asks for `N` hits, so those fields see as deep as the answer did. Default 8, the agent default; recorded as `params.hit_limit` only when passed. Never pass a value that differs from the deployed one |
+| `--hit-limit N` | Issue #1191. The deployed `ANSWER_HIT_LIMIT` as the operator declares it (the agent does not report it; 1–32, the agent's bounds): the sibling `/v1/search` pool behind `gold_retrieved`, `hit_doc_ids` and citation precision/recall asks for `N` hits, so those fields see as deep as the answer did. Default the agent default (16 since #1274, 8 before); recorded as `params.hit_limit` only when passed. Never pass a value that differs from the deployed one |
 | `--export PATH` | Issue #1191. A JSON file built by whitelist for leaving an air-gapped site: `params` (without `agent_url`), `metrics`, `healthz`, `representation`, `coverage` and one row per result with id, repeat, class, behaviour, verdict, failure and warn labels, verification states, finish reason, path, citation-WHY mode, citation and inferred-index counts, token counts, timings, `gold_retrieved`, expected/hit/cited doc ids, citation precision/recall, coverage, and `supplied_n` / `supplied_doc_n` (#1191: how many excerpts the response's `supplied_evidence` lists and from how many distinct manuals, on both endpoints; 0 on the zero-hits path, None when the field is missing or an entry has no doc id). Failure labels come from a closed set (anything else is `other`; an error code outside the agent's stable codes is `?`), finish reasons outside the OpenAI set are `other`, and a `build_id` of an unexpected shape is null. No question, answer, citation, excerpt, script or failure text. `tests/test_eval_site.py` seeds canaries into every text field and checks the export bytes |
 
 Without `--stream`, the JSON request is unchanged: the row still records the
@@ -935,7 +935,11 @@ run H-history1000 chat --all --repeats 2 --turns 2 --follow-up all --arm history
 # remove it; LLM_TOKEN_COUNT_SOURCE=tokenize; deploy; vals:
 run K-count-tokenize answer --all --repeats 2
 run K-count-tokenize chat --all --repeats 2
-# remove it and deploy: the site ends on the release defaults.
+# remove it; ANSWER_HIT_LIMIT=8 and RETRIEVE_MAX_CHUNKS_PER_DOC=3; deploy; vals and
+# show ANSWER_HIT_LIMIT RETRIEVE_MAX_CHUNKS_PER_DOC:
+run D-depth-8-3 answer --all --repeats 2 --hit-limit 8
+run D-depth-8-3 chat --all --repeats 2 --hit-limit 8
+# remove both and deploy: the site ends on the release defaults.
 ```
 
 | Arm | `airgap.env` line | Compare with |
@@ -943,6 +947,7 @@ run K-count-tokenize chat --all --repeats 2
 | `anchor-off` | `CHAT_FOLLOWUP_ANCHOR_ENABLED=false` | `H-baseline` |
 | `history1000` | `CHAT_MAX_PRIOR_TURN_CHARS=1000`, run with `--prior-cap 1000` | `H-baseline` |
 | `count-tokenize` | `LLM_TOKEN_COUNT_SOURCE=tokenize` | B2 (same flags, same build) |
+| `depth-8-3` | `ANSWER_HIT_LIMIT=8` and `RETRIEVE_MAX_CHUNKS_PER_DOC=3`, run with `--hit-limit 8` | B2 |
 
 - `--prior-cap` must equal the deployed cut: omit it on every arm but
   `history1000` (the default is the agent default, 4000), and never pass a
@@ -952,8 +957,9 @@ run K-count-tokenize chat --all --repeats 2
   arm can be skipped. It acts on single-turn answers, so it runs the session
   flags, not the follow-up flags. Compare `verification_state`,
   `finish_reason` and the budget fields with B2.
-- The answer depth settings (hit limit and `RETRIEVE_MAX_CHUNKS_PER_DOC`)
-  get a `depth-8-3` arm once their release carries them.
+- `depth-8-3` switches the retrieval depth (#1191) back to 8 hits and 3
+  chunks per manual; it runs the session flags, single-turn
+  ([depth arm](#site-depth-arm)).
 - Condensation is no longer an arm. `CHAT_CONDENSE_ENABLED=true` still works
   and turns the anchoring default off; setting both true is refused at deploy
   and at startup.
@@ -992,47 +998,41 @@ recount each repeat from the export rows (`repeat`, `follow_up_kind`,
 `--out` and `--summary` hold questions, follow-ups and answers and stay. Any
 default change after the comparison is a separate maintainer decision.
 
-**Retrieval depth arm (issue #1191, one visit).** Not the Pipe's answer
-depths (#1255, reasoning effort). Measures whether a deeper answer
-retrieval adds sections the model uses. It changes two settings together
-against the same build's baseline, single-turn on both endpoints:
+<a id="site-depth-arm"></a>
+**Retrieval depth arm (issue #1191, `depth-8-3`).** Not the Pipe's answer
+depths (#1255, reasoning effort). Since #1274 the release retrieves 16 hits
+per answer and keeps up to 5 chunks per manual; the arm switches both back
+to 8 and 3 together, single-turn on both endpoints, against B2 (the same
+build at its defaults, no `--hit-limit`: the eval's default is the agent
+default, 16):
 
-```sh
-for v in ANSWER_HIT_LIMIT RETRIEVE_MAX_CHUNKS_PER_DOC LLM_MAX_MODEL_LEN; do show $v; done
-run D-baseline answer --all --repeats 2
-run D-baseline chat --all --repeats 2
-# airgap.env: ANSWER_HIT_LIMIT=16 and RETRIEVE_MAX_CHUNKS_PER_DOC=5; deploy; show:
-run D-depth answer --all --repeats 2 --hit-limit 16
-run D-depth chat --all --repeats 2 --hit-limit 16
-# revert both and deploy: the site ends on its baseline values.
-```
-
-- `ANSWER_HIT_LIMIT=16`: twice today's depth. Under the default
-  32,768-token window and reserves, the packing budget is about 21,100 tokens
-  after the fixed preamble, so `LLM_MAX_MODEL_LEN` stays at its deployed
-  value and the arm isolates depth (a denser server count trims the tail
-  excerpt, recorded as omitted).
+- `ANSWER_HIT_LIMIT=16` (default): twice the earlier depth. At the 262144
+  default window the packed evidence does not bind; on a site whose served
+  window is smaller and set in `LLM_MAX_MODEL_LEN`, a 32768 window leaves a
+  packing budget of about 21,100 tokens after the fixed preamble, so a
+  denser server count trims the tail excerpt (recorded as omitted).
   Scaling the stand-in's 8-hit p95 of about 7,600 prompt tokens gives about
-  15,000 at 16, about 7,000 below the verify limit; the worst case at the cap
-  is about 19,700 (static estimates, read `prompt_tokens` p95 from the
-  baseline export before deploying). A 32-hit arm needs about
-  `LLM_MAX_MODEL_LEN=65536` within the served window.
-- `RETRIEVE_MAX_CHUNKS_PER_DOC=5`: the section gap is within the gold manual,
-  and the per-manual cap is what holds its further sections out. In a
-  replay of the recorded stand-in pools (17 section rows, RRF only), a
-  gold section reached the top 8 in 8 rows at 3, 9 at 4 and 10 at 5 or 6, and
-  depth alone (16 at 3) added one row, at rank 13. On the dev set, document-
-  level recall@5 moved from 113 to 111 of 117 at 5; recall@8 stayed at 114.
-- `--hit-limit 16` makes the sibling pool as deep as the answer, so
-  `gold_retrieved` and citation recall are not cut at rank 8. The baseline
-  runs without it.
+  15,000 at 16 (static estimate; read `prompt_tokens` p95 from B2).
+- `RETRIEVE_MAX_CHUNKS_PER_DOC=5` (default; `/v1/search` included): the
+  section gap is within the gold manual, and the per-manual cap is what held
+  its further sections out. In a replay of the recorded stand-in pools (17
+  section rows, RRF only), a gold section reached the top 8 in 8 rows at 3,
+  9 at 4 and 10 at 5 or 6, and depth alone (16 at 3) added one row, at rank
+  13. On the dev set, document-level recall@5 moved from 113 to 111 of 117
+  at 5; recall@8 stayed at 114.
+- `--hit-limit 8` on the arm keeps the sibling pool as deep as the arm's
+  answer; B2 runs without it.
+- Above 12 excerpts the supplied-evidence text total (48000 characters) can
+  leave a cited source with empty text in the Open WebUI Pipe
+  ([bounds](agent.md#supplied-excerpts)); count such sources in B2.
 
-Compare `D-depth` with `D-baseline` per endpoint: `gold_retrieved` rate,
-citation recall, pass rate by class, refusals (abstentions and
+Compare `D-depth-8-3` with B2 per endpoint: `gold_retrieved` rate, citation
+recall, pass rate by class, refusals (abstentions and
 `insufficient_evidence` on answer rows), `prompt_tokens` and `elapsed_ms`
-p50/p95, and `supplied_n`/`supplied_doc_n` (how much of the deeper pool was
-packed). A gain inside either arm's repeat range is noise. A default change
-after the comparison is a separate maintainer decision.
+p50/p95, and `supplied_n`/`supplied_doc_n`. A gain inside either side's
+repeat range is noise. If depth hurts, the site keeps the two lines in
+`airgap.env`; changing the code default back is a separate maintainer
+decision.
 
 The earlier two-arm condense comparison (`--arm condense-off`/`condense-on`
 without `--follow-up`) remains valid. Its exports keep the anaphoric-only

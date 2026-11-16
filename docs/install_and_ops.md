@@ -1530,6 +1530,8 @@ sh scripts/tools/run-task.sh airgap:smoke
   | Prompt count source | `auto` | `LLM_TOKEN_COUNT_SOURCE=tokenize` |
   | Open WebUI ratings | on wherever the feedback store is on (`FEEDBACK_ENABLED=true`; the store stays opt-in) | `OPENWEBUI_RATINGS_ENABLED=false` |
   | Prompt window (`LLM_MAX_MODEL_LEN`) | 262144 (was 32768) | the served window, e.g. `LLM_MAX_MODEL_LEN=32768` |
+  | Hits per answer retrieval | 16 (was 8) | `ANSWER_HIT_LIMIT=8` |
+  | Chunks kept per manual (every retrieval, `/v1/search` included) | 5 (was 3) | `RETRIEVE_MAX_CHUNKS_PER_DOC=3` |
 
   - **Window:** the 262144 default assumes the reasoning model serves at
     least a 256k window. A site whose model serves less must set

@@ -318,8 +318,8 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "rrf_sparse_boost_syntax": 1.0,
     "rrf_sparse_boost_table": 1.0,
     "retrieve_max_chunks_per_page": 1,
-    "retrieve_max_chunks_per_doc": 3,
-    "answer_hit_limit": 8,  # #1191: the former RETRIEVAL_HIT_LIMIT constant
+    "retrieve_max_chunks_per_doc": 5,  # #1274, was 3
+    "answer_hit_limit": 16,  # #1274, was 8 (#1191: the former RETRIEVAL_HIT_LIMIT constant)
     "llm_reasoning_effort_simple": "medium",  # #917, was xhigh (#777)
     "llm_reasoning_effort_complex": "medium",
     "llm_reasoning_efforts": "low,medium,xhigh",

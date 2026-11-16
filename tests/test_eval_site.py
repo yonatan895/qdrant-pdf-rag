@@ -211,11 +211,13 @@ def test_rows_count_supplied_excerpts_and_their_manuals(site_eval, endpoint, tra
     assert (exported["supplied_n"], exported["supplied_doc_n"]) == counts
 
 
-@pytest.mark.parametrize("extra,limit", [((), 8), (("--hit-limit", "16"), 16)])
+@pytest.mark.parametrize("extra,limit", [((), 16), (("--hit-limit", "8"), 8),
+                                         (("--hit-limit", "16"), 16)])
 def test_hit_limit_sets_the_sibling_pool_depth_and_is_recorded(site_eval, extra, limit):
     """Issue #1191: the sibling /v1/search pool (gold_retrieved, citation
     recall) asks for the deployed ANSWER_HIT_LIMIT the operator declares;
-    default 8, and an undeclared run's params are unchanged."""
+    default the agent default (16 since #1274, 8 before), and an undeclared
+    run's params are unchanged."""
     import httpx2
 
     def respond(request):
