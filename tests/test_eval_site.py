@@ -1013,9 +1013,11 @@ def test_switch_pairs_are_deterministic_and_never_share_a_gold_doc(docs, expecte
 
 
 def test_switch_is_scored_against_the_same_question_asked_alone(site_eval):
-    """Harm from history: the switched-to question with its full gold. Alone
-    it passes on its gold evidence; after the opener's history the agent
-    packs the opener's doc and declines, so pass, evidence and state move."""
+    """Harm from history: the switched-to question with its full gold. B
+    alone passes on its gold evidence; after A's history the agent packs A's
+    doc and declines, so pass, evidence and state are lost. A alone misses
+    its gold doc, after B's history it finds it: gained. Each switch is
+    compared with its asked question alone, never with its opener."""
     first = _entry(id="A")
     second = _entry(id="B", query="What does IEA501I report?", expected_doc_ids=[OTHER_DOC],
                     gold_must_contain=["other"])
@@ -1023,7 +1025,8 @@ def test_switch_is_scored_against_the_same_question_asked_alone(site_eval):
     refusal = chat_stream("Nothing in the supplied excerpts answers this question about IEA501I.",
                           citations=(), state="insufficient_evidence")
     agent = _kind_agent({
-        (first["query"], None): chat_stream("Rejected [1]."),
+        (first["query"], None): chat_stream("Other [1].", citations=(OTHER_CITE,),
+                                            supplied=other),
         (second["query"], None): chat_stream("Other [1].", citations=(OTHER_CITE,),
                                              supplied=other),
         (first["query"], second["query"]): refusal,
@@ -1035,7 +1038,8 @@ def test_switch_is_scored_against_the_same_question_asked_alone(site_eval):
     assert switched["verdict"] == "fail" and switched["evidence_gold_hit"] is False
     single = report["metrics"]["by_turn"]["2"]["switch"]["vs_single"]
     assert single["pass"] == {"kept": 1, "lost": 1, "gained": 0, "neither": 0, "unknown": 0}
-    assert (single["evidence_gold_hit"]["lost"], single["evidence_gold_hit"]["kept"]) == (1, 1)
+    assert single["evidence_gold_hit"] == {"kept": 0, "lost": 1, "gained": 1, "neither": 0,
+                                           "unknown": 0}
     assert single["verification_state"] == {"same": 1, "changed": 1, "unknown": 0}
     assert single["verification_moves"] == {"accepted>insufficient_evidence": 1}
     assert {(r["id"], r["switch_id"]) for r in json.loads(export)["rows"]
@@ -1125,19 +1129,23 @@ def test_history_exposure_places_the_citation_list_against_the_cap(view, expecte
     assert history_exposure(view, 1000) == expected
 
 
-@pytest.mark.parametrize("cap", [pytest.param(200, id="cap200"), pytest.param(1000, id="cap1000")])
-def test_history_view_is_what_the_agents_prompt_builder_keeps(cap):
+@pytest.mark.parametrize(("cap", "tail"), [
+    pytest.param(200, "y" * 200, id="cut200"), pytest.param(1000, "y" * 1000, id="cut1000"),
+    pytest.param(1000, "", id="pasted"),
+])
+def test_history_view_is_what_the_agents_prompt_builder_keeps(cap, tail):
     """The evaluator's model of the prior-turn cut against the agent's own
-    `build_chat_messages`: the same kept head, and a string the evaluator
-    places before the cut is in the prompt while one after it is not."""
+    `build_chat_messages`: the same kept text, a string the evaluator places
+    before the cut is in the prompt, one after it is not, and one only in a
+    pasted excerpts block (dropped by the agent) is not in the history."""
     from mainframe_rag.agent.answer import EXCERPTS_HEADER, build_chat_messages
     from mainframe_rag.config import Settings
     from mainframe_rag.eval.follow_up import gold_positions, history_view
     from mainframe_rag.ports import ChatMessage
     from tests.helpers_agent_local import agent_hit
 
-    sent = ("  \n" + "headgold " + "y" * cap + " tailgold\n\n**Citations:**\n- c\n"
-            + EXCERPTS_HEADER + "\n[1] pasted excerpt\n")
+    sent = ("  \nheadgold " + tail + " tailgold\n\n**Citations:**\n- c\n"
+            + EXCERPTS_HEADER + "\n[1] pastedgold\n")
     settings = Settings(_env_file=None, llm_base_url="http://llm.internal/v1",
                         llm_model_reasoning="test-reasoning-model", embed_mode="hash",
                         allow_hash_mode=True, chat_max_prior_turn_chars=cap)
@@ -1147,10 +1155,11 @@ def test_history_view_is_what_the_agents_prompt_builder_keeps(cap):
          ChatMessage(role="user", content="And then?")], [agent_hit()], settings=settings)
     prompt = next(m.content for m in prepared.messages if m.role == "assistant")
     view = history_view(sent)
-    assert len(view) > cap and prompt == view[:cap] + " ... [history truncated]"
-    assert gold_positions(view, ["HEADGOLD", "tailgold", "absent"], cap) == [
-        "before_cut", "after_cut", "not_in_history"]
-    assert "headgold" in prompt and "tailgold" not in prompt
+    assert prompt == (view if len(view) <= cap else view[:cap] + " ... [history truncated]")
+    positions = gold_positions(view, ["HEADGOLD", "tailgold", "pastedgold"], cap)
+    assert positions == ["before_cut", "after_cut" if tail else "before_cut", "not_in_history"]
+    assert "headgold" in prompt and ("tailgold" in prompt) is (not tail)
+    assert "pastedgold" not in prompt
 
 
 def test_kind_export_carries_no_question_answer_gold_or_follow_up_text(site_eval):
@@ -1164,8 +1173,8 @@ def test_kind_export_carries_no_question_answer_gold_or_follow_up_text(site_eval
              for f in (None, FOLLOW_UPS["message_id"], *RESTATE_FOLLOW_UPS.values())}
     turns.update({(first["query"], second["query"]): answer,
                   (second["query"], first["query"]): answer})
-    status, report, export, _ = site_eval(_kind_agent(turns), [first, second],
-                                          [*KINDS, "--repeats", "2"])
+    _, report, export, _ = site_eval(_kind_agent(turns), [first, second],
+                                     [*KINDS, "--repeats", "2"])
     raw = json.dumps(report)
     assert c["gold"] in raw and RESTATE_FOLLOW_UPS["summary"] in raw
     text = export.decode("utf-8")
