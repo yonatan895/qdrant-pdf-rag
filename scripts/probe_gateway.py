@@ -687,7 +687,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Probe gateway model legs before cutover.")
     parser.add_argument("--timeout", type=float, default=None,
                         help=f"per-request timeout in seconds (default {PROBE_TIMEOUT_S:g}; "
-                             f"{ARG_PROBE_TIMEOUT_S:g} with --probe-args)")
+                             f"{ARG_PROBE_TIMEOUT_S:g} with --probe-args; LLM_TOKENIZE_TIMEOUT_S with --probe-count)")
     parser.add_argument(
         "--max-tokens", type=completion_budget,
         default=None,

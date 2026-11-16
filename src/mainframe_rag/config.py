@@ -388,8 +388,9 @@ class Settings(BaseSettings):
     # else the estimator (the behaviour before #1266). completion_usage:
     # `usage.prompt_tokens` of a non-streaming 1-token chat completion built
     # by the generation's own body builder, for a gateway without /tokenize.
-    # auto: /tokenize when served, else completion_usage when a startup check
-    # confirms a usable count, else the estimator. estimate: never ask the
+    # auto: /tokenize until it is pinned as not served, then completion_usage
+    # under its own pin rules, chosen per count (a warn-only startup check
+    # names the source); both pinned is the estimator. estimate: never ask the
     # server. Every count is bounded by LLM_TOKENIZE_TIMEOUT_S.
     llm_token_count_source: TokenCountSource = Field(default="tokenize")
     llm_stream: bool = Field(default=False, description="Stream chat completions to measure TTFT")
