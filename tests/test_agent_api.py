@@ -1648,6 +1648,12 @@ CODING_REQUESTS = [
     "fix this:\n/* REXX */\nsay 'hi'",
     "Write a batch program that updates a VSAM KSDS",
     "Please review this script",
+    "Translate this CLIST into REXX",
+    "Draft a JCL PROC for the nightly backup",
+    "Correct the following JCL:\n//S1 EXEC PGM=IEFBR14",
+    "Give me an example REXX exec that reads a data set",
+    # A message identifier stays a lookup unless code is produced or pasted.
+    "Fix this JCL, it fails with IEFC452I:\n//S1 EXEC PGM=MYPROG",
 ]
 NON_CODING_REQUESTS = [
     "What does IEA500I mean?",
@@ -1666,6 +1672,16 @@ NON_CODING_REQUESTS = [
     "Write a parmlib entry that gives a program non-swappable status",
     "What does this reason code mean for the started task?",
     "Fix the program check interrupt in my region",
+    # Nouns and adjectives that are also coding verbs.
+    "Which port does the FTP PROC listen on?",
+    "What is the correct JCL syntax for DISP?",
+    "Where is the review of REXX exec security documented?",
+    "Is the draft JCL standard still current?",
+    "What is an example of a REXX exec in the TSO/E manual?",
+    "Can the macro translate addresses above the bar?",
+    # A message lookup whose only coding marker is the message's own text.
+    "How do I fix IEFC452I JOB NOT RUN - JCL ERROR?",
+    "How do I debug IEF453I in my JCL?",
 ]
 
 
@@ -1695,6 +1711,8 @@ def test_coding_request_classifier_leaves_lookups_and_diagnostics_alone(query):
     "write " * 20000,
     "//" * 60000,
     "c " * 60000 + "program",
+    "show " + " " * 120000,
+    "draft " + " \t" * 60000,
 ])
 def test_coding_classifier_is_linear_on_a_maximal_message(message):
     """The classifier reads the whole user message (up to the 131072-char

@@ -2259,3 +2259,67 @@ async def test_core_coding_request_without_hits_makes_no_model_call(stream):
     assert output.answer == "No supporting manual excerpts were found for this question."
     assert output.verification_state == "insufficient_evidence"
     assert output.complexity == "complex"
+
+
+async def _model_messages(query, *, enabled, stream, chat, order):
+    """What the model receives for one turn through the real executors."""
+    def retrieve(*_args, **_kwargs):
+        return [_hit()], "nl", {}
+
+    llm = CoreFakeLLM()
+    deps = _deps(_settings(answer_coding_mode_enabled=enabled, prompt_order=order), llm, retrieve)
+    if chat:
+        source = AnswerCoreInput(query=query, is_chat=True, messages=[
+            ChatMessage(role="user", content="What does IEA500I mean?"),
+            ChatMessage(role="assistant", content="It reports a rejected command."),
+            ChatMessage(role="user", content=query)])
+    else:
+        source = AnswerCoreInput(query=query)
+    if stream:
+        events = [event async for event in execute_answer_core_stream(source, deps)]
+        output = events[-1]["output"]
+    else:
+        output = await execute_answer_core(source, deps)
+    (call,) = llm.calls
+    return [(m.role, m.content) for m in call["messages"]], call["reasoning_effort"], output
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
+@pytest.mark.parametrize("chat", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("query", [
+    "What does IEA500I mean?",
+    "How do I diagnose and recover when DFSMShsm journal fills up?",
+    "What is the correct JCL syntax for DISP?",
+    "How do I fix IEFC452I JOB NOT RUN - JCL ERROR?",
+])
+async def test_core_sends_identical_messages_with_coding_mode_on_or_off_for_other_turns(
+    order, chat, stream, query
+):
+    """The setting is read by the executors, so the proof is what the model
+    receives: for every non-coding turn (answer and chat, buffered and
+    streamed, both prompt orders) the messages and effort are identical with
+    coding mode on and off."""
+    on = await _model_messages(query, enabled=True, stream=stream, chat=chat, order=order)
+    off = await _model_messages(query, enabled=False, stream=stream, chat=chat, order=order)
+    assert on[:2] == off[:2]
+    assert on[2].complexity == off[2].complexity
+    assert "Coding Protocol" not in on[0][0][1]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_core_chat_coding_turn_gets_the_coding_prompt(order, stream):
+    """A chat turn whose active message is a coding request is a coding turn
+    on both chat executors and both orders; its history stays intact."""
+    from mainframe_rag.agent.answer import SYSTEM_PROMPT_CODING_EXTENSION
+
+    messages, effort, output = await _model_messages(
+        _CODING_REQUEST, enabled=True, stream=stream, chat=True, order=order)
+    assert messages[0][1].endswith(SYSTEM_PROMPT_CODING_EXTENSION)
+    assert [role for role, _ in messages] == ["system", "user", "assistant", "user"]
+    assert "strictly" not in messages[-1][1]
+    assert effort == _settings().llm_reasoning_effort_complex
+    assert output.complexity == "complex"

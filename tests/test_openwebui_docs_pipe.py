@@ -780,9 +780,12 @@ def test_house_excerpt_supplied_but_not_cited_adds_no_label():
     {"verification_state": None},
     {"verification_state": "unverified_draft", "citations_inferred": True, "inferred_indices": [2]},
 ])
-def test_house_banner_label_never_rides_a_non_accepted_state(overrides: dict[str, Any]):
+def test_house_label_never_rides_a_non_accepted_state(overrides: dict[str, Any]):
+    """Neither the banner nor the source list names house guidance unless
+    the answer is accepted with explicit citations."""
     _content, events = run_pipe(FakeAgent(_frames("Answer.", meta=_house_meta(**overrides))))
     assert "house" not in _final_status(events)
+    assert "house guidance" not in json.dumps(_sources(events))
 
 
 # --- Verification and abstention ---------------------------------------------

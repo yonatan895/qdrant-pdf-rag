@@ -554,6 +554,41 @@ def test_chat_json_surfaces_script_with_review_flag(chat_client, monkeypatch):
     assert data["script_review_required"] is True
 
 
+class MixedScriptChatLLM:
+    """A coding answer in the #1276 shape: compile JCL plus HLASM source."""
+
+    def chat(self, messages, reasoning_effort=None, temperature=None):
+        return ChatResult(
+            content=(
+                "Assemble and run the program below.\n\n"
+                "```jcl\n//ASM EXEC PGM=ASMA90\n```\n\n"
+                "```hlasm\nHELLO    CSECT\n```\n\n"
+                "Citations:\n"
+                "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+            ),
+            finish_reason="stop",
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=20, total_tokens=30),
+        )
+
+
+def test_chat_json_mixed_language_script_characterization(chat_client, monkeypatch):
+    """Characterization (#1276, maintainer decision pending): the
+    non-streaming /v1/chat `message.content` carries the prose and the
+    validated list only; every fence in SCRIPT_LANGS (now including hlasm)
+    is in `script`, joined under the first fence's tag. Streaming deltas
+    carry the model's fences unchanged."""
+    monkeypatch.setattr(app_mod, "llm", MixedScriptChatLLM())
+    data = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Write an HLASM program"}], "stream": False},
+    ).json()
+    content = data["choices"][0]["message"]["content"]
+    assert "CSECT" not in content and "ASMA90" not in content
+    assert data["script"] == "//ASM EXEC PGM=ASMA90\n\nHELLO    CSECT"
+    assert data["script_lang"] == "jcl"
+    assert data["script_review_required"] is True
+
+
 def test_chat_stream_terminal_chunk_carries_state_and_script(chat_client, monkeypatch):
     """The OpenAI-compat terminal chunk reports state + script in `extra`
     before [DONE]. Deltas stay provisional raw tokens; the terminal chunk

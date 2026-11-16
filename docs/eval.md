@@ -954,14 +954,21 @@ read: the coding refusal rate needs 10–20 coding questions (JCL, REXX, HLASM,
 Metal C) written by the team for the graded eval (#1191 D3); golden.jsonl is
 not edited for this.
 
-- `coding-off`: one single-turn session on the candidate build with
-  `ANSWER_CODING_MODE_ENABLED=false` in `airgap.env`, redeployed, then the
-  same `run` lines as B1 (both endpoints, `--all --repeats 2`, or the
-  session's agreed subset), labelled `D-coding-off`. Revert the line and
-  redeploy afterwards. Compare `metrics.coding` and `by_class.syntax`
+- `coding-off`: one single-turn session on the candidate build. Run
+  `show ANSWER_CODING_MODE_ENABLED` (the follow-up arms' helper below; empty
+  means unset, the on default), set `ANSWER_CODING_MODE_ENABLED=false` in
+  `airgap.env`, `sh scripts/tools/run-task.sh airgap:deploy`, wait for the
+  rollout and `show` it again (`false`). Then the same `run` lines as B1
+  (both endpoints, `--all --repeats 2`, or the session's agreed subset),
+  labelled `D-coding-off`. Remove the line, redeploy and `show` it once more
+  (empty). Compare `metrics.coding` and `by_class.syntax`
   against B1/B2 under the decision rule below; the rest of the metrics must
   not move beyond B1 against B2, because with coding mode off only coding
-  requests change. The old build (A sessions) predates the setting and is
+  requests change. Watch `metrics.coding.by_verification_state` for
+  `generation_incomplete`: a coding answer (code, guidance, checklist) has the
+  same output reserve as any complex answer, so truncation is the first
+  cost to look for. The fence handling (`SCRIPT_LANGS`) is not part of the
+  setting: `false` restores the prompts and the complexity, not the parse. The old build (A sessions) predates the setting and is
   already the coding-off prompt with the old fence handling.
 
 **Decision rule.** The [protocol above](#measurement-protocol)

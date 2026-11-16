@@ -284,12 +284,14 @@ def _source_events(final: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     supplied = [e for e in final.get("supplied_evidence") or [] if isinstance(e, dict)]
     base = "inferred, not grounding" if final.get("citations_inferred") is True else "source-matched"
+    # The house mark rides only the accepted banner's condition, like the banner.
+    mark_house = _source_matched(final)
     events: list[dict[str, Any]] = []
     for citation in citations:
         if not isinstance(citation, str):
             continue
         matches = [e for e in supplied if e.get("citation") == citation]
-        house = any(_is_house(e) for e in matches)
+        house = mark_house and any(_is_house(e) for e in matches)
         label = f"{base}, {HOUSE_NOTE}" if house else base
         documents = [str(e.get("text", "")) for e in matches] or [NO_EXCERPT]
         metadata: list[dict[str, Any]] = [
@@ -320,12 +322,19 @@ def _cites_house(final: dict[str, Any], citations: list[Any]) -> bool:
     return any(_is_house(e) and e.get("citation") in citations for e in supplied)
 
 
+def _source_matched(final: dict[str, Any]) -> bool:
+    """`accepted` with explicit (non-inferred) validated citations."""
+    citations = final.get("citations")
+    return (final.get("verification_state") == "accepted" and isinstance(citations, list)
+            and bool(citations) and final.get("citations_inferred") is not True)
+
+
 def _status_text(final: dict[str, Any]) -> str:
     """The fixed verification banner for a completed answer."""
     state = final.get("verification_state")
     citations = final.get("citations")
     count = len(citations) if isinstance(citations, list) else 0
-    if state == "accepted" and count and final.get("citations_inferred") is not True:
+    if _source_matched(final) and isinstance(citations, list):
         parts = [f"Source-matched · {count} citation" + ("" if count == 1 else "s")
                  + (f" (incl. {HOUSE_NOTE})" if _cites_house(final, citations) else "")]
     else:

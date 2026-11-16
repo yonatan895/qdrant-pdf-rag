@@ -510,14 +510,26 @@ def classify_query_complexity(query: str) -> str:
 # ("What is the JCL DISP parameter?") or a diagnostic ("How do I fix reason
 # code 0C?"). Word-bounded patterns over the case-folded text: a bare
 # substring match on "c", "exec" or "code" would fire on almost anything.
-_CODING_INTENT_RE = re.compile(
-    r"\b(?:write|writing|generate|create|draft|rewrite|convert|translate|port|refactor"
-    r"|fix|debug|review|correct)\b(?![\s-]+(?:error|protect|pack|packs|level|failure)s?\b)"
-    r"|\bexplain\s+(?:this|these|the\s+following|my)\b"
+# Words that are also nouns or adjectives (review, draft, translate, correct)
+# count only in verb position, before a determiner; "sample" and "example"
+# count only when asked for ("show me a sample").
+_NOT_A_VERB = r"(?![\s-]+(?:error|protect|pack|packs|level|failure)s?\b)"
+_DETERMINER = r"(?:a|an|the|this|these|that|my|our|following)\b"
+# Producing code: write, generate, convert, ... or asking for an example.
+_CODING_PRODUCE_RE = re.compile(
+    r"\b(?:write|writing|generate|create|rewrite|convert|refactor)\b" + _NOT_A_VERB
+    + r"|\b(?:draft|translate)\s+(?:me\s+)?" + _DETERMINER
+    + r"|\b(?:show|give|provide|send)\s+(?:me\s+|us\s+)?(?:(?:a|an|some)\s+)?"
+    r"(?:sample|example|skeleton|template)s?\b",
+)
+# Repairing or reading code: fix, debug, review, explain this, ...
+_CODING_REPAIR_RE = re.compile(
+    r"\b(?:fix|debug)\b" + _NOT_A_VERB
+    + r"|\b(?:review|correct)\s+(?:me\s+)?" + _DETERMINER
+    + r"|\bexplain\s+(?:this|these|the\s+following|my)\b"
     r"|\bwhat\s+(?:does|do)\s+(?:this|these|the\s+following)\b"
     r"|\bwhat'?s\s+wrong\s+with\b"
-    r"|\bwhy\s+(?:does|doesn'?t|do|don'?t|is|isn'?t)\s+(?:this|my)\b"
-    r"|\b(?:sample|example|skeleton|template)\b",
+    r"|\bwhy\s+(?:does|doesn'?t|do|don'?t|is|isn'?t)\s+(?:this|my)\b",
 )
 _CODING_MARKER_RE = re.compile(
     r"\b(?:jcl|jobstream|rexx|clist|hlasm|assembler|metal[\s-]?c|csect|dsect|proclib)\b"
@@ -545,14 +557,20 @@ _PASTED_CODE_RE = re.compile(
 
 def is_coding_request(query: str) -> bool:
     """True when the message asks to write, fix, review, convert or explain
-    code in a mainframe coding language (issue #1276). Pure."""
+    code in a mainframe coding language (issue #1276). Pure.
+
+    A message naming a message identifier keeps the complexity rule's
+    "message-ID queries stay simple" unless it asks to produce code or pastes
+    code: "How do I fix IEFC452I JOB NOT RUN - JCL ERROR?" is a message
+    lookup, "Write a REXX exec that replies to IEA500I" is a coding request."""
     text = query.casefold()
-    if _CODING_INTENT_RE.search(text) is None:
+    pasted = _PASTED_CODE_RE.search(text) is not None
+    produce = _CODING_PRODUCE_RE.search(text) is not None
+    if not produce and _CODING_REPAIR_RE.search(text) is None:
         return False
-    return any(
-        pattern.search(text) is not None
-        for pattern in (_CODING_MARKER_RE, _CODING_OBJECT_RE, _PASTED_CODE_RE)
-    )
+    if not pasted and _CODING_MARKER_RE.search(text) is None and _CODING_OBJECT_RE.search(text) is None:
+        return False
+    return produce or pasted or not find_message_ids(query)
 
 
 def coding_mode_applies(message: str, search_text: str, settings: Settings | None) -> bool:
