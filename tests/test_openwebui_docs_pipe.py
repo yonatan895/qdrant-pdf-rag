@@ -688,6 +688,42 @@ def test_validated_citations_become_source_events_with_supplied_excerpts():
     assert _final_status(events) == "Source-matched · 2 citations"
 
 
+def test_depth_16_source_events_keep_every_label_and_the_wire_bound():
+    """Issue #1191: at ANSWER_HIT_LIMIT=16 the terminal chunk carries sixteen
+    supplied excerpts, built here by the agent's own packer at 4,000
+    characters each. A cited label 9 or 16 becomes its own source event with
+    its two-digit label; the supplied text of labels past the 48,000-character
+    total is empty (`text_clipped`), so their event shows an empty document.
+    That last row is the current wire bound, recorded for a maintainer
+    decision, not a target."""
+    from mainframe_rag.agent.answer import build_messages
+    from mainframe_rag.agent.tokenizer import FallbackTokenizer
+    from mainframe_rag.config import Settings
+    from tests.fakes import settings_kw
+    from tests.helpers_agent_local import agent_hit
+
+    settings = Settings(**settings_kw(answer_hit_limit=16, retrieve_max_chunks_per_doc=5))
+    hits = []
+    for i in range(1, 17):
+        doc = f"SA22-{(i - 1) // 5:04d}-00"
+        text = (f"Synthetic step {i}. " * 400)[:settings.prompt_max_chunk_chars].strip()
+        hits.append(agent_hit(text, doc, heading="H", page_label=f"1-{i}", chunk_id=f"c{i}",
+                              chunk_type="narrative"))
+    prepared = build_messages("What does the operator do?", hits, tokenizer=FallbackTokenizer(),
+                              settings=settings, max_chunk_chars=settings.prompt_max_chunk_chars)
+    assert len(prepared.supplied) == 16
+    cited = [hits[8].cite, hits[15].cite]
+    meta = _final_meta(citations=cited,
+                       supplied_evidence=[e.model_dump() for e in prepared.supplied])
+    _content, events = run_pipe(FakeAgent(_frames("Answer.", meta=meta)))
+    sources = _sources(events)
+    assert [s["metadata"][0]["name"] for s in sources] == [f"[9] {cited[0]}", f"[16] {cited[1]}"]
+    assert [s["source"]["id"] for s in sources] == ["SA22-0001-00", "SA22-0003-00"]
+    assert sources[0]["document"] == [hits[8].text]
+    assert sources[1]["document"] == [""]
+    assert _final_status(events) == "Source-matched · 2 citations"
+
+
 @pytest.mark.parametrize("citation", [
     "https://evil.example/x, Title, p. 1",
     "HTTP://evil.example/x, Title, p. 1",

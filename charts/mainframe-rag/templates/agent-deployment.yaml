@@ -75,7 +75,7 @@ spec:
               value: {{ index $.Values.models.reasoning $field | toString | quote }}
             {{- end }}
             {{- end }}
-            {{- $chatEnv := dict "chatMaxTurns" "CHAT_MAX_TURNS" "chatMaxPriorTurnChars" "CHAT_MAX_PRIOR_TURN_CHARS" "followupAnchorEnabled" "CHAT_FOLLOWUP_ANCHOR_ENABLED" }}
+            {{- $chatEnv := dict "chatMaxTurns" "CHAT_MAX_TURNS" "chatMaxPriorTurnChars" "CHAT_MAX_PRIOR_TURN_CHARS" "followupAnchorEnabled" "CHAT_FOLLOWUP_ANCHOR_ENABLED" "answerHitLimit" "ANSWER_HIT_LIMIT" "retrieveMaxChunksPerDoc" "RETRIEVE_MAX_CHUNKS_PER_DOC" }}
             {{- range $field, $name := $chatEnv }}
             {{- if hasKey $.Values.models.reasoning $field }}
             - name: {{ $name }}

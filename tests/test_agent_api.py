@@ -141,6 +141,43 @@ def test_answer_validates_citations_and_script(client):
     assert "Citations:" not in body["answer"]
 
 
+@pytest.mark.parametrize("env,depth", [({}, 8), ({"ANSWER_HIT_LIMIT": "16"}, 16)])
+def test_answer_hit_limit_sets_every_answer_retrieval_and_never_search(
+    monkeypatch, synthetic_pdf, servable_representation_gate, env, depth
+):
+    """Issue #1191: ANSWER_HIT_LIMIT (default 8, the former fixed constant)
+    is the hit count of every answer retrieval (/v1/answer, both chat routes,
+    the console and each leg of an anchored follow-up). /v1/search keeps its
+    caller's limit and its own default of 8."""
+    limits: list[tuple[str, int]] = []
+
+    def search(_qdrant, _embedder, _collection, query, *, limit, **_kwargs):
+        limits.append((query, limit))
+        return [_hit()], "nl", {"embed_ms": 1, "qdrant_ms": 2}
+
+    opener, follow_up = "What does IEA500I mean?", "What should the operator do next?"
+    with agent_client(
+        monkeypatch, llm=FakeLLM(), search=search,
+        env={**env, "UI_ENABLED": "true", "CHAT_FOLLOWUP_ANCHOR_ENABLED": "true"},
+    ) as c:
+        for path, payload in (
+            ("/v1/search", {"query": "s1"}),
+            ("/v1/search", {"query": "s2", "limit": 20}),
+            ("/v1/answer", {"query": "a1"}),
+            ("/v1/chat", {"messages": [{"role": "user", "content": "c1"}]}),
+            ("/v1/chat/completions", {"messages": [{"role": "user", "content": "c2"}]}),
+            ("/v1/chat", {"messages": [
+                {"role": "user", "content": opener}, {"role": "assistant", "content": "Earlier."},
+                {"role": "user", "content": follow_up}]}),
+        ):
+            assert c.post(path, json=payload).status_code == 200, path
+        assert c.post("/ui/chat", data={"message": "u1", "messages": ""}).status_code == 200
+    assert limits == [
+        ("s1", 8), ("s2", 20), ("a1", depth), ("c1", depth), ("c2", depth),
+        (follow_up, depth), (opener, depth), ("u1", depth),
+    ]
+
+
 def test_answer_surfaces_inferred_citation_provenance(client, monkeypatch):
     """Issue #269: bracket-only cites stay validated but are flagged, so no
     client or eval has to guess the provenance."""

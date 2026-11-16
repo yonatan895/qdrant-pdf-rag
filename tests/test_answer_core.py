@@ -494,20 +494,22 @@ async def test_anchored_follow_up_fuses_both_legs_by_rank_to_one_retrieval_count
 
 
 @pytest.mark.anyio
-async def test_anchored_fusion_returns_no_more_than_one_retrieval():
-    """Two full legs fuse to one retrieval's hit count (8): the top four of
-    each, alternating; a short leg leaves room for the other's next ranks."""
-    from mainframe_rag.agent.core_ports import RETRIEVAL_HIT_LIMIT
-
-    full_l = [_anchor_hit(f"L{i}", "DOC-L") for i in range(RETRIEVAL_HIT_LIMIT)]
-    full_a = [_anchor_hit(f"A{i}", "DOC-A") for i in range(RETRIEVAL_HIT_LIMIT)]
+@pytest.mark.parametrize("depth", [None, 4, 16])
+async def test_anchored_fusion_returns_no_more_than_one_retrieval(depth):
+    """Two full legs fuse to one retrieval's hit count, `answer_hit_limit`
+    (8 by default, #1191 makes it an operator input): the top half of each,
+    alternating; a short leg leaves room for the other's next ranks."""
+    n = 8 if depth is None else depth
+    full_l = [_anchor_hit(f"L{i}", "DOC-L") for i in range(n)]
+    full_a = [_anchor_hit(f"A{i}", "DOC-A") for i in range(n)]
     source = AnswerCoreInput(query=_FOLLOW_UP, messages=_follow_up_messages(), is_chat=True)
+    overrides = {} if depth is None else {"answer_hit_limit": depth}
     for literal, anchored, want in (
-        (full_l, full_a, [f"{leg}{i}" for i in range(4) for leg in "LA"]),
-        (full_l[:1], full_a, ["L0", *[f"A{i}" for i in range(7)]]),
+        (full_l, full_a, [f"{leg}{i}" for i in range(n // 2) for leg in "LA"]),
+        (full_l[:1], full_a, ["L0", *[f"A{i}" for i in range(n - 1)]]),
         ([], full_a[:2], ["A0", "A1"]),
     ):
-        deps = _deps(_settings(chat_followup_anchor_enabled=True), CoreFakeLLM(),
+        deps = _deps(_settings(chat_followup_anchor_enabled=True, **overrides), CoreFakeLLM(),
                      _LegSearch({_FOLLOW_UP: literal, _OPENER: anchored}))
         found = await retrieve_planned(await plan_search(source, deps), source, deps)
         assert [h.chunk_id for h in found.hits] == want

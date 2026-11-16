@@ -119,6 +119,8 @@
             "condenseEnabled": { "type": "boolean" },
             "chatMaxTurns": { "type": "integer", "minimum": 1, "maximum": 50 },
             "chatMaxPriorTurnChars": { "type": "integer", "minimum": 200, "maximum": 5000 },
+            "answerHitLimit": { "type": "integer", "minimum": 1, "maximum": 32 },
+            "retrieveMaxChunksPerDoc": { "type": "integer", "minimum": 1, "maximum": 10 },
             "followupAnchorEnabled": { "type": "boolean" },
             "maxModelLen": { "type": "integer", "minimum": 512, "maximum": 262144 },
             "reservedOutputTokens": { "type": "integer", "minimum": 128, "maximum": 16384 },

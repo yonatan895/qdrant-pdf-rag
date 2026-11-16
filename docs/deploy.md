@@ -157,8 +157,9 @@ restores the snapshot over whatever the file assigned; empty stays unset
   `LLM_THINKING_RESERVE_TOKENS_SIMPLE` / `COMPLEX`), reasoning efforts
   (`LLM_REASONING_EFFORT_SIMPLE` / `COMPLEX`), `LLM_STREAM` and the chat history
   caps (`CHAT_MAX_TURNS` 1..50, `CHAT_MAX_PRIOR_TURN_CHARS` 200..5000, #1268)
-  follow that same precedence/export path into `models.reasoning` and the
-  rendered agent pod.
+  and the retrieval depth (`ANSWER_HIT_LIMIT` 1..32, `RETRIEVE_MAX_CHUNKS_PER_DOC`
+  1..10, #1191) follow that same precedence/export path into `models.reasoning`
+  and the rendered agent pod.
   `model_config.reasoning_overrides` enforces the existing Settings integer bounds,
   the `low/medium/high/xhigh` effort domain, `LLM_REASONING_EFFORTS` membership
   of both efforts (explicit or default, #748) and strict streaming booleans; chart
@@ -2431,7 +2432,12 @@ the application default, on since #1274. It is exclusive with
 set true, and so would the pod's Settings. An explicit
 `CHAT_CONDENSE_ENABLED=true` with the anchor unset turns the anchor default off,
 so a deployment that condensed before #1274 keeps condensing. Site ablation
-arms: [docs/eval.md](eval.md#at-a-site). Enable condensation deliberately when qualifying pronoun-only
+arms: [docs/eval.md](eval.md#at-a-site). The retrieval depth
+inputs (#1191) `ANSWER_HIT_LIMIT` (hits per answer, chat and console
+retrieval; `/v1/search` keeps its caller's limit) and
+`RETRIEVE_MAX_CHUNKS_PER_DOC` (chunks kept per manual, `/v1/search` included)
+map to `models.reasoning.answerHitLimit` and `retrieveMaxChunksPerDoc`; unset
+renders neither, so the pod keeps 8 and 3. Enable condensation deliberately when qualifying pronoun-only
 console follow-ups; require a grounded answer after the extra reasoning call.
 The local gateway's authenticated `/tokenize` passthrough enforces the per-leg
 key's model allowlist. Use `probe_gateway.py --require-tokenizer --stream

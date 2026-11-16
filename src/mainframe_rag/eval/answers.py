@@ -1033,12 +1033,13 @@ def run_follow_ups(
     return rows
 
 
-def _fetch_pool(client: Any, query: str) -> list[dict[str, Any]] | None:
-    """Sibling /v1/search pool (limit 8, same call the answer retrieval
-    makes). None on any failure: a missing pool is a missing signal, not an
-    empty pool."""
+def _fetch_pool(client: Any, query: str, limit: int = 8) -> list[dict[str, Any]] | None:
+    """Sibling /v1/search pool (the same call the answer retrieval makes, at
+    the deployed `answer_hit_limit`, 8 unless `--hit-limit` declares another,
+    issue #1191). None on any failure: a missing pool is a missing signal,
+    not an empty pool."""
     try:
-        resp = client.post("/v1/search", json={"query": query, "limit": 8})
+        resp = client.post("/v1/search", json={"query": query, "limit": limit})
         if resp.status_code != 200:
             return None
         body = resp.json()
@@ -1098,7 +1099,8 @@ def _chat_answer_data(terminal: dict[str, Any], answer: str) -> dict[str, Any]:
     data: dict[str, Any] = {
         key: terminal[key]
         for key in ("citations", "citations_inferred", "inferred_indices",
-                    "verification_state", "script", "script_review_required")
+                    "verification_state", "script", "script_review_required",
+                    "supplied_evidence")
         if key in terminal
     }
     data["answer"] = answer
@@ -1343,6 +1345,7 @@ def _judge_response(
         if hits is None
         else [str(h.get("doc_id") or "") for h in hits]
     )
+    supplied_n, supplied_doc_n = _supplied_counts(data.get("supplied_evidence"))
     row.update(
         verdict=verdict,
         failures=failures,
@@ -1410,8 +1413,24 @@ def _judge_response(
         # capture handler. Report-only — judge() never reads these.
         budget_verified=signals.get("budget_verified"),
         units_omitted=signals.get("units_omitted"),
+        # Retrieval depth (issue #1191): excerpts the agent supplied to the model
+        # and their distinct manuals, off the response; counts only.
+        supplied_n=supplied_n,
+        supplied_doc_n=supplied_doc_n,
     )
     return row
+
+
+def _supplied_counts(supplied: Any) -> tuple[int | None, int | None]:
+    """(entries, distinct doc ids) of a response's `supplied_evidence`; both
+    None when the field is missing or an entry has no doc id (unknown, never
+    a count)."""
+    if not isinstance(supplied, list) or any(
+        not isinstance(entry, dict) or not isinstance(entry.get("doc_id"), str)
+        for entry in supplied
+    ):
+        return None, None
+    return len(supplied), len({entry["doc_id"] for entry in supplied})
 
 
 _FAILURE_DETAIL_RE = re.compile(r"\([^()]*:[^()]*\)|\[[^\[\]]*\]|'[^']*'")
@@ -1719,6 +1738,8 @@ def export_row(row: dict[str, Any]) -> dict[str, Any]:
         "citation_recall": _number_or_none(row.get("citation_recall")),
         "coverage": row.get("coverage") if row.get("coverage") in COVERAGE_STATES else None,
         "expected_served": _count_or_none(row.get("expected_served")),
+        "supplied_n": _count_or_none(row.get("supplied_n")),
+        "supplied_doc_n": _count_or_none(row.get("supplied_doc_n")),
     }
     if "turn" in row:
         # Two-turn rows only (issue #1268): single-turn rows keep their keys.
@@ -2053,12 +2074,13 @@ def _follow_up_kinds(raw: str) -> tuple[str, ...]:
     return tuple(kind for kind in FOLLOW_UP_KINDS if kind in names)
 
 
-def _prior_cap(raw: str) -> int:
-    # The agent's own bounds for chat_max_prior_turn_chars.
-    field = Settings.model_fields["chat_max_prior_turn_chars"]
+def _setting_bounded(setting: str, label: str, raw: str) -> int:
+    """An operator-declared value of an agent setting, within that setting's
+    own bounds."""
+    field = Settings.model_fields[setting]
     low = next(m.ge for m in field.metadata if hasattr(m, "ge"))
     high = next(m.le for m in field.metadata if hasattr(m, "le"))
-    message = f"prior cap must be an integer from {low} to {high}"
+    message = f"{label} must be an integer from {low} to {high}"
     try:
         value = int(raw)
     except ValueError:
@@ -2066,6 +2088,14 @@ def _prior_cap(raw: str) -> int:
     if not low <= value <= high:
         raise argparse.ArgumentTypeError(message)
     return value
+
+
+def _prior_cap(raw: str) -> int:
+    return _setting_bounded("chat_max_prior_turn_chars", "prior cap", raw)
+
+
+def _hit_limit(raw: str) -> int:
+    return _setting_bounded("answer_hit_limit", "hit limit", raw)
 
 
 def select_subset(entries: list[dict[str, Any]], size: int) -> list[dict[str, Any]]:
@@ -2143,6 +2173,11 @@ def main(argv: list[str] | None = None) -> int:
                              "operator declares it (the agent does not report it); default "
                              f"{Settings.model_fields['chat_max_prior_turn_chars'].default}, the "
                              "agent default (recorded in params)")
+    parser.add_argument("--hit-limit", type=_hit_limit, default=None,
+                        help="the deployed ANSWER_HIT_LIMIT as the operator declares it (the "
+                             "agent does not report it): the sibling /v1/search pool asks for "
+                             "that many hits; default 8, the agent default (recorded in params, "
+                             "issue #1191)")
     args = parser.parse_args(argv)
     if args.stream and args.agent_url is None:
         parser.error("--stream needs --agent-url: the in-process client buffers the response, "
@@ -2266,8 +2301,10 @@ def main(argv: list[str] | None = None) -> int:
                 for row, (_, entry) in zip(results, passes, strict=True):
                     apply_coverage(row, entry, coverage)
         else:
+            pool_limit = (Settings.model_fields["answer_hit_limit"].default
+                          if args.hit_limit is None else args.hit_limit)
             for i, (number, entry) in enumerate(passes, 1):
-                pool = _fetch_pool(client, entry["query"])
+                pool = _fetch_pool(client, entry["query"], pool_limit)
                 frames: list[str] | None = [] if two_turn else None
                 row = run_query(
                     client, entry, signals, pool, temperature=args.temperature,
@@ -2342,6 +2379,8 @@ def main(argv: list[str] | None = None) -> int:
             "datasets": datasets,
         },
     }
+    if args.hit_limit is not None:
+        params["hit_limit"] = args.hit_limit
     if two_turn:
         from mainframe_rag.eval.follow_up import follow_ups_sha256
 
