@@ -570,7 +570,18 @@ checksums **after**.
   `--tmpdir /work/tmp` in `SKOPEO_ARGS` (for example
   `SKOPEO_ARGS="--authfile /work/auth.json --tmpdir /work/tmp"`); `load.sh`
   refuses before the first push unless that directory exists, is writable and
-  has room for the largest member (at least 0.3 GB). A site
+  has room for the largest member (at least 0.3 GB).
+- Bastion load, as run at the site on 2026-11-03 (release 2cd8f67d):
+  - Create every registry repository a release adds (compare its
+    `images.txt` with the registry) and give the push robot Write on it
+    before `airgap:load`; the push of a missing repository fails.
+  - Set `SKOPEO_ARGS` uncommented in `airgap.env`, for example
+    `SKOPEO_ARGS="--dest-cert-dir /work/registry-ca --dest-authfile /run/mfr-session/private/auth.json --tmpdir /work/tmp"`
+    (registry CA, session credential, work tmpdir).
+  - In every new bastion shell, run `. /run/mfr-session/private/env` first.
+  - The bastion and dev kit images have no text editor: prepare
+    `airgap.env` and notes outside and copy them in.
+- A site
   `containers-policy.json` passed with `--policy` that admits only the
   `docker-archive` transport must also admit `oci-archive` (same
   `insecureAcceptAnything` scope: bundle trust is the signed checksum list,
@@ -1979,8 +1990,14 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
    and then the running pod's digest (`check_pod_images`, role `openwebui`), waits for the
    rollout (schema migrations at first start), and verifies the Route.
 4. First admin: a member of an admin role signs in once, creates an API key in Open WebUI, and
-   adds it to the Secret as `admin-api-key`. Re-run `airgap:deploy`. The installer then runs
-   inside the pod with the key on stdin. It refuses a mounted Pipe whose sha256 differs from the
+   adds it to the Secret as `admin-api-key`. Re-run `airgap:deploy`. The pod does not roll when
+   the Pipe ConfigMap changes, and the kubelet refreshes the mounted files about once a minute,
+   so deploy first waits up to 180 s until the mounted Pipe and installer both hash to this
+   release's files. If they still differ, it installs nothing and fails: wait a minute, then
+   re-run. If the files cannot be read in the pod at all (exec refused, pod not running), it
+   fails with kubectl's error instead. A rollback to a release without this wait (2cd8f67d)
+   can still end with the installer's `mounted docs Pipe does not match the repository file`
+   refusal; re-run deploy after a minute. The installer then runs inside the pod with the key on stdin. It refuses a mounted Pipe whose sha256 differs from the
    repository file, sends the key only to the pod's own serving certificate, proves it is an
    admin key on the admin-only Function listing (a refused key, including a non-admin one,
    fails there and nothing is written), creates the Function when the listing lacks it (v0.12.3
