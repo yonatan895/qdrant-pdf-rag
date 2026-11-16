@@ -13,7 +13,7 @@ from fractions import Fraction
 from urllib.parse import urlsplit
 
 REASONING_INTEGER_FIELDS = {
-    "LLM_MAX_MODEL_LEN": ("maxModelLen", 512, 131072),
+    "LLM_MAX_MODEL_LEN": ("maxModelLen", 512, 262144),
     "LLM_RESERVED_OUTPUT_TOKENS": ("reservedOutputTokens", 128, 16384),
     "LLM_THINKING_RESERVE_TOKENS_SIMPLE": ("thinkingReserveTokensSimple", 0, 16384),
     "LLM_THINKING_RESERVE_TOKENS_COMPLEX": ("thinkingReserveTokensComplex", 0, 16384),

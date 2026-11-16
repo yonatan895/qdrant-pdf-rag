@@ -129,6 +129,10 @@ from measured peak usage with both models and Qdrant running. A container limit
 does not reserve host RAM. The [dated audit](deployment-audit-2026-09-20.md)
 records the failed six-worker memory trial; neither a historical one-worker
 figure nor a brief healthy sample establishes full-run fit.
+The protected operator inputs also declare the served reasoning window and
+its budget (`LLM_MAX_MODEL_LEN=4096` with the reserves of the
+[deploy recipe](release-verification.md#deploy-candidate)): the application
+default assumes a 262144-token window (#1274).
 
 From the exact release checkout with protected `AIRGAP_ENV`, the release trust
 anchor `SNEAKERNET_TRUSTED_PUB` exported (live stages refuse without it,

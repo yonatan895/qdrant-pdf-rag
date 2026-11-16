@@ -2392,7 +2392,15 @@ behaviour before #1274.
 | `CHAT_MAX_PRIOR_TURN_CHARS` | 1000 | 4000 | `CHAT_MAX_PRIOR_TURN_CHARS=1000` |
 | `LLM_TOKEN_COUNT_SOURCE` | `tokenize` | `auto` | `LLM_TOKEN_COUNT_SOURCE=tokenize` |
 | `OPENWEBUI_RATINGS_ENABLED` (chart `openwebui.ratings.enabled`) | off (no `airgap.env` key) | follows `FEEDBACK_ENABLED` | `OPENWEBUI_RATINGS_ENABLED=false` |
+| `LLM_MAX_MODEL_LEN` (ceiling 131072 -> 262144) | 32768 | 262144 | the served window, e.g. `LLM_MAX_MODEL_LEN=32768` |
 
+- **Window.** 32768 was the Colab stand-in's window; the production model
+  serves 262144. The default assumes a served window of at least 256k: a
+  site whose model serves less sets `LLM_MAX_MODEL_LEN` to it. Excerpt
+  caps, reserves and the request-size guard are unchanged, so prompts do
+  not grow with the window except a long pasted message, which is kept
+  whole up to the request-size guard instead of being shortened, and
+  `max_tokens` stays the reserve cap (never window minus prompt).
 - **Condensation.** `CHAT_CONDENSE_ENABLED=true` with
   `CHAT_FOLLOWUP_ANCHOR_ENABLED` unset turns the anchoring default off, in the
   pod's Settings; preflight, the mapper and the chart schema write no anchor

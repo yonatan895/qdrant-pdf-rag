@@ -362,15 +362,16 @@ class Settings(BaseSettings):
 
     # Context budgeting via tokenizer accounting:
     # budget = max_model_len - reserved_output_tokens - measured_system_prompt - safety_margin
-    # Must not exceed the served window (#777: 32768 for Qwen3.8-27B; the
-    # model's native 262144 is not served). With a server-verified prompt
+    # Must not exceed the served window. Default 262144 since #1274, the
+    # production model's served window (was 32768, the Colab stand-in's,
+    # #777); a lane or site serving less sets its window. With a server-verified prompt
     # count, the answer reserve plus the path's thinking reserve is also sent
     # as max_tokens, so a runaway generation ends as `length` instead of
     # running to the window (answer_core._output_cap). An estimator-only count
     # sends a cap only when the prompt's byte upper bound plus the reserves
     # fits the window; otherwise it stays uncapped as before.
     # Visible answers reached 2331 tokens in #759, above the old 1536 reserve.
-    llm_max_model_len: int = Field(default=32768, ge=512, le=131072)
+    llm_max_model_len: int = Field(default=262144, ge=512, le=262144)
     llm_reserved_output_tokens: int = Field(default=2560, ge=128, le=16384)
     # Reasoning also consumes completion space. Keep this separate from the
     # answer reserve. xhigh thinking is provisionally priced at 8192 on both

@@ -821,7 +821,8 @@ def test_gate_dia18_shape_runs_uncapped_not_at_the_byte_room(complexity):
     32768 - 29344 - 128 = 3296 and a medium-effort answer the base completed
     uncapped ended as `length` in both passes. With shipped defaults the full
     cap does not fit that room, so no cap is sent, as on the base."""
-    settings = _settings()  # window 32768, margin 128, answer 2560
+    # The 32768 window the gate ran at (the default before #1274), pinned.
+    settings = _settings(llm_max_model_len=32768)  # margin 128, answer 2560
     content = "d" * (29344 - len(b"user") - 8 - 16)
     prepared = _prepared_prompt(content, prompt_tokens=7412)
     assert _prompt_token_upper_bound(prepared.messages) == 29344
@@ -833,6 +834,34 @@ def test_gate_dia18_shape_runs_uncapped_not_at_the_byte_room(complexity):
         else settings.llm_thinking_reserve_tokens_simple
     )
     assert _output_cap(settings, complexity, verified) == settings.llm_reserved_output_tokens + thinking
+
+
+@pytest.mark.parametrize("complexity", ["simple", "complex"])
+@pytest.mark.parametrize("verified", [False, True])
+def test_default_window_cap_never_exceeds_the_window(complexity, verified):
+    """Issue #1274: at the 262144 default window the DIA-18 shape (and any
+    prompt up to the request-size guard's bytes) leaves room for the full cap
+    on the estimator path too, so the cap is the verified path's, never
+    window minus prompt, and byte bound + cap + margin stays inside the
+    window: no request a model serving that window would refuse."""
+    settings = _settings()
+    assert settings.llm_max_model_len == 262144
+    thinking = (settings.llm_thinking_reserve_tokens_complex if complexity == "complex"
+                else settings.llm_thinking_reserve_tokens_simple)
+    full = settings.llm_reserved_output_tokens + thinking
+    # The DIA-18 byte bound, and a whole guard-sized ASCII paste plus 32 KiB
+    # of system prompt and excerpts.
+    for size in (29344, settings.chat_max_body_chars + 32768):
+        prepared = _prepared_prompt("d" * (size - len(b"user") - 8 - 16), verified=verified,
+                                    prompt_tokens=size // 4)
+        cap = _output_cap(settings, complexity, prepared)
+        assert cap == full
+        assert (_prompt_token_upper_bound(prepared.messages) + cap
+                + settings.llm_token_safety_margin <= settings.llm_max_model_len)
+    # The largest reserves the bounds allow still fit a guard-sized prompt.
+    widest = _settings(llm_reserved_output_tokens=16384, llm_thinking_reserve_tokens_complex=16384)
+    prepared = _prepared_prompt("d" * (settings.chat_max_body_chars + 32768), prompt_tokens=1)
+    assert _output_cap(widest, "complex", prepared) == 32768
 
 
 _LONG_PROSE = [ChatMessage(role="user", content="p" * 31000)]
@@ -854,7 +883,7 @@ def test_long_estimator_prompt_runs_uncapped_not_at_the_answer_reserve(messages,
     answer reserve (window - 2 x estimate is negative at these sizes). The
     byte bound leaves less than that floor, so the new rule sends no cap: the
     base behavior, not a smaller generation budget."""
-    settings = _settings()  # shipped defaults: window 32768, answer 2560
+    settings = _settings(llm_max_model_len=32768)  # the review's window (default before #1274)
     prepared = _prepared_prompt(messages, prompt_tokens=estimate)
     assert _output_cap(settings, "simple", prepared) is None
     full = settings.llm_reserved_output_tokens + settings.llm_thinking_reserve_tokens_simple
@@ -872,7 +901,7 @@ def test_default_spaced_hex_prompt_is_not_a_new_cap_refusal():
     uncapped. The new rule sends the full cap only when the prompt's bytes
     leave room for it, so here it sends none and this shape cannot become a
     new 502 because of the cap."""
-    settings = _settings()  # window 32768, answer 2560, thinking 8192
+    settings = _settings(llm_max_model_len=32768)  # the review's window (default before #1274)
     text = "ab12 " * 800  # 4000 characters of spaced hex
     hits = [
         agent_hit(
@@ -2101,7 +2130,9 @@ def test_hex_dump_prompt_fits_the_window_under_a_per_character_count(chars, remo
         def count_messages(self, messages, *, reasoning_effort=None):
             return sum(per_character(m.content) for m in messages)
 
-    settings = _settings()
+    # The cut is the contract here: pinned to the 32768 window the review ran
+    # at (the default before #1274); at 262144 these pastes fit whole (next test).
+    settings = _settings(llm_max_model_len=32768)
     limit = (settings.llm_max_model_len - settings.llm_reserved_output_tokens
              - settings.llm_thinking_reserve_tokens_simple - settings.llm_token_safety_margin)
     message = _hex_paste(chars)
@@ -2128,6 +2159,51 @@ def test_hex_dump_prompt_fits_the_window_under_a_per_character_count(chars, remo
         assert pasted.startswith("Why does the transfer stop at this record?")
         assert message.endswith(pasted[-200:])
         assert 0 < prepared.message_omitted_chars < chars
+        assert prepared.evidence.supplied_count == 8
+
+
+@pytest.mark.parametrize("chars", [40_000, 100_000, 131_072])
+@pytest.mark.parametrize("remote", [False, True])
+def test_guard_sized_paste_fits_the_default_window_whole(chars, remote):
+    """Issue #1274: at the 262144 default window a pasted hex dump up to the
+    request-size guard (chat_max_body_chars) is kept whole, never cut, and
+    the prompt still fits the window minus the reserves when the paste is
+    counted at one token per non-blank character, served count or not; the
+    evidence keeps its place. The guard, not the window, bounds the paste."""
+    from mainframe_rag.agent.answer import build_chat_messages, build_messages
+    from mainframe_rag.agent.tokenizer import FallbackTokenizer, estimate_tokens
+
+    def per_character(text: str) -> int:
+        return sum(1 for ch in text if not ch.isspace())
+
+    class Served(FallbackTokenizer):
+        remote_confirmed = True
+
+        def count_tokens(self, text):
+            return per_character(text)
+
+        def count_messages(self, messages, *, reasoning_effort=None):
+            return sum(per_character(m.content) for m in messages)
+
+    settings = _settings()
+    assert settings.llm_max_model_len == 262144 and chars <= settings.chat_max_body_chars
+    limit = (settings.llm_max_model_len - settings.llm_reserved_output_tokens
+             - settings.llm_thinking_reserve_tokens_simple - settings.llm_token_safety_margin)
+    message = _hex_paste(chars)
+    hits = [_hit().model_copy(update={"chunk_id": f"c{i}"}) for i in range(8)]
+    tokenizer = Served() if remote else FallbackTokenizer()
+    history = [ChatMessage(role="user", content=message)]
+    for prepared in (build_messages(message, hits, tokenizer=tokenizer, settings=settings),
+                     build_chat_messages(history, hits, tokenizer=tokenizer, settings=settings)):
+        prompt = _user_prompt(prepared)
+        assert prepared.message_omitted_chars == 0
+        assert "omitted to fit the model window" not in prompt
+        assert f"Question: {message}" in prompt
+        others = "".join(m.content for m in prepared.messages[:-1]) + prompt.replace(message, "")
+        if remote:
+            assert tokenizer.count_messages(prepared.messages) <= limit
+        else:
+            assert per_character(message) + estimate_tokens(others) <= limit
         assert prepared.evidence.supplied_count == 8
 
 

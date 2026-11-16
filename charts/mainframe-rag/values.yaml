@@ -110,8 +110,10 @@ models:
     model: ""
     # Optional bounded app overrides (#706); absent keys preserve Settings
     # defaults (shown, #777). Explicit zero thinking reserves and stream: false
-    # are retained. maxModelLen must not exceed the served model window.
-    # maxModelLen: 32768
+    # are retained. maxModelLen must not exceed the served model window: the
+    # 262144 default (#1274) assumes the model serves at least that; set the
+    # served window when it serves less.
+    # maxModelLen: 262144
     # reservedOutputTokens: 2560
     # thinkingReserveTokensSimple: 8192
     # thinkingReserveTokensComplex: 8192

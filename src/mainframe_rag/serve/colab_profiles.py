@@ -15,8 +15,8 @@ GENERATOR_MODEL = "Qwen/Qwen3.8-27B"
 GENERATOR_REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
 # Reasoning-server inputs of the measurement protocol (#1195). The defaults
 # are the reference values, so an unparameterised profile is unchanged. The
-# window ceiling is serve.budget.ModelSpec.context_need's and
-# Settings.llm_max_model_len's (131072); a test pins the three in step.
+# window ceiling is serve.budget.ModelSpec.context_need's (131072), within
+# Settings.llm_max_model_len's (262144 since #1274); a test pins both.
 REASONING_DEFAULTS = {"model_id": GENERATOR_MODEL, "revision": GENERATOR_REVISION,
                       "max_model_len": 32768, "reasoning_parser": "qwen3"}
 REASONING_WINDOW_BOUNDS = (4096, 131072)

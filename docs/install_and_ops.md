@@ -568,7 +568,7 @@ default per-leg keys.
 
 | Role | URL key | Model key | Notes |
 |---|---|---|---|
-| Reasoning (answer, chat and console) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. `LLM_MAX_MODEL_LEN` defaults to 32768 and must not exceed the served context: lower it when the platform serves a smaller window, because nothing in the request path can read the served window through the gateway (tokenizer uses the server `/tokenize`, estimator fallback otherwise). Auth: `llm-api-key` from the `GATEWAY_API_KEY_SECRET` Secret (unset = keyless). |
+| Reasoning (answer, chat and console) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. `LLM_MAX_MODEL_LEN` defaults to 262144 (#1274; 32768 before) and must not exceed the served context: set it to the served window when the platform serves less, because nothing in the request path can read the served window through the gateway (tokenizer uses the server `/tokenize`, estimator fallback otherwise). Auth: `llm-api-key` from the `GATEWAY_API_KEY_SECRET` Secret (unset = keyless). |
 | Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (defaults to `GATEWAY_BASE_URL`) | `EMBED_MODEL` + `DENSE_DIM` + `EMBED_MODEL_REVISION` | `DENSE_DIM` is required and fail-closed: it must equal the served native dim (4096 for Qwen3-Embedding-8B). Collections are created at that width; a mismatch against an existing collection refuses with `DimMismatchError`. `EMBED_MODEL_REVISION` is the operator-declared immutable model/config revision (a gateway alias is mutable and a dimension is not an identity): blank/whitespace-only values fail pre-flight and refuse agent/ingest startup, and a revision change requires a deliberate `--reingest` migration. Auth: `embed-api-key` from the same Secret; the ingest Job reads it too. |
 | Rerank (optional, default off) | `RERANK_BASE_URL` (defaults to `GATEWAY_BASE_URL`, no embed fallback) | `RERANK_MODEL` | Served via a vLLM pooling server (`--runner pooling`, `/v1/score`; TEI `/v1/rerank` fallback). Use the platform gateway rerank leg and its model ID; do not configure a direct-backend consumer shortcut. Lifespan logs a loud warning (never a refusal) when the endpoint is unreachable at startup. Auth: `rerank-api-key` from the same Secret. Leg order: run `probe_gateway.py` below to decide — `score_first` whenever the score leg answers (even on a gateway exposing both legs), `rerank_first` only when the score leg is unavailable. |
 
@@ -1529,7 +1529,13 @@ sh scripts/tools/run-task.sh airgap:smoke
   | Characters kept of each prior chat message | 4000 | `CHAT_MAX_PRIOR_TURN_CHARS=1000` |
   | Prompt count source | `auto` | `LLM_TOKEN_COUNT_SOURCE=tokenize` |
   | Open WebUI ratings | on wherever the feedback store is on (`FEEDBACK_ENABLED=true`; the store stays opt-in) | `OPENWEBUI_RATINGS_ENABLED=false` |
+  | Prompt window (`LLM_MAX_MODEL_LEN`) | 262144 (was 32768) | the served window, e.g. `LLM_MAX_MODEL_LEN=32768` |
 
+  - **Window:** the 262144 default assumes the reasoning model serves at
+    least a 256k window. A site whose model serves less must set
+    `LLM_MAX_MODEL_LEN` to its served window (the server's
+    `--max-model-len`) before deploying, or answers that fill the larger
+    budget are refused by the server.
   - `CHAT_CONDENSE_ENABLED=true` with the anchor unset keeps condensing: it
     turns the anchoring default off. Both set true is refused.
   - **Quota:** where the gateway does not serve `/tokenize`, `auto` adds

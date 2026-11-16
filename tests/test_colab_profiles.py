@@ -287,7 +287,12 @@ def test_reasoning_inputs_fail_closed(name, inputs):
         build_profile(name, reasoning=inputs)
 
 
-def test_reasoning_window_ceiling_is_the_budget_and_settings_ceiling():
+def test_reasoning_window_ceiling_is_the_budget_ceiling_within_the_settings_ceiling():
+    """The Colab window ceiling is the budget planner's (131072, what the
+    stand-in hardware can serve). #1274 raised the agent's ceiling to the
+    production window (262144), so every window Colab can serve is one the
+    agent accepts as LLM_MAX_MODEL_LEN (scripts/colab.py pins it to the
+    served window)."""
     from mainframe_rag.config import Settings
     from mainframe_rag.serve.budget import ModelSpec
     from mainframe_rag.serve.colab_profiles import REASONING_WINDOW_BOUNDS
@@ -295,5 +300,5 @@ def test_reasoning_window_ceiling_is_the_budget_and_settings_ceiling():
     def ceiling(field):
         return next(item.le for item in field.metadata if getattr(item, "le", None) is not None)
 
-    assert REASONING_WINDOW_BOUNDS[1] == ceiling(ModelSpec.model_fields["context_need"]) == ceiling(
-        Settings.model_fields["llm_max_model_len"]) == 131072
+    assert REASONING_WINDOW_BOUNDS[1] == ceiling(ModelSpec.model_fields["context_need"]) == 131072
+    assert REASONING_WINDOW_BOUNDS[1] <= ceiling(Settings.model_fields["llm_max_model_len"]) == 262144

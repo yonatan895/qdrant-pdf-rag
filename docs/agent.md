@@ -693,7 +693,9 @@ otherwise multi-step configuration phrasing, comparisons (`versus`, `vs`,
 (`rule, interval, parameter, parmlib, jcl, policy, threshold, journal`)
 select `complex`. Default is `simple`.
 
-- Defaults (#777 sizing for Qwen3.8-27B at a 32768-token window; effort
+- Defaults (#777 sizing for Qwen3.8-27B at a 32768-token window, the
+  Colab stand-in's; since #1274 the window default is the production
+  model's 262144, and the excerpt caps and reserves below are unchanged; effort
   changed to `medium` by #917, maintainer decision 2026-10-23, basis in
   [eval.md](eval.md) and #932): `medium` effort on both paths; complex adds the extended system prompt. Temperature
   0.2 both. Both paths take whole chunks (4000 chars per excerpt, 32000 chars
@@ -1096,7 +1098,7 @@ readers:
 | `answer_timeout_s` | 300.0 | reasoning client wait per model I/O (not a total on a stream; a buffered caller still gets a total), expiry is `504 model_timeout`; no transport retries, explicit fallback policy below; budgets in §6 |
 | `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | medium / medium / 0.2 | answer path (#917, was xhigh / xhigh from #777) |
 | `llm_reasoning_efforts` | `low,medium,xhigh` | served template's effort domain (Qwen3.8): console choices; both efforts above must be members (#748) |
-| `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 32768 / 2560 / 8192 / 128 / 1200 / 5.0 | tokenizer-path budgeting (#298, #777). `llm_max_model_len` must not exceed the served `--max-model-len`. With a server-verified prompt count the reserved output plus the path's thinking reserve is sent as `max_tokens` (prompt + cap stays inside the window minus the margin), so a runaway xhigh generation ends as `finish_reason: length` → `generation_incomplete`; an estimator-only prompt gets the same full cap only when its byte upper bound plus that cap fits, otherwise it runs uncapped as before (never a smaller cap) |
+| `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 262144 (#1274, was 32768; ceiling 262144) / 2560 / 8192 / 128 / 1200 / 5.0 | tokenizer-path budgeting (#298, #777). `llm_max_model_len` must not exceed the served `--max-model-len`. With a server-verified prompt count the reserved output plus the path's thinking reserve is sent as `max_tokens` (prompt + cap stays inside the window minus the margin), so a runaway xhigh generation ends as `finish_reason: length` → `generation_incomplete`; an estimator-only prompt gets the same full cap only when its byte upper bound plus that cap fits, otherwise it runs uncapped as before (never a smaller cap) |
 | `llm_token_count_source` | `auto` (#1274, was `tokenize`) | [token count sources](#token-count-sources) (#1266): `tokenize` (`/tokenize`, else the estimator; the behaviour before #1266), `completion_usage` (a 1-token completion's `usage.prompt_tokens`), `auto` (per count: `/tokenize` until pinned as not served, then completion usage until pinned, else the estimator; a startup check names the source), `estimate` (never ask the server) |
 | `llm_extra_body` / `llm_effort_transport` | empty / `top_level` | [model request arguments](#model-request-arguments) (#1193): one JSON object merged into every chat request by `_chat_body`; how the effort travels (`top_level`, `chat_template`, `none`). Both validated at startup; unset sends the earlier request |
 | `llm_thinking_reserve_tokens_simple` | 8192 | reasoning headroom in single-turn and chat prompt budgets (provisional for xhigh, #777); environment input `LLM_THINKING_RESERVE_TOKENS_SIMPLE` |

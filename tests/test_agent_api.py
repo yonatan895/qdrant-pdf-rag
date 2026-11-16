@@ -2781,6 +2781,9 @@ def test_shortened_message_is_reported_as_a_count_on_every_response(client, monk
 
     monkeypatch.setattr(app_mod, "retrieve_search", MagicMockSearch().search)
     monkeypatch.setattr(app_mod, "llm", Recording())
+    # The paste is cut only past the window share: the 32768 window this ran
+    # at (the default before #1274); at 262144 it is kept whole.
+    monkeypatch.setattr(app_mod.settings, "llm_max_model_len", 32768)
     paste = "\n".join(["Why does the copy step stop here?",
                        *(f"{i:08X} {i:04X}0000 FFFF{i:04X} 0000{i:04X}" for i in range(2500))])
     body = ({"query": paste} if path == "/v1/answer"

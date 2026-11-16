@@ -1396,6 +1396,9 @@ def test_round_trip_a_paste_over_the_window_share_shows_the_fixed_shortened_note
                 yield item
 
     monkeypatch.setattr(app_mod, "llm", Recording())
+    # Cut only past the window share: the 32768 window this ran at (the
+    # default before #1274); at 262144 this paste is kept whole.
+    monkeypatch.setattr(app_mod.settings, "llm_max_model_len", 32768)
     first, last = "The copy step stops and this is the whole listing.", "Why does the copy step stop?"
     paste = "\n".join([first, *(f"{i:08X}  {i:04X}0000 FFFF{i:04X} 0000{i:04X}" for i in range(2500)),
                        last])

@@ -498,6 +498,7 @@ def test_chart_preserves_positive_operator_dimension_and_worker_range():
 
 @pytest.mark.parametrize("field,value,environment", [
     ("maxModelLen", 131072, "LLM_MAX_MODEL_LEN"),
+    ("maxModelLen", 262144, "LLM_MAX_MODEL_LEN"),  # #1274 ceiling
     ("thinkingReserveTokensSimple", 0, "LLM_THINKING_RESERVE_TOKENS_SIMPLE"),
     ("reasoningEfforts", "low,medium,xhigh", "LLM_REASONING_EFFORTS"),
     ("stream", False, "LLM_STREAM"),
@@ -530,6 +531,25 @@ def test_chat_history_limits_are_optional_pod_inputs_bounded_like_settings():
                            ("chatMaxTurns", "chat_max_turns")):
         bounds = {type(m).__name__: m for m in Settings.model_fields[setting].metadata}
         assert (reasoning[field]["minimum"], reasoning[field]["maximum"]) == (bounds["Ge"].ge, bounds["Le"].le)
+
+
+def test_window_bounds_are_the_settings_bounds_everywhere():
+    """Issue #1274: the window default and ceiling are 262144 (the production
+    model's served window); the chart schema and the air-gap mapper accept
+    exactly the Settings range, so a value one accepts the pod accepts."""
+    from scripts.airgap import model_config
+
+    from mainframe_rag.config import Settings
+
+    field = Settings.model_fields["llm_max_model_len"]
+    bounds = {type(m).__name__: m for m in field.metadata}
+    assert field.default == 262144 == bounds["Le"].le and bounds["Ge"].ge == 512
+    schema = json.loads((CHART / "values.schema.json").read_text())
+    window = schema["properties"]["models"]["properties"]["reasoning"]["properties"]["maxModelLen"]
+    assert (window["minimum"], window["maximum"]) == (512, 262144)
+    assert model_config.REASONING_INTEGER_FIELDS["LLM_MAX_MODEL_LEN"] == ("maxModelLen", 512, 262144)
+    # Unset renders no variable: the pod keeps the Settings default.
+    assert "LLM_MAX_MODEL_LEN" not in env_map(run_new_template({})["Deployment", "rag-agent"])
 
 
 def test_direct_chart_refuses_condense_and_anchor_together():
@@ -645,6 +665,7 @@ def test_token_count_source_reaches_the_pod_as_settings_accept_it():
 
 @pytest.mark.parametrize("path,bad", [
     ("models.reasoning.maxModelLen", 511), ("models.reasoning.maxModelLen", "16384"),
+    ("models.reasoning.maxModelLen", 262145),
     ("models.reasoning.reservedOutputTokens", 127),
     ("models.reasoning.thinkingReserveTokensComplex", 16385),
     ("models.reasoning.reasoningEffortSimple", "unsupported"),

@@ -210,7 +210,7 @@ def test_simple_thinking_reserve_loads_from_env(monkeypatch, reserve):
     settings = Settings(_env_file=None)
     assert settings.llm_thinking_reserve_tokens_simple == reserve
     assert settings.llm_thinking_reserve_tokens_complex == 8192
-    assert settings.llm_max_model_len == 32768
+    assert settings.llm_max_model_len == 262144  # #1274, was 32768
 
 
 @pytest.mark.parametrize("reserve", [-1, 16385])
@@ -312,7 +312,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "llm_temperature": 0.2,
     "llm_extra_body": "",
     "llm_effort_transport": "top_level",
-    "llm_max_model_len": 32768,
+    "llm_max_model_len": 262144,  # #1274, was 32768 (the Colab stand-in's window)
     "llm_reserved_output_tokens": 2560,
     "llm_thinking_reserve_tokens_simple": 8192,
     "llm_thinking_reserve_tokens_complex": 8192,
