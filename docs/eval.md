@@ -955,9 +955,10 @@ run D-depth chat --all --repeats 2 --hit-limit 16
 ```
 
 - `ANSWER_HIT_LIMIT=16`: twice today's depth. Under the default
-  32,768-token window and reserves, 16 excerpts at the 4,000-character cap
-  fit the packing budget (about 21,100 tokens after the fixed preamble), so
-  `LLM_MAX_MODEL_LEN` stays at its deployed value and the arm isolates depth.
+  32,768-token window and reserves, the packing budget is about 21,100 tokens
+  after the fixed preamble, so `LLM_MAX_MODEL_LEN` stays at its deployed
+  value and the arm isolates depth (a denser server count trims the tail
+  excerpt, recorded as omitted).
   Scaling the stand-in's 8-hit p95 of about 7,600 prompt tokens gives about
   15,000 at 16, about 7,000 below the verify limit; the worst case at the cap
   is about 19,700 (static estimates, read `prompt_tokens` p95 from the
