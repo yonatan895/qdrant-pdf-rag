@@ -704,9 +704,9 @@ follow-up without its own marker ("now add error handling") is not a coding
 turn. The classifier is deterministic, word-bounded and needs both a coding
 intent and a marker. Intents: producing code (write, generate, create, rewrite,
 convert, refactor; draft, translate or code followed by a determiner, "code"
-never after return/reason/condition/completion/abend/error; "how do I code";
-"I need/want a" followed within two words by the artefact ("a REXX script", never
-"a list of the JCL parameters"); "show/give/provide me a sample/example/template") or repairing
+never after return/reason/condition/completion/abend/error; "how do I code a";
+"I need/want a" followed by the artefact after at most one language word ("a REXX
+script", never "a list of JCL parameters" or "a program product license"); "show/give/provide me a sample/example/template") or repairing
 and reading it (fix, debug; review or correct followed by a determiner;
 "explain this", "what does this", "what's/what is wrong with", "why does my").
 With pasted code-shaped lines (a `//name JOB|EXEC|DD|PROC` line or a `/* REXX`

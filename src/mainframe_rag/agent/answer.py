@@ -523,12 +523,15 @@ _CODING_PRODUCE_RE = re.compile(
     # "code" after return/reason/condition/completion/abend/error is a noun.
     + r"|\b(?<!return\s)(?<!reason\s)(?<!condition\s)(?<!completion\s)(?<!abend\s)(?<!error\s)"
     + r"(?:" + "|".join(_PRODUCE_VERBS_BEFORE_OBJECT) + r")\s+(?:me\s+|up\s+)?" + _DETERMINER
-    + r"|\bhow\s+(?:do|can|should|would)\s+(?:i|we|you)\s+code\b"
-    # "I need a REXX script", never "I need a list of the JCL parameters":
-    # the wanted thing itself is the artefact, within two words.
-    + r"|\b(?:i|we)\s+(?:need|want)\s+(?:a|an|some)\s+(?:[\w/-]+\s+){0,2}"
-    r"(?:program|programs|routine|subroutine|script|scripts|exec|execs|jcl|job|proc|procs"
+    + r"|\bhow\s+(?:do|can|should|would)\s+(?:i|we|you)\s+code\s+(?:a|an)\b"
+    # "I need a REXX script", never "I need a list of JCL parameters" or "a
+    # program product license": the wanted thing itself is the artefact, after
+    # at most one language word.
+    + r"|\b(?:i|we)\s+(?:need|want)\s+(?:a|an|some)\s+"
+    r"(?:(?:jcl|rexx|hlasm|assembler|clist|c|batch|new|simple|small)\s+)?"
+    r"(?:program|programs|routine|subroutine|script|scripts|exec|execs|job|jobs|proc|procs"
     r"|macro|macros|clist|jobstream|csect)\b"
+    r"(?!\s+(?:product|license|permission|authority|name|class|log|check|statement|parameter)s?\b)"
     + r"|\b(?:show|give|provide|send)\s+(?:me\s+|us\s+)?(?:(?:a|an|some)\s+)?"
     r"(?:sample|example|skeleton|template)s?\b",
 )

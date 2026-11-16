@@ -1698,6 +1698,12 @@ NON_CODING_REQUESTS = [
     "I need a list of the JCL DD parameters",
     "We need an explanation of IEF453I JCL ERROR",
     "I want a summary of the REXX EXECIO command",
+    "I need a list of JCL parameters",
+    "I want a JCL reference manual",
+    "We want a program product license for HLASM",
+    "I need an exec permission on USS",
+    # "how do I code" a parameter is a syntax lookup; "code a" macro is not.
+    "How do I code DSNTYPE=LIBRARY in JCL?",
     # A fenced console message is not code: the message-id rule holds.
     "Why do I get this?\n```\nIEF453I MYJOB - JOB FAILED - JCL ERROR\n```",
 ]
