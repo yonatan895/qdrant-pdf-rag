@@ -344,7 +344,11 @@ class ChatResult(BaseModel):
 class Tokenizer(Protocol):
     """Token counting for context budgeting. Implementations: VllmTokenizer
     (one /tokenize RPC per call — reserve it for whole-prompt verification,
-    never per-chunk counting) and FallbackTokenizer (in-process estimator)."""
+    never per-chunk counting), CompletionUsageTokenizer (#1266: one 1-token
+    chat completion per `count_messages`, estimator-only `count_tokens`; it
+    also takes the request's `temperature`, declared by
+    `counts_request_temperature`) and FallbackTokenizer (in-process
+    estimator). LLM_TOKEN_COUNT_SOURCE selects one (agent.tokenizer)."""
 
     def count_tokens(self, text: str) -> int: ...
 

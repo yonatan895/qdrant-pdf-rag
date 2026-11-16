@@ -129,6 +129,10 @@ models:
     #   chat_template_kwargs:
     #     enable_thinking: true
     # effortTransport: top_level
+    # Where the verified prompt count comes from (#1266;
+    # docs/agent.md#token-count-sources): tokenize (default), completion_usage,
+    # auto or estimate.
+    # tokenCountSource: tokenize
   rerank:
     enabled: false
     baseUrl: ""

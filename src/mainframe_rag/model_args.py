@@ -8,6 +8,11 @@ request (`answer._chat_body`) and the `/tokenize` count
 (`tokenizer.VllmTokenizer`), so the count renders the template the generation
 renders. A later named profile can carry its own instance.
 
+`chat_request_body` is the one builder of chat-completion bodies: the
+generation (`answer._chat_body`) and the completion-usage count
+(`tokenizer.CompletionUsageTokenizer`, #1266) both call it, so the counted
+body can differ from the sent one only in `max_tokens` and the streaming flags.
+
 Validation is startup-only (`config.Settings`) and fails closed: a setting
 that would override a field the application owns never reaches a request.
 Messages name fields, never supplied values.
@@ -150,3 +155,35 @@ class ModelRequestArgs:
 
 
 DEFAULT_MODEL_REQUEST_ARGS = ModelRequestArgs()
+
+
+def chat_request_body(
+    model: str,
+    serialized: list[dict[str, Any]],
+    reasoning_effort: str | None,
+    temperature: float | None,
+    *,
+    stream: bool,
+    max_tokens: int | None = None,
+    args: ModelRequestArgs = DEFAULT_MODEL_REQUEST_ARGS,
+) -> dict[str, Any]:
+    """Single builder for chat-completion request bodies: model + messages,
+    optional reasoning_effort/temperature/max_tokens, the configured model
+    request arguments (#1193: the effort transport and the extra body fields,
+    validated at startup so they cannot replace a field built here), and the
+    streaming flags (stream + usage ask). Every chat path (achat, chat_stream,
+    _chat_sync, stream and fallback legs) and the completion-usage count
+    (#1266) funnel through here so a request-shape change cannot diverge
+    copies. With default `args` the body is byte-identical to the pre-#1193
+    one."""
+    body: dict[str, Any] = {"model": model, "messages": serialized}
+    body.update(args.effort_fields(reasoning_effort))
+    if temperature is not None:
+        body["temperature"] = temperature
+    if max_tokens is not None:
+        body["max_tokens"] = max_tokens
+    body.update(args.extra_fields(reasoning_effort))
+    if stream:
+        body["stream"] = True
+        body["stream_options"] = {"include_usage": True}
+    return body
