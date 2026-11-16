@@ -110,7 +110,9 @@ SIGNING_ENTRY_POINTS = (
 # regenerate: python3 -m tests.helpers_signing_closure (upstream checkout).
 SIGNING_CLOSURE = (
     'LICENSE', 'airgap.env.example', 'charts/mainframe-rag/files/openwebui/docs_pipe.py',
+    'charts/mainframe-rag/files/openwebui/prompts.json',
     'charts/mainframe-rag/files/openwebui/provision_pipe.py',
+    'charts/mainframe-rag/files/openwebui/provision_prompts.py',
     'charts/mainframe-rag/files/openwebui/rating_action.py',
     'charts/mainframe-rag/values.yaml', 'deploy/workspace/bastion.template.yaml', 'docs/adr/0009-gap-fork.md',
     'docs/runbooks/devkit-windows.md', 'images.txt', 'images/Containerfile.devkit',

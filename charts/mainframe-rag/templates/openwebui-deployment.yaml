@@ -192,6 +192,13 @@ spec:
               value: "false"
             - name: USER_PERMISSIONS_WORKSPACE_TOOLS_ACCESS
               value: "false"
+            # Shared prompts are repository-owned (#1255): v0.12.3 lets a user
+            # create a prompt with either permission (stored XSS through prompts
+            # was CVE-2025-64495). Users still use the shared `/` commands.
+            - name: USER_PERMISSIONS_WORKSPACE_PROMPTS_ACCESS
+              value: "false"
+            - name: USER_PERMISSIONS_WORKSPACE_PROMPTS_IMPORT
+              value: "false"
             - name: USER_PERMISSIONS_FEATURES_MEMORIES
               value: "false"
             - name: USER_PERMISSIONS_FEATURES_WEB_SEARCH
@@ -342,10 +349,11 @@ spec:
               value: {{ $o.oidc.allowedRoles | quote }}
             - name: OAUTH_ADMIN_ROLES
               value: {{ $o.oidc.adminRoles | quote }}
-            # The Pipe installer needs one admin API key (docs/deploy.md). Narrowest
-            # setting: keys exist, users cannot create them (permission off, admins
-            # bypass it), and a key is honoured only on /api/v1/functions. Pending
-            # trial qualification (#1073 run 2).
+            # The Pipe and shared-prompt installers need one admin API key
+            # (docs/deploy.md). Narrowest setting: keys exist, users cannot create
+            # them (permission off, admins bypass it), and a key is honoured only on
+            # /api/v1/functions and /api/v1/prompts (#1255). Pending trial
+            # qualification (#1073 run 2).
             - name: ENABLE_API_KEYS
               value: "true"
             - name: USER_PERMISSIONS_FEATURES_API_KEYS
@@ -353,7 +361,7 @@ spec:
             - name: ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS
               value: "true"
             - name: API_KEYS_ALLOWED_ENDPOINTS
-              value: /api/v1/functions
+              value: /api/v1/functions,/api/v1/prompts
             - name: OAUTH_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:

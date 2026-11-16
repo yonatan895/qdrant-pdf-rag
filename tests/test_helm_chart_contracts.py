@@ -1187,6 +1187,7 @@ OWUI_ENV_NAMES = {
     "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION", "USER_PERMISSIONS_FEATURES_MEMORIES",
     "USER_PERMISSIONS_FEATURES_NOTES", "USER_PERMISSIONS_FEATURES_WEB_SEARCH",
     "USER_PERMISSIONS_WORKSPACE_KNOWLEDGE_ACCESS", "USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS",
+    "USER_PERMISSIONS_WORKSPACE_PROMPTS_ACCESS", "USER_PERMISSIONS_WORKSPACE_PROMPTS_IMPORT",
     "USER_PERMISSIONS_WORKSPACE_TOOLS_ACCESS", "UVICORN_WORKERS", "VECTOR_DB", "WEBUI_AUTH",
     "WEBUI_SECRET_KEY", "WEBUI_URL", "WHISPER_MODEL_AUTO_UPDATE",
 }
@@ -1432,7 +1433,12 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         "CORS_ALLOW_ORIGIN": "https://docs.apps.example.internal",
         "ENABLE_API_KEYS": "true", "USER_PERMISSIONS_FEATURES_API_KEYS": "false",
         "ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS": "true",
-        "API_KEYS_ALLOWED_ENDPOINTS": "/api/v1/functions",
+        # The installers' APIs only: the docs Pipe and the shared prompts (#1255).
+        "API_KEYS_ALLOWED_ENDPOINTS": "/api/v1/functions,/api/v1/prompts",
+        # Shared prompts are repository-owned (#1255): users cannot create or
+        # import one (v0.12.3 create accepts either permission; CVE-2025-64495).
+        "USER_PERMISSIONS_WORKSPACE_PROMPTS_ACCESS": "false",
+        "USER_PERMISSIONS_WORKSPACE_PROMPTS_IMPORT": "false",
     }.items():
         assert plain.get(key) == value, key
     assert "PGVECTOR_DB_URL" not in env and "OPENAI_API_KEY" not in env
@@ -1697,11 +1703,16 @@ def test_openwebui_pipe_configmap_carries_the_repository_files_and_their_hashes(
     cm = _owui(owui_chart)["ConfigMap", "rag-openwebui-pipe"]
     installer = (CHART / "files" / "openwebui" / "provision_pipe.py").read_text(encoding="utf-8")
     purge = (CHART / "files" / "openwebui" / "purge_chats.py").read_text(encoding="utf-8")
-    assert cm['data'] == {'docs_pipe.py': OWUI_PIPE, 'provision_pipe.py': installer, 'purge_chats.py': purge}
+    shared = (CHART / "files" / "openwebui" / "prompts.json").read_text(encoding="utf-8")
+    prompts_installer = (CHART / "files" / "openwebui" / "provision_prompts.py").read_text(encoding="utf-8")
+    assert cm['data'] == {'docs_pipe.py': OWUI_PIPE, 'provision_pipe.py': installer, 'purge_chats.py': purge,
+                          'prompts.json': shared, 'provision_prompts.py': prompts_installer}
     assert cm["metadata"]["annotations"] == {
         "mainframe-rag/docs-pipe-sha256": hashlib.sha256(OWUI_PIPE.encode()).hexdigest(),
         "mainframe-rag/provision-pipe-sha256": hashlib.sha256(installer.encode()).hexdigest(),
         "mainframe-rag/purge-chats-sha256": hashlib.sha256(purge.encode()).hexdigest(),
+        "mainframe-rag/shared-prompts-sha256": hashlib.sha256(shared.encode()).hexdigest(),
+        "mainframe-rag/provision-prompts-sha256": hashlib.sha256(prompts_installer.encode()).hexdigest(),
     }
 
 
@@ -1786,17 +1797,67 @@ def _allow_regexes():
     conf = _proxy_conf()
     block = re.search(r"map \$uri \$owui_allowed \{(.*?)\n    \}", conf, re.DOTALL).group(1)
     entries = re.findall(r"^\s*~(\S+)\s+1;\s*$", block, re.MULTILINE)
-    assert re.search(r"^\s*default\s+0;\s*$", block, re.MULTILINE), "deny must be the default"
+    # Anything the Route list does not admit falls to the installer map, whose
+    # own default is deny (#1255): deny stays the default for every client.
+    assert re.search(r"^\s*default\s+\$owui_installer_allowed;\s*$", block, re.MULTILINE), \
+        "unlisted paths must fall to the loopback installer map"
     assert entries, "no allow-list entries"
     return [re.compile(e) for e in entries]
 
 
+def _installer_regexes():
+    import re
+    conf = _proxy_conf()
+    block = re.search(r'map "\$remote_addr \$uri" \$owui_installer_allowed \{(.*?)\n    \}',
+                      conf, re.DOTALL).group(1)
+    lines = [line.strip() for line in block.strip().splitlines() if line.strip() and
+             not line.strip().startswith("#")]
+    assert lines[0] == "default 0;", "deny must be the installer map's default"
+    entries = [re.fullmatch(r'"~(\^127\\\.0\\\.0\\\.1 /\S+)" 1;', line) for line in lines[1:]]
+    assert entries and all(entries), "every installer entry is anchored on the loopback source"
+    return [re.compile(m.group(1)) for m in entries]
+
+
+def _proxy_admits(remote, uri):
+    """nginx's decision: the Route allow-list, else the loopback installer map."""
+    return (any(r.search(uri) for r in _allow_regexes())
+            or any(r.search(f"{remote} {uri}") for r in _installer_regexes()))
+
+
+ROUTE_PEER = "10.128.2.17"  # the OpenShift router; never a loopback source
+PROMPT_ID = "0b6f9a52-3c1d-4e8f-9a7b-2d4c6e8f0a1b"
+INSTALLER_PROMPT_PATHS = [
+    "/api/v1/prompts/list", "/api/v1/prompts/create", f"/api/v1/prompts/id/{PROMPT_ID}/update",
+    f"/api/v1/prompts/id/{PROMPT_ID}/toggle", f"/api/v1/prompts/id/{PROMPT_ID}/delete",
+]
+NEVER_PROMPT_PATHS = [
+    "/api/v1/prompts/tags", f"/api/v1/prompts/id/{PROMPT_ID}", f"/api/v1/prompts/id/{PROMPT_ID}/history",
+    f"/api/v1/prompts/id/{PROMPT_ID}/access/update", f"/api/v1/prompts/id/{PROMPT_ID}/update/meta",
+    f"/api/v1/prompts/id/{PROMPT_ID}/update/version", "/api/v1/prompts/id/x/update",
+    "/api/v1/prompts/create/x", "/api/v1/prompts/listx", "/api/v1/prompts//create",
+]
+
+
 def test_openwebui_proxy_allow_list_admits_exactly_the_pilot_paths():
-    rules = _allow_regexes()
-    for path in ALLOWED_PATHS:
-        assert any(r.search(path) for r in rules), path
-    for path in DENIED_PATHS:
-        assert not any(r.search(path) for r in rules), path
+    for remote in (ROUTE_PEER, "127.0.0.1"):
+        for path in ALLOWED_PATHS:
+            assert _proxy_admits(remote, path), (remote, path)
+        for path in DENIED_PATHS + NEVER_PROMPT_PATHS:
+            assert not _proxy_admits(remote, path), (remote, path)
+
+
+def test_openwebui_proxy_admits_the_prompt_writes_only_from_the_pod_loopback():
+    """#1255: the chat `/` menu reads only GET /api/v1/prompts/ (already listed).
+    The shared-prompt installer runs in the pod and connects from 127.0.0.1; its
+    list/create/update/toggle/delete calls are admitted for that source only, so
+    no Route client (users or the admin UI) reaches a prompt write."""
+    assert _proxy_admits(ROUTE_PEER, "/api/v1/prompts/")
+    for path in INSTALLER_PROMPT_PATHS:
+        assert _proxy_admits("127.0.0.1", path), path
+        for remote in (ROUTE_PEER, "127.0.0.2", "10.0.0.1"):
+            assert not _proxy_admits(remote, path), (remote, path)
+    # The source is a prefix of the decided string: a path cannot carry it.
+    assert not _proxy_admits(ROUTE_PEER, "/x 127.0.0.1 /api/v1/prompts/create")
 
 
 def test_openwebui_proxy_config_matches_the_decoded_uri_and_forwards_the_original_uri():

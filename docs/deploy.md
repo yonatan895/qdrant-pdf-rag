@@ -2121,7 +2121,8 @@ for p in /api/v1/files/ /api/v1/files /API/v1/files/ //api/v1/files/ /api/v1/./f
          /api/v1/%66iles/ /api/v1%2Ffiles/ /api/v1/files%2F /%61pi/v1/files/ \
          /api/v1/chats/%2e%2e/files/ /api/v1/%2566iles/ /api/v1/files%00 \
          /api/v1/retrieval/process/text /api/v1/knowledge/ /api/v1/audio/transcriptions \
-         /openai/chat/completions /ollama/api/chat /api/v1/utils/code/execute; do
+         /openai/chat/completions /ollama/api/chat /api/v1/utils/code/execute \
+         /api/v1/prompts/create /api/v1/prompts/list; do
   printf '%s ' "$p"; curl -sk -o /dev/null -w '%{http_code}\n' -X POST -b "$C" "https://$H$p"
 done
 ```
@@ -2137,12 +2138,30 @@ curl checks above; and (5) re-run a browser trace of the pilot flows (sign-in, c
 pages, Pipe install) to catch a path the UI newly needs. A UI error on a denied path is the
 signal to decide, not to widen the list by default.
 
-**Admin API key (installer).** The Pipe installer needs one admin key. The chart sets
-`ENABLE_API_KEYS=true`, `USER_PERMISSIONS_FEATURES_API_KEYS=false` (users cannot create keys;
-admins bypass the permission) and `ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS=true` with
-`API_KEYS_ALLOWED_ENDPOINTS=/api/v1/functions`, so a key works only on the Functions API.
-Rotate or delete the key after an install if you prefer: `deploy.sh` prints the explicit
-not-done notice without it. The settings are pending #1073 run-2 qualification.
+**Admin API key (installer).** The Pipe and shared-prompt installers need one admin key. The
+chart sets `ENABLE_API_KEYS=true`, `USER_PERMISSIONS_FEATURES_API_KEYS=false` (users cannot
+create keys; admins bypass the permission) and `ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS=true` with
+`API_KEYS_ALLOWED_ENDPOINTS=/api/v1/functions,/api/v1/prompts`, so a key works only on the
+Functions and Prompts APIs. Rotate or delete the key after an install if you prefer: `deploy.sh`
+prints the explicit not-done notices without it. The settings are pending #1073 run-2
+qualification.
+
+**Shared prompts (#1255).** The chat `/` commands are repository-owned templates in
+`charts/mainframe-rag/files/openwebui/prompts.json` (`{"prompts": [{"command", "name",
+"content"}]}`; commands are lowercase words joined by hyphens, plain text only). To change them,
+edit the file and re-run `airgap:deploy`; an empty list removes them all. After the docs Pipe,
+deploy runs `provision_prompts.py` in the pod with the admin key on stdin and the repository
+hashes of the file and of itself. It refuses a mounted copy that is not this release's (the
+ConfigMap mount can trail the release by a minute: wait, then re-run) and an invalid file, proves
+the key on the admin-only Function listing, and then converges: it creates, updates and removes
+the prompts it manages (marked in their metadata) and never writes any other prompt. A
+repository command held by a prompt it does not manage fails the deploy before any write. Every
+signed-in user gets read access only. Users cannot create or import prompts
+(`USER_PERMISSIONS_WORKSPACE_PROMPTS_ACCESS` and `_IMPORT` are pinned to `false`; stored XSS
+through prompts was CVE-2025-64495). The proxy admits the installer's prompt calls only from the
+pod's loopback (ADR-0007 E1), so the Route reaches no prompt write and the admin workspace
+cannot edit them either. The listing shows users the installing admin as the owner. Without the
+admin key deploy prints `shared prompts NOT provisioned`.
 
 **Requirements.** The Route API (OpenShift; deploy refuses the front end without it) and an
 enforcing CNI. The Kind lanes do not enable the front end yet: an e2e run with it enabled needs

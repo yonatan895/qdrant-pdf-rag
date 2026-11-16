@@ -178,6 +178,8 @@ ALLOWED = [
     "/s/3f2a", "/api/v1/chats/share/3f2a",
     "/api/chat/actions/mainframe_rag_rating.up", "/api/chat/actions/mainframe_rag_rating.down",
     "/api/chat/actions/mainframe_rag_rating%2Edown",
+    # The chat `/` menu's shared prompts (#1255).
+    "/api/v1/prompts/",
     # Encoded spellings of ALLOWED paths still work, and are forwarded unchanged.
     "/api/v1/ch%61ts/list", "/api/v1%2Fchats/list", "/api/v1/chats/a%20b?x=1%2F2",
     # Merged slashes: nginx decides on the merged path; the raw line is forwarded.
@@ -203,6 +205,11 @@ BLOCKED_OTHER = [
     "/api/chat/actions/community_x.up", "/api/chat/%61ctions/community_x", "/api/chat/actions/",
     "/api/chat/actions/mainframe_rag_rating", "/api/chat/actions/mainframe_rag_rating%2Esideways",
     "/api/chat/actions/mainframe_rag_rating.up%2Fx",
+    # Prompt writes are the in-pod installer's, admitted from 127.0.0.1 only (#1255);
+    # this client is not loopback.
+    "/api/v1/prompts/create", "/api/v1/prompts/list", "/api/v1/prompts/%63reate",
+    "/api/v1/prompts/id/0b6f9a52-3c1d-4e8f-9a7b-2d4c6e8f0a1b/update",
+    "/api/v1/prompts/id/0b6f9a52-3c1d-4e8f-9a7b-2d4c6e8f0a1b/delete",
 ]
 
 

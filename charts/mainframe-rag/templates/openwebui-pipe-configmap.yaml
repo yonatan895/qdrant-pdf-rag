@@ -5,7 +5,9 @@ ConfigMap with their sha256 recorded in annotations. deploy.sh runs the
 installer inside the Open WebUI pod, which refuses a mounted Pipe whose hash
 differs from the repository file and verifies the stored Function content by
 hash after the install. Community Functions are never installed. The same
-ConfigMap carries the chat retention purge run by the chat-purge sidecar.
+ConfigMap carries the chat retention purge run by the chat-purge sidecar, and
+the repository's shared prompt templates with their installer (#1255), which
+deploy.sh runs the same way: both files are hash-checked against the release.
 With openwebui.ratings.enabled it also carries the rating Action (#1255); the
 installer installs it only when it is mounted (its hash is the installer's
 ACTION_SHA256) and removes it when it is not.
@@ -16,6 +18,8 @@ ACTION_SHA256) and removes it when it is not.
 {{- $purge := .Files.Get "files/openwebui/purge_chats.py" }}
 {{- $ratings := (.Values.openwebui.ratings | default dict).enabled }}
 {{- $action := .Files.Get "files/openwebui/rating_action.py" }}
+{{- $prompts := .Files.Get "files/openwebui/prompts.json" }}
+{{- $promptsInstaller := .Files.Get "files/openwebui/provision_prompts.py" }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -30,6 +34,8 @@ metadata:
     {{- if $ratings }}
     mainframe-rag/rating-action-sha256: {{ sha256sum $action | quote }}
     {{- end }}
+    mainframe-rag/shared-prompts-sha256: {{ sha256sum $prompts | quote }}
+    mainframe-rag/provision-prompts-sha256: {{ sha256sum $promptsInstaller | quote }}
 data:
   docs_pipe.py: {{ $pipe | quote }}
   provision_pipe.py: {{ $installer | quote }}
@@ -37,4 +43,6 @@ data:
   {{- if $ratings }}
   rating_action.py: {{ $action | quote }}
   {{- end }}
+  prompts.json: {{ $prompts | quote }}
+  provision_prompts.py: {{ $promptsInstaller | quote }}
 {{- end }}

@@ -1,0 +1,24 @@
+{
+  "prompts": [
+    {
+      "command": "explain-message",
+      "name": "Explain a message",
+      "content": "Explain this message: what it means, the likely cause, and what to check first. Cite the documentation for each point.\n\nMessage: "
+    },
+    {
+      "command": "how-to",
+      "name": "Step-by-step task",
+      "content": "Give step-by-step instructions for this task, prerequisites first. Cite the documentation for each step.\n\nTask: "
+    },
+    {
+      "command": "syntax",
+      "name": "Command syntax",
+      "content": "Show the syntax of this command or statement, with its parameters and a short example. Cite the documentation.\n\nCommand: "
+    },
+    {
+      "command": "define",
+      "name": "Define a term",
+      "content": "Define this term or keyword and say where the documentation describes it.\n\nTerm: "
+    }
+  ]
+}
