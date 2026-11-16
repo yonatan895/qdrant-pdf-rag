@@ -192,6 +192,19 @@ def test_chat_bounds_are_enforced():
         Settings(_env_file=None, chat_max_prior_turn_chars=6000)
 
 
+@pytest.mark.parametrize("field,low,high", [
+    ("answer_hit_limit", 1, 32), ("retrieve_max_chunks_per_doc", 1, 10),
+])
+def test_answer_depth_bounds_are_enforced(field, low, high):
+    """Issue #1191: the answer depth operator inputs accept exactly their
+    documented range (the air-gap mapper and chart schema mirror it)."""
+    for value in (low, high):
+        assert getattr(Settings(_env_file=None, **{field: value}), field) == value
+    for value in (low - 1, high + 1):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, **{field: value})
+
+
 def test_bearer_auth_headers_matrix():
     """Single auth helper for every model leg: unset/empty/whitespace-only
     keys yield no header (never `Bearer None`); a pasted key is stripped."""
@@ -306,6 +319,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "rrf_sparse_boost_table": 1.0,
     "retrieve_max_chunks_per_page": 1,
     "retrieve_max_chunks_per_doc": 3,
+    "answer_hit_limit": 8,  # #1191: the former RETRIEVAL_HIT_LIMIT constant
     "llm_reasoning_effort_simple": "medium",  # #917, was xhigh (#777)
     "llm_reasoning_effort_complex": "medium",
     "llm_reasoning_efforts": "low,medium,xhigh",

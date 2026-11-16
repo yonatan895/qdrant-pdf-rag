@@ -20,6 +20,9 @@ REASONING_INTEGER_FIELDS = {
     # Chat history caps (#1268): prior turns kept, characters kept per prior turn.
     "CHAT_MAX_TURNS": ("chatMaxTurns", 1, 50),
     "CHAT_MAX_PRIOR_TURN_CHARS": ("chatMaxPriorTurnChars", 200, 5000),
+    # Answer retrieval depth (#1191): hits per answer, chunks kept per manual.
+    "ANSWER_HIT_LIMIT": ("answerHitLimit", 1, 32),
+    "RETRIEVE_MAX_CHUNKS_PER_DOC": ("retrieveMaxChunksPerDoc", 1, 10),
 }
 REASONING_EFFORT_FIELDS = {
     "LLM_REASONING_EFFORT_SIMPLE": "reasoningEffortSimple",

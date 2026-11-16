@@ -343,11 +343,14 @@ def test_refused_model_request_arguments_stop_the_deploy_before_helm(tree):
     assert not (root / "dist/agent-rendered.yaml").exists()
 
 
-# Chat follow-up operator inputs (#1268): selected vs a conflicting alternate.
+# Chat follow-up (#1268) and answer depth (#1191) operator inputs: selected vs
+# a conflicting alternate.
 _CHAT_FOLLOWUP_SELECTED = {"CHAT_MAX_PRIOR_TURN_CHARS": "4000", "CHAT_MAX_TURNS": "12",
-                           "CHAT_FOLLOWUP_ANCHOR_ENABLED": "true"}
+                           "CHAT_FOLLOWUP_ANCHOR_ENABLED": "true",
+                           "ANSWER_HIT_LIMIT": "16", "RETRIEVE_MAX_CHUNKS_PER_DOC": "5"}
 _CHAT_FOLLOWUP_ALTERNATE = {"CHAT_MAX_PRIOR_TURN_CHARS": "200", "CHAT_MAX_TURNS": "1",
-                            "CHAT_FOLLOWUP_ANCHOR_ENABLED": "false"}
+                            "CHAT_FOLLOWUP_ANCHOR_ENABLED": "false",
+                            "ANSWER_HIT_LIMIT": "1", "RETRIEVE_MAX_CHUNKS_PER_DOC": "1"}
 
 
 @pytest.mark.parametrize("source", ["file", "environment"])
