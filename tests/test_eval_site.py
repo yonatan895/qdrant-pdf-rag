@@ -757,6 +757,7 @@ def test_turn_two_signals_come_from_supplied_evidence_not_the_search_pool(site_e
         assert rows[(row_id, 2)]["gold_retrieved"] is None
     second = report["metrics"]["by_turn"]["2"]
     assert (second["evidence_n"], second["evidence_gold_hit"]) == (2, 1)
+    assert (second["citation_precision_n"], second["citation_precision_mean"]) == (2, 0.5)
     assert second["vs_opener"] == {"kept": 0, "lost": 1, "gained": 1, "neither": 0, "unknown": 0}
     exported = {(r["id"], r["turn"]): r for r in json.loads(export)["rows"]}
     assert exported[("LOST", 2)]["evidence_gold_hit"] is False

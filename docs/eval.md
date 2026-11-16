@@ -740,16 +740,19 @@ dataset sha256 match across all sessions.
 **What may leave the gap.** Only the `*.export.json` files and a receipt: the
 old and candidate commit SHAs, the agent image digests, the model name and the
 non-secret `LLM_*` and `REQUEST_*` values. Review each export before it
-leaves; this prints 0 when no golden question appears in it (a doc_number
-question that is itself part of a doc id is skipped, since doc ids may leave):
+leaves; this prints 0 when no golden question and no follow-up question
+appears in it (a doc_number question that is itself part of a doc id is
+skipped, since doc ids may leave):
 
 ```sh
-python3 - "$WS/evals/golden.jsonl" A1-answer.export.json <<'PY'
+PYTHONPATH="$WS/src" python3 - "$WS/evals/golden.jsonl" A1-answer.export.json <<'PY'
 import json, sys
+from mainframe_rag.eval.follow_up import DEFAULT_FOLLOW_UP, FOLLOW_UPS
 rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
 ids = " ".join(d for row in rows for d in row.get("expected_doc_ids") or [])
 text = open(sys.argv[2]).read()
-print(sum(row["query"] in text and row["query"] not in ids for row in rows))
+asked = [row["query"] for row in rows] + [*FOLLOW_UPS.values(), DEFAULT_FOLLOW_UP]
+print(sum(query in text and query not in ids for query in asked))
 PY
 ```
 
@@ -790,7 +793,9 @@ seams the evaluator drives (`Pipe._transport`, `build_request`, `fit_request`,
   `chat_max_prior_turn_chars`, which is not an operator input) and, with
   `--repeats`, the spread per repeat. An opener that errored gives a turn-2
   error row (`opener not answered`), and a Pipe that cannot build the history
-  gives `follow-up history failed`; both are counted, not dropped.
+  gives `follow-up history failed`; both are counted, not dropped. The exit
+  code covers both turns: 1 when any row of either turn fails or errors, even
+  when the turn-1 blocks report no failure.
 - Export rows gain `turn`, `prior_answer_chars` and the `evidence_*` fields;
   params gain `turns`, `arm`, `follow_ups_sha256` and `pipe_sha256`. Without
   `--turns 2` neither the export nor the report changes.

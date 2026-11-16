@@ -567,6 +567,9 @@ def _turn_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
     hit = sum(1 for r in known if r["evidence_gold_hit"])
     recall = [r.get("evidence_citation_recall") for r in judged
               if r.get("evidence_citation_recall") is not None]
+    # Precision has no value on a row without citations: its own denominator.
+    precision = [r.get("evidence_citation_precision") for r in judged
+                 if r.get("evidence_citation_precision") is not None]
     labels: Counter = Counter()
     for r in rows:
         labels.update(export_failure_label(str(f)) for f in r.get("failures") or [])
@@ -583,7 +586,8 @@ def _turn_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "by_verification_state": dict(sorted(Counter(
             str(r.get("verification_state") or "unknown") for r in judged).items())),
         "citation_n": len(recall),
-        "citation_precision_mean": _mean([r.get("evidence_citation_precision") for r in judged]),
+        "citation_precision_n": len(precision),
+        "citation_precision_mean": _mean(precision),
         "citation_recall_mean": _mean(recall),
         "pass": passed,
         "pass_rate": round(passed / len(judged), 4) if judged else None,
@@ -1590,7 +1594,8 @@ def _turn_lines(metrics: dict[str, Any]) -> list[str]:
     lines = ["## By turn (follow-up sessions; the metrics above cover turn 1 only)", "",
              "| metric | turn 1 | turn 2 |", "|---|---|---|"]
     for name in ("n", "errors", "evidence_n", "evidence_gold_hit", "evidence_gold_hit_rate",
-                 "zero_hits", "false_refusals", "citation_n", "citation_precision_mean",
+                 "zero_hits", "false_refusals", "citation_n", "citation_precision_n",
+                 "citation_precision_mean",
                  "citation_recall_mean", "pass", "pass_rate"):
         lines.append(f"| {name} | {first[name]} | {second[name]} |")
     states = sorted({*first["by_verification_state"], *second["by_verification_state"]})
