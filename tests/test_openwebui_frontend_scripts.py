@@ -659,6 +659,35 @@ def _seed_shares(conn):
     ])
 
 
+def test_purge_scrubs_an_aged_snapshot_when_nothing_else_is_deleted(tmp_path):
+    """S2 (#1273 review S1): an aged share snapshot of a live chat, deleted
+    alone, arms the scrub. While a reader pins the WAL the run fails and the
+    scrub stays owed; once it can run, the snapshot text is gone from every
+    file on the claim and the next run converges."""
+    old = NOW - 31 * DAY
+    data, db, conn = _db(tmp_path)
+    conn.execute(SHARED_CHAT_DDL)
+    conn.execute("INSERT INTO chat VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 ("live", "u1", "t", json.dumps({"m": "LIVE-TEXT"}), old, NOW - DAY, "tok-aged"))
+    conn.execute("INSERT INTO shared_chat VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 ("tok-aged", "live", "u1", "snap", json.dumps({"m": CANARY_SNAPSHOT}), old, old))
+    reader = sqlite3.connect(db, isolation_level=None)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM chat").fetchone()
+    with pytest.raises(purge.PurgeError, match="^checkpoint-busy$"):
+        purge.purge(db, data, 30, NOW, busy_timeout_s=0.05)
+    assert (data / purge.PENDING_NAME).exists()
+    reader.execute("ROLLBACK")
+    reader.close()
+    assert conn.execute("SELECT count(*) FROM shared_chat").fetchone() == (0,)
+    assert purge.purge(db, data, 30, NOW) == {"chats": 0, "snapshots": 0, "linked_rows": 0,
+                                              "files": 0, "orphans": 0, "folders": 0}
+    conn.close()
+    assert not (data / purge.PENDING_NAME).exists()
+    for path in data.iterdir():
+        if path.is_file():
+            assert CANARY_SNAPSHOT.encode() not in path.read_bytes(), path.name
+
 def test_purge_removes_v0123_share_snapshots_of_purged_chats_and_aged_snapshots(tmp_path):
     """S2: a share snapshot goes with its purged chat AND when the snapshot
     itself is older than the window, even while its chat lives on. The live
