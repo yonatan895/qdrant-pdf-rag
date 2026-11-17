@@ -954,9 +954,9 @@ def test_depth_16_by_5_packs_every_excerpt_under_the_default_window(chat, comple
     under the default 32,768-token window and reserves, sixteen excerpts at
     the 4,000-character cap (the worst case) are all packed whole, in label
     order 1..16, inside the verify limit; a two-digit label is cited like any
-    other. The supplied-evidence projection keeps every entry but its 48,000
-    total character bound empties the text of the last four."""
-    from mainframe_rag.agent.answer import SUPPLIED_EVIDENCE_MAX_CHARS
+    other. The supplied-evidence projection keeps every entry with its whole
+    text: the total bound scales with the hit limit (maintainer decision
+    2026-11-17), so no cited excerpt at 16 hits loses its text."""
     from mainframe_rag.config import Settings
 
     settings = Settings(**settings_kw(answer_hit_limit=16, retrieve_max_chunks_per_doc=5))
@@ -990,10 +990,38 @@ def test_depth_16_by_5_packs_every_excerpt_under_the_default_window(chat, comple
     assert parsed.citations == [hits[15].cite, hits[8].cite]
     supplied = prepared.supplied
     assert [s.index for s in supplied] == list(range(1, 17))
-    full = SUPPLIED_EVIDENCE_MAX_CHARS // chunk
-    assert full == 12
-    assert all(len(s.text) == chunk and not s.text_clipped for s in supplied[:full])
-    assert all(s.text == "" and s.text_clipped for s in supplied[full:])
+    assert all(len(s.text) == chunk and not s.text_clipped for s in supplied)
+    assert sum(len(s.text) for s in supplied) == 16 * chunk == 64000
+
+
+@pytest.mark.parametrize(("hit_limit", "total"), [
+    (1, 48000), (8, 48000), (9, 54000), (16, 96000), (32, 192000)])
+def test_supplied_evidence_total_scales_with_the_hit_limit(hit_limit, total):
+    """Maintainer decision 2026-11-17 (#1191): the supplied-evidence text
+    total is max(48000, 6000 x answer_hit_limit); 48,000 up to 8 hits."""
+    from mainframe_rag.agent.answer import supplied_evidence_max_chars
+
+    assert supplied_evidence_max_chars(hit_limit) == total
+
+
+@pytest.mark.parametrize(("hit_limit", "kept_whole"), [(8, 6), (16, 12)])
+def test_the_projection_total_follows_the_bound_hit_limit(hit_limit, kept_whole):
+    """The bound comes from the request's Settings: with 8,000-character
+    excerpts, 48,000 keeps six whole at a hit limit of 8 and 96,000 keeps
+    twelve at 16; past the total every entry stays, its text empty and
+    flagged."""
+    from mainframe_rag.agent.answer import SUPPLIED_EXCERPT_MAX_CHARS
+    from mainframe_rag.config import Settings
+
+    settings = Settings(**settings_kw(answer_hit_limit=hit_limit, llm_max_model_len=131072))
+    hits = _depth_hits(16, 5, SUPPLIED_EXCERPT_MAX_CHARS)
+    prepared = build_messages("What does the operator do?", hits, tokenizer=FallbackTokenizer(),
+                              settings=settings, max_chunk_chars=SUPPLIED_EXCERPT_MAX_CHARS)
+    supplied = prepared.supplied
+    assert [s.index for s in supplied] == list(range(1, 17))
+    assert all(len(s.text) == SUPPLIED_EXCERPT_MAX_CHARS and not s.text_clipped
+               for s in supplied[:kept_whole])
+    assert all(s.text == "" and s.text_clipped for s in supplied[kept_whole:])
 
 
 class _DenseTokenizer:
