@@ -2026,15 +2026,21 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
 <a id="owui-answer-depth"></a>
 **Answer depth (#1255).** The docs Pipe is an Open WebUI manifold: one Function whose entries
 v0.12.3 lists as the models `mainframe_rag_docs.standard` "Rosetta", `mainframe_rag_docs.quick`
-"Rosetta – quick" (`low`) and `mainframe_rag_docs.thorough` "Rosetta – thorough" (`xhigh`; maintainer
-decision 2026-11-16). Each sends the agent the effort its entry maps to
-([Pipe contract](agent.md#openwebui-docs-pipe)); the default entry sends none, so it answers
-exactly as the single model did. `DEFAULT_MODELS` (chart, fixed) selects the default entry for new
+"Rosetta – quick" and `mainframe_rag_docs.thorough` "Rosetta – thorough" (maintainer decision
+2026-11-16). Each sends the agent its symbolic depth (#1289), and the agent resolves it from its
+own `LLM_REASONING_EFFORTS` ([Pipe contract](agent.md#openwebui-docs-pipe)): quick is the lowest
+offered effort, thorough the highest (`high` with `low,medium,high`, `xhigh` once the platform
+offers it, with no repackage), and the default entry the configured simple/complex effort, so it
+answers exactly as the single model did. The Pipe and the agent ship together: an agent older
+than #1289 refuses a depth as `invalid_request` (the Pipe's fixed text), so upgrade both in one
+deploy. `DEFAULT_MODELS` (chart, fixed) selects the default entry for new
 chats. Upgrading from the single model:
 
 - The model id `mainframe_rag_docs` is gone; its grant row stays in the database unused. Open
   WebUI shows a model only with its own read grant, so ordinary users see **no** Rosetta model
-  until an admin grants each entry (step 5). Grant all three entries right after the deploy (maintainer decision 2026-11-16).
+  until an admin grants each entry (step 5). Grant all three entries right after the deploy (maintainer decision 2026-11-16),
+  whatever `LLM_REASONING_EFFORTS` offers, a site without `xhigh` included: since #1289 every
+  entry answers at an offered effort.
 - A chat started before the upgrade still names `mainframe_rag_docs`. Once the user is granted
   the entries (previous item), v0.12.3 drops on opening it a model id it does not list and
   selects `DEFAULT_MODELS` (`Chat.svelte` `loadChat`; source reading, not yet observed live), so
@@ -2045,11 +2051,9 @@ chats. Upgrading from the single model:
   not found". The dev acceptance check `legacy-chat-answers` covers the server side
   ([checks](openwebui-dev.md)); the browser's switch is part of the pilot browser trace.
 - Every entry shares the Pipe's `TIMEOUT_S` and the agent's request deadline (270 s, sized at
-  medium effort). A thorough (`xhigh`) answer may end as the fixed deadline text. Thorough is
+  medium effort). A thorough answer (the highest offered effort) may end as the fixed deadline text. Thorough is
   granted and visible from the upgrade on; the site eval measures how often it hits the deadline
-  afterwards (maintainer decision 2026-11-16). A site whose
-  `LLM_REASONING_EFFORTS` lacks an entry's effort shows a fixed "does not offer this answer depth"
-  text for it.
+  afterwards (maintainer decision 2026-11-16).
 
 **Retention (ADR-0007 S2).** The window is `OPENWEBUI_RETENTION_DAYS` (`openwebui.retentionDays`),
 default **30 days** (maintainer decision 2026-10-24). An explicit null fails the render.
