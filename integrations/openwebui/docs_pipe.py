@@ -147,7 +147,7 @@ SCRIPT_REVIEW = "Human review required — draft script, not certified executabl
 # (RAG_ANSWER_REFERENCE=true) a completed answer ends with this line carrying
 # the agent's request id (its chunk id is `chatcmpl-<id>`). The rating Action
 # (rating_action.py) reads it back with the same pattern; a test pins the two.
-# The wording is a proposal (maintainer decision, #1255).
+# The visible line and its wording: maintainer decision 2026-11-16 (#1255).
 REFERENCE_ENV = "RAG_ANSWER_REFERENCE"
 REFERENCE_LINE = "\n\nAnswer reference: `{request_id}`"
 REFERENCE_RE = re.compile(r"\n\nAnswer reference: `([0-9a-f]{12})`[ \t\r\n]*\Z")

@@ -1510,8 +1510,10 @@ sh scripts/tools/run-task.sh airgap:smoke
   does not match the repository file` has finished everything except the
   Pipe install: wait about a minute, then re-run `airgap:deploy`. Releases
   that include #1253 wait up to 180 s automatically and, if the mount is
-  still stale, end with `the Open WebUI pod still mounts a docs Pipe or
-  installer that differs from this release`; the remedy is the same. A
+  still stale, end with `the Open WebUI pod still mounts docs Pipe or
+  shared-prompt files that differ from this release` (releases before #1259
+  said `a docs Pipe or installer that differs`); the remedy is the same. The
+  wait covers the docs Pipe, the shared prompts and both installers. A
   rollback to 2cd8f67d does not wait.
 - **Before deploy:** take step 1's snapshot (the only protection against a
   forced re-ingest if data is ever damaged), keep A's workspace and

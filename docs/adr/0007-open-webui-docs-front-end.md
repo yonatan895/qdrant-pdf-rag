@@ -223,11 +223,14 @@ Pipe is provisioned and the admin role is limited to the team.
   grants. With no grant, a folder and its chats stay visible to the owner
   only (and to admins, S3). **Stale folders are purged** (#1255, maintainer
   decision 2026-11-16). A folder goes when three things hold after the
-  run's chat deletions. Its own `updated_at` is older than the window (a
-  NULL age counts as stale, as for a share snapshot). No row of any table
-  names it in `folder_id` (`chat` in v0.12.3, also `automation`). No folder
-  names it as `parent_id`. Leaves go first and the run repeats until none
-  is left, so a stale nested chain goes in one run. Deleted folders count
+  run's chat deletions. Its own `updated_at` is known and older than the
+  window: a folder of unknown age (NULL) is never purged, as in the chat
+  and file purges (maintainer decision 2026-11-16, F-b). No row of any
+  table names it in `folder_id`: `chat` in v0.12.3, and also `automation`,
+  so a folder an automation names stays (maintainer decision 2026-11-16,
+  F-a). No folder names it as `parent_id`. Leaves go first and the run
+  repeats until none is left, so a stale nested chain goes in one run.
+  Deleted folders count
   as `folders` and arm the same scrub. In v0.12.3, renaming, editing
   settings, moving, expanding or collapsing a folder refreshes its age;
   filing or removing a chat does not. A folder in use, and each of its

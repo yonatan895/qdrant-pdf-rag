@@ -2000,8 +2000,8 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
 4. First admin: a member of an admin role signs in once, creates an API key in Open WebUI, and
    adds it to the Secret as `admin-api-key`. Re-run `airgap:deploy`. The pod does not roll when
    the Pipe ConfigMap changes, and the kubelet refreshes the mounted files about once a minute,
-   so deploy first waits up to 180 s until the mounted Pipe and installer both hash to this
-   release's files. If they still differ, it installs nothing and fails: wait a minute, then
+   so deploy first waits up to 180 s until the mounted Pipe, shared prompts (`prompts.json`) and
+   both installers hash to this release's files. If they still differ, it installs nothing and fails: wait a minute, then
    re-run. If the files cannot be read in the pod at all (exec refused, pod not running), it
    fails with kubectl's error instead. A rollback to a release without this wait (2cd8f67d)
    can still end with the installer's `mounted docs Pipe does not match the repository file`
@@ -2032,7 +2032,7 @@ chats. Upgrading from the single model:
 
 - The model id `mainframe_rag_docs` is gone; its grant row stays in the database unused. Open
   WebUI shows a model only with its own read grant, so ordinary users see **no** Rosetta model
-  until an admin grants each entry (step 5). Grant all entries in the same change window.
+  until an admin grants each entry (step 5). Grant all three entries right after the deploy (maintainer decision 2026-11-16).
 - A chat started before the upgrade still names `mainframe_rag_docs`. Once the user is granted
   the entries (previous item), v0.12.3 drops on opening it a model id it does not list and
   selects `DEFAULT_MODELS` (`Chat.svelte` `loadChat`; source reading, not yet observed live), so
@@ -2043,8 +2043,9 @@ chats. Upgrading from the single model:
   not found". The dev acceptance check `legacy-chat-answers` covers the server side
   ([checks](openwebui-dev.md)); the browser's switch is part of the pilot browser trace.
 - Every entry shares the Pipe's `TIMEOUT_S` and the agent's request deadline (270 s, sized at
-  medium effort). A thorough (`xhigh`) answer may end as the fixed deadline text: measure that
-  in the site eval before users are told about thorough. A site whose
+  medium effort). A thorough (`xhigh`) answer may end as the fixed deadline text. Thorough is
+  granted and visible from the upgrade on; the site eval measures how often it hits the deadline
+  afterwards (maintainer decision 2026-11-16). A site whose
   `LLM_REASONING_EFFORTS` lacks an entry's effort shows a fixed "does not offer this answer depth"
   text for it.
 
@@ -2066,8 +2067,10 @@ default **30 days** (maintainer decision 2026-10-24). An explicit null fails the
   the enterprise, and their retention follows the same window: at most 30 days plus one backup
   cycle.
 - Stale chat folders (#1255) go in the same transaction: a folder last updated before the window
-  (or of unknown age) that, after the run's chat deletions, no chat or other row names in
-  `folder_id` and no folder names as its parent. Nested stale folders go in the same run, leaves
+  that, after the run's chat deletions, no chat or other row (an automation, for example) names in
+  `folder_id` and no folder names as its parent. A folder of unknown age (NULL `updated_at`) is
+  never purged, as the chat and file age rules never select a row of unknown age (maintainer
+  decision 2026-11-16). Nested stale folders go in the same run, leaves
   first, counted as `folders`. Renaming, moving, expanding or collapsing a folder refreshes its
   age; filing a chat in it does not. A folder in use, and its ancestors, keep their name, system
   prompt text, icon and background image (ADR-0007 S2).
