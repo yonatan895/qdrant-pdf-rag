@@ -1,7 +1,7 @@
 # Sourced (POSIX sh), never executed. One owner for the local 8 GB vLLM lane's
 # reasoning budget (#777).
 #
-# The application defaults are sized for Qwen3.8-27B at a 32768-token window;
+# The application defaults assume a 262144-token window (#1274);
 # the local lane serves 4096. Unless the caller declares the served window
 # (LLM_MAX_MODEL_LEN, as the Colab lane does), pin this lane's budget for every
 # key left unset, so no local tool prices a 32k prompt against a 4k server.

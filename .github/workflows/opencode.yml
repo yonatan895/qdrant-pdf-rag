@@ -240,6 +240,7 @@ jobs:
             QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=review-corpus \
               EMBED_MODE=hash ALLOW_HASH_MODE=true \
               LLM_BASE_URL=http://127.0.0.1:8001/v1 LLM_MODEL_REASONING=mock-reasoning \
+              LLM_MAX_MODEL_LEN=32768 \
               OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 \
               LLM_STREAM=true PYTHONUNBUFFERED=1 \
               nohup python3 -m uvicorn mainframe_rag.agent.app:app \

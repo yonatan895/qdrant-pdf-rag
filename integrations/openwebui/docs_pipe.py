@@ -77,6 +77,12 @@ DEFAULT_MAX_BODY_CHARS = 131072  # the agent's Settings.chat_max_body_chars defa
 TOO_LONG = ("This message is longer than the documentation service accepts "
             "({limit} characters). Shorten it and retry.")
 NO_EXCERPT = "Excerpt text is not available in this response."
+# House best-practice guides (#1276) are AI-drafted documents whose doc ids
+# start with this prefix (HOUSE-AI-DRAFT-<topic>, later HOUSE-REVIEWED-<topic>):
+# a naming convention of the corpus, not vendor parsing. A validated citation
+# of one is named in its source entry and in the accepted banner.
+HOUSE_DOC_PREFIX = "HOUSE-"
+HOUSE_NOTE = "house guidance"
 TASK_REPLY = "Docs question"
 
 # Answer depths (#1255): the manifold entries Open WebUI shows as models,
@@ -147,7 +153,7 @@ SCRIPT_REVIEW = "Human review required — draft script, not certified executabl
 # (RAG_ANSWER_REFERENCE=true) a completed answer ends with this line carrying
 # the agent's request id (its chunk id is `chatcmpl-<id>`). The rating Action
 # (rating_action.py) reads it back with the same pattern; a test pins the two.
-# The wording is a proposal (maintainer decision, #1255).
+# The visible line and its wording: maintainer decision 2026-11-16 (#1255).
 REFERENCE_ENV = "RAG_ANSWER_REFERENCE"
 REFERENCE_LINE = "\n\nAnswer reference: `{request_id}`"
 REFERENCE_RE = re.compile(r"\n\nAnswer reference: `([0-9a-f]{12})`[ \t\r\n]*\Z")
@@ -277,12 +283,16 @@ def _source_events(final: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(citations, list):
         return []
     supplied = [e for e in final.get("supplied_evidence") or [] if isinstance(e, dict)]
-    label = "inferred, not grounding" if final.get("citations_inferred") is True else "source-matched"
+    base = "inferred, not grounding" if final.get("citations_inferred") is True else "source-matched"
+    # The house mark rides only the accepted banner's condition, like the banner.
+    mark_house = _source_matched(final)
     events: list[dict[str, Any]] = []
     for citation in citations:
         if not isinstance(citation, str):
             continue
         matches = [e for e in supplied if e.get("citation") == citation]
+        house = mark_house and any(_is_house(e) for e in matches)
+        label = f"{base}, {HOUSE_NOTE}" if house else base
         documents = [str(e.get("text", "")) for e in matches] or [NO_EXCERPT]
         metadata: list[dict[str, Any]] = [
             {"source": _plain(citation), "name": f"[{e.get('index')}] {_plain(citation)}",
@@ -291,8 +301,9 @@ def _source_events(final: dict[str, Any]) -> list[dict[str, Any]]:
             for e in matches
         ] or [{"source": _plain(citation), "name": _plain(citation), "label": label}]
         doc_id = matches[0].get("doc_id") if matches else None
+        name = _plain(citation)
         events.append({"type": "source", "data": {
-            "source": {"name": _plain(citation),
+            "source": {"name": f"{name} ({HOUSE_NOTE})" if house else name,
                        "id": _plain(doc_id if isinstance(doc_id, str) else citation)},
             "document": documents,
             "metadata": metadata,
@@ -300,13 +311,32 @@ def _source_events(final: dict[str, Any]) -> list[dict[str, Any]]:
     return events
 
 
+def _is_house(excerpt: dict[str, Any]) -> bool:
+    doc_id = excerpt.get("doc_id")
+    return isinstance(doc_id, str) and doc_id.startswith(HOUSE_DOC_PREFIX)
+
+
+def _cites_house(final: dict[str, Any], citations: list[Any]) -> bool:
+    """A validated citation names a supplied excerpt of a house guide."""
+    supplied = [e for e in final.get("supplied_evidence") or [] if isinstance(e, dict)]
+    return any(_is_house(e) and e.get("citation") in citations for e in supplied)
+
+
+def _source_matched(final: dict[str, Any]) -> bool:
+    """`accepted` with explicit (non-inferred) validated citations."""
+    citations = final.get("citations")
+    return (final.get("verification_state") == "accepted" and isinstance(citations, list)
+            and bool(citations) and final.get("citations_inferred") is not True)
+
+
 def _status_text(final: dict[str, Any]) -> str:
     """The fixed verification banner for a completed answer."""
     state = final.get("verification_state")
     citations = final.get("citations")
     count = len(citations) if isinstance(citations, list) else 0
-    if state == "accepted" and count and final.get("citations_inferred") is not True:
-        parts = [f"Source-matched · {count} citation" + ("" if count == 1 else "s")]
+    if _source_matched(final) and isinstance(citations, list):
+        parts = [f"Source-matched · {count} citation" + ("" if count == 1 else "s")
+                 + (f" (incl. {HOUSE_NOTE})" if _cites_house(final, citations) else "")]
     else:
         parts = [STATE_LABELS.get(state, UNKNOWN_STATE) if isinstance(state, str)
                  else UNKNOWN_STATE]

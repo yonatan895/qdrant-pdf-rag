@@ -261,6 +261,8 @@ def _spawn_agent(
         "ALLOW_HASH_MODE": "true",
         "LLM_BASE_URL": f"{mock_url}/v1",
         "LLM_MODEL_REASONING": "mock-reasoning",
+        # The window this lane ran at before #1274 raised the default.
+        "LLM_MAX_MODEL_LEN": "32768",
         "LLM_STREAM": "true",
         "PYTHONUNBUFFERED": "1",
         # The spawned agent runs this checkout, never an editable install

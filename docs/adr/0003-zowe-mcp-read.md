@@ -81,7 +81,7 @@
     registry and no tool name is a mutating verb; the agent HTTP surface has no
     PUT/PATCH/DELETE, its POST set is exactly the query routes plus the two
     console rating routes and the UI-agnostic rating route `/v1/feedback`
-    (#1255, proposed; the same bounded rating, posted by Open WebUI's
+    (#1255, accepted 2026-11-16; the same bounded rating, posted by Open WebUI's
     repository rating Action) (amendment, ADR-0005: with answer feedback enabled,
     the rating routes forward a bounded rating and the answer, chat and console
     routes (never `/v1/search`) send one answer record with question and answer

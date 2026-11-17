@@ -229,6 +229,8 @@ def _agent(
     monkeypatch.setenv("QDRANT_COLLECTION", collection)
     monkeypatch.setenv("LLM_BASE_URL", f"{mock_url}/v1")
     monkeypatch.setenv("LLM_MODEL_REASONING", "mock-reasoning")
+    # The window this lane ran at before #1274 raised the default.
+    monkeypatch.setenv("LLM_MAX_MODEL_LEN", "32768")
     if embed == "hash":
         monkeypatch.setenv("EMBED_MODE", "hash")
         monkeypatch.setenv("ALLOW_HASH_MODE", "true")

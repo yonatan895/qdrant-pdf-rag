@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from mainframe_rag.agent.answer_core import AnswerCoreDeps
-from mainframe_rag.agent.core_ports import RETRIEVAL_HIT_LIMIT, RetrievalResult
+from mainframe_rag.agent.core_ports import RetrievalResult
 from mainframe_rag.agent.model_adapter import ModelAdapter
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import (
@@ -44,13 +44,16 @@ class AgentResources:
 
     async def retrieve(
         self, query: str, *, product: str | None, version: str | None,
-        settings: Settings, limit: int = RETRIEVAL_HIT_LIMIT,
+        settings: Settings, limit: int | None = None,
     ) -> RetrievalResult:
         """The one retrieval wiring for /v1/search, /v1/answer, /v1/chat and the
-        console. `settings` carries the validated physical collection."""
+        console. `settings` carries the validated physical collection; without
+        an explicit `limit` (only /v1/search passes its caller's) the hit count
+        is the operator's `answer_hit_limit` (#1191)."""
         hits, kind, timings = await maybe_await(self.search(
             self.qdrant, self.embedder, settings.qdrant_collection, query,
-            product=product, version=version, limit=limit, settings=settings,
+            product=product, version=version,
+            limit=settings.answer_hit_limit if limit is None else limit, settings=settings,
             reranker=self.reranker,
         ))
         return RetrievalResult(hits, kind, timings)

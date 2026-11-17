@@ -90,7 +90,10 @@ Pipe is provisioned and the admin role is limited to the team.
   `__request__` or any `__user__`-style parameter it does not use; a test
   inspects its `pipe()` signature. A new parameter is a recorded decision.
   *(Amended, #1255; maintainer decision 2026-11-16.)* With
-  `openwebui.ratings.enabled` (default off), the repository Function set is the
+  ratings on (`openwebui.ratings.enabled`; off by default until #1274, which
+  turned it on wherever the feedback store is on, maintainer decision
+  2026-11-16; an explicit false or `OPENWEBUI_RATINGS_ENABLED=false` keeps it
+  off), the repository Function set is the
   docs Pipe plus the repository rating Action (`rating_action.py`): two message
   buttons that post a rating to the agent's `/v1/feedback` (ADR-0005). Each
   Function is hash-checked. The Pipe's expected hash comes from the deploy
@@ -223,11 +226,14 @@ Pipe is provisioned and the admin role is limited to the team.
   grants. With no grant, a folder and its chats stay visible to the owner
   only (and to admins, S3). **Stale folders are purged** (#1255, maintainer
   decision 2026-11-16). A folder goes when three things hold after the
-  run's chat deletions. Its own `updated_at` is older than the window (a
-  NULL age counts as stale, as for a share snapshot). No row of any table
-  names it in `folder_id` (`chat` in v0.12.3, also `automation`). No folder
-  names it as `parent_id`. Leaves go first and the run repeats until none
-  is left, so a stale nested chain goes in one run. Deleted folders count
+  run's chat deletions. Its own `updated_at` is known and older than the
+  window: a folder of unknown age (NULL) is never purged, as in the chat
+  and file purges (maintainer decision 2026-11-16, F-b). No row of any
+  table names it in `folder_id`: `chat` in v0.12.3, and also `automation`,
+  so a folder an automation names stays (maintainer decision 2026-11-16,
+  F-a). No folder names it as `parent_id`. Leaves go first and the run
+  repeats until none is left, so a stale nested chain goes in one run.
+  Deleted folders count
   as `folders` and arm the same scrub. In v0.12.3, renaming, editing
   settings, moving, expanding or collapsing a folder refreshes its age;
   filing or removing a chat does not. A folder in use, and each of its

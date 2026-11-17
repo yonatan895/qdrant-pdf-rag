@@ -555,7 +555,7 @@ Create the env file. No key values go in it. It selects the one-node 1/1/1
 collection policy and pins a non-root id for the bundled OpenObserve (OpenShift
 assigns one). It also declares the 4096-token window the local reasoning model
 serves, with the `scripts/local_lane_budget.sh` pins the operator path carries (7
-of its 12): the application defaults assume 32768, so without these keys every
+of its 12): the application defaults assume a 262144 window (#1274), so without these keys every
 answer requests more output tokens than the server accepts and fails as 502. Its
 prompt-size pins have no operator path and are not needed, because serving packs
 prompts by token budget. Open WebUI stays on, its default; the next block adds
