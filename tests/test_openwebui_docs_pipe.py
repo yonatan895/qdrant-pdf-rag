@@ -688,6 +688,42 @@ def test_validated_citations_become_source_events_with_supplied_excerpts():
     assert _final_status(events) == "Source-matched · 2 citations"
 
 
+def test_depth_16_source_events_keep_every_label_and_the_wire_bound():
+    """Issue #1191: at ANSWER_HIT_LIMIT=16 the terminal chunk carries sixteen
+    supplied excerpts, built here by the agent's own packer at 4,000
+    characters each. A cited label 9 or 16 becomes its own source event with
+    its two-digit label and its whole supplied text: the evidence total
+    scales with the hit limit (maintainer decision 2026-11-17), so no cited
+    source shows an empty document."""
+    from mainframe_rag.agent.answer import build_messages
+    from mainframe_rag.agent.tokenizer import FallbackTokenizer
+    from mainframe_rag.config import Settings
+    from tests.fakes import settings_kw
+    from tests.helpers_agent_local import agent_hit
+
+    settings = Settings(**settings_kw(answer_hit_limit=16, retrieve_max_chunks_per_doc=5))
+    hits = []
+    for i in range(1, 17):
+        doc = f"SA22-{(i - 1) // 5:04d}-00"
+        text = (f"Synthetic step {i}. " * 400)[:settings.prompt_max_chunk_chars].strip()
+        hits.append(agent_hit(text, doc, heading="H", page_label=f"1-{i}", chunk_id=f"c{i}",
+                              chunk_type="narrative"))
+    prepared = build_messages("What does the operator do?", hits, tokenizer=FallbackTokenizer(),
+                              settings=settings, max_chunk_chars=settings.prompt_max_chunk_chars)
+    assert len(prepared.supplied) == 16
+    cited = [hits[8].cite, hits[15].cite]
+    meta = _final_meta(citations=cited,
+                       supplied_evidence=[e.model_dump() for e in prepared.supplied])
+    _content, events = run_pipe(FakeAgent(_frames("Answer.", meta=meta)))
+    sources = _sources(events)
+    assert [s["metadata"][0]["name"] for s in sources] == [f"[9] {cited[0]}", f"[16] {cited[1]}"]
+    assert [s["source"]["id"] for s in sources] == ["SA22-0001-00", "SA22-0003-00"]
+    assert sources[0]["document"] == [hits[8].text]
+    assert sources[1]["document"] == [hits[15].text]
+    assert not any(e.text_clipped for e in prepared.supplied)
+    assert _final_status(events) == "Source-matched · 2 citations"
+
+
 @pytest.mark.parametrize("citation", [
     "https://evil.example/x, Title, p. 1",
     "HTTP://evil.example/x, Title, p. 1",
@@ -728,6 +764,64 @@ def test_inferred_citations_are_labelled_not_grounding():
         "Unverified draft — no eligible citation · "
         "Inferred citations — bracket provenance, not grounding"
     )
+
+
+CITE_HOUSE = "HOUSE-AI-DRAFT-jcl House JCL guidance, Restart > Checkpoints, p. 1"
+
+
+def _house_meta(**overrides: Any) -> dict[str, Any]:
+    """Accepted answer citing a synthetic house guide next to a manual."""
+    meta = _final_meta(citations=[CITE_A, CITE_HOUSE], supplied_evidence=[
+        _excerpt(1, CITE_A, EXCERPT_A, "SA22-0000-00"),
+        _excerpt(2, CITE_HOUSE, EXCERPT_B, "HOUSE-AI-DRAFT-jcl")])
+    meta.update(overrides)
+    return meta
+
+
+def test_cited_house_guidance_is_named_in_the_banner_and_the_source_list():
+    """House guides (doc ids `HOUSE-...`, #1276) are AI-drafted: a validated
+    citation of one says so in the accepted banner and on its source entry;
+    the manual's entry is unchanged."""
+    _content, events = run_pipe(FakeAgent(_frames("Answer.", meta=_house_meta())))
+    assert _final_status(events) == "Source-matched · 2 citations (incl. house guidance)"
+    manual, house = _sources(events)
+    assert manual["source"]["name"] == CITE_A
+    assert manual["metadata"][0]["label"] == "source-matched"
+    assert house["source"] == {"name": f"{CITE_HOUSE} (house guidance)", "id": "HOUSE-AI-DRAFT-jcl"}
+    assert house["metadata"][0]["label"] == "source-matched, house guidance"
+    assert house["document"] == [EXCERPT_B]
+
+
+@pytest.mark.parametrize("doc_id", ["SA22-0001-00", "house-ai-draft-jcl", "XHOUSE-1", "HOUSE"])
+def test_house_label_needs_a_cited_house_prefixed_doc_id(doc_id: str):
+    """Only the exact `HOUSE-` doc-id prefix marks house guidance."""
+    meta = _house_meta(supplied_evidence=[
+        _excerpt(1, CITE_A, EXCERPT_A, "SA22-0000-00"), _excerpt(2, CITE_HOUSE, EXCERPT_B, doc_id)])
+    _content, events = run_pipe(FakeAgent(_frames("Answer.", meta=meta)))
+    assert _final_status(events) == "Source-matched · 2 citations"
+    assert "house guidance" not in json.dumps(_sources(events))
+
+
+def test_house_excerpt_supplied_but_not_cited_adds_no_label():
+    meta = _house_meta(citations=[CITE_A])
+    _content, events = run_pipe(FakeAgent(_frames("Answer.", meta=meta)))
+    assert _final_status(events) == "Source-matched · 1 citation"
+    assert "house" not in json.dumps(_sources(events))
+
+
+@pytest.mark.parametrize("overrides", [
+    {"verification_state": "unverified_draft"},
+    {"verification_state": "insufficient_evidence"},
+    {"verification_state": "generation_incomplete"},
+    {"verification_state": None},
+    {"verification_state": "unverified_draft", "citations_inferred": True, "inferred_indices": [2]},
+])
+def test_house_label_never_rides_a_non_accepted_state(overrides: dict[str, Any]):
+    """Neither the banner nor the source list names house guidance unless
+    the answer is accepted with explicit citations."""
+    _content, events = run_pipe(FakeAgent(_frames("Answer.", meta=_house_meta(**overrides))))
+    assert "house" not in _final_status(events)
+    assert "house guidance" not in json.dumps(_sources(events))
 
 
 # --- Verification and abstention ---------------------------------------------
@@ -1396,6 +1490,9 @@ def test_round_trip_a_paste_over_the_window_share_shows_the_fixed_shortened_note
                 yield item
 
     monkeypatch.setattr(app_mod, "llm", Recording())
+    # Cut only past the window share: the 32768 window this ran at (the
+    # default before #1274); at 262144 this paste is kept whole.
+    monkeypatch.setattr(app_mod.settings, "llm_max_model_len", 32768)
     first, last = "The copy step stops and this is the whole listing.", "Why does the copy step stop?"
     paste = "\n".join([first, *(f"{i:08X}  {i:04X}0000 FFFF{i:04X} 0000{i:04X}" for i in range(2500)),
                        last])

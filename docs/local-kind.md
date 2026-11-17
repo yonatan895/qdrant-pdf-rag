@@ -156,7 +156,8 @@ namespace `rag-kind`, registry `rag-kind.test:5000`, storage class `standard`,
 `https://rag-kind.test:8444/v1`, exact served IDs and dimension 1024, immutable
 embedding revision, `RERANK_ENABLED=false`, the chart’s enabled console, and
 `CHAT_CONDENSE_ENABLED=true` for pronoun follow-ups. The latter is an explicit
-local choice, not a product-default change. Keep the published `IMAGE_SHA`.
+local choice, not a product-default change; with `CHAT_FOLLOWUP_ANCHOR_ENABLED`
+unset it also turns the anchoring default (on since #1274) off. Keep the published `IMAGE_SHA`.
 
 Use the [real-corpus resource overrides](local-real-corpus.md#1-establish-the-candidate-data-and-resource-budget):
 1/1/1 Qdrant topology, one ingest worker, Kind-only fsGroup 3000, two agent

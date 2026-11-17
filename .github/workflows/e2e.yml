@@ -947,6 +947,7 @@ jobs:
             cat >> airgap.env <<'EOF'
           GATEWAY_BASE_URL=https://test-gateway:4000/v1
           LLM_MODEL_REASONING=mock-reasoning
+          LLM_MAX_MODEL_LEN=32768
           RERANK_ENABLED=false
           GATEWAY_API_KEY_SECRET=test-gateway-keys
           GATEWAY_API_KEY_SECRET_KEY=api-key
@@ -957,6 +958,7 @@ jobs:
           EMBED_BASE_URL=https://test-gateway:4000/v1
           LLM_BASE_URL=https://test-gateway:4000/v1
           LLM_MODEL_REASONING=mock-reasoning
+          LLM_MAX_MODEL_LEN=32768
           RERANK_ENABLED=false
           GATEWAY_API_KEY_SECRET=test-gateway-keys
           GATEWAY_CA_CONFIGMAP=test-gateway-ca
@@ -2079,6 +2081,8 @@ jobs:
           EMBED_BASE_URL: http://vllm-mock:8000/v1
           LLM_BASE_URL: http://vllm-mock:8000/v1
           LLM_MODEL_REASONING: mock-reasoning
+          # The mock lanes keep the window they ran at before #1274 raised the default.
+          LLM_MAX_MODEL_LEN: "32768"
           QDRANT_STORAGE_SIZE: 1Gi
         run: |
           export PATH="/usr/local/bin:$PATH"
@@ -2137,6 +2141,8 @@ jobs:
           EMBED_BASE_URL: http://vllm-mock:8000/v1
           LLM_BASE_URL: http://vllm-mock:8000/v1
           LLM_MODEL_REASONING: mock-reasoning
+          # The mock lanes keep the window they ran at before #1274 raised the default.
+          LLM_MAX_MODEL_LEN: "32768"
           INGEST_WORK_SIZE: 2Gi
           INGEST_TIMEOUT: "900"
         run: |

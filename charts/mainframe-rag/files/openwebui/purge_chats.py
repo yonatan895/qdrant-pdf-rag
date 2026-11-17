@@ -26,7 +26,7 @@ the vacuum and a second clean checkpoint. While it exists every run repeats
 the scrub, even with nothing new to delete, and fails until it completes.
 
 Stale folders (#1255) go in the same transaction, after the chat deletions: a
-folder whose own last update is older than N days (or unknown), that no row of
+folder whose own last update is known and older than N days, that no row of
 any table names in `folder_id` (chat, automation) and no folder names as its
 parent. Leaves go first, repeated until none is left, so a stale nested chain
 goes in one run; a folder still in use and its ancestors stay.
@@ -131,8 +131,9 @@ def _mark_pending(data_dir: Path) -> None:
 def _purge_folders(conn: sqlite3.Connection, tables: list[str], cutoff: int) -> int:
     """Delete stale folders, leaves first, until none is left; returns the count.
 
-    Stale: the folder's own updated_at is older than the cutoff (NULL counts as
-    older, as for a share snapshot), no row of any other table names it in
+    Stale: the folder's own updated_at is known and older than the cutoff (a
+    NULL age is never stale, as in the chat and file purges; maintainer
+    decision 2026-11-16), no row of any other table names it in
     folder_id and no folder names it as parent_id. Run after the chat
     deletions, so a folder whose last chat went this run goes too. A parent
     becomes a leaf once its stale children are gone, so the loop takes a whole
@@ -145,7 +146,7 @@ def _purge_folders(conn: sqlite3.Connection, tables: list[str], cutoff: int) -> 
                      if table != "folder" and "folder_id" in _columns(conn, table))
     deleted = 0
     while True:
-        cur = conn.execute("DELETE FROM folder WHERE coalesce(updated_at, 0) < ? AND id NOT IN "
+        cur = conn.execute("DELETE FROM folder WHERE updated_at < ? AND id NOT IN "
                            "(SELECT parent_id FROM folder WHERE parent_id IS NOT NULL)" + in_use,
                            (cutoff,))
         if cur.rowcount <= 0:

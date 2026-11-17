@@ -119,6 +119,7 @@ module = [
     "mainframe_rag.eval",
     "mainframe_rag.eval.acceptance",
     "mainframe_rag.eval.answer_tier",
+    "mainframe_rag.eval.coverage",
     "mainframe_rag.eval.datasets",
     "mainframe_rag.eval.load",
     "mainframe_rag.eval.performance",

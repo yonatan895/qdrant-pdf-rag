@@ -494,20 +494,23 @@ async def test_anchored_follow_up_fuses_both_legs_by_rank_to_one_retrieval_count
 
 
 @pytest.mark.anyio
-async def test_anchored_fusion_returns_no_more_than_one_retrieval():
-    """Two full legs fuse to one retrieval's hit count (8): the top four of
-    each, alternating; a short leg leaves room for the other's next ranks."""
-    from mainframe_rag.agent.core_ports import RETRIEVAL_HIT_LIMIT
-
-    full_l = [_anchor_hit(f"L{i}", "DOC-L") for i in range(RETRIEVAL_HIT_LIMIT)]
-    full_a = [_anchor_hit(f"A{i}", "DOC-A") for i in range(RETRIEVAL_HIT_LIMIT)]
+@pytest.mark.parametrize("depth", [None, 4, 8, 16])
+async def test_anchored_fusion_returns_no_more_than_one_retrieval(depth):
+    """Two full legs fuse to one retrieval's hit count, `answer_hit_limit`
+    (16 by default since #1274, 8 before; #1191 makes it an operator input):
+    the top half of each, alternating; a short leg leaves room for the
+    other's next ranks."""
+    n = 16 if depth is None else depth
+    full_l = [_anchor_hit(f"L{i}", "DOC-L") for i in range(n)]
+    full_a = [_anchor_hit(f"A{i}", "DOC-A") for i in range(n)]
     source = AnswerCoreInput(query=_FOLLOW_UP, messages=_follow_up_messages(), is_chat=True)
+    overrides = {} if depth is None else {"answer_hit_limit": depth}
     for literal, anchored, want in (
-        (full_l, full_a, [f"{leg}{i}" for i in range(4) for leg in "LA"]),
-        (full_l[:1], full_a, ["L0", *[f"A{i}" for i in range(7)]]),
+        (full_l, full_a, [f"{leg}{i}" for i in range(n // 2) for leg in "LA"]),
+        (full_l[:1], full_a, ["L0", *[f"A{i}" for i in range(n - 1)]]),
         ([], full_a[:2], ["A0", "A1"]),
     ):
-        deps = _deps(_settings(chat_followup_anchor_enabled=True), CoreFakeLLM(),
+        deps = _deps(_settings(chat_followup_anchor_enabled=True, **overrides), CoreFakeLLM(),
                      _LegSearch({_FOLLOW_UP: literal, _OPENER: anchored}))
         found = await retrieve_planned(await plan_search(source, deps), source, deps)
         assert [h.chunk_id for h in found.hits] == want
@@ -565,15 +568,39 @@ async def test_anchored_excerpt_is_supplied_evidence_an_answer_can_cite(order, e
 
 
 @pytest.mark.anyio
-async def test_anchoring_off_by_default_keeps_one_literal_retrieval():
+async def test_anchoring_explicitly_off_keeps_one_literal_retrieval_and_the_old_prompt():
+    """Issue #1274: CHAT_FOLLOWUP_ANCHOR_ENABLED=false is the behaviour before
+    the default flip: one literal retrieval, and the follow-up is
+    searched as written only."""
     search = _LegSearch({_FOLLOW_UP: [_anchor_hit("L1", "DOC-L")]})
     llm = CoreFakeLLM()
-    deps = _deps(_settings(), llm, search)
+    deps = _deps(_settings(chat_followup_anchor_enabled=False), llm, search)
     source = AnswerCoreInput(query=_FOLLOW_UP, messages=_follow_up_messages(), is_chat=True)
     assert (await plan_search(source, deps)).mode == "literal"
     output = await execute_answer_core(source, deps)
     assert search.queries == [_FOLLOW_UP]
     assert [h.chunk_id for h in output.hits] == ["L1"]
+
+
+@pytest.mark.anyio
+async def test_anchoring_is_on_by_default():
+    """Issue #1274: with no setting, an identifier-free follow-up is searched
+    as written and as the previous user message, exactly as an explicit
+    CHAT_FOLLOWUP_ANCHOR_ENABLED=true does (same plan, legs and prompt)."""
+    results = []
+    for settings in (_settings(), _settings(chat_followup_anchor_enabled=True)):
+        search = _LegSearch({_FOLLOW_UP: [_anchor_hit("L1", "DOC-L")],
+                             _OPENER: [_anchor_hit("A1", "DOC-A")]})
+        llm = CoreFakeLLM()
+        deps = _deps(settings, llm, search)
+        source = AnswerCoreInput(query=_FOLLOW_UP, messages=_follow_up_messages(), is_chat=True)
+        plan = await plan_search(source, deps)
+        output = await execute_answer_core(source, deps)
+        results.append((plan, search.queries, [h.chunk_id for h in output.hits],
+                        [(m.role, m.content) for m in llm.calls[-1]["messages"]]))
+    assert results[0][0].mode == "anchored"
+    assert results[0][1] == [_FOLLOW_UP, _OPENER]
+    assert results[0] == results[1]
 
 
 @pytest.mark.anyio
@@ -797,7 +824,8 @@ def test_gate_dia18_shape_runs_uncapped_not_at_the_byte_room(complexity):
     32768 - 29344 - 128 = 3296 and a medium-effort answer the base completed
     uncapped ended as `length` in both passes. With shipped defaults the full
     cap does not fit that room, so no cap is sent, as on the base."""
-    settings = _settings()  # window 32768, margin 128, answer 2560
+    # The 32768 window the gate ran at (the default before #1274), pinned.
+    settings = _settings(llm_max_model_len=32768)  # margin 128, answer 2560
     content = "d" * (29344 - len(b"user") - 8 - 16)
     prepared = _prepared_prompt(content, prompt_tokens=7412)
     assert _prompt_token_upper_bound(prepared.messages) == 29344
@@ -809,6 +837,34 @@ def test_gate_dia18_shape_runs_uncapped_not_at_the_byte_room(complexity):
         else settings.llm_thinking_reserve_tokens_simple
     )
     assert _output_cap(settings, complexity, verified) == settings.llm_reserved_output_tokens + thinking
+
+
+@pytest.mark.parametrize("complexity", ["simple", "complex"])
+@pytest.mark.parametrize("verified", [False, True])
+def test_default_window_cap_never_exceeds_the_window(complexity, verified):
+    """Issue #1274: at the 262144 default window the DIA-18 shape (and any
+    prompt up to the request-size guard's bytes) leaves room for the full cap
+    on the estimator path too, so the cap is the verified path's, never
+    window minus prompt, and byte bound + cap + margin stays inside the
+    window: no request a model serving that window would refuse."""
+    settings = _settings()
+    assert settings.llm_max_model_len == 262144
+    thinking = (settings.llm_thinking_reserve_tokens_complex if complexity == "complex"
+                else settings.llm_thinking_reserve_tokens_simple)
+    full = settings.llm_reserved_output_tokens + thinking
+    # The DIA-18 byte bound, and a whole guard-sized ASCII paste plus 32 KiB
+    # of system prompt and excerpts.
+    for size in (29344, settings.chat_max_body_chars + 32768):
+        prepared = _prepared_prompt("d" * (size - len(b"user") - 8 - 16), verified=verified,
+                                    prompt_tokens=size // 4)
+        cap = _output_cap(settings, complexity, prepared)
+        assert cap == full
+        assert (_prompt_token_upper_bound(prepared.messages) + cap
+                + settings.llm_token_safety_margin <= settings.llm_max_model_len)
+    # The largest reserves the bounds allow still fit a guard-sized prompt.
+    widest = _settings(llm_reserved_output_tokens=16384, llm_thinking_reserve_tokens_complex=16384)
+    prepared = _prepared_prompt("d" * (settings.chat_max_body_chars + 32768), prompt_tokens=1)
+    assert _output_cap(widest, "complex", prepared) == 32768
 
 
 _LONG_PROSE = [ChatMessage(role="user", content="p" * 31000)]
@@ -830,7 +886,7 @@ def test_long_estimator_prompt_runs_uncapped_not_at_the_answer_reserve(messages,
     answer reserve (window - 2 x estimate is negative at these sizes). The
     byte bound leaves less than that floor, so the new rule sends no cap: the
     base behavior, not a smaller generation budget."""
-    settings = _settings()  # shipped defaults: window 32768, answer 2560
+    settings = _settings(llm_max_model_len=32768)  # the review's window (default before #1274)
     prepared = _prepared_prompt(messages, prompt_tokens=estimate)
     assert _output_cap(settings, "simple", prepared) is None
     full = settings.llm_reserved_output_tokens + settings.llm_thinking_reserve_tokens_simple
@@ -848,7 +904,7 @@ def test_default_spaced_hex_prompt_is_not_a_new_cap_refusal():
     uncapped. The new rule sends the full cap only when the prompt's bytes
     leave room for it, so here it sends none and this shape cannot become a
     new 502 because of the cap."""
-    settings = _settings()  # window 32768, answer 2560, thinking 8192
+    settings = _settings(llm_max_model_len=32768)  # the review's window (default before #1274)
     text = "ab12 " * 800  # 4000 characters of spaced hex
     hits = [
         agent_hit(
@@ -1468,7 +1524,7 @@ async def test_use_case_runs_on_explicit_resources_and_borrows_the_model(stream,
     assert output.finish_reason == "stop" and output.hits
     (args, kwargs), = searched
     assert args[:3] == (qdrant, embedder, "physical_gen_1")
-    assert kwargs["reranker"] is reranker and kwargs["limit"] == 8
+    assert kwargs["reranker"] is reranker and kwargs["limit"] == bound.answer_hit_limit == 16  # #1274
     assert kwargs["settings"] is bound
     assert Model.closed == 0
     if async_edges:
@@ -2077,7 +2133,9 @@ def test_hex_dump_prompt_fits_the_window_under_a_per_character_count(chars, remo
         def count_messages(self, messages, *, reasoning_effort=None):
             return sum(per_character(m.content) for m in messages)
 
-    settings = _settings()
+    # The cut is the contract here: pinned to the 32768 window the review ran
+    # at (the default before #1274); at 262144 these pastes fit whole (next test).
+    settings = _settings(llm_max_model_len=32768)
     limit = (settings.llm_max_model_len - settings.llm_reserved_output_tokens
              - settings.llm_thinking_reserve_tokens_simple - settings.llm_token_safety_margin)
     message = _hex_paste(chars)
@@ -2104,6 +2162,51 @@ def test_hex_dump_prompt_fits_the_window_under_a_per_character_count(chars, remo
         assert pasted.startswith("Why does the transfer stop at this record?")
         assert message.endswith(pasted[-200:])
         assert 0 < prepared.message_omitted_chars < chars
+        assert prepared.evidence.supplied_count == 8
+
+
+@pytest.mark.parametrize("chars", [40_000, 100_000, 131_072])
+@pytest.mark.parametrize("remote", [False, True])
+def test_guard_sized_paste_fits_the_default_window_whole(chars, remote):
+    """Issue #1274: at the 262144 default window a pasted hex dump up to the
+    request-size guard (chat_max_body_chars) is kept whole, never cut, and
+    the prompt still fits the window minus the reserves when the paste is
+    counted at one token per non-blank character, served count or not; the
+    evidence keeps its place. The guard, not the window, bounds the paste."""
+    from mainframe_rag.agent.answer import build_chat_messages, build_messages
+    from mainframe_rag.agent.tokenizer import FallbackTokenizer, estimate_tokens
+
+    def per_character(text: str) -> int:
+        return sum(1 for ch in text if not ch.isspace())
+
+    class Served(FallbackTokenizer):
+        remote_confirmed = True
+
+        def count_tokens(self, text):
+            return per_character(text)
+
+        def count_messages(self, messages, *, reasoning_effort=None):
+            return sum(per_character(m.content) for m in messages)
+
+    settings = _settings()
+    assert settings.llm_max_model_len == 262144 and chars <= settings.chat_max_body_chars
+    limit = (settings.llm_max_model_len - settings.llm_reserved_output_tokens
+             - settings.llm_thinking_reserve_tokens_simple - settings.llm_token_safety_margin)
+    message = _hex_paste(chars)
+    hits = [_hit().model_copy(update={"chunk_id": f"c{i}"}) for i in range(8)]
+    tokenizer = Served() if remote else FallbackTokenizer()
+    history = [ChatMessage(role="user", content=message)]
+    for prepared in (build_messages(message, hits, tokenizer=tokenizer, settings=settings),
+                     build_chat_messages(history, hits, tokenizer=tokenizer, settings=settings)):
+        prompt = _user_prompt(prepared)
+        assert prepared.message_omitted_chars == 0
+        assert "omitted to fit the model window" not in prompt
+        assert f"Question: {message}" in prompt
+        others = "".join(m.content for m in prepared.messages[:-1]) + prompt.replace(message, "")
+        if remote:
+            assert tokenizer.count_messages(prepared.messages) <= limit
+        else:
+            assert per_character(message) + estimate_tokens(others) <= limit
         assert prepared.evidence.supplied_count == 8
 
 
@@ -2144,3 +2247,208 @@ def test_derived_query_keeps_the_question_when_pasted_lines_read_as_prose():
     query = derive_retrieval_query("\n".join([opening, *log, question, closing]), settings)
     assert query.startswith(opening) and query.endswith(closing)
     assert query.index(opening) < query.index("worker 0 ") < query.index(question)
+
+
+# ------------------------------------------------- coding mode (issue #1276)
+
+_CODING_REQUEST = "Write an HLASM program that issues a WTO"
+
+
+async def _coding_core(content, *, stream=False, enabled=True, query=_CODING_REQUEST, hits=True):
+    def retrieve(*_args, **_kwargs):
+        return ([_hit()] if hits else []), "nl", {}
+
+    llm = CoreFakeLLM()
+    llm.content = content
+    deps = _deps(_settings(answer_coding_mode_enabled=enabled), llm, retrieve)
+    source = AnswerCoreInput(query=query)
+    if stream:
+        events = [event async for event in execute_answer_core_stream(source, deps)]
+        output = events[-1]["output"]
+    else:
+        output = await execute_answer_core(source, deps)
+    return output, llm
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_core_routes_a_coding_request_to_the_complex_coding_prompt_only_when_enabled(
+    stream, enabled
+):
+    """The executors decide coding mode once: on, a coding request takes the
+    complex path (effort, prompt) with the coding extension; off, it keeps
+    the classifier's simple path and the pre-#1276 prompt."""
+    from mainframe_rag.agent.answer import SYSTEM_PROMPT, SYSTEM_PROMPT_CODING_EXTENSION
+
+    settings = _settings()
+    output, llm = await _coding_core(f"Done.\nCitations:\n{_hit().cite}", stream=stream,
+                                     enabled=enabled)
+    system = llm.calls[0]["messages"][0].content
+    user = llm.calls[0]["messages"][-1].content
+    if enabled:
+        assert output.complexity == "complex"
+        assert llm.calls[0]["reasoning_effort"] == settings.llm_reasoning_effort_complex
+        assert system.endswith(SYSTEM_PROMPT_CODING_EXTENSION)
+        assert "strictly" not in user
+    else:
+        assert output.complexity == "simple"
+        assert llm.calls[0]["reasoning_effort"] == settings.llm_reasoning_effort_simple
+        assert system == SYSTEM_PROMPT
+        assert "Please answer based strictly" in user
+
+
+@pytest.mark.anyio
+async def test_core_leaves_a_lookup_on_its_path_with_coding_mode_on():
+    from mainframe_rag.agent.answer import SYSTEM_PROMPT
+
+    output, llm = await _coding_core(f"Done.\nCitations:\n{_hit().cite}",
+                                     query="What is the JCL DISP parameter?")
+    assert output.complexity == "simple"
+    assert llm.calls[0]["messages"][0].content == SYSTEM_PROMPT
+
+
+_HLASM = "```hlasm\nHELLO    CSECT\n         WTO   'HELLO'  VERIFY: routing codes\n```"
+_CHECKLIST = "Pre-production checklist:\n- VERIFY: routing codes"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "content,citations,state,abstained_script",
+    [
+        # Code, cited mapping prose, VERIFY items and the checklist: grounded.
+        (f"The WTO macro [1] writes the message.\n{_HLASM}\n{_CHECKLIST}\nCitations:\n{{cite}}",
+         ["{cite}"], "accepted", False),
+        # A partial-coverage caveat beside real content is not an abstention.
+        (("The excerpts describe WTO but not every operand. The WTO macro writes the "
+          f"message.\n{_HLASM}\n{_CHECKLIST}\nCitations:\n{{cite}}"),
+         ["{cite}"], "accepted", False),
+        # Code without any supporting citation stays a draft.
+        (f"The WTO macro writes the message.\n{_HLASM}\n{_CHECKLIST}", [], "unverified_draft",
+         False),
+        # Inferred-only provenance stays a draft.
+        (f"The WTO macro [1] writes the message.\n{_HLASM}\n{_CHECKLIST}", ["{cite}"],
+         "unverified_draft", False),
+        # Code alone, no prose: a human-review draft, whatever it cites.
+        (f"{_HLASM}\nCitations:\n{{cite}}", ["{cite}"], "unverified_draft", False),
+        # Characterization (same as jcl/rexx today): a refusal-only body beside
+        # a script is an abstention; citations are zeroed, the script is kept.
+        (f"The excerpts do not contain a WTO example.\n{_HLASM}\nCitations:\n{{cite}}", [],
+         "insufficient_evidence", True),
+    ],
+)
+async def test_core_coding_turn_verification_states_stay_honest(
+    content, citations, state, abstained_script
+):
+    cite = _hit().cite
+    output, _llm = await _coding_core(content.format(cite=cite))
+    assert output.verification_state == state
+    assert output.citations == [c.format(cite=cite) for c in citations]
+    assert output.script is not None and "VERIFY: routing codes" in output.script
+    assert output.script_lang == "hlasm"
+    assert output.script_review_required is True
+    assert "CSECT" not in output.answer
+    if abstained_script:
+        assert output.citations == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_core_coding_request_without_hits_makes_no_model_call(stream):
+    """The zero-hits short circuit holds on a coding turn: no excerpts, no
+    generation, the fixed no-hits answer, insufficient_evidence."""
+    output, llm = await _coding_core("unused", stream=stream, hits=False)
+    assert llm.calls == []
+    assert output.answer == "No supporting manual excerpts were found for this question."
+    assert output.verification_state == "insufficient_evidence"
+    assert output.complexity == "complex"
+
+
+async def _model_messages(query, *, enabled, stream, chat, order):
+    """What the model receives for one turn through the real executors."""
+    def retrieve(*_args, **_kwargs):
+        return [_hit()], "nl", {}
+
+    llm = CoreFakeLLM()
+    deps = _deps(_settings(answer_coding_mode_enabled=enabled, prompt_order=order), llm, retrieve)
+    if chat:
+        source = AnswerCoreInput(query=query, is_chat=True, messages=[
+            ChatMessage(role="user", content="What does IEA500I mean?"),
+            ChatMessage(role="assistant", content="It reports a rejected command."),
+            ChatMessage(role="user", content=query)])
+    else:
+        source = AnswerCoreInput(query=query)
+    if stream:
+        events = [event async for event in execute_answer_core_stream(source, deps)]
+        output = events[-1]["output"]
+    else:
+        output = await execute_answer_core(source, deps)
+    (call,) = llm.calls
+    return [(m.role, m.content) for m in call["messages"]], call["reasoning_effort"], output
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
+@pytest.mark.parametrize("chat", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("query", [
+    "What does IEA500I mean?",
+    "How do I diagnose and recover when DFSMShsm journal fills up?",
+    "What is the correct JCL syntax for DISP?",
+    "How do I fix IEFC452I JOB NOT RUN - JCL ERROR?",
+])
+async def test_core_sends_identical_messages_with_coding_mode_on_or_off_for_other_turns(
+    order, chat, stream, query
+):
+    """The setting is read by the executors, so the proof is what the model
+    receives: for every non-coding turn (answer and chat, buffered and
+    streamed, both prompt orders) the messages and effort are identical with
+    coding mode on and off."""
+    on = await _model_messages(query, enabled=True, stream=stream, chat=chat, order=order)
+    off = await _model_messages(query, enabled=False, stream=stream, chat=chat, order=order)
+    assert on[:2] == off[:2]
+    assert on[2].complexity == off[2].complexity
+    assert "Coding Protocol" not in on[0][0][1]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_core_chat_coding_turn_gets_the_coding_prompt(order, stream):
+    """A chat turn whose active message is a coding request is a coding turn
+    on both chat executors and both orders; its history stays intact."""
+    from mainframe_rag.agent.answer import SYSTEM_PROMPT_CODING_EXTENSION
+
+    messages, effort, output = await _model_messages(
+        _CODING_REQUEST, enabled=True, stream=stream, chat=True, order=order)
+    assert messages[0][1].endswith(SYSTEM_PROMPT_CODING_EXTENSION)
+    assert [role for role, _ in messages] == ["system", "user", "assistant", "user"]
+    assert "strictly" not in messages[-1][1]
+    assert effort == _settings().llm_reasoning_effort_complex
+    assert output.complexity == "complex"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_core_anchored_lookup_after_a_coding_turn_is_not_a_coding_turn(stream):
+    """The decision reads the user's own message only: an anchored follow-up
+    also searches the previous (coding) message, which must not carry the
+    coding prompt into a plain lookup."""
+    from mainframe_rag.agent.answer import SYSTEM_PROMPT
+
+    def retrieve(*_args, **_kwargs):
+        return [_hit()], "nl", {}
+
+    llm = CoreFakeLLM()
+    deps = _deps(_settings(chat_followup_anchor_enabled=True), llm, retrieve)
+    follow_up = "What does that parameter mean?"
+    source = AnswerCoreInput(query=follow_up, is_chat=True, messages=[
+        ChatMessage(role="user", content=_CODING_REQUEST),
+        ChatMessage(role="assistant", content="Here is the program."),
+        ChatMessage(role="user", content=follow_up)])
+    if stream:
+        output = [e async for e in execute_answer_core_stream(source, deps)][-1]["output"]
+    else:
+        output = await execute_answer_core(source, deps)
+    assert llm.calls[-1]["messages"][0].content == SYSTEM_PROMPT
+    assert output.complexity == "simple"

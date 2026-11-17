@@ -337,7 +337,8 @@ verdict.
   paired-CI primary metric: that would let a first-rank gain promote while
   recall@5 and MRR are flat, and would hold every baseline recorded before
   the key ("no paired values"), so primary metrics and thresholds are unchanged.
-- **L1 metrics:** `L1_LIMIT=8` (matches the answer path's retrieval depth);
+- **L1 metrics:** `L1_LIMIT=8` (the answer path's retrieval depth before
+  #1274, which made it 16; the gate's own cutoff, unchanged);
   recall@1/@5/@8, MRR@8, shared nDCG@8 helper (no @3 here, unlike the
   eval); abstain rows contribute traps only; trap precision divides by all
   rows. recall@1 (#837) is reported per class, overall and per query and is
@@ -607,7 +608,8 @@ Flags (defaults are unchanged without them):
 | `--repeats R` | 1–10 whole passes over the sample (pass 1 over every row, then pass 2, ...), so drift within a session lands on every row equally. Rows carry `repeat`; `metrics` pools all passes; `metrics.repeats` gives, per metric, the per-pass values with min, max, mean and range, plus `verdict_flips` (entry ids judged differently across passes). More than one pass is a sweep, so the same non-holdout `--golden` rule applies |
 | `--endpoint chat` | Issue #1191. Each question goes as a single-turn streaming `POST /v1/chat` (`messages: [{role: user, content}]`, `stream: true`, `temperature`), the route the Open WebUI Pipe calls. Needs `--stream`. `params.endpoint` records `answer` (default) or `chat`; `params.transport` still means `json`/`sse`. Differences are listed under [chat rows](#chat-rows) |
 | `--coverage` | Issue #1191. Before the rows, pages `GET /v1/sources` (limit 200) once and records its `build_id`; after the rows, reads the first page again as `build_id_end`. Each row gets `coverage` (`all`, `some` or `none` of its `expected_doc_ids` served; `not_applicable` when it names none; `unknown`) and `expected_served`; `report.coverage` holds the counts per state over distinct rows, `pages` and `sources_n`. The match is on the exact doc id, edition included. A 503 (a build published without a catalog), a 404, a transport error, a malformed page, a build change between pages or 1,000 pages give `status: unknown` with a fixed `reason`. Coverage never changes a verdict or the exit code |
-| `--export PATH` | Issue #1191. A JSON file built by whitelist for leaving an air-gapped site: `params` (without `agent_url`), `metrics`, `healthz`, `representation`, `coverage` and one row per result with id, repeat, class, behaviour, verdict, failure and warn labels, verification states, finish reason, path, citation-WHY mode, citation and inferred-index counts, token counts, timings, `gold_retrieved`, expected/hit/cited doc ids, citation precision/recall and coverage. Failure labels come from a closed set (anything else is `other`; an error code outside the agent's stable codes is `?`), finish reasons outside the OpenAI set are `other`, and a `build_id` of an unexpected shape is null. No question, answer, citation, excerpt, script or failure text. `tests/test_eval_site.py` seeds canaries into every text field and checks the export bytes |
+| `--hit-limit N` | Issue #1191. The deployed `ANSWER_HIT_LIMIT` as the operator declares it (the agent does not report it; 1–32, the agent's bounds): the sibling `/v1/search` pool behind `gold_retrieved`, `hit_doc_ids` and citation precision/recall asks for `N` hits, so those fields see as deep as the answer did. Default the agent default (16 since #1274, 8 before); recorded as `params.hit_limit` only when passed. Never pass a value that differs from the deployed one |
+| `--export PATH` | Issue #1191. A JSON file built by whitelist for leaving an air-gapped site: `params` (without `agent_url`), `metrics`, `healthz`, `representation`, `coverage` and one row per result with id, repeat, class, behaviour, verdict, failure and warn labels, verification states, finish reason, path, citation-WHY mode, citation and inferred-index counts, token counts, timings, `gold_retrieved`, expected/hit/cited doc ids, citation precision/recall, coverage, and `supplied_n` / `supplied_doc_n` (#1191: how many excerpts the response's `supplied_evidence` lists and from how many distinct manuals, on both endpoints; 0 on the zero-hits path, None when the field is missing or an entry has no doc id). Failure labels come from a closed set (anything else is `other`; an error code outside the agent's stable codes is `?`), finish reasons outside the OpenAI set are `other`, and a `build_id` of an unexpected shape is null. No question, answer, citation, excerpt, script or failure text. `tests/test_eval_site.py` seeds canaries into every text field and checks the export bytes |
 | `--keep-evidence-text` | Issue #1191 (graded eval). Every judged row, on every transport and without this flag, keeps what the agent packed and retrieved for that answer as text-free metadata: `supplied_evidence_meta` (per packed excerpt: prompt index, doc id, printed page label, 1-based physical `pdf_page_start`/`pdf_page_end`, character range, trim and clip flags, and `text_sha256`), `evidence_omitted`, and `final_hits` (per final retrieval hit: chunk id, doc id, chunk type, page label, physical pages in the same 1-based convention, score, rerank score). The buffered `/v1/answer` body carries no hits, so `final_hits` is null there; a field the agent did not send, or a malformed entry, is null (unknown), never an empty list. Headings, titles, citation strings and hit text are never copied. This flag adds `supplied_evidence_text` (prompt index and excerpt text) to the JSON report for a later grounding check; `params.keep_evidence_text` records it. None of these fields enter `--export` |
 | `--sessions PATH` | Issue #1191 (graded follow-up rows). Replaces `--golden`: a private dev JSONL, one session per line with `id`, `query_class`, `expected_behavior`, optional `expected_doc_ids` and judge fields, and `turns` that alternate user and authored assistant text, first and last a user turn. Each last turn is sent over `/v1/chat` with the whole history as the Open WebUI Pipe would send it (`build_request` and `fit_request`), so it is graded on a fixed history; it is judged like a golden row and gains the `evidence_*` fields of a two-turn follow-up plus `session_turns` and `prior_answer_chars`. No sibling `/v1/search`. A history the Pipe would not send is an error row (`session request not built`), with no request. The file is refused by name (`holdout.jsonl`, `release_set.jsonl`) before any read and by release-set content after it; a malformed session exits 2 before any request, with a line number and no text. Progress lines print the id only. `params.sessions` records basename, count and sha256; `params.pipe_sha256` the Pipe file. Needs `--endpoint chat --stream`; refused with `--golden`, `--all`, `--subset` or `--turns 2`. The export adds `session_turns`, `prior_answer_chars` and the `evidence_*` fields |
 
@@ -685,6 +687,46 @@ the site's own model before and after an in-place upgrade, with the
 candidate's eval against both builds. Code reaches the site only inside the
 release bundle, so the instrument is the candidate's checkout.
 
+Since #1274 the answer-quality features are on by default: follow-up
+anchoring (`CHAT_FOLLOWUP_ANCHOR_ENABLED`), a 4000-character prior-turn cut
+(`CHAT_MAX_PRIOR_TURN_CHARS`), the `auto` prompt count
+(`LLM_TOKEN_COUNT_SOURCE`), the 262144-token window default
+(`LLM_MAX_MODEL_LEN`), a retrieval depth of 16 hits and 5 chunks per manual
+(`ANSWER_HIT_LIMIT`, `RETRIEVE_MAX_CHUNKS_PER_DOC`, #1191) and coding mode
+(`ANSWER_CODING_MODE_ENABLED`, #1276). No pre-merge evidence exists for them
+on the site model; this visit is the deciding measurement. The release's
+defaults are the baseline. The visit runs in this order: step 0 (settings
+and probes), the A sessions on the old build (f117160c, `--hit-limit 8`),
+the upgrade, the B sessions on the new defaults, then the
+[ablation arms](#site-ablation-arms), each switching one feature off in
+`airgap.env` (anchor off, history 1000, count tokenize, depth 8/3, coding
+off), and last an effort arm only if step 0 showed the effort is honoured.
+A feature that hurts stays off in `airgap.env`, with no new release;
+flipping its code default back is a later decision.
+
+**Step 0, before any session or arm.** Record the deployed `LLM_*` values
+(the receipt below), then run the two probes in the agent pod:
+
+```sh
+oc -n "$NS" get deploy rag-agent \
+  -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' \
+  | grep -E '^(LLM_|CHAT_|REQUEST_|ANSWER_|RETRIEVE_)' | grep -v -E 'KEY|SECRET'   # unset = the default
+oc -n "$NS" exec deploy/rag-agent -c agent -- python3 /app/scripts/probe_gateway.py --probe-args
+oc -n "$NS" exec deploy/rag-agent -c agent -- python3 /app/scripts/probe_gateway.py --probe-count
+```
+
+`--probe-args` shows, per argument set, whether the served model honours the
+reasoning effort: compare `reasoning_tokens` across the effort candidates. If
+answers come back with near-zero reasoning tokens at every effort, the effort
+may not be reaching the model. When an argument set moves the reasoning
+tokens, an effort arm follows the ablations (`LLM_EXTRA_BODY` /
+`LLM_EFFORT_TRANSPORT`, [model request arguments](agent.md#model-request-arguments)).
+`--probe-count` says whether `/tokenize` or the completion-usage count serves
+this gateway, which decides what the `count-tokenize` arm can change. It
+exists from #1266 on: on f117160c run `--probe-args` only, and run
+`--probe-count` after the candidate is deployed, before the first B
+session.
+
 **Where.** The bastion pod (devkit image, Python 3.14 with the dev lock),
 through `oc port-forward` with the operator's namespace session. The Route is
 not usable (OAuth port; the eval refuses credentials and redirects). No
@@ -709,9 +751,9 @@ run() {  # $1 = session label, $2 = endpoint, then extra flags
     --out "$label-$endpoint.json" --summary "$label-$endpoint.md" \
     --export "$label-$endpoint.export.json" "$@" 2>"$label-$endpoint.log"
 }
-run T0 answer --subset 24            # timed 24-row run first
-run A1 answer --all --repeats 2      # then the full session, both endpoints
-run A1 chat --all --repeats 2
+run T0 answer --subset 24 --hit-limit 8   # timed 24-row run first (on f117160c)
+run A1 answer --all --repeats 2 --hit-limit 8   # the full session, both endpoints
+run A1 chat --all --repeats 2 --hit-limit 8
 ```
 
 - Always pass `--golden evals/golden.jsonl` explicitly. Never the holdout:
@@ -728,13 +770,24 @@ run A1 chat --all --repeats 2
 
 | Session | Build | When |
 |---|---|---|
-| A1 | old (2cd8f67d) | the day before the upgrade |
+| A1 | old (f117160c) | the day before the upgrade |
 | A2 | old | just before deploying |
 | B1 | candidate | after the post-deploy smoke |
 | B2 | candidate | the next day |
 | C | candidate | after B2: one pass at `--temperature 0.2 --repeats 1`, both endpoints; it confirms, it never decides |
 
-A1 against A2 is the noise between sessions on an unchanged build. Check that
+A is the release before #1274 (f117160c, every feature off); B is this
+release with its defaults. A1 against A2 is the noise between sessions on an
+unchanged build. Every A run passes `--hit-limit 8`: f117160c retrieves
+8 hits per answer, and the eval's own default is the candidate agent's
+16, so without it the A sibling pool (`gold_retrieved`, citation recall)
+would be deeper than the answer it scores. The B runs pass neither flag.
+A follow-up-kinds run (`--turns 2 --follow-up ...`) against f117160c
+also passes `--prior-cap 1000`, its deployed cut (the candidate's default
+is 4000); `--prior-cap` needs `--follow-up`, and a plain `--turns 2` run
+reads the cut from the agent default instead (see `prior_answer_chars`).
+Check that `params.hit_limit` is 8 in every A export and absent in every
+B export, that
 `coverage.build_id` equals `build_id_end` in every export, that both A
 sessions name the same build, and that `params.sample.ids_sha256` and the
 dataset sha256 match across all sessions.
@@ -791,8 +844,9 @@ seams the evaluator drives (`Pipe._transport`, `build_request`, `fit_request`,
   evidence hit and rate, zero hits, refusals, verification states, citation
   precision/recall, the structural pass rate, `vs_opener` (kept, lost,
   gained, neither per session), `prior_answer_chars` (how many kept answers
-  exceed the application's default 1000-character prior-turn cut,
-  `chat_max_prior_turn_chars`; the count always uses that default, so an arm
+  exceed the application's default prior-turn cut,
+  `chat_max_prior_turn_chars`, 4000 since #1274 and 1000 before; without
+  `--follow-up` the count always uses that default, so an arm
   that sets the operator input `CHAT_MAX_PRIOR_TURN_CHARS` (#1268) must read it
   against its own cut) and, with
   `--repeats`, the spread per repeat. An opener that errored gives a turn-2
@@ -850,7 +904,8 @@ the run is the anaphoric run above and its output is unchanged.
   evidence holds an opener gold doc. That evidence side is a doc-level
   proxy: `supplied_evidence` carries doc ids, not excerpt text.
 - **Prior-turn cut.** The agent does not report `chat_max_prior_turn_chars`,
-  so `--prior-cap` declares it (200-5000, default 1000, the agent default;
+  so `--prior-cap` declares it (200-5000, default the agent default: 4000
+  since #1274, 1000 before;
   recorded as `params.prior_cap`). Exposure per turn-2 row:
   `history_over_cap`, and `citation_list_cut` (`kept`, `partial`, `cut` or
   `absent`): where the Pipe's appended `**Citations:**` list lies against
@@ -876,56 +931,87 @@ the run is the anaphoric run above and its output is unchanged.
   fails or errors. Class-B rows fail whenever a gold string is not restated,
   so with `--follow-up` an exit of 1 is expected. It is not the arm signal.
 
-**Follow-up arms (one visit).** The four arms run on one build, after the
-A/B sessions or on a quiet day. Each arm changes one setting from the
-baseline, with a redeploy before each arm; the previous arm's setting is
-reverted first. Every arm uses the run function above (temperature 0,
-`--coverage`) with the same sample flags:
+<a id="site-ablation-arms"></a>
+**Ablation arms (one visit).** The arms run on the candidate build, after
+the B sessions or on a quiet day. The baseline is the release's defaults
+(nothing below set in `airgap.env`). Each arm switches one feature off with
+one `airgap.env` line and a redeploy; the previous arm's line is removed
+first. Every arm uses the run function above (temperature 0, `--coverage`)
+with the same sample flags:
 
 ```sh
 show() {  # the deployed value of one agent setting (empty = unset, the default)
   oc -n "$NS" get deploy rag-agent -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"$1\")].value}"; echo
 }
-for v in CHAT_CONDENSE_ENABLED CHAT_FOLLOWUP_ANCHOR_ENABLED CHAT_MAX_PRIOR_TURN_CHARS; do show $v; done
+vals() { for v in CHAT_CONDENSE_ENABLED CHAT_FOLLOWUP_ANCHOR_ENABLED CHAT_MAX_PRIOR_TURN_CHARS LLM_TOKEN_COUNT_SOURCE; do show $v; done; }
+vals   # CHAT_CONDENSE_ENABLED shows false (the chart renders it); the rest empty: the defaults (anchoring on, 4000, auto)
 run H-baseline chat --all --repeats 2 --turns 2 --follow-up all --arm baseline
-# airgap.env: CHAT_CONDENSE_ENABLED=true; `sh scripts/tools/run-task.sh airgap:deploy`;
-# wait for the rollout; show the three values again, then:
-run H-condense chat --all --repeats 2 --turns 2 --follow-up all --arm condense
-# revert it; CHAT_FOLLOWUP_ANCHOR_ENABLED=true; deploy; show:
-run H-anchored chat --all --repeats 2 --turns 2 --follow-up all --arm anchored
-# revert it; CHAT_MAX_PRIOR_TURN_CHARS=4000; deploy; show:
-run H-history4000 chat --all --repeats 2 --turns 2 --follow-up all --arm history4000 \
-  --prior-cap 4000
-# revert it and deploy: the site ends on its baseline values.
+# airgap.env: CHAT_FOLLOWUP_ANCHOR_ENABLED=false; `sh scripts/tools/run-task.sh airgap:deploy`;
+# wait for the rollout; vals, then:
+run H-anchor-off chat --all --repeats 2 --turns 2 --follow-up all --arm anchor-off
+# remove it; CHAT_MAX_PRIOR_TURN_CHARS=1000; deploy; vals:
+run H-history1000 chat --all --repeats 2 --turns 2 --follow-up all --arm history1000 \
+  --prior-cap 1000
+# remove it; LLM_TOKEN_COUNT_SOURCE=tokenize; deploy; vals:
+run K-count-tokenize answer --all --repeats 2
+run K-count-tokenize chat --all --repeats 2
+# remove it; ANSWER_HIT_LIMIT=8 and RETRIEVE_MAX_CHUNKS_PER_DOC=3; deploy; vals and
+# show ANSWER_HIT_LIMIT; show RETRIEVE_MAX_CHUNKS_PER_DOC:
+run D-depth-8-3 answer --all --repeats 2 --hit-limit 8
+run D-depth-8-3 chat --all --repeats 2 --hit-limit 8
+# remove both; ANSWER_CODING_MODE_ENABLED=false; deploy; show ANSWER_CODING_MODE_ENABLED:
+run D-coding-off answer --all --repeats 2
+run D-coding-off chat --all --repeats 2
+# remove it and deploy: the site ends on the release defaults (show it: empty).
+# Effort arm only if step 0's --probe-args moved reasoning_tokens with the
+# effort: set the transport it named (LLM_EXTRA_BODY / LLM_EFFORT_TRANSPORT),
+# deploy, run the session flags single-turn as E-effort, remove it and deploy.
 ```
 
-- `baseline`: all three settings off or at their defaults.
-- `condense`: `CHAT_CONDENSE_ENABLED=true`.
-- `anchored`: `CHAT_FOLLOWUP_ANCHOR_ENABLED=true` (#1271). Condense and
-  anchoring together are refused at deploy and at startup, so revert
-  condense first. The deployed build must include #1271; an older build
-  has no such setting, so skip the arm there.
-- `history4000`: `CHAT_MAX_PRIOR_TURN_CHARS=4000` with `--prior-cap 4000`
-  (an operator input since #1271; skip the arm on an older build).
-  Never pass `--prior-cap` that differs from the deployed value.
+| Arm | `airgap.env` line | Compare with |
+|---|---|---|
+| `anchor-off` | `CHAT_FOLLOWUP_ANCHOR_ENABLED=false` | `H-baseline` |
+| `history1000` | `CHAT_MAX_PRIOR_TURN_CHARS=1000`, run with `--prior-cap 1000` | `H-baseline` |
+| `count-tokenize` | `LLM_TOKEN_COUNT_SOURCE=tokenize` | B2 (same flags, same build) |
+| `depth-8-3` | `ANSWER_HIT_LIMIT=8` and `RETRIEVE_MAX_CHUNKS_PER_DOC=3`, run with `--hit-limit 8` | B2 |
+| `coding-off` | `ANSWER_CODING_MODE_ENABLED=false` | B1/B2 ([coding mode](#site-coding-arm)) |
+| `effort` (only if step 0 shows the effort is honoured) | the transport `--probe-args` named | B2 |
+
+- `--prior-cap` must equal the deployed cut: omit it on every arm but
+  `history1000` (the default is the agent default, 4000), and never pass a
+  value that differs from the deployed one.
+- `count-tokenize` changes only where `/tokenize` is not served (step 0's
+  `--probe-count`); where it is served, `auto` already counts with it and the
+  arm can be skipped. It acts on single-turn answers, so it runs the session
+  flags, not the follow-up flags. Compare `verification_state`,
+  `finish_reason` and the budget fields with B2.
+- `depth-8-3` switches the retrieval depth (#1191) back to 8 hits and 3
+  chunks per manual; it runs the session flags, single-turn
+  ([depth arm](#site-depth-arm)).
+- Condensation is no longer an arm. `CHAT_CONDENSE_ENABLED=true` still works
+  and turns the anchoring default off; setting both true is refused at deploy
+  and at startup.
+- Before the window default rose to 262144 (#1274), `LLM_MAX_MODEL_LEN` was
+  32768. Record the deployed value in step 0; it must not exceed the served
+  window.
 
 Cost: per answer row with expected docs, an arm asks one opener and up to
 four follow-ups. Class-B follow-ups go only to passed openers with gold
 strings. Time the baseline arm on `--subset 24` first. If `--all
---repeats 2` does not fit four arms, run every arm with the same
+--repeats 2` does not fit every arm, run every arm with the same
 `--subset 24 --repeats 3`.
 
 Reading the arms. First check that `params.sample.ids_sha256`,
 `follow_ups_sha256`, `restate_follow_ups_sha256`, `switch_pairs_sha256` and
-`pipe_sha256` are equal across the four exports, and that `prior_cap` differs
-only in `history4000`. Then compare each kind on its own signal:
+`pipe_sha256` are equal across the follow-up exports, and that `prior_cap`
+differs only in `history1000`. Then compare each kind on its own signal:
 
 - `anaphoric`: `by_turn["2"]["anaphoric"]`: `evidence_gold_hit_rate` and
   `vs_opener`.
 - `switch`: `vs_single`: `lost` against `gained` for pass and evidence.
   Gains on anaphoric that come with more switch losses are a trade.
 - `restate`/`summary`: `pass_rate`, `restate.declines` and
-  `restate.gold_split` (`after_cut` found should move only with a larger
+  `restate.gold_split` (`after_cut` found should move only with a smaller
   cap).
 - `exposure.over_cap_share` and `citation_list_cut_share` per arm.
 - `timing` p50 per turn and kind is the arm's cost on this host
@@ -940,9 +1026,83 @@ recount each repeat from the export rows (`repeat`, `follow_up_kind`,
 `--out` and `--summary` hold questions, follow-ups and answers and stay. Any
 default change after the comparison is a separate maintainer decision.
 
+<a id="site-depth-arm"></a>
+**Retrieval depth arm (issue #1191, `depth-8-3`).** Not the Pipe's answer
+depths (#1255, reasoning effort). Since #1274 the release retrieves 16 hits
+per answer and keeps up to 5 chunks per manual; the arm switches both back
+to 8 and 3 together, single-turn on both endpoints, against B2 (the same
+build at its defaults, no `--hit-limit`: the eval's default is the agent
+default, 16):
+
+- `ANSWER_HIT_LIMIT=16` (default): twice the earlier depth. At the 262144
+  default window the packed evidence does not bind; on a site whose served
+  window is smaller and set in `LLM_MAX_MODEL_LEN`, a 32768 window leaves a
+  packing budget of about 21,100 tokens after the fixed preamble, so a
+  denser server count trims the tail excerpt (recorded as omitted).
+  Scaling the stand-in's 8-hit p95 of about 7,600 prompt tokens gives about
+  15,000 at 16 (static estimate; read `prompt_tokens` p95 from B2).
+- `RETRIEVE_MAX_CHUNKS_PER_DOC=5` (default; `/v1/search` included): the
+  section gap is within the gold manual, and the per-manual cap is what held
+  its further sections out. In a replay of the recorded stand-in pools (17
+  section rows, RRF only), a gold section reached the top 8 in 8 rows at 3,
+  9 at 4 and 10 at 5 or 6, and depth alone (16 at 3) added one row, at rank
+  13. On the dev set, document-level recall@5 moved from 113 to 111 of 117
+  at 5; recall@8 stayed at 114.
+- `--hit-limit 8` on the arm keeps the sibling pool as deep as the arm's
+  answer; B2 runs without it.
+- The supplied-evidence text total scales with the hit limit
+  (`max(48000, 6000 x answer_hit_limit)`, 96000 at 16), so a cited source
+  keeps its text in the Open WebUI Pipe at the default depth
+  ([bounds](agent.md#supplied-excerpts)).
+
+Compare `D-depth-8-3` with B2 per endpoint: `gold_retrieved` rate, citation
+recall, pass rate by class, refusals (abstentions and
+`insufficient_evidence` on answer rows), `prompt_tokens` and `elapsed_ms`
+p50/p95, and `supplied_n`/`supplied_doc_n`. A gain inside either side's
+repeat range is noise. If depth hurts, the site keeps the two lines in
+`airgap.env`; changing the code default back is a separate maintainer
+decision.
+
 The earlier two-arm condense comparison (`--arm condense-off`/`condense-on`
 without `--follow-up`) remains valid. Its exports keep the anaphoric-only
 shape.
+
+<a id="site-coding-arm"></a>
+**Gold strings and code fences across builds.** The gold-string checks
+(`gold_must_contain`, `gold_must_not_contain`, `must_cite_identifier`, and
+the class-B restate check) read the answer plus the extracted `script`
+(maintainer decision 2026-11-17, #1285), so a gold string inside a `c`,
+`hlasm`, `asm`, `metalc`, `assembler` or `clist` fence scores the same on
+f117160c, which leaves it in the answer, and on the candidate, which moves
+it into `script`; on `/v1/chat` both come from the evaluator's own parse of
+the stream. The structural checks read the answer only, and the export is
+unchanged.
+
+**Coding mode (issue #1276).** Every report and export carries
+`metrics.coding`: the rows whose question the agent's own classifier
+(`is_coding_request`) marks as a coding request, derived on the evaluator side
+from the question, so the old build, the candidate and the arm below count the
+same rows. It holds counts only: `n`, `judged`, `pass`, `answer_n`,
+`false_refusals` and `false_refusal_rate` (same rule as the top-level false
+refusals; denominator `answer_n`), `zero_hits` and `by_verification_state`.
+The pinned `evals/golden.jsonl` has two such rows (SYN-30, SYN-35), too few to
+read: the coding refusal rate needs 10–20 coding questions (JCL, REXX, HLASM,
+Metal C) written by the team for the graded eval (#1191 D3); golden.jsonl is
+not edited for this.
+
+- `coding-off`: the fifth ablation arm above, one single-turn session on
+  the candidate build. `show ANSWER_CODING_MODE_ENABLED` (empty means unset,
+  the on default) before, `false` during the arm, empty after it. It runs
+  the same `run` lines as B1 (both endpoints, `--all --repeats 2`, or the
+  session's agreed subset), labelled `D-coding-off`. Compare `metrics.coding` and `by_class.syntax`
+  against B1/B2 under the decision rule below; the rest of the metrics must
+  not move beyond B1 against B2, because with coding mode off only coding
+  requests change. Watch `metrics.coding.by_verification_state` for
+  `generation_incomplete`: a coding answer (code, guidance, checklist) has the
+  same output reserve as any complex answer, so truncation is the first
+  cost to look for. The fence handling (`SCRIPT_LANGS`) is not part of the
+  setting: `false` restores the prompts and the complexity, not the parse. The old build (A sessions) predates the setting and is
+  already the coding-off prompt with the old fence handling.
 
 **Decision rule.** The [protocol above](#measurement-protocol)
 applies: decide on the hardware-independent group only, and a difference
@@ -951,6 +1111,55 @@ site, a change is also claimed only when B differs from A by more than A1
 differs from A2. Classes with 10 rows or fewer (table, negative, the abstain
 rows) are read in aggregate only. The paired per-row comparison runs on the
 connected side from the exports and is not part of this tool.
+
+### Corpus coverage check
+
+Issue #1191. A read-only check of which publicly available documents the
+deployed corpus holds, so the maintainer fetches only the missing ones.
+`evals/corpus-wishlist.json` lists titles and identifiers only, never document
+text. Each item matches by IBM form number (`match: doc_number`, the number
+without its edition, confirmed against IBM's public library) or by
+whole-word, case-insensitive title keywords (`match: title`). A
+`doc_id_prefixes` field limits title matches to Redbook numbers. The check
+pages `GET /v1/sources` with the answer eval's `fetch_coverage`. Run it from
+the bastion pod through the same port-forward as above:
+
+```sh
+oc -n "$NS" port-forward svc/rag-agent 8087:8080 &   # keep it running
+WS=/work/<candidate>/qdrant-pdf-rag                  # any workspace with this tool
+PYTHONPATH="$WS/src" python3 -m mainframe_rag.eval.coverage \
+  --agent-url http://127.0.0.1:8087 \
+  --wishlist "$WS/evals/corpus-wishlist.json" --out coverage.json
+```
+
+- Each item is `present`, `missing` or `ambiguous`.
+  - A number hit is `present`.
+  - A `match: title` item hit on one form-number family is `present`; its
+    editions count as one family. Hits on several families are `ambiguous`,
+    unless the item is a series (`expect_many`).
+  - A numbered item found only by its title keywords is `ambiguous`. It may
+    be a sibling book or a renumbered edition.
+- The table and `--out` hold only these fields:
+  - the wishlist's ids, titles, categories and priorities, and the statuses;
+  - the doc ids that matched a wishlist number;
+  - title-matched doc ids of a Redbook or Redpaper number (`SG24-6366-02`,
+    `sg246366`). Any other title-matched doc id is only counted
+    (`other_matches`). A form-number shape alone proves nothing, because
+    ingest derives one from any site file name or vendor PDF.
+
+  Catalog titles, unmatched doc ids, the build id and catalog sizes are
+  never printed or written, so the output may leave the gap after the usual
+  review.
+- A book is matched under the doc id ingest gave it
+  ([ingest §2](ingest.md#2-parsing-and-metadata-ibm_pdfpy)). IBM file names
+  such as `dz9zs006.pdf` take the most frequent form number of the first
+  pages, and that can be a cited book's number. So `missing` or a number
+  hit is a fetch guide, not proof of absence or presence.
+- The exit status is 0 for any completed run. It is 1 when the catalog
+  cannot be read (no catalog, transport error, malformed page, or a build
+  change mid-walk): a fixed message is printed and no table. It is 2 for an
+  invalid wishlist (before any request) or an `--out` file that cannot be
+  written (after the table).
 
 ### Failure taxonomy (#830)
 

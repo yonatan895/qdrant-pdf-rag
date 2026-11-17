@@ -610,3 +610,127 @@ def test_resolved_code_note_exact_and_only_what_retrieval_resolved(query, note):
     from mainframe_rag.agent.answer import resolved_code_note
 
     assert resolved_code_note(query) == note
+
+
+# ------------------------------------------------- coding mode (issue #1276)
+
+# SHA-256 of the prompt constants at b0057a50, before coding mode: an
+# independent expectation that the non-coding system prompt, complex
+# extension and stable_cache instruction block keep their bytes.
+_PRE_CODING_PROMPT_SHA256 = {
+    "SYSTEM_PROMPT": "03deeef854aa9b2676ec7b9e892f6b4a60207ac7f9e1ad22be0bb70ade23312d",
+    "SYSTEM_PROMPT_COMPLEX_EXTENSION": "664cfb5a64693ab358ce321f9553c21b9851b1025f5df04f81c28ffc3209813e",
+    "STABLE_CACHE_INSTRUCTIONS": "a44146cd2d4ab15923f383cd65d976b2fb153b06e7874939f5a7e84adf301f6c",
+}
+_STRICT_TAIL = "Please answer based strictly on the retrieved manual excerpts above"
+_CODING_QUERY = "Write a REXX exec that lists the members of a PDS"
+
+
+def test_non_coding_prompt_constants_keep_their_pre_coding_bytes():
+    import hashlib
+
+    from mainframe_rag.agent import answer
+
+    for name, digest in _PRE_CODING_PROMPT_SHA256.items():
+        assert hashlib.sha256(getattr(answer, name).encode()).hexdigest() == digest, name
+
+
+def _prompt(query, *, chat, order, coding_on, complexity=None, coding=False):
+    from mainframe_rag.agent.answer import build_chat_messages
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage
+
+    settings = Settings(_env_file=None, **_MECHANICS_BUDGET, answer_coding_mode_enabled=coding_on)
+    hits = [_hit("SA22-0000-00 Ref, Chapter 2 > IEA500I, p. 1-6", "Body.")]
+    extra = {"coding": True} if coding else {}
+    if chat:
+        history = [ChatMessage(role="user", content="Prior?"),
+                   ChatMessage(role="assistant", content="Prior answer."),
+                   ChatMessage(role="user", content=query)]
+        prepared = build_chat_messages(history, hits, complexity=complexity, settings=settings,
+                                       order=order, **extra)
+    else:
+        prepared = build_messages(query, hits, complexity=complexity, settings=settings,
+                                  order=order, **extra)
+    return [(m.role, m.content) for m in prepared.messages]
+
+
+@pytest.mark.parametrize("chat", [False, True])
+@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
+@pytest.mark.parametrize("query", [
+    "What does IEA500I mean?",
+    "How do I diagnose and recover when DFSMShsm journal fills up?",
+    "What is the JCL DISP parameter?",
+    _CODING_QUERY,  # a coding request whose builder call is not told it is one
+])
+def test_prompt_bytes_do_not_depend_on_the_coding_setting_unless_the_turn_is_coding(
+    chat, order, query
+):
+    """The builder never decides coding mode itself: without `coding=True`
+    every prompt (answer and chat, simple and complex, both orders) is
+    identical with the setting on or off and keeps the strict tail."""
+    on = _prompt(query, chat=chat, order=order, coding_on=True)
+    off = _prompt(query, chat=chat, order=order, coding_on=False)
+    assert on == off
+    assert _STRICT_TAIL in on[-1][1]
+    assert "Coding Protocol" not in on[0][1]
+
+
+@pytest.mark.parametrize("chat", [False, True])
+@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
+def test_coding_turn_prompt_carries_the_extension_and_no_strict_wording(chat, order):
+    """A coding turn: system = base + complex + coding extension (also when a
+    direct caller passes simple); the strict tail and the 'only the excerpts'
+    instruction block are replaced, so no instruction left in the prompt
+    contradicts labelled general guidance."""
+    from mainframe_rag.agent.answer import (
+        STABLE_CACHE_INSTRUCTIONS,
+        STABLE_CACHE_INSTRUCTIONS_CODING,
+        SYSTEM_PROMPT,
+        SYSTEM_PROMPT_CODING_EXTENSION,
+        SYSTEM_PROMPT_COMPLEX_EXTENSION,
+    )
+
+    messages = _prompt(_CODING_QUERY, chat=chat, order=order, coding_on=True,
+                       complexity="simple", coding=True)
+    system, user = messages[0][1], messages[-1][1]
+    assert system == SYSTEM_PROMPT + SYSTEM_PROMPT_COMPLEX_EXTENSION + SYSTEM_PROMPT_CODING_EXTENSION
+    whole = "\n".join(content for _role, content in messages)
+    assert "strictly" not in whole
+    assert STABLE_CACHE_INSTRUCTIONS not in whole
+    assert user.rstrip().endswith(
+        "Citations:\nSA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17")
+    assert "following the Coding Protocol" in user
+    if order == "stable_cache":
+        assert user.startswith(STABLE_CACHE_INSTRUCTIONS_CODING)
+    else:
+        assert "Instructions:" not in user
+
+
+def test_coding_extension_states_the_required_rules():
+    """Issue #1276 prompt contract: cited manual facts, labelled general
+    practice, VERIFY instead of declining, tagged fences, the checklist, and
+    the decline narrowed to no coverage of the language at all."""
+    from mainframe_rag.agent.answer import SYSTEM_PROMPT_CODING_EXTENSION as ext
+
+    for needle in ("cite the excerpt", "General guidance (not from the manuals):",
+                   "never decline a coding request", "`VERIFY: <item>`",
+                   "fenced code block tagged with its language", "Pre-production checklist:",
+                   "only when no excerpt covers the language", "takes precedence"):
+        assert needle in ext, needle
+
+
+def test_coding_prompt_text_reads_as_no_refusal():
+    """No coding instruction (system, tail, instructions) carries a refusal
+    marker, so the prompt's own wording never seeds a refusal phrase."""
+    from mainframe_rag.agent.answer import (
+        STABLE_CACHE_INSTRUCTIONS_CODING,
+        SYSTEM_PROMPT_CODING_EXTENSION,
+        is_refusal,
+    )
+
+    tail = _prompt(_CODING_QUERY, chat=False, order="retrieval", coding_on=True,
+                   coding=True)[-1][1].split("\n\n")[-1]
+    assert tail.startswith("Please answer from the retrieved manual excerpts above")
+    for text in (SYSTEM_PROMPT_CODING_EXTENSION, STABLE_CACHE_INSTRUCTIONS_CODING, tail):
+        assert not is_refusal(text)

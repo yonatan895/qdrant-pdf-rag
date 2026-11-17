@@ -1,6 +1,6 @@
 """Site measurement for the answer eval (issue #1191): the `/v1/chat`
-endpoint, served-corpus coverage, the text-free export, and the RC client
-reading the 2cd8f67d agent's wire.
+endpoint, served-corpus coverage, the text-free export, the RC client
+reading the 2cd8f67d agent's wire, and the corpus coverage check.
 
 The CLI runs over an inert HTTP boundary (`httpx2.MockTransport`) whose
 chat frames come from the agent's own SSE formatters. Two tests drive the
@@ -163,6 +163,150 @@ def test_chat_stream_is_judged_from_its_finish_chunk(site_eval):
     assert report["metrics"]["measurement"]["hardware_independent"]["truncation"]["n"] == 1
 
 
+_HLASM = "GETMAIN R,LV=4096"
+
+
+@pytest.mark.parametrize("transport", ["json", "sse"])
+def test_answer_rows_score_a_gold_string_in_the_script_like_one_in_the_answer(
+        site_eval, transport):
+    """Maintainer decision 2026-11-17 (#1285): a build whose parser moves an
+    hlasm fence into `script` (the candidate) and one that leaves it in the
+    answer (f117160c) give the same verdict on the same model output."""
+    import httpx2
+
+    def run(answer, script):
+        def respond(request):
+            if request.url.path == "/healthz":
+                return httpx2.Response(200, json=HEALTH)
+            if request.url.path == "/v1/search":
+                return httpx2.Response(200, json={"hits": [{"doc_id": "SA22-0000-00"}]})
+            if transport == "sse":
+                return _sse(_answer_final(answer=answer, script=script,
+                                          script_review_required=script is not None))
+            return httpx2.Response(200, json={
+                "answer": answer, "citations": [CITE], "citations_inferred": False,
+                "inferred_indices": [], "verification_state": "accepted", "script": script,
+                "script_review_required": script is not None, "request_id": "r1"})
+
+        args = ["--stream"] if transport == "sse" else []
+        _status, report, _, _ = site_eval(respond, [_entry(gold_must_contain=["GETMAIN"])], args)
+        return report["results"][0]
+
+    old = run(f"Obtain storage:\n\n```hlasm\n{_HLASM}\n```", None)
+    new = run("Obtain storage:", _HLASM)
+    assert old["verdict"] == new["verdict"] == "pass", (old["failures"], new["failures"])
+    assert old["failures"] == new["failures"] == []
+
+
+@pytest.mark.parametrize("agent_script", [None, _HLASM], ids=["old-agent", "new-agent"])
+def test_chat_rows_score_a_fenced_gold_string_the_same_on_either_build(site_eval, agent_script):
+    """On /v1/chat the body and the script both come from the evaluator's
+    own parse of the streamed text, so the agent build's script field does
+    not change the verdict."""
+    import httpx2
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": [{"doc_id": "SA22-0000-00"}]})
+        body = chat_stream("Obtain storage:\n\n", f"```hlasm\n{_HLASM}\n```\n\n",
+                           f"Citations:\n- {CITE}\n")
+        if agent_script is not None:
+            body = body.replace(b'"script": null', json.dumps({"script": agent_script})[1:-1].encode())
+        return _sse(body)
+
+    _status, report, _, _ = site_eval(respond, [_entry(gold_must_contain=["GETMAIN"])],
+                                      ["--endpoint", "chat", "--stream"])
+    row = report["results"][0]
+    assert row["verdict"] == "pass", row["failures"]
+    assert row["answer"] == "Obtain storage:"
+
+
+_DEPTH_SUPPLIED = [
+    {**_supplied(), "index": 1},
+    {**_supplied(doc_id="SA22-0001-00"), "index": 2},
+    {**_supplied(), "index": 9},
+]
+
+
+@pytest.mark.parametrize("endpoint,transport", [("answer", "json"), ("answer", "sse"), ("chat", "sse")])
+@pytest.mark.parametrize("supplied,counts", [
+    (_DEPTH_SUPPLIED, (3, 2)),
+    ([], (0, 0)),
+    (None, (None, None)),  # an agent that does not send the field: unknown
+    ([{"index": 1, "citation": CITE}], (None, None)),  # no doc id: unknown, not a count
+])
+def test_rows_count_supplied_excerpts_and_their_manuals(site_eval, endpoint, transport, supplied,
+                                                        counts):
+    """Issue #1191: each answer row carries how many excerpts the agent
+    supplied to the model and from how many distinct manuals, read off the
+    response's `supplied_evidence` (counts only), on both endpoints."""
+    import httpx2
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": [{"doc_id": "SA22-0000-00", "cite": CITE}]})
+        if endpoint == "chat":
+            if supplied is None:
+                # Strip the field from the agent's own finish chunk.
+                return _sse(chat_stream("IEA500I reports a rejected command.", supplied=[])
+                            .replace(b', "supplied_evidence": []', b""))
+            return _sse(chat_stream("IEA500I reports a rejected command.", supplied=supplied))
+        extra = {} if supplied is None else {"supplied_evidence": supplied}
+        if transport == "sse":
+            return _sse(_answer_final(**extra))
+        return httpx2.Response(200, json={
+            "answer": "IEA500I reports a rejected command.", "citations": [CITE],
+            "citations_inferred": False, "inferred_indices": [], "verification_state": "accepted",
+            "script": None, "script_review_required": False, "request_id": "r1", **extra})
+
+    args = ["--endpoint", endpoint] + (["--stream"] if transport == "sse" else [])
+    _status, report, export, _ = site_eval(respond, [_entry()], args)
+    row = report["results"][0]
+    if endpoint == "chat" and (supplied is None or (supplied and "doc_id" not in supplied[0])):
+        assert row["verdict"] == "error"  # the chat body is parsed over the supplied doc ids
+    else:
+        assert row["verdict"] in ("pass", "fail"), row["failures"]
+    assert (row.get("supplied_n"), row.get("supplied_doc_n")) == counts
+    [exported] = json.loads(export)["rows"]
+    assert (exported["supplied_n"], exported["supplied_doc_n"]) == counts
+
+
+@pytest.mark.parametrize("extra,limit", [((), 16), (("--hit-limit", "8"), 8),
+                                         (("--hit-limit", "16"), 16)])
+def test_hit_limit_sets_the_sibling_pool_depth_and_is_recorded(site_eval, extra, limit):
+    """Issue #1191: the sibling /v1/search pool (gold_retrieved, citation
+    recall) asks for the deployed ANSWER_HIT_LIMIT the operator declares;
+    default the agent default (16 since #1274, 8 before), and an undeclared
+    run's params are unchanged."""
+    import httpx2
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": [{"doc_id": "SA22-0000-00", "cite": CITE}]})
+        return _sse(_answer_final())
+
+    status, report, export, calls = site_eval(respond, [_entry()], ["--stream", *extra])
+    assert status == 0
+    [search] = [c for c in calls if c.url.path == "/v1/search"]
+    assert json.loads(search.content)["limit"] == limit
+    for params in (report["params"], json.loads(export)["params"]):
+        assert params.get("hit_limit") == (limit if extra else None)
+        assert ("hit_limit" in params) == bool(extra)
+
+
+@pytest.mark.parametrize("bad", ["0", "33", "16.0", "x"])
+def test_hit_limit_takes_the_agent_bounds(site_eval, bad):
+    with pytest.raises(SystemExit) as exc:
+        site_eval(lambda r: pytest.fail("no request"), [_entry()], ["--hit-limit", bad])
+    assert exc.value.code == 2
+
+
 def test_chat_zero_hits_stream_is_the_zero_hits_path(site_eval):
     import httpx2
 
@@ -260,16 +404,24 @@ def test_chat_and_answer_rows_agree_on_the_same_model_output(
 
 
 
-@pytest.mark.parametrize(("condense", "gold_hit"), [
-    pytest.param("false", False, id="off"), pytest.param("true", True, id="on")])
+@pytest.mark.parametrize(("env", "gold_hit"), [
+    # Both modes off: the behaviour before #1274's default flip.
+    pytest.param({"CHAT_CONDENSE_ENABLED": "false", "CHAT_FOLLOWUP_ANCHOR_ENABLED": "false"}, False,
+                 id="off"),
+    # Condense on with the anchor unset (#1274): the anchor default yields.
+    pytest.param({"CHAT_CONDENSE_ENABLED": "true"}, True, id="on"),
+    # Nothing set (#1274): anchored, the opener is searched as a second leg.
+    pytest.param({}, True, id="default-anchored"),
+])
 def test_two_turn_evidence_follows_the_real_agents_condense_setting(
-    monkeypatch, servable_representation_gate, condense, gold_hit,
+    monkeypatch, servable_representation_gate, env, gold_hit,
 ):
     """Through the real app (#1268): the agent accepts the Pipe-shaped turn-2
-    body, and the follow-up's evidence hit moves with CHAT_CONDENSE_ENABLED
+    body, and the follow-up's evidence hit moves with the follow-up mode
     because it is read from what the agent packed. The search double returns
     the gold doc only for a query that names the message id; the model double
-    condenses the follow-up into such a query."""
+    condenses the follow-up into such a query, and the anchored leg searches
+    the opener, which names it."""
     from mainframe_rag.eval.answers import run_follow_ups, run_query
     from mainframe_rag.eval.follow_up import load_pipe
     from mainframe_rag.ports import ChatResult, TokenUsage
@@ -294,17 +446,24 @@ def test_two_turn_evidence_follows_the_real_agents_condense_setting(
          "usage": TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15)},
     ))
     frames: list[str] = []
-    with agent_client(monkeypatch, llm=llm, search=search,
-                      env={"CHAT_CONDENSE_ENABLED": condense}) as client:
+    for name in ("CHAT_CONDENSE_ENABLED", "CHAT_FOLLOWUP_ANCHOR_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
+    with agent_client(monkeypatch, llm=llm, search=search, env=env) as client:
         opener = run_query(client, _entry(), stream=True, endpoint="chat", frames=frames,
                            evidence=True)
         [follow] = run_follow_ups(client, _entry(), opener, frames, load_pipe()[0], 0.0)
     assert opener["verdict"] != "error" and follow["verdict"] != "error", follow["failures"]
     assert opener["evidence_gold_hit"] is True
     assert follow["evidence_gold_hit"] is gold_hit
-    assert follow["evidence_doc_ids"] == (["SA22-0000-00"] if gold_hit else [OTHER_DOC])
-    assert searched == [_entry()["query"], "IEA500I recovery procedure" if gold_hit
-                        else FOLLOW_UPS["message_id"]]
+    expected = {"off": [FOLLOW_UPS["message_id"]], "on": ["IEA500I recovery procedure"],
+                "default-anchored": [FOLLOW_UPS["message_id"], _entry()["query"]]}
+    mode = ("off" if env.get("CHAT_FOLLOWUP_ANCHOR_ENABLED") == "false"
+            else "on" if env else "default-anchored")
+    assert searched == [_entry()["query"], *expected[mode]]
+    if mode != "default-anchored":
+        assert follow["evidence_doc_ids"] == (["SA22-0000-00"] if gold_hit else [OTHER_DOC])
+    else:
+        assert "SA22-0000-00" in follow["evidence_doc_ids"]
     assert follow["prior_answer_chars"] > 0
 
 
@@ -440,7 +599,7 @@ EXPORT_ROW_KEYS = {
     "abstention_zeroed", "prompt_tokens", "completion_tokens", "reasoning_tokens", "total_tokens",
     "elapsed_ms", "ttft_ms", "llm_ms", "client_first_token_ms", "decode_tps", "gold_retrieved",
     "expected_doc_ids", "hit_doc_ids", "cited_doc_ids", "citation_precision", "citation_recall",
-    "coverage", "expected_served",
+    "coverage", "expected_served", "supplied_n", "supplied_doc_n",
 }
 
 
@@ -524,6 +683,52 @@ def test_export_carries_no_question_answer_citation_or_failure_text(site_eval, e
     assert data["coverage"]["build_id"] is None and data["coverage"]["status"] == "known"
     assert data["params"]["endpoint"] == endpoint and "agent_url" not in data["params"]
     assert data["metrics"]["by_failure"]["missing required substring"] == 2
+
+
+@pytest.mark.parametrize("endpoint", ["answer", "chat"])
+def test_single_turn_export_does_not_follow_the_prior_turn_default(site_eval, monkeypatch, endpoint):
+    """Issue #1274: the --prior-cap default follows the agent's
+    chat_max_prior_turn_chars default (1000 -> 4000). A single-turn run
+    reads neither: its requests and its export, timings aside, are the same
+    under the old and the new default, and carry no prior_cap."""
+    from mainframe_rag.config import Settings
+
+    def run():
+        _, _, export, calls = site_eval(_canary_agent(endpoint), _canary_entries(),
+                                        ["--endpoint", endpoint, "--stream", "--coverage"])
+        data = json.loads(export)
+        for row in data["rows"]:
+            for key in ("elapsed_ms", "ttft_ms", "llm_ms", "client_first_token_ms", "decode_tps"):
+                row.pop(key)
+        data.pop("timestamp")
+        data["params"].pop("generated_at", None)
+        return data, [(c.method, str(c.url), c.content) for c in calls]
+
+    field = Settings.model_fields["chat_max_prior_turn_chars"]
+    assert field.default == 4000
+    new_export, new_calls = run()
+    monkeypatch.setattr(field, "default", 1000)
+    old_export, old_calls = run()
+    assert "prior_cap" not in new_export["params"]
+    assert "by_turn" not in new_export["metrics"]
+    assert old_calls == new_calls
+    assert json.dumps(old_export, sort_keys=True) == json.dumps(new_export, sort_keys=True)
+
+
+@pytest.mark.parametrize("endpoint", ["answer", "chat"])
+def test_export_carries_the_coding_breakdown_without_the_question(site_eval, endpoint):
+    """Issue #1276: the coding class is derived from the question on the
+    evaluator side and leaves the gap as counts only."""
+    query = f"Write a REXX exec for {CANARIES['query']} one"
+    _, report, export, _ = site_eval(
+        _canary_agent(endpoint), [_entry(id="COD", query=query, query_class="syntax"),
+                                  _entry(id="LOOK", query=f"{CANARIES['query']} one")],
+        ["--endpoint", endpoint, "--stream"])
+    text = export.decode("utf-8")
+    assert CANARIES["query"] not in text and "REXX" not in text
+    coding = json.loads(text)["metrics"]["coding"]
+    assert coding == report["metrics"]["coding"]
+    assert coding["n"] == 1 and coding["judged"] == 1 and coding["answer_n"] == 1
 
 
 def test_export_of_a_health_failure_holds_no_golden_text(site_eval):
@@ -983,7 +1188,7 @@ def test_every_kind_branches_off_the_same_opener_history(site_eval):
     assert timing["ttft_ms"] is None and timing["total_tokens"] is None
     params = report["params"]
     assert params["follow_up"] == ["anaphoric", "switch", "restate", "summary"]
-    assert (params["prior_cap"], params["switch_pairs_n"]) == (1000, 2)
+    assert (params["prior_cap"], params["switch_pairs_n"]) == (4000, 2)  # #1274: was 1000
     assert status == 0, [r["failures"] for r in report["results"]]
 
 
@@ -1109,12 +1314,17 @@ def test_restate_is_scored_on_the_openers_gold_and_declines_are_counted(site_eva
     assert status == 1
 
 
-@pytest.mark.parametrize(("cap", "split", "citations"), [
-    pytest.param([], ({"n": 1, "found": 1}, {"n": 1, "found": 0}), "cut", id="cap1000"),
-    pytest.param(["--prior-cap", "4000"], ({"n": 2, "found": 1}, {"n": 0, "found": 0}), "kept",
-                 id="cap4000"),
+_CUT_1000 = ({"n": 1, "found": 1}, {"n": 1, "found": 0})
+_KEPT_4000 = ({"n": 2, "found": 1}, {"n": 0, "found": 0})
+
+
+@pytest.mark.parametrize(("cap", "cut", "split", "citations"), [
+    pytest.param(["--prior-cap", "1000"], 1000, _CUT_1000, "cut", id="cap1000"),
+    pytest.param(["--prior-cap", "4000"], 4000, _KEPT_4000, "kept", id="cap4000"),
+    # #1274: the default follows the agent default, 4000 (was 1000).
+    pytest.param([], 4000, _KEPT_4000, "kept", id="default"),
 ])
-def test_restate_gold_is_split_at_the_declared_prior_turn_cut(site_eval, cap, split, citations):
+def test_restate_gold_is_split_at_the_declared_prior_turn_cut(site_eval, cap, cut, split, citations):
     """A long opener answer: one gold string in the kept head, one past the
     declared cut. The restatement has only the first; its evidence holds the
     gold doc (the doc-level proxy). Exposure flags the cut citation list."""
@@ -1129,11 +1339,12 @@ def test_restate_gold_is_split_at_the_declared_prior_turn_cut(site_eval, cap, sp
                                      [*TWO_TURN, "--follow-up", "restate", *cap])
     row = _kind_rows(report)[("MSG-01", 2, "restate")]
     assert (row["gold_split"]["before_cut"], row["gold_split"]["after_cut"]) == split
-    assert row["history_over_cap"] is (not cap) and row["citation_list_cut"] == citations
+    assert row["history_over_cap"] is (cut == 1000) and row["citation_list_cut"] == citations
     block = report["metrics"]["by_turn"]["2"]["restate"]
     assert block["restate"]["gold_split"]["before_cut"]["in_evidence"] == split[0]
-    assert block["exposure"]["over_cap"] == (0 if cap else 1)
-    assert block["prior_answer_chars"]["cut_chars"] == (4000 if cap else 1000)
+    assert block["exposure"]["over_cap"] == (1 if cut == 1000 else 0)
+    assert block["prior_answer_chars"]["cut_chars"] == cut
+    assert report["params"]["prior_cap"] == cut
     assert json.loads(export)["rows"][1]["gold_split"]["after_cut"] == split[1]
 
 
@@ -1289,6 +1500,280 @@ def test_a_switch_row_covers_the_docs_of_the_question_it_asked(site_eval):
     rows = {(r["id"], r["turn"]): r for r in json.loads(export)["rows"]}
     assert (rows[("A", 1)]["coverage"], rows[("A", 2)]["coverage"]) == ("none", "all")
     assert (rows[("B", 1)]["coverage"], rows[("B", 2)]["coverage"]) == ("all", "none")
+
+
+# ------------------------------------------------- corpus coverage check (#1191)
+# `python -m mainframe_rag.eval.coverage` compares the served catalog with the
+# wishlist and reports only wishlist items, statuses and public form numbers.
+# All numbers and titles below are synthetic.
+
+PRIVATE_IDS = ("acme-jes2-runbook", "acme-pd-notes", "kb201234", "OPS01-0042", "SITE-SECRET-01")
+SYNTHETIC_WISHLIST = {"schema": "corpus_wishlist/1", "items": [
+    {"id": "num", "category": "hardware_language_reference", "title": "Numbered Principles",
+     "priority": 1, "match": "doc_number", "doc_numbers": ["SA99-0001"],
+     "title_keywords": [["numbered principles"]]},
+    {"id": "miss", "category": "hlasm_library", "title": "Missing Reference",
+     "priority": 2, "match": "doc_number", "doc_numbers": ["SA99-0002"]},
+    {"id": "amb", "category": "language_tool_library", "title": "Assembler Guide",
+     "priority": 2, "match": "title", "title_keywords": [["synthetic", "assembler guide"]]},
+    {"id": "one", "category": "language_tool_library", "title": "Toolkit Handbook",
+     "priority": 3, "match": "title", "title_keywords": [["toolkit handbook"]]},
+    {"id": "many", "category": "redbook", "title": "Synthetic Series",
+     "priority": 1, "match": "title", "title_keywords": [["synthetic series"]],
+     "expect_many": True},
+    {"id": "rb-jes2", "category": "redbook", "title": "JES2 Redbooks",
+     "priority": 2, "match": "title", "title_keywords": [["jes2"]],
+     "doc_id_prefixes": ["SG24", "REDP"], "expect_many": True},
+    {"id": "pd", "category": "practitioner", "title": "Problem Determination",
+     "priority": 3, "match": "title", "title_keywords": [["problem determination"]],
+     "expect_many": True},
+    {"id": "renum", "category": "language_tool_library", "title": "Renumbered Handbook",
+     "priority": 2, "match": "doc_number", "doc_numbers": ["SA99-0005"],
+     "title_keywords": [["toolkit handbook"]]},
+    {"id": "rp", "category": "redbook", "title": "Redpaper Handbook",
+     "priority": 3, "match": "title", "title_keywords": [["redpaper handbook"]]},
+]}
+SYNTHETIC_CATALOG = [
+    ("SA99-0001-13", "Numbered Principles of Operation, Thirteenth Edition"),
+    ("SA99-0001-12", "Numbered Principles of Operation, Twelfth Edition"),
+    ("SC99-1111-00", "Synthetic Assembler Guide"),
+    ("SC99-2222-01", "Synthetic Assembler Guide for Experts"),
+    ("GC99-0003-01", "Toolkit Handbook"),
+    ("SG24-9001-00", "Synthetic Series Volume 1"),
+    ("SG24-9002-00", "Synthetic Series Volume 2"),
+    ("sg249999", "JES2 Synthetic Redbook"),
+    ("REDP-9004-00", "Redpaper Handbook"),
+    ("REDP-9004-01", "Redpaper Handbook, Second Edition"),
+    ("acme-jes2-runbook", "ACME JES2 Runbook"),
+    ("acme-pd-notes", "ACME Problem Determination Notes"),
+    ("kb201234", "KB Problem Determination Checklist"),
+    # A site file named like a form number (ingest keeps that shape).
+    ("OPS01-0042", "OPS Problem Determination Handbook"),
+    ("SITE-SECRET-01", "Secret Site Procedures"),
+]
+
+
+def _catalog_agent(entries, per_page=200, build="b-1"):
+    import httpx2
+
+    def respond(request):
+        assert request.url.path == "/v1/sources"
+        cursor = request.url.params.get("cursor")
+        start = 0 if cursor is None else int(cursor.removeprefix("ls1.p"))
+        chunk = entries[start:start + per_page]
+        nxt = f"ls1.p{start + per_page}" if start + per_page < len(entries) else None
+        return httpx2.Response(200, json={
+            "request_id": "x", "build_id": build, "next_cursor": nxt,
+            "sources": [{"doc_id": d, "title": t, "source_revision": f"r|{d}"} for d, t in chunk]})
+
+    return respond
+
+
+@pytest.fixture
+def corpus_check(tmp_path, monkeypatch, capsys):
+    """The real coverage CLI over an inert HTTP boundary; returns status,
+    stdout, stderr, the parsed --out file (or None) and the requests."""
+    import httpx2
+
+    from mainframe_rag.eval import coverage
+
+    real_client = httpx2.Client
+
+    def run(respond, wishlist=SYNTHETIC_WISHLIST):
+        calls: list = []
+
+        def record(request):
+            calls.append(request)
+            return respond(request)
+
+        monkeypatch.setattr(httpx2, "Client", lambda **kw: real_client(
+            transport=httpx2.MockTransport(record), **kw))
+        args = ["--agent-url", "http://deployed-agent:8087"]
+        if wishlist is not None:
+            path = tmp_path / "wishlist.json"
+            path.write_text(json.dumps(wishlist))
+            args += ["--wishlist", str(path)]
+        out = tmp_path / "coverage.json"
+        out.unlink(missing_ok=True)
+        status = coverage.main([*args, "--out", str(out)])
+        captured = capsys.readouterr()
+        data = json.loads(out.read_text()) if out.exists() else None
+        return status, captured.out, captured.err, data, calls
+
+    return run
+
+
+def test_coverage_check_reports_present_missing_and_ambiguous(corpus_check):
+    status, out, _, data, _ = corpus_check(_catalog_agent(SYNTHETIC_CATALOG))
+    assert status == 0
+    assert data["schema"] == "corpus_coverage/1"
+    rows = {r["id"]: r for r in data["items"]}
+    assert list(rows) == [i["id"] for i in SYNTHETIC_WISHLIST["items"]]
+    # Two editions of one form number are one present document.
+    assert rows["num"] == {"id": "num", "title": "Numbered Principles",
+                           "category": "hardware_language_reference", "priority": 1,
+                           "status": "present", "matched_by": "doc_number",
+                           "doc_ids": ["SA99-0001-12", "SA99-0001-13"], "other_matches": 0}
+    assert (rows["miss"]["status"], rows["miss"]["matched_by"], rows["miss"]["doc_ids"]) == (
+        "missing", None, [])
+    # Two form-number families behind one single-book title: ambiguous. A
+    # title-matched id is named only as a Redbook/Redpaper number, since a
+    # form-number shape alone can be a site file name; the rest are counted.
+    assert (rows["amb"]["status"], rows["amb"]["doc_ids"], rows["amb"]["other_matches"]) == (
+        "ambiguous", [], 2)
+    assert (rows["one"]["status"], rows["one"]["matched_by"], rows["one"]["doc_ids"],
+            rows["one"]["other_matches"]) == ("present", "title", [], 1)
+    assert (rows["many"]["status"], rows["many"]["doc_ids"]) == (
+        "present", ["SG24-9001-00", "SG24-9002-00"])
+    # Two Redpaper editions are one family.
+    assert (rows["rp"]["status"], rows["rp"]["doc_ids"]) == (
+        "present", ["REDP-9004-00", "REDP-9004-01"])
+    # The prefix keeps the site's own JES2 runbook out of the Redbook item.
+    assert (rows["rb-jes2"]["status"], rows["rb-jes2"]["doc_ids"],
+            rows["rb-jes2"]["other_matches"]) == ("present", ["sg249999"], 0)
+    # Site documents (a stem with digits, a file named like a form number)
+    # are counted, never named.
+    assert (rows["pd"]["status"], rows["pd"]["doc_ids"], rows["pd"]["other_matches"]) == (
+        "present", [], 3)
+    # A numbered item whose number is absent but whose title keywords hit
+    # another book is ambiguous, never present.
+    assert (rows["renum"]["status"], rows["renum"]["matched_by"], rows["renum"]["doc_ids"],
+            rows["renum"]["other_matches"]) == ("ambiguous", "title", [], 1)
+    assert data["counts"] == {"present": 6, "missing": 1, "ambiguous": 2}
+    lines = out.splitlines()
+    assert any(line.split()[:3] == ["num", "1", "present"] for line in lines)
+    assert any(line.split()[:3] == ["miss", "2", "missing"] for line in lines)
+    assert any(line.split()[:3] == ["amb", "2", "ambiguous"] for line in lines)
+
+
+def test_coverage_check_never_reports_what_the_wishlist_did_not_name(corpus_check):
+    """Unmatched entries, title-matched private entries, the build id and
+    every catalog title stay out of stdout, stderr and the export."""
+    status, out, err, data, _ = corpus_check(_catalog_agent(SYNTHETIC_CATALOG, build="build-77"))
+    assert status == 0
+    blob = out + err + json.dumps(data)
+    for doc_id in PRIVATE_IDS:
+        assert doc_id not in blob
+    wishlist_titles = {i["title"] for i in SYNTHETIC_WISHLIST["items"]}
+    for _, title in SYNTHETIC_CATALOG:
+        if title not in wishlist_titles:
+            assert title not in blob
+    assert "build-77" not in blob
+
+
+def test_coverage_check_pages_the_whole_catalog(corpus_check):
+    status, _, _, data, calls = corpus_check(_catalog_agent(SYNTHETIC_CATALOG, per_page=4))
+    assert status == 0
+    assert [c.url.params.get("cursor") for c in calls] == [None, "ls1.p4", "ls1.p8", "ls1.p12"]
+    assert {c.url.params.get("limit") for c in calls} == {"200"}
+    rows = {r["id"]: r for r in data["items"]}
+    assert rows["rb-jes2"]["status"] == "present"  # second page
+    assert rows["pd"]["other_matches"] == 3  # third and fourth pages
+
+
+def test_coverage_check_prints_the_table_when_the_export_cannot_be_written(
+        tmp_path, monkeypatch, capsys):
+    import httpx2
+
+    from mainframe_rag.eval import coverage
+
+    real_client = httpx2.Client
+    monkeypatch.setattr(httpx2, "Client", lambda **kw: real_client(
+        transport=httpx2.MockTransport(_catalog_agent(SYNTHETIC_CATALOG)), **kw))
+    wishlist = tmp_path / "wishlist.json"
+    wishlist.write_text(json.dumps(SYNTHETIC_WISHLIST))
+    status = coverage.main(["--agent-url", "http://deployed-agent:8087",
+                            "--wishlist", str(wishlist), "--out", str(tmp_path)])
+    captured = capsys.readouterr()
+    assert status == 2
+    assert any(line.split()[:3] == ["num", "1", "present"] for line in captured.out.splitlines())
+    assert captured.err == "error: the --out file cannot be written\n"
+
+
+def test_coverage_check_matches_by_number_without_a_title(corpus_check):
+    import httpx2
+
+    def respond(request):
+        return httpx2.Response(200, json={"request_id": "x", "build_id": "b-1", "next_cursor": None,
+                                          "sources": [{"doc_id": "SA99-0001-13"}]})
+
+    status, _, _, data, _ = corpus_check(respond)
+    assert status == 0
+    assert data["items"][0]["status"] == "present"
+
+
+def _unreadable(kind):
+    import httpx2
+
+    def respond(request):
+        if kind == "no_catalog":
+            return httpx2.Response(503, json={"code": "sources_unavailable", "message": "m"})
+        if kind == "malformed":
+            return httpx2.Response(200, json={"sources": "nope"})
+        if kind == "transport":
+            raise httpx2.ConnectError("refused")
+        build = "b-1" if request.url.params.get("cursor") is None else "b-2"
+        return httpx2.Response(200, json={
+            "request_id": "x", "build_id": build,
+            "next_cursor": "ls1.p1" if build == "b-1" else None,
+            "sources": [{"doc_id": "SA99-0001-13", "title": "t"}]})
+
+    return respond
+
+
+@pytest.mark.parametrize(("kind", "reason"), [
+    ("no_catalog", "http_503"), ("malformed", "malformed"),
+    ("transport", "request_failed"), ("build_changed", "build_changed"),
+])
+def test_coverage_check_fails_closed_when_the_catalog_is_unreadable(corpus_check, kind, reason):
+    status, out, err, data, _ = corpus_check(_unreadable(kind))
+    assert status == 1
+    assert out == "" and data is None  # no partial table, no export
+    assert err == f"error: the agent's source catalog could not be read ({reason})\n"
+
+
+def test_coverage_check_refuses_an_invalid_wishlist_before_any_request(corpus_check):
+    bad = {"schema": "corpus_wishlist/1", "items": [
+        {"id": "x", "category": "hlasm_library", "title": "X", "priority": 1,
+         "match": "title", "doc_numbers": ["SA99-0001"]}]}
+    status, out, err, data, calls = corpus_check(_catalog_agent(SYNTHETIC_CATALOG), wishlist=bad)
+    assert status == 2 and out == "" and data is None and calls == []
+    assert err.startswith("error: invalid wishlist: ")
+
+
+def test_coverage_check_reads_the_2cd8f67d_catalog(corpus_check):
+    """The site's current agent: its captured catalog pages carry titles."""
+    status, out, err, data, calls = corpus_check(_capture_agent("hits"))
+    assert status == 0
+    assert len(calls) == len(CAPTURE["sources_pages"])
+    assert {r["status"] for r in data["items"]} == {"missing"}
+    guide = {"schema": "corpus_wishlist/1", "items": [
+        {"id": "guide", "category": "practitioner", "title": "A Guide", "priority": 1,
+         "match": "title", "title_keywords": [["synthetic guide"]]}]}
+    status, out, err, data, _ = corpus_check(_capture_agent("hits"), wishlist=guide)
+    assert status == 0
+    assert data["items"] == [{"id": "guide", "title": "A Guide", "category": "practitioner",
+                              "priority": 1, "status": "present", "matched_by": "title",
+                              "doc_ids": [], "other_matches": 1}]
+    blob = out + err + json.dumps(data)
+    for page in CAPTURE["sources_pages"]:
+        for source in page["body"]["sources"]:
+            assert source["doc_id"] not in blob and source["title"] not in blob
+
+
+def test_shipped_wishlist_is_valid_and_runs_by_default(corpus_check):
+    from mainframe_rag.eval import coverage
+
+    items = coverage.load_wishlist(coverage.DEFAULT_WISHLIST)
+    ids = [i["id"] for i in items]
+    assert {i["category"] for i in items} == set(coverage.CATEGORIES)
+    numbers = [n for i in items for n in i.get("doc_numbers", [])]
+    assert len(numbers) == len(set(numbers))
+    status, _, _, data, _ = corpus_check(
+        _catalog_agent([("SITE-SECRET-01", "Secret Site Procedures")]), wishlist=None)
+    assert status == 0
+    assert [r["id"] for r in data["items"]] == ids
+    assert {r["status"] for r in data["items"]} == {"missing"}
 
 
 # ------------------------------------------- graded capture (#1191 PR 1)

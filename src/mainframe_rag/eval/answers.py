@@ -41,6 +41,10 @@ Judging contract (structural first)
     frozen holdout's refusal rows keep the literal until a dedicated holdout
     decision. must_cite_identifier requires the
     identifier to appear in the body or in a validated citation string.
+    These gold checks read the answer body plus the extracted `script`
+    (maintainer decision 2026-11-17, #1285): a build that moves a code fence
+    into `script` scores the same as one that keeps it in the answer. The
+    structural checks (empty body, refusal, grounding) read the body only.
     Gold checks judge MODEL phrasing, so they are suppressed on the agent's
     zero-hits path (a canned message has no model text); the structural
     verdict still fires there.
@@ -171,6 +175,7 @@ from mainframe_rag.agent.answer import (
     VERIFICATION_STATES,
     has_answer_body,
     is_abstention,
+    is_coding_request,
     is_refusal,
 )
 from mainframe_rag.config import Settings, load_settings
@@ -295,6 +300,7 @@ def judge(
     judge_gold: bool = True,
     citations_inferred: bool = False,
     verification_state: str | None = None,
+    script: str | None = None,
 ) -> tuple[str, list[str], list[str]]:
     """Judge one /v1/answer response against a golden entry.
 
@@ -357,18 +363,28 @@ def judge(
         )
 
     if judge_gold:
-        failures.extend(missing_gold(entry, body))
+        content = gold_text(body, script)
+        failures.extend(missing_gold(entry, content))
         for s in entry.get("gold_must_not_contain") or []:
-            if str(s).lower() in body.lower():
+            if str(s).lower() in content.lower():
                 failures.append(f"forbidden substring present: {s!r}")
 
         ident = entry.get("must_cite_identifier")
         if ident:
-            hay = " ".join([body, *citations]).lower()
+            hay = " ".join([content, *citations]).lower()
             if str(ident).lower() not in hay:
                 failures.append(f"identifier not cited or mentioned: {ident!r}")
 
     return ("fail" if failures else "pass"), failures, warns
+
+
+def gold_text(body: str, script: object) -> str:
+    """What the gold-string checks read: the answer body plus the extracted
+    script, if any (#1285), so where a build's parser puts a code fence does
+    not change the verdict."""
+    if isinstance(script, str) and script.strip():
+        return f"{body}\n{script.strip()}"
+    return body
 
 
 def missing_gold(entry: dict[str, Any], body: str) -> list[str]:
@@ -558,7 +574,36 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     metrics["unjudged"] = total - len(judged) - metrics["errors"]
     metrics["error_rate"] = round(metrics["errors"] / total, 4) if total else None
     metrics["judged_rate"] = round(len(judged) / total, 4) if total else None
+    # Coding requests (issue #1276), appended last so no key order moves.
+    metrics["coding"] = coding_breakdown(results)
     return metrics
+
+
+def coding_breakdown(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Counts for the rows whose question is a coding request (issue #1276).
+
+    The class is derived on the evaluator side from each row's question with
+    the agent's own deterministic classifier, never from a dataset field, so
+    the old build, the candidate and a `coding-off` arm count the same rows.
+    Text-free: counts, rates with their denominators and state labels only.
+    The refusal rule is summarize()'s false-refusal rule."""
+    rows = [r for r in results if is_coding_request(str(r.get("query") or ""))]
+    judged = [r for r in rows if r.get("verdict") in ("pass", "fail")]
+    answer_rows = [r for r in judged if r.get("expected_behavior") == "answer"]
+    refusals = sum(1 for r in answer_rows
+                   if "explicit refusal on an answer-tier query" in (r.get("failures") or []))
+    passed = sum(1 for r in judged if r["verdict"] == "pass")
+    return {
+        "n": len(rows),
+        "judged": len(judged),
+        "pass": passed,
+        "answer_n": len(answer_rows),
+        "false_refusals": refusals,
+        "false_refusal_rate": round(refusals / len(answer_rows), 4) if answer_rows else None,
+        "zero_hits": sum(1 for r in judged if r.get("path") == "zero_hits"),
+        "by_verification_state": dict(sorted(Counter(
+            str(r.get("verification_state") or "unknown") for r in judged).items())),
+    }
 
 
 def _mean(values: list[Any]) -> float | None:
@@ -936,7 +981,7 @@ def judge_restate(row: dict[str, Any], entry: dict[str, Any]) -> None:
     counted apart. Unlike `judge`, the zero-hits path is judged too: the
     user got no restatement."""
     answer = str(row.get("answer") or "")
-    missing = missing_gold(entry, answer)
+    missing = missing_gold(entry, gold_text(answer, row.get("script")))
     gold_n = len(entry.get("gold_must_contain") or [])
     declined = row.get("path") == "zero_hits" or is_abstention(answer, row.get("citations") or [])
     row.update(
@@ -1064,12 +1109,13 @@ def run_session(client: Any, entry: dict[str, Any], pipe_mod: Any,
     return row
 
 
-def _fetch_pool(client: Any, query: str) -> list[dict[str, Any]] | None:
-    """Sibling /v1/search pool (limit 8, same call the answer retrieval
-    makes). None on any failure: a missing pool is a missing signal, not an
-    empty pool."""
+def _fetch_pool(client: Any, query: str, limit: int = 8) -> list[dict[str, Any]] | None:
+    """Sibling /v1/search pool (the same call the answer retrieval makes, at
+    the deployed `answer_hit_limit`, the agent default unless `--hit-limit` declares another,
+    issue #1191). None on any failure: a missing pool is a missing signal,
+    not an empty pool."""
     try:
-        resp = client.post("/v1/search", json={"query": query, "limit": 8})
+        resp = client.post("/v1/search", json={"query": query, "limit": limit})
         if resp.status_code != 200:
             return None
         body = resp.json()
@@ -1082,6 +1128,12 @@ def _fetch_pool(client: Any, query: str) -> list[dict[str, Any]] | None:
 
 
 def chat_answer_body(content: str, terminal: dict[str, Any]) -> str | None:
+    """The judged answer body of a chat stream (see `chat_answer_parts`)."""
+    parts = chat_answer_parts(content, terminal)
+    return None if parts is None else parts[0]
+
+
+def chat_answer_parts(content: str, terminal: dict[str, Any]) -> tuple[str, str | None] | None:
     """The answer body of one `/v1/chat` stream (issue #1191), or None when
     the terminal chunk's evidence fields are malformed.
 
@@ -1118,13 +1170,19 @@ def chat_answer_body(content: str, terminal: dict[str, Any]) -> str | None:
         listed = "\n\n**Citations:**\n" + "\n".join(f"- {c}" for c in citations)
         content = content.removesuffix(listed)
     if not entries:
-        return content
-    return parse_answer(content, PromptEvidence(entries=tuple(entries))).answer
+        script = terminal.get("script")
+        return content, script if isinstance(script, str) else None
+    parsed = parse_answer(content, PromptEvidence(entries=tuple(entries)))
+    return parsed.answer, parsed.script
 
 
-def _chat_answer_data(terminal: dict[str, Any], answer: str) -> dict[str, Any]:
+def _chat_answer_data(
+    terminal: dict[str, Any], answer: str, script: str | None = None
+) -> dict[str, Any]:
     """The answer-shaped object `_judge_response` reads, from the chat
-    terminal chunk. Fields the chunk lacks stay absent, never invented."""
+    terminal chunk. Fields the chunk lacks stay absent, never invented.
+    `answer` and `script` are the evaluator's own parse of the streamed
+    text (`chat_answer_parts`), so both builds are judged by one parser."""
     chunk_id = terminal.get("chunk_id")
     data: dict[str, Any] = {
         key: terminal[key]
@@ -1135,6 +1193,7 @@ def _chat_answer_data(terminal: dict[str, Any], answer: str) -> dict[str, Any]:
         if key in terminal
     }
     data["answer"] = answer
+    data["script"] = script
     if isinstance(chunk_id, str):
         data["request_id"] = chunk_id.removeprefix("chatcmpl-")
     return data
@@ -1209,14 +1268,15 @@ def run_query(
         row.update(verdict="error", failures=[outcome.failure], elapsed_ms=elapsed_ms)
         return row
     if endpoint == "chat" and outcome is not None and outcome.final is not None:
-        answer = chat_answer_body(outcome.content or "", outcome.final)
-        if answer is None:
+        parts = chat_answer_parts(outcome.content or "", outcome.final)
+        if parts is None:
             row.update(verdict="error", failures=[STREAM_MALFORMED], elapsed_ms=elapsed_ms)
             return row
+        answer, script = parts
         measured = {"finish_reason": outcome.final["finish_reason"],
                     "client_first_token_ms": outcome.first_token_ms}
         row = _judge_response(
-            row, entry, _chat_answer_data(outcome.final, answer), elapsed_ms,
+            row, entry, _chat_answer_data(outcome.final, answer, script), elapsed_ms,
             answer_signals, hits, measured, keep_evidence_text,
         )
         if evidence and row.get("verdict") in ("pass", "fail"):
@@ -1353,6 +1413,7 @@ def _judge_response(
         judge_gold=not zero_hits,
         citations_inferred=citations_inferred,
         verification_state=verification_state,
+        script=data.get("script") if isinstance(data.get("script"), str) else None,
     )
     if zero_hits:
         warns.append("zero-hits path: gold substrings not judged (canned agent message)")
@@ -1386,6 +1447,7 @@ def _judge_response(
         if hits is None
         else [str(h.get("doc_id") or "") for h in hits]
     )
+    supplied_n, supplied_doc_n = _supplied_counts(data.get("supplied_evidence"))
     row.update(
         verdict=verdict,
         failures=failures,
@@ -1453,6 +1515,10 @@ def _judge_response(
         # capture handler. Report-only — judge() never reads these.
         budget_verified=signals.get("budget_verified"),
         units_omitted=signals.get("units_omitted"),
+        # Retrieval depth (issue #1191): excerpts the agent supplied to the model
+        # and their distinct manuals, off the response; counts only.
+        supplied_n=supplied_n,
+        supplied_doc_n=supplied_doc_n,
     )
     # Stage attribution (issue #1191): what this very answer packed and
     # retrieved, text-free unless the run asked for the excerpt text.
@@ -1461,6 +1527,18 @@ def _judge_response(
 
     row.update(evidence_capture(data, keep_text=keep_evidence_text))
     return row
+
+
+def _supplied_counts(supplied: Any) -> tuple[int | None, int | None]:
+    """(entries, distinct doc ids) of a response's `supplied_evidence`; both
+    None when the field is missing or an entry has no doc id (unknown, never
+    a count)."""
+    if not isinstance(supplied, list) or any(
+        not isinstance(entry, dict) or not isinstance(entry.get("doc_id"), str)
+        for entry in supplied
+    ):
+        return None, None
+    return len(supplied), len({entry["doc_id"] for entry in supplied})
 
 
 _FAILURE_DETAIL_RE = re.compile(r"\([^()]*:[^()]*\)|\[[^\[\]]*\]|'[^']*'")
@@ -1547,7 +1625,8 @@ COVERAGE_STATES = ("all", "some", "none", "not_applicable", "unknown")
 
 def _sources_page(client: Any, cursor: str | None) -> tuple[dict[str, Any] | None, str | None]:
     """One validated `/v1/sources` page, or a fixed reason label. Only the
-    build id, the doc ids and the cursor are read."""
+    build id, the doc ids, their titles and the cursor are read. A title is
+    optional: an entry without a string title is kept by doc id alone."""
     params: dict[str, Any] = {"limit": _SOURCES_PAGE_LIMIT}
     if cursor is not None:
         params["cursor"] = cursor
@@ -1570,6 +1649,7 @@ def _sources_page(client: Any, cursor: str | None) -> tuple[dict[str, Any] | Non
     ):
         return None, "malformed"
     return {"build_id": body["build_id"], "doc_ids": [s["doc_id"] for s in sources],
+            "titles": [(s["doc_id"], s["title"]) for s in sources if isinstance(s.get("title"), str)],
             "next_cursor": body.get("next_cursor")}, None
 
 
@@ -1580,8 +1660,11 @@ def fetch_coverage(client: Any) -> dict[str, Any]:
     build published without a catalog), an agent older than the endpoint, a
     transport error, a malformed page, a build change between pages or the
     page cap all give "unknown" with a fixed `reason`: coverage is never a
-    failure and never touches a verdict or the exit code."""
+    failure and never touches a verdict or the exit code. `titles` holds
+    (doc id, title) pairs for the corpus coverage check's matching
+    (eval/coverage.py); no report carries it."""
     doc_ids: set[str] = set()
+    titles: set[tuple[str, str]] = set()
     build_id: str | None = None
     cursor: str | None = None
     pages = 0
@@ -1597,15 +1680,17 @@ def fetch_coverage(client: Any) -> dict[str, Any]:
         elif page["build_id"] != build_id:
             return _coverage("unknown", "build_changed", build_id, pages)
         doc_ids.update(page["doc_ids"])
+        titles.update(page["titles"])
         cursor = page["next_cursor"]
         if cursor is None:
-            return _coverage("known", None, build_id, pages, frozenset(doc_ids))
+            return _coverage("known", None, build_id, pages, frozenset(doc_ids), frozenset(titles))
 
 
 def _coverage(status: str, reason: str | None, build_id: str | None, pages: int,
-              doc_ids: frozenset[str] = frozenset()) -> dict[str, Any]:
+              doc_ids: frozenset[str] = frozenset(),
+              titles: frozenset[tuple[str, str]] = frozenset()) -> dict[str, Any]:
     return {"status": status, "reason": reason, "build_id": build_id, "pages": pages,
-            "doc_ids": doc_ids}
+            "doc_ids": doc_ids, "titles": titles}
 
 
 def apply_coverage(row: dict[str, Any], entry: dict[str, Any], coverage: dict[str, Any]) -> None:
@@ -1768,6 +1853,8 @@ def export_row(row: dict[str, Any]) -> dict[str, Any]:
         "citation_recall": _number_or_none(row.get("citation_recall")),
         "coverage": row.get("coverage") if row.get("coverage") in COVERAGE_STATES else None,
         "expected_served": _count_or_none(row.get("expected_served")),
+        "supplied_n": _count_or_none(row.get("supplied_n")),
+        "supplied_doc_n": _count_or_none(row.get("supplied_doc_n")),
     }
     if "turn" in row or "session_turns" in row:
         # Two-turn rows (issue #1268) and session rows (#1191) only:
@@ -1888,6 +1975,13 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
         f"(n={metrics.get('answer_completeness_n')}: expected docs retrieved; share whose "
         "validated citations cover all of them; None = caller had no pool join)"
     )
+    coding = metrics.get("coding")
+    if coding:
+        lines.append(
+            f"- coding requests (#1276): {coding['n']} rows, pass {coding['pass']}/{coding['judged']}, "
+            f"false refusals {coding['false_refusals']} "
+            f"(rate {coding['false_refusal_rate']}, n={coding['answer_n']})"
+        )
     lines.append("")
     lines.append("| class | n | pass |")
     lines.append("|---|---|---|")
@@ -2104,12 +2198,13 @@ def _follow_up_kinds(raw: str) -> tuple[str, ...]:
     return tuple(kind for kind in FOLLOW_UP_KINDS if kind in names)
 
 
-def _prior_cap(raw: str) -> int:
-    # The agent's own bounds for chat_max_prior_turn_chars.
-    field = Settings.model_fields["chat_max_prior_turn_chars"]
+def _setting_bounded(setting: str, label: str, raw: str) -> int:
+    """An operator-declared value of an agent setting, within that setting's
+    own bounds."""
+    field = Settings.model_fields[setting]
     low = next(m.ge for m in field.metadata if hasattr(m, "ge"))
     high = next(m.le for m in field.metadata if hasattr(m, "le"))
-    message = f"prior cap must be an integer from {low} to {high}"
+    message = f"{label} must be an integer from {low} to {high}"
     try:
         value = int(raw)
     except ValueError:
@@ -2117,6 +2212,14 @@ def _prior_cap(raw: str) -> int:
     if not low <= value <= high:
         raise argparse.ArgumentTypeError(message)
     return value
+
+
+def _prior_cap(raw: str) -> int:
+    return _setting_bounded("chat_max_prior_turn_chars", "prior cap", raw)
+
+
+def _hit_limit(raw: str) -> int:
+    return _setting_bounded("answer_hit_limit", "hit limit", raw)
 
 
 def select_subset(entries: list[dict[str, Any]], size: int) -> list[dict[str, Any]]:
@@ -2191,8 +2294,15 @@ def main(argv: list[str] | None = None) -> int:
                              "output as before)")
     parser.add_argument("--prior-cap", type=_prior_cap, default=None,
                         help="with --follow-up: the deployed CHAT_MAX_PRIOR_TURN_CHARS as the "
-                             "operator declares it (the agent does not report it); default 1000, "
-                             "the agent default (recorded in params)")
+                             "operator declares it (the agent does not report it); default "
+                             f"{Settings.model_fields['chat_max_prior_turn_chars'].default}, the "
+                             "agent default (recorded in params)")
+    parser.add_argument("--hit-limit", type=_hit_limit, default=None,
+                        help="the deployed ANSWER_HIT_LIMIT as the operator declares it (the "
+                             "agent does not report it): the sibling /v1/search pool asks for "
+                             "that many hits; default "
+                             f"{Settings.model_fields['answer_hit_limit'].default}, the agent default "
+                             "(recorded in params, issue #1191)")
     parser.add_argument("--sessions", type=Path, default=None,
                         help="fixed-history /v1/chat sessions (issue #1191): a private dev JSONL "
                              "of rows whose `turns` alternate user and authored assistant text; "
@@ -2357,6 +2467,8 @@ def main(argv: list[str] | None = None) -> int:
                 for row, (_, entry) in zip(results, passes, strict=True):
                     apply_coverage(row, entry, coverage)
         else:
+            pool_limit = (Settings.model_fields["answer_hit_limit"].default
+                          if args.hit_limit is None else args.hit_limit)
             for i, (number, entry) in enumerate(passes, 1):
                 if sessions_mode:
                     # No sibling search: a last turn searched on its own words
@@ -2365,7 +2477,7 @@ def main(argv: list[str] | None = None) -> int:
                     row = run_session(client, entry, pipe_mod, args.temperature,
                                       args.keep_evidence_text)
                 else:
-                    pool = _fetch_pool(client, entry["query"])
+                    pool = _fetch_pool(client, entry["query"], pool_limit)
                     frames: list[str] | None = [] if two_turn else None
                     row = run_query(
                         client, entry, signals, pool, temperature=args.temperature,
@@ -2445,6 +2557,8 @@ def main(argv: list[str] | None = None) -> int:
             "datasets": datasets,
         },
     }
+    if args.hit_limit is not None:
+        params["hit_limit"] = args.hit_limit
     if two_turn:
         from mainframe_rag.eval.follow_up import follow_ups_sha256
 
