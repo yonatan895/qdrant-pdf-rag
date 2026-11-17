@@ -1948,19 +1948,20 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
 
         # #1285: GitHub served ten full pages at total_count 1015, then page 11 as
         # total_count 0 with no runs. That is the API window, not tampering.
-        def windowed(last_page):
+        def windowed(last_page, total=1015):
             def get(endpoint):
                 page = int(endpoint.rsplit("=", 1)[1])
                 if page <= 10:
-                    return {"total_count": 1015,
+                    return {"total_count": total,
                             "workflow_runs": [{"id": (page - 1) * 100 + n} for n in range(100)]}
                 return last_page
             return get
-        for last_page in ({"total_count": 0, "workflow_runs": []},
-                          {"total_count": 1015, "workflow_runs": []}):
-            with self.subTest(last_page=last_page), \
+        for last_page, total in (({"total_count": 0, "workflow_runs": []}, 1015),
+                                 ({"total_count": 1015, "workflow_runs": []}, 1015),
+                                 ({"total_count": 0, "workflow_runs": []}, 1000)):
+            with self.subTest(last_page=last_page, total=total), \
                  self.assertRaisesRegex(ListWindowExceeded, "list exceeds the GitHub 1000-result API window"):
-                paginate(windowed(last_page), "actions/runs?event=pull_request", "workflow_runs")
+                paginate(windowed(last_page, total), "actions/runs?event=pull_request", "workflow_runs")
         # Inside the window every identity, duplicate and total refusal stays the generic one.
         for response in ({"total_count": 101, "jobs": [{"id": 1}]},
                          {"total_count": 2, "jobs": [{"id": 1}, {"id": 1}]},
@@ -2700,8 +2701,9 @@ def windowed_decision_runs(api, extra):
                 return {'total_count': 0, 'workflow_runs': []}
             return {'total_count': len(rows), 'workflow_runs': copy.deepcopy(rows[(page - 1) * size:page * size])}
         match = re.search(r'actions/runs/([0-9]+)$', endpoint)
-        if match and int(match[1]) != api.run['id']:
-            return copy.deepcopy(next(r for r in store if r['id'] == int(match[1])))
+        listed = [r for r in extra if match and r['id'] == int(match[1])]
+        if listed:
+            return copy.deepcopy(listed[0])
         return original(endpoint)
     api.get = get
     return api
@@ -3246,6 +3248,11 @@ class TestVerifierUpdateDecision(unittest.TestCase):
         summary = api.writes[-1]['output']['summary']
         self.assertIn('list exceeds the GitHub 1000-result API window', summary)
         self.assertNotIn('Verifier files differ', summary)
+        output = io.StringIO()
+        with patch('scripts.acceptance.GitHub'), contextlib.redirect_stdout(output), \
+             patch('scripts.acceptance.collect_acceptance', side_effect=ListWindowExceeded()):
+            self.assertEqual(main(['--repository', 'synthetic/repository', '--pr', '3']), 1)
+        self.assertEqual(json.loads(output.getvalue())['error'], 'github_list_window_exceeded')
 
     def test_comment_grammar_is_strict(self):
 
@@ -3549,6 +3556,22 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
             api.runs = [ordinary.run]
             with self.assertRaises(VerifierApprovalRequired):
                 collect_native(api, api.get(api.prefix + 'pulls/3'), root)
+
+    def test_actual_publisher_finds_the_decision_past_1000_comment_runs_or_names_the_window(self):
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            api = self.collector_fixture(root)
+            windowed_decision_runs(api, skipped_comment_runs(api, 1015))
+            self.assertEqual(collect_acceptance(api, 3, root)['catalogue_approval']['run_id'], 900)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            api = self.collector_fixture(root)
+            windowed_decision_runs(api, skipped_comment_runs(api, 1015, head_sha=api.run['head_sha']))
+            result = publish_acceptance(api, 3, root)
+            self.assertEqual(result['error'], 'github_list_window_exceeded')
+            self.assertEqual(api.writes[-1]['conclusion'], 'failure')
+            self.assertNotIn('Verifier files differ', api.writes[-1]['output']['summary'])
 
     def test_actual_publisher_refuses_anchor_revoked_between_collection_and_final_write(self):
 

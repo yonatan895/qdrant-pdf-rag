@@ -317,7 +317,7 @@ def normalize_native(
 
 def _past_window(total: int | None, rows: list[dict[str, Any]]) -> bool:
     """Only an already failing total check at the window edge is named as the window."""
-    return total is not None and total > API_WINDOW and len(rows) == API_WINDOW
+    return total is not None and total >= API_WINDOW and len(rows) == API_WINDOW
 
 
 def paginate(get, endpoint: str, key: str | None = None, *, identity_key: str = "id") -> list[dict[str, Any]]:
