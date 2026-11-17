@@ -90,6 +90,7 @@ Measurement protocol (issue #1195, docs/metric-contract.md)
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import math
@@ -901,6 +902,8 @@ OPENER_NOT_ANSWERED = "opener not answered"
 HISTORY_FAILED = "follow-up history failed"
 # A class-B follow-up the agent declined (issue #1268).
 RESTATE_DECLINED = "follow-up declined"
+# A `--sessions` row whose history the Pipe would not send (issue #1191).
+SESSION_NOT_BUILT = "session request not built"
 
 
 def has_follow_up(entry: dict[str, Any]) -> bool:
@@ -1020,6 +1023,7 @@ def _annotate_history(row: dict[str, Any], entry: dict[str, Any], kind: str,
 def run_follow_ups(
     client: Any, entry: dict[str, Any], opener: dict[str, Any], frames: list[str],
     pipe_mod: Any, temperature: float | None, plan: FollowUpPlan | None = None,
+    keep_evidence_text: bool = False,
 ) -> list[dict[str, Any]]:
     """Turn 2 of one session, once per follow-up kind: each with the history
     the Open WebUI Pipe would send after the opener (`eval.follow_up`). All
@@ -1064,7 +1068,8 @@ def run_follow_ups(
                        elapsed_ms=0, turn=2)
         else:
             row = run_query(client, follow, None, None, temperature=temperature, stream=True,
-                            endpoint="chat", chat_body=request, evidence=True)
+                            endpoint="chat", chat_body=request, evidence=True,
+                            keep_evidence_text=keep_evidence_text)
             row.update(turn=2, prior_answer_chars=prior_answer_chars(request))
             if plan is not None and kind in RESTATE_FOLLOW_UPS and row.get("verdict") in ("pass", "fail"):
                 judge_restate(row, follow)
@@ -1076,6 +1081,32 @@ def run_follow_ups(
                 _annotate_history(row, follow, kind, request, plan.prior_cap)
         rows.append(row)
     return rows
+
+
+def run_session(client: Any, entry: dict[str, Any], pipe_mod: Any,
+                temperature: float | None, keep_evidence_text: bool = False) -> dict[str, Any]:
+    """One fixed-history session (`--sessions`, issue #1191): its last user
+    turn asked over `/v1/chat` with the whole authored history as the Open
+    WebUI Pipe would send it, judged like a golden row, with the evidence
+    fields read off the agent's packed list. No call when the Pipe would
+    make none (a fixed error label)."""
+    from mainframe_rag.eval.follow_up import history_request, prior_answer_chars
+
+    turns = entry["turns"]
+    try:
+        request = history_request(pipe_mod, turns)
+    except Exception:  # noqa: BLE001 — the Pipe is a boundary; a fixed label only
+        request = None
+    if request is None:
+        row = _base_row(entry, temperature)
+        row.update(verdict="error", failures=[SESSION_NOT_BUILT], elapsed_ms=0,
+                   session_turns=len(turns), prior_answer_chars=None)
+        return row
+    row = run_query(client, entry, None, None, temperature=temperature, stream=True,
+                    endpoint="chat", chat_body=request, evidence=True,
+                    keep_evidence_text=keep_evidence_text)
+    row.update(session_turns=len(turns), prior_answer_chars=prior_answer_chars(request))
+    return row
 
 
 def _fetch_pool(client: Any, query: str, limit: int = 8) -> list[dict[str, Any]] | None:
@@ -1157,7 +1188,8 @@ def _chat_answer_data(
         key: terminal[key]
         for key in ("citations", "citations_inferred", "inferred_indices",
                     "verification_state", "script", "script_review_required",
-                    "supplied_evidence")
+                    # Read by `capture.evidence_capture` only (issue #1191).
+                    "supplied_evidence", "evidence_omitted", "hits")
         if key in terminal
     }
     data["answer"] = answer
@@ -1178,6 +1210,7 @@ def run_query(
     chat_body: dict[str, Any] | None = None,
     frames: list[str] | None = None,
     evidence: bool = False,
+    keep_evidence_text: bool = False,
 ) -> dict[str, Any]:
     """One live /v1/answer call + verdict. Records everything the report and
     the manifest need, including the failure detail (the answer body is the
@@ -1202,7 +1235,11 @@ def run_query(
     messages (the Pipe's follow-up request; `temperature` is still added),
     `frames` receives the stream's `data:` lines for the Pipe replay, and
     `evidence` adds the `evidence_*` fields read off the terminal chunk's
-    `supplied_evidence`."""
+    `supplied_evidence`.
+
+    Every judged row, on every transport, keeps the packed evidence and the
+    final hits as text-free metadata (`eval.capture`, issue #1191);
+    `keep_evidence_text` adds the excerpt text for the private report."""
     t0 = time.monotonic()
     row = _base_row(entry, temperature)
     body: dict[str, Any] = {"query": entry["query"], "temperature": temperature}
@@ -1240,7 +1277,7 @@ def run_query(
                     "client_first_token_ms": outcome.first_token_ms}
         row = _judge_response(
             row, entry, _chat_answer_data(outcome.final, answer, script), elapsed_ms,
-            answer_signals, hits, measured,
+            answer_signals, hits, measured, keep_evidence_text,
         )
         if evidence and row.get("verdict") in ("pass", "fail"):
             apply_evidence(row, entry, outcome.final["supplied_evidence"])
@@ -1254,9 +1291,11 @@ def run_query(
                 elapsed_ms - outcome.first_token_ms,
             )
         return _judge_response(
-            row, entry, outcome.final, elapsed_ms, answer_signals, hits, measured
+            row, entry, outcome.final, elapsed_ms, answer_signals, hits, measured,
+            keep_evidence_text,
         )
-    return _judge_http_response(row, entry, resp, elapsed_ms, answer_signals, hits)
+    return _judge_http_response(row, entry, resp, elapsed_ms, answer_signals, hits,
+                                keep_evidence_text)
 
 
 def _base_row(entry: dict[str, Any], temperature: float | None) -> dict[str, Any]:
@@ -1284,6 +1323,7 @@ def _judge_http_response(
     elapsed_ms: int,
     answer_signals: dict[str, dict[str, Any]] | None,
     hits: list[dict[str, Any]] | None,
+    keep_evidence_text: bool = False,
 ) -> dict[str, Any]:
     """A buffered /v1/answer response, or a non-200 stream response."""
     if resp.status_code != 200:
@@ -1304,7 +1344,8 @@ def _judge_http_response(
     # server measured it, i.e. with LLM_STREAM). Absent stays absent.
     headers = getattr(resp, "headers", None)
     measured = parse_server_timing(headers.get("Server-Timing") if headers is not None else None)
-    return _judge_response(row, entry, data, elapsed_ms, answer_signals, hits, measured)
+    return _judge_response(row, entry, data, elapsed_ms, answer_signals, hits, measured,
+                           keep_evidence_text)
 
 
 def _judge_response(
@@ -1315,6 +1356,7 @@ def _judge_response(
     answer_signals: dict[str, dict[str, Any]] | None,
     hits: list[dict[str, Any]] | None,
     measured: dict[str, Any],
+    keep_evidence_text: bool = False,
 ) -> dict[str, Any]:
     """Validate and judge one answer object (the JSON body or the SSE
     `final`: same answer fields). `measured` holds the count/timing signals
@@ -1478,6 +1520,14 @@ def _judge_response(
         supplied_n=supplied_n,
         supplied_doc_n=supplied_doc_n,
     )
+    # Stage attribution (issue #1191): what this very answer packed and
+    # retrieved, text-free unless the run asked for the excerpt text.
+    # Report-only — judge() never reads these.
+    from mainframe_rag.eval.capture import RowCitations, evidence_capture
+
+    row.update(evidence_capture(
+        data, keep_text=keep_evidence_text,
+        citations=RowCitations(citations, citations_inferred, inferred_indices)))
     return row
 
 
@@ -1710,7 +1760,7 @@ _FIXED_FAILURE_LABELS = frozenset({
     STREAM_INCOMPLETE, STREAM_MALFORMED, STREAM_OVERSIZE,
     "agent health request failed", "malformed agent health response",
     "agent health is not servable",
-    OPENER_NOT_ANSWERED, HISTORY_FAILED, RESTATE_DECLINED,
+    OPENER_NOT_ANSWERED, HISTORY_FAILED, RESTATE_DECLINED, SESSION_NOT_BUILT,
 })
 # OpenAI-compatible finish reasons; any other value is reported as "other".
 _FINISH_REASONS = frozenset({"stop", "length", "content_filter", "tool_calls", "abort"})
@@ -1808,10 +1858,12 @@ def export_row(row: dict[str, Any]) -> dict[str, Any]:
         "supplied_n": _count_or_none(row.get("supplied_n")),
         "supplied_doc_n": _count_or_none(row.get("supplied_doc_n")),
     }
-    if "turn" in row:
-        # Two-turn rows only (issue #1268): single-turn rows keep their keys.
+    if "turn" in row or "session_turns" in row:
+        # Two-turn rows (issue #1268) and session rows (#1191) only:
+        # single-turn rows keep their keys.
         exported.update(
-            turn=2 if row["turn"] == 2 else 1,
+            **({"turn": 2 if row["turn"] == 2 else 1} if "turn" in row
+               else {"session_turns": _count_or_none(row.get("session_turns"))}),
             prior_answer_chars=_count_or_none(row.get("prior_answer_chars")),
             evidence_doc_ids=_doc_ids_or_none(row.get("evidence_doc_ids")),
             evidence_gold_hit=_bool_or_none(row.get("evidence_gold_hit")),
@@ -2273,6 +2325,16 @@ def main(argv: list[str] | None = None) -> int:
                              "image drawn at run time; image+ask sends that image with a short "
                              "fixed typed question. Rows add image size, read count and a "
                              "transcript CER bucket; refuses the frozen holdout (issue #1287)")
+    parser.add_argument("--sessions", type=Path, default=None,
+                        help="fixed-history /v1/chat sessions (issue #1191): a private dev JSONL "
+                             "of rows whose `turns` alternate user and authored assistant text; "
+                             "each last turn is asked with the history the Open WebUI Pipe would "
+                             "send and judged like a golden row. Replaces --golden; needs "
+                             "--endpoint chat --stream")
+    parser.add_argument("--keep-evidence-text", action="store_true",
+                        help="also keep the packed excerpt text per row in the JSON report "
+                             "(private; for a grounding check). Default: text-free metadata "
+                             "only. Never in --export")
     args = parser.parse_args(argv)
     if args.stream and args.agent_url is None:
         parser.error("--stream needs --agent-url: the in-process client buffers the response, "
@@ -2294,9 +2356,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.image_arm is not None and (args.endpoint != "chat" or two_turn):
         parser.error("--image-arm sends single-turn /v1/chat requests: add --endpoint chat "
                      "--stream, without --turns 2")
+    sessions_mode = args.sessions is not None
+    if sessions_mode:
+        if args.endpoint != "chat":
+            parser.error("--sessions asks over /v1/chat: add --endpoint chat --stream")
+        if args.golden is not None or args.all or args.subset is not None or two_turn:
+            parser.error("--sessions is its own dataset: drop --golden, --all, --subset "
+                         "and --turns 2")
+    if args.image_arm is not None and sessions_mode:
+        parser.error("--image-arm draws dev golden questions: drop --sessions")
     pipe_mod: Any = None
     pipe_sha256: str | None = None
-    if two_turn:
+    if two_turn or sessions_mode:
         from mainframe_rag.eval.follow_up import PipeUnavailable, load_pipe
 
         try:
@@ -2306,22 +2377,40 @@ def main(argv: list[str] | None = None) -> int:
                   "checkout)", file=sys.stderr)
             return 2
 
+    sessions_identity: dict[str, Any] | None = None
     try:
-        # Venue rule (issue #268): dev defaults to the golden set only; the
-        # holdout and the real-corpus collection require VENUE=rc. A tuning
-        # sweep additionally refuses a resolved set that contains the holdout
-        # (review B2), before any read or model call: only an explicit
-        # non-holdout --golden may feed --subset/--repeats.
-        golden_paths = resolve_golden_paths(args.golden)
-        if args.subset is not None or args.repeats > 1:
-            operation = "--subset" if args.subset is not None else f"--repeats {args.repeats}"
-            require_tuning_golden(golden_paths, operation)
-        if args.image_arm is not None:
-            # Images are drawn from dev golden questions only (issue #1287).
-            require_tuning_golden(golden_paths, "--image-arm")
-        if args.agent_url is None:
-            require_rc_for_collection(load_settings().qdrant_collection)
-        entries, datasets = load_golden_records_with_identity(golden_paths)
+        if sessions_mode:
+            # Dev-only rows, never the holdout or the release set (refused by
+            # name before the read). Identity is basename + sha256 + count.
+            from mainframe_rag.eval.datasets import read_dev_only_bytes
+            from mainframe_rag.eval.follow_up import SessionError, parse_sessions
+
+            raw = read_dev_only_bytes(args.sessions)
+            try:
+                entries = parse_sessions(raw)
+            except (SessionError, UnicodeDecodeError) as exc:
+                print(f"FAIL: {exc if isinstance(exc, SessionError) else 'session file is not UTF-8'}",
+                      file=sys.stderr)
+                return 2
+            digest = hashlib.sha256(raw).hexdigest()
+            datasets = [{"name": args.sessions.name, "sha256": digest}]
+            sessions_identity = {"name": args.sessions.name, "n": len(entries), "sha256": digest}
+        else:
+            # Venue rule (issue #268): dev defaults to the golden set only; the
+            # holdout and the real-corpus collection require VENUE=rc. A tuning
+            # sweep additionally refuses a resolved set that contains the holdout
+            # (review B2), before any read or model call: only an explicit
+            # non-holdout --golden may feed --subset/--repeats.
+            golden_paths = resolve_golden_paths(args.golden)
+            if args.subset is not None or args.repeats > 1:
+                operation = "--subset" if args.subset is not None else f"--repeats {args.repeats}"
+                require_tuning_golden(golden_paths, operation)
+            if args.image_arm is not None:
+                # Images are drawn from dev golden questions only (issue #1287).
+                require_tuning_golden(golden_paths, "--image-arm")
+            if args.agent_url is None:
+                require_rc_for_collection(load_settings().qdrant_collection)
+            entries, datasets = load_golden_records_with_identity(golden_paths)
     except DatasetError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2
@@ -2336,7 +2425,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"FAIL: {exc}", file=sys.stderr)
             return 2
     else:
-        sample = entries if args.all else select_sample(entries, args.max_queries)
+        # Sessions are authored rows: every one, in file order.
+        sample = (entries if args.all or sessions_mode
+                  else select_sample(entries, args.max_queries))
     print(f"[*] answer-tier eval: {len(sample)} of {len(entries)} entries (deterministic stratified sample)", file=sys.stderr)
     # Whole passes, not row-by-row repeats: drift during a session (cache
     # warmth, co-tenant load) lands on every row equally (issue #1195).
@@ -2391,8 +2482,12 @@ def main(argv: list[str] | None = None) -> int:
                   file=sys.stderr)
         if health_error is not None:
             print(f"FAIL: {health_error}", file=sys.stderr)
-            results = [dict(entry, temperature=args.temperature, verdict="error",
+            results = [dict({k: v for k, v in entry.items() if k != "turns"},
+                            temperature=args.temperature, verdict="error",
                             failures=[health_error], elapsed_ms=0) for _, entry in passes]
+            if sessions_mode:
+                for row, (_, entry) in zip(results, passes, strict=True):
+                    row.update(session_turns=len(entry["turns"]), prior_answer_chars=None)
             if two_turn:
                 for row in results:
                     row["turn"] = 1
@@ -2410,26 +2505,34 @@ def main(argv: list[str] | None = None) -> int:
             pool_limit = (Settings.model_fields["answer_hit_limit"].default
                           if args.hit_limit is None else args.hit_limit)
             for i, (number, entry) in enumerate(passes, 1):
-                pool = _fetch_pool(client, entry["query"], pool_limit)
-                image_turn = None
-                if args.image_arm is not None:
-                    from mainframe_rag.eval.image_arm import build_turn
+                if sessions_mode:
+                    # No sibling search: a last turn searched on its own words
+                    # would hide what the history changes; evidence comes from
+                    # the agent's own packed list (as for a two-turn follow-up).
+                    row = run_session(client, entry, pipe_mod, args.temperature,
+                                      args.keep_evidence_text)
+                else:
+                    pool = _fetch_pool(client, entry["query"], pool_limit)
+                    image_turn = None
+                    if args.image_arm is not None:
+                        from mainframe_rag.eval.image_arm import build_turn
 
-                    image_turn = build_turn(args.image_arm, entry["query"])
-                frames: list[str] | None = (
-                    [] if two_turn or image_turn is not None else None)
-                row = run_query(
-                    client, entry, signals, pool, temperature=args.temperature,
-                    stream=args.stream, endpoint=args.endpoint,
-                    chat_body=None if image_turn is None else image_turn.body,
-                    frames=frames, evidence=two_turn,
-                )
-                if image_turn is not None:
-                    from mainframe_rag.eval.image_arm import apply_image_reads
+                        image_turn = build_turn(args.image_arm, entry["query"])
+                    frames: list[str] | None = (
+                        [] if two_turn or image_turn is not None else None)
+                    row = run_query(
+                        client, entry, signals, pool, temperature=args.temperature,
+                        stream=args.stream, endpoint=args.endpoint,
+                        chat_body=None if image_turn is None else image_turn.body,
+                        frames=frames, evidence=two_turn,
+                        keep_evidence_text=args.keep_evidence_text,
+                    )
+                    if image_turn is not None:
+                        from mainframe_rag.eval.image_arm import apply_image_reads
 
-                    apply_image_reads(row, image_turn, frames)
-                if pool is not None:
-                    apply_pool_join(row, entry, pool)
+                        apply_image_reads(row, image_turn, frames)
+                    if pool is not None:
+                        apply_pool_join(row, entry, pool)
                 session = [row]
                 if two_turn:
                     row["turn"] = 1
@@ -2437,7 +2540,8 @@ def main(argv: list[str] | None = None) -> int:
                         row.update(follow_up_kind=None, switch_id=None)
                     if has_follow_up(entry):
                         session.extend(run_follow_ups(client, entry, row, frames or [],
-                                                      pipe_mod, args.temperature, plan))
+                                                      pipe_mod, args.temperature, plan,
+                                                      args.keep_evidence_text))
                 for turn_row in session:
                     if coverage is not None:
                         # A switch row is judged on its partner's docs.
@@ -2455,11 +2559,13 @@ def main(argv: list[str] | None = None) -> int:
                         turn += f" {turn_row['follow_up_kind']}"
                     print(
                         f"[{i:>3}/{len(passes)}] {marker:5s} {turn_row['id']:8s}{turn} "
-                        f"{turn_row['query'][:58]}",
+                        # Session turns are private dev text: the id only.
+                        f"{'' if sessions_mode else turn_row['query'][:58]}",
                         file=sys.stderr,
                     )
                     for f in turn_row.get("failures") or []:
-                        print(f"        FAIL {f}", file=sys.stderr)
+                        label = export_failure_label(str(f)) if sessions_mode else f
+                        print(f"        FAIL {label}", file=sys.stderr)
             if coverage is not None and coverage["status"] == "known":
                 # A build that moved during the run splits the rows between builds.
                 build_id_end = _served_build_id(client)
@@ -2489,7 +2595,8 @@ def main(argv: list[str] | None = None) -> int:
         "coverage": args.coverage,
         "repeats": args.repeats,
         "sample": {
-            "mode": "subset" if args.subset is not None else "all" if args.all else "default",
+            "mode": ("sessions" if sessions_mode else "subset" if args.subset is not None
+                     else "all" if args.all else "default"),
             **sample_identity(sample),
             # Dataset identity (review N2): basename + sha256 of the exact
             # resolved files, never a private path or question text.
@@ -2509,6 +2616,10 @@ def main(argv: list[str] | None = None) -> int:
 
         params.update(turns=2, arm=args.arm, follow_ups_sha256=follow_ups_sha256(),
                       pipe_sha256=pipe_sha256)
+    if sessions_mode:
+        params.update(sessions=sessions_identity, pipe_sha256=pipe_sha256)
+    # Issue #1191: whether rows hold packed excerpt text (private reports only).
+    params["keep_evidence_text"] = args.keep_evidence_text
     if plan is not None:
         from mainframe_rag.eval.follow_up import restate_follow_ups_sha256, switch_pairs_sha256
 

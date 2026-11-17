@@ -10,6 +10,7 @@ commit's real app with its own test doubles (synthetic data only)."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -89,7 +90,9 @@ def site_eval(tmp_path, monkeypatch):
                         lambda: pytest.fail("remote eval touched local Settings"))
     real_client = httpx2.Client
 
-    def run(respond, entries, extra=()):
+    def run(respond, entries, extra=(), dataset=None):
+        """`dataset` replaces the default `--golden <entries> --all` (the
+        session runner reads its own file)."""
         calls: list = []
 
         def record(request):
@@ -103,7 +106,8 @@ def site_eval(tmp_path, monkeypatch):
         for name in ("report.json", "export.json"):
             (tmp_path / name).unlink(missing_ok=True)
         status = answers.main([
-            "--agent-url", "http://deployed-agent:8087", "--golden", str(golden), "--all",
+            "--agent-url", "http://deployed-agent:8087",
+            *(["--golden", str(golden), "--all"] if dataset is None else dataset),
             "--out", str(tmp_path / "report.json"), "--export", str(tmp_path / "export.json"),
             *extra,
         ])
@@ -1995,3 +1999,466 @@ def test_image_arm_refuses_the_frozen_holdout_before_any_read(tmp_path, monkeypa
                            "--stream", "--image-arm", "image+ask"])
     assert status == 2
     assert "--image-arm needs an explicit non-holdout --golden" in capsys.readouterr().err
+
+
+# ------------------------------------------- graded capture (#1191 PR 1)
+# Stage attribution needs what the agent packed and retrieved for this very
+# answer. Rows keep that as text-free metadata (doc, physical pages, char
+# range, a text hash); the excerpt text only on request, in the private
+# report. Headings, titles, citation strings and hit text are never copied.
+
+
+def _excerpt(**overrides) -> dict:
+    from mainframe_rag.agent.answer import SuppliedExcerpt
+
+    c = CANARIES
+    base = {"index": 1, "citation": f"SA22-0000-00 {c['cite']}, {c['heading']}, p. 6",
+            "doc_id": "SA22-0000-00", "title": c["title"], "heading": c["heading"],
+            "page_label": "1-6", "pdf_page_start": 6, "pdf_page_end": 7, "start_char": 10,
+            "end_char": 40, "source_chars": 50, "truncated_start": True, "truncated_end": True,
+            "text": c["excerpt"]}
+    base.update(overrides)
+    return SuppliedExcerpt(**base).model_dump()
+
+
+def _hit(**overrides) -> dict:
+    from mainframe_rag.retrieve.query import SearchHit
+
+    c = CANARIES
+    base = {"chunk_id": "chunk-1", "score": 0.75, "cite": f"SA22-0000-00 {c['cite']}, p. 6",
+            "heading": c["heading"], "text": c["excerpt"], "doc_id": "SA22-0000-00",
+            "title": c["title"], "page_label": "1-6", "chunk_type": "message",
+            "message_ids": ("IEA500I",), "page_start": 5, "page_end": 6, "rerank_score": 0.5}
+    base.update(overrides)
+    return SearchHit(**base).model_dump(mode="json")
+
+
+# Expected projections, written out by hand (not derived from the code).
+EXCERPT_META = {
+    "index": 1, "doc_id": "SA22-0000-00", "page_label": "1-6", "pdf_page_start": 6,
+    "pdf_page_end": 7, "start_char": 10, "end_char": 40, "source_chars": 50,
+    "truncated_start": True, "truncated_end": True, "text_clipped": False,
+    "duplicate_citation": False, "cited": False,
+}
+# The hit's 0-based page span in the supplied-evidence convention (1-based).
+HIT_META = {"chunk_id": "chunk-1", "doc_id": "SA22-0000-00", "chunk_type": "message",
+            "page_label": "1-6", "pdf_page_start": 6, "pdf_page_end": 7, "score": 0.75,
+            "rerank_score": 0.5}
+
+
+def _capture_respond(transport: str, omitted: int = 2):
+    import httpx2
+
+    supplied, hits = [_excerpt()], [_hit()]
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": [{"doc_id": "SA22-0000-00"}]})
+        if transport == "chat":
+            body = chat_stream("IEA500I reports a rejected command [1].", supplied=supplied,
+                               hits=hits)
+            # The finish chunk's own `evidence_omitted`, as the agent sends it.
+            return _sse(body.replace(b'"evidence_omitted": 0',
+                                     f'"evidence_omitted": {omitted}'.encode()))
+        final = {"supplied_evidence": supplied, "evidence_omitted": omitted}
+        if transport == "sse":
+            return _sse(_answer_final(hits=hits, **final))
+        # The buffered /v1/answer body carries no hits (AnswerResponse).
+        return httpx2.Response(200, json={
+            "request_id": "r1", "answer": "IEA500I reports a rejected command.",
+            "citations": [CITE], "verification_state": "accepted", "script": None, **final})
+
+    return respond
+
+
+CAPTURE_ARGS = {"json": [], "sse": ["--stream"], "chat": ["--endpoint", "chat", "--stream"]}
+
+
+@pytest.mark.parametrize("transport", ["json", "sse", "chat"])
+def test_rows_keep_packed_evidence_and_final_hits_as_text_free_metadata(site_eval, transport):
+    status, report, _, _ = site_eval(_capture_respond(transport), [_entry()],
+                                     CAPTURE_ARGS[transport])
+    row = report["results"][0]
+    assert status == 0 and row["verdict"] == "pass", row["failures"]
+    expected = {**EXCERPT_META,
+                "text_sha256": hashlib.sha256(CANARIES["excerpt"].encode("utf-8")).hexdigest()}
+    assert row["supplied_evidence_meta"] == [expected]
+    assert row["evidence_omitted"] == 2
+    assert row["final_hits"] == (None if transport == "json" else [HIT_META])
+    assert "supplied_evidence_text" not in row
+    captured = json.dumps([row["supplied_evidence_meta"], row["final_hits"]])
+    for name in ("excerpt", "heading", "title", "cite"):
+        assert CANARIES[name] not in captured, name
+
+
+def test_excerpt_text_is_kept_only_on_request_and_never_exported(site_eval):
+    status, report, export, _ = site_eval(_capture_respond("chat"), [_entry()],
+                                          [*CAPTURE_ARGS["chat"], "--keep-evidence-text"])
+    row = report["results"][0]
+    assert status == 0 and row["supplied_evidence_text"] == [
+        {"index": 1, "text": CANARIES["excerpt"]}]
+    assert report["params"]["keep_evidence_text"] is True
+    text = export.decode("utf-8")
+    for name in ("excerpt", "heading", "title", "cite"):
+        assert CANARIES[name] not in text, name
+    assert all(set(r) == EXPORT_ROW_KEYS for r in json.loads(text)["rows"])
+
+
+def test_capture_from_an_agent_without_the_fields_is_unknown_not_empty(site_eval):
+    """A pre-#635 agent sends no supplied evidence and no hits: unknown
+    (None), never a known empty pack."""
+    import httpx2
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": []})
+        final = json.loads(_answer_final().decode().split("data: ", 1)[1])
+        final.pop("hits")
+        return _sse(f"event: final\ndata: {json.dumps(final)}\n\n".encode())
+
+    status, report, _, _ = site_eval(respond, [_entry()], ["--stream"])
+    row = report["results"][0]
+    assert status == 0, row["failures"]
+    assert (row["supplied_evidence_meta"], row["evidence_omitted"], row["final_hits"]) == (
+        None, None, None)
+
+
+@pytest.mark.parametrize("bad", [
+    {"index": "1"}, {"doc_id": None}, {"pdf_page_start": "6"}, {"text": 7},
+], ids=["index", "doc", "page", "text"])
+def test_a_malformed_supplied_entry_makes_the_capture_unknown(site_eval, bad):
+    """Observational only: a malformed entry voids the capture (None) and
+    never fails the row."""
+    import httpx2
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": []})
+        entry = {**_excerpt(), **bad}
+        return _sse(_answer_final(supplied_evidence=[entry], evidence_omitted=0, hits=[_hit()]))
+
+    status, report, _, _ = site_eval(respond, [_entry()], ["--stream"])
+    row = report["results"][0]
+    assert status == 0 and row["verdict"] == "pass"
+    assert row["supplied_evidence_meta"] is None and row["final_hits"] == [HIT_META]
+
+
+# Spec review F1 (#1279): the "Cited" stage maps the answer's citations to
+# the packed excerpts. Two excerpts can share a doc and a page under different
+# headings, so doc and page alone cannot say which one was cited; each excerpt
+# carries `cited`, never the citation line itself.
+LINE_A = "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 6"
+LINE_B = "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA501I, p. 6"
+
+
+def _cited_row(site_eval, transport: str, supplied: list, **final) -> dict:
+    import httpx2
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": []})
+        if transport == "chat":
+            return _sse(chat_stream("IEA500I reports a rejected command [2].",
+                                    supplied=supplied, **final))
+        return _sse(_answer_final(supplied_evidence=supplied, evidence_omitted=0, **final))
+
+    _, report, export, _ = site_eval(respond, [_entry()], CAPTURE_ARGS[transport])
+    row = report["results"][0]
+    assert row["verdict"] in ("pass", "fail"), row["failures"]
+    assert b'"cited"' not in export and b"IEA501I" not in export
+    return row
+
+
+def test_each_packed_excerpt_says_whether_its_citation_was_given(site_eval):
+    """Same doc, same page, different headings: only the excerpt whose line
+    the answer cites is cited. A validated citation names a line, and the
+    agent and the Open WebUI Pipe map it to every excerpt carrying that line,
+    so a repeated line (`duplicate_citation`) is cited on each excerpt."""
+    supplied = [_excerpt(index=1, citation=LINE_A, duplicate_citation=True),
+                _excerpt(index=2, citation=LINE_B),
+                _excerpt(index=3, citation=LINE_A, duplicate_citation=True)]
+    row = _cited_row(site_eval, "sse", supplied, citations=[LINE_A])
+    meta = row["supplied_evidence_meta"]
+    assert [(e["doc_id"], e["pdf_page_start"]) for e in meta] == [("SA22-0000-00", 6)] * 3
+    assert [e["cited"] for e in meta] == [True, False, True]
+    assert LINE_A not in json.dumps(meta) and "IEA501I" not in json.dumps(meta)
+
+
+def test_an_inferred_citation_marks_its_prompt_index_and_never_guesses(site_eval):
+    """Inferred citations come from bracket indices (`inferred_indices`).
+    The agent records an index only when its line is not listed yet, so an
+    answer bracketing [2] and [1], two excerpts on one line, lists only 2:
+    excerpt 2 is cited, excerpt 1 is unknown (null, it may or may not have
+    been bracketed), and an excerpt on a line not listed is not cited."""
+    supplied = [_excerpt(index=1, citation=LINE_A, duplicate_citation=True),
+                _excerpt(index=2, citation=LINE_A, duplicate_citation=True),
+                _excerpt(index=3, citation=LINE_B)]
+    row = _cited_row(site_eval, "chat", supplied, citations=(LINE_A,), inferred=True,
+                     indices=(2,))
+    assert [e["cited"] for e in row["supplied_evidence_meta"]] == [None, True, False]
+
+
+@pytest.mark.parametrize(("supplied", "final"), [
+    ([{**_excerpt(), "citation": None}], {"citations": [LINE_A]}),
+    ([_excerpt(citation=LINE_A)],
+     {"citations": [LINE_A], "citations_inferred": True, "inferred_indices": []}),
+], ids=["excerpt-without-line", "inferred-without-indices"])
+def test_cited_is_unknown_when_the_mapping_cannot_be_read(site_eval, supplied, final):
+    """An excerpt with no citation line, or an inferred line with no index
+    recorded for the excerpt: `cited` is null (unknown), never guessed, and
+    the rest of the capture is kept."""
+    row = _cited_row(site_eval, "sse", supplied, **final)
+    assert [e["cited"] for e in row["supplied_evidence_meta"]] == [None]
+    assert row["supplied_evidence_meta"][0]["doc_id"] == "SA22-0000-00"
+
+
+# --------------------------------- fixed-history /v1/chat sessions (#1191)
+
+
+def _session(**overrides) -> dict:
+    base = {"id": "GTU-01", "query_class": "message_id", "expected_behavior": "answer",
+            "expected_doc_ids": ["SA22-0000-00"],
+            "turns": [{"role": "user", "content": "What does IEA500I report?"},
+                      {"role": "assistant", "content": "It reports a rejected command."},
+                      {"role": "user", "content": "And how do I resolve it?"}]}
+    base.update(overrides)
+    return base
+
+
+def _write_sessions(tmp_path, sessions, name="sessions.jsonl") -> Path:
+    path = tmp_path / name
+    path.write_text("".join(json.dumps(s) + "\n" for s in sessions))
+    return path
+
+
+def _pipe_body(turns: list[dict]) -> dict:
+    """Independent expectation: the body the real Open WebUI Pipe sends for
+    this conversation, captured at its HTTP boundary."""
+    import asyncio
+
+    import httpx
+    from integrations.openwebui import docs_pipe
+
+    sent: list[dict] = []
+
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, content=chat_stream("ok [1]."),
+                              headers={"content-type": "text/event-stream"})
+
+    async def emit(_event):
+        return None
+
+    async def run():
+        pipe = docs_pipe.Pipe()
+        pipe._transport = httpx.MockTransport(handler)
+        result = await pipe.pipe({"model": "docs", "stream": True, "messages": turns},
+                                 __user__={"id": "u1"}, __event_emitter__=emit,
+                                 __task__=None, __metadata__={})
+        return [item async for item in result]
+
+    asyncio.run(run())
+    assert len(sent) == 1
+    return sent[0]
+
+
+def _session_agent():
+    import httpx2
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        assert request.url.path == "/v1/chat", "a session never searches on its own"
+        return _sse(chat_stream("Reenter the command [1].", supplied=[_excerpt()],
+                                hits=[_hit()]))
+
+    return respond
+
+
+SESSION_ARGS = ["--endpoint", "chat", "--stream"]
+SESSION_ROW_KEYS = (TWO_TURN_ROW_KEYS - {"turn"}) | {"session_turns"}
+
+
+def test_a_session_sends_its_fixed_history_as_the_pipe_does(site_eval, tmp_path):
+    session = _session()
+    path = _write_sessions(tmp_path, [session])
+    status, report, _, calls = site_eval(_session_agent(), [], SESSION_ARGS,
+                                         dataset=["--sessions", str(path)])
+    assert status == 0, report["results"]
+    assert _chat_bodies(calls) == [{**_pipe_body(session["turns"]), "temperature": 0.0}]
+    row = report["results"][0]
+    assert row["id"] == "GTU-01" and row["query"] == "And how do I resolve it?"
+    assert row["verdict"] == "pass" and row["session_turns"] == 3
+    assert row["prior_answer_chars"] == len("It reports a rejected command.")
+    assert row["evidence_doc_ids"] == ["SA22-0000-00"] and row["evidence_gold_hit"] is True
+    assert row["supplied_evidence_meta"][0]["pdf_page_start"] == 6
+    assert report["params"]["sessions"] == {
+        "name": "sessions.jsonl", "n": 1, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    assert report["params"]["pipe_sha256"]
+
+
+def test_every_session_runs_once_in_file_order(site_eval, tmp_path):
+    """Sessions are authored rows, never sampled: more than the default
+    sample size (24) all run, in the file's order."""
+    ids = [f"GTU-{n:02d}" for n in range(30, 0, -1)]
+    path = _write_sessions(tmp_path, [_session(id=i) for i in ids])
+    status, report, _, calls = site_eval(_session_agent(), [], SESSION_ARGS,
+                                         dataset=["--sessions", str(path)])
+    assert status == 0 and [r["id"] for r in report["results"]] == ids
+    assert len(_chat_bodies(calls)) == 30
+    assert report["params"]["sample"]["mode"] == "sessions"
+
+
+def test_two_turn_follow_ups_keep_excerpt_text_when_asked(site_eval):
+    opener = _entry()
+    agent = _two_turn_agent({(opener["query"], 1): chat_stream("Rejected [1].", supplied=[_excerpt()]),
+                             (opener["query"], 3): chat_stream("Reenter it [1].",
+                                                               supplied=[_excerpt()])})
+    status, report, _, _ = site_eval(agent, [opener], [*TWO_TURN, "--keep-evidence-text"])
+    assert status == 0
+    assert [r["supplied_evidence_text"] for r in report["results"]] == [
+        [{"index": 1, "text": CANARIES["excerpt"]}]] * 2
+
+
+def test_a_session_export_carries_no_turn_text(site_eval, tmp_path):
+    c = CANARIES
+    session = _session(turns=[{"role": "user", "content": c["query"]},
+                              {"role": "assistant", "content": c["answer"]},
+                              {"role": "user", "content": c["delta"]}])
+    path = _write_sessions(tmp_path, [session])
+    status, report, export, _ = site_eval(_session_agent(), [], SESSION_ARGS,
+                                          dataset=["--sessions", str(path)])
+    assert status == 0 and c["delta"] in json.dumps(report)  # live canary
+    text = export.decode("utf-8")
+    for name in ("query", "answer", "delta", "excerpt", "heading"):
+        assert c[name] not in text, name
+    assert all(set(r) == SESSION_ROW_KEYS for r in json.loads(text)["rows"])
+
+
+@pytest.mark.parametrize("turns", [
+    [{"role": "assistant", "content": "a"}, {"role": "user", "content": "q"}],
+    [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
+    [{"role": "user", "content": "q"}, {"role": "user", "content": "q2"}],
+    [{"role": "user", "content": "q"}, {"role": "system", "content": "s"},
+     {"role": "user", "content": "q2"}],
+    [{"role": "user", "content": " "}],
+    [],
+], ids=["leading-answer", "ends-on-answer", "two-users", "system", "blank-text", "no-turns"])
+def test_a_malformed_session_is_refused_before_any_request(tmp_path, capsys, turns):
+    from mainframe_rag.eval import answers
+
+    path = _write_sessions(tmp_path, [_session(turns=turns)])
+    status = answers.main(["--agent-url", "http://deployed-agent:8087", "--sessions", str(path),
+                           *SESSION_ARGS])
+    assert status == 2 and "FAIL: session" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("name", ["holdout.jsonl", "release_set.jsonl"], ids=["holdout", "release"])
+def test_sessions_refuse_the_protected_sets_before_any_read(tmp_path, monkeypatch, capsys, name):
+    from mainframe_rag.eval import answers
+
+    path = tmp_path / name
+    path.write_text("not read\n")
+    real = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", lambda self: pytest.fail("protected set was read")
+                        if self.name == name else real(self))
+    status = answers.main(["--agent-url", "http://deployed-agent:8087", "--sessions", str(path),
+                           *SESSION_ARGS])
+    assert status == 2 and "FAIL:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("content", "message"), [
+    (json.dumps({"record": "manifest", "set_id": "x"}).encode() + b"\n",
+     "FAIL: release-set records are not a dev dataset"),
+    (b"\n", "FAIL: sessions file has no sessions"),
+    ((json.dumps(_session(id="A")) + "\n" + json.dumps(_session(id="A")) + "\n").encode(),
+     "FAIL: session line 2: missing or duplicate id"),
+    (json.dumps(_session(expected_doc_ids="SA22-0000-00")).encode() + b"\n",
+     "FAIL: session line 1: expected_doc_ids"),
+    (b"\xff\xfe\n", "FAIL: session file is not UTF-8"),
+    (None, "FAIL: dev-only dataset is unreadable"),
+], ids=["release-record", "empty", "duplicate-id", "doc-ids", "not-utf8", "unreadable"])
+def test_a_sessions_file_that_is_not_dev_sessions_is_refused(tmp_path, capsys, content, message):
+    """A renamed release-set copy (by content), an empty file, duplicate ids,
+    a malformed doc-id list, undecodable bytes and an unreadable path (a
+    directory): exit 2 before any request, a fixed message with no text."""
+    from mainframe_rag.eval import answers
+
+    path = tmp_path / "sessions.jsonl"
+    if content is None:
+        path.mkdir()
+    else:
+        path.write_bytes(content)
+    status = answers.main(["--agent-url", "http://deployed-agent:8087", "--sessions", str(path),
+                           *SESSION_ARGS])
+    err = capsys.readouterr().err
+    assert status == 2 and err.strip().splitlines()[-1] == message
+    assert "IEA500I" not in err and "rejected command" not in err
+
+
+def test_a_malformed_hit_makes_final_hits_unknown(site_eval):
+    import httpx2
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": []})
+        return _sse(_answer_final(supplied_evidence=[_excerpt()], evidence_omitted=0,
+                                  hits=[{**_hit(), "page_start": "5"}]))
+
+    status, report, _, _ = site_eval(respond, [_entry()], ["--stream"])
+    row = report["results"][0]
+    assert status == 0 and row["verdict"] == "pass"
+    assert row["final_hits"] is None and row["supplied_evidence_meta"] is not None
+
+
+@pytest.mark.parametrize("extra", [
+    ["--stream"], [*SESSION_ARGS, "--golden", "x.jsonl"], [*SESSION_ARGS, "--all"],
+    [*SESSION_ARGS, "--subset", "8"], [*TWO_TURN],
+], ids=["answer-endpoint", "golden", "all", "subset", "two-turn"])
+def test_session_flags_are_refused_when_inconsistent(tmp_path, extra):
+    from mainframe_rag.eval import answers
+
+    path = _write_sessions(tmp_path, [_session()])
+    with pytest.raises(SystemExit) as exc:
+        answers.main(["--agent-url", "http://deployed-agent:8087", "--sessions", str(path),
+                      *extra])
+    assert exc.value.code == 2
+
+
+def test_a_history_the_pipe_cannot_fit_is_a_fixed_error_row(site_eval, tmp_path):
+    """A last turn larger than the Pipe's body cap means the Pipe makes no
+    call: an error row with a fixed label, and no request."""
+    from integrations.openwebui import docs_pipe
+
+    turns = [{"role": "user", "content": "x" * (docs_pipe.DEFAULT_MAX_BODY_CHARS + 1)}]
+    path = _write_sessions(tmp_path, [_session(turns=turns)])
+    status, report, export, calls = site_eval(_session_agent(), [], SESSION_ARGS,
+                                              dataset=["--sessions", str(path)])
+    row = report["results"][0]
+    assert status == 1 and row["verdict"] == "error"
+    assert row["failures"] == ["session request not built"]
+    assert not _chat_bodies(calls)
+    assert json.loads(export)["rows"][0]["failures"] == ["session request not built"]
+
+
+def test_image_arm_and_sessions_are_refused_together(capsys):
+    """Train 2026-11-17c (#1287 x #1191): the image arm draws dev golden
+    questions and --sessions is its own dataset, so the pair is a usage
+    error before any read or request."""
+    from mainframe_rag.eval import answers
+
+    with pytest.raises(SystemExit) as exc:
+        answers.main(["--agent-url", "http://agent.invalid", "--endpoint", "chat", "--stream",
+                      "--sessions", "sessions.jsonl", "--image-arm", "image"])
+    assert exc.value.code == 2
+    assert "--image-arm draws dev golden questions: drop --sessions" in capsys.readouterr().err

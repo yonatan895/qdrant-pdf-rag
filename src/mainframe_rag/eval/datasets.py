@@ -358,6 +358,23 @@ def read_golden_text(path: Path | str) -> str:
     return read_golden_bytes(path).decode("utf-8")
 
 
+def read_dev_only_bytes(path: Path | str) -> bytes:
+    """A dev-only dataset with no holdout route (the fixed-history sessions,
+    issue #1191): the frozen holdout and the release set are refused by name
+    before any read, at every venue, and by content after it."""
+    if _is_holdout(path) or _is_release_set(path):
+        raise DatasetError(
+            f"dev-only dataset: {HOLDOUT_FILENAME} and {RELEASE_SET_FILENAME} are refused"
+        )
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as exc:
+        raise DatasetError("dev-only dataset is unreadable") from exc
+    if any(_is_release_set_record(line) for line in raw.decode("utf-8", "replace").splitlines()):
+        raise DatasetError("release-set records are not a dev dataset")
+    return raw
+
+
 def read_release_set_text(path: Path | str) -> tuple[str, str]:
     """Read the independent release set: RC venue + adjacent sha256 pin.
 
