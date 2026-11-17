@@ -1066,13 +1066,15 @@ without `--follow-up`) remains valid. Its exports keep the anaphoric-only
 shape.
 
 <a id="site-coding-arm"></a>
-**Answer-endpoint syntax rows across builds.** Since #1276 a `c`, `hlasm`,
-`asm`, `metalc`, `assembler` or `clist` fence moves into `script`, and the
-judge reads `answer` only on `/v1/answer` rows (chat rows parse the stream
-the same way on both builds). A gold string the model writes inside such a
-fence passes on f117160c and fails on the candidate, with coding mode on or
-off. Read an answer-endpoint `missing required substring` delta on syntax
-rows against the chat endpoint before claiming a change.
+**Gold strings and code fences across builds.** The gold-string checks
+(`gold_must_contain`, `gold_must_not_contain`, `must_cite_identifier`, and
+the class-B restate check) read the answer plus the extracted `script`
+(maintainer decision 2026-11-17, #1285), so a gold string inside a `c`,
+`hlasm`, `asm`, `metalc`, `assembler` or `clist` fence scores the same on
+f117160c, which leaves it in the answer, and on the candidate, which moves
+it into `script`; on `/v1/chat` both come from the evaluator's own parse of
+the stream. The structural checks read the answer only, and the export is
+unchanged.
 
 **Coding mode (issue #1276).** Every report and export carries
 `metrics.coding`: the rows whose question the agent's own classifier

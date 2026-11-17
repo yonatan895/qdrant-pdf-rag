@@ -615,6 +615,33 @@ def test_abstain_gold_phrase_pin() -> None:
     assert any("excerpts do not answer" in f for f in fails)
 
 
+_CODE = "GETMAIN R,LV=4096\nST R1,ANCHOR"
+
+
+@pytest.mark.parametrize("entry", [
+    {"gold_must_contain": ["GETMAIN", "ANCHOR"]},
+    {"gold_must_contain": ["GETMAIN", "FREEMAIN"]},
+    {"gold_must_not_contain": ["ST R1"]},
+    {"must_cite_identifier": "GETMAIN"},
+], ids=["gold-found", "gold-missing", "forbidden", "identifier"])
+def test_gold_checks_read_the_script_as_well_as_the_answer(entry) -> None:
+    """Maintainer decision 2026-11-17 (#1285): the gold-string checks read
+    the answer plus the extracted `script`, so a build that moves a code
+    fence into `script` scores the same as one that keeps it in the answer."""
+    cites = ["SA22-7605-00 ref, p. 3"]
+    in_answer = judge(_entry(**entry), f"Obtain storage:\n\n```hlasm\n{_CODE}\n```", cites)
+    in_script = judge(_entry(**entry), "Obtain storage:", cites, script=_CODE)
+    assert in_script == in_answer
+
+
+def test_a_script_never_rescues_a_structural_failure() -> None:
+    """Only the gold-string checks read the script: an empty or refusing body
+    still fails as before."""
+    verdict, fails, _ = judge(_entry(gold_must_contain=["GETMAIN"]), "", ["c1"], script=_CODE)
+    assert verdict == "fail" and "empty answer body" in fails
+    assert not any("missing required substring" in f for f in fails)
+
+
 def test_zero_hits_path_skips_gold_checks() -> None:
     # run_query suppresses gold checks on the canned zero-hits message (no
     # model text to judge); the structural abstain verdict still passes.

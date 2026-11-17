@@ -41,6 +41,10 @@ Judging contract (structural first)
     frozen holdout's refusal rows keep the literal until a dedicated holdout
     decision. must_cite_identifier requires the
     identifier to appear in the body or in a validated citation string.
+    These gold checks read the answer body plus the extracted `script`
+    (maintainer decision 2026-11-17, #1285): a build that moves a code fence
+    into `script` scores the same as one that keeps it in the answer. The
+    structural checks (empty body, refusal, grounding) read the body only.
     Gold checks judge MODEL phrasing, so they are suppressed on the agent's
     zero-hits path (a canned message has no model text); the structural
     verdict still fires there.
@@ -295,6 +299,7 @@ def judge(
     judge_gold: bool = True,
     citations_inferred: bool = False,
     verification_state: str | None = None,
+    script: str | None = None,
 ) -> tuple[str, list[str], list[str]]:
     """Judge one /v1/answer response against a golden entry.
 
@@ -357,18 +362,28 @@ def judge(
         )
 
     if judge_gold:
-        failures.extend(missing_gold(entry, body))
+        content = gold_text(body, script)
+        failures.extend(missing_gold(entry, content))
         for s in entry.get("gold_must_not_contain") or []:
-            if str(s).lower() in body.lower():
+            if str(s).lower() in content.lower():
                 failures.append(f"forbidden substring present: {s!r}")
 
         ident = entry.get("must_cite_identifier")
         if ident:
-            hay = " ".join([body, *citations]).lower()
+            hay = " ".join([content, *citations]).lower()
             if str(ident).lower() not in hay:
                 failures.append(f"identifier not cited or mentioned: {ident!r}")
 
     return ("fail" if failures else "pass"), failures, warns
+
+
+def gold_text(body: str, script: object) -> str:
+    """What the gold-string checks read: the answer body plus the extracted
+    script, if any (#1285), so where a build's parser puts a code fence does
+    not change the verdict."""
+    if isinstance(script, str) and script.strip():
+        return f"{body}\n{script.strip()}"
+    return body
 
 
 def missing_gold(entry: dict[str, Any], body: str) -> list[str]:
@@ -963,7 +978,7 @@ def judge_restate(row: dict[str, Any], entry: dict[str, Any]) -> None:
     counted apart. Unlike `judge`, the zero-hits path is judged too: the
     user got no restatement."""
     answer = str(row.get("answer") or "")
-    missing = missing_gold(entry, answer)
+    missing = missing_gold(entry, gold_text(answer, row.get("script")))
     gold_n = len(entry.get("gold_must_contain") or [])
     declined = row.get("path") == "zero_hits" or is_abstention(answer, row.get("citations") or [])
     row.update(
@@ -1082,6 +1097,12 @@ def _fetch_pool(client: Any, query: str, limit: int = 8) -> list[dict[str, Any]]
 
 
 def chat_answer_body(content: str, terminal: dict[str, Any]) -> str | None:
+    """The judged answer body of a chat stream (see `chat_answer_parts`)."""
+    parts = chat_answer_parts(content, terminal)
+    return None if parts is None else parts[0]
+
+
+def chat_answer_parts(content: str, terminal: dict[str, Any]) -> tuple[str, str | None] | None:
     """The answer body of one `/v1/chat` stream (issue #1191), or None when
     the terminal chunk's evidence fields are malformed.
 
@@ -1118,13 +1139,19 @@ def chat_answer_body(content: str, terminal: dict[str, Any]) -> str | None:
         listed = "\n\n**Citations:**\n" + "\n".join(f"- {c}" for c in citations)
         content = content.removesuffix(listed)
     if not entries:
-        return content
-    return parse_answer(content, PromptEvidence(entries=tuple(entries))).answer
+        script = terminal.get("script")
+        return content, script if isinstance(script, str) else None
+    parsed = parse_answer(content, PromptEvidence(entries=tuple(entries)))
+    return parsed.answer, parsed.script
 
 
-def _chat_answer_data(terminal: dict[str, Any], answer: str) -> dict[str, Any]:
+def _chat_answer_data(
+    terminal: dict[str, Any], answer: str, script: str | None = None
+) -> dict[str, Any]:
     """The answer-shaped object `_judge_response` reads, from the chat
-    terminal chunk. Fields the chunk lacks stay absent, never invented."""
+    terminal chunk. Fields the chunk lacks stay absent, never invented.
+    `answer` and `script` are the evaluator's own parse of the streamed
+    text (`chat_answer_parts`), so both builds are judged by one parser."""
     chunk_id = terminal.get("chunk_id")
     data: dict[str, Any] = {
         key: terminal[key]
@@ -1134,6 +1161,7 @@ def _chat_answer_data(terminal: dict[str, Any], answer: str) -> dict[str, Any]:
         if key in terminal
     }
     data["answer"] = answer
+    data["script"] = script
     if isinstance(chunk_id, str):
         data["request_id"] = chunk_id.removeprefix("chatcmpl-")
     return data
@@ -1203,14 +1231,15 @@ def run_query(
         row.update(verdict="error", failures=[outcome.failure], elapsed_ms=elapsed_ms)
         return row
     if endpoint == "chat" and outcome is not None and outcome.final is not None:
-        answer = chat_answer_body(outcome.content or "", outcome.final)
-        if answer is None:
+        parts = chat_answer_parts(outcome.content or "", outcome.final)
+        if parts is None:
             row.update(verdict="error", failures=[STREAM_MALFORMED], elapsed_ms=elapsed_ms)
             return row
+        answer, script = parts
         measured = {"finish_reason": outcome.final["finish_reason"],
                     "client_first_token_ms": outcome.first_token_ms}
         row = _judge_response(
-            row, entry, _chat_answer_data(outcome.final, answer), elapsed_ms,
+            row, entry, _chat_answer_data(outcome.final, answer, script), elapsed_ms,
             answer_signals, hits, measured,
         )
         if evidence and row.get("verdict") in ("pass", "fail"):
@@ -1342,6 +1371,7 @@ def _judge_response(
         judge_gold=not zero_hits,
         citations_inferred=citations_inferred,
         verification_state=verification_state,
+        script=data.get("script") if isinstance(data.get("script"), str) else None,
     )
     if zero_hits:
         warns.append("zero-hits path: gold substrings not judged (canned agent message)")

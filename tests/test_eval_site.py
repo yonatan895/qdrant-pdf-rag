@@ -159,6 +159,66 @@ def test_chat_stream_is_judged_from_its_finish_chunk(site_eval):
     assert report["metrics"]["measurement"]["hardware_independent"]["truncation"]["n"] == 1
 
 
+_HLASM = "GETMAIN R,LV=4096"
+
+
+@pytest.mark.parametrize("transport", ["json", "sse"])
+def test_answer_rows_score_a_gold_string_in_the_script_like_one_in_the_answer(
+        site_eval, transport):
+    """Maintainer decision 2026-11-17 (#1285): a build whose parser moves an
+    hlasm fence into `script` (the candidate) and one that leaves it in the
+    answer (f117160c) give the same verdict on the same model output."""
+    import httpx2
+
+    def run(answer, script):
+        def respond(request):
+            if request.url.path == "/healthz":
+                return httpx2.Response(200, json=HEALTH)
+            if request.url.path == "/v1/search":
+                return httpx2.Response(200, json={"hits": [{"doc_id": "SA22-0000-00"}]})
+            if transport == "sse":
+                return _sse(_answer_final(answer=answer, script=script,
+                                          script_review_required=script is not None))
+            return httpx2.Response(200, json={
+                "answer": answer, "citations": [CITE], "citations_inferred": False,
+                "inferred_indices": [], "verification_state": "accepted", "script": script,
+                "script_review_required": script is not None, "request_id": "r1"})
+
+        args = ["--stream"] if transport == "sse" else []
+        _status, report, _, _ = site_eval(respond, [_entry(gold_must_contain=["GETMAIN"])], args)
+        return report["results"][0]
+
+    old = run(f"Obtain storage:\n\n```hlasm\n{_HLASM}\n```", None)
+    new = run("Obtain storage:", _HLASM)
+    assert old["verdict"] == new["verdict"] == "pass", (old["failures"], new["failures"])
+    assert old["failures"] == new["failures"] == []
+
+
+@pytest.mark.parametrize("agent_script", [None, _HLASM], ids=["old-agent", "new-agent"])
+def test_chat_rows_score_a_fenced_gold_string_the_same_on_either_build(site_eval, agent_script):
+    """On /v1/chat the body and the script both come from the evaluator's
+    own parse of the streamed text, so the agent build's script field does
+    not change the verdict."""
+    import httpx2
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": [{"doc_id": "SA22-0000-00"}]})
+        body = chat_stream("Obtain storage:\n\n", f"```hlasm\n{_HLASM}\n```\n\n",
+                           f"Citations:\n- {CITE}\n")
+        if agent_script is not None:
+            body = body.replace(b'"script": null', json.dumps({"script": agent_script})[1:-1].encode())
+        return _sse(body)
+
+    _status, report, _, _ = site_eval(respond, [_entry(gold_must_contain=["GETMAIN"])],
+                                      ["--endpoint", "chat", "--stream"])
+    row = report["results"][0]
+    assert row["verdict"] == "pass", row["failures"]
+    assert row["answer"] == "Obtain storage:"
+
+
 _DEPTH_SUPPLIED = [
     {**_supplied(), "index": 1},
     {**_supplied(doc_id="SA22-0001-00"), "index": 2},
