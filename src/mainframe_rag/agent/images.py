@@ -36,6 +36,7 @@ from typing import Any
 
 from pydantic import Field
 
+from mainframe_rag.agent.chat_turn import replace_control_chars
 from mainframe_rag.config import Settings
 from mainframe_rag.logs import error_type
 from mainframe_rag.ports import ChatMessage, ChatResult
@@ -450,9 +451,16 @@ class TurnImages:
     def usable_reads(self) -> list[tuple[int, ImageRead]]:
         return [(i + 1, read) for i, read in enumerate(self.reads) if read is not None]
 
-    def search_text(self) -> str:
-        """The typed text plus each read's identifiers and description (§3.4)."""
-        return "\n".join(p for p in (self.typed, *(r.searched for _, r in self.usable_reads)) if p)
+    def search_text(self, max_chars: int | None = None) -> str:
+        """The typed text plus each read's identifiers and description (§3.4).
+        The reads are model output, so their control characters become
+        spaces, and `max_chars` clips the text from its end (the typed text
+        comes first): plan_search re-checks the search turn like caller input
+        (the control guard and the body cap), and a read must never fail a
+        turn whose caller text passed them (train review B1)."""
+        reads = (replace_control_chars(r.searched) for _, r in self.usable_reads)
+        text = "\n".join(p for p in (self.typed, *reads) if p)
+        return text if max_chars is None else text[:max(max_chars, 0)].rstrip()
 
     def coding_text(self, question: str) -> str:
         """What coding mode reads (decision 12): the question plus the screen text."""

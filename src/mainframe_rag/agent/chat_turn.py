@@ -23,6 +23,13 @@ def is_unsearchable_query(text: str) -> bool:
     return not text.strip() or _CONTROL_CHARS.search(text) is not None
 
 
+def replace_control_chars(text: str) -> str:
+    """`text` with each NUL/C0 control that is_unsearchable_query refuses
+    replaced by a space: for text the agent builds from model output (an
+    image read, #1287), never for caller text, which is refused instead."""
+    return _CONTROL_CHARS.sub(" ", text)
+
+
 def has_lone_surrogate(text: str) -> bool:
     """True when text holds an unpaired surrogate, which cannot be UTF-8 encoded
     and would fail later at the prompt/model boundary (issue #1013)."""
