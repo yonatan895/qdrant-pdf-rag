@@ -162,9 +162,14 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   choices[], usage, citations, citations_inferred, inferred_indices, hits,
   verification_state, script, script_lang, script_review_required,
   supplied_evidence, evidence_omitted, message_omitted_chars}`;
-  `choices[0].message.content` carries the answer plus a trailing markdown
-  `**Citations:**` bullet list when cites exist. Empty hits return
-  `finish_reason: "stop"`, zeroed usage, and empty citations/hits. Provenance
+  `choices[0].message.content` carries the answer, then the extracted
+  `script` (if any) as one fence tagged with `script_lang`
+  (`` ```<lang>\n<script>\n``` ``, the console's re-append format; #1276
+  maintainer decision 1, so a buffered client never loses C, HLASM, JCL or
+  other `SCRIPT_LANGS` code), then a trailing markdown `**Citations:**`
+  bullet list when cites exist. The stream's deltas are the model's raw
+  text and are not changed; `/v1/answer` keeps the script out of `answer`.
+  Empty hits return `finish_reason: "stop"`, zeroed usage, and empty citations/hits. Provenance
   (`citations_inferred`, `inferred_indices`, issues #269/#299) rides chat JSON
   and the SSE finish chunk. Prior turns: the last `chat_max_turns` (10)
   non-system messages, each cut to `chat_max_prior_turn_chars` (1000,
