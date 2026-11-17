@@ -1031,9 +1031,10 @@ default, 16):
   at 5; recall@8 stayed at 114.
 - `--hit-limit 8` on the arm keeps the sibling pool as deep as the arm's
   answer; B2 runs without it.
-- Above 12 excerpts the supplied-evidence text total (48000 characters) can
-  leave a cited source with empty text in the Open WebUI Pipe
-  ([bounds](agent.md#supplied-excerpts)); count such sources in B2.
+- The supplied-evidence text total scales with the hit limit
+  (`max(48000, 6000 x answer_hit_limit)`, 96000 at 16), so a cited source
+  keeps its text in the Open WebUI Pipe at the default depth
+  ([bounds](agent.md#supplied-excerpts)).
 
 Compare `D-depth-8-3` with B2 per endpoint: `gold_retrieved` rate, citation
 recall, pass rate by class, refusals (abstentions and

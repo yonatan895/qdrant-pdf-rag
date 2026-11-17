@@ -692,10 +692,9 @@ def test_depth_16_source_events_keep_every_label_and_the_wire_bound():
     """Issue #1191: at ANSWER_HIT_LIMIT=16 the terminal chunk carries sixteen
     supplied excerpts, built here by the agent's own packer at 4,000
     characters each. A cited label 9 or 16 becomes its own source event with
-    its two-digit label; the supplied text of labels past the 48,000-character
-    total is empty (`text_clipped`), so their event shows an empty document.
-    That last row is the current wire bound, recorded for a maintainer
-    decision, not a target."""
+    its two-digit label and its whole supplied text: the evidence total
+    scales with the hit limit (maintainer decision 2026-11-17), so no cited
+    source shows an empty document."""
     from mainframe_rag.agent.answer import build_messages
     from mainframe_rag.agent.tokenizer import FallbackTokenizer
     from mainframe_rag.config import Settings
@@ -720,7 +719,8 @@ def test_depth_16_source_events_keep_every_label_and_the_wire_bound():
     assert [s["metadata"][0]["name"] for s in sources] == [f"[9] {cited[0]}", f"[16] {cited[1]}"]
     assert [s["source"]["id"] for s in sources] == ["SA22-0001-00", "SA22-0003-00"]
     assert sources[0]["document"] == [hits[8].text]
-    assert sources[1]["document"] == [""]
+    assert sources[1]["document"] == [hits[15].text]
+    assert not any(e.text_clipped for e in prepared.supplied)
     assert _final_status(events) == "Source-matched · 2 citations"
 
 
