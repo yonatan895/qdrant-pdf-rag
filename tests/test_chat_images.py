@@ -253,6 +253,7 @@ def test_a_slow_read_is_one_bounded_attempt():
     # Half of what the deadline has left (0.1 s) bounds the read.
     asyncio.run(img.read_images(chat, turn, _on(), deadline_left_s=lambda: 0.1))
     assert calls == 1 and turn.reads == [None] and turn.timed_out and turn.failed
+    assert turn.log_fields()["image_read_error"] == "TimeoutError"
 
 
 # --- pricing: text-only counts plus the reserve -----------------------------
@@ -475,6 +476,44 @@ def test_image_only_turn_reads_then_answers_buffered(gateway_client):
     assert f"Question: {img.IMAGE_ONLY_QUESTION}" in gateway.answers()[0]["messages"][-1]["content"][0]["text"]
 
 
+@pytest.mark.parametrize("read", [
+    "IEF450I MYJOB STEP1 - ABEND=S0C7\n$HASP395 MYJOB ENDED",  # a reply without the labels
+    "SCREEN TEXT:\nIEF450I MYJOB STEP1 - ABEND=S0C7\nIDENTIFIERS: none\nDESCRIPTION: none",
+])
+def test_image_only_turn_searches_the_screen_text_when_nothing_else_was_read(gateway_client, read):
+    """Review finding (PR #1290): a read with no IDENTIFIERS or DESCRIPTION
+    must not leave an image-only turn searching the fixed question."""
+    gateway = _Gateway(read, _ANSWER)
+    client = gateway_client(gateway, _ON)
+    res = client.post("/v1/chat", json={"messages": [
+        {"role": "user", "content": _parts(None, _url(_png()))}]})
+    assert res.status_code == 200
+    (query,) = client.search.queries
+    assert query.startswith("IEF450I MYJOB STEP1 - ABEND=S0C7")
+    assert img.IMAGE_ONLY_QUESTION not in query
+
+
+def test_the_feedback_record_keeps_the_image_count_only(gateway_client, monkeypatch):
+    """Decision 10: the record keeps the typed text and image_count; no other
+    image field, and never bytes or transcript text."""
+    records = []
+
+    class _Recording:
+        def submit(self, record):
+            records.append(record)
+
+    gateway = _Gateway(_READ, _ANSWER)
+    client = gateway_client(gateway, _ON)
+    monkeypatch.setattr(app_mod, "feedback", _Recording())
+    client.post("/v1/chat", json={"messages": [
+        {"role": "user", "content": _parts("what do I do?", _url(_png()))}]})
+    (record,) = records
+    assert record.query == "what do I do?"
+    assert {k for k in record.telemetry if k.startswith("image_")} == {"image_count"}
+    assert record.telemetry["image_count"] == 1
+    assert TRANSCRIPT_MARKER not in json.dumps(record.telemetry)
+
+
 def test_image_only_turn_fails_with_a_stable_code_when_the_read_fails(gateway_client):
     gateway = _Gateway(_READ, _ANSWER, fail_read=True)
     client = gateway_client(gateway, _ON)
@@ -518,3 +557,19 @@ def test_text_turns_are_unchanged_with_images_on(gateway_client):
         assert "image_reads" not in res.json() and gateway.reads() == []
         bodies[bool(env)] = gateway.answers()
     assert bodies[True] == bodies[False]
+
+
+def test_a_failed_or_empty_read_is_labelled_by_type_only():
+    async def refused(messages, **kwargs):
+        raise RuntimeError("upstream said: " + TRANSCRIPT_MARKER)
+
+    async def empty(messages, **kwargs):
+        return ChatResult(content="SCREEN TEXT: none", finish_reason="stop", usage=TokenUsage())
+
+    image = img.validate_image_url(_url(_png()), _on())
+    for chat, label in ((refused, "RuntimeError"), (empty, "empty_read")):
+        turn = img.TurnImages(images=(image,), typed="q")
+        asyncio.run(img.read_images(chat, turn, _on(), deadline_left_s=lambda: 100.0))
+        fields = turn.log_fields()
+        assert (turn.reads, fields["image_read_error"], fields["image_read_failed"]) == ([None], label, True)
+        assert TRANSCRIPT_MARKER not in json.dumps(fields)

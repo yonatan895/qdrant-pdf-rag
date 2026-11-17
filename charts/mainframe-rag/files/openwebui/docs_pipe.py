@@ -63,9 +63,9 @@ ERROR_MESSAGES: dict[str, str] = {
                                     "Choose another Rosetta model and retry.",
     # A pasted image the agent refused (#1287): one text for every reason
     # (type, size, pixels, count, history); the code alone selects it.
-    "unsupported_image": "Rosetta could not use this image. Paste a PNG, JPEG or WebP "
-                         "screenshot, within the size and count limits, in your latest "
-                         "message and retry.",
+    "unsupported_image": "Rosetta could not use this image. Paste a screenshot of an accepted "
+                         "type (PNG, JPEG or WebP by default), within the size and count "
+                         "limits, in your latest message and retry.",
 }
 UNREACHABLE = ("The documentation service could not be reached. Retry; if it persists, "
                "contact the operators.")
@@ -185,7 +185,7 @@ IMAGE_UNUSABLE = ("Rosetta reads pasted images only in a temporary chat. Paste t
                   "a temporary chat, or type the text from the screen, and retry.")
 TOO_MANY_IMAGES = "Attach at most {limit} images to one message and retry."
 IMAGE_TOO_LARGE = "Each image must be at most {limit} MB. Paste a smaller screenshot and retry."
-IMAGE_READ_FAILED = "The image could not be read; the answer uses your typed text only"
+IMAGE_READ_FAILED = "An image could not be read, so the search did not use it"
 EARLIER_IMAGE = "An earlier image was not re-sent"
 IMAGE_READS_SUMMARY = "What Rosetta read from your image"
 IMAGE_CARRIED = "[Image {index}, as read by the model]: {text}"

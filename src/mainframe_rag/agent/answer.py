@@ -2737,5 +2737,5 @@ def build_chat_messages(
         temperature=temperature,
         search_query=search_query,
         coding=coding,
-        **({"images": images} if images is not None else {}),
+        images=images,
     )

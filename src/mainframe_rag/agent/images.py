@@ -37,6 +37,7 @@ from typing import Any
 from pydantic import Field
 
 from mainframe_rag.config import Settings
+from mainframe_rag.logs import error_type
 from mainframe_rag.ports import ChatMessage, ChatResult
 
 # The question an image-only turn asks (decision 6). Maintainer wording
@@ -112,6 +113,8 @@ def _count_refusal(settings: Settings) -> UnsupportedImage:
 
 
 HISTORY_REFUSAL_MESSAGE = "images are accepted only in the latest user message"
+# The image-only turn whose reads all failed (502 upstream_error).
+IMAGE_READ_FAILED_MESSAGE = "image read failed"
 
 
 @dataclass(frozen=True)
@@ -371,8 +374,12 @@ class ImageRead:
 
     @property
     def searched(self) -> str:
-        """What retrieval adds for this image (§3.4)."""
-        return "\n".join(p for p in (self.identifiers, self.description) if p)
+        """What retrieval adds for this image (§3.4): IDENTIFIERS and
+        DESCRIPTION, or the SCREEN TEXT when the reply had neither (a
+        label-less reply, or both sections `none`), so a usable read always
+        adds something to search."""
+        added = "\n".join(p for p in (self.identifiers, self.description) if p)
+        return added or self.screen_text
 
     @property
     def usable(self) -> bool:
@@ -431,6 +438,9 @@ class TurnImages:
     reads: list[ImageRead | None] = field(default_factory=list)
     read_ms: int = 0
     timed_out: bool = False
+    # The first failed read's exception type name (a fixed label, never its
+    # text), so a failed read is diagnosable from the log line.
+    error: str | None = None
 
     @property
     def failed(self) -> bool:
@@ -475,6 +485,7 @@ class TurnImages:
             "image_read_ms": self.read_ms,
             "image_read_chars": sum(len(r.shown) for _, r in self.usable_reads),
             "image_read_failed": self.failed,
+            "image_read_error": self.error,
         }
 
 
@@ -519,14 +530,18 @@ async def _read_one(
             )
     except TimeoutError:
         turn.timed_out = True
+        turn.error = turn.error or "TimeoutError"
         return None
-    except Exception:  # noqa: BLE001 — one attempt; the caller maps the failure to a fixed code
+    except Exception as exc:  # noqa: BLE001 — one attempt; the caller maps the failure to a fixed code
+        turn.error = turn.error or error_type(exc)
         return None
     content = getattr(result, "content", None)
-    if not isinstance(content, str):
+    read = (parse_image_read(content, settings.chat_image_read_max_chars)
+            if isinstance(content, str) else ImageRead())
+    if not read.usable:
+        turn.error = turn.error or "empty_read"
         return None
-    read = parse_image_read(content, settings.chat_image_read_max_chars)
-    return read if read.usable else None
+    return read
 
 
 def span_attributes(turn: TurnImages) -> Mapping[str, int | bool]:

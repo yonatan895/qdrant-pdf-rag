@@ -1159,8 +1159,9 @@ ERROR_CASES = [
      "administrator to check the Rosetta Pipe configuration.")),
     ("http_error", 400, ("The documentation service rejected the request. Ask an administrator "
      "to check the Rosetta Pipe configuration.")),
-    ("unsupported_image", 422, ("Rosetta could not use this image. Paste a PNG, JPEG or WebP "
-     "screenshot, within the size and count limits, in your latest message and retry.")),
+    ("unsupported_image", 422, ("Rosetta could not use this image. Paste a screenshot of an "
+     "accepted type (PNG, JPEG or WebP by default), within the size and count limits, in your "
+     "latest message and retry.")),
     ("unsupported_reasoning_effort", 422, ("This deployment does not offer this answer depth. "
      "Choose another Rosetta model and retry.")),
 ]
@@ -1607,7 +1608,7 @@ IMAGES_OFF_TEXT = ("Rosetta does not read images in this deployment. Type the qu
                    "text from the screen, and retry.")
 IMAGE_UNUSABLE_TEXT = ("Rosetta reads pasted images only in a temporary chat. Paste the image "
                        "into a temporary chat, or type the text from the screen, and retry.")
-READ_FAILED_NOTE = "The image could not be read; the answer uses your typed text only"
+READ_FAILED_NOTE = "An image could not be read, so the search did not use it"
 EARLIER_NOTE = "An earlier image was not re-sent"
 READS_OPEN = "\n\n<details>\n<summary>What Rosetta read from your image</summary>\n"
 

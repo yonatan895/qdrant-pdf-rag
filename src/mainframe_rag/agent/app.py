@@ -84,6 +84,7 @@ from mainframe_rag.agent.evidence import (
 )
 from mainframe_rag.agent.images import (
     IMAGE_ONLY_QUESTION,
+    IMAGE_READ_FAILED_MESSAGE,
     UNSUPPORTED_IMAGE_CODE,
     TurnImage,
     TurnImages,
@@ -769,7 +770,10 @@ def _record_feedback(
         return
     request_id = request.state.request_id
     try:
-        telemetry = {k: v for k, v in fields.items() if v is None or isinstance(v, (bool, int, float, str))}
+        # An image turn's record keeps `image_count` only (#1287 decision 10).
+        telemetry = {k: v for k, v in fields.items()
+                     if (v is None or isinstance(v, (bool, int, float, str)))
+                     and (k == "image_count" or not k.startswith("image_"))}
         telemetry.update(
             reasoning_effort=output.reasoning_effort,
             llm_model=settings.llm_model_reasoning,
@@ -2505,15 +2509,13 @@ async def _read_turn_images(
     log.info(json_log(request_id, "image_read", **turn.log_fields()))
     if turn.typed or turn.usable_reads:
         return turn
-    _record_endpoint(
-        owner.request,
-        owner.endpoint,
-        "model_timeout" if turn.timed_out else "upstream_error",
-        owner.started,
+    failure = (
+        AppError(504, MODEL_TIMEOUT_CODE, MODEL_TIMEOUT_MESSAGE)
+        if turn.timed_out
+        else AppError(502, "upstream_error", IMAGE_READ_FAILED_MESSAGE)
     )
-    if turn.timed_out:
-        raise AppError(504, MODEL_TIMEOUT_CODE, MODEL_TIMEOUT_MESSAGE)
-    raise AppError(502, "upstream_error", "image read failed")
+    _record_endpoint(owner.request, owner.endpoint, failure.code, owner.started)
+    raise failure
 
 
 async def _chat_response(req, response, owner):
