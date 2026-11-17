@@ -1875,7 +1875,6 @@ def test_chat_effort_outside_the_vocabulary_is_invalid_request(effort_client):
 
 _COMPLEX_TURN = {"messages": [{"role": "user", "content": (
     "How do I diagnose and recover when DFSMShsm journal fills up during migration?")}]}
-_INVALID_REQUEST = {"code": "invalid_request", "message": "request body failed validation"}
 
 
 # (LLM_REASONING_EFFORTS, simple default, complex default, quick, thorough):
@@ -1903,24 +1902,24 @@ def test_settings_resolve_each_depth_from_the_offered_efforts(efforts, simple, c
 
 
 @pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("turn", [_CHAT_TURN, _COMPLEX_TURN], ids=["simple", "complex"])
+@pytest.mark.parametrize("depth", ["quick", "standard", "thorough"])
 @pytest.mark.parametrize("efforts,simple,complex_,quick,thorough", _DEPTH_MATRIX)
 def test_chat_depth_reaches_the_model_as_the_resolved_effort(
-        effort_client, monkeypatch, stream, efforts, simple, complex_, quick, thorough):
+        effort_client, monkeypatch, stream, turn, depth, efforts, simple, complex_, quick, thorough):
     """#1289: /v1/chat resolves `reasoning_depth` against this deployment's own
-    LLM_REASONING_EFFORTS. Standard follows the request's complexity path,
-    the effort the agent uses with no field."""
+    LLM_REASONING_EFFORTS. Quick and thorough ignore complexity; standard
+    follows the request's complexity path, the effort the agent uses with no
+    field."""
     client, fake, _search = effort_client
     monkeypatch.setattr(app_mod.settings, "llm_reasoning_efforts", efforts)
     monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_simple", simple)
     monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_complex", complex_)
-    sent = []
-    for turn, depth in ((_CHAT_TURN, "quick"), (_COMPLEX_TURN, "quick"),
-                        (_CHAT_TURN, "thorough"), (_COMPLEX_TURN, "thorough"),
-                        (_CHAT_TURN, "standard"), (_COMPLEX_TURN, "standard")):
-        resp = client.post("/v1/chat", json={**turn, "stream": stream, "reasoning_depth": depth})
-        assert resp.status_code == 200
-        sent.append(fake.last_reasoning_effort)
-    assert sent == [quick, quick, thorough, thorough, simple, complex_]
+    default = simple if turn is _CHAT_TURN else complex_
+    expected = {"quick": quick, "thorough": thorough, "standard": default}[depth]
+    resp = client.post("/v1/chat", json={**turn, "stream": stream, "reasoning_depth": depth})
+    assert resp.status_code == 200
+    assert fake.last_reasoning_effort == expected
 
 
 @pytest.mark.parametrize("path", ["/v1/chat", "/v1/chat/completions"])
@@ -1959,23 +1958,27 @@ def test_chat_depth_with_a_literal_effort_is_refused_before_retrieval(effort_cli
     client, fake, search = effort_client
     refused = client.post("/v1/chat", json={**_CHAT_TURN, "stream": stream,
                                             "reasoning_depth": "quick", "reasoning_effort": effort})
-    assert refused.status_code == 422 and refused.json() == _INVALID_REQUEST
+    assert refused.status_code == 422 and refused.json() == _FIXED_422
     assert (fake.calls, search.calls) == (0, [])
 
 
 @pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("depth", ["deep", "Quick", "", "low", 1, None])
+@pytest.mark.parametrize("depth", ["deep", "Quick", "", "low", 1])
 def test_chat_unknown_depth_is_the_fixed_invalid_request(effort_client, stream, depth):
     """Outside quick/standard/thorough (an effort name included) is the fixed
-    validation 422, before retrieval or any model call. An explicit null is
-    the same as no field."""
+    validation 422, before retrieval or any model call."""
     client, fake, search = effort_client
     resp = client.post("/v1/chat", json={**_CHAT_TURN, "stream": stream, "reasoning_depth": depth})
-    if depth is None:
-        assert resp.status_code == 200 and fake.last_reasoning_effort == "medium"
-        return
-    assert resp.status_code == 422 and resp.json() == _INVALID_REQUEST
+    assert resp.status_code == 422 and resp.json() == _FIXED_422
     assert (fake.calls, search.calls) == (0, [])
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_chat_null_depth_is_the_same_as_no_depth(effort_client, stream):
+    """An explicit null depth is accepted and keeps the configured default."""
+    client, fake, _search = effort_client
+    resp = client.post("/v1/chat", json={**_CHAT_TURN, "stream": stream, "reasoning_depth": None})
+    assert resp.status_code == 200 and fake.last_reasoning_effort == "medium"
 
 
 @pytest.mark.parametrize("stream,query,field", [

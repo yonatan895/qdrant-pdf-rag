@@ -129,8 +129,8 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
 - `POST /v1/chat` (native) and `POST /v1/chat/completions` (OpenAI-compatible
   alias) — `ChatRequest{messages (client-managed history; min 1, roles
   `system`/`user`/`assistant`, `extra="forbid"`), product?, version?,
-  splunk_context?, stream?, temperature?, model?, max_tokens?, reasoning_effort?,
-  reasoning_depth?}`. At least one
+  splunk_context?, stream?, temperature?, model?, max_tokens?, reasoning_effort?, reasoning_depth?}`.
+  At least one
    `user`-role message is required (missing user turn is a body-validation
    failure: `422 invalid_request` / `request body failed validation`, issue
    #314). `agent/chat_turn.prepare_chat_turn` owns active-turn normalization
@@ -164,8 +164,9 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   `xhigh`: `quick` is the lowest offered effort, `thorough` the highest, and
   `standard` the configured simple/complex effort for the request, exactly as
   with neither field (`Settings.reasoning_depth_effort`). With `low,medium,high`
-  thorough is `high`; once `xhigh` is offered it is `xhigh`. Any other value, and
-  a request carrying both `reasoning_depth` and `reasoning_effort`, is the fixed
+  thorough is `high`; once `xhigh` is offered it is `xhigh`. An explicit `null` is
+  the same as an absent field. Any other value, and a request carrying both
+  `reasoning_depth` and `reasoning_effort` non-null, is the fixed
   `422 invalid_request` / `request body failed validation` before retrieval or any
   model call. The resolved effort is what the model receives and what the
   existing `rag.reasoning_effort` / `llm.reasoning_effort` span attributes and the

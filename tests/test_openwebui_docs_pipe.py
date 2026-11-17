@@ -1568,7 +1568,11 @@ def test_round_trip_each_depth_reaches_the_model_at_its_effort(real_agent, monke
     assert transport.efforts == [effort]
 
 
-def test_round_trip_every_entry_answers_where_xhigh_is_not_offered(real_agent, monkeypatch):
+@pytest.mark.parametrize("entry,effort", [
+    ("standard", "medium"), ("quick", "low"), ("thorough", "high"),
+])
+def test_round_trip_every_entry_answers_where_xhigh_is_not_offered(real_agent, monkeypatch,
+                                                                  entry: str, effort: str):
     """#1289: a site whose template has no xhigh (LLM_REASONING_EFFORTS
     low,medium,high) answers every entry, thorough at high, with no
     repackage. The agent's unsupported-effort refusal and the Pipe's fixed
@@ -1580,9 +1584,8 @@ def test_round_trip_every_entry_answers_where_xhigh_is_not_offered(real_agent, m
     monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_simple", "medium")
     monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_complex", "medium")
     transport, _searches = real_agent
-    for entry in ("standard", "quick", "thorough"):
-        content, events = run_pipe(None, transport=transport,
-                                   body_extra={"model": f"{FUNCTION_ID}.{entry}"})
-        assert content == f"Reissue the command.\n\n**Citations:**\n- {CITE_A}"
-        assert _final_status(events) == "Source-matched · 1 citation"
-    assert transport.efforts == ["medium", "low", "high"]
+    content, events = run_pipe(None, transport=transport,
+                               body_extra={"model": f"{FUNCTION_ID}.{entry}"})
+    assert content == f"Reissue the command.\n\n**Citations:**\n- {CITE_A}"
+    assert _final_status(events) == "Source-matched · 1 citation"
+    assert transport.efforts == [effort]
