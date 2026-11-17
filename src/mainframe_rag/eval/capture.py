@@ -58,15 +58,18 @@ class RowCitations:
         #1279). A validated citation names a citation line, and the agent and
         the Open WebUI Pipe map it to every excerpt carrying that line, so
         excerpts sharing a line (`duplicate_citation`) are cited together.
-        Inferred citations are exact through their prompt indices. None
-        (unknown) for an excerpt without a citation line, or for inferred
-        citations sent without indices (an agent before the field)."""
-        if self.inferred:
-            if self.lines and not self.indices:
-                return None
-            return item["index"] in self.indices
+        Inferred citations count by prompt index (`inferred_indices`), but the
+        agent records an index only when its line is not listed yet, so an
+        excerpt whose line is listed under another index is unknown. None
+        (unknown) also for an excerpt without a citation line."""
+        if self.inferred and item["index"] in self.indices:
+            return True
         citation = item.get("citation")
-        return citation in self.lines if isinstance(citation, str) else None
+        if not isinstance(citation, str):
+            return None
+        if citation not in self.lines:
+            return False
+        return None if self.inferred else True
 
 
 def _excerpt_meta(item: Any, citations: RowCitations | None = None) -> dict[str, Any] | None:

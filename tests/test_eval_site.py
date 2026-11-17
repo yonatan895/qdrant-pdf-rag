@@ -1967,14 +1967,18 @@ def test_each_packed_excerpt_says_whether_its_citation_was_given(site_eval):
     assert LINE_A not in json.dumps(meta) and "IEA501I" not in json.dumps(meta)
 
 
-def test_an_inferred_citation_marks_only_its_prompt_index(site_eval):
-    """An inferred citation comes from a bracket index (`inferred_indices`),
-    so it is exact even when two excerpts share the line it lists."""
+def test_an_inferred_citation_marks_its_prompt_index_and_never_guesses(site_eval):
+    """Inferred citations come from bracket indices (`inferred_indices`).
+    The agent records an index only when its line is not listed yet, so an
+    answer bracketing [2] and [1], two excerpts on one line, lists only 2:
+    excerpt 2 is cited, excerpt 1 is unknown (null, it may or may not have
+    been bracketed), and an excerpt on a line not listed is not cited."""
     supplied = [_excerpt(index=1, citation=LINE_A, duplicate_citation=True),
-                _excerpt(index=2, citation=LINE_A, duplicate_citation=True)]
+                _excerpt(index=2, citation=LINE_A, duplicate_citation=True),
+                _excerpt(index=3, citation=LINE_B)]
     row = _cited_row(site_eval, "chat", supplied, citations=(LINE_A,), inferred=True,
                      indices=(2,))
-    assert [e["cited"] for e in row["supplied_evidence_meta"]] == [False, True]
+    assert [e["cited"] for e in row["supplied_evidence_meta"]] == [None, True, False]
 
 
 @pytest.mark.parametrize(("supplied", "final"), [
@@ -1983,9 +1987,9 @@ def test_an_inferred_citation_marks_only_its_prompt_index(site_eval):
      {"citations": [LINE_A], "citations_inferred": True, "inferred_indices": []}),
 ], ids=["excerpt-without-line", "inferred-without-indices"])
 def test_cited_is_unknown_when_the_mapping_cannot_be_read(site_eval, supplied, final):
-    """An excerpt with no citation line, or inferred citations from an agent
-    that sends no indices: `cited` is null (unknown), never guessed, and the
-    rest of the capture is kept."""
+    """An excerpt with no citation line, or an inferred line with no index
+    recorded for the excerpt: `cited` is null (unknown), never guessed, and
+    the rest of the capture is kept."""
     row = _cited_row(site_eval, "sse", supplied, **final)
     assert [e["cited"] for e in row["supplied_evidence_meta"]] == [None]
     assert row["supplied_evidence_meta"][0]["doc_id"] == "SA22-0000-00"
