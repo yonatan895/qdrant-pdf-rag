@@ -568,7 +568,7 @@ default per-leg keys.
 
 | Role | URL key | Model key | Notes |
 |---|---|---|---|
-| Reasoning (answer, chat and console) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. `LLM_MAX_MODEL_LEN` defaults to 32768 and must not exceed the served context: lower it when the platform serves a smaller window, because nothing in the request path can read the served window through the gateway (tokenizer uses the server `/tokenize`, estimator fallback otherwise). Auth: `llm-api-key` from the `GATEWAY_API_KEY_SECRET` Secret (unset = keyless). |
+| Reasoning (answer, chat and console) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. `LLM_MAX_MODEL_LEN` defaults to 262144 (#1274; 32768 before) and must not exceed the served context: set it to the served window when the platform serves less, because nothing in the request path can read the served window through the gateway (tokenizer uses the server `/tokenize`, estimator fallback otherwise). Auth: `llm-api-key` from the `GATEWAY_API_KEY_SECRET` Secret (unset = keyless). |
 | Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (defaults to `GATEWAY_BASE_URL`) | `EMBED_MODEL` + `DENSE_DIM` + `EMBED_MODEL_REVISION` | `DENSE_DIM` is required and fail-closed: it must equal the served native dim (4096 for Qwen3-Embedding-8B). Collections are created at that width; a mismatch against an existing collection refuses with `DimMismatchError`. `EMBED_MODEL_REVISION` is the operator-declared immutable model/config revision (a gateway alias is mutable and a dimension is not an identity): blank/whitespace-only values fail pre-flight and refuse agent/ingest startup, and a revision change requires a deliberate `--reingest` migration. Auth: `embed-api-key` from the same Secret; the ingest Job reads it too. |
 | Rerank (optional, default off) | `RERANK_BASE_URL` (defaults to `GATEWAY_BASE_URL`, no embed fallback) | `RERANK_MODEL` | Served via a vLLM pooling server (`--runner pooling`, `/v1/score`; TEI `/v1/rerank` fallback). Use the platform gateway rerank leg and its model ID; do not configure a direct-backend consumer shortcut. Lifespan logs a loud warning (never a refusal) when the endpoint is unreachable at startup. Auth: `rerank-api-key` from the same Secret. Leg order: run `probe_gateway.py` below to decide — `score_first` whenever the score leg answers (even on a gateway exposing both legs), `rerank_first` only when the score leg is unavailable. |
 
@@ -955,6 +955,165 @@ Monitor ingest progress:
 ```bash
 oc -n mainframe-rag logs -f job/ingest
 ```
+
+<a id="adding-documents"></a>
+#### 4.5.1 Adding documents to the corpus
+
+Ingest reads PDFs only (`ingest/walk.py`). Other sources become PDFs first,
+outside ingest, so the extraction rules and their version stay unchanged (#1277):
+
+| Source | Converter | Doc id | Title | Heading path |
+|---|---|---|---|---|
+| Member library: macros, samples, procedures, shop JCL/REXX/HLASM/C | `python -m mainframe_rag.tools.text_to_pdf library` | `--name` | `--title` | member name |
+| Markdown guide (`HOUSE-AI-DRAFT-*.md`) | `python -m mainframe_rag.tools.text_to_pdf markdown` | file stem | the H1 | H2, H2 > H3 |
+| Word document (`.docx`, `.doc`) | `scripts/corpus/docx_to_pdf.ps1`, on Windows with Word | file stem | the Title property | Heading 1-3 |
+
+Rules for all three:
+
+- **The file name is the doc id.** Citations start with it. Use letters and
+  digits joined by `-`, `_` or `.`, with at least two parts and no IBM form
+  number, e.g. `SITE-MACLIB-SYSA-20261117`. A new export or version gets a new
+  name. Ingest treats changed bytes under the same name as a new revision of
+  the same document. One exception: if an IBM form number (`SA23-1385-07`)
+  appears anywhere in a PDF's first four pages, ingest takes that number as
+  the doc id instead of the file name, and the document is filed as that IBM
+  manual. The converter's cover pages prevent this. For Word documents, run
+  the check below and move such references past page 4.
+- **The title has no comma and no page mark** (`p.`, `pp.`). The comma
+  separates citation fields. The converter refuses such a title, and the Word
+  script warns. A Word document needs its Title property set (File > Info >
+  Properties). Without it, ingest takes the first line of page 1 as the title.
+- **Headings make the citation path.** Word documents need the built-in
+  Heading 1-3 styles. Ingest files a page under the bookmarks that start on
+  it, so text continued from the previous page goes under the page's first
+  heading. A repeated heading title such as "Examples" does not split its
+  page. Turn on "Page break before" for Heading 1 and Heading 2 where exact
+  sections matter. Headings that ingest skips by name (Notices, Index,
+  Copyright, an early Contents) lose their own section. The Markdown
+  converter refuses them, and library members with such names are
+  bookmarked as `<NAME> (member)`.
+- **Corpus layout:** `<corpus root>/<vendor>/<product>/<version>/<name>.pdf`,
+  exactly four levels. For example: `site/macros/<sysname>/` for member
+  libraries, `house/guidance/<date>/` for Markdown guides and `site/docs/<year>/`
+  for Word documents. Product and version come from the folders. In any other
+  depth they are read from the text and can change with it. Keep the vendor
+  markers `ibm`, `bmc`, `ca-`, `broadcom`, `precisely` and `red-hat` out of
+  folder and file names below the root: they set the vendor label.
+- **Licensing:** site library contents (MACLIB, MODGEN, SAMPLIB, PROCLIB) are
+  licensed with the site's z/OS, and internal documents and shop code belong to
+  the site. Convert, store and ingest them inside the gap only. They never go
+  into git, an issue, a release or a kit, and neither do the generated PDFs.
+
+**1. Export.** Download a library's members as text into one folder per
+library: FTP in ASCII mode, IND$FILE or the site's usual transfer. One file
+per member, named after the member (`IEFBR14` or `iefbr14.txt`). The converter
+never contacts z/OS and opens no network connection.
+
+**2. Convert.** Run it where the checkout and its Python packages are, for
+example in the dev workspace pod (`PYTHONPATH=<checkout>/src python3 -m ...`)
+or in a project venv inside the gap. The bastion's host `python3` has no
+application packages.
+
+```bash
+python3 -m mainframe_rag.tools.text_to_pdf library \
+  --src /work/export/sys1.maclib \
+  --out-dir /work/corpus/site/macros/sysa \
+  --corpus-root /work/corpus \
+  --name SITE-MACLIB-SYSA-20261117 \
+  --title "Site export - SYS1.MACLIB macro sources (not IBM documentation)" \
+  --strip-sequence          # only for 80-column records with sequence numbers
+python3 -m mainframe_rag.tools.text_to_pdf markdown \
+  --src /work/guides/HOUSE-AI-DRAFT-JCL-STANDARDS.md \
+  --out-dir /work/corpus/house/guidance/2026-11-17 --corpus-root /work/corpus
+```
+
+Library options:
+
+- `--columns N` sets the record length; the default is 80. A longer line is refused.
+- `--shop-names` bookmarks file names as they are, instead of validating
+  them as PDS member names (1-8 of `A-Z 0-9 @ # $`, not starting with a digit).
+- `--encoding` sets the input encoding; the default is UTF-8.
+- `--creation-date YYYY-MM-DD` stamps a fixed date. Otherwise the PDF carries
+  no date, and the same input always gives the same sha256.
+
+Tabs are expanded to 8 columns, trailing blanks and leading or trailing blank
+records are dropped. In Markdown:
+
+- typographic quotes, dashes, ellipses and arrows become ASCII;
+- fenced code, indented code and tables are kept verbatim;
+- H4 and deeper headings become bold lines;
+- thematic breaks (`---`) are dropped.
+
+The converter refuses underlined (setext) headings, and also:
+
+- characters outside printable Latin-1, which the PDF base fonts cannot carry;
+- inputs over the size caps (8 MiB per member, 256 MiB per library, 20,000
+  members, 50,000 pages);
+- symlinks and subfolders in the member folder;
+- an existing output with different bytes, unless `--replace` is given;
+- lines that look like literal credentials (`PASSWORD=...`), naming only member
+  and line. Remove those lines, or review them and pass `--allow-secret-like`.
+
+Before the PDF is moved into place, the converter runs ingest's own parse and
+chunk steps on it. It refuses unless the doc id, title, outline, each page's
+text and each chunk's heading are as planned. The first four pages are a cover
+that carries only the header, so ingest's first-pages form-number scan cannot
+take a number from a comment as the doc id. Every page repeats a four-line
+header and footer, which ingest removes as page chrome, so no source line
+(`MACRO`, `MEND`, a numeric record) sits at a page edge where it would be
+removed. A member starts a new page, and the page grows with it (up to 1,000
+lines), so its citation reads `<doc id> <title>, <member>, p. PDF n`. Columns
+are kept in chunk text with one exception: ingest strips the leading blanks
+of the first line of each paragraph. That affects a member's first line, any
+line after a blank record, and the first line of a continuation page. A
+member longer than 1,000 lines is split, where possible, before a column-1
+line (a label or comment) so that its continuation pages lose nothing.
+
+**Word documents** (`docx_to_pdf.ps1`, PowerShell 5.1 on Windows with Word):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\corpus\docx_to_pdf.ps1 `
+  -SourceDir D:\docs\word -OutDir D:\docs\pdf
+```
+
+It opens each document read-only and exports it with heading bookmarks,
+structure tags and the document properties, which carry the Title. It warns
+about:
+
+- a missing Heading 1-3 style;
+- an empty Title or one with a comma or page mark;
+- a file stem that is not a usable doc id;
+- an IBM form number in the text;
+- a `.doc` and `.docx` with the same stem, which it skips.
+
+It never overwrites a PDF without `-Force`. Exit codes: 1 when a file failed
+or was skipped, 3 when Word is not available.
+
+The warnings are early hints. Before placing Word PDFs in the corpus, check
+them with ingest's own parser:
+
+```bash
+python3 -m mainframe_rag.tools.text_to_pdf check /work/docs/pdf/*.pdf
+```
+
+The check prints one line per file with the doc id and bookmark count. It
+exits 2 if any file has a problem: a doc id other than the file stem, a title
+with a comma, a page mark or a form number, or an unusable file name. These
+are reported as notices: missing bookmarks, headings that ingest skips by
+name, and headings with a page mark or form number, which the citation drops.
+Commas and typographic characters in headings are fine.
+
+**3. Place and ingest.** Copy the PDFs into their layout folders on the corpus
+volume, the same way as manuals, then run the ordinary ingest
+(`sh scripts/tools/run-task.sh airgap:ingest`, above). Only new or changed
+files are parsed and embedded.
+
+**4. Retire an older export.** When `SITE-MACLIB-SYSA-20261117` replaces
+`SITE-MACLIB-SYSA-20260501`, remove the old PDF from the corpus volume and set
+`INGEST_RETIRE_DOCS=SITE-MACLIB-SYSA-20260501` in `airgap.env` for that one
+ingest run, then clear it. A file missing from the walk is not a removal
+instruction: without the retirement the publication refuses
+([ingest §9](ingest.md#9-orchestration-run_ingestpy-inventorypy)).
 
 ### 4.6 Verification & Smoke Testing
 
@@ -1510,13 +1669,45 @@ sh scripts/tools/run-task.sh airgap:smoke
   does not match the repository file` has finished everything except the
   Pipe install: wait about a minute, then re-run `airgap:deploy`. Releases
   that include #1253 wait up to 180 s automatically and, if the mount is
-  still stale, end with `the Open WebUI pod still mounts a docs Pipe or
-  installer that differs from this release`; the remedy is the same. A
+  still stale, end with `the Open WebUI pod still mounts docs Pipe or
+  shared-prompt files that differ from this release` (releases before #1259
+  said `a docs Pipe or installer that differs`); the remedy is the same. The
+  wait covers the docs Pipe, the shared prompts and both installers. A
   rollback to 2cd8f67d does not wait.
 - **Before deploy:** take step 1's snapshot (the only protection against a
   forced re-ingest if data is ever damaged), keep A's workspace and
   `airgap.env` for step 4, and confirm A's image tags are still in the
   registry (registry tag expiry would break step 4).
+<a id="upgrade-1274-defaults"></a>
+- **Behaviour changes from #1274 (answer-quality defaults on).** No
+  re-ingest. Each change is one `airgap.env` line to keep the old behaviour,
+  with no new release ([deploy.md](deploy.md#default-changes-1274) owns the
+  details):
+
+  | Setting | New default | Keep the old behaviour |
+  |---|---|---|
+  | Follow-up anchoring: an identifier-free follow-up is also searched as the previous user message | on | `CHAT_FOLLOWUP_ANCHOR_ENABLED=false` |
+  | Characters kept of each prior chat message | 4000 | `CHAT_MAX_PRIOR_TURN_CHARS=1000` |
+  | Prompt count source | `auto` | `LLM_TOKEN_COUNT_SOURCE=tokenize` |
+  | Open WebUI ratings | on wherever the feedback store is on (`FEEDBACK_ENABLED=true`; the store stays opt-in) | `OPENWEBUI_RATINGS_ENABLED=false` |
+  | Prompt window (`LLM_MAX_MODEL_LEN`) | 262144 (was 32768) | the served window, e.g. `LLM_MAX_MODEL_LEN=32768` |
+  | Hits per answer retrieval | 16 (was 8) | `ANSWER_HIT_LIMIT=8` |
+  | Chunks kept per manual (every retrieval, `/v1/search` included) | 5 (was 3) | `RETRIEVE_MAX_CHUNKS_PER_DOC=3` |
+  | Coding mode (#1276): a request to write, fix, review, convert or explain JCL, REXX, HLASM or (Metal) C takes the complex path and the coding prompt | on | `ANSWER_CODING_MODE_ENABLED=false` (restores the prompts and complexity; the new `c`/`hlasm`/`asm`/`metalc`/`assembler`/`clist` fence handling stays) |
+
+  - **Window:** the 262144 default assumes the reasoning model serves at
+    least a 256k window. A site whose model serves less must set
+    `LLM_MAX_MODEL_LEN` to its served window (the server's
+    `--max-model-len`) before deploying, or answers that fill the larger
+    budget are refused by the server.
+  - `CHAT_CONDENSE_ENABLED=true` with the anchor unset keeps condensing: it
+    turns the anchoring default off. Both set true is refused.
+  - **Quota:** where the gateway does not serve `/tokenize`, `auto` adds
+    about one short gateway call per answer (a 1-token completion that counts
+    the prompt). Confirm the reasoning key's rate limit and quota allow it
+    before the upgrade, or keep `LLM_TOKEN_COUNT_SOURCE=tokenize`. Step 0 of
+    the [site eval](eval.md#at-a-site) (`probe_gateway.py --probe-count`)
+    shows which source this gateway uses.
 - **Keep the `ingest-work` PVC.** It holds the ingest inventory; a later
   ingest against the live generation without it refuses ("fails verification
   … operator intervention required").

@@ -8,7 +8,7 @@ hash after the install. Community Functions are never installed. The same
 ConfigMap carries the chat retention purge run by the chat-purge sidecar, and
 the repository's shared prompt templates with their installer (#1255), which
 deploy.sh runs the same way: both files are hash-checked against the release.
-With openwebui.ratings.enabled it also carries the rating Action (#1255); the
+With ratings on (mainframe-rag.openwebuiRatings) it also carries the rating Action (#1255); the
 installer installs it only when it is mounted (its hash is the installer's
 ACTION_SHA256) and removes it when it is not.
 */ -}}
@@ -16,7 +16,7 @@ ACTION_SHA256) and removes it when it is not.
 {{- $pipe := .Files.Get "files/openwebui/docs_pipe.py" }}
 {{- $installer := .Files.Get "files/openwebui/provision_pipe.py" }}
 {{- $purge := .Files.Get "files/openwebui/purge_chats.py" }}
-{{- $ratings := (.Values.openwebui.ratings | default dict).enabled }}
+{{- $ratings := include "mainframe-rag.openwebuiRatings" . }}
 {{- $action := .Files.Get "files/openwebui/rating_action.py" }}
 {{- $prompts := .Files.Get "files/openwebui/prompts.json" }}
 {{- $promptsInstaller := .Files.Get "files/openwebui/provision_prompts.py" }}

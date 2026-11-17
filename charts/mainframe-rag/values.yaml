@@ -101,17 +101,29 @@ models:
     # Chat history caps (#1268); absent keys keep the Settings defaults (shown):
     # prior messages kept, and characters kept of each prior message.
     # chatMaxTurns: 10
-    # chatMaxPriorTurnChars: 1000
-    # Antecedent-anchored follow-up retrieval (#1268); absent keeps it off.
+    # chatMaxPriorTurnChars: 4000  # 1000 before #1274
+    # Antecedent-anchored follow-up retrieval (#1268); absent keeps it on
+    # (#1274), unless condenseEnabled is true, which turns the default off.
     # Exclusive with condenseEnabled (the schema refuses both true).
-    # followupAnchorEnabled: false
+    # followupAnchorEnabled: true  # false before #1274
+    # Retrieval depth (#1191); absent keys keep the Settings defaults
+    # (shown): hits per answer retrieval (1..32; /v1/search keeps its own
+    # limit) and chunks kept per manual (1..10; applies to /v1/search too).
+    # answerHitLimit: 16          # 8 before #1274
+    # retrieveMaxChunksPerDoc: 5  # 3 before #1274
+    # Coding mode (#1276); absent keeps the Settings default (on). false
+    # restores the pre-#1276 prompts and complexity for every request (the
+    # c/hlasm/asm/metalc/clist fence handling is not part of the setting).
+    # codingModeEnabled: true
     # Empty model disables /v1/answer; when set, baseUrl is required.
     baseUrl: ""
     model: ""
     # Optional bounded app overrides (#706); absent keys preserve Settings
     # defaults (shown, #777). Explicit zero thinking reserves and stream: false
-    # are retained. maxModelLen must not exceed the served model window.
-    # maxModelLen: 32768
+    # are retained. maxModelLen must not exceed the served model window: the
+    # 262144 default (#1274) assumes the model serves at least that; set the
+    # served window when it serves less.
+    # maxModelLen: 262144
     # reservedOutputTokens: 2560
     # thinkingReserveTokensSimple: 8192
     # thinkingReserveTokensComplex: 8192
@@ -279,14 +291,17 @@ openwebui:
   # Public Route host; the OIDC redirect URI is https://<host>/oauth/oidc/callback.
   host: ""
   retentionDays: 30
-  # Thumbs up/down on answers (#1255), default off; requires feedback.enabled.
+  # Thumbs up/down on answers (#1255). enabled unset (the default since
+  # #1274) follows feedback.enabled: on wherever the feedback store is on.
+  # true requires feedback.enabled; false keeps ratings off beside the store.
   # Ratings go only to the agent's POST /v1/feedback and the feedback store
   # (ADR-0005); Open WebUI's own ratings stay off. On: the docs Pipe ends each
   # answer with an "Answer reference" line, and deploy.sh installs the
   # repository rating Action (hash-checked) next to the docs Pipe. Off again:
-  # the next deploy removes the Action.
-  ratings:
-    enabled: false
+  # the next deploy removes the Action. One helper decides for every
+  # template: mainframe-rag.openwebuiRatings.
+  ratings: {}
+    # enabled: false
   storageSize: 10Gi
   # Chat share links and temporary chats (ADR-0007 S2, #1255). Off by default;
   # turning either on is the site's (maintainer's) decision. These set the

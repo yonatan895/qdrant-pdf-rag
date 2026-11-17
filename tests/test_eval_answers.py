@@ -615,6 +615,33 @@ def test_abstain_gold_phrase_pin() -> None:
     assert any("excerpts do not answer" in f for f in fails)
 
 
+_CODE = "GETMAIN R,LV=4096\nST R1,ANCHOR"
+
+
+@pytest.mark.parametrize("entry", [
+    {"gold_must_contain": ["GETMAIN", "ANCHOR"]},
+    {"gold_must_contain": ["GETMAIN", "FREEMAIN"]},
+    {"gold_must_not_contain": ["ST R1"]},
+    {"must_cite_identifier": "GETMAIN"},
+], ids=["gold-found", "gold-missing", "forbidden", "identifier"])
+def test_gold_checks_read_the_script_as_well_as_the_answer(entry) -> None:
+    """Maintainer decision 2026-11-17 (#1285): the gold-string checks read
+    the answer plus the extracted `script`, so a build that moves a code
+    fence into `script` scores the same as one that keeps it in the answer."""
+    cites = ["SA22-7605-00 ref, p. 3"]
+    in_answer = judge(_entry(**entry), f"Obtain storage:\n\n```hlasm\n{_CODE}\n```", cites)
+    in_script = judge(_entry(**entry), "Obtain storage:", cites, script=_CODE)
+    assert in_script == in_answer
+
+
+def test_a_script_never_rescues_a_structural_failure() -> None:
+    """Only the gold-string checks read the script: an empty or refusing body
+    still fails as before."""
+    verdict, fails, _ = judge(_entry(gold_must_contain=["GETMAIN"]), "", ["c1"], script=_CODE)
+    assert verdict == "fail" and "empty answer body" in fails
+    assert not any("missing required substring" in f for f in fails)
+
+
 def test_zero_hits_path_skips_gold_checks() -> None:
     # run_query suppresses gold checks on the canned zero-hits message (no
     # model text to judge); the structural abstain verdict still passes.
@@ -848,10 +875,41 @@ def test_summarize_leaves_the_existing_metrics_unchanged() -> None:
         "warns": 1,
         "zero_hits": 0,
     }
-    metrics = {k: v for k, v in summarize(rows).items() if k != "measurement"}
+    # #1195 measurement and #1276 coding are later blocks with their own tests.
+    metrics = {k: v for k, v in summarize(rows).items() if k not in ("measurement", "coding")}
     assert set(metrics) - set(before) == {"error_rate", "judged_rate", "total", "unjudged"}
     for key, value in before.items():
         assert metrics[key] == value, key
+
+
+# ------------------------------------------------------- coding breakdown #1276
+def test_coding_breakdown_counts_only_coding_questions_with_their_denominators() -> None:
+    refusal = "explicit refusal on an answer-tier query"
+    rows = [
+        {"query_class": "syntax", "query": "Write a REXX exec that lists members", "verdict": "fail",
+         "expected_behavior": "answer", "failures": [refusal],
+         "verification_state": "insufficient_evidence"},
+        {"query_class": "syntax", "query": "Fix this JCL:\n//S1 EXEC PGM=IEFBR14", "verdict": "pass",
+         "expected_behavior": "answer", "failures": [], "verification_state": "accepted"},
+        {"query_class": "syntax", "query": "Generate an HLASM program", "verdict": "error", "expected_behavior": "answer"},
+        {"query_class": "syntax", "query": "Write a REXX exec that deletes everything", "verdict": "pass",
+         "expected_behavior": "abstain", "failures": [], "verification_state": "insufficient_evidence",
+         "path": "zero_hits"},
+        # Not coding: a lookup with a marker, and its refusal is not counted.
+        {"query_class": "syntax", "query": "What is the JCL DISP parameter?", "verdict": "fail",
+         "expected_behavior": "answer", "failures": [refusal]},
+    ]
+    from mainframe_rag.eval.answers import summarize
+
+    coding = summarize(rows)["coding"]
+    assert coding == {
+        "n": 4, "judged": 3, "pass": 2, "answer_n": 2, "false_refusals": 1,
+        "false_refusal_rate": 0.5, "zero_hits": 1,
+        "by_verification_state": {"accepted": 1, "insufficient_evidence": 2},
+    }
+    assert list(summarize(rows))[-1] == "coding"  # appended: no existing key moves
+    empty = summarize(rows[-1:])["coding"]
+    assert empty["n"] == 0 and empty["false_refusal_rate"] is None
 
 
 # ------------------------------------------------------- answer completeness #305

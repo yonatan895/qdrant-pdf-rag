@@ -3270,6 +3270,9 @@ def test_ambient_agent_settings_never_reach_the_workload(lab, monkeypatch):
     monkeypatch.setenv("LLM_STREAM", "true")
     monkeypatch.setenv("PROMPT_MAX_CONTEXT_CHARS", "50000")
     monkeypatch.setenv("COMPARATIVE_SPLIT_ENABLED", "false")
+    monkeypatch.setenv("ANSWER_HIT_LIMIT", "16")
+    monkeypatch.setenv("RETRIEVE_MAX_CHUNKS_PER_DOC", "5")
+    monkeypatch.setenv("ANSWER_CODING_MODE_ENABLED", "false")
     # Documented caller-only inputs survive the clear.
     monkeypatch.setenv("QDRANT_API_KEY", "fixture-reader-1195")
     monkeypatch.setenv("EMBED_API_KEY", "fixture-embed-1195")
@@ -3277,7 +3280,8 @@ def test_ambient_agent_settings_never_reach_the_workload(lab, monkeypatch):
     observed = json.loads((root / "workload-env.json").read_text())
     for env in (observed, _sandbox_env(state)):
         for name in ("LLM_RESERVED_OUTPUT_TOKENS", "LLM_STREAM", "PROMPT_MAX_CONTEXT_CHARS",
-                     "COMPARATIVE_SPLIT_ENABLED"):
+                     "COMPARATIVE_SPLIT_ENABLED", "ANSWER_HIT_LIMIT",
+                     "RETRIEVE_MAX_CHUNKS_PER_DOC", "ANSWER_CODING_MODE_ENABLED"):
             assert name not in env
         # The lane's own values are applied after the clear.
         assert env["LLM_MAX_MODEL_LEN"] == "32768"

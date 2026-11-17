@@ -254,6 +254,8 @@ def run_agent_phase(qdrant_url: str, collection: str, concurrency: int,
             "ALLOW_HASH_MODE": "true",
             "LLM_BASE_URL": f"{mock_url}/v1",
             "LLM_MODEL_REASONING": "mock-reasoning",
+            # The window this lane ran at before #1274 raised the default.
+            "LLM_MAX_MODEL_LEN": "32768",
         }
         with tempfile.TemporaryFile(mode="w+") as log:
             agent = subprocess.Popen(

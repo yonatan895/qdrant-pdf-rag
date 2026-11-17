@@ -272,8 +272,17 @@ def test_chat_configured_xhigh_reaches_model(chat_client, monkeypatch, path, str
         assert response.json()["choices"][0]["finish_reason"] == "stop"
 
 
-def test_build_chat_messages_pruning_and_cap():
-    huge_prev_answer = "Here is the explanation.\n" + ("x" * 2000) + "\nRetrieved manual excerpts:\n[1] Chunk\n[2] Chunk2"
+@pytest.mark.parametrize("cut", [None, 1000, 4000])
+def test_build_chat_messages_pruning_and_cap(cut):
+    """Prior turns are pruned of pasted excerpts and cut at
+    chat_max_prior_turn_chars: the default (None: 4000 since #1274, the
+    Settings default also without Settings), or an explicit value; an
+    explicit 1000 is the cut before #1274."""
+    from mainframe_rag.config import Settings
+
+    settings = None if cut is None else Settings(_env_file=None, chat_max_prior_turn_chars=cut)
+    limit = 4000 if cut is None else cut  # #1274 default, independent of the field
+    huge_prev_answer = "Here is the explanation.\n" + ("x" * 5000) + "\nRetrieved manual excerpts:\n[1] Chunk\n[2] Chunk2"
     past_messages = [
         ChatMessage(role="user", content="Explain IEA500I"),
         ChatMessage(
@@ -283,7 +292,7 @@ def test_build_chat_messages_pruning_and_cap():
         ChatMessage(role="user", content="How do I resolve it?"),
     ]
     hits = [_hit()]
-    prepared = build_chat_messages(past_messages, hits)
+    prepared = build_chat_messages(past_messages, hits, settings=settings)
     assembled = prepared.messages
 
     assert len(assembled) == 4  # system, user (prior), assistant (prior), user (active)
@@ -298,7 +307,7 @@ def test_build_chat_messages_pruning_and_cap():
     assert "Retrieved manual excerpts:" not in assembled[2].content
     # Verify history was capped
     assert "[history truncated]" in assembled[2].content
-    assert len(assembled[2].content) <= 1100
+    assert assembled[2].content == huge_prev_answer[:limit] + " ... [history truncated]"
 
     # Active user message contains the fresh excerpts
     assert assembled[3].role == "user"
@@ -349,14 +358,15 @@ def _condense_settings(**overrides):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("cut", [None, 2500])
+@pytest.mark.parametrize("cut", [None, 1000, 2500])
 async def test_condense_query_cuts_prior_turns_at_the_history_setting(cut):
     """Issue #1268: condensation cuts each prior turn at
-    `chat_max_prior_turn_chars` (default 1000), the same cap the answer
-    prompt applies, so the `history4000` arm reaches the rewrite too."""
+    `chat_max_prior_turn_chars` (default 4000 since #1274, was 1000), the
+    same cap the answer prompt applies, so a history arm reaches the rewrite
+    too."""
     settings = _condense_settings(**({} if cut is None else {"chat_max_prior_turn_chars": cut}))
-    expected = 1000 if cut is None else cut
-    prior = "".join(chr(ord("a") + i % 26) for i in range(4000))
+    expected = 4000 if cut is None else cut
+    prior = "".join(chr(ord("a") + i % 26) for i in range(6000))
     llm = _RewriteLLM("rewritten query")
     messages = [
         ChatMessage(role="user", content=prior),
@@ -423,6 +433,10 @@ def test_condensed_query_drives_packing_while_the_model_sees_the_literal_message
     from mainframe_rag.agent.answer import SYSTEM_PROMPT, SYSTEM_PROMPT_COMPLEX_EXTENSION
 
     monkeypatch.setattr(app_mod.settings, "chat_condense_enabled", condense)
+    # The condense A/B against the literal search (before #1274): anchoring,
+    # on by default since #1274, is pinned off (a patched attribute skips the
+    # Settings rule that turns it off beside an explicit condense).
+    monkeypatch.setattr(app_mod.settings, "chat_followup_anchor_enabled", False)
     rewrite = "abend SAFB recovery procedure"
     original_chat = chat_client.fake_llm.chat
 
@@ -488,6 +502,10 @@ def test_condensed_no_hits_wording_names_what_retrieval_searched(chat_client, mo
     the core already documents (#1192): a condensed follow-up that named an
     identifier says which one carried no excerpts."""
     monkeypatch.setattr(app_mod.settings, "chat_condense_enabled", True)
+    # The condense A/B against the literal search (before #1274): anchoring,
+    # on by default since #1274, is pinned off (a patched attribute skips the
+    # Settings rule that turns it off beside an explicit condense).
+    monkeypatch.setattr(app_mod.settings, "chat_followup_anchor_enabled", False)
     chat_client.mock_search.return_hits = False
     payload = {"messages": [*_PRIOR_TURNS, {"role": "user", "content": "How do I fix that?"}]}
     body = chat_client.post("/v1/chat", json=payload).json()
@@ -499,15 +517,19 @@ def test_condensed_no_hits_wording_names_what_retrieval_searched(chat_client, mo
 
 
 @pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("anchor", [False, True])
+@pytest.mark.parametrize("anchor", [False, True, None], ids=["off", "on", "default"])
 def test_chat_follow_up_anchoring_searches_the_previous_user_message(
     chat_client, monkeypatch, anchor, stream
 ):
     """Issue #1268: with CHAT_FOLLOWUP_ANCHOR_ENABLED, /v1/chat searches an
     identifier-free follow-up as written and as the previous user message (no
     model call); off, it searches the follow-up only. The question the model
-    reads is the literal follow-up either way."""
-    monkeypatch.setattr(app_mod.settings, "chat_followup_anchor_enabled", anchor)
+    reads is the literal follow-up either way. Unset (None) is on since #1274."""
+    if anchor is None:
+        assert app_mod.settings.chat_followup_anchor_enabled is True
+        anchor = True
+    else:
+        monkeypatch.setattr(app_mod.settings, "chat_followup_anchor_enabled", anchor)
     active = "What should the operator do next?"
     result = chat_client.post("/v1/chat", json={
         "messages": [*_PRIOR_TURNS, {"role": "user", "content": active}], "stream": stream})
@@ -552,6 +574,104 @@ def test_chat_json_surfaces_script_with_review_flag(chat_client, monkeypatch):
     assert data["script"] == "//STEP1 EXEC PGM=IEFBR14"
     assert data["script_lang"] == "jcl"
     assert data["script_review_required"] is True
+
+
+class MixedScriptChatLLM:
+    """A coding answer in the #1276 shape: compile JCL plus HLASM source."""
+
+    def chat(self, messages, reasoning_effort=None, temperature=None):
+        return ChatResult(
+            content=(
+                "Assemble and run the program below.\n\n"
+                "```jcl\n//ASM EXEC PGM=ASMA90\n```\n\n"
+                "```hlasm\nHELLO    CSECT\n```\n\n"
+                "Citations:\n"
+                "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+            ),
+            finish_reason="stop",
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=20, total_tokens=30),
+        )
+
+
+def test_chat_json_mixed_language_script_characterization(chat_client, monkeypatch):
+    """#1276 maintainer decision 1 (2026-11-17): the non-streaming /v1/chat
+    `message.content` keeps the extracted script as one fenced block tagged
+    with its language, between the prose and the validated list; every
+    fence in SCRIPT_LANGS (now including hlasm) is in `script`, joined under
+    the first fence's tag (decision 2). Streaming deltas carry the model's
+    fences unchanged."""
+    monkeypatch.setattr(app_mod, "llm", MixedScriptChatLLM())
+    data = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Write an HLASM program"}], "stream": False},
+    ).json()
+    content = data["choices"][0]["message"]["content"]
+    assert content == (
+        "Assemble and run the program below.\n\n"
+        "```jcl\n//ASM EXEC PGM=ASMA90\n\nHELLO    CSECT\n```\n\n"
+        "**Citations:**\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
+    )
+    assert data["script"] == "//ASM EXEC PGM=ASMA90\n\nHELLO    CSECT"
+    assert data["script_lang"] == "jcl"
+    assert data["script_review_required"] is True
+
+
+class _OneFenceChatLLM:
+    def __init__(self, lang: str, code: str):
+        self.lang = lang
+        self.code = code
+
+    def chat(self, messages, reasoning_effort=None, temperature=None):
+        return ChatResult(
+            content=(
+                "Use the code below.\n\n"
+                f"```{self.lang}\n{self.code}\n```\n\n"
+                "Citations:\n"
+                "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+            ),
+            finish_reason="stop",
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=20, total_tokens=30),
+        )
+
+
+@pytest.mark.parametrize(("lang", "code"), [
+    ("c", "#include <stdio.h>\nint main(void) { return 0; }"),
+    ("hlasm", "HELLO    CSECT\n         BR    14"),
+    ("jcl", "//STEP1 EXEC PGM=IEFBR14"),
+])
+def test_chat_json_content_keeps_the_script_as_a_tagged_fence(chat_client, monkeypatch, lang, code):
+    """#1276 maintainer decision 1: a non-streaming /v1/chat answer never
+    loses its code. The script parse_answer moved into `script` comes back
+    into `message.content` as a fence with its language tag, before the
+    validated list (the console's re-append format)."""
+    monkeypatch.setattr(app_mod, "llm", _OneFenceChatLLM(lang, code))
+    data = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Write the program"}], "stream": False},
+    ).json()
+    cite = "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
+    assert data["choices"][0]["message"]["content"] == (
+        f"Use the code below.\n\n```{lang}\n{code}\n```\n\n**Citations:**\n- {cite}"
+    )
+    assert (data["script"], data["script_lang"]) == (code, lang)
+
+
+@pytest.mark.parametrize("lang", ["c", "hlasm"])
+def test_chat_stream_and_answer_keep_their_bodies_for_new_fences(chat_client, monkeypatch, lang):
+    """The re-append is non-streaming /v1/chat only: the stream's deltas are
+    the model's raw text (the fence once, not twice) and /v1/answer keeps
+    the script out of `answer`."""
+    code = "HELLO    CSECT" if lang == "hlasm" else "int main(void) { return 0; }"
+    monkeypatch.setattr(app_mod, "llm", _OneFenceChatLLM(lang, code))
+    resp = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Write the program"}], "stream": True},
+    )
+    deltas = "".join(
+        f["choices"][0]["delta"].get("content", "") for f in chat_frames(resp.text))
+    assert deltas.count(f"```{lang}\n") == 1 and deltas.count(code) == 1
+    answer = chat_client.post("/v1/answer", json={"query": "Write the program"}).json()
+    assert code not in answer["answer"] and answer["script"] == code
 
 
 def test_chat_stream_terminal_chunk_carries_state_and_script(chat_client, monkeypatch):
@@ -639,6 +759,10 @@ def test_chat_condensation_uses_only_history_before_normalized_user(
     chat_client, monkeypatch, mode, stream
 ):
     monkeypatch.setattr(app_mod.settings, "chat_condense_enabled", mode != "off")
+    # The condense A/B against the literal search (before #1274): anchoring,
+    # on by default since #1274, is pinned off (a patched attribute skips the
+    # Settings rule that turns it off beside an explicit condense).
+    monkeypatch.setattr(app_mod.settings, "chat_followup_anchor_enabled", False)
     original_chat = chat_client.fake_llm.chat
 
     def chat(messages, **kwargs):

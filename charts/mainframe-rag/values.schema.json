@@ -119,8 +119,11 @@
             "condenseEnabled": { "type": "boolean" },
             "chatMaxTurns": { "type": "integer", "minimum": 1, "maximum": 50 },
             "chatMaxPriorTurnChars": { "type": "integer", "minimum": 200, "maximum": 5000 },
+            "answerHitLimit": { "type": "integer", "minimum": 1, "maximum": 32 },
+            "retrieveMaxChunksPerDoc": { "type": "integer", "minimum": 1, "maximum": 10 },
             "followupAnchorEnabled": { "type": "boolean" },
-            "maxModelLen": { "type": "integer", "minimum": 512, "maximum": 131072 },
+            "codingModeEnabled": { "type": "boolean" },
+            "maxModelLen": { "type": "integer", "minimum": 512, "maximum": 262144 },
             "reservedOutputTokens": { "type": "integer", "minimum": 128, "maximum": 16384 },
             "thinkingReserveTokensSimple": { "type": "integer", "minimum": 0, "maximum": 16384 },
             "thinkingReserveTokensComplex": { "type": "integer", "minimum": 0, "maximum": 16384 },
@@ -420,7 +423,7 @@
         "ratings": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Thumbs up/down through the repository rating Action and the agent's POST /v1/feedback (#1255). Requires feedback.enabled.",
+          "description": "Thumbs up/down through the repository rating Action and the agent's POST /v1/feedback (#1255). enabled unset follows feedback.enabled (#1274); true requires feedback.enabled.",
           "properties": { "enabled": { "type": "boolean" } }
         },
         "storageSize": { "type": "string", "pattern": "^[1-9][0-9]*(Mi|Gi|Ti)$" },

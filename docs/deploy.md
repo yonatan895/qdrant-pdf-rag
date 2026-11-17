@@ -93,7 +93,7 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - Operator booleans `UI_ENABLED`, `CONTEXTUAL_EMBED_ENABLED`,
   `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `INGEST_AUTHORIZE_FROM_CATALOG`,
   `CHAT_CONDENSE_ENABLED`, `CHAT_FOLLOWUP_ANCHOR_ENABLED`, `LLM_STREAM`
-  `FEEDBACK_ENABLED`, `OPENWEBUI_ENABLED` and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
+  `FEEDBACK_ENABLED`, `OPENWEBUI_ENABLED`, `ANSWER_CODING_MODE_ENABLED` (unset keeps the pod's **true** default) and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
   accept only `true/1/yes` or `false/0/no` (any case; unset keeps the
   default). `INGEST_ALIAS_PUBLISH` may only be unset or true: in-place ingest
   was retired (#360) and an explicit false fails closed.
@@ -152,13 +152,14 @@ restores the snapshot over whatever the file assigned; empty stays unset
   `estimate`; [semantics](agent.md#token-count-sources)) follows the same path
   into `models.reasoning.tokenCountSource`; `model_config.reasoning_overrides`
   and the chart schema refuse other values. Unset renders no variable and keeps
-  the application default `tokenize`.
+  the application default `auto` (since #1274; `tokenize` before).
 - Optional application budgets (`LLM_MAX_MODEL_LEN`, `LLM_RESERVED_OUTPUT_TOKENS`,
   `LLM_THINKING_RESERVE_TOKENS_SIMPLE` / `COMPLEX`), reasoning efforts
   (`LLM_REASONING_EFFORT_SIMPLE` / `COMPLEX`), `LLM_STREAM` and the chat history
   caps (`CHAT_MAX_TURNS` 1..50, `CHAT_MAX_PRIOR_TURN_CHARS` 200..5000, #1268)
-  follow that same precedence/export path into `models.reasoning` and the
-  rendered agent pod.
+  and the retrieval depth (`ANSWER_HIT_LIMIT` 1..32, `RETRIEVE_MAX_CHUNKS_PER_DOC`
+  1..10, #1191) follow that same precedence/export path into `models.reasoning`
+  and the rendered agent pod.
   `model_config.reasoning_overrides` enforces the existing Settings integer bounds,
   the `low/medium/high/xhigh` effort domain, `LLM_REASONING_EFFORTS` membership
   of both efforts (explicit or default, #748) and strict streaming booleans; chart
@@ -2000,8 +2001,8 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
 4. First admin: a member of an admin role signs in once, creates an API key in Open WebUI, and
    adds it to the Secret as `admin-api-key`. Re-run `airgap:deploy`. The pod does not roll when
    the Pipe ConfigMap changes, and the kubelet refreshes the mounted files about once a minute,
-   so deploy first waits up to 180 s until the mounted Pipe and installer both hash to this
-   release's files. If they still differ, it installs nothing and fails: wait a minute, then
+   so deploy first waits up to 180 s until the mounted Pipe, shared prompts (`prompts.json`) and
+   both installers hash to this release's files. If they still differ, it installs nothing and fails: wait a minute, then
    re-run. If the files cannot be read in the pod at all (exec refused, pod not running), it
    fails with kubectl's error instead. A rollback to a release without this wait (2cd8f67d)
    can still end with the installer's `mounted docs Pipe does not match the repository file`
@@ -2012,10 +2013,11 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
    answers an absent Function with 401, so a 401 on the Function itself never decides) or
    updates it, reads it back by hash and activates it. Until the key exists, deploy prints
    `docs Pipe NOT installed` and the front end offers no model.
-   With `openwebui.ratings.enabled` (#1255, default off, requires the feedback store) the same
+   With ratings on (#1255; `openwebui.ratings.enabled`, which follows `feedback.enabled`
+   when unset since #1274; `airgap.env` `OPENWEBUI_RATINGS_ENABLED`) the same
    run also installs the hash-checked rating Action, active and global, and prints
    `rating Action installed`. Turned off again, the next run deletes it and prints `rating
-   Action removed`. It is a chart value only: no `airgap.env` key sets it yet (#1255).
+   Action removed`. Explicit true requires the feedback store.
    Contract: [Open WebUI ratings](agent.md#openwebui-ratings).
 5. Give all signed-in users read access to each Rosetta model (one per answer depth, below) in
    the Open WebUI admin UI (the default visibility is a #1073 trial item). Then sign in as an ordinary user and ask one
@@ -2032,7 +2034,7 @@ chats. Upgrading from the single model:
 
 - The model id `mainframe_rag_docs` is gone; its grant row stays in the database unused. Open
   WebUI shows a model only with its own read grant, so ordinary users see **no** Rosetta model
-  until an admin grants each entry (step 5). Grant all entries in the same change window.
+  until an admin grants each entry (step 5). Grant all three entries right after the deploy (maintainer decision 2026-11-16).
 - A chat started before the upgrade still names `mainframe_rag_docs`. Once the user is granted
   the entries (previous item), v0.12.3 drops on opening it a model id it does not list and
   selects `DEFAULT_MODELS` (`Chat.svelte` `loadChat`; source reading, not yet observed live), so
@@ -2043,8 +2045,9 @@ chats. Upgrading from the single model:
   not found". The dev acceptance check `legacy-chat-answers` covers the server side
   ([checks](openwebui-dev.md)); the browser's switch is part of the pilot browser trace.
 - Every entry shares the Pipe's `TIMEOUT_S` and the agent's request deadline (270 s, sized at
-  medium effort). A thorough (`xhigh`) answer may end as the fixed deadline text: measure that
-  in the site eval before users are told about thorough. A site whose
+  medium effort). A thorough (`xhigh`) answer may end as the fixed deadline text. Thorough is
+  granted and visible from the upgrade on; the site eval measures how often it hits the deadline
+  afterwards (maintainer decision 2026-11-16). A site whose
   `LLM_REASONING_EFFORTS` lacks an entry's effort shows a fixed "does not offer this answer depth"
   text for it.
 
@@ -2066,8 +2069,10 @@ default **30 days** (maintainer decision 2026-10-24). An explicit null fails the
   the enterprise, and their retention follows the same window: at most 30 days plus one backup
   cycle.
 - Stale chat folders (#1255) go in the same transaction: a folder last updated before the window
-  (or of unknown age) that, after the run's chat deletions, no chat or other row names in
-  `folder_id` and no folder names as its parent. Nested stale folders go in the same run, leaves
+  that, after the run's chat deletions, no chat or other row (an automation, for example) names in
+  `folder_id` and no folder names as its parent. A folder of unknown age (NULL `updated_at`) is
+  never purged, as the chat and file age rules never select a row of unknown age (maintainer
+  decision 2026-11-16). Nested stale folders go in the same run, leaves
   first, counted as `folders`. Renaming, moving, expanding or collapsing a folder refreshes its
   age; filing a chat in it does not. A folder in use, and its ancestors, keep their name, system
   prompt text, icon and background image (ADR-0007 S2).
@@ -2376,6 +2381,48 @@ affected unchanged callers and classify evidence gaps honestly. Their actual
 loader/environment acceptance remains an explicit audit item under #397.
 
 
+<a id="default-changes-1274"></a>
+### Default changes (#1274)
+
+Maintainer decision of 2026-11-16: the answer-quality features ship on by
+default. Each stays an operator setting, so a site that measures harm
+switches it off in `airgap.env` and redeploys; no new release is needed.
+Unset keeps the new default; the line in the last column restores the
+behaviour before #1274.
+
+| Setting | Before | Now | Old behaviour |
+|---|---|---|---|
+| `CHAT_FOLLOWUP_ANCHOR_ENABLED` | false | true | `CHAT_FOLLOWUP_ANCHOR_ENABLED=false` |
+| `CHAT_MAX_PRIOR_TURN_CHARS` | 1000 | 4000 | `CHAT_MAX_PRIOR_TURN_CHARS=1000` |
+| `LLM_TOKEN_COUNT_SOURCE` | `tokenize` | `auto` | `LLM_TOKEN_COUNT_SOURCE=tokenize` |
+| `OPENWEBUI_RATINGS_ENABLED` (chart `openwebui.ratings.enabled`) | off (no `airgap.env` key) | follows `FEEDBACK_ENABLED` | `OPENWEBUI_RATINGS_ENABLED=false` |
+| `LLM_MAX_MODEL_LEN` (ceiling 131072 -> 262144) | 32768 | 262144 | the served window, e.g. `LLM_MAX_MODEL_LEN=32768` |
+| `ANSWER_HIT_LIMIT` (#1191) | 8 | 16 | `ANSWER_HIT_LIMIT=8` |
+| `RETRIEVE_MAX_CHUNKS_PER_DOC` (also `/v1/search`) | 3 | 5 | `RETRIEVE_MAX_CHUNKS_PER_DOC=3` |
+
+- **Window.** 32768 was the Colab stand-in's window. The 262144 default
+  assumes a served window of at least 256k: a
+  site whose model serves less sets `LLM_MAX_MODEL_LEN` to it. Excerpt
+  caps, reserves and the request-size guard are unchanged, so prompts do
+  not grow with the window except a long pasted message, which is kept
+  whole up to the request-size guard instead of being shortened, and
+  `max_tokens` stays the reserve cap (never window minus prompt).
+- **Condensation.** `CHAT_CONDENSE_ENABLED=true` with
+  `CHAT_FOLLOWUP_ANCHOR_ENABLED` unset turns the anchoring default off, in the
+  pod's Settings; preflight, the mapper and the chart schema write no anchor
+  value for it. A deployment that condensed before #1274 keeps starting and
+  condensing. Both set true explicitly is still refused everywhere.
+- **Count calls.** Where the gateway serves `/tokenize`, `auto` counts with it
+  exactly as `tokenize` did. Where it does not, each answer's verified count
+  is one 1-token completion (about one short gateway call per answer,
+  [cost](agent.md#token-count-sources)). Confirm the reasoning key's rate
+  limit and quota first.
+- **Ratings.** Unset `OPENWEBUI_RATINGS_ENABLED` renders no chart value, and
+  the chart turns ratings on exactly when the feedback store is on.
+  `OPENWEBUI_RATINGS_ENABLED=true` without `FEEDBACK_ENABLED=true` is refused
+  (mapper and chart). Ratings have not yet run on a live Open WebUI
+  ([status](agent.md#openwebui-ratings)).
+
 ### Local follow-up and tokenizer acceptance
 
 `CHAT_CONDENSE_ENABLED` is an explicit boolean operator input mapped to Helm
@@ -2383,13 +2430,25 @@ loader/environment acceptance remains an explicit audit item under #397.
 application's false default. The chat history caps `CHAT_MAX_TURNS` and
 `CHAT_MAX_PRIOR_TURN_CHARS` (#1268) map to `models.reasoning.chatMaxTurns` and
 `chatMaxPriorTurnChars`; unset renders neither variable, so the pod keeps the
-application defaults (10 and 1000). `CHAT_FOLLOWUP_ANCHOR_ENABLED` maps to
-`models.reasoning.followupAnchorEnabled` and renders only when set; it is
-exclusive with `CHAT_CONDENSE_ENABLED` (preflight, the mapper and the chart
-schema refuse both true; the pod's Settings would too). Site follow-up arms:
-`condense` = `CHAT_CONDENSE_ENABLED=true`, `anchored` =
-`CHAT_FOLLOWUP_ANCHOR_ENABLED=true`, `history4000` =
-`CHAT_MAX_PRIOR_TURN_CHARS=4000`; redeploy between arms. Enable it deliberately when qualifying pronoun-only
+application defaults (10 and 4000; 1000 before #1274). `CHAT_FOLLOWUP_ANCHOR_ENABLED` maps to
+`models.reasoning.followupAnchorEnabled` and renders only when set; unset keeps
+the application default, on since #1274. It is exclusive with
+`CHAT_CONDENSE_ENABLED`: preflight, the mapper and the chart schema refuse both
+set true, and so would the pod's Settings. An explicit
+`CHAT_CONDENSE_ENABLED=true` with the anchor unset turns the anchor default off,
+so a deployment that condensed before #1274 keeps condensing. Site ablation
+arms: [docs/eval.md](eval.md#at-a-site). The retrieval depth
+inputs (#1191) `ANSWER_HIT_LIMIT` (hits per answer, chat and console
+retrieval; `/v1/search` keeps its caller's limit) and
+`RETRIEVE_MAX_CHUNKS_PER_DOC` (chunks kept per manual, `/v1/search` included)
+map to `models.reasoning.answerHitLimit` and `retrieveMaxChunksPerDoc`; unset
+renders neither, so the pod keeps the defaults, 16 and 5 since #1274 (8 and 3 before). `ANSWER_CODING_MODE_ENABLED`
+(#1276) maps to `models.reasoning.codingModeEnabled` and renders only when set;
+unset keeps the pod's on default, and `ANSWER_CODING_MODE_ENABLED=false` in
+`airgap.env` is the one-line per-site revert of the coding prompts and the
+coding route to the complex path (the `coding-off` arm). It does not revert the
+#1276 code-fence tags (`c`, `metalc`, `asm`, `hlasm`, `assembler`, `clist` kept
+as `script`), which apply to every answer. Enable condensation deliberately when qualifying pronoun-only
 console follow-ups; require a grounded answer after the extra reasoning call.
 The local gateway's authenticated `/tokenize` passthrough enforces the per-leg
 key's model allowlist. Use `probe_gateway.py --require-tokenizer --stream

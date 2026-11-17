@@ -13,13 +13,16 @@ from fractions import Fraction
 from urllib.parse import urlsplit
 
 REASONING_INTEGER_FIELDS = {
-    "LLM_MAX_MODEL_LEN": ("maxModelLen", 512, 131072),
+    "LLM_MAX_MODEL_LEN": ("maxModelLen", 512, 262144),
     "LLM_RESERVED_OUTPUT_TOKENS": ("reservedOutputTokens", 128, 16384),
     "LLM_THINKING_RESERVE_TOKENS_SIMPLE": ("thinkingReserveTokensSimple", 0, 16384),
     "LLM_THINKING_RESERVE_TOKENS_COMPLEX": ("thinkingReserveTokensComplex", 0, 16384),
     # Chat history caps (#1268): prior turns kept, characters kept per prior turn.
     "CHAT_MAX_TURNS": ("chatMaxTurns", 1, 50),
     "CHAT_MAX_PRIOR_TURN_CHARS": ("chatMaxPriorTurnChars", 200, 5000),
+    # Retrieval depth (#1191): hits per answer, chunks kept per manual.
+    "ANSWER_HIT_LIMIT": ("answerHitLimit", 1, 32),
+    "RETRIEVE_MAX_CHUNKS_PER_DOC": ("retrieveMaxChunksPerDoc", 1, 10),
 }
 REASONING_EFFORT_FIELDS = {
     "LLM_REASONING_EFFORT_SIMPLE": "reasoningEffortSimple",
@@ -45,7 +48,7 @@ EFFORT_TRANSPORT_KEY = "LLM_EFFORT_TRANSPORT"
 EFFORT_TRANSPORTS = ("top_level", "chat_template", "none")
 MODEL_ARGUMENT_ENV_KEYS = (EXTRA_BODY_KEY, EFFORT_TRANSPORT_KEY)
 # Prompt-count source (#1266). Mirrors config.TOKEN_COUNT_SOURCES; a test pins
-# both sides. Empty keeps the application default (tokenize).
+# both sides. Empty keeps the application default (auto since #1274).
 TOKEN_COUNT_SOURCE_KEY = "LLM_TOKEN_COUNT_SOURCE"
 TOKEN_COUNT_SOURCES = ("tokenize", "completion_usage", "auto", "estimate")
 # Antecedent-anchored follow-up retrieval (#1268): optional boolean, exclusive
@@ -55,8 +58,10 @@ FOLLOWUP_ANCHOR_KEY = "CHAT_FOLLOWUP_ANCHOR_ENABLED"
 CHAT_FOLLOWUP_MODES_CONFLICT = (
     "CHAT_CONDENSE_ENABLED and CHAT_FOLLOWUP_ANCHOR_ENABLED are mutually exclusive; enable at most one"
 )
+# Coding mode (#1276): optional boolean, default on in Settings; empty keeps it.
+CODING_MODE_KEY = "ANSWER_CODING_MODE_ENABLED"
 REASONING_ENV_KEYS = (*REASONING_INTEGER_FIELDS, *REASONING_EFFORT_FIELDS, "LLM_REASONING_EFFORTS", "LLM_STREAM",
-                      *MODEL_ARGUMENT_ENV_KEYS, TOKEN_COUNT_SOURCE_KEY, FOLLOWUP_ANCHOR_KEY)
+                      *MODEL_ARGUMENT_ENV_KEYS, TOKEN_COUNT_SOURCE_KEY, FOLLOWUP_ANCHOR_KEY, CODING_MODE_KEY)
 
 # Request admission and total deadline (#374 handoff, #843 D1). Empty keeps the
 # chart default (deadline 270; admission 4/4/30, #843); zero is an explicit selection. Limits match config.Settings and the
@@ -83,7 +88,8 @@ MODEL_CONFIG_KEYS = (
 OPERATOR_BOOL_KEYS = (
     "UI_ENABLED", "CONTEXTUAL_EMBED_ENABLED", "INGEST_ALIAS_PUBLISH",
     "INGEST_REINGEST", "INGEST_AUTHORIZE_FROM_CATALOG", "CHAT_CONDENSE_ENABLED", "LLM_STREAM", "AGENT_NETWORK_POLICY",
-    "FEEDBACK_ENABLED", "OPENWEBUI_ENABLED", "CHAT_FOLLOWUP_ANCHOR_ENABLED",
+    "FEEDBACK_ENABLED", "OPENWEBUI_ENABLED", "CHAT_FOLLOWUP_ANCHOR_ENABLED", "ANSWER_CODING_MODE_ENABLED",
+    "OPENWEBUI_RATINGS_ENABLED",
 )
 
 # Agent ingress NetworkPolicy (issue #373): default ON; the allow-list names
@@ -354,6 +360,16 @@ def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
     raw_port = values.get("OPENWEBUI_IDP_EGRESS_PORT", "") or "443"
     if re.fullmatch(r"[0-9]{1,5}", raw_port) is None or not 1 <= int(raw_port) <= 65535:
         raise ValueError("OPENWEBUI_IDP_EGRESS_PORT must be a TCP port from 1 to 65535")
+    # Ratings (#1255): unset writes no chart value, so the chart follows
+    # feedback.enabled (#1274: on wherever the feedback store is on); an
+    # explicit spelling is carried, false included. True needs the store
+    # (the chart refuses it too).
+    raw_ratings = values.get("OPENWEBUI_RATINGS_ENABLED", "")
+    ratings = (None if raw_ratings == ""
+               else parse_strict_bool("OPENWEBUI_RATINGS_ENABLED", raw_ratings, False))
+    if ratings and not parse_strict_bool("FEEDBACK_ENABLED", values.get("FEEDBACK_ENABLED", ""), False):
+        raise ValueError("OPENWEBUI_RATINGS_ENABLED=true requires FEEDBACK_ENABLED=true: Open WebUI "
+                         "ratings are stored only by the agent's feedback store (ADR-0005)")
     if not enabled:
         return None
     required = {"OPENWEBUI_SECRET": secret, "OPENWEBUI_HOST": host,
@@ -385,6 +401,7 @@ def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
             "usernameClaim": claims["OPENWEBUI_OIDC_USERNAME_CLAIM"],
         },
         "idpEgress": {"cidrs": cidrs, "port": int(raw_port)},
+        **({} if ratings is None else {"ratings": {"enabled": ratings}}),
     }
 
 
@@ -542,6 +559,8 @@ def reasoning_overrides(values: Mapping[str, str]) -> dict[str, object]:
         result["stream"] = parse_strict_bool("LLM_STREAM", values["LLM_STREAM"], False)
     if values.get(FOLLOWUP_ANCHOR_KEY, "") != "":
         result["followupAnchorEnabled"] = parse_strict_bool(FOLLOWUP_ANCHOR_KEY, values[FOLLOWUP_ANCHOR_KEY], False)
+    if values.get(CODING_MODE_KEY, "") != "":
+        result["codingModeEnabled"] = parse_strict_bool(CODING_MODE_KEY, values[CODING_MODE_KEY], True)
     source = values.get(TOKEN_COUNT_SOURCE_KEY, "")
     if source != "":
         if source not in TOKEN_COUNT_SOURCES:

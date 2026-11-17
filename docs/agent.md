@@ -63,9 +63,9 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   `Settings.llm_temperature` (0.0–2.0, no inf/NaN; out-of-range 422s before
   retrieval); omitted means the configured default. The chat routes accept
   the same bounded override.
-  Retrieval always runs
-  with a hardcoded `limit=8` (tuning the search `limit` does not change
-  answers); the JSON response deliberately omits `query_kind`, `hits`,
+  Retrieval runs
+  with `answer_hit_limit` hits (`ANSWER_HIT_LIMIT`, 16 by default since
+  #1274; tuning the search `limit` does not change answers); the JSON response deliberately omits `query_kind`, `hits`,
   `usage`, `finish_reason`, and `ttft` (those live on spans, logs, and the
   SSE `final` event). `citations_inferred` is the provenance flag (issue
   #269): true when every returned cite was mapped from bare bracket markers
@@ -162,13 +162,18 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   choices[], usage, citations, citations_inferred, inferred_indices, hits,
   verification_state, script, script_lang, script_review_required,
   supplied_evidence, evidence_omitted, message_omitted_chars}`;
-  `choices[0].message.content` carries the answer plus a trailing markdown
-  `**Citations:**` bullet list when cites exist. Empty hits return
-  `finish_reason: "stop"`, zeroed usage, and empty citations/hits. Provenance
+  `choices[0].message.content` carries the answer, then the extracted
+  `script` (if any) as one fence tagged with `script_lang`
+  (`` ```<lang>\n<script>\n``` ``, the console's re-append format; #1276
+  maintainer decision 1, so a buffered client never loses C, HLASM, JCL or
+  other `SCRIPT_LANGS` code), then a trailing markdown `**Citations:**`
+  bullet list when cites exist. The stream's deltas are the model's raw
+  text and are not changed; `/v1/answer` keeps the script out of `answer`.
+  Empty hits return `finish_reason: "stop"`, zeroed usage, and empty citations/hits. Provenance
   (`citations_inferred`, `inferred_indices`, issues #269/#299) rides chat JSON
   and the SSE finish chunk. Prior turns: the last `chat_max_turns` (10)
-  non-system messages, each cut to `chat_max_prior_turn_chars` (1000,
-  ` ... [history truncated]`); pasted `Retrieved manual excerpts:` tails are
+  non-system messages, each cut to `chat_max_prior_turn_chars` (4000 since
+  #1274, was 1000; ` ... [history truncated]`); pasted `Retrieved manual excerpts:` tails are
   pruned from prior assistant turns. Follow-up turns condense only when
   `CHAT_CONDENSE_ENABLED=true` (default off): one low-effort reasoning call
   rewrites the latest turn into a standalone search query (last 4 non-system
@@ -180,7 +185,7 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   prompt decisions (complexity, the resolved-code note, identifier anchoring in
   packing, the no-hits wording); the question the model reads stays the user's
   own words, and with condensation off or bypassed the prompt is unchanged.
-  `CHAT_FOLLOWUP_ANCHOR_ENABLED=true` (default off, #1268) instead searches an
+  `CHAT_FOLLOWUP_ANCHOR_ENABLED` (#1268; default on since #1274, was off) instead searches an
   identifier-free follow-up twice, as written and as the previous user
   message's retrieval query, with no model call. The two ranked lists
   interleave literal-first, a chunk found by both keeps its first place, and
@@ -249,7 +254,7 @@ guard, asserts the reasoning model is configured (`503 not_configured`,
 before any retrieval), retrieves under the root span (same `502` as
 search), classifies complexity, short-circuits empty hits (§3), builds the
 prompt, and either chats once (JSON) or streams (SSE). `chat` runs the same
-assertion and retrieval (hardcoded `limit=8` for both endpoints), resolving
+assertion and retrieval (`answer_hit_limit` for both endpoints), resolving
 the follow-up search through `plan_search` / `retrieve_planned` first so the
 condensation and anchoring gates cannot be honored on one path only. Both console routes run
 this chat path through `prepare_chat_core` (issue #985): the form maps core
@@ -673,8 +678,8 @@ call (`agent/user_message.derive_retrieval_query`; the rule is owned by
   as it always did. Logs carry character counts (`long_message`, `request_too_large`),
   never text.
 - Not changed: prior turns are still cut to `chat_max_prior_turn_chars`, so a
-  long paste in an earlier turn reaches later turns as its first 1000
-  characters plus ` ... [history truncated]`.
+  long paste in an earlier turn reaches later turns as its first 4000
+  characters (the default since #1274, was 1000) plus ` ... [history truncated]`.
 
 Resolved system code (#944): when `find_system_codes` normalizes a query token
 that is written with an `S` prefix or as `X'hhh'` (SAFB -> AFB, S0C4 -> 0C4,
@@ -693,7 +698,55 @@ otherwise multi-step configuration phrasing, comparisons (`versus`, `vs`,
 (`rule, interval, parameter, parmlib, jcl, policy, threshold, journal`)
 select `complex`. Default is `simple`.
 
-- Defaults (#777 sizing for Qwen3.8-27B at a 32768-token window; effort
+Coding mode (#1276, `answer_coding_mode_enabled`, default **on** by maintainer
+decision 2026-11-16; operator input `ANSWER_CODING_MODE_ENABLED`). Both
+executors decide it once per turn, next to the complexity call:
+`coding_mode_applies(message, settings)` is true when the setting is on and
+`is_coding_request` holds for the user's own message (the active chat message).
+The searched text is not read: an anchored follow-up also searches the previous
+message, which would carry an earlier coding turn into a plain lookup, and a
+follow-up without its own marker ("now add error handling") is not a coding
+turn. The classifier is deterministic, word-bounded and needs both a coding
+intent and a marker. Intents: producing code (write, generate, create, rewrite,
+convert, refactor; draft, translate or code followed by a determiner, "code"
+never after return/reason/condition/completion/abend/error; "how do I code a";
+"I need/want a" followed by the artefact after at most one language word ("a REXX
+script", never "a list of JCL parameters" or "a program product license"); "show/give/provide me a sample/example/template") or repairing
+and reading it (fix, debug; review or correct followed by a determiner;
+"explain this", "what does this", "what's/what is wrong with", "why does my").
+With pasted code-shaped lines (a `//name JOB|EXEC|DD|PROC` line or a `/* REXX`
+header) a looser ask is enough (review, check, why, wrong, fails, error, abend,
+help, improve); a bare fence is only a marker, since operators also fence
+console output, so it needs a real intent and keeps the message-id rule.
+Markers: JCL, jobstream, REXX, CLIST, HLASM, assembler, Metal C, CSECT/DSECT,
+PROCLIB, EXEC, macro, PROC, a cataloged or in-stream procedure, C as a language
+("C program", "in C"), "this/my code", a generic program/routine/script as the
+object of any of those verbs, or pasted code (code-shaped lines or a fenced
+block). A marker alone (a message or syntax lookup) or an intent
+alone (fix a reason code) is not a coding request, and a message naming a
+message identifier stays a lookup unless it asks to produce code or pastes
+code-shaped lines ("How do I fix IEFC452I ... JCL ERROR?" keeps the message-id rule;
+"Write a REXX exec that replies to IEA500I" is coding). A coding turn:
+
+- is `complex` (effort, context, thinking reserve, output cap), overriding the
+  injected `classify_query_complexity`, which itself is unchanged;
+- gets `SYSTEM_PROMPT + SYSTEM_PROMPT_COMPLEX_EXTENSION +
+  SYSTEM_PROMPT_CODING_EXTENSION`, a coding tail without "strictly", and under
+  `stable_cache` the `STABLE_CACHE_INSTRUCTIONS_CODING` block;
+- keeps every verification rule: no new state, `accepted` still needs
+  validated explicit citations, inferred-only or uncited code stays
+  `unverified_draft`, empty hits still short-circuit with no model call, and a
+  refusal-only body beside a script is still an abstention (citations zeroed,
+  script kept, as for JCL/REXX).
+
+The builders receive `coding=True` only from the executors (passed only when it
+fires, like `search_query`), so with the setting off, or for any other turn,
+every prompt keeps its pre-#1276 bytes (`tests/test_prompt_order.py` pins the
+constants' hashes and on/off equality).
+
+- Defaults (#777 sizing for Qwen3.8-27B at a 32768-token window, the
+  Colab stand-in's; since #1274 the window default is 262144, which assumes
+  the served model's window is at least that, and the excerpt caps and reserves below are unchanged; effort
   changed to `medium` by #917, maintainer decision 2026-10-23, basis in
   [eval.md](eval.md) and #932): `medium` effort on both paths; complex adds the extended system prompt. Temperature
   0.2 both. Both paths take whole chunks (4000 chars per excerpt, 32000 chars
@@ -869,7 +922,8 @@ hits omitted by budget packing, and the tail's example cite, are rejected:
   lines only — inline mentions (`refer to SA22-… for details`), dimensions
   (`3.5 inches`), and table pipes survive.
 - Fenced code blocks in `SCRIPT_LANGS` (`jcl, rexx, sh, bash, shell,
-  python, py, yaml, yml, json, ops, rule, parmlib`) become `script` (joined,
+  python, py, yaml, yml, json, ops, rule, parmlib, c, metalc, asm, hlasm,
+  assembler, clist`; the last six from #1276) become `script` (joined,
   removed from body) and pass through **unvalidated** — cite-like lines
   inside code are kept; `thought`/`thinking` fences are dropped; other
   fences unwrap to body. Validating scripts would corrupt JCL/REXX;
@@ -1088,16 +1142,19 @@ readers:
 | `prompt_max_chunk_chars` / `prompt_max_chunk_chars_complex` | 4000 / 4000 | per-type packing caps |
 | `query_max_chars` / `splunk_context_max_chars` | 2000 / 4000 (truncate+suffix) | `/v1/search` query and `product`/`version` length guard (422); on answer and chat the longest message searched as written ([long messages](#long-messages)) / prompt packing |
 | `chat_condense_enabled` | `false` | follow-up condensation gate (`resolve_search_query`) |
-| `chat_followup_anchor_enabled` | `false` | antecedent-anchored follow-up retrieval (`plan_search`, #1268); operator input `CHAT_FOLLOWUP_ANCHOR_ENABLED`, exclusive with condensation |
+| `chat_followup_anchor_enabled` | `true` (#1274, was `false`) | antecedent-anchored follow-up retrieval (`plan_search`, #1268); operator input `CHAT_FOLLOWUP_ANCHOR_ENABLED`, exclusive with condensation: an explicit `CHAT_CONDENSE_ENABLED=true` turns the default off, and both set true explicitly is refused (Settings, preflight, mapper, chart schema) |
 | `chat_max_body_chars` | 131072 (422, message states the limit) | request-size guard for `/v1/answer`, `/v1/chat` and `/ui` (abuse protection; shared `chat_body_chars` helper); the Pipe valve `MAX_BODY_CHARS` must match |
-| `chat_max_turns` / `chat_max_prior_turn_chars` | 10 / 1000 | chat history packing caps; operator inputs `CHAT_MAX_TURNS` / `CHAT_MAX_PRIOR_TURN_CHARS` (#1268; unset renders no variable) |
+| `chat_max_turns` / `chat_max_prior_turn_chars` | 10 / 4000 (#1274, was 1000) | chat history packing caps; operator inputs `CHAT_MAX_TURNS` / `CHAT_MAX_PRIOR_TURN_CHARS` (#1268; unset renders no variable) |
+| `answer_hit_limit` | 16 (#1274, was 8; 1..32) | hits one answer retrieval returns: `/v1/answer`, `/v1/chat*`, the console and the fused cut of an anchored follow-up's two legs (`AgentResources.retrieve`, `_fuse_by_rank`); `/v1/search` and MCP search keep the caller's `limit` (default 8, max 40). Operator input `ANSWER_HIT_LIMIT` (#1191; unset renders no variable). The pool (40 per leg, or `rerank_candidates` with rerank on) and the per-page/per-doc caps may return fewer. Every hit is offered to packing: under the default window and reserves, the estimator fits 16 excerpts at the 4000-character cap (above the 3500-character ingest section cap), and a denser server count trims or drops from the tail; 32 need about a 65,536-token window. The supplied-evidence text total scales as `max(48000, 6000 x answer_hit_limit)`, so excerpts at the 4000-character cap keep their text ([supplied evidence](#supplied-evidence-projection-issue-635)) |
+| `retrieve_max_chunks_per_page` / `retrieve_max_chunks_per_doc` | 1 / 5 (#1274, was 3; 1..10 each) | diversity caps in `diversify_hits`, for every retrieval (`/v1/search` and MCP included); a capped hit is backfilled only when the pool runs short. Operator input `RETRIEVE_MAX_CHUNKS_PER_DOC` (#1191; unset renders no variable) |
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
+| `answer_coding_mode_enabled` | `true` (#1276) | coding mode: coding requests take the complex path and the coding prompt extension ([prompt assembly](#4-prompt-assembly-and-budgets)); operator input `ANSWER_CODING_MODE_ENABLED`, unset renders no variable |
 | `llm_base_url` / `llm_model_reasoning` / `llm_api_key` | unset (answer stays disabled; key unset = keyless) | per-request assertion, LLM client, tokenizer |
 | `answer_timeout_s` | 300.0 | reasoning client wait per model I/O (not a total on a stream; a buffered caller still gets a total), expiry is `504 model_timeout`; no transport retries, explicit fallback policy below; budgets in §6 |
 | `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | medium / medium / 0.2 | answer path (#917, was xhigh / xhigh from #777) |
 | `llm_reasoning_efforts` | `low,medium,xhigh` | served template's effort domain (Qwen3.8): console choices; both efforts above must be members (#748) |
-| `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 32768 / 2560 / 8192 / 128 / 1200 / 5.0 | tokenizer-path budgeting (#298, #777). `llm_max_model_len` must not exceed the served `--max-model-len`. With a server-verified prompt count the reserved output plus the path's thinking reserve is sent as `max_tokens` (prompt + cap stays inside the window minus the margin), so a runaway xhigh generation ends as `finish_reason: length` → `generation_incomplete`; an estimator-only prompt gets the same full cap only when its byte upper bound plus that cap fits, otherwise it runs uncapped as before (never a smaller cap) |
-| `llm_token_count_source` | `tokenize` | [token count sources](#token-count-sources) (#1266): `tokenize` (`/tokenize`, else the estimator; the behaviour before #1266), `completion_usage` (a 1-token completion's `usage.prompt_tokens`), `auto` (per count: `/tokenize` until pinned as not served, then completion usage until pinned, else the estimator; a startup check names the source), `estimate` (never ask the server) |
+| `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 262144 (#1274, was 32768; ceiling 262144) / 2560 / 8192 / 128 / 1200 / 5.0 | tokenizer-path budgeting (#298, #777). `llm_max_model_len` must not exceed the served `--max-model-len`. With a server-verified prompt count the reserved output plus the path's thinking reserve is sent as `max_tokens` (prompt + cap stays inside the window minus the margin), so a runaway xhigh generation ends as `finish_reason: length` → `generation_incomplete`; an estimator-only prompt gets the same full cap only when its byte upper bound plus that cap fits, otherwise it runs uncapped as before (never a smaller cap) |
+| `llm_token_count_source` | `auto` (#1274, was `tokenize`) | [token count sources](#token-count-sources) (#1266): `tokenize` (`/tokenize`, else the estimator; the behaviour before #1266), `completion_usage` (a 1-token completion's `usage.prompt_tokens`), `auto` (per count: `/tokenize` until pinned as not served, then completion usage until pinned, else the estimator; a startup check names the source), `estimate` (never ask the server) |
 | `llm_extra_body` / `llm_effort_transport` | empty / `top_level` | [model request arguments](#model-request-arguments) (#1193): one JSON object merged into every chat request by `_chat_body`; how the effort travels (`top_level`, `chat_template`, `none`). Both validated at startup; unset sends the earlier request |
 | `llm_thinking_reserve_tokens_simple` | 8192 | reasoning headroom in single-turn and chat prompt budgets (provisional for xhigh, #777); environment input `LLM_THINKING_RESERVE_TOKENS_SIMPLE` |
 | `llm_stream` | `false` | TTFT measurement and streaming recovery policy for server-side reasoning calls (the wire is a stream either way, #868) |
@@ -1352,9 +1409,15 @@ chunk text, from #632), `truncated_start`/`truncated_end`, `text_clipped`, and
 (the leading/trailing cut markers are not part of it). The location is the
 recorded chunk span, not finer attribution. `chunk_id` is not exposed.
 
-Bounds: `text` is clipped at 8000 chars per entry and 48000 chars in total
-(`text_clipped: true`; the text is then a prefix of the shipped slice); the
-rest is bounded by the prompt window. Raw excerpt text is response-only: never
+Bounds: `text` is clipped at 8000 chars per entry and at
+`max(48000, 6000 x answer_hit_limit)` chars in total (48000 up to 8 hits,
+96000 at 16; maintainer decision 2026-11-17, #1191) (`text_clipped: true`;
+the text is then a prefix of the shipped slice); the rest is bounded by the
+prompt window. Every supplied entry is listed, and an entry past the total
+keeps its metadata with empty `text` (the Open WebUI Pipe then shows an empty
+document for that cited source). With excerpts at the default 4000-character
+packing cap every entry keeps its text at any hit limit; only a
+`prompt_max_chunk_chars` above 6000 can reach the total. Raw excerpt text is response-only: never
 logged, in metrics or spans. The console shows it in an expandable view for
 the current response only, held in memory (never in localStorage, history or
 the markdown export, gone on reload); earlier turns show an explicit
@@ -1736,9 +1799,9 @@ per trim round (normally one round per answer); planning and long-message
 fitting stay estimator-only. `LLM_TOKEN_COUNT_SOURCE` selects where that
 count comes from (`tokenizer.build_tokenizer`):
 
-- **`tokenize` (default):** vLLM `/tokenize` at the server origin with the
+- **`tokenize`:** vLLM `/tokenize` at the server origin with the
   generation's template arguments; else the estimator. This is the behaviour
-  before #1266.
+  before #1266, and the default until #1274.
 - **`completion_usage`:** for a gateway without `/tokenize`. The packed
   request is sent as a non-streaming chat completion with `max_tokens: 1`, and
   `usage.prompt_tokens` is the count (the server's own template-aware prompt
@@ -1749,7 +1812,7 @@ count comes from (`tokenizer.build_tokenizer`):
   `max_tokens` and the streaming flags
   (`test_completion_usage_count_body_equals_the_sent_body`). Text counts
   for packing never send a completion.
-- **`auto`:** `/tokenize` if it counts; otherwise the completion-usage count
+- **`auto` (default since #1274):** `/tokenize` if it counts; otherwise the completion-usage count
   if it confirms a usable `usage.prompt_tokens`; otherwise the estimator
   (`tokenizer.AutoTokenizer`). The choice is made per count: `/tokenize` in a
   transient or refused window answers from the estimator and keeps
@@ -1800,9 +1863,13 @@ passthrough, the platform-gateway shape for the estimator-only lane (#1193);
 `GATEWAY_SHAPE=site` (#1195) also omits it and drops the argument allow-list.
 
 The Helm operator input `CHAT_CONDENSE_ENABLED` maps to
-`models.reasoning.condenseEnabled`; both default to false. `CHAT_MAX_TURNS` and
-`CHAT_MAX_PRIOR_TURN_CHARS` map to `models.reasoning.chatMaxTurns` and
-`chatMaxPriorTurnChars` and render only when set (#1268). Explicit local
+`models.reasoning.condenseEnabled`; both default to false. `CHAT_MAX_TURNS`,
+`CHAT_MAX_PRIOR_TURN_CHARS` and `CHAT_FOLLOWUP_ANCHOR_ENABLED` map to
+`models.reasoning.chatMaxTurns`, `chatMaxPriorTurnChars` and
+`followupAnchorEnabled` and render only when set (#1268), so an unset value
+keeps the application default (anchoring on, 4000 characters, since #1274);
+`ANSWER_HIT_LIMIT` and `RETRIEVE_MAX_CHUNKS_PER_DOC` map to `answerHitLimit` and
+`retrieveMaxChunksPerDoc` the same way (#1191). Explicit local
 follow-up acceptance is described in [the real-corpus runbook](local-real-corpus.md).
 
 
@@ -1855,10 +1922,10 @@ only; the PR lints and types this file directly.
 | Answer text | Prose deltas stream through in order. The model's own citations section (answer prompt rule 7) is unvalidated, so the Pipe hides it (#1098): a header alone on its line, as `cites.py` recognizes it (`Citations:`, or the `Sources:`/`References:` aliases), starts a section; a `Citations:` section takes citation and bullet lines, an alias section only citation lines; a blank line after a citation, or any other line, ends it and the text is prose again (an alias header followed by prose is kept). A citation here is any line with a `, ` gap before a `, p. ` tail, a superset of the agent's shape test, which needs the supplied doc ids, so such a line right after a `Citations:` header is hidden even where `cites.py` keeps it as prose. Fenced code is never touched, so a raw section inside a prose fence still shows (the agent unwraps those). Both divergences were accepted by the maintainer 2026-10-25. Only the undecided current line is held: at most 64 characters outside a section, where a line that cannot be a header streams at once, and 2048 inside one, past which it is prose; each delta is also held until the next frame. When the terminal frame carries a validated `**Citations:**` list the Pipe shows that list, spelled exactly as `_chat_final_frames` spells it for that frame's `citations`, and it follows the prose unchanged: a held last delta equal to that list is used as the list, not shown as model text, and any other last delta stays model text while the list is rendered from the terminal frame's `citations`; with no validated list none is shown. The header and list-marker patterns are copies of `cites.py`'s, pinned equal by a test. Each delta is yielded as an OpenAI chunk dict, never a raw string, because Open WebUI forwards a yielded string that starts with `data:` as an SSE frame and emits its `event`: model text cannot forge a banner, source or replace event. A non-streaming call gets one string. Tokens are provisional ([answer states](#answer-contract)): the banner arrives only after the terminal frame |
 | Completion | Complete only with a non-null `finish_reason` frame **and** `[DONE]`. A missing finish, a missing `[DONE]` or a malformed frame appends the fixed "stream ended before it completed" text with the incomplete banner |
 | Citations | One `source` event per validated citation in the terminal frame: `source{name: citation, id: doc_id}`, `document[]` = the `supplied_evidence[].text` entries carrying that citation (the excerpt the prompt actually held, never a new search), parallel `metadata[]` with `[index] citation`, doc id, page label, product, version and `label` (`source-matched`, or `inferred, not grounding` when `citations_inferred`). No URLs: a name or id that Open WebUI could render as a link (a scheme such as `http:` or `javascript:`, a bare `http` prefix, `//` or `www.`) is prefixed with `Citation: `. Supplied but uncited excerpts are not sources |
-| Verification | One final `status` event (`done: true`) in the console's wording: "Source-matched · N citation(s)" only for `accepted` with non-inferred citations; otherwise "Insufficient evidence — not operational guidance", "Unverified draft — no eligible citation", "Incomplete generation — output was cut off", or "Unverified — verification state unknown" for anything else. Inferred citations and `script_review_required` append their fixed warnings. Abstention text is the agent's own content; banners never enter the message content, so they are not sent back as history |
+| Verification | One final `status` event (`done: true`) in the console's wording: "Source-matched · N citation(s)" only for `accepted` with non-inferred citations, with " (incl. house guidance)" appended when a validated citation's supplied doc id starts with `HOUSE-` (#1276: AI-drafted house guides, `HOUSE-AI-DRAFT-<topic>` / `HOUSE-REVIEWED-<topic>`; on the same condition that source entry's name gains " (house guidance)" and its label ", house guidance"); otherwise "Insufficient evidence — not operational guidance", "Unverified draft — no eligible citation", "Incomplete generation — output was cut off", or "Unverified — verification state unknown" for anything else. Inferred citations and `script_review_required` append their fixed warnings. Abstention text is the agent's own content; banners never enter the message content, so they are not sent back as history |
 | Errors | An error envelope's stable `code` selects a fixed message (`invalid_request`, `prompt_budget_exceeded`, `upstream_error`, `model_timeout`, `deadline_exceeded`, `overloaded`, `not_configured`, `representation_unavailable`, `internal`, `unsupported_reasoning_effort`; `not_found`/`method_not_allowed`/`http_error` = configuration). An in-stream error frame uses the same table and the incomplete banner. Unknown codes, non-JSON bodies, transport failures and any internal fault give one fixed "could not be reached" text: the agent's `message`, upstream bodies and exception text are never shown, and the Pipe never raises into Open WebUI (which would display the exception) |
 | History trim | Open WebUI resends the whole chat each turn, so the Pipe fits the body to the agent's cap before sending, counted as the agent counts it (`chat_body_chars`: message characters plus `product` plus `version`, not JSON bytes). It drops the oldest turns first, then any leading assistant turn (history never starts with an answer to a dropped question); the last user turn is always kept. If that turn alone exceeds the cap, the Pipe returns its fixed too-long text, which states the valve's limit, and makes no agent call. When turns were dropped it emits the fixed status "Earlier messages in this chat were not sent" (no content) and appends it to the final banner. When the agent reports `message_omitted_chars` > 0 the final banner also carries the fixed note "Your message was too long for the model; its middle part was not read" (no count, no text). The agent has no turn-count cap on the request, so the character cap is the only limit. A long last turn under the cap is sent whole and unchanged; the agent answers it ([long messages](#long-messages)) |
-| Answer reference | Only with `RAG_ANSWER_REFERENCE=true` in Open WebUI's environment (the chart sets it with `openwebui.ratings.enabled`, #1255): a completed answer (finish frame plus `[DONE]`) whose chunk id is the agent's `chatcmpl-<12-hex request id>` ends with the fixed line ``Answer reference: `<id>` `` after the validated list. This is the only message field Open WebUI hands the [rating Action](#openwebui-ratings). A failed or truncated answer gets none. Off (the default), the answer output is unchanged. Whether the switch is on or off, the Pipe removes that exact trailing line from assistant turns when it builds a request, so the agent sees its own answer, including in chats from before ratings were turned off |
+| Answer reference | Only with `RAG_ANSWER_REFERENCE=true` in Open WebUI's environment (the chart sets it whenever ratings are on, #1255; [install](#openwebui-ratings)): a completed answer (finish frame plus `[DONE]`) whose chunk id is the agent's `chatcmpl-<12-hex request id>` ends with the fixed line ``Answer reference: `<id>` `` after the validated list. This is the only message field Open WebUI hands the [rating Action](#openwebui-ratings). A failed or truncated answer gets none. Off (the default), the answer output is unchanged. Whether the switch is on or off, the Pipe removes that exact trailing line from assistant turns when it builds a request, so the agent sees its own answer, including in chats from before ratings were turned off |
 | Tasks | Background task calls (title, tags, follow-ups, summaries), detected by `__task__`, `__metadata__["task"]`, or a `task`/`metadata.task` body key, return the fixed text `Docs question` and never call the agent |
 | Allowed calls | One `POST {AGENT_URL}/v1/chat` per question. No tools, no model calls, no other host, `trust_env=False` (no proxy environment), no redirects (a 3xx is the fixed "could not be reached" text), no forwarded identity headers, no logging |
 
@@ -1900,7 +1967,8 @@ events as documented.
 <a id="openwebui-ratings"></a>
 ## Open WebUI ratings (#1255)
 
-**Status:** code and tests only, default off; not yet run on a live Open WebUI (#1255).
+**Status:** code and tests only; not yet run on a live Open WebUI (#1255). On by default
+wherever the feedback store is on since #1274 (was off).
 **Decision owners:**
 [ADR-0005](adr/0005-answer-feedback-data-boundary.md) (store, D5) and
 [ADR-0007 V2](adr/0007-open-webui-docs-front-end.md). **Code:**
@@ -1935,7 +2003,10 @@ through the real `/v1/chat` and `/v1/feedback`.
   the exception text as the message's error, and it does no logging.
 - **Arguments.** Only `body`, `__id__` (`up`/`down`), `__event_emitter__` and
   `__event_call__`; a test pins the signature (ADR-0007 V2).
-- **Install.** `openwebui.ratings.enabled` (requires `feedback.enabled`) mounts the Action and
+- **Install.** Ratings are on when `openwebui.ratings.enabled` is true (requires
+  `feedback.enabled`) or, unset, when `feedback.enabled` is true (#1274; one chart helper,
+  `mainframe-rag.openwebuiRatings`, decides for every template). `airgap.env`
+  `OPENWEBUI_RATINGS_ENABLED` maps to the chart value; unset writes none. On, the chart mounts the Action and
   sets `RAG_ANSWER_REFERENCE=true`. The installer (`provision_pipe.py`) converges the Function
   set to the docs Pipe plus the Action: hash-checked against `ACTION_SHA256`, active and global
   (a Function-backed model shows only global Actions). With ratings off it deletes the Action.

@@ -24,7 +24,9 @@ with an inventory file for resume.
 a sample (a real run is a publication of the whole corpus and refuses `--limit`).
 
 - Only `suffix.lower() == ".pdf"` is kept; `.pdx`/`.idx` catalogs are ignored
-  by omission.
+  by omission. Member libraries, Markdown guides and Word documents are
+  converted to PDFs outside ingest
+  ([adding documents](install_and_ops.md#adding-documents)).
 - Any path component starting with `.`, plus `__MACOSX` and `lost+found` at
   any depth **below `root`**, is skipped (issue #594). Dot-directories above
   the corpus root never exclude the corpus itself.
