@@ -141,11 +141,12 @@ def test_answer_validates_citations_and_script(client):
     assert "Citations:" not in body["answer"]
 
 
-@pytest.mark.parametrize("env,depth", [({}, 8), ({"ANSWER_HIT_LIMIT": "16"}, 16)])
+@pytest.mark.parametrize("env,depth", [({}, 16), ({"ANSWER_HIT_LIMIT": "8"}, 8),
+                                       ({"ANSWER_HIT_LIMIT": "16"}, 16)])
 def test_answer_hit_limit_sets_every_answer_retrieval_and_never_search(
     monkeypatch, synthetic_pdf, servable_representation_gate, env, depth
 ):
-    """Issue #1191: ANSWER_HIT_LIMIT (default 8, the former fixed constant)
+    """Issue #1191: ANSWER_HIT_LIMIT (default 16 since #1274; 8, the former fixed constant, before)
     is the hit count of every answer retrieval (/v1/answer, both chat routes,
     the console and each leg of an anchored follow-up). /v1/search keeps its
     caller's limit and its own default of 8."""
@@ -2818,6 +2819,9 @@ def test_shortened_message_is_reported_as_a_count_on_every_response(client, monk
 
     monkeypatch.setattr(app_mod, "retrieve_search", MagicMockSearch().search)
     monkeypatch.setattr(app_mod, "llm", Recording())
+    # The paste is cut only past the window share: the 32768 window this ran
+    # at (the default before #1274); at 262144 it is kept whole.
+    monkeypatch.setattr(app_mod.settings, "llm_max_model_len", 32768)
     paste = "\n".join(["Why does the copy step stop here?",
                        *(f"{i:08X} {i:04X}0000 FFFF{i:04X} 0000{i:04X}" for i in range(2500))])
     body = ({"query": paste} if path == "/v1/answer"

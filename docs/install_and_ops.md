@@ -568,7 +568,7 @@ default per-leg keys.
 
 | Role | URL key | Model key | Notes |
 |---|---|---|---|
-| Reasoning (answer, chat and console) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. `LLM_MAX_MODEL_LEN` defaults to 32768 and must not exceed the served context: lower it when the platform serves a smaller window, because nothing in the request path can read the served window through the gateway (tokenizer uses the server `/tokenize`, estimator fallback otherwise). Auth: `llm-api-key` from the `GATEWAY_API_KEY_SECRET` Secret (unset = keyless). |
+| Reasoning (answer, chat and console) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. `LLM_MAX_MODEL_LEN` defaults to 262144 (#1274; 32768 before) and must not exceed the served context: set it to the served window when the platform serves less, because nothing in the request path can read the served window through the gateway (tokenizer uses the server `/tokenize`, estimator fallback otherwise). Auth: `llm-api-key` from the `GATEWAY_API_KEY_SECRET` Secret (unset = keyless). |
 | Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (defaults to `GATEWAY_BASE_URL`) | `EMBED_MODEL` + `DENSE_DIM` + `EMBED_MODEL_REVISION` | `DENSE_DIM` is required and fail-closed: it must equal the served native dim (4096 for Qwen3-Embedding-8B). Collections are created at that width; a mismatch against an existing collection refuses with `DimMismatchError`. `EMBED_MODEL_REVISION` is the operator-declared immutable model/config revision (a gateway alias is mutable and a dimension is not an identity): blank/whitespace-only values fail pre-flight and refuse agent/ingest startup, and a revision change requires a deliberate `--reingest` migration. Auth: `embed-api-key` from the same Secret; the ingest Job reads it too. |
 | Rerank (optional, default off) | `RERANK_BASE_URL` (defaults to `GATEWAY_BASE_URL`, no embed fallback) | `RERANK_MODEL` | Served via a vLLM pooling server (`--runner pooling`, `/v1/score`; TEI `/v1/rerank` fallback). Use the platform gateway rerank leg and its model ID; do not configure a direct-backend consumer shortcut. Lifespan logs a loud warning (never a refusal) when the endpoint is unreachable at startup. Auth: `rerank-api-key` from the same Secret. Leg order: run `probe_gateway.py` below to decide — `score_first` whenever the score leg answers (even on a gateway exposing both legs), `rerank_first` only when the score leg is unavailable. |
 
@@ -1519,6 +1519,35 @@ sh scripts/tools/run-task.sh airgap:smoke
   forced re-ingest if data is ever damaged), keep A's workspace and
   `airgap.env` for step 4, and confirm A's image tags are still in the
   registry (registry tag expiry would break step 4).
+<a id="upgrade-1274-defaults"></a>
+- **Behaviour changes from #1274 (answer-quality defaults on).** No
+  re-ingest. Each change is one `airgap.env` line to keep the old behaviour,
+  with no new release ([deploy.md](deploy.md#default-changes-1274) owns the
+  details):
+
+  | Setting | New default | Keep the old behaviour |
+  |---|---|---|
+  | Follow-up anchoring: an identifier-free follow-up is also searched as the previous user message | on | `CHAT_FOLLOWUP_ANCHOR_ENABLED=false` |
+  | Characters kept of each prior chat message | 4000 | `CHAT_MAX_PRIOR_TURN_CHARS=1000` |
+  | Prompt count source | `auto` | `LLM_TOKEN_COUNT_SOURCE=tokenize` |
+  | Open WebUI ratings | on wherever the feedback store is on (`FEEDBACK_ENABLED=true`; the store stays opt-in) | `OPENWEBUI_RATINGS_ENABLED=false` |
+  | Prompt window (`LLM_MAX_MODEL_LEN`) | 262144 (was 32768) | the served window, e.g. `LLM_MAX_MODEL_LEN=32768` |
+  | Hits per answer retrieval | 16 (was 8) | `ANSWER_HIT_LIMIT=8` |
+  | Chunks kept per manual (every retrieval, `/v1/search` included) | 5 (was 3) | `RETRIEVE_MAX_CHUNKS_PER_DOC=3` |
+
+  - **Window:** the 262144 default assumes the reasoning model serves at
+    least a 256k window. A site whose model serves less must set
+    `LLM_MAX_MODEL_LEN` to its served window (the server's
+    `--max-model-len`) before deploying, or answers that fill the larger
+    budget are refused by the server.
+  - `CHAT_CONDENSE_ENABLED=true` with the anchor unset keeps condensing: it
+    turns the anchoring default off. Both set true is refused.
+  - **Quota:** where the gateway does not serve `/tokenize`, `auto` adds
+    about one short gateway call per answer (a 1-token completion that counts
+    the prompt). Confirm the reasoning key's rate limit and quota allow it
+    before the upgrade, or keep `LLM_TOKEN_COUNT_SOURCE=tokenize`. Step 0 of
+    the [site eval](eval.md#at-a-site) (`probe_gateway.py --probe-count`)
+    shows which source this gateway uses.
 - **Keep the `ingest-work` PVC.** It holds the ingest inventory; a later
   ingest against the live generation without it refuses ("fails verification
   … operator intervention required").

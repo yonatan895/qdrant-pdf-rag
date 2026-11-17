@@ -252,7 +252,7 @@ spec:
               value: "false"
             - name: ENABLE_MESSAGE_RATING
               value: "false"
-            {{- if (.Values.openwebui.ratings | default dict).enabled }}
+            {{- if include "mainframe-rag.openwebuiRatings" . }}
             # Ratings go to the agent's feedback store only (#1255): the docs
             # Pipe adds the answer reference the rating Action reads.
             - name: RAG_ANSWER_REFERENCE

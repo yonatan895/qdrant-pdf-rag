@@ -13,7 +13,7 @@ from fractions import Fraction
 from urllib.parse import urlsplit
 
 REASONING_INTEGER_FIELDS = {
-    "LLM_MAX_MODEL_LEN": ("maxModelLen", 512, 131072),
+    "LLM_MAX_MODEL_LEN": ("maxModelLen", 512, 262144),
     "LLM_RESERVED_OUTPUT_TOKENS": ("reservedOutputTokens", 128, 16384),
     "LLM_THINKING_RESERVE_TOKENS_SIMPLE": ("thinkingReserveTokensSimple", 0, 16384),
     "LLM_THINKING_RESERVE_TOKENS_COMPLEX": ("thinkingReserveTokensComplex", 0, 16384),
@@ -87,6 +87,7 @@ OPERATOR_BOOL_KEYS = (
     "UI_ENABLED", "CONTEXTUAL_EMBED_ENABLED", "INGEST_ALIAS_PUBLISH",
     "INGEST_REINGEST", "INGEST_AUTHORIZE_FROM_CATALOG", "CHAT_CONDENSE_ENABLED", "LLM_STREAM", "AGENT_NETWORK_POLICY",
     "FEEDBACK_ENABLED", "OPENWEBUI_ENABLED", "CHAT_FOLLOWUP_ANCHOR_ENABLED",
+    "OPENWEBUI_RATINGS_ENABLED",
 )
 
 # Agent ingress NetworkPolicy (issue #373): default ON; the allow-list names
@@ -357,6 +358,16 @@ def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
     raw_port = values.get("OPENWEBUI_IDP_EGRESS_PORT", "") or "443"
     if re.fullmatch(r"[0-9]{1,5}", raw_port) is None or not 1 <= int(raw_port) <= 65535:
         raise ValueError("OPENWEBUI_IDP_EGRESS_PORT must be a TCP port from 1 to 65535")
+    # Ratings (#1255): unset writes no chart value, so the chart follows
+    # feedback.enabled (#1274: on wherever the feedback store is on); an
+    # explicit spelling is carried, false included. True needs the store
+    # (the chart refuses it too).
+    raw_ratings = values.get("OPENWEBUI_RATINGS_ENABLED", "")
+    ratings = (None if raw_ratings == ""
+               else parse_strict_bool("OPENWEBUI_RATINGS_ENABLED", raw_ratings, False))
+    if ratings and not parse_strict_bool("FEEDBACK_ENABLED", values.get("FEEDBACK_ENABLED", ""), False):
+        raise ValueError("OPENWEBUI_RATINGS_ENABLED=true requires FEEDBACK_ENABLED=true: Open WebUI "
+                         "ratings are stored only by the agent's feedback store (ADR-0005)")
     if not enabled:
         return None
     required = {"OPENWEBUI_SECRET": secret, "OPENWEBUI_HOST": host,
@@ -388,6 +399,7 @@ def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
             "usernameClaim": claims["OPENWEBUI_OIDC_USERNAME_CLAIM"],
         },
         "idpEgress": {"cidrs": cidrs, "port": int(raw_port)},
+        **({} if ratings is None else {"ratings": {"enabled": ratings}}),
     }
 
 

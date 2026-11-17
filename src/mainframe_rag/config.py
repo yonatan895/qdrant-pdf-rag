@@ -328,14 +328,15 @@ class Settings(BaseSettings):
     rrf_sparse_boost_syntax: float = Field(default=1.0, gt=0.0, le=10.0)
     rrf_sparse_boost_table: float = Field(default=1.0, gt=0.0, le=10.0)
     retrieve_max_chunks_per_page: int = Field(default=1, ge=1, le=10)
-    retrieve_max_chunks_per_doc: int = Field(default=3, ge=1, le=10)
+    # Chunks kept per manual in every retrieval (5 since #1274, was 3).
+    retrieve_max_chunks_per_doc: int = Field(default=5, ge=1, le=10)
     # Hits one answer retrieval returns (#1191; was the fixed 8): /v1/answer,
     # /v1/chat*, the console and an anchored follow-up's fused legs. /v1/search
     # keeps its caller's `limit`. 32 caps it below /v1/search's 40 and keeps the
     # packed evidence within a 65,536-token window at the 4,000-character
     # excerpt cap; the retrieval pool (40 per leg, or `rerank_candidates`) and
-    # the per-page/per-doc caps may return fewer.
-    answer_hit_limit: int = Field(default=8, ge=1, le=32)
+    # the per-page/per-doc caps may return fewer. 16 since #1274 (was 8).
+    answer_hit_limit: int = Field(default=16, ge=1, le=32)
 
     # Reasoning effort control: directs the reasoning model to think more thoroughly
     # on complex operational, diagnostic, and comparative inquiries while conserving
@@ -369,15 +370,16 @@ class Settings(BaseSettings):
 
     # Context budgeting via tokenizer accounting:
     # budget = max_model_len - reserved_output_tokens - measured_system_prompt - safety_margin
-    # Must not exceed the served window (#777: 32768 for Qwen3.8-27B; the
-    # model's native 262144 is not served). With a server-verified prompt
+    # Must not exceed the served window. Default 262144 since #1274, which
+    # assumes the reasoning model serves at least that (was 32768, the Colab
+    # stand-in's, #777); a lane or site serving less sets its window. With a server-verified prompt
     # count, the answer reserve plus the path's thinking reserve is also sent
     # as max_tokens, so a runaway generation ends as `length` instead of
     # running to the window (answer_core._output_cap). An estimator-only count
     # sends a cap only when the prompt's byte upper bound plus the reserves
     # fits the window; otherwise it stays uncapped as before.
     # Visible answers reached 2331 tokens in #759, above the old 1536 reserve.
-    llm_max_model_len: int = Field(default=32768, ge=512, le=131072)
+    llm_max_model_len: int = Field(default=262144, ge=512, le=262144)
     llm_reserved_output_tokens: int = Field(default=2560, ge=128, le=16384)
     # Reasoning also consumes completion space. Keep this separate from the
     # answer reserve. xhigh thinking is provisionally priced at 8192 on both
@@ -403,22 +405,27 @@ class Settings(BaseSettings):
     # auto: /tokenize until it is pinned as not served, then completion_usage
     # under its own pin rules, chosen per count (a warn-only startup check
     # names the source); both pinned is the estimator. estimate: never ask the
-    # server. Every count is bounded by LLM_TOKENIZE_TIMEOUT_S.
-    llm_token_count_source: TokenCountSource = Field(default="tokenize")
+    # server. Every count is bounded by LLM_TOKENIZE_TIMEOUT_S. Default auto
+    # since #1274 (was tokenize): where /tokenize is served nothing changes;
+    # where it is not, each verified count is one 1-token completion call.
+    llm_token_count_source: TokenCountSource = Field(default="auto")
     llm_stream: bool = Field(default=False, description="Stream chat completions to measure TTFT")
 
     # Multi-turn chat engine and operator console
     chat_condense_enabled: bool = False
-    # Antecedent-anchored follow-up retrieval (issue #1268, default off): an
-    # identifier-free chat follow-up is also searched as the previous user
-    # message, with no model call. Exclusive with condensation.
-    chat_followup_anchor_enabled: bool = False
+    # Antecedent-anchored follow-up retrieval (issue #1268; default on since
+    # #1274): an identifier-free chat follow-up is also searched as the
+    # previous user message, with no model call. Exclusive with condensation:
+    # an explicit CHAT_CONDENSE_ENABLED=true turns this default off, and only
+    # both set true explicitly is refused (_one_follow_up_mode).
+    chat_followup_anchor_enabled: bool = True
     # Request-size guard for /v1/answer, /v1/chat and /ui (issue #1192): abuse
     # protection only, the one length refusal on those paths. The Open WebUI
     # Pipe valve MAX_BODY_CHARS must carry the same value.
     chat_max_body_chars: int = Field(default=131072, ge=1000, le=1048576)
     chat_max_turns: int = Field(default=10, ge=1, le=50)
-    chat_max_prior_turn_chars: int = Field(default=1000, ge=200, le=5000)
+    # Characters kept of each prior chat message (#1268; 4000 since #1274, was 1000).
+    chat_max_prior_turn_chars: int = Field(default=4000, ge=200, le=5000)
     ui_enabled: bool = False
 
     # Console answer feedback (issue #780). Off by default: no record, no
@@ -570,8 +577,16 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _one_follow_up_mode(self) -> Settings:
+        """One follow-up mode (#1268). Anchoring is on by default (#1274), so
+        an explicit condense with the anchor left unset turns the anchor
+        default off: a deployment that enabled condensation before #1274
+        keeps starting and condensing. Both set true explicitly is refused.
+        Every source (init, environment, dotenv) marks a field it supplies as
+        set, so `model_fields_set` tells a default from an explicit value."""
         if self.chat_condense_enabled and self.chat_followup_anchor_enabled:
-            raise ValueError(CHAT_FOLLOWUP_MODES_CONFLICT)
+            if "chat_followup_anchor_enabled" in self.model_fields_set:
+                raise ValueError(CHAT_FOLLOWUP_MODES_CONFLICT)
+            object.__setattr__(self, "chat_followup_anchor_enabled", False)
         return self
 
     @model_validator(mode="after")

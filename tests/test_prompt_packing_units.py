@@ -947,11 +947,13 @@ def _depth_hits(n: int, per_doc: int, chars: int) -> list[SearchHit]:
     return hits
 
 
+@pytest.mark.parametrize("window", [32768, 262144])
 @pytest.mark.parametrize("complexity", ["simple", "complex"])
 @pytest.mark.parametrize("chat", [False, True])
-def test_depth_16_by_5_packs_every_excerpt_under_the_default_window(chat, complexity):
+def test_depth_16_by_5_packs_every_excerpt_under_the_default_window(chat, complexity, window):
     """Issue #1191: at ANSWER_HIT_LIMIT=16 and RETRIEVE_MAX_CHUNKS_PER_DOC=5
-    under the default 32,768-token window and reserves, sixteen excerpts at
+    under the 32,768-token window (the default before #1274) and the
+    262,144-token default since, with the default reserves, sixteen excerpts at
     the 4,000-character cap (the worst case) are all packed whole, in label
     order 1..16, inside the verify limit; a two-digit label is cited like any
     other. The supplied-evidence projection keeps every entry with its whole
@@ -959,8 +961,8 @@ def test_depth_16_by_5_packs_every_excerpt_under_the_default_window(chat, comple
     2026-11-17), so no cited excerpt at 16 hits loses its text."""
     from mainframe_rag.config import Settings
 
-    settings = Settings(**settings_kw(answer_hit_limit=16, retrieve_max_chunks_per_doc=5))
-    assert settings.llm_max_model_len == 32768
+    settings = Settings(**settings_kw(llm_max_model_len=window))
+    assert (settings.answer_hit_limit, settings.retrieve_max_chunks_per_doc) == (16, 5)  # #1274
     chunk = settings.prompt_max_chunk_chars
     hits = _depth_hits(16, settings.retrieve_max_chunks_per_doc, chunk)
     kwargs = {
@@ -1037,12 +1039,13 @@ class _DenseTokenizer:
 @pytest.mark.parametrize("chat", [False, True])
 def test_depth_16_trims_the_tail_when_the_server_counts_denser(chat):
     """Issue #1191: when the served tokenizer prices 16 capped excerpts above
-    the default window, verification trims or drops from the tail only: the
+    a 32,768-token window (the default before #1274; a site serving that
+    sets it), verification trims or drops from the tail only: the
     prompt fits, the kept labels stay contiguous from 1 and every dropped
     label is listed as omitted; no budget refusal."""
     from mainframe_rag.config import Settings
 
-    settings = Settings(**settings_kw(answer_hit_limit=16, retrieve_max_chunks_per_doc=5))
+    settings = Settings(**settings_kw(llm_max_model_len=32768))
     chunk = settings.prompt_max_chunk_chars
     hits = _depth_hits(16, settings.retrieve_max_chunks_per_doc, chunk)
     kwargs = {"max_chunk_chars": chunk, "tokenizer": _DenseTokenizer(), "settings": settings}

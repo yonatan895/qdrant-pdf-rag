@@ -1035,7 +1035,7 @@ def run_follow_ups(
 
 def _fetch_pool(client: Any, query: str, limit: int = 8) -> list[dict[str, Any]] | None:
     """Sibling /v1/search pool (the same call the answer retrieval makes, at
-    the deployed `answer_hit_limit`, 8 unless `--hit-limit` declares another,
+    the deployed `answer_hit_limit`, the agent default unless `--hit-limit` declares another,
     issue #1191). None on any failure: a missing pool is a missing signal,
     not an empty pool."""
     try:
@@ -2170,13 +2170,15 @@ def main(argv: list[str] | None = None) -> int:
                              "output as before)")
     parser.add_argument("--prior-cap", type=_prior_cap, default=None,
                         help="with --follow-up: the deployed CHAT_MAX_PRIOR_TURN_CHARS as the "
-                             "operator declares it (the agent does not report it); default 1000, "
-                             "the agent default (recorded in params)")
+                             "operator declares it (the agent does not report it); default "
+                             f"{Settings.model_fields['chat_max_prior_turn_chars'].default}, the "
+                             "agent default (recorded in params)")
     parser.add_argument("--hit-limit", type=_hit_limit, default=None,
                         help="the deployed ANSWER_HIT_LIMIT as the operator declares it (the "
                              "agent does not report it): the sibling /v1/search pool asks for "
-                             "that many hits; default 8, the agent default (recorded in params, "
-                             "issue #1191)")
+                             "that many hits; default "
+                             f"{Settings.model_fields['answer_hit_limit'].default}, the agent default "
+                             "(recorded in params, issue #1191)")
     args = parser.parse_args(argv)
     if args.stream and args.agent_url is None:
         parser.error("--stream needs --agent-url: the in-process client buffers the response, "

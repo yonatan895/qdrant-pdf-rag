@@ -37,7 +37,7 @@ OPENWEBUI_KEYS = [
     "OPENWEBUI_OIDC_ADMIN_ROLES", "OPENWEBUI_IDP_EGRESS_CIDRS", "OPENWEBUI_IDP_EGRESS_PORT",
     "ROUTE_DESTINATION_CA_FILE", "IMAGE_DIGEST_OPENWEBUI", "IMAGE_DIGEST_OPENWEBUI_PROXY",
     "OPENWEBUI_IDP_CA_FILE", "OPENWEBUI_OIDC_SCOPES", "OPENWEBUI_OIDC_EMAIL_CLAIM",
-    "OPENWEBUI_OIDC_USERNAME_CLAIM",
+    "OPENWEBUI_OIDC_USERNAME_CLAIM", "OPENWEBUI_RATINGS_ENABLED",
 ]
 MAPPER_KEYS = [
     *OPENWEBUI_KEYS,
@@ -556,10 +556,22 @@ def test_chat_condensation_operator_mapping(monkeypatch, mapper_env, raw, want):
 
 @pytest.mark.parametrize("raw,want", [("", None), ("true", True), ("no", False)])
 def test_follow_up_anchoring_operator_mapping(monkeypatch, mapper_env, raw, want):
-    """Issue #1268: unset writes no key (the pod keeps the false default);
-    an explicit spelling is carried as a boolean, explicit false included."""
+    """Issue #1268: unset writes no key (the pod keeps its default, on since
+    #1274); an explicit spelling is carried as a boolean, explicit false
+    included."""
     monkeypatch.setenv("CHAT_FOLLOWUP_ANCHOR_ENABLED", raw)
     assert mapped(mapper_env)["models"]["reasoning"].get("followupAnchorEnabled") is want
+
+
+def test_condense_with_anchor_unset_maps_without_refusal(monkeypatch, mapper_env):
+    """Issue #1274: an airgap.env from before #1274 that sets only
+    CHAT_CONDENSE_ENABLED=true still maps; no anchor key is written, so the
+    pod's Settings turn the anchor default off (tests/test_config.py)."""
+    monkeypatch.setenv("CHAT_CONDENSE_ENABLED", "true")
+    monkeypatch.delenv("CHAT_FOLLOWUP_ANCHOR_ENABLED", raising=False)
+    reasoning = mapped(mapper_env)["models"]["reasoning"]
+    assert reasoning["condenseEnabled"] is True
+    assert "followupAnchorEnabled" not in reasoning
 
 
 @pytest.mark.parametrize("anchor,condense", [("true", "true"), ("1", "yes")])
@@ -1195,6 +1207,36 @@ def test_openwebui_selection_round_trips_with_the_decided_defaults(monkeypatch, 
     values = load_values(out)
     assert values["images"]["openwebui"]["digest"] == digest
     assert values["openwebui"]["retentionDays"] == 7
+
+
+@pytest.mark.parametrize(("raw", "feedback", "want"), [
+    ("", False, None), ("", True, None),  # unset: the chart follows feedback.enabled (#1274)
+    ("false", True, {"enabled": False}), ("no", False, {"enabled": False}),
+    ("true", True, {"enabled": True}),
+])
+def test_openwebui_ratings_operator_mapping(monkeypatch, mapper_env, tmp_path, raw, feedback, want):
+    """#1274: OPENWEBUI_RATINGS_ENABLED is the airgap.env switch for ratings.
+    Unset writes no chart value (ratings then follow the feedback store);
+    an explicit spelling is carried, false included."""
+    _owui_env(monkeypatch, tmp_path, OPENWEBUI_RATINGS_ENABLED=raw)
+    if feedback:
+        for key, value in FEEDBACK_ON.items():
+            monkeypatch.setenv(key, value)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["openwebui"].get("ratings") == want
+
+
+@pytest.mark.parametrize(("raw", "message"), [
+    ("true", "OPENWEBUI_RATINGS_ENABLED=true requires FEEDBACK_ENABLED=true"),
+    ("on", "OPENWEBUI_RATINGS_ENABLED must be true/false"),
+])
+def test_openwebui_ratings_refusals_write_no_values(monkeypatch, mapper_env, tmp_path, raw, message):
+    _owui_env(monkeypatch, tmp_path, OPENWEBUI_RATINGS_ENABLED=raw)
+    monkeypatch.delenv("FEEDBACK_ENABLED", raising=False)
+    r, out = mapper_env()
+    assert r.returncode != 0 and not out.exists()
+    assert message in r.stderr
 
 
 def test_openwebui_allow_list_proxy_image_is_rendered_with_its_verified_digest(monkeypatch, mapper_env, tmp_path):

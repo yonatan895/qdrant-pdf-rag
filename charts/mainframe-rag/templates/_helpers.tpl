@@ -98,6 +98,22 @@ one fixed message that names the missing values and the opt-out, so a
 half-configured front end never renders. Also refused: no enforced retention
 window, no repository-owned docs Pipe (#1072).
 */}}
+{{/*
+Open WebUI ratings (#1255), the one owner of the switch: "true" or nothing.
+openwebui.ratings.enabled when it is a boolean (an explicit false stays off:
+Helm's `default` would read false as unset), else feedback.enabled (#1274: on
+wherever the feedback store is on). An explicit true without the store fails
+in mainframe-rag.openwebuiEnabled.
+*/}}
+{{- define "mainframe-rag.openwebuiRatings" -}}
+{{- $r := .Values.openwebui.ratings | default dict -}}
+{{- if kindIs "bool" $r.enabled -}}
+{{- if $r.enabled }}true{{ end -}}
+{{- else if (.Values.feedback | default dict).enabled -}}
+true
+{{- end -}}
+{{- end -}}
+
 {{- define "mainframe-rag.openwebuiEnabled" -}}
 {{- if .Values.openwebui.enabled -}}
 {{- $o := .Values.openwebui -}}
@@ -158,14 +174,14 @@ true
 
 {{/*
 The Open WebUI allow-list proxy config (ADR-0007 E1): the repository file
-files/openwebui/proxy.nginx.conf verbatim when openwebui.ratings.enabled, and
+files/openwebui/proxy.nginx.conf verbatim when ratings are on, and
 otherwise the same file without the rating Action block (#1255), so the
 default allow-list admits no /api/chat/actions path. Tests pin that the block
 occurs exactly once in the file.
 */}}
 {{- define "mainframe-rag.openwebuiProxyConf" -}}
 {{- $conf := .Files.Get "files/openwebui/proxy.nginx.conf" -}}
-{{- if not (.Values.openwebui.ratings | default dict).enabled -}}
+{{- if not (include "mainframe-rag.openwebuiRatings" .) -}}
 {{- $conf = replace (include "mainframe-rag.openwebuiRatingsAllow" .) "" $conf -}}
 {{- end -}}
 {{- $conf -}}
