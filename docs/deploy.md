@@ -93,7 +93,7 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - Operator booleans `UI_ENABLED`, `CONTEXTUAL_EMBED_ENABLED`,
   `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `INGEST_AUTHORIZE_FROM_CATALOG`,
   `CHAT_CONDENSE_ENABLED`, `CHAT_FOLLOWUP_ANCHOR_ENABLED`, `LLM_STREAM`
-  `FEEDBACK_ENABLED`, `OPENWEBUI_ENABLED`, `ANSWER_CODING_MODE_ENABLED` (unset keeps the pod's **true** default) and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
+  `FEEDBACK_ENABLED`, `OPENWEBUI_ENABLED`, `ANSWER_CODING_MODE_ENABLED` (unset keeps the pod's **true** default), `CHAT_IMAGES_ENABLED` and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
   accept only `true/1/yes` or `false/0/no` (any case; unset keeps the
   default). `INGEST_ALIAS_PUBLISH` may only be unset or true: in-place ingest
   was retired (#360) and an explicit false fails closed.
@@ -2098,6 +2098,56 @@ all off by default; there is no `airgap.env` key for them yet.
   Open WebUI admin UI; v0.12.3 combines group permissions most-permissive, so any one group that
   enforces it enforces it for its members.
 
+<a id="owui-chat-images"></a>
+**Pasted images (#1287, ADR-0007 amendment 2026-11-17).** Off by default. A screenshot pasted
+in a **temporary chat** travels inline as a data URL. The reasoning model reads it once to feed
+retrieval and sees it again with the answer call ([agent contract](agent.md#chat-images)).
+Nothing is uploaded or stored, and E1 adds no route. A paste in a saved chat still gets Open WebUI's "no permission to upload" toast.
+- **Off (the default).** The default render's one #1287 change is a single Open WebUI variable,
+  `DEFAULT_MODEL_METADATA={"capabilities":{"vision":false}}`. Every model, the Rosetta entries
+  included, is declared not image-capable, so the browser refuses a paste up front. Without it,
+  the paste was silently dropped. The Pipe's fixed "images are not read" notice is the
+  backstop. The proxy config is unchanged byte for byte.
+- **Step 0, from the agent pod (required before turning it on):**
+
+  ```sh
+  oc -n "$NAMESPACE" exec deploy/rag-agent -c agent -- \
+    python3 /app/scripts/probe_gateway.py --probe-image
+  ```
+
+  It draws a per-run 6-digit nonce into a synthetic 400x130 PNG (800x260 for the 2x call). It
+  makes up to five requests, each bounded by `CHAT_IMAGE_READ_TIMEOUT_S` (`--timeout`
+  overrides). It prints one JSON row of numbers and flags, then `PASS` or
+  `FAIL not-configured|unreachable|refused <status>|no-reply|accepted-but-not-read`. It exits 0
+  only when the model returned the drawn digits. `accepted-but-not-read` means the gateway
+  answered without the image. `no-reply` with `finish_reason` `length` means raise
+  `--max-tokens` (default 1024). The `/tokenize` columns never change the exit code.
+  `image_tokens` is what one image costs. The agent prices each image at
+  `LLM_IMAGE_TOKEN_RESERVE` (default 6144, an estimate). That is agent configuration, not an
+  `airgap.env` key. If `image_tokens` exceeds it, keep images off and report the figure.
+- **Turning it on.** Add one `airgap.env` line, `CHAT_IMAGES_ENABLED=true`
+  (`models.reasoning.chatImagesEnabled`), and re-run `airgap:deploy`. It sets the agent's
+  `CHAT_IMAGES_ENABLED`. In Open WebUI it sets the Pipe switch `RAG_CHAT_IMAGES`, the browser
+  caps and one dismissible banner (`WEBUI_BANNERS`; the wording is a draft for the maintainer to
+  approve). Turning it off reverses each of these.
+- **Caps chain** (each hop admits what the next accepts):
+
+  | Hop | Per image | Per message | Pixels |
+  |---|---|---|---|
+  | Browser (`RAG_FILE_MAX_SIZE`, `RAG_FILE_MAX_COUNT`, `FILE_IMAGE_COMPRESSION_*`), checked before the paste | 5 MB (MiB) | 3 | downscaled to 2048 px, aspect kept |
+  | Agent (`CHAT_IMAGE_MAX_BYTES`, `_COUNT`, `_PIXELS`), latest user message only | 5242880 bytes | 3 | 4194304 |
+
+  The proxy adds an exact `location = /api/chat/completions` with `client_max_body_size 55m`,
+  only while images are on. Every other path keeps 1m. The browser resends every earlier image
+  of a temporary chat each turn, so 55m holds the 1 MiB text cap plus 8 images base64-encoded
+  (53.3 MiB). Past it the user sees Open WebUI's generic error. The location repeats the
+  allow-list check and every directive of `location /`. nginx spools such a body to the proxy's
+  `/tmp` emptyDir (no size limit, node ephemeral storage) until the streamed answer ends, about
+  55 MiB per in-flight image turn at most.
+- **Admin edits.** With `ENABLE_PERSISTENT_CONFIG=false` these settings are not stored. The
+  environment applies at every start, and an admin-UI edit lasts only until the next restart
+  (ADR-0007 C1).
+
 **Patch policy and advisory switch-off (ADR-0007 P1).** The maintainer owns patching. Agents
 prepare a monthly import of the latest upstream release as a dedicated pin-bump PR, carrying the
 base and derived digests, the licence record, the re-run of every ADR-0007 condition, and an
@@ -2448,7 +2498,9 @@ unset keeps the pod's on default, and `ANSWER_CODING_MODE_ENABLED=false` in
 `airgap.env` is the one-line per-site revert of the coding prompts and the
 coding route to the complex path (the `coding-off` arm). It does not revert the
 #1276 code-fence tags (`c`, `metalc`, `asm`, `hlasm`, `assembler`, `clist` kept
-as `script`), which apply to every answer. Enable condensation deliberately when qualifying pronoun-only
+as `script`), which apply to every answer. `CHAT_IMAGES_ENABLED` (#1287) maps to
+`models.reasoning.chatImagesEnabled` and renders only when set; unset keeps the pod's off
+default and the Open WebUI render's images off ([pasted images](#owui-chat-images)). Enable condensation deliberately when qualifying pronoun-only
 console follow-ups; require a grounded answer after the extra reasoning call.
 The local gateway's authenticated `/tokenize` passthrough enforces the per-leg
 key's model allowlist. Use `probe_gateway.py --require-tokenizer --stream

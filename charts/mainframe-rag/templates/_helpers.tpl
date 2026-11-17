@@ -174,17 +174,64 @@ true
 
 {{/*
 The Open WebUI allow-list proxy config (ADR-0007 E1): the repository file
-files/openwebui/proxy.nginx.conf verbatim when ratings are on, and
-otherwise the same file without the rating Action block (#1255), so the
-default allow-list admits no /api/chat/actions path. Tests pin that the block
-occurs exactly once in the file.
+files/openwebui/proxy.nginx.conf verbatim when ratings and chat images are
+on. Without ratings, the file loses the rating Action block (#1255), so the
+default allow-list admits no /api/chat/actions path. Without chat images, it
+loses the completions body-cap location (#1287), so the default render is the
+pre-#1287 file byte for byte. Tests pin that each block occurs exactly once in
+the file.
 */}}
 {{- define "mainframe-rag.openwebuiProxyConf" -}}
 {{- $conf := .Files.Get "files/openwebui/proxy.nginx.conf" -}}
 {{- if not (include "mainframe-rag.openwebuiRatings" .) -}}
 {{- $conf = replace (include "mainframe-rag.openwebuiRatingsAllow" .) "" $conf -}}
 {{- end -}}
+{{- if not (include "mainframe-rag.chatImages" .) -}}
+{{- $conf = replace (include "mainframe-rag.openwebuiChatImagesLocation" .) "" $conf -}}
+{{- end -}}
 {{- $conf -}}
+{{- end -}}
+
+{{/*
+Pasted images in Open WebUI temporary chats (#1287), the one owner of the
+switch: "true" or nothing. True when models.reasoning.chatImagesEnabled is
+true (it also renders the agent's CHAT_IMAGES_ENABLED) and Open WebUI is
+enabled. Every Open WebUI template reads it: the image caps, the banner and
+the Pipe switch when on, the not-vision-capable model default when off, and
+the proxy's completions body cap.
+*/}}
+{{- define "mainframe-rag.chatImages" -}}
+{{- if and .Values.openwebui.enabled (eq (toString ((.Values.models).reasoning).chatImagesEnabled) "true") -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{- define "mainframe-rag.openwebuiChatImagesLocation" -}}
+{{- print `
+        # Pasted images (#1287), rendered only while chat images are on. The
+        # browser resends every earlier image of a temporary chat each turn, so
+        # the completions body carries the conversation's images: 8 images
+        # (decision 7) x ceil(5242880 * 4 / 3) base64 bytes = 53.3 MiB, plus
+        # the 1 MiB text cap above, is 54.3 MiB; rounded up to 55m. Every
+        # directive of "location /" is repeated, the allow-list check included,
+        # so the allow-list (E1) is unchanged: only this path's body cap grows.
+        location = /api/chat/completions {
+            client_max_body_size 55m;
+            if ($owui_allowed = 0) {
+                return 403 "denied\n";
+            }
+            proxy_pass http://owui_upstream;
+            proxy_http_version 1.1;
+            proxy_set_header Host $http_host;
+            proxy_set_header X-Forwarded-For $remote_addr;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $owui_connection;
+            proxy_buffering off;
+            proxy_read_timeout 600s;
+            proxy_send_timeout 600s;
+        }
+` -}}
 {{- end -}}
 
 {{- define "mainframe-rag.openwebuiRatingsAllow" -}}

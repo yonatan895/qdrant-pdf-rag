@@ -424,6 +424,41 @@ def test_unset_coding_mode_adds_no_pod_variable(tree):
     assert "ANSWER_CODING_MODE_ENABLED" not in pod
 
 
+@pytest.mark.parametrize("source", ["file", "environment"])
+def test_chat_images_one_line_turns_on_reaches_the_pod_settings(tree, source):
+    """Issue #1287 through real common.sh, mapper and Helm: the one airgap.env
+    line CHAT_IMAGES_ENABLED=true reaches the Deployment and Settings reads it
+    as on; an environment value beats the file; unset renders no variable
+    (separate test below), so the pod keeps the off default."""
+    from mainframe_rag.config import Settings
+
+    root, _log = tree
+    file_values = {
+        "INTERNAL_REGISTRY": "reg.internal", "NAMESPACE": "ns",
+        "STORAGE_CLASS": "standard", "IMAGE_SHA": IMAGE_SHA,
+        "EMBED_MODEL": "embed", "DENSE_DIM": "64", "EMBED_MODEL_REVISION": "rev-1",
+        "EMBED_BASE_URL": "http://vllm:8000/v1", "OPENWEBUI_ENABLED": "false",
+        "CHAT_IMAGES_ENABLED": "true" if source == "file" else "false",
+    }
+    env_file = root / "airgap.env"
+    env_file.write_text("".join(f"{key}={value}\n" for key, value in file_values.items()))
+    overrides = [("CHAT_IMAGES_ENABLED", "true")] if source == "environment" else []
+    result = _run(tree, ("AIRGAP_ENV", str(env_file)), *overrides)
+    assert result.returncode == 0, result.stderr
+    pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
+    assert pod.get("CHAT_IMAGES_ENABLED") == "true"
+    assert Settings(_env_file=None, chat_images_enabled=pod["CHAT_IMAGES_ENABLED"]
+                    ).chat_images_enabled is True
+
+
+def test_unset_chat_images_adds_no_pod_variable(tree):
+    root, _log = tree
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
+    assert "CHAT_IMAGES_ENABLED" not in pod
+
+
 def test_condense_and_anchor_together_stop_the_deploy_before_helm(tree):
     root, _log = tree
     result = _run(tree, ("CHAT_CONDENSE_ENABLED", "true"), ("CHAT_FOLLOWUP_ANCHOR_ENABLED", "true"))

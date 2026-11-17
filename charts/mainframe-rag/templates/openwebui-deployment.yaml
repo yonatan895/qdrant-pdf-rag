@@ -258,6 +258,36 @@ spec:
             - name: RAG_ANSWER_REFERENCE
               value: "true"
             {{- end }}
+            {{- if include "mainframe-rag.chatImages" . }}
+            # Pasted images in temporary chats (#1287, ADR-0007 V1/V2): the
+            # browser sends them inline as data URLs (no upload, nothing stored)
+            # and the docs Pipe forwards them to the agent (RAG_CHAT_IMAGES).
+            # The browser caps equal the agent's Settings defaults (a chart test
+            # pins them): 5 MB (Open WebUI's unit, MiB) and 3 images per message,
+            # checked before the paste, and a 2048 px downscale (aspect kept), so
+            # an image stays within CHAT_IMAGE_MAX_PIXELS.
+            - name: RAG_CHAT_IMAGES
+              value: "true"
+            - name: RAG_FILE_MAX_SIZE
+              value: "5"
+            - name: RAG_FILE_MAX_COUNT
+              value: "3"
+            - name: FILE_IMAGE_COMPRESSION_WIDTH
+              value: "2048"
+            - name: FILE_IMAGE_COMPRESSION_HEIGHT
+              value: "2048"
+            # Decision 13: one dismissible notice. The wording is the
+            # maintainer's to approve (draft, #1287). A fixed id and timestamp:
+            # the browser remembers a dismissal by id.
+            - name: WEBUI_BANNERS
+              value: {{ list (dict "id" "mainframe-rag-chat-images" "type" "info" "content" "Paste screenshots in a temporary chat. Images go to the reasoning model: do not paste screens that show passwords or personal data." "dismissible" true "timestamp" 1794873600) | toJson | quote }}
+            {{- else }}
+            # Chat images off (#1287 decision 3): every model, the docs Pipe's
+            # entries included, is declared not image-capable, so Open WebUI
+            # refuses a pasted image up front instead of the Pipe dropping it.
+            - name: DEFAULT_MODEL_METADATA
+              value: {{ dict "capabilities" (dict "vision" false) | toJson | quote }}
+            {{- end }}
             # The docs Pipe's default answer depth (#1255, docs_pipe.py DEPTHS, first
             # entry): new chats and chats whose stored model id is gone use it.
             - name: DEFAULT_MODELS
