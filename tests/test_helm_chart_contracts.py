@@ -514,6 +514,7 @@ def test_chart_preserves_positive_operator_dimension_and_worker_range():
     ("codingModeEnabled", False, "ANSWER_CODING_MODE_ENABLED"),
     ("chatImagesEnabled", True, "CHAT_IMAGES_ENABLED"),
     ("chatImagesEnabled", False, "CHAT_IMAGES_ENABLED"),
+    ("imageTokenReserve", 8192, "LLM_IMAGE_TOKEN_RESERVE"),
 ])
 def test_direct_chart_optional_budget_limits_reach_pod(field, value, environment):
     rendered = run_new_template({"models": {"reasoning": {field: value}}})
@@ -561,14 +562,15 @@ def test_chat_history_limits_are_optional_pod_inputs_bounded_like_settings():
 
     default = env_map(run_new_template({})["Deployment", "rag-agent"])
     assert not {"CHAT_MAX_PRIOR_TURN_CHARS", "CHAT_MAX_TURNS", "CHAT_FOLLOWUP_ANCHOR_ENABLED",
-                "ANSWER_HIT_LIMIT", "RETRIEVE_MAX_CHUNKS_PER_DOC"} & set(default)
+                "ANSWER_HIT_LIMIT", "RETRIEVE_MAX_CHUNKS_PER_DOC", "LLM_IMAGE_TOKEN_RESERVE"} & set(default)
     schema = json.loads((CHART / "values.schema.json").read_text())
     reasoning = schema["properties"]["models"]["properties"]["reasoning"]["properties"]
     # The retrieval depth inputs (#1191) follow the same rule.
     for field, setting in (("chatMaxPriorTurnChars", "chat_max_prior_turn_chars"),
                            ("chatMaxTurns", "chat_max_turns"),
                            ("answerHitLimit", "answer_hit_limit"),
-                           ("retrieveMaxChunksPerDoc", "retrieve_max_chunks_per_doc")):
+                           ("retrieveMaxChunksPerDoc", "retrieve_max_chunks_per_doc"),
+                           ("imageTokenReserve", "llm_image_token_reserve")):
         bounds = {type(m).__name__: m for m in Settings.model_fields[setting].metadata}
         assert (reasoning[field]["minimum"], reasoning[field]["maximum"]) == (bounds["Ge"].ge, bounds["Le"].le)
 
@@ -719,6 +721,8 @@ def test_token_count_source_reaches_the_pod_as_settings_accept_it():
     ("models.reasoning.answerHitLimit", 0), ("models.reasoning.answerHitLimit", 33),
     ("models.reasoning.answerHitLimit", "16"),
     ("models.reasoning.retrieveMaxChunksPerDoc", 0), ("models.reasoning.retrieveMaxChunksPerDoc", 11),
+    ("models.reasoning.imageTokenReserve", 255), ("models.reasoning.imageTokenReserve", 65537),
+    ("models.reasoning.imageTokenReserve", "6144"),
     ("models.reasoning.followupAnchorEnabled", "true"),
     ("models.reasoning.tokenCountSource", "usage"), ("models.reasoning.tokenCountSource", ""),
     ("models.reasoning.tokenCountSource", "Tokenize"),

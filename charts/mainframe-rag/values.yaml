@@ -120,6 +120,10 @@ models:
     # --probe-image` passes; true also sets the Open WebUI image caps, the
     # banner and the proxy's 55m body cap on /api/chat/completions.
     # chatImagesEnabled: false
+    # Prompt tokens priced per pasted image (#1287; 256..65536); absent keeps
+    # the Settings default (shown, an estimate). Set the image_tokens the
+    # site's `probe_gateway.py --probe-image` measured, rounded up.
+    # imageTokenReserve: 6144
     # Empty model disables /v1/answer; when set, baseUrl is required.
     baseUrl: ""
     model: ""

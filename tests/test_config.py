@@ -673,6 +673,19 @@ def test_chat_images_are_off_by_default_and_one_env_line_turns_them_on(monkeypat
     assert Settings(_env_file=None).chat_images_enabled is False
 
 
+@pytest.mark.parametrize(("raw", "accepted"), [
+    ("255", False), ("256", True), ("6144", True), ("65536", True), ("65537", False), ("0", False)])
+def test_image_token_reserve_bounds_match_the_operator_key(monkeypatch, raw, accepted):
+    """LLM_IMAGE_TOKEN_RESERVE (#1287, operator key by maintainer decision
+    2026-11-17): 256..65536, the bounds the mapper and the chart schema use."""
+    monkeypatch.setenv("LLM_IMAGE_TOKEN_RESERVE", raw)
+    if accepted:
+        assert Settings(_env_file=None).llm_image_token_reserve == int(raw)
+    else:
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None)
+
+
 @pytest.mark.parametrize(("efforts", "default", "lowest"), [
     ("medium,high", "medium", "medium"),
     ("high,xhigh", "high", "high"),

@@ -23,6 +23,8 @@ REASONING_INTEGER_FIELDS = {
     # Retrieval depth (#1191): hits per answer, chunks kept per manual.
     "ANSWER_HIT_LIMIT": ("answerHitLimit", 1, 32),
     "RETRIEVE_MAX_CHUNKS_PER_DOC": ("retrieveMaxChunksPerDoc", 1, 10),
+    # Tokens priced per pasted image (#1287): config.Settings bounds.
+    "LLM_IMAGE_TOKEN_RESERVE": ("imageTokenReserve", 256, 65536),
 }
 REASONING_EFFORT_FIELDS = {
     "LLM_REASONING_EFFORT_SIMPLE": "reasoningEffortSimple",

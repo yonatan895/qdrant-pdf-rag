@@ -453,18 +453,20 @@ class Settings(BaseSettings):
     # is parsed but not accepted by default (decision 7: screenshots are PNG
     # or JPEG, and only a GIF's first frame is meaningful).
     chat_image_types: str = Field(default="png,jpeg,webp")
-    # The transcription call (decision 8): its effort, completion cap, the
-    # characters kept of its reply, and its own timeout (also bounded by half
-    # of what the request deadline has left). One attempt, never retried.
-    chat_image_read_effort: ReasoningEffort = Field(default="low")
+    # The transcription call (decision 8): its completion cap, the characters
+    # kept of its reply, and its own timeout (also bounded by half of what the
+    # request deadline has left). One attempt, never retried. Its effort is the
+    # quick depth's, the lowest LLM_REASONING_EFFORTS offers (maintainer
+    # decision 2026-11-17), so turning images on never conflicts with the list.
     chat_image_read_max_tokens: int = Field(default=4096, ge=256, le=32768)
     chat_image_read_max_chars: int = Field(default=4000, ge=500, le=20000)
     chat_image_read_timeout_s: float = Field(default=60.0, gt=0, le=600)
     # Tokens priced per image in the answer prompt (decision 14): counts are
     # text-only, so each image adds this reserve. The default is an estimate
     # (2048x2048 px at 28x28 px per token is about 5350 tokens, rounded up);
-    # a site sets the image_tokens its `--probe-image` measured.
-    llm_image_token_reserve: int = Field(default=6144, ge=0, le=65536)
+    # a site sets the image_tokens its `--probe-image` measured through the
+    # operator key LLM_IMAGE_TOKEN_RESERVE (256..65536; unset renders nothing).
+    llm_image_token_reserve: int = Field(default=6144, ge=256, le=65536)
     ui_enabled: bool = False
 
     # Console answer feedback (issue #780). Off by default: no record, no
@@ -643,10 +645,6 @@ class Settings(BaseSettings):
         for name in ("llm_reasoning_effort_simple", "llm_reasoning_effort_complex"):
             if getattr(self, name) not in efforts:
                 raise ValueError(f"{name.upper()} must be one of LLM_REASONING_EFFORTS")
-        # The image read effort (#1287) is checked only where it is used, so
-        # an image-free deployment's effort domain is unchanged.
-        if self.chat_images_enabled and self.chat_image_read_effort not in efforts:
-            raise ValueError("CHAT_IMAGE_READ_EFFORT must be one of LLM_REASONING_EFFORTS")
         return self
 
     @model_validator(mode="after")
@@ -689,7 +687,8 @@ class Settings(BaseSettings):
     def reasoning_depth_effort(self, depth: ReasoningDepth) -> ReasoningEffort | None:
         """The effort a symbolic depth resolves to (#1289): quick the lowest
         offered effort, thorough the highest, standard None, so the answer
-        core keeps the simple/complex default exactly as with no field."""
+        core keeps the simple/complex default exactly as with no field. The
+        image transcription call (#1287) also goes at the quick effort."""
         if depth == "standard":
             return None
         efforts = self.reasoning_efforts()

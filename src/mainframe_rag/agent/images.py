@@ -524,7 +524,7 @@ async def _read_one(
         async with asyncio.timeout(timeout):
             result = await chat(
                 image_read_messages(image),
-                reasoning_effort=settings.chat_image_read_effort,
+                reasoning_effort=settings.reasoning_depth_effort("quick"),
                 temperature=0.0,
                 max_tokens=settings.chat_image_read_max_tokens,
             )

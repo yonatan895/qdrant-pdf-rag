@@ -2127,8 +2127,9 @@ Nothing is uploaded or stored, and E1 adds no route. A paste in a saved chat sti
   answered without the image. `no-reply` with `finish_reason` `length` means raise
   `--max-tokens` (default 1024). The `/tokenize` columns never change the exit code.
   `image_tokens` is what one image costs. The agent prices each image at
-  `LLM_IMAGE_TOKEN_RESERVE` (default 6144, an estimate). That is agent configuration, not an
-  `airgap.env` key. If `image_tokens` exceeds it, keep images off and report the figure.
+  `LLM_IMAGE_TOKEN_RESERVE` (default 6144, an estimate; 256..65536). If `image_tokens` exceeds
+  it, set `LLM_IMAGE_TOKEN_RESERVE` in `airgap.env` to the measured figure, rounded up
+  (`models.reasoning.imageTokenReserve`; unset renders no variable), before turning images on.
 - **Turning it on.** Add one `airgap.env` line, `CHAT_IMAGES_ENABLED=true`
   (`models.reasoning.chatImagesEnabled`), and re-run `airgap:deploy`. It sets the agent's
   `CHAT_IMAGES_ENABLED`. In Open WebUI it sets the Pipe switch `RAG_CHAT_IMAGES`, the browser
@@ -2147,7 +2148,8 @@ Nothing is uploaded or stored, and E1 adds no route. A paste in a saved chat sti
   (53.3 MiB). Past it the user sees Open WebUI's generic error. The location repeats the
   allow-list check and every directive of `location /`. nginx spools such a body to the proxy's
   `/tmp` emptyDir (no size limit, node ephemeral storage) until the streamed answer ends, about
-  55 MiB per in-flight image turn at most.
+  55 MiB per in-flight image turn at most. The maintainer accepted this buffering on 2026-11-17
+  (no `proxy_request_buffering off`).
 - **Admin edits.** With `ENABLE_PERSISTENT_CONFIG=false` these settings are not stored. The
   environment applies at every start, and an admin-UI edit lasts only until the next restart
   (ADR-0007 C1).

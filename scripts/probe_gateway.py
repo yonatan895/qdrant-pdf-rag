@@ -60,10 +60,11 @@ pasted image through to the reasoning model, and what an image costs in
 prompt tokens. Each run draws a per-run 6-digit nonce, black on white, into a
 synthetic PNG of 400x130 pixels (`mainframe_rag.synthetic_png`, no real
 image) and asks the model to read it back with the application's own chat
-body (model, `CHAT_IMAGE_READ_EFFORT` through the effort transport, extra
-body, temperature 0, `--max-tokens`, default 1024). Three calls differ only in
-the image part: the image, the same text without it (the token difference)
-and the image at twice the scale; then `/tokenize` counts the first two
+body (model, the transcription effort, the lowest `LLM_REASONING_EFFORTS`
+offers, through the effort transport, extra body, temperature 0,
+`--max-tokens`, default 1024). Three calls differ only in the image part:
+the image, the same text without it (the token difference) and the image at
+twice the scale; then `/tokenize` counts the first two
 message lists, to learn whether the tokenize count source prices images.
 It prints one JSON row of numbers and flags (`status`, `finish_reason`,
 `digits_match`, `prompt_tokens_image`, `prompt_tokens_text`, `image_tokens`,
@@ -753,7 +754,7 @@ def _image_call(
     upstream text and never read."""
     assert settings.llm_base_url and settings.llm_model_reasoning
     body = chat_request_body(
-        settings.llm_model_reasoning, messages, settings.chat_image_read_effort, 0,
+        settings.llm_model_reasoning, messages, settings.reasoning_depth_effort("quick"), 0,
         stream=False, max_tokens=max_tokens, args=settings.model_request_args(),
     )
     result: dict[str, Any] = {"status": None, "finish_reason": None, "reply": None,
@@ -793,7 +794,7 @@ def _image_tokenize(settings: Settings, messages: list[dict[str, Any]], timeout:
         "model": settings.llm_model_reasoning, "messages": messages,
         "add_generation_prompt": True, "add_special_tokens": False,
     }
-    template_kwargs = settings.model_request_args().template_kwargs(settings.chat_image_read_effort)
+    template_kwargs = settings.model_request_args().template_kwargs(settings.reasoning_depth_effort("quick"))
     if template_kwargs:
         payload["chat_template_kwargs"] = template_kwargs
     try:
