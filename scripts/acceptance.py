@@ -14,6 +14,7 @@ from urllib.parse import quote
 from scripts.acceptance_evidence import (
     LIMIT,
     PRODUCERS,
+    ListWindowExceeded,
     NativeProducer,
     artifact_members,
     normalize_native,
@@ -672,6 +673,9 @@ def publish_acceptance(api: GitHub, number: int, approved_root: Path, *,
     except StaleBase as exc:
         result = {'all_prerequisites_met': False, 'verification_status': 'incomplete',
                   'error': 'candidate_base_not_current', 'markdown_report': exc.report()}
+    except ListWindowExceeded as exc:
+        result = {'all_prerequisites_met': False, 'verification_status': 'incomplete',
+                  'error': 'github_list_window_exceeded', 'markdown_report': str(exc) + '.'}
     except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError, zipfile.BadZipFile):
         result = {'all_prerequisites_met': False, 'verification_status': 'incomplete',
                   'error': 'acceptance_evidence_unavailable_or_changed'}
@@ -760,6 +764,11 @@ def main(argv: list[str] | None = None) -> int:
                           'verification_status': 'incomplete', 'error': 'candidate_base_not_current',
                           'base_sha': exc.base_sha, 'live_base_sha': exc.live_sha,
                           'fix': 'update the branch onto the live default-branch tip'}))
+        return 1
+    except ListWindowExceeded:
+        # A fixed code; the GitHub response itself is never echoed.
+        print(json.dumps({'schema_version': 2, 'all_prerequisites_met': False,
+                          'verification_status': 'incomplete', 'error': 'github_list_window_exceeded'}))
         return 1
     except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError, zipfile.BadZipFile):
         # Never print API errors, remote bodies or authentication diagnostics.

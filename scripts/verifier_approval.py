@@ -13,6 +13,7 @@ from typing import Any
 
 from scripts.acceptance_evidence import (
     LIMIT,
+    ListWindowExceeded,
     artifact_members,
     object_json,
     paginate,
@@ -90,10 +91,16 @@ def _namespace(kind: str) -> tuple[str, str]:
 
 def latest_decision(api: Any, candidate: dict, *, kind: str = 'implementation') -> dict | None:
     title, _ = _namespace(kind)
+    base = candidate['base_sha']
+    require(isinstance(base, str) and re.fullmatch('[a-f0-9]{40}', base) is not None)
     runs: dict[int, dict] = {}
+    # Only runs on main at the candidate base can validate (head_sha/head_branch
+    # are required below). Unfiltered, every PR comment run counted and the list
+    # outgrew GitHub's 1,000-result window (#1285). A newer decision recorded on
+    # a later main head means the base moved, which require_current_base refuses.
     for event in EVENTS:
-        for item in paginate(api.get, api.prefix + 'actions/workflows/' + WORKFLOW + f'/runs?event={event}',
-                             'workflow_runs'):
+        for item in paginate(api.get, api.prefix + 'actions/workflows/' + WORKFLOW
+                             + f'/runs?event={event}&branch=main&head_sha={base}', 'workflow_runs'):
             runs[item['id']] = item
     titles = {f"{title} PR {candidate['number']}: {decision}" for decision in ('approve', 'revoke')}
     # A comment run by anyone else is a skipped no-op and must not shadow the
@@ -239,6 +246,8 @@ def approved_catalogue(api: Any, candidate: dict, approved_bytes: bytes) -> tupl
     try:
         approval = validated_decision(api, candidate, {CATALOGUE: catalogue['candidate_sha256']},
                                       kind='catalogue-anchors', catalogue=catalogue)
+    except ListWindowExceeded:
+        raise
     except (KeyError, TypeError, ValueError, OSError):
         raise VerifierApprovalRequired([CATALOGUE], kind='catalogue-anchors') from None
     return observed, approval
@@ -255,6 +264,8 @@ def approved_inputs(api: Any, candidate: dict, expected: dict[str, str]) -> tupl
         raise VerifierApprovalRequired(changed)
     try:
         approval = validated_decision(api, candidate, observed)
+    except ListWindowExceeded:
+        raise
     except (KeyError, TypeError, ValueError, OSError):
         raise VerifierApprovalRequired(changed) from None
     return observed, approval

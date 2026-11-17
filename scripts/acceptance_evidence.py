@@ -59,6 +59,19 @@ def require(condition: bool) -> None:
         raise ValueError('native evidence identity or execution does not satisfy policy')
 
 
+# GitHub serves at most 1,000 results for a filtered list (workflow runs with
+# event, branch, head_sha, actor, status, created or check_suite_id); a later
+# page reports total_count 0 and no rows (#1285).
+API_WINDOW = 1000
+
+
+class ListWindowExceeded(ValueError):
+    """A list GitHub cannot serve completely; never a policy or identity verdict."""
+
+    def __init__(self) -> None:
+        super().__init__('list exceeds the GitHub 1000-result API window; evidence is incomplete')
+
+
 def unit_producers(source: bytes, digest: str) -> tuple[NativeProducer, ...]:
     """Select only a supported layout from independently approved workflow bytes."""
     require(hashlib.sha256(source).hexdigest() == digest)
@@ -302,6 +315,11 @@ def normalize_native(
             'unit_coverage': unit_coverage}
 
 
+def _past_window(total: int | None, rows: list[dict[str, Any]]) -> bool:
+    """Only an already failing total check at the window edge is named as the window."""
+    return total is not None and total > API_WINDOW and len(rows) == API_WINDOW
+
+
 def paginate(get, endpoint: str, key: str | None = None, *, identity_key: str = "id") -> list[dict[str, Any]]:
     """Read every native page; truncation, duplicate IDs and changing totals fail."""
     rows: list[dict[str, Any]] = []
@@ -318,6 +336,8 @@ def paginate(get, endpoint: str, key: str | None = None, *, identity_key: str = 
             require(type(count) is int and count >= 0)
             if total is None:
                 total = count
+            if count != total and _past_window(total, rows):
+                raise ListWindowExceeded()
             require(count == total)
         for row in batch:
             require(isinstance(row, dict))
@@ -327,6 +347,8 @@ def paginate(get, endpoint: str, key: str | None = None, *, identity_key: str = 
             ids.add(identity)
             rows.append(row)
         if len(batch) < 100:
+            if total is not None and len(rows) != total and _past_window(total, rows):
+                raise ListWindowExceeded()
             require(total is None or len(rows) == total)
             return rows
     raise ValueError('native API pagination limit reached; evidence is incomplete')

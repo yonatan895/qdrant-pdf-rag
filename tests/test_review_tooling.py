@@ -28,6 +28,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import urllib.parse
 import uuid
 import warnings
 import xml.etree.ElementTree as ET
@@ -55,6 +56,7 @@ from scripts.acceptance import (
 )
 from scripts.acceptance_evidence import (
     PRODUCERS,
+    ListWindowExceeded,
     artifact_members,
     normalize_native,
     paginate,
@@ -1942,6 +1944,31 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             with self.subTest(response=response), self.assertRaises(ValueError):
                 paginate(lambda endpoint, response=response: response, "jobs", "jobs")
 
+    def test_native_pagination_names_the_github_result_window_only_past_it(self):
+
+        # #1285: GitHub served ten full pages at total_count 1015, then page 11 as
+        # total_count 0 with no runs. That is the API window, not tampering.
+        def windowed(last_page):
+            def get(endpoint):
+                page = int(endpoint.rsplit("=", 1)[1])
+                if page <= 10:
+                    return {"total_count": 1015,
+                            "workflow_runs": [{"id": (page - 1) * 100 + n} for n in range(100)]}
+                return last_page
+            return get
+        for last_page in ({"total_count": 0, "workflow_runs": []},
+                          {"total_count": 1015, "workflow_runs": []}):
+            with self.subTest(last_page=last_page), \
+                 self.assertRaisesRegex(ListWindowExceeded, "list exceeds the GitHub 1000-result API window"):
+                paginate(windowed(last_page), "actions/runs?event=pull_request", "workflow_runs")
+        # Inside the window every identity, duplicate and total refusal stays the generic one.
+        for response in ({"total_count": 101, "jobs": [{"id": 1}]},
+                         {"total_count": 2, "jobs": [{"id": 1}, {"id": 1}]},
+                         {"total_count": 1000, "jobs": [{"id": 1}]}):
+            with self.subTest(response=response), self.assertRaises(ValueError) as refused:
+                paginate(lambda endpoint, response=response: response, "jobs", "jobs")
+            self.assertNotIsInstance(refused.exception, ListWindowExceeded)
+
     def test_artifact_tampering_paths_duplicates_and_symlinks_are_rejected(self):
         for name, symlink, duplicate in (("../evidence.json", False, False), ("evidence.json", True, False),
                                         ("evidence.json", False, True)):
@@ -2651,6 +2678,43 @@ class ReviewTemplateTests(unittest.TestCase):
                 api.write(endpoint, {'body': 'template'}, method=method)
             run.assert_not_called()
 
+def windowed_decision_runs(api, extra):
+    """GitHub's filtered workflow-run list: filters apply, at most 1,000 results are served.
+
+    Past the window GitHub answers with total_count 0 and no runs (#1285).
+    """
+    store = [api.run, *extra]
+    api.requested = []
+    original = api.get
+
+    def get(endpoint):
+        if 'actions/workflows/verifier-update.yml/runs?' in endpoint:
+            api.requested.append(endpoint)
+            query = dict(urllib.parse.parse_qsl(endpoint.split('?', 1)[1]))
+            rows = sorted((r for r in store if r['event'] == query['event']
+                           and r['head_sha'] == query.get('head_sha', r['head_sha'])
+                           and r['head_branch'] == query.get('branch', r['head_branch'])),
+                          key=lambda r: -r['id'])
+            page, size = int(query['page']), int(query['per_page'])
+            if (page - 1) * size >= 1000:
+                return {'total_count': 0, 'workflow_runs': []}
+            return {'total_count': len(rows), 'workflow_runs': copy.deepcopy(rows[(page - 1) * size:page * size])}
+        match = re.search(r'actions/runs/([0-9]+)$', endpoint)
+        if match and int(match[1]) != api.run['id']:
+            return copy.deepcopy(next(r for r in store if r['id'] == int(match[1])))
+        return original(endpoint)
+    api.get = get
+    return api
+
+
+def skipped_comment_runs(api, count, *, first_id=1000, head_sha=None):
+    """Unrelated skipped comment runs, each newer than the decision, on other main heads by default."""
+    return [{**api.run, 'id': first_id + number, 'event': 'issue_comment',
+             'display_title': 'Verifier comment ignored', 'conclusion': 'skipped',
+             'head_sha': head_sha or f'{number + 1:040x}',
+             'actor': {'login': 'contributor', 'type': 'User'}} for number in range(count)]
+
+
 class TestVerifierUpdateDecision(unittest.TestCase):
     """Trust changes must bind real native data, without relaxing test outcomes."""
 
@@ -3122,6 +3186,67 @@ class TestVerifierUpdateDecision(unittest.TestCase):
         api.get = lambda e: api.runs[1] if e.endswith('/950') else original_get(e)
         self.assertEqual(latest_decision(api, api.candidate)['id'], 950)
 
+    def test_decision_lookup_is_bounded_to_the_candidate_base_past_1000_comment_runs(self):
+
+        # #1285: 1015 skipped comment runs on earlier main heads made the unfiltered
+        # list exceed GitHub's window, so no decision could validate on any PR.
+        api = windowed_decision_runs(self.comment_fixture(), skipped_comment_runs(self.fixture(), 1015))
+        inputs = api.record['inputs']
+        self.assertEqual(validated_decision(api, api.candidate, inputs),
+                         {'run_id': 900, 'run_attempt': 1, 'inputs': inputs})
+        self.assertEqual(approved_inputs(api, api.candidate, {k: '0' * 64 for k in inputs}),
+                         (inputs, {'run_id': 900, 'run_attempt': 1, 'inputs': inputs}))
+        self.assertTrue(api.requested)
+        prefix = 'repos/synthetic/repository/actions/workflows/verifier-update.yml/runs?event='
+        for endpoint in api.requested:
+            self.assertRegex(endpoint, '^' + re.escape(prefix) + '(workflow_dispatch|issue_comment)&branch=main&head_sha='
+                             + 'b' * 40 + '&per_page=100&page=1$')
+
+    def test_bounded_lookup_keeps_newer_revoke_and_ignores_other_main_heads(self):
+
+        maintainer = {'login': 'yonatan895', 'type': 'User'}
+        # A maintainer approval recorded on another main head never reaches this candidate.
+        api = self.comment_fixture()
+        other = {**api.run, 'id': 2200, 'head_sha': 'd' * 40, 'actor': maintainer}
+        windowed_decision_runs(api, [*skipped_comment_runs(api, 1015), other])
+        self.assertEqual(latest_decision(api, api.candidate)['id'], 900)
+        self.assertEqual(validated_decision(api, api.candidate, api.record['inputs'])['run_id'], 900)
+        # A newer revoke, pending or failed decision on this base still never falls back.
+        for status, conclusion, decision in [('completed', 'success', 'revoke'),
+                                             ('in_progress', None, 'approve'),
+                                             ('completed', 'failure', 'approve')]:
+            with self.subTest(status=status, decision=decision):
+                api = self.comment_fixture()
+                newer = {**api.run, 'id': 2100, 'status': status, 'conclusion': conclusion,
+                         'display_title': 'Verifier PR 3: ' + decision, 'actor': maintainer}
+                windowed_decision_runs(api, [*skipped_comment_runs(api, 1015), newer])
+                self.assertEqual(latest_decision(api, api.candidate)['id'], 2100)
+                with self.assertRaises(ValueError):
+                    validated_decision(api, api.candidate, api.record['inputs'])
+                with self.assertRaises(VerifierApprovalRequired):
+                    approved_inputs(api, api.candidate, {k: '0' * 64 for k in api.record['inputs']})
+
+    def test_decision_list_past_the_window_on_one_base_is_named_not_a_verifier_refusal(self):
+
+        # Residual bound: more than 1000 comment runs while main stays on one head.
+        api = self.comment_fixture()
+        windowed_decision_runs(api, skipped_comment_runs(api, 1015, head_sha='b' * 40))
+        with self.assertRaisesRegex(ListWindowExceeded, '1000-result API window'):
+            approved_inputs(api, api.candidate, {k: '0' * 64 for k in api.record['inputs']})
+        with self.assertRaises(ListWindowExceeded):
+            recheck_current(api, {'candidate': api.candidate, 'runs': {},
+                                  'verifier_approval': {'run_id': 900, 'run_attempt': 1,
+                                                        'inputs': api.record['inputs']}})
+        api = self.fixture()
+        with patch('scripts.acceptance.collect_acceptance', side_effect=ListWindowExceeded()):
+            result = publish_acceptance(api, 3, pathlib.Path.cwd())
+        self.assertEqual(result['error'], 'github_list_window_exceeded')
+        self.assertFalse(result['all_prerequisites_met'])
+        self.assertEqual(api.writes[-1]['conclusion'], 'failure')
+        summary = api.writes[-1]['output']['summary']
+        self.assertIn('list exceeds the GitHub 1000-result API window', summary)
+        self.assertNotIn('Verifier files differ', summary)
+
     def test_comment_grammar_is_strict(self):
 
         sha = 'ab12cd3'
@@ -3540,6 +3665,18 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
                     b'{malformed', b'[]'):
             with self.subTest(raw=raw[:80]), self.assertRaises(ValueError):
                 allowed_anchor_change(approved, raw)
+
+    def test_anchor_decision_lookup_is_bounded_to_the_candidate_base(self):
+
+        api, approved, adopted, identity = self.fixture()
+        windowed_decision_runs(api, skipped_comment_runs(api, 1015))
+        self.assertEqual(approved_catalogue(api, api.candidate, approved), (adopted, identity))
+        self.assertTrue(api.requested)
+        self.assertTrue(all('&branch=main&head_sha=' + 'b' * 40 + '&' in e for e in api.requested))
+        api, approved, _, _ = self.fixture()
+        windowed_decision_runs(api, skipped_comment_runs(api, 1015, head_sha='b' * 40))
+        with self.assertRaises(ListWindowExceeded):
+            approved_catalogue(api, api.candidate, approved)
 
     def test_distinct_anchor_decision_approves_exact_bytes_but_ordinary_approval_stays_excluded(self):
 
