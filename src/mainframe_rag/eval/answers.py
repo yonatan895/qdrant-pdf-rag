@@ -1517,7 +1517,8 @@ COVERAGE_STATES = ("all", "some", "none", "not_applicable", "unknown")
 
 def _sources_page(client: Any, cursor: str | None) -> tuple[dict[str, Any] | None, str | None]:
     """One validated `/v1/sources` page, or a fixed reason label. Only the
-    build id, the doc ids and the cursor are read."""
+    build id, the doc ids, their titles and the cursor are read. A title is
+    optional: an entry without a string title is kept by doc id alone."""
     params: dict[str, Any] = {"limit": _SOURCES_PAGE_LIMIT}
     if cursor is not None:
         params["cursor"] = cursor
@@ -1540,6 +1541,7 @@ def _sources_page(client: Any, cursor: str | None) -> tuple[dict[str, Any] | Non
     ):
         return None, "malformed"
     return {"build_id": body["build_id"], "doc_ids": [s["doc_id"] for s in sources],
+            "titles": [(s["doc_id"], s["title"]) for s in sources if isinstance(s.get("title"), str)],
             "next_cursor": body.get("next_cursor")}, None
 
 
@@ -1550,8 +1552,11 @@ def fetch_coverage(client: Any) -> dict[str, Any]:
     build published without a catalog), an agent older than the endpoint, a
     transport error, a malformed page, a build change between pages or the
     page cap all give "unknown" with a fixed `reason`: coverage is never a
-    failure and never touches a verdict or the exit code."""
+    failure and never touches a verdict or the exit code. `titles` holds
+    (doc id, title) pairs for the corpus coverage check's matching
+    (eval/coverage.py); no report carries it."""
     doc_ids: set[str] = set()
+    titles: set[tuple[str, str]] = set()
     build_id: str | None = None
     cursor: str | None = None
     pages = 0
@@ -1567,15 +1572,17 @@ def fetch_coverage(client: Any) -> dict[str, Any]:
         elif page["build_id"] != build_id:
             return _coverage("unknown", "build_changed", build_id, pages)
         doc_ids.update(page["doc_ids"])
+        titles.update(page["titles"])
         cursor = page["next_cursor"]
         if cursor is None:
-            return _coverage("known", None, build_id, pages, frozenset(doc_ids))
+            return _coverage("known", None, build_id, pages, frozenset(doc_ids), frozenset(titles))
 
 
 def _coverage(status: str, reason: str | None, build_id: str | None, pages: int,
-              doc_ids: frozenset[str] = frozenset()) -> dict[str, Any]:
+              doc_ids: frozenset[str] = frozenset(),
+              titles: frozenset[tuple[str, str]] = frozenset()) -> dict[str, Any]:
     return {"status": status, "reason": reason, "build_id": build_id, "pages": pages,
-            "doc_ids": doc_ids}
+            "doc_ids": doc_ids, "titles": titles}
 
 
 def apply_coverage(row: dict[str, Any], entry: dict[str, Any], coverage: dict[str, Any]) -> None:
