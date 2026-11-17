@@ -2079,6 +2079,52 @@ def test_sessions_refuse_the_protected_sets_before_any_read(tmp_path, monkeypatc
     assert status == 2 and "FAIL:" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(("content", "message"), [
+    (json.dumps({"record": "manifest", "set_id": "x"}).encode() + b"\n",
+     "FAIL: release-set records are not a dev dataset"),
+    (b"\n", "FAIL: sessions file has no sessions"),
+    ((json.dumps(_session(id="A")) + "\n" + json.dumps(_session(id="A")) + "\n").encode(),
+     "FAIL: session line 2: missing or duplicate id"),
+    (json.dumps(_session(expected_doc_ids="SA22-0000-00")).encode() + b"\n",
+     "FAIL: session line 1: expected_doc_ids"),
+    (b"\xff\xfe\n", "FAIL: session file is not UTF-8"),
+    (None, "FAIL: dev-only dataset is unreadable"),
+], ids=["release-record", "empty", "duplicate-id", "doc-ids", "not-utf8", "unreadable"])
+def test_a_sessions_file_that_is_not_dev_sessions_is_refused(tmp_path, capsys, content, message):
+    """A renamed release-set copy (by content), an empty file, duplicate ids,
+    a malformed doc-id list, undecodable bytes and an unreadable path (a
+    directory): exit 2 before any request, a fixed message with no text."""
+    from mainframe_rag.eval import answers
+
+    path = tmp_path / "sessions.jsonl"
+    if content is None:
+        path.mkdir()
+    else:
+        path.write_bytes(content)
+    status = answers.main(["--agent-url", "http://deployed-agent:8087", "--sessions", str(path),
+                           *SESSION_ARGS])
+    err = capsys.readouterr().err
+    assert status == 2 and err.strip().splitlines()[-1] == message
+    assert "IEA500I" not in err and "rejected command" not in err
+
+
+def test_a_malformed_hit_makes_final_hits_unknown(site_eval):
+    import httpx2
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": []})
+        return _sse(_answer_final(supplied_evidence=[_excerpt()], evidence_omitted=0,
+                                  hits=[{**_hit(), "page_start": "5"}]))
+
+    status, report, _, _ = site_eval(respond, [_entry()], ["--stream"])
+    row = report["results"][0]
+    assert status == 0 and row["verdict"] == "pass"
+    assert row["final_hits"] is None and row["supplied_evidence_meta"] is not None
+
+
 @pytest.mark.parametrize("extra", [
     ["--stream"], [*SESSION_ARGS, "--golden", "x.jsonl"], [*SESSION_ARGS, "--all"],
     [*SESSION_ARGS, "--subset", "8"], [*TWO_TURN],
