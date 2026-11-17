@@ -763,8 +763,17 @@ class PackedExcerpt:
 # Response bounds for the supplied-evidence projection (issue #635). The
 # slice is already capped by the prompt window; these are hard wire limits
 # on top, applied per entry then in total, and a clipped entry says so.
+# The total is max(48000, 6000 x answer_hit_limit) (maintainer decision
+# 2026-11-17, #1191): 48,000 up to 8 hits, and at 16 hits every excerpt at
+# the 4,000-character packing cap keeps its text.
 SUPPLIED_EXCERPT_MAX_CHARS = 8000
 SUPPLIED_EVIDENCE_MAX_CHARS = 48000
+SUPPLIED_EVIDENCE_CHARS_PER_HIT = 6000
+
+
+def supplied_evidence_max_chars(hit_limit: int) -> int:
+    """The total supplied-evidence text bound for an answer hit limit."""
+    return max(SUPPLIED_EVIDENCE_MAX_CHARS, SUPPLIED_EVIDENCE_CHARS_PER_HIT * hit_limit)
 
 
 class SuppliedExcerpt(BaseModel):
@@ -802,7 +811,9 @@ class SuppliedExcerpt(BaseModel):
     text: str
 
 
-def _supplied_excerpts(packed: list[PackedExcerpt]) -> tuple[SuppliedExcerpt, ...]:
+def _supplied_excerpts(
+    packed: list[PackedExcerpt], max_total_chars: int = SUPPLIED_EVIDENCE_MAX_CHARS
+) -> tuple[SuppliedExcerpt, ...]:
     """The bounded projection of the final packed list (after every trim),
     the same list the prompt and manifest derive from: retrieved-but-omitted
     chunks and conversation history never appear here."""
@@ -810,7 +821,7 @@ def _supplied_excerpts(packed: list[PackedExcerpt]) -> tuple[SuppliedExcerpt, ..
     for p in packed:
         cite_counts[p.hit.cite] = cite_counts.get(p.hit.cite, 0) + 1
     out: list[SuppliedExcerpt] = []
-    budget = SUPPLIED_EVIDENCE_MAX_CHARS
+    budget = max_total_chars
     for p in packed:
         hit = p.hit
         source = hit.text.strip()
@@ -1588,7 +1599,12 @@ def _build_prompt(
         messages=messages if tokenizer is not None else candidate(),
         evidence=_prompt_evidence(packed, len(hits)),
         budget_verified=budget_verified,
-        supplied=_supplied_excerpts(packed),
+        supplied=_supplied_excerpts(
+            packed,
+            SUPPLIED_EVIDENCE_MAX_CHARS
+            if settings is None
+            else supplied_evidence_max_chars(settings.answer_hit_limit),
+        ),
         prompt_tokens=prompt_tokens,
         message_omitted_chars=message_omitted,
     )

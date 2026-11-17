@@ -159,6 +159,88 @@ def test_chat_stream_is_judged_from_its_finish_chunk(site_eval):
     assert report["metrics"]["measurement"]["hardware_independent"]["truncation"]["n"] == 1
 
 
+_DEPTH_SUPPLIED = [
+    {**_supplied(), "index": 1},
+    {**_supplied(doc_id="SA22-0001-00"), "index": 2},
+    {**_supplied(), "index": 9},
+]
+
+
+@pytest.mark.parametrize("endpoint,transport", [("answer", "json"), ("answer", "sse"), ("chat", "sse")])
+@pytest.mark.parametrize("supplied,counts", [
+    (_DEPTH_SUPPLIED, (3, 2)),
+    ([], (0, 0)),
+    (None, (None, None)),  # an agent that does not send the field: unknown
+    ([{"index": 1, "citation": CITE}], (None, None)),  # no doc id: unknown, not a count
+])
+def test_rows_count_supplied_excerpts_and_their_manuals(site_eval, endpoint, transport, supplied,
+                                                        counts):
+    """Issue #1191: each answer row carries how many excerpts the agent
+    supplied to the model and from how many distinct manuals, read off the
+    response's `supplied_evidence` (counts only), on both endpoints."""
+    import httpx2
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": [{"doc_id": "SA22-0000-00", "cite": CITE}]})
+        if endpoint == "chat":
+            if supplied is None:
+                # Strip the field from the agent's own finish chunk.
+                return _sse(chat_stream("IEA500I reports a rejected command.", supplied=[])
+                            .replace(b', "supplied_evidence": []', b""))
+            return _sse(chat_stream("IEA500I reports a rejected command.", supplied=supplied))
+        extra = {} if supplied is None else {"supplied_evidence": supplied}
+        if transport == "sse":
+            return _sse(_answer_final(**extra))
+        return httpx2.Response(200, json={
+            "answer": "IEA500I reports a rejected command.", "citations": [CITE],
+            "citations_inferred": False, "inferred_indices": [], "verification_state": "accepted",
+            "script": None, "script_review_required": False, "request_id": "r1", **extra})
+
+    args = ["--endpoint", endpoint] + (["--stream"] if transport == "sse" else [])
+    _status, report, export, _ = site_eval(respond, [_entry()], args)
+    row = report["results"][0]
+    if endpoint == "chat" and (supplied is None or (supplied and "doc_id" not in supplied[0])):
+        assert row["verdict"] == "error"  # the chat body is parsed over the supplied doc ids
+    else:
+        assert row["verdict"] in ("pass", "fail"), row["failures"]
+    assert (row.get("supplied_n"), row.get("supplied_doc_n")) == counts
+    [exported] = json.loads(export)["rows"]
+    assert (exported["supplied_n"], exported["supplied_doc_n"]) == counts
+
+
+@pytest.mark.parametrize("extra,limit", [((), 8), (("--hit-limit", "16"), 16)])
+def test_hit_limit_sets_the_sibling_pool_depth_and_is_recorded(site_eval, extra, limit):
+    """Issue #1191: the sibling /v1/search pool (gold_retrieved, citation
+    recall) asks for the deployed ANSWER_HIT_LIMIT the operator declares;
+    default 8, and an undeclared run's params are unchanged."""
+    import httpx2
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": [{"doc_id": "SA22-0000-00", "cite": CITE}]})
+        return _sse(_answer_final())
+
+    status, report, export, calls = site_eval(respond, [_entry()], ["--stream", *extra])
+    assert status == 0
+    [search] = [c for c in calls if c.url.path == "/v1/search"]
+    assert json.loads(search.content)["limit"] == limit
+    for params in (report["params"], json.loads(export)["params"]):
+        assert params.get("hit_limit") == (limit if extra else None)
+        assert ("hit_limit" in params) == bool(extra)
+
+
+@pytest.mark.parametrize("bad", ["0", "33", "16.0", "x"])
+def test_hit_limit_takes_the_agent_bounds(site_eval, bad):
+    with pytest.raises(SystemExit) as exc:
+        site_eval(lambda r: pytest.fail("no request"), [_entry()], ["--hit-limit", bad])
+    assert exc.value.code == 2
+
+
 def test_chat_zero_hits_stream_is_the_zero_hits_path(site_eval):
     import httpx2
 
@@ -436,7 +518,7 @@ EXPORT_ROW_KEYS = {
     "abstention_zeroed", "prompt_tokens", "completion_tokens", "reasoning_tokens", "total_tokens",
     "elapsed_ms", "ttft_ms", "llm_ms", "client_first_token_ms", "decode_tps", "gold_retrieved",
     "expected_doc_ids", "hit_doc_ids", "cited_doc_ids", "citation_precision", "citation_recall",
-    "coverage", "expected_served",
+    "coverage", "expected_served", "supplied_n", "supplied_doc_n",
 }
 
 

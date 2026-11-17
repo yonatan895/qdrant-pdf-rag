@@ -934,6 +934,131 @@ def test_projection_equals_shipped_slice_non_prefix_and_omits_unsupplied():
     assert omitted.isdisjoint(e.index for e in prepared.supplied)
 
 
+def _depth_hits(n: int, per_doc: int, chars: int) -> list[SearchHit]:
+    """`n` narrative hits of `chars` characters, `per_doc` per manual, each
+    with its own shape-valid cite (page = label)."""
+    hits = []
+    for i in range(1, n + 1):
+        doc = f"SA22-{(i - 1) // per_doc:04d}-00"
+        sentence = f"Synthetic step {i} applies to the operator procedure. "
+        text = (sentence * (chars // len(sentence) + 1))[:chars].strip()
+        hits.append(_hit(text, chunk_type="narrative", index=f"c{i}", page=str(i)).model_copy(
+            update={"doc_id": doc, "cite": f"{doc} Synthetic Reference, H, p. 1-{i}"}))
+    return hits
+
+
+@pytest.mark.parametrize("complexity", ["simple", "complex"])
+@pytest.mark.parametrize("chat", [False, True])
+def test_depth_16_by_5_packs_every_excerpt_under_the_default_window(chat, complexity):
+    """Issue #1191: at ANSWER_HIT_LIMIT=16 and RETRIEVE_MAX_CHUNKS_PER_DOC=5
+    under the default 32,768-token window and reserves, sixteen excerpts at
+    the 4,000-character cap (the worst case) are all packed whole, in label
+    order 1..16, inside the verify limit; a two-digit label is cited like any
+    other. The supplied-evidence projection keeps every entry with its whole
+    text: the total bound scales with the hit limit (maintainer decision
+    2026-11-17), so no cited excerpt at 16 hits loses its text."""
+    from mainframe_rag.config import Settings
+
+    settings = Settings(**settings_kw(answer_hit_limit=16, retrieve_max_chunks_per_doc=5))
+    assert settings.llm_max_model_len == 32768
+    chunk = settings.prompt_max_chunk_chars
+    hits = _depth_hits(16, settings.retrieve_max_chunks_per_doc, chunk)
+    kwargs = {
+        "max_chunk_chars": chunk, "tokenizer": FallbackTokenizer(), "settings": settings,
+        "complexity": complexity,
+        "max_chunk_chars_narrative": (
+            settings.prompt_max_chunk_chars_complex if complexity == "complex" else None),
+    }
+    if chat:
+        history = [ChatMessage(role=role, content="p" * settings.chat_max_prior_turn_chars)
+                   for role in ("user", "assistant") * 2]
+        prepared = build_chat_messages(
+            [*history, ChatMessage(role="user", content="What does the operator do?")],
+            hits, **kwargs)
+    else:
+        prepared = build_messages("What does the operator do?", hits, **kwargs)
+    verify_limit = (settings.llm_max_model_len - settings.llm_reserved_output_tokens
+                    - settings.llm_thinking_reserve_tokens_simple - settings.llm_token_safety_margin)
+    assert prepared.prompt_tokens is not None and prepared.prompt_tokens <= verify_limit
+    assert [e.prompt_index for e in prepared.evidence.entries] == list(range(1, 17))
+    assert not any(e.truncated for e in prepared.evidence.entries)
+    assert prepared.evidence.omitted_indices == ()
+    assert all(f"[{i}]" in prepared.messages[-1].content for i in (1, 9, 16))
+    parsed = parse_answer(
+        f"Run the procedure [16].\n\nCitations:\n- {hits[15].cite}\n- {hits[8].cite}\n",
+        prepared.evidence)
+    assert parsed.citations == [hits[15].cite, hits[8].cite]
+    supplied = prepared.supplied
+    assert [s.index for s in supplied] == list(range(1, 17))
+    assert all(len(s.text) == chunk and not s.text_clipped for s in supplied)
+    assert sum(len(s.text) for s in supplied) == 16 * chunk == 64000
+
+
+@pytest.mark.parametrize(("hit_limit", "total"), [
+    (1, 48000), (8, 48000), (9, 54000), (16, 96000), (32, 192000)])
+def test_supplied_evidence_total_scales_with_the_hit_limit(hit_limit, total):
+    """Maintainer decision 2026-11-17 (#1191): the supplied-evidence text
+    total is max(48000, 6000 x answer_hit_limit); 48,000 up to 8 hits."""
+    from mainframe_rag.agent.answer import supplied_evidence_max_chars
+
+    assert supplied_evidence_max_chars(hit_limit) == total
+
+
+@pytest.mark.parametrize(("hit_limit", "kept_whole"), [(8, 6), (16, 12)])
+def test_the_projection_total_follows_the_bound_hit_limit(hit_limit, kept_whole):
+    """The bound comes from the request's Settings: with 8,000-character
+    excerpts, 48,000 keeps six whole at a hit limit of 8 and 96,000 keeps
+    twelve at 16; past the total every entry stays, its text empty and
+    flagged."""
+    from mainframe_rag.agent.answer import SUPPLIED_EXCERPT_MAX_CHARS
+    from mainframe_rag.config import Settings
+
+    settings = Settings(**settings_kw(answer_hit_limit=hit_limit, llm_max_model_len=131072))
+    hits = _depth_hits(16, 5, SUPPLIED_EXCERPT_MAX_CHARS)
+    prepared = build_messages("What does the operator do?", hits, tokenizer=FallbackTokenizer(),
+                              settings=settings, max_chunk_chars=SUPPLIED_EXCERPT_MAX_CHARS)
+    supplied = prepared.supplied
+    assert [s.index for s in supplied] == list(range(1, 17))
+    assert all(len(s.text) == SUPPLIED_EXCERPT_MAX_CHARS and not s.text_clipped
+               for s in supplied[:kept_whole])
+    assert all(s.text == "" and s.text_clipped for s in supplied[kept_whole:])
+
+
+class _DenseTokenizer:
+    """A server count of 2.5 characters per token: far denser than the
+    estimator prices this text, so the verification loop must trim."""
+
+    remote_confirmed = True
+
+    def count_messages(self, messages, *, reasoning_effort=None) -> int:
+        return int(sum(len(m.content) for m in messages) / 2.5)
+
+
+@pytest.mark.parametrize("chat", [False, True])
+def test_depth_16_trims_the_tail_when_the_server_counts_denser(chat):
+    """Issue #1191: when the served tokenizer prices 16 capped excerpts above
+    the default window, verification trims or drops from the tail only: the
+    prompt fits, the kept labels stay contiguous from 1 and every dropped
+    label is listed as omitted; no budget refusal."""
+    from mainframe_rag.config import Settings
+
+    settings = Settings(**settings_kw(answer_hit_limit=16, retrieve_max_chunks_per_doc=5))
+    chunk = settings.prompt_max_chunk_chars
+    hits = _depth_hits(16, settings.retrieve_max_chunks_per_doc, chunk)
+    kwargs = {"max_chunk_chars": chunk, "tokenizer": _DenseTokenizer(), "settings": settings}
+    question = "What does the operator do?"
+    prepared = (build_chat_messages([ChatMessage(role="user", content=question)], hits, **kwargs)
+                if chat else build_messages(question, hits, **kwargs))
+    verify_limit = (settings.llm_max_model_len - settings.llm_reserved_output_tokens
+                    - settings.llm_thinking_reserve_tokens_simple - settings.llm_token_safety_margin)
+    assert prepared.budget_verified is True
+    assert prepared.prompt_tokens is not None and prepared.prompt_tokens <= verify_limit
+    kept = [e.prompt_index for e in prepared.evidence.entries]
+    assert 8 <= len(kept) < 16
+    assert kept == list(range(1, len(kept) + 1))
+    assert prepared.evidence.omitted_indices == tuple(range(len(kept) + 1, 17))
+
+
 def test_projection_text_is_clipped_and_flagged_at_wire_bound():
     from mainframe_rag.agent.answer import SUPPLIED_EXCERPT_MAX_CHARS
 

@@ -329,6 +329,13 @@ class Settings(BaseSettings):
     rrf_sparse_boost_table: float = Field(default=1.0, gt=0.0, le=10.0)
     retrieve_max_chunks_per_page: int = Field(default=1, ge=1, le=10)
     retrieve_max_chunks_per_doc: int = Field(default=3, ge=1, le=10)
+    # Hits one answer retrieval returns (#1191; was the fixed 8): /v1/answer,
+    # /v1/chat*, the console and an anchored follow-up's fused legs. /v1/search
+    # keeps its caller's `limit`. 32 caps it below /v1/search's 40 and keeps the
+    # packed evidence within a 65,536-token window at the 4,000-character
+    # excerpt cap; the retrieval pool (40 per leg, or `rerank_candidates`) and
+    # the per-page/per-doc caps may return fewer.
+    answer_hit_limit: int = Field(default=8, ge=1, le=32)
 
     # Reasoning effort control: directs the reasoning model to think more thoroughly
     # on complex operational, diagnostic, and comparative inquiries while conserving

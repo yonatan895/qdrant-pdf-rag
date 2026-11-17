@@ -1091,6 +1091,8 @@ readers:
 | `chat_followup_anchor_enabled` | `false` | antecedent-anchored follow-up retrieval (`plan_search`, #1268); operator input `CHAT_FOLLOWUP_ANCHOR_ENABLED`, exclusive with condensation |
 | `chat_max_body_chars` | 131072 (422, message states the limit) | request-size guard for `/v1/answer`, `/v1/chat` and `/ui` (abuse protection; shared `chat_body_chars` helper); the Pipe valve `MAX_BODY_CHARS` must match |
 | `chat_max_turns` / `chat_max_prior_turn_chars` | 10 / 1000 | chat history packing caps; operator inputs `CHAT_MAX_TURNS` / `CHAT_MAX_PRIOR_TURN_CHARS` (#1268; unset renders no variable) |
+| `answer_hit_limit` | 8 (1..32) | hits one answer retrieval returns: `/v1/answer`, `/v1/chat*`, the console and the fused cut of an anchored follow-up's two legs (`AgentResources.retrieve`, `_fuse_by_rank`); `/v1/search` and MCP search keep the caller's `limit` (default 8, max 40). Operator input `ANSWER_HIT_LIMIT` (#1191; unset renders no variable). The pool (40 per leg, or `rerank_candidates` with rerank on) and the per-page/per-doc caps may return fewer. Every hit is offered to packing: under the default window and reserves, the estimator fits 16 excerpts at the 4000-character cap (above the 3500-character ingest section cap), and a denser server count trims or drops from the tail; 32 need about a 65,536-token window. The supplied-evidence text total scales as `max(48000, 6000 x answer_hit_limit)`, so excerpts at the 4000-character cap keep their text ([supplied evidence](#supplied-evidence-projection-issue-635)) |
+| `retrieve_max_chunks_per_page` / `retrieve_max_chunks_per_doc` | 1 / 3 (1..10 each) | diversity caps in `diversify_hits`, for every retrieval (`/v1/search` and MCP included); a capped hit is backfilled only when the pool runs short. Operator input `RETRIEVE_MAX_CHUNKS_PER_DOC` (#1191; unset renders no variable) |
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
 | `llm_base_url` / `llm_model_reasoning` / `llm_api_key` | unset (answer stays disabled; key unset = keyless) | per-request assertion, LLM client, tokenizer |
 | `answer_timeout_s` | 300.0 | reasoning client wait per model I/O (not a total on a stream; a buffered caller still gets a total), expiry is `504 model_timeout`; no transport retries, explicit fallback policy below; budgets in §6 |
@@ -1352,9 +1354,15 @@ chunk text, from #632), `truncated_start`/`truncated_end`, `text_clipped`, and
 (the leading/trailing cut markers are not part of it). The location is the
 recorded chunk span, not finer attribution. `chunk_id` is not exposed.
 
-Bounds: `text` is clipped at 8000 chars per entry and 48000 chars in total
-(`text_clipped: true`; the text is then a prefix of the shipped slice); the
-rest is bounded by the prompt window. Raw excerpt text is response-only: never
+Bounds: `text` is clipped at 8000 chars per entry and at
+`max(48000, 6000 x answer_hit_limit)` chars in total (48000 up to 8 hits,
+96000 at 16; maintainer decision 2026-11-17, #1191) (`text_clipped: true`;
+the text is then a prefix of the shipped slice); the rest is bounded by the
+prompt window. Every supplied entry is listed, and an entry past the total
+keeps its metadata with empty `text` (the Open WebUI Pipe then shows an empty
+document for that cited source). With excerpts at the default 4000-character
+packing cap every entry keeps its text at any hit limit; only a
+`prompt_max_chunk_chars` above 6000 can reach the total. Raw excerpt text is response-only: never
 logged, in metrics or spans. The console shows it in an expandable view for
 the current response only, held in memory (never in localStorage, history or
 the markdown export, gone on reload); earlier turns show an explicit
@@ -1802,7 +1810,9 @@ passthrough, the platform-gateway shape for the estimator-only lane (#1193);
 The Helm operator input `CHAT_CONDENSE_ENABLED` maps to
 `models.reasoning.condenseEnabled`; both default to false. `CHAT_MAX_TURNS` and
 `CHAT_MAX_PRIOR_TURN_CHARS` map to `models.reasoning.chatMaxTurns` and
-`chatMaxPriorTurnChars` and render only when set (#1268). Explicit local
+`chatMaxPriorTurnChars` and render only when set (#1268); `ANSWER_HIT_LIMIT` and
+`RETRIEVE_MAX_CHUNKS_PER_DOC` map to `answerHitLimit` and
+`retrieveMaxChunksPerDoc` the same way (#1191). Explicit local
 follow-up acceptance is described in [the real-corpus runbook](local-real-corpus.md).
 
 

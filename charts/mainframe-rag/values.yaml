@@ -105,6 +105,11 @@ models:
     # Antecedent-anchored follow-up retrieval (#1268); absent keeps it off.
     # Exclusive with condenseEnabled (the schema refuses both true).
     # followupAnchorEnabled: false
+    # Retrieval depth (#1191); absent keys keep the Settings defaults
+    # (shown): hits per answer retrieval (1..32; /v1/search keeps its own
+    # limit) and chunks kept per manual (1..10; applies to /v1/search too).
+    # answerHitLimit: 8
+    # retrieveMaxChunksPerDoc: 3
     # Empty model disables /v1/answer; when set, baseUrl is required.
     baseUrl: ""
     model: ""

@@ -49,7 +49,7 @@ MAPPER_KEYS = [
     "LLM_THINKING_RESERVE_TOKENS_SIMPLE", "LLM_THINKING_RESERVE_TOKENS_COMPLEX",
     "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS", "LLM_STREAM",
     "LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT", "LLM_TOKEN_COUNT_SOURCE", "CHAT_MAX_PRIOR_TURN_CHARS", "CHAT_MAX_TURNS",
-    "CHAT_FOLLOWUP_ANCHOR_ENABLED", "REQUEST_DEADLINE_S", "REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S",
+    "CHAT_FOLLOWUP_ANCHOR_ENABLED", "ANSWER_HIT_LIMIT", "RETRIEVE_MAX_CHUNKS_PER_DOC", "REQUEST_DEADLINE_S", "REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S",
     "RERANK_ENABLED", "RERANK_BASE_URL", "RERANK_MODEL", "RERANK_ENDPOINT_ORDER",
     "GATEWAY_API_KEY_SECRET", "GATEWAY_API_KEY_SECRET_KEY", "GATEWAY_CA_CONFIGMAP", "PULL_SECRET",
     "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_ENDPOINT_RESOLVED", "OTEL_TRACING_ENABLED",
@@ -613,6 +613,36 @@ def test_chat_history_limits_reach_rendered_agent(monkeypatch, mapper_env):
         assert (low, high) == (bounds["Ge"].ge, bounds["Le"].le)
 
 
+def test_answer_depth_reaches_rendered_agent(monkeypatch, mapper_env):
+    """Issue #1191: the retrieval depth inputs cross the mapper into the pod
+    exactly; the limits the mapper enforces are the Settings limits."""
+    from scripts.airgap import model_config
+
+    from mainframe_rag.config import Settings
+
+    selected = {"ANSWER_HIT_LIMIT": "16", "RETRIEVE_MAX_CHUNKS_PER_DOC": "5"}
+    for name, value in selected.items():
+        monkeypatch.setenv(name, value)
+    result, output = mapper_env()
+    assert result.returncode == 0, result.stderr
+    reasoning = load_values(output)["models"]["reasoning"]
+    assert (reasoning["answerHitLimit"], reasoning["retrieveMaxChunksPerDoc"]) == (16, 5)
+    rendered = subprocess.run(
+        [str(REPO / ".tools/bin/helm"), "template", "app", str(CHART), "-f", str(output),
+         "--namespace", "ns", "--show-only", "templates/agent-deployment.yaml"],
+        capture_output=True, text=True, check=False,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    agent = yaml.safe_load(rendered.stdout)["spec"]["template"]["spec"]["containers"][0]
+    actual = {entry["name"]: entry.get("value") for entry in agent["env"]}
+    assert {name: actual.get(name) for name in selected} == selected
+    for name, setting in (("ANSWER_HIT_LIMIT", "answer_hit_limit"),
+                          ("RETRIEVE_MAX_CHUNKS_PER_DOC", "retrieve_max_chunks_per_doc")):
+        bounds = {type(m).__name__: m for m in Settings.model_fields[setting].metadata}
+        _field, low, high = model_config.REASONING_INTEGER_FIELDS[name]
+        assert (low, high) == (bounds["Ge"].ge, bounds["Le"].le)
+
+
 @pytest.mark.parametrize("stream,simple_reserve,complex_effort,efforts", [
     ("true", "512", "medium", "low,medium,high"),
     ("false", "0", "xhigh", " xhigh, low,medium"),  # accepted spelling reaches the pod canonically
@@ -661,6 +691,8 @@ def test_selected_model_budgets_reach_rendered_agent(monkeypatch, mapper_env, st
     ("LLM_STREAM", "unsupported-private-value"),
     ("CHAT_MAX_PRIOR_TURN_CHARS", "199"), ("CHAT_MAX_PRIOR_TURN_CHARS", "5001"),
     ("CHAT_MAX_PRIOR_TURN_CHARS", "4000.0"), ("CHAT_MAX_TURNS", "0"), ("CHAT_MAX_TURNS", "51"),
+    ("ANSWER_HIT_LIMIT", "0"), ("ANSWER_HIT_LIMIT", "33"), ("ANSWER_HIT_LIMIT", "16.0"),
+    ("RETRIEVE_MAX_CHUNKS_PER_DOC", "0"), ("RETRIEVE_MAX_CHUNKS_PER_DOC", "11"),
     ("CHAT_FOLLOWUP_ANCHOR_ENABLED", "unsupported-private-value"),
 ])
 def test_model_budget_invalid_selection_fails_without_artifact(monkeypatch, mapper_env, name, bad):
@@ -861,7 +893,7 @@ def test_empty_model_budget_inputs_preserve_application_defaults(monkeypatch, ma
                  "LLM_THINKING_RESERVE_TOKENS_SIMPLE", "LLM_THINKING_RESERVE_TOKENS_COMPLEX",
                  "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS",
                  "LLM_STREAM", "LLM_TOKEN_COUNT_SOURCE", "CHAT_MAX_PRIOR_TURN_CHARS", "CHAT_MAX_TURNS",
-                 "CHAT_FOLLOWUP_ANCHOR_ENABLED"):
+                 "CHAT_FOLLOWUP_ANCHOR_ENABLED", "ANSWER_HIT_LIMIT", "RETRIEVE_MAX_CHUNKS_PER_DOC"):
         monkeypatch.setenv(name, "")
     result, output = mapper_env()
     assert result.returncode == 0, result.stderr

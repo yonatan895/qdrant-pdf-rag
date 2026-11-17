@@ -44,7 +44,6 @@ from mainframe_rag.agent.chat_turn import (
 )
 from mainframe_rag.agent.chat_turn import is_unsearchable_query, prepare_chat_turn
 from mainframe_rag.agent.core_ports import (
-    RETRIEVAL_HIT_LIMIT,
     AnswerModel,
     ModelDone,
     ModelToken,
@@ -234,13 +233,15 @@ async def plan_search(
     return SearchPlan(mode, query, anchor)
 
 
-def _fuse_by_rank(literal: RetrievalResult, anchored: RetrievalResult) -> RetrievalResult:
+def _fuse_by_rank(
+    literal: RetrievalResult, anchored: RetrievalResult, hit_limit: int,
+) -> RetrievalResult:
     """Interleave two ranked lists, the literal leg first, keeping a chunk at
-    its first place, cut to what one retrieval returns (`RETRIEVAL_HIT_LIMIT`,
+    its first place, cut to what one retrieval returns (`answer_hit_limit`,
     or a longer leg's length). Rank, not score: rerank and RRF scores of
     different queries are not comparable. The query kind is the literal leg's
     (the user's own question class); timings add."""
-    limit = max(RETRIEVAL_HIT_LIMIT, len(literal.hits), len(anchored.hits))
+    limit = max(hit_limit, len(literal.hits), len(anchored.hits))
     seen: set[str] = set()
     hits: list[SearchHit] = []
     for pair in zip_longest(literal.hits, anchored.hits):
@@ -268,7 +269,7 @@ async def retrieve_planned(
     anchored = await deps.retrieve(
         plan.anchor, product=source.product, version=source.version, settings=deps.settings,
     )
-    return _fuse_by_rank(found, anchored)
+    return _fuse_by_rank(found, anchored, deps.settings.answer_hit_limit)
 
 
 @dataclass
