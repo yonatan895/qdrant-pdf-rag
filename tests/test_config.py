@@ -301,6 +301,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "query_max_chars": 2000,
     "splunk_context_max_chars": 4000,
     "prompt_order": "retrieval",
+    "answer_coding_mode_enabled": True,  # #1276: on by default (maintainer, 2026-11-16)
     "dense_query_prefix": (
         "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: "
     ),
@@ -627,6 +628,13 @@ def test_explicit_condensation_from_an_env_file_turns_the_anchor_default_off(tmp
     with pytest.raises(ValidationError) as exc:
         Settings(_env_file=env)
     assert CHAT_FOLLOWUP_MODES_CONFLICT in str(exc.value)
+@pytest.mark.parametrize(("raw", "expected"), [("false", False), ("0", False), ("true", True)])
+def test_coding_mode_is_on_by_default_and_one_env_line_turns_it_off(monkeypatch, raw, expected):
+    """Issue #1276: coding mode ships on; a site reverts it with one
+    ANSWER_CODING_MODE_ENABLED line in airgap.env."""
+    assert Settings(_env_file=None).answer_coding_mode_enabled is True
+    monkeypatch.setenv("ANSWER_CODING_MODE_ENABLED", raw)
+    assert Settings(_env_file=None).answer_coding_mode_enabled is expected
 
 
 def test_condensation_and_anchoring_cannot_both_be_enabled(monkeypatch):

@@ -274,6 +274,11 @@ class Settings(BaseSettings):
     # (issue #80) puts the static instruction block first for vLLM prefix
     # reuse, then context, delimited excerpts, question, and tail last.
     prompt_order: Literal["retrieval", "stable_cache"] = Field(default="retrieval")
+    # Coding mode (issue #1276, default on by maintainer decision 2026-11-16):
+    # a request to write, fix, review, convert or explain JCL, REXX, HLASM or
+    # (Metal) C takes the complex path and the coding prompt extension. False
+    # restores the pre-#1276 complexity and prompt bytes for every request.
+    answer_coding_mode_enabled: bool = True
 
     # Dense query instruction prefix for asymmetric embedders (e.g. Qwen3-Embedding).
     # Applied to query vector embeddings; chunks during ingest remain raw text.

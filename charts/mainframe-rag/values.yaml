@@ -110,6 +110,10 @@ models:
     # limit) and chunks kept per manual (1..10; applies to /v1/search too).
     # answerHitLimit: 16          # 8 before #1274
     # retrieveMaxChunksPerDoc: 5  # 3 before #1274
+    # Coding mode (#1276); absent keeps the Settings default (on). false
+    # restores the pre-#1276 prompts and complexity for every request (the
+    # c/hlasm/asm/metalc/clist fence handling is not part of the setting).
+    # codingModeEnabled: true
     # Empty model disables /v1/answer; when set, baseUrl is required.
     baseUrl: ""
     model: ""

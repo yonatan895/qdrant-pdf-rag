@@ -766,6 +766,64 @@ def test_inferred_citations_are_labelled_not_grounding():
     )
 
 
+CITE_HOUSE = "HOUSE-AI-DRAFT-jcl House JCL guidance, Restart > Checkpoints, p. 1"
+
+
+def _house_meta(**overrides: Any) -> dict[str, Any]:
+    """Accepted answer citing a synthetic house guide next to a manual."""
+    meta = _final_meta(citations=[CITE_A, CITE_HOUSE], supplied_evidence=[
+        _excerpt(1, CITE_A, EXCERPT_A, "SA22-0000-00"),
+        _excerpt(2, CITE_HOUSE, EXCERPT_B, "HOUSE-AI-DRAFT-jcl")])
+    meta.update(overrides)
+    return meta
+
+
+def test_cited_house_guidance_is_named_in_the_banner_and_the_source_list():
+    """House guides (doc ids `HOUSE-...`, #1276) are AI-drafted: a validated
+    citation of one says so in the accepted banner and on its source entry;
+    the manual's entry is unchanged."""
+    _content, events = run_pipe(FakeAgent(_frames("Answer.", meta=_house_meta())))
+    assert _final_status(events) == "Source-matched · 2 citations (incl. house guidance)"
+    manual, house = _sources(events)
+    assert manual["source"]["name"] == CITE_A
+    assert manual["metadata"][0]["label"] == "source-matched"
+    assert house["source"] == {"name": f"{CITE_HOUSE} (house guidance)", "id": "HOUSE-AI-DRAFT-jcl"}
+    assert house["metadata"][0]["label"] == "source-matched, house guidance"
+    assert house["document"] == [EXCERPT_B]
+
+
+@pytest.mark.parametrize("doc_id", ["SA22-0001-00", "house-ai-draft-jcl", "XHOUSE-1", "HOUSE"])
+def test_house_label_needs_a_cited_house_prefixed_doc_id(doc_id: str):
+    """Only the exact `HOUSE-` doc-id prefix marks house guidance."""
+    meta = _house_meta(supplied_evidence=[
+        _excerpt(1, CITE_A, EXCERPT_A, "SA22-0000-00"), _excerpt(2, CITE_HOUSE, EXCERPT_B, doc_id)])
+    _content, events = run_pipe(FakeAgent(_frames("Answer.", meta=meta)))
+    assert _final_status(events) == "Source-matched · 2 citations"
+    assert "house guidance" not in json.dumps(_sources(events))
+
+
+def test_house_excerpt_supplied_but_not_cited_adds_no_label():
+    meta = _house_meta(citations=[CITE_A])
+    _content, events = run_pipe(FakeAgent(_frames("Answer.", meta=meta)))
+    assert _final_status(events) == "Source-matched · 1 citation"
+    assert "house" not in json.dumps(_sources(events))
+
+
+@pytest.mark.parametrize("overrides", [
+    {"verification_state": "unverified_draft"},
+    {"verification_state": "insufficient_evidence"},
+    {"verification_state": "generation_incomplete"},
+    {"verification_state": None},
+    {"verification_state": "unverified_draft", "citations_inferred": True, "inferred_indices": [2]},
+])
+def test_house_label_never_rides_a_non_accepted_state(overrides: dict[str, Any]):
+    """Neither the banner nor the source list names house guidance unless
+    the answer is accepted with explicit citations."""
+    _content, events = run_pipe(FakeAgent(_frames("Answer.", meta=_house_meta(**overrides))))
+    assert "house" not in _final_status(events)
+    assert "house guidance" not in json.dumps(_sources(events))
+
+
 # --- Verification and abstention ---------------------------------------------
 
 

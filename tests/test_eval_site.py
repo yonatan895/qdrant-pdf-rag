@@ -651,6 +651,22 @@ def test_single_turn_export_does_not_follow_the_prior_turn_default(site_eval, mo
     assert json.dumps(old_export, sort_keys=True) == json.dumps(new_export, sort_keys=True)
 
 
+@pytest.mark.parametrize("endpoint", ["answer", "chat"])
+def test_export_carries_the_coding_breakdown_without_the_question(site_eval, endpoint):
+    """Issue #1276: the coding class is derived from the question on the
+    evaluator side and leaves the gap as counts only."""
+    query = f"Write a REXX exec for {CANARIES['query']} one"
+    _, report, export, _ = site_eval(
+        _canary_agent(endpoint), [_entry(id="COD", query=query, query_class="syntax"),
+                                  _entry(id="LOOK", query=f"{CANARIES['query']} one")],
+        ["--endpoint", endpoint, "--stream"])
+    text = export.decode("utf-8")
+    assert CANARIES["query"] not in text and "REXX" not in text
+    coding = json.loads(text)["metrics"]["coding"]
+    assert coding == report["metrics"]["coding"]
+    assert coding["n"] == 1 and coding["judged"] == 1 and coding["answer_n"] == 1
+
+
 def test_export_of_a_health_failure_holds_no_golden_text(site_eval):
     import httpx2
 

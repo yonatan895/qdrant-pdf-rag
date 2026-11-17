@@ -93,7 +93,7 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - Operator booleans `UI_ENABLED`, `CONTEXTUAL_EMBED_ENABLED`,
   `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `INGEST_AUTHORIZE_FROM_CATALOG`,
   `CHAT_CONDENSE_ENABLED`, `CHAT_FOLLOWUP_ANCHOR_ENABLED`, `LLM_STREAM`
-  `FEEDBACK_ENABLED`, `OPENWEBUI_ENABLED` and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
+  `FEEDBACK_ENABLED`, `OPENWEBUI_ENABLED`, `ANSWER_CODING_MODE_ENABLED` (unset keeps the pod's **true** default) and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
   accept only `true/1/yes` or `false/0/no` (any case; unset keeps the
   default). `INGEST_ALIAS_PUBLISH` may only be unset or true: in-place ingest
   was retired (#360) and an explicit false fails closed.
@@ -2442,7 +2442,13 @@ inputs (#1191) `ANSWER_HIT_LIMIT` (hits per answer, chat and console
 retrieval; `/v1/search` keeps its caller's limit) and
 `RETRIEVE_MAX_CHUNKS_PER_DOC` (chunks kept per manual, `/v1/search` included)
 map to `models.reasoning.answerHitLimit` and `retrieveMaxChunksPerDoc`; unset
-renders neither, so the pod keeps the defaults, 16 and 5 since #1274 (8 and 3 before). Enable condensation deliberately when qualifying pronoun-only
+renders neither, so the pod keeps the defaults, 16 and 5 since #1274 (8 and 3 before). `ANSWER_CODING_MODE_ENABLED`
+  (#1276) maps to `models.reasoning.codingModeEnabled` and renders only when set;
+  unset keeps the pod's on default, and `ANSWER_CODING_MODE_ENABLED=false` in
+  `airgap.env` is the one-line per-site revert of the coding prompts and the
+  coding route to the complex path (the `coding-off` arm). It does not revert the
+  #1276 code-fence tags (`c`, `metalc`, `asm`, `hlasm`, `assembler`, `clist` kept
+  as `script`), which apply to every answer. Enable condensation deliberately when qualifying pronoun-only
 console follow-ups; require a grounded answer after the extra reasoning call.
 The local gateway's authenticated `/tokenize` passthrough enforces the per-leg
 key's model allowlist. Use `probe_gateway.py --require-tokenizer --stream

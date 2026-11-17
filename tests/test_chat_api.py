@@ -576,6 +576,104 @@ def test_chat_json_surfaces_script_with_review_flag(chat_client, monkeypatch):
     assert data["script_review_required"] is True
 
 
+class MixedScriptChatLLM:
+    """A coding answer in the #1276 shape: compile JCL plus HLASM source."""
+
+    def chat(self, messages, reasoning_effort=None, temperature=None):
+        return ChatResult(
+            content=(
+                "Assemble and run the program below.\n\n"
+                "```jcl\n//ASM EXEC PGM=ASMA90\n```\n\n"
+                "```hlasm\nHELLO    CSECT\n```\n\n"
+                "Citations:\n"
+                "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+            ),
+            finish_reason="stop",
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=20, total_tokens=30),
+        )
+
+
+def test_chat_json_mixed_language_script_characterization(chat_client, monkeypatch):
+    """#1276 maintainer decision 1 (2026-11-17): the non-streaming /v1/chat
+    `message.content` keeps the extracted script as one fenced block tagged
+    with its language, between the prose and the validated list; every
+    fence in SCRIPT_LANGS (now including hlasm) is in `script`, joined under
+    the first fence's tag (decision 2). Streaming deltas carry the model's
+    fences unchanged."""
+    monkeypatch.setattr(app_mod, "llm", MixedScriptChatLLM())
+    data = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Write an HLASM program"}], "stream": False},
+    ).json()
+    content = data["choices"][0]["message"]["content"]
+    assert content == (
+        "Assemble and run the program below.\n\n"
+        "```jcl\n//ASM EXEC PGM=ASMA90\n\nHELLO    CSECT\n```\n\n"
+        "**Citations:**\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
+    )
+    assert data["script"] == "//ASM EXEC PGM=ASMA90\n\nHELLO    CSECT"
+    assert data["script_lang"] == "jcl"
+    assert data["script_review_required"] is True
+
+
+class _OneFenceChatLLM:
+    def __init__(self, lang: str, code: str):
+        self.lang = lang
+        self.code = code
+
+    def chat(self, messages, reasoning_effort=None, temperature=None):
+        return ChatResult(
+            content=(
+                "Use the code below.\n\n"
+                f"```{self.lang}\n{self.code}\n```\n\n"
+                "Citations:\n"
+                "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+            ),
+            finish_reason="stop",
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=20, total_tokens=30),
+        )
+
+
+@pytest.mark.parametrize(("lang", "code"), [
+    ("c", "#include <stdio.h>\nint main(void) { return 0; }"),
+    ("hlasm", "HELLO    CSECT\n         BR    14"),
+    ("jcl", "//STEP1 EXEC PGM=IEFBR14"),
+])
+def test_chat_json_content_keeps_the_script_as_a_tagged_fence(chat_client, monkeypatch, lang, code):
+    """#1276 maintainer decision 1: a non-streaming /v1/chat answer never
+    loses its code. The script parse_answer moved into `script` comes back
+    into `message.content` as a fence with its language tag, before the
+    validated list (the console's re-append format)."""
+    monkeypatch.setattr(app_mod, "llm", _OneFenceChatLLM(lang, code))
+    data = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Write the program"}], "stream": False},
+    ).json()
+    cite = "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
+    assert data["choices"][0]["message"]["content"] == (
+        f"Use the code below.\n\n```{lang}\n{code}\n```\n\n**Citations:**\n- {cite}"
+    )
+    assert (data["script"], data["script_lang"]) == (code, lang)
+
+
+@pytest.mark.parametrize("lang", ["c", "hlasm"])
+def test_chat_stream_and_answer_keep_their_bodies_for_new_fences(chat_client, monkeypatch, lang):
+    """The re-append is non-streaming /v1/chat only: the stream's deltas are
+    the model's raw text (the fence once, not twice) and /v1/answer keeps
+    the script out of `answer`."""
+    code = "HELLO    CSECT" if lang == "hlasm" else "int main(void) { return 0; }"
+    monkeypatch.setattr(app_mod, "llm", _OneFenceChatLLM(lang, code))
+    resp = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Write the program"}], "stream": True},
+    )
+    deltas = "".join(
+        f["choices"][0]["delta"].get("content", "") for f in chat_frames(resp.text))
+    assert deltas.count(f"```{lang}\n") == 1 and deltas.count(code) == 1
+    answer = chat_client.post("/v1/answer", json={"query": "Write the program"}).json()
+    assert code not in answer["answer"] and answer["script"] == code
+
+
 def test_chat_stream_terminal_chunk_carries_state_and_script(chat_client, monkeypatch):
     """The OpenAI-compat terminal chunk reports state + script in `extra`
     before [DONE]. Deltas stay provisional raw tokens; the terminal chunk

@@ -2449,6 +2449,12 @@ async def _chat_response(req, response, owner):
             )
 
         content = output.answer
+        # parse_answer moves SCRIPT_LANGS fences into `script`; a buffered
+        # chat client reads only `message.content`, so the script comes back
+        # as one fence tagged with its language, in the console's re-append
+        # format (#1276 maintainer decision 1). Streams keep the raw deltas.
+        if output.script is not None:
+            content += f"\n\n```{output.script_lang or ''}\n{output.script}\n```"
         if output.citations:
             content += "\n\n**Citations:**\n" + "\n".join(f"- {c}" for c in output.citations)
 

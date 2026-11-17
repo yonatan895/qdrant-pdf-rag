@@ -49,7 +49,7 @@ MAPPER_KEYS = [
     "LLM_THINKING_RESERVE_TOKENS_SIMPLE", "LLM_THINKING_RESERVE_TOKENS_COMPLEX",
     "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS", "LLM_STREAM",
     "LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT", "LLM_TOKEN_COUNT_SOURCE", "CHAT_MAX_PRIOR_TURN_CHARS", "CHAT_MAX_TURNS",
-    "CHAT_FOLLOWUP_ANCHOR_ENABLED", "ANSWER_HIT_LIMIT", "RETRIEVE_MAX_CHUNKS_PER_DOC", "REQUEST_DEADLINE_S", "REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S",
+    "CHAT_FOLLOWUP_ANCHOR_ENABLED", "ANSWER_HIT_LIMIT", "RETRIEVE_MAX_CHUNKS_PER_DOC", "ANSWER_CODING_MODE_ENABLED", "REQUEST_DEADLINE_S", "REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S",
     "RERANK_ENABLED", "RERANK_BASE_URL", "RERANK_MODEL", "RERANK_ENDPOINT_ORDER",
     "GATEWAY_API_KEY_SECRET", "GATEWAY_API_KEY_SECRET_KEY", "GATEWAY_CA_CONFIGMAP", "PULL_SECRET",
     "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_ENDPOINT_RESOLVED", "OTEL_TRACING_ENABLED",
@@ -572,6 +572,12 @@ def test_condense_with_anchor_unset_maps_without_refusal(monkeypatch, mapper_env
     reasoning = mapped(mapper_env)["models"]["reasoning"]
     assert reasoning["condenseEnabled"] is True
     assert "followupAnchorEnabled" not in reasoning
+@pytest.mark.parametrize("raw,want", [("", None), ("false", False), ("0", False), ("true", True)])
+def test_coding_mode_operator_mapping(monkeypatch, mapper_env, raw, want):
+    """Issue #1276: unset writes no key (the pod keeps the true default); the
+    one-line revert `false` is carried as an explicit boolean false."""
+    monkeypatch.setenv("ANSWER_CODING_MODE_ENABLED", raw)
+    assert mapped(mapper_env)["models"]["reasoning"].get("codingModeEnabled") is want
 
 
 @pytest.mark.parametrize("anchor,condense", [("true", "true"), ("1", "yes")])
@@ -706,6 +712,7 @@ def test_selected_model_budgets_reach_rendered_agent(monkeypatch, mapper_env, st
     ("ANSWER_HIT_LIMIT", "0"), ("ANSWER_HIT_LIMIT", "33"), ("ANSWER_HIT_LIMIT", "16.0"),
     ("RETRIEVE_MAX_CHUNKS_PER_DOC", "0"), ("RETRIEVE_MAX_CHUNKS_PER_DOC", "11"),
     ("CHAT_FOLLOWUP_ANCHOR_ENABLED", "unsupported-private-value"),
+    ("ANSWER_CODING_MODE_ENABLED", "unsupported-private-value"),
 ])
 def test_model_budget_invalid_selection_fails_without_artifact(monkeypatch, mapper_env, name, bad):
     monkeypatch.setenv(name, bad)
@@ -905,7 +912,7 @@ def test_empty_model_budget_inputs_preserve_application_defaults(monkeypatch, ma
                  "LLM_THINKING_RESERVE_TOKENS_SIMPLE", "LLM_THINKING_RESERVE_TOKENS_COMPLEX",
                  "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS",
                  "LLM_STREAM", "LLM_TOKEN_COUNT_SOURCE", "CHAT_MAX_PRIOR_TURN_CHARS", "CHAT_MAX_TURNS",
-                 "CHAT_FOLLOWUP_ANCHOR_ENABLED", "ANSWER_HIT_LIMIT", "RETRIEVE_MAX_CHUNKS_PER_DOC"):
+                 "CHAT_FOLLOWUP_ANCHOR_ENABLED", "ANSWER_HIT_LIMIT", "RETRIEVE_MAX_CHUNKS_PER_DOC", "ANSWER_CODING_MODE_ENABLED"):
         monkeypatch.setenv(name, "")
     result, output = mapper_env()
     assert result.returncode == 0, result.stderr

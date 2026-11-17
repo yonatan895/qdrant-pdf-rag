@@ -389,6 +389,41 @@ def test_unset_chat_followup_inputs_add_no_pod_variable(tree):
     assert not set(_CHAT_FOLLOWUP_SELECTED) & set(pod)
 
 
+@pytest.mark.parametrize("source", ["file", "environment"])
+def test_coding_mode_one_line_revert_reaches_the_pod_settings(tree, source):
+    """Issue #1276 through real common.sh, mapper and Helm: the one airgap.env
+    line ANSWER_CODING_MODE_ENABLED=false reaches the Deployment and Settings
+    reads it as off; an environment value beats the file; unset renders no
+    variable (separate test below)."""
+    from mainframe_rag.config import Settings
+
+    root, _log = tree
+    file_values = {
+        "INTERNAL_REGISTRY": "reg.internal", "NAMESPACE": "ns",
+        "STORAGE_CLASS": "standard", "IMAGE_SHA": IMAGE_SHA,
+        "EMBED_MODEL": "embed", "DENSE_DIM": "64", "EMBED_MODEL_REVISION": "rev-1",
+        "EMBED_BASE_URL": "http://vllm:8000/v1", "OPENWEBUI_ENABLED": "false",
+        "ANSWER_CODING_MODE_ENABLED": "false" if source == "file" else "true",
+    }
+    env_file = root / "airgap.env"
+    env_file.write_text("".join(f"{key}={value}\n" for key, value in file_values.items()))
+    overrides = [("ANSWER_CODING_MODE_ENABLED", "false")] if source == "environment" else []
+    result = _run(tree, ("AIRGAP_ENV", str(env_file)), *overrides)
+    assert result.returncode == 0, result.stderr
+    pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
+    assert pod.get("ANSWER_CODING_MODE_ENABLED") == "false"
+    assert Settings(_env_file=None, answer_coding_mode_enabled=pod["ANSWER_CODING_MODE_ENABLED"]
+                    ).answer_coding_mode_enabled is False
+
+
+def test_unset_coding_mode_adds_no_pod_variable(tree):
+    root, _log = tree
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
+    assert "ANSWER_CODING_MODE_ENABLED" not in pod
+
+
 def test_condense_and_anchor_together_stop_the_deploy_before_helm(tree):
     root, _log = tree
     result = _run(tree, ("CHAT_CONDENSE_ENABLED", "true"), ("CHAT_FOLLOWUP_ANCHOR_ENABLED", "true"))

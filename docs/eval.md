@@ -688,12 +688,19 @@ release bundle, so the instrument is the candidate's checkout.
 Since #1274 the answer-quality features are on by default: follow-up
 anchoring (`CHAT_FOLLOWUP_ANCHOR_ENABLED`), a 4000-character prior-turn cut
 (`CHAT_MAX_PRIOR_TURN_CHARS`), the `auto` prompt count
-(`LLM_TOKEN_COUNT_SOURCE`) and the 262144-token window default
-(`LLM_MAX_MODEL_LEN`). No pre-merge evidence exists for them on the site
-model; this visit is the deciding measurement. The release's defaults are
-the baseline. Each [ablation arm](#site-ablation-arms) switches one feature
-off in `airgap.env`. A feature that hurts stays off in `airgap.env`, with no
-new release; flipping its code default back is a later decision.
+(`LLM_TOKEN_COUNT_SOURCE`), the 262144-token window default
+(`LLM_MAX_MODEL_LEN`), a retrieval depth of 16 hits and 5 chunks per manual
+(`ANSWER_HIT_LIMIT`, `RETRIEVE_MAX_CHUNKS_PER_DOC`, #1191) and coding mode
+(`ANSWER_CODING_MODE_ENABLED`, #1276). No pre-merge evidence exists for them
+on the site model; this visit is the deciding measurement. The release's
+defaults are the baseline. The visit runs in this order: step 0 (settings
+and probes), the A sessions on the old build (f117160c, `--hit-limit 8`),
+the upgrade, the B sessions on the new defaults, then the
+[ablation arms](#site-ablation-arms), each switching one feature off in
+`airgap.env` (anchor off, history 1000, count tokenize, depth 8/3, coding
+off), and last an effort arm only if step 0 showed the effort is honoured.
+A feature that hurts stays off in `airgap.env`, with no new release;
+flipping its code default back is a later decision.
 
 **Step 0, before any session or arm.** Record the deployed `LLM_*` values
 (the receipt below), then run the two probes in the agent pod:
@@ -701,7 +708,7 @@ new release; flipping its code default back is a later decision.
 ```sh
 oc -n "$NS" get deploy rag-agent \
   -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' \
-  | grep -E '^(LLM_|CHAT_|REQUEST_)' | grep -v -E 'KEY|SECRET'   # unset = the default
+  | grep -E '^(LLM_|CHAT_|REQUEST_|ANSWER_|RETRIEVE_)' | grep -v -E 'KEY|SECRET'   # unset = the default
 oc -n "$NS" exec deploy/rag-agent -c agent -- python3 /app/scripts/probe_gateway.py --probe-args
 oc -n "$NS" exec deploy/rag-agent -c agent -- python3 /app/scripts/probe_gateway.py --probe-count
 ```
@@ -948,7 +955,13 @@ run K-count-tokenize chat --all --repeats 2
 # show ANSWER_HIT_LIMIT RETRIEVE_MAX_CHUNKS_PER_DOC:
 run D-depth-8-3 answer --all --repeats 2 --hit-limit 8
 run D-depth-8-3 chat --all --repeats 2 --hit-limit 8
-# remove both and deploy: the site ends on the release defaults.
+# remove both; ANSWER_CODING_MODE_ENABLED=false; deploy; show ANSWER_CODING_MODE_ENABLED:
+run D-coding-off answer --all --repeats 2
+run D-coding-off chat --all --repeats 2
+# remove it and deploy: the site ends on the release defaults (show it: empty).
+# Effort arm only if step 0's --probe-args moved reasoning_tokens with the
+# effort: set the transport it named (LLM_EXTRA_BODY / LLM_EFFORT_TRANSPORT),
+# deploy, run the session flags single-turn as E-effort, remove it and deploy.
 ```
 
 | Arm | `airgap.env` line | Compare with |
@@ -957,6 +970,8 @@ run D-depth-8-3 chat --all --repeats 2 --hit-limit 8
 | `history1000` | `CHAT_MAX_PRIOR_TURN_CHARS=1000`, run with `--prior-cap 1000` | `H-baseline` |
 | `count-tokenize` | `LLM_TOKEN_COUNT_SOURCE=tokenize` | B2 (same flags, same build) |
 | `depth-8-3` | `ANSWER_HIT_LIMIT=8` and `RETRIEVE_MAX_CHUNKS_PER_DOC=3`, run with `--hit-limit 8` | B2 |
+| `coding-off` | `ANSWER_CODING_MODE_ENABLED=false` | B1/B2 ([coding mode](#site-coding-arm)) |
+| `effort` (only if step 0 shows the effort is honoured) | the transport `--probe-args` named | B2 |
 
 - `--prior-cap` must equal the deployed cut: omit it on every arm but
   `history1000` (the default is the agent default, 4000), and never pass a
@@ -1047,6 +1062,33 @@ decision.
 The earlier two-arm condense comparison (`--arm condense-off`/`condense-on`
 without `--follow-up`) remains valid. Its exports keep the anaphoric-only
 shape.
+
+<a id="site-coding-arm"></a>
+**Coding mode (issue #1276).** Every report and export carries
+`metrics.coding`: the rows whose question the agent's own classifier
+(`is_coding_request`) marks as a coding request, derived on the evaluator side
+from the question, so the old build, the candidate and the arm below count the
+same rows. It holds counts only: `n`, `judged`, `pass`, `answer_n`,
+`false_refusals` and `false_refusal_rate` (same rule as the top-level false
+refusals; denominator `answer_n`), `zero_hits` and `by_verification_state`.
+The pinned `evals/golden.jsonl` has two such rows (SYN-30, SYN-35), too few to
+read: the coding refusal rate needs 10–20 coding questions (JCL, REXX, HLASM,
+Metal C) written by the team for the graded eval (#1191 D3); golden.jsonl is
+not edited for this.
+
+- `coding-off`: the fifth ablation arm above, one single-turn session on
+  the candidate build. `show ANSWER_CODING_MODE_ENABLED` (empty means unset,
+  the on default) before, `false` during the arm, empty after it. It runs
+  the same `run` lines as B1 (both endpoints, `--all --repeats 2`, or the
+  session's agreed subset), labelled `D-coding-off`. Compare `metrics.coding` and `by_class.syntax`
+  against B1/B2 under the decision rule below; the rest of the metrics must
+  not move beyond B1 against B2, because with coding mode off only coding
+  requests change. Watch `metrics.coding.by_verification_state` for
+  `generation_incomplete`: a coding answer (code, guidance, checklist) has the
+  same output reserve as any complex answer, so truncation is the first
+  cost to look for. The fence handling (`SCRIPT_LANGS`) is not part of the
+  setting: `false` restores the prompts and the complexity, not the parse. The old build (A sessions) predates the setting and is
+  already the coding-off prompt with the old fence handling.
 
 **Decision rule.** The [protocol above](#measurement-protocol)
 applies: decide on the hardware-independent group only, and a difference
