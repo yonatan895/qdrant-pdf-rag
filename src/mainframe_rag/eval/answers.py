@@ -1699,7 +1699,7 @@ _ERROR_CODES = frozenset({
     "deadline_exceeded", "evidence_budget_exceeded", "http_error", "internal",
     "invalid_request", "method_not_allowed", "model_timeout", "not_configured", "not_found",
     "overloaded", "prompt_budget_exceeded", "qdrant_unready", "representation_unavailable",
-    "unsupported_reasoning_effort", "upstream_error",
+    "unsupported_image", "unsupported_reasoning_effort", "upstream_error",
 })
 _FIXED_FAILURE_LABELS = frozenset({
     "empty answer body", "explicit refusal on an answer-tier query",
@@ -1818,6 +1818,20 @@ def export_row(row: dict[str, Any]) -> dict[str, Any]:
             evidence_cited_doc_ids=_doc_ids_or_none(row.get("evidence_cited_doc_ids")),
             evidence_citation_precision=_number_or_none(row.get("evidence_citation_precision")),
             evidence_citation_recall=_number_or_none(row.get("evidence_citation_recall")),
+        )
+    if "image_arm" in row:
+        # `--image-arm` runs only (issue #1287): sizes, counts and a fixed CER
+        # label; never the image, its base64, the transcript or the drawn text.
+        from mainframe_rag.eval.image_arm import IMAGE_ARMS, cer_bucket
+
+        arm = row["image_arm"]
+        exported.update(
+            image_arm=arm if arm in IMAGE_ARMS else None,
+            image_n=_count_or_none(row.get("image_n")),
+            image_bytes=_count_or_none(row.get("image_bytes")),
+            image_reads_n=_count_or_none(row.get("image_reads_n")),
+            image_read_failed=_bool_or_none(row.get("image_read_failed")),
+            image_cer_bucket=cer_bucket(_number_or_none(row.get("image_cer"))),
         )
     if "follow_up_kind" in row:
         # `--follow-up` runs only (issue #1268); turn-1 rows carry None.
@@ -2253,6 +2267,12 @@ def main(argv: list[str] | None = None) -> int:
                              "that many hits; default "
                              f"{Settings.model_fields['answer_hit_limit'].default}, the agent default "
                              "(recorded in params, issue #1191)")
+    parser.add_argument("--image-arm", choices=("text", "image", "image+ask"), default=None,
+                        help="with --endpoint chat: text sends the question typed (today's "
+                             "body); image sends it only as a synthetic 80-column terminal "
+                             "image drawn at run time; image+ask sends that image with a short "
+                             "fixed typed question. Rows add image size, read count and a "
+                             "transcript CER bucket; refuses the frozen holdout (issue #1287)")
     args = parser.parse_args(argv)
     if args.stream and args.agent_url is None:
         parser.error("--stream needs --agent-url: the in-process client buffers the response, "
@@ -2271,6 +2291,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--follow-up chooses the second turns: add --turns 2")
     if args.prior_cap is not None and args.follow_up is None:
         parser.error("--prior-cap is read by --follow-up: add it")
+    if args.image_arm is not None and (args.endpoint != "chat" or two_turn):
+        parser.error("--image-arm sends single-turn /v1/chat requests: add --endpoint chat "
+                     "--stream, without --turns 2")
     pipe_mod: Any = None
     pipe_sha256: str | None = None
     if two_turn:
@@ -2293,6 +2316,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.subset is not None or args.repeats > 1:
             operation = "--subset" if args.subset is not None else f"--repeats {args.repeats}"
             require_tuning_golden(golden_paths, operation)
+        if args.image_arm is not None:
+            # Images are drawn from dev golden questions only (issue #1287).
+            require_tuning_golden(golden_paths, "--image-arm")
         if args.agent_url is None:
             require_rc_for_collection(load_settings().qdrant_collection)
         entries, datasets = load_golden_records_with_identity(golden_paths)
@@ -2372,6 +2398,11 @@ def main(argv: list[str] | None = None) -> int:
                     row["turn"] = 1
                     if plan is not None:
                         row.update(follow_up_kind=None, switch_id=None)
+            if args.image_arm is not None:
+                from mainframe_rag.eval.image_arm import unsent_fields
+
+                for row in results:
+                    row.update(unsent_fields(args.image_arm))
             if coverage is not None:
                 for row, (_, entry) in zip(results, passes, strict=True):
                     apply_coverage(row, entry, coverage)
@@ -2380,12 +2411,23 @@ def main(argv: list[str] | None = None) -> int:
                           if args.hit_limit is None else args.hit_limit)
             for i, (number, entry) in enumerate(passes, 1):
                 pool = _fetch_pool(client, entry["query"], pool_limit)
-                frames: list[str] | None = [] if two_turn else None
+                image_turn = None
+                if args.image_arm is not None:
+                    from mainframe_rag.eval.image_arm import build_turn
+
+                    image_turn = build_turn(args.image_arm, entry["query"])
+                frames: list[str] | None = (
+                    [] if two_turn or image_turn is not None else None)
                 row = run_query(
                     client, entry, signals, pool, temperature=args.temperature,
                     stream=args.stream, endpoint=args.endpoint,
+                    chat_body=None if image_turn is None else image_turn.body,
                     frames=frames, evidence=two_turn,
                 )
+                if image_turn is not None:
+                    from mainframe_rag.eval.image_arm import apply_image_reads
+
+                    apply_image_reads(row, image_turn, frames)
                 if pool is not None:
                     apply_pool_join(row, entry, pool)
                 session = [row]
@@ -2456,6 +2498,12 @@ def main(argv: list[str] | None = None) -> int:
     }
     if args.hit_limit is not None:
         params["hit_limit"] = args.hit_limit
+    if args.image_arm is not None:
+        from mainframe_rag.eval.image_arm import PANEL_COLUMNS, image_ask_sha256, image_metrics
+
+        params.update(image_arm=args.image_arm, image_columns=PANEL_COLUMNS,
+                      image_ask_sha256=image_ask_sha256())
+        metrics["image"] = image_metrics(results, args.image_arm)
     if two_turn:
         from mainframe_rag.eval.follow_up import follow_ups_sha256
 

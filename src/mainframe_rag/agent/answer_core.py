@@ -52,6 +52,7 @@ from mainframe_rag.agent.core_ports import (
     RetrievalResult,
     Retriever,
 )
+from mainframe_rag.agent.images import TurnImages, image_count
 from mainframe_rag.agent.user_message import derive_retrieval_query
 from mainframe_rag.config import REASONING_EFFORTS, ReasoningEffort, Settings
 from mainframe_rag.logs import error_type
@@ -106,6 +107,9 @@ class AnswerCoreInput:
     # the condensed query of a chat follow-up. None means the message's own
     # derived retrieval query, the only search a non-chat turn makes.
     search_query: str | None = None
+    # The latest user message's images and their reads (#1287, /v1/chat
+    # only); None on every other turn, which keeps its exact prompt bytes.
+    images: TurnImages | None = None
 
 
 @dataclass
@@ -369,6 +373,13 @@ def _prompt_token_upper_bound(messages: list[ChatMessage]) -> int:
     )
 
 
+def _image_tokens(settings: Settings, messages: list[ChatMessage]) -> int:
+    """The prompt's images priced at LLM_IMAGE_TOKEN_RESERVE each (#1287
+    §3.6): counts are text-only and an image's base64 is never in `content`,
+    so the byte bound above never sees it either."""
+    return image_count(messages) * settings.llm_image_token_reserve
+
+
 def _output_cap(settings: Settings, complexity: str, prepared: PreparedPrompt) -> int | None:
     """Completion cap (#777, #1193) bounding `real prompt + cap <= window -
     safety margin`, never an estimate plus a proportional margin.
@@ -409,6 +420,7 @@ def _output_cap(settings: Settings, complexity: str, prepared: PreparedPrompt) -
     room = (
         settings.llm_max_model_len
         - _prompt_token_upper_bound(prepared.messages)
+        - _image_tokens(settings, prepared.messages)
         - settings.llm_token_safety_margin
     )
     return full if room >= full else None
@@ -457,6 +469,11 @@ async def _build_prepared_prompt(
                 if searched != derive_retrieval_query(input_data.query, settings)
                 else {}
             )
+            # An image turn only (#1287), so every other call keeps its exact
+            # keyword set.
+            image_kw: dict[str, Any] = (
+                {"images": input_data.images} if input_data.images is not None else {}
+            )
             return await asyncio.to_thread(
                 build_chat_fn,
                 input_data.messages,
@@ -478,6 +495,7 @@ async def _build_prepared_prompt(
                 temperature=temperature,
                 **extra,
                 **coding_kw,
+                **image_kw,
             )
         build_msg_fn = deps.build_messages_fn or build_messages
         return await asyncio.to_thread(
@@ -598,6 +616,15 @@ async def _retrieve_inputs(
     return replace(source, search_query=plan.search_text), found
 
 
+def _coding_text(input_data: AnswerCoreInput) -> str:
+    """What coding mode reads: the user's message, plus on an image turn the
+    screen text read from each image (#1287 decision 12: a screenshot of JCL
+    with "fix this" is pasted code)."""
+    if input_data.images is None:
+        return input_data.query
+    return input_data.images.coding_text(input_data.query)
+
+
 def _search_text(input_data: AnswerCoreInput, settings: Settings) -> str:
     """What retrieval searched: the condensed or anchored search text a chat
     turn recorded, else the message's own derived retrieval query (issue
@@ -653,7 +680,7 @@ async def execute_answer_core(
     # Coding mode (issue #1276) is decided once here, from the operator
     # setting and the turn's own text, and routes the turn to the complex
     # path; with the setting off every turn keeps the classifier's result.
-    coding = coding_mode_applies(input_data.query, settings)
+    coding = coding_mode_applies(_coding_text(input_data), settings)
     complexity = "complex" if coding else classify_fn(search_text)
 
     if not hits:
@@ -739,7 +766,7 @@ async def execute_answer_core_stream(
     # Coding mode (issue #1276) is decided once here, from the operator
     # setting and the turn's own text, and routes the turn to the complex
     # path; with the setting off every turn keeps the classifier's result.
-    coding = coding_mode_applies(input_data.query, settings)
+    coding = coding_mode_applies(_coding_text(input_data), settings)
     complexity = "complex" if coding else classify_fn(search_text)
 
     # 2. Empty hits short-circuit: only the terminal record is yielded. The

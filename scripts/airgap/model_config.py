@@ -23,6 +23,8 @@ REASONING_INTEGER_FIELDS = {
     # Retrieval depth (#1191): hits per answer, chunks kept per manual.
     "ANSWER_HIT_LIMIT": ("answerHitLimit", 1, 32),
     "RETRIEVE_MAX_CHUNKS_PER_DOC": ("retrieveMaxChunksPerDoc", 1, 10),
+    # Tokens priced per pasted image (#1287): config.Settings bounds.
+    "LLM_IMAGE_TOKEN_RESERVE": ("imageTokenReserve", 256, 65536),
 }
 REASONING_EFFORT_FIELDS = {
     "LLM_REASONING_EFFORT_SIMPLE": "reasoningEffortSimple",
@@ -60,8 +62,11 @@ CHAT_FOLLOWUP_MODES_CONFLICT = (
 )
 # Coding mode (#1276): optional boolean, default on in Settings; empty keeps it.
 CODING_MODE_KEY = "ANSWER_CODING_MODE_ENABLED"
+# Pasted chat images (#1287): optional boolean, default off in Settings; empty keeps it.
+CHAT_IMAGES_KEY = "CHAT_IMAGES_ENABLED"
 REASONING_ENV_KEYS = (*REASONING_INTEGER_FIELDS, *REASONING_EFFORT_FIELDS, "LLM_REASONING_EFFORTS", "LLM_STREAM",
-                      *MODEL_ARGUMENT_ENV_KEYS, TOKEN_COUNT_SOURCE_KEY, FOLLOWUP_ANCHOR_KEY, CODING_MODE_KEY)
+                      *MODEL_ARGUMENT_ENV_KEYS, TOKEN_COUNT_SOURCE_KEY, FOLLOWUP_ANCHOR_KEY, CODING_MODE_KEY,
+                      CHAT_IMAGES_KEY)
 
 # Request admission and total deadline (#374 handoff, #843 D1). Empty keeps the
 # chart default (deadline 270; admission 4/4/30, #843); zero is an explicit selection. Limits match config.Settings and the
@@ -89,7 +94,7 @@ OPERATOR_BOOL_KEYS = (
     "UI_ENABLED", "CONTEXTUAL_EMBED_ENABLED", "INGEST_ALIAS_PUBLISH",
     "INGEST_REINGEST", "INGEST_AUTHORIZE_FROM_CATALOG", "CHAT_CONDENSE_ENABLED", "LLM_STREAM", "AGENT_NETWORK_POLICY",
     "FEEDBACK_ENABLED", "OPENWEBUI_ENABLED", "CHAT_FOLLOWUP_ANCHOR_ENABLED", "ANSWER_CODING_MODE_ENABLED",
-    "OPENWEBUI_RATINGS_ENABLED",
+    "OPENWEBUI_RATINGS_ENABLED", "CHAT_IMAGES_ENABLED",
 )
 
 # Agent ingress NetworkPolicy (issue #373): default ON; the allow-list names
@@ -561,6 +566,8 @@ def reasoning_overrides(values: Mapping[str, str]) -> dict[str, object]:
         result["followupAnchorEnabled"] = parse_strict_bool(FOLLOWUP_ANCHOR_KEY, values[FOLLOWUP_ANCHOR_KEY], False)
     if values.get(CODING_MODE_KEY, "") != "":
         result["codingModeEnabled"] = parse_strict_bool(CODING_MODE_KEY, values[CODING_MODE_KEY], True)
+    if values.get(CHAT_IMAGES_KEY, "") != "":
+        result["chatImagesEnabled"] = parse_strict_bool(CHAT_IMAGES_KEY, values[CHAT_IMAGES_KEY], False)
     source = values.get(TOKEN_COUNT_SOURCE_KEY, "")
     if source != "":
         if source not in TOKEN_COUNT_SOURCES:

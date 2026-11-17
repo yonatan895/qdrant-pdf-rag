@@ -752,12 +752,13 @@ def test_export_of_a_health_failure_holds_no_golden_text(site_eval):
     ("verification state None != expected 'accepted'", "verification state None != expected …"),
     ("HTTP 422 (prompt_budget_exceeded)", "HTTP 422 (prompt_budget_exceeded)"),
     ("HTTP 500 (internal error text)", "HTTP 500 (?)"),
+    ("HTTP 422 (unsupported_image)", "HTTP 422 (unsupported_image)"),
     ("stream error (model_timeout)", "stream error (model_timeout)"),
     ("request error: ConnectTimeout", "request error"),
     ("agent health returned HTTP 401", "agent health returned HTTP 401"),
     ("free text a future template forgot to quote", "other"),
 ], ids=["empty-body", "only-inferred", "trap-answered", "state-mismatch", "state-none",
-        "http-known-code", "http-unknown-code", "stream-error-known-code", "request-error",
+        "http-known-code", "http-unknown-code", "http-image-code", "stream-error-known-code", "request-error",
         "health-http", "free-text-other"])
 def test_export_failure_labels_are_a_closed_set(failure, label):
     from mainframe_rag.eval.answers import export_failure_label
@@ -1770,3 +1771,227 @@ def test_shipped_wishlist_is_valid_and_runs_by_default(corpus_check):
     assert status == 0
     assert [r["id"] for r in data["items"]] == ids
     assert {r["status"] for r in data["items"]} == {"missing"}
+
+
+# ------------------------------------------------------------- image arms (#1287)
+
+IMAGE_ROW_KEYS = EXPORT_ROW_KEYS | {
+    "image_arm", "image_n", "image_bytes", "image_reads_n", "image_read_failed", "image_cer_bucket"}
+IMAGE_CHAT = ["--endpoint", "chat", "--stream", "--image-arm"]
+
+
+def _image_stream(reads=None) -> bytes:
+    """A chat stream whose finish chunk carries the agent's own image fields
+    (`reads`: one ImageRead, or None for a failed read, per image; None for
+    a finish chunk without image fields), inside `choices[0]` like every
+    other finish field."""
+    from mainframe_rag.agent.images import TurnImages
+
+    image = {} if reads is None else TurnImages(images=(), typed="",
+                                                reads=list(reads)).final_fields()
+    frames = [format_openai_chunk("chatcmpl-abc", "m", delta_content="IEA500I is rejected.\n\n"),
+              format_openai_chunk("chatcmpl-abc", "m",
+                                  delta_content=f"\n\n**Citations:**\n- {CITE}"),
+              format_openai_chunk("chatcmpl-abc", "m", finish_reason="stop", extra={
+                  "citations": [CITE], "citations_inferred": False, "inferred_indices": [],
+                  "hits": [], "verification_state": "accepted", "script": None,
+                  "script_lang": None, "script_review_required": False,
+                  "supplied_evidence": [_supplied()], "evidence_omitted": 0, **image}),
+              format_openai_done()]
+    return "".join(frames).encode()
+
+
+def _read(screen: str, description: str = ""):
+    from mainframe_rag.agent.images import ImageRead
+
+    return ImageRead(screen_text=screen, description=description)
+
+
+def _shown(screen: str, description: str = "") -> str:
+    """`image_reads[].text` as the agent builds it."""
+    return _read(screen, description).shown
+
+
+def _image_agent(read_for):
+    """`read_for(chat_body)` -> the SSE bytes of that chat call."""
+    import httpx2
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": [{"doc_id": "SA22-0000-00"}]})
+        assert request.url.path == "/v1/chat"
+        return _sse(read_for(json.loads(request.content)))
+
+    return respond
+
+
+def _image_parts(body: dict) -> tuple[list[str], list[bytes]]:
+    import base64
+
+    (message,) = body["messages"]
+    texts = [p["text"] for p in message["content"] if p["type"] == "text"]
+    images = []
+    for part in message["content"]:
+        if part["type"] == "image_url":
+            prefix, _, data = part["image_url"]["url"].partition(",")
+            assert prefix == "data:image/png;base64"
+            images.append(base64.b64decode(data, validate=True))
+    return texts, images
+
+
+def _chat_calls(calls) -> list[dict]:
+    return [json.loads(c.content) for c in calls if c.url.path == "/v1/chat"]
+
+
+def test_levenshtein_and_cer_buckets_by_hand():
+    from mainframe_rag.eval.image_arm import cer_bucket, character_error_rate, levenshtein
+
+    assert levenshtein("KITTEN", "SITTING") == 3
+    assert levenshtein("", "ABC") == levenshtein("ABC", "") == 3
+    assert levenshtein("FLAW", "LAWN") == 2 and levenshtein("SAME", "SAME") == 0
+    # Case and layout are the panel's; then one substitution in 20 characters.
+    assert character_error_rate("IEA500I REPORTS WHAT", "iea500i\nreports  whaT") == 0
+    assert character_error_rate("IEA500I REPORTS WHAT", "IEA500I REPORTS WHAX") == 0.05
+    assert character_error_rate("", "anything") is None
+    assert [cer_bucket(v) for v in (0, 0.0, 0.049, 0.05, 0.19, 0.2, 0.49, 0.5, 3.0)] == [
+        "0", "0", "<0.05", "<0.2", "<0.2", "<0.5", "<0.5", ">=0.5", ">=0.5"]
+    assert {cer_bucket(v) for v in (None, True, "0", float("nan"), -1)} == {"none"}
+
+
+def test_cer_scores_the_agents_screen_text_not_its_description():
+    from mainframe_rag.eval.image_arm import character_error_rate
+
+    reference = "IEA500I REPORTS WHAT"
+    assert character_error_rate(reference, _shown("IEA500I REPORTS WHAT", "A panel.")) == 0
+    # A read with no screen text misses every drawn character.
+    assert character_error_rate(reference, _shown("", "A panel.")) == 1
+
+
+def test_image_arms_ask_the_same_rows_three_ways(site_eval):
+    """text: today's body; image: one PNG data URL alone; image+ask: the
+    same image after the fixed typed question. Panels are 80 columns wide
+    whatever the question's length."""
+    from mainframe_rag.eval.image_arm import IMAGE_ASK
+
+    entries = [_entry(), _entry(id="LONG", query="Why does IEA500I appear " * 8)]
+
+    def agent():
+        return _image_agent(lambda body: _image_stream([_read("WHAT DOES IEA500I REPORT?")]))
+
+    _, _, _, plain = site_eval(agent(), entries, ["--endpoint", "chat", "--stream"])
+    bodies, samples = {}, []
+    for arm in ("text", "image", "image+ask"):
+        status, report, _, calls = site_eval(agent(), entries, [*IMAGE_CHAT, arm])
+        assert status == 0, arm
+        bodies[arm] = _chat_calls(calls)
+        samples.append(report["params"]["sample"])
+        assert (report["params"]["image_arm"], report["params"]["image_columns"]) == (arm, 80)
+    assert samples[0] == samples[1] == samples[2]
+    assert bodies["text"] == _chat_calls(plain)
+    widths = set()
+    for image_body, ask_body in zip(bodies["image"], bodies["image+ask"], strict=True):
+        texts, (png,) = _image_parts(image_body)
+        assert texts == [] and png.startswith(b"\x89PNG\r\n\x1a\n")
+        widths.add(int.from_bytes(png[16:20], "big"))
+        assert _image_parts(ask_body) == ([IMAGE_ASK], [png])
+        assert image_body["stream"] is True and image_body["temperature"] == 0.0
+    assert len(widths) == 1
+
+
+def test_image_rows_record_the_read_and_its_cer(site_eval):
+    reads = {
+        "EXACT": [_read("WHAT DOES IEA500I REPORT?", "A panel.")],
+        "GARBLED": [_read("XXXX")],
+        "FAILED": [None],
+        "OLD": None,
+    }
+    entries = [_entry(id=key) for key in reads]
+    streams = iter(reads.values())
+
+    status, report, export, _ = site_eval(
+        _image_agent(lambda body: _image_stream(next(streams))), entries, [*IMAGE_CHAT, "image"])
+    assert status == 0
+    rows = {r["id"]: r for r in json.loads(export)["rows"]}
+    assert all(set(r) == IMAGE_ROW_KEYS for r in rows.values())
+    assert [(rows[k]["image_cer_bucket"], rows[k]["image_reads_n"], rows[k]["image_read_failed"])
+            for k in reads] == [("0", 1, False), (">=0.5", 1, False), ("none", 0, True),
+                                ("none", None, False)]
+    assert {r["image_arm"] for r in rows.values()} == {"image"}
+    assert {r["image_n"] for r in rows.values()} == {1}
+    assert all(r["image_bytes"] > 0 for r in rows.values())
+    assert report["metrics"]["image"] == {
+        "arm": "image", "n": 4, "read_failed": 1, "reads_missing": 2,
+        "cer": {"0": 1, "<0.05": 0, "<0.2": 0, "<0.5": 0, ">=0.5": 1, "none": 2}}
+
+
+def test_image_export_carries_no_question_image_or_transcript(site_eval):
+    marker = "CANARY-TRANSCRIPT-5e11"
+    entries = [_entry(id="ASK", query=f"{CANARIES['query']} what now")]
+
+    def read_for(body):
+        return _image_stream([_read(f"{CANARIES['query']} WHAT NOW {marker}", marker)])
+
+    for arm in ("image", "image+ask"):
+        _, report, export, calls = site_eval(_image_agent(read_for), entries, [*IMAGE_CHAT, arm])
+        (body,) = _chat_calls(calls)
+        encoded = body["messages"][0]["content"][-1]["image_url"]["url"].partition(",")[2]
+        assert len(encoded) > 200
+        local, text = json.dumps(report), export.decode("utf-8")
+        assert CANARIES["query"] in local  # the local report holds the question
+        assert marker not in local and encoded[:40] not in local  # transcript, image: never kept
+        for needle in (CANARIES["query"], marker, encoded[:40], encoded[-40:], "base64",
+                       "WHAT NOW", "what now"):
+            assert needle.lower() not in text.lower(), needle
+        (row,) = json.loads(text)["rows"]
+        assert set(row) == IMAGE_ROW_KEYS and row["image_cer_bucket"] in ("<0.5", ">=0.5")
+
+
+def test_text_arm_rows_carry_the_image_keys_and_no_image(site_eval):
+    status, report, export, _ = site_eval(
+        _image_agent(lambda body: _image_stream()), [_entry()], [*IMAGE_CHAT, "text"])
+    (row,) = json.loads(export)["rows"]
+    assert status == 0 and set(row) == IMAGE_ROW_KEYS
+    assert (row["image_arm"], row["image_n"], row["image_bytes"], row["image_reads_n"],
+            row["image_cer_bucket"]) == ("text", 0, 0, None, "none")
+    assert report["metrics"]["image"]["cer"] is None
+
+
+def test_image_arm_health_failure_rows_carry_the_image_keys(site_eval):
+    import httpx2
+
+    status, _, export, _ = site_eval(lambda r: httpx2.Response(503, json={}), [_entry()],
+                                     [*IMAGE_CHAT, "image"])
+    (row,) = json.loads(export)["rows"]
+    assert status == 2 and set(row) == IMAGE_ROW_KEYS
+    assert (row["image_arm"], row["image_n"], row["image_cer_bucket"]) == ("image", None, "none")
+
+
+@pytest.mark.parametrize("extra", [
+    ["--stream", "--image-arm", "image"],
+    ["--endpoint", "chat", "--stream", "--turns", "2", "--arm", "a", "--image-arm", "image"],
+    ["--endpoint", "chat", "--stream", "--image-arm", "photo"],
+])
+def test_image_arm_flags_are_refused_when_inconsistent(site_eval, extra):
+    with pytest.raises(SystemExit) as exc:
+        site_eval(lambda r: pytest.fail("no request"), [_entry()], extra)
+    assert exc.value.code == 2
+
+
+def test_image_arm_refuses_the_frozen_holdout_before_any_read(tmp_path, monkeypatch, capsys):
+    """VENUE=rc adds the holdout to the default golden set; the image arm
+    refuses that set before reading a row or sending a request."""
+    import httpx2
+
+    from mainframe_rag.eval import answers
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("VENUE", "rc")
+    monkeypatch.setattr(httpx2, "Client", lambda **kw: pytest.fail("no request"))
+    monkeypatch.setattr(answers, "load_golden_records_with_identity",
+                        lambda *a, **k: pytest.fail("no read"))
+    status = answers.main(["--agent-url", "http://deployed-agent:8087", "--endpoint", "chat",
+                           "--stream", "--image-arm", "image+ask"])
+    assert status == 2
+    assert "--image-arm needs an explicit non-holdout --golden" in capsys.readouterr().err

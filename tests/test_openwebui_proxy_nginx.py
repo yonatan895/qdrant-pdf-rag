@@ -47,6 +47,7 @@ error_log /dev/stderr warn;
 events {}
 http {
     access_log off;
+    client_max_body_size 0;
     client_body_temp_path /tmp/c; proxy_temp_path /tmp/p; fastcgi_temp_path /tmp/f;
     uwsgi_temp_path /tmp/u; scgi_temp_path /tmp/s;
     server {
@@ -255,3 +256,40 @@ def test_post_to_an_allowed_path_is_proxied_and_the_denial_text_is_fixed(proxy):
     assert status == 200 and body.endswith("|POST\n")
     _status, denied = _request(proxy, "GET", "/api/v1/files/secret-name-123")
     assert denied == "denied\n"  # no path, no upstream text in the refusal
+
+
+def _post_size(port: int, target: str, length: int, body_bytes: int) -> int:
+    """POST with the given Content-Length, sending `body_bytes` of it; the status."""
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    head = (f"POST {target} HTTP/1.1\r\nHost: docs.example\r\nContent-Type: application/json\r\n"
+            f"Content-Length: {length}\r\nConnection: close\r\n\r\n").encode()
+    with (socket.create_connection(("127.0.0.1", port), timeout=30) as sock,
+          context.wrap_socket(sock, server_hostname="localhost") as tls):
+        tls.sendall(head)
+        try:
+            chunk = b"x" * 65536
+            for start in range(0, body_bytes, len(chunk)):
+                tls.sendall(chunk[: min(len(chunk), body_bytes - start)])
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLError):
+            pass  # nginx answered 413 and closed before the whole body arrived
+        data = b""
+        while b"\r\n" not in data:
+            part = tls.recv(65536)
+            if not part:
+                break
+            data += part
+    return int(data.split(b" ", 2)[1])
+
+
+def test_completions_take_an_image_conversation_body_and_other_paths_keep_1m(proxy):
+    """#1287 (the repository file is the chat-images-on render): the exact
+    completions location admits a body above the 1m cap, up to 55m; every
+    other path, /api/chat/completed included, keeps 1m and answers 413."""
+    two_mib = 2 * 1024 * 1024
+    assert _post_size(proxy, "/api/chat/completions", two_mib, two_mib) == 200
+    assert _post_size(proxy, "/api/chat/%63ompletions", two_mib, two_mib) == 200
+    assert _post_size(proxy, "/api/chat/completed", two_mib, two_mib) == 413
+    # Above 55m is refused from the Content-Length alone.
+    assert _post_size(proxy, "/api/chat/completions", 55 * 1024 * 1024 + 1, 0) == 413

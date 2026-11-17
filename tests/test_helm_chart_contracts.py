@@ -512,6 +512,9 @@ def test_chart_preserves_positive_operator_dimension_and_worker_range():
     ("retrieveMaxChunksPerDoc", 5, "RETRIEVE_MAX_CHUNKS_PER_DOC"),
     ("codingModeEnabled", True, "ANSWER_CODING_MODE_ENABLED"),
     ("codingModeEnabled", False, "ANSWER_CODING_MODE_ENABLED"),
+    ("chatImagesEnabled", True, "CHAT_IMAGES_ENABLED"),
+    ("chatImagesEnabled", False, "CHAT_IMAGES_ENABLED"),
+    ("imageTokenReserve", 8192, "LLM_IMAGE_TOKEN_RESERVE"),
 ])
 def test_direct_chart_optional_budget_limits_reach_pod(field, value, environment):
     rendered = run_new_template({"models": {"reasoning": {field: value}}})
@@ -534,6 +537,22 @@ def test_coding_mode_off_reaches_the_pod_settings_and_unset_renders_nothing(monk
     assert Settings(_env_file=None).answer_coding_mode_enabled is False
 
 
+def test_chat_images_on_reaches_the_pod_settings_and_unset_renders_nothing(monkeypatch):
+    """Issue #1287: default off renders no variable (the pod keeps the off
+    default and unset manifests are unchanged); true crosses the chart into
+    Settings. With Open WebUI off only the agent variable renders."""
+    from mainframe_rag.config import Settings
+
+    default = env_map(run_new_template({})["Deployment", "rag-agent"])
+    assert "CHAT_IMAGES_ENABLED" not in default
+    assert Settings(_env_file=None).chat_images_enabled is False
+    rendered = run_new_template({"models": {"reasoning": {"chatImagesEnabled": True}}})
+    pod = env_map(rendered["Deployment", "rag-agent"])
+    assert not {key for key in rendered if key[1].startswith("rag-openwebui")}
+    monkeypatch.setenv("CHAT_IMAGES_ENABLED", pod["CHAT_IMAGES_ENABLED"]["value"])
+    assert Settings(_env_file=None).chat_images_enabled is True
+
+
 def test_chat_history_limits_are_optional_pod_inputs_bounded_like_settings():
     """Issue #1268: the chat history caps are operator inputs. Unset renders
     neither variable (the default pod keeps the Settings defaults); the schema
@@ -543,14 +562,15 @@ def test_chat_history_limits_are_optional_pod_inputs_bounded_like_settings():
 
     default = env_map(run_new_template({})["Deployment", "rag-agent"])
     assert not {"CHAT_MAX_PRIOR_TURN_CHARS", "CHAT_MAX_TURNS", "CHAT_FOLLOWUP_ANCHOR_ENABLED",
-                "ANSWER_HIT_LIMIT", "RETRIEVE_MAX_CHUNKS_PER_DOC"} & set(default)
+                "ANSWER_HIT_LIMIT", "RETRIEVE_MAX_CHUNKS_PER_DOC", "LLM_IMAGE_TOKEN_RESERVE"} & set(default)
     schema = json.loads((CHART / "values.schema.json").read_text())
     reasoning = schema["properties"]["models"]["properties"]["reasoning"]["properties"]
     # The retrieval depth inputs (#1191) follow the same rule.
     for field, setting in (("chatMaxPriorTurnChars", "chat_max_prior_turn_chars"),
                            ("chatMaxTurns", "chat_max_turns"),
                            ("answerHitLimit", "answer_hit_limit"),
-                           ("retrieveMaxChunksPerDoc", "retrieve_max_chunks_per_doc")):
+                           ("retrieveMaxChunksPerDoc", "retrieve_max_chunks_per_doc"),
+                           ("imageTokenReserve", "llm_image_token_reserve")):
         bounds = {type(m).__name__: m for m in Settings.model_fields[setting].metadata}
         assert (reasoning[field]["minimum"], reasoning[field]["maximum"]) == (bounds["Ge"].ge, bounds["Le"].le)
 
@@ -701,6 +721,8 @@ def test_token_count_source_reaches_the_pod_as_settings_accept_it():
     ("models.reasoning.answerHitLimit", 0), ("models.reasoning.answerHitLimit", 33),
     ("models.reasoning.answerHitLimit", "16"),
     ("models.reasoning.retrieveMaxChunksPerDoc", 0), ("models.reasoning.retrieveMaxChunksPerDoc", 11),
+    ("models.reasoning.imageTokenReserve", 255), ("models.reasoning.imageTokenReserve", 65537),
+    ("models.reasoning.imageTokenReserve", "6144"),
     ("models.reasoning.followupAnchorEnabled", "true"),
     ("models.reasoning.tokenCountSource", "usage"), ("models.reasoning.tokenCountSource", ""),
     ("models.reasoning.tokenCountSource", "Tokenize"),
@@ -1264,7 +1286,7 @@ OWUI_KEYS = {
 OWUI_ENV_NAMES = {
     "ANONYMIZED_TELEMETRY", "API_KEYS_ALLOWED_ENDPOINTS", "AUDIT_LOG_LEVEL",
     "BYPASS_EMBEDDING_AND_RETRIEVAL", "BYPASS_MODEL_ACCESS_CONTROL", "CORS_ALLOW_ORIGIN", "DATA_DIR",
-    "DEFAULT_MODELS", "DO_NOT_TRACK", "ENABLE_ADMIN_CHAT_ACCESS", "ENABLE_ADMIN_EXPORT", "ENABLE_API_KEYS",
+    "DEFAULT_MODEL_METADATA", "DEFAULT_MODELS", "DO_NOT_TRACK", "ENABLE_ADMIN_CHAT_ACCESS", "ENABLE_ADMIN_EXPORT", "ENABLE_API_KEYS",
     "ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS", "ENABLE_AUTOCOMPLETE_GENERATION", "ENABLE_CHANNELS",
     "ENABLE_CODE_EXECUTION", "ENABLE_CODE_INTERPRETER", "ENABLE_COMMUNITY_SHARING",
     "ENABLE_DIRECT_CONNECTIONS", "ENABLE_DIRECT_INTEGRATIONS", "ENABLE_EVALUATION_ARENA_MODELS",
@@ -1493,7 +1515,7 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
     assert pod_vols[proxy_vols["/tmp"]] == {"name": proxy_vols["/tmp"], "emptyDir": {}}
     assert proxy_vols["/tmp"] != next(m["name"] for m in container["volumeMounts"] if m["mountPath"] == "/tmp")
     assert dep["spec"]["template"]["metadata"]["annotations"]["checksum/proxy-config"] == hashlib.sha256(
-        _proxy_conf_without_ratings().encode()).hexdigest()
+        _proxy_conf_rendered(ratings=False, images=False).encode()).hexdigest()
     env = env_map(dep, "openwebui")
     plain = {k: v["value"] for k, v in env.items() if "value" in v}
     for key, value in {
@@ -2028,9 +2050,11 @@ def test_openwebui_proxy_admits_the_prompt_writes_only_from_the_pod_loopback():
 def test_openwebui_proxy_config_matches_the_decoded_uri_and_forwards_the_original_uri():
     """Maintainer decision 2026-10-24 (ADR-0007 E1): nginx decides on its
     decoded, normalised $uri; the request line is forwarded to uvicorn as the
-    client sent it, so both see the same path; everything else is a fixed 403."""
+    client sent it, so both see the same path; everything else is a fixed 403.
+    Checked on the default render (one location); the chat-images location
+    (#1287) is pinned to repeat it by the next test."""
     import re
-    conf = _proxy_conf()
+    conf = _proxy_conf_rendered(ratings=True, images=False)
     assert re.search(r"^\s*merge_slashes\s+on;", conf, re.MULTILINE)
     assert re.search(r"^\s*server_tokens\s+off;", conf, re.MULTILINE)
     assert re.search(r"^\s*listen\s+8443\s+ssl;", conf, re.MULTILINE)
@@ -2039,7 +2063,7 @@ def test_openwebui_proxy_config_matches_the_decoded_uri_and_forwards_the_origina
     # no rewrite of any kind, and nothing else may change $uri before the check.
     proxy_passes = re.findall(r"^\s*proxy_pass\s+(\S+);", conf, re.MULTILINE)
     assert proxy_passes == ["http://owui_upstream"]
-    assert not re.search(r"^\s*(rewrite|set\s+\$uri|try_files|alias|root)\b", conf, re.MULTILINE)
+    assert not re.search(r"^\s*(rewrite|set\s+\$uri|try_files|alias|root)\b", _proxy_conf(), re.MULTILINE)
     assert re.search(r'if \(\$owui_allowed = 0\) \{\s*return 403 "denied\\n";\s*\}', conf)
     # The check precedes the proxy_pass inside the one location.
     assert conf.index("$owui_allowed = 0") < conf.index("proxy_pass http://")
@@ -2050,6 +2074,45 @@ def test_openwebui_proxy_config_matches_the_decoded_uri_and_forwards_the_origina
     for needle in ("proxy_http_version 1.1;", "proxy_buffering off;", "$http_upgrade", "ssl_protocols TLSv1.2 TLSv1.3;"):
         assert needle in conf, needle
     assert "client_max_body_size 1m;" in conf
+    assert "55m" not in conf
+
+
+def _locations(conf):
+    """Each location's match and its directive lines (comments and blanks dropped)."""
+    import re
+    found = {}
+    for match, body in re.findall(r"^        location ([^{]+?) \{\n(.*?)^        \}\n", conf, re.MULTILINE | re.DOTALL):
+        found[match] = [line.strip() for line in body.splitlines()
+                        if line.strip() and not line.strip().startswith("#")]
+    return found
+
+
+def test_openwebui_proxy_chat_images_location_repeats_the_allow_list_location():
+    """#1287: with chat images on, the one exact completions location raises
+    only its body cap. It repeats every directive of `location /`, the
+    allow-list check first, so E1 is unchanged; nothing else differs."""
+    locations = _locations(_proxy_conf())
+    assert set(locations) == {"/", "= /api/chat/completions"}
+    images = locations["= /api/chat/completions"]
+    assert images[0] == "client_max_body_size 55m;"
+    assert images[1:] == locations["/"]
+    assert locations["/"][:3] == ["if ($owui_allowed = 0) {", 'return 403 "denied\\n";', "}"]
+    # The default render keeps the one allow-list location.
+    assert set(_locations(_proxy_conf_rendered(ratings=True, images=False))) == {"/"}
+
+
+def test_openwebui_proxy_completions_cap_fits_the_conversation_images():
+    """#1287 decision 7: the browser resends every earlier image of a
+    temporary chat each turn. 55m is the smallest whole MiB that holds the
+    1 MiB text cap plus 8 images of the agent's per-image byte cap, base64."""
+    import math
+
+    from mainframe_rag.config import Settings
+
+    max_bytes = Settings.model_fields["chat_image_max_bytes"].default
+    needed = 1024 * 1024 + 8 * 4 * math.ceil(max_bytes / 3)
+    assert math.ceil(needed / (1024 * 1024)) == 55
+    assert "client_max_body_size 55m;" in CHAT_IMAGES_LOCATION
 
 
 RATINGS_ALLOW = (
@@ -2057,26 +2120,77 @@ RATINGS_ALLOW = (
     "        # checks the Function is an active, surfaced Action; its id is fixed.\n"
     "        ~^/api/chat/actions/mainframe_rag_rating\\.(up|down)$ 1;\n"
 )
+# The chat-images location (#1287), removed from the render while images are off.
+CHAT_IMAGES_LOCATION = (
+    "\n"
+    "        # Pasted images (#1287), rendered only while chat images are on. The\n"
+    "        # browser resends every earlier image of a temporary chat each turn, so\n"
+    "        # the completions body carries the conversation's images: 8 images\n"
+    "        # (decision 7) x ceil(5242880 * 4 / 3) base64 bytes = 53.3 MiB, plus\n"
+    "        # the 1 MiB text cap above, is 54.3 MiB; rounded up to 55m. Every\n"
+    '        # directive of "location /" is repeated, the allow-list check included,\n'
+    "        # so the allow-list (E1) is unchanged: only this path's body cap grows.\n"
+    "        location = /api/chat/completions {\n"
+    "            client_max_body_size 55m;\n"
+    "            if ($owui_allowed = 0) {\n"
+    '                return 403 "denied\\n";\n'
+    "            }\n"
+    "            proxy_pass http://owui_upstream;\n"
+    "            proxy_http_version 1.1;\n"
+    "            proxy_set_header Host $http_host;\n"
+    "            proxy_set_header X-Forwarded-For $remote_addr;\n"
+    "            proxy_set_header X-Forwarded-Proto https;\n"
+    "            proxy_set_header Upgrade $http_upgrade;\n"
+    "            proxy_set_header Connection $owui_connection;\n"
+    "            proxy_buffering off;\n"
+    "            proxy_read_timeout 600s;\n"
+    "            proxy_send_timeout 600s;\n"
+    "        }\n"
+)
+# sha256 of proxy.nginx.conf before #1287. The images-off render must equal it
+# byte for byte (the default render's only #1287 change is one Open WebUI
+# variable). An allow-list change after #1287 updates this pin deliberately.
+PRE_1287_PROXY_SHA256 = "842fe2600b125677a52af1232dbbbe499aeb7bf5a2a4fd7dcd798149a872ff36"
 
 
-def _proxy_conf_without_ratings():
-    """The allow-list as rendered with ratings off (the default): the file
-    without its one rating Action block (#1255)."""
+def _proxy_conf_rendered(*, ratings, images):
+    """The allow-list as rendered: the file without its rating Action block
+    when ratings are off (#1255) and without its chat-images location when
+    images are off (#1287). Each block occurs exactly once in the file."""
     conf = _proxy_conf()
     assert conf.count(RATINGS_ALLOW) == 1
-    return conf.replace(RATINGS_ALLOW, "")
+    assert conf.count(CHAT_IMAGES_LOCATION) == 1
+    if not ratings:
+        conf = conf.replace(RATINGS_ALLOW, "")
+    if not images:
+        conf = conf.replace(CHAT_IMAGES_LOCATION, "")
+    return conf
 
 
-@pytest.mark.parametrize("ratings", [False, True])
-def test_openwebui_proxy_configmap_carries_the_repository_config(owui_chart, ratings):
-    """Ratings on: the repository file verbatim. Off (the default): the same
-    file without the rating Action block, so no /api/chat/actions path is
-    admitted (E1) and the pod's proxy checksum follows the rendered text."""
-    extra = RATINGS_ON if ratings else None
+def test_openwebui_proxy_images_off_render_is_the_pre_1287_file():
+    assert hashlib.sha256(_proxy_conf_rendered(ratings=True, images=False).encode()).hexdigest() == (
+        PRE_1287_PROXY_SHA256)
+
+
+IMAGES_ON = {"models": {"reasoning": {"chatImagesEnabled": True}}}
+
+
+@pytest.mark.parametrize("images", [False, True], ids=["images-off", "images-on"])
+@pytest.mark.parametrize("ratings", [False, True], ids=["ratings-off", "ratings-on"])
+def test_openwebui_proxy_configmap_carries_the_repository_config(owui_chart, ratings, images):
+    """Ratings and chat images on: the repository file verbatim. Ratings off
+    (the default without the feedback store): no rating Action block, so no
+    /api/chat/actions path is admitted (E1). Images off (the default): no
+    completions location, so every body keeps the 1m cap. The pod's proxy
+    checksum follows the rendered text."""
+    extra = {**(RATINGS_ON if ratings else {}), **(IMAGES_ON if images else {})}
     docs = _owui(owui_chart, extra)
     cm = docs["ConfigMap", "rag-openwebui-proxy"]
-    text = _proxy_conf() if ratings else _proxy_conf_without_ratings()
+    text = _proxy_conf_rendered(ratings=ratings, images=images)
     assert ("/api/chat/actions" in text) is ratings
+    assert ("location = /api/chat/completions" in text) is images
+    if ratings and images:
+        assert text == _proxy_conf()
     assert cm["data"] == {"nginx.conf": text}
     assert cm["metadata"]["annotations"] == {
         "mainframe-rag/proxy-config-sha256": hashlib.sha256(text.encode()).hexdigest()}
@@ -2085,6 +2199,56 @@ def test_openwebui_proxy_configmap_carries_the_repository_config(owui_chart, rat
     # Not rendered (and the default render unchanged) when the front end is off.
     default = run_new_template({}, chart=owui_chart)
     assert ("ConfigMap", "rag-openwebui-proxy") not in default
+
+
+# Open WebUI variables chat images (#1287) set when on, in place of the
+# not-vision-capable model default they set when off.
+CHAT_IMAGES_ENV = {"RAG_CHAT_IMAGES", "RAG_FILE_MAX_SIZE", "RAG_FILE_MAX_COUNT",
+                   "FILE_IMAGE_COMPRESSION_WIDTH", "FILE_IMAGE_COMPRESSION_HEIGHT", "WEBUI_BANNERS"}
+
+
+def test_openwebui_chat_images_off_declares_the_models_not_vision_capable(owui_chart):
+    """#1287 decision 3: off (the default), Open WebUI's model default marks
+    every model, the docs Pipe's entries included, not image-capable, so the
+    browser refuses a paste up front; no image variable is set."""
+    env = env_map(_owui(owui_chart)["Deployment", "rag-openwebui"], "openwebui")
+    assert json.loads(env["DEFAULT_MODEL_METADATA"]["value"]) == {"capabilities": {"vision": False}}
+    assert not CHAT_IMAGES_ENV & set(env)
+    # An explicit false renders the Open WebUI objects exactly as unset does.
+    explicit = _owui(owui_chart, {"models": {"reasoning": {"chatImagesEnabled": False}}})
+    default = _owui(owui_chart)
+    for key in (("ConfigMap", "rag-openwebui-proxy"), ("Deployment", "rag-openwebui")):
+        assert explicit[key] == default[key], key
+
+
+def test_openwebui_chat_images_on_sets_the_caps_banner_and_pipe_switch(owui_chart):
+    """#1287: on, the Pipe switch, the browser caps and one banner replace the
+    model default; the agent gets CHAT_IMAGES_ENABLED. The browser caps equal
+    the agent's Settings defaults, so a paste the browser admits is one the
+    agent admits (as the Pipe's MAX_BODY_CHARS is pinned to its Settings)."""
+    from mainframe_rag.config import Settings
+
+    docs = _owui(owui_chart, IMAGES_ON)
+    env = env_map(docs["Deployment", "rag-openwebui"], "openwebui")
+    assert set(env) == (OWUI_ENV_NAMES - {"DEFAULT_MODEL_METADATA"}) | CHAT_IMAGES_ENV
+    plain = {k: v["value"] for k, v in env.items() if k in CHAT_IMAGES_ENV}
+    assert plain["RAG_CHAT_IMAGES"] == "true"
+    fields = Settings.model_fields
+    # Open WebUI's RAG_FILE_MAX_SIZE is in MB of 1048576 bytes (MessageInput.svelte).
+    assert int(plain["RAG_FILE_MAX_SIZE"]) * 1048576 == fields["chat_image_max_bytes"].default
+    assert int(plain["RAG_FILE_MAX_COUNT"]) == fields["chat_image_max_count"].default
+    assert (int(plain["FILE_IMAGE_COMPRESSION_WIDTH"]) * int(plain["FILE_IMAGE_COMPRESSION_HEIGHT"])
+            == fields["chat_image_max_pixels"].default)
+    # v0.12.3 BannerModel: a missing or mistyped field drops every banner.
+    banners = json.loads(plain["WEBUI_BANNERS"])
+    assert len(banners) == 1
+    banner = banners[0]
+    assert set(banner) == {"id", "type", "content", "dismissible", "timestamp"}
+    assert banner["id"] == "mainframe-rag-chat-images" and banner["type"] == "info"
+    assert banner["dismissible"] is True and type(banner["timestamp"]) is int
+    assert isinstance(banner["content"], str) and "temporary chat" in banner["content"]
+    agent = env_map(docs["Deployment", "rag-agent"])
+    assert agent["CHAT_IMAGES_ENABLED"]["value"] == "true"
 
 
 def test_openwebui_retention_defaults_to_30_days_and_cannot_be_unset(owui_chart):

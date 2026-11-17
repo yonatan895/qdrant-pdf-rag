@@ -150,3 +150,21 @@ thorough uses it with no repackage. The site admin does the following
 API callers of `/v1/chat` may send `reasoning_depth` (`quick`, `standard`,
 `thorough`) or the unchanged `reasoning_effort`, not both. Nothing is removed
 from the extension surface.
+
+## 2026-11-17 GH#1287 Pasted images in temporary chats, off by default
+
+Open WebUI users can paste screenshots into a temporary chat once the site
+turns images on; the reasoning model reads each image to search the manuals
+and sees it when answering. Nothing changes until a site opts in: off, Rosetta
+is declared not image-capable and every request is byte-identical to before.
+Two new optional `airgap.env` keys ([pasted images](deploy.md#owui-chat-images)):
+
+1. Run `probe_gateway.py --probe-image` in the agent pod. Turn images on only
+   after it prints `PASS`.
+2. If its `image_tokens` is above 6144, set `LLM_IMAGE_TOKEN_RESERVE` to that
+   figure, rounded up (256..65536).
+3. Set `CHAT_IMAGES_ENABLED=true` and run `airgap:deploy`. The transcription
+   call uses the lowest effort `LLM_REASONING_EFFORTS` offers, so no effort
+   setting changes.
+
+Nothing is removed from the extension surface.

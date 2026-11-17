@@ -7,7 +7,8 @@
   paragraph, V2, R2, one no-go item and the framework reading, as its table
   lists); amended for chat folders (#1255: V1, E1, S2, S3). V2 wording
   amended for the docs Pipe's answer-depth entries (#1255, maintainer
-  decision 2026-11-16).
+  decision 2026-11-16). Amended for pasted images in temporary chats
+  (#1287, maintainer decisions 2026-11-17: V1, V2, V3, E1, S2, S4).
   Accepting this record does not enable anything: the chart component stays
   off by default (superseded by ADR-0008: default on), and a site enables it only after every condition below
   passes. Amends [ADR-0004](0004-operator-console-htmx.md) and
@@ -70,6 +71,12 @@ Pipe is provisioned and the admin role is limited to the team.
   acceptance step (#1255, not yet in the battery): a folder with a system
   prompt and a knowledge entry, then a chat in it; the agent request holds
   user and assistant turns only, and the data directory is unchanged.
+  *(Amended 2026-11-17, Refs #1287.)* **Pasted images** (off by default)
+  travel inline as data URLs in temporary chats only. Nothing reaches the
+  file store or a vector store, and nothing is stored: v0.12.3 builds a
+  temporary chat's image part in the browser and makes no `/api/v1/files`
+  call; uploads stay off. The battery adds an image paste in a temporary chat
+  and an unchanged data directory.
 - **V2 Answers only through the agent.** Open WebUI holds no gateway or LiteLLM
   key. It has no OpenAI or Ollama connections, so the default connections are
   off. Direct connections, user-created models and user Tools/Functions are
@@ -109,6 +116,9 @@ Pipe is provisioned and the admin role is limited to the team.
   read, and the Pipe drops it from the history it sends back. Agent requests
   still equal user turns: a rating is not an answer request.
   Proof: over a multi-turn trial, agent requests equal user turns.
+  *(Amended 2026-11-17, Refs #1287.)* With pasted images on, the agent makes
+  one extra reasoning-model call per image (its reading feeds retrieval);
+  images still reach a model only through the agent.
 - **V3 Contract fidelity.** The Pipe sends exactly the agent's `ChatRequest`
   shape. It renders validated citations with their supplied excerpts as source
   events, and it shows `verification_state` and the script-review warning.
@@ -121,6 +131,9 @@ Pipe is provisioned and the admin role is limited to the team.
   third-party behaviour, and the trial shows that no agent or upstream text
   passes through them. The Pipe is stateless. It does no retrieval, prompt
   assembly, tool planning or LLM calls of its own.
+  *(Amended 2026-11-17, Refs #1287.)* With pasted images on, the Pipe also
+  forwards the latest user turn's image parts (`data:image/` URLs only) in
+  the `ChatRequest` content-part shape; the request is no longer text only.
 - **R1 Non-root.** The pod is admitted under `restricted-v2` with an arbitrary
   UID: non-root, ALL capabilities dropped, RuntimeDefault seccomp and no
   privilege escalation. There is no `anyuid` and no root. Writable paths are
@@ -169,6 +182,10 @@ Pipe is provisioned and the admin role is limited to the team.
   config test runs the real pinned image against every encoded variant, and the
   site curl checks in `docs/deploy.md` return a refusal for each. The remaining
   browser-trace completeness of the list is a #1073 run-2 item.
+  *(Amended 2026-11-17, Refs #1287.)* Pasted images add no route. While they
+  are on, the exact path `/api/chat/completions` gets its own body cap
+  (55m) in a location that repeats the allow-list check and every directive
+  of `location /`; with them off the config is unchanged.
 - **R3 Identity.** Login is OIDC against the identity team's IdP (AD FS, with
   Keycloak also in use). Every employee signs in with a personal account.
   Groups and the admin role come from IdP claims. The local login form,
@@ -242,6 +259,11 @@ Pipe is provisioned and the admin role is limited to the team.
   it. These also stay in PVC backups under S3. A `parent_id` cycle never
   becomes a leaf and is kept. v0.12.3 refuses to file a chat under a folder
   that no longer exists (`has_folder_write_access`).
+  *(Amended 2026-11-17, Refs #1287.)* Pasted images change nothing here:
+  they are accepted in temporary chats only, which are never saved. If
+  saved-chat images (option B) come later, the purge already covers
+  `uploads/` (aged file rows, files of purged chats, orphans); that option
+  needs its own amendment.
 - **S3 Protected copies and admin access.** PVC backups hold manual excerpts
   and pasted incident text. They are protected records that never leave the
   enterprise. They follow the same 30-day window: the purge job also removes
@@ -259,6 +281,9 @@ Pipe is provisioned and the admin role is limited to the team.
 - **S4 No content in telemetry.** The log level is INFO or higher, and the
   audit level never records request or response bodies. A canary scan of the
   container logs finds 0 hits.
+  *(Amended 2026-11-17, Refs #1287.)* With images on, the scan adds an image
+  canary: a pasted image showing a canary string, which no container log
+  may contain.
 - **L1 Licence.** The branding stays unmodified: no custom name, logo, theme
   or injected CSS. The licence permits that at any user count. Users are
   capped at 100. The maintainer signed off as repository owner on 2026-10-24.

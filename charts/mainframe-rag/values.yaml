@@ -115,6 +115,15 @@ models:
     # restores the pre-#1276 prompts and complexity for every request (the
     # c/hlasm/asm/metalc/clist fence handling is not part of the setting).
     # codingModeEnabled: true
+    # Pasted images in Open WebUI temporary chats (#1287); absent keeps the
+    # Settings default (off). Turn on only after `probe_gateway.py
+    # --probe-image` passes; true also sets the Open WebUI image caps, the
+    # banner and the proxy's 55m body cap on /api/chat/completions.
+    # chatImagesEnabled: false
+    # Prompt tokens priced per pasted image (#1287; 256..65536); absent keeps
+    # the Settings default (shown, an estimate). Set the image_tokens the
+    # site's `probe_gateway.py --probe-image` measured, rounded up.
+    # imageTokenReserve: 6144
     # Empty model disables /v1/answer; when set, baseUrl is required.
     baseUrl: ""
     model: ""
