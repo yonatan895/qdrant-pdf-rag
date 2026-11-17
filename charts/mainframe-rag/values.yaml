@@ -101,10 +101,11 @@ models:
     # Chat history caps (#1268); absent keys keep the Settings defaults (shown):
     # prior messages kept, and characters kept of each prior message.
     # chatMaxTurns: 10
-    # chatMaxPriorTurnChars: 1000
-    # Antecedent-anchored follow-up retrieval (#1268); absent keeps it off.
+    # chatMaxPriorTurnChars: 4000  # 1000 before #1274
+    # Antecedent-anchored follow-up retrieval (#1268); absent keeps it on
+    # (#1274), unless condenseEnabled is true, which turns the default off.
     # Exclusive with condenseEnabled (the schema refuses both true).
-    # followupAnchorEnabled: false
+    # followupAnchorEnabled: true  # false before #1274
     # Retrieval depth (#1191); absent keys keep the Settings defaults
     # (shown): hits per answer retrieval (1..32; /v1/search keeps its own
     # limit) and chunks kept per manual (1..10; applies to /v1/search too).

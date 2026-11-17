@@ -48,7 +48,7 @@ EFFORT_TRANSPORT_KEY = "LLM_EFFORT_TRANSPORT"
 EFFORT_TRANSPORTS = ("top_level", "chat_template", "none")
 MODEL_ARGUMENT_ENV_KEYS = (EXTRA_BODY_KEY, EFFORT_TRANSPORT_KEY)
 # Prompt-count source (#1266). Mirrors config.TOKEN_COUNT_SOURCES; a test pins
-# both sides. Empty keeps the application default (tokenize).
+# both sides. Empty keeps the application default (auto since #1274).
 TOKEN_COUNT_SOURCE_KEY = "LLM_TOKEN_COUNT_SOURCE"
 TOKEN_COUNT_SOURCES = ("tokenize", "completion_usage", "auto", "estimate")
 # Antecedent-anchored follow-up retrieval (#1268): optional boolean, exclusive
