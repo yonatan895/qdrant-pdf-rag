@@ -68,6 +68,7 @@ from mainframe_rag.agent.chat_turn import (
     InvalidChatTurn,
     PreparedChatTurn,
     RequestTooLarge,
+    chat_body_chars,
     is_unsearchable_query,
     prepare_chat_turn,
     too_large_message,
@@ -2471,7 +2472,10 @@ async def prepare_chat_core(
     search_input = core_input
     if turn_images is not None:
         core_input.images = turn_images
-        searched = turn_images.search_text()
+        # The body cap counts the caller's text only: the search turn gets
+        # whatever room the history leaves, which always holds the typed text.
+        room = settings.chat_max_body_chars - chat_body_chars(list(turn.history), splunk_context)
+        searched = turn_images.search_text(room)
         if searched and searched != turn.query:
             search_input = replace(
                 core_input,

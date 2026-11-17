@@ -513,7 +513,8 @@ def test_a_read_never_fails_a_turn_whose_caller_text_fits_the_body_cap(gateway_c
         *history, {"role": "user", "content": _parts("what now?", _url(_png(seed=5)))}]})
     assert res.status_code == 200
     assert len(gateway.reads()) == 1 and len(gateway.answers()) == 1
-    (query,) = client.search.queries
+    # An identifier-free follow-up may also search its anchor (#1268).
+    (query,) = [q for q in client.search.queries if q.startswith("what now?")]
     full = "what now?\nIEA500I\n" + ("A z/OS console screen. " * 40).strip()
     assert query.startswith("what now?\nIEA5") and full.startswith(query)
     assert len(query) <= slack + len("what now?") < len(full)
