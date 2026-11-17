@@ -29,11 +29,12 @@ from dataclasses import replace
 import anyio
 import httpx2
 from fastapi import FastAPI, Query, Request, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from mainframe_rag.agent.admission import (
@@ -80,6 +81,16 @@ from mainframe_rag.agent.evidence import (
     EvidenceService,
     SharedCorpusAccess,
     TrustedCaller,
+)
+from mainframe_rag.agent.images import (
+    IMAGE_ONLY_QUESTION,
+    UNSUPPORTED_IMAGE_CODE,
+    TurnImage,
+    TurnImages,
+    UnsupportedImage,
+    read_images,
+    span_attributes,
+    split_chat_images,
 )
 from mainframe_rag.agent.metrics import (
     endpoint_for_path,
@@ -141,6 +152,7 @@ from mainframe_rag.tracing import (
     parent_context,
     setup_tracing,
     shutdown_tracing,
+    start_as_current_span,
     start_span,
     use_span,
 )
@@ -1202,6 +1214,22 @@ class ChatRequest(BoundedRequestText):
     # LLM_REASONING_EFFORTS, sent to the model verbatim; omitted keeps the
     # configured simple/complex effort. Same refusal as the console (#748).
     reasoning_effort: ReasoningEffort | None = None
+    # The latest user message's validated images (#1287), split out of its
+    # content parts before the text model validates; empty with
+    # CHAT_IMAGES_ENABLED off, where a content list stays today's 422.
+    _images: tuple[TurnImage, ...] = PrivateAttr(default=())
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _split_images(cls, data: object, handler):
+        normalised, images = split_chat_images(data, settings)
+        model = handler(normalised)
+        model._images = images
+        return model
+
+    @property
+    def images(self) -> tuple[TurnImage, ...]:
+        return self._images
 
 
 class ChatMessageResponse(BaseModel):
@@ -1372,18 +1400,23 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
 
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-    _record_handler_error(request, "invalid_request")
     # The request-size guard states its limit (issue #1192): the configured
-    # number only, read off the typed refusal, never any input text.
-    message = "request body failed validation"
+    # number only, read off the typed refusal, never any input text. A
+    # refused pasted image (#1287) has its own stable code and fixed
+    # per-reason text, which states only the configured limit.
+    code, message = "invalid_request", "request body failed validation"
     for error in exc.errors():
         cause = (error.get("ctx") or {}).get("error")
         if isinstance(cause, RequestTooLarge):
             message = too_large_message(cause.limit)
             break
+        if isinstance(cause, UnsupportedImage):
+            code, message = UNSUPPORTED_IMAGE_CODE, cause.message
+            break
+    _record_handler_error(request, code)
     return JSONResponse(
         status_code=422,
-        content=ErrorEnvelope(code="invalid_request", message=message).model_dump(),
+        content=ErrorEnvelope(code=code, message=message).model_dump(),
     )
 
 
@@ -2298,6 +2331,23 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
         return await _within_deadline(owner, _chat_response(req, response, owner))
 
 
+def _with_image_fields(fields: dict, images: TurnImages | None) -> dict:
+    """An image turn's finalized log fields add the image counts (#1287 §3.9;
+    the feedback record's telemetry reads `image_count`, decision 10): never
+    bytes, hashes or transcript text. Other turns keep their exact keys."""
+    if images is not None:
+        fields.update(images.log_fields())
+    return fields
+
+
+def _chat_json(images: TurnImages | None, body: ChatCompletionsResponse):
+    """A buffered chat response; an image turn's body adds `image_reads`
+    (#1287) and other turns return the model unchanged."""
+    if images is None:
+        return body
+    return JSONResponse(content={**jsonable_encoder(body), **images.final_fields()})
+
+
 def _chat_final_frames(
     owner: _RequestSpan,
     chat_id: str,
@@ -2305,20 +2355,24 @@ def _chat_final_frames(
     timings: dict,
     llm_model: str,
     output: AnswerCoreOutput,
+    images: TurnImages | None = None,
 ) -> Iterator[str]:
     """The terminal OpenAI chunks of a chat stream (citations delta, the
     finish chunk carrying the answer metadata, then [DONE]), with their
-    terminal side effects performed in their fixed order."""
+    terminal side effects performed in their fixed order. An image turn's
+    finish chunk also carries `image_reads` (#1287)."""
     root_span = owner.span
     request_id = owner.request.state.request_id
     if not output.hits:
         yield format_openai_chunk(chat_id, llm_model, delta_content=output.answer)
         extra_meta = _answer_metadata(output, hits=[])
+        if images is not None:
+            extra_meta.update(images.final_fields())
         root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
         _record_no_hits(owner, "chat", kind, output)
         log.info(json_log(request_id, "chat", query_kind=kind, hits=0, stream=True))
-        _record_feedback(owner.request, "chat_stream", output,
-                         _output_log_fields(output, kind, timings, owner.started, stream=True))
+        _record_feedback(owner.request, "chat_stream", output, _with_image_fields(
+            _output_log_fields(output, kind, timings, owner.started, stream=True), images))
         yield format_openai_chunk(chat_id, llm_model, finish_reason="stop", extra=extra_meta)
         yield format_openai_done()
         return
@@ -2328,8 +2382,11 @@ def _chat_final_frames(
         yield format_openai_chunk(chat_id, llm_model, delta_content=cites_delta)
 
     extra_meta = _answer_metadata(output, hits=[h.model_dump() for h in output.hits])
+    if images is not None:
+        extra_meta.update(images.final_fields())
     _record_answered(owner, "chat", kind, output, llm_model)
-    fields = _output_log_fields(output, kind, timings, owner.started, stream=True)
+    fields = _with_image_fields(
+        _output_log_fields(output, kind, timings, owner.started, stream=True), images)
     log.info(json_log(request_id, "chat", **fields))
     _record_feedback(owner.request, "chat_stream", output, fields)
     yield format_openai_chunk(
@@ -2347,12 +2404,18 @@ async def prepare_chat_core(
     version: str | None,
     temperature: float | None = None,
     reasoning_effort: ReasoningEffort | None = None,
+    images: tuple[TurnImage, ...] = (),
 ) -> tuple[AnswerCoreInput, AnswerCoreDeps, str]:
     """One chat turn up to the answer core, shared by /v1/chat* and both
     console routes so the same fault maps to the same code, outcome and log
     level on each (issue #985): turn validation, the reasoning-model gate,
     the serving gate, condensation and retrieval. Returns the core input
     carrying the retrieved hits, the bound deps and the reasoning model.
+
+    `images` (#1287, /v1/chat only) are the latest user message's validated
+    images: each is read once by the reasoning model after the serving gate,
+    and the reads join what retrieval searches; the question stays the
+    user's own words.
 
     The turn's RED endpoint is `owner.endpoint`. A retrieval-leg failure
     (condensation included) is recorded here and raised as the stable
@@ -2372,6 +2435,10 @@ async def prepare_chat_core(
     rsc = resources()
     deps = await serving_deps(rsc)
 
+    turn_images = (
+        await _read_turn_images(owner, deps, images, turn.query) if images else None
+    )
+
     owner.request.state.feedback_query = turn.query
     core_input = AnswerCoreInput(
         query=turn.query,
@@ -2383,11 +2450,24 @@ async def prepare_chat_core(
         is_chat=True,
         reasoning_effort=reasoning_effort,
     )
+    # An image turn searches the typed text plus what was read from each
+    # image (#1287 §3.4): the plan reads that text as the active message, so
+    # condensation, anchoring and the identifier bypass all see it.
+    search_input = core_input
+    if turn_images is not None:
+        core_input.images = turn_images
+        searched = turn_images.search_text()
+        if searched and searched != turn.query:
+            search_input = replace(
+                core_input,
+                query=searched,
+                messages=[*turn.history, ChatMessage(role="user", content=searched)],
+            )
 
     try:
         with use_span(owner.span, end_on_exit=False):
-            plan = await plan_search(core_input, deps, parent_span=owner.span)
-            found = await retrieve_planned(plan, core_input, deps)
+            plan = await plan_search(search_input, deps, parent_span=owner.span)
+            found = await retrieve_planned(plan, search_input, deps)
     except Exception as exc:
         raise _retrieval_failed(owner, owner.endpoint, f"{owner.endpoint}_retrieval", exc) from exc
 
@@ -2396,6 +2476,44 @@ async def prepare_chat_core(
     core_input.timings = found.timings
     core_input.search_query = plan.search_text
     return core_input, deps, llm_model
+
+
+async def _read_turn_images(
+    owner: _RequestSpan, deps: AnswerCoreDeps, images: tuple[TurnImage, ...], question: str,
+) -> TurnImages:
+    """Read the turn's images (#1287 §3.3): one reasoning-model call per
+    distinct image, inside this request's slot and deadline. Logs and spans
+    carry counts and fixed labels only. A turn with typed text continues when
+    a read fails (the final frame says so); an image-only turn with nothing
+    read fails with the stable model codes, since there is nothing to search."""
+    request_id = owner.request.state.request_id
+    turn = TurnImages(images=images, typed="" if question == IMAGE_ONLY_QUESTION else question)
+
+    def left() -> float:
+        remaining = owner.remaining()
+        return math.inf if remaining is None else remaining
+
+    with start_as_current_span(
+        tracer,
+        "chat.image_read",
+        kind=SpanKind.CLIENT,
+        context=trace.set_span_in_context(owner.span),
+        attributes={"rag.image_count": len(images)},
+    ):
+        await read_images(deps.llm.chat, turn, settings, deadline_left_s=left)
+    owner.span.set_attributes(dict(span_attributes(turn)))
+    log.info(json_log(request_id, "image_read", **turn.log_fields()))
+    if turn.typed or turn.usable_reads:
+        return turn
+    _record_endpoint(
+        owner.request,
+        owner.endpoint,
+        "model_timeout" if turn.timed_out else "upstream_error",
+        owner.started,
+    )
+    if turn.timed_out:
+        raise AppError(504, MODEL_TIMEOUT_CODE, MODEL_TIMEOUT_MESSAGE)
+    raise AppError(502, "upstream_error", "image read failed")
 
 
 async def _chat_response(req, response, owner):
@@ -2411,9 +2529,11 @@ async def _chat_response(req, response, owner):
         version=req.version,
         temperature=req.temperature,
         reasoning_effort=req.reasoning_effort,
+        images=req.images,
     )
     hits, kind, timings = core_input.hits, core_input.query_kind, core_input.timings
     is_stream = req.stream
+    images = core_input.images
 
     if not is_stream:
         if any(not math.isfinite(h.score) for h in hits):
@@ -2430,9 +2550,9 @@ async def _chat_response(req, response, owner):
             with use_span(root_span, end_on_exit=False):
                 root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
                 log.info(json_log(request_id, "chat", query_kind=kind, hits=0))
-            _record_feedback(owner.request, "chat", output,
-                             _output_log_fields(output, kind, timings, started, stream=False))
-            return ChatCompletionsResponse(
+            _record_feedback(owner.request, "chat", output, _with_image_fields(
+                _output_log_fields(output, kind, timings, started, stream=False), images))
+            return _chat_json(images, ChatCompletionsResponse(
                 id=f"chatcmpl-{request_id}",
                 created=int(time.time()),
                 model=llm_model,
@@ -2446,7 +2566,7 @@ async def _chat_response(req, response, owner):
                 usage=TokenUsage(),
                 hits=[],
                 **_answer_metadata(output),
-            )
+            ))
 
         content = output.answer
         # parse_answer moves SCRIPT_LANGS fences into `script`; a buffered
@@ -2459,12 +2579,13 @@ async def _chat_response(req, response, owner):
             content += "\n\n**Citations:**\n" + "\n".join(f"- {c}" for c in output.citations)
 
         with use_span(root_span, end_on_exit=False):
-            fields = _output_log_fields(output, kind, timings, started, stream=False)
+            fields = _with_image_fields(
+                _output_log_fields(output, kind, timings, started, stream=False), images)
             log.info(json_log(request_id, "chat", **fields))
             _record_feedback(owner.request, "chat", output, fields)
         _record_answered(owner, "chat", kind, output, llm_model)
 
-        return ChatCompletionsResponse(
+        return _chat_json(images, ChatCompletionsResponse(
             id=f"chatcmpl-{request_id}",
             created=int(time.time()),
             model=llm_model,
@@ -2478,7 +2599,7 @@ async def _chat_response(req, response, owner):
             usage=output.usage,
             hits=output.hits,
             **_answer_metadata(output),
-        )
+        ))
 
     chat_id = f"chatcmpl-{request_id}"
     return owner.stream(
@@ -2492,7 +2613,7 @@ async def _chat_response(req, response, owner):
             hit_count=len(hits),
             token_frame=lambda delta: format_openai_chunk(chat_id, llm_model, delta_content=delta),
             final_frames=lambda output: _chat_final_frames(
-                owner, chat_id, kind, timings, llm_model, output
+                owner, chat_id, kind, timings, llm_model, output, images
             ),
             error_frames=lambda code, message: (
                 format_openai_error(code, message), format_openai_done()

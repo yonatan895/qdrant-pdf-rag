@@ -5,12 +5,17 @@ no network. Success paths are forced with mocks; every failure asserted is
 a canned server answer, never a connect error accident.
 """
 
+import base64
 import json
+import struct
+import zlib
 
 import httpx2
 import pytest
 import scripts.probe_gateway as probe_mod
 from scripts.probe_gateway import main
+
+from mainframe_rag.synthetic_png import GLYPHS, render_digits_png
 
 
 class SimpleResp:
@@ -785,4 +790,355 @@ def test_count_probe_is_exclusive(monkeypatch, capsys, argv):
     monkeypatch.setattr(probe_mod, "httpx2", fake)
     with pytest.raises(SystemExit) as exc:
         main(["--probe-count", *argv])
+    assert exc.value.code == 2 and fake.calls == []
+
+
+# ---------------------------------------------------------------------------
+# `--probe-image` (issue #1287): does the gateway pass a pasted image through?
+# ---------------------------------------------------------------------------
+
+def _decode_png(data):
+    """Independent minimal PNG reader for the fake: (width, height, rows)."""
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    pos, idat, header = 8, b"", None
+    while pos < len(data):
+        (length,) = struct.unpack(">I", data[pos:pos + 4])
+        kind, body = data[pos + 4:pos + 8], data[pos + 8:pos + 8 + length]
+        if kind == b"IHDR":
+            header = struct.unpack(">IIBBBBB", body)
+        elif kind == b"IDAT":
+            idat += body
+        pos += 12 + length
+    width, height = header[0], header[1]
+    raw = zlib.decompress(idat)
+    stride = 1 + 3 * width
+    return width, height, [raw[i * stride + 1:(i + 1) * stride] for i in range(height)]
+
+
+def _read_digits(png):
+    """The fake's 'model': read the digits actually drawn in the PNG it was
+    sent by sampling each 5x7 cell against the font, so a probe that draws
+    one number and checks another cannot pass."""
+    width, height, rows = _decode_png(png)
+    scale = height // 13  # one text row of 9 font pixels plus a 2-pixel margin each side
+    margin = 2 * scale
+    cols = (width - 2 * margin) // (6 * scale)
+    lookup = {glyph: char for char, glyph in GLYPHS.items()}
+    out = []
+    for col in range(cols):
+        glyph = tuple(
+            tuple(rows[margin + y * scale + scale // 2][3 * (margin + (6 * col + x) * scale + scale // 2)] == 0
+                  for x in range(5))
+            for y in range(7))
+        out.append(lookup.get(glyph, "?"))
+    return "".join(out)
+
+
+def _png_of(url):
+    assert url.startswith("data:image/png;base64,")
+    return base64.b64decode(url.split(",", 1)[1], validate=True)
+
+
+class ImageGateway(FakeGateway):
+    """A vision gateway: it decodes the image_url part, reads the digits off
+    the PNG, and replies through `reply(digits)`. Prompt tokens grow with
+    the image's pixels; /tokenize prices images only when `tokenize_image`."""
+
+    TEXT_TOKENS = 30
+
+    def __init__(self, reply=lambda digits: digits, status=200, finish="stop",
+                 tokenize_status=200, tokenize_image=True, text_status=None):
+        super().__init__([])
+        self.reply = reply
+        self.status = status
+        self.finish = finish
+        self.tokenize_status = tokenize_status
+        self.tokenize_image = tokenize_image
+        self.text_status = text_status
+        self.read = []
+        self.timeouts = []
+
+    @staticmethod
+    def _image_parts(messages):
+        return [p for p in messages[-1]["content"] if p["type"] == "image_url"]
+
+    def post(self, url, json=None, timeout=None, headers=None):
+        self.calls.append(("POST", url, headers))
+        self.bodies.append((url, json))
+        self.timeouts.append(timeout)
+        parts = self._image_parts(json["messages"])
+        image_tokens = 0
+        for part in parts:
+            width, height, _ = _decode_png(_png_of(part["image_url"]["url"]))
+            image_tokens += width * height // 200
+        if url.endswith("/tokenize"):
+            if parts and self.tokenize_status != 200:
+                return SimpleResp(url, "POST", self.tokenize_status, {"detail": "PRIVATE tokenize"})
+            priced = image_tokens if self.tokenize_image else min(image_tokens, 1)
+            return SimpleResp(url, "POST", 200, {"count": self.TEXT_TOKENS + priced})
+        status = self.status if parts else (self.text_status or 200)
+        if status != 200:
+            return SimpleResp(url, "POST", status, {"error": {"message": "PRIVATE upstream detail"}})
+        content = "ok"
+        if parts:
+            digits = _read_digits(_png_of(parts[0]["image_url"]["url"]))
+            self.read.append(digits)
+            content = self.reply(digits)
+        return SimpleResp(url, "POST", 200, {
+            "choices": [{"message": {"content": content}, "finish_reason": self.finish}],
+            "usage": {"prompt_tokens": self.TEXT_TOKENS + image_tokens, "completion_tokens": 7}})
+
+
+IMAGE_ROW_KEYS = {
+    "status", "finish_reason", "digits_match", "prompt_tokens_image", "prompt_tokens_text", "image_tokens",
+    "image_tokens_2x", "tokenize_status", "tokenize_image_tokens", "tokenize_counts_image", "ms",
+}
+
+
+def _image_probe(monkeypatch, capsys, gateway, argv=(), **env):
+    _env(monkeypatch, **{"GATEWAY_PROBE_MAX_TOKENS": "16", "LLM_EXTRA_BODY": None,
+                         "LLM_EFFORT_TRANSPORT": None, **env})
+    monkeypatch.setattr(probe_mod, "httpx2", gateway)
+    rc = main(["--probe-image", *argv])
+    out = capsys.readouterr().out
+    lines = out.strip().splitlines()
+    return rc, json.loads(lines[0]), lines[-1], out
+
+
+def _assert_numbers_and_flags(row):
+    assert set(row) == IMAGE_ROW_KEYS
+    for key, value in row.items():
+        if key == "finish_reason":
+            assert value in (None, "stop", "length", "content_filter", "tool_calls", "other")
+        else:
+            assert _number_or_flag(value), key
+
+
+def test_image_probe_passes_when_the_model_reads_the_drawn_digits(monkeypatch, capsys):
+    gateway = ImageGateway(reply=lambda digits: f"The digits are {digits}. PRIVATE-REPLY")
+    rc, row, summary, out = _image_probe(monkeypatch, capsys, gateway)
+    assert rc == 0 and summary == "PASS"
+    assert len(out.strip().splitlines()) == 2
+    _assert_numbers_and_flags(row)
+    nonce = gateway.read[0]
+    assert len(nonce) == 6 and nonce.isdecimal() and gateway.read == [nonce, nonce]
+    assert row["status"] == 200 and row["digits_match"] is True and row["finish_reason"] == "stop"
+    # 400x130 and 800x260 pixels at the fake's 1 token per 200 pixels.
+    assert row["prompt_tokens_text"] == 30 and row["prompt_tokens_image"] == 30 + 260
+    assert row["image_tokens"] == 260 and row["image_tokens_2x"] == 1040
+    assert row["tokenize_status"] == 200 and row["tokenize_image_tokens"] == 260
+    assert row["tokenize_counts_image"] is True
+    assert isinstance(row["ms"], (int, float)) and row["ms"] >= 0
+    # Never the nonce, the reply, the image or a key.
+    for secret in (nonce, "PRIVATE", "base64", "sk-llm", "The digits"):
+        assert secret not in out
+
+
+def test_image_probe_nonce_is_six_digits_and_new_per_run(monkeypatch, capsys):
+    first, second = ImageGateway(), ImageGateway()
+    _image_probe(monkeypatch, capsys, first)
+    _image_probe(monkeypatch, capsys, second)
+    assert first.read[0] != second.read[0]
+    nonces = {probe_mod.image_probe_nonce() for _ in range(200)}
+    assert all(len(n) == 6 and n.isascii() and n.isdecimal() and n[0] != "0" for n in nonces)
+    assert len(nonces) > 150
+
+
+def test_image_probe_sends_the_application_request_shape(monkeypatch, capsys):
+    """Every call goes through the application's builder: the read effort,
+    temperature 0, the budget, the effort transport and the extra body; the
+    three calls differ only in the image part."""
+    gateway = ImageGateway()
+    rc, _row, _summary, _out = _image_probe(
+        monkeypatch, capsys, gateway, ["--max-tokens", "300"], LLM_EFFORT_TRANSPORT="chat_template",
+        LLM_EXTRA_BODY='{"chat_template_kwargs": {"enable_thinking": true}, "top_k": 20}')
+    assert rc == 0
+    chats = [body for url, body in gateway.bodies if url == "http://gw:8001/v1/chat/completions"]
+    assert len(chats) == 3
+    prompt = {"type": "text", "text": "Read the digits in the image. Reply with the digits only."}
+    images = []
+    for body in chats:
+        parts = body["messages"][0]["content"]
+        images.append(parts[1:])
+        assert body == {
+            "model": "gw-reasoning",
+            "messages": [{"role": "user", "content": [prompt, *parts[1:]]}],
+            "temperature": 0,
+            "max_tokens": 300,
+            "chat_template_kwargs": {"enable_thinking": True, "reasoning_effort": "low"},
+            "top_k": 20,
+        }
+    assert images[1] == []
+    assert [p["type"] for p in images[0] + images[2]] == ["image_url", "image_url"]
+    nonce = gateway.read[0]
+    sent = [_png_of(p["image_url"]["url"]) for p in images[0] + images[2]]
+    assert sent == [render_digits_png(nonce, scale=10), render_digits_png(nonce, scale=20)]
+    assert [_decode_png(png)[:2] for png in sent] == [(400, 130), (800, 260)]
+
+
+def test_image_probe_defaults_to_the_top_level_read_effort_and_its_budget(monkeypatch, capsys):
+    gateway = ImageGateway()
+    _image_probe(monkeypatch, capsys, gateway, CHAT_IMAGE_READ_EFFORT="medium")
+    body = gateway.bodies[0][1]
+    assert body["reasoning_effort"] == "medium" and body["temperature"] == 0
+    assert body["max_tokens"] == probe_mod.IMAGE_PROBE_MAX_TOKENS
+    assert list(body) == ["model", "messages", "reasoning_effort", "temperature", "max_tokens"]
+
+
+def test_image_probe_tokenizes_like_the_application_count(monkeypatch, capsys):
+    gateway = ImageGateway()
+    _image_probe(monkeypatch, capsys, gateway)
+    chats = [b for u, b in gateway.bodies if u.endswith("/chat/completions")]
+    tokenizes = [(u, b) for u, b in gateway.bodies if u.endswith("/tokenize")]
+    assert [u for u, _ in tokenizes] == ["http://gw:8001/tokenize"] * 2
+    for (_url, body), chat in zip(tokenizes, chats[:2], strict=True):
+        assert body == {"model": "gw-reasoning", "messages": chat["messages"], "add_generation_prompt": True,
+                        "add_special_tokens": False,
+                        "chat_template_kwargs": {"reasoning_effort": "low", "enable_thinking": True}}
+
+
+@pytest.mark.parametrize(("gateway", "status", "counts"), [
+    (lambda: ImageGateway(tokenize_image=False), 200, False),
+    (lambda: ImageGateway(tokenize_status=400), 400, False),
+], ids=["placeholder-only", "image-refused"])
+def test_image_probe_reports_a_tokenize_source_that_cannot_price_images(
+        monkeypatch, capsys, gateway, status, counts):
+    rc, row, summary, out = _image_probe(monkeypatch, capsys, gateway())
+    assert rc == 0 and summary == "PASS"  # /tokenize never decides the exit
+    assert row["tokenize_status"] == status and row["tokenize_counts_image"] is counts
+    assert "PRIVATE" not in out
+
+
+def test_image_probe_without_tokenize_route_cannot_judge_it(monkeypatch, capsys):
+    gateway = ImageGateway()
+    real_post = gateway.post
+
+    def post(url, json=None, timeout=None, headers=None):
+        if url.endswith("/tokenize"):
+            return SimpleResp(url, "POST", 404, {})
+        return real_post(url, json=json, timeout=timeout, headers=headers)
+
+    gateway.post = post
+    rc, row, _summary, _out = _image_probe(monkeypatch, capsys, gateway)
+    assert rc == 0 and row["tokenize_status"] == 404
+    assert row["tokenize_counts_image"] is None and row["tokenize_image_tokens"] is None
+
+
+@pytest.mark.parametrize("reply", [
+    lambda d: "PRIVATE-REPLY " + ("123456" if d != "123456" else "654321"),
+    lambda d: "PRIVATE-REPLY",
+    lambda d: str(int(d) + 1),
+    lambda d: d + "7",
+    lambda d: d[:5],
+], ids=["other-digits", "no-digits", "off-by-one", "longer-run", "shorter-run"])
+def test_image_probe_answer_without_the_digits_is_accepted_but_not_read(monkeypatch, capsys, reply):
+    gateway = ImageGateway(reply=reply)
+    rc, row, summary, out = _image_probe(monkeypatch, capsys, gateway)
+    assert rc == 1 and summary == "FAIL accepted-but-not-read"
+    assert row["status"] == 200 and row["digits_match"] is False
+    _assert_numbers_and_flags(row)
+    assert "PRIVATE" not in out and gateway.read[0] not in out
+
+
+@pytest.mark.parametrize(("reply", "match"), [
+    ("907135", True),
+    ("  907135\n", True),
+    ("9 0 7 1 3 5", True),
+    ("907 135", True),
+    ("Digits: 907135.", True),
+    ("I read 42 then 907135; done (3 lines)", True),
+    ("9\n0\n7\n1\n3\n5", True),
+    ("907135\n42", True),  # the answer, then another number on its own line
+    ("9071\n35 42", False),  # no reading has 907135 as a whole run
+    ("907 1354", False),
+    ("9071350", False),
+    ("1907135", False),
+    ("90713", False),
+    ("907-135", False),
+    ("907,135", False),
+    ("９０７１３５", False),  # fullwidth digits are not ASCII digits
+    ("", False),
+])
+def test_digits_match_needs_the_nonce_as_a_whole_ascii_digit_run(reply, match):
+    assert probe_mod.digits_match(reply, "907135") is match
+
+
+def test_image_probe_refusal_prints_only_the_status(monkeypatch, capsys):
+    gateway = ImageGateway(status=400)
+    rc, row, summary, out = _image_probe(monkeypatch, capsys, gateway)
+    assert rc == 1 and summary == "FAIL refused 400"
+    _assert_numbers_and_flags(row)
+    assert row["status"] == 400 and row["digits_match"] is False and row["finish_reason"] is None
+    # The text-only call still runs, so a served text request with a refused
+    # image tells "the image was refused" apart from a bad key or effort.
+    assert row["prompt_tokens_text"] == 30 and row["prompt_tokens_image"] is None
+    assert row["image_tokens"] is None and row["image_tokens_2x"] is None and row["tokenize_status"] is None
+    chats = [u for u, _ in gateway.bodies if u.endswith("/chat/completions")]
+    assert len(chats) == 2 and not any(u.endswith("/tokenize") for u, _ in gateway.bodies)
+    assert "PRIVATE" not in out
+
+
+def test_image_probe_refusal_of_every_request_shows_in_the_text_call(monkeypatch, capsys):
+    gateway = ImageGateway(status=401, text_status=401)
+    rc, row, summary, _out = _image_probe(monkeypatch, capsys, gateway)
+    assert rc == 1 and summary == "FAIL refused 401"
+    assert row["prompt_tokens_text"] is None
+
+
+def test_image_probe_without_a_reply_is_no_reply(monkeypatch, capsys):
+    gateway = ImageGateway(reply=lambda digits: "", finish="length")
+    rc, row, summary, _out = _image_probe(monkeypatch, capsys, gateway)
+    assert rc == 1 and summary == "FAIL no-reply"
+    assert row["status"] == 200 and row["finish_reason"] == "length" and row["digits_match"] is False
+
+
+def test_image_probe_maps_an_unknown_finish_reason_to_a_fixed_label(monkeypatch, capsys):
+    gateway = ImageGateway(finish="PRIVATE-FINISH")
+    rc, row, _summary, out = _image_probe(monkeypatch, capsys, gateway)
+    assert rc == 0 and row["finish_reason"] == "other" and "PRIVATE" not in out
+
+
+def test_image_probe_unreachable_gateway_stops_after_one_call(monkeypatch, capsys):
+    gateway = ImageGateway()
+
+    def refuse(url, json=None, timeout=None, headers=None):
+        gateway.calls.append(("POST", url, headers))
+        raise httpx2.ConnectError("PRIVATE upstream detail")
+
+    gateway.post = refuse
+    rc, row, summary, out = _image_probe(monkeypatch, capsys, gateway)
+    assert rc == 1 and summary == "FAIL unreachable"
+    assert row["status"] is None and len(gateway.calls) == 1
+    _assert_numbers_and_flags(row)
+    assert "PRIVATE" not in out
+
+
+@pytest.mark.parametrize(("argv", "env", "expected"), [
+    ((), {}, 60.0), ((), {"CHAT_IMAGE_READ_TIMEOUT_S": "12"}, 12.0), (("--timeout", "30"), {}, 30.0)])
+def test_image_probe_waits_as_long_as_the_application_image_read(monkeypatch, capsys, argv, env, expected):
+    gateway = ImageGateway()
+    _image_probe(monkeypatch, capsys, gateway, argv, **env)
+    assert gateway.timeouts == [expected] * 5
+
+
+def test_image_probe_requires_a_reasoning_model(monkeypatch, capsys):
+    _env(monkeypatch, LLM_MODEL_REASONING=None)
+    fake = FakeGateway([])
+    monkeypatch.setattr(probe_mod, "httpx2", fake)
+    assert main(["--probe-image"]) == 1
+    assert capsys.readouterr().out.strip() == "FAIL not-configured" and fake.calls == []
+
+
+@pytest.mark.parametrize("argv", [
+    ["--probe-image", "--probe-args"], ["--probe-image", "--probe-count"], ["--probe-count", "--probe-image"],
+    ["--probe-image", "--models"], ["--probe-image", "--stream"], ["--probe-image", "--require-reasoning"],
+    ["--probe-image", "--require-tokenizer"], ["--probe-image", "--candidate", "x={}"],
+    ["--probe-image", "--max-tokens", "0"],
+])
+def test_image_probe_is_exclusive(monkeypatch, capsys, argv):
+    _env(monkeypatch)
+    fake = FakeGateway([])
+    monkeypatch.setattr(probe_mod, "httpx2", fake)
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
     assert exc.value.code == 2 and fake.calls == []

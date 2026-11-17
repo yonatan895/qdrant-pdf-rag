@@ -54,11 +54,37 @@ overrides).
 
     kubectl -n mainframe-rag exec deploy/rag-agent -- \
         python3 /app/scripts/probe_gateway.py --probe-count
+
+Image probe (`--probe-image`, issue #1287): whether this gateway passes a
+pasted image through to the reasoning model, and what an image costs in
+prompt tokens. Each run draws a per-run 6-digit nonce, black on white, into a
+synthetic PNG of 400x130 pixels (`mainframe_rag.synthetic_png`, no real
+image) and asks the model to read it back with the application's own chat
+body (model, `CHAT_IMAGE_READ_EFFORT` through the effort transport, extra
+body, temperature 0, `--max-tokens`, default 1024). Three calls differ only in
+the image part: the image, the same text without it (the token difference)
+and the image at twice the scale; then `/tokenize` counts the first two
+message lists, to learn whether the tokenize count source prices images.
+It prints one JSON row of numbers and flags (`status`, `finish_reason`,
+`digits_match`, `prompt_tokens_image`, `prompt_tokens_text`, `image_tokens`,
+`image_tokens_2x`, `tokenize_status`, `tokenize_image_tokens`,
+`tokenize_counts_image`, `ms`) and a summary line: `PASS`, or `FAIL` with a
+fixed label (`not-configured`, `unreachable`, `refused <status>`, `no-reply`,
+`accepted-but-not-read`). Never the nonce, the reply, the image, a key or
+upstream error text. Exit 0 only when the image call answers 200 with the
+nonce as a whole digit run; a 200 without it is `accepted-but-not-read` (a
+gateway can drop the image and still answer). Each call waits at most
+CHAT_IMAGE_READ_TIMEOUT_S, the application's image-read timeout (`--timeout`
+overrides).
+
+    kubectl -n mainframe-rag exec deploy/rag-agent -- \
+        python3 /app/scripts/probe_gateway.py --probe-image
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -72,9 +98,10 @@ import httpx2
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from mainframe_rag.agent.tokenizer import count_request_body, usage_prompt_tokens
+from mainframe_rag.agent.tokenizer import _tokenize_count, count_request_body, usage_prompt_tokens
 from mainframe_rag.config import Settings, bearer_auth_headers, load_settings
-from mainframe_rag.model_args import parse_body_fields
+from mainframe_rag.model_args import chat_request_body, parse_body_fields
+from mainframe_rag.synthetic_png import render_digits_png
 
 PROBE_TEXT = "gateway readiness probe"
 PROBE_TIMEOUT_S = 30.0
@@ -683,16 +710,183 @@ def run_count_probe(settings: Settings, timeout: float) -> int:
     return 0 if passed else 1
 
 
+# Image probe (#1287): a synthetic digit image the model must read back.
+IMAGE_PROBE_TEXT = "Read the digits in the image. Reply with the digits only."
+IMAGE_PROBE_SCALE = 10  # 6 digits: 400x130 pixels; the second call doubles it
+IMAGE_PROBE_MAX_TOKENS = 1024  # room for a reasoning model's low-effort thinking
+_FINISH_REASONS = frozenset({"stop", "length", "content_filter", "tool_calls"})
+_DIGIT_GAPS = (re.compile(r"(?<=[0-9])\s+(?=[0-9])"), re.compile(r"(?<=[0-9])[ \t]+(?=[0-9])"))
+_DIGIT_RUN = re.compile(r"[0-9]+")
+
+
+def image_probe_nonce() -> str:
+    """Six digits, the first never 0 (a reply that drops a leading zero
+    must not read as a wrong answer)."""
+    return str(100000 + secrets.randbelow(900000))
+
+
+def digits_match(reply: str, nonce: str) -> bool:
+    """True when `nonce` is one whole run of ASCII digits in `reply` once
+    whitespace between digits is removed ("1 2 3 4 5 6" or one digit per
+    line read as 123456), or once only spaces and tabs between digits are
+    removed (so "123456" then another number on the next line still reads).
+    A run that only contains the nonce ("1234567"), part of it, or other
+    digits never matches."""
+    return any(nonce in _DIGIT_RUN.findall(gap.sub("", reply)) for gap in _DIGIT_GAPS)
+
+
+def _image_messages(nonce: str, scale: int | None) -> list[dict[str, Any]]:
+    """The probe's one user turn: the fixed text, then the image (none for
+    the text-only call), as the content parts the agent forwards."""
+    parts: list[dict[str, Any]] = [{"type": "text", "text": IMAGE_PROBE_TEXT}]
+    if scale is not None:
+        png = base64.b64encode(render_digits_png(nonce, scale=scale)).decode("ascii")
+        parts.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png}"}})
+    return [{"role": "user", "content": parts}]
+
+
+def _image_call(
+    settings: Settings, messages: list[dict[str, Any]], max_tokens: int, timeout: float,
+) -> dict[str, Any]:
+    """One chat completion with the application's body. The reply text is
+    returned for the match only and never printed; a refusal's body is
+    upstream text and never read."""
+    assert settings.llm_base_url and settings.llm_model_reasoning
+    body = chat_request_body(
+        settings.llm_model_reasoning, messages, settings.chat_image_read_effort, 0,
+        stream=False, max_tokens=max_tokens, args=settings.model_request_args(),
+    )
+    result: dict[str, Any] = {"status": None, "finish_reason": None, "reply": None,
+                              "prompt_tokens": None, "ms": None}
+    t0 = time.monotonic()
+    try:
+        resp = httpx2.post(
+            f"{settings.llm_base_url.rstrip('/')}/chat/completions",
+            json=body, timeout=timeout, headers=bearer_auth_headers(settings.llm_api_key),
+        )
+        result["status"] = resp.status_code
+        if resp.status_code == 200:
+            data = resp.json()
+            result["prompt_tokens"] = usage_prompt_tokens(data)
+            choices = data.get("choices") if isinstance(data, dict) else None
+            choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+            finish = choice.get("finish_reason")
+            if isinstance(finish, str):
+                result["finish_reason"] = finish if finish in _FINISH_REASONS else "other"
+            message = choice.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, str) and content.strip():
+                result["reply"] = content
+    except ValueError:
+        pass  # a 200 without a JSON body: no reply
+    except (httpx2.HTTPError, OSError):
+        result["status"] = None
+    result["ms"] = round((time.monotonic() - t0) * 1000, 1)
+    return result
+
+
+def _image_tokenize(settings: Settings, messages: list[dict[str, Any]], timeout: float) -> tuple[int | None, int | None]:
+    """`/tokenize` with the application's chat count payload
+    (`VllmTokenizer.count_messages`): (status, count), None when absent."""
+    assert settings.llm_base_url and settings.llm_model_reasoning
+    payload: dict[str, Any] = {
+        "model": settings.llm_model_reasoning, "messages": messages,
+        "add_generation_prompt": True, "add_special_tokens": False,
+    }
+    template_kwargs = settings.model_request_args().template_kwargs(settings.chat_image_read_effort)
+    if template_kwargs:
+        payload["chat_template_kwargs"] = template_kwargs
+    try:
+        resp = httpx2.post(
+            f"{settings.llm_base_url.rstrip('/').removesuffix('/v1')}/tokenize",
+            json=payload, timeout=timeout, headers=bearer_auth_headers(settings.llm_api_key),
+        )
+        if resp.status_code != 200:
+            return resp.status_code, None
+        return 200, _tokenize_count(resp.json())
+    except ValueError:
+        return 200, None
+    except (httpx2.HTTPError, OSError):
+        return None, None
+
+
+def _difference(with_image: int | None, without: int | None) -> int | None:
+    return with_image - without if with_image is not None and without is not None else None
+
+
+def run_image_probe(settings: Settings, timeout: float, max_tokens: int) -> int:
+    """`--probe-image`: one JSON row of numbers and flags, then `PASS` or
+    `FAIL <label>`."""
+    if not settings.llm_base_url or not settings.llm_model_reasoning:
+        print("FAIL not-configured")
+        return 1
+    nonce = image_probe_nonce()
+    image_messages = _image_messages(nonce, IMAGE_PROBE_SCALE)
+    text_messages = _image_messages(nonce, None)
+    image = _image_call(settings, image_messages, max_tokens, timeout)
+    text: dict[str, Any] = {"prompt_tokens": None}
+    double: dict[str, Any] = {"prompt_tokens": None}
+    tokenize_status: int | None = None
+    tokenize_image: int | None = None
+    tokenize_text: int | None = None
+    if image["status"] is not None:
+        # After a refusal too: a served text-only call then says the image
+        # part, not the key or the effort, was what the gateway refused.
+        text = _image_call(settings, text_messages, max_tokens, timeout)
+    if image["status"] == 200:
+        double = _image_call(settings, _image_messages(nonce, 2 * IMAGE_PROBE_SCALE), max_tokens, timeout)
+        tokenize_status, tokenize_image = _image_tokenize(settings, image_messages, timeout)
+        _text_status, tokenize_text = _image_tokenize(settings, text_messages, timeout)
+    matched = image["reply"] is not None and digits_match(image["reply"], nonce)
+    image_tokens = _difference(image["prompt_tokens"], text["prompt_tokens"])
+    tokenize_tokens = _difference(tokenize_image, tokenize_text)
+    counts_image: bool | None = None
+    if tokenize_text is not None and tokenize_image is None:
+        counts_image = False  # the source counts text but not an image turn
+    elif tokenize_tokens is not None and image_tokens is not None and image_tokens > 0:
+        # Priced when the tokenize count sees at least half the served cost.
+        counts_image = 2 * tokenize_tokens >= image_tokens
+    row = {
+        "status": image["status"],
+        "finish_reason": image["finish_reason"],
+        "digits_match": matched,
+        "prompt_tokens_image": image["prompt_tokens"],
+        "prompt_tokens_text": text["prompt_tokens"],
+        "image_tokens": image_tokens,
+        "image_tokens_2x": _difference(double["prompt_tokens"], text["prompt_tokens"]),
+        "tokenize_status": tokenize_status,
+        "tokenize_image_tokens": tokenize_tokens,
+        "tokenize_counts_image": counts_image,
+        "ms": image["ms"],
+    }
+    print(json.dumps(row, sort_keys=True), flush=True)
+    if image["status"] is None:
+        label = "unreachable"
+    elif image["status"] != 200:
+        label = f"refused {int(image['status'])}"
+    elif image["reply"] is None:
+        label = "no-reply"
+    elif not matched:
+        label = "accepted-but-not-read"
+    else:
+        print("PASS")
+        return 0
+    print(f"FAIL {label}")
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Probe gateway model legs before cutover.")
     parser.add_argument("--timeout", type=float, default=None,
                         help=f"per-request timeout in seconds (default {PROBE_TIMEOUT_S:g}; "
-                             f"{ARG_PROBE_TIMEOUT_S:g} with --probe-args; LLM_TOKENIZE_TIMEOUT_S with --probe-count)")
+                             f"{ARG_PROBE_TIMEOUT_S:g} with --probe-args; LLM_TOKENIZE_TIMEOUT_S with --probe-count; "
+                             "CHAT_IMAGE_READ_TIMEOUT_S with --probe-image)")
     parser.add_argument(
         "--max-tokens", type=completion_budget,
         default=None,
         help=f"completion budget 1–4096 (readiness: GATEWAY_PROBE_MAX_TOKENS, default {PROBE_MAX_TOKENS}; "
-             f"--probe-args: default {ARG_PROBE_MAX_TOKENS}, the readiness variable is not read)",
+             f"--probe-args: default {ARG_PROBE_MAX_TOKENS}; --probe-image: default {IMAGE_PROBE_MAX_TOKENS}; "
+             "the probe modes do not read the readiness variable)",
     )
     parser.add_argument("--probe-args", action="store_true",
                         help="argument probe: one fixed prompt under each candidate argument set, one JSON row each")
@@ -705,16 +899,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-builtin", action="store_true", help="skip the built-in candidates")
     parser.add_argument("--probe-count", action="store_true",
                         help="count probe: usage.prompt_tokens of a 1-token completion, stable and growing (#1266)")
+    parser.add_argument("--probe-image", action="store_true",
+                        help="image probe: the model reads a synthetic digit image back; image token cost (#1287)")
     parser.add_argument("--stream", action="store_true", help="require a successful chat stream ending in [DONE]")
     parser.add_argument("--require-reasoning", action="store_true", help="fail when reasoning is not configured")
     parser.add_argument("--require-tokenizer", action="store_true", help="require chat-template-aware model token counts")
     parser.add_argument("--models", action="store_true", help="list served model ids and exit")
     args = parser.parse_args(argv)
-    if args.probe_count and (args.probe_args or args.models or args.stream or args.require_reasoning
-                             or args.require_tokenizer or args.max_tokens is not None):
+    if args.probe_count and (args.probe_args or args.probe_image or args.models or args.stream
+                             or args.require_reasoning or args.require_tokenizer or args.max_tokens is not None):
         parser.error("--probe-count cannot be combined with other probe modes, readiness requirements"
                      " or --max-tokens")
-    if args.max_tokens is None and not args.probe_args and not args.probe_count:
+    if args.probe_image and (args.probe_args or args.models or args.stream or args.require_reasoning
+                             or args.require_tokenizer):
+        parser.error("--probe-image cannot be combined with other probe modes or readiness requirements")
+    if args.max_tokens is None and not args.probe_args and not args.probe_count and not args.probe_image:
         # The readiness budget's environment default, validated like the flag.
         try:
             args.max_tokens = completion_budget(os.environ.get("GATEWAY_PROBE_MAX_TOKENS") or str(PROBE_MAX_TOKENS))
@@ -735,6 +934,12 @@ def main(argv: list[str] | None = None) -> int:
         # agent would time out on must not pass here.
         return run_count_probe(
             settings, args.timeout if args.timeout is not None else settings.llm_tokenize_timeout_s)
+    if args.probe_image:
+        # The application's image-read timeout unless overridden: a read the
+        # agent would time out on must not pass here.
+        return run_image_probe(
+            settings, args.timeout if args.timeout is not None else settings.chat_image_read_timeout_s,
+            args.max_tokens if args.max_tokens is not None else IMAGE_PROBE_MAX_TOKENS)
     if args.timeout is None:
         args.timeout = PROBE_TIMEOUT_S
     failures = 0

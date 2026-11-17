@@ -25,6 +25,12 @@ from pydantic import BaseModel, ConfigDict, Field
 log = logging.getLogger(__name__)
 
 from mainframe_rag.agent.chat_turn import prepare_chat_turn
+from mainframe_rag.agent.images import (
+    SYSTEM_PROMPT_IMAGE_EXTENSION,
+    ImageChatMessage,
+    TurnImages,
+    wire_messages,
+)
 from mainframe_rag.agent.tokenizer import estimate_tokens
 from mainframe_rag.agent.user_message import (
     MESSAGE_WINDOW_SHARE,
@@ -1479,6 +1485,7 @@ def _build_prompt(
     temperature: float | None = None,
     search_query: str | None = None,
     coding: bool = False,
+    images: TurnImages | None = None,
 ) -> PreparedPrompt:
     is_chat = history is not None
     # Retention policy (issue #633), identical for planning and recount: the
@@ -1526,6 +1533,19 @@ def _build_prompt(
         system_content = SYSTEM_PROMPT + SYSTEM_PROMPT_COMPLEX_EXTENSION
     else:
         system_content = SYSTEM_PROMPT
+    # An image turn (#1287): the image extension closes the system prompt,
+    # the transcription joins the question frame as a labelled user-supplied
+    # block (escaped like an excerpt: it is text read from a user's image),
+    # each image rides the final user message and is priced at
+    # LLM_IMAGE_TOKEN_RESERVE, since every count is text-only. Other turns
+    # keep their exact bytes.
+    image_urls = tuple(image.url for image in images.images) if images is not None else ()
+    transcript = _escape_excerpt(images.transcript_block()) if images is not None else ""
+    if images is not None:
+        system_content += SYSTEM_PROMPT_IMAGE_EXTENSION
+    image_tokens = (
+        len(image_urls) * settings.llm_image_token_reserve if settings is not None else 0
+    )
     resolved_note = resolved_code_note(search_text)
     message_text = query
     # Tokens the estimator under-prices the fitted message by (0 for a
@@ -1551,6 +1571,7 @@ def _build_prompt(
                 "\n".join([system_content, *context_entries, QUESTION_LABEL, resolved_note])
             )
             - sum(estimate_tokens(m.content) for m in antecedent)
+            - (estimate_tokens(transcript) + image_tokens if images is not None else 0)
         )
         message_text, message_tokens, message_omitted = fit_message(
             query, int(free * MESSAGE_WINDOW_SHARE), tokenizer
@@ -1559,6 +1580,8 @@ def _build_prompt(
     question_text = f"{QUESTION_LABEL} " + message_text
     if resolved_note:
         question_text += "\n" + resolved_note
+    if transcript:
+        question_text += "\n\n" + transcript
     # Pre-excerpt user parts, exactly as before: the estimator below counts
     # this shape, so it stays character-identical.
     parts = [*context_entries, question_text]
@@ -1600,21 +1623,21 @@ def _build_prompt(
             used = tokenizer.count_messages(messages, reasoning_effort=reasoning_effort)
         if message_drift and not getattr(tokenizer, "remote_confirmed", False):
             used += message_drift
-        return used
+        return used + image_tokens
 
     def candidate() -> list[ChatMessage]:
+        content = _user_content(
+            _assemble_blocks(context_entries, question_text, packed, tail_part),
+            order,
+            instructions,
+        )
         return [
             ChatMessage(role="system", content=system_content),
             *(m for turn in older_turns for m in turn),
             *antecedent,
-            ChatMessage(
-                role="user",
-                content=_user_content(
-                    _assemble_blocks(context_entries, question_text, packed, tail_part),
-                    order,
-                    instructions,
-                ),
-            ),
+            ImageChatMessage(role="user", content=content, image_urls=image_urls)
+            if image_urls
+            else ChatMessage(role="user", content=content),
         ]
 
     if tokenizer is not None:
@@ -1638,7 +1661,7 @@ def _build_prompt(
         # trailing citation example).
         fixed_tokens = estimate_tokens(
             system_content + "\n" + "\n".join(parts) + "\n" + tail_part
-        ) + sum(estimate_tokens(m.content) for m in antecedent) + message_drift
+        ) + sum(estimate_tokens(m.content) for m in antecedent) + message_drift + image_tokens
         budget_tokens = max(100, model_len - reserved - thinking_reserve - margin - fixed_tokens)
 
         packed = _plan_packed_excerpts(
@@ -1655,7 +1678,9 @@ def _build_prompt(
         # first and contiguous; the recount below is the exact check.
         if older_turns:
             candidates, older_turns = older_turns, []
-            estimated = sum(estimate_tokens(m.content) for m in candidate()) + message_drift
+            estimated = (
+                sum(estimate_tokens(m.content) for m in candidate()) + message_drift + image_tokens
+            )
             kept_turns: list[list[ChatMessage]] = []
             for turn in reversed(candidates):
                 cost = sum(estimate_tokens(m.content) for m in turn)
@@ -2165,7 +2190,7 @@ class HttpxLLMClient:
     ) -> ChatResult:
         base_url, model = assert_reasoning_model(self._settings)
         headers = bearer_auth_headers(self._settings.llm_api_key)
-        serialized = [m.model_dump() for m in messages]
+        serialized = wire_messages(messages)
         body = _chat_body(model, serialized, reasoning_effort, temperature, args=self._request_args, max_tokens=max_tokens, stream=False)
         if not getattr(self._settings, "llm_stream", False):
             return await self._achat_buffered_over_stream(
@@ -2235,7 +2260,7 @@ class HttpxLLMClient:
     ) -> AsyncIterator[dict[str, Any]]:
         base_url, model = assert_reasoning_model(self._settings)
         headers = bearer_auth_headers(self._settings.llm_api_key)
-        serialized = [m.model_dump() for m in messages]
+        serialized = wire_messages(messages)
         body = _chat_body(model, serialized, reasoning_effort, temperature, args=self._request_args, max_tokens=max_tokens, stream=True)
 
         t0 = time.monotonic()
@@ -2337,7 +2362,7 @@ class HttpxLLMClient:
     ) -> ChatResult:
         base_url, model = assert_reasoning_model(self._settings)
         headers = bearer_auth_headers(self._settings.llm_api_key)
-        serialized = [m.model_dump() for m in messages]
+        serialized = wire_messages(messages)
         body = _chat_body(model, serialized, reasoning_effort, temperature, args=self._request_args, max_tokens=max_tokens, stream=False)
         if not getattr(self._settings, "llm_stream", False) and hasattr(self._sync_http(), "stream"):
             # Issue #868: read the buffered answer from the streamed wire so
@@ -2655,6 +2680,7 @@ def build_chat_messages(
     temperature: float | None = None,
     search_query: str | None = None,
     coding: bool = False,
+    images: TurnImages | None = None,
 ) -> PreparedPrompt:
     """Build multi-turn chat prompt messages + supplied-evidence manifest.
 
@@ -2711,4 +2737,5 @@ def build_chat_messages(
         temperature=temperature,
         search_query=search_query,
         coding=coding,
+        **({"images": images} if images is not None else {}),
     )

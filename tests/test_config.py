@@ -341,6 +341,16 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "chat_max_body_chars": 131072,
     "chat_max_turns": 10,
     "chat_max_prior_turn_chars": 4000,  # #1274, was 1000
+    "chat_images_enabled": False,  # #1287: off until the site's --probe-image passes
+    "chat_image_max_bytes": 5242880,
+    "chat_image_max_count": 3,
+    "chat_image_max_pixels": 4194304,
+    "chat_image_types": "png,jpeg,webp",
+    "chat_image_read_effort": "low",
+    "chat_image_read_max_tokens": 4096,
+    "chat_image_read_max_chars": 4000,
+    "chat_image_read_timeout_s": 60.0,
+    "llm_image_token_reserve": 6144,
     "ui_enabled": False,
     "feedback_enabled": False,
     "feedback_url": None,
@@ -652,3 +662,24 @@ def test_condensation_and_anchoring_cannot_both_be_enabled(monkeypatch):
     with pytest.raises(ValidationError) as exc:
         Settings(_env_file=None)
     assert CHAT_FOLLOWUP_MODES_CONFLICT in str(exc.value)
+
+
+def test_chat_images_are_off_by_default_and_one_env_line_turns_them_on(monkeypatch):
+    """#1287 decision 2: off by default; CHAT_IMAGES_ENABLED=true in airgap.env
+    turns them on. The read effort is checked against the offered efforts only
+    when images are on, so an image-free deployment's effort domain is unchanged."""
+    assert Settings(_env_file=None).chat_images_enabled is False
+    monkeypatch.setenv("CHAT_IMAGES_ENABLED", "true")
+    assert Settings(_env_file=None).chat_images_enabled is True
+    monkeypatch.setenv("LLM_REASONING_EFFORTS", "medium,high")
+    monkeypatch.setenv("LLM_REASONING_EFFORT_SIMPLE", "medium")
+    with pytest.raises(ValueError, match="CHAT_IMAGE_READ_EFFORT must be one of LLM_REASONING_EFFORTS"):
+        Settings(_env_file=None)
+    monkeypatch.setenv("CHAT_IMAGES_ENABLED", "false")
+    assert Settings(_env_file=None).chat_images_enabled is False
+
+
+@pytest.mark.parametrize("raw", ["", "png,bmp", "png,png", "svg"])
+def test_chat_image_types_refuse_unknown_or_duplicate_entries(raw):
+    with pytest.raises(ValueError, match="CHAT_IMAGE_TYPES must list distinct types"):
+        Settings(_env_file=None, chat_image_types=raw)
