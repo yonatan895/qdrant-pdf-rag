@@ -156,7 +156,10 @@ from the extension surface.
 Open WebUI users can paste screenshots into a temporary chat once the site
 turns images on; the reasoning model reads each image to search the manuals
 and sees it when answering. Nothing changes until a site opts in: off, Rosetta
-is declared not image-capable and every request is byte-identical to before.
+is declared not image-capable and requests for messages without attachments
+are byte-identical to before. The docs Pipe still drops Open WebUI's
+`<attached_files>` text, which appears only when a file is attached, and
+uploads are off.
 Two new optional `airgap.env` keys ([pasted images](deploy.md#owui-chat-images)):
 
 1. Run `probe_gateway.py --probe-image` in the agent pod. Turn images on only
