@@ -112,8 +112,9 @@ API state. Only decision runs on `main` at the candidate's base SHA are listed
 later main head means the base moved, which is refused as `candidate_base_not_current`.
 Among them the newest decision for this PR is authoritative; a pending, failed,
 cancelled, expired, malformed or **revoke** decision blocks fallback to an older
-approval. Any list GitHub truncates at that window fails as
-`github_list_window_exceeded`, never as a verifier-file difference. Use the same workflow with **revoke** to withdraw trust. The publisher
+approval. A decision counts only when run on main. Any list GitHub truncates at
+that window fails as `github_list_window_exceeded`, never as a verifier-file
+difference. Use the same workflow with **revoke** to withdraw trust. The publisher
 runs after workflow completion and on its existing periodic reconciliation;
 revocation is not an atomic merge lock. An already-running merge is not undone.
 

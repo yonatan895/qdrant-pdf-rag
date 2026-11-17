@@ -63,13 +63,14 @@ def require(condition: bool) -> None:
 # event, branch, head_sha, actor, status, created or check_suite_id); a later
 # page reports total_count 0 and no rows (#1285).
 API_WINDOW = 1000
+WINDOW_REPORT = 'list exceeds the GitHub 1000-result API window; evidence is incomplete'
 
 
 class ListWindowExceeded(ValueError):
     """A list GitHub cannot serve completely; never a policy or identity verdict."""
 
     def __init__(self) -> None:
-        super().__init__('list exceeds the GitHub 1000-result API window; evidence is incomplete')
+        super().__init__(WINDOW_REPORT)
 
 
 def unit_producers(source: bytes, digest: str) -> tuple[NativeProducer, ...]:

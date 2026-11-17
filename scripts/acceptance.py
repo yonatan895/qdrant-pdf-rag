@@ -14,6 +14,7 @@ from urllib.parse import quote
 from scripts.acceptance_evidence import (
     LIMIT,
     PRODUCERS,
+    WINDOW_REPORT,
     ListWindowExceeded,
     NativeProducer,
     artifact_members,
@@ -673,9 +674,9 @@ def publish_acceptance(api: GitHub, number: int, approved_root: Path, *,
     except StaleBase as exc:
         result = {'all_prerequisites_met': False, 'verification_status': 'incomplete',
                   'error': 'candidate_base_not_current', 'markdown_report': exc.report()}
-    except ListWindowExceeded as exc:
+    except ListWindowExceeded:
         result = {'all_prerequisites_met': False, 'verification_status': 'incomplete',
-                  'error': 'github_list_window_exceeded', 'markdown_report': str(exc) + '.'}
+                  'error': 'github_list_window_exceeded', 'markdown_report': WINDOW_REPORT + '.'}
     except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError, zipfile.BadZipFile):
         result = {'all_prerequisites_met': False, 'verification_status': 'incomplete',
                   'error': 'acceptance_evidence_unavailable_or_changed'}
