@@ -572,6 +572,8 @@ def test_condense_with_anchor_unset_maps_without_refusal(monkeypatch, mapper_env
     reasoning = mapped(mapper_env)["models"]["reasoning"]
     assert reasoning["condenseEnabled"] is True
     assert "followupAnchorEnabled" not in reasoning
+
+
 @pytest.mark.parametrize("raw,want", [("", None), ("false", False), ("0", False), ("true", True)])
 def test_coding_mode_operator_mapping(monkeypatch, mapper_env, raw, want):
     """Issue #1276: unset writes no key (the pod keeps the true default); the

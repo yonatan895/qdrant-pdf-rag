@@ -2443,12 +2443,12 @@ retrieval; `/v1/search` keeps its caller's limit) and
 `RETRIEVE_MAX_CHUNKS_PER_DOC` (chunks kept per manual, `/v1/search` included)
 map to `models.reasoning.answerHitLimit` and `retrieveMaxChunksPerDoc`; unset
 renders neither, so the pod keeps the defaults, 16 and 5 since #1274 (8 and 3 before). `ANSWER_CODING_MODE_ENABLED`
-  (#1276) maps to `models.reasoning.codingModeEnabled` and renders only when set;
-  unset keeps the pod's on default, and `ANSWER_CODING_MODE_ENABLED=false` in
-  `airgap.env` is the one-line per-site revert of the coding prompts and the
-  coding route to the complex path (the `coding-off` arm). It does not revert the
-  #1276 code-fence tags (`c`, `metalc`, `asm`, `hlasm`, `assembler`, `clist` kept
-  as `script`), which apply to every answer. Enable condensation deliberately when qualifying pronoun-only
+(#1276) maps to `models.reasoning.codingModeEnabled` and renders only when set;
+unset keeps the pod's on default, and `ANSWER_CODING_MODE_ENABLED=false` in
+`airgap.env` is the one-line per-site revert of the coding prompts and the
+coding route to the complex path (the `coding-off` arm). It does not revert the
+#1276 code-fence tags (`c`, `metalc`, `asm`, `hlasm`, `assembler`, `clist` kept
+as `script`), which apply to every answer. Enable condensation deliberately when qualifying pronoun-only
 console follow-ups; require a grounded answer after the extra reasoning call.
 The local gateway's authenticated `/tokenize` passthrough enforces the per-leg
 key's model allowlist. Use `probe_gateway.py --require-tokenizer --stream

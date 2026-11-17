@@ -628,6 +628,8 @@ def test_explicit_condensation_from_an_env_file_turns_the_anchor_default_off(tmp
     with pytest.raises(ValidationError) as exc:
         Settings(_env_file=env)
     assert CHAT_FOLLOWUP_MODES_CONFLICT in str(exc.value)
+
+
 @pytest.mark.parametrize(("raw", "expected"), [("false", False), ("0", False), ("true", True)])
 def test_coding_mode_is_on_by_default_and_one_env_line_turns_it_off(monkeypatch, raw, expected):
     """Issue #1276: coding mode ships on; a site reverts it with one

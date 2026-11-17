@@ -1693,6 +1693,7 @@ sh scripts/tools/run-task.sh airgap:smoke
   | Prompt window (`LLM_MAX_MODEL_LEN`) | 262144 (was 32768) | the served window, e.g. `LLM_MAX_MODEL_LEN=32768` |
   | Hits per answer retrieval | 16 (was 8) | `ANSWER_HIT_LIMIT=8` |
   | Chunks kept per manual (every retrieval, `/v1/search` included) | 5 (was 3) | `RETRIEVE_MAX_CHUNKS_PER_DOC=3` |
+  | Coding mode (#1276): a request to write, fix, review, convert or explain JCL, REXX, HLASM or (Metal) C takes the complex path and the coding prompt | on | `ANSWER_CODING_MODE_ENABLED=false` (restores the prompts and complexity; the new `c`/`hlasm`/`asm`/`metalc`/`assembler`/`clist` fence handling stays) |
 
   - **Window:** the 262144 default assumes the reasoning model serves at
     least a 256k window. A site whose model serves less must set
