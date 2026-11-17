@@ -780,8 +780,10 @@ unchanged build. Every A run passes `--hit-limit 8`: f117160c retrieves
 8 hits per answer, and the eval's own default is the candidate agent's
 16, so without it the A sibling pool (`gold_retrieved`, citation recall)
 would be deeper than the answer it scores. The B runs pass neither flag.
-A follow-up run (`--turns 2`) against f117160c also passes
-`--prior-cap 1000`, its deployed cut (the candidate's default is 4000).
+A follow-up-kinds run (`--turns 2 --follow-up ...`) against f117160c
+also passes `--prior-cap 1000`, its deployed cut (the candidate's default
+is 4000); `--prior-cap` needs `--follow-up`, and a plain `--turns 2` run
+reads the cut from the agent default instead (see `prior_answer_chars`).
 Check that `params.hit_limit` is 8 in every A export and absent in every
 B export, that
 `coverage.build_id` equals `build_id_end` in every export, that both A
@@ -940,7 +942,7 @@ show() {  # the deployed value of one agent setting (empty = unset, the default)
   oc -n "$NS" get deploy rag-agent -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"$1\")].value}"; echo
 }
 vals() { for v in CHAT_CONDENSE_ENABLED CHAT_FOLLOWUP_ANCHOR_ENABLED CHAT_MAX_PRIOR_TURN_CHARS LLM_TOKEN_COUNT_SOURCE; do show $v; done; }
-vals   # all empty: the defaults (anchoring on, 4000, auto)
+vals   # CHAT_CONDENSE_ENABLED shows false (the chart renders it); the rest empty: the defaults (anchoring on, 4000, auto)
 run H-baseline chat --all --repeats 2 --turns 2 --follow-up all --arm baseline
 # airgap.env: CHAT_FOLLOWUP_ANCHOR_ENABLED=false; `sh scripts/tools/run-task.sh airgap:deploy`;
 # wait for the rollout; vals, then:
@@ -952,7 +954,7 @@ run H-history1000 chat --all --repeats 2 --turns 2 --follow-up all --arm history
 run K-count-tokenize answer --all --repeats 2
 run K-count-tokenize chat --all --repeats 2
 # remove it; ANSWER_HIT_LIMIT=8 and RETRIEVE_MAX_CHUNKS_PER_DOC=3; deploy; vals and
-# show ANSWER_HIT_LIMIT RETRIEVE_MAX_CHUNKS_PER_DOC:
+# show ANSWER_HIT_LIMIT; show RETRIEVE_MAX_CHUNKS_PER_DOC:
 run D-depth-8-3 answer --all --repeats 2 --hit-limit 8
 run D-depth-8-3 chat --all --repeats 2 --hit-limit 8
 # remove both; ANSWER_CODING_MODE_ENABLED=false; deploy; show ANSWER_CODING_MODE_ENABLED:
