@@ -1813,7 +1813,7 @@ EXCERPT_META = {
     "index": 1, "doc_id": "SA22-0000-00", "page_label": "1-6", "pdf_page_start": 6,
     "pdf_page_end": 7, "start_char": 10, "end_char": 40, "source_chars": 50,
     "truncated_start": True, "truncated_end": True, "text_clipped": False,
-    "duplicate_citation": False,
+    "duplicate_citation": False, "cited": False,
 }
 # The hit's 0-based page span in the supplied-evidence convention (1-based).
 HIT_META = {"chunk_id": "chunk-1", "doc_id": "SA22-0000-00", "chunk_type": "message",
@@ -1922,6 +1922,73 @@ def test_a_malformed_supplied_entry_makes_the_capture_unknown(site_eval, bad):
     row = report["results"][0]
     assert status == 0 and row["verdict"] == "pass"
     assert row["supplied_evidence_meta"] is None and row["final_hits"] == [HIT_META]
+
+
+# Spec review F1 (#1279): the "Cited" stage maps the answer's citations to
+# the packed excerpts. Two excerpts can share a doc and a page under different
+# headings, so doc and page alone cannot say which one was cited; each excerpt
+# carries `cited`, never the citation line itself.
+LINE_A = "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 6"
+LINE_B = "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA501I, p. 6"
+
+
+def _cited_row(site_eval, transport: str, supplied: list, **final) -> dict:
+    import httpx2
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": []})
+        if transport == "chat":
+            return _sse(chat_stream("IEA500I reports a rejected command [2].",
+                                    supplied=supplied, **final))
+        return _sse(_answer_final(supplied_evidence=supplied, evidence_omitted=0, **final))
+
+    _, report, export, _ = site_eval(respond, [_entry()], CAPTURE_ARGS[transport])
+    row = report["results"][0]
+    assert row["verdict"] in ("pass", "fail"), row["failures"]
+    assert b'"cited"' not in export and b"IEA501I" not in export
+    return row
+
+
+def test_each_packed_excerpt_says_whether_its_citation_was_given(site_eval):
+    """Same doc, same page, different headings: only the excerpt whose line
+    the answer cites is cited. A validated citation names a line, and the
+    agent and the Open WebUI Pipe map it to every excerpt carrying that line,
+    so a repeated line (`duplicate_citation`) is cited on each excerpt."""
+    supplied = [_excerpt(index=1, citation=LINE_A, duplicate_citation=True),
+                _excerpt(index=2, citation=LINE_B),
+                _excerpt(index=3, citation=LINE_A, duplicate_citation=True)]
+    row = _cited_row(site_eval, "sse", supplied, citations=[LINE_A])
+    meta = row["supplied_evidence_meta"]
+    assert [(e["doc_id"], e["pdf_page_start"]) for e in meta] == [("SA22-0000-00", 6)] * 3
+    assert [e["cited"] for e in meta] == [True, False, True]
+    assert LINE_A not in json.dumps(meta) and "IEA501I" not in json.dumps(meta)
+
+
+def test_an_inferred_citation_marks_only_its_prompt_index(site_eval):
+    """An inferred citation comes from a bracket index (`inferred_indices`),
+    so it is exact even when two excerpts share the line it lists."""
+    supplied = [_excerpt(index=1, citation=LINE_A, duplicate_citation=True),
+                _excerpt(index=2, citation=LINE_A, duplicate_citation=True)]
+    row = _cited_row(site_eval, "chat", supplied, citations=(LINE_A,), inferred=True,
+                     indices=(2,))
+    assert [e["cited"] for e in row["supplied_evidence_meta"]] == [False, True]
+
+
+@pytest.mark.parametrize(("supplied", "final"), [
+    ([{**_excerpt(), "citation": None}], {"citations": [LINE_A]}),
+    ([_excerpt(citation=LINE_A)],
+     {"citations": [LINE_A], "citations_inferred": True, "inferred_indices": []}),
+], ids=["excerpt-without-line", "inferred-without-indices"])
+def test_cited_is_unknown_when_the_mapping_cannot_be_read(site_eval, supplied, final):
+    """An excerpt with no citation line, or inferred citations from an agent
+    that sends no indices: `cited` is null (unknown), never guessed, and the
+    rest of the capture is kept."""
+    row = _cited_row(site_eval, "sse", supplied, **final)
+    assert [e["cited"] for e in row["supplied_evidence_meta"]] == [None]
+    assert row["supplied_evidence_meta"][0]["doc_id"] == "SA22-0000-00"
 
 
 # --------------------------------- fixed-history /v1/chat sessions (#1191)

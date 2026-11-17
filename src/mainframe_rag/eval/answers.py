@@ -1523,9 +1523,11 @@ def _judge_response(
     # Stage attribution (issue #1191): what this very answer packed and
     # retrieved, text-free unless the run asked for the excerpt text.
     # Report-only — judge() never reads these.
-    from mainframe_rag.eval.capture import evidence_capture
+    from mainframe_rag.eval.capture import RowCitations, evidence_capture
 
-    row.update(evidence_capture(data, keep_text=keep_evidence_text))
+    row.update(evidence_capture(
+        data, keep_text=keep_evidence_text,
+        citations=RowCitations(citations, citations_inferred, inferred_indices)))
     return row
 
 

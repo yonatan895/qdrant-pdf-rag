@@ -8,7 +8,8 @@ fact was lost: not retrieved, not packed, trimmed, or packed but unused.
 
 Rows keep a text-free projection: doc id, physical pages (1-based, the
 `pdf_page_start` convention), the printed page label, the character range and
-trim flags, scores, and a sha256 of each excerpt's text. Headings, titles,
+trim flags, scores, a sha256 of each excerpt's text, and whether the answer
+cited each excerpt (`cited`). Headings, titles,
 citation strings and hit text are manual-derived and are never copied. The
 excerpt text itself is kept only on request (`--keep-evidence-text`), in the
 private report, for a later grounding check; the text-free export copies none
@@ -22,6 +23,8 @@ from __future__ import annotations
 
 import hashlib
 import math
+from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 _EXCERPT_INTS = ("start_char", "end_char", "source_chars")
@@ -40,7 +43,33 @@ def _number(value: Any) -> bool:
     return value is None or (type(value) in (int, float) and math.isfinite(value))
 
 
-def _excerpt_meta(item: Any) -> dict[str, Any] | None:
+@dataclass(frozen=True)
+class RowCitations:
+    """The row's citations as the judge read them: the validated citation
+    lines, whether they were inferred from bracket indices, and those
+    indices."""
+
+    lines: list[str]
+    inferred: bool
+    indices: list[int]
+
+    def cites(self, item: dict[str, Any]) -> bool | None:
+        """Whether the answer cited this packed excerpt (spec review F1,
+        #1279). A validated citation names a citation line, and the agent and
+        the Open WebUI Pipe map it to every excerpt carrying that line, so
+        excerpts sharing a line (`duplicate_citation`) are cited together.
+        Inferred citations are exact through their prompt indices. None
+        (unknown) for an excerpt without a citation line, or for inferred
+        citations sent without indices (an agent before the field)."""
+        if self.inferred:
+            if self.lines and not self.indices:
+                return None
+            return item["index"] in self.indices
+        citation = item.get("citation")
+        return citation in self.lines if isinstance(citation, str) else None
+
+
+def _excerpt_meta(item: Any, citations: RowCitations | None = None) -> dict[str, Any] | None:
     if not isinstance(item, dict):
         return None
     index, doc_id, label, text = (item.get(k) for k in ("index", "doc_id", "page_label", "text"))
@@ -59,6 +88,7 @@ def _excerpt_meta(item: Any) -> dict[str, Any] | None:
         **{k: item[k] for k in _EXCERPT_INTS},
         **{k: item.get(k, False) for k in _EXCERPT_FLAGS},
         "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "cited": None if citations is None else citations.cites(item),
     }
 
 
@@ -92,12 +122,15 @@ def _all_or_none(items: Any, project: Any) -> list[dict[str, Any]] | None:
     return None if any(o is None for o in out) else out
 
 
-def evidence_capture(data: dict[str, Any], keep_text: bool = False) -> dict[str, Any]:
+def evidence_capture(data: dict[str, Any], keep_text: bool = False,
+                     citations: RowCitations | None = None) -> dict[str, Any]:
     """Row fields from one answer object (the JSON body, the SSE `final`,
     or the chat finish chunk): `supplied_evidence_meta`, `evidence_omitted`,
-    `final_hits`, and with `keep_text` also `supplied_evidence_text`."""
+    `final_hits`, and with `keep_text` also `supplied_evidence_text`.
+    `citations` is the judge's own read of the row's citations; without it
+    every excerpt's `cited` is None (unknown)."""
     supplied = data.get("supplied_evidence")
-    meta = _all_or_none(supplied, _excerpt_meta)
+    meta = _all_or_none(supplied, partial(_excerpt_meta, citations=citations))
     omitted = data.get("evidence_omitted")
     fields: dict[str, Any] = {
         "supplied_evidence_meta": meta,
