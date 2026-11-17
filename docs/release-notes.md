@@ -130,3 +130,23 @@ thorough answers may end at the 270 s request deadline; thorough is visible
 from the upgrade on, and the site eval measures how often that happens
 afterwards. Nothing is removed from the
 extension surface.
+
+## 2026-11-17 GH#1289 Answer depth follows the offered efforts: grant all three entries
+
+The Rosetta entries no longer carry a fixed effort. The docs Pipe sends a
+symbolic depth and the agent resolves it from its own `LLM_REASONING_EFFORTS`:
+quick is the lowest offered effort, thorough the highest, and standard the
+configured simple/complex default, as before. A site offering
+`low,medium,high` answers thorough at `high`; once the platform offers `xhigh`,
+thorough uses it with no repackage. The site admin does the following
+([answer depth](deploy.md#owui-answer-depth)):
+
+1. Run `airgap:deploy` as usual; the Pipe and the agent upgrade together (an
+   agent older than this change refuses the depth). No new `airgap.env` key.
+2. Grant read access to all three entries, thorough included, whatever
+   `LLM_REASONING_EFFORTS` offers. The interim advice to hold back thorough
+   on a site without `xhigh` no longer applies.
+
+API callers of `/v1/chat` may send `reasoning_depth` (`quick`, `standard`,
+`thorough`) or the unchanged `reasoning_effort`, not both. Nothing is removed
+from the extension surface.

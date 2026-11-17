@@ -88,25 +88,26 @@ TASK_REPLY = "Docs question"
 # Answer depths (#1255): the manifold entries Open WebUI shows as models,
 # `<Function id>.<id>` (v0.12.3 functions.py get_function_models). The id is
 # stored in chats and model grants, so it never changes; the name is what
-# users see. The effort is one the agent offers (LLM_REASONING_EFFORTS); None
-# omits the field, so the agent's configured simple/complex effort applies.
-# The first entry is the default: DEFAULT_MODELS in the chart names it, and an
-# unknown entry or a pre-#1255 chat's single-model id gets it. Ids, names,
-# efforts and the default: maintainer decision 2026-11-16 (#1255). Thorough is
-# xhigh on purpose: the default LLM_REASONING_EFFORTS offers it; some thorough
-# answers may reach the 270 s request deadline (the site eval measures that).
+# users see. Each entry sends its id as the agent's symbolic `reasoning_depth`
+# (#1289), never a literal effort: the agent resolves it from its own
+# LLM_REASONING_EFFORTS (quick the lowest offered effort, thorough the highest,
+# standard its configured simple/complex default), so a site without xhigh
+# needs no repackage. The first entry is the default: DEFAULT_MODELS in the
+# chart names it, and an unknown entry or a pre-#1255 chat's single-model id
+# gets it (no field sent). Ids, names and the default: maintainer decision
+# 2026-11-16 (#1255); some thorough answers may reach the 270 s request
+# deadline (the site eval measures that).
 class Depth(NamedTuple):
     id: str
     name: str
-    effort: str | None
 
 
 DEPTHS: tuple[Depth, ...] = (
-    Depth("standard", "Rosetta", None),
-    Depth("quick", "Rosetta \N{EN DASH} quick", "low"),
-    Depth("thorough", "Rosetta \N{EN DASH} thorough", "xhigh"),
+    Depth("standard", "Rosetta"),
+    Depth("quick", "Rosetta \N{EN DASH} quick"),
+    Depth("thorough", "Rosetta \N{EN DASH} thorough"),
 )
-_DEPTH_EFFORTS = {depth.id: depth.effort for depth in DEPTHS}
+_DEPTH_IDS = frozenset(depth.id for depth in DEPTHS)
 
 WORKING = "Searching the documentation…"
 FAILED = "Request failed"
@@ -239,13 +240,15 @@ def build_request(messages: object, user_valves: object) -> dict[str, Any] | Non
     return body
 
 
-def depth_effort(model: object) -> str | None:
-    """The agent effort for the selected model id `<Function id>.<depth>`; None
-    (the agent default) for the default depth, an unknown depth, or an id
-    without one, such as the single-model id chats stored before #1255."""
+def selected_depth(model: object) -> str | None:
+    """The agent `reasoning_depth` for the selected model id
+    `<Function id>.<depth>`; None (no field: the agent default) for an unknown
+    depth or an id without one, such as the single-model id chats stored
+    before #1255."""
     if not isinstance(model, str) or "." not in model:
         return None
-    return _DEPTH_EFFORTS.get(model.split(".", 1)[1])
+    depth = model.split(".", 1)[1]
+    return depth if depth in _DEPTH_IDS else None
 
 
 def fit_request(request: dict[str, Any], max_chars: int) -> tuple[dict[str, Any] | None, bool]:
@@ -606,8 +609,8 @@ class Pipe:
         request = build_request(body.get("messages"), user_valves)
         if request is None:
             return NO_TEXT_TURN
-        if effort := depth_effort(body.get("model")):
-            request["reasoning_effort"] = effort
+        if depth := selected_depth(body.get("model")):
+            request["reasoning_depth"] = depth
         request, trimmed = fit_request(request, self.valves.MAX_BODY_CHARS)
         if request is None:
             return TOO_LONG.format(limit=self.valves.MAX_BODY_CHARS)

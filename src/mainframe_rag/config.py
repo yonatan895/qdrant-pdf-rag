@@ -60,6 +60,10 @@ def qdrant_pool_limits(url: str) -> httpx2.Limits:
 # verbatim; LLM_REASONING_EFFORTS declares the subset the served template accepts.
 ReasoningEffort = Literal["low", "medium", "high", "xhigh"]
 REASONING_EFFORTS: tuple[ReasoningEffort, ...] = get_args(ReasoningEffort)
+# Symbolic answer depth (#1289): resolved against the deployment's own
+# LLM_REASONING_EFFORTS by Settings.reasoning_depth_effort, so a client (the
+# Open WebUI docs Pipe) never hard-codes an effort the site may not offer.
+ReasoningDepth = Literal["quick", "standard", "thorough"]
 # Prompt-count sources (#1266), see Settings.llm_token_count_source.
 TokenCountSource = Literal["tokenize", "completion_usage", "auto", "estimate"]
 TOKEN_COUNT_SOURCES: tuple[TokenCountSource, ...] = get_args(TokenCountSource)
@@ -633,6 +637,15 @@ class Settings(BaseSettings):
         if not parts or any(part not in REASONING_EFFORTS for part in parts) or len(set(parts)) != len(parts):
             raise ValueError("LLM_REASONING_EFFORTS must list distinct low/medium/high/xhigh values")
         return tuple(effort for effort in REASONING_EFFORTS if effort in parts)
+
+    def reasoning_depth_effort(self, depth: ReasoningDepth) -> ReasoningEffort | None:
+        """The effort a symbolic depth resolves to (#1289): quick the lowest
+        offered effort, thorough the highest, standard None, so the answer
+        core keeps the simple/complex default exactly as with no field."""
+        if depth == "standard":
+            return None
+        efforts = self.reasoning_efforts()
+        return efforts[0] if depth == "quick" else efforts[-1]
 
     @field_validator("ingest_alias_publish")
     @classmethod

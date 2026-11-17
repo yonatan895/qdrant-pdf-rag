@@ -129,7 +129,8 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
 - `POST /v1/chat` (native) and `POST /v1/chat/completions` (OpenAI-compatible
   alias) — `ChatRequest{messages (client-managed history; min 1, roles
   `system`/`user`/`assistant`, `extra="forbid"`), product?, version?,
-  splunk_context?, stream?, temperature?, model?, max_tokens?, reasoning_effort?}`. At least one
+  splunk_context?, stream?, temperature?, model?, max_tokens?, reasoning_effort?, reasoning_depth?}`.
+  At least one
    `user`-role message is required (missing user turn is a body-validation
    failure: `422 invalid_request` / `request body failed validation`, issue
    #314). `agent/chat_turn.prepare_chat_turn` owns active-turn normalization
@@ -157,7 +158,20 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   `high`, `xhigh` and must be in `LLM_REASONING_EFFORTS`, else the fixed
   `422 unsupported_reasoning_effort` before retrieval or any model call; it reaches
   the model verbatim, and omitted keeps the configured simple/complex effort
-  ([effort](#http-model-contract)). The response is
+  ([effort](#http-model-contract)). `reasoning_depth` (#1289, what the docs Pipe
+  sends) is one of `quick`, `standard`, `thorough`, resolved from this
+  deployment's `LLM_REASONING_EFFORTS` in the order `low` < `medium` < `high` <
+  `xhigh`: `quick` is the lowest offered effort, `thorough` the highest, and
+  `standard` the configured simple/complex effort for the request, exactly as
+  with neither field (`Settings.reasoning_depth_effort`). With `low,medium,high`
+  thorough is `high`; once `xhigh` is offered it is `xhigh`. An explicit `null` is
+  the same as an absent field. Any other value, and a request carrying both
+  `reasoning_depth` and `reasoning_effort` non-null, is the fixed
+  `422 invalid_request` / `request body failed validation` before retrieval or any
+  model call. The resolved effort is what the model receives and what the
+  existing `rag.reasoning_effort` / `llm.reasoning_effort` span attributes and the
+  feedback record's `reasoning_effort` carry; the depth adds no telemetry field.
+  A request with neither field is unchanged. The response is
   `ChatCompletionsResponse{id: "chatcmpl-<request_id>", created, model,
   choices[], usage, citations, citations_inferred, inferred_indices, hits,
   verification_state, script, script_lang, script_review_required,
@@ -1649,8 +1663,9 @@ renders exactly these choices (`xhigh` as "Extra high") and refuses any other
 before a model call: `/ui/chat` shows a fixed banner and `/ui/chat/stream`
 returns `422 unsupported_reasoning_effort`. A stale saved browser choice keeps
 the server's default; no effort is remapped. `/v1/chat*` takes the same optional
-`reasoning_effort` under the same refusal (#1255, for the Open WebUI docs Pipe's
-answer depths); `/v1/answer` has no effort field. Tokenizer requests retain their existing message and
+`reasoning_effort` under the same refusal (#1255), or the symbolic
+`reasoning_depth` resolved from `LLM_REASONING_EFFORTS` (#1289, what the Open WebUI
+docs Pipe's answer depths send, [§1](#1-endpoints)); `/v1/answer` has no effort field. Tokenizer requests retain their existing message and
 generation flags; this change does not establish effort-dependent token counts.
 
 <a id="model-request-arguments"></a>
@@ -1905,8 +1920,8 @@ SSE formatters and `SuppliedExcerpt`, plus a round trip through the real app.
 
 The Pipe is one admin-installed Open WebUI Function that shows the docs corpus
 as one model per answer depth (a manifold, #1255). It is a stateless translator over the streaming
-`POST /v1/chat` (§1, §3); the only agent field it adds is the depth's optional
-`reasoning_effort`. The target version is
+`POST /v1/chat` (§1, §3); the only agent field it adds is the entry's
+`reasoning_depth` (#1289), never a literal `reasoning_effort`. The target version is
 pinned: Open WebUI **v0.12.3**, in `OPEN_WEBUI_VERSION` and the
 `required_open_webui_version` frontmatter, kept equal by a test. The file
 imports only the standard library, `httpx` and `pydantic`, and its
@@ -1917,8 +1932,8 @@ only; the PR lints and types this file directly.
 
 | Concern | Behaviour |
 |---|---|
-| Request | Only `ChatRequest` fields: `messages` (only `user`/`assistant` turns as plain text: a string, or the text parts of an Open WebUI content list joined by newlines; system prompts, image and file parts, tool turns and every other Open WebUI key are dropped), `stream: true`, `reasoning_effort` only for a depth that sets one (below), and `product`/`version` from the per-user **UserValves** only when set (trimmed, blank = not sent). The last message is the question: unless it is a user turn with text, the Pipe returns a fixed hint and makes no agent call, never asking an earlier turn in its place |
-| Answer depth | `pipes()` returns the `DEPTHS` entries; Open WebUI v0.12.3 shows each as the model `mainframe_rag_docs.<id>` under the entry's name (`functions.py` `get_function_models`) and passes that id as `body["model"]`. Maintainer decision 2026-11-16 (#1255): `standard` "Rosetta" (no effort sent: the agent's configured simple/complex effort, unchanged behaviour), `quick` "Rosetta – quick" (`low`) and `thorough` "Rosetta – thorough" (`xhigh`, deliberately: the default `LLM_REASONING_EFFORTS` offers it). The first entry is the default (chart `DEFAULT_MODELS`). An unknown entry or an id without one also sends no effort (defensive: v0.12.3 refuses an unlisted model id before the Pipe; chats that stored the pre-#1255 id `mainframe_rag_docs` reach the Pipe through Open WebUI's default-model fallback, [upgrade](deploy.md#owui-answer-depth)). An effort the deployment does not offer (`LLM_REASONING_EFFORTS`) is the agent's `422 unsupported_reasoning_effort` and the Pipe's fixed text. No per-depth timeout exists: every depth shares `TIMEOUT_S` and the agent's request deadline, which was sized at medium effort ([§6a](#6a-request-admission-total-deadline-and-embed-input-bound-issue-374)) |
+| Request | Only `ChatRequest` fields: `messages` (only `user`/`assistant` turns as plain text: a string, or the text parts of an Open WebUI content list joined by newlines; system prompts, image and file parts, tool turns and every other Open WebUI key are dropped), `stream: true`, `reasoning_depth` for a known entry (below), and `product`/`version` from the per-user **UserValves** only when set (trimmed, blank = not sent). The last message is the question: unless it is a user turn with text, the Pipe returns a fixed hint and makes no agent call, never asking an earlier turn in its place |
+| Answer depth | `pipes()` returns the `DEPTHS` entries; Open WebUI v0.12.3 shows each as the model `mainframe_rag_docs.<id>` under the entry's name (`functions.py` `get_function_models`) and passes that id as `body["model"]`. Maintainer decision 2026-11-16 (#1255): `standard` "Rosetta", `quick` "Rosetta – quick" and `thorough` "Rosetta – thorough". Each entry sends its id as `reasoning_depth` (#1289) and the agent resolves it from its own `LLM_REASONING_EFFORTS` ([§1](#1-endpoints)): standard is the configured simple/complex effort (unchanged behaviour), quick the lowest offered effort and thorough the highest (`high` with `low,medium,high`, `xhigh` once offered), so no effort is hard-coded in the Pipe and no entry is refused for its effort. The first entry is the default (chart `DEFAULT_MODELS`). An unknown entry or an id without one sends no depth (defensive: v0.12.3 refuses an unlisted model id before the Pipe; chats that stored the pre-#1255 id `mainframe_rag_docs` reach the Pipe through Open WebUI's default-model fallback, [upgrade](deploy.md#owui-answer-depth)). The Pipe keeps its fixed text for the agent's `422 unsupported_reasoning_effort`. No per-depth timeout exists: every depth shares `TIMEOUT_S` and the agent's request deadline, which was sized at medium effort ([§6a](#6a-request-admission-total-deadline-and-embed-input-bound-issue-374)) |
 | Answer text | Prose deltas stream through in order. The model's own citations section (answer prompt rule 7) is unvalidated, so the Pipe hides it (#1098): a header alone on its line, as `cites.py` recognizes it (`Citations:`, or the `Sources:`/`References:` aliases), starts a section; a `Citations:` section takes citation and bullet lines, an alias section only citation lines; a blank line after a citation, or any other line, ends it and the text is prose again (an alias header followed by prose is kept). A citation here is any line with a `, ` gap before a `, p. ` tail, a superset of the agent's shape test, which needs the supplied doc ids, so such a line right after a `Citations:` header is hidden even where `cites.py` keeps it as prose. Fenced code is never touched, so a raw section inside a prose fence still shows (the agent unwraps those). Both divergences were accepted by the maintainer 2026-10-25. Only the undecided current line is held: at most 64 characters outside a section, where a line that cannot be a header streams at once, and 2048 inside one, past which it is prose; each delta is also held until the next frame. When the terminal frame carries a validated `**Citations:**` list the Pipe shows that list, spelled exactly as `_chat_final_frames` spells it for that frame's `citations`, and it follows the prose unchanged: a held last delta equal to that list is used as the list, not shown as model text, and any other last delta stays model text while the list is rendered from the terminal frame's `citations`; with no validated list none is shown. The header and list-marker patterns are copies of `cites.py`'s, pinned equal by a test. Each delta is yielded as an OpenAI chunk dict, never a raw string, because Open WebUI forwards a yielded string that starts with `data:` as an SSE frame and emits its `event`: model text cannot forge a banner, source or replace event. A non-streaming call gets one string. Tokens are provisional ([answer states](#answer-contract)): the banner arrives only after the terminal frame |
 | Completion | Complete only with a non-null `finish_reason` frame **and** `[DONE]`. A missing finish, a missing `[DONE]` or a malformed frame appends the fixed "stream ended before it completed" text with the incomplete banner |
 | Citations | One `source` event per validated citation in the terminal frame: `source{name: citation, id: doc_id}`, `document[]` = the `supplied_evidence[].text` entries carrying that citation (the excerpt the prompt actually held, never a new search), parallel `metadata[]` with `[index] citation`, doc id, page label, product, version and `label` (`source-matched`, or `inferred, not grounding` when `citations_inferred`). No URLs: a name or id that Open WebUI could render as a link (a scheme such as `http:` or `javascript:`, a bare `http` prefix, `//` or `www.`) is prefixed with `Citation: `. Supplied but uncited excerpts are not sources |

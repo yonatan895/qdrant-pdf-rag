@@ -217,6 +217,27 @@ def test_follow_up_mode_is_a_text_free_root_attribute(
     assert CANARY_QUERY not in "\n".join(_formatted_logs(caplog))
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("depth,effort", [("quick", "low"), ("thorough", "high"), ("standard", "medium")])
+def test_answer_depth_records_only_the_resolved_effort(client, caplog, monkeypatch, stream, depth, effort):
+    """Issue #1289: a symbolic depth is recorded as the effort it resolved to,
+    in the existing prompt.build and llm.chat effort attributes; no span or
+    log carries the question text."""
+    c, exporter = client
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_efforts", "low,medium,high")
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_simple", "medium")
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_complex", "medium")
+    with caplog.at_level(logging.INFO):
+        resp = c.post("/v1/chat", json={"messages": [{"role": "user", "content": CANARY_QUERY}],
+                                        "stream": stream, "reasoning_depth": depth})
+    assert resp.status_code == 200
+    spans = exporter.get_finished_spans()
+    assert [s.attributes["rag.reasoning_effort"] for s in spans if s.name == "prompt.build"] == [effort]
+    assert [s.attributes["llm.reasoning_effort"] for s in spans if s.name == "llm.chat"] == [effort]
+    assert CANARY_QUERY not in _span_text(spans)
+    assert CANARY_QUERY not in "\n".join(_formatted_logs(caplog))
+
+
 def test_failure_hides_canaries_but_keeps_error_type(client, caplog, monkeypatch):
     c, exporter = client
     monkeypatch.setattr(
