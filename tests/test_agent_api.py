@@ -1871,6 +1871,116 @@ def test_chat_effort_outside_the_vocabulary_is_invalid_request(effort_client):
     assert (fake.calls, search.calls) == (0, [])
 
 
+# --- Symbolic answer depth (#1289) -------------------------------------------
+
+_COMPLEX_TURN = {"messages": [{"role": "user", "content": (
+    "How do I diagnose and recover when DFSMShsm journal fills up during migration?")}]}
+
+
+# (LLM_REASONING_EFFORTS, simple default, complex default, quick, thorough):
+# quick is the lowest offered effort and thorough the highest, in the
+# vocabulary order low < medium < high < xhigh, whatever order the list uses.
+_DEPTH_MATRIX = [
+    pytest.param("low,medium,high", "medium", "high", "low", "high", id="site-low-medium-high"),
+    pytest.param("low,medium,xhigh", "medium", "low", "low", "xhigh", id="low-medium-xhigh"),
+    pytest.param("xhigh,high,low,medium", "high", "medium", "low", "xhigh", id="all-four-unordered"),
+    pytest.param("high", "high", "high", "high", "high", id="single-effort"),
+    pytest.param("medium,high", "high", "medium", "medium", "high", id="two-efforts"),
+]
+
+
+@pytest.mark.parametrize("efforts,simple,complex_,quick,thorough", _DEPTH_MATRIX)
+def test_settings_resolve_each_depth_from_the_offered_efforts(efforts, simple, complex_, quick, thorough):
+    """The resolver beside reasoning_efforts(): standard is None, so the
+    answer core keeps choosing the simple/complex default exactly as with no
+    field at all."""
+    s = Settings(llm_reasoning_efforts=efforts, llm_reasoning_effort_simple=simple,
+                 llm_reasoning_effort_complex=complex_, _env_file=None)
+    assert s.reasoning_depth_effort("quick") == quick
+    assert s.reasoning_depth_effort("thorough") == thorough
+    assert s.reasoning_depth_effort("standard") is None
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("turn", [_CHAT_TURN, _COMPLEX_TURN], ids=["simple", "complex"])
+@pytest.mark.parametrize("depth", ["quick", "standard", "thorough"])
+@pytest.mark.parametrize("efforts,simple,complex_,quick,thorough", _DEPTH_MATRIX)
+def test_chat_depth_reaches_the_model_as_the_resolved_effort(
+        effort_client, monkeypatch, stream, turn, depth, efforts, simple, complex_, quick, thorough):
+    """#1289: /v1/chat resolves `reasoning_depth` against this deployment's own
+    LLM_REASONING_EFFORTS. Quick and thorough ignore complexity; standard
+    follows the request's complexity path, the effort the agent uses with no
+    field."""
+    client, fake, _search = effort_client
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_efforts", efforts)
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_simple", simple)
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_complex", complex_)
+    default = simple if turn is _CHAT_TURN else complex_
+    expected = {"quick": quick, "thorough": thorough, "standard": default}[depth]
+    resp = client.post("/v1/chat", json={**turn, "stream": stream, "reasoning_depth": depth})
+    assert resp.status_code == 200
+    assert fake.last_reasoning_effort == expected
+
+
+@pytest.mark.parametrize("path", ["/v1/chat", "/v1/chat/completions"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("turn", [_CHAT_TURN, _COMPLEX_TURN], ids=["simple", "complex"])
+@pytest.mark.parametrize("depth,literal", [
+    ("standard", {}),
+    ("quick", {"reasoning_effort": "low"}),
+    ("thorough", {"reasoning_effort": "xhigh"}),
+])
+def test_chat_depth_sends_the_model_what_the_equivalent_literal_request_sends(
+        effort_client, monkeypatch, path, stream, turn, depth, literal):
+    """A depth changes nothing but the effort it resolves to: the model gets
+    the same messages, effort and temperature as the request that names that
+    effort literally (standard: as the request without either field)."""
+    client, _fake, _search = effort_client
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_complex", "xhigh")
+    calls = []
+
+    class Recording(FakeLLM):
+        def chat(self, messages, reasoning_effort=None, temperature=None):
+            calls.append(([m.model_dump() for m in messages], reasoning_effort, temperature))
+            return super().chat(messages, reasoning_effort, temperature)
+
+    monkeypatch.setattr(app_mod, "llm", Recording())
+    for extra in (literal, {"reasoning_depth": depth}):
+        assert client.post(path, json={**turn, "stream": stream, **extra}).status_code == 200
+    assert len(calls) == 2 and calls[0] == calls[1]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("effort", ["low", "high", "max"])
+def test_chat_depth_with_a_literal_effort_is_refused_before_retrieval(effort_client, stream, effort):
+    """Both fields at once is ambiguous: the fixed invalid_request 422, before
+    retrieval or any model call, whatever the literal value."""
+    client, fake, search = effort_client
+    refused = client.post("/v1/chat", json={**_CHAT_TURN, "stream": stream,
+                                            "reasoning_depth": "quick", "reasoning_effort": effort})
+    assert refused.status_code == 422 and refused.json() == _FIXED_422
+    assert (fake.calls, search.calls) == (0, [])
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("depth", ["deep", "Quick", "", "low", 1])
+def test_chat_unknown_depth_is_the_fixed_invalid_request(effort_client, stream, depth):
+    """Outside quick/standard/thorough (an effort name included) is the fixed
+    validation 422, before retrieval or any model call."""
+    client, fake, search = effort_client
+    resp = client.post("/v1/chat", json={**_CHAT_TURN, "stream": stream, "reasoning_depth": depth})
+    assert resp.status_code == 422 and resp.json() == _FIXED_422
+    assert (fake.calls, search.calls) == (0, [])
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_chat_null_depth_is_the_same_as_no_depth(effort_client, stream):
+    """An explicit null depth is accepted and keeps the configured default."""
+    client, fake, _search = effort_client
+    resp = client.post("/v1/chat", json={**_CHAT_TURN, "stream": stream, "reasoning_depth": None})
+    assert resp.status_code == 200 and fake.last_reasoning_effort == "medium"
+
+
 @pytest.mark.parametrize("stream,query,field", [
     (False, "IEA500I", "llm_reasoning_effort_simple"),
     (True, "How do I diagnose and recover when DFSMShsm journal fills up during migration?",

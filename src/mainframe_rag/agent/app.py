@@ -121,6 +121,7 @@ from mainframe_rag.agent.user_message import derive_retrieval_query
 from mainframe_rag.agent.zowe_mcp import build_zowe_mcp, probe_zowe_mcp
 from mainframe_rag.config import (
     QDRANT_CLIENT_KEEPALIVE_EXPIRY_S,
+    ReasoningDepth,
     ReasoningEffort,
     Settings,
     bearer_auth_headers,
@@ -1218,6 +1219,10 @@ class ChatRequest(BoundedRequestText):
     # LLM_REASONING_EFFORTS, sent to the model verbatim; omitted keeps the
     # configured simple/complex effort. Same refusal as the console (#748).
     reasoning_effort: ReasoningEffort | None = None
+    # Symbolic answer depth (#1289, what the docs Pipe sends): resolved from
+    # LLM_REASONING_EFFORTS by Settings.reasoning_depth_effort. Exclusive with
+    # reasoning_effort: both at once is the fixed invalid_request 422.
+    reasoning_depth: ReasoningDepth | None = None
     # The latest user message's validated images (#1287), split out of its
     # content parts before the text model validates; empty with
     # CHAT_IMAGES_ENABLED off, where a content list stays today's 422.
@@ -1234,6 +1239,12 @@ class ChatRequest(BoundedRequestText):
     @property
     def images(self) -> tuple[TurnImage, ...]:
         return self._images
+
+    @model_validator(mode="after")
+    def _one_effort_selector(self) -> ChatRequest:
+        if self.reasoning_depth is not None and self.reasoning_effort is not None:
+            raise ValueError("reasoning_depth and reasoning_effort are exclusive")
+        return self
 
 
 class ChatMessageResponse(BaseModel):
@@ -2522,7 +2533,9 @@ async def _chat_response(req, response, owner):
     root_span = owner.span
     request_id = owner.request.state.request_id
     started = owner.started
-    require_offered_effort(req.reasoning_effort)
+    effort = (req.reasoning_effort if req.reasoning_depth is None
+              else settings.reasoning_depth_effort(req.reasoning_depth))
+    require_offered_effort(effort)
     core_input, deps, llm_model = await prepare_chat_core(
         owner,
         req.messages,
@@ -2530,7 +2543,7 @@ async def _chat_response(req, response, owner):
         product=req.product,
         version=req.version,
         temperature=req.temperature,
-        reasoning_effort=req.reasoning_effort,
+        reasoning_effort=effort,
         images=req.images,
     )
     hits, kind, timings = core_input.hits, core_input.query_kind, core_input.timings
