@@ -1349,7 +1349,7 @@ def real_agent(monkeypatch, servable_representation_gate):
 
     from mainframe_rag.agent import app as app_mod
     from mainframe_rag.agent.tokenizer import FallbackTokenizer
-    from mainframe_rag.ports import TokenUsage
+    from mainframe_rag.ports import ChatResult, TokenUsage
     from mainframe_rag.retrieve.query import SearchHit
 
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
@@ -1371,6 +1371,13 @@ def real_agent(monkeypatch, servable_representation_gate):
     efforts: list[str | None] = []
 
     class FakeLLM:
+        async def chat(self, messages, reasoning_effort=None, temperature=None, max_tokens=None):
+            # Only an image turn's transcription call (#1287) is buffered.
+            efforts.append(reasoning_effort)
+            return ChatResult(content="SCREEN TEXT:\nIEA500I\nIDENTIFIERS:\nIEA500I\n"
+                                      "DESCRIPTION: A console screen.",
+                              finish_reason="stop", usage=TokenUsage())
+
         async def chat_stream(self, messages, reasoning_effort=None, temperature=None):
             efforts.append(reasoning_effort)
             yield {"type": "token", "delta": "Reissue the command.\n\n", "ttft_ms": 3}
@@ -1998,3 +2005,31 @@ def test_round_trip_a_refused_image_is_the_fixed_unsupported_image_text(real_age
     assert content == ERROR_CASES[-2][2]
     assert _final_status(events) == "Request failed"
     assert searches == [] and transport.efforts == []
+
+
+@pytest.mark.parametrize(("efforts", "entry", "read_effort", "answer_effort"), [
+    ("low,medium,high", "thorough", "low", "high"),
+    ("medium,high", "thorough", "medium", "high"),
+    ("medium,high", "quick", "medium", "medium"),
+    ("high", "standard", "high", "high"),
+])
+def test_round_trip_an_image_turn_reads_at_the_lowest_effort_and_answers_at_the_entry(
+        real_agent, monkeypatch, images_on, efforts, entry, read_effort, answer_effort):
+    """#1287 x #1289 through the real agent: the Pipe forwards the image and
+    the entry's reasoning_depth; the transcription call takes the lowest
+    offered effort and the answer the entry's resolved effort, also where
+    `low` is not offered or only one effort is."""
+    from mainframe_rag.agent import app as app_mod
+
+    monkeypatch.setattr(app_mod.settings, "chat_images_enabled", True)
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_efforts", efforts)
+    default = efforts.split(",")[0]
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_simple", default)
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_complex", default)
+    transport, searches = real_agent
+    content, _events = run_pipe(None, transport=transport, messages=[_image_turn(_image(PNG_URL))],
+                                body_extra={"model": f"{FUNCTION_ID}.{entry}"})
+    assert transport.efforts == [read_effort, answer_effort]
+    assert content.startswith(f"Reissue the command.\n\n**Citations:**\n- {CITE_A}\n\n<details>")
+    assert "<summary>What Rosetta read from your image</summary>" in content
+    assert len(searches) == 1 and "IEA500I" in searches[0]["query"]

@@ -346,7 +346,6 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "chat_image_max_count": 3,
     "chat_image_max_pixels": 4194304,
     "chat_image_types": "png,jpeg,webp",
-    "chat_image_read_effort": "low",
     "chat_image_read_max_tokens": 4096,
     "chat_image_read_max_chars": 4000,
     "chat_image_read_timeout_s": 60.0,
@@ -666,17 +665,34 @@ def test_condensation_and_anchoring_cannot_both_be_enabled(monkeypatch):
 
 def test_chat_images_are_off_by_default_and_one_env_line_turns_them_on(monkeypatch):
     """#1287 decision 2: off by default; CHAT_IMAGES_ENABLED=true in airgap.env
-    turns them on. The read effort is checked against the offered efforts only
-    when images are on, so an image-free deployment's effort domain is unchanged."""
+    turns them on."""
     assert Settings(_env_file=None).chat_images_enabled is False
     monkeypatch.setenv("CHAT_IMAGES_ENABLED", "true")
     assert Settings(_env_file=None).chat_images_enabled is True
-    monkeypatch.setenv("LLM_REASONING_EFFORTS", "medium,high")
-    monkeypatch.setenv("LLM_REASONING_EFFORT_SIMPLE", "medium")
-    with pytest.raises(ValueError, match="CHAT_IMAGE_READ_EFFORT must be one of LLM_REASONING_EFFORTS"):
-        Settings(_env_file=None)
     monkeypatch.setenv("CHAT_IMAGES_ENABLED", "false")
     assert Settings(_env_file=None).chat_images_enabled is False
+
+
+@pytest.mark.parametrize(("efforts", "default", "lowest"), [
+    ("medium,high", "medium", "medium"),
+    ("high,xhigh", "high", "high"),
+    ("high", "high", "high"),
+    ("xhigh,medium", "xhigh", "medium"),
+])
+def test_chat_images_start_with_any_offered_effort_list(monkeypatch, efforts, default, lowest):
+    """Maintainer decision 2026-11-17 (#1290): turning images on can never stop
+    the pod because of LLM_REASONING_EFFORTS. The transcription call takes the
+    quick depth's effort (#1289), the lowest the deployment offers, so there is
+    no separate read effort to mismatch, even where `low` is not offered."""
+    monkeypatch.setenv("CHAT_IMAGES_ENABLED", "true")
+    monkeypatch.setenv("LLM_REASONING_EFFORTS", efforts)
+    monkeypatch.setenv("LLM_REASONING_EFFORT_SIMPLE", default)
+    monkeypatch.setenv("LLM_REASONING_EFFORT_COMPLEX", default)
+    monkeypatch.setenv("CHAT_IMAGE_READ_EFFORT", "low")  # no longer a setting: ignored
+    loaded = Settings(_env_file=None)
+    assert loaded.chat_images_enabled is True
+    assert loaded.reasoning_depth_effort("quick") == lowest
+    assert not hasattr(loaded, "chat_image_read_effort")
 
 
 @pytest.mark.parametrize("raw", ["", "png,bmp", "png,png", "svg"])

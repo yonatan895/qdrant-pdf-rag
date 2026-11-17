@@ -976,9 +976,12 @@ def test_image_probe_sends_the_application_request_shape(monkeypatch, capsys):
     assert [_decode_png(png)[:2] for png in sent] == [(400, 130), (800, 260)]
 
 
-def test_image_probe_defaults_to_the_top_level_read_effort_and_its_budget(monkeypatch, capsys):
+def test_image_probe_reads_at_the_lowest_offered_effort_and_its_budget(monkeypatch, capsys):
+    """The probe sends the agent's transcription effort: the lowest
+    LLM_REASONING_EFFORTS offers (#1290 x #1289), here without `low`."""
     gateway = ImageGateway()
-    _image_probe(monkeypatch, capsys, gateway, CHAT_IMAGE_READ_EFFORT="medium")
+    _image_probe(monkeypatch, capsys, gateway, LLM_REASONING_EFFORTS="medium,high",
+                 LLM_REASONING_EFFORT_SIMPLE="high", LLM_REASONING_EFFORT_COMPLEX="high")
     body = gateway.bodies[0][1]
     assert body["reasoning_effort"] == "medium" and body["temperature"] == 0
     assert body["max_tokens"] == probe_mod.IMAGE_PROBE_MAX_TOKENS

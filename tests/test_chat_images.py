@@ -227,7 +227,7 @@ def test_identical_images_share_one_read_within_a_request():
 
     async def chat(messages, **kwargs):
         calls.append(messages)
-        assert kwargs == {"reasoning_effort": "low", "temperature": 0.0, "max_tokens": 4096}
+        assert kwargs == {"reasoning_effort": "low", "temperature": 0.0, "max_tokens": 4096}  # lowest offered
         return ChatResult(content="SCREEN TEXT:\nA\nIDENTIFIERS:\nIEA500I\nDESCRIPTION: d",
                           finish_reason="stop", usage=TokenUsage())
 
@@ -453,6 +453,48 @@ def test_the_transcription_feeds_retrieval_and_the_answer_carries_the_image(
     logged = "\n".join([*(r.getMessage() for r in caplog.records), captured.out, captured.err])
     assert url[40:120] not in logged and TRANSCRIPT_MARKER not in logged
     assert '"action":"image_read","image_count":1' in logged
+
+
+@pytest.mark.parametrize(("efforts", "default", "lowest"), [
+    ("medium,high", "medium", "medium"),
+    ("high,xhigh", "high", "high"),
+    ("high", "high", "high"),
+])
+def test_the_transcription_call_takes_the_lowest_offered_effort(gateway_client, efforts, default,
+                                                                lowest):
+    """Maintainer decision 2026-11-17 (#1290): the read goes at the quick
+    depth's effort (#1289), the lowest LLM_REASONING_EFFORTS offers, so a
+    deployment without `low`, or with a single effort, starts with images on
+    and reads at an effort its template accepts."""
+    gateway = _Gateway(_READ, _ANSWER)
+    client = gateway_client(gateway, {**_ON, "LLM_REASONING_EFFORTS": efforts,
+                                      "LLM_REASONING_EFFORT_SIMPLE": default,
+                                      "LLM_REASONING_EFFORT_COMPLEX": default})
+    res = client.post("/v1/chat", json={"messages": [
+        {"role": "user", "content": _parts("what do I do?", _url(_png(seed=3)))}]})
+    assert res.status_code == 200
+    (read,) = gateway.reads()
+    (answer,) = gateway.answers()
+    assert (read["reasoning_effort"], answer["reasoning_effort"]) == (lowest, default)
+
+
+@pytest.mark.parametrize(("depth", "answer_effort"), [
+    ("quick", "low"), ("standard", "medium"), ("thorough", "xhigh")])
+def test_an_image_turn_with_a_depth_reads_at_the_lowest_and_answers_at_the_depth(
+        gateway_client, depth, answer_effort):
+    """#1287 x #1289: the depth selects the answer's effort only; the read
+    stays at the lowest offered effort whatever entry asked."""
+    gateway = _Gateway(_READ, _ANSWER)
+    client = gateway_client(gateway, {**_ON, "LLM_REASONING_EFFORTS": "low,medium,high,xhigh",
+                                      "LLM_REASONING_EFFORT_SIMPLE": "medium",
+                                      "LLM_REASONING_EFFORT_COMPLEX": "medium"})
+    res = client.post("/v1/chat", json={"reasoning_depth": depth, "messages": [
+        {"role": "user", "content": _parts("what do I do?", _url(_png(seed=4)))}]})
+    assert res.status_code == 200
+    (read,) = gateway.reads()
+    (answer,) = gateway.answers()
+    assert (read["reasoning_effort"], answer["reasoning_effort"]) == ("low", answer_effort)
+    assert answer["messages"][-1]["content"][-1]["type"] == "image_url"
 
 
 def test_the_image_never_becomes_a_citation(gateway_client):
