@@ -61,6 +61,11 @@ ERROR_MESSAGES: dict[str, str] = {
     "http_error": _REJECTED,
     "unsupported_reasoning_effort": "This deployment does not offer this answer depth. "
                                     "Choose another Rosetta model and retry.",
+    # A pasted image the agent refused (#1287): one text for every reason
+    # (type, size, pixels, count, history); the code alone selects it.
+    "unsupported_image": "Rosetta could not use this image. Paste a screenshot of an accepted "
+                         "type (PNG, JPEG or WebP by default), within the size and count "
+                         "limits, in your latest message and retry.",
 }
 UNREACHABLE = ("The documentation service could not be reached. Retry; if it persists, "
                "contact the operators.")
@@ -88,25 +93,26 @@ TASK_REPLY = "Docs question"
 # Answer depths (#1255): the manifold entries Open WebUI shows as models,
 # `<Function id>.<id>` (v0.12.3 functions.py get_function_models). The id is
 # stored in chats and model grants, so it never changes; the name is what
-# users see. The effort is one the agent offers (LLM_REASONING_EFFORTS); None
-# omits the field, so the agent's configured simple/complex effort applies.
-# The first entry is the default: DEFAULT_MODELS in the chart names it, and an
-# unknown entry or a pre-#1255 chat's single-model id gets it. Ids, names,
-# efforts and the default: maintainer decision 2026-11-16 (#1255). Thorough is
-# xhigh on purpose: the default LLM_REASONING_EFFORTS offers it; some thorough
-# answers may reach the 270 s request deadline (the site eval measures that).
+# users see. Each entry sends its id as the agent's symbolic `reasoning_depth`
+# (#1289), never a literal effort: the agent resolves it from its own
+# LLM_REASONING_EFFORTS (quick the lowest offered effort, thorough the highest,
+# standard its configured simple/complex default), so a site without xhigh
+# needs no repackage. The first entry is the default: DEFAULT_MODELS in the
+# chart names it, and an unknown entry or a pre-#1255 chat's single-model id
+# gets it (no field sent). Ids, names and the default: maintainer decision
+# 2026-11-16 (#1255); some thorough answers may reach the 270 s request
+# deadline (the site eval measures that).
 class Depth(NamedTuple):
     id: str
     name: str
-    effort: str | None
 
 
 DEPTHS: tuple[Depth, ...] = (
-    Depth("standard", "Rosetta", None),
-    Depth("quick", "Rosetta \N{EN DASH} quick", "low"),
-    Depth("thorough", "Rosetta \N{EN DASH} thorough", "xhigh"),
+    Depth("standard", "Rosetta"),
+    Depth("quick", "Rosetta \N{EN DASH} quick"),
+    Depth("thorough", "Rosetta \N{EN DASH} thorough"),
 )
-_DEPTH_EFFORTS = {depth.id: depth.effort for depth in DEPTHS}
+_DEPTH_IDS = frozenset(depth.id for depth in DEPTHS)
 
 WORKING = "Searching the documentation…"
 FAILED = "Request failed"
@@ -160,6 +166,46 @@ REFERENCE_RE = re.compile(r"\n\nAnswer reference: `([0-9a-f]{12})`[ \t\r\n]*\Z")
 _CHUNK_ID = re.compile(r"chatcmpl-([0-9a-f]{12})\Z")
 _REQUEST_ID_KEY = "__request_id"  # set on `final` by _deltas, never by the agent
 
+# Pasted images (#1287), temporary chats only. On only when the chart sets
+# RAG_CHAT_IMAGES=true (read per call, like REFERENCE_ENV); default off. Only
+# the last user turn's `data:image/` URLs are forwarded; earlier turns are
+# always text. The agent's transcript of each image (final-frame
+# `image_reads`) is shown in a collapsed block before the reference line; on
+# the next turn build_request moves it back into the user turn it came from,
+# so no earlier image is ever re-sent and the Pipe stays stateless. Every
+# user-visible text below is draft wording for maintainer review.
+IMAGES_ENV = "RAG_CHAT_IMAGES"
+DEFAULT_MAX_IMAGE_BYTES = 5242880  # the agent's Settings.chat_image_max_bytes default
+DEFAULT_MAX_IMAGES = 3  # the agent's Settings.chat_image_max_count default
+# The agent counts an image-only turn as its fixed question (agent images.py
+# IMAGE_ONLY_QUESTION, 54 characters); a test pins the two.
+IMAGE_ONLY_QUESTION_CHARS = 54
+IMAGES_OFF = ("Rosetta does not read images in this deployment. Type the question, or the "
+              "text from the screen, and retry.")
+IMAGE_UNUSABLE = ("Rosetta reads pasted images only in a temporary chat. Paste the image into "
+                  "a temporary chat, or type the text from the screen, and retry.")
+TOO_MANY_IMAGES = "Attach at most {limit} images to one message and retry."
+IMAGE_TOO_LARGE = "Each image must be at most {limit} MB. Paste a smaller screenshot and retry."
+IMAGE_READ_FAILED = "An image could not be read, so the search did not use it"
+EARLIER_IMAGE = "An earlier image was not re-sent"
+IMAGE_READS_SUMMARY = "What Rosetta read from your image"
+IMAGE_CARRIED = "[Image {index}, as read by the model]: {text}"
+# The block opens as Open WebUI v0.12.3's details tokenizer requires
+# (src/lib/utils/marked/extension.ts: `<details>` then a newline, then
+# `<summary>...</summary>` and a newline). Each transcript sits in a backtick
+# fence longer than any backtick run in it, with `&`, `<` and `>` escaped: that
+# tokenizer counts raw `<details`/`</details>` anywhere (fences included) and
+# html-decodes the block before rendering it, and processDetails rewrites
+# typed details in history, so no transcript can close, open or retype the
+# block, and the user still sees the exact text as code (never links or HTML).
+_READS_OPEN = f"\n\n<details>\n<summary>{IMAGE_READS_SUMMARY}</summary>\n"
+_READS_CLOSE = "</details>"
+_READ_HEAD = re.compile(r"\n\*\*Image ([1-9][0-9]?)\*\*\n\n(`{3,})\n")
+_ESCAPES = (("&", "&amp;"), ("<", "&lt;"), (">", "&gt;"))
+# Open WebUI's add_file_context (utils/middleware.py) block: a whole text
+# part, or the prefix of string content. Only that exact shape is removed.
+_ATTACHED_FILES = re.compile(r"<attached_files>\n.*?\n</attached_files>\n\n", re.DOTALL)
+
 
 class _Failure(Exception):
     """A fixed user-visible failure; carries the fixed text, never upstream text."""
@@ -204,48 +250,187 @@ def _is_task(task: object, metadata: object, body: dict[str, Any]) -> bool:
 
 def _text(content: object) -> str:
     """Plain text of a message: a string, or the text parts of an Open WebUI
-    content list joined by newlines (image and file parts dropped)."""
+    content list joined by newlines (image and file parts dropped). Open
+    WebUI's `<attached_files>` block (a whole text part, or a string's
+    prefix) is file metadata, not question text, and is removed."""
     if isinstance(content, str):
+        if match := _ATTACHED_FILES.match(content):
+            content = content[match.end():]
         return content if content.strip() else ""
     if not isinstance(content, list):
         return ""
     parts = [p.get("text") for p in content if isinstance(p, dict) and p.get("type") == "text"]
-    joined = "\n".join(t for t in parts if isinstance(t, str) and t.strip())
+    joined = "\n".join(t for t in parts if isinstance(t, str) and t.strip()
+                       and not _ATTACHED_FILES.fullmatch(t))
     return joined if joined.strip() else ""
 
 
-def build_request(messages: object, user_valves: object) -> dict[str, Any] | None:
-    """The agent ChatRequest body: user/assistant turns as plain text
-    (system prompts, image and file parts, tool turns and every other Open
-    WebUI field are dropped), `stream: true`, and product/version only when
-    the user set them. The last message is the question: None, so no agent
-    call, unless it is a user turn with text. An earlier turn is never asked
-    in its place."""
+def _image_urls(content: object) -> list[object]:
+    """The URL of each `image_url` part of a content list (None when absent)."""
+    if not isinstance(content, list):
+        return []
+    urls: list[object] = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "image_url":
+            image = part.get("image_url")
+            urls.append(image.get("url") if isinstance(image, dict) else image)
+    return urls
+
+
+def _decoded_bytes(url: str) -> int:
+    """A base64 data URL's decoded size by length arithmetic (nothing is
+    decoded); 0 for any other shape, which the agent judges itself."""
+    header, comma, payload = url.partition(",")
+    if not comma or not header.endswith(";base64"):
+        return 0
+    padding = min(len(payload) - len(payload.rstrip("=")), 2)
+    return len(payload) * 3 // 4 - padding
+
+
+def _escape(text: str) -> str:
+    for raw, escaped in _ESCAPES:
+        text = text.replace(raw, escaped)
+    return text
+
+
+def _unescape(text: str) -> str:
+    for raw, escaped in reversed(_ESCAPES):
+        text = text.replace(escaped, raw)
+    return text
+
+
+def _image_reads_block(final: dict[str, Any]) -> str:
+    """The collapsed block of the agent's image transcripts (`image_reads`),
+    or "" when the final frame has none."""
+    reads = final.get("image_reads")
+    items = [(r["index"], r["text"]) for r in reads if isinstance(r, dict)
+             and type(r.get("index")) is int and 1 <= r["index"] <= 99
+             and isinstance(r.get("text"), str) and r["text"].strip()
+             ] if isinstance(reads, list) else []
+    if not items:
+        return ""
+    parts = [_READS_OPEN]
+    for index, text in items:
+        runs = [len(run) for run in re.findall("`+", text)]
+        fence = "`" * max(3, max(runs, default=0) + 1)
+        parts.append(f"\n**Image {index}**\n\n{fence}\n{_escape(text)}\n{fence}\n")
+    parts.append(_READS_CLOSE)
+    return "".join(parts)
+
+
+def _split_reads(text: str) -> tuple[str, list[tuple[int, str]]]:
+    """An answer's text without its trailing image-reads block, and the
+    transcripts the block carries ([] when there is no block or it does not
+    parse, for instance after an edit). Open WebUI trims history content, so
+    trailing whitespace is tolerated."""
+    stripped = text.rstrip()
+    start = stripped.rfind(_READS_OPEN)
+    if start < 0 or not stripped.endswith(_READS_CLOSE):
+        return text, []
+    body = stripped[start + len(_READS_OPEN):-len(_READS_CLOSE)]
+    reads: list[tuple[int, str]] = []
+    pos = 0
+    while pos < len(body):
+        head = _READ_HEAD.match(body, pos)
+        close = body.find(f"\n{head.group(2)}\n", head.end()) if head else -1
+        if head is None or close < 0:
+            reads = []
+            break
+        if transcript := _unescape(body[head.end():close]):
+            reads.append((int(head.group(1)), transcript))
+        pos = close + len(head.group(2)) + 2
+    return stripped[:start], reads
+
+
+def _build(messages: object, user_valves: object, *, images_on: bool, max_images: int,
+           max_image_bytes: int) -> tuple[dict[str, Any] | str, bool]:
+    """(the agent request body, or the fixed text to show instead of a
+    call; whether an earlier image was dropped without its transcript)."""
     items = [m for m in messages if isinstance(m, dict)] if isinstance(messages, list) else []
-    if not items or items[-1].get("role") != "user" or not _text(items[-1].get("content")):
-        return None
-    turns: list[dict[str, str]] = []
-    for message in items:
+    if not items or items[-1].get("role") != "user":
+        return NO_TEXT_TURN, False
+    last = items[-1].get("content")
+    question, urls = _text(last), _image_urls(last)
+    content: str | list[dict[str, Any]] = question
+    if urls:
+        if not images_on:
+            return IMAGES_OFF, False
+        if not all(isinstance(u, str) and u.startswith("data:image/") for u in urls):
+            return IMAGE_UNUSABLE, False
+        data_urls = [u for u in urls if isinstance(u, str)]
+        if len(data_urls) > max_images:
+            return TOO_MANY_IMAGES.format(limit=max_images), False
+        if any(_decoded_bytes(u) > max_image_bytes for u in data_urls):
+            return IMAGE_TOO_LARGE.format(limit=f"{max_image_bytes / 1048576:.3g}"), False
+        content = ([{"type": "text", "text": question}] if question else []) + [
+            {"type": "image_url", "image_url": {"url": u}} for u in data_urls]
+    elif not question:
+        return NO_TEXT_TURN, False
+    turns: list[dict[str, Any]] = []
+    dropped = False
+    for i, message in enumerate(items[:-1]):
         role, text = message.get("role"), _text(message.get("content"))
         if role == "assistant":
             # The reference line is display state, not part of the answer.
             text = REFERENCE_RE.sub("", text)
+            if i and items[i - 1].get("role") == "user" and _image_urls(
+                    items[i - 1].get("content")):
+                text = _split_reads(text)[0]
+        elif role == "user" and (count := len(_image_urls(message.get("content")))):
+            # An earlier image is never re-sent: its transcript, carried in
+            # the answer that follows it, takes its place.
+            following = items[i + 1]
+            reads = (_split_reads(REFERENCE_RE.sub("", _text(following.get("content"))))[1]
+                     if following.get("role") == "assistant" else [])
+            dropped = dropped or not set(range(1, count + 1)) <= {n for n, _ in reads}
+            carried = [IMAGE_CARRIED.format(index=n, text=t) for n, t in reads]
+            text = "\n\n".join([text, *carried] if text else carried)
         if role in ("user", "assistant") and text:
             turns.append({"role": role, "content": text})
+    turns.append({"role": "user", "content": content})
     body: dict[str, Any] = {"messages": turns, "stream": True}
     for name in ("product", "version"):
         if value := _valve(user_valves, name):
             body[name] = value
-    return body
+    return body, dropped
 
 
-def depth_effort(model: object) -> str | None:
-    """The agent effort for the selected model id `<Function id>.<depth>`; None
-    (the agent default) for the default depth, an unknown depth, or an id
-    without one, such as the single-model id chats stored before #1255."""
+def build_request(messages: object, user_valves: object) -> dict[str, Any] | None:
+    """The agent ChatRequest body: user/assistant turns as plain text
+    (system prompts, file parts, tool turns and every other Open WebUI field
+    are dropped), `stream: true`, and product/version only when the user set
+    them. The last message is the question: None, so no agent call, unless
+    it is a user turn with text, or, with images on (RAG_CHAT_IMAGES=true),
+    usable images; its images are its only content parts. An earlier turn is
+    never asked in its place, and its images are replaced by their carried
+    transcripts. Limits are the agent's defaults; the Pipe applies its valves."""
+    built, _dropped = _build(messages, user_valves,
+                             images_on=os.environ.get(IMAGES_ENV) == "true",
+                             max_images=DEFAULT_MAX_IMAGES, max_image_bytes=DEFAULT_MAX_IMAGE_BYTES)
+    return built if isinstance(built, dict) else None
+
+
+def selected_depth(model: object) -> str | None:
+    """The agent `reasoning_depth` for the selected model id
+    `<Function id>.<depth>`; None (no field: the agent default) for an unknown
+    depth or an id without one, such as the single-model id chats stored
+    before #1255."""
     if not isinstance(model, str) or "." not in model:
         return None
-    return _DEPTH_EFFORTS.get(model.split(".", 1)[1])
+    depth = model.split(".", 1)[1]
+    return depth if depth in _DEPTH_IDS else None
+
+
+def _chars(content: str | list[dict[str, Any]]) -> int:
+    """Characters of one turn as the agent counts them: a content list is its
+    text parts joined by newlines, and an image-only turn is the agent's
+    fixed question."""
+    if isinstance(content, str):
+        return len(content)
+    texts = [p["text"] for p in content if p.get("type") == "text"]
+    if not texts:
+        return IMAGE_ONLY_QUESTION_CHARS
+    return sum(len(t) for t in texts) + len(texts) - 1
 
 
 def fit_request(request: dict[str, Any], max_chars: int) -> tuple[dict[str, Any] | None, bool]:
@@ -254,15 +439,17 @@ def fit_request(request: dict[str, Any], max_chars: int) -> tuple[dict[str, Any]
     the oldest turns first and then any leading assistant turn, so the history
     never starts with an answer to a dropped question. The last turn is always
     kept. Returns (request, trimmed); (None, False) when the last turn alone
-    does not fit, so there is no call to make."""
-    turns: list[dict[str, str]] = request["messages"]
+    does not fit, so there is no call to make. A content list (a last turn
+    with images) counts its text only, as the agent does; images have their
+    own limits."""
+    turns: list[dict[str, Any]] = request["messages"]
     budget = max_chars - sum(len(request.get(name, "")) for name in ("product", "version"))
-    if len(turns[-1]["content"]) > budget:
+    if _chars(turns[-1]["content"]) > budget:
         return None, False
-    total = sum(len(t["content"]) for t in turns)
+    total = sum(_chars(t["content"]) for t in turns)
     start = 0
     while start < len(turns) - 1 and (total > budget or turns[start]["role"] != "user"):
-        total -= len(turns[start]["content"])
+        total -= _chars(turns[start]["content"])
         start += 1
     if start == 0:
         return request, False
@@ -575,6 +762,16 @@ class Pipe:
             description="Request body cap in characters. Must equal the deployed agent's "
                         "chat_max_body_chars; older turns are dropped to fit it.",
         )
+        MAX_IMAGE_BYTES: int = Field(
+            default=DEFAULT_MAX_IMAGE_BYTES, ge=1024, le=20971520,
+            description="Per-image cap in decoded bytes (pasted images, RAG_CHAT_IMAGES). "
+                        "Must equal the deployed agent's chat_image_max_bytes.",
+        )
+        MAX_IMAGES: int = Field(
+            default=DEFAULT_MAX_IMAGES, ge=1, le=8,
+            description="Images per message (pasted images, RAG_CHAT_IMAGES). Must equal "
+                        "the deployed agent's chat_image_max_count.",
+        )
 
     class UserValves(BaseModel):
         product: str = Field(default="", description="Restrict answers to this product.")
@@ -603,21 +800,27 @@ class Pipe:
             # record a turn and carry the user's content).
             return TASK_REPLY
         user_valves = (__user__ or {}).get("valves")
-        request = build_request(body.get("messages"), user_valves)
-        if request is None:
-            return NO_TEXT_TURN
-        if effort := depth_effort(body.get("model")):
-            request["reasoning_effort"] = effort
+        images_on = os.environ.get(IMAGES_ENV) == "true"
+        built, earlier_dropped = _build(
+            body.get("messages"), user_valves, images_on=images_on,
+            max_images=self.valves.MAX_IMAGES, max_image_bytes=self.valves.MAX_IMAGE_BYTES)
+        request = built if isinstance(built, dict) else None
+        if request is None:  # a fixed text instead of a call
+            return built if isinstance(built, str) else NO_TEXT_TURN
+        if depth := selected_depth(body.get("model")):
+            request["reasoning_depth"] = depth
         request, trimmed = fit_request(request, self.valves.MAX_BODY_CHARS)
         if request is None:
             return TOO_LONG.format(limit=self.valves.MAX_BODY_CHARS)
-        answer = self._answer(request, __event_emitter__, trimmed)
+        answer = self._answer(request, __event_emitter__, trimmed,
+                              earlier_dropped=earlier_dropped, images_on=images_on)
         if body.get("stream") is True:
             return _chunks(answer)
         return "".join([text async for text in answer])
 
     async def _answer(self, request: dict[str, Any], emit: Emitter | None,
-                      trimmed: bool = False) -> AsyncIterator[str]:
+                      trimmed: bool = False, *, earlier_dropped: bool = False,
+                      images_on: bool = False) -> AsyncIterator[str]:
         async def event(payload: dict[str, Any]) -> None:
             if emit is None:
                 return
@@ -633,6 +836,8 @@ class Pipe:
         try:
             if trimmed:
                 await status(TRIMMED, False)
+            if earlier_dropped:
+                await status(EARLIER_IMAGE, False)
             await status(WORKING, False)
             final: dict[str, Any] = {}
             timeout = httpx.Timeout(self.valves.TIMEOUT_S, connect=10.0)
@@ -657,20 +862,25 @@ class Pipe:
                         yield text
             if text := shown.close():
                 yield text
-            # The validated list and the reference line replace any pending
-            # line ends: they bring their own.
+            # The validated list, the image transcripts and the reference line
+            # replace any pending line ends: they bring their own. The
+            # reference line stays last (the rating Action reads it there).
             request_id = final.get(_REQUEST_ID_KEY)
             reference = (REFERENCE_LINE.format(request_id=request_id)
                          if os.environ.get(REFERENCE_ENV) == "true" and isinstance(request_id, str)
                          else "")
-            pending = "" if reference else shown.newlines()
-            if text := (agent_list[0] if agent_list else pending) + reference:
+            reads = _image_reads_block(final) if images_on else ""
+            pending = "" if reference or reads else shown.newlines()
+            if text := (agent_list[0] if agent_list else pending) + reads + reference:
                 yield text
             for source in _source_events(final):
                 await event(source)
             omitted = final.get("message_omitted_chars")
             shortened = type(omitted) is int and omitted > 0
+            read_failed = images_on and final.get("image_read_failed") is True
             await status(_status_text(final) + (f" · {SHORTENED}" if shortened else "")
+                         + (f" · {IMAGE_READ_FAILED}" if read_failed else "")
+                         + (f" · {EARLIER_IMAGE}" if earlier_dropped else "")
                          + (f" · {TRIMMED}" if trimmed else ""), True)
         except _Failure as failure:
             text = shown.close() + shown.newlines()

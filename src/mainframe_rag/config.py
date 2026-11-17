@@ -60,6 +60,12 @@ def qdrant_pool_limits(url: str) -> httpx2.Limits:
 # verbatim; LLM_REASONING_EFFORTS declares the subset the served template accepts.
 ReasoningEffort = Literal["low", "medium", "high", "xhigh"]
 REASONING_EFFORTS: tuple[ReasoningEffort, ...] = get_args(ReasoningEffort)
+# Image types a chat image may be (#1287), as CHAT_IMAGE_TYPES names them.
+CHAT_IMAGE_TYPES: tuple[str, ...] = ("png", "jpeg", "webp", "gif")
+# Symbolic answer depth (#1289): resolved against the deployment's own
+# LLM_REASONING_EFFORTS by Settings.reasoning_depth_effort, so a client (the
+# Open WebUI docs Pipe) never hard-codes an effort the site may not offer.
+ReasoningDepth = Literal["quick", "standard", "thorough"]
 # Prompt-count sources (#1266), see Settings.llm_token_count_source.
 TokenCountSource = Literal["tokenize", "completion_usage", "auto", "estimate"]
 TOKEN_COUNT_SOURCES: tuple[TokenCountSource, ...] = get_args(TokenCountSource)
@@ -431,6 +437,36 @@ class Settings(BaseSettings):
     chat_max_turns: int = Field(default=10, ge=1, le=50)
     # Characters kept of each prior chat message (#1268; 4000 since #1274, was 1000).
     chat_max_prior_turn_chars: int = Field(default=4000, ge=200, le=5000)
+    # Pasted images in chat (issue #1287; off by maintainer decision
+    # 2026-11-17 until the site's `probe_gateway.py --probe-image` passes).
+    # Off: a content-part list is today's 422 invalid_request and every
+    # request is byte-identical. On: the latest user message of /v1/chat may
+    # carry data-URL images, each read once by the reasoning model to feed
+    # retrieval and attached to the answer call (docs/agent.md#chat-images).
+    chat_images_enabled: bool = False
+    # Per-image decoded bytes, images per request and pixels per image
+    # (decision 7: 5 MiB, 3, the 2048 px browser downscale squared).
+    chat_image_max_bytes: int = Field(default=5242880, ge=1024, le=20971520)
+    chat_image_max_count: int = Field(default=3, ge=1, le=8)
+    chat_image_max_pixels: int = Field(default=4194304, ge=4096, le=33554432)
+    # Accepted image types, comma-separated, from png, jpeg, webp and gif. GIF
+    # is parsed but not accepted by default (decision 7: screenshots are PNG
+    # or JPEG, and only a GIF's first frame is meaningful).
+    chat_image_types: str = Field(default="png,jpeg,webp")
+    # The transcription call (decision 8): its completion cap, the characters
+    # kept of its reply, and its own timeout (also bounded by half of what the
+    # request deadline has left). One attempt, never retried. Its effort is the
+    # quick depth's, the lowest LLM_REASONING_EFFORTS offers (maintainer
+    # decision 2026-11-17), so turning images on never conflicts with the list.
+    chat_image_read_max_tokens: int = Field(default=4096, ge=256, le=32768)
+    chat_image_read_max_chars: int = Field(default=4000, ge=500, le=20000)
+    chat_image_read_timeout_s: float = Field(default=60.0, gt=0, le=600)
+    # Tokens priced per image in the answer prompt (decision 14): counts are
+    # text-only, so each image adds this reserve. The default is an estimate
+    # (2048x2048 px at 28x28 px per token is about 5350 tokens, rounded up);
+    # a site sets the image_tokens its `--probe-image` measured through the
+    # operator key LLM_IMAGE_TOKEN_RESERVE (256..65536; unset renders nothing).
+    llm_image_token_reserve: int = Field(default=6144, ge=256, le=65536)
     ui_enabled: bool = False
 
     # Console answer feedback (issue #780). Off by default: no record, no
@@ -612,6 +648,20 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _image_types_are_known(self) -> Settings:
+        self.chat_image_type_set()
+        return self
+
+    def chat_image_type_set(self) -> frozenset[str]:
+        """The accepted image types (#1287); refuses an unknown, duplicate or
+        empty list instead of dropping entries."""
+        parts = [part.strip() for part in self.chat_image_types.split(",")]
+        if (not parts or any(p not in CHAT_IMAGE_TYPES for p in parts)
+                or len(set(parts)) != len(parts)):
+            raise ValueError("CHAT_IMAGE_TYPES must list distinct types from png, jpeg, webp, gif")
+        return frozenset(parts)
+
+    @model_validator(mode="after")
     def _model_request_args_are_valid(self) -> Settings:
         """Fail closed at startup (#1193): a refused extra body never reaches
         a request. Messages name fields, not supplied values."""
@@ -633,6 +683,16 @@ class Settings(BaseSettings):
         if not parts or any(part not in REASONING_EFFORTS for part in parts) or len(set(parts)) != len(parts):
             raise ValueError("LLM_REASONING_EFFORTS must list distinct low/medium/high/xhigh values")
         return tuple(effort for effort in REASONING_EFFORTS if effort in parts)
+
+    def reasoning_depth_effort(self, depth: ReasoningDepth) -> ReasoningEffort | None:
+        """The effort a symbolic depth resolves to (#1289): quick the lowest
+        offered effort, thorough the highest, standard None, so the answer
+        core keeps the simple/complex default exactly as with no field. The
+        image transcription call (#1287) also goes at the quick effort."""
+        if depth == "standard":
+            return None
+        efforts = self.reasoning_efforts()
+        return efforts[0] if depth == "quick" else efforts[-1]
 
     @field_validator("ingest_alias_publish")
     @classmethod

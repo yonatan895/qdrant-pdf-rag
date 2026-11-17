@@ -599,7 +599,9 @@ host.
   winner is confirmed by one full pass. The holdout is never used for tuning
   (§7).
 
-Flags (defaults are unchanged without them):
+Flags (a run without them behaves as before; judged rows always carry the
+text-free packed-evidence and final-hit metadata described under
+`--keep-evidence-text`):
 
 | Flag | Effect |
 |---|---|
@@ -607,9 +609,12 @@ Flags (defaults are unchanged without them):
 | `--subset N` | The default sampler's round-robin (sorted classes, sorted ids, one row per class per round), so every cutoff of its order keeps every class. Refused (exit 2, no request) when `N` is below the class count, and refused before any read when the resolved dataset contains the frozen holdout: a sweep needs an explicit non-holdout `--golden`. Exclusive with `--all`. `params.sample` records the mode, row count, class count, a SHA-256 over the ordered ids, and the resolved datasets' basenames + SHA-256, so two arms can prove they ran the same rows over the same splits |
 | `--repeats R` | 1–10 whole passes over the sample (pass 1 over every row, then pass 2, ...), so drift within a session lands on every row equally. Rows carry `repeat`; `metrics` pools all passes; `metrics.repeats` gives, per metric, the per-pass values with min, max, mean and range, plus `verdict_flips` (entry ids judged differently across passes). More than one pass is a sweep, so the same non-holdout `--golden` rule applies |
 | `--endpoint chat` | Issue #1191. Each question goes as a single-turn streaming `POST /v1/chat` (`messages: [{role: user, content}]`, `stream: true`, `temperature`), the route the Open WebUI Pipe calls. Needs `--stream`. `params.endpoint` records `answer` (default) or `chat`; `params.transport` still means `json`/`sse`. Differences are listed under [chat rows](#chat-rows) |
+| `--image-arm {text,image,image+ask}` | Issue #1287. With `--endpoint chat --stream` only: the question typed, as a synthetic 80-column terminal image alone, or that image plus a fixed typed question. Rows add the image size and count, the read count and flag, and a transcript error-rate bucket. Refuses the frozen holdout and `--sessions`. See [pasted-image arms](#image-arms) |
 | `--coverage` | Issue #1191. Before the rows, pages `GET /v1/sources` (limit 200) once and records its `build_id`; after the rows, reads the first page again as `build_id_end`. Each row gets `coverage` (`all`, `some` or `none` of its `expected_doc_ids` served; `not_applicable` when it names none; `unknown`) and `expected_served`; `report.coverage` holds the counts per state over distinct rows, `pages` and `sources_n`. The match is on the exact doc id, edition included. A 503 (a build published without a catalog), a 404, a transport error, a malformed page, a build change between pages or 1,000 pages give `status: unknown` with a fixed `reason`. Coverage never changes a verdict or the exit code |
 | `--hit-limit N` | Issue #1191. The deployed `ANSWER_HIT_LIMIT` as the operator declares it (the agent does not report it; 1–32, the agent's bounds): the sibling `/v1/search` pool behind `gold_retrieved`, `hit_doc_ids` and citation precision/recall asks for `N` hits, so those fields see as deep as the answer did. Default the agent default (16 since #1274, 8 before); recorded as `params.hit_limit` only when passed. Never pass a value that differs from the deployed one |
 | `--export PATH` | Issue #1191. A JSON file built by whitelist for leaving an air-gapped site: `params` (without `agent_url`), `metrics`, `healthz`, `representation`, `coverage` and one row per result with id, repeat, class, behaviour, verdict, failure and warn labels, verification states, finish reason, path, citation-WHY mode, citation and inferred-index counts, token counts, timings, `gold_retrieved`, expected/hit/cited doc ids, citation precision/recall, coverage, and `supplied_n` / `supplied_doc_n` (#1191: how many excerpts the response's `supplied_evidence` lists and from how many distinct manuals, on both endpoints; 0 on the zero-hits path, None when the field is missing or an entry has no doc id). Failure labels come from a closed set (anything else is `other`; an error code outside the agent's stable codes is `?`), finish reasons outside the OpenAI set are `other`, and a `build_id` of an unexpected shape is null. No question, answer, citation, excerpt, script or failure text. `tests/test_eval_site.py` seeds canaries into every text field and checks the export bytes |
+| `--keep-evidence-text` | Issue #1191 (graded eval). Every judged row, on every transport and without this flag, keeps what the agent packed and retrieved for that answer as text-free metadata: `supplied_evidence_meta` (per packed excerpt: prompt index, doc id, printed page label, 1-based physical `pdf_page_start`/`pdf_page_end`, character range, trim and clip flags, `text_sha256`, and `cited`: whether the answer cited that excerpt. A validated citation names a line, so every excerpt carrying it is cited (`duplicate_citation` marks a shared line); inferred citations count by prompt index (`inferred_indices`). `cited` is null for an excerpt without a citation line, and for an inferred citation's line on an excerpt whose index the agent did not record: it records an index only when its line is not listed yet), `evidence_omitted`, and `final_hits` (per final retrieval hit: chunk id, doc id, chunk type, page label, physical pages in the same 1-based convention, score, rerank score). The buffered `/v1/answer` body carries no hits, so `final_hits` is null there; a field the agent did not send, or a malformed entry, is null (unknown), never an empty list. Headings, titles, citation strings and hit text are never copied. This flag adds `supplied_evidence_text` (prompt index and excerpt text) to the JSON report for a later grounding check; `params.keep_evidence_text` records it. None of these fields enter `--export` |
+| `--sessions PATH` | Issue #1191 (graded follow-up rows). Replaces `--golden`: a private dev JSONL, one session per line with `id`, `query_class`, `expected_behavior`, optional `expected_doc_ids` and judge fields, and `turns` that alternate user and authored assistant text, first and last a user turn. Each last turn is sent over `/v1/chat` with the history as the Open WebUI Pipe would send it (`build_request`, then `fit_request`, which drops the oldest turns past its body cap; `session_turns` counts the authored turns), so it is graded on a fixed history; it is judged like a golden row and gains the `evidence_*` fields of a two-turn follow-up plus `session_turns` and `prior_answer_chars`. No sibling `/v1/search`, so `--hit-limit` is only recorded. A history the Pipe would not send is an error row (`session request not built`), with no request. The file is refused by name (`holdout.jsonl`, `release_set.jsonl`) before any read and by release-set content after it; a malformed or unreadable session file exits 2 before any request, with a fixed message (a line number where one applies) and no text. Progress lines print the id only. `params.sessions` records basename, count and sha256; `params.pipe_sha256` the Pipe file. Needs `--endpoint chat --stream`; refused with `--golden`, `--all`, `--subset`, `--turns 2` or `--image-arm`. The export adds `session_turns`, `prior_answer_chars` and the `evidence_*` fields |
 
 Without `--stream`, the JSON request is unchanged: the row still records the
 model-leg `llm_ms` (and `ttft_ms` when the agent runs with `LLM_STREAM`) from
@@ -655,7 +660,7 @@ required before it gates a change.
 **Chat rows (`--endpoint chat`).** The chat stream ([agent contract](agent.md),
 §3) ends with a chunk whose `choices[0]` carries `finish_reason`, `citations`,
 `citations_inferred`, `inferred_indices`, `verification_state`, the script
-flag and `supplied_evidence`, then `[DONE]`. The row is judged by the same
+flag, `supplied_evidence`, `evidence_omitted` and `hits`, then `[DONE]`. The row is judged by the same
 `judge()` on those fields. Differences from `/v1/answer` rows:
 
 - **Body.** The stream has no answer field: its deltas are the model's raw
@@ -676,6 +681,93 @@ flag and `supplied_evidence`, then `[DONE]`. The row is judged by the same
 - **Not measured.** The eval sends `temperature`; the Pipe sends none, so the
   agent's configured default applies to users. The Pipe's own rendering
   (hiding the model's citation section, banners) is not scored.
+
+<a id="image-arms"></a>
+**Pasted-image arms (`--image-arm`, issue #1287).** The arms measure whether
+a question pasted as a screenshot is answered as well as the same question
+typed. Each run asks one arm; run each arm over the same rows (the same
+`--golden` and sampling flags give the same `params.sample`):
+
+- `text`: the question typed. The body is the same as `--endpoint chat`
+  without the flag.
+- `image`: an image-only user turn. The content is one
+  `image_url` part, `data:image/png;base64,...`, so the agent asks its fixed
+  image-only question.
+- `image+ask`: a `text` part with the fixed question "What does this mean and
+  what do I do?" (draft wording, for maintainer review), then the same image.
+
+The image is drawn at run time from the row's question by
+`mainframe_rag/synthetic_png.py` (stdlib only, an original 5x7 font, no
+Pillow). It is the question wrapped and padded to 80 columns, green on
+black. Images are never written to disk or committed. Like
+`--subset`, the flag refuses a resolved set that contains the frozen holdout
+(exit 2, before any read or request). The deployed agent needs
+`CHAT_IMAGES_ENABLED=true`; with it off, every image row is an
+`HTTP 422 (invalid_request)` error row. An image over a configured limit is
+`HTTP 422 (unsupported_image)`. The flag needs `--endpoint chat --stream` and
+is refused with `--turns 2`.
+
+Rows keep every existing verdict and verification state, and add:
+
+- `image_arm`;
+- `image_n` (images sent: 0 or 1) and `image_bytes` (PNG size);
+- `image_reads_n`: entries in the finish chunk's `image_reads`. It is null when
+  the stream ended without a finish chunk or the field is missing or
+  malformed;
+- `image_read_failed`: the finish chunk's flag;
+- `image_cer`: the transcript character error rate.
+
+**How the error rate is computed.** The reference is the text actually drawn
+(`rendered_text`: uppercase, unsupported characters as `?`). The hypothesis is
+the SCREEN TEXT part of `image_reads[0].text`: the agent's trailing
+`Description:` paragraph is cut off. Both sides are uppercased and every
+whitespace run becomes one space, because wrapping belongs to the panel, not
+the reader. The rate is the Levenshtein distance divided by the reference
+length. The local report keeps that number and drops the transcript.
+
+`metrics.image` counts rows per error-rate bucket, rows without a read
+(`reads_missing`) and rows with `read_failed`. `params` adds `image_arm`,
+`image_columns` and `image_ask_sha256`.
+
+**What leaves the site.** The export adds the same row keys, except that
+`image_cer` becomes `image_cer_bucket`, a fixed label: `0`, `<0.05`, `<0.2`,
+`<0.5`, `>=0.5` or `none`. The rest are numbers and fixed labels. Images, base64, transcripts,
+drawn text and questions never leave. `tests/test_eval_site.py` puts a
+canary in the question and in the transcript, captures the base64 that was
+sent, and checks that none of them is in the export bytes.
+
+The pool behind `gold_retrieved`, `hit_doc_ids` and citation precision and
+recall is the typed question's `/v1/search` pool in every arm. It is not what
+the agent retrieved from the transcript.
+
+**Not measured:**
+
+- the agent's image-read time and image token count (the finish chunk does
+  not carry them);
+- the message-line image family (§6 of the design);
+- diagrams and photos, which are a qualitative check at the site.
+
+**Where results come from.** CI tests the plumbing against a fake agent's
+SSE. Semantic results come only from a site run, because the local stand-in
+model is not known to accept images.
+
+```bash
+for arm in text image image+ask; do
+  python -m mainframe_rag.eval.answers --agent-url "$AGENT_URL" \
+    --golden evals/golden.jsonl --all --endpoint chat --stream --image-arm "$arm" \
+    --out "img-$arm.json" --export "img-$arm.export.json"
+done
+```
+
+**Rollout gate (decision 15, recommended).** A site may turn images on only
+when all of the following hold:
+
+- `probe_gateway.py --probe-image` passes at that site;
+- on `message_id` rows (`metrics.by_class.message_id`, `n` and `pass`), the
+  `image+ask` pass rate is within a margin the maintainer sets of the `text`
+  arm's;
+- the error-rate buckets for both image arms are reported beside that
+  comparison.
 
 <a id="at-a-site"></a>
 ### At a site (before/after an upgrade)

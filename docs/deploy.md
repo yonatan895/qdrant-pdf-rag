@@ -93,7 +93,7 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - Operator booleans `UI_ENABLED`, `CONTEXTUAL_EMBED_ENABLED`,
   `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `INGEST_AUTHORIZE_FROM_CATALOG`,
   `CHAT_CONDENSE_ENABLED`, `CHAT_FOLLOWUP_ANCHOR_ENABLED`, `LLM_STREAM`
-  `FEEDBACK_ENABLED`, `OPENWEBUI_ENABLED`, `ANSWER_CODING_MODE_ENABLED` (unset keeps the pod's **true** default) and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
+  `FEEDBACK_ENABLED`, `OPENWEBUI_ENABLED`, `ANSWER_CODING_MODE_ENABLED` (unset keeps the pod's **true** default), `CHAT_IMAGES_ENABLED` and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
   accept only `true/1/yes` or `false/0/no` (any case; unset keeps the
   default). `INGEST_ALIAS_PUBLISH` may only be unset or true: in-place ingest
   was retired (#360) and an explicit false fails closed.
@@ -2026,15 +2026,21 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
 <a id="owui-answer-depth"></a>
 **Answer depth (#1255).** The docs Pipe is an Open WebUI manifold: one Function whose entries
 v0.12.3 lists as the models `mainframe_rag_docs.standard` "Rosetta", `mainframe_rag_docs.quick`
-"Rosetta – quick" (`low`) and `mainframe_rag_docs.thorough` "Rosetta – thorough" (`xhigh`; maintainer
-decision 2026-11-16). Each sends the agent the effort its entry maps to
-([Pipe contract](agent.md#openwebui-docs-pipe)); the default entry sends none, so it answers
-exactly as the single model did. `DEFAULT_MODELS` (chart, fixed) selects the default entry for new
+"Rosetta – quick" and `mainframe_rag_docs.thorough` "Rosetta – thorough" (maintainer decision
+2026-11-16). Each sends the agent its symbolic depth (#1289), and the agent resolves it from its
+own `LLM_REASONING_EFFORTS` ([Pipe contract](agent.md#openwebui-docs-pipe)): quick is the lowest
+offered effort, thorough the highest (`high` with `low,medium,high`, `xhigh` once the platform
+offers it, with no repackage), and the default entry the configured simple/complex effort, so it
+answers exactly as the single model did. The Pipe and the agent ship together: an agent older
+than #1289 refuses a depth as `invalid_request` (the Pipe's fixed text), so upgrade both in one
+deploy. `DEFAULT_MODELS` (chart, fixed) selects the default entry for new
 chats. Upgrading from the single model:
 
 - The model id `mainframe_rag_docs` is gone; its grant row stays in the database unused. Open
   WebUI shows a model only with its own read grant, so ordinary users see **no** Rosetta model
-  until an admin grants each entry (step 5). Grant all three entries right after the deploy (maintainer decision 2026-11-16).
+  until an admin grants each entry (step 5). Grant all three entries right after the deploy (maintainer decision 2026-11-16),
+  whatever `LLM_REASONING_EFFORTS` offers, a site without `xhigh` included: since #1289 every
+  entry answers at an offered effort.
 - A chat started before the upgrade still names `mainframe_rag_docs`. Once the user is granted
   the entries (previous item), v0.12.3 drops on opening it a model id it does not list and
   selects `DEFAULT_MODELS` (`Chat.svelte` `loadChat`; source reading, not yet observed live), so
@@ -2045,11 +2051,9 @@ chats. Upgrading from the single model:
   not found". The dev acceptance check `legacy-chat-answers` covers the server side
   ([checks](openwebui-dev.md)); the browser's switch is part of the pilot browser trace.
 - Every entry shares the Pipe's `TIMEOUT_S` and the agent's request deadline (270 s, sized at
-  medium effort). A thorough (`xhigh`) answer may end as the fixed deadline text. Thorough is
+  medium effort). A thorough answer (the highest offered effort) may end as the fixed deadline text. Thorough is
   granted and visible from the upgrade on; the site eval measures how often it hits the deadline
-  afterwards (maintainer decision 2026-11-16). A site whose
-  `LLM_REASONING_EFFORTS` lacks an entry's effort shows a fixed "does not offer this answer depth"
-  text for it.
+  afterwards (maintainer decision 2026-11-16).
 
 **Retention (ADR-0007 S2).** The window is `OPENWEBUI_RETENTION_DAYS` (`openwebui.retentionDays`),
 default **30 days** (maintainer decision 2026-10-24). An explicit null fails the render.
@@ -2097,6 +2101,58 @@ all off by default; there is no `airgap.env` key for them yet.
   continued and stays until the purge. To enforce for one group only, leave this off and set the group's permission in the
   Open WebUI admin UI; v0.12.3 combines group permissions most-permissive, so any one group that
   enforces it enforces it for its members.
+
+<a id="owui-chat-images"></a>
+**Pasted images (#1287, ADR-0007 amendment 2026-11-17).** Off by default. A screenshot pasted
+in a **temporary chat** travels inline as a data URL. The reasoning model reads it once to feed
+retrieval and sees it again with the answer call ([agent contract](agent.md#chat-images)).
+Nothing is uploaded or stored, and E1 adds no route. A paste in a saved chat still gets Open WebUI's "no permission to upload" toast.
+- **Off (the default).** The default render's one #1287 change is a single Open WebUI variable,
+  `DEFAULT_MODEL_METADATA={"capabilities":{"vision":false}}`. Every model, the Rosetta entries
+  included, is declared not image-capable, so the browser refuses a paste up front. Without it,
+  the paste was silently dropped. The Pipe's fixed "images are not read" notice is the
+  backstop. The proxy config is unchanged byte for byte.
+- **Step 0, from the agent pod (required before turning it on):**
+
+  ```sh
+  oc -n "$NAMESPACE" exec deploy/rag-agent -c agent -- \
+    python3 /app/scripts/probe_gateway.py --probe-image
+  ```
+
+  It draws a per-run 6-digit nonce into a synthetic 400x130 PNG (800x260 for the 2x call). It
+  makes up to five requests, each bounded by `CHAT_IMAGE_READ_TIMEOUT_S` (`--timeout`
+  overrides). It prints one JSON row of numbers and flags, then `PASS` or
+  `FAIL not-configured|unreachable|refused <status>|no-reply|accepted-but-not-read`. It exits 0
+  only when the model returned the drawn digits. `accepted-but-not-read` means the gateway
+  answered without the image. `no-reply` with `finish_reason` `length` means raise
+  `--max-tokens` (default 1024). The `/tokenize` columns never change the exit code.
+  `image_tokens` is what one image costs. The agent prices each image at
+  `LLM_IMAGE_TOKEN_RESERVE` (default 6144, an estimate; 256..65536). If `image_tokens` exceeds
+  it, set `LLM_IMAGE_TOKEN_RESERVE` in `airgap.env` to the measured figure, rounded up
+  (`models.reasoning.imageTokenReserve`; unset renders no variable), before turning images on.
+- **Turning it on.** Add one `airgap.env` line, `CHAT_IMAGES_ENABLED=true`
+  (`models.reasoning.chatImagesEnabled`), and re-run `airgap:deploy`. It sets the agent's
+  `CHAT_IMAGES_ENABLED`. In Open WebUI it sets the Pipe switch `RAG_CHAT_IMAGES`, the browser
+  caps and one dismissible banner (`WEBUI_BANNERS`; the wording is a draft for the maintainer to
+  approve). Turning it off reverses each of these.
+- **Caps chain** (each hop admits what the next accepts):
+
+  | Hop | Per image | Per message | Pixels |
+  |---|---|---|---|
+  | Browser (`RAG_FILE_MAX_SIZE`, `RAG_FILE_MAX_COUNT`, `FILE_IMAGE_COMPRESSION_*`), checked before the paste | 5 MB (MiB) | 3 | downscaled to 2048 px, aspect kept |
+  | Agent (`CHAT_IMAGE_MAX_BYTES`, `_COUNT`, `_PIXELS`), latest user message only | 5242880 bytes | 3 | 4194304 |
+
+  The proxy adds an exact `location = /api/chat/completions` with `client_max_body_size 55m`,
+  only while images are on. Every other path keeps 1m. The browser resends every earlier image
+  of a temporary chat each turn, so 55m holds the 1 MiB text cap plus 8 images base64-encoded
+  (53.3 MiB). Past it the user sees Open WebUI's generic error. The location repeats the
+  allow-list check and every directive of `location /`. nginx spools such a body to the proxy's
+  `/tmp` emptyDir (no size limit, node ephemeral storage) until the streamed answer ends, about
+  55 MiB per in-flight image turn at most. The maintainer accepted this buffering on 2026-11-17
+  (no `proxy_request_buffering off`).
+- **Admin edits.** With `ENABLE_PERSISTENT_CONFIG=false` these settings are not stored. The
+  environment applies at every start, and an admin-UI edit lasts only until the next restart
+  (ADR-0007 C1).
 
 **Patch policy and advisory switch-off (ADR-0007 P1).** The maintainer owns patching. Agents
 prepare a monthly import of the latest upstream release as a dedicated pin-bump PR, carrying the
@@ -2448,7 +2504,9 @@ unset keeps the pod's on default, and `ANSWER_CODING_MODE_ENABLED=false` in
 `airgap.env` is the one-line per-site revert of the coding prompts and the
 coding route to the complex path (the `coding-off` arm). It does not revert the
 #1276 code-fence tags (`c`, `metalc`, `asm`, `hlasm`, `assembler`, `clist` kept
-as `script`), which apply to every answer. Enable condensation deliberately when qualifying pronoun-only
+as `script`), which apply to every answer. `CHAT_IMAGES_ENABLED` (#1287) maps to
+`models.reasoning.chatImagesEnabled` and renders only when set; unset keeps the pod's off
+default and the Open WebUI render's images off ([pasted images](#owui-chat-images)). Enable condensation deliberately when qualifying pronoun-only
 console follow-ups; require a grounded answer after the extra reasoning call.
 The local gateway's authenticated `/tokenize` passthrough enforces the per-leg
 key's model allowlist. Use `probe_gateway.py --require-tokenizer --stream
