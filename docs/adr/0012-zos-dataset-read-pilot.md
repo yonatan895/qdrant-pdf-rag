@@ -53,13 +53,16 @@
    allowlisted dataset with their own ID. So the pilot returns nothing a caller
    could not read directly, which is ADR-0011 D1's rule. Guards:
    - (a) the premise is re-checked, and recorded at the site, whenever the
-     sign-in groups or the allowlist change;
+     sign-in groups or the allowlist change, or a person leaves the
+     mainframe team (that person is also demoted or deleted in Open WebUI,
+     see G2);
    - (b) mechanical: render and deploy refuse enabling reads unless every
-     `OPENWEBUI_OIDC_ALLOWED_ROLES` and `OPENWEBUI_OIDC_ADMIN_ROLES` value is
-     in an approved-roles setting for dataset reads (named by #1294). Admin
-     roles are included because an admin role alone signs a user in.
-   - Other callers of the agent's chat and answer routes (the console Route,
-     pods allowed by the agent NetworkPolicy) are open point (6).
+     `OPENWEBUI_OIDC_ALLOWED_ROLES` value is in an approved-roles setting for
+     dataset reads (named by #1294). *(Extension awaiting the maintainer's
+     confirmation: the same check covers `OPENWEBUI_OIDC_ADMIN_ROLES`,
+     because an admin role alone signs a user in.)*
+   - Other readers the role guard does not cover (the console Route, pods
+     allowed by the agent NetworkPolicy, chat share links) are open point (6).
 4. **D4, read-only is enforced by z/OS, not by the client.** The site owns,
    and records before the pilot: the ID has READ access to the allowlisted
    datasets and nothing wider; it cannot submit jobs or write over
@@ -102,7 +105,8 @@
    - ADR-0003's `acquired_at` and outcome vocabulary apply; every outcome
      other than `complete` is stated in the answer. No caching across
      requests; dry-run plans without calling.
-   - Where content may live: only the user's Open WebUI chat history, as user
+   - Where content may live: in transit, in the prompt to the designated
+     reasoning model; at rest, only the user's Open WebUI chat history, as user
      session state under ADR-0007 S1 to S4 (30-day purge). Never Qdrant, logs,
      telemetry, traces or the feedback store. How the feedback path keeps it
      out is open point (7).
@@ -133,7 +137,7 @@
 | Guarantee | State that establishes it | Who can change that state | Valid for | What forbids the counterexample |
 |---|---|---|---|---|
 | G1. Only allowlisted exact names are read | The operator allowlist and the name validation in the bridge, before any FTP command | The operator, through a deployed release | Until the list changes | **Required of #1294:** bypass tests (case, quotes, member, GDG, wildcard) and a fake FTP showing no command was sent |
-| G2. No sign-in holder reads data they could not read themselves | The premise (D3), the approved-roles guard and the site's RACF scope of the ID (D4) | The identity team (who holds a role); the operator (role lists); the site (the ID's access, team membership) | Until a role list, group or the allowlist changes | **Required:** render refusal tests; the premise record at the site. Group membership in the IdP is not checked by this repository |
+| G2. No sign-in holder reads data they could not read themselves | The premise (D3), the approved-roles guard and the site's RACF scope of the ID (D4) | The identity team (who holds a role); the operator (role lists); the site (the ID's access, team membership) | Until a role list, group or the allowlist changes. A person removed from the group keeps an open session up to its expiry (8 hours) and their API keys keep the old role until the account is demoted or deleted in Open WebUI ("Revocation window" in [deploy](../deploy.md#docs-front-end)) | **Required:** render refusal tests; the premise record at the site. Group membership in the IdP is not checked by this repository |
 | G3. Nothing is written or submitted | Site controls on the ID (D4); the bridge's pinned verbs | The site security owner; bridge code, through a release | Standing | Pinned verb test (`tests/test_mcp_ftp_bridge.py`); the site's record. The verb pin alone is not the control |
 | G4. Content stays out of logs, telemetry, Qdrant and feedback | D6; the bridge and agent log ids, counts and codes only | Product code, through a release | Standing | **Required of #1294:** tests that logs and the answer record of an observation-bearing turn carry no content, per open point (7) |
 
@@ -145,12 +149,13 @@
 | ADR-0003 decision 3 | Per-caller target authorization by the agent (the `denied` check), one shared SAF credential | For `dataset_read` in the pilot: the allowlist (D2) plus the premise (D3) replace per-caller authorization; off-list targets are `denied` with no call |
 | ADR-0003 decision 6 | `unavailable` covers `timeout`, `jes_unavailable`, `upstream_error`, `not_configured` | Adds a logon-failure code (D9) |
 | ADR-0003 decision 8 | Plain FTP a recorded risk; FTPS where AT-TLS exists | D5: plain FTP is the expected pilot transport with written owner acceptance; FTPS must verify the server; the mode is pinned, no fallback |
+| ADR-0003 security boundary, "the client allowlist equals the bridge registry" | Client allowlist and bridge registry are the same four | The bridge registers a configured subset (D7); the client allowlist and the closed four stay as pinned; a call to an unregistered tool fails closed |
 | ADR-0003 "Required of #91" | Includes the per-caller `denied` check | For the pilot, replaced by D2 and D3; screening, delimiting, distinct citation and fixed errors stay required (D6), built under #1294 |
 | ADR-0003 reactivation gate | One implementation (#91) wires `job_status` | For `dataset_read`, D8 states the investigation and approvals; #1294 builds it |
 | ADR-0011 policy matrix, z/OS, user class | ADR-0003; shared credential does not qualify | `dataset_read` through E3, pilot only. Agent class: still none |
 | ADR-0011 shared credentials, z/OS row | Does not qualify | Named exception E3 (table above), pilot only. Per-user access stays the target (follow-up 1) |
 | ADR-0005 decision scope (as amended by ADR-0007 and ADR-0010) | Chat history may hold question, answer, excerpt and Team-model tool output | It may also hold dataset observations from Docs-model chats, under the same rules. The feedback store never holds them (D6, open point (7)) |
-| ADR-0007 R3, the agent anonymous to users | Safe because every user may read every manual | Unchanged; for dataset reads it is safe only while E3's premise holds |
+| ADR-0007 R3, the agent anonymous to users | Safe because every user may read every manual | Unchanged in text; for dataset reads it is safe only while E3's premise holds. Open point (1)'s recommendation would change it (a pseudonymous audit field) |
 | ADR-0010 TD1, the Docs model stays tool-free | | Unchanged: reads are planned by the agent, not offered as a tool |
 | ADR-0003 decisions 1, 4, 5, 7, 9 and the pinned verb set | | Unchanged |
 
@@ -166,8 +171,11 @@
    dataset name, outcome and bytes. It never authorizes anything: any caller
    that reaches the agent's port could forge it, and the NetworkPolicy limits
    that to the namespace. It leaves "the Pipe declares no `__oauth_token__`"
-   intact. *Alternative:* forward the verified user token, stronger but an
-   ADR-0010 amendment.
+   intact. Adopting it amends ADR-0003's audit-record clause (today: request
+   id, route, tool names, byte counts and a fixed code only), ADR-0007's Pipe
+   parameter rule (a recorded decision for any new `__user__` use) and R3
+   (the agent no longer anonymous, though pseudonymous). *Alternative:*
+   forward the verified user token, stronger but an ADR-0010 amendment.
 2. **Bridge caller authentication.** *Recommendation:* a bearer secret, as
    the feedback service has (ADR-0005), in addition to an ingress
    NetworkPolicy admitting agent pods only, because the bridge holds a
@@ -180,12 +188,18 @@
    registered in the pilot (D7); Splunk covers jobs.
 5. **Transport mode rule** (D5): pinned mode, no fallback, probe without
    logon. *Recommendation:* confirm as written.
-6. **Callers other than Open WebUI users.** The console Route (when
+6. **Readers other than signed-in team members.** The console Route (when
    `AGENT_ROUTE=true`) and pods admitted by the agent NetworkPolicy also
-   reach the chat and answer routes, and the guard in D3 does not cover them.
+   reach the chat and answer routes. An Open WebUI admin can also grant a
+   no-auth "anyone" read on a chat share link (ADR-0007 R3 residual), which
+   would expose a chat holding an observation to anyone who reaches the
+   Route. The role guard covers none of these.
    *Recommendation:* render and deploy refuse enabling reads with
    `AGENT_ROUTE=true`, with `AGENT_NETWORK_POLICY=false`, or with extra
-   allowed namespaces, until each such caller group is added to the premise.
+   allowed namespaces, until each such caller group is added to the premise;
+   admins are told in the pilot runbook not to share observation-bearing chats,
+   and E3's premise names admins as bound by it (bounded by the admin role
+   limit, ADR-0007 S3).
 7. **Feedback and export of observation-bearing turns.** With
    `FEEDBACK_ENABLED`, each finalized answer sends an answer record with the
    question and answer text (ADR-0005), and the rated-case export (ADR-0011)
