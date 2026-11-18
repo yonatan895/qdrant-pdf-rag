@@ -19,6 +19,9 @@
   *(Amendment, [ADR-0010](0010-team-tools-on-open-webui.md), accepted
   2026-11-02: that chat history may also hold tool output returned in
   Team-model chats, under the same rules.)*
+  *(Amendment, [ADR-0012](0012-zos-dataset-read-pilot.md), proposed: it may
+  also hold z/OS dataset observations from Docs-model chats, under the same
+  rules; the feedback store never holds them.)*
 - **Consequences / rules:**
   - No backend choice under #529 or #782 may ingest question, answer, excerpt or
     comment text. Using content for analytics means exporting from the feedback

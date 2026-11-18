@@ -11,7 +11,9 @@
   may require ("Amendments").
   Accepting it enables nothing: no gateway, entry point, Route, credential
   or fence rule is added by it. Each agent-class gateway still needs its own
-  decision record ("Required follow-up").
+  decision record ("Required follow-up"). Amended by
+  [ADR-0012](0012-zos-dataset-read-pilot.md) (proposed): named exception E3
+  for a z/OS `dataset_read` pilot.
 - **Context:**
   - ADR-0010 defines the gateways for one caller, a signed-in user in a
     Team-model chat. The improvement agents of the gap (herdr-core plus
