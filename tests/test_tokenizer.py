@@ -652,8 +652,9 @@ def test_transient_completion_count_failure_recovers_after_the_window(failure, c
 
 @pytest.mark.parametrize("status", [400, 401, 403, 422])
 def test_refused_completion_count_opens_the_long_window(status):
-    """#1214 semantics: a refusal (a prompt over the served window answers
-    400 here) is not a missing route: the long window, then one probe."""
+    """#1214 + #1296 semantics: auth/policy and non-window 4xx refusals (a
+    bare 400 with no context-window error) are not a missing route: the long
+    window, then one probe."""
     replies = [httpx2.Response(status)]
     clock = _Clock()
     counter, calls, client = _usage_counter(
@@ -869,3 +870,172 @@ def test_auto_selected_usage_counter_counts_on_a_request_thread():
         worker.join()
     assert result == {"n": 64, "ok": True}
     assert calls == ["/tokenize", "/v1/chat/completions", "/v1/chat/completions"]
+
+
+# ---------------------------------------------------------------------------
+# Over-window HTTP 400 on CompletionUsageTokenizer (#1296): must signal
+# over-window without opening the replica-wide 600 s refusal cooldown, while
+# auth/policy and non-window 4xx refusals retain the #1214 cooldown.
+# ---------------------------------------------------------------------------
+
+_OVER_WINDOW_400_BODIES = {
+    "vllm-context-len": {
+        "object": "error",
+        "message": (
+            "This model's maximum context length is 32768 tokens. However, you requested "
+            "41200 tokens (41199 in the messages, 1 in the completion). "
+            "Please reduce the length of the messages or completion. UPSTREAM-SECRET-TOKEN"
+        ),
+        "type": "BadRequestError",
+        "code": 400,
+    },
+    "vllm-input-tokens": {
+        "error": {
+            "message": (
+                "'max_tokens' or 'max_completion_tokens' is too large: 1. This model's "
+                "maximum context length is 16384 tokens and your request has 19000 input tokens. "
+                "UPSTREAM-SECRET-TOKEN"
+            ),
+            "type": "BadRequestError",
+        }
+    },
+    "litellm-code": {
+        "error": {
+            "message": "litellm.ContextWindowExceededError: UPSTREAM-SECRET-TOKEN",
+            "type": "invalid_request_error",
+            "code": "context_length_exceeded",
+        }
+    },
+    "llamacpp-context-size": {
+        "error": {
+            "message": "request (40000 tokens) exceeds the available context size (32768 tokens) UPSTREAM-SECRET-TOKEN",
+        }
+    },
+    "tgi-inputs-tokens": {
+        "error": "Input validation error: `inputs` tokens + `max_new_tokens` must be <= 32768 UPSTREAM-SECRET-TOKEN",
+    },
+    "bare-code-only": {
+        "error": {"code": "context_length_exceeded", "message": "UPSTREAM-SECRET-TOKEN"},
+    },
+}
+
+
+@pytest.mark.parametrize("shape", list(_OVER_WINDOW_400_BODIES))
+@pytest.mark.parametrize("source", ["completion_usage", "auto"])
+def test_completion_usage_over_window_400_does_not_open_cooldown(shape, source, caplog):
+    """#1296: an over-window HTTP 400 from /chat/completions raises
+    PromptWindowExceededError without starting the 600 s cooldown, leaves
+    remote_confirmed False (clearing any prior confirmation on the thread),
+    never leaks upstream body text, and lets the very next ordinary count
+    succeed remotely with zero clock advance."""
+    from mainframe_rag.agent.tokenizer import PromptWindowExceededError
+
+    clock = _Clock()
+    body = _OVER_WINDOW_400_BODIES[shape]
+    calls: list[str] = []
+    oversized_seen = [False]
+
+    def respond(request):
+        calls.append(request.url.path)
+        if request.url.path == "/tokenize":
+            return httpx2.Response(404)
+        payload = json.loads(request.content)
+        content = payload["messages"][-1]["content"]
+        if "OVERSIZED" in content:
+            oversized_seen[0] = True
+            return httpx2.Response(400, json=body)
+        return _usage_reply(88)
+
+    settings = Settings(
+        _env_file=None, **_COUNT_SETTINGS, llm_token_count_source=source
+    )
+    with (
+        httpx2.Client(transport=httpx2.MockTransport(respond)) as client,
+        caplog.at_level(logging.INFO, logger="agent.tokenizer"),
+    ):
+        tok = build_tokenizer(settings, client, clock=clock)
+        # First establish a confirmed remote count on this thread.
+        assert tok.count_messages([ChatMessage(role="user", content="ordinary-1")]) == 88
+        assert tok.remote_confirmed is True
+        # Now send an over-window prompt: must raise, NOT fall back or poison cooldown.
+        with pytest.raises(PromptWindowExceededError) as exc_info:
+            tok.count_messages([ChatMessage(role="user", content="OVERSIZED prompt")])
+        assert oversized_seen[0] is True
+        assert "UPSTREAM-SECRET-TOKEN" not in str(exc_info.value)
+        assert tok.remote_confirmed is False
+        # Zero clock advance: the immediately following ordinary request STILL
+        # counts remotely and confirms the budget.
+        assert tok.count_messages([ChatMessage(role="user", content="ordinary-2")]) == 88
+        assert tok.remote_confirmed is True
+    assert all("UPSTREAM-SECRET-TOKEN" not in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        httpx2.Response(401),
+        httpx2.Response(401, json={"error": {"code": "context_length_exceeded"}}),
+        httpx2.Response(403, json={"error": {"message": "maximum context length"}}),
+        httpx2.Response(400),
+        httpx2.Response(400, json={"error": {"message": "Unsupported parameter: reasoning_effort"}}),
+        httpx2.Response(400, json={"error": {"message": "Content blocked by gateway policy"}}),
+        httpx2.Response(422),
+    ],
+    ids=[
+        "401-empty",
+        "401-context-text",
+        "403-context-text",
+        "400-empty",
+        "400-unsupported-param",
+        "400-policy",
+        "422-empty",
+    ],
+)
+def test_non_window_4xx_and_auth_refusals_keep_600s_cooldown(reply):
+    """#1214 + #1296: 401/403 (regardless of body) and non-window 400/422
+    refusals still open the 600 s cooldown and fall back to the estimator."""
+    replies = [reply]
+    clock = _Clock()
+    counter, calls, client = _usage_counter(
+        lambda request: replies.pop(0) if replies else _usage_reply(55), clock=clock
+    )
+    messages = [ChatMessage(role="user", content="q")]
+    with client:
+        assert counter.count_messages(messages) == FallbackTokenizer().count_messages(messages)
+        assert counter.remote_confirmed is False
+        assert counter._pinned is False
+        # Inside 600 s cooldown: no remote call.
+        clock.now += TOKENIZE_REFUSED_RETRY_AFTER_S - 1
+        assert counter.count_messages(messages) == FallbackTokenizer().count_messages(messages)
+        assert len(calls) == 1
+        # After 600 s: one probe resumes remote counting.
+        clock.now += 1
+        assert counter.count_messages(messages) == 55
+        assert counter.remote_confirmed is True
+    assert len(calls) == 2
+
+
+def test_over_window_400_on_probe_clears_expired_cooldown_for_trimmed_retry():
+    """When a cooldown expires and the probe happens to be over-window 400,
+    the endpoint is alive: clearing the probe window lets the trimmed retry
+    immediately verify against the server instead of falling back for 60 s."""
+    from mainframe_rag.agent.tokenizer import PromptWindowExceededError
+
+    clock = _Clock()
+    replies = [
+        httpx2.Response(503),
+        httpx2.Response(400, json=_OVER_WINDOW_400_BODIES["vllm-context-len"]),
+        _usage_reply(73),
+    ]
+    counter, calls, client = _usage_counter(lambda request: replies.pop(0), clock=clock)
+    messages = [ChatMessage(role="user", content="q")]
+    with client:
+        assert counter.count_messages(messages) == FallbackTokenizer().count_messages(messages)
+        clock.now += TOKENIZE_RETRY_AFTER_S
+        with pytest.raises(PromptWindowExceededError):
+            counter.count_messages(messages)
+        assert counter.remote_confirmed is False
+        # Immediately retry trimmed prompt with zero clock advance: must hit server!
+        assert counter.count_messages(messages) == 73
+        assert counter.remote_confirmed is True
+    assert len(calls) == 3

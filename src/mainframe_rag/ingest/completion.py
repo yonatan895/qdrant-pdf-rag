@@ -29,6 +29,7 @@ import json
 import re
 import time
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
 
@@ -60,6 +61,250 @@ _COMPLETION_SUFFIX = "__completions"
 REPRESENTATION_FINGERPRINT_VERSION = 2
 
 _COMPLETION_KEYWORD_INDEXES = ("doc_id", "sha256", "rules_v", "generation_id", "target_collection")
+
+# Bound buffered chunk text during single-pass verification (#1298, #374).
+# Corpora under this cap verify every document in one data scroll; oversized
+# corpora verify remaining documents via per-document fallback scans.
+DEFAULT_VERIFY_TEXT_BUDGET_BYTES = 64 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class CompletionSnapshot:
+    """Single-scroll snapshot of `<collection>__completions` (issue #1298)."""
+
+    control_exists: bool
+    raw_records: list[models.Record]
+    markers_by_doc: dict[str, list[CompletionRecord]]
+
+    def find_completion(
+        self,
+        doc_id: str,
+        *,
+        source_rev: str,
+        generation_id: str,
+        target_collection: str,
+    ) -> CompletionRecord | None:
+        for m in self.markers_by_doc.get(doc_id, ()):
+            if (
+                m.source_rev == source_rev
+                and m.generation_id == generation_id
+                and m.target_collection == target_collection
+            ):
+                return m
+        return None
+
+
+def prefetch_completions(client: QdrantReader, settings: Settings) -> CompletionSnapshot:
+    """Read `<collection>__completions` once for batched skip/verification/catalog."""
+    name = completion_collection_name(settings)
+    if not client.collection_exists(name):
+        return CompletionSnapshot(control_exists=False, raw_records=[], markers_by_doc={})
+    raw = scroll_all_points(
+        client,
+        name,
+        scroll_filter=None,
+        with_payload=True,
+        page_size=settings.ingest_scan_page_size,
+    )
+    by_doc: dict[str, list[CompletionRecord]] = {}
+    for p in raw:
+        try:
+            marker = CompletionRecord.model_validate(p.payload or {})
+        except ValidationError, ValueError:
+            continue
+        by_doc.setdefault(marker.doc_id, []).append(marker)
+    return CompletionSnapshot(control_exists=True, raw_records=raw, markers_by_doc=by_doc)
+
+
+@dataclass
+class _DocPointsSummary:
+    count: int = 0
+    sha256s: set[Any] = field(default_factory=set)
+    rules_vs: set[Any] = field(default_factory=set)
+    chunks: list[tuple[str, str]] = field(default_factory=list)
+    buffered_bytes: int = 0
+    deferred: bool = False
+
+
+@dataclass
+class VerificationSnapshot:
+    """Bounded-memory single-pass snapshot of control + data collections (#1298).
+
+    Shared across migration stale-marker checks, `verify_searchable_coverage`
+    (`is_doc_complete` + `audit_unmarked_residue`), `verify_all_complete`, and
+    `build_source_catalog`. Never caches the representation manifest state."""
+
+    collection: str
+    data_exists: bool
+    completions: CompletionSnapshot
+    pair_counts: dict[tuple[str | None, str | None], int]
+    pair_samples: dict[tuple[str | None, str | None], list[str]]
+    doc_points: dict[tuple[str, str], _DocPointsSummary]
+    catalog_acc: dict[str, dict] | None = None
+    catalog_error: str | None = None
+
+    def has_stored_points(self, doc_id: str, source_rev: str) -> bool:
+        return (doc_id, source_rev) in self.pair_counts
+
+    def revisions_for_doc(self, doc_id: str) -> set[str | None]:
+        return {rev for d, rev in self.pair_counts if d == doc_id}
+
+    def verify_doc(
+        self,
+        client: QdrantReader,
+        settings: Settings,
+        doc_id: str,
+        *,
+        sha256: str,
+        rules_v: str,
+        source_labels: str,
+        source_rev: str,
+        required_manifest_digest: str | None = None,
+    ) -> bool:
+        expected_gen = doc_generation_id(settings, sha256, rules_v, source_labels)
+        scoped = self.completions.find_completion(
+            doc_id,
+            source_rev=source_rev,
+            generation_id=expected_gen,
+            target_collection=settings.qdrant_collection,
+        )
+        if scoped is None:
+            return False
+        if required_manifest_digest is not None and scoped.manifest_digest != required_manifest_digest:
+            return False
+        if scoped.sha256 != sha256 or scoped.rules_v != rules_v or scoped.expected_chunks < 1:
+            return False
+        if not self.data_exists:
+            return False
+        summary = self.doc_points.get((doc_id, source_rev))
+        if summary is None or summary.count != scoped.expected_chunks:
+            return False
+        if summary.sha256s != {sha256} or summary.rules_vs != {rules_v}:
+            return False
+        if summary.deferred:
+            return verify_doc_points(
+                client,
+                settings,
+                doc_id,
+                sha256=sha256,
+                rules_v=rules_v,
+                source_rev=source_rev,
+                expected_chunks=scoped.expected_chunks,
+                chunk_ids_digest=scoped.chunk_ids_digest,
+                content_digest=scoped.content_digest,
+            )
+        ids: list[str] = []
+        texts: dict[str, str] = {}
+        for pid, text in summary.chunks:
+            ids.append(pid)
+            texts[pid] = text
+        ids.sort()
+        return _match_digests(ids, texts, scoped.chunk_ids_digest, scoped.content_digest)
+
+
+def prefetch_verification_state(
+    client: QdrantReader,
+    settings: Settings,
+    *,
+    include_catalog_fields: bool = False,
+    completions: CompletionSnapshot | None = None,
+    text_budget_bytes: int = DEFAULT_VERIFY_TEXT_BUDGET_BYTES,
+    target_pairs: set[tuple[str, str]] | None = None,
+) -> VerificationSnapshot:
+    """Stream `<collection>` once (plus one `<collection>__completions` read)
+    to feed stale-marker, coverage, residue, and optional catalog checks."""
+    from mainframe_rag.ingest.catalog import (
+        DATA_FIELDS,
+        SourceCatalogError,
+        accumulate_catalog_record,
+    )
+
+    comp = completions if completions is not None else prefetch_completions(client, settings)
+    collection = settings.qdrant_collection
+    pair_counts: dict[tuple[str | None, str | None], int] = {}
+    pair_samples: dict[tuple[str | None, str | None], list[str]] = {}
+    doc_points: dict[tuple[str, str], _DocPointsSummary] = {}
+    catalog_acc: dict[str, dict] | None = {} if include_catalog_fields else None
+    catalog_error: str | None = None
+
+    if not client.collection_exists(collection):
+        return VerificationSnapshot(
+            collection=collection,
+            data_exists=False,
+            completions=comp,
+            pair_counts=pair_counts,
+            pair_samples=pair_samples,
+            doc_points=doc_points,
+            catalog_acc=catalog_acc,
+            catalog_error=catalog_error,
+        )
+
+    fields = (
+        list(dict.fromkeys((*DATA_FIELDS, "rules_v", "text")))
+        if include_catalog_fields
+        else ["doc_id", "source_rev", "sha256", "rules_v", "text"]
+    )
+    buffered_bytes = 0
+    offset: int | str | uuid.UUID | None = None
+    while True:
+        page, offset = client.scroll(
+            collection,
+            scroll_filter=None,
+            limit=settings.ingest_scan_page_size,
+            with_payload=fields,
+            offset=offset,
+        )
+        for p in page:
+            payload = p.payload or {}
+            raw_doc_id = payload.get("doc_id")
+            raw_rev = payload.get("source_rev")
+            pair_key = (raw_doc_id, raw_rev)
+            pair_counts[pair_key] = pair_counts.get(pair_key, 0) + 1
+            samples = pair_samples.setdefault(pair_key, [])
+            if len(samples) < 3:
+                samples.append(str(p.id))
+
+            if isinstance(raw_doc_id, str) and raw_doc_id and isinstance(raw_rev, str) and raw_rev:
+                doc_key = (raw_doc_id, raw_rev)
+                if target_pairs is None or doc_key in target_pairs:
+                    summary = doc_points.setdefault(doc_key, _DocPointsSummary())
+                    summary.count += 1
+                    if len(summary.sha256s) < 2:
+                        summary.sha256s.add(payload.get("sha256"))
+                    if len(summary.rules_vs) < 2:
+                        summary.rules_vs.add(payload.get("rules_v"))
+                    if not summary.deferred:
+                        text = str(payload.get("text") or "")
+                        text_len = len(text.encode("utf-8"))
+                        if buffered_bytes + text_len <= text_budget_bytes:
+                            summary.chunks.append((str(p.id), text))
+                            summary.buffered_bytes += text_len
+                            buffered_bytes += text_len
+                        else:
+                            buffered_bytes -= summary.buffered_bytes
+                            summary.chunks.clear()
+                            summary.buffered_bytes = 0
+                            summary.deferred = True
+
+            if catalog_acc is not None and catalog_error is None:
+                try:
+                    accumulate_catalog_record(catalog_acc, payload)
+                except SourceCatalogError as exc:
+                    catalog_error = str(exc)
+
+        if offset is None or not page:
+            break
+
+    return VerificationSnapshot(
+        collection=collection,
+        data_exists=True,
+        completions=comp,
+        pair_counts=pair_counts,
+        pair_samples=pair_samples,
+        doc_points=doc_points,
+        catalog_acc=catalog_acc,
+        catalog_error=catalog_error,
+    )
 
 
 class CompletionRecord(BaseModel):
@@ -574,6 +819,7 @@ def stale_completion_markers(
     exclude_doc_ids: frozenset[str] = frozenset(),
     retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
     require_stored_points: bool = False,
+    snapshot: VerificationSnapshot | None = None,
 ) -> tuple[int, list[str]]:
     """Completion markers NOT certified under `wanted_digest` — the
     commit-time scope proof for a representation migration (issue #391 F2).
@@ -593,18 +839,24 @@ def stale_completion_markers(
     coverage proof that follows independently attributes every point. A
     marker without a source revision is unsupported data and always counts.
     Returns (count, sample labels)."""
-    name = completion_collection_name(settings)
-    if not client.collection_exists(name):
-        return 0, []
+    if snapshot is not None:
+        if not snapshot.completions.control_exists:
+            return 0, []
+        records = snapshot.completions.raw_records
+    else:
+        name = completion_collection_name(settings)
+        if not client.collection_exists(name):
+            return 0, []
+        records = scroll_all_points(
+            client,
+            name,
+            scroll_filter=None,
+            with_payload=["doc_id", "source_rev", "manifest_digest"],
+            page_size=settings.ingest_scan_page_size,
+        )
     count = 0
     labels: list[str] = []
-    for p in scroll_all_points(
-        client,
-        name,
-        scroll_filter=None,
-        with_payload=["doc_id", "source_rev", "manifest_digest"],
-        page_size=settings.ingest_scan_page_size,
-    ):
+    for p in records:
         payload = p.payload or {}
         doc_id = payload.get("doc_id")
         if not doc_id:
@@ -614,10 +866,14 @@ def stale_completion_markers(
         if payload.get("manifest_digest") == wanted_digest:
             continue
         source_rev = payload.get("source_rev")
-        if require_stored_points and source_rev and not _revision_has_points(
-            client, settings, str(doc_id), str(source_rev)
-        ):
-            continue
+        if require_stored_points and source_rev:
+            has_points = (
+                snapshot.has_stored_points(str(doc_id), str(source_rev))
+                if snapshot is not None
+                else _revision_has_points(client, settings, str(doc_id), str(source_rev))
+            )
+            if not has_points:
+                continue
         count += 1
         if len(labels) < sample:
             labels.append(f"{doc_id}@{payload.get('source_rev') or 'unknown'}")

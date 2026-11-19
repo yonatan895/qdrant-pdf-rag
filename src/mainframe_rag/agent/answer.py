@@ -31,9 +31,10 @@ from mainframe_rag.agent.images import (
     TurnImages,
     wire_messages,
 )
-from mainframe_rag.agent.tokenizer import estimate_tokens
+from mainframe_rag.agent.tokenizer import PromptWindowExceededError, estimate_tokens
 from mainframe_rag.agent.user_message import (
     MESSAGE_WINDOW_SHARE,
+    conservative_tokens,
     derive_retrieval_query,
     effective_retrieval_text,
     fit_message,
@@ -1225,6 +1226,31 @@ def _packed_excerpt(
     )
 
 
+# Proportional trim safety margin (mirrors user_message.fit_message's 0.95
+# keep ratio so one verification trim round clears the measured overshoot).
+_TRIM_SAFETY_FACTOR = 1.05
+# Dense-text threshold for conservative window planning (#1296): ordinary
+# English prose sits around 0.45-0.60 conservative tokens/char (where
+# estimate_tokens is within +2% of real BPE), while JCL, hex dumps, numeric
+# tables and message lines sit >= 0.80.
+_DENSE_CONSERVATIVE_NUM = 65
+_DENSE_CONSERVATIVE_DEN = 100
+
+
+def _dense_window_tokens(text: str) -> int:
+    """Window-ceiling token price for planning (#1296): ordinary English prose
+    stays at `estimate_tokens`, while dense/non-prose text (JCL, hex, numeric
+    tables, message lines) uses `conservative_tokens` so packing does not
+    exceed the served model window before the first remote count."""
+    est = estimate_tokens(text)
+    if not text:
+        return est
+    cons = conservative_tokens(text)
+    if cons * _DENSE_CONSERVATIVE_DEN > len(text) * _DENSE_CONSERVATIVE_NUM:
+        return max(est, cons)
+    return est
+
+
 def _plan_packed_excerpts(
     hits: list[SearchHit],
     budget_tokens: int,
@@ -1233,6 +1259,8 @@ def _plan_packed_excerpts(
     narrative_token_cap: int,
     complexity: str,
     requested: re.Pattern[str] | None = None,
+    *,
+    window_tokens: int | None = None,
 ) -> list[PackedExcerpt]:
     """Estimator-only planning loop shared by the single-turn and chat
     tokenizer paths (one excerpt-identity rule, so the two builders cannot
@@ -1241,9 +1269,12 @@ def _plan_packed_excerpts(
     (issues #368, #632): a requested entry heading is kept in preference to
     an unrelated prefix, and a hit whose necessary unit does not fit is
     omitted with explicit omission metadata instead of shipping a partial
-    statement."""
+    statement. When ``window_tokens`` is given (#1296), dense excerpts are
+    also bounded by ``conservative_tokens`` against the served window so
+    completion-usage counting avoids an initial HTTP-400 overshoot."""
     packed: list[PackedExcerpt] = []
     total_tokens = 0
+    total_window = 0
     for i, hit in enumerate(hits, 1):
         text = hit.text.strip()
         spans = _hit_spans(hit, text)
@@ -1263,7 +1294,9 @@ def _plan_packed_excerpts(
             start, end, required_end = selected
         excerpt = _packed_excerpt(i, hit, text, start, end, required_end)
         header = _priced_header(i, hit)
-        chunk_tokens = estimate_tokens(f"{header}\n{excerpt.body}")
+        combined = f"{header}\n{excerpt.body}"
+        chunk_tokens = estimate_tokens(combined)
+        chunk_window = _dense_window_tokens(combined) if window_tokens is not None else chunk_tokens
         if total_tokens + chunk_tokens > budget_tokens and packed:
             rem_tokens = budget_tokens - total_tokens
             # The char cut must leave room for the header too, or the
@@ -1279,24 +1312,159 @@ def _plan_packed_excerpts(
                 if reselected is not None:
                     packed.append(_packed_excerpt(i, hit, text, *reselected))
             break
+        if window_tokens is not None and total_window + chunk_window > window_tokens and packed:
+            rem_window = window_tokens - total_window - _dense_window_tokens(header)
+            if rem_window > 60:
+                body_window = max(1, _dense_window_tokens(excerpt.body))
+                keep_chars = min(int((end - start) * rem_window / body_window), end - start)
+                reselected = _select_range(text, spans, keep_chars, requested)
+                if reselected is not None:
+                    packed.append(_packed_excerpt(i, hit, text, *reselected))
+            break
         packed.append(excerpt)
         total_tokens += chunk_tokens
+        total_window += chunk_window
     return packed
 
 
+def _excerpt_weight(excerpt: PackedExcerpt) -> int:
+    """Conservative-token weight of one packed excerpt (header + body)."""
+    header = _priced_header(excerpt.index, excerpt.hit)
+    return max(1, conservative_tokens(f"{header}\n{excerpt.body}"))
+
+
+def _trim_packed_by_weight(packed: list[PackedExcerpt], target_weight: float) -> None:
+    """Drop/trim trailing excerpts in ``packed`` to remove ``target_weight``
+    conservative-token units in one round (#1296), preserving whole atomic
+    units (#368), requested-entry ranges (#632), and strict progress."""
+    remaining = max(0.0, target_weight)
+    popped = 0
+    while packed:
+        last = packed[-1]
+        excerpt_w = _excerpt_weight(last)
+        if remaining >= excerpt_w:
+            packed.pop()
+            remaining -= excerpt_w
+            popped += 1
+            if remaining <= 0:
+                return
+            continue
+        if popped > 0 and remaining < 1.0:
+            return
+        source = last.hit.text.strip()
+        start, end = last.source_range()
+        consistent = 0 <= start <= end <= len(source) and last.body == _compose_body(
+            source, start, end
+        )
+        if not consistent:
+            # Defensive: the body does not reproduce its recorded range (should
+            # be impossible) — drop the excerpt entirely to keep the whole-unit
+            # invariant structural.
+            packed.pop()
+            return
+        body_len = end - start
+        body_w = max(1, conservative_tokens(last.body))
+        cut = int(body_len * remaining / body_w) + _TRIM_OVERCUT_CHARS
+        spans = _hit_spans(last.hit, source)
+        new_end = _snap_window(source, spans, start, max(0, body_len - cut))
+        if new_end is None or new_end < last.required_end:
+            packed.pop()
+        else:
+            last.body = _compose_body(source, start, new_end)
+            last.truncated = True
+            last.start, last.end = start, new_end
+        return
+
+
+def _trim_older_turns(older_turns: list[list[ChatMessage]], target_weight: float) -> None:
+    """Drop oldest expendable chat turns (#633) up to ``target_weight`` in one
+    round, always popping at least one turn without over-popping a turn that
+    fits."""
+    removed = 0
+    popped = 0
+    while older_turns:
+        turn_w = max(1, sum(conservative_tokens(m.content) for m in older_turns[0]))
+        if popped > 0 and removed + turn_w > target_weight:
+            break
+        older_turns.pop(0)
+        removed += turn_w
+        popped += 1
+
+
+def _trim_for_over_window(
+    exc: PromptWindowExceededError,
+    messages: Sequence[ChatMessage],
+    older_turns: list[list[ChatMessage]],
+    packed: list[PackedExcerpt],
+    verify_limit: int,
+    image_tokens: int,
+) -> bool:
+    """Handle an over-window HTTP 400 from CompletionUsageTokenizer (#1296) by
+    dropping/trimming expendable history or trailing excerpts in O(1) rounds.
+    Returns False when nothing trimmable remains."""
+    if not older_turns and not packed:
+        return False
+    prompt_weight = max(1, sum(conservative_tokens(m.content) for m in messages))
+    effective_limit = verify_limit
+    if exc.max_model_len is not None:
+        effective_limit = min(verify_limit, max(1, int(exc.max_model_len * 0.9)))
+    w_hint = 0.0
+    if exc.prompt_tokens is not None and exc.prompt_tokens > effective_limit:
+        w_hint = (
+            prompt_weight
+            * ((exc.prompt_tokens - effective_limit) / exc.prompt_tokens)
+            * _TRIM_SAFETY_FACTOR
+        )
+    w_cons = (
+        ((prompt_weight + image_tokens) - effective_limit) * _TRIM_SAFETY_FACTOR
+        if prompt_weight + image_tokens > effective_limit
+        else 0.0
+    )
+    if older_turns:
+        older_total = sum(
+            max(1, sum(conservative_tokens(m.content) for m in turn)) for turn in older_turns
+        )
+        target = max(w_hint, w_cons)
+        if w_hint <= 0.0:
+            target = max(target, older_total * 0.5)
+        _trim_older_turns(older_turns, target)
+        return True
+    packed_total = sum(_excerpt_weight(p) for p in packed)
+    target = max(w_hint, w_cons)
+    if w_hint <= 0.0:
+        # Without numeric server hints, ensure at least half of packed weight
+        # is removed so even a server whose real window is smaller than
+        # settings.llm_max_model_len converges in O(log N) calls.
+        target = max(target, packed_total * 0.5)
+    _trim_packed_by_weight(packed, target)
+    return True
+
+
 def _verify_trim_last(
-    packed: list[PackedExcerpt], used: int, verify_limit: int
+    packed: list[PackedExcerpt],
+    used: int,
+    verify_limit: int,
+    *,
+    messages: Sequence[ChatMessage] | None = None,
 ) -> None:
-    """One verification trim round on the last packed excerpt, shared by both
-    tokenizer paths: regenerate its cut from the measured overshoot, snapping
-    back to whole atomic units (issue #368), and drop it when no unit fits or
-    the cut would remove the requested entry (issue #632). The retained range
-    keeps its start; its recorded offsets must reproduce the shipped body
-    exactly or the excerpt is dropped. A complete short unit always survives
-    in preference to an empty excerpt: the loop recounts afterwards, so
-    keeping evidence can never stall it. The manifest is derived from
-    `packed` afterwards, so trimming cannot bypass it."""
-    overshoot = used - verify_limit
+    """One verification trim round on ``packed``, shared by both tokenizer
+    paths: when ``messages`` is supplied (#1296), proportionally drops/trims
+    trailing excerpts by measured overshoot in O(1) rounds using
+    ``conservative_tokens`` weights; otherwise trims the last excerpt by
+    ``_APPROX_CHARS_PER_TOKEN``. Always snaps back to whole atomic units
+    (issue #368) and drops an excerpt when no unit fits or the cut would
+    remove the requested entry (issue #632). The retained range keeps its
+    start; its recorded offsets must reproduce the shipped body exactly or
+    the excerpt is dropped. The manifest is derived from ``packed``
+    afterwards, so trimming cannot bypass it."""
+    if not packed:
+        return
+    overshoot = max(1, used - verify_limit)
+    if messages is not None and used > 0:
+        prompt_weight = max(1, sum(conservative_tokens(m.content) for m in messages))
+        target_weight = prompt_weight * (overshoot / used) * _TRIM_SAFETY_FACTOR
+        _trim_packed_by_weight(packed, target_weight)
+        return
     cut = int(overshoot * _APPROX_CHARS_PER_TOKEN) + _TRIM_OVERCUT_CHARS
     last = packed[-1]
     source = last.hit.text.strip()
@@ -1663,6 +1831,7 @@ def _build_prompt(
             system_content + "\n" + "\n".join(parts) + "\n" + tail_part
         ) + sum(estimate_tokens(m.content) for m in antecedent) + message_drift + image_tokens
         budget_tokens = max(100, model_len - reserved - thinking_reserve - margin - fixed_tokens)
+        window_tokens = max(100, int((model_len - margin) * 0.85) - fixed_tokens)
 
         packed = _plan_packed_excerpts(
             hits,
@@ -1672,6 +1841,7 @@ def _build_prompt(
             narrative_token_cap,
             complexity,
             requested,
+            window_tokens=window_tokens,
         )
 
         # Older turns only fill what the packed evidence leaves free, newest
@@ -1707,14 +1877,27 @@ def _build_prompt(
             if not packed and not is_chat:
                 break
             messages = candidate()
-            used = counted(messages)
+            try:
+                used = counted(messages)
+            except PromptWindowExceededError as exc:
+                if not _trim_for_over_window(
+                    exc, messages, older_turns, packed, verify_limit, image_tokens
+                ):
+                    raise PromptBudgetExceeded(
+                        exc.prompt_tokens or max(model_len + 1, verify_limit + 1),
+                        verify_limit,
+                    ) from None
+                continue
             if used <= verify_limit:
                 verified_clean = True
                 break
             if older_turns:
-                older_turns.pop(0)
+                overshoot = used - verify_limit
+                prompt_weight = max(1, sum(conservative_tokens(m.content) for m in messages))
+                target_weight = prompt_weight * (overshoot / used) if used > 0 else 0.0
+                _trim_older_turns(older_turns, target_weight)
             elif packed:
-                _verify_trim_last(packed, used, verify_limit)
+                _verify_trim_last(packed, used, verify_limit, messages=messages)
             else:
                 break
         if not verified_clean:
@@ -1723,7 +1906,13 @@ def _build_prompt(
             # instead of returning an unchecked prompt. One bounded extra
             # count, not a repair loop.
             messages = candidate()
-            used = counted(messages)
+            try:
+                used = counted(messages)
+            except PromptWindowExceededError as exc:
+                raise PromptBudgetExceeded(
+                    exc.prompt_tokens or max(model_len + 1, verify_limit + 1),
+                    verify_limit,
+                ) from None
             if used > verify_limit:
                 raise PromptBudgetExceeded(used, verify_limit)
             verified_clean = True

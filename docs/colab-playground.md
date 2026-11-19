@@ -268,7 +268,7 @@ gateway configuration to their digests at `c5259460`).
 | `--reasoning-max-model-len` | `32768` | 4096–131072 (the ceiling of `serve.budget`, within `LLM_MAX_MODEL_LEN`'s 262144) |
 | `--reasoning-max-num-seqs` | `2` (`1` on the A100 profile) | 1–16 |
 | `--reasoning-parser` | `qwen3` | A vLLM parser name, or `none` to serve without `--reasoning-parser` |
-| `--agent-env NAME=VALUE` (repeatable) | none | Any agent setting: effort defaults (`LLM_REASONING_EFFORT_SIMPLE`, `LLM_REASONING_EFFORT_COMPLEX`, `LLM_REASONING_EFFORTS`), reserves, an agent window below the served one, a request-body extra. At most 32; lane-owned names are refused (gateway legs and routing, any `*_URL` or `*_ENDPOINT`, `QDRANT_*`, `EMBED_*`, `RERANK_*`, credentials, `ALLOW_HASH_MODE`, interpreter paths). Names that are agent settings are validated against the settings model at `prepare` |
+| `--agent-env NAME=VALUE` (repeatable) | none | Any agent setting: effort defaults (`LLM_REASONING_EFFORT_SIMPLE`, `LLM_REASONING_EFFORT_COMPLEX`, `LLM_REASONING_EFFORTS`), reserves, an agent window below the served one, a request-body extra. At most 32; lane-owned names are refused (gateway legs and routing, any `*_URL` or `*_ENDPOINT`, `QDRANT_*`, `EMBED_*`, `RERANK_*`, credentials, `ALLOW_HASH_MODE`, interpreter paths, and the test-only `COLAB_TEST_*` time-scale prefix, #1299). Names that are agent settings are validated against the settings model at `prepare` |
 | `--gateway-shape` | `local` | `site`: no `/tokenize` pass-through and no argument allow-list (below) |
 
 Only a reasoning profile (`COLAB_G4_BF16`, `COLAB_A100_80GB_BF16`) takes them.

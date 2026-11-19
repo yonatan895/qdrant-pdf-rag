@@ -1536,35 +1536,37 @@ def test_core_type_boundary_rejects_storage_injection_and_write_use(tmp_path):
     import subprocess
     import sys
 
-    source = tmp_path / "capabilities.py"
     imports = """
 from mainframe_rag.agent.answer_core import AnswerCoreDeps
 from mainframe_rag.agent.core_ports import AnswerModel, Retriever
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import QdrantPoints
 """
-    source.write_text(imports + """
+    good = tmp_path / "good.py"
+    good.write_text(imports + """
 def good(settings: Settings, model: AnswerModel, read: Retriever) -> AnswerCoreDeps:
     return AnswerCoreDeps(settings=settings, llm=model, retrieve=read)
 
 """)
-    command = [sys.executable, "-m", "mypy", "--strict", "--follow-imports=silent",
-               "--no-incremental", str(source)]
-    good = subprocess.run(command, capture_output=True, text=True, check=False)
-    assert good.returncode == 0, good.stdout + good.stderr
-    source.write_text(imports + """
+    bad = tmp_path / "bad.py"
+    bad.write_text(imports + """
 def bad(settings: Settings, model: AnswerModel, writer: QdrantPoints,
         read: Retriever, deps: AnswerCoreDeps) -> None:
     AnswerCoreDeps(settings=settings, llm=model, retrieve=writer)
     read.upsert("corpus", points=[])
     deps.qdrant.upsert("corpus", points=[])
 """)
-    bad = subprocess.run(command, capture_output=True, text=True, check=False)
-    assert bad.returncode == 1, bad.stdout + bad.stderr
-    assert 'incompatible type "QdrantPoints"; expected "Retriever"' in bad.stdout
-    assert '"Retriever" has no attribute "upsert"' in bad.stdout
-    assert '"AnswerCoreDeps" has no attribute "qdrant"' in bad.stdout
-    assert "Found 3 errors" in bad.stdout
+    command = [sys.executable, "-m", "mypy", "--strict", "--follow-imports=silent",
+               "--no-incremental", str(good), str(bad)]
+    checked = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert checked.returncode == 1, checked.stdout + checked.stderr
+    assert str(good) not in checked.stdout
+    error_lines = [line for line in checked.stdout.splitlines() if ": error:" in line]
+    assert len(error_lines) == 3 and all(line.startswith(f"{bad}:") for line in error_lines)
+    assert 'incompatible type "QdrantPoints"; expected "Retriever"' in checked.stdout
+    assert '"Retriever" has no attribute "upsert"' in checked.stdout
+    assert '"AnswerCoreDeps" has no attribute "qdrant"' in checked.stdout
+    assert "Found 3 errors in 1 file (checked 2 source files)" in checked.stdout
 
 
 @pytest.mark.anyio
@@ -2452,3 +2454,108 @@ async def test_core_anchored_lookup_after_a_coding_turn_is_not_a_coding_turn(str
         output = await execute_answer_core(source, deps)
     assert llm.calls[-1]["messages"][0].content == SYSTEM_PROMPT
     assert output.complexity == "simple"
+
+
+@pytest.mark.anyio
+async def test_retrieve_planned_runs_literal_and_anchor_concurrently_with_parity():
+    """Issue #1297: retrieve_planned runs literal and anchor legs concurrently
+    while preserving literal-first _fuse_by_rank order, literal query kind,
+    and summed per-leg timings even when the anchor leg finishes first."""
+    import asyncio
+
+    literal = [_anchor_hit("L1", "DOC-L"), _anchor_hit("S", "DOC-S"), _anchor_hit("L2", "DOC-L")]
+    anchored = [_anchor_hit("A1", "DOC-A"), _anchor_hit("S", "DOC-S"), _anchor_hit("A2", "DOC-A")]
+    both_started = asyncio.Event()
+    anchor_done = asyncio.Event()
+    in_flight = 0
+
+    async def concurrent_retrieve(query, *, product, version, settings):
+        nonlocal in_flight
+        in_flight += 1
+        if in_flight == 2:
+            both_started.set()
+        await both_started.wait()
+        if query == _FOLLOW_UP:
+            await anchor_done.wait()
+            return RetrievalResult(list(literal), "nl", {"embed_ms": 1, "qdrant_ms": 2})
+        anchor_done.set()
+        return RetrievalResult(
+            list(anchored), "identifier", {"embed_ms": 1, "qdrant_ms": 2, "rerank_ms": 4}
+        )
+
+    settings = _settings(chat_followup_anchor_enabled=True)
+    deps = replace(_deps(settings, CoreFakeLLM(), _LegSearch({})), retrieve=concurrent_retrieve)
+    source = AnswerCoreInput(query=_FOLLOW_UP, messages=_follow_up_messages(), is_chat=True)
+    plan = await plan_search(source, deps)
+    assert (plan.mode, plan.query, plan.anchor) == ("anchored", _FOLLOW_UP, _OPENER)
+
+    found = await asyncio.wait_for(retrieve_planned(plan, source, deps), timeout=2.0)
+    assert [h.chunk_id for h in found.hits] == ["L1", "A1", "S", "L2", "A2"]
+    assert found.kind == "nl"
+    assert found.timings == {"embed_ms": 2, "qdrant_ms": 4, "rerank_ms": 4}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failing_leg", ["literal", "anchor"])
+async def test_retrieve_planned_fails_together_and_cancels_sibling_leg(failing_leg):
+    """Issue #1297: either leg failing fails the turn promptly and cancels the
+    in-flight sibling leg cleanly (no leaked background task)."""
+    import asyncio
+
+    sibling_started = asyncio.Event()
+    sibling_cancelled = False
+
+    async def failing_retrieve(query, *, product, version, settings):
+        nonlocal sibling_cancelled
+        is_failing = (failing_leg == "literal" and query == _FOLLOW_UP) or (
+            failing_leg == "anchor" and query == _OPENER
+        )
+        if is_failing:
+            await sibling_started.wait()
+            raise RuntimeError(f"{failing_leg} boom")
+        sibling_started.set()
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            sibling_cancelled = True
+            raise
+        return RetrievalResult([], "nl", {})
+
+    settings = _settings(chat_followup_anchor_enabled=True)
+    deps = replace(_deps(settings, CoreFakeLLM(), _LegSearch({})), retrieve=failing_retrieve)
+    source = AnswerCoreInput(query=_FOLLOW_UP, messages=_follow_up_messages(), is_chat=True)
+    plan = await plan_search(source, deps)
+
+    with pytest.raises(RuntimeError, match=f"{failing_leg} boom"):
+        await asyncio.wait_for(retrieve_planned(plan, source, deps), timeout=2.0)
+    assert sibling_cancelled is True
+
+
+@pytest.mark.anyio
+async def test_retrieve_planned_first_failed_leg_surfaces_the_single_retrieval_error():
+    """Issue #1297 review F1: whichever leg's failure completes first
+    surfaces; a still-in-flight sibling is cancelled, so its would-be error
+    never lands and no second error code can appear. The client sees one
+    fixed envelope: _retrieve_inputs wraps the leg error into the single
+    RetrievalError either way."""
+    import asyncio
+
+    literal_in_flight = asyncio.Event()
+
+    async def anchor_fails_first(query, *, product, version, settings):
+        if query == _FOLLOW_UP:
+            # Literal leg is still mid-flight when the anchor leg fails; it
+            # would have failed on its own, but fail-fast cancels it first.
+            await literal_in_flight.wait()
+            raise RuntimeError("literal boom")
+        literal_in_flight.set()
+        raise RuntimeError("anchor boom")
+
+    settings = _settings(chat_followup_anchor_enabled=True)
+    deps = replace(_deps(settings, CoreFakeLLM(), _LegSearch({})), retrieve=anchor_fails_first)
+    source = AnswerCoreInput(query=_FOLLOW_UP, messages=_follow_up_messages(), is_chat=True)
+    plan = await plan_search(source, deps)
+    assert plan.anchor is not None
+
+    with pytest.raises(RetrievalError):
+        await asyncio.wait_for(execute_answer_core(source, deps), timeout=2.0)
