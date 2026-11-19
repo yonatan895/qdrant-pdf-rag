@@ -1047,6 +1047,11 @@ async def async_search(
             try:
                 dense_vecs, sparse_vecs = await asyncio.gather(dense_task, sparse_task)
             except BaseException:
+                # to_thread legs are not preemptible: cancelling the surviving
+                # task abandons the await, but the sibling thread (HTTP POST
+                # or BM25) runs to completion first, so this failure path is
+                # bounded by that one embed call. The client-visible refusal
+                # is unchanged (#1297 review N4).
                 for task in (dense_task, sparse_task):
                     if not task.done():
                         task.cancel()

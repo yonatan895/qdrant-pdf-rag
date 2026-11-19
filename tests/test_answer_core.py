@@ -2527,3 +2527,33 @@ async def test_retrieve_planned_fails_together_and_cancels_sibling_leg(failing_l
     with pytest.raises(RuntimeError, match=f"{failing_leg} boom"):
         await asyncio.wait_for(retrieve_planned(plan, source, deps), timeout=2.0)
     assert sibling_cancelled is True
+
+
+@pytest.mark.anyio
+async def test_retrieve_planned_first_failed_leg_surfaces_the_single_retrieval_error():
+    """Issue #1297 review F1: whichever leg's failure completes first
+    surfaces; a still-in-flight sibling is cancelled, so its would-be error
+    never lands and no second error code can appear. The client sees one
+    fixed envelope: _retrieve_inputs wraps the leg error into the single
+    RetrievalError either way."""
+    import asyncio
+
+    literal_in_flight = asyncio.Event()
+
+    async def anchor_fails_first(query, *, product, version, settings):
+        if query == _FOLLOW_UP:
+            # Literal leg is still mid-flight when the anchor leg fails; it
+            # would have failed on its own, but fail-fast cancels it first.
+            await literal_in_flight.wait()
+            raise RuntimeError("literal boom")
+        literal_in_flight.set()
+        raise RuntimeError("anchor boom")
+
+    settings = _settings(chat_followup_anchor_enabled=True)
+    deps = replace(_deps(settings, CoreFakeLLM(), _LegSearch({})), retrieve=anchor_fails_first)
+    source = AnswerCoreInput(query=_FOLLOW_UP, messages=_follow_up_messages(), is_chat=True)
+    plan = await plan_search(source, deps)
+    assert plan.anchor is not None
+
+    with pytest.raises(RetrievalError):
+        await asyncio.wait_for(execute_answer_core(source, deps), timeout=2.0)

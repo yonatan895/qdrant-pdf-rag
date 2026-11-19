@@ -204,7 +204,10 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   message's retrieval query, with no model call. The two ranked lists
   interleave literal-first, a chunk found by both keeps its first place, and
   the result is cut to one retrieval's hit count (8); the query kind is the literal leg's, the leg timings add, and
-  either leg failing is the one retrieval failure. It is skipped on the first
+  either leg failing is the one retrieval failure: whichever leg's failure
+  completes first surfaces, a still-in-flight sibling leg is cancelled (its
+  would-be error never lands), and the client sees that one fixed retrieval
+  error code either way (#1297). It is skipped on the first
   turn, when the active message names an identifier or abend code (the
   condensation bypass), when either message screens as a trap, or when both
   search the same text. The retrieval-derived prompt decisions read both
