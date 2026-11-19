@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -30,6 +31,15 @@ gateway_transport = test_local_gateway_sh.gateway_transport
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = "example.invalid/gateway@sha256:" + "a" * 64
+TEST_TIME_SCALE = 0.05
+
+
+@pytest.fixture(autouse=True)
+def _scaled_colab_timing(monkeypatch):
+    """Run Colab lifecycle loops at a bounded test time scale (#1299) so the
+    exact real subprocess/retry/deadline state machine executes without
+    multi-second wall sleeps."""
+    monkeypatch.setenv(controller.TEST_TIME_SCALE_ENV, str(TEST_TIME_SCALE))
 
 # Output and auto-allocation semantics follow google-colab-cli v0.7.4
 # commands/session.py, commands/usage.py and commands/ssh.py. The fake SSH
@@ -39,7 +49,7 @@ FAKE = r'''
 import json, os, pathlib, sys, time
 root=pathlib.Path(os.environ['FAKE_COLAB_ROOT'])
 with (root/'fake-pids').open('a') as f: f.write(str(os.getpid())+'\n')
-name=pathlib.Path(sys.argv[0]).name
+name=os.environ.get('FAKE_TOOL_NAME') or pathlib.Path(sys.argv[0]).name
 args=sys.argv[1:]
 store=root/'default-cli-store.json'
 if name=='colab' and '--config' in args:
@@ -51,6 +61,7 @@ def event(kind, data):
 event(name,args)
 if name=='colab': event('cli-store',[str(store)])
 scenario=os.environ.get('FAKE_COLAB_SCENARIO','success')
+scale=float(os.environ.get('COLAB_TEST_TIME_SCALE') or '1')
 remote=root/'remote'; remote.mkdir(exist_ok=True)
 def path(p): return remote/pathlib.Path(p).name
 def diagnostic(value):
@@ -97,7 +108,7 @@ if name=='colab':
         if override.exists():
             response=json.loads(override.read_text())
             if response['mode']=='error': sys.exit(17)
-            if response['mode']=='timeout': time.sleep(30)
+            if response['mode']=='timeout': time.sleep(max(2.0,30*scale))
             if response['mode']=='malformed':
                 print('original fake account usage is unavailable'); sys.exit(0)
             print('Current balance: '+str(response['balance'])+' compute units\nUsage rate: 0.00/hr\nActive assignments: '+str(len(state)))
@@ -108,7 +119,7 @@ if name=='colab':
     elif cmd=='sessions':
         if scenario=='slow_export' and not (root/'first-sessions').exists():
             (root/'first-sessions').touch()
-            time.sleep(10)
+            time.sleep(max(1.5,10*scale))
         if not state: print('[colab] No active sessions found on server.')
         for n,e in state.items():
             shown='?' if os.environ.get('FAKE_UNNAMED_SESSIONS') else next((n for n,v in local.items() if v==e),'?')
@@ -143,7 +154,7 @@ if name=='colab':
     elif cmd=='upload':
         local, target=rest[-2:]
         if target.endswith('colab-stop'):
-            if scenario=='slow_upload': time.sleep(6)
+            if scenario=='slow_upload': time.sleep(6*scale)
             if scenario=='upload_fail': sys.exit(1)
         path(target).write_bytes(pathlib.Path(local).read_bytes())
     elif cmd=='download':
@@ -151,7 +162,7 @@ if name=='colab':
         if scenario=='download_fail' and source.endswith('.tgz'): sys.exit(1)
         if (scenario=='slow_diagnostics' and source.endswith('colab-diagnostics.json')
                 and not (root/'slow-diagnostics-done').exists()):
-            (root/'slow-diagnostics-done').touch(); time.sleep(12)
+            (root/'slow-diagnostics-done').touch(); time.sleep(max(1.5,12*scale))
         pathlib.Path(target).write_bytes(path(source).read_bytes())
     elif cmd=='exec':
         file=rest[rest.index('-f')+1]
@@ -173,7 +184,7 @@ if name=='colab':
                     report=root/'original-runtime-observed.json'
                     observed=json.loads(report.read_text()) if report.exists() else {}
                     diagnostic({**observed,'stage':'ready'})
-                time.sleep(.02)
+                time.sleep(.005)
             path('/content/colab-artifacts.tgz').write_bytes(b'private-fake-diagnostics')
     else: raise AssertionError('unsupported real CLI command: '+cmd)
 elif name=='ssh':
@@ -208,7 +219,7 @@ elif name=='ssh':
     # listener early let the fake expose health before its final bridge bind.
     for server in servers:
         threading.Thread(target=server.serve_forever,daemon=True).start()
-    if scenario=='tunnel_loss': time.sleep(.5); sys.exit(7)
+    if scenario=='tunnel_loss': time.sleep(max(.05,.5*scale)); sys.exit(7)
     while time.monotonic()<until: time.sleep(.1)
 elif name=='docker':
     networks_file=root/'gateway-networks.json'
@@ -235,7 +246,7 @@ elif name=='docker':
             if identity==expected: print(identity)
     elif args[:2]==['network','rm']:
         if scenario=='gateway_network_release_fail': sys.exit(23)
-        if scenario=='gateway_network_release_hang': time.sleep(30)
+        if scenario=='gateway_network_release_hang': time.sleep(max(2.0,30*scale))
         names=[key for key,identity in networks.items() if identity==args[2]]
         if not names: sys.exit(1)
         for key in names: del networks[key]
@@ -249,11 +260,11 @@ elif name=='docker':
         if network!='bridge':
             assert network in networks.values()
             if scenario=='gateway_network_fail': sys.exit(19)
-            if scenario=='gateway_network_probe_hang': time.sleep(30)
-        import subprocess
+            if scenario=='gateway_network_probe_hang': time.sleep(max(2.0,30*scale))
         code_at=args.index('-c')+1
         code=args[code_at].replace('host.docker.internal','127.0.0.2')
-        subprocess.run([sys.executable,'-c',code,*args[code_at+1:]],check=True)
+        sys.argv=['-c',*args[code_at+1:]]
+        exec(compile(code,'<docker-run>','exec'),{'__name__':'__main__'})
     else: raise AssertionError('unsupported Docker command')
 elif name=='kubectl':
     assert args[:1]==['--kubeconfig'] and args[2]=='--context' and args[4]=='--namespace'
@@ -402,6 +413,18 @@ SHORT_PRODUCTION_DEADLINE_SECONDS = "20"
 
 def _prepare_short_deadline(source_state, state):
     return _prepare_new(source_state, state, extra=("--deadline-seconds", SHORT_DEADLINE_SECONDS))
+
+
+def _prepare_hold(source_state, state):
+    """Prepare a sandbox-hold run whose work window is already within colab_hold's 15s margin."""
+    original = _manifest(source_state)
+    config = original["config"]
+    extra = ["--deadline-seconds", "22"]
+    if config.get("inference_lock"):
+        extra += ["--inference-lock", config["inference_lock"]]
+    if config.get("transport_receipt"):
+        extra += ["--transport-receipt", config["transport_receipt"]]
+    return _prepare_new(source_state, state, profile=original["profile"]["name"], extra=extra)
 
 
 @pytest.mark.parametrize("extra", [
@@ -752,6 +775,7 @@ def test_native_gateway_pg_readiness_interruption_and_recovery_preserve_foreign_
     assert (gateway_root / "rendered-gateway.yaml").is_file()
 
 
+@functools.lru_cache(maxsize=1)
 def _production_fixture_paths():
     # Only the native admission/import/recipe closure, with explicit finite
     # fixture bounds. No checkout, environment, corpus or model-tree copy.
@@ -818,8 +842,20 @@ def _execution_fixture(root, *, production=False):
             path.chmod(0o755)
     task = source / ".tools/bin/task"
     task.parent.mkdir(parents=True)
-    task.write_text(f"#!{sys.executable}\n" + '''
-import json,os,pathlib,subprocess,sys
+    task.write_text("#!/bin/sh\nset -eu\n"
+                    'if [ $# -ge 6 ] && [ "$1" = "--offline" ] && [ "$2" = "--dir" ] && [ "$4" = "--taskfile" ]; then\n'
+                    '  for a in "$@"; do\n'
+                    '    if [ "$a" = "--summary" ]; then\n'
+                    '      [ "$3" = "$PWD" ] || exit 1\n'
+                    '      parent=$(dirname "$5")\n'
+                    '      grand=$(cd ../.. && pwd)\n'
+                    '      [ "$parent" = "$grand" ] || exit 1\n'
+                    '      exit 0\n'
+                    '    fi\n'
+                    '  done\n'
+                    'fi\n'
+                    f'exec {shlex.quote(sys.executable)} - "$@" <<\'PY\'\n'
+                    '''import json,os,pathlib,subprocess,sys
 assert sys.argv[1:3]==['--offline','--dir'] and sys.argv[4]=='--taskfile'
 assert pathlib.Path(sys.argv[3])==pathlib.Path.cwd()
 assert pathlib.Path(sys.argv[5]).parent==pathlib.Path.cwd().parents[1]
@@ -848,6 +884,7 @@ Path(os.environ['FAKE_COLAB_ROOT'],'snapshot-workload.json').write_text(json.dum
 time.sleep(float(os.environ.get('FAKE_NATIVE_WORKLOAD_SECONDS','0')))
 """
     subprocess.run([os.environ['PY'],'-c',code],check=True)
+PY
 ''')
     task.chmod(0o755)
     pin = source / "scripts/tools/task-pin.txt"
@@ -887,10 +924,374 @@ def _real_ssh_keygen(binaries):
     passwd = binaries.parent / "lab-passwd"
     passwd.write_text(f"lab:x:{os.getuid()}:{os.getgid()}:lab:{binaries.parent}:/bin/sh\n")
     wrapper = binaries / "ssh-keygen"
-    wrapper.write_text(f"#!/bin/sh\nLD_PRELOAD={shlex.quote(library)} NSS_WRAPPER_PASSWD={shlex.quote(str(passwd))} "
+    wrapper.write_text("#!/bin/sh\n"
+                       f"LD_PRELOAD={shlex.quote(library)} "
+                       'NSS_WRAPPER_PASSWD="$(dirname "$0")/../lab-passwd" '
                        f"NSS_WRAPPER_GROUP=/etc/group exec {shlex.quote(real)} \"$@\"\n")
     wrapper.chmod(0o755)
     return ["--ssh-keygen", str(wrapper)]
+
+
+FAKE_COLAB_SH = r'''#!/bin/sh
+set -eu
+self_dir=$(dirname "$0")
+fallback() { FAKE_TOOL_NAME=colab exec "$FAKE_PY" "$self_dir/fake_impl.py" "$@"; }
+root=$FAKE_COLAB_ROOT
+scenario=${FAKE_COLAB_SCENARIO:-success}
+[ "$scenario" = "success" ] || fallback "$@"
+[ ! -e "$root/fail-calls.json" ] || fallback "$@"
+[ $# -ge 5 ] && [ "$1" = "--auth" ] && [ "$2" = "oauth2" ] && [ "$3" = "--config" ] || fallback "$@"
+store=$4
+cmd=$5
+for a in "$@"; do
+  case "$a" in *\"*|*\\*|*"
+"*) fallback "$@" ;; esac
+done
+inc() {
+  c=0
+  if [ -f "$1" ]; then
+    read -r c < "$1" || true
+  fi
+  printf '%s' "$((c + 1))" > "$1"
+}
+read_all() {
+  val=""
+  IFS= read -r val < "$1" || true
+}
+case "$cmd" in
+  version)
+    [ $# -eq 5 ] || fallback "$@"
+    printf '%s\n' "$$" >> "$root/fake-pids"
+    printf '["colab", ["--auth", "oauth2", "version"]]\n["cli-store", ["%s"]]\n' "$store" >> "$root/events.jsonl"
+    inc "$root/calls-version"
+    printf '0.7.4\n'
+    exit 0
+    ;;
+  usage)
+    [ $# -eq 5 ] && [ ! -e "$root/usage-response.json" ] || fallback "$@"
+    active=0
+    if [ -f "$root/sessions.json" ]; then
+      read_all "$root/sessions.json"
+      case "$val" in
+        "{}"|"") active=0 ;;
+        *,*) fallback "$@" ;;
+        \{\"*\":\ \"*\"\}) active=1 ;;
+        *) fallback "$@" ;;
+      esac
+    fi
+    printf '%s\n' "$$" >> "$root/fake-pids"
+    printf '["colab", ["--auth", "oauth2", "usage"]]\n["cli-store", ["%s"]]\n' "$store" >> "$root/events.jsonl"
+    inc "$root/calls-usage"
+    inc "$root/usage-reads"
+    printf 'Current balance: 200.00 compute units\nUsage rate: 8.00/hr\nActive assignments: %s\n' "$active"
+    exit 0
+    ;;
+  sessions)
+    [ $# -eq 5 ] && [ -z "${FAKE_UNNAMED_SESSIONS:-}" ] || fallback "$@"
+    if [ ! -f "$root/sessions.json" ]; then
+      s="{}"
+    else
+      read_all "$root/sessions.json"
+      s=$val
+    fi
+    if [ "$s" = "{}" ]; then
+      printf '%s\n' "$$" >> "$root/fake-pids"
+      printf '["colab", ["--auth", "oauth2", "sessions"]]\n["cli-store", ["%s"]]\n' "$store" >> "$root/events.jsonl"
+      inc "$root/calls-sessions"
+      printf '[colab] No active sessions found on server.\n'
+      exit 0
+    fi
+    [ -f "$store" ] || fallback "$@"
+    read_all "$store"
+    l=$val
+    [ "$s" = "$l" ] || fallback "$@"
+    case "$s" in *,*) fallback "$@" ;; esac
+    tmp=${s#\{\"}
+    sess=${tmp%%\"*}
+    tmp=${s#*\": \"}
+    ep=${tmp%%\"*}
+    [ "$s" = "{\"$sess\": \"$ep\"}" ] || fallback "$@"
+    printf '%s\n' "$$" >> "$root/fake-pids"
+    printf '["colab", ["--auth", "oauth2", "sessions"]]\n["cli-store", ["%s"]]\n' "$store" >> "$root/events.jsonl"
+    inc "$root/calls-sessions"
+    printf '[%s] %s | Hardware: G4 | Shape: HIGH_RAM | Variant: GPU\n' "$sess" "$ep"
+    exit 0
+    ;;
+  upload)
+    [ $# -eq 9 ] && [ "$6" = "-s" ] || fallback "$@"
+    [ -d "$root/remote" ] || mkdir -p "$root/remote"
+    cp -- "$8" "$root/remote/${9##*/}"
+    printf '%s\n' "$$" >> "$root/fake-pids"
+    printf '["colab", ["--auth", "oauth2", "upload", "-s", "%s", "%s", "%s"]]\n["cli-store", ["%s"]]\n' \
+      "$7" "$8" "$9" "$store" >> "$root/events.jsonl"
+    inc "$root/calls-upload"
+    exit 0
+    ;;
+  download)
+    [ $# -eq 9 ] && [ "$6" = "-s" ] && [ -f "$root/remote/${8##*/}" ] || fallback "$@"
+    cp -- "$root/remote/${8##*/}" "$9"
+    printf '%s\n' "$$" >> "$root/fake-pids"
+    printf '["colab", ["--auth", "oauth2", "download", "-s", "%s", "%s", "%s"]]\n["cli-store", ["%s"]]\n' \
+      "$7" "$8" "$9" "$store" >> "$root/events.jsonl"
+    inc "$root/calls-download"
+    exit 0
+    ;;
+  new)
+    [ "$6" = "-s" ] || fallback "$@"
+    if [ -f "$root/sessions.json" ]; then
+      read_all "$root/sessions.json"
+      [ "$val" = "{}" ] || fallback "$@"
+    fi
+    if [ -f "$store" ]; then
+      read_all "$store"
+      [ "$val" = "{}" ] || fallback "$@"
+    fi
+    if [ $# -eq 7 ]; then
+      ev_args=$(printf '"--auth", "oauth2", "new", "-s", "%s"' "$7")
+    elif [ $# -eq 9 ] && [ "$8" = "--gpu" ]; then
+      ev_args=$(printf '"--auth", "oauth2", "new", "-s", "%s", "--gpu", "%s"' "$7" "$9")
+    else
+      fallback "$@"
+    fi
+    [ -d "$root/remote" ] || mkdir -p "$root/remote"
+    for f in "$root/remote"/*; do
+      [ -e "$f" ] && rm -f -- "$f" || true
+    done
+    printf '{"%s": "endpoint-owned"}' "$7" > "$root/sessions.json"
+    printf '{"%s": "endpoint-owned"}' "$7" > "$store"
+    printf '%s\n' "$$" >> "$root/fake-pids"
+    printf '["colab", [%s]]\n["cli-store", ["%s"]]\n' "$ev_args" "$store" >> "$root/events.jsonl"
+    inc "$root/calls-new"
+    printf '[colab] Session READY.\n'
+    exit 0
+    ;;
+  stop)
+    [ $# -eq 7 ] && [ "$6" = "-s" ] && [ ! -e "$root/original-source-bytes.json" ] || fallback "$@"
+    [ -f "$root/sessions.json" ] && [ -f "$store" ] || fallback "$@"
+    read_all "$root/sessions.json"; s=$val
+    read_all "$store"; l=$val
+    case "$s" in "{\"$7\": "*) case "$s" in *,*) fallback "$@" ;; esac ;; *) fallback "$@" ;; esac
+    case "$l" in "{\"$7\": "*) case "$l" in *,*) fallback "$@" ;; esac ;; *) fallback "$@" ;; esac
+    printf '{}' > "$root/sessions.json"
+    printf '{}' > "$store"
+    printf '%s\n' "$$" >> "$root/fake-pids"
+    printf '["colab", ["--auth", "oauth2", "stop", "-s", "%s"]]\n["cli-store", ["%s"]]\n' "$7" "$store" >> "$root/events.jsonl"
+    inc "$root/calls-stop"
+    printf '[colab] Session terminated.\n'
+    exit 0
+    ;;
+  exec)
+    if [ $# -eq 13 ] && [ "$6" = "-s" ] && [ "$8" = "--timeout" ] && [ "$10" = "--env" ] && [ "$12" = "-f" ]; then
+      case "${13}" in
+        *colab_preflight.py)
+          [ -f "${13}" ] || fallback "$@"
+          [ -d "$root/remote" ] || mkdir -p "$root/remote"
+          printf '{"gpu_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition", "vram_mib": 98304, "available_ram_mib": 131072, "free_disk_mib": 200000, "driver_version": "580.100", "admitted": true}' > "$root/remote/colab-preflight.json"
+          printf '%s\n' "$$" >> "$root/fake-pids"
+          printf '["colab", ["--auth", "oauth2", "exec", "-s", "%s", "--timeout", "%s", "--env", "%s", "-f", "%s"]]\n["cli-store", ["%s"]]\n' \
+            "$7" "$9" "${11}" "${13}" "$store" >> "$root/events.jsonl"
+          inc "$root/calls-exec"
+          exit 0
+          ;;
+      esac
+    fi
+    ;;
+esac
+fallback "$@"
+'''
+
+FAKE_DOCKER_SH = r'''#!/bin/sh
+set -eu
+self_dir=$(dirname "$0")
+fallback() { FAKE_TOOL_NAME=docker exec "$FAKE_PY" "$self_dir/fake_impl.py" "$@"; }
+root=$FAKE_COLAB_ROOT
+scenario=${FAKE_COLAB_SCENARIO:-success}
+[ "$scenario" = "success" ] || fallback "$@"
+for a in "$@"; do
+  case "$a" in *\"*|*\\*|*"
+"*) fallback "$@" ;; esac
+done
+read_nw() {
+  nw=""
+  if [ -f "$root/gateway-networks.json" ]; then
+    IFS= read -r nw < "$root/gateway-networks.json" || true
+  fi
+}
+parse_single_nw() {
+  case "$nw" in
+    "{}"|"") nw_k=""; nw_v=""; return 1 ;;
+    *,*) return 2 ;;
+    \{\"*\":\ \"*\"\})
+      tmp=${nw#\{\"}
+      nw_k=${tmp%%\"*}
+      tmp=${nw#*\": \"}
+      nw_v=${tmp%%\"*}
+      [ "$nw" = "{\"$nw_k\": \"$nw_v\"}" ] || return 2
+      return 0
+      ;;
+    *) return 2 ;;
+  esac
+}
+case "${1:-}" in
+  image)
+    [ $# -eq 3 ] && [ "$2" = "inspect" ] || fallback "$@"
+    printf '%s\n' "$$" >> "$root/fake-pids"
+    printf '["docker", ["image", "inspect", "%s"]]\n' "$3" >> "$root/events.jsonl"
+    printf 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+    exit 0
+    ;;
+  ps)
+    [ $# -eq 5 ] && [ "$2" = "-aq" ] && [ "$3" = "--no-trunc" ] && [ "$4" = "--filter" ] || fallback "$@"
+    case "$5" in label=io.mainframe-rag.gateway-run=*) ;; *) fallback "$@" ;; esac
+    printf '%s\n' "$$" >> "$root/fake-pids"
+    printf '["docker", ["ps", "-aq", "--no-trunc", "--filter", "%s"]]\n' "$5" >> "$root/events.jsonl"
+    exit 0
+    ;;
+  network)
+    if [ $# -eq 5 ] && [ "$2" = "inspect" ]; then
+      if [ "$3" = "bridge" ]; then
+        case "$5" in *IPAM*) ;; *) fallback "$@" ;; esac
+        printf '%s\n' "$$" >> "$root/fake-pids"
+        printf '["docker", ["network", "inspect", "bridge", "%s", "%s"]]\n' "$4" "$5" >> "$root/events.jsonl"
+        printf '127.0.0.2\n'
+        exit 0
+      fi
+      read_nw
+      rc=0; parse_single_nw || rc=$?
+      if [ "$rc" -eq 1 ]; then
+        printf '%s\n' "$$" >> "$root/fake-pids"
+        printf '["docker", ["network", "inspect", "%s", "%s", "%s"]]\n' "$3" "$4" "$5" >> "$root/events.jsonl"
+        exit 1
+      elif [ "$rc" -eq 0 ]; then
+        printf '%s\n' "$$" >> "$root/fake-pids"
+        printf '["docker", ["network", "inspect", "%s", "%s", "%s"]]\n' "$3" "$4" "$5" >> "$root/events.jsonl"
+        if [ "$3" = "$nw_k" ]; then
+          printf '%s bridge\n' "$nw_v"
+          exit 0
+        fi
+        exit 1
+      fi
+    elif [ "$2" = "create" ]; then
+      read_nw
+      rc=0; parse_single_nw || rc=$?
+      [ "$rc" -eq 1 ] || fallback "$@"
+      if [ $# -eq 3 ]; then
+        target=$3
+        ev_args=$(printf '"network", "create", "%s"' "$3")
+      elif [ $# -eq 5 ] && [ "$3" = "--subnet" ]; then
+        target=$5
+        ev_args=$(printf '"network", "create", "--subnet", "%s", "%s"' "$4" "$5")
+      else
+        fallback "$@"
+      fi
+      seq=0
+      [ -f "$root/gateway-network-sequence" ] && { IFS= read -r seq < "$root/gateway-network-sequence" || true; }
+      seq=$((seq + 1))
+      printf '%s' "$seq" > "$root/gateway-network-sequence"
+      nid=$(printf '%064x' "$seq")
+      printf '{"%s": "%s"}' "$target" "$nid" > "$root/gateway-networks.json"
+      printf '%s\n' "$$" >> "$root/fake-pids"
+      printf '["docker", [%s]]\n' "$ev_args" >> "$root/events.jsonl"
+      printf '%s\n' "$nid"
+      exit 0
+    elif [ $# -eq 7 ] && [ "$2" = "ls" ] && [ "$4" = "--filter" ]; then
+      case "$5" in id=*) expected=${5#id=} ;; *) fallback "$@" ;; esac
+      read_nw
+      rc=0; parse_single_nw || rc=$?
+      [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || fallback "$@"
+      printf '%s\n' "$$" >> "$root/fake-pids"
+      printf '["docker", ["network", "ls", "%s", "--filter", "%s", "%s", "%s"]]\n' "$3" "$5" "$6" "$7" >> "$root/events.jsonl"
+      if [ "$rc" -eq 0 ] && [ "$nw_v" = "$expected" ]; then
+        printf '%s\n' "$nw_v"
+      fi
+      exit 0
+    elif [ $# -eq 3 ] && [ "$2" = "rm" ]; then
+      read_nw
+      rc=0; parse_single_nw || rc=$?
+      [ "$rc" -eq 0 ] && [ "$nw_v" = "$3" ] || fallback "$@"
+      printf '{}' > "$root/gateway-networks.json"
+      printf '%s\n' "$$" >> "$root/fake-pids"
+      printf '["docker", ["network", "rm", "%s"]]\n' "$3" >> "$root/events.jsonl"
+      exit 0
+    fi
+    ;;
+esac
+fallback "$@"
+'''
+
+
+def _write_fake_binaries(binaries: Path) -> Path:
+    binaries.mkdir(exist_ok=True)
+    impl = binaries / "fake_impl.py"
+    impl.write_text(f"#!{sys.executable}\n" + FAKE)
+    impl.chmod(0o755)
+    for name, shell_body in (("colab", FAKE_COLAB_SH), ("docker", FAKE_DOCKER_SH)):
+        executable = binaries / name
+        executable.write_text(shell_body.replace('"$FAKE_PY"', shlex.quote(sys.executable)))
+        executable.chmod(0o755)
+    ssh = binaries / "ssh"
+    ssh.write_text(f"#!{sys.executable}\n" + FAKE)
+    ssh.chmod(0o755)
+    return binaries
+
+
+@pytest.fixture(scope="module")
+def _cpu_proof_cache(tmp_path_factory):
+    """Cache one genuinely executed CPU-transport proof per source-closure variant
+    so GPU/storage test setup reuses a real transport-receipt.json without
+    repeating identical CPU runs."""
+    cache = {}
+    roots = []
+    try:
+        def get(production: bool):
+            if production in cache:
+                return cache[production]
+            root = tmp_path_factory.mktemp(f"cpu-proof-{'prod' if production else 'std'}")
+            roots.append(root)
+            source = _execution_fixture(root, production=production)
+            binaries = _write_fake_binaries(root / "bin")
+            reasoning_port, embedding_port = _distinct_local_ports(2)
+            command = [sys.executable, str(ROOT / "scripts/colab.py")]
+            common = ["--dataset", "synthetic", "--gateway-image", IMAGE,
+                      "--colab", str(binaries / "colab"), "--ssh", str(binaries / "ssh"),
+                      "--docker", str(binaries / "docker"), "--reasoning-port", str(reasoning_port),
+                      "--embedding-port", str(embedding_port), "--deadline-seconds", "30",
+                      *_real_ssh_keygen(binaries)]
+            cpu = root / "cpu-proof"
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setenv("COLAB_ASSIGNMENT_LOCK_DIR", str(root / "assignment-lock"))
+                patch.setenv(controller.TEST_TIME_SCALE_ENV, str(TEST_TIME_SCALE))
+                patch.setenv("FAKE_COLAB_ROOT", str(root))
+                patch.setenv("PYTHONPATH", os.pathsep.join((str(ROOT / "src"), str(ROOT))))
+                patch.delenv("GATEWAY_NAME", raising=False)
+                patch.delenv("PG_NET", raising=False)
+                patch.setenv("GATEWAY_DRYRUN", "0")
+                patch.setenv("FAKE_COLAB_SOURCE_ROOT", str(source))
+                assert _controller_call(["prepare", "--state", str(cpu), "--profile", "COLAB_CPU_TRANSPORT"]
+                                        + common, source_root=source) == 0
+                proof = _run_direct(command, cpu, "/bin/true")
+                assert proof.returncode == 0, proof.stdout + proof.stderr + _run_trail(cpu)
+            receipt = (cpu / "transport-receipt.json").read_bytes()
+            cache[production] = (receipt, reasoning_port, embedding_port)
+            return cache[production]
+
+        yield get
+    finally:
+        for root in roots:
+            ledger = root / "fake-pids"
+            if ledger.exists():
+                for pid in {int(line) for line in ledger.read_text().splitlines()}:
+                    try:
+                        argv = Path(f"/proc/{pid}/cmdline").read_bytes()
+                        if str(root / "bin").encode() in argv:
+                            os.kill(pid, signal.SIGTERM)
+                    except (ProcessLookupError, FileNotFoundError):
+                        pass
+            for execution in root.glob("*/execution"):
+                for directory, children, _ in os.walk(execution):
+                    Path(directory).chmod(0o700)
+                    for name in children:
+                        (Path(directory) / name).chmod(0o700)
 
 
 @pytest.fixture
@@ -900,42 +1301,41 @@ def local_ports():
 
 
 @pytest.fixture
-def lab(tmp_path, monkeypatch, request, local_ports):
-    source = _execution_fixture(tmp_path, production="storage_lab" in request.fixturenames)
-    binaries = tmp_path / "bin"
-    binaries.mkdir()
-    for name in ("colab", "ssh", "docker"):
-        executable = binaries / name
-        executable.write_text(f"#!{sys.executable}\n" + FAKE)
-        executable.chmod(0o755)
+def lab(tmp_path, monkeypatch, request, local_ports, _cpu_proof_cache):
+    production = "storage_lab" in request.fixturenames
+    source = _execution_fixture(tmp_path, production=production)
+    binaries = _write_fake_binaries(tmp_path / "bin")
     monkeypatch.setenv("FAKE_COLAB_ROOT", str(tmp_path))
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join((str(ROOT / "src"), str(ROOT))))
     monkeypatch.delenv("GATEWAY_NAME", raising=False)
     monkeypatch.delenv("PG_NET", raising=False)
     monkeypatch.setenv("GATEWAY_DRYRUN", "0")
     monkeypatch.setenv("FAKE_COLAB_SOURCE_ROOT", str(source))
-    reasoning_port, embedding_port = (str(port) for port in local_ports[:2])
+    profile = getattr(request, "param", "COLAB_CPU_TRANSPORT")
+    if profile != "COLAB_CPU_TRANSPORT" or production:
+        cached_receipt, r_port, e_port = _cpu_proof_cache(production)
+        reasoning_port, embedding_port = str(r_port), str(e_port)
+    else:
+        cached_receipt = None
+        reasoning_port, embedding_port = (str(port) for port in local_ports[:2])
     state = tmp_path / "private-run"
     command = [sys.executable, str(ROOT / "scripts/colab.py")]
-    profile = getattr(request, "param", "COLAB_CPU_TRANSPORT")
     common = ["--dataset", "synthetic", "--gateway-image", IMAGE,
               "--colab", str(binaries / "colab"), "--ssh", str(binaries / "ssh"),
               "--docker", str(binaries / "docker"), "--reasoning-port", reasoning_port,
               "--embedding-port", embedding_port, "--deadline-seconds", "30", *_real_ssh_keygen(binaries)]
     prerequisites = []
     if profile != "COLAB_CPU_TRANSPORT":
-        cpu = tmp_path / "cpu-proof"
-        assert _controller_call(["prepare", "--state", str(cpu), "--profile", "COLAB_CPU_TRANSPORT"]
-                                + common, source_root=source) == 0
-        proof = _run_direct(command, cpu, "/bin/true")
-        assert proof.returncode == 0, proof.stdout + proof.stderr + _run_trail(cpu)
+        receipt_path = tmp_path / "cpu-transport-receipt.json"
+        receipt_path.write_bytes(cached_receipt)
         inference_lock = tmp_path / "inference.lock"
         inference_lock.write_text(_reference_lock())
         prerequisites = ["--inference-lock", str(inference_lock),
-                         "--transport-receipt", str(cpu / "transport-receipt.json")]
-        (tmp_path / "events.jsonl").write_text("")
+                         "--transport-receipt", str(receipt_path)]
     assert _controller_call(["prepare", "--state", str(state), "--profile", profile] + common + prerequisites,
                             source_root=source) == 0
+    if production and cached_receipt is not None:
+        (state / "transport-receipt.json").write_bytes(cached_receipt)
     try:
         yield tmp_path, state, command
     finally:
@@ -961,7 +1361,7 @@ def lab(tmp_path, monkeypatch, request, local_ports):
 
 @pytest.fixture
 def storage_lab(lab, retained, original_inputs, monkeypatch, local_ports):
-    root, base, command = lab
+    root, base, _ = lab
     original = _manifest(base)
     source = Path(original["origin"]["source_root"])
     kubectl = root / "bin/kubectl"
@@ -1015,8 +1415,7 @@ def storage_lab(lab, retained, original_inputs, monkeypatch, local_ports):
         "metadata_sha256": {name: row["sha256"] for name, row in evidence["files"].items()},
     }]}
     test_colab_production._json(root / "original-runtime-observed.json", runtime)
-    proof = _run_direct(command, base, "/bin/true")
-    assert proof.returncode == 0, proof.stdout + proof.stderr + _run_trail(base)
+    assert (base / "transport-receipt.json").is_file()
     (root / "events.jsonl").write_text("")
     kubeconfig = root / "original-kubeconfig"
     kubeconfig.write_text("original fake Kubernetes client input\n")
@@ -1510,7 +1909,7 @@ def test_transient_budget_poll_failure_keeps_session_then_run_completes_and_next
     root, state, _ = lab
     # usage call 0 is the initial budget, 1 follows allocation, 2 is the hold loop's first poll.
     (root / "fail-calls.json").write_text(json.dumps({"usage": [2]}))
-    assert _run_fake(state, ("/bin/sleep", "1")) == 0
+    assert _run_fake(state, ("/bin/sleep", "0.2")) == 0
     manifest = _manifest(state)
     assert manifest["cu_poll_failures"] == 1 and "failure_reason" not in manifest
     assert manifest["final_cu_observation"]["status"] == "available"
@@ -1613,7 +2012,8 @@ def test_failed_stop_upload_still_attempts_download_and_stays_incomplete_then_ne
 def test_slow_stop_upload_still_exports_artifacts_and_issues_cpu_receipt_then_next_run_works(lab, monkeypatch):
     """#740: a stop-marker upload slower than the former fixed 5 s cap uses the
     bounded export window; the archive is still downloaded and the run certified."""
-    root, state, _ = lab
+    root, base, _ = lab
+    state = _prepare_new(base, root / "slow-upload-run", extra=("--deadline-seconds", "60"))
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "slow_upload")
     assert _run_fake(state) == 0
     manifest = _manifest(state)
@@ -1998,7 +2398,7 @@ def test_cpu_transport_survives_delayed_listener_inside_run_deadline_then_next_r
     # The public controller has a 20-second work window. Its boundary doubles
     # must not disappear at 12 seconds while that valid work is still ongoing.
     with monkeypatch.context() as delayed:
-        delayed.setenv("FAKE_SSH_START_SECONDS", "12.5")
+        delayed.setenv("FAKE_SSH_START_SECONDS", str(12.5 * TEST_TIME_SCALE))
         result = _run_direct(command, state, "/bin/true", timeout=24)
     assert result.returncode == 0, result.stdout + result.stderr
     receipt = json.loads((state / "transport-receipt.json").read_text())
@@ -2021,7 +2421,8 @@ def test_cpu_transport_survives_delayed_listener_inside_run_deadline_then_next_r
 def test_sandbox_hold_hands_off_without_snapshot_interpreter_then_releases_and_next_run_works(lab):
     """#742: the hold workload keeps the session until its margin, then ends a
     completed run; sandbox.env carries routing/ownership, not the snapshot interpreter."""
-    root, state, _ = lab
+    root, base, _ = lab
+    state = _prepare_hold(base, root / "sandbox-hold")
     assert _run_fake(state, ("scripts/colab_hold.py",)) == 0
     manifest = _manifest(state)
     assert manifest["workload_succeeded"] is True and manifest["released"] is True
@@ -2496,7 +2897,7 @@ def test_mid_run_retained_store_loss_fails_the_workload_and_releases(storage_lab
             return budget(self, initial=initial)
 
         monkeypatch.setattr(controller.Run, "budget", lose_running_forward)
-        monkeypatch.setenv("FAKE_NATIVE_WORKLOAD_SECONDS", "3")
+        monkeypatch.setenv("FAKE_NATIVE_WORKLOAD_SECONDS", "0.5")
     assert _run_fake(run.state, ()) != 0
     manifest = _manifest(run.state)
     assert manifest.get("workload_succeeded") is not True
@@ -2650,8 +3051,9 @@ def test_network_release_has_independent_budget_after_vm_release_then_recovery_w
 
     def record_release_window(self, argv, **kwargs):
         if argv[-1:] == ["transport-release"]:
-            assert 0 < kwargs["cleanup_deadline"] - time.time() <= 5
-            assert kwargs["seconds"] == 5 and kwargs["cleanup"] is True
+            expected = controller.scaled_seconds(controller.NETWORK_RELEASE_SECONDS, minimum=0.5)
+            assert 0 < kwargs["cleanup_deadline"] - time.time() <= expected
+            assert kwargs["seconds"] == expected and kwargs["cleanup"] is True
             started = time.monotonic()
             try:
                 return command(self, argv, **kwargs)
@@ -2661,7 +3063,8 @@ def test_network_release_has_independent_budget_after_vm_release_then_recovery_w
 
     monkeypatch.setattr(controller.Run, "command", record_release_window)
     assert _run_fake(state) != 0
-    assert release_windows and max(release_windows) < 8
+    assert release_windows and max(release_windows) < controller.scaled_seconds(
+        controller.NETWORK_RELEASE_SECONDS, minimum=0.5) + 3
     manifest = _manifest(state)
     assert manifest["released"] is True and manifest["release_evidence"]["absent"] is True
     assert manifest["gateway_network_cleanup"] == {"completed": False}
@@ -3081,7 +3484,8 @@ def _sandbox_env(state):
 @pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
 def test_reasoning_profile_sandbox_handoff_keeps_its_exact_routing(lab):
     """#862 characterization: the two-model reference's handoff is unchanged."""
-    _, state, _ = lab
+    root, base, _ = lab
+    state = _prepare_hold(base, root / "reasoning-hold")
     assert _run_fake(state, ("scripts/colab_hold.py",)) == 0
     manifest = _manifest(state)
     config, profile, bridge = manifest["config"], manifest["profile"], manifest["transport"]["bridge"]
@@ -3111,7 +3515,8 @@ def test_reasoning_profile_sandbox_handoff_keeps_its_exact_routing(lab):
 def test_rerank_profile_sandbox_routes_embed_and_rerank_legs_without_a_reasoning_leg(lab):
     """#862: the reranker is routed through the real gateway on the first model
     slot (so the CPU receipt's :8000/:8001 transport proves it); no reasoning leg."""
-    root, state, _ = lab
+    root, base, _ = lab
+    state = _prepare_hold(base, root / "rerank-hold")
     assert _run_fake(state, ("scripts/colab_hold.py",)) == 0
     manifest = _manifest(state)
     assert manifest["workload_succeeded"] is True and manifest["released"] is True
@@ -3356,6 +3761,40 @@ def test_prepared_measurement_inputs_reach_the_workload_exactly_and_bind_approva
     assert _run_fake(_prepare_new(state, root / "ordinary-after-measurement")) == 0
 
 
+@pytest.fixture(scope="module")
+def g4_prepare_base(tmp_path_factory, _cpu_proof_cache):
+    """Read-only prepared G4 state for prepare-refusal cases that never mutate or run it."""
+    root = tmp_path_factory.mktemp("g4-prepare-base")
+    source = _execution_fixture(root)
+    binaries = _write_fake_binaries(root / "bin")
+    cached_receipt, reasoning_port, embedding_port = _cpu_proof_cache(False)
+    common = ["--dataset", "synthetic", "--gateway-image", IMAGE,
+              "--colab", str(binaries / "colab"), "--ssh", str(binaries / "ssh"),
+              "--docker", str(binaries / "docker"), "--reasoning-port", str(reasoning_port),
+              "--embedding-port", str(embedding_port), "--deadline-seconds", "30", *_real_ssh_keygen(binaries)]
+    state = root / "private-run"
+    receipt_path = root / "cpu-transport-receipt.json"
+    receipt_path.write_bytes(cached_receipt)
+    inference_lock = root / "inference.lock"
+    inference_lock.write_text(_reference_lock())
+    prerequisites = ["--inference-lock", str(inference_lock),
+                     "--transport-receipt", str(receipt_path)]
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(controller.TEST_TIME_SCALE_ENV, str(TEST_TIME_SCALE))
+        patch.delenv("GATEWAY_NAME", raising=False)
+        patch.delenv("PG_NET", raising=False)
+        assert _controller_call(["prepare", "--state", str(state), "--profile", "COLAB_G4_BF16"]
+                                + common + prerequisites, source_root=source) == 0
+    try:
+        yield state
+    finally:
+        for execution in root.glob("*/execution"):
+            for directory, children, _ in os.walk(execution):
+                Path(directory).chmod(0o700)
+                for name in children:
+                    (Path(directory) / name).chmod(0o700)
+
+
 @pytest.mark.parametrize("extra", [
     ("--agent-env", "LLM_API_KEY=sk-not-here"),
     ("--agent-env", "FEEDBACK_SERVICE_TOKEN=x"),
@@ -3368,6 +3807,7 @@ def test_prepared_measurement_inputs_reach_the_workload_exactly_and_bind_approva
     ("--agent-env", "ALLOW_HASH_MODE=1"),
     ("--agent-env", "GATEWAY_SHAPE=site"),
     ("--agent-env", "PYTHONPATH=/elsewhere"),
+    ("--agent-env", "COLAB_TEST_TIME_SCALE=0.05"),
     ("--agent-env", "llm_stream=true"),
     ("--agent-env", "LLM_STREAM"),
     ("--agent-env", "LLM_STREAM=true", "--agent-env", "LLM_STREAM=false"),
@@ -3382,15 +3822,40 @@ def test_prepared_measurement_inputs_reach_the_workload_exactly_and_bind_approva
     ("--reasoning-parser", "qwen3 --trust-remote-code"),
     ("--gateway-shape", "platform"),
 ])
-@pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
-def test_measurement_inputs_fail_closed_at_prepare(lab, extra):
-    root, state, _ = lab
-    refused = root / "refused"
+def test_measurement_inputs_fail_closed_at_prepare(g4_prepare_base, tmp_path, extra):
+    refused = tmp_path / "refused"
     try:
-        _prepare_g4(state, refused, *extra, expect=2)
+        _prepare_g4(g4_prepare_base, refused, *extra, expect=2)
     except SystemExit as usage:  # argparse choices
         assert usage.code == 2
     assert not refused.exists()
+
+
+@pytest.mark.parametrize("invalid", ["0", "-0.1", "0.005", "1.1", "nan", "inf", "fast"])
+def test_invalid_test_time_scale_fails_closed_and_unset_keeps_production_timings(lab, monkeypatch, invalid):
+    """#1299: COLAB_TEST_TIME_SCALE is test-only, bounded in [0.01, 1.0],
+    fails closed on invalid values, and leaves production timings and manifests unchanged."""
+    root, base, _ = lab
+    monkeypatch.delenv(controller.TEST_TIME_SCALE_ENV, raising=False)
+    assert controller.test_time_scale() == 1.0
+    assert controller.scaled_seconds(5, minimum=0.5) == 5
+    monkeypatch.setenv(controller.TEST_TIME_SCALE_ENV, "")
+    assert controller.test_time_scale() == 1.0
+
+    monkeypatch.setenv(controller.TEST_TIME_SCALE_ENV, invalid)
+    refused = root / "refused-scale"
+    argv, source = _prepare_arguments(base, refused)
+    assert _controller_call(argv, source_root=source) == 2
+    assert not refused.exists()
+    assert _run_fake(base) == 2
+    assert _events(root) == []
+
+    monkeypatch.setenv(controller.TEST_TIME_SCALE_ENV, str(TEST_TIME_SCALE))
+    if invalid == "0":
+        assert _run_fake(base) == 0
+        assert controller.TEST_TIME_SCALE_ENV not in (base / "manifest.json").read_text()
+        assert controller.TEST_TIME_SCALE_ENV not in (base / "sandbox.env").read_text()
+        assert controller.TEST_TIME_SCALE_ENV not in (base / "handoff.env").read_text()
 
 
 def test_measurement_inputs_need_a_reasoning_profile(lab):
