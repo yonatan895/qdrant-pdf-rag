@@ -925,6 +925,24 @@ def check_sync(root: Path) -> list[str]:
             else:
                 findings.append("scripts/airgap/common.sh: OPERATOR_ENV_KEYS is not in canonical sorted order")
 
+    # 1b. common.sh _RETIRED_ENV_KEYS — the exported retired-key guard must
+    # match model_config.RETIRED_KEYS exactly, not a hand-kept copy: retiring
+    # a key in model_config without updating common.sh would silently stop
+    # file-only retired settings from being exported (and refused) at all.
+    m_retired = re.search(r'^_RETIRED_ENV_KEYS="([^"]+)"', common_text, re.MULTILINE)
+    if not m_retired:
+        findings.append("scripts/airgap/common.sh: missing _RETIRED_ENV_KEYS assignment")
+    else:
+        have_retired = m_retired.group(1).split()
+        want_retired = list(retired_key_names())
+        if sorted(have_retired) != want_retired:
+            missing_retired = sorted(set(want_retired) - set(have_retired))
+            extra_retired = sorted(set(have_retired) - set(want_retired))
+            findings.append(
+                "scripts/airgap/common.sh: _RETIRED_ENV_KEYS mismatch "
+                f"(missing={missing_retired}, extra={extra_retired})"
+            )
+
     # 2. taskfiles/airgap.yml bridge block
     taskfile_path = root / "taskfiles" / "airgap.yml"
     taskfile_text = taskfile_path.read_text(encoding="utf-8")

@@ -490,6 +490,17 @@ def test_operator_keys_check_detects_surface_drift(tmp_path):
     findings = check_sync(tmp_path)
     assert any("OPERATOR_ENV_KEYS" in f and "UI_ENABLED" in f for f in findings)
 
+    # Drop a key from _RETIRED_ENV_KEYS in common.sh: the exported retired-key
+    # guard must match model_config.RETIRED_KEYS, not a hand-kept copy.
+    common.write_text(
+        common.read_text(encoding="utf-8").replace(
+            ' REGISTRY_INTERNAL VLLM_BASE_URL"', ' REGISTRY_INTERNAL"'
+        ),
+        encoding="utf-8",
+    )
+    findings = check_sync(tmp_path)
+    assert any("_RETIRED_ENV_KEYS" in f and "VLLM_BASE_URL" in f for f in findings)
+
 
 def test_config_check_catches_remaining_cross_key_and_plaintext_rules(tmp_path):
     from scripts.airgap.config_tool import check_config

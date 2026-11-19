@@ -37,9 +37,10 @@ if [ -z "$SUBCMD" ]; then
     exit 2
 fi
 
-# For `check`, inspect the raw env file before common.sh sourcing might abort
-# on a plaintext key or AIRGAP_DRYRUN spelling; if common.sh succeeds, run the
-# full resolved check with caller > file > preset precedence.
+# `check` passes the raw env file to config_tool (--env-file) in addition to
+# the exported operator env, so file-only keys are reported too. common.sh
+# still sources first: a hard sourcing failure (e.g. a plaintext key) aborts
+# the shell before the check runs, and the plaintext guard keeps that contract.
 . "$(dirname -- "$0")/common.sh"
 
 command -v python3 >/dev/null 2>&1 || die "python3 is required for airgap:config"
