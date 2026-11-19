@@ -278,7 +278,7 @@ def test_candidate_selection_records_only_labels_and_counts(
     spans = exporter.get_finished_spans()
     root = next(s for s in spans if s.name == root_name)
     assert {k: v for k, v in root.attributes.items() if k.startswith("rag.select")} == {
-        "rag.select_candidates": 3, **attributes,
+        "rag.select_candidates": 3, "rag.select_pinned": 0, **attributes,
     }
     children = [s for s in spans if s.name == "answer.select"]
     assert len(children) == 1 and children[0].parent.span_id == root.context.span_id

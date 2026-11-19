@@ -261,15 +261,13 @@ def _fuse_by_rank(
     return RetrievalResult(hits[:limit], literal.kind, timings)
 
 
-async def retrieve_planned(
-    plan: SearchPlan, source: AnswerCoreInput, deps: AnswerCoreDeps,
-    limit: int | None = None,
-) -> RetrievalResult:
-    """Run a plan's retrieval: one search, or for an anchored follow-up the
-    literal and antecedent legs concurrently, fused literal-first. Either leg
-    failing fails the turn as one retrieval failure does. `limit` (candidate
-    selection only, issue #1309) asks each leg, and the fused cut, for that
-    many hits instead of `answer_hit_limit`; without it the retrieval call is
+async def _retrieve_legs(
+    plan: SearchPlan, source: AnswerCoreInput, deps: AnswerCoreDeps, limit: int | None,
+) -> tuple[RetrievalResult, RetrievalResult | None]:
+    """A plan's searches, unfused: the one search, or for an anchored
+    follow-up the literal and antecedent legs run concurrently. Either leg
+    failing fails the turn as one retrieval failure does. With `limit` each
+    search is asked for that many hits; without it the retrieval call is
     unchanged."""
     async def _run_leg(query: str) -> RetrievalResult:
         if limit is None:
@@ -282,9 +280,9 @@ async def retrieve_planned(
         )
 
     if plan.anchor is None:
-        return await _run_leg(plan.query)
-    literal_task: asyncio.Task[RetrievalResult] = asyncio.create_task(_run_leg(plan.query))
-    anchor_task: asyncio.Task[RetrievalResult] = asyncio.create_task(_run_leg(plan.anchor))
+        return await _run_leg(plan.query), None
+    literal_task = asyncio.create_task(_run_leg(plan.query))
+    anchor_task = asyncio.create_task(_run_leg(plan.anchor))
     try:
         found, anchored = await asyncio.gather(literal_task, anchor_task)
     except BaseException:
@@ -293,9 +291,30 @@ async def retrieve_planned(
                 task.cancel()
         await asyncio.gather(literal_task, anchor_task, return_exceptions=True)
         raise
-    return _fuse_by_rank(
-        found, anchored, deps.settings.answer_hit_limit if limit is None else limit
-    )
+    return found, anchored
+
+
+def _fuse_legs(
+    found: RetrievalResult, anchored: RetrievalResult | None, settings: Settings,
+    limit: int | None,
+) -> RetrievalResult:
+    if anchored is None:
+        return found
+    return _fuse_by_rank(found, anchored, settings.answer_hit_limit if limit is None else limit)
+
+
+async def retrieve_planned(
+    plan: SearchPlan, source: AnswerCoreInput, deps: AnswerCoreDeps,
+    limit: int | None = None,
+) -> RetrievalResult:
+    """Run a plan's retrieval: one search, or for an anchored follow-up the
+    literal and antecedent legs concurrently, fused literal-first. Either leg
+    failing fails the turn as one retrieval failure does. `limit` (candidate
+    selection only, issue #1309) asks each leg, and the fused cut, for that
+    many hits instead of `answer_hit_limit`; without it the retrieval call is
+    unchanged."""
+    found, anchored = await _retrieve_legs(plan, source, deps, limit)
+    return _fuse_legs(found, anchored, deps.settings, limit)
 
 
 async def retrieve_for_answer(
@@ -308,13 +327,17 @@ async def retrieve_for_answer(
     and every chat route alike: the plan's retrieval, then candidate selection
     when ANSWER_SELECT_ENABLED is on (issue #1309; later stages, if ever
     built, run after it). Off, this is `retrieve_planned` and nothing else.
-    On, a turn whose searched text (its query or an anchored antecedent)
-    names an identifier or screens as a trap, or whose candidate setting is
-    no wider than `answer_hit_limit`, retrieves as usual with no model call;
-    every other turn retrieves once at `answer_select_candidates` and the selection (or, on any failure of that
-    call, the retrieval order cut to `answer_hit_limit`) is the result.
-    A selection failure is never a retrieval failure. `parent_span` gets the
-    outcome as fixed labels and counts, never text."""
+    On, a turn whose own query names an identifier, whose searched text (its
+    query or an anchored antecedent) screens as a trap, or whose candidate
+    setting is no wider than `answer_hit_limit`, retrieves as usual with no
+    model call; every other turn retrieves once at
+    `answer_select_candidates` and the selection (or, on any failure of that
+    call, the retrieval order cut to `answer_hit_limit`) is the result. On
+    an anchored follow-up whose antecedent names an identifier, the
+    antecedent leg's hits in the fused head are pinned: packed first on every
+    path and never offered to the model. A selection failure is never a
+    retrieval failure. `parent_span` gets the outcome as fixed labels and
+    counts, never text."""
     settings = deps.settings
     if not settings.answer_select_enabled:
         return await retrieve_planned(plan, source, deps)
@@ -325,8 +348,12 @@ async def retrieve_for_answer(
         found = await retrieve_planned(plan, source, deps)
         outcome = answer_select.SelectOutcome("bypass", len(found.hits), reason=reason)
     else:
-        found = await retrieve_planned(
-            plan, source, deps, limit=settings.answer_select_candidates
+        wide = settings.answer_select_candidates
+        literal, anchored = await _retrieve_legs(plan, source, deps, wide)
+        found = _fuse_legs(literal, anchored, settings, wide)
+        pinned = (
+            answer_select.pinned_hits(found.hits, anchored.hits, settings.answer_hit_limit)
+            if anchored is not None and answer_select.pins_anchor(plan.anchor) else []
         )
         ctx = trace.set_span_in_context(parent_span) if parent_span is not None else None
         with start_as_current_span(
@@ -334,7 +361,7 @@ async def retrieve_for_answer(
             attributes={"rag.select_candidates": len(found.hits)},
         ):
             hits, outcome = await answer_select.select_candidates(
-                deps.llm, settings, plan.query, plan.anchor, found.hits
+                deps.llm, settings, plan.query, plan.anchor, found.hits, pinned
             )
         found = RetrievalResult(hits, found.kind, found.timings)
     if parent_span is not None:

@@ -1173,7 +1173,7 @@ readers:
 | `chat_max_body_chars` | 131072 (422, message states the limit) | request-size guard for `/v1/answer`, `/v1/chat` and `/ui` (abuse protection; shared `chat_body_chars` helper); the Pipe valve `MAX_BODY_CHARS` must match |
 | `chat_max_turns` / `chat_max_prior_turn_chars` | 10 / 4000 (#1274, was 1000) | chat history packing caps; operator inputs `CHAT_MAX_TURNS` / `CHAT_MAX_PRIOR_TURN_CHARS` (#1268; unset renders no variable) |
 | `answer_hit_limit` | 16 (#1274, was 8; 1..32) | hits one answer retrieval returns: `/v1/answer`, `/v1/chat*`, the console and the fused cut of an anchored follow-up's two legs (`AgentResources.retrieve`, `_fuse_by_rank`); `/v1/search` and MCP search keep the caller's `limit` (default 8, max 40). Operator input `ANSWER_HIT_LIMIT` (#1191; unset renders no variable). The pool (40 per leg, or `rerank_candidates` with rerank on) and the per-page/per-doc caps may return fewer. Every hit is offered to packing: under the default window and reserves, the estimator fits 16 excerpts at the 4000-character cap (above the 3500-character ingest section cap), and a denser server count trims or drops from the tail; 32 need about a 65,536-token window. The supplied-evidence text total scales as `max(48000, 6000 x answer_hit_limit)`, so excerpts at the 4000-character cap keep their text ([supplied evidence](#supplied-evidence-projection-issue-635)) |
-| `answer_select_enabled` / `answer_select_candidates` | `false` / 40 (2..40) | [candidate selection](#candidate-selection) (#1309): one lowest-effort reasoning call picks which of one retrieval's `answer_select_candidates` hits are the answer's `answer_hit_limit` hits. Off is byte-identical. Settings/environment only (`ANSWER_SELECT_ENABLED`, `ANSWER_SELECT_CANDIDATES`): no operator key, chart value or registry entry until a measured A/B |
+| `answer_select_enabled` / `answer_select_candidates` | `false` / 40 (2..40) | [candidate selection](#candidate-selection) (#1309): one lowest-effort reasoning call picks which of one retrieval's `answer_select_candidates` hits are the answer's `answer_hit_limit` hits; on an anchored follow-up whose antecedent names an identifier, the antecedent leg's head (at most `answer_hit_limit // 2` hits) is pinned and the model picks the rest. Off is byte-identical. Settings/environment only (`ANSWER_SELECT_ENABLED`, `ANSWER_SELECT_CANDIDATES`): no operator key, chart value or registry entry until a measured A/B |
 | `retrieve_max_chunks_per_page` / `retrieve_max_chunks_per_doc` | 1 / 5 (#1274, was 3; 1..10 each) | diversity caps in `diversify_hits`, for every retrieval (`/v1/search` and MCP included); a capped hit is backfilled only when the pool runs short. Operator input `RETRIEVE_MAX_CHUNKS_PER_DOC` (#1191; unset renders no variable) |
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
 | `answer_coding_mode_enabled` | `true` (#1276) | coding mode: coding requests take the complex path and the coding prompt extension ([prompt assembly](#4-prompt-assembly-and-budgets)); operator input `ANSWER_CODING_MODE_ENABLED`, unset renders no variable |
@@ -1668,22 +1668,25 @@ console (never `/v1/search` or MCP search) do this after the search plan:
 
 | Step | Rule |
 |---|---|
-| Bypass before retrieval | Any searched text (the turn's query or an anchored antecedent) names an identifier or abend code (`names_identifier`, the condensation and anchoring predicate; reason `identifier` for the turn's query, `anchor_identifier` when only the antecedent names one), or a searched text screens as a trap, or `answer_select_candidates <= answer_hit_limit`: the usual retrieval at `answer_hit_limit`, no model call |
-| Candidates | One retrieval at `answer_select_candidates` (each leg of an anchored follow-up, fused literal-first and cut to that count). No more candidates than `answer_hit_limit`: packed as retrieved, no model call |
-| Call | One reasoning-model call at the lowest offered effort (`reasoning_depth_effort("quick")`), temperature 0, under `answer_timeout_s` and the request deadline. The model reads the searched question (and the antecedent on an anchored follow-up) and, per candidate, `[n]`, the cite, the heading and the first 600 characters of the text |
-| Reply | Must be one JSON array. Only an integer from 1 to the candidate count counts, once; unknown or repeated numbers, booleans, strings and other shapes select nothing. The reply can only reorder and cut the supplied candidates |
-| Order | `order_selection`: the model's choices in the model's order, then the remaining candidates in retrieval order until `answer_hit_limit` hits are packed (a short selection is filled; a long one is cut) |
-| Failure | As condensation ([policy](#http-model-contract)): a transport error, timeout, empty reply or a reply naming no supplied candidate packs the retrieval order cut to `answer_hit_limit`; no retry, no new client error. Cancellation (the request deadline) propagates |
+| Bypass before retrieval | The turn's own query names an identifier or abend code (`names_identifier`, the condensation and anchoring predicate; reason `identifier`), or a searched text (the query or an anchored antecedent) screens as a trap, or `answer_select_candidates <= answer_hit_limit`: the usual retrieval at `answer_hit_limit`, no model call |
+| Candidates | One retrieval at `answer_select_candidates` (each leg of an anchored follow-up, fused literal-first and cut to that count) |
+| Pinned | Only on an anchored follow-up whose antecedent names an identifier (its own query does not): selection runs, but the antecedent leg's hits that the fused list places within `answer_hit_limit` (what the turn packs from that leg with the stage off) are pinned, in the leg's rank order, at most `answer_hit_limit // 2` (`pinned_hits`). A pinned hit is always packed, on every path below, and is never offered to the model; a chunk both legs found is pinned once and is not also a candidate. A plain antecedent pins nothing. The pinned set is read from the wider legs; that it equals the stage-off turn's hits from that leg is not asserted |
+| Nothing to choose | The model chooses `answer_hit_limit` minus the pinned count from the unpinned candidates. No slot left, or no more unpinned candidates than slots: pinned hits, then the rest in retrieval order, no model call (reason `few_candidates`) |
+| Call | One reasoning-model call at the lowest offered effort (`reasoning_depth_effort("quick")`), temperature 0, under `answer_timeout_s` and the request deadline. The model reads the searched question (and the antecedent on an anchored follow-up) and, per unpinned candidate, `[n]`, the cite, the heading and the first 600 characters of the text; the prompt's "at most" is the number of slots left after the pinned hits |
+| Reply | Must be one JSON array. Only an integer from 1 to the offered candidate count counts, once; unknown or repeated numbers, booleans, strings and other shapes select nothing. The reply can only reorder and cut the supplied candidates |
+| Order | `order_selection`: the pinned hits, then the model's choices in the model's order, then the remaining unpinned candidates in retrieval order until `answer_hit_limit` hits are packed (a short selection is filled; a long one is cut) |
+| Failure | As condensation ([policy](#http-model-contract)): a transport error, timeout, empty reply or a reply naming no supplied candidate packs the pinned hits, then the retrieval order of the rest, cut to `answer_hit_limit`; no retry, no new client error. Cancellation (the request deadline) propagates |
 
 The result replaces the retrieval list everywhere downstream: packing, the
 response `hits`, `supplied_evidence` and the citation allowlist. The stage
 never rewrites the query and never retrieves again. Its fallback order is the
-head of the wider retrieval; that this equals the `answer_hit_limit`
-retrieval is not asserted. The root span carries `rag.select_mode`
+pinned hits and then the head of the wider retrieval; that this equals the
+`answer_hit_limit` retrieval is not asserted. The root span carries `rag.select_mode`
 (`selected` | `bypass` | `fallback`), `rag.select_reason` (`identifier` |
-`anchor_identifier` | `trap` | `few_candidates` | `model_error` | `invalid_output`; absent when
-selected), `rag.select_candidates` and `rag.select_selected` (model-chosen
-hits packed); the call is an `answer.select` child span. A failure logs the
+`trap` | `few_candidates` | `model_error` | `invalid_output`; absent when
+selected), `rag.select_candidates` (hits held, pinned included),
+`rag.select_selected` (model-chosen hits packed) and `rag.select_pinned`
+(pinned hits packed; 0 when nothing is pinned); the call is an `answer.select` child span. A failure logs the
 error class only. Timings gain no key: the call's time is inside the request's
 elapsed time, not `llm_ms`. Stage order is fixed for later work: select, then
 (if ever built) expand.
@@ -1838,7 +1841,7 @@ tokenizer share; a later named profile can carry its own instance.
 | Embed/context/health pools | Bounded Settings connect-only retries, no generic POST replay policy |
 | Rerank | Configured score/rerank endpoint order plus alternate endpoint fallback; exhaustion fails closed; a batch rejected on both legs with HTTP 4xx (not 5xx/transport/shape) is re-scored once with passages cut to `RERANK_RETRY_PASSAGE_MAX_CHARS` (2000), and a failing retry fails closed (issue #664); [retrieval](retrieval.md) owns dispatch |
 | Condensation | Optional reasoning call; failure returns the raw latest query, not a fabricated condensed result |
-| Candidate selection (#1309) | Optional reasoning call, one attempt; failure, timeout, an empty reply or one naming no supplied candidate packs the retrieval order cut to `answer_hit_limit`, never a fabricated selection ([candidate selection](#candidate-selection)) |
+| Candidate selection (#1309) | Optional reasoning call, one attempt; failure, timeout, an empty reply or one naming no supplied candidate packs the pinned hits and then the retrieval order, cut to `answer_hit_limit`, never a fabricated selection ([candidate selection](#candidate-selection)) |
 | Admission / total deadline (issue #374) | Opt-in (`request_*`, default off): refusal is `503 overloaded` before any work; expiry cancels async legs and is `504 deadline_exceeded` / a terminal SSE `error` event; sync worker-thread legs are bounded by their own timeouts, not interrupted (§6a). No retry or fallback is added |
 | Tracing export | Separately bounded fail-open export; outages drop/log and must not fail request/shutdown |
 

@@ -2713,7 +2713,7 @@ async def test_selection_packs_the_models_choice_in_its_order_then_fills_from_re
     assert packed.index("head-C5") < packed.index("head-C2") < packed.index("head-C1")
     assert [entry.citation for entry in out.supplied] == [_cand(n).cite for n in (5, 2, 1)]
     assert _select_attributes(root) == {
-        "rag.select_mode": "selected", "rag.select_candidates": 6, "rag.select_selected": 2,
+        "rag.select_mode": "selected", "rag.select_candidates": 6, "rag.select_selected": 2, "rag.select_pinned": 0,
     }
 
 
@@ -2733,7 +2733,7 @@ async def test_selection_counts_only_supplied_indices(reply, ids, selected):
         AnswerCoreInput(query=_SELECT_Q), _select_deps(_SelectLLM(reply), search), parent_span=root)
     assert _ids(out.hits) == ids
     assert _select_attributes(root) == {
-        "rag.select_mode": "selected", "rag.select_candidates": 6, "rag.select_selected": selected,
+        "rag.select_mode": "selected", "rag.select_candidates": 6, "rag.select_selected": selected, "rag.select_pinned": 0,
     }
 
 
@@ -2768,7 +2768,7 @@ async def test_selection_failure_falls_back_to_the_retrieval_order(reply, reason
     assert out.answer == "An answer [1]."
     assert _select_attributes(root) == {
         "rag.select_mode": "fallback", "rag.select_reason": reason,
-        "rag.select_candidates": 6, "rag.select_selected": 0,
+        "rag.select_candidates": 6, "rag.select_selected": 0, "rag.select_pinned": 0,
     }
     logged = "\n".join(record.getMessage() for record in caplog.records)
     assert "manual text" not in logged and "timed out" not in logged and "head-C" not in logged
@@ -2808,7 +2808,7 @@ async def test_selection_bypass_makes_no_model_call(query, pool, overrides, reas
     assert _ids(out.hits) == ["C1", "C2", "C3"]
     assert _select_attributes(root) == {
         "rag.select_mode": "bypass", "rag.select_reason": reason,
-        "rag.select_candidates": 3, "rag.select_selected": 0,
+        "rag.select_candidates": 3, "rag.select_selected": 0, "rag.select_pinned": 0,
     }
 
 
@@ -2835,55 +2835,214 @@ async def test_selection_on_an_anchored_follow_up_picks_from_the_fused_list():
     assert f"Earlier question: {_SELECT_Q}" in listed and f"Question: {_FOLLOW_UP}" in listed
     assert _ids(out.hits) == ["A2", "L1", "A1"]
     assert _select_attributes(root) == {
-        "rag.select_mode": "selected", "rag.select_candidates": 4, "rag.select_selected": 2,
+        "rag.select_mode": "selected", "rag.select_candidates": 4, "rag.select_selected": 2, "rag.select_pinned": 0,
+    }
+
+
+def _pin_legs(literal: int = 5, anchor: tuple[str, ...] = ("A1", "A2", "A3", "A4", "A5")):
+    """The two legs of an anchored follow-up whose antecedent (_OPENER)
+    names an identifier: 'literal' hits L1.. and the named anchor-leg hits
+    (an L-name is the same chunk the literal leg found)."""
+    return _WideSearch({
+        _FOLLOW_UP: [_cand(n, "L") for n in range(1, literal + 1)],
+        _OPENER: [_cand(int(name[1:]), name[0]) for name in anchor],
+    })
+
+
+def _pin_deps(llm, search, **overrides) -> AnswerCoreDeps:
+    return _select_deps(llm, search, **{
+        "answer_hit_limit": 4, "answer_select_candidates": 8,
+        "chat_followup_anchor_enabled": True, **overrides})
+
+
+def _pin_source(active: str = _FOLLOW_UP) -> AnswerCoreInput:
+    return AnswerCoreInput(query=active, messages=_follow_up_messages(active), is_chat=True)
+
+
+def _offered(select_call: dict) -> list[str]:
+    """Chunk names of the numbered candidates in one selection prompt, in order."""
+    listed = select_call["messages"][-1].content.split("Candidate excerpts:\n")[1]
+    return [block.split("\n")[2].split(" ")[0].removeprefix("head-")
+            for block in listed.split("\n\nChosen excerpt numbers:")[0].split("\n\n")]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("literal,anchor,reply,offered,ids,held,selected", [
+    # The reply fills both free slots with literal hits and names no anchor hit.
+    (5, ("A1", "A2", "A3", "A4", "A5"), "[3, 1]",
+     ["L1", "L2", "L3", "A3", "L4", "A4"], ["A1", "A2", "L3", "L1"], 8, 2),
+    # More choices than free slots: cut after the pinned hits.
+    (5, ("A1", "A2", "A3", "A4", "A5"), "[6, 5, 4, 3]",
+     ["L1", "L2", "L3", "A3", "L4", "A4"], ["A1", "A2", "A4", "L4"], 8, 2),
+    # Fewer choices than free slots: fused-order fill from the unchosen.
+    (5, ("A1", "A2", "A3", "A4", "A5"), "[4]",
+     ["L1", "L2", "L3", "A3", "L4", "A4"], ["A1", "A2", "A3", "L1"], 8, 1),
+    # Cap: a short literal leg puts three anchor hits in the fused head of
+    # four; only answer_hit_limit // 2 of them are pinned.
+    (1, ("A1", "A2", "A3", "A4", "A5"), "[4]",
+     ["L1", "A3", "A4", "A5"], ["A1", "A2", "A5", "L1"], 6, 1),
+    # A chunk both legs found (L1, second in the anchor leg) is pinned in the
+    # anchor leg's order and is not also a candidate.
+    (5, ("A1", "L1", "A2", "A3", "A4"), "[2, 1]",
+     ["L2", "L3", "A2", "L4", "A3", "L5"], ["A1", "L1", "L3", "L2"], 8, 2),
+])
+async def test_selection_pins_the_identifier_antecedent_legs_head(
+    literal, anchor, reply, offered, ids, held, selected
+):
+    """Maintainer decision 2026-11-19 (issue #1309, final): on an anchored
+    follow-up whose antecedent names an identifier and whose own query does
+    not, selection runs, but the antecedent leg's hits in the fused head
+    (answer_hit_limit, at most half of it) are always packed, first, and are
+    never offered to the model; it chooses the remaining slots from the
+    other candidates of the wider fused list."""
+    search = _pin_legs(literal, anchor)
+    llm = _SelectLLM(reply)
+    root = _recording_root()
+    out = await execute_answer_core(_pin_source(), _pin_deps(llm, search), parent_span=root)
+
+    assert dict(root.attributes)["rag.followup_mode"] == "anchored"
+    assert sorted(search.calls) == sorted([(_FOLLOW_UP, 8), (_OPENER, 8)])
+    assert len(llm.select_calls) == 1
+    assert _offered(llm.select_calls[0]) == offered
+    listed = llm.select_calls[0]["messages"][-1].content
+    assert [f"[{n}] " in listed for n in (len(offered), len(offered) + 1)] == [True, False]
+    assert [f"head-{name} " in listed for name in ids[:2]] == [False, False]
+    assert "at most 2." in llm.select_calls[0]["messages"][0].content
+    assert _ids(out.hits) == ids
+    packed = llm.answer_calls[0]["messages"][-1].content
+    places = [packed.index(f"head-{name} ") for name in ids]
+    assert places == sorted(places)
+    assert _select_attributes(root) == {
+        "rag.select_mode": "selected", "rag.select_candidates": held,
+        "rag.select_selected": selected, "rag.select_pinned": 2,
     }
 
 
 @pytest.mark.anyio
-async def test_selection_is_bypassed_when_an_anchored_antecedent_names_an_identifier():
-    """Maintainer decision D1 (2026-11-19, issue #1309): the identifier
-    bypass reads every searched text. An anchored follow-up whose own query
-    names no identifier but whose antecedent does is packed from the usual
-    fused retrieval (both legs at answer_hit_limit) with no selection call,
-    under its own fixed label (`anchor_identifier`), distinct from the
-    turn's own query naming one (`identifier`)."""
-    search = _WideSearch({
-        _FOLLOW_UP: [_cand(n, "L") for n in range(1, 6)],
-        _OPENER: [_cand(n, "A") for n in range(1, 6)],
-    })
-    llm = _SelectLLM("[3]")
-    deps = _select_deps(llm, search, chat_followup_anchor_enabled=True)
-    source = AnswerCoreInput(query=_FOLLOW_UP, messages=_follow_up_messages(), is_chat=True)
+@pytest.mark.parametrize("reply,reason", [
+    ("", "invalid_output"),
+    ("[99, 0]", "invalid_output"),
+    ("The best excerpts are [3] and [4].", "invalid_output"),
+    (RuntimeError("upstream said: manual text"), "model_error"),
+    (httpx2.ReadTimeout("read timed out"), "model_error"),
+])
+async def test_selection_fallback_keeps_the_pinned_hits_first(reply, reason):
+    """A failed, timed-out or unusable selection on a pinned turn packs the
+    pinned hits first, then the fused order of the rest."""
+    search = _pin_legs()
+    llm = _SelectLLM(reply)
     root = _recording_root()
-    out = await execute_answer_core(source, deps, parent_span=root)
-    assert dict(root.attributes)["rag.followup_mode"] == "anchored"
-    assert sorted(search.calls) == sorted([(_FOLLOW_UP, None), (_OPENER, None)])
-    assert llm.select_calls == [] and len(llm.answer_calls) == 1
-    assert _ids(out.hits) == ["L1", "A1", "L2"]
+    out = await execute_answer_core(_pin_source(), _pin_deps(llm, search), parent_span=root)
+    assert len(llm.select_calls) == 1 and len(llm.answer_calls) == 1
+    assert _ids(out.hits) == ["A1", "A2", "L1", "L2"]
     assert _select_attributes(root) == {
-        "rag.select_mode": "bypass", "rag.select_reason": "anchor_identifier",
-        "rag.select_candidates": 3, "rag.select_selected": 0,
+        "rag.select_mode": "fallback", "rag.select_reason": reason,
+        "rag.select_candidates": 8, "rag.select_selected": 0, "rag.select_pinned": 2,
     }
 
 
-def test_selection_bypass_labels_tell_the_query_from_the_antecedent():
-    """The two identifier bypasses carry distinct fixed labels; the turn's
-    own query wins when both name one, and the trap screen comes after."""
-    from mainframe_rag.agent.answer_select import bypass_reason
+@pytest.mark.anyio
+@pytest.mark.parametrize("literal,anchor,ids", [
+    (2, ("A1", "A2"), ["A1", "A2", "L1", "L2"]),
+    (1, ("A1", "A2", "A3"), ["A1", "A2", "L1", "A3"]),
+])
+async def test_selection_with_nothing_left_to_choose_packs_pinned_then_fused_order(
+    literal, anchor, ids
+):
+    """No more unpinned candidates than free slots: no model call, and the
+    pinned hits still come first."""
+    search = _pin_legs(literal, anchor)
+    llm = _SelectLLM("[1]")
+    root = _recording_root()
+    out = await execute_answer_core(_pin_source(), _pin_deps(llm, search), parent_span=root)
+    assert llm.select_calls == [] and len(llm.answer_calls) == 1
+    assert _ids(out.hits) == ids
+    assert _select_attributes(root) == {
+        "rag.select_mode": "bypass", "rag.select_reason": "few_candidates",
+        "rag.select_candidates": 4, "rag.select_selected": 0, "rag.select_pinned": 2,
+    }
 
-    assert bypass_reason(_FOLLOW_UP, _OPENER) == "anchor_identifier"
+
+@pytest.mark.anyio
+async def test_selection_is_bypassed_when_the_follow_ups_own_query_names_an_identifier():
+    """Unchanged by pinning: a follow-up whose own query names an identifier
+    is not anchored and bypasses the stage entirely (one leg at
+    answer_hit_limit, no model call, nothing pinned), whatever the
+    antecedent names."""
+    active = "IEA500I rejected"
+    search = _WideSearch({
+        active: [_cand(n, "L") for n in range(1, 6)],
+        _OPENER: [_cand(n, "A") for n in range(1, 6)],
+    })
+    llm = _SelectLLM("[3]")
+    root = _recording_root()
+    out = await execute_answer_core(_pin_source(active), _pin_deps(llm, search), parent_span=root)
+    assert search.calls == [(active, None)]
+    assert llm.select_calls == [] and len(llm.answer_calls) == 1
+    assert _ids(out.hits) == ["L1", "L2", "L3", "L4"]
+    assert _select_attributes(root) == {
+        "rag.select_mode": "bypass", "rag.select_reason": "identifier",
+        "rag.select_candidates": 4, "rag.select_selected": 0, "rag.select_pinned": 0,
+    }
+
+
+@pytest.mark.anyio
+async def test_selection_off_keeps_an_anchored_identifier_follow_up_unchanged():
+    """Setting off: the anchored follow-up that the stage would pin is the
+    fused retrieval of main (both legs asked with no limit, literal first,
+    cut to answer_hit_limit), with no selection call and no stage attribute."""
+    legs = {_FOLLOW_UP: [_cand(n, "L") for n in range(1, 6)],
+            _OPENER: [_cand(n, "A") for n in range(1, 6)]}
+    asked: list[str] = []
+
+    async def port_without_limit(query, *, product, version, settings):
+        # The pre-#1309 port: an unexpected 'limit' keyword is a TypeError.
+        asked.append(query)
+        return RetrievalResult(legs[query][:settings.answer_hit_limit], "nl",
+                               {"embed_ms": 1, "qdrant_ms": 2})
+
+    llm = _SelectLLM("[3]")
+    root = _recording_root()
+    out = await execute_answer_core(
+        _pin_source(),
+        _pin_deps(llm, port_without_limit, answer_select_enabled=False),
+        parent_span=root,
+    )
+    assert sorted(asked) == sorted([_FOLLOW_UP, _OPENER])
+    assert llm.select_calls == [] and len(llm.answer_calls) == 1
+    assert _ids(out.hits) == ["L1", "A1", "L2", "A2"]
+    assert out.timings == {"embed_ms": 2, "qdrant_ms": 4}
+    assert _select_attributes(root) == {}
+
+
+def test_selection_bypass_reads_the_antecedent_for_traps_only():
+    """The identifier bypass is the turn's own query; an antecedent naming
+    one pins its leg instead (no bypass label of its own any more). A trap
+    in either searched text still bypasses."""
+    from typing import get_args
+
+    from mainframe_rag.agent.answer_select import SelectReason, bypass_reason
+
+    assert bypass_reason(_FOLLOW_UP, _OPENER) is None
     assert bypass_reason("IEA500I rejected", None) == "identifier"
     assert bypass_reason("IEA500I rejected", _OPENER) == "identifier"
+    assert bypass_reason(_FOLLOW_UP, _TRAP_Q) == "trap"
     assert bypass_reason(_FOLLOW_UP, _SELECT_Q) is None
     assert bypass_reason(_FOLLOW_UP, None) is None
+    assert "anchor_identifier" not in get_args(SelectReason.__value__)
 
 
-def test_selection_order_rule_is_model_order_then_retrieval_fill():
-    """The one ordering rule (issue #1309): the model's order first, the
-    retrieval order fills what is left, cut to the limit."""
+def test_selection_order_rule_is_pinned_then_model_order_then_retrieval_fill():
+    """The one ordering rule (issue #1309): pinned hits first, then the
+    model's order, then the retrieval order fills what is left, cut to the
+    limit."""
     from mainframe_rag.agent.answer_select import order_selection
 
     candidates = [_cand(n) for n in range(1, 6)]
     assert _ids(order_selection(candidates, [3, 0], 4)) == ["C4", "C1", "C2", "C3"]
     assert _ids(order_selection(candidates, [4, 3, 2], 2)) == ["C5", "C4"]
     assert _ids(order_selection(candidates, [], 2)) == ["C1", "C2"]
+    pinned = [_cand(1, "P"), _cand(2, "P")]
+    assert _ids(order_selection(candidates, [3, 0], 4, pinned)) == ["P1", "P2", "C4", "C1"]
+    assert _ids(order_selection(candidates, [], 3, pinned)) == ["P1", "P2", "C1"]
+    assert _ids(order_selection(candidates, [4], 2, pinned)) == ["P1", "P2"]

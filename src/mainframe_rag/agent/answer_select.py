@@ -6,12 +6,15 @@ candidates are packed for the answer. The model sees a numbered list (cite,
 heading, a bounded prefix of the text) and returns numbers only; a number
 that names no supplied candidate selects nothing, so the stage can only
 reorder and cut what retrieval returned. It never rewrites the query and
-never retrieves. `answer_core.retrieve_for_answer` owns when it runs.
+never retrieves. Pinned hits (the head of an identifier antecedent's leg on
+an anchored follow-up) are packed first on every path and never offered.
+`answer_core.retrieve_for_answer` owns when it runs.
 """
 from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -27,8 +30,7 @@ log = logging.getLogger(__name__)
 
 type SelectMode = Literal["selected", "bypass", "fallback"]
 type SelectReason = Literal[
-    "identifier", "anchor_identifier", "trap", "few_candidates", "model_error",
-    "invalid_output",
+    "identifier", "trap", "few_candidates", "model_error", "invalid_output",
 ]
 
 # Characters of each candidate shown to the model. The prefix bounds the
@@ -49,19 +51,23 @@ SELECT_SYSTEM_PROMPT = (
 @dataclass(frozen=True)
 class SelectOutcome:
     """What the stage did on one turn, text-free: fixed labels and counts.
-    `candidates` is the number of hits the stage held; `selected` the
-    number of packed hits the model chose (fill and fallback hits excluded)."""
+    `candidates` is the number of hits the stage held (pinned ones
+    included); `selected` the number of packed hits the model chose (pinned,
+    fill and fallback hits excluded); `pinned` the number packed without
+    being offered to the model."""
 
     mode: SelectMode
     candidates: int
     selected: int = 0
     reason: SelectReason | None = None
+    pinned: int = 0
 
     def span_attributes(self) -> dict[str, str | int]:
         attributes: dict[str, str | int] = {
             "rag.select_mode": self.mode,
             "rag.select_candidates": self.candidates,
             "rag.select_selected": self.selected,
+            "rag.select_pinned": self.pinned,
         }
         if self.reason is not None:
             attributes["rag.select_reason"] = self.reason
@@ -70,19 +76,35 @@ class SelectOutcome:
 
 def bypass_reason(query: str, anchor: str | None = None) -> SelectReason | None:
     """Why a turn is packed in retrieval order with no model call, decided
-    from the searched text alone, before retrieval: any searched text (the
-    turn's query or an anchored antecedent) names an identifier (the
-    condensation and anchoring predicate, `names_identifier`), or a
-    searched text screens as a trap. The label tells the two identifier
-    cases apart: `identifier` (the turn's query) and `anchor_identifier`
-    (only the antecedent of an anchored follow-up)."""
+    from the searched text alone, before retrieval: the turn's own query
+    names an identifier (the condensation and anchoring predicate,
+    `names_identifier`), or a searched text (the query or an anchored
+    antecedent) screens as a trap. An antecedent that names an identifier
+    is not a bypass: its leg is pinned (`pins_anchor`)."""
     if names_identifier(query):
         return "identifier"
-    if anchor is not None and names_identifier(anchor):
-        return "anchor_identifier"
     if any(screen_query(text) == "trap" for text in (query, anchor) if text is not None):
         return "trap"
     return None
+
+
+def pins_anchor(anchor: str | None) -> bool:
+    """Whether a turn that is not bypassed pins its antecedent leg: an
+    anchored follow-up whose antecedent names an identifier (its own query
+    does not, or `bypass_reason` would have bypassed the turn)."""
+    return anchor is not None and names_identifier(anchor)
+
+
+def pinned_hits(
+    fused: list[SearchHit], anchor_leg: list[SearchHit], limit: int,
+) -> list[SearchHit]:
+    """The antecedent leg's hits that the fused list places within `limit`
+    (what a turn with the stage off packs from that leg), in the leg's rank
+    order, at most `limit // 2`. A chunk both legs found counts once, as
+    the fused list holds it."""
+    head = {hit.chunk_id: hit for hit in fused[:limit]}
+    in_leg_order = dict.fromkeys(hit.chunk_id for hit in anchor_leg if hit.chunk_id in head)
+    return [head[chunk_id] for chunk_id in in_leg_order][: limit // 2]
 
 
 def _clip(text: str, limit: int) -> str:
@@ -133,41 +155,55 @@ def parse_selection(content: str, count: int) -> list[int]:
     return picked
 
 
-def order_selection(candidates: list[SearchHit], picked: list[int], limit: int) -> list[SearchHit]:
-    """The one ordering rule: the model's choices in the model's order, then
-    the remaining candidates in retrieval order until `limit` are packed.
-    Change the packed order here only."""
+def order_selection(
+    candidates: list[SearchHit], picked: list[int], limit: int,
+    pinned: Sequence[SearchHit] = (),
+) -> list[SearchHit]:
+    """The one ordering rule: the pinned hits, then the model's choices in
+    the model's order, then the remaining candidates in retrieval order
+    until `limit` are packed. `candidates` are the offered (unpinned) hits
+    and `picked` positions in them. Change the packed order here only."""
     chosen = [candidates[position] for position in picked]
     rest = [hit for position, hit in enumerate(candidates) if position not in set(picked)]
-    return (chosen + rest)[:limit]
+    return ([*pinned] + chosen + rest)[:limit]
 
 
 async def select_candidates(
     llm: AnswerModel, settings: Settings, query: str, anchor: str | None,
-    candidates: list[SearchHit],
+    candidates: list[SearchHit], pinned: Sequence[SearchHit] = (),
 ) -> tuple[list[SearchHit], SelectOutcome]:
-    """Pick `answer_hit_limit` of the candidates. No call when there are no
-    more candidates than that. Any failure of the one call (transport,
-    timeout, empty or unusable reply) packs the retrieval order instead, as
-    condensation falls back to the raw query; cancellation propagates."""
+    """Pack `answer_hit_limit` of the candidates: the `pinned` ones first,
+    never offered to the model, then its choice among the others for the
+    slots left. No call when no slot is left or there are no more unpinned
+    candidates than slots. Any failure of the one call (transport, timeout,
+    empty or unusable reply) packs the pinned hits and the retrieval order
+    of the rest instead, as condensation falls back to the raw query;
+    cancellation propagates."""
     limit = settings.answer_hit_limit
     count = len(candidates)
-    if count <= limit:
-        return candidates, SelectOutcome("bypass", count, reason="few_candidates")
+    held = {hit.chunk_id for hit in pinned}
+    offered = [hit for hit in candidates if hit.chunk_id not in held]
+    free = limit - len(pinned)
+    unselected = order_selection(offered, [], limit, pinned)
+    if free <= 0 or len(offered) <= free:
+        return unselected, SelectOutcome(
+            "bypass", count, reason="few_candidates", pinned=len(pinned))
     try:
         result = await llm.chat(
-            build_select_messages(query, anchor, candidates, limit),
+            build_select_messages(query, anchor, offered, free),
             reasoning_effort=settings.reasoning_depth_effort("quick"),
             temperature=0.0,
         )
         content = result.content
     except Exception as exc:  # noqa: BLE001 — an optional stage must not fail the answer
         log.warning("candidate selection failed (%s); packing the retrieval order", error_type(exc))
-        return candidates[:limit], SelectOutcome("fallback", count, reason="model_error")
-    picked = parse_selection(content, count) if isinstance(content, str) else []
+        return unselected, SelectOutcome(
+            "fallback", count, reason="model_error", pinned=len(pinned))
+    picked = parse_selection(content, len(offered)) if isinstance(content, str) else []
     if not picked:
-        return candidates[:limit], SelectOutcome("fallback", count, reason="invalid_output")
+        return unselected, SelectOutcome(
+            "fallback", count, reason="invalid_output", pinned=len(pinned))
     return (
-        order_selection(candidates, picked, limit),
-        SelectOutcome("selected", count, selected=min(len(picked), limit)),
+        order_selection(offered, picked, limit, pinned),
+        SelectOutcome("selected", count, selected=min(len(picked), free), pinned=len(pinned)),
     )
