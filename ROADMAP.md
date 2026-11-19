@@ -81,9 +81,10 @@ arms saturated at 1.0 — no signal, stays default-off, no RC escalation.
 Gate-l1 cannot register this flag: it is hash-only and saturated, while
 contextual embedding refuses hash mode. This result does not establish a
 quality benefit or prove that the feature is useless on other corpora.
-It was measured on 21 points with small local models; it is open for
-re-measurement at the production profile (#1191, 2026-11-19). That needs a
-re-embed, so it follows the measurements that do not.
+It was measured on 21 points with a small local gist model (the record names
+no embedder). It is open for re-measurement at the production profile (#1191,
+2026-11-19) on an unsaturated independent development venue, as #300 requires.
+That needs a re-embed, so it follows the measurements that do not.
 
 Current embedding and evaluation contracts: [docs/ingest.md](docs/ingest.md)
 and [docs/eval.md](docs/eval.md).
@@ -124,11 +125,12 @@ and [docs/live-stack.md](docs/live-stack.md).
 > the +1-call latency cost. Until then, do not re-propose.
 >
 > **Measurement profile and reopening (#1191, 2026-11-19):** measured 2026-09-05 on `real_manuals` with
-> Qwen3-Embedding-0.6B (1024-dim) and the local reasoning model of that date. That is
-> history for that profile, not a verdict for the production profile. Open for
-> a pre-registered re-measurement there; adoption still needs a paired A/B on
-> an instrument with headroom (#1310: the dev golden is near-saturated at
-> document level).
+> Qwen3-Embedding-0.6B (1024-dim) and a live reasoning model the record does not name. That is
+> history for that profile, not a verdict for the production profile. Where
+> this note and the gate above differ, this note governs: a pre-registered
+> re-measurement at the production profile may be proposed. Adoption still
+> needs a paired A/B on an instrument with headroom (#1310, stand-in lane:
+> the dev golden is near-saturated at document level).
 
 Current acronym behavior and measured retry verdicts: [docs/retrieval.md](docs/retrieval.md).
 
@@ -175,13 +177,15 @@ Current L4 instrument and RC-only evaluation contract: [docs/eval.md](docs/eval.
 > headroom, both with per-query attribution on post-freeze real pools.
 > Until then, do not re-propose.
 >
-> **Measurement profile and reopening (#1191, 2026-11-19):** measured 2026-09-12 on the same September
-> `real_manuals` venue; only a fused-score margin trigger and acronym expansion
-> as the retry were tried, never a model-chosen follow-up query. That is
-> history for that profile, not a verdict for the production profile. Open for
-> a pre-registered re-measurement there; adoption still needs a paired A/B on
-> an instrument with headroom (#1310: the dev golden is near-saturated at
-> document level).
+> **Measurement profile and reopening (#1191, 2026-11-19):** measured 2026-09-12 on the `real_manuals`
+> collection of that date (the record names no embedder); the triggers tried
+> were the fused-score margin and the top score, and the only retry was
+> acronym expansion. No model-chosen follow-up query appears in the record. That is
+> history for that profile, not a verdict for the production profile. Where
+> this note and the gate above differ, this note governs: a pre-registered
+> re-measurement at the production profile may be proposed. Adoption still
+> needs a paired A/B on an instrument with headroom (#1310, stand-in lane:
+> the dev golden is near-saturated at document level).
 
 Decision evidence and reopening conditions: [docs/retrieval.md](docs/retrieval.md).
 
@@ -254,7 +258,8 @@ Decision evidence and reopening conditions: [docs/retrieval.md](docs/retrieval.m
 ### PR-20 (issue #94): Cross-reference graph ("GraphRAG-lite")
 > **Status: CLOSED (not planned).** No graph approach was built or evaluated.
 > Its precondition rests on the #82 and #86 verdicts, which are open for
-> re-measurement at the production profile (#1191, 2026-11-19).
+> re-measurement at the production profile (#1191, 2026-11-19); #94's own
+> conditions are unchanged.
 - ONLY if multi-hop questions still fail after #82 + #86. Extract entity/see-also/syntax
   cross-references at ingest (deterministic, no LLM community summaries); 1-hop expansion
   at retrieval. Full GraphRAG out of scope unless this proves the direction.
