@@ -664,3 +664,105 @@ def test_unchanged_airgap_env_renders_byte_identical_values_and_manifests(tmp_pa
     from_env = _render_pair(tmp_path / "from_env", via_file=False)
     assert from_file == from_env
 
+
+def test_registry_defaults_match_values_yaml_and_settings(tmp_path):
+    """Issue #1284 B1: every mapped registry default must match the actual
+    deployed default — `charts/mainframe-rag/values.yaml` when the chart sets
+    a value, or `Settings()` when the chart omits the key so the pod inherits
+    its runtime default (e.g. LLM_STREAM=False)."""
+    import yaml
+    from scripts.airgap.operator_keys import OPERATOR_KEYS, OPERATOR_KEYS_BY_NAME
+
+    from mainframe_rag.config import Settings
+
+    settings = Settings()
+    values = yaml.safe_load((REPO / "charts" / "mainframe-rag" / "values.yaml").read_text(encoding="utf-8"))
+
+    # Required/placeholder or list-encoded env keys whose values.yaml placeholder
+    # is not a runtime default.
+    skip_values_yaml = {
+        "INTERNAL_REGISTRY",
+        "STORAGE_CLASS",
+        "IMAGE_SHA",
+        "EMBED_BASE_URL",
+        "EMBED_MODEL",
+        "DENSE_DIM",
+        "EMBED_MODEL_REVISION",
+        "AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES",
+        "OPENWEBUI_IDP_EGRESS_CIDRS",
+        "INGEST_RETIRE_DOCS",
+        "OPENOBSERVE_RUN_AS_ID",
+        "SERVICEMONITOR_ENABLED",
+        "OPENWEBUI_RATINGS_ENABLED",
+        "LLM_EXTRA_BODY",
+    }
+
+    def _lookup(doc: dict, dotted: str) -> tuple[bool, object]:
+        cur: object = doc
+        for part in dotted.split("."):
+            if not isinstance(cur, dict) or part not in cur:
+                return False, None
+            cur = cur[part]
+        return True, cur
+
+    assert OPERATOR_KEYS_BY_NAME["LLM_STREAM"].default is False
+    for entry in OPERATOR_KEYS:
+        if "mapper" not in entry.surfaces or entry.name in skip_values_yaml or not entry.helm_path:
+            continue
+        present, chart_val = _lookup(values, entry.helm_path)
+        if present:
+            assert entry.default == chart_val, (
+                f"{entry.name}: registry default {entry.default!r} != values.yaml {entry.helm_path}={chart_val!r}"
+            )
+        else:
+            field_name = entry.name.lower()
+            assert hasattr(settings, field_name), f"{entry.name}: absent from values.yaml and Settings"
+            runtime_val = getattr(settings, field_name)
+            assert entry.default == runtime_val, (
+                f"{entry.name}: registry default {entry.default!r} != Settings().{field_name}={runtime_val!r}"
+            )
+
+    # End-to-end `config.sh show` with unset LLM_STREAM reports false [default].
+    make_bin_tree(tmp_path, ["common.sh", "config.sh"])
+    empty = tmp_path / "empty.env"
+    empty.write_text("", encoding="utf-8")
+    r = _run_config_sh(tmp_path, {"PATH": system_path(tmp_path / "bin"), "AIRGAP_ENV": str(empty)}, "show")
+    assert r.returncode == 0, r.stderr
+    assert "LLM_STREAM = false  [default]" in r.stdout
+
+
+def test_config_check_matches_map_values_for_metrics_enabled_spelling(tmp_path):
+    """Issue #1284 B2: `map_values.py` enables metrics only on exact
+    `METRICS_ENABLED=true`. `config check` must reject `METRICS_ENABLED=1` with
+    `SERVICEMONITOR_ENABLED=true` just like `validate.sh` / `deploy.sh`."""
+    make_bin_tree(tmp_path, ["common.sh", "config.sh"])
+    bad_file = tmp_path / "metrics_one.env"
+    bad_file.write_text(
+        "OPENWEBUI_ENABLED=false\n"
+        "METRICS_ENABLED=1\n"
+        "SERVICEMONITOR_ENABLED=true\n",
+        encoding="utf-8",
+    )
+    r_bad = _run_config_sh(
+        tmp_path,
+        {"PATH": system_path(tmp_path / "bin"), "AIRGAP_ENV": str(bad_file)},
+        "check",
+    )
+    assert r_bad.returncode != 0
+    assert "SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true" in r_bad.stdout + r_bad.stderr
+
+    good_file = tmp_path / "metrics_true.env"
+    good_file.write_text(
+        "OPENWEBUI_ENABLED=false\n"
+        "METRICS_ENABLED=true\n"
+        "SERVICEMONITOR_ENABLED=true\n",
+        encoding="utf-8",
+    )
+    r_good = _run_config_sh(
+        tmp_path,
+        {"PATH": system_path(tmp_path / "bin"), "AIRGAP_ENV": str(good_file)},
+        "check",
+    )
+    assert r_good.returncode == 0, r_good.stdout + r_good.stderr
+
+

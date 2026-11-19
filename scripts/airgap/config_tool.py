@@ -488,10 +488,11 @@ def _check_cross_key_rules(effective: Mapping[str, str], errors: list[str]) -> N
         if not retire:
             _add_unique(errors, "INGEST_AUTHORIZE_FROM_CATALOG requires INGEST_RETIRE_DOCS")
 
-    # SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true (#529)
+    # SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true (#529);
+    # map_values.py enables metrics only on exact `METRICS_ENABLED=true`.
     sm = _safe_bool(effective, "SERVICEMONITOR_ENABLED", False)
-    metrics = _safe_bool(effective, "METRICS_ENABLED", False)
-    if sm is True and metrics is not True:
+    metrics = effective.get("METRICS_ENABLED", "") == "true"
+    if sm is True and not metrics:
         _add_unique(
             errors,
             "SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true: refusing to monitor a disabled endpoint",

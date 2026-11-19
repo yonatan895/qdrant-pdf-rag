@@ -363,7 +363,7 @@ OPERATOR_KEYS: tuple[OperatorKey, ...] = (
         chart_env=("LLM_REASONING_EFFORTS",),
     ),
     OperatorKey(
-        "LLM_STREAM", _SEC_INFERENCE, "bool", True,
+        "LLM_STREAM", _SEC_INFERENCE, "bool", False,
         "Enable streaming responses from the reasoning LLM.",
         "#706", _EX_CHART, helm_path="models.reasoning.stream", chart_env=("LLM_STREAM",),
     ),
