@@ -636,7 +636,7 @@ def main(
         refuse_output(manifest_path(args.out))
         collection = args.collection
         if client is None or model is None or collection is None:
-            from mainframe_rag.config import load_settings
+            from mainframe_rag.config import load_settings, qdrant_pool_limits
 
             settings = load_settings()
             collection = collection or settings.qdrant_collection
@@ -647,8 +647,12 @@ def main(
         if client is None:
             from qdrant_client import QdrantClient
 
-            client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key,
-                                  timeout=settings.qdrant_timeout_s)
+            client = QdrantClient(
+                url=settings.qdrant_url,
+                api_key=settings.qdrant_api_key,
+                timeout=settings.qdrant_timeout_s,
+                limits=qdrant_pool_limits(settings.qdrant_url),
+            )
         if model is None:
             from mainframe_rag.agent.answer import HttpxLLMClient
 
@@ -669,7 +673,9 @@ def main(
         print(REFUSALS[exc.code], file=sys.stderr)
         return 2
     print(json.dumps(manifest["counts"], sort_keys=True))
-    return 0
+    # A run that kept nothing (no model configured, every row filtered) still
+    # leaves its manifest as the record, but is not a success.
+    return 0 if rows else 1
 
 
 if __name__ == "__main__":

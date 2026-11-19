@@ -464,6 +464,16 @@ def test_cli_writes_private_rows_and_a_manifest_and_prints_counts_only(tmp_path,
     assert "code=not_answerable" in caplog.text
 
 
+def test_cli_exits_1_and_keeps_the_manifest_when_no_row_is_kept(tmp_path, capsys):
+    out = tmp_path / "candidates.jsonl"
+    failing = ModelDouble(questions={i: gc.ModelCallError("down") for i in range(6)})
+    code, _, _ = _cli(out, model=failing)
+    counts = json.loads(gc.manifest_path(out).read_text())["counts"]
+    assert code == 1 and out.read_bytes() == b""
+    assert (counts["sampled"], counts["kept"], counts["dropped"]["model_error"]) == (6, 0, 6)
+    assert json.loads(capsys.readouterr().out) == counts
+
+
 def test_cli_output_is_byte_identical_for_the_same_seed(tmp_path):
     first, second = tmp_path / "one.jsonl", tmp_path / "two.jsonl"
     assert (_cli(first)[0], _cli(second)[0]) == (0, 0)

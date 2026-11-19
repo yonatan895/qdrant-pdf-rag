@@ -1559,6 +1559,8 @@ release set and writes no baseline.
   stored `rules_v` (a collection mixing versions is refused), seed, model
   label, classes, prompt sha256s, the hash rule, `rows_sha256`, and counts
   scanned, sampled, kept and dropped per code (sampled = kept + dropped).
+  Exit 0 with at least one row kept, 1 with none (the files are still
+  written), 2 on a refusal.
 
 Today the golden parser ignores the extra fields, so a candidate file passed
 to an explicit `--golden` would load; `gold_candidates.is_candidate_record`
