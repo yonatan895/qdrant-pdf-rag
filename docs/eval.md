@@ -1116,6 +1116,46 @@ recount each repeat from the export rows (`repeat`, `follow_up_kind`,
 `--out` and `--summary` hold questions, follow-ups and answers and stay. Any
 default change after the comparison is a separate maintainer decision.
 
+<a id="select-arm"></a>
+**Candidate-selection arm (`select-on`, issue #1309; stand-in lane only).**
+[Candidate selection](agent.md#candidate-selection) has no operator key, so
+this arm cannot run at a site: it is set in the agent's environment on the
+stand-in lane, and its result is relative to that lane's model.
+
+| Arm | Agent environment | Compare with |
+|---|---|---|
+| `select-on` | `ANSWER_SELECT_ENABLED=true`, `ANSWER_SELECT_CANDIDATES=40`, `ANSWER_HIT_LIMIT=N` | `select-off` |
+| `select-off` (control) | `ANSWER_HIT_LIMIT=N` only | n/a |
+
+- Run both with `--stream` (the buffered `/v1/answer` body carries no hits,
+  so `final_hits` is null there).
+- Before reading results, confirm from the stand-in's traces that most
+  non-identifier rows carry `rag.select_mode=selected`. Eval rows carry no
+  selection label, and the selection prompt is not budgeted (about 1,000
+  characters per candidate): on a window too small for it every row is a
+  `fallback` and the arm measures nothing. Lower `ANSWER_SELECT_CANDIDATES`
+  until the list fits.
+- Both arms pack the same number of excerpts (`N`, run with `--hit-limit N`),
+  so the difference is which candidates are packed, not how many. Raising
+  `ANSWER_HIT_LIMIT` instead is a different arm ([depth](#site-depth-arm)).
+- Same rows, flags, build and `--repeats` in both arms; restart the agent
+  between them and record the two values.
+- Read `final_hits` and `supplied_evidence_meta` (they are the selection):
+  `evidence_gold_hit_rate`, then pass rate and citation precision/recall per
+  class. The sibling `/v1/search` fields (`gold_retrieved`, `hit_doc_ids`)
+  are the unselected pool at depth `N` in both arms and do not move.
+- Cost: one extra lowest-effort model call per selected row; compare `timing`
+  p50 as cost, never as the deciding signal.
+- Identifier rows bypass the stage, so they should not move; a difference
+  there inside the repeat range is noise. An anchored follow-up row whose
+  antecedent names an identifier is not bypassed: its antecedent leg's head
+  is pinned and the model picks the remaining hits.
+- The wider retrieval's head can differ from the narrow retrieval's hits,
+  because the fuse cut depends on the limit: a `select-on` row that falls
+  back is not always the `select-off` row.
+- Read `rag.select_pinned` and the selected share from traces before
+  interpreting follow-up rows.
+
 <a id="site-depth-arm"></a>
 **Retrieval depth arm (issue #1191, `depth-8-3`).** Not the Pipe's answer
 depths (#1255, reasoning effort). Since #1274 the release retrieves 16 hits

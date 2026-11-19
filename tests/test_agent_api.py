@@ -179,6 +179,51 @@ def test_answer_hit_limit_sets_every_answer_retrieval_and_never_search(
     ]
 
 
+_SELECT_OPENER, _SELECT_FOLLOW_UP = "What does IEA500I mean?", "What should the operator do next?"
+_SELECT_PLAIN_OPENER = "How do I restart the widget service?"
+
+
+@pytest.mark.parametrize("path,payload,asked", [
+    ("/v1/search", {"json": {"query": "s1"}}, [("s1", 8)]),
+    ("/v1/answer", {"json": {"query": "a1"}}, [("a1", 24)]),
+    ("/v1/answer", {"json": {"query": "IEA500I"}}, [("IEA500I", 8)]),
+    ("/v1/chat", {"json": {"messages": [{"role": "user", "content": "c1"}]}}, [("c1", 24)]),
+    ("/v1/chat/completions", {"json": {"messages": [{"role": "user", "content": "c2"}]}},
+     [("c2", 24)]),
+    ("/v1/chat", {"json": {"messages": [
+        {"role": "user", "content": _SELECT_OPENER}, {"role": "assistant", "content": "Earlier."},
+        {"role": "user", "content": _SELECT_FOLLOW_UP}]}},
+     [(_SELECT_FOLLOW_UP, 24), (_SELECT_OPENER, 24)]),
+    ("/v1/chat", {"json": {"messages": [
+        {"role": "user", "content": _SELECT_PLAIN_OPENER},
+        {"role": "assistant", "content": "Earlier."},
+        {"role": "user", "content": _SELECT_FOLLOW_UP}]}},
+     [(_SELECT_FOLLOW_UP, 24), (_SELECT_PLAIN_OPENER, 24)]),
+    ("/ui/chat", {"data": {"message": "u1", "messages": ""}}, [("u1", 24)]),
+])
+def test_candidate_selection_widens_answer_retrievals_only(
+    monkeypatch, synthetic_pdf, servable_representation_gate, path, payload, asked
+):
+    """Issue #1309: with ANSWER_SELECT_ENABLED on, each answer retrieval (both
+    legs of an anchored follow-up included, whether or not its antecedent
+    names an identifier: that leg's head is pinned, not bypassed) asks for
+    ANSWER_SELECT_CANDIDATES hits; an identifier turn and /v1/search keep
+    their own limits."""
+    limits: list[tuple[str, int]] = []
+
+    def search(_qdrant, _embedder, _collection, query, *, limit, **_kwargs):
+        limits.append((query, limit))
+        return [_hit()], "nl", {"embed_ms": 1, "qdrant_ms": 2}
+
+    with agent_client(
+        monkeypatch, llm=FakeLLM(), search=search,
+        env={"UI_ENABLED": "true", "ANSWER_SELECT_ENABLED": "true",
+             "ANSWER_SELECT_CANDIDATES": "24", "ANSWER_HIT_LIMIT": "8"},
+    ) as c:
+        assert c.post(path, **payload).status_code == 200
+    assert sorted(limits) == sorted(asked)
+
+
 def test_answer_surfaces_inferred_citation_provenance(client, monkeypatch):
     """Issue #269: bracket-only cites stay validated but are flagged, so no
     client or eval has to guess the provenance."""

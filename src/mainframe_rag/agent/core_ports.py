@@ -21,8 +21,12 @@ class RetrievalResult:
 
 class Retriever(Protocol):
     async def __call__(
-        self, query: str, *, product: str | None, version: str | None, settings: Settings
-    ) -> RetrievalResult: ...
+        self, query: str, *, product: str | None, version: str | None, settings: Settings,
+        limit: int | None = ...,
+    ) -> RetrievalResult:
+        """`limit` is passed only for a wider candidate list (issue #1309);
+        without it the hit count is the operator's `answer_hit_limit`."""
+        ...
 
 
 class PromptBuilder[T](Protocol):
