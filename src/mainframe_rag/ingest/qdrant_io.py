@@ -359,15 +359,18 @@ def clone_collection(
     want: set[str] = set()
     # A final single-page/single-point wait=True only synchronizes the shard(s)
     # owning those points and skips write_consistency_factor error checks on
-    # intermediate wait=False pages. Restrict wait=False pipelining to explicit
-    # single-shard, unreplicated targets; multi-shard/replicated topologies
-    # (e.g. production 6/3/2) flush every batch with wait=True while overlapping
-    # scroll(src) with one in-flight synchronous upsert (#1298).
+    # intermediate wait=False pages. Restrict wait=False pipelining to the
+    # explicit 1/1/1 policy; every other target (e.g. production 6/3/2) flushes
+    # every batch with wait=True while overlapping scroll(src) with one
+    # in-flight synchronous upsert (#1298). An unset or partial policy is not
+    # 1/1/1: the server default then creates dst, with one shard per peer on a
+    # multi-peer cluster, and 1/1/1 is never inferred (deploy.md collection
+    # policy).
     single_shard_unreplicated = (
-        (settings.qdrant_shard_number or 1) == 1
-        and (settings.qdrant_replication_factor or 1) == 1
-        and (settings.qdrant_write_consistency_factor or 1) == 1
-    )
+        settings.qdrant_shard_number,
+        settings.qdrant_replication_factor,
+        settings.qdrant_write_consistency_factor,
+    ) == (1, 1, 1)
     if single_shard_unreplicated:
         pending_async = False
         last_point: models.PointStruct | None = None
