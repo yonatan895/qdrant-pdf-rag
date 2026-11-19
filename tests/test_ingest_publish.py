@@ -4399,20 +4399,23 @@ def test_build_and_cut_over_single_seal_and_bounded_verification_scans(tmp_path,
     assert served_docs == set(doc_ids)
 
 
-@pytest.mark.parametrize("tamper", ["catalog-summary", "build-id", "collection-point"])
+@pytest.mark.parametrize("tamper", ["content-seal", "catalog-summary", "build-id", "collection-point"])
 def test_publish_tampered_receipt_and_point_fail_closed(tmp_path, monkeypatch, tamper):
-    """Issue #1298: receipt readback rejects altered catalog/binding fields
-    before cutover, and independent seal verification on steady-state rerun
-    still catches tampered collection points."""
+    """Issue #1298: receipt readback rejects altered seal/catalog/binding fields
+    before cutover (including in-place payload mutation during upsert), and
+    independent seal verification on steady-state rerun still catches tampered
+    collection points."""
     fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     _build_doc_with_id(corpus, "doc_a", DOC_A)
 
-    if tamper in ("catalog-summary", "build-id"):
+    if tamper in ("content-seal", "catalog-summary", "build-id"):
         real_upsert = fake.upsert
 
         def corrupt_receipt(collection, *, points, wait=True):
             if any((p.payload or {}).get("record_type") == "publication-metadata" for p in points):
-                if tamper == "catalog-summary":
+                if tamper == "content-seal":
+                    points[0].payload["content_seal"]["data"]["sha256"] = "0" * 64
+                elif tamper == "catalog-summary":
                     points[0].payload["source_catalog"]["sha256"] = "0" * 64
                 else:
                     points[0].payload["build_id"] = "00000000-0000-4000-8000-000000000000"
@@ -4484,4 +4487,96 @@ def test_clone_collection_pipelines_upserts_and_avoids_second_source_scan(traili
     assert src_id_only_scrolls == [], f"unexpected post-copy src ID scan: {src_id_only_scrolls}"
     dst_id_scrolls = [c for c in fake.scroll_calls if c[0] == "dst_col" and not c[4]]
     assert dst_id_scrolls, "dst ID verification scan must still run"
+
+
+@pytest.mark.parametrize(
+    ("count", "trailing_empty_page"),
+    [
+        (201, False),  # 3 pages: 100, 100, 1-point final page -> only 1 of 6 shards touched last
+        (200, True),   # 2 pages + empty trailing page -> single-point barrier touches only 1 of 6 shards
+    ],
+)
+def test_clone_collection_6_3_2_flushes_every_shard_synchronously(count, trailing_empty_page):
+    """Issue #1298 B1: under multi-shard/replicated 6/3/2 policy, every cloned
+    page uses wait=True (overlapped with scroll) so all 6 shards flush and
+    enforce WCF=2 before dst ID verification — even with a 1-point final page
+    or empty trailing page."""
+    from mainframe_rag.ingest.qdrant_io import clone_collection
+
+    class _ShardedCloneFake(_CountingPublishFake):
+        """Models Qdrant per-shard visibility: wait=False buffers per shard;
+        wait=True flushes ONLY the shards touched by that call's points."""
+
+        def __init__(self, shards: int = 6):
+            super().__init__()
+            self.shards = shards
+            self.unflushed: dict[str, dict[int, list]] = {}
+
+        def _shard_of(self, point_id: object) -> int:
+            return int(str(point_id).rsplit("-", 1)[-1]) % self.shards
+
+        def scroll(
+            self,
+            collection,
+            *,
+            scroll_filter=None,
+            limit=10,
+            with_payload=None,
+            with_vectors=False,
+            offset=None,
+        ):
+            self.scroll_calls.append((collection, scroll_filter, limit, with_payload, with_vectors))
+            stored = self._filtered(collection, scroll_filter)
+            start = int(offset) if offset is not None else 0
+            page = stored[start : start + limit]
+            if trailing_empty_page and collection == "src_col" and page and start + limit == len(stored):
+                return page, str(start + limit)
+            nxt = str(start + limit) if start + limit < len(stored) else None
+            return page, nxt
+
+        def upsert(self, collection, *, points, wait=True):
+            self.upsert_waits.append((collection, len(points), wait))
+            if collection != "dst_col":
+                return super().upsert(collection, points=points, wait=wait)
+            buf = self.unflushed.setdefault(collection, {})
+            touched: set[int] = set()
+            for pt in points:
+                sh = self._shard_of(pt.id)
+                touched.add(sh)
+                buf.setdefault(sh, []).append(pt)
+            if wait:
+                to_commit = []
+                for sh in sorted(touched):
+                    to_commit.extend(buf.pop(sh, []))
+                if to_commit:
+                    super().upsert(collection, points=to_commit, wait=True)
+            return SimpleNamespace()
+
+    fake = _ShardedCloneFake(shards=6)
+    fake.collections["src_col"] = [
+        models.PointStruct(
+            id=f"00000000-0000-0000-0000-{i:012d}",
+            vector={"dense": [0.0] * 256, "bm25": models.SparseVector(indices=[0], values=[1.0])},
+            payload={"doc_id": "D", "text": f"p{i}"},
+        )
+        for i in range(count)
+    ]
+    settings = _settings(
+        ingest_scan_page_size=100,
+        qdrant_shard_number=6,
+        qdrant_replication_factor=3,
+        qdrant_write_consistency_factor=2,
+    )
+    clone_collection(fake, settings, "src_col", "dst_col")
+
+    assert len(fake.collections["dst_col"]) == count
+    assert not fake.unflushed.get("dst_col"), f"unflushed shards remained: {fake.unflushed}"
+    dst_upserts = [(n, w) for col, n, w in fake.upsert_waits if col == "dst_col"]
+    assert len(dst_upserts) >= 2
+    assert all(w is True for _, w in dst_upserts), (
+        f"multi-shard/replicated clone must use wait=True on every page: {dst_upserts}"
+    )
+    src_id_only_scrolls = [c for c in fake.scroll_calls if c[0] == "src_col" and not c[4]]
+    assert src_id_only_scrolls == [], f"unexpected post-copy src ID scan: {src_id_only_scrolls}"
+
 

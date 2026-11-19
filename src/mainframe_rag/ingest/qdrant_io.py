@@ -8,6 +8,7 @@ Collection mainframe_manuals (architecture.md section 4.3):
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 from uuid import UUID
 
@@ -312,6 +313,18 @@ def _point_ids(client: QdrantReader, settings: Settings, collection: str) -> set
         page_size=settings.ingest_scan_page_size)}
 
 
+def _records_to_points(
+    page: list[models.Record], want: set[str]
+) -> list[models.PointStruct]:
+    points: list[models.PointStruct] = []
+    for record in page:
+        want.add(str(record.id))
+        vector = getattr(record, "vector", None)
+        named: dict[str, Any] = dict(vector) if isinstance(vector, dict) else {}
+        points.append(models.PointStruct(id=record.id, vector=named, payload=record.payload))
+    return points
+
+
 def clone_collection(
     client: QdrantPoints, settings: Settings, src: str, dst: str
 ) -> None:
@@ -344,34 +357,59 @@ def clone_collection(
         client.create_payload_index(dst, field_name=field, field_schema=index.data_type)
     offset: int | str | UUID | None = None
     want: set[str] = set()
-    pending_async = False
-    last_point: models.PointStruct | None = None
-    while True:
-        page, offset = client.scroll(
-            src,
-            limit=settings.ingest_scan_page_size,
-            with_payload=True,
-            with_vectors=True,
-            offset=offset,
-        )
-        if page:
-            points = []
-            for record in page:
-                want.add(str(record.id))
-                vector = getattr(record, "vector", None)
-                named: dict[str, Any] = dict(vector) if isinstance(vector, dict) else {}
-                points.append(models.PointStruct(id=record.id, vector=named, payload=record.payload))
-            # Pipeline intermediate pages with wait=False; the final page (or
-            # explicit barrier below when the server ends with an empty page)
-            # synchronizes before verifying dst point IDs (#1298).
-            is_last = offset is None
-            client.upsert(dst, points=points, wait=is_last)
-            pending_async = not is_last
-            last_point = points[-1]
-        if offset is None or not page:
-            break
-    if pending_async and last_point is not None:
-        client.upsert(dst, points=[last_point], wait=True)
+    # A final single-page/single-point wait=True only synchronizes the shard(s)
+    # owning those points and skips write_consistency_factor error checks on
+    # intermediate wait=False pages. Restrict wait=False pipelining to explicit
+    # single-shard, unreplicated targets; multi-shard/replicated topologies
+    # (e.g. production 6/3/2) flush every batch with wait=True while overlapping
+    # scroll(src) with one in-flight synchronous upsert (#1298).
+    single_shard_unreplicated = (
+        (settings.qdrant_shard_number or 1) == 1
+        and (settings.qdrant_replication_factor or 1) == 1
+        and (settings.qdrant_write_consistency_factor or 1) == 1
+    )
+    if single_shard_unreplicated:
+        pending_async = False
+        last_point: models.PointStruct | None = None
+        while True:
+            page, offset = client.scroll(
+                src,
+                limit=settings.ingest_scan_page_size,
+                with_payload=True,
+                with_vectors=True,
+                offset=offset,
+            )
+            if page:
+                points = _records_to_points(page, want)
+                is_last = offset is None
+                client.upsert(dst, points=points, wait=is_last)
+                pending_async = not is_last
+                last_point = points[-1]
+            if offset is None or not page:
+                break
+        if pending_async and last_point is not None:
+            client.upsert(dst, points=[last_point], wait=True)
+    else:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending: Future[Any] | None = None
+            while True:
+                page, offset = client.scroll(
+                    src,
+                    limit=settings.ingest_scan_page_size,
+                    with_payload=True,
+                    with_vectors=True,
+                    offset=offset,
+                )
+                if pending is not None:
+                    pending.result()
+                    pending = None
+                if page:
+                    points = _records_to_points(page, want)
+                    pending = pool.submit(client.upsert, dst, points=points, wait=True)
+                if offset is None or not page:
+                    break
+            if pending is not None:
+                pending.result()
     got = _point_ids(client, settings, dst)
     if got != want:
         raise RuntimeError(
