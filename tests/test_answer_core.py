@@ -1536,35 +1536,37 @@ def test_core_type_boundary_rejects_storage_injection_and_write_use(tmp_path):
     import subprocess
     import sys
 
-    source = tmp_path / "capabilities.py"
     imports = """
 from mainframe_rag.agent.answer_core import AnswerCoreDeps
 from mainframe_rag.agent.core_ports import AnswerModel, Retriever
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import QdrantPoints
 """
-    source.write_text(imports + """
+    good = tmp_path / "good.py"
+    good.write_text(imports + """
 def good(settings: Settings, model: AnswerModel, read: Retriever) -> AnswerCoreDeps:
     return AnswerCoreDeps(settings=settings, llm=model, retrieve=read)
 
 """)
-    command = [sys.executable, "-m", "mypy", "--strict", "--follow-imports=silent",
-               "--no-incremental", str(source)]
-    good = subprocess.run(command, capture_output=True, text=True, check=False)
-    assert good.returncode == 0, good.stdout + good.stderr
-    source.write_text(imports + """
+    bad = tmp_path / "bad.py"
+    bad.write_text(imports + """
 def bad(settings: Settings, model: AnswerModel, writer: QdrantPoints,
         read: Retriever, deps: AnswerCoreDeps) -> None:
     AnswerCoreDeps(settings=settings, llm=model, retrieve=writer)
     read.upsert("corpus", points=[])
     deps.qdrant.upsert("corpus", points=[])
 """)
-    bad = subprocess.run(command, capture_output=True, text=True, check=False)
-    assert bad.returncode == 1, bad.stdout + bad.stderr
-    assert 'incompatible type "QdrantPoints"; expected "Retriever"' in bad.stdout
-    assert '"Retriever" has no attribute "upsert"' in bad.stdout
-    assert '"AnswerCoreDeps" has no attribute "qdrant"' in bad.stdout
-    assert "Found 3 errors" in bad.stdout
+    command = [sys.executable, "-m", "mypy", "--strict", "--follow-imports=silent",
+               "--no-incremental", str(good), str(bad)]
+    checked = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert checked.returncode == 1, checked.stdout + checked.stderr
+    assert str(good) not in checked.stdout
+    error_lines = [line for line in checked.stdout.splitlines() if ": error:" in line]
+    assert len(error_lines) == 3 and all(line.startswith(f"{bad}:") for line in error_lines)
+    assert 'incompatible type "QdrantPoints"; expected "Retriever"' in checked.stdout
+    assert '"Retriever" has no attribute "upsert"' in checked.stdout
+    assert '"AnswerCoreDeps" has no attribute "qdrant"' in checked.stdout
+    assert "Found 3 errors in 1 file (checked 2 source files)" in checked.stdout
 
 
 @pytest.mark.anyio
