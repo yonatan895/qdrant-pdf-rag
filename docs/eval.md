@@ -1146,8 +1146,15 @@ stand-in lane, and its result is relative to that lane's model.
   are the unselected pool at depth `N` in both arms and do not move.
 - Cost: one extra lowest-effort model call per selected row; compare `timing`
   p50 as cost, never as the deciding signal.
-- Identifier rows bypass the stage, so they should not move; a difference
+- Identifier rows bypass the stage (as do anchored follow-up rows whose
+  antecedent names an identifier), so they should not move; a difference
   there inside the repeat range is noise.
+- The wider retrieval's head can differ from the narrow retrieval's hits,
+  because the fuse cut depends on the limit: a `select-on` row that falls
+  back is not always the `select-off` row.
+- Before reading a null result on follow-up rows, check from the traces how
+  often selection actually ran on follow-ups: an antecedent that names an
+  identifier bypasses it (`rag.select_reason=anchor_identifier`).
 
 <a id="site-depth-arm"></a>
 **Retrieval depth arm (issue #1191, `depth-8-3`).** Not the Pipe's answer

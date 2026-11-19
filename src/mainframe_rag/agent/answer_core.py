@@ -308,10 +308,10 @@ async def retrieve_for_answer(
     and every chat route alike: the plan's retrieval, then candidate selection
     when ANSWER_SELECT_ENABLED is on (issue #1309; later stages, if ever
     built, run after it). Off, this is `retrieve_planned` and nothing else.
-    On, a turn whose own search names an identifier or screens as a trap, or
-    whose candidate setting is no wider than `answer_hit_limit`, retrieves as
-    usual with no model call; every other turn retrieves once at
-    `answer_select_candidates` and the selection (or, on any failure of that
+    On, a turn whose searched text (its query or an anchored antecedent)
+    names an identifier or screens as a trap, or whose candidate setting is
+    no wider than `answer_hit_limit`, retrieves as usual with no model call;
+    every other turn retrieves once at `answer_select_candidates` and the selection (or, on any failure of that
     call, the retrieval order cut to `answer_hit_limit`) is the result.
     A selection failure is never a retrieval failure. `parent_span` gets the
     outcome as fixed labels and counts, never text."""

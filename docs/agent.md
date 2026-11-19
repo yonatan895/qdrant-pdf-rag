@@ -1668,7 +1668,7 @@ console (never `/v1/search` or MCP search) do this after the search plan:
 
 | Step | Rule |
 |---|---|
-| Bypass before retrieval | The turn's own searched text names an identifier or abend code (`names_identifier`, the condensation and anchoring bypass), or a searched text screens as a trap, or `answer_select_candidates <= answer_hit_limit`: the usual retrieval at `answer_hit_limit`, no model call. An anchored follow-up whose antecedent names an identifier is not bypassed |
+| Bypass before retrieval | Any searched text (the turn's query or an anchored antecedent) names an identifier or abend code (`names_identifier`, the condensation and anchoring predicate; reason `identifier` for the turn's query, `anchor_identifier` when only the antecedent names one), or a searched text screens as a trap, or `answer_select_candidates <= answer_hit_limit`: the usual retrieval at `answer_hit_limit`, no model call |
 | Candidates | One retrieval at `answer_select_candidates` (each leg of an anchored follow-up, fused literal-first and cut to that count). No more candidates than `answer_hit_limit`: packed as retrieved, no model call |
 | Call | One reasoning-model call at the lowest offered effort (`reasoning_depth_effort("quick")`), temperature 0, under `answer_timeout_s` and the request deadline. The model reads the searched question (and the antecedent on an anchored follow-up) and, per candidate, `[n]`, the cite, the heading and the first 600 characters of the text |
 | Reply | Must be one JSON array. Only an integer from 1 to the candidate count counts, once; unknown or repeated numbers, booleans, strings and other shapes select nothing. The reply can only reorder and cut the supplied candidates |
@@ -1681,7 +1681,7 @@ never rewrites the query and never retrieves again. Its fallback order is the
 head of the wider retrieval; that this equals the `answer_hit_limit`
 retrieval is not asserted. The root span carries `rag.select_mode`
 (`selected` | `bypass` | `fallback`), `rag.select_reason` (`identifier` |
-`trap` | `few_candidates` | `model_error` | `invalid_output`; absent when
+`anchor_identifier` | `trap` | `few_candidates` | `model_error` | `invalid_output`; absent when
 selected), `rag.select_candidates` and `rag.select_selected` (model-chosen
 hits packed); the call is an `answer.select` child span. A failure logs the
 error class only. Timings gain no key: the call's time is inside the request's

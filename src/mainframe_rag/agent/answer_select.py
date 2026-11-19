@@ -27,7 +27,8 @@ log = logging.getLogger(__name__)
 
 type SelectMode = Literal["selected", "bypass", "fallback"]
 type SelectReason = Literal[
-    "identifier", "trap", "few_candidates", "model_error", "invalid_output"
+    "identifier", "anchor_identifier", "trap", "few_candidates", "model_error",
+    "invalid_output",
 ]
 
 # Characters of each candidate shown to the model. The prefix bounds the
@@ -69,11 +70,16 @@ class SelectOutcome:
 
 def bypass_reason(query: str, anchor: str | None = None) -> SelectReason | None:
     """Why a turn is packed in retrieval order with no model call, decided
-    from the searched text alone, before retrieval: the turn's own search
-    names an identifier (the condensation and anchoring bypass,
-    `names_identifier`), or a searched text screens as a trap."""
+    from the searched text alone, before retrieval: any searched text (the
+    turn's query or an anchored antecedent) names an identifier (the
+    condensation and anchoring predicate, `names_identifier`), or a
+    searched text screens as a trap. The label tells the two identifier
+    cases apart: `identifier` (the turn's query) and `anchor_identifier`
+    (only the antecedent of an anchored follow-up)."""
     if names_identifier(query):
         return "identifier"
+    if anchor is not None and names_identifier(anchor):
+        return "anchor_identifier"
     if any(screen_query(text) == "trap" for text in (query, anchor) if text is not None):
         return "trap"
     return None

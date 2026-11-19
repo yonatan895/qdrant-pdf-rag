@@ -2815,27 +2815,67 @@ async def test_selection_bypass_makes_no_model_call(query, pool, overrides, reas
 @pytest.mark.anyio
 async def test_selection_on_an_anchored_follow_up_picks_from_the_fused_list():
     """Both legs are asked for the wider limit, fuse literal-first to that
-    count, and the model picks from the fused list. The antecedent naming an
-    identifier is no bypass: the turn's own search text does not."""
+    count, and the model picks from the fused list (neither searched text
+    names an identifier)."""
     search = _WideSearch({
         _FOLLOW_UP: [_cand(n, "L") for n in range(1, 6)],
-        _OPENER: [_cand(n, "A") for n in range(1, 6)],
+        _SELECT_Q: [_cand(n, "A") for n in range(1, 6)],
     })
     llm = _SelectLLM("[4, 6, 1]")
     deps = _select_deps(llm, search, answer_select_candidates=4, chat_followup_anchor_enabled=True)
-    source = AnswerCoreInput(query=_FOLLOW_UP, messages=_follow_up_messages(), is_chat=True)
+    source = AnswerCoreInput(
+        query=_FOLLOW_UP, messages=_follow_up_messages(opener=_SELECT_Q), is_chat=True)
     root = _recording_root()
     out = await execute_answer_core(source, deps, parent_span=root)
-    assert sorted(search.calls) == sorted([(_FOLLOW_UP, 4), (_OPENER, 4)])
+    assert sorted(search.calls) == sorted([(_FOLLOW_UP, 4), (_SELECT_Q, 4)])
     listed = llm.select_calls[0]["messages"][-1].content
     order = [listed.index(f"head-{chunk}") for chunk in ("L1", "A1", "L2", "A2")]
     assert order == sorted(order)
     assert "head-L3" not in listed and "[5]" not in listed
-    assert f"Earlier question: {_OPENER}" in listed and f"Question: {_FOLLOW_UP}" in listed
+    assert f"Earlier question: {_SELECT_Q}" in listed and f"Question: {_FOLLOW_UP}" in listed
     assert _ids(out.hits) == ["A2", "L1", "A1"]
     assert _select_attributes(root) == {
         "rag.select_mode": "selected", "rag.select_candidates": 4, "rag.select_selected": 2,
     }
+
+
+@pytest.mark.anyio
+async def test_selection_is_bypassed_when_an_anchored_antecedent_names_an_identifier():
+    """Maintainer decision D1 (2026-11-19, issue #1309): the identifier
+    bypass reads every searched text. An anchored follow-up whose own query
+    names no identifier but whose antecedent does is packed from the usual
+    fused retrieval (both legs at answer_hit_limit) with no selection call,
+    under its own fixed label (`anchor_identifier`), distinct from the
+    turn's own query naming one (`identifier`)."""
+    search = _WideSearch({
+        _FOLLOW_UP: [_cand(n, "L") for n in range(1, 6)],
+        _OPENER: [_cand(n, "A") for n in range(1, 6)],
+    })
+    llm = _SelectLLM("[3]")
+    deps = _select_deps(llm, search, chat_followup_anchor_enabled=True)
+    source = AnswerCoreInput(query=_FOLLOW_UP, messages=_follow_up_messages(), is_chat=True)
+    root = _recording_root()
+    out = await execute_answer_core(source, deps, parent_span=root)
+    assert dict(root.attributes)["rag.followup_mode"] == "anchored"
+    assert sorted(search.calls) == sorted([(_FOLLOW_UP, None), (_OPENER, None)])
+    assert llm.select_calls == [] and len(llm.answer_calls) == 1
+    assert _ids(out.hits) == ["L1", "A1", "L2"]
+    assert _select_attributes(root) == {
+        "rag.select_mode": "bypass", "rag.select_reason": "anchor_identifier",
+        "rag.select_candidates": 3, "rag.select_selected": 0,
+    }
+
+
+def test_selection_bypass_labels_tell_the_query_from_the_antecedent():
+    """The two identifier bypasses carry distinct fixed labels; the turn's
+    own query wins when both name one, and the trap screen comes after."""
+    from mainframe_rag.agent.answer_select import bypass_reason
+
+    assert bypass_reason(_FOLLOW_UP, _OPENER) == "anchor_identifier"
+    assert bypass_reason("IEA500I rejected", None) == "identifier"
+    assert bypass_reason("IEA500I rejected", _OPENER) == "identifier"
+    assert bypass_reason(_FOLLOW_UP, _SELECT_Q) is None
+    assert bypass_reason(_FOLLOW_UP, None) is None
 
 
 def test_selection_order_rule_is_model_order_then_retrieval_fill():

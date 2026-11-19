@@ -180,6 +180,7 @@ def test_answer_hit_limit_sets_every_answer_retrieval_and_never_search(
 
 
 _SELECT_OPENER, _SELECT_FOLLOW_UP = "What does IEA500I mean?", "What should the operator do next?"
+_SELECT_PLAIN_OPENER = "How do I restart the widget service?"
 
 
 @pytest.mark.parametrize("path,payload,asked", [
@@ -192,7 +193,12 @@ _SELECT_OPENER, _SELECT_FOLLOW_UP = "What does IEA500I mean?", "What should the 
     ("/v1/chat", {"json": {"messages": [
         {"role": "user", "content": _SELECT_OPENER}, {"role": "assistant", "content": "Earlier."},
         {"role": "user", "content": _SELECT_FOLLOW_UP}]}},
-     [(_SELECT_FOLLOW_UP, 24), (_SELECT_OPENER, 24)]),
+     [(_SELECT_FOLLOW_UP, 8), (_SELECT_OPENER, 8)]),
+    ("/v1/chat", {"json": {"messages": [
+        {"role": "user", "content": _SELECT_PLAIN_OPENER},
+        {"role": "assistant", "content": "Earlier."},
+        {"role": "user", "content": _SELECT_FOLLOW_UP}]}},
+     [(_SELECT_FOLLOW_UP, 24), (_SELECT_PLAIN_OPENER, 24)]),
     ("/ui/chat", {"data": {"message": "u1", "messages": ""}}, [("u1", 24)]),
 ])
 def test_candidate_selection_widens_answer_retrievals_only(
@@ -200,7 +206,8 @@ def test_candidate_selection_widens_answer_retrievals_only(
 ):
     """Issue #1309: with ANSWER_SELECT_ENABLED on, each answer retrieval (both
     legs of an anchored follow-up included) asks for ANSWER_SELECT_CANDIDATES
-    hits; an identifier turn and /v1/search keep their own limits."""
+    hits; an identifier turn, an anchored follow-up whose antecedent names an
+    identifier (maintainer decision D1) and /v1/search keep their own limits."""
     limits: list[tuple[str, int]] = []
 
     def search(_qdrant, _embedder, _collection, query, *, limit, **_kwargs):
