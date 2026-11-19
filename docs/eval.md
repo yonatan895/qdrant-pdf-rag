@@ -1127,6 +1127,14 @@ stand-in lane, and its result is relative to that lane's model.
 | `select-on` | `ANSWER_SELECT_ENABLED=true`, `ANSWER_SELECT_CANDIDATES=40`, `ANSWER_HIT_LIMIT=N` | `select-off` |
 | `select-off` (control) | `ANSWER_HIT_LIMIT=N` only | n/a |
 
+- Run both with `--stream` (the buffered `/v1/answer` body carries no hits,
+  so `final_hits` is null there).
+- Before reading results, confirm from the stand-in's traces that most
+  non-identifier rows carry `rag.select_mode=selected`. Eval rows carry no
+  selection label, and the selection prompt is not budgeted (about 1,000
+  characters per candidate): on a window too small for it every row is a
+  `fallback` and the arm measures nothing. Lower `ANSWER_SELECT_CANDIDATES`
+  until the list fits.
 - Both arms pack the same number of excerpts (`N`, run with `--hit-limit N`),
   so the difference is which candidates are packed, not how many. Raising
   `ANSWER_HIT_LIMIT` instead is a different arm ([depth](#site-depth-arm)).

@@ -2700,12 +2700,12 @@ async def test_selection_packs_the_models_choice_in_its_order_then_fills_from_re
     assert [call["reasoning_effort"] for call in llm.select_calls] == ["low"]
     listed = llm.select_calls[0]["messages"][-1].content
     assert f"Question: {_SELECT_Q}" in listed
-    for n in range(1, 7):
-        assert f"[{n}] {_cand(n).cite}" in listed
-        assert _cand(n).heading in listed
-        assert f"head-C{n}" in listed
-        assert f"tail-C{n}" not in listed
-    assert "C7" not in listed
+    blocks = listed.split("Candidate excerpts:\n")[1].split("\n\n")[:6]
+    assert [block.split("\n")[:2] for block in blocks] == [
+        [f"[{n}] {_cand(n).cite}", _cand(n).heading] for n in range(1, 7)]
+    assert [block.split("\n")[2][:8] for block in blocks] == [f"head-C{n} " for n in range(1, 7)]
+    assert [len(block.split("\n")[2]) for block in blocks] == [600] * 6
+    assert "tail-C" not in listed and "C7" not in listed
     assert len(listed) < 6 * 1200
     packed = llm.answer_calls[0]["messages"][-1].content
     assert [marker in packed for marker in ("head-C5", "head-C2", "head-C1", "head-C3", "head-C4")] == [
