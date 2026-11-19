@@ -1314,7 +1314,7 @@ class TaskContractsTests(unittest.TestCase):
     # script name differs from the task name).
     AIRGAP_STAGES: ClassVar[dict[str, str]] = {"pack": "pack.sh", "load": "load.sh", "deploy": "deploy.sh",
                      "ingest": "ingest.sh", "smoke": "smoke.sh", "validate": "validate.sh",
-                     "pipeline": "pipeline.sh", "retire-legacy": "retire_legacy.sh"}
+                     "pipeline": "pipeline.sh", "retire-legacy": "retire_legacy.sh", "config": "config.sh"}
     # airgap.env.example names these two as GitLab CI/CD variables read by
     # .gitlab-ci.yml, "not from this file"; no air-gap script reads them.
     CI_ONLY_EXAMPLE_NAMES: ClassVar[frozenset[str]] = frozenset({"CI_APPROVED_REGISTRY", "CI_PYTHON_IMAGE"})

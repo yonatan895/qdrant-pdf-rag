@@ -125,6 +125,7 @@
     ],
     "task_names": [
       "agent-doctor",
+      "airgap:config",
       "airgap:deploy",
       "airgap:dryrun",
       "airgap:ingest",
@@ -367,6 +368,8 @@
       "qdrant:snapshotPersistence.storageClassName"
     ],
     "script_flags": [
+      "config.sh --help",
+      "config.sh -h",
       "import-script BUNDLE",
       "import-script FORK",
       "import-script R",

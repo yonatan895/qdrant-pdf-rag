@@ -481,6 +481,31 @@ def test_ingest_authorize_from_catalog_renders_only_with_retire_docs(ingest_tree
     assert_no_placeholders(rendered)
 
 
+@pytest.mark.parametrize("with_retire", [True, False])
+def test_ingest_authorize_from_catalog_from_airgap_env_file_only(ingest_tree, with_retire):
+    """Issue #1284 regression: setting INGEST_AUTHORIZE_FROM_CATALOG only inside
+    airgap.env (without exporting it in the caller process environment) must
+    still reach map_values.py and render --authorize-from-catalog (or fail
+    closed without INGEST_RETIRE_DOCS)."""
+    tmp_path, _ = ingest_tree
+    lines = ["INGEST_AUTHORIZE_FROM_CATALOG=true"]
+    if with_retire:
+        lines.append("INGEST_RETIRE_DOCS='SA22-0000-00@ibm|zos|2.5|abc'")
+    env_file = tmp_path / "site.env"
+    env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    r = _run_ingest(ingest_tree, ("AIRGAP_ENV", str(env_file)))
+    if not with_retire:
+        assert r.returncode != 0
+        assert "INGEST_AUTHORIZE_FROM_CATALOG requires INGEST_RETIRE_DOCS" in r.stderr
+        return
+    assert r.returncode == 0, r.stderr
+    rendered = (tmp_path / "dist" / "ingest-rendered.yaml").read_text()
+    assert rendered_container(rendered, "ingest")["args"][-3:] == [
+        "--retire-doc", "SA22-0000-00@ibm|zos|2.5|abc", "--authorize-from-catalog",
+    ]
+    assert_no_placeholders(rendered)
+
+
 def test_ingest_retire_docs_preserves_interior_spaces_in_product_label(ingest_tree):
     """Issue #391 Q419-I1: operator inputs with interior spaces (e.g. from
     normalize_label on product names) must not be fragmented by word splitting.

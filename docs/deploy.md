@@ -177,9 +177,35 @@ restores the snapshot over whatever the file assigned; empty stays unset
   selections keep their previous defaults and interpretation. Render/precedence
   evidence lives in `test_map_values.py`, `test_helm_chart_contracts.py` and
   `test_airgap_deploy_sh.py`; live model/deployment acceptance stays separate.
-- **Maintenance rule:** a new `.example` key must join `OPERATOR_ENV_KEYS`
-  and the Task bridge; `test_every_example_key_crosses_the_task_cli_and_beats_the_file`
-  derives the keys from the example and fails until both are updated.
+- **Maintenance rule (#1284):** `scripts/airgap/operator_keys.py` (stdlib-only,
+  `python3 -I`-safe) is the single key registry for all operator keys. Every
+  key entry declares its name, section, type, default, bounds/allowed values,
+  one-line description, owning issue, and surfaces. `OPERATOR_ENV_KEYS` in
+  `scripts/airgap/common.sh`, the `TASK_OP_KEYS`/`TASK_*` bridge in
+  `taskfiles/airgap.yml`, `airgap.env.example` key lines/sections, and
+  `tests/fixtures/extension-surface.json` are sync-tested against the registry
+  (`python3 -I scripts/airgap/operator_keys.py --check` and
+  `tests/test_airgap_operator_config.py`). `common.sh`'s `export_operator_env`
+  exports every non-empty `OPERATOR_ENV_KEYS` entry before invoking
+  `model_config.py` or `map_values.py`, so file-only `airgap.env` assignments
+  cannot be dropped by a hand-maintained export list.
+- **Inspecting and checking operator config (`airgap:config`, #1284):**
+  - `sh scripts/tools/run-task.sh airgap:config -- show` prints the effective
+    configuration (same CLI/env > file > preset > default precedence as every
+    stage), grouped by registry section and marking each key as `[default]`,
+    `[set (file)]`, or `[set (env)]`. Secret-reference keys print the Secret
+    name only (`(secret-ref)`); sensitive credentials (such as
+    `TRACE_QUERY_PASSWORD`) print `<redacted>`, so the output is safe to paste
+    into a receipt.
+  - `sh scripts/tools/run-task.sh airgap:config -- check` checks for unknown
+    keys in `airgap.env` (with "did you mean" suggestions), type and bound
+    violations, mutually exclusive settings (such as `CHAT_CONDENSE_ENABLED`
+    with `CHAT_FOLLOWUP_ANCHOR_ENABLED`), deprecated/retired keys, forbidden
+    plaintext gateway keys, and process-env-only overrides set in the file. It
+    emits fixed messages only (receipt-safe) and exits nonzero on errors.
+    `airgap:validate` runs `config check` as a non-fatal warning first; run
+    `airgap:config -- check` explicitly before `airgap:validate` when editing
+    `airgap.env`.
 - The plaintext gateway-key guard (`LLM_API_KEY`, `EMBED_API_KEY`,
   `RERANK_API_KEY`, `CONTEXT_LLM_API_KEY`) scans the operator file text before it
   is sourced (any `export`/`readonly`/`declare`/chained form) and rejects any
@@ -2257,11 +2283,38 @@ and the current model-ownership agreement. **Decision owners:** `common.sh`
 override/require/normalization helpers, `validate.sh`, deploy/ingest renderers and
 `config.Settings` / `representation.require_attested_revision`.
 
-**Producer → state → consumers:** operator setting → `airgap.env.example` and
-explicit environment → `OPERATOR_ENV_KEYS` snapshot/restore around file loading
-→ `require_env` plus blank/preflight validation → generated Helm values → schema validation and chart rendering
-→ both agent and ingest environments → Settings and operation-specific interpretation. Trace every step
-for a newly required input; an example alone or agent-only render is insufficient.
+**Producer → state → consumers:** operator setting → `scripts/airgap/operator_keys.py`
+registry → `airgap.env.example` and explicit environment → `OPERATOR_ENV_KEYS`
+snapshot/restore and `export_operator_env` around file loading → `require_env`
+plus blank/preflight validation → generated Helm values → schema validation and
+chart rendering → both agent and ingest environments → Settings and
+operation-specific interpretation. Trace every step for a newly required input;
+an example alone or agent-only render is insufficient.
+
+**Adding an operator key (#1284):**
+1. Add one `OperatorKey` entry in `scripts/airgap/operator_keys.py` with its
+   section, type (`bool`/`int`/`float`/`enum`/`str`/`path`/`secret-ref`),
+   default, bounds or allowed values, one-line description, owning issue, and
+   surfaces (`shell_snapshot`, `task_bridge`, `example`, `preflight`, `mapper`
+   + `helm_path`, `chart_env`, `qdrant_helm`).
+2. Add the runtime `Settings` field (when applicable), mapper/validation logic
+   (`scripts/airgap/model_config.py` / `scripts/airgap/map_values.py`), and
+   chart values/schema/template wiring.
+3. Sync the derived surfaces:
+   - Replace `OPERATOR_ENV_KEYS` in `scripts/airgap/common.sh` with the output
+     of `python3 -I scripts/airgap/operator_keys.py --operator-env-keys` (no
+     manual `export` list edits are needed; `export_operator_env` loops over
+     `OPERATOR_ENV_KEYS`).
+   - Add the commented or active example line under the matching `# --- ... ---`
+     section in `airgap.env.example` (preserving hand-written prose).
+   - Refresh `tests/fixtures/extension-surface.json` via
+     `.venv/bin/python scripts/extension_surface.py --write`.
+   - For the Verifier-owned `taskfiles/airgap.yml`, apply the exact output of
+     `python3 -I scripts/airgap/operator_keys.py --taskfile-bridge` and include
+     that diff in the PR body for the maintainer's Verifier decision.
+4. Run `python3 -I scripts/airgap/operator_keys.py --check` and
+   `tests/test_airgap_operator_config.py` — any missing or unregistered surface
+   fails closed.
 Maintenance modes (issue #391 current packet) follow the same path:
 `INGEST_REINGEST`, `INGEST_RETIRE_DOCS` and `INGEST_AUTHORIZE_FROM_CATALOG` are `OPERATOR_ENV_KEYS` validated by
 `scripts/airgap/ingest.sh` and rendered into the ingest Job args (`INGEST_RETIRE_DOCS` accepts comma- or newline-separated
