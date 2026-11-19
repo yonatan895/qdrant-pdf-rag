@@ -13,8 +13,8 @@ import re
 import time
 import unicodedata
 from collections import defaultdict
-from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from collections.abc import Coroutine, Sequence
+from typing import TYPE_CHECKING, Any
 
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
@@ -890,6 +890,48 @@ def _query_filters(
     return flt, fallback_flt
 
 
+async def _gather_fail_fast[T](*coros: Coroutine[Any, Any, T]) -> list[T]:
+    """Run coroutines concurrently, preserving input order and cancelling
+    still-running siblings if any coroutine fails or is cancelled."""
+    tasks: list[asyncio.Task[T]] = [asyncio.create_task(coro) for coro in coros]
+    try:
+        return list(await asyncio.gather(*tasks))
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
+async def _prefetch_one_leg(
+    client: AsyncQdrantReader,
+    collection: str,
+    dense_vec: list[float],
+    sparse_idx: list[int],
+    sparse_val: list[float],
+    flt: models.Filter | None,
+    fallback_flt: models.Filter | None,
+    prefetch_limit: int,
+    dense_params: models.SearchParams | None = None,
+) -> tuple[list[models.ScoredPoint], list[models.ScoredPoint], bool]:
+    dense_req, sparse_req = _build_prefetch_requests(
+        dense_vec, sparse_idx, sparse_val, flt, prefetch_limit, dense_params
+    )
+    responses = await client.query_batch_points(collection, requests=[dense_req, sparse_req])
+    dense_points, sparse_points = responses[0].points, responses[1].points
+    retried = _needs_filter_fallback(dense_points, sparse_points, flt, fallback_flt)
+    if retried:
+        dense_req, sparse_req = _build_prefetch_requests(
+            dense_vec, sparse_idx, sparse_val, fallback_flt, prefetch_limit, dense_params
+        )
+        responses = await client.query_batch_points(
+            collection, requests=[dense_req, sparse_req]
+        )
+        dense_points, sparse_points = responses[0].points, responses[1].points
+    return dense_points, sparse_points, retried
+
+
 async def _prefetch_leg_points(
     client: AsyncQdrantReader,
     collection: str,
@@ -903,27 +945,43 @@ async def _prefetch_leg_points(
     leg, one batched dense + BM25 query under the ORIGINAL filter (splitting
     changes ranking text only, never the constraint allowlist, so a stripped
     cause leg cannot surface must_not docs the symptom filter excluded), and
-    the empty-filtered retry under the relaxed filter. Returns (dense,
-    sparse, retried) per leg. `dense_params` rides every dense request,
-    the retry included."""
-    legs = []
-    for dense_vec, sparse_idx, sparse_val in leg_vecs:
-        dense_req, sparse_req = _build_prefetch_requests(
-            dense_vec, sparse_idx, sparse_val, flt, prefetch_limit, dense_params
+    the empty-filtered retry under the relaxed filter. Multi-leg prefetches
+    run concurrently while returning (dense, sparse, retried) in exact
+    `leg_vecs` order. `dense_params` rides every dense request, the retry
+    included."""
+    if not leg_vecs:
+        return []
+    if len(leg_vecs) == 1:
+        dense_vec, sparse_idx, sparse_val = leg_vecs[0]
+        return [
+            await _prefetch_one_leg(
+                client,
+                collection,
+                dense_vec,
+                sparse_idx,
+                sparse_val,
+                flt,
+                fallback_flt,
+                prefetch_limit,
+                dense_params,
+            )
+        ]
+    return await _gather_fail_fast(
+        *(
+            _prefetch_one_leg(
+                client,
+                collection,
+                dense_vec,
+                sparse_idx,
+                sparse_val,
+                flt,
+                fallback_flt,
+                prefetch_limit,
+                dense_params,
+            )
+            for dense_vec, sparse_idx, sparse_val in leg_vecs
         )
-        responses = await client.query_batch_points(collection, requests=[dense_req, sparse_req])
-        dense_points, sparse_points = responses[0].points, responses[1].points
-        retried = _needs_filter_fallback(dense_points, sparse_points, flt, fallback_flt)
-        if retried:
-            dense_req, sparse_req = _build_prefetch_requests(
-                dense_vec, sparse_idx, sparse_val, fallback_flt, prefetch_limit, dense_params
-            )
-            responses = await client.query_batch_points(
-                collection, requests=[dense_req, sparse_req]
-            )
-            dense_points, sparse_points = responses[0].points, responses[1].points
-        legs.append((dense_points, sparse_points, retried))
-    return legs
+    )
 
 
 async def async_search(
@@ -977,13 +1035,29 @@ async def async_search(
             attributes={"rag.embedder": type(embedder).__name__},
         ):
             t0 = time.monotonic()
-            # One embed per retrieval leg, sequential (parity over fan-out;
-            # each leg stays off the event loop via to_thread like today).
-            leg_vecs: list[tuple[list[float], list[int], list[float]]] = []
-            for eq in eff_legs:
-                dense_vec = (await asyncio.to_thread(embedder.dense_query, [eq]))[0]
-                sparse_idx, sparse_val = (await asyncio.to_thread(embedder.sparse_query, [eq]))[0]
-                leg_vecs.append((dense_vec, sparse_idx, sparse_val))
+            # Run dense (HTTP POST) and sparse (CPU BM25) concurrently across
+            # all retrieval legs in one batch per encoder, preserving exact
+            # eff_legs order and upfront embed_max_input_chars refusal.
+            dense_task = asyncio.create_task(
+                asyncio.to_thread(embedder.dense_query, list(eff_legs))
+            )
+            sparse_task = asyncio.create_task(
+                asyncio.to_thread(embedder.sparse_query, list(eff_legs))
+            )
+            try:
+                dense_vecs, sparse_vecs = await asyncio.gather(dense_task, sparse_task)
+            except BaseException:
+                for task in (dense_task, sparse_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(dense_task, sparse_task, return_exceptions=True)
+                raise
+            leg_vecs: list[tuple[list[float], list[int], list[float]]] = [
+                (dense_vec, sparse_idx, sparse_val)
+                for _, dense_vec, (sparse_idx, sparse_val) in zip(
+                    eff_legs, dense_vecs, sparse_vecs, strict=True
+                )
+            ]
             timings["embed_ms"] = int((time.monotonic() - t0) * 1000)
 
         with start_as_current_span(

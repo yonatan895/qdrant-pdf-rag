@@ -2452,3 +2452,78 @@ async def test_core_anchored_lookup_after_a_coding_turn_is_not_a_coding_turn(str
         output = await execute_answer_core(source, deps)
     assert llm.calls[-1]["messages"][0].content == SYSTEM_PROMPT
     assert output.complexity == "simple"
+
+
+@pytest.mark.anyio
+async def test_retrieve_planned_runs_literal_and_anchor_concurrently_with_parity():
+    """Issue #1297: retrieve_planned runs literal and anchor legs concurrently
+    while preserving literal-first _fuse_by_rank order, literal query kind,
+    and summed per-leg timings even when the anchor leg finishes first."""
+    import asyncio
+
+    literal = [_anchor_hit("L1", "DOC-L"), _anchor_hit("S", "DOC-S"), _anchor_hit("L2", "DOC-L")]
+    anchored = [_anchor_hit("A1", "DOC-A"), _anchor_hit("S", "DOC-S"), _anchor_hit("A2", "DOC-A")]
+    both_started = asyncio.Event()
+    anchor_done = asyncio.Event()
+    in_flight = 0
+
+    async def concurrent_retrieve(query, *, product, version, settings):
+        nonlocal in_flight
+        in_flight += 1
+        if in_flight == 2:
+            both_started.set()
+        await both_started.wait()
+        if query == _FOLLOW_UP:
+            await anchor_done.wait()
+            return RetrievalResult(list(literal), "nl", {"embed_ms": 1, "qdrant_ms": 2})
+        anchor_done.set()
+        return RetrievalResult(
+            list(anchored), "identifier", {"embed_ms": 1, "qdrant_ms": 2, "rerank_ms": 4}
+        )
+
+    settings = _settings(chat_followup_anchor_enabled=True)
+    deps = replace(_deps(settings, CoreFakeLLM(), _LegSearch({})), retrieve=concurrent_retrieve)
+    source = AnswerCoreInput(query=_FOLLOW_UP, messages=_follow_up_messages(), is_chat=True)
+    plan = await plan_search(source, deps)
+    assert (plan.mode, plan.query, plan.anchor) == ("anchored", _FOLLOW_UP, _OPENER)
+
+    found = await asyncio.wait_for(retrieve_planned(plan, source, deps), timeout=2.0)
+    assert [h.chunk_id for h in found.hits] == ["L1", "A1", "S", "L2", "A2"]
+    assert found.kind == "nl"
+    assert found.timings == {"embed_ms": 2, "qdrant_ms": 4, "rerank_ms": 4}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failing_leg", ["literal", "anchor"])
+async def test_retrieve_planned_fails_together_and_cancels_sibling_leg(failing_leg):
+    """Issue #1297: either leg failing fails the turn promptly and cancels the
+    in-flight sibling leg cleanly (no leaked background task)."""
+    import asyncio
+
+    sibling_started = asyncio.Event()
+    sibling_cancelled = False
+
+    async def failing_retrieve(query, *, product, version, settings):
+        nonlocal sibling_cancelled
+        is_failing = (failing_leg == "literal" and query == _FOLLOW_UP) or (
+            failing_leg == "anchor" and query == _OPENER
+        )
+        if is_failing:
+            await sibling_started.wait()
+            raise RuntimeError(f"{failing_leg} boom")
+        sibling_started.set()
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            sibling_cancelled = True
+            raise
+        return RetrievalResult([], "nl", {})
+
+    settings = _settings(chat_followup_anchor_enabled=True)
+    deps = replace(_deps(settings, CoreFakeLLM(), _LegSearch({})), retrieve=failing_retrieve)
+    source = AnswerCoreInput(query=_FOLLOW_UP, messages=_follow_up_messages(), is_chat=True)
+    plan = await plan_search(source, deps)
+
+    with pytest.raises(RuntimeError, match=f"{failing_leg} boom"):
+        await asyncio.wait_for(retrieve_planned(plan, source, deps), timeout=2.0)
+    assert sibling_cancelled is True

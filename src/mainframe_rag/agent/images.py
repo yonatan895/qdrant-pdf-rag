@@ -27,6 +27,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import math
 import re
 import struct
 import time
@@ -504,32 +505,61 @@ async def read_images(
     *,
     deadline_left_s: Callable[[], float],
 ) -> TurnImages:
-    """One transcription call per distinct image, in order, each a single
-    attempt bounded by CHAT_IMAGE_READ_TIMEOUT_S and half of what the request
-    deadline has left. Identical images (same content hash) share one call
-    within the request. A failed or empty read is recorded as None; the caller
-    decides whether the turn can continue."""
-    cache: dict[str, ImageRead | None] = {}
+    """One transcription call per distinct image, concurrently, each a single
+    attempt under one shared stage timeout budget bounded by
+    CHAT_IMAGE_READ_TIMEOUT_S and half of what the request deadline has left.
+    Identical images (same content hash) share one call within the request.
+    A failed or empty read is recorded as None; the caller decides whether the
+    turn can continue."""
     started = time.monotonic()
+    if not turn.images:
+        turn.reads = []
+        turn.read_ms = int((time.monotonic() - started) * 1000)
+        return turn
+    distinct: list[TurnImage] = []
+    seen_hashes: set[str] = set()
+    for image in turn.images:
+        if image.sha256 not in seen_hashes:
+            seen_hashes.add(image.sha256)
+            distinct.append(image)
+    timeout = min(settings.chat_image_read_timeout_s, max(0.0, deadline_left_s()) / 2)
+    if timeout <= 0:
+        turn.timed_out = True
+        turn.reads = [None] * len(turn.images)
+        turn.read_ms = int((time.monotonic() - started) * 1000)
+        return turn
+    deadline = None if math.isinf(timeout) else asyncio.get_running_loop().time() + timeout
+    tasks: list[asyncio.Task[tuple[ImageRead | None, bool, str | None]]] = [
+        asyncio.create_task(_read_one(chat, image, settings, deadline))
+        for image in distinct
+    ]
+    try:
+        results = await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    outcomes = dict(zip((img.sha256 for img in distinct), results, strict=True))
     reads: list[ImageRead | None] = []
     for image in turn.images:
-        if image.sha256 not in cache:
-            cache[image.sha256] = await _read_one(chat, image, settings, turn, deadline_left_s())
-        reads.append(cache[image.sha256])
+        read, timed_out, err = outcomes[image.sha256]
+        reads.append(read)
+        if timed_out:
+            turn.timed_out = True
+        if err is not None and turn.error is None:
+            turn.error = err
     turn.reads = reads
     turn.read_ms = int((time.monotonic() - started) * 1000)
     return turn
 
 
 async def _read_one(
-    chat: ReadCall, image: TurnImage, settings: Settings, turn: TurnImages, left_s: float,
-) -> ImageRead | None:
-    timeout = min(settings.chat_image_read_timeout_s, max(0.0, left_s) / 2)
-    if timeout <= 0:
-        turn.timed_out = True
-        return None
+    chat: ReadCall, image: TurnImage, settings: Settings, deadline: float | None,
+) -> tuple[ImageRead | None, bool, str | None]:
     try:
-        async with asyncio.timeout(timeout):
+        async with asyncio.timeout_at(deadline):
             result = await chat(
                 image_read_messages(image),
                 reasoning_effort=settings.reasoning_depth_effort("quick"),
@@ -537,19 +567,15 @@ async def _read_one(
                 max_tokens=settings.chat_image_read_max_tokens,
             )
     except TimeoutError:
-        turn.timed_out = True
-        turn.error = turn.error or "TimeoutError"
-        return None
+        return None, True, "TimeoutError"
     except Exception as exc:  # noqa: BLE001 — one attempt; the caller maps the failure to a fixed code
-        turn.error = turn.error or error_type(exc)
-        return None
+        return None, False, error_type(exc)
     content = getattr(result, "content", None)
     read = (parse_image_read(content, settings.chat_image_read_max_chars)
             if isinstance(content, str) else ImageRead())
     if not read.usable:
-        turn.error = turn.error or "empty_read"
-        return None
-    return read
+        return None, False, "empty_read"
+    return read, False, None
 
 
 def span_attributes(turn: TurnImages) -> Mapping[str, int | bool]:
