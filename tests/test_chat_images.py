@@ -651,3 +651,128 @@ def test_a_failed_or_empty_read_is_labelled_by_type_only():
         fields = turn.log_fields()
         assert (turn.reads, fields["image_read_error"], fields["image_read_failed"]) == ([None], label, True)
         assert TRANSCRIPT_MARKER not in json.dumps(fields)
+
+
+def test_read_images_runs_distinct_hashes_concurrently_and_preserves_dedup_mapping():
+    """Issue #1297: distinct-hash _read_one calls overlap via asyncio.gather
+    while deduping identical hashes and preserving input order even when the
+    second distinct image finishes first."""
+    first = img.validate_image_url(_url(_png(seed=11)), _on())
+    other = img.validate_image_url(_url(_png(seed=22)), _on())
+
+    async def run():
+        both_started = asyncio.Event()
+        second_done = asyncio.Event()
+        started = 0
+        calls: list[str] = []
+
+        async def chat(messages, **kwargs):
+            nonlocal started
+            url = messages[1].image_urls[0]
+            calls.append(url)
+            started += 1
+            if started == 2:
+                both_started.set()
+            await both_started.wait()
+            if url == first.url:
+                await second_done.wait()
+                return ChatResult(
+                    content="SCREEN TEXT:\nFIRST\nIDENTIFIERS:\nIEA500I\nDESCRIPTION: first",
+                    finish_reason="stop", usage=TokenUsage(),
+                )
+            second_done.set()
+            return ChatResult(
+                content="SCREEN TEXT:\nSECOND\nIDENTIFIERS:\nIEA501I\nDESCRIPTION: second",
+                finish_reason="stop", usage=TokenUsage(),
+            )
+
+        turn = img.TurnImages(images=(first, other, first), typed="q")
+        await asyncio.wait_for(
+            img.read_images(chat, turn, _on(), deadline_left_s=lambda: 100.0), timeout=2.0
+        )
+        assert len(calls) == 2
+        assert len(turn.reads) == 3
+        assert turn.reads[0] is not None and turn.reads[0].screen_text == "FIRST"
+        assert turn.reads[1] is not None and turn.reads[1].screen_text == "SECOND"
+        assert turn.reads[2] == turn.reads[0]
+        assert not turn.failed and not turn.timed_out and turn.error is None
+
+    asyncio.run(run())
+
+
+def test_read_images_selects_first_failed_index_error_deterministically():
+    """Issue #1297: even when a later image fails before an earlier image,
+    TurnImages.error records the first failed image's error label in input
+    order (matching sequential semantics)."""
+    img0 = img.validate_image_url(_url(_png(seed=31)), _on())
+    img1 = img.validate_image_url(_url(_png(seed=32)), _on())
+    img2 = img.validate_image_url(_url(_png(seed=33)), _on())
+
+    async def run():
+        img2_failed = asyncio.Event()
+
+        async def chat(messages, **kwargs):
+            url = messages[1].image_urls[0]
+            if url == img0.url:
+                return ChatResult(
+                    content="SCREEN TEXT:\nOK\nIDENTIFIERS:\nIEA500I\nDESCRIPTION: ok",
+                    finish_reason="stop", usage=TokenUsage(),
+                )
+            if url == img1.url:
+                await img2_failed.wait()
+                raise ValueError("slow failure on index 1")
+            img2_failed.set()
+            raise RuntimeError("fast failure on index 2")
+
+        turn = img.TurnImages(images=(img0, img1, img2), typed="q")
+        await asyncio.wait_for(
+            img.read_images(chat, turn, _on(), deadline_left_s=lambda: 100.0), timeout=2.0
+        )
+        assert turn.reads[0] is not None and turn.reads[0].screen_text == "OK"
+        assert turn.reads[1] is None and turn.reads[2] is None
+        assert turn.failed and not turn.timed_out
+        assert turn.error == "ValueError"
+
+    asyncio.run(run())
+
+
+def test_read_images_shares_one_stage_timeout_budget_and_keeps_completed_reads():
+    """Issue #1297: distinct image reads share one stage timeout budget
+    min(chat_image_read_timeout_s, left_s / 2) rather than stacking N budgets,
+    and a fast read survives when a sibling times out."""
+    import time
+
+    img0 = img.validate_image_url(_url(_png(seed=41)), _on())
+    img1 = img.validate_image_url(_url(_png(seed=42)), _on())
+
+    async def run():
+        # Both slow: wall time stays bounded by one shared 0.12s stage budget,
+        # not 2 * 0.12s = 0.24s.
+        async def both_slow(messages, **kwargs):
+            await asyncio.sleep(5)
+
+        turn = img.TurnImages(images=(img0, img1), typed="")
+        t0 = time.monotonic()
+        await img.read_images(both_slow, turn, _on(), deadline_left_s=lambda: 0.24)
+        elapsed = time.monotonic() - t0
+        assert elapsed < 0.22, f"expected shared stage budget (~0.12s), took {elapsed:.3f}s"
+        assert turn.reads == [None, None]
+        assert turn.timed_out and turn.failed and turn.error == "TimeoutError"
+
+        # One fast, one slow: fast read is preserved when sibling hits stage timeout.
+        async def mixed(messages, **kwargs):
+            if messages[1].image_urls[0] == img0.url:
+                return ChatResult(
+                    content="SCREEN TEXT:\nFAST\nIDENTIFIERS:\nIEA500I\nDESCRIPTION: fast",
+                    finish_reason="stop", usage=TokenUsage(),
+                )
+            await asyncio.sleep(5)
+            return ChatResult(content="", finish_reason="stop", usage=TokenUsage())
+
+        turn2 = img.TurnImages(images=(img0, img1), typed="q")
+        await img.read_images(mixed, turn2, _on(), deadline_left_s=lambda: 0.16)
+        assert turn2.reads[0] is not None and turn2.reads[0].screen_text == "FAST"
+        assert turn2.reads[1] is None
+        assert turn2.timed_out and turn2.failed and turn2.error == "TimeoutError"
+
+    asyncio.run(run())
