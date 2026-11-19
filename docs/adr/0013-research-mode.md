@@ -108,15 +108,16 @@ one answer call. Each decision names the alternative considered.
    *Alternatives:* a deadline only (rejected: C16); a loop that runs until the
    model says done (the issue's forbidden outcome).
 5. **D5, the user selects the mode per request; never the default in the
-   first release.** Two gates: an operator switch (default off, no production
-   manifest sets it before D9 is met) and a per-request field on the chat
+   first release.** Two gates: an operator switch (default off; when a site
+   may turn it on for opt-in use is open point 9) and a per-request field on the chat
    routes, separate from `reasoning_depth`/`reasoning_effort` so that
    `thorough` keeps its meaning. With the operator switch off, a request that
    asks for the mode gets a fixed 4xx with a stable code before retrieval or
    any model call, never a silent ordinary answer. In Open WebUI the docs Pipe
    lists one extra entry only when the switch is on, and that entry sends the
    field; the Pipe still makes no retrieval, planning or model call of its own
-   (C8). Neither the model nor retrieved text can turn the mode on.
+   (C8). The answer call's effort on that entry is open point 10. Neither the
+   model nor retrieved text can turn the mode on.
    *Alternatives:* attach it to `thorough` (rejected: a silent behaviour
    change for existing users); a score-based automatic trigger (rejected:
    that is #86's measured-negative trigger, C20).
@@ -125,14 +126,16 @@ one answer call. Each decision names the alternative considered.
    one attempt, no retry, under the stage budget and the request deadline. A
    transport error, timeout, empty or malformed reply ends the loop, and the
    answer uses the evidence held; no new client error and no fabricated query.
-   A failed follow-up search also ends the loop with the evidence held (open
-   point 5). First-round failures are unchanged. Cancellation and the request
-   deadline propagate. This is a new fallback under C18, so the build adds its
-   row to the policy table with bounded Settings and evidence.
+   A failed follow-up search is a retrieval fault like any other: the existing
+   fixed `502 upstream_error`, identical on every path (C22); the alternative,
+   answering with the evidence held, is open point 5. Cancellation and the
+   request deadline propagate. The planning-call fallback is new under C18, so
+   the build adds its row to the policy table with bounded Settings and
+   evidence.
 7. **D7, evidence and citations.** A follow-up hit is an ordinary retrieval
    hit: every packed excerpt keeps its stored citation, appears in
-   `supplied_evidence` and the citation allowlist, and passes the existing
-   chunk screening. The model's query text is never evidence and never
+   `supplied_evidence` and the citation allowlist, and is packed under the
+   same prompt rules as a first-round hit. The model's query text is never evidence and never
    grounds a citation; citation validation is unchanged.
 8. **D8, a text-free trace per round.** The root span records the mode, the
    rounds run, the searches made and one stop reason from a closed
@@ -140,7 +143,7 @@ one answer call. Each decision names the alternative considered.
    new hits). Follow-up query text is manual-derived, so it never enters
    spans, logs or the feedback record (C19). Names are fixed by the build
    issue with `docs/metric-contract.md`.
-9. **D9, measured before any default or site enablement.** The dev golden
+9. **D9, measured before any default change.** The dev golden
    cannot rank this (#1310: near-saturated at document level). The decision
    instrument is the generated passage-level gold of #1317, which does not
    exist yet, from a batch that passed its spot-check rate. Required: a
@@ -154,8 +157,8 @@ one answer call. Each decision names the alternative considered.
    concern.
 10. **D10, what this does not reopen.**
     - *HyDE and step-back (#82, C21):* those replaced the user's query before
-      the first retrieval; step-back failed by dropping the product tokens
-      that select the manual. Here the first retrieval is always the user's
+      the first retrieval; step-back's recorded failure (PR #175) was dropping
+      the product tokens that select the manual. Here the first retrieval is always the user's
       query, its hits are never displaced (D4), and the scope filter is fixed
       (D2). #82 stays closed under its own gate.
     - *Margin-triggered retry (#86, C20):* no score decides a re-search and
@@ -179,11 +182,11 @@ is designed to satisfy it.
 | C4 | `docs/adr/0003-zowe-mcp-read.md`:95-96 | "Search never calls an LLM; routing is deterministic and trap queries always route `manual`." | Confirmed (D1, D3) |
 | C5 | `docs/adr/0003-zowe-mcp-read.md`:133-134 | "*Generic tool/connector framework or LLM-chosen tool calls:* the model would pick sources and untrusted text could steer reads." | Confirmed; the reason D2 and D3 exist |
 | C6 | `docs/agent.md`:2122-2123 | "Search never calls an LLM; routing is deterministic and trap queries stay on the manuals path." | Confirmed |
-| C7 | `docs/adr/0010-team-tools-on-open-webui.md`:37-39, 185-186 | "The **Docs model stays tool-free**: it is still only the hash-checked docs Pipe over the agent, with no tool, tool server or Function attached." and "**A repository-owned tool loop.** Rejected: it would be a new orchestration layer in this repository." | Confirmed; reading in D1, open point 2 |
+| C7 | `docs/adr/0010-team-tools-on-open-webui.md`:37-39, 47-48, 185-186 | "The **Docs model stays tool-free**: it is still only the hash-checked docs Pipe over the agent, with no tool, tool server or Function attached." and "The loop runs outside this repository's runtime: the repository adds no orchestration layer." and "**A repository-owned tool loop.** Rejected: it would be a new orchestration layer in this repository." | Confirmed for Team models and the Docs model; whether D1's stage is such a layer is open point 2 |
 | C8 | `docs/adr/0007-open-webui-docs-front-end.md`:83-85, 132-133 | "The only models are the docs Pipe's entries: one Function, whose answer-depth entries Open WebUI lists as models `mainframe_rag_docs.<depth>`, each answering only through the agent" and "The Pipe is stateless. It does no retrieval, prompt assembly, tool planning or LLM calls of its own." | **V2 amended** (one more entry that is not an answer depth, D5); V3 confirmed |
 | C9 | `docs/adr/0007-open-webui-docs-front-end.md`:119-121 | "With pasted images on, the agent makes one extra reasoning-model call per image (its reading feeds retrieval);" | Precedent |
 | C10 | `docs/agent.md`:192-193 | "one low-effort reasoning call rewrites the latest turn into a standalone search query" | Precedent (`CHAT_CONDENSE_ENABLED`, default off) |
-| C11 | `docs/agent.md`:1681-1682, 1691-1692 | "The stage never rewrites the query and never retrieves again." and "Stage order is fixed for later work: select, then (if ever built) expand." | Precedent (#1309). **Amended:** the first sentence stays true of selection; a research request does not run selection in the first release (open point 4) |
+| C11 | `docs/agent.md`:1681-1682, 1691-1692 | "The stage never rewrites the query and never retrieves again." and "Stage order is fixed for later work: select, then (if ever built) expand." | Precedent (#1309, `agent/answer_select.py`). **Amended:** the first sentence stays true of selection; a research request does not run selection in the first release (open point 4) |
 | C12 | `docs/agent.md`:1671 | "or a searched text (the query or an anchored antecedent) screens as a trap" | Relied on (D3) |
 | C13 | `docs/agent.md`:1988 | "The read text is model output, so its control characters become spaces and it is clipped" | Precedent; D3 is stricter |
 | C14 | `docs/retrieval.md`:371-373 | "`screen_query` classifies each query as `answerable` or `trap` with deterministic regexes over a normalized query — no LLM, no network, no model to vendor." | Relied on (D3) |
@@ -194,13 +197,15 @@ is designed to satisfy it.
 | C19 | `docs/agent.md`:1252-1253 | "Span attributes carry finite labels, counts, and operator config only" | Relied on (D8) |
 | C20 | `ROADMAP.md`:163-166; `docs/retrieval.md`:364 | "**Reopening gate (all required):** a confidence signal with measured hit/miss separation plus a retry variant with measured positive headroom, both with per-query attribution on post-freeze real pools. Until then, do not re-propose." and "margin never decides re-search" | Not changed here; dependency on #1313 (open point 1) |
 | C21 | `ROADMAP.md`:118-121 | "**Reopening gate (all required):** per-query attribution shows failures from vocabulary mismatch (query terms absent from relevant docs) on the post-#214/#216 stack; paired A/B on a post-re-ingest real corpus; beats the +1-call latency cost. Until then, do not re-propose." | Not reopened (D10) |
+| C22 | `docs/agent.md`:539 | "Any retrieval or condensation fault, identical on search, answer, chat and console (#985)" | Confirmed (D6); amended only if open point 5 goes the other way |
 
 ## Consequences
 
 - An opted-in answer costs up to the round bound in extra planning calls and
   searches, and more latency; an ordinary request is byte-identical to today.
 - A research answer can hold more excerpts than an ordinary one, so prompt
-  budget trimming is hit more often.
+  budget trimming is hit more often; it trims from the tail, so follow-up
+  hits go first.
 - Residual risk: with no product scope set, a follow-up query can add hits
   from another product's manual. They can only follow the first-round hits,
   and D9's attribution measures it.
@@ -217,18 +222,19 @@ is designed to satisfy it.
    model-written follow-up? *Recommendation:* treat it as covered, merge or
    decline #1313 first, and accept this record only after that; do not waive
    the gate inside this ADR.
-2. **Is a fixed search-only stage a "repository-owned loop" in ADR-0010's
-   sense?** *Recommendation:* no, on the D1 reading (one operation, no tool
-   registry, no dependency), recorded here so it is not stretched to tools.
+2. **Is a fixed search-only stage an "orchestration layer" in ADR-0010's
+   sense (C7: TD3 and the rejected repository-owned tool loop)?**
+   *Recommendation:* no, on the D1 reading (one operation, no tool registry,
+   no dependency), recorded here so it is not stretched to tools.
 3. **Bound values.** *Recommendation:* at most 2 follow-up rounds, at most 3
    searches per request, ceilings fixed in code; the stage budget and packed
    cap are set from the stand-in measurement, not guessed here.
 4. **Research with candidate selection (#1309).** *Recommendation:* exclusive
    per request in the first release (selection bypasses with a fixed reason),
    so each is measured alone; combine only after both have results.
-5. **A failed follow-up search.** *Recommendation:* end the loop and answer
-   with the evidence held, with a fixed stop reason. The stricter alternative
-   is the existing `502 upstream_error` for any retrieval fault.
+5. **A failed follow-up search.** *Recommendation:* keep D6, the existing
+   `502 upstream_error` (C22). The alternative, ending the loop and answering
+   with the first-round evidence, amends C22 and needs its own evidence (C18).
 6. **Routes.** *Recommendation:* the chat routes and the docs Pipe only;
    `/v1/answer` and the console (frozen fallback) get no field in the first
    release.
@@ -237,5 +243,13 @@ is designed to satisfy it.
    text is manual-derived model output. Showing it is a later decision.
 8. **Planning-call effort.** *Recommendation:* the lowest offered effort, as
    the other auxiliary calls use, with the effort recorded in D9's runs.
-9. **ADR number.** 0012 is taken by open PR #1295; this is 0013 and is
-   renumbered only on request.
+9. **May a site turn the operator switch on for opt-in use before #1317
+   results exist?** D9 gates only a default change. *Recommendation:* yes,
+   as a labelled pilot, once a stand-in run shows the bounds hold and trap
+   and abstain behaviour is unchanged; quality claims wait for D9.
+10. **Answer effort of the research entry.** A Pipe entry sends one value, so
+    research and answer depth do not combine in the picker. *Recommendation:*
+    the research entry answers at the `standard` effort; a research entry per
+    depth is a later decision.
+11. **ADR number.** 0012 is taken by open PR #1295; this is 0013 and is
+    renumbered only on request.
