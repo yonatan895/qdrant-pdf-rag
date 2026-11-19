@@ -31,7 +31,12 @@ gateway_transport = test_local_gateway_sh.gateway_transport
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = "example.invalid/gateway@sha256:" + "a" * 64
-TEST_TIME_SCALE = 0.05
+TEST_TIME_SCALE = 0.2
+# 0.2, not a deeper cut: at 0.05 the 30 s run window scales to 1.5 s, which a
+# loaded 2-core CI runner can miss on subprocess spawn overhead alone (the
+# canary and the unit 8/8 lane each observed one such timing failure while
+# the same tree passed elsewhere). 0.2 keeps every window at 4x that margin
+# and still quarters the suite's sleeps.
 
 
 @pytest.fixture(autouse=True)
