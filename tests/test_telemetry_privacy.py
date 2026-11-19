@@ -217,6 +217,78 @@ def test_follow_up_mode_is_a_text_free_root_attribute(
     assert CANARY_QUERY not in "\n".join(_formatted_logs(caplog))
 
 
+class _SelectingLLM(FakeLLM):
+    """FakeLLM whose candidate-selection call (told apart by its candidate
+    list) returns `reply` or raises it."""
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.select_calls = 0
+
+    def chat(self, messages, reasoning_effort=None, temperature=None):
+        if "Candidate excerpts:" not in messages[-1].content:
+            return super().chat(messages, reasoning_effort, temperature)
+        self.select_calls += 1
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return ChatResult(content=self.reply, finish_reason="stop", usage=TokenUsage())
+
+
+@pytest.mark.parametrize("path,stream,root_name", [
+    ("/v1/answer", False, "v1.answer"),
+    ("/v1/answer", True, "v1.answer"),
+    ("/v1/chat", False, "v1.chat"),
+    ("/v1/chat", True, "v1.chat"),
+    ("/ui/chat", False, "ui.chat"),
+])
+@pytest.mark.parametrize("reply,attributes,kept", [
+    ("[2]", {"rag.select_mode": "selected", "rag.select_selected": 1}, 1),
+    (f"[2] {CANARY_EXC}",
+     {"rag.select_mode": "fallback", "rag.select_reason": "invalid_output", "rag.select_selected": 0}, 0),
+    (RuntimeError(" / ".join(CANARIES)),
+     {"rag.select_mode": "fallback", "rag.select_reason": "model_error", "rag.select_selected": 0}, 0),
+])
+def test_candidate_selection_records_only_labels_and_counts(
+    client, caplog, monkeypatch, path, stream, root_name, reply, attributes, kept
+):
+    """Issue #1309: on every answer route the stage's outcome is a fixed
+    label and counts on the root span, with one `answer.select` child for the
+    model call; no span or log carries the question, a candidate, the model's
+    reply or its error text. The hit the client receives is the selection."""
+    c, exporter = client
+    hits = [_hit(doc_id=f"{CANARY_DOC}-{n}") for n in range(3)]
+    llm = _SelectingLLM(reply)
+    monkeypatch.setattr(app_mod, "retrieve_search", MagicSearch(hits=hits))
+    monkeypatch.setattr(app_mod, "llm", llm)
+    monkeypatch.setattr(app_mod.settings, "answer_select_enabled", True)
+    monkeypatch.setattr(app_mod.settings, "answer_hit_limit", 1)
+    monkeypatch.setattr(app_mod.settings, "ui_enabled", True)
+    with caplog.at_level(logging.INFO):
+        if path == "/ui/chat":
+            resp = c.post(path, data={"message": CANARY_QUERY, "messages": ""})
+        elif path == "/v1/answer":
+            resp = c.post(path, json={"query": CANARY_QUERY, "stream": stream})
+        else:
+            resp = c.post(path, json={"messages": [{"role": "user", "content": CANARY_QUERY}],
+                                      "stream": stream})
+    assert resp.status_code == 200
+    assert llm.select_calls == 1
+    assert f"{CANARY_DOC}-{kept}" in resp.text
+    assert [f"{CANARY_DOC}-{n}" in resp.text for n in range(3) if n != kept] == [False, False]
+    spans = exporter.get_finished_spans()
+    root = next(s for s in spans if s.name == root_name)
+    assert {k: v for k, v in root.attributes.items() if k.startswith("rag.select")} == {
+        "rag.select_candidates": 3, **attributes,
+    }
+    children = [s for s in spans if s.name == "answer.select"]
+    assert len(children) == 1 and children[0].parent.span_id == root.context.span_id
+    assert dict(children[0].attributes) == {"rag.select_candidates": 3}
+    spans_blob, logs_blob = _span_text(spans), "\n".join(_formatted_logs(caplog))
+    for canary in CANARIES:
+        assert canary not in spans_blob, f"{canary} leaked into spans"
+        assert canary not in logs_blob, f"{canary} leaked into stdout JSON"
+
+
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("depth,effort", [("quick", "low"), ("thorough", "high"), ("standard", "medium")])
 def test_answer_depth_records_only_the_resolved_effort(client, caplog, monkeypatch, stream, depth, effort):

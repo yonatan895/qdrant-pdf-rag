@@ -1116,6 +1116,31 @@ recount each repeat from the export rows (`repeat`, `follow_up_kind`,
 `--out` and `--summary` hold questions, follow-ups and answers and stay. Any
 default change after the comparison is a separate maintainer decision.
 
+<a id="select-arm"></a>
+**Candidate-selection arm (`select-on`, issue #1309; stand-in lane only).**
+[Candidate selection](agent.md#candidate-selection) has no operator key, so
+this arm cannot run at a site: it is set in the agent's environment on the
+stand-in lane, and its result is relative to that lane's model.
+
+| Arm | Agent environment | Compare with |
+|---|---|---|
+| `select-on` | `ANSWER_SELECT_ENABLED=true`, `ANSWER_SELECT_CANDIDATES=40`, `ANSWER_HIT_LIMIT=N` | `select-off` |
+| `select-off` (control) | `ANSWER_HIT_LIMIT=N` only | n/a |
+
+- Both arms pack the same number of excerpts (`N`, run with `--hit-limit N`),
+  so the difference is which candidates are packed, not how many. Raising
+  `ANSWER_HIT_LIMIT` instead is a different arm ([depth](#site-depth-arm)).
+- Same rows, flags, build and `--repeats` in both arms; restart the agent
+  between them and record the two values.
+- Read `final_hits` and `supplied_evidence_meta` (they are the selection):
+  `evidence_gold_hit_rate`, then pass rate and citation precision/recall per
+  class. The sibling `/v1/search` fields (`gold_retrieved`, `hit_doc_ids`)
+  are the unselected pool at depth `N` in both arms and do not move.
+- Cost: one extra lowest-effort model call per selected row; compare `timing`
+  p50 as cost, never as the deciding signal.
+- Identifier rows bypass the stage, so they should not move; a difference
+  there inside the repeat range is noise.
+
 <a id="site-depth-arm"></a>
 **Retrieval depth arm (issue #1191, `depth-8-3`).** Not the Pipe's answer
 depths (#1255, reasoning effort). Since #1274 the release retrieves 16 hits

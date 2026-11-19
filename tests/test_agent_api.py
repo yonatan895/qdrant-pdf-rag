@@ -179,6 +179,42 @@ def test_answer_hit_limit_sets_every_answer_retrieval_and_never_search(
     ]
 
 
+def test_candidate_selection_widens_answer_retrievals_only(
+    monkeypatch, synthetic_pdf, servable_representation_gate
+):
+    """Issue #1309: with ANSWER_SELECT_ENABLED on, each answer retrieval (both
+    legs of an anchored follow-up included) asks for ANSWER_SELECT_CANDIDATES
+    hits; an identifier turn and /v1/search keep their own limits."""
+    limits: list[tuple[str, int]] = []
+
+    def search(_qdrant, _embedder, _collection, query, *, limit, **_kwargs):
+        limits.append((query, limit))
+        return [_hit()], "nl", {"embed_ms": 1, "qdrant_ms": 2}
+
+    opener, follow_up = "What does IEA500I mean?", "What should the operator do next?"
+    with agent_client(
+        monkeypatch, llm=FakeLLM(), search=search,
+        env={"UI_ENABLED": "true", "ANSWER_SELECT_ENABLED": "true",
+             "ANSWER_SELECT_CANDIDATES": "24", "ANSWER_HIT_LIMIT": "8"},
+    ) as c:
+        for path, payload in (
+            ("/v1/search", {"query": "s1"}),
+            ("/v1/answer", {"query": "a1"}),
+            ("/v1/answer", {"query": "IEA500I"}),
+            ("/v1/chat", {"messages": [{"role": "user", "content": "c1"}]}),
+            ("/v1/chat/completions", {"messages": [{"role": "user", "content": "c2"}]}),
+            ("/v1/chat", {"messages": [
+                {"role": "user", "content": opener}, {"role": "assistant", "content": "Earlier."},
+                {"role": "user", "content": follow_up}]}),
+        ):
+            assert c.post(path, json=payload).status_code == 200, path
+        assert c.post("/ui/chat", data={"message": "u1", "messages": ""}).status_code == 200
+    assert limits == [
+        ("s1", 8), ("a1", 24), ("IEA500I", 8), ("c1", 24), ("c2", 24),
+        (follow_up, 24), (opener, 24), ("u1", 24),
+    ]
+
+
 def test_answer_surfaces_inferred_citation_provenance(client, monkeypatch):
     """Issue #269: bracket-only cites stay validated but are flagged, so no
     client or eval has to guess the provenance."""

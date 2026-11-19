@@ -273,7 +273,9 @@ search), classifies complexity, short-circuits empty hits (§3), builds the
 prompt, and either chats once (JSON) or streams (SSE). `chat` runs the same
 assertion and retrieval (`answer_hit_limit` for both endpoints), resolving
 the follow-up search through `plan_search` / `retrieve_planned` first so the
-condensation and anchoring gates cannot be honored on one path only. Both console routes run
+condensation and anchoring gates cannot be honored on one path only. Every
+answer route retrieves through `retrieve_for_answer`, the one owner of
+[candidate selection](#candidate-selection). Both console routes run
 this chat path through `prepare_chat_core` (issue #985): the form maps core
 faults like chat JSON, the stream shares the answer/chat SSE loop, and a fault
 records the same outcome and log level on every chat route. The SSE generators hold
@@ -890,7 +892,8 @@ constants' hashes and on/off equality).
   count, plus the omitted retrieved labels. Duplicate display citations keep
   distinct identities. The manifest is the only source of the citation
   allowlist and of `inferred_indices`; the retrieval list rides
-  `AnswerCoreOutput.hits` separately as retrieved candidates. For multi-turn
+  `AnswerCoreOutput.hits` separately as retrieved candidates (with
+  [candidate selection](#candidate-selection) on, the selected hits). For multi-turn
   chat, prior turns are conversation context, never evidence for the new
   answer.
 - The tail's worked example is the fixed synthetic `TAIL_EXAMPLE_CITE` (the
@@ -1170,6 +1173,7 @@ readers:
 | `chat_max_body_chars` | 131072 (422, message states the limit) | request-size guard for `/v1/answer`, `/v1/chat` and `/ui` (abuse protection; shared `chat_body_chars` helper); the Pipe valve `MAX_BODY_CHARS` must match |
 | `chat_max_turns` / `chat_max_prior_turn_chars` | 10 / 4000 (#1274, was 1000) | chat history packing caps; operator inputs `CHAT_MAX_TURNS` / `CHAT_MAX_PRIOR_TURN_CHARS` (#1268; unset renders no variable) |
 | `answer_hit_limit` | 16 (#1274, was 8; 1..32) | hits one answer retrieval returns: `/v1/answer`, `/v1/chat*`, the console and the fused cut of an anchored follow-up's two legs (`AgentResources.retrieve`, `_fuse_by_rank`); `/v1/search` and MCP search keep the caller's `limit` (default 8, max 40). Operator input `ANSWER_HIT_LIMIT` (#1191; unset renders no variable). The pool (40 per leg, or `rerank_candidates` with rerank on) and the per-page/per-doc caps may return fewer. Every hit is offered to packing: under the default window and reserves, the estimator fits 16 excerpts at the 4000-character cap (above the 3500-character ingest section cap), and a denser server count trims or drops from the tail; 32 need about a 65,536-token window. The supplied-evidence text total scales as `max(48000, 6000 x answer_hit_limit)`, so excerpts at the 4000-character cap keep their text ([supplied evidence](#supplied-evidence-projection-issue-635)) |
+| `answer_select_enabled` / `answer_select_candidates` | `false` / 40 (2..40) | [candidate selection](#candidate-selection) (#1309): one lowest-effort reasoning call picks which of one retrieval's `answer_select_candidates` hits are the answer's `answer_hit_limit` hits. Off is byte-identical. Settings/environment only (`ANSWER_SELECT_ENABLED`, `ANSWER_SELECT_CANDIDATES`): no operator key, chart value or registry entry until a measured A/B |
 | `retrieve_max_chunks_per_page` / `retrieve_max_chunks_per_doc` | 1 / 5 (#1274, was 3; 1..10 each) | diversity caps in `diversify_hits`, for every retrieval (`/v1/search` and MCP included); a capped hit is backfilled only when the pool runs short. Operator input `RETRIEVE_MAX_CHUNKS_PER_DOC` (#1191; unset renders no variable) |
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
 | `answer_coding_mode_enabled` | `true` (#1276) | coding mode: coding requests take the complex path and the coding prompt extension ([prompt assembly](#4-prompt-assembly-and-budgets)); operator input `ANSWER_CODING_MODE_ENABLED`, unset renders no variable |
@@ -1243,7 +1247,8 @@ lifespan), as does Python `warnings` output.
 Spans mirror the log contract (one request = one trace: a
 `v1.search`/`v1.answer`/`v1.chat`/`ui.chat` root → (`chat.condense` before
 retrieval on an eligible chat follow-up) → retrieve
-embed/prefetch/RRF/rerank/diversify → prompt build → LLM chat with
+embed/prefetch/RRF/rerank/diversify → (`answer.select` when
+[candidate selection](#candidate-selection) calls the model) → prompt build → LLM chat with
 model/effort/TTFT/finish/tokens). Span attributes carry finite labels,
 counts, and operator config only — raw query text was removed as an
 explicit telemetry-policy change (issue #529 OBS-1A); PDF text and
@@ -1649,6 +1654,40 @@ Closing a core stream closes its upstream operation without closing the shared
 model client. [Architecture](architecture.md#boundary-map) owns the dependency
 and capability restrictions.
 
+<a id="candidate-selection"></a>
+## Candidate selection (issue #1309)
+
+**Status: implemented, default off** (`answer_select_enabled`; no operator key,
+chart value or registry entry yet, so it is a Settings/environment switch for
+the stand-in lane only). **Decision owners:** `answer_core.retrieve_for_answer`
+(when the stage runs) and `agent/answer_select.py` (prompt, parsing, order).
+
+Off, every request is byte-identical: the same retrieval call, hits, timings
+and prompt, and no span attribute. On, `/v1/answer`, `/v1/chat*` and the
+console (never `/v1/search` or MCP search) do this after the search plan:
+
+| Step | Rule |
+|---|---|
+| Bypass before retrieval | The turn's own searched text names an identifier or abend code (`names_identifier`, the condensation and anchoring bypass), or a searched text screens as a trap, or `answer_select_candidates <= answer_hit_limit`: the usual retrieval at `answer_hit_limit`, no model call. An anchored follow-up whose antecedent names an identifier is not bypassed |
+| Candidates | One retrieval at `answer_select_candidates` (each leg of an anchored follow-up, fused literal-first and cut to that count). No more candidates than `answer_hit_limit`: packed as retrieved, no model call |
+| Call | One reasoning-model call at the lowest offered effort (`reasoning_depth_effort("quick")`), temperature 0, under `answer_timeout_s` and the request deadline. The model reads the searched question (and the antecedent on an anchored follow-up) and, per candidate, `[n]`, the cite, the heading and the first 600 characters of the text |
+| Reply | Must be one JSON array. Only an integer from 1 to the candidate count counts, once; unknown or repeated numbers, booleans, strings and other shapes select nothing. The reply can only reorder and cut the supplied candidates |
+| Order | `order_selection`: the model's choices in the model's order, then the remaining candidates in retrieval order until `answer_hit_limit` hits are packed (a short selection is filled; a long one is cut) |
+| Failure | As condensation ([policy](#http-model-contract)): a transport error, timeout, empty reply or a reply naming no supplied candidate packs the retrieval order cut to `answer_hit_limit`; no retry, no new client error. Cancellation (the request deadline) propagates |
+
+The result replaces the retrieval list everywhere downstream: packing, the
+response `hits`, `supplied_evidence` and the citation allowlist. The stage
+never rewrites the query and never retrieves again. Its fallback order is the
+head of the wider retrieval; that this equals the `answer_hit_limit`
+retrieval is not asserted. The root span carries `rag.select_mode`
+(`selected` | `bypass` | `fallback`), `rag.select_reason` (`identifier` |
+`trap` | `few_candidates` | `model_error` | `invalid_output`; absent when
+selected), `rag.select_candidates` and `rag.select_selected` (model-chosen
+hits packed); the call is an `answer.select` child span. A failure logs the
+error class only. Timings gain no key: the call's time is inside the request's
+elapsed time, not `llm_ms`. Stage order is fixed for later work: select, then
+(if ever built) expand.
+
 <a id="http-model-contract"></a>
 ## HTTP/model fallback and lifecycle policy
 
@@ -1799,6 +1838,7 @@ tokenizer share; a later named profile can carry its own instance.
 | Embed/context/health pools | Bounded Settings connect-only retries, no generic POST replay policy |
 | Rerank | Configured score/rerank endpoint order plus alternate endpoint fallback; exhaustion fails closed; a batch rejected on both legs with HTTP 4xx (not 5xx/transport/shape) is re-scored once with passages cut to `RERANK_RETRY_PASSAGE_MAX_CHARS` (2000), and a failing retry fails closed (issue #664); [retrieval](retrieval.md) owns dispatch |
 | Condensation | Optional reasoning call; failure returns the raw latest query, not a fabricated condensed result |
+| Candidate selection (#1309) | Optional reasoning call, one attempt; failure, timeout, an empty reply or one naming no supplied candidate packs the retrieval order cut to `answer_hit_limit`, never a fabricated selection ([candidate selection](#candidate-selection)) |
 | Admission / total deadline (issue #374) | Opt-in (`request_*`, default off): refusal is `503 overloaded` before any work; expiry cancels async legs and is `504 deadline_exceeded` / a terminal SSE `error` event; sync worker-thread legs are bounded by their own timeouts, not interrupted (§6a). No retry or fallback is added |
 | Tracing export | Separately bounded fail-open export; outages drop/log and must not fail request/shutdown |
 

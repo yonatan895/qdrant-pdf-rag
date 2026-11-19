@@ -20,6 +20,7 @@ from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
+from mainframe_rag.agent import answer_select
 from mainframe_rag.agent.answer import (
     REASON_MALFORMED_FRAME,
     REASON_MISSING_FINISH,
@@ -262,13 +263,22 @@ def _fuse_by_rank(
 
 async def retrieve_planned(
     plan: SearchPlan, source: AnswerCoreInput, deps: AnswerCoreDeps,
+    limit: int | None = None,
 ) -> RetrievalResult:
     """Run a plan's retrieval: one search, or for an anchored follow-up the
     literal and antecedent legs concurrently, fused literal-first. Either leg
-    failing fails the turn as one retrieval failure does."""
+    failing fails the turn as one retrieval failure does. `limit` (candidate
+    selection only, issue #1309) asks each leg, and the fused cut, for that
+    many hits instead of `answer_hit_limit`; without it the retrieval call is
+    unchanged."""
     async def _run_leg(query: str) -> RetrievalResult:
+        if limit is None:
+            return await deps.retrieve(
+                query, product=source.product, version=source.version, settings=deps.settings,
+            )
         return await deps.retrieve(
             query, product=source.product, version=source.version, settings=deps.settings,
+            limit=limit,
         )
 
     if plan.anchor is None:
@@ -283,7 +293,53 @@ async def retrieve_planned(
                 task.cancel()
         await asyncio.gather(literal_task, anchor_task, return_exceptions=True)
         raise
-    return _fuse_by_rank(found, anchored, deps.settings.answer_hit_limit)
+    return _fuse_by_rank(
+        found, anchored, deps.settings.answer_hit_limit if limit is None else limit
+    )
+
+
+async def retrieve_for_answer(
+    plan: SearchPlan,
+    source: AnswerCoreInput,
+    deps: AnswerCoreDeps,
+    parent_span: trace.Span | None = None,
+) -> RetrievalResult:
+    """The hits one answer turn is packed from, for the core retrieval branch
+    and every chat route alike: the plan's retrieval, then candidate selection
+    when ANSWER_SELECT_ENABLED is on (issue #1309; later stages, if ever
+    built, run after it). Off, this is `retrieve_planned` and nothing else.
+    On, a turn whose own search names an identifier or screens as a trap, or
+    whose candidate setting is no wider than `answer_hit_limit`, retrieves as
+    usual with no model call; every other turn retrieves once at
+    `answer_select_candidates` and the selection (or, on any failure of that
+    call, the retrieval order cut to `answer_hit_limit`) is the result.
+    A selection failure is never a retrieval failure. `parent_span` gets the
+    outcome as fixed labels and counts, never text."""
+    settings = deps.settings
+    if not settings.answer_select_enabled:
+        return await retrieve_planned(plan, source, deps)
+    reason = answer_select.bypass_reason(plan.query, plan.anchor)
+    if reason is None and settings.answer_select_candidates <= settings.answer_hit_limit:
+        reason = "few_candidates"
+    if reason is not None:
+        found = await retrieve_planned(plan, source, deps)
+        outcome = answer_select.SelectOutcome("bypass", len(found.hits), reason=reason)
+    else:
+        found = await retrieve_planned(
+            plan, source, deps, limit=settings.answer_select_candidates
+        )
+        ctx = trace.set_span_in_context(parent_span) if parent_span is not None else None
+        with start_as_current_span(
+            tracer, "answer.select", kind=SpanKind.CLIENT, context=ctx,
+            attributes={"rag.select_candidates": len(found.hits)},
+        ):
+            hits, outcome = await answer_select.select_candidates(
+                deps.llm, settings, plan.query, plan.anchor, found.hits
+            )
+        found = RetrievalResult(hits, found.kind, found.timings)
+    if parent_span is not None:
+        parent_span.set_attributes(outcome.span_attributes())
+    return found
 
 
 @dataclass
@@ -312,8 +368,9 @@ class AnswerCoreOutput:
     complexity: str
     parsed: ParsedAnswer
     # Final supplied-evidence manifest (issue #364): `hits` stays the
-    # retrieval list (retrieved candidates for diagnostics); `evidence` is
-    # what the citation allowlist was actually derived from.
+    # retrieval list (retrieved candidates for diagnostics; with candidate
+    # selection on, issue #1309, the selected hits offered to packing);
+    # `evidence` is what the citation allowlist was actually derived from.
     evidence: PromptEvidence
     # Token-budget compliance of the final prompt (issue #368): True only
     # for a fitting remote tokenizer measurement; estimator and
@@ -619,7 +676,7 @@ async def _retrieve_inputs(
         )
     plan = await plan_search(source, deps, parent_span)
     try:
-        found = await retrieve_planned(plan, source, deps)
+        found = await retrieve_for_answer(plan, source, deps, parent_span)
     except Exception as exc:
         raise RetrievalError(exc) from exc
     return replace(source, search_query=plan.search_text), found
