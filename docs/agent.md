@@ -838,11 +838,16 @@ constants' hashes and on/off equality).
   with a static deterministic instruction block (no cites, timestamps, or
   ids — the prefix-cache premise) that demotes excerpts to untrusted data.
 - Tokenizer path (when a tokenizer is configured): plans with the
-  in-process estimator (`≈3.5` chars/token, 1200-token complex narrative cap), then
-  verifies the packed prompt against the whole-message count per trim round
-  and trims up to `4 + 2*len(packed excerpts)` rounds (64-char overcut, drop
-  under 80 chars, else suffix; the bound scales with the trimmable evidence
-  so `prompt_budget_exceeded` means nothing was left to trim, #307).
+  in-process estimator (`≈3.5` chars/token, 1200-token complex narrative cap),
+  additionally bounding dense excerpts (JCL, hex, numeric tables, message lines)
+  against `llm_max_model_len` with `user_message.conservative_tokens` (#1296),
+  then verifies the packed prompt against the whole-message count per trim round
+  and proportionally drops/trims trailing excerpts across `packed` by
+  measured overshoot (weighted by `conservative_tokens`, 64-char overcut, drop
+  under 80 chars, else suffix) so large overshoots converge in O(1) remote count
+  calls within the `4 + 2*len(packed excerpts)` safety bound (the bound scales
+  with the trimmable evidence so `prompt_budget_exceeded` means nothing was left
+  to trim, #307).
   Chat packing (`build_chat_messages`) uses the same discipline under one
   deterministic retention policy (#633) applied to both planning and recount:
   the system prompt, scope, active question and the most recent prior turn
@@ -851,12 +856,12 @@ constants' hashes and on/off equality).
   evidence. Planning charges only the antecedent against the excerpt budget,
   then keeps older turns newest-first, contiguous and whole, only in the
   space the packed evidence leaves. Recount runs for up to
-  `4*2 + 2*len(packed) + len(older turns)` rounds: it pops the oldest older
-  turn first, then trims excerpt bodies; if the antecedent plus question and
-  evidence still overflow, it raises `PromptBudgetExceeded` rather than
-  dropping the antecedent. Prior assistant text never enters the evidence
-  manifest, and caller message lists are never mutated. Never per-chunk
-  tokenize RPCs.
+  `4*2 + 2*len(packed) + len(older turns)` rounds: it drops oldest older turns
+  up to the measured overshoot first, then trims excerpt bodies; if the
+  antecedent plus question and evidence still overflow, it raises
+  `PromptBudgetExceeded` rather than dropping the antecedent. Prior assistant
+  text never enters the evidence manifest, and caller message lists are never
+  mutated. Never per-chunk tokenize RPCs.
 - Planning and verification both charge reserved output, the selected complexity's
   thinking reserve and safety margin, for both single-turn answers and chat.
   `llm_thinking_reserve_tokens_simple` accounts for simple-path reasoning separately
@@ -1787,7 +1792,7 @@ tokenizer share; a later named profile can carry its own instance.
 | Buffered `achat` / `_chat_sync` without `LLM_STREAM` | One streamed request assembled into the buffered result (#868); no recovery POST, as before. An upstream error or malformed frame, a missing `[DONE]` or a missing explicit finish is `TruncatedStreamError`; an empty `stop` completion is an empty result; `length`/`content_filter` is returned as that finish. Total wait is `answer_timeout_s`, expiry `model_timeout` |
 | Buffered `achat` / `_chat_sync` with `LLM_STREAM` | Empty content *with a `stop` finish*, caught stream/protocol failures, missing `[DONE]`, upstream error/malformed frame, or missing explicit finish lead to one non-streaming POST; accumulated content is discarded, even if a prefix was buffered. The POST must itself carry an explicit finish, have no top-level error, and have valid string content (issue #365). Never recovered (issue #868): a stream that ended with an explicit non-`stop` finish (`length`, `content_filter`) and no content is returned as that finish, and an `httpx` timeout (`answer_timeout_s` spent) propagates as `model_timeout` instead of starting a second ask |
 | Client-visible `chat_stream` | No-content (`stop` finish) or pre-output stream failure (malformed first frame, pre-output error, missing finish/done before any emitted token) can make one non-streaming ask; malformed/rejected/empty/no-finish fallback fails. Missing `[DONE]`, an upstream error frame, a malformed frame, or `[DONE]` without an explicit finish after actually emitted content raises truncation; no replay after those tokens. The shared core applies the same gate to the terminal `done` item itself: a falsy/missing `done` finish, or a token-only stream with no `done`, raises truncation and never synthesizes `stop` (issue #365). A validated stream with zero content deltas and an explicit non-`stop` finish ends with that `done` and no recovery POST (issue #868); timeouts propagate |
-| Tokenizer | Plan locally, verify whole messages per trim round with the generation's template arguments (#1193), from the source `LLM_TOKEN_COUNT_SOURCE` selects ([token count sources](#token-count-sources), #1266); the completion-usage count follows the same three outcomes. No per-chunk RPCs; gateway may lack `/tokenize` (the generation then gets the full cap only when the prompt's byte upper bound plus that cap fits, otherwise no cap). Three outcomes (issue #1214). An endpoint that is not served or gives no usable count (404/405/501, a 200 without a usable count) warns once and pins the estimator until restart. A transient failure (transport error, timeout, 408/429/5xx other than 501) warns and uses the estimator for `TOKENIZE_RETRY_AFTER_S` (60 s). Any other refusal (400/401/403, any other 4xx, an unexpected 3xx) warns once naming the status and uses the estimator for the long `TOKENIZE_REFUSED_RETRY_AFTER_S` (600 s) window, never pinning: one unusual payload or a rotated key must not disable remote counting for the life of the process. In either window the first count after it expires is the one probe, and a probe success resumes remote counts (issue #835). `budget_verified` reads the counting thread's own last count, so a probe on another thread never confirms an estimated prompt |
+| Tokenizer | Plan locally (bounding dense excerpts against `llm_max_model_len` via `conservative_tokens`), verify whole messages per trim round with the generation's template arguments (#1193), from the source `LLM_TOKEN_COUNT_SOURCE` selects ([token count sources](#token-count-sources), #1266); proportional multi-excerpt overshoot trimming converges in O(1) rounds (#1296). No per-chunk RPCs; gateway may lack `/tokenize` (the generation then gets the full cap only when the prompt's byte upper bound plus that cap fits, otherwise no cap). Three downgrade outcomes (issue #1214), plus over-window 400 trimming on `CompletionUsageTokenizer` (#1296). An endpoint that is not served or gives no usable count (404/405/501, a 200 without a usable count) warns once and pins the estimator until restart. A transient failure (transport error, timeout, 408/429/5xx other than 501) warns and uses the estimator for `TOKENIZE_RETRY_AFTER_S` (60 s). On `CompletionUsageTokenizer`, an HTTP 400 whose error code/message classifies as over-window raises `PromptWindowExceededError` (fixed message, never upstream body text) without opening any cooldown so `_build_prompt` trims/drops trailing excerpts (or raises `422 prompt_budget_exceeded` if untrimmable) and subsequent ordinary requests stay verified. Any other refusal (401/403, non-window 400, any other 4xx, an unexpected 3xx) warns once naming the status and uses the estimator for the long `TOKENIZE_REFUSED_RETRY_AFTER_S` (600 s) window, never pinning: one unusual payload or a rotated key must not disable remote counting for the life of the process. In either window the first count after it expires is the one probe, and a probe success (or over-window 400) clears the window (issue #835, #1296). `budget_verified` reads the counting thread's own last count, so a probe on another thread never confirms an estimated prompt |
 | Embed/context/health pools | Bounded Settings connect-only retries, no generic POST replay policy |
 | Rerank | Configured score/rerank endpoint order plus alternate endpoint fallback; exhaustion fails closed; a batch rejected on both legs with HTTP 4xx (not 5xx/transport/shape) is re-scored once with passages cut to `RERANK_RETRY_PASSAGE_MAX_CHARS` (2000), and a failing retry fails closed (issue #664); [retrieval](retrieval.md) owns dispatch |
 | Condensation | Optional reasoning call; failure returns the raw latest query, not a fabricated condensed result |
@@ -1849,13 +1854,19 @@ count comes from (`tokenizer.build_tokenizer`):
   verified.
 
 **Failures.** The completion-usage count follows the pin and retry rules of
-`/tokenize` (#835, #1214; table below): 404/405/501, or a 200 whose
+`/tokenize` (#835, #1214; table above): 404/405/501, or a 200 whose
 `usage.prompt_tokens` is missing or not a positive integer, pins the
-estimator; 408/429/5xx and transport errors open the 60 s window; any other
-refusal opens the 600 s window. A prompt over the served window is answered
-`400` by a completion where `/tokenize` would still count it, so it opens the
-600 s window. A failed count answers from the estimator for that call and logs
-one warning with a fixed message (source, URL, status or error type), never
+estimator; 408/429/5xx and transport errors open the 60 s window; auth/policy
+and non-window refusals (401/403, non-window 400, other 4xx, unexpected 3xx)
+open the 600 s window. An over-window HTTP `400` (context/model length
+exceeded, classified in-process without logging or exposing upstream error
+text) does **not** open the 600 s cooldown (#1296): it raises
+`PromptWindowExceededError` so `_build_prompt` drops/trims older history or
+trailing excerpts (or raises `422 prompt_budget_exceeded` if nothing trimmable
+remains) instead of falling back to the estimator and sending an over-window
+prompt to generation; subsequent ordinary requests stay verified. Other failed
+counts answer from the estimator (`budget_verified: false`, #368) and log one
+warning with a fixed message (source, URL, status or error type), never
 request content.
 
 **Cost, deadline and admission.** One extra request per verification round.

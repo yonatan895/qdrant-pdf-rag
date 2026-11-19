@@ -22,12 +22,16 @@ A gateway without /tokenize can still count (#1266): CompletionUsageTokenizer
 sends the packed request as a non-streaming chat completion with
 `max_tokens=1`, built by the generation's own body builder, and reads
 `usage.prompt_tokens`, the server's template-aware count. It follows the same
-pin and retry rules. `LLM_TOKEN_COUNT_SOURCE` selects the source
-(build_tokenizer); docs/agent.md#token-count-sources owns the contract.
+pin and retry rules, except that an over-window HTTP 400 raises
+`PromptWindowExceededError` without opening the 600 s cooldown so
+`_build_prompt` trims instead of falling back (#1296).
+`LLM_TOKEN_COUNT_SOURCE` selects the source (build_tokenizer);
+docs/agent.md#token-count-sources owns the contract.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import threading
@@ -58,6 +62,141 @@ TOKENIZE_RETRY_AFTER_S = 60.0
 TOKENIZE_REFUSED_RETRY_AFTER_S = 600.0
 # The endpoint answered but is not served: no window can make it usable.
 _ABSENT_STATUSES = frozenset({404, 405, 501})
+
+# Issue #1296: over-window HTTP 400 error codes and message patterns returned
+# by OpenAI-compatible gateways (vLLM, LiteLLM, OpenAI, llama.cpp, TGI,
+# SGLang) when a completion-usage count prompt exceeds the served model's
+# context window. Matched strictly in-process; upstream body text is never
+# logged or exposed to clients.
+_OVER_WINDOW_CODES = frozenset({
+    "context_length_exceeded",
+    "context_window_exceeded",
+    "contextwindowexceedederror",
+})
+_OVER_WINDOW_RE = re.compile(
+    r"(?:"
+    r"context[_\s-]?length[_\s-]?exceeded"
+    r"|context[_\s-]?window[_\s-]?exceeded"
+    r"|contextwindowexceeded"
+    r"|maximum\s+(?:context|model|sequence|input|prompt)\s+length"
+    r"|max(?:_|\s+)(?:context|model|seq(?:uence)?)(?:_|\s+)?len(?:gth)?"
+    r"|exceed(?:s|ed)?\s+(?:the\s+)?(?:available\s+)?(?:max(?:imum)?\s+)?(?:context|model)\s+(?:length|size|window)"
+    r"|(?:prompt|input|messages?|request|sequence)(?:\s+\w+){0,5}\s+"
+    r"(?:too\s+long|longer\s+than\s+(?:the\s+)?max(?:imum)?\s+(?:model|context)"
+    r"|exceed(?:s|ed)?\s+(?:the\s+)?(?:max(?:imum)?\s+)?(?:context|model|token|window|sequence))"
+    r"|reduce\s+the\s+length\s+of\s+the\s+messages"
+    r"|too\s+many\s+(?:input\s+)?tokens"
+    r"|token\s+limit\s+exceeded|exceed(?:s|ed)?\s+(?:the\s+)?token\s+limit"
+    r"|inputs?\W+tokens\s*\+\s*\W*max_(?:new_)?tokens"
+    r")",
+    re.IGNORECASE,
+)
+_MAX_LEN_HINT_RE = re.compile(
+    r"(?:maximum\s+(?:context|model)\s+length\s+(?:is|of)|context\s+size\s*\(|must\s+be\s*<=)\s*(\d+)",
+    re.IGNORECASE,
+)
+_PROMPT_TOKENS_HINT_RE = re.compile(
+    r"(?:(\d+)\s+in\s+the\s+messages"
+    r"|(?:you\s+requested|request\s+has|prompt\s*\(\s*length|prompt\s+length\s*\(|request\s*\()\s*(\d+))",
+    re.IGNORECASE,
+)
+_OVER_WINDOW_BODY_SCAN_BYTES = 4096
+_MAX_HINT_TOKENS = 10**8
+
+
+class PromptWindowExceededError(Exception):
+    """The completion-usage counter rejected this prompt with HTTP 400 because
+    it exceeded the served model's context window (issue #1296).
+
+    Not a gateway or auth refusal: no replica-wide cooldown is opened, and
+    `_build_prompt` trims/drops trailing excerpts (or raises
+    `PromptBudgetExceeded` if untrimmable) instead of falling back to
+    `estimate_tokens`. Carries a fixed message and optional bounded integer
+    sizing hints only — never upstream error text.
+    """
+
+    def __init__(
+        self,
+        *,
+        prompt_tokens: int | None = None,
+        max_model_len: int | None = None,
+    ) -> None:
+        super().__init__("prompt exceeds the served model context window")
+        self.prompt_tokens = prompt_tokens
+        self.max_model_len = max_model_len
+
+
+def _bounded_hint_int(raw: str | None) -> int | None:
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if 1 <= value <= _MAX_HINT_TOKENS else None
+
+
+def _over_window_from_response(resp: Any) -> PromptWindowExceededError | None:
+    """Classify an HTTP 400 response from `/chat/completions` as over-window
+    (#1296). Returns a `PromptWindowExceededError` (with optional integer
+    sizing hints, never body text) when matched, else None so non-window 400
+    refusals keep the #1214 cooldown."""
+    codes: list[str] = []
+    texts: list[str] = []
+    data: Any = None
+    try:
+        data = resp.json()
+    except Exception:  # noqa: BLE001
+        data = None
+    if isinstance(data, dict):
+        for key in ("code", "type"):
+            val = data.get(key)
+            if isinstance(val, str):
+                codes.append(val[:128])
+        for key in ("message", "detail"):
+            val = data.get(key)
+            if isinstance(val, str):
+                texts.append(val[:_OVER_WINDOW_BODY_SCAN_BYTES])
+        err = data.get("error")
+        if isinstance(err, str):
+            texts.append(err[:_OVER_WINDOW_BODY_SCAN_BYTES])
+        elif isinstance(err, dict):
+            for key in ("code", "type"):
+                val = err.get(key)
+                if isinstance(val, str):
+                    codes.append(val[:128])
+            for key in ("message", "detail"):
+                val = err.get(key)
+                if isinstance(val, str):
+                    texts.append(val[:_OVER_WINDOW_BODY_SCAN_BYTES])
+    elif isinstance(data, str):
+        texts.append(data[:_OVER_WINDOW_BODY_SCAN_BYTES])
+    else:
+        raw = getattr(resp, "content", b"")
+        if isinstance(raw, (bytes, bytearray)) and raw:
+            texts.append(bytes(raw[:_OVER_WINDOW_BODY_SCAN_BYTES]).decode("utf-8", "ignore"))
+    matched = any(c.strip().casefold() in _OVER_WINDOW_CODES for c in codes) or any(
+        _OVER_WINDOW_RE.search(t) for t in texts
+    )
+    if not matched:
+        return None
+    prompt_tokens: int | None = None
+    max_model_len: int | None = None
+    for t in texts:
+        if max_model_len is None and (m := _MAX_LEN_HINT_RE.search(t)):
+            max_model_len = _bounded_hint_int(m.group(1))
+        if prompt_tokens is None and (m := _PROMPT_TOKENS_HINT_RE.search(t)):
+            prompt_tokens = _bounded_hint_int(m.group(1) or m.group(2))
+    if (
+        prompt_tokens is not None
+        and max_model_len is not None
+        and prompt_tokens < max_model_len
+    ):
+        prompt_tokens = None
+    return PromptWindowExceededError(
+        prompt_tokens=prompt_tokens,
+        max_model_len=max_model_len,
+    )
 
 
 def estimate_tokens(text: str) -> int:
@@ -143,11 +282,19 @@ class _RemoteCount:
         return bool(getattr(self._local, "remote", False))
 
     def _remote_count(
-        self, url: str, payload: dict[str, Any], parse: Callable[[Any], int | None]
+        self,
+        url: str,
+        payload: dict[str, Any],
+        parse: Callable[[Any], int | None],
+        *,
+        over_window_check: Callable[[Any], PromptWindowExceededError | None] | None = None,
     ) -> int | None:
         """One count call, or None for the estimator: the endpoint is pinned
         off, inside a retry window, or this call failed. ``parse`` maps a 200
-        body to a count, or None when it carries no usable one."""
+        body to a count, or None when it carries no usable one. When
+        ``over_window_check`` classifies an HTTP 400 as a context-window
+        overflow (#1296), raises ``PromptWindowExceededError`` without opening
+        a cooldown."""
         with self._lock:
             if self._pinned:
                 return None
@@ -176,16 +323,34 @@ class _RemoteCount:
                 # grew this route: pin, even though the status is not 404.
                 self._downgrade(url, "no usable token count in response", mode="absent")
                 return None
+            if status == 400 and over_window_check is not None:
+                over_window = over_window_check(resp)
+                if over_window is not None:
+                    if probing:
+                        # The endpoint answered and enforced its window; clear
+                        # the tentative probe claim so this request's trimmed
+                        # retry verifies remotely right away.
+                        with self._lock:
+                            self._retry_at = None
+                    log.info(
+                        "%s at %s reported prompt over model context window (status 400); "
+                        "trimming prompt",
+                        self._label,
+                        url,
+                    )
+                    raise over_window
             # Three outcomes: an endpoint that is not served pins, a
             # transient failure gets the short window, and any other
-            # refusal (400, 401, 403, other 4xx, unexpected 3xx) is only
-            # refused for now and gets the long window without pinning.
+            # refusal (non-window 400, 401, 403, other 4xx, unexpected 3xx)
+            # is only refused for now and gets the long window without pinning.
             if status in _ABSENT_STATUSES:
                 self._downgrade(url, f"status {status}", mode="absent")
             elif status in (408, 429) or status >= 500:
                 self._downgrade(url, f"status {status}", mode="transient")
             else:
                 self._downgrade(url, f"status {status}", mode="refused")
+        except PromptWindowExceededError:
+            raise
         except Exception as exc:  # noqa: BLE001
             self._downgrade(url, type(exc).__name__, mode="transient")
         return None
@@ -444,7 +609,12 @@ class CompletionUsageTokenizer(_RemoteCount):
             temperature if temperature is not None else self._temperature,
             self._request_args,
         )
-        count = self._remote_count(self._url, body, usage_prompt_tokens)
+        count = self._remote_count(
+            self._url,
+            body,
+            usage_prompt_tokens,
+            over_window_check=_over_window_from_response,
+        )
         if count is not None:
             return count
         return self._fallback.count_messages(messages, reasoning_effort=reasoning_effort)
@@ -513,6 +683,7 @@ class AutoTokenizer:
         reasoning_effort: str | None = None,
         temperature: float | None = None,
     ) -> int:
+        self._local.remote = False
         if not self._tokenize._pinned:
             count = self._tokenize.count_messages(messages, reasoning_effort=reasoning_effort)
             if self._tokenize.remote_confirmed or not self._tokenize._pinned:
@@ -536,7 +707,10 @@ def _select_auto(
         _vllm_tokenizer(settings, client, clock),
         CompletionUsageTokenizer.from_settings(settings, client, clock),
     )
-    auto.count_messages(_STARTUP_CHECK_MESSAGES, reasoning_effort=settings.llm_reasoning_effort_simple)
+    with contextlib.suppress(PromptWindowExceededError):
+        auto.count_messages(
+            _STARTUP_CHECK_MESSAGES, reasoning_effort=settings.llm_reasoning_effort_simple
+        )
     confirmed = auto.remote_confirmed
     # The check's own thread must not read as a confirmed request count.
     auto._local.remote = False
