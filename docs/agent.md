@@ -1662,7 +1662,7 @@ chart value or registry entry yet, so it is a Settings/environment switch for
 the stand-in lane only). **Decision owners:** `answer_core.retrieve_for_answer`
 (when the stage runs) and `agent/answer_select.py` (prompt, parsing, order).
 [ADR-0013](adr/0013-research-mode.md) (proposed, not in effect) would add a
-bounded follow-up search stage; a request using it would skip this stage.
+bounded follow-up search stage; how it meets this stage is undecided (its open point 4).
 
 Off, every request is byte-identical: the same retrieval call, hits, timings
 and prompt, and no span attribute. On, `/v1/answer`, `/v1/chat*` and the

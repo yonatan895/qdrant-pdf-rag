@@ -8,12 +8,18 @@
   (#86) with "do not re-propose". Open PR #1313 proposes opening that verdict
   for re-measurement and is **not merged**. This record can be accepted only
   after #1313 merges, or with an explicit maintainer ruling recorded here that
-  #86's gate does not cover this mode (open point 1).
-  If accepted it **amends** the candidate-selection contract in
-  [docs/agent.md](../agent.md#candidate-selection) and V2 of
-  [ADR-0007](0007-open-webui-docs-front-end.md), and it **confirms without
-  change** the AGENTS.md search boundary, [ADR-0003](0003-zowe-mcp-read.md) and
-  [ADR-0010](0010-team-tools-on-open-webui.md), as "Clauses" lists.
+  #86's gate does not cover this mode (open point 1). What #1313's merge would
+  and would not license is open point 15.
+  If accepted it **amends** V2 of [ADR-0007](0007-open-webui-docs-front-end.md)
+  and, if open point 4 is ruled as recommended, the candidate-selection
+  contract in [docs/agent.md](../agent.md#candidate-selection). It **confirms
+  without change** the AGENTS.md search boundary and
+  [ADR-0003](0003-zowe-mcp-read.md). It confirms
+  [ADR-0010](0010-team-tools-on-open-webui.md) and ADR-0007's reading of "new
+  orchestration framework" **only if** open point 2 is ruled as recommended
+  (C2, C7). Ruled the other way, those clauses forbid the mode as designed and
+  it would need an explicit amendment of both, which this record does not
+  make. "Clauses" lists each.
 - **Context:**
   - Today one retrieval feeds one answer: zero model-directed searches per
     answer. A diagnostic question often needs a second look once the first
@@ -87,20 +93,60 @@ one answer call. Each decision names the alternative considered.
    excerpts as data, not instructions. *Alternative:* sanitise and clip, as
    the image read does (C13); rejected because that text comes from the
    user's own image, while this text comes from the corpus.
-4. **D4, hard bounds, each with a fixed outcome.** All are bounded Settings
+4. **D4, hard bounds, each with one fixed outcome.** All are bounded Settings
    with ceilings in code; the values are open point 3.
+   - *No first-round evidence:* if the first retrieval returns no hits, the
+     mode makes no planning call and no follow-up search, and the existing
+     empty-hits short-circuit runs unchanged, before any model call (C23). If
+     it returns hits but none yields an excerpt the planning prompt can show,
+     there is likewise no planning call, and packing takes the existing
+     zero-usable-excerpts path (C23). Neither clause is amended.
    - *Rounds:* a maximum number of follow-up rounds, one planning call and at
      most one search each. At the bound: stop, answer.
-   - *Searches:* a maximum total per request, the first retrieval included (an
-     anchored first round counts as one). At the bound: stop, answer.
+   - *Searches:* a maximum total per request, the first retrieval included.
+     One search is one retrieval call as the first round makes it: an anchored
+     first round counts as one, and a query that the deterministic multi-path
+     split turns into its at most two paths counts as one (C24). At the bound:
+     stop, answer.
+   - *Planning prompt:* the call reads the searched text (open point 16) and a
+     fixed-length head of each excerpt held, in evidence order up to a fixed
+     excerpt count, with a fixed reply cap. It is planned against the model
+     window like any other prompt. If it does not fit, no planning call is
+     made, the loop ends and the answer uses the evidence held; the planning
+     stage never returns `422 prompt_budget_exceeded`.
    - *Stage budget:* one time budget across all follow-up rounds, not renewed
-     per round, sized so the answer call keeps its time. At expiry: stop,
-     answer with the evidence held.
+     per round. It is checked at two points only, before a planning call
+     starts and before a follow-up search starts. One outcome per case:
+     - *Expired before a planning call:* stop, answer with the evidence held.
+     - *Expires during a planning call:* the call's timeout is the budget
+       left, and the model leg is async, so it is cancelled. This is D6's
+       planning-call timeout: stop, answer with the evidence held.
+     - *Expired when the planning call returns:* the query is discarded
+       unsearched; stop, answer with the evidence held.
+     - *Expires while a follow-up search is in flight:* the search is not
+       abandoned. Its synchronous embed and BM25 legs cannot be interrupted
+       (C25), so it runs to its end under its own per-leg timeouts and the
+       request deadline. If it succeeds, its new hits are appended and the
+       loop ends; if it fails, that is D6's failed follow-up search. The
+       budget alone never produces a 502 and never discards a finished
+       search. This is the recommended rule; the alternative is open point 12.
+
+     The budget does not guarantee the answer call's time. The stage can
+     overrun it by at most one search's per-leg timeouts, and only the request
+     deadline bounds the whole request. Settings refuses a stage budget that,
+     with that overrun added, is not below the request deadline; an answer
+     call that still runs out of time ends as the existing 504.
    - *Request deadline:* the existing `request_deadline_s` covers the whole
      request (C17). It is opt-in and off by default (C16), so Settings refuses
      the mode at startup unless it is set. Expiry is the existing
      `504 deadline_exceeded` or terminal SSE error; no partial answer is
-     invented.
+     invented. The supported deployment already ships a 270 s deadline, sized
+     from a medium-effort record whose maximum was 232 s (C26). So the startup
+     refusal bites only local, CI and stand-in runs that leave the deadline
+     unset, and at that effort the loop's headroom there is about 38 s (270
+     minus 232), less at a higher effort. The stage budget has to fit inside
+     that; resizing the deadline is its own approved concern, not part of
+     this record.
    - *Evidence:* first-round hits are never dropped or reordered by a later
      round. New hits are appended in round order, deduplicated by chunk id,
      up to a fixed packed-excerpt cap; the existing prompt budget still trims
@@ -112,23 +158,45 @@ one answer call. Each decision names the alternative considered.
    may turn it on for opt-in use is open point 9) and a per-request field on the chat
    routes, separate from `reasoning_depth`/`reasoning_effort` so that
    `thorough` keeps its meaning. With the operator switch off, a request that
-   asks for the mode gets a fixed 4xx with a stable code before retrieval or
+   carries the field gets a fixed 4xx with a stable code before retrieval or
    any model call, never a silent ordinary answer. In Open WebUI the docs Pipe
    lists one extra entry only when the switch is on, and that entry sends the
    field; the Pipe still makes no retrieval, planning or model call of its own
    (C8). The answer call's effort on that entry is open point 10. Neither the
    model nor retrieved text can turn the mode on.
+   **How the Pipe learns the switch** (recommended rule; open point 13): one
+   chart value sets both the agent's switch and an environment variable on
+   the Open WebUI pod, which the Pipe reads when it lists its entries, as
+   pasted images already work (C27). The Pipe stays stateless and never asks
+   the agent. One outcome per disagreement:
+   - *The Pipe lists the entry and the agent's switch is off* (rollout skew,
+     a hand-set environment): the entry sends the field, the agent returns
+     the fixed 4xx above and the Pipe shows its fixed text for that code. No
+     ordinary answer.
+   - *The agent's switch is on and the Pipe does not list the entry:* the
+     mode cannot be reached from Open WebUI. Every listed entry answers as
+     today and no request carries the field.
+   - *A stored chat names the research entry after the switch goes off:* by
+     source reading, not yet observed live (C28), Open WebUI drops a model id
+     it does not list and selects the default entry. The next message then
+     carries no field and gets an ordinary answer under the default entry's
+     name. This record accepts that as a visible fallback: the rule above
+     binds a request that carries the field, and this one does not. The
+     build's browser check has to observe it. The alternative that removes
+     the fallback is in open point 13.
    *Alternatives:* attach it to `thorough` (rejected: a silent behaviour
    change for existing users); a score-based automatic trigger (rejected:
    that is #86's measured-negative trigger, C20).
 6. **D6, failure and fallback follow the HTTP/model contract.** The planning
    call is an optional reasoning call like condensation and selection (C15):
-   one attempt, no retry, under the stage budget and the request deadline. A
+   one attempt, no retry, under the stage budget and the request deadline,
+   and made only when first-round evidence exists (D4, C23). A
    transport error, timeout, empty or malformed reply ends the loop, and the
    answer uses the evidence held; no new client error and no fabricated query.
    A failed follow-up search is a retrieval fault like any other: the existing
    fixed `502 upstream_error`, identical on every path (C22); the alternative,
-   answering with the evidence held, is open point 5. Cancellation and the
+   answering with the evidence held, is open point 5. A stage-budget expiry
+   is never itself a failed search (D4). Cancellation and the
    request deadline propagate. The planning-call fallback is new under C18, so
    the build adds its row to the policy table with bounded Settings and
    evidence.
@@ -160,7 +228,9 @@ one answer call. Each decision names the alternative considered.
       the first retrieval; step-back's recorded failure (PR #175) was dropping
       the product tokens that select the manual. Here the first retrieval is always the user's
       query, its hits are never displaced (D4), and the scope filter is fixed
-      (D2). #82 stays closed under its own gate.
+      (D2). Those are differences, not a ruling: whether #82's verdict on
+      "the LLM-rewriting remainder" and its gate cover a model-written
+      follow-up query is open point 14.
     - *Margin-triggered retry (#86, C20):* no score decides a re-search and
       acronym expansion is not a retry. The trigger is the user's opt-in; the
       variant is a model-written query, which #86 never measured. This record
@@ -171,22 +241,25 @@ one answer call. Each decision names the alternative considered.
 
 ## Clauses relied on or amended
 
-Quoted from 0d14b11d. "Confirmed" means the clause keeps its text and this mode
-is designed to satisfy it.
+Quoted from 0d14b11d, with that commit's line numbers. "Confirmed" means the
+clause keeps its text and this mode is designed to satisfy it. On this branch
+the two "proposed, not in effect" pointers move every later line by two:
+`docs/agent.md` after line 1663 (C6, C11 to C13, C15, C16, C18, C27, C28) and
+ADR-0007 after line 11 (C7, C8, C9).
 
 | # | Where | Clause | Effect |
 |---|---|---|---|
 | C1 | `AGENTS.md`:69-70 | "Search never calls an LLM; answers/chat/console use the designated reasoning model." | Confirmed (D1) |
-| C2 | `AGENTS.md`:77 | "No LangChain, LlamaIndex, second vector DB, new orchestration framework," | Confirmed; reading in D1, open point 2 |
+| C2 | `AGENTS.md`:77 | "No LangChain, LlamaIndex, second vector DB, new orchestration framework," | Confirmed on D1's reading only, so conditional on open point 2 (see C7) |
 | C3 | `docs/adr/0003-zowe-mcp-read.md`:22-24 | "never chosen by the model or by manual text: a deterministic router plans, and only a closed allowlist of read operations can run." | Confirmed (D2) |
 | C4 | `docs/adr/0003-zowe-mcp-read.md`:95-96 | "Search never calls an LLM; routing is deterministic and trap queries always route `manual`." | Confirmed (D1, D3) |
 | C5 | `docs/adr/0003-zowe-mcp-read.md`:133-134 | "*Generic tool/connector framework or LLM-chosen tool calls:* the model would pick sources and untrusted text could steer reads." | Confirmed; the reason D2 and D3 exist |
 | C6 | `docs/agent.md`:2122-2123 | "Search never calls an LLM; routing is deterministic and trap queries stay on the manuals path." | Confirmed |
-| C7 | `docs/adr/0010-team-tools-on-open-webui.md`:37-39, 47-48, 185-186 | "The **Docs model stays tool-free**: it is still only the hash-checked docs Pipe over the agent, with no tool, tool server or Function attached." and "The loop runs outside this repository's runtime: the repository adds no orchestration layer." and "**A repository-owned tool loop.** Rejected: it would be a new orchestration layer in this repository." | Confirmed for Team models and the Docs model; whether D1's stage is such a layer is open point 2 |
+| C7 | `docs/adr/0010-team-tools-on-open-webui.md`:37-39, 47-48, 185-186, 147; `docs/adr/0007-open-webui-docs-front-end.md`:371-372 | "The **Docs model stays tool-free**: it is still only the hash-checked docs Pipe over the agent, with no tool, tool server or Function attached." and "The loop runs outside this repository's runtime: the repository adds no orchestration layer." and "**A repository-owned tool loop.** Rejected: it would be a new orchestration layer in this repository." and "no repository-owned tool loop exists" and "these rules bind this repository's code, dependencies and answer path." | Confirmed for Team models and the Docs model. For D1's stage, confirmed **only if** open point 2 is ruled as recommended (a fixed search-only stage is neither a tool loop nor an orchestration layer). Ruled otherwise, these clauses forbid the mode as designed; it would need an explicit amendment of ADR-0010 and of ADR-0007's reading, which this record does not make |
 | C8 | `docs/adr/0007-open-webui-docs-front-end.md`:83-85, 132-133 | "The only models are the docs Pipe's entries: one Function, whose answer-depth entries Open WebUI lists as models `mainframe_rag_docs.<depth>`, each answering only through the agent" and "The Pipe is stateless. It does no retrieval, prompt assembly, tool planning or LLM calls of its own." | **V2 amended** (one more entry that is not an answer depth, D5); V3 confirmed |
 | C9 | `docs/adr/0007-open-webui-docs-front-end.md`:119-121 | "With pasted images on, the agent makes one extra reasoning-model call per image (its reading feeds retrieval);" | Precedent |
 | C10 | `docs/agent.md`:192-193 | "one low-effort reasoning call rewrites the latest turn into a standalone search query" | Precedent (`CHAT_CONDENSE_ENABLED`, default off) |
-| C11 | `docs/agent.md`:1681-1682, 1691-1692 | "The stage never rewrites the query and never retrieves again." and "Stage order is fixed for later work: select, then (if ever built) expand." | Precedent (#1309, `agent/answer_select.py`). **Amended:** the first sentence stays true of selection; a research request does not run selection in the first release (open point 4) |
+| C11 | `docs/agent.md`:1681-1682, 1691-1692 | "The stage never rewrites the query and never retrieves again." and "Stage order is fixed for later work: select, then (if ever built) expand." | Precedent (#1309, `agent/answer_select.py`). **Amended only if open point 4 is ruled as recommended:** the first sentence stays true of selection, and a research request then does not run selection in the first release. The stage-order sentence keeps its text: the research stage is not the "expand" it names and takes no place in that order while the two are exclusive. A later record that combines them has to fix where research sits relative to select and expand; this one does not |
 | C12 | `docs/agent.md`:1671 | "or a searched text (the query or an anchored antecedent) screens as a trap" | Relied on (D3) |
 | C13 | `docs/agent.md`:1988 | "The read text is model output, so its control characters become spaces and it is clipped" | Precedent; D3 is stricter |
 | C14 | `docs/retrieval.md`:371-373 | "`screen_query` classifies each query as `answerable` or `trap` with deterministic regexes over a normalized query — no LLM, no network, no model to vendor." | Relied on (D3) |
@@ -196,8 +269,14 @@ is designed to satisfy it.
 | C18 | `docs/agent.md`:1848-1849 | "This policy describes current operations, not permission to add retries. A new fallback/timeout is a behavior change, with bounded Settings and evidence." | Relied on; the build adds a policy row (D6) |
 | C19 | `docs/agent.md`:1252-1253 | "Span attributes carry finite labels, counts, and operator config only" | Relied on (D8) |
 | C20 | `ROADMAP.md`:163-166; `docs/retrieval.md`:364 | "**Reopening gate (all required):** a confidence signal with measured hit/miss separation plus a retry variant with measured positive headroom, both with per-query attribution on post-freeze real pools. Until then, do not re-propose." and "margin never decides re-search" | Not changed here; dependency on #1313 (open point 1) |
-| C21 | `ROADMAP.md`:118-121 | "**Reopening gate (all required):** per-query attribution shows failures from vocabulary mismatch (query terms absent from relevant docs) on the post-#214/#216 stack; paired A/B on a post-re-ingest real corpus; beats the +1-call latency cost. Until then, do not re-propose." | Not reopened (D10) |
+| C21 | `ROADMAP.md`:114-115, 118-121 | "the LLM-rewriting remainder (PR #175) is closed unmerged" and "**Reopening gate (all required):** per-query attribution shows failures from vocabulary mismatch (query terms absent from relevant docs) on the post-#214/#216 stack; paired A/B on a post-re-ingest real corpus; beats the +1-call latency cost. Until then, do not re-propose." | Not changed here; whether it covers a model-written follow-up query is open point 14 (D10) |
 | C22 | `docs/agent.md`:539 | "Any retrieval or condensation fault, identical on search, answer, chat and console (#985)" | Confirmed (D6); amended only if open point 5 goes the other way |
+| C23 | `docs/agent.md`:608-610, 611-612 | "The empty-hits short-circuit happens before prompt build and any LLM call, on both JSON and SSE." and "Retrieved hits with zero usable supplied excerpts (issue #634) take the same path, never a model call" | Confirmed (D4, D6): no planning call without first-round evidence |
+| C24 | `docs/retrieval.md`:210-211, 234 | "decomposes comparative and diagnostic queries into at most two retrieval paths" and "first marker only, cap 2 paths." | Relied on (D4: a split query is one search) |
+| C25 | `docs/agent.md`:1098-1100 | "**Known gap:** sync legs already running via `asyncio.to_thread` (embed POST, BM25, rerank, prompt build/tokenize RPC) cannot be interrupted" | Relied on (D4 stage budget, open point 12) |
+| C26 | `docs/agent.md`:1057-1059, 1060-1062 | "The supported deployment ships `REQUEST_DEADLINE_S=270` through the chart value `requestDeadlineSeconds`" and "It is chosen from the medium-effort record (#917: p95 162 s, max 232 s on 126 dev rows), so the supported route sees no 504 at that effort" | Relied on (D4 request deadline) |
+| C27 | `docs/agent.md`:2027 | "On only when the Open WebUI pod has `RAG_CHAT_IMAGES=true` (the chart sets it with `models.reasoning.chatImagesEnabled`)." | Precedent (D5, open point 13) |
+| C28 | `docs/agent.md`:2021; `docs/deploy.md`:2071-2072 | "v0.12.3 refuses an unlisted model id before the Pipe" and "v0.12.3 drops on opening it a model id it does not list and selects `DEFAULT_MODELS` (`Chat.svelte` `loadChat`; source reading, not yet observed live)" | Relied on (D5); not observed live, so the build has to observe it |
 
 ## Consequences
 
@@ -214,7 +293,8 @@ is designed to satisfy it.
   scope, never a read, a tool call or a filter (D2, D3).
 - The build updates the owners in the same PR: `docs/agent.md` (request
   field, error code, stage contract, policy row, settings),
-  `docs/metric-contract.md`, the Pipe contract and ADR-0007 V2.
+  `docs/metric-contract.md`, the Pipe contract, ADR-0007 V2 and the chart
+  value that sets the switch on both sides (D5).
 
 ## Open points for the maintainer
 
@@ -227,8 +307,9 @@ is designed to satisfy it.
    *Recommendation:* no, on the D1 reading (one operation, no tool registry,
    no dependency), recorded here so it is not stretched to tools.
 3. **Bound values.** *Recommendation:* at most 2 follow-up rounds, at most 3
-   searches per request, ceilings fixed in code; the stage budget and packed
-   cap are set from the stand-in measurement, not guessed here.
+   searches per request, ceilings fixed in code; the stage budget, the packed
+   cap and the planning prompt's excerpt count, excerpt length and reply cap
+   are set from the stand-in measurement, not guessed here.
 4. **Research with candidate selection (#1309).** *Recommendation:* exclusive
    per request in the first release (selection bypasses with a fixed reason),
    so each is measured alone; combine only after both have results.
@@ -246,10 +327,46 @@ is designed to satisfy it.
 9. **May a site turn the operator switch on for opt-in use before #1317
    results exist?** D9 gates only a default change. *Recommendation:* yes,
    as a labelled pilot, once a stand-in run shows the bounds hold and trap
-   and abstain behaviour is unchanged; quality claims wait for D9.
+   and abstain behaviour is unchanged; quality claims wait for D9. Merging
+   #1313 does not by itself answer this (open point 15).
 10. **Answer effort of the research entry.** A Pipe entry sends one value, so
     research and answer depth do not combine in the picker. *Recommendation:*
     the research entry answers at the `standard` effort; a research entry per
     depth is a later decision.
 11. **ADR number.** 0012 is taken by open PR #1295; this is 0013 and is
     renumbered only on request.
+12. **The stage budget expires while a follow-up search is in flight.**
+    *Recommendation:* D4's rule: the search finishes under its own per-leg
+    timeouts and the request deadline, its hits are kept, the loop ends, and
+    only a failed search is a 502. The alternative, abandoning the search at
+    expiry and answering with the evidence held, still spends the time and
+    the threads (C25) and throws a finished result away.
+13. **How the Pipe learns the operator switch, and stored research chats.**
+    *Recommendation:* D5's rule: one chart value for both sides, the fixed
+    4xx when they disagree, and the default-entry fallback for a stored chat
+    accepted as visible. The alternative is that the Pipe always lists the
+    entry and, with the switch off, returns a fixed "research is off" text
+    with no agent call: no fallback at all, but every site shows an entry
+    that may never work.
+14. **Does #82's "do not re-propose" gate cover a model-written follow-up
+    query (C21)?** *Recommendation:* treat it as covered, as open point 1
+    does for #86, and do not waive it inside this ADR. #1313 names #82 among
+    the ideas it opens, so its merge would settle both. D10's differences
+    explain why the recorded failure need not recur; they are not a waiver.
+15. **Is merging #1313 enough to accept this ADR, and to run open point 9's
+    site pilot?** #1313 opens a re-measurement only and says adoption still
+    needs a paired A/B. *Recommendation:* enough to accept this record
+    (acceptance enables nothing), to build the mode default-off and to
+    measure it on the stand-in lane and under D9. Not enough for the site
+    pilot: users at a site using the mode is use, not measurement, so the
+    pilot needs open point 9 ruled explicitly, and a default needs D9's
+    paired run.
+16. **Does the planning call read chat history or image-read text?**
+    *Recommendation:* neither directly. It reads only the request's searched
+    texts as the search plan produced them (the literal, condensed or
+    anchored text) and the excerpts held: no earlier turn, no image and no
+    separate transcription. On an image turn the searched text already holds
+    the clipped image reading that feeds retrieval (C9, C13), and that is all
+    of it the planner sees. History and image text therefore reach the
+    planner only as text the first round already searched and D3 already
+    screened.
