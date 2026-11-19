@@ -105,8 +105,9 @@ def make_bin_tree(tmp_path: Path, scripts: list[str]) -> Path:
         # legacy_layout.py: the stored-layout preflight (#1070) runs from both.
         scripts = [*scripts, "check_app_ownership.py", "check_route_exposure.py", "legacy_layout.py"]
     if "common.sh" in scripts:
-        # resolve_observability evaluates the values mapper's decisions.
-        scripts = [*scripts, "model_config.py", "map_values.py"]
+        # resolve_observability evaluates the values mapper's decisions;
+        # validate.sh and config.sh invoke config_tool.py and operator_keys.py.
+        scripts = [*scripts, "model_config.py", "map_values.py", "operator_keys.py", "config_tool.py"]
     if "pack.sh" in scripts:
         scripts = [*scripts, "reference_docs.py"]
     if any(name in scripts for name in ("pack.sh", "load.sh", "deploy.sh", "ingest.sh")):
