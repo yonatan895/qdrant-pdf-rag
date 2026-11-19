@@ -38,7 +38,9 @@ DATA_FIELDS = ("source_rev", "doc_id", "sha256", "title", "product", "version",
 _ENTRY_KEYS = frozenset({"source_revision", "source_sha256", "doc_id", "title", "product", "version",
                          "chunk_count", "pages", "page_labels", "indexed_pages"})
 _LABEL_RANGE = "–"
-_PAGE_SIZE = 256
+DEFAULT_CATALOG_PAGE_SIZE = 1000
+_PAGE_SIZE = DEFAULT_CATALOG_PAGE_SIZE
+_UPSERT_BATCH_SIZE = 256
 
 
 class SourceCatalogError(RuntimeError):
@@ -99,68 +101,83 @@ def _indexed_pages(spans: set[tuple[int, int]]) -> int:
     return total
 
 
-def _bound_markers(client: QdrantReader, control: str, physical: str) -> dict[str, Any]:
-    """Completion markers that certify this physical (inherited ancestor
-    markers certify their own target and are not sources of this build)."""
+def _bound_markers_from_records(records: list[Any], physical: str) -> dict[str, Any]:
+    """Extract completion markers certifying `physical` from prefetched control records."""
     from pydantic import ValidationError
 
     from mainframe_rag.ingest.completion import CompletionRecord
 
     markers: dict[str, CompletionRecord] = {}
-    offset = None
-    while True:
-        records, offset = client.scroll(control, limit=_PAGE_SIZE, offset=offset, with_payload=True)
-        for record in records:
-            payload = record.payload or {}
-            if "record_type" in payload or payload.get("target_collection") != physical:
-                continue
-            try:
-                marker = CompletionRecord.model_validate(payload)
-            except ValidationError as exc:
-                raise SourceCatalogError("a completion marker of this build is unreadable") from exc
-            if marker.source_rev in markers:
-                raise SourceCatalogError("a source revision has two completion markers in this build")
-            markers[marker.source_rev] = marker
-        if offset is None or not records:
-            break
+    for record in records:
+        payload = record.payload or {}
+        if "record_type" in payload or payload.get("target_collection") != physical:
+            continue
+        try:
+            marker = CompletionRecord.model_validate(payload)
+        except ValidationError as exc:
+            raise SourceCatalogError("a completion marker of this build is unreadable") from exc
+        if marker.source_rev in markers:
+            raise SourceCatalogError("a source revision has two completion markers in this build")
+        markers[marker.source_rev] = marker
     if not markers:
         raise SourceCatalogError("the build has no completion markers")
     return markers
 
 
-def build_source_catalog(client: QdrantReader, physical: str) -> list[dict]:
-    """One entry per source revision of the staging build, verified against
-    its completion markers. Raises SourceCatalogError on any inconsistency."""
-    control = physical + "__completions"
-    markers = _bound_markers(client, control, physical)
-    acc: dict[str, dict] = {}
+def _bound_markers(
+    client: QdrantReader,
+    control: str,
+    physical: str,
+    *,
+    page_size: int = _PAGE_SIZE,
+    control_records: list[Any] | None = None,
+) -> dict[str, Any]:
+    """Completion markers that certify this physical (inherited ancestor
+    markers certify their own target and are not sources of this build)."""
+    if control_records is not None:
+        return _bound_markers_from_records(control_records, physical)
+    records_all: list[Any] = []
     offset = None
     while True:
-        records, offset = client.scroll(physical, limit=_PAGE_SIZE, offset=offset,
-                                        with_payload=list(DATA_FIELDS))
-        for record in records:
-            payload = record.payload or {}
-            rev = payload.get("source_rev")
-            if not isinstance(rev, str) or not rev:
-                raise SourceCatalogError("a stored chunk has no source revision")
-            start, end = payload.get("page_start"), payload.get("page_end")
-            if (type(start) is not int or type(end) is not int or start < 0 or end < start):
-                raise SourceCatalogError("a stored chunk has an invalid page span")
-            a = acc.setdefault(rev, {"count": 0, "labels": {k: set() for k in DATA_FIELDS[1:6]},
-                                     "spans": set(), "first": None, "last": None})
-            a["count"] += 1
-            for key in DATA_FIELDS[1:6]:
-                value = payload.get(key)
-                if value is not None and not isinstance(value, str):
-                    raise SourceCatalogError("a stored chunk has a non-text identity label")
-                a["labels"][key].add(value)
-            a["spans"].add((start, end))
-            first = (start, _edge_label(payload.get("page_label"), 0))
-            last = (end, _edge_label(payload.get("page_label"), -1))
-            a["first"] = _pick_edge(a["first"], first, lower=True)
-            a["last"] = _pick_edge(a["last"], last, lower=False)
+        records, offset = client.scroll(control, limit=page_size, offset=offset, with_payload=True)
+        records_all.extend(records)
         if offset is None or not records:
             break
+    return _bound_markers_from_records(records_all, physical)
+
+
+def accumulate_catalog_record(acc: dict[str, dict], payload: dict[str, Any]) -> None:
+    """Fold one data point's identity/page payload into a catalog accumulator."""
+    rev = payload.get("source_rev")
+    if not isinstance(rev, str) or not rev:
+        raise SourceCatalogError("a stored chunk has no source revision")
+    start, end = payload.get("page_start"), payload.get("page_end")
+    if type(start) is not int or type(end) is not int or start < 0 or end < start:
+        raise SourceCatalogError("a stored chunk has an invalid page span")
+    a = acc.setdefault(
+        rev,
+        {
+            "count": 0,
+            "labels": {k: set() for k in DATA_FIELDS[1:6]},
+            "spans": set(),
+            "first": None,
+            "last": None,
+        },
+    )
+    a["count"] += 1
+    for key in DATA_FIELDS[1:6]:
+        value = payload.get(key)
+        if value is not None and not isinstance(value, str):
+            raise SourceCatalogError("a stored chunk has a non-text identity label")
+        a["labels"][key].add(value)
+    a["spans"].add((start, end))
+    first = (start, _edge_label(payload.get("page_label"), 0))
+    last = (end, _edge_label(payload.get("page_label"), -1))
+    a["first"] = _pick_edge(a["first"], first, lower=True)
+    a["last"] = _pick_edge(a["last"], last, lower=False)
+
+
+def _finalize_source_catalog(markers: dict[str, Any], acc: dict[str, dict]) -> list[dict]:
     if set(acc) != set(markers):
         raise SourceCatalogError("stored source revisions do not match the build's completion markers")
     entries = []
@@ -191,6 +208,37 @@ def build_source_catalog(client: QdrantReader, physical: str) -> list[dict]:
     return entries
 
 
+def build_source_catalog(
+    client: QdrantReader,
+    physical: str,
+    *,
+    page_size: int = _PAGE_SIZE,
+    snapshot: Any = None,
+) -> list[dict]:
+    """One entry per source revision of the staging build, verified against
+    its completion markers. Raises SourceCatalogError on any inconsistency."""
+    control = physical + "__completions"
+    if snapshot is not None and snapshot.catalog_acc is not None:
+        markers = _bound_markers(
+            client, control, physical, page_size=page_size,
+            control_records=snapshot.completions.raw_records,
+        )
+        if snapshot.catalog_error is not None:
+            raise SourceCatalogError(snapshot.catalog_error)
+        return _finalize_source_catalog(markers, snapshot.catalog_acc)
+    markers = _bound_markers(client, control, physical, page_size=page_size)
+    acc: dict[str, dict] = {}
+    offset = None
+    while True:
+        records, offset = client.scroll(physical, limit=page_size, offset=offset,
+                                        with_payload=list(DATA_FIELDS))
+        for record in records:
+            accumulate_catalog_record(acc, record.payload or {})
+        if offset is None or not records:
+            break
+    return _finalize_source_catalog(markers, acc)
+
+
 def _pick_edge(current: tuple[int, str | None] | None, candidate: tuple[int, str | None],
                *, lower: bool) -> tuple[int, str | None]:
     """The extreme physical page; among chunks sharing it, one agreed label
@@ -205,22 +253,31 @@ def _pick_edge(current: tuple[int, str | None] | None, candidate: tuple[int, str
     return current if current[1] == candidate[1] else (current[0], None)
 
 
-def _catalog_point_ids(client: QdrantReader, control: str) -> list[str]:
+def _catalog_point_ids(
+    client: QdrantReader, control: str, *, page_size: int = _PAGE_SIZE,
+) -> list[str]:
     ids: list[str] = []
     offset = None
     while True:
-        records, offset = client.scroll(control, limit=_PAGE_SIZE, offset=offset, with_payload=["record_type"])
+        records, offset = client.scroll(control, limit=page_size, offset=offset, with_payload=["record_type"])
         ids.extend(str(r.id) for r in records if (r.payload or {}).get("record_type") == CATALOG_RECORD_TYPE)
         if offset is None or not records:
             break
     return ids
 
 
-def write_source_catalog(client: QdrantPoints, physical: str, entries: list[dict], dense_dim: int) -> None:
+def write_source_catalog(
+    client: QdrantPoints,
+    physical: str,
+    entries: list[dict],
+    dense_dim: int,
+    *,
+    page_size: int = _PAGE_SIZE,
+) -> None:
     """Replace every catalog entry in the staging control collection (the
     clone inherits the ancestor's entries, as it does its receipt)."""
     control = physical + "__completions"
-    stale = _catalog_point_ids(client, control)
+    stale = _catalog_point_ids(client, control, page_size=page_size)
     if stale:
         client.delete(control, points_selector=models.PointIdsList(points=sorted(stale)), wait=True)
     points = [
@@ -233,8 +290,8 @@ def write_source_catalog(client: QdrantPoints, physical: str, entries: list[dict
         )
         for entry in entries
     ]
-    for i in range(0, len(points), _PAGE_SIZE):
-        client.upsert(control, points=points[i : i + _PAGE_SIZE], wait=True)
+    for i in range(0, len(points), _UPSERT_BATCH_SIZE):
+        client.upsert(control, points=points[i : i + _UPSERT_BATCH_SIZE], wait=True)
 
 
 def _opt_text(value: object) -> bool:
@@ -277,12 +334,25 @@ def decode_catalog_point(control: str, point_id: object, payload: object) -> dic
     return entry
 
 
-def read_source_catalog(client: QdrantReader, control: str) -> list[dict]:
+def read_source_catalog(
+    client: QdrantReader,
+    control: str,
+    *,
+    page_size: int = _PAGE_SIZE,
+    control_records: list[Any] | None = None,
+) -> list[dict]:
     """Every stored entry, validated and sorted. A malformed entry raises."""
     entries: list[dict] = []
+    if control_records is not None:
+        for record in control_records:
+            payload = record.payload or {}
+            if payload.get("record_type") != CATALOG_RECORD_TYPE:
+                continue
+            entries.append(decode_catalog_point(control, record.id, payload))
+        return sorted(entries, key=lambda e: e["source_revision"])
     offset = None
     while True:
-        records, offset = client.scroll(control, limit=_PAGE_SIZE, offset=offset, with_payload=True)
+        records, offset = client.scroll(control, limit=page_size, offset=offset, with_payload=True)
         for record in records:
             payload = record.payload or {}
             if payload.get("record_type") != CATALOG_RECORD_TYPE:
@@ -293,10 +363,19 @@ def read_source_catalog(client: QdrantReader, control: str) -> list[dict]:
     return sorted(entries, key=lambda e: e["source_revision"])
 
 
-def verify_source_catalog(client: QdrantReader, control: str, summary: object) -> list[dict]:
+def verify_source_catalog(
+    client: QdrantReader,
+    control: str,
+    summary: object,
+    *,
+    page_size: int = _PAGE_SIZE,
+    control_records: list[Any] | None = None,
+) -> list[dict]:
     """Stored entries must equal the receipt's binding exactly."""
     expected = decode_catalog_summary(summary)
-    entries = read_source_catalog(client, control)
+    entries = read_source_catalog(
+        client, control, page_size=page_size, control_records=control_records,
+    )
     if catalog_summary(entries) != expected:
         raise SourceCatalogError("stored source catalog does not match its publication receipt")
     return entries

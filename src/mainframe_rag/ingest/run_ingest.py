@@ -59,6 +59,7 @@ from mainframe_rag.ingest.catalog import (
 from mainframe_rag.ingest.chrome import strip_chrome
 from mainframe_rag.ingest.chunk import Chunk, make_chunks
 from mainframe_rag.ingest.completion import (
+    VerificationSnapshot,
     acquire_publish_lock,
     acquire_run_lock,
     completion_collection_name,
@@ -69,6 +70,8 @@ from mainframe_rag.ingest.completion import (
     expected_digests,
     is_doc_complete,
     plan_refresh_deletes,
+    prefetch_completions,
+    prefetch_verification_state,
     release_run_lock,
     source_labels,
     stale_completion_markers,
@@ -95,8 +98,14 @@ from mainframe_rag.ingest.corpus_scan import (
 from mainframe_rag.ingest.embed import build_embedder, chunk_embed_text, embed_batch
 from mainframe_rag.ingest.ibm_pdf import (
     ParsedDoc,
+    _bounded_title,
     _extract_page_texts,
+    _metadata_line,
+    extract_doc_id,
+    extract_product_version,
+    extract_title,
     parse_pdf,
+    sha256_file,
 )
 from mainframe_rag.ingest.identity import (
     RevisionCollisionError,
@@ -129,6 +138,7 @@ from mainframe_rag.ingest.publish import (
     resolve_publish_staging,
     verify_all_complete,
     verify_build_catalog,
+    verify_publication_receipt,
     verify_publication_seal,
     verify_searchable_coverage,
     verify_staging_distribution,
@@ -158,6 +168,7 @@ from mainframe_rag.ingest.representation import (
     require_attested_revision,
 )
 from mainframe_rag.ingest.rules_version import extraction_rules_version
+from mainframe_rag.ingest.walk import detect_vendor, infer_from_path
 from mainframe_rag.logs import configure_logging
 from mainframe_rag.ports import QdrantPoints, QdrantReader, SparseVector
 from mainframe_rag.tracing import setup_tracing, shutdown_tracing, start_as_current_span, start_span
@@ -346,6 +357,44 @@ def walked_source_rev(parsed: ParsedDoc) -> str:
     return parsed_source_rev(parsed)
 
 
+def _parse_open_pdf(
+    doc: Any,
+    path: Path,
+    *,
+    vendor: str | None = None,
+    product: str | None = None,
+    version: str | None = None,
+    corpus_root: Path | None = None,
+    sha256: str | None = None,
+) -> ParsedDoc:
+    """Build ParsedDoc from an already-open PyMuPDF document using the exact
+    rule helpers in `ibm_pdf.py`/`walk.py`, avoiding a second open in
+    `_parse_one` without modifying any `rules_version`-hashed module (#1298)."""
+    path = Path(path)
+    doc_id = extract_doc_id(doc, path) or path.stem
+    text_product, text_version = extract_product_version(doc)
+    lp, lver = ("unknown", "")
+    if corpus_root is not None:
+        _, lp, lver = infer_from_path(path, corpus_root)
+    vendor_f = vendor or detect_vendor(path, corpus_root)
+    product_f = product or (lp if lp != "unknown" else text_product)
+    version_f = version or lver or text_version
+    return ParsedDoc(
+        path=path,
+        sha256=sha256 or sha256_file(path),
+        doc_id=doc_id,
+        title=extract_title(doc, doc_id),
+        product=product_f,
+        version=version_f or None,
+        vendor=vendor_f or "unknown",
+        toc=tuple(
+            (level, _bounded_title(_metadata_line(title)), page)
+            for level, title, page in doc.get_toc(simple=True)
+        ),
+        page_count=doc.page_count,
+    )
+
+
 def parse_walked(
     path: Path,
     sha: str,
@@ -354,6 +403,7 @@ def parse_walked(
     product: str | None,
     version: str | None,
     corpus_root: Path | None,
+    doc: Any = None,
 ) -> ParsedDoc:
     """Parse one walked PDF with the run's CLI labels, its corpus root and
     its walk digest: the one label/identity input mapping behind the build
@@ -361,6 +411,11 @@ def parse_walked(
     file cannot be labelled one way when stored and another when retired (the
     #839 drift). Its key is `walked_source_rev(parsed)`. Both only compose
     `parse_pdf` and `parsed_source_rev`, so no stored key changes."""
+    if doc is not None:
+        return _parse_open_pdf(
+            doc, path, vendor=vendor, product=product, version=version,
+            corpus_root=corpus_root, sha256=sha,
+        )
     return parse_pdf(
         path, vendor=vendor, product=product, version=version,
         corpus_root=corpus_root, sha256=sha,
@@ -412,18 +467,19 @@ def _parse_one(
             except OSError:  # scratch dir cannot be made: fixed text, no path
                 raise ParseScratchError from None
             work_path, work_root = private_verified_copy(path, corpus_root, sha, tmp_dir)
-        parsed = parse_walked(
-            work_path,
-            sha,
-            vendor=vendor,
-            product=product,
-            version=version,
-            corpus_root=work_root,
-        )
-        source_rev = walked_source_rev(parsed)
-        require_document_within("pages", parsed.page_count, settings.ingest_max_doc_pages)
         doc = pymupdf.open(work_path)
         try:
+            parsed = parse_walked(
+                work_path,
+                sha,
+                vendor=vendor,
+                product=product,
+                version=version,
+                corpus_root=work_root,
+                doc=doc,
+            )
+            source_rev = walked_source_rev(parsed)
+            require_document_within("pages", parsed.page_count, settings.ingest_max_doc_pages)
             page_texts, page_labels = _extract_page_texts(doc)
         finally:
             doc.close()
@@ -1042,6 +1098,90 @@ def _plan(
     # sole-lineage/residue rules instead of guessing.
     lineage_by_path = {path: rec.source_rev for path, rec in inventory.items()}
 
+    # Batch bound-skip completion verification (#1298): prefetch completions once
+    # and verify matched candidates in one bounded scan instead of N per-doc
+    # collection_exists + control/data scrolls.
+    skip_candidates: dict[str, tuple[InventoryRecord, str]] = {}
+    if not dry_run:
+        for path_str, sha in walk_entries:
+            record = inventory.get(path_str)
+            if (
+                record
+                and should_skip(
+                    record,
+                    sha,
+                    allow_dry=False,
+                    rules_version=rules_v,
+                    force_reingest=force_reingest and not resume_checkpoints,
+                )
+                and record.doc_id
+                and record.source_rev
+            ):
+                skip_candidates[path_str] = (record, sha)
+
+    verified_skips: set[str] = set()
+    if skip_candidates:
+        assert client is not None
+        req_digest = manifest_digest(settings, rules_v) if resume_checkpoints else None
+        comp_snap = prefetch_completions(client, settings)
+        matched: list[tuple[str, InventoryRecord, str, Any]] = []
+        for path_str, (record, sha) in skip_candidates.items():
+            assert record.doc_id and record.source_rev
+            expected_gen = doc_generation_id(settings, sha, rules_v, src_labels)
+            scoped = comp_snap.find_completion(
+                record.doc_id,
+                source_rev=record.source_rev,
+                generation_id=expected_gen,
+                target_collection=settings.qdrant_collection,
+            )
+            if scoped is None:
+                continue
+            if req_digest is not None and scoped.manifest_digest != req_digest:
+                continue
+            if scoped.sha256 != sha or scoped.rules_v != rules_v:
+                continue
+            matched.append((path_str, record, sha, scoped))
+        if len(matched) >= 2 and len(matched) * 4 >= len(walk_entries):
+            target_pairs = {
+                (rec.doc_id, rec.source_rev)
+                for _, rec, _, _ in matched
+                if rec.doc_id and rec.source_rev
+            }
+            ver_snap = prefetch_verification_state(
+                client,
+                settings,
+                completions=comp_snap,
+                target_pairs=target_pairs,
+            )
+            for path_str, record, sha, _scoped in matched:
+                assert record.doc_id and record.source_rev
+                if ver_snap.verify_doc(
+                    client,
+                    settings,
+                    record.doc_id,
+                    sha256=sha,
+                    rules_v=rules_v,
+                    source_labels=src_labels,
+                    source_rev=record.source_rev,
+                    required_manifest_digest=req_digest,
+                ):
+                    verified_skips.add(path_str)
+        else:
+            for path_str, record, sha, scoped in matched:
+                assert record.doc_id and record.source_rev
+                if verify_doc_points(
+                    client,
+                    settings,
+                    record.doc_id,
+                    sha256=sha,
+                    rules_v=rules_v,
+                    source_rev=record.source_rev,
+                    expected_chunks=scoped.expected_chunks,
+                    chunk_ids_digest=scoped.chunk_ids_digest,
+                    content_digest=scoped.content_digest,
+                ):
+                    verified_skips.add(path_str)
+
     tasks: list[ParseTask] = []
     skipped_ok = 0
     for path_str, sha in walk_entries:
@@ -1061,14 +1201,6 @@ def _plan(
                     )
                 )
                 continue
-            # Bound skip (issue #359 req 3): an inventory line alone
-            # never proves the target holds the generation. Require
-            # a valid completion + verified points; otherwise
-            # re-queue for parse+upsert+verify. Legacy records
-            # without a doc_id re-ingest explicitly.
-            assert client is not None
-            bound_doc = record.doc_id
-            bound_rev = record.source_rev
             # Bound skip (issue #359 req 3, revision-scoped by #361):
             # an inventory line alone never proves the target holds
             # the generation. Require a valid completion for THIS
@@ -1076,22 +1208,7 @@ def _plan(
             # parse+upsert+verify. Legacy records without a doc_id
             # or revision re-ingest explicitly (one lazy-migration
             # cycle, never a wrong skip).
-            if (
-                bound_doc
-                and bound_rev
-                and is_doc_complete(
-                    client,
-                    settings,
-                    bound_doc,
-                    sha256=sha,
-                    rules_v=rules_v,
-                    source_labels=src_labels,
-                    source_rev=bound_rev,
-                    required_manifest_digest=(
-                        manifest_digest(settings, rules_v) if resume_checkpoints else None
-                    ),
-                )
-            ):
+            if path_str in verified_skips:
                 skipped_ok += 1
                 log.info(
                     json.dumps(
@@ -1554,6 +1671,8 @@ def _run_impl(
     version: str | None = None,
     force_reingest: bool = False,
     staging: _StagingBuild | None = None,
+    *,
+    verified_out: dict[str, Any] | None = None,
 ) -> int:
     """One build: the publisher's staging generation (`settings` already
     name the staging physical), or a dry run (`staging` None), which writes
@@ -1676,7 +1795,8 @@ def _run_impl(
         # proof runs here, before any summary claims success (issue #391 F2).
         if stats.files_failed == 0 and manifest_mode == STATE_PENDING:
             assert client is not None
-            _commit_migration_representation(
+            has_pending_removals = bool(staging and staging.pending_removals)
+            snap = _commit_migration_representation(
                 client,
                 settings,
                 rules_v,
@@ -1685,7 +1805,10 @@ def _run_impl(
                 src_labels=src_labels,
                 pending_removals=staging.pending_removals if staging is not None else frozenset(),
                 retire_plan=staging.retire_plan if staging is not None else None,
+                include_catalog_fields=verified_out is not None and not has_pending_removals,
             )
+            if verified_out is not None and not has_pending_removals:
+                verified_out["snapshot"] = snap
     finally:
         if run_lock is not None:
             release_run_lock(run_lock)
@@ -1712,7 +1835,8 @@ def _commit_migration_representation(
     src_labels: str,
     pending_removals: frozenset[str] = frozenset(),
     retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
-) -> None:
+    include_catalog_fields: bool = False,
+) -> VerificationSnapshot:
     """Success-path commit of a pending migration contract (issue #391 F2):
     prove no marker under another contract remains AND the actual searchable
     membership is attributable to this run's verified walked documents
@@ -1722,6 +1846,11 @@ def _commit_migration_representation(
     blocked. Read-only: unknown points are preserved, never deleted; the
     approved-removal plan is enforced gone by the post-removal swap audit."""
     digest = manifest_digest(settings, rules_v)
+    snap = prefetch_verification_state(
+        client,
+        settings,
+        include_catalog_fields=include_catalog_fields,
+    )
     count, labels = stale_completion_markers(
         client,
         settings,
@@ -1729,6 +1858,7 @@ def _commit_migration_representation(
         exclude_doc_ids=pending_removals,
         retire_plan=retire_plan,
         require_stored_points=True,
+        snapshot=snap,
     )
     if count:
         raise RuntimeError(
@@ -1747,6 +1877,7 @@ def _commit_migration_representation(
         src_labels,
         pending_removals=pending_removals,
         retire_plan=retire_plan,
+        snapshot=snap,
     )
     if problems:
         raise RuntimeError(
@@ -1768,6 +1899,7 @@ def _commit_migration_representation(
             }
         )
     )
+    return snap
 
 
 def _run_publish(
@@ -2151,6 +2283,7 @@ def _certify_live(
             "generation keeps serving reads, operator intervention "
             "required (issue #360)."
         )
+    live_snap = prefetch_verification_state(client, staging_settings)
     problems = verify_all_complete(
         client,
         staging_settings,
@@ -2160,16 +2293,23 @@ def _certify_live(
         labels,
         retired,
         retire_plan,
+        snapshot=live_snap,
     )
     if problems:
         raise RuntimeError(
             f"live generation {live!r} fails verification for {len(problems)} "
             f"path(s) (e.g. {problems[0]!r}) — operator intervention required."
         )
-    verify_publication_seal(client, completion_collection_name(staging_settings))
+    controls = completion_collection_name(staging_settings)
+    verify_publication_seal(client, controls, page_size=staging_settings.ingest_scan_page_size)
     # A schema-3 build's catalog must still match its receipt; an older live
     # build has none and keeps serving (issue #827).
-    verify_build_catalog(client, completion_collection_name(staging_settings))
+    verify_build_catalog(
+        client,
+        controls,
+        page_size=staging_settings.ingest_scan_page_size,
+        control_records=live_snap.completions.raw_records,
+    )
 
 
 def _recertify_live(
@@ -2251,8 +2391,9 @@ def _build_and_cut_over(
                           for target in observed_aliases.values()):
         raise RuntimeError("candidate has aliases but lacks its build control; refusing mutation")
     if sealed:
-        if not (verify_publication_seal(client, completion_collection_name(staging_settings))
-                and verify_build_catalog(client, completion_collection_name(staging_settings))):
+        controls = completion_collection_name(staging_settings)
+        if not (verify_publication_seal(client, controls, page_size=staging_settings.ingest_scan_page_size)
+                and verify_build_catalog(client, controls, page_size=staging_settings.ingest_scan_page_size)):
             raise RuntimeError("unfinished old-format build: finish with its release or explicitly abandon")
         expected = BuildBinding(build_id, alias, staging, gen_fp, corp_fp)
         if candidate_binding != expected:
@@ -2280,6 +2421,7 @@ def _build_and_cut_over(
     mode = ensure_staging(client, settings, staging_settings, live)
     if sealed != (mode == "sealed"):
         raise RuntimeError("candidate build state changed during preparation; refusing mutation")
+    verified_state: dict[str, Any] = {}
     if not sealed:
         log.info(
             json.dumps(
@@ -2313,6 +2455,7 @@ def _build_and_cut_over(
                 retire_plan=retire_plan,
                 resume_verified=resumed and mode == "reused",
             ),
+            verified_out=verified_state,
         )
         if rc != 0:
             return rc
@@ -2320,6 +2463,7 @@ def _build_and_cut_over(
             # Explicit removals only (issue #405 R1): a missing file never
             # deletes. Applied after the build, before verification, so the
             # read-only audit certifies the exact candidate being published.
+            verified_state.clear()
             removed = apply_approved_removals(client, staging_settings, retire_plan)
             log.info(
                 json.dumps(
@@ -2352,6 +2496,13 @@ def _build_and_cut_over(
             f"(e.g. {place_problems[0]!r}) — alias untouched, {live!r} still "
             "live (issue #360)."
         )
+    snap: VerificationSnapshot | None = verified_state.get("snapshot")
+    if snap is None:
+        snap = prefetch_verification_state(
+            client,
+            staging_settings,
+            include_catalog_fields=not sealed,
+        )
     problems = verify_all_complete(
         client,
         staging_settings,
@@ -2361,6 +2512,7 @@ def _build_and_cut_over(
         labels,
         retired,
         retire_plan,
+        snapshot=snap,
     )
     if problems:
         raise RuntimeError(
@@ -2378,35 +2530,71 @@ def _build_and_cut_over(
             "another publisher cut over first — alias untouched, retry against "
             "the current live generation."
         )
+    controls = completion_collection_name(staging_settings)
     if not sealed:
         # Source catalog (issue #827): built from the verified staging pair,
         # written before the receipt so the seal covers it, and read back.
         # Inherited ancestor entries are replaced, like the receipt below.
-        controls = completion_collection_name(staging_settings)
-        catalog = build_source_catalog(client, staging)
+        catalog = build_source_catalog(
+            client,
+            staging,
+            page_size=staging_settings.ingest_scan_page_size,
+            snapshot=snap,
+        )
         built = catalog_summary(catalog)
         try:
             catalog_dim = staging_settings.require_dense_dim()
         except RuntimeError:
             catalog_dim = 1
-        write_source_catalog(client, staging, catalog, catalog_dim)
-        if catalog_summary(read_source_catalog(client, controls)) != built:
+        write_source_catalog(
+            client,
+            staging,
+            catalog,
+            catalog_dim,
+            page_size=staging_settings.ingest_scan_page_size,
+        )
+        if (
+            catalog_summary(
+                read_source_catalog(
+                    client, controls, page_size=staging_settings.ingest_scan_page_size
+                )
+            )
+            != built
+        ):
             raise RuntimeError(
                 f"staging {staging!r} source catalog did not read back — alias untouched, "
                 f"{live!r} still live."
             )
         # Remove only staging copies of the ancestor's publication receipt.
         # The new receipt seals this exact pair; retries verify it read-only.
-        delete_publication_metadata(client, controls,
-                                    ancestor_completions=live + "__completions" if live else None)
-        write_publication_metadata(
+        delete_publication_metadata(
+            client,
+            controls,
+            ancestor_completions=live + "__completions" if live else None,
+            page_size=staging_settings.ingest_scan_page_size,
+        )
+        written_seal = write_publication_metadata(
             client, controls, staging_settings,
             gen_fp=gen_fp, corpus_fp=corp_fp, build_id=build_id, logical_alias=alias,
             source_catalog=built,
         )
-    if not sealed and not verify_publication_seal(client, completion_collection_name(staging_settings)):
-        raise RuntimeError("new publication lacks its content seal")
-    if not verify_build_catalog(client, completion_collection_name(staging_settings)):
+        # Verify the persisted receipt under the same publish lock without
+        # repeating the full-collection vector+payload seal scan (#1298).
+        expected_binding = BuildBinding(build_id, alias, staging, gen_fp, corp_fp)
+        if not verify_publication_receipt(
+            client,
+            controls,
+            expected_seal=written_seal,
+            expected_binding=expected_binding,
+            expected_catalog=built,
+        ):
+            raise RuntimeError("new publication lacks its content seal")
+    elif not verify_build_catalog(
+        client,
+        controls,
+        page_size=staging_settings.ingest_scan_page_size,
+        control_records=snap.completions.raw_records,
+    ):
         raise RuntimeError("new publication lacks its source catalog")
     summary = swap_alias_to(client, settings, staging, live, build_id=build_id)
     summary["docs"] = str(len(prewalked))
