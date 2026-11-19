@@ -4456,3 +4456,134 @@ def test_livez_responsive_while_hostile_reply_is_finalized(client, monkeypatch):
     t1 = time.perf_counter()
     assert client.get("/livez").status_code == 200
     assert time.perf_counter() - t1 < 1.0
+
+
+def test_answer_completion_usage_400_trims_and_untrimmable_422_without_cooldown(
+    monkeypatch, synthetic_pdf, servable_representation_gate, capsys
+):
+    """#1296 end-to-end HTTP contract: on a site gateway without /tokenize,
+    an over-window 400 from CompletionUsageTokenizer trims trailing excerpts
+    and returns 200 (never 502), an untrimmable over-window 400 returns the
+    fixed 422 prompt_budget_exceeded envelope (never leaking upstream 400
+    body text, zero generation calls), and the next ordinary request still
+    gets remote verified counting (no 600 s cooldown)."""
+    from mainframe_rag.agent.tokenizer import build_tokenizer
+
+    upstream_secret = "UPSTREAM-400-BODY-LEAK-MARKER"
+    count_calls: list[int] = []
+    window_limit = [10000]
+
+    def gateway(request):
+        if request.url.path == "/tokenize":
+            return httpx2.Response(404)
+        body = json.loads(request.content)
+        tokens = sum(len(m["content"]) for m in body["messages"])
+        count_calls.append(tokens)
+        if tokens + 1 > window_limit[0]:
+            return httpx2.Response(
+                400,
+                json={
+                    "error": {
+                        "message": (
+                            f"This model's maximum context length is {window_limit[0]} tokens. "
+                            f"However, you requested {tokens + 1} tokens. {upstream_secret}"
+                        ),
+                        "code": "context_length_exceeded",
+                    }
+                },
+            )
+        return httpx2.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "x"}, "finish_reason": "length"}],
+                "usage": {"prompt_tokens": tokens, "completion_tokens": 1},
+            },
+        )
+
+    dense_hits = [
+        _hit(text="ab12 " * 400).model_copy(
+            update={
+                "chunk_id": f"dense-{i}",
+                "chunk_type": "message",
+                "cite": f"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-{i}",
+            }
+        )
+        for i in range(1, 13)
+    ]
+    ordinary_hits = [_hit()]
+    active_hits = [dense_hits]
+
+    class _RecordingLLM:
+        def __init__(self) -> None:
+            self.calls: list[list[ChatMessage]] = []
+
+        def chat(self, messages, *a, **k):
+            self.calls.append(messages)
+            cite = active_hits[0][0].cite
+            return ChatResult(
+                content=f"Reissue the command.\n\nCitations:\n- {cite}\n",
+                finish_reason="stop",
+                usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            )
+
+    llm = _RecordingLLM()
+    with httpx2.Client(transport=httpx2.MockTransport(gateway)) as http_client:
+        tok_settings = Settings(
+            _env_file=None,
+            llm_base_url="http://synthetic/v1",
+            llm_model_reasoning="reasoning",
+            llm_token_count_source="auto",
+        )
+        tok = build_tokenizer(tok_settings, http_client)
+        count_calls.clear()
+
+        with agent_client(
+            monkeypatch,
+            llm=llm,
+            search=lambda *a, **k: (active_hits[0], "identifier", {"embed_ms": 1}),
+            tokenizer=tok,
+            env={
+                "LLM_MAX_MODEL_LEN": "32768",
+                "LLM_RESERVED_OUTPUT_TOKENS": "1536",
+                "LLM_THINKING_RESERVE_TOKENS_SIMPLE": "0",
+                "LLM_TOKEN_SAFETY_MARGIN": "128",
+            },
+        ) as api:
+            # 1) Trimmable oversized prompt: hits over-window 400, trims, answers 200.
+            resp = api.post("/v1/answer", json={"query": "IEA500I"})
+            assert resp.status_code == 200, resp.text
+            assert len(llm.calls) == 1
+            assert sum(len(m.content) for m in llm.calls[0]) <= 10000
+            assert len(count_calls) <= 3
+
+            # 2) Untrimmable prompt (even 0 excerpts exceeds window): fixed 422, no leak, no LLM call.
+            window_limit[0] = 500
+            active_hits[0] = ordinary_hits
+            llm.calls.clear()
+            resp_422 = api.post("/v1/answer", json={"query": "IEA500I"})
+            assert resp_422.status_code == 422
+            assert resp_422.json() == {
+                "code": "prompt_budget_exceeded",
+                "message": "prompt exceeds the model token budget",
+            }
+            assert upstream_secret not in resp_422.text
+            assert llm.calls == []
+
+            # 3) Immediately following ordinary request (zero clock advance):
+            # gateway is STILL called (no 600 s cooldown) and answers 200 with
+            # a verified budget (logged in the finalized answer log).
+            window_limit[0] = 32768
+            count_calls.clear()
+            capsys.readouterr()
+            resp_ok = api.post("/v1/answer", json={"query": "IEA500I"})
+            assert resp_ok.status_code == 200
+            assert len(count_calls) == 1
+            assert tok._usage._retry_at is None
+            stderr_lines = capsys.readouterr().err.splitlines()
+            answer_logs = [
+                json.loads(line)
+                for line in stderr_lines
+                if line.startswith("{") and '"action":"answer"' in line
+            ]
+            assert answer_logs and answer_logs[-1]["budget_verified"] is True
+            assert all(upstream_secret not in line for line in stderr_lines)
