@@ -343,6 +343,9 @@ def clone_collection(
     for field, index in sorted((getattr(info, "payload_schema", None) or {}).items()):
         client.create_payload_index(dst, field_name=field, field_schema=index.data_type)
     offset: int | str | UUID | None = None
+    want: set[str] = set()
+    pending_async = False
+    last_point: models.PointStruct | None = None
     while True:
         page, offset = client.scroll(
             src,
@@ -354,13 +357,22 @@ def clone_collection(
         if page:
             points = []
             for record in page:
+                want.add(str(record.id))
                 vector = getattr(record, "vector", None)
                 named: dict[str, Any] = dict(vector) if isinstance(vector, dict) else {}
                 points.append(models.PointStruct(id=record.id, vector=named, payload=record.payload))
-            client.upsert(dst, points=points, wait=True)
+            # Pipeline intermediate pages with wait=False; the final page (or
+            # explicit barrier below when the server ends with an empty page)
+            # synchronizes before verifying dst point IDs (#1298).
+            is_last = offset is None
+            client.upsert(dst, points=points, wait=is_last)
+            pending_async = not is_last
+            last_point = points[-1]
         if offset is None or not page:
             break
-    want, got = _point_ids(client, settings, src), _point_ids(client, settings, dst)
+    if pending_async and last_point is not None:
+        client.upsert(dst, points=[last_point], wait=True)
+    got = _point_ids(client, settings, dst)
     if got != want:
         raise RuntimeError(
             f"copy {src!r} -> {dst!r} unverified: {len(got)} of {len(want)} point ids match "

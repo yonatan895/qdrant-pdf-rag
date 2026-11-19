@@ -4262,3 +4262,226 @@ def test_in_root_symlink_keeps_target_labels_and_identity_through_the_private_co
         expected.version,
     )
     assert record.source_rev == run_ingest.walked_source_rev(expected)
+
+
+# ------------------------------------------------ publish I/O dedup (#1298)
+class _CountingPublishFake(PublishFake):
+    """PublishFake recording every scroll, retrieve, collection_exists, and upsert call."""
+
+    def __init__(self, dim: int = 256):
+        super().__init__(dim)
+        self.scroll_calls: list[tuple[str, object, int, object, bool]] = []
+        self.retrieve_calls: list[tuple[str, int, bool]] = []
+        self.exists_calls: list[str] = []
+        self.upsert_waits: list[tuple[str, int, bool]] = []
+
+    def reset_counts(self) -> None:
+        self.scroll_calls.clear()
+        self.retrieve_calls.clear()
+        self.exists_calls.clear()
+        self.upsert_waits.clear()
+
+    def collection_exists(self, name):
+        self.exists_calls.append(name)
+        return super().collection_exists(name)
+
+    def scroll(
+        self,
+        collection,
+        *,
+        scroll_filter=None,
+        limit=10,
+        with_payload=None,
+        with_vectors=False,
+        offset=None,
+    ):
+        self.scroll_calls.append((collection, scroll_filter, limit, with_payload, with_vectors))
+        return super().scroll(
+            collection,
+            scroll_filter=scroll_filter,
+            limit=limit,
+            with_payload=with_payload,
+            with_vectors=with_vectors,
+            offset=offset,
+        )
+
+    def retrieve(self, collection, ids, *, with_payload=True, with_vectors=False):
+        self.retrieve_calls.append((collection, len(ids), with_vectors))
+        return super().retrieve(
+            collection, ids, with_payload=with_payload, with_vectors=with_vectors
+        )
+
+    def upsert(self, collection, *, points, wait=True):
+        self.upsert_waits.append((collection, len(points), wait))
+        return super().upsert(collection, points=points, wait=wait)
+
+
+def test_build_and_cut_over_single_seal_and_bounded_verification_scans(tmp_path, monkeypatch):
+    """Issue #1298: fresh publish captures the content seal once (not twice),
+    shares one control+data verification scan across migration commit,
+    verify_all_complete and build_source_catalog, respects ingest_scan_page_size,
+    and succeeds on subsequent no-op rerun + search."""
+    from mainframe_rag.ingest import publish, run_ingest, seal
+    from mainframe_rag.ingest.publish import verify_publication_seal
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch, store=_CountingPublishFake())
+    monkeypatch.setenv("INGEST_SCAN_PAGE_SIZE", "500")
+    doc_ids = [f"SA22-900{i}-00" for i in range(5)]
+    for i, doc_id in enumerate(doc_ids):
+        _build_doc_with_id(corpus, f"doc_{i}", doc_id)
+
+    seal_calls = 0
+    real_capture = seal.capture_content_seal
+
+    def counting_capture(*args, **kwargs):
+        nonlocal seal_calls
+        seal_calls += 1
+        return real_capture(*args, **kwargs)
+
+    monkeypatch.setattr(publish, "capture_content_seal", counting_capture)
+
+    # Reset counters right as migration commit starts so we measure the
+    # post-upsert commit + verify_all_complete + catalog + seal phase cleanly.
+    real_commit = run_ingest._commit_migration_representation
+
+    def observing_commit(*args, **kwargs):
+        fake.reset_counts()
+        return real_commit(*args, **kwargs)
+
+    monkeypatch.setattr(run_ingest, "_commit_migration_representation", observing_commit)
+
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    published = fake.aliases[ALIAS]
+    controls = published + "__completions"
+
+    # Single content-seal capture under the publish lock (not back-to-back twice).
+    assert seal_calls == 1
+    data_vector_retrieves = [c for c in fake.retrieve_calls if c[0] == published and c[2]]
+    assert len(data_vector_retrieves) == 1
+
+    # Bounded scroll counts across commit + verify_all_complete + build_source_catalog + seal:
+    # No N+1 per-document scrolls (5 docs would previously issue >= 15 data scrolls).
+    data_scrolls = [c for c in fake.scroll_calls if c[0] == published]
+    assert len(data_scrolls) <= 2, f"expected <=2 data scrolls, got {len(data_scrolls)}: {data_scrolls}"
+    assert all(c[2] == 500 for c in data_scrolls), f"expected page_size=500, got {[c[2] for c in data_scrolls]}"
+
+    control_scrolls = [c for c in fake.scroll_calls if c[0] == controls]
+    assert len(control_scrolls) <= 5, f"expected bounded control scrolls, got {len(control_scrolls)}: {control_scrolls}"
+    assert all(c[2] == 500 for c in control_scrolls), f"expected page_size=500, got {[c[2] for c in control_scrolls]}"
+
+    # Next ordinary operation #1: steady-state no-op rerun succeeds read-only with bounded scans.
+    seal_calls = 0
+    fake.reset_counts()
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    assert fake.aliases[ALIAS] == published
+    assert fake.upsert_waits == [], "steady-state rerun must be zero-write"
+    assert seal_calls == 1, "steady-state rerun must still independently verify the content seal"
+    steady_data_scrolls = [c for c in fake.scroll_calls if c[0] == published]
+    assert len(steady_data_scrolls) <= 2, f"expected <=2 steady data scrolls, got {len(steady_data_scrolls)}"
+    steady_control_scrolls = [c for c in fake.scroll_calls if c[0] == controls]
+    assert len(steady_control_scrolls) <= 3, f"expected <=3 steady control scrolls, got {len(steady_control_scrolls)}"
+
+    # Next ordinary operation #2: serving gate + search over the published alias succeeds.
+    import asyncio
+
+    from mainframe_rag.ingest.representation import resolve_serving_generation
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+    from mainframe_rag.ports import AsyncReaderAdapter
+
+    assert verify_publication_seal(fake, controls) is True
+    physical, outcome, _ = asyncio.run(
+        resolve_serving_generation(
+            AsyncReaderAdapter(fake), _settings(qdrant_collection=ALIAS), extraction_rules_version()
+        )
+    )
+    assert (physical, outcome) == (published, "compatible")
+    served_docs = {(p.payload or {}).get("doc_id") for p in fake.alias_target_points(ALIAS)}
+    assert served_docs == set(doc_ids)
+
+
+@pytest.mark.parametrize("tamper", ["catalog-summary", "build-id", "collection-point"])
+def test_publish_tampered_receipt_and_point_fail_closed(tmp_path, monkeypatch, tamper):
+    """Issue #1298: receipt readback rejects altered catalog/binding fields
+    before cutover, and independent seal verification on steady-state rerun
+    still catches tampered collection points."""
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+
+    if tamper in ("catalog-summary", "build-id"):
+        real_upsert = fake.upsert
+
+        def corrupt_receipt(collection, *, points, wait=True):
+            if any((p.payload or {}).get("record_type") == "publication-metadata" for p in points):
+                if tamper == "catalog-summary":
+                    points[0].payload["source_catalog"]["sha256"] = "0" * 64
+                else:
+                    points[0].payload["build_id"] = "00000000-0000-4000-8000-000000000000"
+            return real_upsert(collection, points=points, wait=wait)
+
+        monkeypatch.setattr(fake, "upsert", corrupt_receipt)
+        with pytest.raises(RuntimeError):
+            _run_main(monkeypatch, corpus, progress)
+        assert not fake.aliases and not fake.alias_calls
+    else:
+        assert _run_main(monkeypatch, corpus, progress) == 0
+        published = fake.aliases[ALIAS]
+        # Tamper with a stored point's dense vector after publish.
+        target_pt = fake.collections[published][0]
+        target_pt.vector["dense"] = [1.0] + [0.0] * 255
+        with pytest.raises(RuntimeError, match="seal"):
+            _run_main(monkeypatch, corpus, progress)
+
+
+@pytest.mark.parametrize("trailing_empty_page", [False, True])
+def test_clone_collection_pipelines_upserts_and_avoids_second_source_scan(trailing_empty_page):
+    """Issue #1298: clone_collection upserts intermediate pages with wait=False,
+    ends with a wait=True barrier (even on an empty trailing page), and verifies
+    dst IDs against the IDs observed during copy without re-scrolling src."""
+    from mainframe_rag.ingest.qdrant_io import clone_collection
+
+    class _CloneCountingFake(_CountingPublishFake):
+        def scroll(
+            self,
+            collection,
+            *,
+            scroll_filter=None,
+            limit=10,
+            with_payload=None,
+            with_vectors=False,
+            offset=None,
+        ):
+            self.scroll_calls.append((collection, scroll_filter, limit, with_payload, with_vectors))
+            stored = self._filtered(collection, scroll_filter)
+            start = int(offset) if offset is not None else 0
+            page = stored[start : start + limit]
+            if trailing_empty_page and collection == "src_col" and page and start + limit == len(stored):
+                # Simulate a server returning a non-None offset at an exact page boundary.
+                return page, str(start + limit)
+            nxt = str(start + limit) if start + limit < len(stored) else None
+            return page, nxt
+
+    fake = _CloneCountingFake()
+    count = 200 if trailing_empty_page else 250
+    fake.collections["src_col"] = [
+        models.PointStruct(
+            id=f"00000000-0000-0000-0000-{i:012d}",
+            vector={"dense": [0.0] * 256, "bm25": models.SparseVector(indices=[0], values=[1.0])},
+            payload={"doc_id": "D", "text": f"p{i}"},
+        )
+        for i in range(count)
+    ]
+    settings = _settings(ingest_scan_page_size=100)
+    clone_collection(fake, settings, "src_col", "dst_col")
+
+    assert len(fake.collections["dst_col"]) == count
+    dst_upserts = [(n, w) for col, n, w in fake.upsert_waits if col == "dst_col"]
+    assert len(dst_upserts) >= 2
+    assert dst_upserts[-1][1] is True, f"final upsert must be synchronous barrier: {dst_upserts}"
+    assert any(w is False for _, w in dst_upserts[:-1]), f"intermediate pages must pipeline with wait=False: {dst_upserts}"
+
+    # No second ID-only scan of src_col after copying (only the copy scrolls with vectors).
+    src_id_only_scrolls = [c for c in fake.scroll_calls if c[0] == "src_col" and not c[4]]
+    assert src_id_only_scrolls == [], f"unexpected post-copy src ID scan: {src_id_only_scrolls}"
+    dst_id_scrolls = [c for c in fake.scroll_calls if c[0] == "dst_col" and not c[4]]
+    assert dst_id_scrolls, "dst ID verification scan must still run"
+
