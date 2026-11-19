@@ -4437,7 +4437,7 @@ def test_publish_tampered_receipt_and_point_fail_closed(tmp_path, monkeypatch, t
 
 @pytest.mark.parametrize("trailing_empty_page", [False, True])
 def test_clone_collection_pipelines_upserts_and_avoids_second_source_scan(trailing_empty_page):
-    """Issue #1298: clone_collection upserts intermediate pages with wait=False,
+    """Issue #1298: under the explicit 1/1/1 policy clone_collection upserts intermediate pages with wait=False,
     ends with a wait=True barrier (even on an empty trailing page), and verifies
     dst IDs against the IDs observed during copy without re-scrolling src."""
     from mainframe_rag.ingest.qdrant_io import clone_collection
@@ -4473,7 +4473,12 @@ def test_clone_collection_pipelines_upserts_and_avoids_second_source_scan(traili
         )
         for i in range(count)
     ]
-    settings = _settings(ingest_scan_page_size=100)
+    settings = _settings(
+        ingest_scan_page_size=100,
+        qdrant_shard_number=1,
+        qdrant_replication_factor=1,
+        qdrant_write_consistency_factor=1,
+    )
     clone_collection(fake, settings, "src_col", "dst_col")
 
     assert len(fake.collections["dst_col"]) == count
@@ -4490,17 +4495,32 @@ def test_clone_collection_pipelines_upserts_and_avoids_second_source_scan(traili
 
 
 @pytest.mark.parametrize(
+    "policy",
+    [
+        # The production tuple.
+        {"qdrant_shard_number": 6, "qdrant_replication_factor": 3, "qdrant_write_consistency_factor": 2},
+        # No policy selected: the server default creates the target, and on a
+        # multi-peer cluster that default is one shard per peer. 1/1/1 is never
+        # inferred from unset values (docs/deploy.md, collection policy).
+        {},
+        # A partial tuple is not the explicit 1/1/1 claim either.
+        {"qdrant_shard_number": 1},
+    ],
+    ids=["6/3/2", "unset", "partial"],
+)
+@pytest.mark.parametrize(
     ("count", "trailing_empty_page"),
     [
         (201, False),  # 3 pages: 100, 100, 1-point final page -> only 1 of 6 shards touched last
         (200, True),   # 2 pages + empty trailing page -> single-point barrier touches only 1 of 6 shards
     ],
 )
-def test_clone_collection_6_3_2_flushes_every_shard_synchronously(count, trailing_empty_page):
-    """Issue #1298 B1: under multi-shard/replicated 6/3/2 policy, every cloned
-    page uses wait=True (overlapped with scroll) so all 6 shards flush and
-    enforce WCF=2 before dst ID verification — even with a 1-point final page
-    or empty trailing page."""
+def test_clone_collection_6_3_2_flushes_every_shard_synchronously(count, trailing_empty_page, policy):
+    """Issue #1298 B1: unless the explicit 1/1/1 tuple is selected (6/3/2, an
+    unset policy on a server-default multi-shard target, or a partial tuple),
+    every cloned page uses wait=True (overlapped with scroll) so all 6 shards
+    flush and enforce the write consistency factor before dst ID verification
+    — even with a 1-point final page or empty trailing page."""
     from mainframe_rag.ingest.qdrant_io import clone_collection
 
     class _ShardedCloneFake(_CountingPublishFake):
@@ -4561,12 +4581,7 @@ def test_clone_collection_6_3_2_flushes_every_shard_synchronously(count, trailin
         )
         for i in range(count)
     ]
-    settings = _settings(
-        ingest_scan_page_size=100,
-        qdrant_shard_number=6,
-        qdrant_replication_factor=3,
-        qdrant_write_consistency_factor=2,
-    )
+    settings = _settings(ingest_scan_page_size=100, **policy)
     clone_collection(fake, settings, "src_col", "dst_col")
 
     assert len(fake.collections["dst_col"]) == count
