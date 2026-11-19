@@ -1119,3 +1119,251 @@ def test_forged_excerpt_body_is_dropped_at_the_verification_trim():
     forged = [PackedExcerpt(index=1, hit=_hit(text), body=forged_body, end=len(text))]
     _verify_trim_last(forged, used=1011, verify_limit=1000)
     assert forged == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #1296: CompletionUsageTokenizer HTTP-400 over-window trimming (no
+# cooldown poisoning) and O(1) proportional multi-excerpt trim convergence.
+# ---------------------------------------------------------------------------
+
+
+def _site_usage_gateway(
+    window_tokens: int,
+    *,
+    include_counts_in_400: bool = True,
+    secret: str = "UPSTREAM-400-SECRET",
+    tokens_per_char: float = 1.0,
+):
+    """Fake site gateway without /tokenize: counts real characters at
+    ``tokens_per_char`` and returns HTTP 400 when prompt + 1 > window_tokens."""
+    from mainframe_rag.config import Settings
+
+    calls: list[dict] = []
+
+    def respond(request):
+        if request.url.path == "/tokenize":
+            return httpx2.Response(404)
+        body = json.loads(request.content)
+        tokens = max(1, int(sum(len(m["content"]) for m in body["messages"]) * tokens_per_char))
+        calls.append({"path": request.url.path, "tokens": tokens})
+        if tokens + 1 > window_tokens:
+            if include_counts_in_400:
+                msg = (
+                    f"This model's maximum context length is {window_tokens} tokens. "
+                    f"However, you requested {tokens + 1} tokens ({tokens} in the messages, "
+                    f"1 in the completion). {secret}"
+                )
+            else:
+                msg = f"Prompt is too long: {secret}"
+            return httpx2.Response(
+                400,
+                json={"error": {"message": msg, "code": "context_length_exceeded"}},
+            )
+        return httpx2.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "x"}, "finish_reason": "length"}],
+                "usage": {"prompt_tokens": tokens, "completion_tokens": 1},
+            },
+        )
+
+    client = httpx2.Client(transport=httpx2.MockTransport(respond))
+    settings = Settings(
+        **settings_kw(
+            llm_base_url="http://synthetic/v1",
+            llm_model_reasoning="reasoning",
+            llm_token_count_source="auto",
+            llm_max_model_len=window_tokens,
+            llm_reserved_output_tokens=1536,
+            llm_thinking_reserve_tokens_simple=0,
+            llm_thinking_reserve_tokens_complex=1000,
+            llm_token_safety_margin=128,
+        )
+    )
+    return settings, calls, client
+
+
+@pytest.mark.parametrize("include_counts", [True, False], ids=["with-vllm-counts", "code-only-400"])
+def test_completion_usage_over_window_400_trims_and_keeps_next_request_verified(include_counts):
+    """#1296: an over-window HTTP 400 on CompletionUsageTokenizer trims
+    trailing excerpts in <=3 remote calls instead of falling back to the
+    estimator, AND the immediately following ordinary request still gets
+    budget_verified=True (no 600 s cooldown poisoning)."""
+    from mainframe_rag.agent.tokenizer import build_tokenizer
+
+    # Configured window is larger than the gateway's actual served window so
+    # even conservative planning sends an initial prompt that hits HTTP 400.
+    settings, calls, client = _site_usage_gateway(
+        window_tokens=10000, include_counts_in_400=include_counts
+    )
+    wide_settings = settings.model_copy(update={"llm_max_model_len": 32768})
+    # 16 excerpts of ~1200 chars each (~19.2k tokens > 10k gateway window).
+    hits = [
+        _hit(
+            "\n".join(f"R{r:02d}  {r * 256:08X}  {r * 31:06d}" for r in range(50)),
+            chunk_type="table",
+            index=f"c{i}",
+            page=str(i),
+        )
+        for i in range(1, 17)
+    ]
+    with client:
+        tok = build_tokenizer(settings, client)
+        calls.clear()  # discard auto startup check
+        prepared = build_messages(
+            "which table row", hits, tokenizer=tok, settings=wide_settings, complexity="simple"
+        )
+        assert prepared.budget_verified is True
+        assert 1 <= len(prepared.evidence.entries) < 16
+        assert prepared.prompt_tokens is not None and prepared.prompt_tokens <= 10000
+        # Converged in bounded remote calls, not single-excerpt rounds.
+        assert len(calls) <= 3
+        # Immediately following ordinary request (zero clock advance) still
+        # verifies remotely — cooldown was NOT poisoned by the 400.
+        calls.clear()
+        ordinary = build_messages(
+            "What does IEA500I mean?",
+            [_hit(JCL_TEXT, index="ord1", page="1")],
+            tokenizer=tok,
+            settings=settings,
+            complexity="simple",
+        )
+        assert ordinary.budget_verified is True
+        assert len(calls) == 1
+
+
+def test_completion_usage_untrimmable_over_window_400_raises_422_without_cooldown():
+    """#1296: when even zero excerpts exceed the served window (HTTP 400),
+    build_messages raises PromptBudgetExceeded (fixed 422, no upstream text)
+    and leaves the next ordinary request with budget_verified=True."""
+    from mainframe_rag.agent.tokenizer import build_tokenizer
+
+    secret = "UPSTREAM-SECRET-NEVER-LEAK"
+    settings, calls, client = _site_usage_gateway(
+        window_tokens=1200, include_counts_in_400=False, secret=secret
+    )
+    with client:
+        tok = build_tokenizer(settings, client)
+        calls.clear()
+        with pytest.raises(PromptBudgetExceeded) as exc_info:
+            build_messages(
+                "Explain " + ("context " * 200),
+                [_hit(JCL_TEXT, index="c1", page="1")],
+                tokenizer=tok,
+                settings=settings,
+                complexity="simple",
+            )
+        assert secret not in str(exc_info.value)
+        # Immediately following ordinary count still hits the server (no cooldown).
+        calls.clear()
+        assert tok.count_messages([ChatMessage(role="user", content="short")]) == 5
+        assert tok.remote_confirmed is True
+        assert len(calls) == 1
+
+
+@pytest.mark.parametrize("chat", [False, True])
+def test_multi_excerpt_overshoot_converges_in_at_most_three_remote_calls(chat):
+    """#1296: a 16-excerpt prompt that overshoots verify_limit by >2x must
+    converge in <=3 remote count calls via proportional multi-excerpt trimming,
+    not 10-36 single-excerpt rounds."""
+    from mainframe_rag.config import Settings
+
+    class _CountingDenseTokenizer:
+        remote_confirmed = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def count_messages(self, messages, *, reasoning_effort=None) -> int:
+            self.calls += 1
+            return int(sum(len(m.content) for m in messages) / 1.5)
+
+    settings = Settings(**settings_kw(llm_max_model_len=32768))
+    chunk = settings.prompt_max_chunk_chars
+    hits = _depth_hits(16, settings.retrieve_max_chunks_per_doc, chunk)
+    tok = _CountingDenseTokenizer()
+    kwargs = {"max_chunk_chars": chunk, "tokenizer": tok, "settings": settings}
+    question = "What does the operator do?"
+    prepared = (
+        build_chat_messages([ChatMessage(role="user", content=question)], hits, **kwargs)
+        if chat
+        else build_messages(question, hits, **kwargs)
+    )
+    verify_limit = (
+        settings.llm_max_model_len
+        - settings.llm_reserved_output_tokens
+        - settings.llm_thinking_reserve_tokens_simple
+        - settings.llm_token_safety_margin
+    )
+    assert prepared.budget_verified is True
+    assert prepared.prompt_tokens is not None and prepared.prompt_tokens <= verify_limit
+    kept = [e.prompt_index for e in prepared.evidence.entries]
+    assert 1 <= len(kept) < 16
+    assert kept == list(range(1, len(kept) + 1))
+    assert prepared.evidence.omitted_indices == tuple(range(len(kept) + 1, 17))
+    assert tok.calls <= 3, f"expected <=3 remote count calls, got {tok.calls}"
+
+
+def test_dense_hex_planning_avoids_initial_over_window_400():
+    """#1296: 16 dense spaced-hex excerpts at a 32,768-token window (measured
+    0.85 tokens/char per user_message.py) are bounded by conservative_tokens
+    during planning so CompletionUsageTokenizer does not exceed model_len on
+    the first count and converges in <=2 calls."""
+    from mainframe_rag.agent.tokenizer import build_tokenizer
+
+    settings, calls, client = _site_usage_gateway(window_tokens=32768, tokens_per_char=0.85)
+    hits = [
+        _hit("ab12 " * 800, chunk_type="message", index=f"hex-{i}", page=str(i))
+        for i in range(1, 17)
+    ]
+    with client:
+        tok = build_tokenizer(settings, client)
+        calls.clear()
+        prepared = build_messages(
+            "IEA500I hex dump",
+            hits,
+            max_chunk_chars=4000,
+            tokenizer=tok,
+            settings=settings,
+            complexity="simple",
+        )
+    assert prepared.budget_verified is True
+    assert 1 <= len(prepared.evidence.entries) < 16
+    assert len(calls) <= 2
+    assert all(c["tokens"] <= 32768 for c in calls)
+
+
+def test_chat_over_window_400_drops_older_turns_before_touching_evidence():
+    """#633 + #1296: an over-window 400 on chat drops expendable older history
+    turns before trimming or dropping current evidence."""
+    from mainframe_rag.agent.tokenizer import build_tokenizer
+
+    settings, calls, client = _site_usage_gateway(
+        window_tokens=6000, include_counts_in_400=False
+    )
+    wide_settings = settings.model_copy(update={"llm_max_model_len": 32768})
+    older = []
+    for n in range(6):
+        older.append(ChatMessage(role="user", content=f"Older question {n}?"))
+        older.append(ChatMessage(role="assistant", content=(f"Stale advice {n}. " * 40).strip()))
+    antecedent = [
+        ChatMessage(role="user", content="What does IEA500I mean?"),
+        ChatMessage(role="assistant", content="IEA500I is a synthetic message."),
+    ]
+    active = [ChatMessage(role="user", content="What should I check next?")]
+    hit = _hit("Check PASSAGE-KEEP in synthetic reference.", chunk_type="narrative")
+    with client:
+        tok = build_tokenizer(settings, client)
+        calls.clear()
+        prepared = build_chat_messages(
+            [*older, *antecedent, *active],
+            [hit],
+            tokenizer=tok,
+            settings=wide_settings,
+            complexity="simple",
+        )
+    assert prepared.budget_verified is True
+    assert "PASSAGE-KEEP" in prepared.messages[-1].content
+    assert len(prepared.evidence.entries) == 1
+    assert any("IEA500I is a synthetic message." in m.content for m in prepared.messages)
+    assert len(calls) <= 3

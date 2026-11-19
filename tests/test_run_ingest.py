@@ -1503,3 +1503,121 @@ def test_synthetic_corp_manuals_ingest_dry_run(tmp_path, capsys):
     assert [p.stem for p in paths] == sorted(CORP_MANUALS)
     assert main(["--src", str(corpus), "--dry-run", "--progress", str(tmp_path / "inv.jsonl")]) == 0
     assert '"pdfs":3' in capsys.readouterr().err
+
+
+def test_parse_one_opens_pdf_once_and_matches_parse_pdf(synthetic_pdf, plain_pdf, tmp_path, monkeypatch):
+    """Issue #1298: _parse_one opens each PDF once (reusing the open document
+    across metadata parsing and page extraction) and produces a ParsedDoc
+    identical to ibm_pdf.parse_pdf without touching any hashed rule module."""
+    import shutil
+
+    import pymupdf
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import parse_pdf, sha256_file
+
+    monkeypatch.setattr(
+        run_ingest, "_load_worker_settings", lambda: Settings(embed_mode="hash", _env_file=None)
+    )
+    real_open = pymupdf.open
+    opens = 0
+
+    def counting_open(*args, **kwargs):
+        nonlocal opens
+        opens += 1
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(pymupdf, "open", counting_open)
+    for src_pdf in (synthetic_pdf, plain_pdf):
+        corpus = tmp_path / src_pdf.stem
+        corpus.mkdir()
+        pdf = corpus / src_pdf.name
+        shutil.copy(src_pdf, pdf)
+        sha = sha256_file(pdf)
+        opens = 0
+        expected = parse_pdf(pdf, corpus_root=corpus, sha256=sha)
+        assert opens == 1
+
+        opens = 0
+        record, parsed, chunks, _vectors, _ = run_ingest._parse_one(
+            run_ingest.ParseTask(str(pdf), None, None, None, str(corpus), sha, False, None)
+        )
+        assert record.status != "error", record.error
+        assert opens == 1, f"expected 1 pymupdf.open call, got {opens}"
+        assert parsed.doc_id == expected.doc_id
+        assert parsed.title == expected.title
+        assert parsed.product == expected.product
+        assert parsed.version == expected.version
+        assert parsed.vendor == expected.vendor
+        assert parsed.toc == expected.toc
+        assert parsed.page_count == expected.page_count
+        assert chunks
+
+
+def test_plan_batches_completion_checks_without_n_plus_one_scrolls(tmp_path, monkeypatch):
+    """Issue #1298: _plan prefetches completions once and verifies skip
+    candidates in bounded scans instead of N per-doc control+data scrolls."""
+    from scripts.make_synthetic_pdf import build
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.completion import source_labels
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    for i in range(4):
+        build(
+            corpus / f"SA22-800{i}-00.pdf",
+            doc_id=f"SA22-800{i}-00",
+            title=f"Synthetic Plan Doc {i}",
+            message_id=f"IEB80{i}I",
+        )
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    progress = tmp_path / "inventory.jsonl"
+    assert main(_migration_args(corpus, progress)) == 0
+
+    scroll_log: list[str] = []
+    exists_log: list[str] = []
+    real_scroll = fake.scroll
+    real_exists = fake.collection_exists
+
+    def log_scroll(collection, *args, **kwargs):
+        scroll_log.append(collection)
+        return real_scroll(collection, *args, **kwargs)
+
+    def log_exists(collection):
+        exists_log.append(collection)
+        return real_exists(collection)
+
+    monkeypatch.setattr(fake, "scroll", log_scroll)
+    monkeypatch.setattr(fake, "collection_exists", log_exists)
+
+    settings = Settings(embed_mode="hash", _env_file=None)
+    plan = run_ingest._plan(
+        corpus,
+        progress,
+        settings,
+        client=fake,
+        prewalked=None,
+        limit=None,
+        dry_run=False,
+        rules_v=extraction_rules_version(),
+        src_labels=source_labels(None, None, None),
+        force_reingest=False,
+        resume_checkpoints=False,
+        vendor=None,
+        product=None,
+        version=None,
+        cache_path=None,
+    )
+    assert plan.skipped_ok == 4 and plan.tasks == []
+    comp = settings.qdrant_collection + "__completions"
+    assert scroll_log.count(comp) == 1, f"expected 1 control scroll, got {scroll_log}"
+    assert exists_log.count(comp) == 1, f"expected 1 control exists check, got {exists_log}"
+    assert scroll_log.count(settings.qdrant_collection) == 1, f"expected 1 data scroll, got {scroll_log}"
+

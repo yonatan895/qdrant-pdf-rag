@@ -30,6 +30,7 @@ refused fail-closed by the caller.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import time
@@ -47,14 +48,19 @@ from mainframe_rag.ingest.build import (
     canonical_build_id,
     decode_build_binding,
 )
-from mainframe_rag.ingest.catalog import decode_catalog_summary, verify_source_catalog
+from mainframe_rag.ingest.catalog import (
+    DEFAULT_CATALOG_PAGE_SIZE,
+    decode_catalog_summary,
+    verify_source_catalog,
+)
 from mainframe_rag.ingest.completion import (
+    VerificationSnapshot,
     completion_collection_for,
     completion_collection_name,
     delete_completion,
-    is_doc_complete,
     is_revision_committed,
     plan_retire_deletes,
+    prefetch_verification_state,
     representation_fingerprint,
 )
 from mainframe_rag.ingest.inventory import InventoryRecord
@@ -67,7 +73,7 @@ from mainframe_rag.ingest.placement import (
     member_peer_ids,
     observe_collection,
 )
-from mainframe_rag.ingest.seal import capture_content_seal
+from mainframe_rag.ingest.seal import DEFAULT_SEAL_PAGE_SIZE, capture_content_seal
 from mainframe_rag.ports import QdrantPoints, QdrantReader
 
 
@@ -342,13 +348,14 @@ def write_publication_metadata(
     build_id: str,
     logical_alias: str,
     source_catalog: dict,
-) -> None:
+) -> dict:
     """Record publication fingerprints and the build binding on cutover
     (issue #391 Q418-R1). Allows subsequent ordinary runs to recognize
     successful repair generations as steady state. Every receipt binds its
     build; unbound receipts are not written. `source_catalog` is the summary
     of the entries already written to this control collection (issue #827);
-    the seal captured here covers those entries."""
+    the seal captured here covers those entries. Returns the captured content
+    seal (unaliased from the upserted point payload) for lock-held readback."""
     from qdrant_client import models
 
     try:
@@ -358,14 +365,27 @@ def write_publication_metadata(
     dummy_dim = dim or 1
     if not logical_alias:
         raise ValueError("new builds require their logical alias")
-    build_fields = {"build_schema": BUILD_SCHEMA, "build_id": canonical_build_id(build_id),
-                    "logical_alias": logical_alias, "data_collection": settings.qdrant_collection,
-                    "source_catalog": decode_catalog_summary(source_catalog)}
-    build_fields["content_seal"] = capture_content_seal(
-        client, build_id=build_id, alias=logical_alias, physical=settings.qdrant_collection,
-        gen_fp=gen_fp, corpus_fp=corpus_fp,
+    decoded_catalog = decode_catalog_summary(source_catalog)
+    seal = capture_content_seal(
+        client,
+        build_id=build_id,
+        alias=logical_alias,
+        physical=settings.qdrant_collection,
+        gen_fp=gen_fp,
+        corpus_fp=corpus_fp,
         receipt_id=publication_metadata_point_id(completions_collection),
+        page_size=settings.ingest_scan_page_size,
     )
+    # Copy mutable dicts before handing them to client.upsert so an in-place
+    # transport/fake mutation can never alias the returned expected seal.
+    build_fields = {
+        "build_schema": BUILD_SCHEMA,
+        "build_id": canonical_build_id(build_id),
+        "logical_alias": logical_alias,
+        "data_collection": settings.qdrant_collection,
+        "source_catalog": copy.deepcopy(decoded_catalog),
+        "content_seal": copy.deepcopy(seal),
+    }
     client.upsert(
         completions_collection,
         points=[
@@ -386,6 +406,33 @@ def write_publication_metadata(
         ],
         wait=True,
     )
+    return seal
+
+
+def verify_publication_receipt(
+    client: QdrantReader,
+    completions_collection: str,
+    *,
+    expected_seal: dict,
+    expected_binding: BuildBinding | None = None,
+    expected_catalog: dict | None = None,
+) -> bool:
+    """Read back the persisted publication receipt under the publish lock and
+    verify it matches the seal, binding, and source catalog written by
+    `write_publication_metadata` without re-scanning all vectors (issue #1298).
+    Returns False when no receipt/seal is persisted; raises on any mismatch."""
+    payload = read_publication_record(client, completions_collection)
+    if payload is None or "content_seal" not in payload:
+        return False
+    if payload["content_seal"] != expected_seal:
+        raise RuntimeError("stored build content does not match its seal")
+    if expected_binding is not None:
+        binding = decode_build_binding(payload, completions_collection)
+        if binding != expected_binding:
+            raise RuntimeError("persisted publication receipt does not match its build binding")
+    if expected_catalog is not None and payload.get("source_catalog") != expected_catalog:
+        raise RuntimeError("persisted publication receipt does not match its source catalog")
+    return True
 
 
 def read_publication_record(client: QdrantReader, completions_collection: str) -> dict | None:
@@ -414,7 +461,12 @@ def decode_publication_record(payload: dict, completions_collection: str) -> dic
     return payload
 
 
-def verify_publication_seal(client: QdrantReader, completions_collection: str) -> bool:
+def verify_publication_seal(
+    client: QdrantReader,
+    completions_collection: str,
+    *,
+    page_size: int = DEFAULT_SEAL_PAGE_SIZE,
+) -> bool:
     """Compare retained content independently of surviving completions/inventory.
 
     Schema-1 receipts (bound, unsealed) remain readable without acquiring this
@@ -429,19 +481,32 @@ def verify_publication_seal(client: QdrantReader, completions_collection: str) -
         client, build_id=binding.build_id, alias=binding.alias, physical=binding.physical,
         gen_fp=binding.gen_fp, corpus_fp=binding.corpus_fp,
         receipt_id=publication_metadata_point_id(completions_collection),
+        page_size=page_size,
     )
     if observed != payload["content_seal"]:
         raise RuntimeError("stored build content does not match its seal")
     return True
 
 
-def verify_build_catalog(client: QdrantReader, completions_collection: str) -> bool:
+def verify_build_catalog(
+    client: QdrantReader,
+    completions_collection: str,
+    *,
+    page_size: int = DEFAULT_CATALOG_PAGE_SIZE,
+    control_records: list[Any] | None = None,
+) -> bool:
     """A schema-3 build's stored source catalog must equal its receipt's
     summary (issue #827). False for an older build, which has no catalog."""
     payload = read_publication_record(client, completions_collection)
     if payload is None or "source_catalog" not in payload:
         return False
-    verify_source_catalog(client, completions_collection, payload["source_catalog"])
+    verify_source_catalog(
+        client,
+        completions_collection,
+        payload["source_catalog"],
+        page_size=page_size,
+        control_records=control_records,
+    )
     return True
 
 
@@ -466,6 +531,7 @@ def delete_publication_metadata(
     completions_collection: str,
     *,
     ancestor_completions: str | None = None,
+    page_size: int = DEFAULT_CATALOG_PAGE_SIZE,
 ) -> None:
     """Remove publication metadata from staging completions during preparation (issue #391 S423-N1).
 
@@ -487,7 +553,7 @@ def delete_publication_metadata(
         while True:
             records, offset = client.scroll(
                 completions_collection,
-                limit=100,
+                limit=page_size,
                 with_payload=True,
                 offset=offset,
             )
@@ -710,6 +776,7 @@ def _transfer_staging_metadata(
         client,
         staging_completions,
         ancestor_completions=live_completions,
+        page_size=staging_settings.ingest_scan_page_size,
     )
     if read_manifest_record(client, staging_completions) != live_record:
         raise RuntimeError(
@@ -729,6 +796,7 @@ def verify_searchable_coverage(
     retired: frozenset[str] = frozenset(),
     retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
     pending_removals: frozenset[str] = frozenset(),
+    snapshot: VerificationSnapshot | None = None,
 ) -> list[str]:
     """One read-only coverage rule: every walked document verifies and every
     searchable point is attributable to a verified walked generation
@@ -739,6 +807,7 @@ def verify_searchable_coverage(
     under a lock-validated `--retire-doc` plan that applies before the swap
     audit, so the commit does not block on data whose removal is already
     approved and enforced downstream. Never deletes."""
+    snap = snapshot if snapshot is not None else prefetch_verification_state(client, settings)
     problems: list[str] = []
     for path_str, sha in walked:
         rec = inventory.get(path_str)
@@ -752,7 +821,7 @@ def verify_searchable_coverage(
         ):
             problems.append(path_str)
             continue
-        if not is_doc_complete(
+        if not snap.verify_doc(
             client,
             settings,
             rec.doc_id,
@@ -772,6 +841,7 @@ def verify_searchable_coverage(
             retired,
             retire_plan,
             pending_removals=pending_removals,
+            snapshot=snap,
         )
     )
     return problems
@@ -786,6 +856,8 @@ def verify_all_complete(
     src_labels: str,
     retired: frozenset[str] = frozenset(),
     retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
+    *,
+    snapshot: VerificationSnapshot | None = None,
 ) -> list[str]:
     """Paths that must block publication: missing/stale inventory, an
     unverified staging generation, a contract that is not committed
@@ -828,6 +900,7 @@ def verify_all_complete(
             src_labels,
             retired=retired,
             retire_plan=retire_plan,
+            snapshot=snapshot,
         )
     )
     return problems
@@ -1108,6 +1181,8 @@ def _retired_still_present(
     doc_id: str,
     retire_plan: dict[str, dict[str, set[str] | bool]] | None,
     valid_pairs: set[tuple[str, str]] | None = None,
+    *,
+    remaining_override: set[str | None] | None = None,
 ) -> str:
     """Name the exact gap when an approved removal did not fully land
     (issue #405 R1, #391 R-REV): every refusal names the operator path through,
@@ -1118,7 +1193,11 @@ def _retired_still_present(
     """
     from mainframe_rag.ingest.qdrant_io import stored_doc_revisions
 
-    remaining = stored_doc_revisions(client, staging_settings, doc_id)
+    remaining = (
+        remaining_override
+        if remaining_override is not None
+        else stored_doc_revisions(client, staging_settings, doc_id)
+    )
     valid = valid_pairs or set()
     named = sorted(str(r) for r in remaining if r is not None and (doc_id, r) not in valid)
     if named:
@@ -1144,6 +1223,7 @@ def audit_unmarked_residue(
     retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
     *,
     pending_removals: frozenset[str] = frozenset(),
+    snapshot: VerificationSnapshot | None = None,
 ) -> list[str]:
     """Read-only coverage audit (issue #405 R1): every searchable point in the
     candidate generation must be attributable to the walked corpus. A point
@@ -1158,8 +1238,6 @@ def audit_unmarked_residue(
     from mainframe_rag.ingest.qdrant_io import scroll_all_points
 
     staging = staging_settings.qdrant_collection
-    if not client.collection_exists(staging):
-        return []
     valid_pairs = {
         (rec.doc_id, rec.source_rev)
         for path_str, sha in walked
@@ -1172,36 +1250,64 @@ def audit_unmarked_residue(
     }
     residue = 0
     sample: list[str] = []
-    for p in scroll_all_points(
-        client,
-        staging,
-        scroll_filter=None,
-        with_payload=["doc_id", "source_rev", "sha256"],
-        page_size=staging_settings.ingest_scan_page_size,
-    ):
-        payload = p.payload or {}
-        doc_id = payload.get("doc_id")
-        source_rev = payload.get("source_rev")
-        if (doc_id, source_rev) in valid_pairs:
-            continue
-        if doc_id is not None and doc_id in retired:
-            return [
-                _retired_still_present(
-                    client,
-                    staging_settings,
-                    staging,
-                    str(doc_id),
-                    retire_plan,
-                    valid_pairs=valid_pairs,
-                )
-            ]
-        if _is_point_retired(doc_id, source_rev, pending_removals, retire_plan):
-            # The approved removal applies before verification: the swap gate
-            # still refuses any remnant the plan does not actually delete.
-            continue
-        residue += 1
-        if len(sample) < 3:
-            sample.append(str(p.id))
+    if snapshot is not None:
+        if not snapshot.data_exists:
+            return []
+        for (doc_id, source_rev), count in snapshot.pair_counts.items():
+            if (doc_id, source_rev) in valid_pairs:
+                continue
+            if doc_id is not None and doc_id in retired:
+                return [
+                    _retired_still_present(
+                        client,
+                        staging_settings,
+                        staging,
+                        str(doc_id),
+                        retire_plan,
+                        valid_pairs=valid_pairs,
+                        remaining_override=snapshot.revisions_for_doc(str(doc_id)),
+                    )
+                ]
+            if _is_point_retired(doc_id, source_rev, pending_removals, retire_plan):
+                continue
+            residue += count
+            if len(sample) < 3:
+                for pid in snapshot.pair_samples.get((doc_id, source_rev), ()):
+                    if len(sample) < 3:
+                        sample.append(pid)
+    else:
+        if not client.collection_exists(staging):
+            return []
+        for p in scroll_all_points(
+            client,
+            staging,
+            scroll_filter=None,
+            with_payload=["doc_id", "source_rev", "sha256"],
+            page_size=staging_settings.ingest_scan_page_size,
+        ):
+            payload = p.payload or {}
+            doc_id = payload.get("doc_id")
+            source_rev = payload.get("source_rev")
+            if (doc_id, source_rev) in valid_pairs:
+                continue
+            if doc_id is not None and doc_id in retired:
+                return [
+                    _retired_still_present(
+                        client,
+                        staging_settings,
+                        staging,
+                        str(doc_id),
+                        retire_plan,
+                        valid_pairs=valid_pairs,
+                    )
+                ]
+            if _is_point_retired(doc_id, source_rev, pending_removals, retire_plan):
+                # The approved removal applies before verification: the swap gate
+                # still refuses any remnant the plan does not actually delete.
+                continue
+            residue += 1
+            if len(sample) < 3:
+                sample.append(str(p.id))
     if residue:
         return [
             (
@@ -1297,7 +1403,9 @@ def catalog_retirement_approvals(
     )
     published: dict[str, set[str]] = {}
     if payload is not None and "source_catalog" in payload:
-        for entry in verify_source_catalog(client, controls, payload["source_catalog"]):
+        for entry in verify_source_catalog(
+            client, controls, payload["source_catalog"], page_size=live_settings.ingest_scan_page_size,
+        ):
             published.setdefault(entry["doc_id"], set()).add(entry["source_revision"])
     approvals: dict[str, set[str]] = {}
     for doc_id in sorted(requested):

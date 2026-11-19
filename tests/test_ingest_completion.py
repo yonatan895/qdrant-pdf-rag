@@ -582,3 +582,68 @@ def test_no_completion_collection_means_no_marker_and_not_complete():
     settings = _settings()
     assert _read(settings, fake) is None
     assert _complete(settings, fake) is False
+
+
+@pytest.mark.parametrize("text_budget_bytes", [64 * 1024 * 1024, 1])
+def test_verification_snapshot_matches_is_doc_complete_and_fails_closed_on_tamper(text_budget_bytes):
+    """Issue #1298: single-pass VerificationSnapshot (both in-budget and
+    over-budget deferred fallback) agrees with is_doc_complete and rejects
+    missing, surplus, altered-text, or wrong-manifest points."""
+    from mainframe_rag.ingest.completion import (
+        expected_digests,
+        prefetch_verification_state,
+        write_completion,
+    )
+
+    settings = _settings()
+    rules_v = extraction_rules_version()
+    fake = FailingFakeQdrant()
+    ensure_completion_collection(fake, settings)
+    rev = _rev()
+    doc = _parsed(sha="a" * 64)
+    cs = _chunks(n=3, rev=rev)
+    upsert_chunks(fake, settings, doc, cs, _vectors(3))
+    expected, ids_d, content_d = expected_digests(cs)
+    rec = write_completion(
+        fake,
+        settings,
+        doc_id="DOC1",
+        sha256="a" * 64,
+        rules_v=rules_v,
+        source_labels="||",
+        source_rev=rev,
+        expected_chunks=expected,
+        chunk_ids_digest=ids_d,
+        content_digest=content_d,
+    )
+
+    snap = prefetch_verification_state(fake, settings, text_budget_bytes=text_budget_bytes)
+    assert snap.verify_doc(
+        fake, settings, "DOC1", sha256="a" * 64, rules_v=rules_v, source_labels="||", source_rev=rev,
+    ) is True
+    assert snap.verify_doc(
+        fake, settings, "DOC1", sha256="a" * 64, rules_v=rules_v, source_labels="||", source_rev=rev,
+        required_manifest_digest=rec.manifest_digest,
+    ) is True
+    assert snap.verify_doc(
+        fake, settings, "DOC1", sha256="a" * 64, rules_v=rules_v, source_labels="||", source_rev=rev,
+        required_manifest_digest="0" * 16,
+    ) is False
+
+    # Tamper text on one stored point -> must fail closed.
+    original_text = fake.collections[settings.qdrant_collection][0].payload["text"]
+    fake.collections[settings.qdrant_collection][0].payload["text"] = "tampered text"
+    tampered = prefetch_verification_state(fake, settings, text_budget_bytes=text_budget_bytes)
+    assert tampered.verify_doc(
+        fake, settings, "DOC1", sha256="a" * 64, rules_v=rules_v, source_labels="||", source_rev=rev,
+    ) is False
+    fake.collections[settings.qdrant_collection][0].payload["text"] = original_text
+
+    # Surplus point for the same revision -> must fail closed.
+    extra = fake.collections[settings.qdrant_collection][0].model_copy(update={"id": "extra-point"})
+    fake.collections[settings.qdrant_collection].append(extra)
+    surplus = prefetch_verification_state(fake, settings, text_budget_bytes=text_budget_bytes)
+    assert surplus.verify_doc(
+        fake, settings, "DOC1", sha256="a" * 64, rules_v=rules_v, source_labels="||", source_rev=rev,
+    ) is False
+

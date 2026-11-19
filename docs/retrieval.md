@@ -30,13 +30,15 @@ Stage order:
 4. `_effective_query` applies acronym expansion, if enabled (§7), per leg.
    Identifiers, the filter, and the returned `query_kind` always stay on the
    operator's original query.
-5. `embedder.dense_query` + `embedder.sparse_query` embed each leg (one embed per
-   path, sequential for determinism).
+5. `embedder.dense_query` and `embedder.sparse_query` embed all legs
+   concurrently (one batched call per encoder, preserving exact leg order and
+   upfront `embed_max_input_chars` refusal).
 6. `_build_prefetch_requests` issues one dense + one BM25 prefetch per leg
    in one batched `query_batch_points` call (taking `filter=flt` on each
    `QueryRequest`; the reader protocol and the pinned client always provide
-   it). Every leg shares the ORIGINAL filter: splitting changes
-   ranking text only, never the constraint allowlist.
+   it); split legs prefetch concurrently while keeping exact leg order. Every
+   leg shares the ORIGINAL filter: splitting changes ranking text only, never
+   the constraint allowlist.
 7. `rrf_fuse` merges the legs per path (§4); paths merge when split —
    comparative peers by distinct document per side (`interleave_split_hits`,
    issue #825: the sides take turns placing their next document not yet

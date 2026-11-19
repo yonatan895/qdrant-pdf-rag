@@ -1085,3 +1085,230 @@ def test_search_other_ids_of_the_chapter_keep_their_order(embedder):
     assert [h.chunk_id for h in hits] == ["m0", "m1", "m2"]
     hits, _, _ = search(fake, embedder, "mainframe_manuals", "what is ZZQ201I", limit=3)
     assert hits[0].chunk_id == "m1"  # m1 is the chunk headed by ZZQ201I
+
+
+# ---------------------------------------------------------------------------
+# Concurrent serving I/O legs (issue #1297)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_async_search_embeds_dense_and_sparse_concurrently_in_batch():
+    """Issue #1297: async_search runs dense_query(eff_legs) concurrently with
+    sparse_query(eff_legs) in one batch per leg type and matches sequential
+    per-leg embedding byte-for-byte."""
+    import threading
+
+    from mainframe_rag.ingest.embed import HashEmbedder
+    from mainframe_rag.retrieve.query import async_search
+
+    comp_query = "Compare documented JES2 versus JES3 spool concepts for the job."
+    settings = _settings(comparative_split_enabled=True)
+    base_embedder = HashEmbedder()
+    barrier = threading.Barrier(2, timeout=2.0)
+    seen_dense: list[list[str]] = []
+    seen_sparse: list[list[str]] = []
+
+    class BarrierEmbedder:
+        def dense(self, texts: list[str]) -> list[list[float]]:
+            return base_embedder.dense(texts)
+
+        def dense_query(self, queries: list[str]) -> list[list[float]]:
+            seen_dense.append(list(queries))
+            barrier.wait()
+            return base_embedder.dense_query(queries)
+
+        def sparse(self, texts: list[str]) -> list[tuple[list[int], list[float]]]:
+            return base_embedder.sparse(texts)
+
+        def sparse_query(self, queries: list[str]) -> list[tuple[list[int], list[float]]]:
+            seen_sparse.append(list(queries))
+            barrier.wait()
+            return base_embedder.sparse_query(queries)
+
+    p1, p2, p3 = _point("d1", 0.9), _point("s1", 0.8), _point("d2", 0.7)
+    hits, kind, timings = await async_search(
+        AsyncReaderAdapter(FakeQdrant(dense=[p1, p3], sparse=[p2])),
+        BarrierEmbedder(),
+        "mainframe_manuals",
+        comp_query,
+        limit=5,
+        settings=settings,
+    )
+    assert len(seen_dense) == 1 and len(seen_dense[0]) == 2
+    assert seen_sparse == seen_dense
+    assert kind == "nl"
+    assert set(timings) >= {"embed_ms", "qdrant_ms"}
+
+    # Byte-identical parity against HashEmbedder.
+    ref_hits, ref_kind, _ = await async_search(
+        AsyncReaderAdapter(FakeQdrant(dense=[p1, p3], sparse=[p2])),
+        base_embedder,
+        "mainframe_manuals",
+        comp_query,
+        limit=5,
+        settings=settings,
+    )
+    assert [h.model_dump() for h in hits] == [h.model_dump() for h in ref_hits]
+    assert kind == ref_kind
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("query", "settings_kw"),
+    [
+        (
+            "Compare documented JES2 versus JES3 spool concepts for the job.",
+            {"comparative_split_enabled": True},
+        ),
+        (
+            "IRA100E reports a CSA shortage. What diagnostic steps and recovery apply?",
+            {"diagnostic_dualpath_enabled": True},
+        ),
+    ],
+)
+async def test_async_search_prefetches_split_legs_concurrently_preserving_order(query, settings_kw):
+    """Issue #1297: per-leg query_batch_points (and empty-filtered fallback
+    retries) execute concurrently while preserving exact eff_legs ordering
+    even when leg 1 completes before leg 0."""
+    import asyncio
+
+    from mainframe_rag.retrieve.query import async_search
+
+    settings = _settings(**settings_kw)
+
+    def _doc_point(pid: str, doc_id: str, score: float) -> models.ScoredPoint:
+        p = _point(pid, score)
+        payload = dict(p.payload or {})
+        payload["doc_id"] = doc_id
+        payload["text"] = f"{doc_id} chunk {pid}"
+        return p.model_copy(update={"payload": payload})
+
+    class MarkerEmbedder:
+        def dense(self, texts: list[str]) -> list[list[float]]:
+            return self.dense_query(texts)
+
+        def dense_query(self, queries: list[str]) -> list[list[float]]:
+            return [[float(i + 1)] * 4 for i, _ in enumerate(queries)]
+
+        def sparse(self, texts: list[str]) -> list[tuple[list[int], list[float]]]:
+            return self.sparse_query(texts)
+
+        def sparse_query(self, queries: list[str]) -> list[tuple[list[int], list[float]]]:
+            return [([i + 1], [1.0]) for i, _ in enumerate(queries)]
+
+    leg0_dense = [_doc_point("l0-d1", "DOC-LEG0", 0.9), _doc_point("l0-d2", "DOC-LEG0-B", 0.7)]
+    leg0_sparse = [_doc_point("l0-s1", "DOC-LEG0", 0.85)]
+    leg1_dense = [_doc_point("l1-d1", "DOC-LEG1", 0.95), _doc_point("l1-d2", "DOC-LEG1-B", 0.75)]
+    leg1_sparse = [_doc_point("l1-s1", "DOC-LEG1", 0.88)]
+
+    def _points_for(req: models.QueryRequest) -> list[models.ScoredPoint]:
+        q = req.query
+        leg_idx = int(q[0]) - 1 if isinstance(q, list) else int(q.indices[0]) - 1
+        if leg_idx == 0:
+            return leg0_dense if req.using == "dense" else leg0_sparse
+        return leg1_dense if req.using == "dense" else leg1_sparse
+
+    class ConcurrentAsyncQdrant:
+        def __init__(self, *, require_overlap: bool) -> None:
+            self._require_overlap = require_overlap
+            self._arrived = 0
+            self._both_started = asyncio.Event()
+            self._leg1_done = asyncio.Event()
+            self.calls = 0
+
+        async def query_batch_points(self, collection_name: str, *, requests: list[models.QueryRequest]):
+            self.calls += 1
+            first_q = requests[0].query
+            leg_idx = int(first_q[0]) - 1 if isinstance(first_q, list) else int(first_q.indices[0]) - 1
+            if self._require_overlap:
+                if self._arrived < 2:
+                    self._arrived += 1
+                    if self._arrived == 2:
+                        self._both_started.set()
+                    await self._both_started.wait()
+                # Force leg 1 to finish BEFORE leg 0 so output order must not
+                # depend on completion order.
+                if leg_idx == 0:
+                    await self._leg1_done.wait()
+                else:
+                    self._leg1_done.set()
+            # Trigger empty-filtered fallback on leg 0's first attempt when filtered.
+            if (
+                leg_idx == 0
+                and self.calls <= 2
+                and any(
+                    getattr(c, "key", None) == "message_ids"
+                    for r in requests
+                    if r.filter is not None
+                    for c in (r.filter.must or [])
+                )
+            ):
+                return [SimpleNamespace(points=[]), SimpleNamespace(points=[])]
+            return [SimpleNamespace(points=list(_points_for(r))) for r in requests]
+
+    conc_client = ConcurrentAsyncQdrant(require_overlap=True)
+    conc_hits, conc_kind, _ = await asyncio.wait_for(
+        async_search(
+            conc_client, MarkerEmbedder(), "mainframe_manuals", query, limit=6, settings=settings
+        ),
+        timeout=2.0,
+    )
+
+    seq_client = ConcurrentAsyncQdrant(require_overlap=False)
+    seq_hits, seq_kind, _ = await async_search(
+        seq_client, MarkerEmbedder(), "mainframe_manuals", query, limit=6, settings=settings
+    )
+    assert conc_kind == seq_kind
+    assert [h.model_dump() for h in conc_hits] == [h.model_dump() for h in seq_hits]
+    assert conc_hits[0].doc_id == "DOC-LEG0"
+    assert any(h.doc_id == "DOC-LEG1" for h in conc_hits)
+    expected_calls = 3 if settings_kw.get("diagnostic_dualpath_enabled") else 2
+    assert conc_client.calls == expected_calls and seq_client.calls == expected_calls
+
+
+@pytest.mark.anyio
+async def test_async_search_batch_dense_preserves_embed_max_input_chars_refusal():
+    """Issue #1297: when any split leg exceeds embed_max_input_chars, batched
+    dense_query refuses the entire batch before posting to vLLM or touching Qdrant."""
+    from mainframe_rag.ingest.bounds import EmbedInputTooLarge
+    from mainframe_rag.ingest.embed import VllmEmbedder
+    from mainframe_rag.retrieve.query import async_search
+
+    posts: list[list[str]] = []
+
+    class RecordingHttp:
+        def post(self, url, json, headers):
+            posts.append(list(json["input"]))
+            raise AssertionError("HTTP POST must not run when any split leg exceeds the bound")
+
+    class CountingQdrant:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def query_batch_points(self, collection_name: str, *, requests: list[models.QueryRequest]):
+            self.calls += 1
+            return [SimpleNamespace(points=[]) for _ in requests]
+
+    # Leg 0 ("... IPL ...", 76 + 3 = 79 chars) is at the bound while leg 1
+    # ("... JES3 ...", 77 + 3 = 80 chars) exceeds it: sequential per-leg calls
+    # would POST leg 0 before failing; batched dense_query(eff_legs) refuses
+    # the entire batch with zero HTTP POSTs.
+    query = "What is the difference between IPL and JES3 extended spool checkpoint administration?"
+    settings = Settings(
+        embed_mode="vllm",
+        embed_base_url="http://embed.test/v1",
+        embed_model="test-embed",
+        embed_max_input_chars=79,
+        dense_query_prefix="Q: ",
+        comparative_split_enabled=True,
+        _env_file=None,
+    )
+    embedder = VllmEmbedder(settings, client=RecordingHttp())
+    # Stub sparse_query so no local BM25 weights are required for this hermetic check.
+    embedder.sparse_query = lambda queries: [([1], [1.0]) for _ in queries]  # type: ignore[method-assign]
+    qdrant = CountingQdrant()
+    with pytest.raises(EmbedInputTooLarge):
+        await async_search(qdrant, embedder, "mainframe_manuals", query, limit=5, settings=settings)
+    assert posts == []
+    assert qdrant.calls == 0

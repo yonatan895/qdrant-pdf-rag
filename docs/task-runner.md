@@ -340,6 +340,8 @@ Tasks added since the map (#1070/#1074) are `airgap:retire-legacy`,
 `artifacts:openwebui-image` and `local:openwebui:{dev-up,dev-dry-run,dev-down,acceptance}`;
 they wrap `retire_legacy.sh`, `images/openwebui/Containerfile` and
 `scripts/openwebui/dev.sh`/`acceptance.sh`, and take script flags after `--`.
+`airgap:config` (#1284) joins them: `show`/`check` over the operator-key
+registry's surfaces, wrapped by `scripts/airgap/config.sh`.
 
 ### Retained local Helm acceptance and maintenance
 

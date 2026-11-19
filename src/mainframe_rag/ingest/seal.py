@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from mainframe_rag.ports import QdrantReader
 
 SEAL_SCHEMA = 1
+DEFAULT_SEAL_PAGE_SIZE = 1000
 
 
 def decode_content_seal(value: object) -> dict:
@@ -56,7 +57,13 @@ def _point_digest(point: Any) -> bytes:
 
 
 def _collection_digest(
-    client: QdrantReader, collection: str, binding: list[str], role: str, excluded_id: str | None,
+    client: QdrantReader,
+    collection: str,
+    binding: list[str],
+    role: str,
+    excluded_id: str | None,
+    *,
+    page_size: int = DEFAULT_SEAL_PAGE_SIZE,
 ) -> dict:
     # Keep only IDs and fixed-size hashes across pages; never retain all corpus
     # text/vectors. Sorted IDs make the certificate independent of page order.
@@ -65,7 +72,7 @@ def _collection_digest(
     offset = None
     while True:
         records, next_offset = client.scroll(
-            collection, limit=256, offset=offset, with_payload=False,
+            collection, limit=page_size, offset=offset, with_payload=False,
         )
         # Use the existing points port's full retrieve projection, as completion
         # verification does. Never depend on scroll's default vector projection.
@@ -104,11 +111,14 @@ def _collection_digest(
 def capture_content_seal(
     client: QdrantReader, *, build_id: str, alias: str, physical: str,
     gen_fp: str, corpus_fp: str, receipt_id: str,
+    page_size: int = DEFAULT_SEAL_PAGE_SIZE,
 ) -> dict:
     """Capture verified immutable bytes, bound to the complete build identity."""
     binding = [build_id, alias, physical, gen_fp, corpus_fp]
     return {
         "schema": SEAL_SCHEMA,
-        "data": _collection_digest(client, physical, binding, "data", None),
-        "control": _collection_digest(client, physical + "__completions", binding, "control", receipt_id),
+        "data": _collection_digest(client, physical, binding, "data", None, page_size=page_size),
+        "control": _collection_digest(
+            client, physical + "__completions", binding, "control", receipt_id, page_size=page_size,
+        ),
     }

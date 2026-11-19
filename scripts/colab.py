@@ -81,9 +81,20 @@ FINAL_USAGE_SECONDS = 5
 # CU cap and floor stay enforced through work_expiry from that observed rate.
 USAGE_STALE_SECONDS = 120
 RELEASE_RETRY_SECONDS = 5
+DIAGNOSTIC_POLL_TIMEOUT_SECONDS = 10
+EXPORT_WINDOW_MAX_SECONDS = 20
+EXPORT_RELEASE_RESERVE_SECONDS = 30
+EXPORT_RUNTIME_WAIT_SECONDS = 5
+WAIT_HTTP_SECONDS = 20
+TERMINATE_GRACE_SECONDS = 2
 EVENT_HISTORY_LIMIT = 64
 CU_HISTORY_LIMIT = 32
 METADATA_PERSIST_SECONDS = 5
+# Test-only timing scale (#1299): unset in production (1.0). When set by the
+# test suite, scales runtime waits and command/cleanup windows proportionally
+# while keeping CLI validation, manifests, and retry/deadline state machines intact.
+TEST_TIME_SCALE_ENV = "COLAB_TEST_TIME_SCALE"
+TEST_TIME_SCALE_BOUNDS = (0.01, 1.0)
 MANIFEST_LIMIT_BYTES = 64 * 1024
 QDRANT_CONFIG_PATHS = frozenset(f"/qdrant/config/{filename}" for filename in
                                ("initialize.sh", "config.yaml", "production.yaml", "local.yaml"))
@@ -118,7 +129,7 @@ finally:
 AGENT_ENV_LIMIT = 32
 AGENT_ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 AGENT_ENV_DENIED_PREFIXES = ("GATEWAY_", "PG_", "LITELLM_", "QDRANT_", "EMBED_", "RERANK_", "PRODUCTION_",
-                             "LOCAL_", "PYTHON", "LD_", "DOCKER_", "KUBE", "RAG_COLAB_")
+                             "LOCAL_", "PYTHON", "LD_", "DOCKER_", "KUBE", "RAG_COLAB_", "COLAB_TEST_")
 AGENT_ENV_DENIED_SUFFIXES = ("_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_URL", "_URLS", "_ENDPOINT")
 AGENT_ENV_DENIED = frozenset({"LLM_BASE_URL", "LLM_MODEL_REASONING", "DENSE_DIM", "ALLOW_HASH_MODE", "VENUE",
                               "PY", "PATH", "HOME", "CORPUS_DIR", "TMPDIR"})
@@ -175,6 +186,28 @@ class ToolFailure(LabError):
 # fixed refusal line. Production never sets it, so the cause stays out of every
 # user-visible stream.
 refusal_cause_sink: Callable[[BaseException], None] | None = None
+
+
+def test_time_scale() -> float:
+    """Bounded test-only time scale; production leaves COLAB_TEST_TIME_SCALE unset (1.0)."""
+    raw = os.environ.get(TEST_TIME_SCALE_ENV)
+    if raw is None or raw == "":
+        return 1.0
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise LabError("test time scale must be finite and within its declared test bounds") from exc
+    if not math.isfinite(value) or not TEST_TIME_SCALE_BOUNDS[0] <= value <= TEST_TIME_SCALE_BOUNDS[1]:
+        raise LabError("test time scale must be finite and within its declared test bounds")
+    return value
+
+
+def scaled_seconds(seconds: float, *, minimum: float = 0.0) -> float:
+    """Scale a runtime wait or window under COLAB_TEST_TIME_SCALE; unchanged in production."""
+    scale = test_time_scale()
+    if scale == 1.0:
+        return seconds
+    return max(min(seconds, minimum), seconds * scale)
 
 
 def print_diagnostic(message: str, *, error: bool = False) -> None:
@@ -733,6 +766,7 @@ def agent_environment(pairs: list[str] | None, profile: dict) -> dict[str, str]:
 
 
 def prepare(args: argparse.Namespace, *, source_root: Path | None = None) -> int:
+    test_time_scale()
     state = external(args.state)
     if state.exists() or state.is_symlink():
         raise LabError("run state already exists; use a fresh per-run directory")
@@ -878,6 +912,7 @@ def initialize_fresh(args: argparse.Namespace, *, source_root: Path | None = Non
     """One local operation, no deferred dispatch, cloud tools or paid-run snapshot."""
     from mainframe_rag.serve.colab_production import ScanBounds, initialize_fresh_binding
 
+    test_time_scale()
     state = external(args.state)
     if state.exists() or state.is_symlink():
         raise LabError("initialization state already exists; select a fresh private operation directory")
@@ -950,6 +985,7 @@ def initialize_fresh(args: argparse.Namespace, *, source_root: Path | None = Non
 
 class Run:
     def __init__(self, state: Path, *, local_initialization: bool = False):
+        test_time_scale()
         self.state = state.expanduser().absolute()
         if self.state.is_symlink() or self.state.stat().st_uid != os.geteuid() or self.state.stat().st_mode & 0o077:
             raise LabError("run state must be private and owned by the current user")
@@ -1126,9 +1162,10 @@ class Run:
                     if cleanup else self.work_expiry)
         if cleanup_deadline is not None:
             now = time.time()
+            network_release = scaled_seconds(NETWORK_RELEASE_SECONDS, minimum=0.5)
             if (not cleanup or type(cleanup_deadline) not in (int, float)
                     or not math.isfinite(cleanup_deadline)
-                    or not now < cleanup_deadline <= now + NETWORK_RELEASE_SECONDS):
+                    or not now < cleanup_deadline <= now + network_release):
                 raise LabError("independent network cleanup requires its bounded control deadline")
             deadline = cleanup_deadline
         remaining = deadline - time.time()
@@ -1166,7 +1203,10 @@ class Run:
                     raise LabError("local tool stdout exceeded its bound; partial identity is refused")
                 if time.monotonic() >= until:
                     raise subprocess.TimeoutExpired(argv, timeout)
-                time.sleep(.01)
+                wait = min(.01, max(0.0, until - time.monotonic()))
+                if wait > 0:
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        process.wait(timeout=wait)
         finally:
             # Signal the owned group even when its root already exited: an
             # inherited pipe held by a descendant must not keep capture alive.
@@ -1272,9 +1312,10 @@ class Run:
         """Retain final best-effort account evidence without spending stop's reserve."""
         previous_expiry = self.cleanup_phase_expiry
         now = time.time()
-        self.cleanup_phase_expiry = now + min(FINAL_USAGE_SECONDS, max(0.0, self.expiry - now) / 4)
+        usage_seconds = scaled_seconds(FINAL_USAGE_SECONDS, minimum=0.3)
+        self.cleanup_phase_expiry = now + min(usage_seconds, max(0.0, self.expiry - now) / 4)
         try:
-            observation = self.observe_usage(cleanup=True, seconds=FINAL_USAGE_SECONDS)
+            observation = self.observe_usage(cleanup=True, seconds=usage_seconds)
             if observation is None:
                 raise LabError("cannot verify current CU balance/rate")
             starting = self.manifest.get("starting_balance")
@@ -1351,8 +1392,9 @@ class Run:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(child.pid, signal.SIGTERM)
                 if child.poll() is None:
+                    grace = scaled_seconds(TERMINATE_GRACE_SECONDS, minimum=0.5)
                     with contextlib.suppress(subprocess.TimeoutExpired):
-                        child.wait(timeout=min(2, max(.01, self.expiry - time.time())))
+                        child.wait(timeout=min(grace, max(.01, self.expiry - time.time())))
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(child.pid, signal.SIGKILL)
                 child.wait(timeout=.25)
@@ -1492,7 +1534,7 @@ class Run:
             raise LabError("retained Qdrant producer identity or readiness changed")
 
     def wait_http(self, url: str, child: subprocess.Popen) -> None:
-        until = min(self.work_expiry, time.time() + 20)
+        until = min(self.work_expiry, time.time() + scaled_seconds(WAIT_HTTP_SECONDS, minimum=3.0))
         while time.time() < until and child.poll() is None:
             try:
                 with urllib.request.urlopen(url, timeout=min(2, max(.01, until - time.time()))) as response:
@@ -1500,12 +1542,13 @@ class Run:
                         return
             except OSError:
                 pass
-            time.sleep(.05)
+            time.sleep(scaled_seconds(.05, minimum=.01))
         raise LabError("owned local transport did not become reachable")
 
     def diagnostic_stage(self, stage: str) -> dict:
-        until = min(self.work_expiry, time.time() + 1200)
+        until = min(self.work_expiry, time.time() + scaled_seconds(1200, minimum=10.0))
         destination = self.state / "remote-diagnostics.json"
+        poll_timeout = scaled_seconds(DIAGNOSTIC_POLL_TIMEOUT_SECONDS, minimum=0.5)
         while time.time() < until:
             if self.runtime and self.runtime.poll() is not None:
                 raise LabError("remote runtime exited before readiness; diagnostics retained privately")
@@ -1513,7 +1556,7 @@ class Run:
                 raise LabError("owned SSH tunnel was lost")
             try:
                 result = self.colab("download", "-s", self.manifest["session"], "/content/colab-diagnostics.json",
-                                    str(destination), seconds=10, allow_failure=True)
+                                    str(destination), seconds=poll_timeout, allow_failure=True)
             except subprocess.TimeoutExpired:
                 # One slow poll means "not ready yet" (#746): readiness stays
                 # bounded by `until`, and liveness/budget checks still run.
@@ -1530,7 +1573,7 @@ class Run:
                 if diagnostic["stage"] in ("stopping", "stopped"):
                     raise LabError("remote runtime is shutting down")
             self.budget()
-            time.sleep(self.config["poll_seconds"])
+            time.sleep(scaled_seconds(self.config["poll_seconds"], minimum=.02))
         raise LabError("remote readiness exceeded the run budget")
 
     def transport(self, bridge: str) -> None:
@@ -1643,10 +1686,11 @@ class Run:
         # Mandatory VM stop/absence runs first. This separate bounded control
         # window may finish after that absolute deadline and cannot spend the
         # Colab release capture pool or postpone its mandatory operations.
+        release_seconds = scaled_seconds(NETWORK_RELEASE_SECONDS, minimum=0.5)
         self.command(["sh", str(self.execution_root / "scripts/run_local_gateway.sh"), "transport-release"],
                      env=env,
-                     seconds=NETWORK_RELEASE_SECONDS, cleanup=True,
-                     cleanup_deadline=time.time() + NETWORK_RELEASE_SECONDS,
+                     seconds=release_seconds, cleanup=True,
+                     cleanup_deadline=time.time() + release_seconds,
                      require_complete_stdout=False)
         self.manifest["gateway_network_cleanup"] = {"completed": True,
                                                      "owned_removed_or_absent": ownership["created"],
@@ -1779,12 +1823,18 @@ class Run:
                 ok = False
                 self.save("local_workload_stop_failed")
         if self.manifest["allocation_attempted"]:
+            if test_time_scale() < 1.0 and math.isfinite(self.expiry):
+                remaining = self.expiry - time.time()
+                if remaining > 0:
+                    self.expiry = time.time() + scaled_seconds(remaining, minimum=0.9)
             # Export gets at most a third of the remaining cleanup window and
             # at most 20 seconds. Preserve time for independent release even
             # when its first ownership check or download stalls.
             remaining = max(0.0, self.expiry - time.time())
-            self.cleanup_phase_expiry = min(time.time() + 20,
-                                            self.expiry - min(30, remaining * 2 / 3))
+            export_max = scaled_seconds(EXPORT_WINDOW_MAX_SECONDS, minimum=1.0)
+            release_reserve = scaled_seconds(EXPORT_RELEASE_RESERVE_SECONDS, minimum=1.5)
+            self.cleanup_phase_expiry = min(time.time() + export_max,
+                                            self.expiry - min(release_reserve, remaining * 2 / 3))
             try:
                 if self.owned(cleanup=True):
                     control = self.state / "stop-control"
@@ -1802,7 +1852,8 @@ class Run:
                     except subprocess.SubprocessError:
                         self.save("artifact_stop_signal_failed")
                     if self.runtime:
-                        wait = min(5, self.cleanup_phase_expiry - time.time())
+                        runtime_wait = scaled_seconds(EXPORT_RUNTIME_WAIT_SECONDS, minimum=0.25)
+                        wait = min(runtime_wait, self.cleanup_phase_expiry - time.time())
                         if wait > 0:
                             with contextlib.suppress(subprocess.TimeoutExpired):
                                 self.runtime.wait(timeout=wait)
@@ -1826,6 +1877,7 @@ class Run:
             # An unverified release keeps billing, so a failed tool call or a
             # still-active session repeats stop plus the absence check until
             # the hard deadline (#746). Ownership refusals are never retried.
+            retry_seconds = scaled_seconds(RELEASE_RETRY_SECONDS, minimum=0.05)
             while True:
                 retry = True
                 try:
@@ -1841,10 +1893,10 @@ class Run:
                     pass
                 except LabError:
                     retry = False
-                if retry and time.time() + RELEASE_RETRY_SECONDS < self.expiry:
+                if retry and time.time() + retry_seconds < self.expiry:
                     self.manifest["release_retries"] = self.manifest.get("release_retries", 0) + 1
                     self.save("session_release_retrying")
-                    time.sleep(RELEASE_RETRY_SECONDS)
+                    time.sleep(retry_seconds)
                     continue
                 ok = False
                 self.manifest["released"] = False
@@ -1987,6 +2039,8 @@ class Run:
             self.manifest["phase"] = "running"
             self.save("local_workload_started")
             next_budget = time.time()
+            poll_wait = scaled_seconds(self.config["poll_seconds"], minimum=.02)
+            budget_interval = scaled_seconds(30, minimum=0.5)
             while child.poll() is None:
                 if time.time() >= self.work_expiry:
                     raise LabError("run work deadline/CU envelope reached")
@@ -1994,8 +2048,9 @@ class Run:
                     raise LabError("owned model transport/runtime was lost")
                 if time.time() >= next_budget:
                     self.budget()
-                    next_budget = time.time() + 30
-                time.sleep(self.config["poll_seconds"])
+                    next_budget = time.time() + budget_interval
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    child.wait(timeout=poll_wait)
             if tunnel.poll() is not None or runtime.poll() is not None:
                 raise LabError("owned model transport/runtime was lost before workload completion")
             self.check_qdrant()

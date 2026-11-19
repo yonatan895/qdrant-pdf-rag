@@ -324,7 +324,15 @@ def test_attachment_failures_hide_canaries(
             payload = {} if endpoint == "console" else {"stream": stream}
             payload.update({"query": CANARY_QUERY} if endpoint == "answer" else {"messages": messages})
             response = connection.post(path, headers=headers, json=payload)
-    assert calls == [failure]
+    # Anchored follow-ups (#1268/#1274) launch literal and anchor retrieval
+    # legs concurrently (#1297), so both legs invoke retrieve_search before
+    # fail-fast surfaces the single failure.
+    expected_calls = (
+        [failure, failure]
+        if endpoint in {"chat", "console"} and not condensation
+        else [failure]
+    )
+    assert calls == expected_calls
     # The console retrieves before its stream opens, as /v1/chat does (#985):
     # the failure is the same JSON envelope, never a post-header error frame.
     if path == "/ui/chat":

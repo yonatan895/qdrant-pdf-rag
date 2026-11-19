@@ -483,9 +483,6 @@ def adapted(s: qdrant_client.QdrantClient) -> AsyncQdrantReader:
 def writer(s: qdrant_client.QdrantClient) -> QdrantPoints:
     return s
 """)
-    accepted = subprocess.run([*command, str(good)], capture_output=True, text=True, check=False)
-    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
-
     bad = tmp_path / "bad.py"
     bad.write_text("""
 from mainframe_rag.agent.resources import AgentResources
@@ -497,10 +494,13 @@ def bad(res: AgentResources, a: AsyncQdrantReader, s: QdrantReader) -> None:
     a.delete_collection("c")
     s.update_collection_aliases([])
 """)
-    rejected = subprocess.run([*command, str(bad)], capture_output=True, text=True, check=False)
-    assert rejected.returncode == 1, rejected.stdout + rejected.stderr
-    out = rejected.stdout
+    checked = subprocess.run([*command, str(good), str(bad)], capture_output=True, text=True, check=False)
+    assert checked.returncode == 1, checked.stdout + checked.stderr
+    out = checked.stdout
+    assert str(good) not in out
+    error_lines = [line for line in out.splitlines() if ": error:" in line]
+    assert len(error_lines) == 3 and all(line.startswith(f"{bad}:") for line in error_lines)
     assert '"AsyncQdrantReader" has no attribute "upsert"' in out
     assert '"AsyncQdrantReader" has no attribute "delete_collection"' in out
     assert '"QdrantReader" has no attribute "update_collection_aliases"' in out
-    assert "Found 3 errors" in out
+    assert "Found 3 errors in 1 file (checked 2 source files)" in out

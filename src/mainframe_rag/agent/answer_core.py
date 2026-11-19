@@ -264,16 +264,25 @@ async def retrieve_planned(
     plan: SearchPlan, source: AnswerCoreInput, deps: AnswerCoreDeps,
 ) -> RetrievalResult:
     """Run a plan's retrieval: one search, or for an anchored follow-up the
-    literal leg then the antecedent leg, fused. Either leg failing fails the
-    turn as one retrieval failure does."""
-    found = await deps.retrieve(
-        plan.query, product=source.product, version=source.version, settings=deps.settings,
-    )
+    literal and antecedent legs concurrently, fused literal-first. Either leg
+    failing fails the turn as one retrieval failure does."""
+    async def _run_leg(query: str) -> RetrievalResult:
+        return await deps.retrieve(
+            query, product=source.product, version=source.version, settings=deps.settings,
+        )
+
     if plan.anchor is None:
-        return found
-    anchored = await deps.retrieve(
-        plan.anchor, product=source.product, version=source.version, settings=deps.settings,
-    )
+        return await _run_leg(plan.query)
+    literal_task: asyncio.Task[RetrievalResult] = asyncio.create_task(_run_leg(plan.query))
+    anchor_task: asyncio.Task[RetrievalResult] = asyncio.create_task(_run_leg(plan.anchor))
+    try:
+        found, anchored = await asyncio.gather(literal_task, anchor_task)
+    except BaseException:
+        for task in (literal_task, anchor_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(literal_task, anchor_task, return_exceptions=True)
+        raise
     return _fuse_by_rank(found, anchored, deps.settings.answer_hit_limit)
 
 

@@ -26,6 +26,10 @@ case "$DENSE_DIM" in
 esac
 
 validate_model_config
+# Issue #1284: run static config check as a non-fatal warning first (unknown
+# key typos, deprecated keys, etc.); making it fatal is a later decision.
+export_operator_env
+python3 -I scripts/airgap/config_tool.py check --env-file "${_AIRGAP_ENV_FILE:-}" --warn-only || true
 
 check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 check_secret_name "${PULL_SECRET:-}" PULL_SECRET
