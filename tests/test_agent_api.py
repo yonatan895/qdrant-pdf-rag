@@ -304,7 +304,10 @@ def test_neighbour_expansion_on_ships_neighbours_as_their_own_hits(
     from tests.fakes import StoredChunksFake
     from tests.test_answer_expand import Corpus
 
-    corpus = Corpus().add([("A", [(3, 3)] * 3)])
+    # Every chunk carries the identifier the follow-up's antecedent names, so
+    # the identifier rule (tests/test_answer_expand.py) packs both neighbours.
+    corpus = Corpus().add([("A", [(3, 3)] * 3)],
+                          scope={f"A#{n}": {"message_ids": ["IEA500I"]} for n in range(3)})
     retrieved = corpus.hit("A#1").model_copy(update={"rerank_score": 0.75})
     stored = StoredChunksFake(corpus.payloads)
 

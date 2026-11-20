@@ -334,7 +334,9 @@ async def retrieve_for_answer(
     final list whatever selection did (pinned, selected, bypassed or fallen
     back). Both off, this is `retrieve_planned` and nothing else. Expansion
     appends neighbours after the hits and never fails the turn
-    (`answer_expand.expand_hits`).
+    (`answer_expand.expand_hits`); on a turn whose searched text names an
+    identifier it appends only neighbours carrying a named identifier
+    (`answer_expand.named_identifiers`).
 
     Selection on: a turn whose own query names an identifier, whose searched text (its
     query or an anchored antecedent) screens as a trap, or whose candidate
@@ -358,6 +360,7 @@ async def retrieve_for_answer(
         hits, expanded = await answer_expand.expand_hits(
             deps.neighbours, deps.settings, found.hits,
             product=source.product, version=source.version,
+            query=plan.query, anchor=plan.anchor,
         )
     if parent_span is not None:
         parent_span.set_attributes(expanded.span_attributes())

@@ -9,8 +9,12 @@ order is claimed only where the stored fields prove it. Everything else
 stops the walk in that direction (fail closed), and any lookup failure
 leaves the hits exactly as they were.
 
-This module owns the lookup, the order rules and the budget rule;
-answer_core.retrieve_for_answer owns when it runs.
+On a turn whose searched text names an identifier, a neighbour is packed
+only when its stored identifier fields carry one the text names
+(named_identifiers; review decision 8 of PR #1324).
+
+This module owns the lookup, the order rules, the identifier rule and the
+budget rule; answer_core.retrieve_for_answer owns when it runs.
 """
 
 from __future__ import annotations
@@ -21,11 +25,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from mainframe_rag.agent.answer import names_identifier
 from mainframe_rag.agent.core_ports import StoredChunkReader
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.chunk import make_chunk_id
 from mainframe_rag.logs import error_type
-from mainframe_rag.retrieve.filters import build_scope_filter
+from mainframe_rag.retrieve.filters import QueryIdentifiers, build_scope_filter, parse_query
 from mainframe_rag.retrieve.query import NeighbourHit, SearchHit, hit_from_payload
 
 if TYPE_CHECKING:
@@ -44,6 +49,10 @@ ORDINAL_SCAN_MAX = 1024
 # The identity read carries no text.
 IDENTITY_FIELDS = ["source_rev", "heading_path", "page_start", "page_end"]
 _SCOPE_FIELDS = ("product", "version")
+# The stored identifier fields the identifier rule reads: the ones retrieval's
+# identifier filter matches (filters.build_filter) apart from doc_id, which
+# every neighbour shares with its hit.
+_IDENTIFIER_FIELDS = ("message_ids", "members", "system_codes")
 
 ExpandMode = Literal["expanded", "skipped", "fallback"]
 ExpandReason = Literal["no_hits", "no_budget", "no_reader", "timeout", "lookup_error"]
@@ -55,7 +64,9 @@ class ExpandOutcome:
     'added' neighbours were appended, to 'expanded' of the hits; 'stopped'
     directions ended on a fail-closed rule rather than at the window's edge
     or the per-hit cap; 'budget_cut' neighbours were found and left out
-    because the budget was full."""
+    because the budget was full; 'identifier_skipped' neighbours were found
+    and left out by the identifier rule, None when the rule was not in force
+    (the turn names no identifier, or nothing was expanded)."""
 
     mode: ExpandMode
     added: int = 0
@@ -63,6 +74,7 @@ class ExpandOutcome:
     stopped: int = 0
     budget_cut: int = 0
     reason: ExpandReason | None = None
+    identifier_skipped: int | None = None
 
     def span_attributes(self) -> dict[str, str | int]:
         attributes: dict[str, str | int] = {
@@ -74,7 +86,40 @@ class ExpandOutcome:
         }
         if self.reason is not None:
             attributes["rag.expand_reason"] = self.reason
+        if self.identifier_skipped is not None:
+            attributes["rag.expand_identifier_skipped"] = self.identifier_skipped
         return attributes
+
+
+def named_identifiers(query: str, anchor: str | None) -> QueryIdentifiers | None:
+    """The one switch of the identifier rule (review decision 8 of PR #1324,
+    applied on the coordinator's recommendation): returning None always
+    turns the rule off. None when no searched text (the turn's retrieval
+    query, an anchored antecedent's) names an identifier, by the predicate
+    the selection stage and the condensation bypass use; else the message
+    ids, members and system codes those texts name, parsed as retrieval
+    parses its query (parse_query). Document numbers are left out: a
+    neighbour always shares its hit's document. The result can be empty (a
+    turn naming only a document number): the rule is in force and no
+    neighbour carries a named identifier."""
+    parsed = [parse_query(text) for text in (query, anchor)
+              if text is not None and names_identifier(text)]
+    if not parsed:
+        return None
+    return QueryIdentifiers(**{
+        field: sorted({value for ids in parsed for value in getattr(ids, field)})
+        for field in _IDENTIFIER_FIELDS
+    })
+
+
+def _carries(payload: dict[str, Any], named: QueryIdentifiers) -> bool:
+    """Whether a stored chunk carries a named identifier: any one, in its
+    own field, as retrieval's filter matches each field (MatchAny)."""
+    for field in _IDENTIFIER_FIELDS:
+        stored, wanted = payload.get(field), getattr(named, field)
+        if isinstance(stored, list) and any(value in wanted for value in stored):
+            return True
+    return False
 
 
 def _page(raw: object) -> int | None:
@@ -315,21 +360,28 @@ def _nearest_first(forward: list[_Stored], backward: list[_Stored], cap: int) ->
 
 def _place(
     hits: Sequence[SearchHit], found: list[list[tuple[int, _Stored]]], budget: int,
-) -> tuple[list[SearchHit], int, int]:
+    named: QueryIdentifiers | None,
+) -> tuple[list[SearchHit], int, int, int]:
     """The one budget and placement rule. Slots go by distance from the hit
     first and the hit's rank second (every hit's nearest neighbour, then
     every hit's second nearest, ...), so a full budget drops the farthest
     neighbours of the lowest-ranked hits first. A chunk that is already a
-    retrieved hit or another hit's neighbour is skipped and takes no slot.
-    The neighbours are then appended after the retrieved hits, by parent
-    rank and, within a parent, in reading order. Returns the list, the
-    number of hits that gained a neighbour and the number cut."""
+    retrieved hit or another hit's neighbour is skipped and takes no slot;
+    so is, with 'named' (an identifier turn), one that carries none of the
+    named identifiers, counted once per hit that reached it. The neighbours
+    are then appended after the retrieved hits, by parent rank and, within
+    a parent, in reading order. Returns the list, the number of hits that
+    gained a neighbour, the number cut and the number the identifier rule
+    left out."""
     held = {hit.chunk_id for hit in hits}
     kept: list[tuple[int, int, _Stored]] = []
-    cut = 0
+    cut = skipped = 0
     for distance in range(max((len(run) for run in found), default=0)):
         for rank, run in enumerate(found):
             if distance >= len(run) or run[distance][1].chunk_id in held:
+                continue
+            if named is not None and not _carries(run[distance][1].payload, named):
+                skipped += 1
                 continue
             if len(kept) >= budget:
                 cut += 1
@@ -345,17 +397,19 @@ def _place(
         )
         for rank, _, chunk in kept
     ]
-    return [*hits, *neighbours], len({rank for rank, _, _ in kept}), cut
+    return [*hits, *neighbours], len({rank for rank, _, _ in kept}), cut, skipped
 
 
 async def expand_hits(
     reader: StoredChunkReader | None, settings: Settings, hits: list[SearchHit], *,
-    product: str | None, version: str | None,
+    product: str | None, version: str | None, query: str, anchor: str | None = None,
 ) -> tuple[list[SearchHit], ExpandOutcome]:
     """The hits with their reading-order neighbours appended. Reads stored
     points of 'settings.qdrant_collection' (the request's bound physical
-    collection) under one deadline, 'evidence_timeout_s'. A timeout or any
-    other failure returns 'hits' itself; cancellation propagates."""
+    collection) under one deadline, 'evidence_timeout_s'. 'query' and
+    'anchor' are the turn's searched texts, read only by the identifier
+    rule. A timeout or any other failure returns 'hits' itself;
+    cancellation propagates."""
     if not hits:
         return hits, ExpandOutcome("skipped", reason="no_hits")
     if settings.answer_expand_budget == 0:
@@ -380,7 +434,8 @@ async def expand_hits(
             backward, backward_stopped = window.run(stored, -1, cap, in_scope)
             found.append(_nearest_first(forward, backward, cap))
             stopped += forward_stopped + backward_stopped
-        packed, expanded, cut = _place(hits, found, settings.answer_expand_budget)
+        named = named_identifiers(query, anchor)
+        packed, expanded, cut, skipped = _place(hits, found, settings.answer_expand_budget, named)
     except TimeoutError:
         log.warning("neighbour expansion timed out; packing the hits unchanged")
         return hits, ExpandOutcome("fallback", reason="timeout")
@@ -389,4 +444,5 @@ async def expand_hits(
         log.warning("neighbour expansion failed (%s); packing the hits unchanged", error_type(cause))
         return hits, ExpandOutcome("fallback", reason="lookup_error")
     return packed, ExpandOutcome(
-        "expanded", added=len(packed) - len(hits), expanded=expanded, stopped=stopped, budget_cut=cut)
+        "expanded", added=len(packed) - len(hits), expanded=expanded, stopped=stopped, budget_cut=cut,
+        identifier_skipped=None if named is None else skipped)

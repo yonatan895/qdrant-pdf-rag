@@ -1706,8 +1706,9 @@ Off, every request is byte-identical: no stored-point read, the same hits,
 timings, prompt and response keys, and no span attribute. On, `/v1/answer`,
 `/v1/chat*` and the console (never `/v1/search`, MCP search or
 `retrieve/query.py` ranking) run it last: retrieve, select (when on), expand.
-It applies to the final list whatever selection did (pinned hits stay first)
-and to identifier turns like any other. No stored field was added: there is
+It applies to the final list whatever selection did (pinned hits stay first).
+On an identifier turn only neighbours carrying a named identifier are packed
+(the identifier rule below). No stored field was added: there is
 no chapter unit, because sections that share a page have no stored order.
 
 | Step | Rule |
@@ -1720,6 +1721,7 @@ no chapter unit, because sections that share a page have no stored order.
 | Fail closed, per direction | A missing ordinal, a page whose sections are not orderable by the rule above (including any section there with a repeated or unmatched ordinal), or a neighbour outside the scope stops the walk in that direction for that hit. A truncated scroll, a stored point without the identity fields, or a hit whose own point is gone expands nothing for that hit |
 | Scope | A neighbour shares its hit's `source_rev` (the scroll filter), carries its hit's `product` and `version`, and meets the request's scope conditions (`build_scope_filter`) |
 | Per hit | Up to `answer_expand_per_hit` neighbours, nearest first, the one after the hit before the one before it |
+| Identifier rule | One function, `answer_expand.named_identifiers` (PR #1324 review decision 8, applied on the coordinator's recommendation; the maintainer may flip it). In force when a searched text (the turn's retrieval query, or an anchored antecedent's) names an identifier, by `names_identifier`, the predicate the selection bypass and the condensation bypass use. A neighbour is then packed only if its stored `message_ids`, `members` or `system_codes` contain at least one identifier those texts name, parsed by retrieval's own `parse_query` (case folding and canonical code forms included) and compared field by field. Any other neighbour is skipped: the walk does not stop, it takes no budget slot, and it still counts toward the per-hit cap. Document numbers are not compared (a neighbour shares its hit's document), so a turn naming only a document number, or a code the parser does not extract, packs no neighbour. Ingest fills these fields from each chunk's own text: a continuation chunk that does not repeat the identifier is skipped. A turn naming no identifier is unchanged |
 | Budget | `answer_expand_budget` chunks per turn. Slots go by distance first and the hit's rank second (every hit's nearest neighbour, then every hit's second nearest), so a full budget drops the farthest neighbours of the lowest-ranked hits first |
 | De-duplication | A chunk is packed once: a neighbour that is already a retrieved hit or another hit's neighbour is skipped and takes no slot (it still counts toward the per-hit cap) |
 | Placement | Appended after the retrieved hits, by parent rank and then reading order. Retrieved hits keep their prompt labels; packing cuts the list tail first, so a window trim removes neighbours before any retrieved hit |
@@ -1737,8 +1739,10 @@ sized from the hits offered to packing when they exceed `answer_hit_limit`
 `no_budget` | `no_reader` | `timeout` | `lookup_error`; absent when
 expanded), `rag.expand_added` (neighbours appended), `rag.expand_hits` (hits
 that gained one), `rag.expand_stopped` (directions ended by a fail-closed
-rule) and `rag.expand_budget_cut` (neighbours found and left out by the
-budget); the reads are an `answer.expand` child span carrying
+rule), `rag.expand_budget_cut` (neighbours found and left out by the
+budget) and, only when the identifier rule was in force on an expanded turn,
+`rag.expand_identifier_skipped` (neighbours found and left out by that rule,
+counted once per hit that reached them); the reads are an `answer.expand` child span carrying
 `rag.expand_parents`. `rag.hits`, the `hits` log field and the
 `rag.retrieval.hits` histogram keep their meaning, the hits offered to
 packing, and so include the neighbours (up to 64, past the histogram's last

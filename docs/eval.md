@@ -1181,7 +1181,9 @@ this arm cannot run at a site.
 - Before reading results, confirm from the stand-in's traces that rows carry
   `rag.expand_mode=expanded` with `rag.expand_added` near `B`; a row with
   fewer added packed fewer chunks than its control row. `rag.expand_stopped`
-  counts the directions the order rules refused.
+  counts the directions the order rules refused, and on identifier rows
+  `rag.expand_identifier_skipped` the neighbours the
+  [identifier rule](agent.md#neighbour-expansion) left out.
 - A 32,768-token window may cut the tail of 32 chunks (neighbours first in
   `expand-on`, the lowest-ranked hits in the control): check
   `evidence_omitted` in both arms before comparing.

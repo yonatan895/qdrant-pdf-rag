@@ -120,7 +120,7 @@ def _expand_attributes(root) -> dict:
     return {k: v for k, v in dict(root.attributes).items() if k.startswith("rag.expand")}
 
 
-async def _expand(corpus: Corpus, labels: list[str], reader=None, *, query=PLAIN_Q,
+async def _expand(corpus: Corpus, labels: list[str], reader=None, *, query=PLAIN_Q, anchor=None,
                   product=None, version=None, **overrides):
     """Run the answer path's retrieval stages over hits 'labels' (scores
     descend with rank); returns (retrieved, result hits, root attributes, reader)."""
@@ -129,9 +129,9 @@ async def _expand(corpus: Corpus, labels: list[str], reader=None, *, query=PLAIN
     deps = AnswerCoreDeps(settings=_settings(**overrides), llm=ModelAdapter(_AnswerLLM()),
                           retrieve=_Search(retrieved), neighbours=reader)
     root = _root()
+    plan = SearchPlan("literal", query) if anchor is None else SearchPlan("anchored", query, anchor)
     found = await retrieve_for_answer(
-        SearchPlan("literal", query),
-        AnswerCoreInput(query=query, product=product, version=version), deps, root)
+        plan, AnswerCoreInput(query=query, product=product, version=version), deps, root)
     return retrieved, found, _expand_attributes(root), reader
 
 
@@ -284,6 +284,123 @@ async def test_a_chunk_is_packed_once(hits, neighbours):
 
 
 @pytest.mark.anyio
+async def test_a_chunk_already_packed_still_counts_toward_the_per_hit_cap():
+    """At a per-hit cap of 1, A#1's one neighbour is the chunk after it, A#2,
+    which is already a retrieved hit: A#1 gains nothing, and the chunk before
+    it (A#0) is not taken in its place."""
+    corpus = Corpus().add([("A", [(3, 3)] * 4)])
+    retrieved, found, attributes, _ = await _expand(
+        corpus, ["A#1", "A#2"], answer_expand_per_hit=1)
+    assert found.hits[:2] == retrieved
+    assert [(hit.text, hit.neighbour_of) for hit in found.hits[2:]] == [("A#3", corpus.ids["A#2"])]
+    assert attributes["rag.expand_added"] == 1
+    assert attributes["rag.expand_hits"] == 1
+    assert attributes["rag.expand_budget_cut"] == 0
+
+
+def _carrying(**ids_by_label) -> dict:
+    return {label: {"message_ids": ids} for label, ids in ids_by_label.items()}
+
+
+# One message section on one page: the entry before, the hit's entry in two
+# chunks (M#1 and its continuation M#2), the entry after, and a later chunk
+# that names the hit's id again.
+_ENTRIES = _carrying(**{"M#0": ["IEA499I"], "M#1": ["IEA500I"], "M#2": ["IEA500I"],
+                        "M#3": ["IEA501I"], "M#4": ["IEA501I", "IEA500I"]})
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("query,anchor,per_hit,neighbours,skipped", [
+    pytest.param(IDENTIFIER_Q, None, 2, ["M#2"], 1,
+                 id="the-continuation-is-packed-and-the-adjacent-entry-is-not"),
+    pytest.param(IDENTIFIER_Q, None, 4, ["M#2", "M#4"], 2,
+                 id="another-entry-is-skipped-not-a-stop"),
+    pytest.param("iea500i rejected", None, 2, ["M#2"], 1, id="lower-case-as-retrieval-folds-it"),
+    pytest.param("What should I do next?", IDENTIFIER_Q, 2, ["M#2"], 1,
+                 id="an-anchored-follow-up-whose-antecedent-names-it"),
+    pytest.param("IEA501I rejected", None, 4, ["M#3", "M#4"], 2,
+                 id="the-rule-follows-the-named-identifier-not-the-hit"),
+    pytest.param("IEA500I or IEA499I?", None, 4, ["M#0", "M#2", "M#4"], 1,
+                 id="any-one-named-identifier-is-enough"),
+    pytest.param(PLAIN_Q, None, 4, ["M#0", "M#2", "M#3", "M#4"], None,
+                 id="a-turn-naming-no-identifier-is-unchanged"),
+    pytest.param("What should I do next?", PLAIN_Q, 4, ["M#0", "M#2", "M#3", "M#4"], None,
+                 id="an-anchored-follow-up-naming-no-identifier-is-unchanged"),
+])
+async def test_an_identifier_turn_packs_only_neighbours_carrying_a_named_identifier(
+    query, anchor, per_hit, neighbours, skipped
+):
+    """Review decision 8 (#1324): a hit for one message id must not pack the
+    adjacent entries for other ids, and must pack a chunk carrying the same
+    id. A skipped neighbour does not stop the walk, takes no budget slot and
+    is counted, text-free, only when the rule was in force."""
+    corpus = Corpus().add([("M", [(3, 3)] * 5)], scope=_ENTRIES)
+    retrieved, found, attributes, _ = await _expand(
+        corpus, ["M#1"], query=query, anchor=anchor, answer_expand_per_hit=per_hit)
+    assert found.hits[:1] == retrieved
+    assert _texts(found.hits[1:]) == neighbours
+    assert attributes.get("rag.expand_identifier_skipped") == skipped
+    assert attributes["rag.expand_added"] == len(neighbours)
+    assert attributes["rag.expand_stopped"] == 0
+    assert attributes["rag.expand_budget_cut"] == 0
+
+
+@pytest.mark.anyio
+async def test_a_skipped_neighbour_takes_no_budget_slot_but_counts_toward_the_per_hit_cap():
+    """Budget 1: the chunk after the hit (M#3, another entry) is skipped and
+    its slot goes to the chunk before it (M#1); M#4 is then cut by the
+    budget and M#0 skipped. Per-hit cap 1: the one neighbour is M#3, and
+    nothing farther is taken in its place (as for a de-duplicated chunk)."""
+    corpus = Corpus().add([("M", [(3, 3)] * 5)], scope=_ENTRIES)
+    _, found, attributes, _ = await _expand(
+        corpus, ["M#2"], query=IDENTIFIER_Q, answer_expand_budget=1)
+    assert _texts(found.hits[1:]) == ["M#1"]
+    assert (attributes["rag.expand_identifier_skipped"], attributes["rag.expand_budget_cut"]) == (2, 1)
+    _, found, attributes, _ = await _expand(
+        corpus, ["M#2"], query=IDENTIFIER_Q, answer_expand_per_hit=1)
+    assert found.hits[1:] == []
+    assert (attributes["rag.expand_identifier_skipped"], attributes["rag.expand_added"]) == (1, 0)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("query,stored,neighbours,skipped", [
+    pytest.param("ieasysxx syntax", {"A#0": {"members": ["IEASYSxx"]}}, ["A#0"], 1,
+                 id="a-member-in-retrievals-folded-case"),
+    pytest.param("abend S0C4 in the step", {"A#2": {"system_codes": ["0C4"]}}, ["A#2"], 1,
+                 id="a-system-code-in-retrievals-canonical-form"),
+    pytest.param("IEA500I rejected", {"A#0": {"members": ["IEA500I"]}}, [], 2,
+                 id="an-identifier-is-matched-in-its-own-field"),
+    pytest.param("IEA500I rejected", {"A#0": {"message_ids": None}, "A#2": {"message_ids": "IEA500I"}},
+                 [], 2, id="a-malformed-stored-field-carries-nothing"),
+    pytest.param("SA23-1380", {"A#0": {"message_ids": ["IEA500I"]}}, [], 2,
+                 id="a-document-number-alone-names-nothing-a-chunk-can-carry"),
+])
+async def test_the_identifier_rule_reads_the_three_stored_fields_with_retrievals_parsing(
+    query, stored, neighbours, skipped
+):
+    """The named identifiers are retrieval's own parse of the searched text
+    (parse_query), compared field by field with a neighbour's stored
+    message_ids, members and system_codes. A turn that names only a document
+    number is an identifier turn that names nothing in those fields: no
+    neighbour is packed."""
+    corpus = Corpus().add([("A", [(3, 3)] * 3)], scope=stored)
+    _, found, attributes, _ = await _expand(corpus, ["A#1"], query=query)
+    assert _texts(found.hits[1:]) == neighbours
+    assert attributes["rag.expand_identifier_skipped"] == skipped
+
+
+def test_the_identifier_rule_is_one_function_over_the_searched_texts():
+    from mainframe_rag.agent.answer_expand import named_identifiers
+
+    assert named_identifiers(PLAIN_Q, None) is None
+    assert named_identifiers(PLAIN_Q, PLAIN_Q) is None
+    named = named_identifiers("What next?", "IEA500I with abend S0C4 in ieasysxx, see SA23-1380-09")
+    assert named is not None
+    assert (named.message_ids, named.members, named.system_codes, named.doc_ids) == (
+        ["IEA500I"], ["IEASYSxx"], ["0C4"], [])
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("product,version,scope,neighbours,stopped", [
     pytest.param("z/OS", "9.9", {}, ["A#0", "A#2"], 0, id="same-scope"),
     pytest.param(None, None, {"A#2": {"product": "other"}}, ["A#0"], 1,
@@ -431,7 +548,10 @@ async def test_expansion_runs_after_selection_on_the_final_list(query, select_ca
     turn (selection bypassed) is expanded like any other."""
     corpus = Corpus()
     for name, rev in (("A", "rev-a"), ("B", "rev-b"), ("C", "rev-c")):
-        corpus.add([(name, [(3, 3)] * 2)], rev=rev)
+        # Every chunk carries the identifier the identifier turn names, so
+        # the identifier rule (below) leaves the stage order visible.
+        corpus.add([(name, [(3, 3)] * 2)], rev=rev,
+                   scope={f"{name}#{n}": {"message_ids": ["IEA500I"]} for n in range(2)})
     llm = _SelectingLLM("[3, 1]")
     deps = AnswerCoreDeps(
         settings=_settings(answer_select_enabled=True, answer_hit_limit=2,
@@ -656,3 +776,48 @@ async def test_recovered_order_never_disagrees_with_the_chunkers_own_order(store
             wrong.append(position)
     assert wrong == []
     assert found == _MANUAL_NEIGHBOURS_FOUND
+
+
+@pytest.mark.anyio
+async def test_on_the_real_chunker_only_chunks_whose_own_text_names_the_id_are_packed():
+    """Ingest fills message_ids from each chunk's own text. A long message
+    entry is cut into three chunks; only the first and the last name the id.
+    On an identifier turn the hit (the entry's first chunk) packs the last
+    one and neither the continuation that does not name it nor the next
+    entry; on a plain turn all three neighbours are packed."""
+    from pathlib import Path
+
+    from mainframe_rag.ingest.chunk import make_chunks
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+    from mainframe_rag.ingest.payload import point_payload
+
+    toc = [[1, "Messages", 1], [2, "WID200E", 1], [2, "WID201E", 3]]
+    pages = ["Messages\nWID200E\nWIDGET VALVE STUCK\nExplanation: The valve is stuck.\n\n"
+             + _procedure_page(1),
+             _procedure_page(7) + "\n\nSee also WID200E in the log.",
+             "WID201E\nWIDGET OFFLINE\nExplanation: The widget is offline.\n"]
+    parsed = ParsedDoc(path=Path("widget-messages.pdf"), sha256="8" * 64, doc_id="widget-messages",
+                       title="Widget Messages", product="Widget", version="1.0", vendor="Example",
+                       toc=toc, page_count=len(pages))
+    chunks = make_chunks(parsed, pages, ["1", "2", "3"])
+    assert [(c.heading_path.rsplit(" > ", 1)[-1], c.ordinal, c.message_ids) for c in chunks] == [
+        ("WID200E", 0, ["WID200E"]), ("WID200E", 1, []), ("WID200E", 2, ["WID200E"]),
+        ("WID201E", 0, ["WID201E"])]
+    payloads = {c.chunk_id: point_payload(parsed, c, "test-rules") for c in chunks}
+    order = [c.chunk_id for c in chunks]
+
+    async def neighbours_of_the_first_chunk(query: str) -> tuple[list[int], dict]:
+        hit = hit_from_payload(order[0], payloads[order[0]], 0.5)
+        deps = AnswerCoreDeps(settings=_settings(), llm=ModelAdapter(_AnswerLLM()),
+                              retrieve=_Search([hit]), neighbours=StoredChunksFake(payloads))
+        root = _root()
+        found = await retrieve_for_answer(
+            SearchPlan("literal", query), AnswerCoreInput(query=query), deps, root)
+        return [order.index(h.chunk_id) for h in found.hits[1:]], _expand_attributes(root)
+
+    packed, attributes = await neighbours_of_the_first_chunk("What does WID200E mean?")
+    assert packed == [2]
+    assert attributes["rag.expand_identifier_skipped"] == 2
+    packed, attributes = await neighbours_of_the_first_chunk(PLAIN_Q)
+    assert packed == [1, 2, 3]
+    assert "rag.expand_identifier_skipped" not in attributes
