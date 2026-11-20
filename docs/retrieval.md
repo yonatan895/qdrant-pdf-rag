@@ -508,7 +508,10 @@ caller-opted-in global flag; it is not a retry path. Combined with the
 §4 margin result, corrective retry has no measured trigger and no
 measured variant: PR-12 stays will-not-pursue. Reopen gate: a variant
 with measured positive headroom plus a trigger with measured separation,
-with per-query attribution on post-freeze pools.
+with per-query attribution on post-freeze pools. These numbers are from the
+September 2026 `real_manuals` collection; a pre-registered re-measurement at
+the production profile may be proposed (ROADMAP PR-12 note, #1191,
+2026-11-19).
 
 <a id="diversification"></a>
 ## 8. Diversification

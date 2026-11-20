@@ -289,6 +289,127 @@ def test_candidate_selection_records_only_labels_and_counts(
         assert canary not in logs_blob, f"{canary} leaked into stdout JSON"
 
 
+class _RecordingLLM(FakeLLM):
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def chat(self, messages, reasoning_effort=None, temperature=None):
+        self.prompts.append(messages[-1].content)
+        return super().chat(messages, reasoning_effort, temperature)
+
+
+_OFF_FOLLOW_UP = [{"role": "user", "content": "What does IEA500I mean?"},
+                  {"role": "assistant", "content": "Earlier."},
+                  {"role": "user", "content": "What should the operator do next?"}]
+_ANSWER_ROOT = ["http.request_id", "rag.citations", "rag.evidence", "rag.has_script", "rag.hits",
+                "rag.query_kind", "rag.stream"]
+
+
+@pytest.mark.parametrize("path,payload,root_name,root_keys,timing", [
+    ("/v1/answer", {"query": "plain question"}, "v1.answer", _ANSWER_ROOT, True),
+    ("/v1/answer", {"query": "plain question", "stream": True}, "v1.answer", _ANSWER_ROOT, True),
+    ("/v1/chat", {"messages": [{"role": "user", "content": "plain question"}]}, "v1.chat",
+     ["http.request_id", "rag.stream"], False),
+    ("/v1/chat", {"messages": _OFF_FOLLOW_UP}, "v1.chat",
+     ["http.request_id", "rag.followup_mode", "rag.stream"], False),
+])
+@pytest.mark.parametrize("select", [False, True])
+def test_neighbour_expansion_off_leaves_the_request_as_it_was(
+    client, monkeypatch, path, payload, root_name, root_keys, timing, select
+):
+    """Issue #1314: with ANSWER_EXPAND_ENABLED off (the default) the stage's
+    code is never entered and no stored point is read, on /v1/answer and
+    /v1/chat, first turn and anchored follow-up, with candidate selection on
+    or off: one excerpt in the prompt, the root span's attribute names as
+    they were (selection adds only its own), no `answer.expand` span and the
+    Server-Timing parts of the one retrieval."""
+    from mainframe_rag.agent import answer_expand
+
+    async def never(*args, **kwargs):
+        raise AssertionError("neighbour expansion entered with the stage off")
+
+    c, exporter = client
+    llm = _RecordingLLM()
+    monkeypatch.setattr(answer_expand, "expand_hits", never)
+    monkeypatch.setattr(app_mod, "qdrant", _FailingStore())
+    monkeypatch.setattr(app_mod, "llm", llm)
+    monkeypatch.setattr(app_mod.settings, "answer_select_enabled", select)
+    resp = c.post(path, json=payload)
+    assert resp.status_code == 200
+    assert len(llm.prompts) == 1 and llm.prompts[0].count("IEA500I synthetic text") == 1
+    assert "[1]" in llm.prompts[0] and "[2]" not in llm.prompts[0]
+    spans = exporter.get_finished_spans()
+    root = next(s for s in spans if s.name == root_name)
+    assert sorted(k for k in root.attributes if not k.startswith("rag.select")) == root_keys
+    assert "answer.expand" not in {s.name for s in spans}
+    assert resp.headers.get("server-timing", "").split(", ")[:2] == (
+        ["embed;dur=1", "qdrant;dur=2"] if timing else [""])
+
+
+class _FailingStore:
+    async def retrieve(self, *args, **kwargs):
+        raise RuntimeError(" / ".join(CANARIES))
+
+    scroll = retrieve
+
+
+@pytest.mark.parametrize("path,stream,root_name", [
+    ("/v1/answer", False, "v1.answer"),
+    ("/v1/answer", True, "v1.answer"),
+    ("/v1/chat", False, "v1.chat"),
+    ("/v1/chat", True, "v1.chat"),
+    ("/ui/chat", False, "ui.chat"),
+])
+@pytest.mark.parametrize("fails,attributes,hit_count", [
+    (False, {"rag.expand_mode": "expanded", "rag.expand_added": 2, "rag.expand_hits": 1,
+             "rag.expand_stopped": 0, "rag.expand_budget_cut": 0}, 3),
+    (True, {"rag.expand_mode": "fallback", "rag.expand_reason": "lookup_error",
+            "rag.expand_added": 0, "rag.expand_hits": 0, "rag.expand_stopped": 0,
+            "rag.expand_budget_cut": 0}, 1),
+])
+def test_neighbour_expansion_records_only_labels_and_counts(
+    client, caplog, monkeypatch, path, stream, root_name, fails, attributes, hit_count
+):
+    """Issue #1314: on every answer route the stage's outcome is a fixed
+    label and counts on the root span, with one `answer.expand` child for
+    the stored-point reads; `rag.hits` stays the number of hits offered to
+    packing (neighbours included) and `rag.expand_added` says how many of
+    them are neighbours. No span or log carries the question, a stored
+    field, or the store's error text."""
+    from tests.fakes import StoredChunksFake
+    from tests.test_answer_expand import Corpus
+
+    c, exporter = client
+    labels = ("A#0", "A#1", "A#2")
+    corpus = Corpus().add([("A", [(3, 3)] * 3)],
+                          scope={label: {"doc_id": CANARY_DOC, "title": CANARY_HEADER} for label in labels})
+    monkeypatch.setattr(app_mod, "retrieve_search", MagicSearch(hits=[corpus.hit("A#1")]))
+    monkeypatch.setattr(app_mod, "qdrant", _FailingStore() if fails else StoredChunksFake(corpus.payloads))
+    monkeypatch.setattr(app_mod.settings, "answer_expand_enabled", True)
+    monkeypatch.setattr(app_mod.settings, "ui_enabled", True)
+    with caplog.at_level(logging.INFO):
+        if path == "/ui/chat":
+            resp = c.post(path, data={"message": CANARY_QUERY, "messages": ""})
+        elif path == "/v1/answer":
+            resp = c.post(path, json={"query": CANARY_QUERY, "stream": stream})
+        else:
+            resp = c.post(path, json={"messages": [{"role": "user", "content": CANARY_QUERY}],
+                                      "stream": stream})
+    assert resp.status_code == 200
+    spans = exporter.get_finished_spans()
+    root = next(s for s in spans if s.name == root_name)
+    assert {k: v for k, v in root.attributes.items() if k.startswith("rag.expand")} == attributes
+    # Only /v1/answer puts rag.hits on its root span.
+    assert root.attributes.get("rag.hits") == (hit_count if path == "/v1/answer" else None)
+    children = [s for s in spans if s.name == "answer.expand"]
+    assert len(children) == 1 and children[0].parent.span_id == root.context.span_id
+    assert dict(children[0].attributes) == {"rag.expand_parents": 1}
+    spans_blob, logs_blob = _span_text(spans), "\n".join(_formatted_logs(caplog))
+    for canary in CANARIES:
+        assert canary not in spans_blob, f"{canary} leaked into spans"
+        assert canary not in logs_blob, f"{canary} leaked into stdout JSON"
+
+
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("depth,effort", [("quick", "low"), ("thorough", "high"), ("standard", "medium")])
 def test_answer_depth_records_only_the_resolved_effort(client, caplog, monkeypatch, stream, depth, effort):

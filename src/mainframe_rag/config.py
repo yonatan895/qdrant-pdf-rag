@@ -355,6 +355,14 @@ class Settings(BaseSettings):
     # /v1/search's 40); at or under answer_hit_limit there is nothing to pick.
     answer_select_enabled: bool = False
     answer_select_candidates: int = Field(default=40, ge=2, le=40)
+    # Neighbour expansion (issue #1314; off, no operator key, maintainer
+    # decision 2026-11-20): after retrieval and selection, a hit's
+    # reading-order neighbours within two pages are appended as separate
+    # hits. Off: every request is byte-identical. The budget is the most
+    # chunks one turn adds (0 adds none); the cap is the most one hit adds.
+    answer_expand_enabled: bool = False
+    answer_expand_budget: int = Field(default=16, ge=0, le=32)
+    answer_expand_per_hit: int = Field(default=4, ge=1, le=8)
 
     # Reasoning effort control: directs the reasoning model to think more thoroughly
     # on complex operational, diagnostic, and comparative inquiries while conserving

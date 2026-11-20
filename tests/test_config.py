@@ -194,10 +194,13 @@ def test_chat_bounds_are_enforced():
 
 @pytest.mark.parametrize("field,low,high", [
     ("answer_hit_limit", 1, 32), ("retrieve_max_chunks_per_doc", 1, 10),
+    ("answer_expand_budget", 0, 32), ("answer_expand_per_hit", 1, 8),
 ])
 def test_answer_depth_bounds_are_enforced(field, low, high):
     """Issue #1191: the retrieval depth operator inputs accept exactly their
-    documented range (the air-gap mapper and chart schema mirror it)."""
+    documented range (the air-gap mapper and chart schema mirror it). The
+    neighbour-expansion bounds (#1314) are Settings-only: no mapper or chart
+    value exists for them."""
     for value in (low, high):
         assert getattr(Settings(_env_file=None, **{field: value}), field) == value
     for value in (low - 1, high + 1):
@@ -325,6 +328,9 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "llm_reasoning_effort_complex": "medium",
     "answer_select_enabled": False,  # #1309: off until a measured A/B
     "answer_select_candidates": 40,
+    "answer_expand_enabled": False,  # #1314: off, no operator key
+    "answer_expand_budget": 16,
+    "answer_expand_per_hit": 4,
     "llm_reasoning_efforts": "low,medium,xhigh",
     "llm_temperature": 0.2,
     "llm_extra_body": "",

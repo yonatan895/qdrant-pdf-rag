@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import json
 import sys
+import uuid
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -738,6 +739,64 @@ class AliasQdrant:
 
     def close(self):
         pass
+
+
+class StoredChunksFake:
+    """Async read-only double of a data collection's stored points (issue
+    #1314): `retrieve` by id with a payload projection, and `scroll` with
+    the pinned server's semantics the neighbour lookup relies on (`must`
+    conditions by exact match or inclusive integer range, integer-UUID order,
+    `limit`, and a `next_page_offset` when more points match). No write
+    method exists. Every call is recorded; `before` is an async hook run
+    with the operation name before each call answers (raise or wait there)."""
+
+    def __init__(self, payloads: dict[str, dict], before=None):
+        self.payloads = dict(payloads)
+        self.before = before
+        self.calls: list[dict] = []
+
+    @staticmethod
+    def _project(payload: dict, with_payload) -> dict | None:
+        if with_payload is True:
+            return dict(payload)
+        if not with_payload:
+            return None
+        return {key: payload[key] for key in with_payload if key in payload}
+
+    @staticmethod
+    def _matches(payload: dict, flt) -> bool:
+        for cond in (flt.must if flt is not None else None) or []:
+            value = payload.get(cond.key)
+            if cond.match is not None and value != cond.match.value:
+                return False
+            if cond.range is not None and not (
+                isinstance(value, int) and cond.range.gte <= value <= cond.range.lte
+            ):
+                return False
+        return True
+
+    async def retrieve(self, name, ids, *, with_payload=True, with_vectors=False):
+        self.calls.append({"op": "retrieve", "collection": name, "ids": list(ids),
+                           "with_payload": with_payload})
+        assert with_vectors is False
+        if self.before is not None:
+            await self.before("retrieve")
+        return [SimpleNamespace(id=i, payload=self._project(self.payloads[i], with_payload),
+                                vector=None)
+                for i in ids if i in self.payloads]
+
+    async def scroll(self, name, *, scroll_filter=None, limit=10, with_payload=True, offset=None):
+        self.calls.append({"op": "scroll", "collection": name, "filter": scroll_filter,
+                           "limit": limit, "with_payload": with_payload})
+        assert offset is None
+        if self.before is not None:
+            await self.before("scroll")
+        matching = [i for i in sorted(self.payloads, key=lambda i: uuid.UUID(i).int)
+                    if self._matches(self.payloads[i], scroll_filter)]
+        page = [SimpleNamespace(id=i, payload=self._project(self.payloads[i], with_payload))
+                for i in matching[:limit]]
+        return page, (matching[limit] if len(matching) > limit else None)
+
 
 
 # ---------------------------------------------------------------------------
