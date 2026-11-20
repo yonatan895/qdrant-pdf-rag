@@ -921,6 +921,16 @@ def supplied_evidence_max_chars(hit_limit: int) -> int:
     return max(SUPPLIED_EVIDENCE_MAX_CHARS, SUPPLIED_EVIDENCE_CHARS_PER_HIT * hit_limit)
 
 
+def _projection_hit_count(settings: Settings, offered: int) -> int:
+    """The hit count the supplied-evidence total is sized from:
+    `answer_hit_limit`, and with neighbour expansion on (issue #1314) the
+    number of hits offered to packing when that is larger, so a neighbour the
+    prompt carried is not clipped from the response for being past the limit."""
+    if settings.answer_expand_enabled:
+        return max(settings.answer_hit_limit, offered)
+    return settings.answer_hit_limit
+
+
 class SuppliedExcerpt(BaseModel):
     """One excerpt exactly as supplied to the model in the final prompt
     (issue #635): the request-local, additive response projection reused by
@@ -1974,7 +1984,7 @@ def _build_prompt(
             packed,
             SUPPLIED_EVIDENCE_MAX_CHARS
             if settings is None
-            else supplied_evidence_max_chars(settings.answer_hit_limit),
+            else supplied_evidence_max_chars(_projection_hit_count(settings, len(hits))),
         ),
         prompt_tokens=prompt_tokens,
         message_omitted_chars=message_omitted,

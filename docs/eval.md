@@ -1156,6 +1156,39 @@ stand-in lane, and its result is relative to that lane's model.
 - Read `rag.select_pinned` and the selected share from traces before
   interpreting follow-up rows.
 
+<a id="expand-arm"></a>
+**Neighbour-expansion arm (`expand-on`, issue #1314; stand-in lane only).**
+[Neighbour expansion](agent.md#neighbour-expansion) has no operator key, so
+this arm cannot run at a site.
+
+| Arm | Agent environment | Compare with |
+|---|---|---|
+| `expand-on` | `ANSWER_EXPAND_ENABLED=true`, `ANSWER_HIT_LIMIT=N`, `ANSWER_EXPAND_BUDGET=B` (`ANSWER_EXPAND_PER_HIT` at its default 4) | `expand-control` |
+| `expand-control` | `ANSWER_HIT_LIMIT=N+B` only (at most 32) | n/a |
+
+- The control packs the same number of chunks by plain retrieval depth, so
+  the difference is which chunks fill the extra slots, not how many. With
+  the defaults that is `N=16`, `B=16` against `ANSWER_HIT_LIMIT=32`.
+- The eval does not see neighbours yet. Its retrieval fields
+  (`gold_retrieved`, `hit_doc_ids`, the judge's evidence for a citation) come
+  from the sibling `/v1/search` pool and join by cite string, which same-page
+  neighbours repeat: on `expand-on` rows a cited neighbour is unmapped and
+  positions past `N` do not line up. Until the eval joins on the final's
+  hits (the second #1314 change), read only `final_hits` and
+  `supplied_evidence_meta` from this arm, with `--stream`, and do not compare
+  pass rate or citation precision/recall across the two arms.
+- Run `expand-on` with `--hit-limit N` and the control with `--hit-limit N+B`.
+- Before reading results, confirm from the stand-in's traces that rows carry
+  `rag.expand_mode=expanded` with `rag.expand_added` near `B`; a row with
+  fewer added packed fewer chunks than its control row. `rag.expand_stopped`
+  counts the directions the order rules refused, and on identifier rows
+  `rag.expand_identifier_skipped` the neighbours the
+  [identifier rule](agent.md#neighbour-expansion) left out.
+- A 32,768-token window may cut the tail of 32 chunks (neighbours first in
+  `expand-on`, the lowest-ranked hits in the control): check
+  `evidence_omitted` in both arms before comparing.
+- Cost: one identity read and up to `N` scrolls per row, no model call.
+
 <a id="site-depth-arm"></a>
 **Retrieval depth arm (issue #1191, `depth-8-3`).** Not the Pipe's answer
 depths (#1255, reasoning effort). Since #1274 the release retrieves 16 hits
