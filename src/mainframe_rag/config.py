@@ -348,6 +348,13 @@ class Settings(BaseSettings):
     # excerpt cap; the retrieval pool (40 per leg, or `rerank_candidates`) and
     # the per-page/per-doc caps may return fewer. 16 since #1274 (was 8).
     answer_hit_limit: int = Field(default=16, ge=1, le=32)
+    # Candidate selection (issue #1309; off until a measured A/B, maintainer
+    # decision): one lowest-effort reasoning call picks which of one wider
+    # retrieval's candidates are the answer's hits. Off: every request is
+    # byte-identical. The candidate count is that retrieval's limit (at most
+    # /v1/search's 40); at or under answer_hit_limit there is nothing to pick.
+    answer_select_enabled: bool = False
+    answer_select_candidates: int = Field(default=40, ge=2, le=40)
 
     # Reasoning effort control: directs the reasoning model to think more thoroughly
     # on complex operational, diagnostic, and comparative inquiries while conserving

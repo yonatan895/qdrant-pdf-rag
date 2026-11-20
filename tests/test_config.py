@@ -323,6 +323,8 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "answer_hit_limit": 16,  # #1274, was 8 (#1191: the former RETRIEVAL_HIT_LIMIT constant)
     "llm_reasoning_effort_simple": "medium",  # #917, was xhigh (#777)
     "llm_reasoning_effort_complex": "medium",
+    "answer_select_enabled": False,  # #1309: off until a measured A/B
+    "answer_select_candidates": 40,
     "llm_reasoning_efforts": "low,medium,xhigh",
     "llm_temperature": 0.2,
     "llm_extra_body": "",
