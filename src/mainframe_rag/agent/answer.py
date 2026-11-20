@@ -2769,9 +2769,15 @@ _ABEND_RE = re.compile(
     r"\b(?:abend\s*=?\s*(?=[0-9a-f]*\d)[su]?[0-9a-f]{3,4}|[su](?=[0-9a-f]{0,3}\d)[0-9a-f]{3,4})\b",
     re.IGNORECASE,
 )
-# Without Settings (direct callers) the prior-turn cut is the Settings
-# default, one owner (#1274: 4000, was 1000).
-_MAX_PRIOR_TURN_CHARS: int = Settings.model_fields["chat_max_prior_turn_chars"].default
+def _max_prior_turn_chars(settings: Settings | None) -> int:
+    """The prior-turn cut. Without Settings (direct callers) it is the
+    Settings default, one owner (#1274: 4000, was 1000). Read per call, not
+    at import: the reference build imports this module with pydantic mocked,
+    where Settings has no model_fields (#1320)."""
+    if settings is not None:
+        return settings.chat_max_prior_turn_chars
+    default: int = Settings.model_fields["chat_max_prior_turn_chars"].default
+    return default
 
 
 def names_identifier(text: str) -> bool:
@@ -2804,7 +2810,7 @@ async def condense_query(
         return latest_text
 
     # Each prior turn is cut at the answer prompt's per-turn cap (issue #1268).
-    cut = settings.chat_max_prior_turn_chars if settings is not None else _MAX_PRIOR_TURN_CHARS
+    cut = _max_prior_turn_chars(settings)
     history_turns = []
     for m in turn.history[-4:]:
         history_turns.append(f"{m.role.capitalize()}: {m.content[:cut]}")
@@ -2892,9 +2898,7 @@ def build_chat_messages(
     active_query = turn.query
 
     max_turns = settings.chat_max_turns if settings is not None else 10
-    max_prior_chars = (
-        settings.chat_max_prior_turn_chars if settings is not None else _MAX_PRIOR_TURN_CHARS
-    )
+    max_prior_chars = _max_prior_turn_chars(settings)
 
     prior_messages: list[ChatMessage] = []
     raw_history = turn.history[-max_turns:]
