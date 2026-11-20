@@ -67,4 +67,5 @@ class AgentResources:
             llm=ModelAdapter(self.llm),
             retrieve=self.retrieve,
             tokenizer=self.tokenizer,
+            neighbours=self.qdrant,
         )

@@ -289,6 +289,70 @@ def test_candidate_selection_records_only_labels_and_counts(
         assert canary not in logs_blob, f"{canary} leaked into stdout JSON"
 
 
+class _FailingStore:
+    async def retrieve(self, *args, **kwargs):
+        raise RuntimeError(" / ".join(CANARIES))
+
+    scroll = retrieve
+
+
+@pytest.mark.parametrize("path,stream,root_name", [
+    ("/v1/answer", False, "v1.answer"),
+    ("/v1/answer", True, "v1.answer"),
+    ("/v1/chat", False, "v1.chat"),
+    ("/v1/chat", True, "v1.chat"),
+    ("/ui/chat", False, "ui.chat"),
+])
+@pytest.mark.parametrize("fails,attributes,hit_count", [
+    (False, {"rag.expand_mode": "expanded", "rag.expand_added": 2, "rag.expand_hits": 1,
+             "rag.expand_stopped": 0, "rag.expand_budget_cut": 0}, 3),
+    (True, {"rag.expand_mode": "fallback", "rag.expand_reason": "lookup_error",
+            "rag.expand_added": 0, "rag.expand_hits": 0, "rag.expand_stopped": 0,
+            "rag.expand_budget_cut": 0}, 1),
+])
+def test_neighbour_expansion_records_only_labels_and_counts(
+    client, caplog, monkeypatch, path, stream, root_name, fails, attributes, hit_count
+):
+    """Issue #1314: on every answer route the stage's outcome is a fixed
+    label and counts on the root span, with one `answer.expand` child for
+    the stored-point reads; `rag.hits` stays the number of hits offered to
+    packing (neighbours included) and `rag.expand_added` says how many of
+    them are neighbours. No span or log carries the question, a stored
+    field, or the store's error text."""
+    from tests.fakes import StoredChunksFake
+    from tests.test_answer_expand import Corpus
+
+    c, exporter = client
+    labels = ("A#0", "A#1", "A#2")
+    corpus = Corpus().add([("A", [(3, 3)] * 3)],
+                          scope={label: {"doc_id": CANARY_DOC, "title": CANARY_HEADER} for label in labels})
+    monkeypatch.setattr(app_mod, "retrieve_search", MagicSearch(hits=[corpus.hit("A#1")]))
+    monkeypatch.setattr(app_mod, "qdrant", _FailingStore() if fails else StoredChunksFake(corpus.payloads))
+    monkeypatch.setattr(app_mod.settings, "answer_expand_enabled", True)
+    monkeypatch.setattr(app_mod.settings, "ui_enabled", True)
+    with caplog.at_level(logging.INFO):
+        if path == "/ui/chat":
+            resp = c.post(path, data={"message": CANARY_QUERY, "messages": ""})
+        elif path == "/v1/answer":
+            resp = c.post(path, json={"query": CANARY_QUERY, "stream": stream})
+        else:
+            resp = c.post(path, json={"messages": [{"role": "user", "content": CANARY_QUERY}],
+                                      "stream": stream})
+    assert resp.status_code == 200
+    spans = exporter.get_finished_spans()
+    root = next(s for s in spans if s.name == root_name)
+    assert {k: v for k, v in root.attributes.items() if k.startswith("rag.expand")} == attributes
+    # Only /v1/answer puts rag.hits on its root span.
+    assert root.attributes.get("rag.hits") == (hit_count if path == "/v1/answer" else None)
+    children = [s for s in spans if s.name == "answer.expand"]
+    assert len(children) == 1 and children[0].parent.span_id == root.context.span_id
+    assert dict(children[0].attributes) == {"rag.expand_parents": 1}
+    spans_blob, logs_blob = _span_text(spans), "\n".join(_formatted_logs(caplog))
+    for canary in CANARIES:
+        assert canary not in spans_blob, f"{canary} leaked into spans"
+        assert canary not in logs_blob, f"{canary} leaked into stdout JSON"
+
+
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("depth,effort", [("quick", "low"), ("thorough", "high"), ("standard", "medium")])
 def test_answer_depth_records_only_the_resolved_effort(client, caplog, monkeypatch, stream, depth, effort):

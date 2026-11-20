@@ -1174,6 +1174,7 @@ readers:
 | `chat_max_turns` / `chat_max_prior_turn_chars` | 10 / 4000 (#1274, was 1000) | chat history packing caps; operator inputs `CHAT_MAX_TURNS` / `CHAT_MAX_PRIOR_TURN_CHARS` (#1268; unset renders no variable) |
 | `answer_hit_limit` | 16 (#1274, was 8; 1..32) | hits one answer retrieval returns: `/v1/answer`, `/v1/chat*`, the console and the fused cut of an anchored follow-up's two legs (`AgentResources.retrieve`, `_fuse_by_rank`); `/v1/search` and MCP search keep the caller's `limit` (default 8, max 40). Operator input `ANSWER_HIT_LIMIT` (#1191; unset renders no variable). The pool (40 per leg, or `rerank_candidates` with rerank on) and the per-page/per-doc caps may return fewer. Every hit is offered to packing: under the default window and reserves, the estimator fits 16 excerpts at the 4000-character cap (above the 3500-character ingest section cap), and a denser server count trims or drops from the tail; 32 need about a 65,536-token window. The supplied-evidence text total scales as `max(48000, 6000 x answer_hit_limit)`, so excerpts at the 4000-character cap keep their text ([supplied evidence](#supplied-evidence-projection-issue-635)) |
 | `answer_select_enabled` / `answer_select_candidates` | `false` / 40 (2..40) | [candidate selection](#candidate-selection) (#1309): one lowest-effort reasoning call picks which of one retrieval's `answer_select_candidates` hits are the answer's `answer_hit_limit` hits; on an anchored follow-up whose antecedent names an identifier, the antecedent leg's head (at most `answer_hit_limit // 2` hits) is pinned and the model picks the rest. Off is byte-identical. Settings/environment only (`ANSWER_SELECT_ENABLED`, `ANSWER_SELECT_CANDIDATES`): no operator key, chart value or registry entry until a measured A/B |
+| `answer_expand_enabled` / `answer_expand_budget` / `answer_expand_per_hit` | `false` / 16 (0..32) / 4 (1..8) | [neighbour expansion](#neighbour-expansion) (#1314): after retrieval and selection, a hit's reading-order neighbours within two pages are appended as separate hits, at most `answer_expand_per_hit` per hit and `answer_expand_budget` per turn (0 adds none). Off is byte-identical. Settings/environment only (`ANSWER_EXPAND_ENABLED`, `ANSWER_EXPAND_BUDGET`, `ANSWER_EXPAND_PER_HIT`): no operator key, chart value or registry entry (maintainer decision 2026-11-20) |
 | `retrieve_max_chunks_per_page` / `retrieve_max_chunks_per_doc` | 1 / 5 (#1274, was 3; 1..10 each) | diversity caps in `diversify_hits`, for every retrieval (`/v1/search` and MCP included); a capped hit is backfilled only when the pool runs short. Operator input `RETRIEVE_MAX_CHUNKS_PER_DOC` (#1191; unset renders no variable) |
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
 | `answer_coding_mode_enabled` | `true` (#1276) | coding mode: coding requests take the complex path and the coding prompt extension ([prompt assembly](#4-prompt-assembly-and-budgets)); operator input `ANSWER_CODING_MODE_ENABLED`, unset renders no variable |
@@ -1443,9 +1444,12 @@ chunk text, from #632), `truncated_start`/`truncated_end`, `text_clipped`, and
 (the leading/trailing cut markers are not part of it). The location is the
 recorded chunk span, not finer attribution. `chunk_id` is not exposed.
 
+<a id="supplied-evidence-bounds"></a>
 Bounds: `text` is clipped at 8000 chars per entry and at
 `max(48000, 6000 x answer_hit_limit)` chars in total (48000 up to 8 hits,
-96000 at 16; maintainer decision 2026-11-17, #1191) (`text_clipped: true`;
+96000 at 16; maintainer decision 2026-11-17, #1191; with
+[neighbour expansion](#neighbour-expansion) on, the count is the number of
+hits offered to packing when that is larger, #1314) (`text_clipped: true`;
 the text is then a prefix of the shipped slice); the rest is bounded by the
 prompt window. Every supplied entry is listed, and an entry past the total
 keeps its metadata with empty `text` (the Open WebUI Pipe then shows an empty
@@ -1688,8 +1692,58 @@ selected), `rag.select_candidates` (hits held, pinned included),
 `rag.select_selected` (model-chosen hits packed) and `rag.select_pinned`
 (pinned hits packed; 0 when nothing is pinned); the call is an `answer.select` child span. A failure logs the
 error class only. Timings gain no key: the call's time is inside the request's
-elapsed time, not `llm_ms`. Stage order is fixed for later work: select, then
-(if ever built) expand.
+elapsed time, not `llm_ms`. Stage order is fixed: retrieve, select, then
+[expand](#neighbour-expansion).
+
+<a id="neighbour-expansion"></a>
+## Neighbour expansion (issue #1314)
+
+**Status: implemented, default off** (`answer_expand_enabled`; Settings/environment
+only, for the stand-in lane). **Decision owners:** `answer_core.retrieve_for_answer`
+(when the stage runs) and `agent/answer_expand.py` (lookup, order rules, budget).
+
+Off, every request is byte-identical: no stored-point read, the same hits,
+timings, prompt and response keys, and no span attribute. On, `/v1/answer`,
+`/v1/chat*` and the console (never `/v1/search`, MCP search or
+`retrieve/query.py` ranking) run it last: retrieve, select (when on), expand.
+It applies to the final list whatever selection did (pinned hits stay first)
+and to identifier turns like any other. No stored field was added: there is
+no chapter unit, because sections that share a page have no stored order.
+
+| Step | Rule |
+|---|---|
+| Lookup | Through `StoredChunkReader` (the two reads of the `AsyncQdrantReader` port that `GET /v1/evidence` uses) on the request's bound physical collection: one `retrieve` of the hit ids for `source_rev`, `heading_path`, `page_start`, `page_end` (no text), then one `scroll` per distinct (`source_rev`, page) among the hits, filtered on the indexed `source_rev` and `page_start` in [p-2, p+2] (`PAGE_WINDOW`), limit 65 (`WINDOW_SCROLL_LIMIT`), run concurrently. At most 1 + `answer_hit_limit` reads |
+| Deadline | The whole lookup runs under `evidence_timeout_s` (the existing bounded deadline for stored-point reads through this port; each call is also under `qdrant_timeout_s`). No new timeout setting |
+| Ordinals | Recovered, never stored: a chunk's ordinal is the one whose chunk key (`make_chunk_id` over source_rev, raw heading_path, page_start, ordinal) equals its point id, tried up to `ORDINAL_SCAN_MAX` (1024) |
+| Order inside a section | Ordinal order; the next chunk must carry the next ordinal |
+| Order across sections | Pages in `page_start` order. On one page: at most one section continuing from an earlier page (first), at most one starting and ending on that page (next), at most one starting there and running on (last). A section starts on a page when its ordinal-0 chunk does; it is "ending on that page" only when a later page of the window shows no more of it, so the window's last page never proves it. A step into another section must land on, or leave from, that section's ordinal 0 |
+| Fail closed, per direction | A missing ordinal, a page whose sections are not orderable by the rule above (including any section there with a repeated or unmatched ordinal), or a neighbour outside the scope stops the walk in that direction for that hit. A truncated scroll, a stored point without the identity fields, or a hit whose own point is gone expands nothing for that hit |
+| Scope | A neighbour shares its hit's `source_rev` (the scroll filter), carries its hit's `product` and `version`, and meets the request's scope conditions (`build_scope_filter`) |
+| Per hit | Up to `answer_expand_per_hit` neighbours, nearest first, the one after the hit before the one before it |
+| Budget | `answer_expand_budget` chunks per turn. Slots go by distance first and the hit's rank second (every hit's nearest neighbour, then every hit's second nearest), so a full budget drops the farthest neighbours of the lowest-ranked hits first |
+| De-duplication | A chunk is packed once: a neighbour that is already a retrieved hit or another hit's neighbour is skipped and takes no slot (it still counts toward the per-hit cap) |
+| Placement | Appended after the retrieved hits, by parent rank and then reading order. Retrieved hits keep their prompt labels; packing cuts the list tail first, so a window trim removes neighbours before any retrieved hit |
+| A neighbour | A separate hit built from its stored payload by retrieval's conversion (`hit_from_payload`): its own `chunk_id`, cite, text, units and page span, never merged or re-chunked. It carries its parent's `score` (it was not ranked; `rerank_score` is null) and `neighbour_of`, the parent's chunk id. A retrieved hit has no `neighbour_of` key |
+| Failure | A timeout or any lookup error leaves the hits exactly as they were: no retry, no new client error, error class logged only. Cancellation (the request deadline) propagates |
+
+Downstream, neighbours are ordinary entries: the response `hits` (stream
+finals and the buffered chat body), prompt labels, `supplied_evidence`, the
+citation allowlist and feedback records. Same-page neighbours of one section
+repeat their hit's cite string, so `duplicate_citation` is common with the
+stage on; the prompt label is the handle. The supplied-evidence text total is
+sized from the hits offered to packing when they exceed `answer_hit_limit`
+([bounds](#supplied-evidence-bounds)). The root span carries `rag.expand_mode`
+(`expanded` | `skipped` | `fallback`), `rag.expand_reason` (`no_hits` |
+`no_budget` | `no_reader` | `timeout` | `lookup_error`; absent when
+expanded), `rag.expand_added` (neighbours appended), `rag.expand_hits` (hits
+that gained one), `rag.expand_stopped` (directions ended by a fail-closed
+rule) and `rag.expand_budget_cut` (neighbours found and left out by the
+budget); the reads are an `answer.expand` child span carrying
+`rag.expand_parents`. `rag.hits`, the `hits` log field and the
+`rag.retrieval.hits` histogram keep their meaning, the hits offered to
+packing, and so include the neighbours (up to 64, past the histogram's last
+boundary of 40). Timings gain no key. The per-page and per-manual retrieval
+caps are not re-applied to neighbours.
 
 <a id="http-model-contract"></a>
 ## HTTP/model fallback and lifecycle policy

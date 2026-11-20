@@ -34,7 +34,15 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SerializeAsAny,
+    field_validator,
+    model_validator,
+)
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from mainframe_rag.agent.admission import (
@@ -1270,7 +1278,10 @@ class ChatCompletionsResponse(BaseModel):
     citations: list[str] = Field(default_factory=list)
     citations_inferred: bool = False
     inferred_indices: list[int] = Field(default_factory=list)
-    hits: list[SearchHit] = Field(default_factory=list)
+    # Serialized by each hit's own type: a neighbour hit (issue #1314) keeps
+    # its `neighbour_of`, as the stream's `final` does; a retrieved hit's
+    # keys and the schema are unchanged.
+    hits: list[SerializeAsAny[SearchHit]] = Field(default_factory=list)
     # Verification state (issue #365): same vocabulary as AnswerResponse.
     verification_state: str = "unverified_draft"
     # Scripts ride chat too (issue #365): previously dropped on both chat

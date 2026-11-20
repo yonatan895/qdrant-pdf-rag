@@ -20,7 +20,7 @@ from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
-from mainframe_rag.agent import answer_select
+from mainframe_rag.agent import answer_expand, answer_select
 from mainframe_rag.agent.answer import (
     REASON_MALFORMED_FRAME,
     REASON_MISSING_FINISH,
@@ -52,6 +52,7 @@ from mainframe_rag.agent.core_ports import (
     PromptBuilder,
     RetrievalResult,
     Retriever,
+    StoredChunkReader,
 )
 from mainframe_rag.agent.images import TurnImages, image_count
 from mainframe_rag.agent.user_message import derive_retrieval_query
@@ -122,6 +123,9 @@ class AnswerCoreDeps:
     build_messages_fn: PromptBuilder[str] | None = None
     build_chat_messages_fn: PromptBuilder[list[ChatMessage]] | None = None
     classify_query_complexity_fn: Callable[[str], str] | None = None
+    # Stored-point reads for neighbour expansion (issue #1314); read only
+    # when ANSWER_EXPAND_ENABLED is on. None: the stage falls back.
+    neighbours: StoredChunkReader | None = None
 
 
 def _prepare_chat_input(input_data: AnswerCoreInput, settings: Settings) -> AnswerCoreInput:
@@ -324,10 +328,15 @@ async def retrieve_for_answer(
     parent_span: trace.Span | None = None,
 ) -> RetrievalResult:
     """The hits one answer turn is packed from, for the core retrieval branch
-    and every chat route alike: the plan's retrieval, then candidate selection
-    when ANSWER_SELECT_ENABLED is on (issue #1309; later stages, if ever
-    built, run after it). Off, this is `retrieve_planned` and nothing else.
-    On, a turn whose own query names an identifier, whose searched text (its
+    and every chat route alike. Stage order: the plan's retrieval, candidate
+    selection when ANSWER_SELECT_ENABLED is on (issue #1309), then neighbour
+    expansion when ANSWER_EXPAND_ENABLED is on (issue #1314), applied to the
+    final list whatever selection did (pinned, selected, bypassed or fallen
+    back). Both off, this is `retrieve_planned` and nothing else. Expansion
+    appends neighbours after the hits and never fails the turn
+    (`answer_expand.expand_hits`).
+
+    Selection on: a turn whose own query names an identifier, whose searched text (its
     query or an anchored antecedent) screens as a trap, or whose candidate
     setting is no wider than `answer_hit_limit`, retrieves as usual with no
     model call; every other turn retrieves once at
@@ -338,6 +347,28 @@ async def retrieve_for_answer(
     path and never offered to the model. A selection failure is never a
     retrieval failure. `parent_span` gets the outcome as fixed labels and
     counts, never text."""
+    found = await _retrieve_selected(plan, source, deps, parent_span)
+    if not deps.settings.answer_expand_enabled:
+        return found
+    ctx = trace.set_span_in_context(parent_span) if parent_span is not None else None
+    with start_as_current_span(
+        tracer, "answer.expand", kind=SpanKind.CLIENT, context=ctx,
+        attributes={"rag.expand_parents": len(found.hits)},
+    ):
+        hits, expanded = await answer_expand.expand_hits(
+            deps.neighbours, deps.settings, found.hits,
+            product=source.product, version=source.version,
+        )
+    if parent_span is not None:
+        parent_span.set_attributes(expanded.span_attributes())
+    return RetrievalResult(hits, found.kind, found.timings)
+
+
+async def _retrieve_selected(
+    plan: SearchPlan, source: AnswerCoreInput, deps: AnswerCoreDeps,
+    parent_span: trace.Span | None,
+) -> RetrievalResult:
+    """Retrieval, then candidate selection when it is on (issue #1309)."""
     settings = deps.settings
     if not settings.answer_select_enabled:
         return await retrieve_planned(plan, source, deps)
