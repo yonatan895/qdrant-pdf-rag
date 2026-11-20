@@ -11,7 +11,8 @@ input or a tracked file. Model-written gold is not expert gold.
 Privacy: questions derive from manual text. The output is refused inside any
 git work tree and under a holdout or release-set name, before any Qdrant or
 model call; it is created new with mode 0600. Logs, the manifest and stdout
-carry ids, counts and hashes only, never question or passage text.
+carry ids, counts and hashes only, never question or passage text. The golden
+readers of ``eval.datasets`` refuse any file holding a candidate row.
 
 Steps (each pure over its inputs, the ports passed in):
 ``scan_identities`` (identity fields only, no text) -> ``stratified_sample``
@@ -38,13 +39,16 @@ import random
 import re
 import sys
 from collections import Counter, defaultdict
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from mainframe_rag.eval import datasets as _datasets
 from mainframe_rag.eval.datasets import (
     DEV,
+    HOLDOUT_FILENAME,
+    RELEASE_SET_FILENAME,
     DatasetError,
     require_rc_for_collection,
     require_rc_for_golden,
@@ -55,6 +59,9 @@ if TYPE_CHECKING:
     from mainframe_rag.ports import QdrantReader
 
 log = logging.getLogger(__name__)
+
+# The content identity of a candidate row lives with the readers that refuse it.
+is_candidate_record = _datasets.is_candidate_record
 
 # Classes a single passage can carry. comparative needs several documents,
 # negative is an abstain class, doc_number and version ask about the document
@@ -90,6 +97,10 @@ MIN_QUESTION_TOKENS = 4
 MAX_QUESTION_TOKENS = 40
 HEADING_COPY_MIN_TOKENS = 3
 MIN_CONTENT_TOKENS = 2
+# Most section siblings one row lists after its source chunk. A section is a
+# heading path, and an unoutlined document is one section, so without a bound
+# a row could carry every chunk of a document.
+MAX_SECTION_SIBLINGS = 64
 # Drop codes in the order the checks run; a row is dropped by the first one.
 DROP_CODES = (
     "text_unavailable",
@@ -100,7 +111,6 @@ DROP_CODES = (
     "heading_copy",
     "identifier_only",
     "duplicate",
-    "answerability_unparseable",
     "not_answerable",
 )
 
@@ -110,15 +120,23 @@ IDENTITY_FIELDS = [
     "message_ids", "rules_v",
 ]
 OUTPUT_REFUSAL = (
-    "refused: the output must be a new file outside any git work tree, "
-    "not named like the holdout or the release set"
+    "refused: the output must be a new file in a writable directory outside "
+    "any git work tree, not named like the holdout or the release set"
 )
+# Compared case-folded, as a prefix: HOLDOUT.jsonl and holdout.jsonl.bak too.
+_PROTECTED_NAME_PREFIXES = (HOLDOUT_FILENAME.casefold(), RELEASE_SET_FILENAME.casefold())
+# The framing tags of the two model passes, as they could appear inside data.
+_FRAME_TAG_RE = re.compile(r"<(?=\s*/?\s*(?:passage|question)\b)", re.IGNORECASE)
 REFUSALS = {
     "output": OUTPUT_REFUSAL,
     "venue": "refused: this collection is the real-corpus RC venue; set VENUE=rc",
     "no_points": "refused: the collection has no usable points",
     "mixed_rules_versions": "refused: the collection mixes extraction-rules versions",
     "classes": "refused: --classes takes a comma-separated subset of " + ",".join(TARGET_CLASSES),
+    "class_without_eligible_chunk": (
+        "refused: a requested class has no eligible chunk in the collection; "
+        "name only classes the collection can carry in --classes"
+    ),
 }
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -301,22 +319,59 @@ def stratified_sample(
     return samples
 
 
-def section_gold(identities: Sequence[PointIdentity]) -> dict[str, list[str]]:
-    """chunk id -> gold chunk ids: the chunk itself first, then the other
-    chunks of its section (same source revision and heading path), sorted."""
-    sections: dict[tuple[str, str], list[str]] = defaultdict(list)
+@dataclass(frozen=True)
+class SectionGold:
+    """One row's chunk-level gold and the size of the section it came from."""
+
+    chunk_ids: list[str]
+    section_chunks: int
+
+    @property
+    def truncated(self) -> bool:
+        return len(self.chunk_ids) < self.section_chunks
+
+
+def section_gold(
+    identities: Sequence[PointIdentity], chunk_ids: Iterable[str]
+) -> dict[str, SectionGold]:
+    """Gold for the given chunks only: the chunk itself first, then the other
+    chunks of its section (same source revision and heading path) in id
+    order, at most ``MAX_SECTION_SIBLINGS`` of them. Each section is sorted
+    once and each row reads at most the bound plus one of its ids."""
+    wanted = set(chunk_ids)
+    keys = {p.chunk_id: p.section_key for p in identities if p.chunk_id in wanted}
+    members: dict[tuple[str, str], list[str]] = {key: [] for key in keys.values()}
     for point in identities:
-        sections[point.section_key].append(point.chunk_id)
-    return {
-        point.chunk_id: [point.chunk_id, *sorted(
-            i for i in sections[point.section_key] if i != point.chunk_id)]
-        for point in identities
-    }
+        if point.section_key in members:
+            members[point.section_key].append(point.chunk_id)
+    for ids in members.values():
+        ids.sort()
+    gold: dict[str, SectionGold] = {}
+    for chunk_id, key in keys.items():
+        section = members[key]
+        siblings = [i for i in section[:MAX_SECTION_SIBLINGS + 1] if i != chunk_id]
+        gold[chunk_id] = SectionGold(
+            [chunk_id, *siblings[:MAX_SECTION_SIBLINGS]], len(section))
+    return gold
+
+
+def requested_per_class(count: int, classes: Sequence[str]) -> dict[str, int]:
+    """The even share of ``count`` each class is asked for; the remainder
+    goes to the classes named first. The sampler balances towards it."""
+    share, extra = divmod(count, len(classes))
+    return {c: share + (1 if i < extra else 0) for i, c in enumerate(classes)}
 
 
 # ------------------------------------------------------------- model steps
+def neutralize_frame_tags(text: str) -> str:
+    """``text`` with the opening bracket of every passage/question tag
+    escaped, so data cannot close its block or open another. Other text,
+    including other angle brackets, is unchanged."""
+    return _FRAME_TAG_RE.sub("&lt;", text)
+
+
 def _passage_block(passage: str) -> str:
-    return f"<passage>\n{passage}\n</passage>"
+    return f"<passage>\n{neutralize_frame_tags(passage)}\n</passage>"
 
 
 def write_question(model: CandidateModel, passage: str, query_class: str) -> str:
@@ -324,15 +379,15 @@ def write_question(model: CandidateModel, passage: str, query_class: str) -> str
     return model.complete(question_prompt(query_class), _passage_block(passage))
 
 
-def check_answerable(model: CandidateModel, question: str, passage: str) -> bool | None:
-    """Second pass: answerable from the passage alone. None when the reply
-    does not start with YES or NO."""
+def check_answerable(model: CandidateModel, question: str, passage: str) -> bool:
+    """Second pass: answerable from the passage alone. Only a reply that is
+    exactly YES (whitespace trimmed, any case) is a yes; every other reply,
+    a qualified or two-way one included, is a no."""
     reply = model.complete(
         ANSWERABILITY_PROMPT,
-        f"{_passage_block(passage)}\n<question>\n{question}\n</question>",
+        f"{_passage_block(passage)}\n<question>\n{neutralize_frame_tags(question)}\n</question>",
     )
-    first = tokens(reply)[:1]
-    return {"yes": True, "no": False}.get(first[0]) if first else None
+    return reply.strip().casefold() == "yes"
 
 
 # ----------------------------------------------------------------- filters
@@ -396,7 +451,7 @@ def lexical_overlap(question: str, passage: str) -> float:
 
 # -------------------------------------------------------------------- rows
 def candidate_row(
-    sample: Sample, question: str, passage: str, gold_chunk_ids: Sequence[str],
+    sample: Sample, question: str, passage: str, gold: SectionGold,
     *, model_label: str, seed: int,
 ) -> dict[str, Any]:
     """One candidate row: the GoldenEntry fields plus chunk-level gold, the
@@ -422,7 +477,9 @@ def candidate_row(
         "reviewers": [],
         "reviewed_by": None,
         "reviewed_at": None,
-        "gold_chunk_ids": list(gold_chunk_ids),
+        "gold_chunk_ids": list(gold.chunk_ids),
+        "gold_chunk_ids_truncated": gold.truncated,
+        "section_chunk_count": gold.section_chunks,
         "chunk_type": point.chunk_type,
         "physical_page": None if point.page_start is None else point.page_start + 1,
         "lexical_overlap": lexical_overlap(question, passage),
@@ -434,18 +491,6 @@ def candidate_row(
             "seed": seed,
         },
     }
-
-
-def is_candidate_record(line: str) -> bool:
-    """Content identity of a candidate row, for guards that must keep
-    candidates out of tracked files and eval sets."""
-    if '"candidate"' not in line:
-        return False
-    try:
-        obj = json.loads(line)
-    except ValueError:
-        return False
-    return isinstance(obj, dict) and obj.get("status") == "candidate" and "gold_chunk_ids" in obj
 
 
 # ---------------------------------------------------------------- pipeline
@@ -463,9 +508,13 @@ def generate(
     rules = sorted({p.rules_v for p in identities})
     if len(rules) != 1:
         raise Refused("mixed_rules_versions")
+    eligible = Counter(c for p in identities for c in eligible_classes(p, classes))
+    if any(not eligible[c] for c in classes):
+        raise Refused("class_without_eligible_chunk")
     samples = stratified_sample(identities, count=count, classes=classes, seed=seed)
-    gold = section_gold(identities)
-    texts = fetch_texts(client, collection, [s.point.chunk_id for s in samples])
+    sampled_ids = [s.point.chunk_id for s in samples]
+    gold = section_gold(identities, sampled_ids)
+    texts = fetch_texts(client, collection, sampled_ids)
 
     rows: list[dict[str, Any]] = []
     dropped: Counter[str] = Counter()
@@ -477,6 +526,9 @@ def generate(
         if code is not None:
             dropped[code] += 1
             log.info("gold candidate dropped chunk_id=%s code=%s", chunk_id, code)
+    requested = requested_per_class(count, classes)
+    sampled_classes = Counter(s.query_class for s in samples)
+    kept_classes = Counter(r["query_class"] for r in rows)
     manifest = {
         "kind": "gold-candidates-manifest",
         "version": 1,
@@ -488,6 +540,7 @@ def generate(
         "seed": seed,
         "model": model_label,
         "classes": list(classes),
+        "max_section_siblings": MAX_SECTION_SIBLINGS,
         "prompts": {
             "question_template_sha256": _sha256(QUESTION_PROMPT),
             "question_sha256": {c: _sha256(question_prompt(c)) for c in classes},
@@ -498,7 +551,17 @@ def generate(
             "scanned": len(identities),
             "sampled": len(samples),
             "kept": len(rows),
+            "gold_truncated": sum(1 for r in rows if r["gold_chunk_ids_truncated"]),
             "dropped": {c: dropped[c] for c in DROP_CODES},
+            "classes": {
+                c: {
+                    "requested": requested[c],
+                    "eligible": eligible[c],
+                    "sampled": sampled_classes[c],
+                    "kept": kept_classes[c],
+                }
+                for c in classes
+            },
         },
     }
     return rows, manifest
@@ -506,7 +569,7 @@ def generate(
 
 def _candidate(
     model: CandidateModel, sample: Sample, passage: str | None, seen: set[str],
-    rows: list[dict[str, Any]], gold_chunk_ids: Sequence[str], *, model_label: str, seed: int,
+    rows: list[dict[str, Any]], gold: SectionGold, *, model_label: str, seed: int,
 ) -> str | None:
     """Run one sample through the steps; append its row or return a drop code."""
     if passage is None:
@@ -522,12 +585,10 @@ def _candidate(
         answerable = check_answerable(model, question, passage)
     except ModelCallError:
         return "model_error"
-    if answerable is None:
-        return "answerability_unparseable"
     if not answerable:
         return "not_answerable"
     seen.add(question_key(question))
-    rows.append(candidate_row(sample, question, passage, gold_chunk_ids,
+    rows.append(candidate_row(sample, question, passage, gold,
                               model_label=model_label, seed=seed))
     return None
 
@@ -538,16 +599,20 @@ def manifest_path(out: Path) -> Path:
 
 
 def refuse_output(path: Path) -> None:
-    """Refuse an output that git tracks or could track, that carries a
-    protected dataset name, or that already exists. Checked on the literal
-    and the resolved path, without a git subprocess: any ancestor holding
-    ``.git`` (a directory, or a linked work tree's file) is a work tree."""
+    """Refuse an output that git tracks or could track, that carries or
+    starts with a protected dataset name (any case), that already exists, or
+    whose directory cannot take a new file. Checked on the literal and the
+    resolved path, without a git subprocess: any ancestor holding ``.git``
+    (a directory, or a linked work tree's file) is a work tree."""
     try:
         require_rc_for_golden([path], DEV)
-        resolved = path.parent.resolve(strict=True) / path.name
+        parent = path.parent.resolve(strict=True)
+        resolved = parent / path.name
         require_rc_for_golden([resolved], DEV)
         ancestors = {*path.absolute().parents, *resolved.parents}
         if (path.is_symlink() or path.exists()
+                or path.name.casefold().startswith(_PROTECTED_NAME_PREFIXES)
+                or not os.access(parent, os.W_OK | os.X_OK)
                 or any((p / ".git").exists() for p in ancestors)):
             raise Refused("output")
     except (DatasetError, OSError, RuntimeError, ValueError):
@@ -663,18 +728,26 @@ def main(
                 seed=args.seed, model_label=args.model_label, page_size=args.page_size)
         except DatasetError:
             raise Refused("venue") from None
-        data = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
-                       for row in rows).encode("utf-8")
-        manifest["rows_sha256"] = hashlib.sha256(data).hexdigest()
-        write_private(args.out, data)
-        write_private(manifest_path(args.out),
-                      (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode("utf-8"))
+        if rows:
+            data = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+                           for row in rows).encode("utf-8")
+            manifest["rows_sha256"] = hashlib.sha256(data).hexdigest()
+            write_private(args.out, data)
+            try:
+                write_private(
+                    manifest_path(args.out),
+                    (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode("utf-8"))
+            except BaseException:
+                # Rows without their manifest would block the next run here.
+                args.out.unlink(missing_ok=True)
+                raise
     except Refused as exc:
         print(REFUSALS[exc.code], file=sys.stderr)
         return 2
     print(json.dumps(manifest["counts"], sort_keys=True))
-    # A run that kept nothing (no model configured, every row filtered) still
-    # leaves its manifest as the record, but is not a success.
+    # A run that kept nothing (no model configured, every row filtered) is not
+    # a success and writes no file, so the same path serves the next run; its
+    # counts are on stdout.
     return 0 if rows else 1
 
 

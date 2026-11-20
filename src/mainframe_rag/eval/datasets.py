@@ -77,6 +77,7 @@ def load_golden(path: Path) -> list[GoldenEntry]:
 
 
 def _golden_records(text: str) -> list[dict[str, Any]]:
+    _refuse_candidate_rows(text)
     return [
         json.loads(line)
         for line in map(str.strip, text.splitlines())
@@ -116,6 +117,9 @@ def load_golden_records_with_identity(
 
 def parse_golden_text(text: str) -> list[GoldenEntry]:
     """Parse an already acquired dataset without reopening its source."""
+    # Before any row is validated: an invalid-entry message echoes row text.
+    if has_candidate_record(text):
+        raise SystemExit(CANDIDATE_REFUSAL)
     entries: list[GoldenEntry] = []
     for line in text.splitlines():
         line = line.strip()
@@ -172,6 +176,42 @@ class DatasetPinError(DatasetError):
 
 class VenueError(DatasetError):
     """An RC-only instrument was requested without a declared RC venue."""
+
+
+class CandidateDatasetError(DatasetError):
+    """A file holding generated, unadjudicated rows was passed as a dataset."""
+
+
+# One fixed message for every reader; it never carries row text.
+CANDIDATE_REFUSAL = (
+    "refused: the file holds generated gold candidates (status \"candidate\"); "
+    "an unadjudicated row is not an eval row and is never read as gold"
+)
+
+
+def is_candidate_record(line: str) -> bool:
+    """Content identity of a generated gold candidate (issue #1317): a JSON
+    object whose ``status`` is ``"candidate"``. The status alone decides,
+    whatever the file is called and whichever other fields the row keeps."""
+    if '"candidate"' not in line:
+        return False
+    try:
+        obj = json.loads(line)
+    except ValueError:
+        return False
+    return isinstance(obj, dict) and obj.get("status") == "candidate"
+
+
+def has_candidate_record(text: str) -> bool:
+    return '"candidate"' in text and any(is_candidate_record(line) for line in text.splitlines())
+
+
+def _refuse_candidate_rows(text: str) -> None:
+    """Refuse a dataset holding any candidate row (#806: a row needs human
+    adjudication before it enters an eval set). Every golden reader calls
+    this on the content it acquired, before parsing or scoring a row."""
+    if has_candidate_record(text):
+        raise CandidateDatasetError(CANDIDATE_REFUSAL)
 
 
 def resolve_venue(environ: Mapping[str, str] | None = None) -> str:
@@ -334,7 +374,9 @@ def read_golden_bytes(path: Path | str) -> bytes:
     protected = path.name == HOLDOUT_FILENAME or target.name == HOLDOUT_FILENAME
     require_rc_for_golden([HOLDOUT_PATH if protected else target])
     if not protected:
-        return target.read_bytes()
+        data = target.read_bytes()
+        _refuse_candidate_rows(data.decode("utf-8", "replace"))
+        return data
     try:
         pin = target.with_name(target.name + ".sha256")
         record = pin.read_text(encoding="utf-8")
@@ -347,10 +389,12 @@ def read_golden_bytes(path: Path | str) -> bytes:
         # Validate the text encoding here, as the old text reader did, so an
         # invalid protected dataset still fails as DatasetPinError rather than
         # raising a decode error later. The bytes remain the identity source.
-        data.decode("utf-8")
-        return data
+        text = data.decode("utf-8")
     except (OSError, UnicodeError, ValueError) as exc:
         raise DatasetPinError("frozen holdout or its sha256 pin is unavailable or invalid") from exc
+    # After the venue and pin checks, so their order and messages are unchanged.
+    _refuse_candidate_rows(text)
+    return data
 
 
 def read_golden_text(path: Path | str) -> str:
@@ -370,8 +414,10 @@ def read_dev_only_bytes(path: Path | str) -> bytes:
         raw = Path(path).read_bytes()
     except OSError as exc:
         raise DatasetError("dev-only dataset is unreadable") from exc
-    if any(_is_release_set_record(line) for line in raw.decode("utf-8", "replace").splitlines()):
+    text = raw.decode("utf-8", "replace")
+    if any(_is_release_set_record(line) for line in text.splitlines()):
         raise DatasetError("release-set records are not a dev dataset")
+    _refuse_candidate_rows(text)
     return raw
 
 
