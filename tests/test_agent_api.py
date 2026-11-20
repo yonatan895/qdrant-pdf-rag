@@ -300,11 +300,12 @@ def test_neighbour_expansion_on_ships_neighbours_as_their_own_hits(
     first) and then its neighbours, each with its own id and text and the
     parent's id and score, on the stream finals and the buffered chat body
     alike; the supplied evidence carries them under the next labels."""
+    from mainframe_rag.eval.capture import evidence_capture
     from tests.fakes import StoredChunksFake
     from tests.test_answer_expand import Corpus
 
     corpus = Corpus().add([("A", [(3, 3)] * 3)])
-    retrieved = corpus.hit("A#1")
+    retrieved = corpus.hit("A#1").model_copy(update={"rerank_score": 0.75})
     stored = StoredChunksFake(corpus.payloads)
 
     def search(*_args, **_kwargs):
@@ -327,6 +328,12 @@ def test_neighbour_expansion_on_ships_neighbours_as_their_own_hits(
     assert [(item["index"], item["text"]) for item in body["supplied_evidence"]] == [
         (1, "A#1"), (2, "A#0"), (3, "A#2")]
     assert body["evidence_omitted"] == 0
+    # The eval's capture of this final (eval/capture.py): every hit and every
+    # supplied excerpt projects, neighbours under their own chunk ids.
+    captured = evidence_capture(body)
+    assert [(hit["chunk_id"], hit["score"], hit["rerank_score"]) for hit in captured["final_hits"]] == [
+        (retrieved.chunk_id, 0.5, 0.75), (corpus.ids["A#0"], 0.5, None), (corpus.ids["A#2"], 0.5, None)]
+    assert [item["index"] for item in captured["supplied_evidence_meta"]] == [1, 2, 3]
     assert {call["collection"] for call in stored.calls} == {collection}
     assert [call["op"] for call in stored.calls] == ["retrieve", "scroll"]
 

@@ -169,25 +169,24 @@ class _Window:
         for chunk in self._pages[page]:
             by_section.setdefault(chunk.heading, []).append(chunk)
         continuing: list[str] = []
-        confined: list[str] = []
-        running_on: list[str] = []
+        starting: list[str] = []
         for heading, chunks in by_section.items():
             ordinals = self.ordinals(heading)
             if ordinals is None:
                 return None
             chunks.sort(key=lambda chunk: ordinals[chunk.chunk_id])
-            if ordinals[chunks[0].chunk_id] != 0:
-                continuing.append(heading)
-            elif self._runs_past(heading, page):
-                running_on.append(heading)
-            elif len(by_section) > 1 and not self._ends_on(heading, page):
-                return None
-            else:
-                confined.append(heading)
-        if max(len(continuing), len(confined), len(running_on)) > 1:
+            (starting if ordinals[chunks[0].chunk_id] == 0 else continuing).append(heading)
+        if len(continuing) > 1 or len(starting) > 2:
             return None
-        return [chunk for heading in (*continuing, *confined, *running_on)
-                for chunk in by_section[heading]]
+        if len(starting) == 2:
+            # Two sections start here: one must provably end here and the
+            # other provably run on.
+            starting.sort(key=lambda heading: self._runs_past(heading, page))
+            first, second = starting
+            if (self._runs_past(first, page) or not self._ends_on(first, page)
+                    or not self._runs_past(second, page)):
+                return None
+        return [chunk for heading in (*continuing, *starting) for chunk in by_section[heading]]
 
     def _runs_past(self, heading: str, page: int) -> bool:
         return any(

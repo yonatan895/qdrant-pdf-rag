@@ -31,6 +31,26 @@ IDENTIFIER_Q = "IEA500I rejected"
 CANARY = "storage-secret-detail"
 TIMINGS = {"embed_ms": 1, "qdrant_ms": 2}
 
+# The generated manual of the real-chunker tests below, as the chunker cuts
+# it: (section, page_start, ordinal) in output order.
+_LP = "Long procedure"
+_MANUAL_SHAPE = [
+    ("Widget guide", 0, 0), (_LP, 1, 0), (_LP, 1, 1), (_LP, 2, 2), (_LP, 3, 3), (_LP, 3, 4),
+    ("WID101E", 4, 0), ("WID102E", 4, 0), ("WID103E", 4, 0), ("WID104E", 5, 0),
+]
+_MANUAL_CASES = [
+    pytest.param((_LP, 2, 2), [(_LP, 1, 0), (_LP, 1, 1), (_LP, 3, 3), (_LP, 3, 4)], 1,
+                 id="ordinals-past-zero-across-pages-then-stops-at-the-shared-page"),
+    pytest.param(("Widget guide", 0, 0), [(_LP, 1, 0), (_LP, 1, 1), (_LP, 2, 2)], 0,
+                 id="into-the-next-section-at-its-first-chunk"),
+    pytest.param((_LP, 3, 4), [(_LP, 1, 0), (_LP, 1, 1), (_LP, 2, 2), (_LP, 3, 3)], 1,
+                 id="backwards-through-the-section"),
+    pytest.param(("WID102E", 4, 0), [], 2, id="three-sections-on-one-page-are-refused"),
+    pytest.param(("WID104E", 5, 0), [], 1, id="no-walk-back-into-the-shared-page"),
+]
+# Summed over every chunk as the hit at a per-hit cap of 8: 3 + 5 + 5 + 5 + 4 + 4.
+_MANUAL_NEIGHBOURS_FOUND = 26
+
 
 def _settings(**overrides) -> Settings:
     return Settings(
@@ -124,7 +144,8 @@ _SPANNING = [("A", [(3, 3), (3, 4), (4, 4), (5, 5), (6, 6)])]
 _CONTINUING_THEN_NEW = [("A", [(2, 2), (3, 3)]), ("B", [(3, 3), (4, 4)])]
 _CONFINED_THEN_EXTENDING = [("A", [(2, 2)]), ("B", [(3, 3)]), ("C", [(3, 3), (4, 4)])]
 _TWO_CONFINED = [("A", [(2, 2), (2, 2)]), ("B", [(3, 3)]), ("C", [(3, 3)]), ("D", [(4, 4)])]
-_TWO_STARTERS_AT_THE_EDGE = [("A", [(1, 1), (1, 1)]), ("B", [(3, 3)]), ("C", [(3, 3)])]
+_TWO_STARTERS_AT_THE_EDGE = [("A", [(1, 1), (1, 1)]), ("B", [(3, 3)]), ("C", [(3, 3), (4, 4)])]
+_CONTINUING_AT_THE_EDGE = [("A", [(1, 1), (2, 2), (3, 3)]), ("B", [(3, 3)])]
 _REPEATED = [("A", [(3, 3, 0), (3, 3, 1), (4, 4, 1)])]
 _GAP = [("A", [(3, 3, 0), (3, 3, 1), (3, 3, 3)])]
 _NOT_FROM_ZERO = [("A", [(2, 2), (2, 2)]), ("B", [(3, 3, 1), (3, 3, 2)])]
@@ -149,6 +170,8 @@ _NOT_FROM_ZERO = [("A", [(2, 2), (2, 2)]), ("B", [(3, 3, 1), (3, 3, 2)])]
     pytest.param(_TWO_CONFINED, "D#0", {}, [], 1, id="and-does-not-walk-back-into-one"),
     pytest.param(_TWO_STARTERS_AT_THE_EDGE, "A#0", {}, ["A#1"], 1,
                  id="a-section-on-the-windows-last-page-is-not-provably-confined"),
+    pytest.param(_CONTINUING_AT_THE_EDGE, "A#0", {}, ["A#1", "A#2", "B#0"], 0,
+                 id="one-section-starting-after-a-continuing-one-needs-no-proof-of-its-end"),
     pytest.param(_REPEATED, "A#0", {}, [], 2, id="a-repeated-ordinal-orders-nothing"),
     pytest.param(_GAP, "A#1", {}, ["A#0"], 1, id="a-missing-ordinal-stops-that-direction"),
     pytest.param(_NOT_FROM_ZERO, "A#1", {}, ["A#0"], 1,
@@ -469,73 +492,167 @@ async def test_the_packed_prompt_labels_retrieved_hits_first_then_neighbours(str
     assert out.timings == TIMINGS
 
 
+def _single(query: str) -> AnswerCoreInput:
+    return AnswerCoreInput(query=query)
+
+
+def _follow_up(query: str) -> AnswerCoreInput:
+    """An anchored follow-up: both legs are searched and fused."""
+    from mainframe_rag.ports import ChatMessage
+
+    return AnswerCoreInput(query=query, is_chat=True, messages=[
+        ChatMessage(role="user", content="What does IEA500I mean?"),
+        ChatMessage(role="assistant", content="An earlier answer"),
+        ChatMessage(role="user", content=query)])
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("select", [False, True])
 @pytest.mark.parametrize("query", [PLAIN_Q, IDENTIFIER_Q])
-async def test_expansion_off_never_reads_stored_chunks_and_changes_nothing(select, query):
-    """ANSWER_EXPAND_ENABLED off (the default): the hits, timings, prompt and
-    span attributes are those of a turn with no stored-chunk reader at all,
-    with candidate selection on or off."""
+@pytest.mark.parametrize("source", [_single, _follow_up])
+async def test_expansion_off_never_reads_stored_chunks_and_changes_nothing(
+    select, query, source, monkeypatch
+):
+    """ANSWER_EXPAND_ENABLED off (the default): the stage's code is never
+    entered and no stored chunk is read, on a first turn and an anchored
+    follow-up, with candidate selection on or off. The hits, timings, prompt
+    and span attributes equal those of a turn with no reader at all."""
+    from mainframe_rag.agent import answer_expand
+
+    async def never(*args, **kwargs):
+        raise AssertionError("neighbour expansion entered with the stage off")
+
+    monkeypatch.setattr(answer_expand, "expand_hits", never)
     corpus = Corpus()
     for name, rev in (("A", "rev-a"), ("B", "rev-b"), ("C", "rev-c")):
         corpus.add([(name, [(3, 3)] * 2)], rev=rev)
     pool = [corpus.hit(f"{n}#0") for n in "ABC"]
     overrides = {"answer_expand_enabled": False, "answer_hit_limit": 2,
-                 "answer_select_enabled": select, "answer_select_candidates": 3}
+                 "answer_select_enabled": select, "answer_select_candidates": 3,
+                 "chat_followup_anchor_enabled": True}
     runs = []
     for reader in (None, _Untouchable()):
         llm, root = _SelectingLLM("[3, 1]"), _root()
         out = await execute_answer_core(
-            AnswerCoreInput(query=query),
+            source(query),
             AnswerCoreDeps(settings=_settings(**overrides), llm=ModelAdapter(llm),
                            retrieve=_LimitedSearch(pool), neighbours=reader),
             parent_span=root)
         runs.append((out.hits, out.timings, out.supplied, llm.calls, dict(root.attributes)))
     assert runs[0] == runs[1]
     hits, timings, _, _, attributes = runs[1]
-    assert _texts(hits) == (["C#0", "A#0"] if select and query == PLAIN_Q else ["A#0", "B#0"])
-    assert all(type(hit) is SearchHit for hit in hits)
-    assert timings == TIMINGS
+    assert len(hits) == 2 and all(type(hit) is SearchHit for hit in hits)
+    assert sorted(timings) == ["embed_ms", "qdrant_ms"]
     assert not any(key.startswith("rag.expand") for key in attributes)
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("fixture", ["synthetic_pdf", "jcl_pdf"])
-async def test_recovered_order_never_disagrees_with_the_chunkers_own_order(fixture, request):
-    """One property over a real generated manual: the chunker's output order
-    is the truth, and the stored payloads are the ingest's own
-    ('point_payload'). Whatever chunk is the hit, a neighbour the stage
-    returns sits in the chunker's order exactly where the stage placed it
-    (the hit and its neighbours are one unbroken run of that order, listed
-    in that order), and ordinals recovered from point ids make that possible
-    for at least one chunk of every manual."""
-    import pymupdf
 
-    from mainframe_rag.ingest.chrome import strip_chrome
+# --- The real chunker and a real Qdrant store --------------------------------
+#
+# The cases above mint point ids with the chunk-key function the stage also
+# uses. Here the chunker itself assigns sections, pages and ordinals, the
+# ingest writer stores the points, and the stage reads them back through the
+# sync-to-async adapter over qdrant-client's local store: the filter (exact
+# match and integer range), limit and next-page offset are the client's own.
+
+_STEP = "Step {n}: set the widget dial to {n} and wait for the lamp. "
+_MESSAGES_PAGE = (
+    "WID101E\nWIDGET TABLE FULL\nExplanation: The widget table has no free slot.\n"
+    "WID102E\nWIDGET NAME INVALID\nExplanation: The name has a character outside A-Z.\n"
+    "WID103E\nWIDGET LIMIT REACHED\nExplanation: The configured widget limit was reached.\n"
+)
+
+
+def _procedure_page(first: int) -> str:
+    return "\n\n".join((_STEP.format(n=n) * 12).strip() for n in range(first, first + 6))
+
+
+@pytest.fixture(scope="module")
+def stored_manual():
+    """(chunks in the chunker's order, sync client, collection) for one
+    generated manual: an overview page, a procedure whose chunks run over
+    three pages, a page of three bookmarked messages, a last message."""
+    from pathlib import Path
+
+    from qdrant_client import QdrantClient, models
+
     from mainframe_rag.ingest.chunk import make_chunks
-    from mainframe_rag.ingest.ibm_pdf import parse_pdf
-    from mainframe_rag.ingest.payload import point_payload
-    from mainframe_rag.ingest.run_ingest import _extract_page_texts
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+    from mainframe_rag.ingest.qdrant_io import upsert_chunks
 
-    path = request.getfixturevalue(fixture)
-    parsed = parse_pdf(path)
-    with pymupdf.open(path) as doc:
-        texts, labels = _extract_page_texts(doc)
-    chunks = make_chunks(parsed, strip_chrome(texts), labels)
+    toc = [[1, "Widget guide", 1], [2, "Long procedure", 2], [2, "Messages", 5],
+           [3, "WID101E", 5], [3, "WID102E", 5], [3, "WID103E", 5], [3, "WID104E", 6]]
+    pages = ["Overview of the widget guide.", "Long procedure\n\n" + _procedure_page(1),
+             _procedure_page(7), _procedure_page(13), "Messages\n" + _MESSAGES_PAGE,
+             "WID104E\nWIDGET OFFLINE\nExplanation: The widget is offline.\n"]
+    parsed = ParsedDoc(path=Path("widget-guide.pdf"), sha256="7" * 64, doc_id="widget-guide",
+                       title="Widget Guide", product="Widget", version="1.0", vendor="Example",
+                       toc=toc, page_count=len(pages))
+    chunks = make_chunks(parsed, pages, [str(n) for n in range(1, len(pages) + 1)])
+    settings = Settings(qdrant_collection="expand", dense_dim=2, _env_file=None)
+    client = QdrantClient(":memory:")
+    client.create_collection(
+        "expand", vectors_config={"dense": models.VectorParams(size=2, distance=models.Distance.COSINE)},
+        sparse_vectors_config={"bm25": models.SparseVectorParams()})
+    upsert_chunks(client, settings, parsed, chunks, [([1.0, 0.0], ([1], [1.0])) for _ in chunks])
+    yield chunks, client
+    client.close()
+
+
+async def _expand_stored(stored_manual, position: int, **overrides):
+    from mainframe_rag.ports import AsyncReaderAdapter
+
+    chunks, client = stored_manual
+    [record] = client.retrieve("expand", ids=[chunks[position].chunk_id], with_payload=True)
+    hit = hit_from_payload(str(record.id), record.payload, 0.5)
+    deps = AnswerCoreDeps(
+        settings=_settings(qdrant_collection="expand", **overrides),
+        llm=ModelAdapter(_AnswerLLM()), retrieve=_Search([hit]),
+        neighbours=AsyncReaderAdapter(client))
+    root = _root()
+    found = await retrieve_for_answer(
+        SearchPlan("literal", PLAIN_Q), AnswerCoreInput(query=PLAIN_Q), deps, root)
+    return found.hits[1:], _expand_attributes(root)
+
+
+def _shape(chunks) -> list[tuple[str, int, int]]:
+    return [(c.heading_path.rsplit(" > ", 1)[-1], c.page_start, c.ordinal) for c in chunks]
+
+
+def test_the_generated_manual_has_the_shapes_the_order_rules_meet(stored_manual):
+    """Pins the chunker's own output for the manual: a section whose chunks
+    span pages with ordinals past 0, and one page three sections share."""
+    assert _shape(stored_manual[0]) == _MANUAL_SHAPE
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("hit,neighbours,stopped", _MANUAL_CASES)
+async def test_stored_points_of_the_real_chunker_expand_in_the_chunkers_order(
+    stored_manual, hit, neighbours, stopped
+):
+    """The neighbours of a hit, by (section, page, ordinal) as the chunker
+    assigned them, read back from a real store."""
+    chunks = stored_manual[0]
+    found, attributes = await _expand_stored(stored_manual, _MANUAL_SHAPE.index(hit))
+    by_id = dict(zip([c.chunk_id for c in chunks], _MANUAL_SHAPE, strict=True))
+    assert [by_id[h.chunk_id] for h in found] == neighbours
+    assert attributes["rag.expand_stopped"] == stopped
+
+
+@pytest.mark.anyio
+async def test_recovered_order_never_disagrees_with_the_chunkers_own_order(stored_manual):
+    """One property over the whole manual: whichever chunk is the hit, the
+    hit and the neighbours the stage returns are one unbroken run of the
+    chunker's output order, listed in that order."""
+    chunks = stored_manual[0]
     order = [chunk.chunk_id for chunk in chunks]
-    payloads = {chunk.chunk_id: point_payload(parsed, chunk, "rules") for chunk in chunks}
     wrong, found = [], 0
-    for position, chunk_id in enumerate(order):
-        hit = hit_from_payload(chunk_id, payloads[chunk_id], 0.5)
-        deps = AnswerCoreDeps(
-            settings=_settings(answer_expand_per_hit=2), llm=ModelAdapter(_AnswerLLM()),
-            retrieve=_Search([hit]), neighbours=StoredChunksFake(payloads))
-        result = await retrieve_for_answer(
-            SearchPlan("literal", PLAIN_Q), AnswerCoreInput(query=PLAIN_Q), deps)
-        placed = [order.index(h.chunk_id) for h in result.hits[1:]]
+    for position in range(len(order)):
+        neighbours, _ = await _expand_stored(stored_manual, position, answer_expand_per_hit=8)
+        placed = [order.index(h.chunk_id) for h in neighbours]
         found += len(placed)
         run = sorted([position, *placed])
         if placed != sorted(placed) or run != list(range(run[0], run[0] + len(run))):
             wrong.append(position)
-    assert len(order) > 1 and wrong == []
-    assert found > 0
+    assert wrong == []
+    assert found == _MANUAL_NEIGHBOURS_FOUND
