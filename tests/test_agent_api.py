@@ -224,6 +224,123 @@ def test_candidate_selection_widens_answer_retrievals_only(
     assert sorted(limits) == sorted(asked)
 
 
+_HIT_KEYS = ["chunk_id", "score", "cite", "heading", "text", "doc_id", "title", "page_label",
+             "chunk_type", "message_ids", "product", "version", "rerank_score", "units",
+             "page_start", "page_end"]
+_EXPAND_Q = "How do I restart the widget service?"
+_EXPAND_CHAT = {"messages": [{"role": "user", "content": _EXPAND_Q}]}
+_EXPAND_FOLLOW_UP = {"messages": [
+    {"role": "user", "content": _SELECT_OPENER}, {"role": "assistant", "content": "Earlier."},
+    {"role": "user", "content": _SELECT_FOLLOW_UP}]}
+
+
+def _answer_final(resp) -> dict:
+    return next(payload for name, payload in _parse_sse_events(resp.text) if name == "final")
+
+
+def _chat_final(resp) -> dict:
+    from tests.helpers_agent_local import chat_frames
+
+    return next(choice for frame in chat_frames(resp.text)
+                for choice in frame["choices"] if "hits" in choice)
+
+
+_EXPAND_ROUTES = [
+    pytest.param("/v1/answer", {"query": _EXPAND_Q, "stream": True}, _answer_final,
+                 id="answer-stream"),
+    pytest.param("/v1/chat", _EXPAND_CHAT, lambda resp: resp.json(), id="chat"),
+    pytest.param("/v1/chat", {**_EXPAND_CHAT, "stream": True}, _chat_final, id="chat-stream"),
+    pytest.param("/v1/chat", _EXPAND_FOLLOW_UP, lambda resp: resp.json(),
+                 id="chat-anchored-follow-up"),
+]
+
+
+class _NoStoredReads:
+    """The published Qdrant client of a turn that must not read stored points."""
+
+    async def retrieve(self, *args, **kwargs):
+        raise AssertionError("stored points read with neighbour expansion off")
+
+    scroll = retrieve
+
+
+@pytest.mark.parametrize("path,payload,final", _EXPAND_ROUTES)
+@pytest.mark.parametrize("select", ["false", "true"])
+def test_neighbour_expansion_off_keeps_every_answer_hit_as_retrieved(
+    monkeypatch, servable_representation_gate, path, payload, final, select
+):
+    """Issue #1314: with ANSWER_EXPAND_ENABLED off (the default) no stored
+    point is read and every response hit is the retrieved hit, key for key
+    (no parent-id key), on /v1/answer and /v1/chat, first turn and anchored
+    follow-up, with candidate selection on or off."""
+    from tests.test_answer_expand import Corpus
+
+    corpus = Corpus().add([("A", [(3, 3)] * 3)])
+    retrieved = corpus.hit("A#1")
+
+    def search(*_args, **_kwargs):
+        return [retrieved], "nl", {"embed_ms": 1, "qdrant_ms": 2}
+
+    with agent_client(monkeypatch, llm=FakeLLM(), search=search,
+                      env={"ANSWER_SELECT_ENABLED": select}) as c:
+        monkeypatch.setattr(app_mod, "qdrant", _NoStoredReads())
+        resp = c.post(path, json=payload)
+    assert resp.status_code == 200
+    body = final(resp)
+    assert body["hits"] == [json.loads(retrieved.model_dump_json())]
+    assert [list(hit) for hit in body["hits"]] == [_HIT_KEYS]
+    assert [item["text"] for item in body["supplied_evidence"]] == ["A#1"]
+
+
+@pytest.mark.parametrize("path,payload,final", _EXPAND_ROUTES)
+def test_neighbour_expansion_on_ships_neighbours_as_their_own_hits(
+    monkeypatch, servable_representation_gate, path, payload, final
+):
+    """Issue #1314: on, the response hits are the retrieved hit (unchanged,
+    first) and then its neighbours, each with its own id and text and the
+    parent's id and score, on the stream finals and the buffered chat body
+    alike; the supplied evidence carries them under the next labels."""
+    from mainframe_rag.eval.capture import evidence_capture
+    from tests.fakes import StoredChunksFake
+    from tests.test_answer_expand import Corpus
+
+    # Every chunk carries the identifier the follow-up's antecedent names, so
+    # the identifier rule (tests/test_answer_expand.py) packs both neighbours.
+    corpus = Corpus().add([("A", [(3, 3)] * 3)],
+                          scope={f"A#{n}": {"message_ids": ["IEA500I"]} for n in range(3)})
+    retrieved = corpus.hit("A#1").model_copy(update={"rerank_score": 0.75})
+    stored = StoredChunksFake(corpus.payloads)
+
+    def search(*_args, **_kwargs):
+        return [retrieved], "nl", {"embed_ms": 1, "qdrant_ms": 2}
+
+    with agent_client(monkeypatch, llm=FakeLLM(), search=search,
+                      env={"ANSWER_EXPAND_ENABLED": "true"}) as c:
+        monkeypatch.setattr(app_mod, "qdrant", stored)
+        resp = c.post(path, json=payload)
+        collection = app_mod.settings.qdrant_collection
+    assert resp.status_code == 200
+    body = final(resp)
+    parent, *neighbours = body["hits"]
+    assert parent == json.loads(retrieved.model_dump_json()) and list(parent) == _HIT_KEYS
+    assert [list(hit) for hit in neighbours] == [[*_HIT_KEYS, "neighbour_of"]] * 2
+    assert [(hit["chunk_id"], hit["text"], hit["neighbour_of"], hit["score"]) for hit in neighbours] == [
+        (corpus.ids["A#0"], "A#0", retrieved.chunk_id, 0.5),
+        (corpus.ids["A#2"], "A#2", retrieved.chunk_id, 0.5),
+    ]
+    assert [(item["index"], item["text"]) for item in body["supplied_evidence"]] == [
+        (1, "A#1"), (2, "A#0"), (3, "A#2")]
+    assert body["evidence_omitted"] == 0
+    # The eval's capture of this final (eval/capture.py): every hit and every
+    # supplied excerpt projects, neighbours under their own chunk ids.
+    captured = evidence_capture(body)
+    assert [(hit["chunk_id"], hit["score"], hit["rerank_score"]) for hit in captured["final_hits"]] == [
+        (retrieved.chunk_id, 0.5, 0.75), (corpus.ids["A#0"], 0.5, None), (corpus.ids["A#2"], 0.5, None)]
+    assert [item["index"] for item in captured["supplied_evidence_meta"]] == [1, 2, 3]
+    assert {call["collection"] for call in stored.calls} == {collection}
+    assert [call["op"] for call in stored.calls] == ["retrieve", "scroll"]
+
+
 def test_answer_surfaces_inferred_citation_provenance(client, monkeypatch):
     """Issue #269: bracket-only cites stay validated but are flagged, so no
     client or eval has to guess the provenance."""

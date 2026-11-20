@@ -245,8 +245,23 @@ def _parse_unit_spans(raw: object) -> tuple[tuple[int, int, str], ...] | None:
     return tuple(spans)
 
 
+class NeighbourHit(SearchHit):
+    """A stored chunk next to a retrieved hit in reading order (issue #1314,
+    answer path only): its own chunk id, cite, text and units, the parent
+    hit's `score` (it was never ranked) and the parent's chunk id. A
+    retrieved hit is a plain `SearchHit` and carries no such key."""
+
+    neighbour_of: str
+
+
 def _to_hit(point: models.ScoredPoint, score: float) -> SearchHit:
-    payload = point.payload or {}
+    return hit_from_payload(str(point.id), point.payload or {}, score)
+
+
+def hit_from_payload(chunk_id: str, payload: dict[str, Any], score: float) -> SearchHit:
+    """The one stored-payload-to-hit conversion: retrieval's ranked points
+    and the answer path's neighbour chunks (issue #1314) both come through
+    here, so a chunk reads the same however it was found."""
     doc_id = str(payload.get("doc_id") or "")
     # Served fields are bounded, single-line display text (issue #998); the
     # cite additionally drops foreign doc numbers and page designations.
@@ -259,7 +274,7 @@ def _to_hit(point: models.ScoredPoint, score: float) -> SearchHit:
         # Legacy point (no page_end) or malformed span: single page.
         page_end = page_start
     return SearchHit(
-        chunk_id=str(point.id),
+        chunk_id=chunk_id,
         score=score,
         cite=format_citation(doc_id, title, heading, page_label, page_start, page_end),
         heading=heading,

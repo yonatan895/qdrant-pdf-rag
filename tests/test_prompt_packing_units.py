@@ -1062,6 +1062,67 @@ def test_depth_16_trims_the_tail_when_the_server_counts_denser(chat):
     assert prepared.evidence.omitted_indices == tuple(range(len(kept) + 1, 17))
 
 
+def _with_neighbours(hits: list[SearchHit], count: int, chars: int) -> list[SearchHit]:
+    """'hits' then 'count' neighbour hits, as the expansion stage appends them."""
+    from mainframe_rag.retrieve.query import NeighbourHit
+
+    extra = _depth_hits(len(hits) + count, 5, chars)[len(hits):]
+    return hits + [NeighbourHit(**hit.model_dump(), neighbour_of=hits[n % len(hits)].chunk_id)
+                   for n, hit in enumerate(extra)]
+
+
+@pytest.mark.parametrize(("expand", "hit_limit", "offered", "kept_whole"), [
+    (False, 16, 20, 12), (True, 16, 20, 15), (True, 16, 10, 10), (False, 16, 10, 10),
+    (True, 8, 6, 6), (True, 8, 20, 15),
+])
+def test_the_projection_total_follows_the_offered_count_with_expansion_on(
+    expand, hit_limit, offered, kept_whole
+):
+    """Issue #1314: with neighbour expansion on, the supplied-evidence total
+    is sized from the hits offered to packing when they exceed
+    answer_hit_limit (20 offered: 120,000 characters keep fifteen
+    8,000-character excerpts whole), and never from fewer than
+    answer_hit_limit. Off, it is max(48000, 6000 x answer_hit_limit) whatever
+    is offered (96,000 keeps twelve)."""
+    from mainframe_rag.agent.answer import SUPPLIED_EXCERPT_MAX_CHARS
+    from mainframe_rag.config import Settings
+
+    settings = Settings(**settings_kw(answer_hit_limit=hit_limit, answer_expand_enabled=expand,
+                                      llm_max_model_len=262144))
+    hits = _with_neighbours(_depth_hits(4, 5, SUPPLIED_EXCERPT_MAX_CHARS), offered - 4,
+                            SUPPLIED_EXCERPT_MAX_CHARS)
+    prepared = build_messages("What does the operator do?", hits, tokenizer=FallbackTokenizer(),
+                              settings=settings, max_chunk_chars=SUPPLIED_EXCERPT_MAX_CHARS)
+    supplied = prepared.supplied
+    assert [s.index for s in supplied] == list(range(1, offered + 1))
+    assert [not s.text_clipped for s in supplied] == [n < kept_whole for n in range(offered)]
+
+
+@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
+@pytest.mark.parametrize("question", ["What does the operator do?", "What does IEA500I mean?"])
+@pytest.mark.parametrize("chat", [False, True])
+def test_a_window_trim_removes_neighbours_before_any_retrieved_hit(chat, question, order):
+    """Issue #1314: neighbours are the tail of the list and the tail is cut
+    first. When the served tokenizer prices 16 hits and 16 neighbours above
+    the window, every retrieved hit keeps its label 1..16 and only
+    neighbours (labels past 16) are dropped, in either prompt order and on
+    an identifier question."""
+    from mainframe_rag.config import Settings
+
+    settings = Settings(**settings_kw(llm_max_model_len=49152, answer_expand_enabled=True))
+    chunk = settings.prompt_max_chunk_chars
+    hits = _with_neighbours(_depth_hits(16, settings.retrieve_max_chunks_per_doc, chunk), 16, chunk)
+    kwargs = {"max_chunk_chars": chunk, "tokenizer": _DenseTokenizer(), "settings": settings,
+              "order": order}
+    prepared = (build_chat_messages([ChatMessage(role="user", content=question)], hits, **kwargs)
+                if chat else build_messages(question, hits, **kwargs))
+    kept = [e.prompt_index for e in prepared.evidence.entries]
+    assert prepared.budget_verified is True
+    assert kept == list(range(1, len(kept) + 1)) and 16 <= len(kept) < 32
+    assert [e.chunk_id for e in prepared.evidence.entries[:16]] == [h.chunk_id for h in hits[:16]]
+    assert prepared.evidence.omitted_indices == tuple(range(len(kept) + 1, 33))
+
+
 def test_projection_text_is_clipped_and_flagged_at_wire_bound():
     from mainframe_rag.agent.answer import SUPPLIED_EXCERPT_MAX_CHARS
 
