@@ -1546,6 +1546,97 @@ scratch checkout and compare only the holdout sha with its pin.
   the frozen holdout receives it only in an adjudicated re-freeze, so dev
   acceptance and holdout acceptance stay separate rulers.
 
+### 7.1 Generated gold candidates (#1317)
+
+`python -m mainframe_rag.eval.gold_candidates --out PATH --count N --seed S
+--model-label LABEL [--collection NAME] [--classes a,b]` samples stored points
+of one collection through the read-only Qdrant port, has the reasoning model
+write one question per sampled passage, filters the result and writes
+**candidate** rows with chunk-level gold. It reads no golden set, holdout or
+release set and writes no baseline.
+
+- **Candidates, not an eval set.** Every row carries `status: "candidate"`, an
+  empty `reviewers` list and null `reviewed_by`/`reviewed_at`. A row needs human
+  adjudication before it enters any eval set (#806); model-written gold is
+  never reported as expert gold. No spot-check rate is defined yet (#1317,
+  maintainer decision); until then no candidate file is an input to a
+  baseline, a gate, a tuning sweep or an A/B.
+- **Candidates are unreadable as gold.** Every golden reader refuses a file
+  holding any row whose `status` is `"candidate"`, by content and whatever
+  the file is called, with one fixed message and no row text:
+  `parse_golden_text` (a `SystemExit`, before any row is validated) and the
+  byte readers behind `load_golden`, `load_golden_records`,
+  `load_golden_records_with_identity`, `read_golden_text` and
+  `read_dev_only_bytes` (a `DatasetError`, so every `--golden`,
+  `--subset`, `--repeats`, `--sessions` and `--update-baseline` entry
+  point exits 2 before it scores or writes). `verify_golden`, which reads
+  its files itself, reports the same message as a FAIL for the file, verifies
+  none of its rows and exits 1. This is the whole state today: there is no accepted
+  status and no adjudication workflow, so no generated row can enter an eval
+  set through these tools. The refusal reads the status field; it is not
+  itself an adjudication record, and what replaces `"candidate"` after human
+  review is a maintainer decision (#1317, PR 2/3).
+- **Privacy.** Questions derive from manual text. The output is refused (exit
+  2, one fixed message, before any Qdrant or model call) when it or its parent
+  resolves inside any git work tree, has a name that is or starts with
+  `holdout.jsonl` or `release_set.jsonl` in any case (`HOLDOUT.jsonl`,
+  `holdout.jsonl.bak`), already exists, or its directory is missing or not
+  writable; files are created with mode 0600.
+  Stdout, logs and the manifest carry ids, counts and hashes only. The
+  real-corpus collection needs `VENUE=rc`, by name and through an alias.
+- **Row.** The `GoldenEntry` fields (`id`, `query`, `expected_doc_ids`,
+  `expected_heading` and `expected_page` as a search hit exposes them,
+  `query_class`, `source: "generated"`) plus `gold_chunk_ids` (the source
+  chunk first, then the other chunks with the same source revision and heading
+  path in id order, at most `MAX_SECTION_SIBLINGS` = 64 of them),
+  `section_chunk_count` (the size of that section) and
+  `gold_chunk_ids_truncated` (true when the section is larger than the list:
+  such a row's gold is incomplete at section level), `chunk_type`, `physical_page` (1-based), `lexical_overlap` (share of
+  the question's non-stopword tokens found in the passage) and `provenance`
+  (`text_sha256` of the stored text, both prompt sha256s, the model label, the
+  seed). Report any result by overlap band: a question written from its
+  passage favours the lexical leg.
+- **Sampling.** Identity fields are scrolled without text; documents are
+  drawn in turn, then chunk types inside a document; each point gets the
+  eligible target class with the fewest rows so far (`diagnostic` any point,
+  `syntax` and `table` their chunk type, `message_id` a point with message
+  ids). Text is fetched for the sampled ids only. The seed fixes the sample;
+  the model is called at temperature 0. The draw is a round-robin per
+  document, not proportional to size: each turn gives every document that
+  still has eligible chunks one sample, so a 3,000-chunk document gets the
+  same share as a one-chunk document, and with more documents than `--count`
+  some documents get none. A requested class with no eligible chunk in the
+  collection is refused (exit 2, one fixed message) after the identity scan
+  and before any text fetch or model call.
+- **Model input.** The passage and the question are framed by
+  `<passage>`/`<question>` tags. Any such tag inside the stored text or the
+  generated question (any case, inner whitespace) has its opening bracket
+  escaped before the call, so data cannot close its block or open another;
+  `text_sha256` stays over the stored text. Only a reply that is exactly
+  `YES` after trimming whitespace, in any case, counts as answerable; every
+  other reply is a no.
+- **Filters**, in order, one drop code per row: `text_unavailable`,
+  `model_error`, `malformed_question` (not exactly one line), `too_short`,
+  `too_long`, `heading_copy` (a heading element of three or more words
+  verbatim), `identifier_only` (an identifier and fewer than two content
+  words, unless the class is `message_id`), `duplicate`, then the second model
+  pass: `not_answerable`.
+- **Manifest** (`PATH.manifest.json`): alias and resolved collection, the
+  stored `rules_v` (a collection mixing versions is refused), seed, model
+  label, classes, `max_section_siblings`, prompt sha256s, the hash rule,
+  `rows_sha256`, and counts scanned, sampled, kept, `gold_truncated` (kept
+  rows with a truncated gold list), dropped per code (sampled = kept +
+  dropped) and per class `requested` (the even share of `--count`, the
+  remainder to the classes named first), `eligible` (scanned points that can
+  carry the class), `sampled` and `kept`. Exit 0 with at least one row kept;
+  1 with none, and then no file is written (the counts are on stdout), so the
+  same path serves the next run; 2 on a refusal.
+
+Planned in #1317, not built: the retrieval eval and replay attribution reading `gold_chunk_ids` (PR
+2), and the qualification any eval set built from adjudicated candidates must
+pass before an A/B uses it (PR 2/3): measurable headroom at the default cut,
+and reproducing a known direction such as `rrf_k` 2 against 60.
+
 <a id="benchmarks"></a>
 ## 8. Benchmarks (`benchmark.py`, `loadtest.py`)
 
