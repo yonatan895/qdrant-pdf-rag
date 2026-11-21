@@ -61,7 +61,7 @@
       ]
     },
     "vault": {
-      "_comment": "F6 (GH#1207 Rev 2 D3): optional Vault signing endpoint. Never on bastion/dev/runner/manager allow-lists; when VAULT_CIDRS is provided, isolation_proof.py runs the negative probe proving the bastion cannot reach Vault.",
+      "_comment": "F6 (GH#1207 Rev 2 D3): optional Vault signing endpoint. Never on bastion/dev/runner/manager allow-lists; when VAULT_CIDRS is provided, isolation_proof.py runs the negative probe proving no workspace role reaches Vault. Only an absent VAULT_CIDRS skips the class, and the record lists it under optional_classes_unset; a present but blank or empty value is refused, and a class a role's allow-list names is required.",
       "optional": true,
       "peers_parameter": "VAULT_CIDRS",
       "peer_kind": "ipBlock",

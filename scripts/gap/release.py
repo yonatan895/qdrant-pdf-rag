@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gap release pipeline Increment 1: classify, pack, assemble, verify, rehearse-check
+"""Gap release pipeline Increment 1: classify, pack, assemble, verify, rehearse-check, render-role
 (GH#1207 Rev 2 D1–D12, ADR-0009 §5).
 
 Trust path with zero replaced layers (Increment 1):
@@ -20,9 +20,11 @@ Trust path with zero replaced layers (Increment 1):
     content identity (single ``HEAD`` ref, no unreachable objects, exact ``gap_tree``),
     base upstream bundle verification, allow-list & ledger proof, and per-member
     reproduction/equality checks.
-  - ``rehearse-check``: enforce D6 rehearsal-namespace guards (separate namespace from
-    installed release, no changed fixed-tag third-party image on a shared registry path,
-    empty rehearsal namespace).
+  - ``rehearse-check``: enforce D6 rehearsal-namespace guards on the target the deploy
+    resolves from the rehearsal workspace (separate namespace from the installed release,
+    no changed fixed-tag third-party image on a shared registry path, empty namespace).
+  - ``render-role``: render an F6 workspace template with ``oc process --local``, refusing
+    any NetworkPolicy egress rule without peers.
 
 Signing NEVER runs in this tool or in the bastion (use ``scripts/gap/sign_vault.py``
 on the workstation or in the ephemeral F9 ``sign`` pod).
@@ -1557,32 +1559,168 @@ def cmd_verify(
         }
 
 
+# The deploy's own target resolution (Rev 2 §3h, D6; #1336 B1). Sourced in a
+# subshell with $0 inside the workspace, so common.sh cds to that workspace and
+# reads its airgap.env (or AIRGAP_ENV) with the same precedence and defaults as
+# deploy.sh: process environment over the env file, then resolve_aliases, then
+# deploy.sh's KC=${KC:-$(kc)}. NAMESPACE is captured before resolve_aliases too,
+# so an unset value is refused instead of becoming deploy's mainframe-rag
+# default. Fields are NUL-separated: values round-trip byte for byte.
+_RESOLVE_DEPLOY_TARGET_SH = r"""
+. "$1"
+_mfr_raw_namespace=${NAMESPACE:-}
+resolve_aliases
+KC=${KC:-$(kc)}
+_mfr_context=$($KC config current-context 2>/dev/null) || _mfr_context=""
+printf 'raw_namespace=%s\0namespace=%s\0registry=%s\0qdrant_release=%s\0kc=%s\0context=%s\0' \
+    "$_mfr_raw_namespace" "$NAMESPACE" "$INTERNAL_REGISTRY" "$QDRANT_RELEASE" "$KC" "$_mfr_context"
+"""
+# deploy.sh installs the application chart under this literal release name.
+APP_RELEASE = "mainframe-rag"
+# What the emptiness check lists in the rehearsal namespace (Helm release
+# records are Secrets labelled owner=helm).
+_REHEARSAL_KINDS: tuple[str, ...] = (
+    "deployments.apps", "statefulsets.apps", "jobs.batch", "pods", "pvc", "secrets",
+)
+
+
+@dataclass(frozen=True)
+class DeployTarget:
+    """Where scripts/airgap/deploy.sh run from one workspace would deploy."""
+
+    workspace: Path
+    raw_namespace: str
+    namespace: str
+    registry: str
+    qdrant_release: str
+    kc: str
+    context: str
+
+
+def resolve_deploy_target(workspace: Path, role: str, env: Mapping[str, str]) -> DeployTarget:
+    """Resolve a workspace's deploy target with that workspace's own common.sh."""
+    common = workspace / "scripts" / "airgap" / "common.sh"
+    if not common.is_file():
+        raise ReleaseStop(f"rehearsal refused: the {role} workspace is not a release workspace "
+                          "(no scripts/airgap/common.sh)")
+    try:
+        proc = subprocess.run(
+            ["sh", "-c", _RESOLVE_DEPLOY_TARGET_SH,
+             str(workspace / "scripts" / "airgap" / "rehearse-check"), str(common)],
+            env=dict(env), stdout=subprocess.PIPE, check=False, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ReleaseStop(f"rehearsal refused: cannot resolve the deploy target of the {role} "
+                          "workspace") from exc
+    fields: dict[str, str] = {}
+    try:
+        for chunk in proc.stdout.decode("utf-8").split("\0")[:-1]:
+            key, sep, value = chunk.partition("=")
+            if sep:
+                fields[key] = value
+    except UnicodeDecodeError:
+        fields = {}
+    names = ("raw_namespace", "namespace", "registry", "qdrant_release", "kc", "context")
+    if proc.returncode != 0 or set(fields) != set(names):
+        raise ReleaseStop(f"rehearsal refused: cannot resolve the deploy target of the {role} "
+                          "workspace (FAIL line above, if any)")
+    return DeployTarget(
+        workspace=workspace,
+        raw_namespace=fields["raw_namespace"],
+        namespace=fields["namespace"],
+        registry=fields["registry"],
+        qdrant_release=fields["qdrant_release"],
+        kc=fields["kc"],
+        context=fields["context"],
+    )
+
+
+def _registry_identity(registry: str) -> str:
+    """One spelling per registry path: lowercase, no port, no trailing slash.
+    Dropping the port errs towards "shared" (a refusal), never towards "separate"."""
+    host, _, path = registry.strip().lower().rstrip("/").partition("/")
+    return host.partition(":")[0] + "/" + path
+
+
+def _object_names(data: object, kind: str) -> list[str]:
+    """Names in a Kubernetes List; anything else is refused with a fixed message."""
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        raise ReleaseStop(f"rehearsal refused: the {kind} listing is not a Kubernetes List")
+    names = []
+    for item in items:
+        meta = item.get("metadata") if isinstance(item, dict) else None
+        if not isinstance(meta, dict):
+            raise ReleaseStop(f"rehearsal refused: the {kind} listing holds a malformed object")
+        names.append(f"{item.get('kind') or kind}/{meta.get('name', '')}")
+    return names
+
+
 def cmd_rehearse_check(
     *,
+    rehearsal_workspace: Path,
+    installed_workspace: Path,
     rehearsal_namespace: str,
     prod_namespace: str,
     rehearsal_registry: str,
     prod_registry: str,
+    kube_context: str,
     candidate_manifest: Path,
     installed_manifest: Path,
     namespace_objects_json: Path | None = None,
-    kubectl_cmd: str | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
-    """Enforce Rev 2 §3h / D6 rehearsal-namespace preflight refusals:
-    1. Rehearsal namespace must differ from the installed/production namespace.
-    2. If any fixed-tag third-party image digest differs from the installed release,
-       the rehearsal must use a separate registry path.
-    3. Target rehearsal namespace must be empty of existing workloads/PVCs/Helm releases.
+    """Rev 2 §3h / D6 preflight on the target the deploy will actually use.
+
+    Both workspaces are resolved by their own scripts/airgap/common.sh under this
+    process environment (see _RESOLVE_DEPLOY_TARGET_SH); the operator's typed
+    values only have to agree with that. Refused: an unresolvable workspace; an
+    unset NAMESPACE or INTERNAL_REGISTRY; no current kube context; a KC that is not
+    one command; a HELM_KUBECONTEXT other than the context; any typed value that
+    differs from its effective value; the installed workspace itself; the installed
+    release's namespace; a changed fixed-tag third-party image on the installed
+    registry path; a namespace that is not empty, as the deploy's own KC lists it.
     """
-    reh_ns = rehearsal_namespace.strip()
-    prod_ns = prod_namespace.strip()
-    if not reh_ns or not prod_ns:
-        raise ReleaseStop("rehearsal and production namespaces must both be non-empty")
-    if reh_ns == prod_ns:
+    run_env = dict(os.environ if env is None else env)
+    try:
+        same = rehearsal_workspace.resolve() == installed_workspace.resolve()
+    except OSError as exc:
+        raise ReleaseStop("rehearsal refused: a workspace path cannot be resolved") from exc
+    if same:
+        raise ReleaseStop("rehearsal refused: the rehearsal workspace is the installed workspace")
+    reh = resolve_deploy_target(rehearsal_workspace, "rehearsal", run_env)
+    live = resolve_deploy_target(installed_workspace, "installed", run_env)
+
+    if not reh.raw_namespace.strip():
+        raise ReleaseStop("rehearsal refused: NAMESPACE is not set for the rehearsal workspace "
+                          "(deploy would fall back to its default); set it in its airgap.env")
+    if reh.namespace.strip().lower() == live.namespace.strip().lower():
         raise ReleaseStop(
-            "rehearsal refused: target rehearsal namespace equals the installed release namespace — "
-            "deploy rehearsal to a dedicated rehearsal namespace (Rev 2 D6)"
+            "rehearsal refused: the rehearsal deploy would target the installed release's "
+            "namespace; set the rehearsal namespace in the rehearsal workspace's airgap.env "
+            "and do not override NAMESPACE in the environment (Rev 2 D6)"
         )
+    if not reh.registry.strip():
+        raise ReleaseStop("rehearsal refused: INTERNAL_REGISTRY is not set for the rehearsal workspace")
+    if not reh.context.strip():
+        raise ReleaseStop("rehearsal refused: no current kube context for the rehearsal "
+                          "workspace's KC; log in first")
+    if not reh.kc or any(ch.isspace() for ch in reh.kc):
+        raise ReleaseStop("rehearsal refused: KC must name one command (no arguments)")
+    helm_context = run_env.get("HELM_KUBECONTEXT", "")
+    if helm_context and helm_context != reh.context:
+        raise ReleaseStop("rehearsal refused: HELM_KUBECONTEXT names another context than "
+                          "kubectl's; helm and kubectl would deploy to different clusters")
+    for flag, typed, effective in (
+        ("--rehearsal-namespace", rehearsal_namespace, reh.namespace),
+        ("--prod-namespace", prod_namespace, live.namespace),
+        ("--rehearsal-registry", rehearsal_registry, reh.registry),
+        ("--prod-registry", prod_registry, live.registry),
+        ("--kube-context", kube_context, reh.context),
+    ):
+        if typed != effective:
+            raise ReleaseStop(f"rehearsal refused: {flag} does not match what the deploy "
+                              "resolves from its workspace and this environment")
 
     cand_map, _ = parse_manifest(candidate_manifest.read_text(encoding="utf-8"))
     inst_map, _ = parse_manifest(installed_manifest.read_text(encoding="utf-8"))
@@ -1590,51 +1728,110 @@ def cmd_rehearse_check(
         key for key in FIXED_TAG_IMAGE_KEYS
         if cand_map.get(key) and cand_map.get(key) != inst_map.get(key)
     ]
-    if changed_fixed_tags and rehearsal_registry.strip().rstrip("/") == prod_registry.strip().rstrip("/"):
+    if changed_fixed_tags and _registry_identity(reh.registry) == _registry_identity(live.registry):
         raise ReleaseStop(
             "rehearsal refused: candidate changes a fixed-tag third-party image while sharing "
             "INTERNAL_REGISTRY with the installed release — use a separate rehearsal registry path"
         )
 
-    # Check target rehearsal namespace is empty.
     existing: list[str] = []
     if namespace_objects_json is not None:
-        data = json.loads(namespace_objects_json.read_text(encoding="utf-8"))
-        items = data.get("items") if isinstance(data, dict) else data
-        if not isinstance(items, list):
-            raise ReleaseStop("namespace objects JSON is malformed")
-        for item in items:
-            if isinstance(item, dict):
-                kind = str(item.get("kind", "Object"))
-                name = str((item.get("metadata") or {}).get("name", ""))
-                existing.append(f"{kind}/{name}")
-    elif kubectl_cmd is not None:
-        for kind in ("deployments.apps", "statefulsets.apps", "jobs.batch", "pods", "pvc", "secrets"):
-            args = [kubectl_cmd, "-n", reh_ns, "get", kind, "-o", "json"]
+        try:
+            data = json.loads(namespace_objects_json.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ReleaseStop("rehearsal refused: the namespace objects file is unreadable") from exc
+        existing = _object_names(data, "namespace objects")
+    else:
+        for kind in _REHEARSAL_KINDS:
+            args = [reh.kc, "-n", reh.namespace, "get", kind, "-o", "json"]
             if kind == "secrets":
                 args.extend(["-l", "owner=helm"])
-            proc = subprocess.run(args, capture_output=True, text=True, check=False, timeout=30)
+            try:
+                proc = subprocess.run(args, cwd=reh.workspace, env=run_env, capture_output=True,
+                                      text=True, check=False, timeout=30)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise ReleaseStop(f"rehearsal refused: cannot run KC to inspect {kind}") from exc
             if proc.returncode != 0:
-                raise ReleaseStop(f"rehearsal refused: cannot inspect {kind} in namespace {reh_ns}")
-            parsed = json.loads(proc.stdout or "{}")
-            for item in parsed.get("items") or []:
-                name = str((item.get("metadata") or {}).get("name", ""))
-                existing.append(f"{kind}/{name}")
-    else:
-        raise ReleaseStop("rehearse-check requires --namespace-objects-json or --kubectl")
+                raise ReleaseStop(f"rehearsal refused: cannot inspect {kind} in namespace {reh.namespace}")
+            try:
+                data = json.loads(proc.stdout)
+            except json.JSONDecodeError as exc:
+                raise ReleaseStop(f"rehearsal refused: the {kind} listing is not JSON") from exc
+            existing.extend(_object_names(data, kind))
 
     if existing:
         raise ReleaseStop(
-            f"rehearsal refused: target namespace {reh_ns} is not empty ({len(existing)} existing object(s)) — "
+            f"rehearsal refused: target namespace {reh.namespace} is not empty ({len(existing)} existing object(s)) — "
             "run the rehearsal teardown procedure first"
         )
 
-    print(f"REHEARSE READY namespace={reh_ns} registry={rehearsal_registry}")
+    print(f"REHEARSE READY namespace={reh.namespace} registry={reh.registry} context={reh.context} "
+          f"qdrant_release={reh.qdrant_release} app_release={APP_RELEASE}")
     return {
-        "rehearsal_namespace": reh_ns,
-        "prod_namespace": prod_ns,
+        "rehearsal_namespace": reh.namespace,
+        "prod_namespace": live.namespace,
+        "registry": reh.registry,
+        "context": reh.context,
+        "qdrant_release": reh.qdrant_release,
         "changed_fixed_tags": changed_fixed_tags,
     }
+
+
+# Workspace templates the operator renders by hand (F6): `render-role` runs
+# `oc process --local` and refuses to print a NetworkPolicy egress rule that
+# allows every destination. A JSON peer parameter such as `VAULT_CIDRS=[]`
+# renders `to: []`, which NetworkPolicy reads as "all destinations" (#1336 P4).
+RENDER_ROLE_TEMPLATES: tuple[str, ...] = ("sign", "sign-vault", "rehearsal-egress")
+
+
+def check_rendered_egress(rendered: object) -> list[dict[str, object]]:
+    """The rendered objects, or ReleaseStop when any egress rule is unbounded."""
+    items = rendered.get("items") if isinstance(rendered, dict) else None
+    if not isinstance(items, list) or not items or not all(isinstance(i, dict) for i in items):
+        raise ReleaseStop("render refused: oc process did not return a list of objects")
+    for obj in items:
+        if obj.get("kind") != "NetworkPolicy":
+            continue
+        spec = obj.get("spec")
+        rules = spec.get("egress", []) if isinstance(spec, dict) else None
+        if not isinstance(rules, list):
+            raise ReleaseStop("render refused: a NetworkPolicy has a malformed egress list")
+        for rule in rules:
+            peers = rule.get("to") if isinstance(rule, dict) else None
+            if not isinstance(peers, list) or not peers or not all(
+                isinstance(p, dict) and p for p in peers
+            ):
+                meta = obj.get("metadata")
+                name = meta.get("name", "?") if isinstance(meta, dict) else "?"
+                raise ReleaseStop(
+                    f"render refused: NetworkPolicy {name} has an egress rule with no peers, "
+                    "which allows every destination; give a non-empty list of ipBlock peers "
+                    "(for example VAULT_CIDRS or GATEWAY_CIDRS)"
+                )
+    return items
+
+
+def cmd_render_role(*, repo_root: Path, template: str, param_file: Path, oc: str) -> None:
+    if template not in RENDER_ROLE_TEMPLATES:
+        raise ReleaseStop("render refused: unknown template (expected one of "
+                          f"{', '.join(RENDER_ROLE_TEMPLATES)})")
+    path = repo_root / "deploy" / "workspace" / f"{template}.template.yaml"
+    try:
+        proc = subprocess.run(
+            [oc, "process", "--local", "-f", str(path), "--param-file", str(param_file), "-o", "json"],
+            capture_output=True, text=True, check=False, timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ReleaseStop("render refused: cannot run oc process") from exc
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        raise ReleaseStop("render refused: oc process failed (its error is above)")
+    try:
+        rendered = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise ReleaseStop("render refused: oc process did not return JSON") from exc
+    check_rendered_egress(rendered)
+    sys.stdout.write(json.dumps(rendered, indent=2) + "\n")
 
 
 def _env_path(name: str) -> Path | None:
@@ -1684,14 +1881,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                        help="directory to unpack the candidate and base into (default TMPDIR; use /work on the bastion)")
 
     p_reh = sub.add_parser("rehearse-check", help="enforce D6 rehearsal-namespace preflight refusals")
+    p_reh.add_argument("--rehearsal-workspace", type=Path, required=True,
+                       help="the rehearsal workspace the airgap: pipeline will run from")
+    p_reh.add_argument("--installed-workspace", type=Path, default=None,
+                       help="the live workspace (default: the workspace running this tool)")
     p_reh.add_argument("--rehearsal-namespace", required=True)
     p_reh.add_argument("--prod-namespace", required=True)
     p_reh.add_argument("--rehearsal-registry", required=True)
     p_reh.add_argument("--prod-registry", required=True)
+    p_reh.add_argument("--kube-context", required=True)
     p_reh.add_argument("--candidate-manifest", type=Path, required=True)
     p_reh.add_argument("--installed-manifest", type=Path, required=True)
     p_reh.add_argument("--namespace-objects-json", type=Path, default=None)
-    p_reh.add_argument("--kubectl", default=None)
+
+    p_rr = sub.add_parser("render-role", help="render an F6 workspace template, refusing allow-all egress")
+    p_rr.add_argument("--template", required=True, choices=RENDER_ROLE_TEMPLATES)
+    p_rr.add_argument("--param-file", type=Path, required=True)
+    p_rr.add_argument("--oc", default="oc")
 
     args = parser.parse_args(argv)
     try:
@@ -1747,15 +1953,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "rehearse-check":
             cmd_rehearse_check(
+                rehearsal_workspace=args.rehearsal_workspace,
+                installed_workspace=args.installed_workspace or args.repo_root,
                 rehearsal_namespace=args.rehearsal_namespace,
                 prod_namespace=args.prod_namespace,
                 rehearsal_registry=args.rehearsal_registry,
                 prod_registry=args.prod_registry,
+                kube_context=args.kube_context,
                 candidate_manifest=args.candidate_manifest,
                 installed_manifest=args.installed_manifest,
                 namespace_objects_json=args.namespace_objects_json,
-                kubectl_cmd=args.kubectl,
             )
+            return 0
+        if args.command == "render-role":
+            cmd_render_role(repo_root=args.repo_root, template=args.template,
+                            param_file=args.param_file, oc=args.oc)
             return 0
         raise ReleaseStop("unknown subcommand")
     except ReleaseStop as exc:

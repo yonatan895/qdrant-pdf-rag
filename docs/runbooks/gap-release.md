@@ -33,7 +33,9 @@ The record each release fills in is the
   `scripts/gap/release.sh`. Every command below runs from that workspace,
   so a change to these tools takes effect one release later.
 - Both anchors are plain files in `/work/anchors/` and are **exported in the
-  process environment**: `release.sh` ignores `airgap.env`.
+  process environment**: `release.sh` ignores `airgap.env`, except that
+  `rehearse-check` (step 7) reads the rehearsal and installed workspaces'
+  deploy settings the way `deploy.sh` does.
 
   ```sh
   export SNEAKERNET_TRUSTED_PUB=/work/anchors/upstream.pub
@@ -66,12 +68,16 @@ passphrase or a credential that can sign (D3).
   It must print an RSA-3072 key and its fingerprint (`PUBKEY v<n> <sha256>`).
   Add the Vault address to the isolation proof's site values (`VAULT_CIDRS`,
   `VAULT_PORT`): the proof then requires every workspace role, the bastion
-  included, to be blocked from it.
+  included, to be blocked from it. Leave the `VAULT_CIDRS` line out only when
+  the site has no Vault; the record then lists `vault` under
+  `optional_classes_unset`. A line that is present but blank or `[]` is
+  refused.
 - **Fallback, without Vault.** Generate a passphrase-encrypted RSA-3072 key
   in the zero-egress signing pod
   ([`deploy/workspace/sign.template.yaml`](../../deploy/workspace/sign.template.yaml):
   no `/work`, no Secret, no token, no egress, a memory-only
-  `/run/mfr-session`; render it with `oc process --local -f … | oc apply -f -`
+  `/run/mfr-session`; render it with
+  `sh scripts/gap/release.sh render-role --template sign --param-file <file> | oc apply -f -`
   and delete the pod afterwards), store only the encrypted
   file in the site secret store, keep the passphrase with the key holder,
   and delete the pod:
@@ -137,8 +143,12 @@ line; rerun the same command after fixing the cause.
      `http://` is accepted only to a loopback address.
    - Vault from a pod, only when the workstation cannot reach Vault:
      [`sign-vault.template.yaml`](../../deploy/workspace/sign-vault.template.yaml)
-     (egress to Vault and DNS only); pipe in the maintainer's Vault token for
-     the one call and delete the pod.
+     (egress to Vault and DNS only), rendered with
+     `release.sh render-role --template sign-vault --param-file <file> | oc apply -f -`;
+     pipe in the maintainer's Vault token for the one call and delete the pod.
+     `render-role` runs `oc process --local` and prints nothing when any
+     NetworkPolicy egress rule has no peers (`VAULT_CIDRS=[]` renders
+     `to: []`, which allows every destination).
    - Fallback, in the zero-egress signing pod: pipe in `SHA256SUMS`, the
      encrypted key and `sign_vault.py`, then run
      `python3 -I sign_vault.py key-sign --sums SHA256SUMS --key gap-release.key.enc
@@ -184,17 +194,36 @@ line; rerun the same command after fixing the cause.
    anchors and `NAMESPACE` set to the rehearsal namespace, the ordinary
    `airgap:` pipeline, then the go-live checks. Apply
    [`rehearsal-egress.template.yaml`](../../deploy/workspace/rehearsal-egress.template.yaml)
-   to the rehearsal namespace first. Before deploying, run
+   to the rehearsal namespace first
+   (`release.sh render-role --template rehearsal-egress --param-file <file> | oc apply -f -`;
+   an empty `GATEWAY_CIDRS` is refused). Before the pipeline, from the
+   installed workspace and in the shell and kube login the pipeline will use, run
 
    ```sh
-   sh scripts/gap/release.sh rehearse-check --rehearsal-namespace <ns> --prod-namespace <live ns> \
+   sh scripts/gap/release.sh rehearse-check --rehearsal-workspace <rehearsal workspace> \
+     --rehearsal-namespace <ns> --prod-namespace <live ns> \
      --rehearsal-registry <rehearsal INTERNAL_REGISTRY> --prod-registry <live INTERNAL_REGISTRY> \
-     --candidate-manifest <bundle>/MANIFEST.txt --installed-manifest <installed>/dist/MANIFEST.txt --kubectl oc
+     --kube-context <the rehearsal cluster's context name> \
+     --candidate-manifest <bundle>/MANIFEST.txt --installed-manifest dist/MANIFEST.txt
    ```
 
-   It refuses the installed release's namespace, a non-empty namespace, and
-   a changed third-party `*_digest` on a shared registry path (load pushes
-   third-party images under fixed tags). Afterwards uninstall both
+   It resolves `NAMESPACE`, `INTERNAL_REGISTRY`, `QDRANT_RELEASE` and `KC`
+   for each workspace with that workspace's own `scripts/airgap/common.sh`,
+   as `deploy.sh` does (this environment over `AIRGAP_ENV` or `airgap.env`,
+   then the deploy defaults), and the kube context from `KC config
+   current-context`. It refuses: a workspace it cannot resolve; the installed
+   workspace itself; a rehearsal `NAMESPACE` that is unset (deploy would
+   default it) or equal to the installed workspace's, ignoring case and
+   surrounding spaces; an unset `INTERNAL_REGISTRY`; no current context; a
+   `KC` with arguments; a `HELM_KUBECONTEXT` other than that context; any
+   typed value that differs from its resolved one; a changed third-party
+   `*_digest` while the two registries are the same path ignoring case, port
+   and a trailing `/` (load pushes third-party images under fixed tags); and
+   a rehearsal namespace in which the deploy's `KC` lists any Deployment,
+   StatefulSet, Job, Pod, PVC or Helm release Secret, or answers with
+   anything but a list of objects. It checks this moment only: a later
+   `NAMESPACE=…` override, login or context switch before the pipeline is
+   not covered. Afterwards uninstall both
    releases, delete the namespace's PVCs and Jobs and confirm it is empty.
 8. **Promote** only when every required row of the record is `PASS` or
    `INHERITED` and the approver signed off: bootstrap the same signed

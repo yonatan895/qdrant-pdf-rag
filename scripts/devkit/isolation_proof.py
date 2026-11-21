@@ -413,6 +413,10 @@ class Params:
         value = self._values.get(name, "").strip()
         return value or None
 
+    def present(self, name: str) -> bool:
+        """The site's parameter file names this key (even with a blank value)."""
+        return name in self._values
+
 
 def read_param_file(path: Path) -> dict[str, str]:
     try:
@@ -537,6 +541,23 @@ def _ip_block_cidrs(raw: str, parameter: str) -> tuple[str, ...]:
     return cidrs
 
 
+def optional_classes_unset(contract: Contract, params: Params) -> list[str]:
+    """Optional ipBlock classes the site leaves out of its parameter file.
+
+    Only an absent key skips a class, and the record lists it; a key that is
+    present but blank is refused as missing (#1336 P7). A class that any role's
+    allow-list names is never optional.
+    """
+    selected = {cls for role in _require(contract.raw.get("roles"), dict).values()
+                if isinstance(role, dict) for cls in role.get("egress") or []}
+    out = []
+    for name, spec in _require(contract.raw.get("egress_classes"), dict).items():
+        if (isinstance(spec, dict) and spec.get("optional") and name not in selected
+                and not params.present(str(spec.get("peers_parameter")))):
+            out.append(name)
+    return out
+
+
 def egress_classes(contract: Contract, params: Params) -> dict[str, EgressClass]:
     out: dict[str, EgressClass] = {}
     for name, spec in _require(contract.raw.get("egress_classes"), dict).items():
@@ -545,7 +566,7 @@ def egress_classes(contract: Contract, params: Params) -> dict[str, EgressClass]
         cidrs: tuple[str, ...] = ()
         if kind == "ipBlock":
             parameter = str(_require(spec.get("peers_parameter"), str))
-            if spec.get("optional") and not params.optional(parameter):
+            if name in optional_classes_unset(contract, params):
                 continue
             cidrs = _ip_block_cidrs(params.get(parameter), parameter)
         elif kind != "namespaceSelector":
@@ -1638,6 +1659,7 @@ def run_probes(kube: Kube, contract: Contract, params: Params, run_id: str,
         "targets": [{k: t[k] for k in ("id", "class", "kind", "host", "port", "retry_delay")
                      if k in t} for t in targets],
         "cidrs_not_probed": unprobed,
+        "optional_classes_unset": optional_classes_unset(contract, params),
         "control": {"namespace": contract.prod,
                     "results": {t["id"]: control[t["id"]] for t in targets},
                     "retried": sorted(retried["control"])},
