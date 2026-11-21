@@ -63,7 +63,7 @@ def _config_from_env() -> FTPConfig:
         parse_enabled_tools(raw_tools) if raw_tools else DEFAULT_ENABLED_TOOLS
     )
     ca_file = os.environ.get("MCP_FTP_CA_FILE", "").strip() or None
-    encoding = os.environ.get("MCP_FTP_ENCODING", "utf-8").strip() or "utf-8"
+    encoding = os.environ.get("MCP_FTP_ENCODING", "latin-1").strip() or "latin-1"
 
     return FTPConfig(
         host=os.environ.get("MCP_FTP_HOST", "").strip(),

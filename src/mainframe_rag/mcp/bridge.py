@@ -4,8 +4,9 @@ All approved tools speak the z/OS FTP server; nothing here opens any other
 connection. Text reads stay in TYPE A end to end (never ftplib's retrbinary,
 which switches to TYPE I), so the server translates EBCDIC on the wire; the
 received bytes are decoded with `FTPConfig.encoding` (`MCP_FTP_ENCODING`), the
-code page of the server's ASCII output (ISO8859-1 unless the site's FTP.DATA
-SBDATACONN says otherwise), not the dataset's EBCDIC page. Credentials travel only
+code page of the server's ASCII output (ISO8859-1, i.e. `latin-1`, which maps every
+byte to one character and never fails, unless the site's FTP.DATA SBDATACONN says
+otherwise, e.g. `MCP_FTP_ENCODING=utf-8`), not the dataset's EBCDIC page. Credentials travel only
 inside ftplib and never enter error strings, logs, or tool results.
 
 ADR-0012 pilot controls enforced here:
@@ -294,7 +295,7 @@ class FTPConfig:
     transport_mode: Literal["ftps", "plain"] = "ftps"
     plain_ftp_accepted: bool = False
     ca_file: str | None = None
-    encoding: str = "utf-8"  # server's TYPE A output code page (see module doc)
+    encoding: str = "latin-1"  # server's TYPE A output code page (see module doc)
     dataset_allowlist: tuple[str, ...] = ()
     enabled_tools: tuple[str, ...] = DEFAULT_ENABLED_TOOLS
     jes_jobname_prefixes: tuple[str, ...] = ()

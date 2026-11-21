@@ -2227,8 +2227,9 @@ deterministic and trap queries stay on the manuals path.
   run concurrently. Every tool output, `job_status` included, is capped at
   `MCP_FTP_MAX_BYTES` with a truncation suffix. Text reads stay in `TYPE A`
   end to end (the server translates EBCDIC); `MCP_FTP_ENCODING` is the code
-  page of the server's ASCII output (default `utf-8`; z/OS FTP usually sends
-  ISO8859-1), not the dataset's EBCDIC page. The bridge strips control/bidi characters, and
+  page of the server's ASCII output (default `latin-1`, because z/OS FTP usually sends
+  ISO8859-1 and bytes above 0x7F such as `¬` or `¢` are invalid UTF-8; set `utf-8` only if the site
+  configures UTF-8 output), not the dataset's EBCDIC page. The bridge strips control/bidi characters, and
   redacts PEM private keys (also one cut open by the byte cap), RACF/TSO/JCL password and passphrase operands
   (`PASSWORD(...)`, `PHRASE('...')`, `PW`/`PASS`/`PWD`, the `NEW*`
   forms, `KEYMASKED`/`KEYENCRYPTED`/`SESSKEY`; any case, quoted or bare,

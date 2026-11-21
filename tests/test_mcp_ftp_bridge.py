@@ -649,7 +649,8 @@ def test_d6_screening_redaction_delimiting_and_code_page() -> None:
     ).encode("utf-8")
     fake = FakeFTP()
     fake.files["'SYS1.PARMLIB'"] = raw
-    out = bridge.dataset_read(_session(fake), "SYS1.PARMLIB")
+    # Bidi/format characters only exist in UTF-8 output, so this fixture opts in.
+    out = bridge.dataset_read(_session(fake, encoding="utf-8"), "SYS1.PARMLIB")
     assert out["isError"] is False
     text = out["content"][0]["text"]
     # Control and bidi stripped, tab/newline preserved
@@ -681,6 +682,19 @@ def test_d6_screening_redaction_delimiting_and_code_page() -> None:
 
     with pytest.raises(ValueError, match="unknown encoding"):
         _config(encoding="no-such-codepage-999")
+
+
+def test_default_encoding_is_latin1_and_decodes_not_sign() -> None:
+    """Maintainer decision 2026-11-21: the default is latin-1, so 0xAC (the NOT
+    sign used in REXX/PL/I `¬=`) decodes to '¬' instead of U+FFFD, and every
+    byte decodes. A pinned utf-8 default was replaced by this decision."""
+    assert _config().encoding == "latin-1"
+    fake = FakeFTP()
+    fake.files["'SYS1.PARMLIB'"] = b"IF A \xac= B \xa2\xa7 \xe9\n"
+    out = bridge.dataset_read(_session(fake), "SYS1.PARMLIB")
+    text = out["content"][0]["text"]
+    assert "IF A \N{NOT SIGN}= B \N{CENT SIGN}\N{SECTION SIGN} \N{LATIN SMALL LETTER E WITH ACUTE}" in text
+    assert "\N{REPLACEMENT CHARACTER}" not in text
 
 
 def test_byte_cap_truncates_with_suffix() -> None:
