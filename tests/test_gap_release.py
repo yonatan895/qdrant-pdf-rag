@@ -912,3 +912,49 @@ def test_release_sh_verify_runs_from_a_verified_installed_release_only(tmp_path:
 
     _git(installed, "checkout", "--", "scripts/gap/release.py")
     assert verify().returncode == 0
+
+
+def test_rehearse_check_enforces_d6_guards(tmp_path: Path):
+    cand = tmp_path / "cand-MANIFEST.txt"
+    inst = tmp_path / "inst-MANIFEST.txt"
+    base_txt = "qdrant_digest: sha256:" + "a" * 64 + "\nopenobserve_digest: sha256:" + "b" * 64 + "\n"
+    cand.write_text(base_txt, encoding="utf-8")
+    inst.write_text(base_txt, encoding="utf-8")
+
+    empty_ns = tmp_path / "empty.json"
+    empty_ns.write_text('{"items": []}\n', encoding="utf-8")
+    nonempty_ns = tmp_path / "nonempty.json"
+    nonempty_ns.write_text('{"items": [{"kind": "Deployment", "metadata": {"name": "rag-agent"}}]}\n', encoding="utf-8")
+
+    # 1. Same namespace as prod -> refused
+    with pytest.raises(release.ReleaseStop, match="equals the installed release namespace"):
+        release.cmd_rehearse_check(
+            rehearsal_namespace="mfr-prod", prod_namespace="mfr-prod",
+            rehearsal_registry="reg/mfr", prod_registry="reg/mfr",
+            candidate_manifest=cand, installed_manifest=inst, namespace_objects_json=empty_ns,
+        )
+
+    # 2. Non-empty rehearsal namespace -> refused
+    with pytest.raises(release.ReleaseStop, match="is not empty"):
+        release.cmd_rehearse_check(
+            rehearsal_namespace="mfr-rehearsal", prod_namespace="mfr-prod",
+            rehearsal_registry="reg/mfr", prod_registry="reg/mfr",
+            candidate_manifest=cand, installed_manifest=inst, namespace_objects_json=nonempty_ns,
+        )
+
+    # 3. Changed fixed-tag third-party image on shared registry -> refused
+    cand.write_text("qdrant_digest: sha256:" + "c" * 64 + "\n", encoding="utf-8")
+    with pytest.raises(release.ReleaseStop, match="fixed-tag third-party image"):
+        release.cmd_rehearse_check(
+            rehearsal_namespace="mfr-rehearsal", prod_namespace="mfr-prod",
+            rehearsal_registry="reg/mfr", prod_registry="reg/mfr",
+            candidate_manifest=cand, installed_manifest=inst, namespace_objects_json=empty_ns,
+        )
+
+    # 4. Separate registry path + separate empty rehearsal namespace -> passes!
+    res = release.cmd_rehearse_check(
+        rehearsal_namespace="mfr-rehearsal", prod_namespace="mfr-prod",
+        rehearsal_registry="reg/mfr-rehearsal", prod_registry="reg/mfr",
+        candidate_manifest=cand, installed_manifest=inst, namespace_objects_json=empty_ns,
+    )
+    assert res["rehearsal_namespace"] == "mfr-rehearsal"

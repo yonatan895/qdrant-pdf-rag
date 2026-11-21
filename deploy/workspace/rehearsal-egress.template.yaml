@@ -1,0 +1,57 @@
+# F6 rehearsal-namespace egress isolation policy (GH#1207 Rev 2 §3h, D6).
+# Confines rehearsal workloads to their own namespace (rehearsal Qdrant, agent,
+# ingest, OpenObserve), the configured rehearsal model gateway, and openshift-dns.
+# Blocks egress to the production namespace (live Qdrant/agent) and to Vault.
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: mfr-rehearsal-egress
+  annotations:
+    description: F6 default-deny and allow-list egress policies for a dedicated gap-release rehearsal namespace (D6).
+parameters:
+  - name: REHEARSAL_NAMESPACE
+    description: Dedicated rehearsal deployment namespace (never the production or CI namespace).
+    required: true
+  - name: GATEWAY_CIDRS
+    description: JSON list of NetworkPolicy ipBlock peers for the rehearsal model gateway endpoint; never empty.
+    required: true
+  - name: GATEWAY_PORT
+    description: Rehearsal model gateway TCP port.
+    value: "443"
+objects:
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: mfr-rehearsal-default-deny-egress
+      namespace: ${REHEARSAL_NAMESPACE}
+    spec:
+      podSelector: {}
+      policyTypes: [Egress]
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: mfr-rehearsal-egress
+      namespace: ${REHEARSAL_NAMESPACE}
+    spec:
+      podSelector: {}
+      policyTypes: [Egress]
+      egress:
+        - to:
+            - podSelector: {}
+        - to: "${{GATEWAY_CIDRS}}"
+          ports:
+            - protocol: TCP
+              port: "${{GATEWAY_PORT}}"
+        - to:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: openshift-dns
+          ports:
+            - protocol: UDP
+              port: 53
+            - protocol: TCP
+              port: 53
+            - protocol: UDP
+              port: 5353
+            - protocol: TCP
+              port: 5353

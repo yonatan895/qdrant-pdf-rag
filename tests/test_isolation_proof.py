@@ -1627,3 +1627,34 @@ def test_release_policy_that_does_not_select_the_bastion_is_ignored(cluster: Clu
         "policyTypes": ["Egress"], "egress": [{}]}})
     code, record = cluster.run()
     assert (code, record["findings"]) == (2, [])
+
+
+def test_bastion_to_vault_negative_probe_blocks_and_catches_unexpected_reach(cluster: Cluster) -> None:
+    """GH#1207 Rev 2 §3b (D3): when VAULT_CIDRS is configured, the isolation proof
+    runs a negative probe proving the bastion cannot reach Vault, and flags a
+    violation if the bastion ever reaches Vault."""
+    # Unset: no Vault target is probed and the baseline record has no vault rows.
+    code, record = cluster.run("--probe")
+    assert code == 0, record["findings"]
+    assert not [t for t in record["checks"]["probes"]["targets"] if t["class"] == "vault"]
+
+    cluster.set_param("VAULT_CIDRS", '[{"ipBlock":{"cidr":"10.9.0.4/32"}}]')
+    cluster.set_param("VAULT_PORT", "8200")
+    # The negative control (an unselected pod in the production namespace) reaches
+    # Vault, so a blocked probe from every workspace role counts as proven.
+    cluster.scenario["network"]["control"]["vault"] = "connected"
+    code, record = cluster.run("--probe")
+    assert code == 0, record["findings"]
+    vault_rows = [r for r in record["checks"]["probes"]["results"] if r["class"] == "vault"]
+    assert {r["identity"] for r in vault_rows} == set(ALLOWED)
+    assert all(r["expect"] == "block" and r["verdict"] == "ok" for r in vault_rows)
+    assert [t["port"] for t in record["checks"]["probes"]["targets"] if t["class"] == "vault"] == [8200]
+
+    # The bastion reaching Vault is a violation, never a pass.
+    cluster.scenario["network"]["bastion"]["vault"] = "connected"
+    bad_code, bad_record = cluster.run("--probe")
+    assert bad_code == 1
+    assert any(
+        "bastion -> vault" in f["subject"] and f["reason"] == "unexpected-reach"
+        for f in bad_record["findings"]
+    )

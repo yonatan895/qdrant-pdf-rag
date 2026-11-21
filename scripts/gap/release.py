@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gap release pipeline Increment 1: classify, pack, assemble, verify
+"""Gap release pipeline Increment 1: classify, pack, assemble, verify, rehearse-check
 (GH#1207 Rev 2 D1–D12, ADR-0009 §5).
 
 Trust path with zero replaced layers (Increment 1):
@@ -20,6 +20,9 @@ Trust path with zero replaced layers (Increment 1):
     content identity (single ``HEAD`` ref, no unreachable objects, exact ``gap_tree``),
     base upstream bundle verification, allow-list & ledger proof, and per-member
     reproduction/equality checks.
+  - ``rehearse-check``: enforce D6 rehearsal-namespace guards (separate namespace from
+    installed release, no changed fixed-tag third-party image on a shared registry path,
+    empty rehearsal namespace).
 
 Signing NEVER runs in this tool or in the bastion (use ``scripts/gap/sign_vault.py``
 on the workstation or in the ephemeral F9 ``sign`` pod).
@@ -68,6 +71,17 @@ OPTIONAL_IMAGE_MEMBERS: tuple[str, ...] = (
     "oauth-proxy-image.tar",
     "openwebui-image.tar",
     "openwebui-proxy-image.tar",
+)
+
+# Third-party images loaded under fixed registry tags (load.sh); a rehearsal on a
+# shared registry path must not change what a restarted live pod pulls (D6).
+FIXED_TAG_IMAGE_KEYS: tuple[str, ...] = (
+    "qdrant_digest",
+    "openobserve_digest",
+    "otelcol_digest",
+    "oauth_proxy_digest",
+    "openwebui_digest",
+    "openwebui_proxy_digest",
 )
 
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
@@ -1517,6 +1531,86 @@ def cmd_verify(
         }
 
 
+def cmd_rehearse_check(
+    *,
+    rehearsal_namespace: str,
+    prod_namespace: str,
+    rehearsal_registry: str,
+    prod_registry: str,
+    candidate_manifest: Path,
+    installed_manifest: Path,
+    namespace_objects_json: Path | None = None,
+    kubectl_cmd: str | None = None,
+) -> dict[str, object]:
+    """Enforce Rev 2 §3h / D6 rehearsal-namespace preflight refusals:
+    1. Rehearsal namespace must differ from the installed/production namespace.
+    2. If any fixed-tag third-party image digest differs from the installed release,
+       the rehearsal must use a separate registry path.
+    3. Target rehearsal namespace must be empty of existing workloads/PVCs/Helm releases.
+    """
+    reh_ns = rehearsal_namespace.strip()
+    prod_ns = prod_namespace.strip()
+    if not reh_ns or not prod_ns:
+        raise ReleaseStop("rehearsal and production namespaces must both be non-empty")
+    if reh_ns == prod_ns:
+        raise ReleaseStop(
+            "rehearsal refused: target rehearsal namespace equals the installed release namespace — "
+            "deploy rehearsal to a dedicated rehearsal namespace (Rev 2 D6)"
+        )
+
+    cand_map, _ = parse_manifest(candidate_manifest.read_text(encoding="utf-8"))
+    inst_map, _ = parse_manifest(installed_manifest.read_text(encoding="utf-8"))
+    changed_fixed_tags = [
+        key for key in FIXED_TAG_IMAGE_KEYS
+        if cand_map.get(key) and cand_map.get(key) != inst_map.get(key)
+    ]
+    if changed_fixed_tags and rehearsal_registry.strip().rstrip("/") == prod_registry.strip().rstrip("/"):
+        raise ReleaseStop(
+            "rehearsal refused: candidate changes a fixed-tag third-party image while sharing "
+            "INTERNAL_REGISTRY with the installed release — use a separate rehearsal registry path"
+        )
+
+    # Check target rehearsal namespace is empty.
+    existing: list[str] = []
+    if namespace_objects_json is not None:
+        data = json.loads(namespace_objects_json.read_text(encoding="utf-8"))
+        items = data.get("items") if isinstance(data, dict) else data
+        if not isinstance(items, list):
+            raise ReleaseStop("namespace objects JSON is malformed")
+        for item in items:
+            if isinstance(item, dict):
+                kind = str(item.get("kind", "Object"))
+                name = str((item.get("metadata") or {}).get("name", ""))
+                existing.append(f"{kind}/{name}")
+    elif kubectl_cmd is not None:
+        for kind in ("deployments.apps", "statefulsets.apps", "jobs.batch", "pods", "pvc", "secrets"):
+            args = [kubectl_cmd, "-n", reh_ns, "get", kind, "-o", "json"]
+            if kind == "secrets":
+                args.extend(["-l", "owner=helm"])
+            proc = subprocess.run(args, capture_output=True, text=True, check=False, timeout=30)
+            if proc.returncode != 0:
+                raise ReleaseStop(f"rehearsal refused: cannot inspect {kind} in namespace {reh_ns}")
+            parsed = json.loads(proc.stdout or "{}")
+            for item in parsed.get("items") or []:
+                name = str((item.get("metadata") or {}).get("name", ""))
+                existing.append(f"{kind}/{name}")
+    else:
+        raise ReleaseStop("rehearse-check requires --namespace-objects-json or --kubectl")
+
+    if existing:
+        raise ReleaseStop(
+            f"rehearsal refused: target namespace {reh_ns} is not empty ({len(existing)} existing object(s)) — "
+            "run the rehearsal teardown procedure first"
+        )
+
+    print(f"REHEARSE READY namespace={reh_ns} registry={rehearsal_registry}")
+    return {
+        "rehearsal_namespace": reh_ns,
+        "prod_namespace": prod_ns,
+        "changed_fixed_tags": changed_fixed_tags,
+    }
+
+
 def _env_path(name: str) -> Path | None:
     val = os.environ.get(name, "").strip()
     return Path(val) if val else None
@@ -1524,7 +1618,7 @@ def _env_path(name: str) -> Path | None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Gap release pipeline Increment 1: classify, pack, assemble, verify."
+        description="Gap release pipeline Increment 1: classify, pack, assemble, verify, rehearse-check."
     )
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1560,6 +1654,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_ver.add_argument("--upstream-pub", type=Path, default=_env_path("SNEAKERNET_TRUSTED_PUB"))
     p_ver.add_argument("--gap-pub", type=Path, default=_env_path("SNEAKERNET_GAP_TRUSTED_PUB"))
     p_ver.add_argument("--remote", default=None, help="optional GitLab remote to check gap_tag still resolves to sha")
+
+    p_reh = sub.add_parser("rehearse-check", help="enforce D6 rehearsal-namespace preflight refusals")
+    p_reh.add_argument("--rehearsal-namespace", required=True)
+    p_reh.add_argument("--prod-namespace", required=True)
+    p_reh.add_argument("--rehearsal-registry", required=True)
+    p_reh.add_argument("--prod-registry", required=True)
+    p_reh.add_argument("--candidate-manifest", type=Path, required=True)
+    p_reh.add_argument("--installed-manifest", type=Path, required=True)
+    p_reh.add_argument("--namespace-objects-json", type=Path, default=None)
+    p_reh.add_argument("--kubectl", default=None)
 
     args = parser.parse_args(argv)
     try:
@@ -1610,6 +1714,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 gap_pub=args.gap_pub,
                 repo_root=args.repo_root,
                 remote=args.remote,
+            )
+            return 0
+        if args.command == "rehearse-check":
+            cmd_rehearse_check(
+                rehearsal_namespace=args.rehearsal_namespace,
+                prod_namespace=args.prod_namespace,
+                rehearsal_registry=args.rehearsal_registry,
+                prod_registry=args.prod_registry,
+                candidate_manifest=args.candidate_manifest,
+                installed_manifest=args.installed_manifest,
+                namespace_objects_json=args.namespace_objects_json,
+                kubectl_cmd=args.kubectl,
             )
             return 0
         raise ReleaseStop("unknown subcommand")

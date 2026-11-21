@@ -59,10 +59,15 @@ passphrase or a credential that can sign (D3).
   ```
 
   It must print an RSA-3072 key and its fingerprint (`PUBKEY v<n> <sha256>`).
+  Add the Vault address to the isolation proof's site values (`VAULT_CIDRS`,
+  `VAULT_PORT`): the proof then requires every workspace role, the bastion
+  included, to be blocked from it.
 - **Fallback, without Vault.** Generate a passphrase-encrypted RSA-3072 key
-  in a zero-egress signing pod (no `/work`, no Secret, memory-only session
-  directory; the `sign` workspace role is listed under
-  [Not in this increment](#not-in-this-increment)), store only the encrypted
+  in the zero-egress signing pod
+  ([`deploy/workspace/sign.template.yaml`](../../deploy/workspace/sign.template.yaml):
+  no `/work`, no Secret, no token, no egress, a memory-only
+  `/run/mfr-session`; render it with `oc process --local -f … | oc apply -f -`
+  and delete the pod afterwards), store only the encrypted
   file in the site secret store, keep the passphrase with the key holder,
   and delete the pod:
 
@@ -124,6 +129,10 @@ line; rerun the same command after fixing the cause.
      It signs the prehashed digest with PKCS#1 v1.5 and SHA-256 and converts
      `vault:v<n>:<base64>` to the raw signature bootstrap verifies; plain
      `http://` is accepted only to a loopback address.
+   - Vault from a pod, only when the workstation cannot reach Vault:
+     [`sign-vault.template.yaml`](../../deploy/workspace/sign-vault.template.yaml)
+     (egress to Vault and DNS only); pipe in the maintainer's Vault token for
+     the one call and delete the pod.
    - Fallback, in the zero-egress signing pod: pipe in `SHA256SUMS`, the
      encrypted key and `sign_vault.py`, then run
      `python3 -I sign_vault.py key-sign --sums SHA256SUMS --key gap-release.key.enc
@@ -166,12 +175,19 @@ line; rerun the same command after fixing the cause.
 7. **Rehearse** in the dedicated rehearsal namespace, never the production
    namespace or a second release in it (D6): a fresh workspace with both
    anchors and `NAMESPACE` set to the rehearsal namespace, the ordinary
-   `airgap:` pipeline, then the go-live checks. Before deploying, check by
-   hand that the rehearsal namespace is empty and differs from the
-   installed release's, and that every third-party `*_digest` line of the
-   candidate `MANIFEST.txt` equals the installed release's, or that the
-   rehearsal workspace loads into its own `INTERNAL_REGISTRY` path (load
-   pushes third-party images under fixed tags). Afterwards uninstall both
+   `airgap:` pipeline, then the go-live checks. Apply
+   [`rehearsal-egress.template.yaml`](../../deploy/workspace/rehearsal-egress.template.yaml)
+   to the rehearsal namespace first. Before deploying, run
+
+   ```sh
+   sh scripts/gap/release.sh rehearse-check --rehearsal-namespace <ns> --prod-namespace <live ns> \
+     --rehearsal-registry <rehearsal INTERNAL_REGISTRY> --prod-registry <live INTERNAL_REGISTRY> \
+     --candidate-manifest <bundle>/MANIFEST.txt --installed-manifest <installed>/dist/MANIFEST.txt --kubectl oc
+   ```
+
+   It refuses the installed release's namespace, a non-empty namespace, and
+   a changed third-party `*_digest` on a shared registry path (load pushes
+   third-party images under fixed tags). Afterwards uninstall both
    releases, delete the namespace's PVCs and Jobs and confirm it is empty.
 8. **Promote** only when every required row of the record is `PASS` or
    `INHERITED` and the approver signed off: bootstrap the same signed
@@ -190,10 +206,6 @@ guard refuses gap fields on an `origin: upstream` MANIFEST.
 
 - Layer replacement for `src/` and image-bound `scripts/` changes, with the
   base-layer self-check at `diff_id` level (increment 2).
-- The `sign` workspace role (zero-egress and Vault-egress signing pods),
-  the Vault address as an isolation-proof negative probe from the bastion,
-  the rehearsal namespace egress policy and a `rehearse-check` command for
-  the step 7 checks: the follow-up PR listed in #1207.
 - The generated gate table, the upstream-after-gap check (D8: record-only
   until the first upstream import after a gap release), the promotion
   attestation (D9) and a Kind lane that rehearses a gap bundle.

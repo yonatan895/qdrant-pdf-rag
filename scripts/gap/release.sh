@@ -6,6 +6,7 @@
 #   sh scripts/gap/release.sh pack --tag <tag> --remote <url> --base-bundle <path> --work-dir <dir>
 #   sh scripts/gap/release.sh assemble --work-dir <dir> --signature <SHA256SUMS.sig>
 #   sh scripts/gap/release.sh verify --bundle <tar-or-dir> --base-bundle <tar-or-dir>
+#   sh scripts/gap/release.sh rehearse-check ...
 #
 # Signing NEVER runs in the bastion (Rev 2 D3): there is no `sign` subcommand here.
 # Use scripts/gap/sign_vault.py on the maintainer workstation or in the ephemeral
@@ -26,6 +27,7 @@ Subcommands:
   pack            Pack an unsigned origin: gap bundle in the bastion (zero replaced layers).
   assemble        Verify an externally-produced signature and write the deterministic tarball.
   verify          Trusted pre-promotion verification of a signed gap bundle.
+  rehearse-check  Enforce D6 rehearsal-namespace preflight refusals.
 
 Signing is never run in the bastion (Rev 2 D3); see docs/runbooks/gap-release.md.
 EOF
@@ -40,7 +42,7 @@ case "${1:-}" in
         echo "STOP: signing never runs in the bastion (ADR-0009 §5, Rev 2 D3) — sign SHA256SUMS on the maintainer workstation with Vault transit or in the ephemeral sign pod (docs/runbooks/gap-release.md)." >&2
         exit 1
         ;;
-    classify)
+    classify|rehearse-check)
         exec python3 -I "$RELEASE_PY" --repo-root "$REPO_ROOT" "$@"
         ;;
     pack|assemble|verify)
@@ -64,7 +66,7 @@ case "${1:-}" in
         exec python3 -I "$RELEASE_PY" --repo-root "$REPO_ROOT" "$@"
         ;;
     *)
-        echo "STOP: unknown subcommand '${1}' (expected classify, pack, assemble or verify)." >&2
+        echo "STOP: unknown subcommand '${1}' (expected classify, pack, assemble, verify or rehearse-check)." >&2
         exit 2
         ;;
 esac

@@ -60,6 +60,19 @@
         }
       ]
     },
+    "vault": {
+      "_comment": "F6 (GH#1207 Rev 2 D3): optional Vault signing endpoint. Never on bastion/dev/runner/manager allow-lists; when VAULT_CIDRS is provided, isolation_proof.py runs the negative probe proving the bastion cannot reach Vault.",
+      "optional": true,
+      "peers_parameter": "VAULT_CIDRS",
+      "peer_kind": "ipBlock",
+      "ports": [
+        {
+          "protocol": "TCP",
+          "port_parameter": "VAULT_PORT",
+          "default": 8200
+        }
+      ]
+    },
     "dns": {
       "peer_kind": "namespaceSelector",
       "namespace_selector": {
@@ -300,5 +313,52 @@
         "branch"
       ]
     }
+  },
+  "ephemeral_roles": {
+    "sign": {
+      "_comment": "F6 ephemeral signing pod role (GH#1207 Rev 2 §3b, D3). Created for one signing when workstation-to-Vault is unavailable (sign-vault) or as encrypted-key fallback (sign zero-egress), then deleted immediately. Never mounts /work or any Secret.",
+      "service_account": "mfr-sign",
+      "rbac": "none",
+      "automount_service_account_token": false,
+      "allowed_secret_refs": {
+        "mounted": [],
+        "mounted_parameters": [],
+        "image_pull_parameters": [
+          "PULL_SECRET"
+        ],
+        "image_pull_patterns": [
+          "^mfr-sign-dockercfg-[a-z0-9]{5}$"
+        ]
+      },
+      "work_claim": null,
+      "session": {
+        "mount_path": "/run/mfr-session",
+        "medium": "Memory",
+        "credentials_dir": "/run/mfr-session/private"
+      },
+      "templates": {
+        "zero_egress": {
+          "template": "deploy/workspace/sign.template.yaml",
+          "egress": [],
+          "default_deny": "mfr-sign-default-deny-egress",
+          "allow_policy": null
+        },
+        "vault": {
+          "template": "deploy/workspace/sign-vault.template.yaml",
+          "egress": [
+            "vault",
+            "dns"
+          ],
+          "default_deny": "mfr-sign-default-deny-egress",
+          "allow_policy": "mfr-sign-vault-egress"
+        }
+      }
+    }
+  },
+  "rehearsal": {
+    "_comment": "F6 dedicated rehearsal-namespace egress isolation (GH#1207 Rev 2 §3h, D6).",
+    "template": "deploy/workspace/rehearsal-egress.template.yaml",
+    "default_deny": "mfr-rehearsal-default-deny-egress",
+    "allow_policy": "mfr-rehearsal-egress"
   }
 }

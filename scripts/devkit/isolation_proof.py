@@ -545,6 +545,8 @@ def egress_classes(contract: Contract, params: Params) -> dict[str, EgressClass]
         cidrs: tuple[str, ...] = ()
         if kind == "ipBlock":
             parameter = str(_require(spec.get("peers_parameter"), str))
+            if spec.get("optional") and not params.optional(parameter):
+                continue
             cidrs = _ip_block_cidrs(params.get(parameter), parameter)
         elif kind != "namespaceSelector":
             raise ProofError("contract-unreadable")

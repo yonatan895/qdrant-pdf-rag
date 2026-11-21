@@ -948,3 +948,106 @@ def test_runner_check_catches_an_override_privilege_or_token(line, expected):
         text = text.replace("    privileged = false", "    privileged = false\n" + line)
     config = render_runner(text, RUNNER_PARAMS)
     assert any(expected in v for v in runner_violations(config, "gate", RUNNER_PARAMS))
+
+
+# --- F6 ephemeral sign role and rehearsal egress (GH#1207 Rev 2 D3, D6) --------
+
+
+@pytest.mark.parametrize("mode", ["zero_egress", "vault"])
+def test_ephemeral_sign_templates_meet_f9_and_d3_invariants(mode):
+    sign_contract = CONTRACT["ephemeral_roles"]["sign"]
+    mode_spec = sign_contract["templates"][mode]
+    template = yaml.safe_load((ROOT / mode_spec["template"]).read_text(encoding="utf-8"))
+    declared = {p["name"] for p in template["parameters"]}
+    raw = json.dumps(template["objects"])
+    referenced = set(_STRING_PARAM.findall(raw)) | set(_JSON_PARAM.findall(raw))
+    assert referenced == declared
+
+    params = {
+        "SIGN_NAMESPACE": "site-rag-sign",
+        "DEVKIT_REPOSITORY": f"{REGISTRY_PATH}/devkit",
+        "DEVKIT_DIGEST": DIGEST,
+        "PULL_SECRET": "mfr-prod-pull",
+    }
+    if mode == "vault":
+        params["VAULT_CIDRS"] = _peers("10.9.0.4/32")
+    objects = render(template, params)
+    assert "${" not in json.dumps(objects)
+    assert {o["kind"] for o in objects} == {"NetworkPolicy", "ServiceAccount", "Pod"}
+
+    # Policies precede pod so pod never starts without default-deny egress.
+    kinds = [o["kind"] for o in objects]
+    assert max(i for i, k in enumerate(kinds) if k == "NetworkPolicy") < kinds.index("Pod")
+
+    for obj in objects:
+        assert forbidden_label_violations(obj) == []
+        assert obj["metadata"]["namespace"] == "site-rag-sign"
+
+    sa = _named(objects, "ServiceAccount", sign_contract["service_account"])
+    assert service_account_violations(sa, "sign") == []
+
+    pod = _named(objects, "Pod", "mfr-sign")
+    spec = pod["spec"]
+    assert pod["metadata"]["labels"] == {LABEL_KEY: "sign"}
+    assert spec["serviceAccountName"] == "mfr-sign"
+    assert spec["automountServiceAccountToken"] is False
+    assert spec["restartPolicy"] == "Never"
+    assert spec["activeDeadlineSeconds"] > 0
+    assert spec["imagePullSecrets"] == [{"name": "mfr-prod-pull"}]
+    # No Secret mounts and no /work PVC (only memory-only /run/mfr-session).
+    refs = secret_references(spec)
+    assert {n for k, n in refs if k != "imagePullSecrets"} == set()
+    volumes = {v["name"]: v for v in spec["volumes"]}
+    assert list(volumes) == ["session"]
+    assert volumes["session"]["emptyDir"]["medium"] == "Memory"
+    assert not any("persistentVolumeClaim" in v for v in spec["volumes"])
+    [container] = spec["containers"]
+    assert _DIGEST_REF.match(container["image"])
+    assert container["securityContext"]["allowPrivilegeEscalation"] is False
+    assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
+
+    policies = {p["metadata"]["name"]: p for p in _of_kind(objects, "NetworkPolicy")}
+    deny = policies[mode_spec["default_deny"]]
+    assert deny["spec"] == {
+        "podSelector": {"matchLabels": {LABEL_KEY: "sign"}},
+        "policyTypes": ["Egress"],
+    }
+    if mode == "zero_egress":
+        assert set(policies) == {mode_spec["default_deny"]}
+    else:
+        assert set(policies) == {mode_spec["default_deny"], mode_spec["allow_policy"]}
+        allow = policies[mode_spec["allow_policy"]]
+        assert allow["spec"]["policyTypes"] == ["Egress"]
+        assert allow["spec"]["egress"][0] == {
+            "to": [{"ipBlock": {"cidr": "10.9.0.4/32"}}],
+            "ports": [{"protocol": "TCP", "port": 8200}],
+        }
+
+
+def test_rehearsal_egress_template_isolates_rehearsal_namespace():
+    reh_contract = CONTRACT["rehearsal"]
+    template = yaml.safe_load((ROOT / reh_contract["template"]).read_text(encoding="utf-8"))
+    declared = {p["name"] for p in template["parameters"]}
+    raw = json.dumps(template["objects"])
+    assert (set(_STRING_PARAM.findall(raw)) | set(_JSON_PARAM.findall(raw))) == declared
+
+    objects = render(
+        template,
+        {
+            "REHEARSAL_NAMESPACE": "site-rag-rehearsal",
+            "GATEWAY_CIDRS": _peers("10.3.0.9/32"),
+            "GATEWAY_PORT": "443",
+        },
+    )
+    assert "${" not in json.dumps(objects)
+    policies = {p["metadata"]["name"]: p for p in _of_kind(objects, "NetworkPolicy")}
+    assert set(policies) == {reh_contract["default_deny"], reh_contract["allow_policy"]}
+    deny = policies[reh_contract["default_deny"]]
+    assert deny["spec"] == {"podSelector": {}, "policyTypes": ["Egress"]}
+    allow = policies[reh_contract["allow_policy"]]
+    assert allow["spec"]["podSelector"] == {}
+    assert allow["spec"]["egress"][0] == {"to": [{"podSelector": {}}]}
+    assert allow["spec"]["egress"][1] == {
+        "to": [{"ipBlock": {"cidr": "10.3.0.9/32"}}],
+        "ports": [{"protocol": "TCP", "port": 443}],
+    }
