@@ -15,8 +15,10 @@ Security controls (ADR-0012):
 - `tools/list` and `tools/call` expose only `config.enabled_tools` (D7).
 - Pre-connect policy validation rejects off-allowlist targets before any FTP
   connection is opened (D2).
-- Thread-safe `LogonBreaker` stops further logons on FTP 530 until cooldown
-  elapses or an operator resets it via `POST /admin/reset-logon-breaker` (D9).
+- `LogonBreaker` bounds FTP logons under concurrency: at most `threshold`
+  failing logons in flight, and after an FTP 530 trip no logon reaches the
+  server until cooldown elapses or an operator resets it via
+  `POST /admin/reset-logon-breaker` (D9). Reads are not serialized.
 - Optional/required bearer-secret caller authentication on HTTP endpoints
   (except `/healthz`), matching the feedback service pattern (D4 point 2).
 
@@ -135,20 +137,17 @@ def _run_tool(
     if policy_error is not None:
         return policy_error
 
+    # Only session setup (connect + logon) holds a breaker slot; the read
+    # below runs outside it, so concurrent reads stay concurrent (D9).
     try:
-        if breaker is not None:
-            breaker.check()
-        ftp = connect(config)
+        if breaker is None:
+            ftp = connect(config)
+        else:
+            with breaker.logon_slot(wait_s=config.timeout_s):
+                ftp = connect(config)
     except Exception as exc:  # noqa: BLE001 — mapped to stable error codes
-        if breaker is not None and (
-            isinstance(exc, bridge._LogonFailed) or bridge._is_530_error(exc)
-        ):
-            breaker.record_failure()
         code, message = bridge._classify_ftp_error(exc)
         return bridge._tool_error(code, message)
-
-    if breaker is not None:
-        breaker.record_success()
 
     session = bridge.FTPSession(ftp, config)
     try:

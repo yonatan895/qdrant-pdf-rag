@@ -2213,11 +2213,22 @@ deterministic and trap queries stay on the manuals path.
   `--probe` runs a logon-free `AUTH TLS` connectivity probe without credentials.
   Every session sets explicit passive mode (`ftp.set_pasv(True)`). HTTP mode
   offloads blocking FTP I/O via `asyncio.to_thread`, enforces bearer caller auth
-  (`MCP_BRIDGE_AUTH_TOKEN`, except `GET /healthz`), trips a thread-safe FTP 530
-  logon-failure breaker (`logon_failed`, cooldown `MCP_FTP_LOGON_COOLDOWN_S`,
-  operator reset `POST /admin/reset-logon-breaker`), decodes with configurable
-  `MCP_FTP_ENCODING`, strips control/bidi characters, redacts password-shaped
-  strings, and wraps outputs in untrusted observation delimiters.
+  (`MCP_BRIDGE_AUTH_TOKEN`, except `GET /healthz`), and bounds logons with an
+  FTP 530 breaker (`logon_failed`): at most the breaker threshold (default 1) of failing logons
+  can be in flight however many calls arrive at once, later callers are refused
+  without contacting the server, and none logs on until the cooldown
+  (`MCP_FTP_LOGON_COOLDOWN_S`) passes or an operator resets it
+  (`POST /admin/reset-logon-breaker`); only session setup is bounded, reads
+  run concurrently. Every tool output, `job_status` included, is capped at
+  `MCP_FTP_MAX_BYTES` with a truncation suffix. The bridge decodes with
+  configurable `MCP_FTP_ENCODING`, strips control/bidi characters, and
+  redacts PEM private keys, RACF/TSO/JCL password and passphrase operands
+  (`PASSWORD(...)`, `PHRASE('...')`, `PW`/`PASS`/`PWD`, the `NEW*`
+  forms, `KEYMASKED`/`KEYENCRYPTED`/`SESSKEY`; any case, quoted or bare,
+  also when the byte cap cuts them open), TSO `LOGON user/password`, `=`/`:`
+  password, secret and token assignments, `password <value>` and
+  Bearer/Basic credentials, then wraps outputs in untrusted observation
+  delimiters.
   `HttpZoweMCP` maps `isError` responses to fixed messages and stable codes only
   (never echoing upstream text).
 - **Feedback suppression (ADR-0012 Option 7A):** `_record_feedback` in

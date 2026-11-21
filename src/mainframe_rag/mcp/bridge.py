@@ -19,10 +19,13 @@ ADR-0012 pilot controls enforced here:
   prefix allowlists before any `RETR`, with explicit `TYPE A`); `uss_read`
   stays unapproved and is refused.
 - Content screening & untrusted delimiting (D6): control/bidi characters
-  stripped, password-shaped strings redacted, output wrapped in untrusted
-  observation delimiters with breakout neutralization.
-- Logon-failure breaker (D9): FTP 530 maps to `logon_failed` and stops further
-  logons until cooldown elapses or an operator resets the breaker.
+  stripped, password-shaped strings redacted (the forms `screen_zos_text`
+  lists), output wrapped in untrusted observation delimiters with breakout
+  neutralization.
+- Logon-failure breaker (D9): FTP 530 maps to `logon_failed`; at most
+  `threshold` failing logons can be in flight whatever the concurrency, and
+  once tripped no logon reaches the server until cooldown elapses or an
+  operator resets the breaker.
 - Logon-free connectivity probe (D5 point 5): tests `AUTH TLS` and certificate
   verification without sending credentials.
 """
@@ -39,7 +42,7 @@ import ssl
 import threading
 import time
 import unicodedata
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -79,8 +82,25 @@ _FORBIDDEN_NAME_CHARS = frozenset("'\"*?%/\\")
 _PEM_PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
 )
+# Password and passphrase keywords as RACF, TSO and JCL spell them (any case):
+# the operands of ADDUSER/ALTUSER/PASSWORD/LOGON, their NEW* forms, and the
+# PassTicket/session key operands, whose values are secrets too.
+_PASSWORD_WORDS = (
+    r"new(?:password|passwd|passphrase|phrase|pass|pw)|"
+    r"password|passwd|passphrase|phrase|pass|pwd|pw|"
+    r"keymasked|keyencrypted|sesskey"
+)
+# Operand form: PASSWORD(x), PHRASE('a b c'), PW (x), quoted with doubled
+# quotes or bare; the closing parenthesis or quote is optional because the byte
+# cap can cut the operand open before screening.
+_OPERAND_SECRET_RE = re.compile(
+    rf"(?i)(?<![A-Z0-9#$@])({_PASSWORD_WORDS})(\s*\(\s*)"
+    r"(?:'(?:[^'\n]|'')*'?|\"[^\"\n]*\"?|[^)\n]*)"
+)
+# TSO logon positional form: LOGON userid/password[/newpassword].
+_TSO_LOGON_RE = re.compile(r"(?i)\b(LOGON\s+[A-Z#$@][A-Z0-9#$@]{0,7})/[^\s/]*(?:/[^\s/]*)?")
 _KV_SECRET_RE = re.compile(
-    r"(?i)\b(password|passwd|passphrase|pwd|secret|api[_-]?key|apikey|"
+    rf"(?i)\b({_PASSWORD_WORDS}|secret|api[_-]?key|apikey|"
     r"auth[_-]?token|access[_-]?token|bearer[_-]?token|token|credential)"
     r"(\s*[=:]\s*)"
     r"(?:\([^)\n]*\)|'[^'\n]*'|\"[^\"\n]*\"|[^\s,;]+)"
@@ -302,11 +322,17 @@ class FTPConfig:
 
 
 class LogonBreaker:
-    """Thread-safe FTP 530 logon-failure circuit breaker (ADR-0012 D9).
+    """FTP 530 logon-failure circuit breaker, bounded under concurrency (D9).
 
-    Trips after `threshold` consecutive 530 failures (default 1, preventing
-    RACF ID revocation) and blocks all further logon attempts until `cooldown_s`
-    passes or an operator calls `reset()`.
+    Every logon runs inside `logon_slot()`, which admits a caller only while
+    `failures + in_flight < threshold`. So at most `threshold` failing logons
+    are ever in flight or recorded per closed/half-open window, however many
+    calls arrive at once (default 1, so a wrong password cannot revoke the
+    RACF ID). A caller without a slot waits, bounded by the FTP timeout, and
+    re-checks: if the in-flight logon tripped the breaker it is refused without
+    touching the server. Only the logon holds a slot; reads run concurrently.
+    Once tripped, no logon is admitted until `cooldown_s` passes or an operator
+    calls `reset()`; callers after the cooldown are bounded the same way.
     """
 
     def __init__(
@@ -323,44 +349,67 @@ class LogonBreaker:
         self._threshold = threshold
         self._cooldown_s = cooldown_s
         self._clock = clock
-        self._lock = threading.Lock()
+        self._cond = threading.Condition(threading.Lock())
         self._failures = 0
+        self._in_flight = 0
         self._opened_until: float | None = None
 
-    def check(self) -> None:
-        with self._lock:
-            if self._opened_until is None:
-                return
-            if self._clock() < self._opened_until:
-                raise _LogonBreakerOpen("FTP logon breaker is open")
+    def _expire_locked(self) -> None:
+        if self._opened_until is not None and self._clock() >= self._opened_until:
             self._opened_until = None
             self._failures = 0
 
-    def record_failure(self) -> None:
-        with self._lock:
-            self._failures += 1
-            if self._failures >= self._threshold:
-                self._opened_until = self._clock() + self._cooldown_s
+    @contextlib.contextmanager
+    def logon_slot(self, *, wait_s: float) -> Iterator[None]:
+        """Admit one logon attempt; record its outcome when the block exits.
 
-    def record_success(self) -> None:
-        with self._lock:
-            self._failures = 0
-            self._opened_until = None
+        Raises `_LogonBreakerOpen` (no logon) while the breaker is open, and
+        `TimeoutError` (no logon) after waiting `wait_s` for a free slot. A
+        530 (`_LogonFailed` or a raw 530 `error_perm`) counts as a failure;
+        any other exception releases the slot without counting.
+        """
+        deadline = time.monotonic() + wait_s
+        with self._cond:
+            while True:
+                self._expire_locked()
+                if self._opened_until is not None:
+                    raise _LogonBreakerOpen("FTP logon breaker is open")
+                if self._failures + self._in_flight < self._threshold:
+                    self._in_flight += 1
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("no logon slot within the FTP timeout")
+                self._cond.wait(remaining)
+        outcome: Literal["success", "failure", "neutral"] = "neutral"
+        try:
+            yield
+            outcome = "success"
+        except Exception as exc:
+            if isinstance(exc, _LogonFailed) or _is_530_error(exc):
+                outcome = "failure"
+            raise
+        finally:
+            with self._cond:
+                self._in_flight -= 1
+                if outcome == "success":
+                    self._failures = 0
+                elif outcome == "failure":
+                    self._failures += 1
+                    if self._failures >= self._threshold:
+                        self._opened_until = self._clock() + self._cooldown_s
+                self._cond.notify_all()
 
     def reset(self) -> None:
-        with self._lock:
+        with self._cond:
             self._failures = 0
             self._opened_until = None
+            self._cond.notify_all()
 
     def is_open(self) -> bool:
-        with self._lock:
-            if self._opened_until is None:
-                return False
-            if self._clock() < self._opened_until:
-                return True
-            self._opened_until = None
-            self._failures = 0
-            return False
+        with self._cond:
+            self._expire_locked()
+            return self._opened_until is not None
 
 
 def build_verified_tls_context(ca_file: str | None = None) -> ssl.SSLContext:
@@ -446,16 +495,21 @@ def connect(
 ) -> Any:
     """Open one FTP/FTPS session for a single tool call.
 
-    - Checks the 530 logon-failure breaker before opening any socket.
+    - With a breaker, the whole session setup runs inside its logon slot, so
+      no socket is opened while the breaker is open (see `LogonBreaker`).
     - In `ftps` mode, builds a verified TLS context (CA + hostname check),
       completes `AUTH TLS` BEFORE `login()`, refuses any TLS failure with zero
       downgrade fallback, and protects the data channel with `PROT P`.
     - In `plain` mode, requires `plain_ftp_accepted=True`.
     - Sets explicit passive mode (`ftp.set_pasv(True)`) on every session.
     """
-    if breaker is not None:
-        breaker.check()
+    if breaker is None:
+        return _open_session(config, factory)
+    with breaker.logon_slot(wait_s=config.timeout_s):
+        return _open_session(config, factory)
 
+
+def _open_session(config: FTPConfig, factory: type[ftplib.FTP]) -> Any:
     if config.transport_mode == "ftps":
         ctx = build_verified_tls_context(config.ca_file)
         ftp: Any = ftplib.FTP_TLS(context=ctx)
@@ -490,13 +544,8 @@ def connect(
         with contextlib.suppress(Exception):
             ftp.close()
         if _is_530_error(exc):
-            if breaker is not None:
-                breaker.record_failure()
             raise _LogonFailed("FTP logon failed") from exc
         raise
-
-    if breaker is not None:
-        breaker.record_success()
 
     try:
         if config.transport_mode == "ftps" and isinstance(ftp, ftplib.FTP_TLS):
@@ -515,8 +564,12 @@ def screen_zos_text(text: str) -> str:
     - Normalizes line endings (`\\r\\n`, `\\r`, Unicode line/paragraph seps -> `\\n`).
     - Strips C0/C1 control characters and Unicode format/bidi characters
       (category Cc/Cf), retaining only `\\n` and `\\t`.
-    - Redacts PEM private keys, password/secret/token key-value assignments,
-      space-separated password values, and Bearer/Basic auth headers.
+    - Redacts PEM private keys; RACF/TSO/JCL password and passphrase operands
+      (`PASSWORD(x)`, `PHRASE('a b')`, `PW(x)`, `PASS(x)`, `PWD(x)`, the
+      `NEW*` forms, `KEYMASKED`/`KEYENCRYPTED`/`SESSKEY`; any case, quoted or
+      bare, closed or cut open by the byte cap); TSO `LOGON user/pw[/newpw]`;
+      password/secret/token key-value assignments (`=` or `:`); space-separated
+      password values; and Bearer/Basic auth headers.
     """
     normalized = (
         text.replace("\r\n", "\n")
@@ -530,6 +583,8 @@ def screen_zos_text(text: str) -> str:
         if ch in ("\n", "\t") or unicodedata.category(ch) not in ("Cc", "Cf")
     )
     cleaned = _PEM_PRIVATE_KEY_RE.sub("[REDACTED]", cleaned)
+    cleaned = _OPERAND_SECRET_RE.sub(r"\1\2[REDACTED]", cleaned)
+    cleaned = _TSO_LOGON_RE.sub(r"\1/[REDACTED]", cleaned)
     cleaned = _KV_SECRET_RE.sub(r"\1\2[REDACTED]", cleaned)
     cleaned = _SPACE_PASSWORD_RE.sub(r"\1\2[REDACTED]", cleaned)
     return _AUTH_SCHEME_RE.sub(r"\1\2[REDACTED]", cleaned)
@@ -868,7 +923,12 @@ def job_status(
     owner: str | None = None,
     job_id: str | None = None,
 ) -> dict:
-    """List one exact job matching bridge-side JES prefix allowlists."""
+    """List one exact job matching bridge-side JES prefix allowlists.
+
+    Lines are filtered as the `LIST` streams in; the rendered output is capped
+    at `max_bytes` like `dataset_read` (truncation suffix, transfer aborted),
+    so a large listing is never buffered whole.
+    """
     try:
         clean_name, clean_owner, clean_id = _check_job_status_policy(
             session.config, job_name=job_name, owner=owner, job_id=job_id
@@ -879,34 +939,52 @@ def job_status(
 
     try:
         _jes_mode(session, clean_owner or "*", clean_name or "*")
-        lines: list[str] = []
-        session.ftp.retrlines("LIST", lines.append)
+        cap = session.config.max_bytes
+        rendered: list[str] = []
+        used = 0
         matched_any_target = False
-        allowed_jobs: list[dict[str, Any]] = []
-        for line in lines:
+        allowed_any = False
+
+        def _collect(line: str) -> None:
+            nonlocal used, matched_any_target, allowed_any
             parsed = _parse_job_line(line)
             if parsed is None:
-                continue
+                return
             if clean_id and parsed["job_id"] != clean_id:
-                continue
+                return
             if clean_name and parsed["name"] != clean_name:
-                continue
+                return
             if clean_owner and parsed["owner"] != clean_owner:
-                continue
+                return
             matched_any_target = True
-            if _matches_jes_prefixes(session.config, parsed["name"], parsed["owner"]):
-                allowed_jobs.append(parsed)
-        if matched_any_target and not allowed_jobs:
+            if not _matches_jes_prefixes(session.config, parsed["name"], parsed["owner"]):
+                return
+            allowed_any = True
+            piece = f"{parsed['name']} {parsed['job_id']} {parsed['status']}"
+            if parsed.get("return_code"):
+                piece += f" RC={parsed['return_code']}"
+            if rendered:
+                piece = "\n" + piece
+            encoded = piece.encode("utf-8")
+            if used + len(encoded) > cap:
+                rendered.append(encoded[: cap - used].decode("utf-8", errors="ignore"))
+                raise _CapExceeded
+            rendered.append(piece)
+            used += len(encoded)
+
+        truncated = False
+        try:
+            session.ftp.retrlines("LIST", _collect)
+        except _CapExceeded:
+            truncated = True
+            with contextlib.suppress(Exception):  # best-effort abort only
+                session.ftp.abort()
+        if matched_any_target and not allowed_any:
             return _tool_error(DENIED, "requested z/OS target is not permitted")
-        rendered_lines = []
-        for j in allowed_jobs:
-            line = f"{j['name']} {j['job_id']} {j['status']}"
-            if j.get("return_code"):
-                line += f" RC={j['return_code']}"
-            rendered_lines.append(line)
         target_label = clean_id or f"{clean_name}/{clean_owner}"
         return _tool_result(
-            "\n".join(rendered_lines) or "No matching jobs.",
+            "".join(rendered) or "No matching jobs.",
+            truncated,
             frame_tool="job_status",
             frame_target=target_label,
         )
