@@ -587,3 +587,45 @@ def test_release_gate_kind_recipe_creates_a_valid_openobserve_secret(pipe_tree):
     assert data["metrics-auth"] == f"Basic {token}"
     # Values never reach output.
     assert password not in r.stdout + r.stderr
+
+
+# --- #1338: a gap rehearsal through the documented entry point -----------------
+
+
+@pytest.mark.parametrize("target", ["rehearsal", "live"])
+def test_task_pipeline_carries_the_gap_rehearsal_declaration_to_every_writing_stage(pipe_tree, target):
+    """`run-task.sh airgap:pipeline` from a rehearsal workspace, as runbook step 7
+    writes it: the GAP_REHEARSAL_* exports reach deploy and ingest through Task
+    and pipeline.sh, the rehearsal workspace's airgap.env values do not leak into
+    the installed workspace's resolution, and a live namespace is refused."""
+    from tests.helpers_airgap import (
+        copy_gap_tools,
+        gap_release_key,
+        installed_workspace,
+        write_signed_manifest,
+    )
+
+    task = _task_tree(pipe_tree)
+    copy_gap_tools(pipe_tree)
+    write_stub(pipe_tree / "bin" / "kubectl",
+               "#!/bin/sh\n[ \"$*\" = 'config current-context' ] && echo rehearsal-ctx\nexit 0\n")
+    write_signed_manifest(pipe_tree / "dist", f"sha: {IMAGE_SHA}\n", origin="gap", key=gap_release_key())
+    namespace = "mfr-reh" if target == "rehearsal" else "mfr-prod"
+    (pipe_tree / "airgap.env").write_text(f"NAMESPACE='{namespace}'\nINTERNAL_REGISTRY='reg.internal:5000'\n")
+    installed = installed_workspace(pipe_tree, "NAMESPACE='mfr-prod'\nINTERNAL_REGISTRY='reg.live'\n")
+    operator = {"IMAGE_SHA": IMAGE_SHA, "STORAGE_CLASS": "standard", "EMBED_MODEL": "embed-v1",
+                "DENSE_DIM": "768", "EMBED_MODEL_REVISION": "rev-1", "EMBED_BASE_URL": "http://vllm:8000/v1",
+                "OPENWEBUI_ENABLED": "false", "CORPUS_PVC": "corpus-pvc",
+                "GAP_REHEARSAL_INSTALLED_WORKSPACE": str(installed),
+                "GAP_REHEARSAL_KUBE_CONTEXT": "rehearsal-ctx"}
+    r = _run_task(pipe_tree, task, "airgap:pipeline", "AIRGAP_DRYRUN=1", extra_env=operator)
+    if target == "rehearsal":
+        assert r.returncode == 0, r.stdout + r.stderr
+        guarded = "==> Gap release rehearsal: namespace=mfr-reh registry=reg.internal:5000 context=rehearsal-ctx"
+        assert r.stdout.count(guarded) == 2, r.stdout  # deploy and ingest
+        assert "PIPELINE DRY-RUN COMPLETE" in r.stdout
+        assert "-n mfr-prod" not in r.stdout
+    else:
+        assert r.returncode != 0
+        assert "the rehearsal deploy would target the installed release's namespace" in r.stderr
+        assert "STAGE 4/5" not in r.stdout and "-n mfr-prod" not in r.stdout

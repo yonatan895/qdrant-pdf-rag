@@ -1701,6 +1701,9 @@ def judge_rehearsal_target(
     if not reh.raw_namespace.strip():
         raise ReleaseStop("rehearsal refused: NAMESPACE is not set for the rehearsal workspace "
                           "(deploy would fall back to its default); set it in its airgap.env")
+    if not live.raw_namespace.strip():
+        raise ReleaseStop("rehearsal refused: NAMESPACE is not set for the installed workspace, so its "
+                          "target is unknown; record it in the installed workspace's airgap.env")
     if reh.namespace.strip().lower() == live.namespace.strip().lower():
         raise ReleaseStop(
             "rehearsal refused: the rehearsal deploy would target the installed release's "
@@ -1827,16 +1830,19 @@ def cmd_rehearse_check(
     }
 
 
-def deploy_process_env(env: Mapping[str, str], operator_keys: str, process_keys: str) -> dict[str, str]:
-    """The environment the operator started a deploy stage with (#1338).
+def workspace_only_env(env: Mapping[str, str], operator_keys: str) -> dict[str, str]:
+    """`env` without any operator key (#1338).
 
-    common.sh exports every operator key it resolved (export_operator_env), so a
-    stage's children see the rehearsal workspace's NAMESPACE and the other
-    airgap.env values as if the operator had set them. Resolving the installed
-    workspace under that would read the rehearsal target back. Keep an operator
-    key only when it was set in the process environment before common.sh read
-    the file (common.sh's _AIRGAP_ENV_CLI_KEYS); everything else passes as is."""
-    drop = set(operator_keys.split()) - set(process_keys.split())
+    Inside a stage no operator key in the environment can be told apart from
+    an `airgap.env` value: common.sh exports what it resolved
+    (export_operator_env), and the Task bridge and pipeline.sh export every key
+    before a stage sources the file, so a file assignment reaches the stage's
+    children as if the operator had typed it. The guard therefore resolves both
+    workspaces from their own `airgap.env` (or deploy default) only, and
+    requires the stage's own values to equal the rehearsal workspace's: an
+    operator override can only cause a refusal, never redirect a rehearsal or
+    hide the installed target."""
+    drop = set(operator_keys.split())
     return {key: value for key, value in env.items() if key not in drop}
 
 
@@ -1856,10 +1862,10 @@ def cmd_rehearse_guard(
     `origin: gap` and the operator declared a rehearsal.
 
     The executing workspace is the rehearsal workspace. Both targets are
-    resolved and judged exactly as `rehearse-check` does, under the
-    environment the operator started the stage with; the stage's own resolved
-    NAMESPACE, INTERNAL_REGISTRY and KC must equal the rehearsal workspace's
-    resolution, and the declared kube context must be the one its KC uses. No
+    resolved and judged exactly as `rehearse-check` does, from each workspace's
+    own settings (workspace_only_env); the stage's own resolved NAMESPACE,
+    INTERNAL_REGISTRY and KC must equal the rehearsal workspace's resolution,
+    and the declared kube context must be the one its KC uses. No
     emptiness check: a repeat deploy or ingest into the same rehearsal is a
     rehearsal row, and leftovers before the first one are rehearse-check's."""
     reh, live = _resolve_both(repo_root, installed_workspace, env)
@@ -1873,8 +1879,8 @@ def cmd_rehearse_guard(
         ("KC", kc, reh.kc),
     ):
         if own != resolved:
-            raise ReleaseStop(f"rehearsal refused: this stage's {name} differs from what the rehearsal "
-                              "workspace resolves; nothing in the deploy path may override it")
+            raise ReleaseStop(f"rehearsal refused: this stage's {name} differs from the rehearsal "
+                              "workspace's airgap.env (or its default); set it there, not in the environment")
     if kube_context != reh.context:
         raise ReleaseStop("rehearsal refused: GAP_REHEARSAL_KUBE_CONTEXT does not name the context "
                           "the rehearsal workspace's KC uses (check KUBECONFIG, in airgap.env too, "
@@ -2010,7 +2016,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_rg.add_argument("--registry", required=True)
     p_rg.add_argument("--kc", required=True)
     p_rg.add_argument("--operator-keys", required=True)
-    p_rg.add_argument("--process-env-keys", required=True)
 
     p_rr = sub.add_parser("render-role", help="render an F6 workspace template, refusing allow-all egress")
     p_rr.add_argument("--template", required=True, choices=RENDER_ROLE_TEMPLATES)
@@ -2092,7 +2097,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 namespace=args.namespace,
                 registry=args.registry,
                 kc=args.kc,
-                env=deploy_process_env(os.environ, args.operator_keys, args.process_env_keys),
+                env=workspace_only_env(os.environ, args.operator_keys),
             )
             return 0
         if args.command == "render-role":

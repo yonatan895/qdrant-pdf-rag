@@ -763,8 +763,10 @@ check_checkout_sha() {
 #     whose signed SHA256SUMS has this sha256, the record's release identity;
 #   - GAP_REHEARSAL_INSTALLED_WORKSPACE and GAP_REHEARSAL_KUBE_CONTEXT: a
 #     rehearsal (step 7). This workspace's release.py (rehearse-guard) resolves
-#     this workspace and the installed one with their own common.sh and judges
-#     them with rehearse-check's refusals, in this process's environment.
+#     this workspace and the installed one with their own common.sh from their
+#     own airgap.env, judges them with rehearse-check's refusals, and requires
+#     this stage's NAMESPACE, INTERNAL_REGISTRY and KC to equal this
+#     workspace's resolution (no environment override).
 # Neither, both, or an identity naming another bundle is refused. Fixed
 # messages; the STOP line before a rehearsal refusal names the reason.
 check_gap_release_stage() {
@@ -794,8 +796,7 @@ check_gap_release_stage() {
         --installed-workspace "$_GAP_REHEARSAL_INSTALLED_WORKSPACE_PROCESS_ENV" \
         --kube-context "$_GAP_REHEARSAL_KUBE_CONTEXT_PROCESS_ENV" \
         --candidate-manifest "$1" --namespace "${NAMESPACE:-}" --registry "${INTERNAL_REGISTRY:-}" \
-        --kc "${KC:-$(kc)}" --operator-keys "$_OPERATOR_ENV_KEYS $_RETIRED_ENV_KEYS" \
-        --process-env-keys "$_AIRGAP_ENV_CLI_KEYS" ||
+        --kc "${KC:-$(kc)}" --operator-keys "$_OPERATOR_ENV_KEYS $_RETIRED_ENV_KEYS" ||
         die "gap release rehearsal refused (the STOP line above names the reason); nothing was changed"
     unset _grs_origin _grs_rehearsal
 }

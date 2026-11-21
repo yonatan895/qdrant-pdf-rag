@@ -2087,8 +2087,14 @@ def _live_kubeconfig(tree):
 _LIVE_TARGETS = {
     "live-namespace-in-airgap-env": (f"NAMESPACE='{LIVE_NS}'\nINTERNAL_REGISTRY='reg.internal'\n", _LIVE_ENV, (),
                                      "the rehearsal deploy would target the installed release's namespace"),
+    # Inside a stage an exported value cannot be told from an airgap.env one, so
+    # the stage's own target must equal its workspace's airgap.env resolution.
     "live-namespace-in-process-env": (_REH_ENV, _LIVE_ENV, (("NAMESPACE", LIVE_NS),),
-                                      "the rehearsal deploy would target the installed release's namespace"),
+                                      "this stage's NAMESPACE differs from the rehearsal workspace's airgap.env"),
+    "registry-in-process-env": (_REH_ENV, _LIVE_ENV, (("INTERNAL_REGISTRY", "reg.live"),),
+                                "this stage's INTERNAL_REGISTRY differs from the rehearsal workspace's airgap.env"),
+    "installed-namespace-unset": (_REH_ENV, "INTERNAL_REGISTRY='reg.live'\n", (),
+                                  "NAMESPACE is not set for the installed workspace"),
     "unset-namespace": ("INTERNAL_REGISTRY='reg.internal'\n", _LIVE_ENV, (),
                         "NAMESPACE is not set for the rehearsal workspace"),
     "both-unset-default": ("INTERNAL_REGISTRY='reg.internal'\n", "INTERNAL_REGISTRY='reg.live'\n", (),

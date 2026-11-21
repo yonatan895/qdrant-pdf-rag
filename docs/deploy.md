@@ -763,6 +763,18 @@ checksums **after**.
   nothing from the candidate can write the anchor files, `airgap.env` or an
   operator workspace on `/work`
   ([gap release runbook](runbooks/gap-release.md)).
+- *Gap release stage (#1338).* After the guard above, load, deploy, ingest
+  and retire_legacy run a bundle whose authenticated origin is `gap` (in
+  dry-run: whose MANIFEST says so) only in a stage the process environment
+  declares (`check_gap_release_stage`; `airgap.env` values are ignored):
+  a rehearsal (`GAP_REHEARSAL_INSTALLED_WORKSPACE` and
+  `GAP_REHEARSAL_KUBE_CONTEXT`), whose target `release.py rehearse-guard`
+  resolves and judges with `rehearse-check`'s refusals before any registry
+  or cluster write, or a promoted release (`GAP_PROMOTE_IDENTITY`, the sha256
+  of the bundle's signed `SHA256SUMS`). The promoted declaration is needed
+  for every later stage run from that live workspace too. Upstream and
+  unpacked runs are unchanged
+  ([gap release runbook](runbooks/gap-release.md) steps 7 to 9).
 - `bootstrap.sh` cannot source `common.sh` (no clone exists yet), so it
   carries an inline twin of the trust check (bundle signature, then the
   anchors, then `SHA256SUMS`, then the `gap_*` MANIFEST fields: all four
