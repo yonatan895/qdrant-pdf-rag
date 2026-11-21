@@ -167,13 +167,23 @@ def _section(
     return dict(value)
 
 
-def config_from_document(doc: object, gateway: str, *, require_auth: bool = True) -> GatewayConfig:
+def config_from_document(
+    doc: object,
+    gateway: str,
+    *,
+    require_auth: bool = True,
+    limit_defaults: Mapping[str, Any] | None = None,
+) -> GatewayConfig:
     """Validate a parsed configuration document for `gateway`. Unknown keys are
     refused (a misspelt limit must not silently fall back to its default), and
     an empty `allowed_groups` is refused (a gateway nobody may call is a
     misconfiguration, not a safe default). With `require_auth=False` (a
     gateway in bearer mode, ADR-0014) the `auth` section may be absent; when
-    present it is still validated."""
+    present it is still validated. `limit_defaults` replaces `Limits`
+    defaults for the keys the document's `limits` section leaves out (per
+    key: a key the document sets always wins)."""
+    if set(limit_defaults or {}) - _LIMIT_KEYS:
+        raise ValueError("limit_defaults names an unknown limit")
     if not isinstance(doc, dict):
         raise GatewayConfigError("the configuration must be a JSON object")
     unknown = sorted(set(doc) - _TOP_KEYS)
@@ -208,11 +218,16 @@ def config_from_document(doc: object, gateway: str, *, require_auth: bool = True
         raise GatewayConfigError(
             f"invalid auth or token_exchange: {error_type(exc)}: {exc}"
         ) from None
-    return GatewayConfig(gateway, auth_config, exchange, Limits(**limits_doc), backend)
+    limits = Limits(**{**dict(limit_defaults or {}), **limits_doc})
+    return GatewayConfig(gateway, auth_config, exchange, limits, backend)
 
 
 def load_config(
-    gateway: str, environ: Mapping[str, str] | None = None, *, require_auth: bool = True
+    gateway: str,
+    environ: Mapping[str, str] | None = None,
+    *,
+    require_auth: bool = True,
+    limit_defaults: Mapping[str, Any] | None = None,
 ) -> GatewayConfig:
     """Read the file named by `GATEWAY_CONFIG_FILE` (a mounted ConfigMap)."""
     env = os.environ if environ is None else environ
@@ -225,7 +240,9 @@ def load_config(
         raise GatewayConfigError("the configuration file is unreadable") from None
     except ValueError:
         raise GatewayConfigError("the configuration file is not JSON") from None
-    return config_from_document(doc, gateway, require_auth=require_auth)
+    return config_from_document(
+        doc, gateway, require_auth=require_auth, limit_defaults=limit_defaults
+    )
 
 
 # --- tools and argument validation ----------------------------------------------------
@@ -245,14 +262,23 @@ class ToolContext:
 
 @dataclass(frozen=True)
 class ToolOutput:
-    """A handler's result: structured `rows`, or one `text`."""
+    """A handler's result: structured `rows`, or one `text`. `next_page`
+    (rows only) names the next page a paged tool can be asked for."""
 
     rows: Sequence[Mapping[str, Any]] | None = None
     text: str | None = None
+    next_page: int | None = None
 
     def __post_init__(self) -> None:
         if (self.rows is None) == (self.text is None):
             raise ValueError("a ToolOutput holds exactly one of rows or text")
+        if self.next_page is not None and (
+            self.rows is None
+            or isinstance(self.next_page, bool)
+            or not isinstance(self.next_page, int)
+            or self.next_page < 1
+        ):
+            raise ValueError("next_page is a positive page number for rows")
 
 
 Handler = Callable[[ToolContext, dict[str, Any]], Awaitable[ToolOutput]]
@@ -511,7 +537,10 @@ def render_untrusted(
         cut = len(output.rows) > limits.max_rows
         # Start from the empty wrapper (row_count padded to 10 digits), so the
         # whole escaped body stays within the cap.
-        size = len(_frame_body({"rows": [], "row_count": 10**9, "truncated": False}))
+        paging: dict[str, object] = (
+            {} if output.next_page is None else {"next_page": output.next_page}
+        )
+        size = len(_frame_body({"rows": [], "row_count": 10**9, "truncated": False, **paging}))
         for row in output.rows[: limits.max_rows]:
             cleaned, row_cut = _clean_row(row, limits) if isinstance(row, Mapping) else ({}, True)
             row_size = len(_frame_body(cleaned).encode("utf-8")) + 1
@@ -522,19 +551,23 @@ def render_untrusted(
             size += row_size
             cut = cut or row_cut
         rows = len(kept)
-        body = _frame_body({"rows": kept, "row_count": rows, "truncated": cut})
+        body = _frame_body({"rows": kept, "row_count": rows, "truncated": cut, **paging})
     framed = f'{UNTRUSTED_PREAMBLE}\n<tool-output gateway="{gateway}" tool="{tool}">\n{body}\n</tool-output>'
     return framed, RenderStats(rows=rows, bytes_out=len(framed.encode("utf-8")), truncated=cut)
 
 
-def fit_text_tail(text: str, limits: Limits, *, prefix: str = "") -> str:
-    """`prefix` plus the longest suffix of `text` that `render_untrusted` keeps
-    whole: the end is what survives, never the start. Escaping can grow the
-    body, so the suffix is searched against the framed, escaped size."""
+def fit_text_tail(text: str, limits: Limits, *, prefix: str = "", suffix: str = "") -> str:
+    """The longest tail of `clean_text(text)` that starts at a line start (or
+    is the whole text) and that `render_untrusted` keeps whole between
+    `prefix` and `suffix`: lines are dropped from the start, never the end.
+    Escaping can grow the body, so the tail is searched against the framed,
+    escaped size. Returns the tail alone; a single line longer than the budget
+    gives an empty tail. `clean_text` is idempotent, so a caller may pass
+    text it already cleaned."""
     text = clean_text(text)
 
     def fits(start: int) -> bool:
-        body = _frame_body({"text": prefix + text[start:], "truncated": False})
+        body = _frame_body({"text": prefix + text[start:] + suffix, "truncated": False})
         return len(body.encode("utf-8")) <= limits.max_result_bytes
 
     low, high = 0, len(text)
@@ -544,7 +577,10 @@ def fit_text_tail(text: str, limits: Limits, *, prefix: str = "") -> str:
             high = middle
         else:
             low = middle + 1
-    return prefix + text[low:]
+    if 0 < low < len(text) and text[low - 1] != "\n":
+        newline = text.find("\n", low)
+        low = len(text) if newline < 0 else newline + 1
+    return text[low:]
 
 
 # --- per-user limits -------------------------------------------------------------------
@@ -645,6 +681,29 @@ class UpstreamResponse:
             raise GatewayError("upstream_error") from None
 
 
+@dataclass(frozen=True)
+class UpstreamTail:
+    """The end of a streamed backend answer (`UpstreamClient.stream_tail`):
+    `tail` holds its last bytes (at most `keep_bytes`), `total` how many
+    bytes were read, and `complete` whether the body was read to its end
+    (false when the byte or time ceiling stopped the read)."""
+
+    tail: bytes
+    total: int
+    complete: bool
+
+
+def _raise_for_status(status: int) -> None:
+    if status in (401, 403):
+        raise GatewayError("upstream_refused")
+    if status == 404:
+        raise GatewayError("not_found")
+    if status == 429 or status >= 500 or 300 <= status < 400:
+        raise GatewayError("upstream_unavailable")
+    if not 200 <= status < 300:
+        raise GatewayError("upstream_error")
+
+
 class UpstreamClient:
     """The backend client every gateway uses. Methods outside
     `allowed_methods` (GET by default; PUT and PATCH never) are a programming
@@ -741,14 +800,7 @@ class UpstreamClient:
                 timeout=self._timeout,
             ) as response:
                 status = response.status_code
-                if status in (401, 403):
-                    raise GatewayError("upstream_refused")
-                if status == 404:
-                    raise GatewayError("not_found")
-                if status == 429 or status >= 500 or 300 <= status < 400:
-                    raise GatewayError("upstream_unavailable")
-                if not 200 <= status < 300:
-                    raise GatewayError("upstream_error")
+                _raise_for_status(status)
                 body = bytearray()
                 async for chunk in response.aiter_bytes():
                     body += chunk
@@ -761,6 +813,66 @@ class UpstreamClient:
         except httpx2.HTTPError:
             raise GatewayError("upstream_unavailable") from None
         return UpstreamResponse(status, bytes(body), content_type, kept)
+
+    async def stream_tail(
+        self,
+        method: str,
+        path: str,
+        *,
+        keep_bytes: int,
+        max_read_bytes: int,
+        deadline_s: float,
+        params: Mapping[str, str | int] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> UpstreamTail:
+        """Stream one backend answer, keeping only its last `keep_bytes` in
+        memory (a log far larger than any cap). Reading stops after
+        `max_read_bytes` or `deadline_s` seconds, whichever comes first,
+        and what was read is returned with `complete=False`. Statuses map as
+        in `request`; no answer by the deadline is `upstream_timeout`, and a
+        transport failure mid-body keeps its fixed code (never a partial)."""
+        if keep_bytes <= 0 or max_read_bytes <= 0 or not deadline_s > 0:
+            raise ValueError("keep_bytes, max_read_bytes and deadline_s must be positive")
+        if method not in self._methods:
+            raise RuntimeError("this gateway does not allow that method")  # programming error
+        url = self._url(path)
+        tail = bytearray()
+        total = 0
+        complete = reading = False
+        deadline = asyncio.get_running_loop().time() + deadline_s
+        try:
+            async with asyncio.timeout_at(deadline):
+                async with self._client.stream(
+                    method,
+                    url,
+                    params=params,
+                    headers=headers,
+                    follow_redirects=False,
+                    timeout=self._timeout,
+                ) as response:
+                    _raise_for_status(response.status_code)
+                    reading = True
+                    async for chunk in response.aiter_bytes():
+                        room = max_read_bytes - total
+                        over = len(chunk) > room
+                        if over:
+                            chunk = chunk[:room]
+                        tail += chunk
+                        total += len(chunk)
+                        if len(tail) > keep_bytes:
+                            del tail[: len(tail) - keep_bytes]
+                        if over:
+                            break  # the ceiling, with more still to come: stop reading
+                    else:
+                        complete = True
+        except TimeoutError:
+            if not reading:
+                raise GatewayError("upstream_timeout") from None
+        except httpx2.TimeoutException:
+            raise GatewayError("upstream_timeout") from None
+        except httpx2.HTTPError:
+            raise GatewayError("upstream_unavailable") from None
+        return UpstreamTail(bytes(tail), total, complete)
 
     async def aclose(self) -> None:
         await self._client.aclose()

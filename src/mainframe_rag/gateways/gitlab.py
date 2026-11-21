@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import sys
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Protocol
@@ -37,13 +38,17 @@ from urllib.parse import quote
 import httpx2
 
 from mainframe_rag.gateways.common import (
+    REDACTED,
     GatewayConfig,
     GatewayConfigError,
     GatewayError,
+    Limits,
     Tool,
     ToolContext,
     ToolOutput,
     UpstreamClient,
+    UpstreamTail,
+    clean_text,
     configure_gateway_logging,
     create_gateway_app,
     fit_text_tail,
@@ -73,6 +78,21 @@ _REF_PATTERN: Final = r"(?!.*\.\.)[A-Za-z0-9_][A-Za-z0-9_./+-]{0,254}"
 _FILE_PATTERN: Final = r"(?!/)(?!.*(?:^|/)\.{1,2}(?:/|$))[^\x00-\x1f\x7f\\]{1,1024}"
 _SEARCH_PATTERN: Final = r"[^\x00-\x1f\x7f]{1,200}"
 _ANSI_RE: Final = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]{0,256}(?:\x07|\x1b\\)")
+# A private key's END line whose BEGIN line fell before the kept tail.
+_ORPHAN_KEY_END_RE: Final = re.compile(r"-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----")
+
+# Bearer mode (ADR-0014 D4): every Open WebUI user is the one caller
+# `service:openwebui`, so the per-caller limits are instance-wide. These
+# replace the runtime defaults for keys the configuration leaves out
+# (maintainer, 2026-11-21); oidc mode keeps the runtime defaults.
+BEARER_LIMIT_DEFAULTS: Final = {"max_concurrent_per_user": 4, "rate_per_minute": 120}
+
+# The bridge-authored lines around a cut job log (docs/team-tools.md).
+JOB_LOG_OMITTED: Final = "[gateway: about {} of earlier log omitted]\n"
+JOB_LOG_UNREAD: Final = (
+    "[gateway: the end of the log was not read; reading stopped after about {}]\n"
+)
+JOB_LOG_STOPPED: Final = "[gateway: reading stopped here; the end of the log was not read]\n"
 
 
 class TokenScopeError(Exception):
@@ -97,7 +117,8 @@ class GitLabBackend:
     timeout_s: float = 15.0
     max_response_bytes: int = 1024 * 1024
     max_file_bytes: int = 1024 * 1024
-    max_job_log_bytes: int = 8 * 1024 * 1024
+    max_job_log_read_bytes: int = 64 * 1024 * 1024
+    max_job_log_read_s: float = 20.0
     per_page: int = 20
     max_page: int = 10
 
@@ -116,7 +137,7 @@ class GitLabBackend:
         for name in (
             "max_response_bytes",
             "max_file_bytes",
-            "max_job_log_bytes",
+            "max_job_log_read_bytes",
             "per_page",
             "max_page",
         ):
@@ -125,12 +146,14 @@ class GitLabBackend:
                 raise GatewayConfigError(f"backend.{name} must be a positive integer")
         if self.per_page > 100:
             raise GatewayConfigError("backend.per_page must be at most 100")
-        if (
-            isinstance(self.timeout_s, bool)
-            or not isinstance(self.timeout_s, (int, float))
-            or not 0 < self.timeout_s <= 120
-        ):
-            raise GatewayConfigError("backend.timeout_s must be in (0, 120]")
+        for name in ("timeout_s", "max_job_log_read_s"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not 0 < value <= 120
+            ):
+                raise GatewayConfigError(f"backend.{name} must be in (0, 120]")
         if self.ca_file is not None and not isinstance(self.ca_file, str):
             raise GatewayConfigError("backend.ca_file must be a path")
 
@@ -238,6 +261,38 @@ class GitLabClient:
         except ValueError, RecursionError:
             raise GatewayError("upstream_error") from None
 
+    async def get_json_page(
+        self, principal: Principal, path: str, params: Mapping[str, str | int]
+    ) -> tuple[Any, int | None]:
+        """A JSON page and GitLab's `x-next-page` (None when absent, empty or
+        not a page number)."""
+        token = await self.provider.token_for(principal)
+        response = await self.upstream.request(
+            "GET", path, params=params, headers={"PRIVATE-TOKEN": token}
+        )
+        raw = response.headers.get("x-next-page", "")
+        next_page = int(raw) if raw.isascii() and raw.isdigit() and int(raw) > 0 else None
+        return response.json(), next_page
+
+    async def get_tail(
+        self,
+        principal: Principal,
+        path: str,
+        *,
+        keep_bytes: int,
+        max_read_bytes: int,
+        deadline_s: float,
+    ) -> UpstreamTail:
+        token = await self.provider.token_for(principal)
+        return await self.upstream.stream_tail(
+            "GET",
+            path,
+            headers={"PRIVATE-TOKEN": token},
+            keep_bytes=keep_bytes,
+            max_read_bytes=max_read_bytes,
+            deadline_s=deadline_s,
+        )
+
     async def get_bytes(
         self,
         principal: Principal,
@@ -281,6 +336,52 @@ async def check_token_scopes(client: GitLabClient, token: str) -> list[str]:
     if not held >= REQUIRED_SCOPES:
         raise TokenScopeError("token_scope_missing")
     return sorted(held)
+
+
+# --- job logs ------------------------------------------------------------------------
+
+
+def _about(size: int) -> str:
+    if size < 1024:
+        return f"{size} bytes"
+    if size < 1024 * 1024:
+        return f"{round(size / 1024)} KiB"
+    return f"{size / (1024 * 1024):.1f} MiB"
+
+
+def job_log_text(read: UpstreamTail, tail_bytes: int, limits: Limits) -> str:
+    """The end of a streamed job log as whole, cleaned lines, with marker lines.
+
+    Of the last `tail_bytes` read, a partial first line is dropped (and, when
+    the read stopped before the end, a partial last line), so a cut never
+    leaves a fragment of a secret that redaction would no longer recognise;
+    a private key whose BEGIN line was cut off is redacted through its END
+    line. The kept lines are cleaned whole, then lines are dropped from the
+    start until the framed text fits `max_result_bytes`. A marker line says
+    roughly how much came before; when the end was not read, a line before
+    and after the text says so."""
+    data = read.tail
+    head_cut = read.total > tail_bytes
+    if head_cut:
+        data = data[-(tail_bytes + 1) :]
+        newline = data.find(b"\n")
+        data = data[newline + 1 :] if newline >= 0 else b""
+    skipped = read.total - len(data)
+    if not read.complete:
+        data = data[: data.rfind(b"\n") + 1]
+    text = clean_text(_ANSI_RE.sub("", data.decode("utf-8", errors="replace")))
+    if head_cut and (orphan := _ORPHAN_KEY_END_RE.search(text)):
+        text = REDACTED + text[orphan.end() :]
+    unread = "" if read.complete else JOB_LOG_UNREAD.format(_about(read.total))
+    stopped = "" if read.complete else JOB_LOG_STOPPED
+    kept = fit_text_tail(text, limits, prefix=unread, suffix=stopped)
+    if skipped or len(kept) < len(text):
+        # Fit again with the longest marker this could need, then write it.
+        widest = unread + JOB_LOG_OMITTED.format(_about(2**60))
+        kept = fit_text_tail(text, limits, prefix=widest, suffix=stopped)
+        omitted = skipped + len(text[: len(text) - len(kept)].encode("utf-8"))
+        return unread + JOB_LOG_OMITTED.format(_about(omitted)) + kept + stopped
+    return unread + kept + stopped
 
 
 # --- tools ---------------------------------------------------------------------------
@@ -341,11 +442,13 @@ _ISSUE_KEYS: Final = (
     "author",
     "assignee",
     "labels",
+    "user_notes_count",
     "created_at",
     "updated_at",
     "closed_at",
     "web_url",
 )
+_NOTE_KEYS: Final = ("id", "author", "body", "created_at", "updated_at", "system", "internal")
 _PIPELINE_KEYS: Final = (
     "id",
     "iid",
@@ -584,27 +687,55 @@ class GitLabTools:
         )
         return ToolOutput(rows=_rows(items, _JOB_KEYS))
 
-    async def read_job_log(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
-        """The tail of a job log, ANSI colour codes removed. A log longer than
-        `max_job_log_bytes` is refused (`upstream_too_large`), never read on."""
+    async def list_issue_notes(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
+        """One issue's notes, oldest first by default. System notes (label,
+        state and description changes) are left out unless `include_system`:
+        asked of GitLab with `activity_filter` and filtered here as well, as
+        an older GitLab ignores that parameter."""
         project_id, _ = await self._project(ctx, args["project"])
-        body = await self.client.get_bytes(
-            ctx.principal,
-            f"/projects/{project_id}/jobs/{args['job_id']}/trace",
-            max_bytes=self.backend.max_job_log_bytes,
+        include_system = bool(args.get("include_system", False))
+        params: dict[str, str | int] = {
+            "per_page": int(args.get("per_page", self.backend.per_page)),
+            "page": int(args.get("page", 1)),
+            "sort": args.get("sort", "asc"),
+            "order_by": "created_at",
+        }
+        if not include_system:
+            params["activity_filter"] = "only_comments"
+        items, next_page = await self.client.get_json_page(
+            ctx.principal, f"/projects/{project_id}/issues/{args['iid']}/notes", params
         )
-        # The result cap clamps the tail, and whatever still does not fit once
-        # framed and escaped is cut from the start: the end is always kept.
+        if not isinstance(items, list):
+            raise GatewayError("upstream_error")
+        if not include_system:
+            items = [i for i in items if not (isinstance(i, Mapping) and i.get("system") is True)]
+        if next_page is not None and next_page > self.backend.max_page:
+            next_page = None  # a page no call may ask for
+        return ToolOutput(rows=_rows(items, _NOTE_KEYS), next_page=next_page)
+
+    async def read_job_log(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
+        """The end of a job log, streamed: only the last `tail_bytes` are kept
+        in memory, however long the log. Reading stops after
+        `max_job_log_read_bytes` or `max_job_log_read_s` (counted from the
+        start of the call), and what was read is returned, marked."""
+        started = time.monotonic()
+        project_id, _ = await self._project(ctx, args["project"])
+        # The result cap clamps the tail; job_log_text keeps the end.
         tail_bytes = min(
             int(args.get("tail_bytes", ctx.limits.max_result_bytes // 2)),
             ctx.limits.max_result_bytes,
         )
-        text = _ANSI_RE.sub("", body[-tail_bytes:].decode("utf-8", errors="replace"))
-        omitted = "[earlier log lines omitted]\n"
-        fitted = fit_text_tail(text, ctx.limits)
-        if len(body) > tail_bytes or len(fitted) < len(text):
-            fitted = fit_text_tail(text, ctx.limits, prefix=omitted)
-        return ToolOutput(text=fitted)
+        remaining = self.backend.max_job_log_read_s - (time.monotonic() - started)
+        if remaining <= 0:
+            raise GatewayError("upstream_timeout")
+        read = await self.client.get_tail(
+            ctx.principal,
+            f"/projects/{project_id}/jobs/{args['job_id']}/trace",
+            keep_bytes=tail_bytes + 1,
+            max_read_bytes=self.backend.max_job_log_read_bytes,
+            deadline_s=remaining,
+        )
+        return ToolOutput(text=job_log_text(read, tail_bytes, ctx.limits))
 
     def tools(self) -> list[Tool]:
         b = self.backend
@@ -732,6 +863,22 @@ class GitLabTools:
                 ["project", "iid"],
             ),
             tool(
+                "list_issue_notes",
+                "List the comments on one issue, oldest first (sort=desc for newest"
+                " first); system notes only with include_system. next_page names"
+                " the following page; if truncated, ask again with a smaller per_page.",
+                self.list_issue_notes,
+                {
+                    "project": project,
+                    "iid": iid,
+                    "page": page,
+                    "per_page": _int("Notes per page", 1, b.per_page),
+                    "sort": {"type": "string", "enum": ["asc", "desc"]},
+                    "include_system": {"type": "boolean"},
+                },
+                ["project", "iid"],
+            ),
+            tool(
                 "list_pipelines",
                 "List CI pipelines.",
                 self.list_pipelines,
@@ -768,6 +915,7 @@ class Gateway:
     client: GitLabClient
     token: str
     mode: str
+    limits: Limits
 
 
 def auth_mode(environ: Mapping[str, str]) -> str:
@@ -787,8 +935,16 @@ def build_gateway(
     `transport` (a fake GitLab) and `jwks`; nothing here touches the network."""
     env = os.environ if environ is None else environ
     mode = auth_mode(env)
-    config = load_config(GATEWAY, env, require_auth=mode == "oidc")
+    config = load_config(
+        GATEWAY,
+        env,
+        require_auth=mode == "oidc",
+        limit_defaults=BEARER_LIMIT_DEFAULTS if mode == "bearer" else None,
+    )
     backend = backend_from_config(config)
+    if backend.max_job_log_read_s >= config.limits.tool_timeout_s:
+        # Reading must stop, and the tail be returned, before the call is cancelled.
+        raise GatewayConfigError("backend.max_job_log_read_s must be below limits.tool_timeout_s")
     token = env.get(TOKEN_ENV, "")
     provider = StaticGroupTokenProvider(token)
     client = GitLabClient(backend, provider, transport=transport)
@@ -804,7 +960,7 @@ def build_gateway(
         # ADR-0010 TD6: exactly this gateway's audience, fixed here.
         fixed = dataclasses.replace(config.auth, require_single_audience=True)
         app = create_gateway_app(dataclasses.replace(config, auth=fixed), tools, jwks=jwks)
-    return Gateway(app=app, client=client, token=token, mode=mode)
+    return Gateway(app=app, client=client, token=token, mode=mode, limits=config.limits)
 
 
 async def _checked_scopes(gateway: Gateway) -> list[str]:

@@ -1648,10 +1648,10 @@ def test_limit_defaults_fill_only_the_keys_the_document_leaves_out():
 
 
 def test_rows_can_name_the_next_page():
-    result = _result(_post_all(_gateway(_Handler(gw.ToolOutput(rows=[{"n": 1}], next_page=3))).app, [_call()])[0])
+    result = _result(_post_all(_gateway(_Handler(gw.ToolOutput(rows=[{"n": 1}], next_page=3))), [_call()])[0])
     _, body = _frame(result)
     assert body == {"rows": [{"n": 1}], "row_count": 1, "truncated": False, "next_page": 3}
-    _, plain = _frame(_result(_post_all(_gateway(_Handler()).app, [_call()])[0]))
+    _, plain = _frame(_result(_post_all(_gateway(_Handler()), [_call()])[0]))
     assert "next_page" not in plain
     with pytest.raises(ValueError):
         gw.ToolOutput(text="t", next_page=2)
