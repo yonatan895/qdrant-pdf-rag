@@ -2224,8 +2224,23 @@ deterministic and trap queries stay on the manuals path.
   without contacting the server, and none logs on until the cooldown
   (`MCP_FTP_LOGON_COOLDOWN_S`) passes or an operator resets it
   (`POST /admin/reset-logon-breaker`); only session setup is bounded, reads
-  run concurrently. Every tool output, `job_status` included, is capped at
-  `MCP_FTP_MAX_BYTES` with a truncation suffix. Text reads stay in `TYPE A`
+  run concurrently. `dataset_read` and `job_status` output is capped at
+  `MCP_FTP_MAX_BYTES` with a truncation suffix. `jes_spool_read` keeps the
+  start and end of a job log instead: a file whose screened text fits the cap
+  less 1 KiB returns whole, a longer one keeps its first quarter and last three
+  quarters around an `[... z/OS bridge omitted about N bytes ...]` marker
+  (forged lookalikes in the data are neutralized), the framed result fits
+  `MCP_FTP_MAX_BYTES`, and the BEGIN header and `structuredContent`
+  (`truncated`, `window` `full|head_tail|head_only`, `total_bytes`,
+  approximate `omitted_bytes`, `stream_complete`) carry the window facts.
+  `MCP_FTP_SPOOL_STREAM_MAX_BYTES` (default 16 MiB, at least the cap) and
+  `MCP_FTP_SPOOL_STREAM_MAX_S` (default 8.0, must stay below the agent's
+  default 15 s `ZOWE_MCP_TIMEOUT_S`) stop a longer stream, which closes the
+  connection without `ABOR` and returns the head with a stop marker; a
+  `LIST` BYTE-COUNT above that ceiling reads the head only. Text reads send
+  `SITE NOTRAILINGBLANKS` and `SITE SBSENDEOL=CRLF` before `TYPE A`; an
+  unconfirmed reply proceeds and is logged by reply code only (ADR-0012 D6,
+  D8(d)). Text reads stay in `TYPE A`
   end to end (the server translates EBCDIC); `MCP_FTP_ENCODING` is the code
   page of the server's ASCII output (default `latin-1`, because z/OS FTP usually sends
   ISO8859-1 and bytes above 0x7F such as `¬` or `¢` are invalid UTF-8; set `utf-8` only if the site

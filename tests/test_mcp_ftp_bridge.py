@@ -1083,11 +1083,13 @@ def test_spool_tail_without_newline_is_omitted() -> None:
 
 def test_spool_crlf_and_multibyte_split_at_chunk_edges() -> None:
     """8192-byte receive chunks that split a CRLF or a UTF-8 character leave
-    no stray blank line and no U+FFFD, whole or windowed."""
+    no stray blank line and no U+FFFD, whole or windowed. UTF-8 is set
+    explicitly: the latin-1 default has no multibyte characters to split, but
+    MCP_FTP_ENCODING may name a multibyte code page."""
     e_acute = "\u00e9"
     whole = b"A" * 8191 + b"\r\n" + b"B" * (16383 - 8193) + e_acute.encode() + b"\r\nEND\r\n"
     assert whole[8191:8193] == b"\r\n" and whole[16383:16385] == e_acute.encode()
-    text = _assert_framed_within(_spool_out(_spool_fake(whole)), 262144)
+    text = _assert_framed_within(_spool_out(_spool_fake(whole), encoding="utf-8"), 262144)
     body = text.split("\n", 1)[1]
     assert "\ufffd" not in text and "\n\n" not in body and e_acute in text
 
@@ -1101,7 +1103,7 @@ def test_spool_crlf_and_multibyte_split_at_chunk_edges() -> None:
     assert len(payload) == 4 * 8192 and payload[3 * 8192 - 1 : 3 * 8192 + 1] == b"\r\n"
     _, h, _ = _window_budget(_SMALL_CAP)
     assert h == 994
-    text = _assert_framed_within(_spool_out(_spool_fake(payload), max_bytes=_SMALL_CAP), _SMALL_CAP)
+    text = _assert_framed_within(_spool_out(_spool_fake(payload), max_bytes=_SMALL_CAP, encoding="utf-8"), _SMALL_CAP)
     body = text.split("\n", 1)[1]
     assert "\ufffd" not in text and "\n\n" not in body
     assert "X" + e_acute in text and "END 000203" in text and _GAP in text

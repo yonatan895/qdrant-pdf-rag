@@ -25,7 +25,11 @@ ADR-0012 pilot controls enforced here:
 - Content screening & untrusted delimiting (D6): control/bidi characters
   stripped, password-shaped strings redacted (the forms `screen_zos_text`
   lists), output wrapped in untrusted observation delimiters with breakout
-  neutralization.
+  neutralization. Text reads pin `SITE NOTRAILINGBLANKS` and
+  `SITE SBSENDEOL=CRLF` (unconfirmed replies proceed, marked by code).
+- Spool window (D6): `jes_spool_read` returns the first quarter and last
+  three quarters of a job log that exceeds the cap (`_spool_window`), bounded
+  by `spool_stream_max_bytes` / `spool_stream_max_s`.
 - Logon-failure breaker (D9): FTP 530 maps to `logon_failed`; at most
   `threshold` failing logons can be in flight whatever the concurrency, and
   once tripped no logon reaches the server until cooldown elapses or an
