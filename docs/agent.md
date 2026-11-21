@@ -171,7 +171,14 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   model call. The resolved effort is what the model receives and what the
   existing `rag.reasoning_effort` / `llm.reasoning_effort` span attributes and the
   feedback record's `reasoning_effort` carry; the depth adds no telemetry field.
-  A request with neither field is unchanged. The response is
+  A request with neither field is unchanged. `research_mode` ([research mode](#research-mode),
+  [ADR-0013](adr/0013-research-mode.md), #1325) is an optional boolean on `/v1/chat` and
+  `/v1/chat/completions` only (no field on `/v1/answer` or `/ui/chat*`), separate from
+  `reasoning_depth` and `reasoning_effort`. An explicit `null` is the same as an absent field;
+  non-boolean values fail with `422 invalid_request`. While `RESEARCH_MODE_ENABLED` is off
+  (default), any request carrying a boolean `research_mode` fails before retrieval or any model
+  call with `422 research_mode_disabled` / `research mode is not enabled on this deployment`
+  (never a silent ordinary answer). The response is
   `ChatCompletionsResponse{id: "chatcmpl-<request_id>", created, model,
   choices[], usage, citations, citations_inferred, inferred_indices, hits,
   verification_state, script, script_lang, script_review_required,
@@ -565,6 +572,7 @@ status (`/ui` failures render HTML banners instead, §1):
 | `invalid_request` / `the rating is invalid` | 422 | `/ui/feedback`: the feedback service refused the rating shape. The form fallback `/ui/feedback/form` renders the same fixed texts: status 200 text for the htmx status slot, a full page with the real status for a native post |
 | `prompt_budget_exceeded` / `prompt exceeds the model token budget` | 422 | Irreducible token-budget overflow (issue #368): fixed content alone exceeds the window with nothing left to trim, or (issue #634) hits were retrieved but final packing supplied no usable excerpt (atomic-unit omission, verification trimming, whitespace-only text); the second case is the `EvidenceBudgetExceeded` subtype, logged/spanned under that type but identical on the wire; raised before any model call on JSON/chat, as an `error` event (no `final`) on already-open streams; `/ui/chat` renders its fixed banner |
 | `unsupported_reasoning_effort` / `the reasoning effort is not offered by this deployment` | 422 | Console (#748) and `/v1/chat*` (#1255): the requested effort is outside `LLM_REASONING_EFFORTS`; refused before retrieval or any model call. `/ui/chat` renders its fixed banner; `/ui/chat/stream` and `/v1/chat*` return this envelope |
+| `research_mode_disabled` / `research mode is not enabled on this deployment` | 422 | `/v1/chat*` carrying a boolean `research_mode` while `RESEARCH_MODE_ENABLED` is off ([research mode](#research-mode), ADR-0013 D5, #1325); refused before retrieval or any model call, never a silent ordinary answer |
 | `unsupported_image` / one fixed text per reason: `images must be PNG, JPEG or WebP data URLs` (the configured types), `each image must be at most <CHAT_IMAGE_MAX_BYTES> bytes`, `each image must be at most <CHAT_IMAGE_MAX_PIXELS> pixels`, `at most <CHAT_IMAGE_MAX_COUNT> images per message`, `images are accepted only in the latest user message` | 422 | `/v1/chat*` with `CHAT_IMAGES_ENABLED` on (#1287): a refused pasted image, before the serving gate or any model call; states only the configured limit, never input ([chat images](#chat-images)). With images off a content list is today's `invalid_request` |
 | `metrics_unavailable` / `metrics are not available` | 503 | `/metrics` scrape failure while enabled |
 | `not_found` / `not found` | 404 | Unknown route |
@@ -1175,6 +1183,7 @@ readers:
 | `answer_hit_limit` | 16 (#1274, was 8; 1..32) | hits one answer retrieval returns: `/v1/answer`, `/v1/chat*`, the console and the fused cut of an anchored follow-up's two legs (`AgentResources.retrieve`, `_fuse_by_rank`); `/v1/search` and MCP search keep the caller's `limit` (default 8, max 40). Operator input `ANSWER_HIT_LIMIT` (#1191; unset renders no variable). The pool (40 per leg, or `rerank_candidates` with rerank on) and the per-page/per-doc caps may return fewer. Every hit is offered to packing: under the default window and reserves, the estimator fits 16 excerpts at the 4000-character cap (above the 3500-character ingest section cap), and a denser server count trims or drops from the tail; 32 need about a 65,536-token window. The supplied-evidence text total scales as `max(48000, 6000 x answer_hit_limit)`, so excerpts at the 4000-character cap keep their text ([supplied evidence](#supplied-evidence-projection-issue-635)) |
 | `answer_select_enabled` / `answer_select_candidates` | `false` / 40 (2..40) | [candidate selection](#candidate-selection) (#1309): one lowest-effort reasoning call picks which of one retrieval's `answer_select_candidates` hits are the answer's `answer_hit_limit` hits; on an anchored follow-up whose antecedent names an identifier, the antecedent leg's head (at most `answer_hit_limit // 2` hits) is pinned and the model picks the rest. Off is byte-identical. Settings/environment only (`ANSWER_SELECT_ENABLED`, `ANSWER_SELECT_CANDIDATES`): no operator key, chart value or registry entry until a measured A/B |
 | `answer_expand_enabled` / `answer_expand_budget` / `answer_expand_per_hit` | `false` / 16 (0..32) / 4 (1..8) | [neighbour expansion](#neighbour-expansion) (#1314): after retrieval and selection, a hit's reading-order neighbours within two pages are appended as separate hits, at most `answer_expand_per_hit` per hit and `answer_expand_budget` per turn (0 adds none). Off is byte-identical. Settings/environment only (`ANSWER_EXPAND_ENABLED`, `ANSWER_EXPAND_BUDGET`, `ANSWER_EXPAND_PER_HIT`): no operator key, chart value or registry entry (maintainer decision 2026-11-20) |
+| `research_mode_enabled` / `research_max_rounds` / `research_max_searches` / `research_stage_budget_s` / `research_max_packed_excerpts` / `research_plan_max_excerpts` / `research_plan_excerpt_chars` / `research_plan_max_tokens` | `false` / 2 (1..2) / 3 (1..3) / 30.0 (0..120) / 24 (1..64) / 16 (1..32) / 600 (100..2000) / 1024 (32..4096) | [research mode](#research-mode) (ADR-0013, #1325): bounded model-directed follow-up search stage on opted-in `/v1/chat*` turns. Default off (byte-identical when off or not requested). Hard ceilings in code: `research_max_rounds <= 2`, `research_max_searches <= 3` (first retrieval included). Enabling refuses startup unless `request_deadline_s > 0` and `research_stage_budget_s + embed_timeout_s + qdrant_timeout_s (+ rerank_timeout_s if rerank_enabled) < request_deadline_s`. Settings/environment only in Issue 1 (no chart value, operator key or Pipe entry yet) |
 | `retrieve_max_chunks_per_page` / `retrieve_max_chunks_per_doc` | 1 / 5 (#1274, was 3; 1..10 each) | diversity caps in `diversify_hits`, for every retrieval (`/v1/search` and MCP included); a capped hit is backfilled only when the pool runs short. Operator input `RETRIEVE_MAX_CHUNKS_PER_DOC` (#1191; unset renders no variable) |
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
 | `answer_coding_mode_enabled` | `true` (#1276) | coding mode: coding requests take the complex path and the coding prompt extension ([prompt assembly](#4-prompt-assembly-and-budgets)); operator input `ANSWER_CODING_MODE_ENABLED`, unset renders no variable |
@@ -1249,7 +1258,9 @@ Spans mirror the log contract (one request = one trace: a
 `v1.search`/`v1.answer`/`v1.chat`/`ui.chat` root → (`chat.condense` before
 retrieval on an eligible chat follow-up) → retrieve
 embed/prefetch/RRF/rerank/diversify → (`answer.select` when
-[candidate selection](#candidate-selection) calls the model) → prompt build → LLM chat with
+[candidate selection](#candidate-selection) calls the model, or
+`answer.research_round` per round when [research mode](#research-mode) runs on
+`/v1/chat*`) → prompt build → LLM chat with
 model/effort/TTFT/finish/tokens). Span attributes carry finite labels,
 counts, and operator config only — raw query text was removed as an
 explicit telemetry-policy change (issue #529 OBS-1A); PDF text and
@@ -1448,8 +1459,9 @@ recorded chunk span, not finer attribution. `chunk_id` is not exposed.
 Bounds: `text` is clipped at 8000 chars per entry and at
 `max(48000, 6000 x answer_hit_limit)` chars in total (48000 up to 8 hits,
 96000 at 16; maintainer decision 2026-11-17, #1191; with
-[neighbour expansion](#neighbour-expansion) on, the count is the number of
-hits offered to packing when that is larger, #1314) (`text_clipped: true`;
+[neighbour expansion](#neighbour-expansion) (#1314) or
+[research mode](#research-mode) (#1325) on, the count is the number of
+hits offered to packing when that is larger) (`text_clipped: true`;
 the text is then a prefix of the shipped slice); the rest is bounded by the
 prompt window. Every supplied entry is listed, and an entry past the total
 keeps its metadata with empty `text` (the Open WebUI Pipe then shows an empty
@@ -1665,8 +1677,8 @@ and capability restrictions.
 chart value or registry entry yet, so it is a Settings/environment switch for
 the stand-in lane only). **Decision owners:** `answer_core.retrieve_for_answer`
 (when the stage runs) and `agent/answer_select.py` (prompt, parsing, order).
-[ADR-0013](adr/0013-research-mode.md) (proposed, not in effect) would add a
-bounded follow-up search stage, exclusive per request with this one in its first release (its D1).
+[ADR-0013](adr/0013-research-mode.md) (accepted, implemented default off in #1325) adds a
+bounded follow-up search stage ([research mode](#research-mode)), exclusive per request with this one in its first release (its D1; selection bypasses with reason `research_mode`).
 
 Off, every request is byte-identical: the same retrieval call, hits, timings
 and prompt, and no span attribute. On, `/v1/answer`, `/v1/chat*` and the
@@ -1689,7 +1701,7 @@ never rewrites the query and never retrieves again. Its fallback order is the
 pinned hits and then the head of the wider retrieval; that this equals the
 `answer_hit_limit` retrieval is not asserted. The root span carries `rag.select_mode`
 (`selected` | `bypass` | `fallback`), `rag.select_reason` (`identifier` |
-`trap` | `few_candidates` | `model_error` | `invalid_output`; absent when
+`trap` | `few_candidates` | `model_error` | `invalid_output` | `research_mode`; absent when
 selected), `rag.select_candidates` (hits held, pinned included),
 `rag.select_selected` (model-chosen hits packed) and `rag.select_pinned`
 (pinned hits packed; 0 when nothing is pinned); the call is an `answer.select` child span. A failure logs the
@@ -1750,6 +1762,37 @@ counted once per hit that reached them); the reads are an `answer.expand` child 
 packing, and so include the neighbours (up to 64, past the histogram's last
 boundary of 40). Timings gain no key. The per-page and per-manual retrieval
 caps are not re-applied to neighbours.
+
+<a id="research-mode"></a>
+## Research mode (ADR-0013, issue #1325)
+
+**Status: implemented, default off** (`research_mode_enabled`; Settings/environment
+only in Issue 1, no chart value, operator key or Pipe entry yet). **Decision
+owners:** `answer_core.retrieve_for_answer` (stage dispatch and exclusivity with
+[candidate selection](#candidate-selection)) and `agent/answer_research.py`
+(planning prompt, strict reply parser, untrusted query screens, stage budget and
+evidence merge).
+
+Off, or on a turn without `research_mode: true`, every request is byte-identical
+with zero planning calls and no `rag.research_*` span attributes. Any `/v1/chat*`
+request carrying a boolean `research_mode` while `RESEARCH_MODE_ENABLED` is off
+fails before retrieval or any model call with `422 research_mode_disabled`
+(`research mode is not enabled on this deployment`). `/v1/answer`, `/ui/chat*`,
+`/v1/search`, MCP knowledge search, ops CLI search and ingest never run it.
+
+| Step | Rule |
+|---|---|
+| Startup validation (D4) | Enabling `RESEARCH_MODE_ENABLED` refuses startup unless `request_deadline_s > 0` and `research_stage_budget_s + embed_timeout_s + qdrant_timeout_s (+ rerank_timeout_s if rerank_enabled) < request_deadline_s` |
+| Exclusivity with #1309 (D1) | On a research turn when `ANSWER_SELECT_ENABLED` is also on, candidate selection bypasses before retrieval with `rag.select_reason="research_mode"`, retrieves at `answer_hit_limit` and makes zero selection calls |
+| Pre-loop stops (D3, D4, C12, C23) | Trap user query (`plan.query` or `plan.anchor` screens as `trap` → `trap_query`), empty first retrieval (`no_hits`), or first-round hits with zero non-empty excerpts (`no_usable_excerpts`) make zero planning calls; empty hits and zero usable excerpts take their existing C23 paths unchanged. Identifier queries do **not** bypass |
+| Bounds (D4) | Hard ceilings in code: at most `research_max_rounds <= 2` follow-up rounds and `research_max_searches <= 3` total searches per request (first retrieval included; an anchored first round or multi-path split counts as one search). Stop reasons: `round_limit`, `search_limit`, `packed_cap` |
+| Planning prompt (D3, D4 pt 16) | Reads only the request's searched texts (`plan.query`, `plan.anchor`, prior follow-up queries of this request) and fixed-length heads (`research_plan_excerpt_chars`) of up to `research_plan_max_excerpts` usable held excerpts in evidence order, delimited as untrusted data (not instructions); never reads chat history, raw images, separate image transcriptions or `splunk_context`. Checked against `llm_max_model_len - research_plan_max_tokens - llm_token_safety_margin` off the event loop; overflow ends the loop (`prompt_budget`) with zero planning calls and never raises `422 prompt_budget_exceeded` |
+| Planning call & reply (D2, D6 pt 8) | One attempt, no retry, at the lowest offered effort (`reasoning_depth_effort("quick")`), temperature `0.0`, `max_tokens=research_plan_max_tokens`. Strict JSON reply: `{"done": true}` (`model_done`) or `{"query": "<str>"}`. Any extra key (e.g. filters/limits), prose, non-JSON, timeout (`plan_timeout`) or error (`plan_error`) ends the loop (`malformed_reply` / fallback) and answers with held evidence |
+| Untrusted query screens (D3) | Every follow-up query passes `is_unsearchable_query` and lone-surrogate check (`screen_unsearchable`), `screen_query` (`screen_trap`), retrieval/embed effective-length limit (`screen_too_long`) and normalized duplicate-query dedup against `plan.query`, `plan.anchor` and earlier follow-up queries (`duplicate_query`). Rejected queries are dropped without repair, truncation or retry and end the loop |
+| Stage budget (D4 pt 12) | Single non-renewed `research_stage_budget_s` budget checked before planning and before starting a follow-up search (`stage_budget`). Expiry during the async planning call cancels it and answers with held evidence; expiry after planning returns discards the query unsearched. Once a follow-up search starts, it is never abandoned by the stage budget: it finishes under its own per-leg timeouts and the request deadline, appends its new hits, and the loop ends before the next round |
+| Follow-up search & isolation (D2, D6 pt 5) | Uses the same retrieval call with the request's `product`/`version` scope unchanged. A failed follow-up search stays the existing `502 upstream_error` (`retrieval failed`). Follow-up queries never reach the live-read planner, coding classifier or retrieval-derived prompt decisions (`search_query`, `query_kind`, complexity, resolved-code note, no-hits wording) |
+| Evidence & citations (D4, D7) | First-round hits are never dropped or reordered; new hits append in round order deduplicated by `chunk_id` up to `max(len(first_hits), research_max_packed_excerpts)`. A round adding zero new chunks ends the loop (`no_new_hits`). Citations validate strictly against stored excerpts in `supplied_evidence`; follow-up query text never grounds a citation |
+| Telemetry privacy (D8) | Root span sets `rag.research_mode` (`searched` \| `planned` \| `bypass`), `rag.research_rounds`, `rag.research_searches`, and `rag.research_stop_reason`; each round emits one `answer.research_round` child span carrying counts only (`rag.research_round`, `rag.research_hits`, `rag.research_new_hits`). Follow-up query text never enters spans, logs or feedback records |
 
 <a id="http-model-contract"></a>
 ## HTTP/model fallback and lifecycle policy
@@ -1902,6 +1945,7 @@ tokenizer share; a later named profile can carry its own instance.
 | Rerank | Configured score/rerank endpoint order plus alternate endpoint fallback; exhaustion fails closed; a batch rejected on both legs with HTTP 4xx (not 5xx/transport/shape) is re-scored once with passages cut to `RERANK_RETRY_PASSAGE_MAX_CHARS` (2000), and a failing retry fails closed (issue #664); [retrieval](retrieval.md) owns dispatch |
 | Condensation | Optional reasoning call; failure returns the raw latest query, not a fabricated condensed result |
 | Candidate selection (#1309) | Optional reasoning call, one attempt; failure, timeout, an empty reply or one naming no supplied candidate packs the pinned hits and then the retrieval order, cut to `answer_hit_limit`, never a fabricated selection ([candidate selection](#candidate-selection)) |
+| Research planning (#1325) | Optional reasoning call per round (`research_max_rounds <= 2`, `research_max_searches <= 3`), lowest offered effort, one attempt, no retry, bounded by `research_stage_budget_s` and `request_deadline_s`; transport error, timeout, stage-budget expiry, malformed reply or screened-out query ends the loop and answers with held evidence, never a fabricated query; failed follow-up search remains `502 upstream_error` ([research mode](#research-mode)) |
 | Admission / total deadline (issue #374) | Opt-in (`request_*`, default off): refusal is `503 overloaded` before any work; expiry cancels async legs and is `504 deadline_exceeded` / a terminal SSE `error` event; sync worker-thread legs are bounded by their own timeouts, not interrupted (§6a). No retry or fallback is added |
 | Tracing export | Separately bounded fail-open export; outages drop/log and must not fail request/shutdown |
 

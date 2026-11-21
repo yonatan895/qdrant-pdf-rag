@@ -84,21 +84,23 @@ measured host and gateway only; never a decision input.
 
 ## Trace contract (OpenObserve service `mainframe-rag-agent`)
 
-Operations and Kinds (13, matching the OBS-1B tree plus `chat.condense`):
+Operations and Kinds (14, matching the OBS-1B tree plus `chat.condense` and `answer.research_round`):
 
 - SERVER roots: `v1.search`, `v1.answer`, `v1.chat`, `ui.chat`
 - CLIENT legs: `retrieve.embed`, `retrieve.prefetch`, `retrieve.rerank`, `llm.chat`, `chat.condense`
-- INTERNAL stages: `retrieve.search`, `retrieve.rrf`, `retrieve.diversify`, `prompt.build`
+- INTERNAL stages: `retrieve.search`, `retrieve.rrf`, `retrieve.diversify`, `prompt.build`, `answer.research_round`
 
 Root-span tags by endpoint (all carry `http.request_id` except framework
 rejections, which leave no trace — see below):
 
 - `v1.search`: `rag.query_kind`, `rag.hits`, `rag.limit`
 - `v1.answer`: plus `rag.stream`, `rag.evidence`, `rag.citations`, `rag.has_script`
-- `v1.chat`, `ui.chat`: `rag.stream`, `rag.followup_mode` on follow-up turns (`literal` | `condensed` | `anchored`, #1268; a fixed label, never text; `literal` also covers a condensation that bypassed or fell back, `condensed` only a searched rewrite; anchored retrieval timings are the two legs' sums) (empty-hit runs also set `rag.query_kind`/`rag.hits: 0` on the root)
+- `v1.chat`, `ui.chat`: `rag.stream`, `rag.followup_mode` on follow-up turns (`literal` | `condensed` | `anchored`, #1268; a fixed label, never text; `literal` also covers a condensation that bypassed or fell back, `condensed` only a searched rewrite; anchored retrieval timings are the two legs' sums) (empty-hit runs also set `rag.query_kind`/`rag.hits: 0` on the root); on opted-in `/v1/chat*` research-mode turns (`#1325` / ADR-0013, absent when off or unrequested), `rag.research_mode` (`searched` | `planned` | `bypass`), `rag.research_rounds` (`0..2`), `rag.research_searches` (`1..3`), and `rag.research_stop_reason` (closed vocabulary, never text)
 
 Stage tags used by the queries: `retrieve.search` (`rag.query_kind`,
-`rag.split_mode`, `rag.hits`, `rag.rerank_active`), `llm.chat`
+`rag.split_mode`, `rag.hits`, `rag.rerank_active`), `answer.research_round`
+(`rag.research_round`, `rag.research_hits`, `rag.research_new_hits` — counts
+only, never follow-up query text), `llm.chat`
 (`llm.model`, `llm.ttft_ms`, `llm.{prompt,completion,total}_tokens`,
 `llm.finish_reason`).
 

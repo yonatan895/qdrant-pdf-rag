@@ -331,6 +331,14 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "answer_expand_enabled": False,  # #1314: off, no operator key
     "answer_expand_budget": 16,
     "answer_expand_per_hit": 4,
+    "research_mode_enabled": False,  # #1325 / ADR-0013: default off
+    "research_max_rounds": 2,
+    "research_max_searches": 3,
+    "research_stage_budget_s": 30.0,
+    "research_max_packed_excerpts": 24,
+    "research_plan_max_excerpts": 16,
+    "research_plan_excerpt_chars": 600,
+    "research_plan_max_tokens": 1024,
     "llm_reasoning_efforts": "low,medium,xhigh",
     "llm_temperature": 0.2,
     "llm_extra_body": "",
@@ -720,3 +728,75 @@ def test_chat_images_start_with_any_offered_effort_list(monkeypatch, efforts, de
 def test_chat_image_types_refuse_unknown_or_duplicate_entries(raw):
     with pytest.raises(ValueError, match="CHAT_IMAGE_TYPES must list distinct types"):
         Settings(_env_file=None, chat_image_types=raw)
+
+
+@pytest.mark.parametrize("field,low,high", [
+    ("research_max_rounds", 1, 2),
+    ("research_max_searches", 1, 3),
+    ("research_max_packed_excerpts", 1, 64),
+    ("research_plan_max_excerpts", 1, 32),
+    ("research_plan_excerpt_chars", 100, 2000),
+    ("research_plan_max_tokens", 32, 4096),
+])
+def test_research_mode_hard_ceilings_are_enforced(field, low, high):
+    """ADR-0013 D4 / #1325: hard ceilings in code (max_rounds <= 2,
+    max_searches <= 3, and bounded prompt/packed caps)."""
+    for value in (low, high):
+        assert getattr(Settings(_env_file=None, **{field: value}), field) == value
+    for value in (low - 1, high + 1):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, **{field: value})
+
+
+@pytest.mark.parametrize("bad_budget", [0.0, -1.0, 120.1])
+def test_research_stage_budget_bounds(bad_budget):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, research_stage_budget_s=bad_budget)
+
+
+def test_research_mode_requires_request_deadline_and_strict_overrun_margin():
+    """ADR-0013 D4 / #1325: startup refuses enabling research mode when
+    request_deadline_s is unset or when stage_budget + one search overrun
+    is not strictly below request_deadline_s."""
+    assert Settings(_env_file=None).research_mode_enabled is False
+    # Unset (0.0) request deadline refuses research mode.
+    with pytest.raises(ValidationError, match="REQUEST_DEADLINE_S"):
+        Settings(_env_file=None, research_mode_enabled=True, request_deadline_s=0.0)
+
+    # Default overrun without rerank: embed_timeout_s (60) + qdrant_timeout_s (30) = 90s.
+    # Stage budget 30s + 90s = 120s: exact equality MUST fail (strictly below).
+    with pytest.raises(ValidationError, match="RESEARCH_STAGE_BUDGET_S"):
+        Settings(
+            _env_file=None,
+            research_mode_enabled=True,
+            research_stage_budget_s=30.0,
+            request_deadline_s=120.0,
+        )
+    # Strictly below succeeds (and the supported 270s deployment deadline fits easily).
+    ok = Settings(
+        _env_file=None,
+        research_mode_enabled=True,
+        research_stage_budget_s=30.0,
+        request_deadline_s=120.1,
+    )
+    assert ok.research_mode_enabled is True
+    assert ok.research_search_overrun_s() == 90.0
+    assert Settings(_env_file=None, research_mode_enabled=True, request_deadline_s=270.0).research_mode_enabled is True
+
+    # Rerank enabled adds rerank_timeout_s (5s) -> overrun 95s; 30 + 95 = 125s must fail at 125.0.
+    with pytest.raises(ValidationError, match="RESEARCH_STAGE_BUDGET_S"):
+        Settings(
+            _env_file=None,
+            research_mode_enabled=True,
+            rerank_enabled=True,
+            research_stage_budget_s=30.0,
+            request_deadline_s=125.0,
+        )
+    ok_rerank = Settings(
+        _env_file=None,
+        research_mode_enabled=True,
+        rerank_enabled=True,
+        research_stage_budget_s=30.0,
+        request_deadline_s=125.1,
+    )
+    assert ok_rerank.research_search_overrun_s() == 95.0
