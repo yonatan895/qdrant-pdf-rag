@@ -943,5 +943,5 @@ def test_gap_rehearsal_ingest_refuses_the_live_namespace_before_any_cluster_writ
     assert refused.returncode == 1
     assert "the rehearsal deploy would target the installed release's namespace" in refused.stderr
     calls = kc_log.read_text().splitlines() if kc_log.exists() else []
-    assert [c for c in calls if c.split()[:1] != ["config"]] == [], "only the context lookup ran"
+    assert set(calls) <= {"config", "current-context"}, "only the context lookup ran"
     assert not (tmp_path / "dist" / "ingest-rendered.yaml").exists()

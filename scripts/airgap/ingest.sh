@@ -27,6 +27,8 @@ check_manifest_sha
 # The executing checkout itself must resolve to the packed SHA (issue #414):
 # an explicitly set IMAGE_SHA alone never changes which code executes.
 check_checkout_sha
+# A gap bundle ingests only as a declared rehearsal or promotion (#1338).
+check_gap_release_stage "$MANIFEST"
 require_kc
 refuse_nfs_storage
 KC=${KC:-$(kc)}

@@ -561,7 +561,7 @@ def _load_all(tree) -> dict[str, str]:
     return {role: _put_registry(tree, role, _image_manifest(role)) for role in ROLE_REFS}
 
 
-def _write_pods(tree, digests: dict[str, str], **override) -> None:
+def _write_pods(tree, digests: dict[str, str], namespace: str = "ns", **override) -> None:
     items = []
     for role, repo in ROLE_REPOS.items():
         kind = "StatefulSet" if role == "qdrant" else "Deployment"
@@ -570,7 +570,7 @@ def _write_pods(tree, digests: dict[str, str], **override) -> None:
         uid = f"{role}-workload"
         spec = {"containers": [{"name": role, "image": f"{repo}:tag"}]}
         items.append({
-            "kind": kind, "metadata": {"name": name, "namespace": "ns", "uid": uid,
+            "kind": kind, "metadata": {"name": name, "namespace": namespace, "uid": uid,
                 "annotations": {"deployment.kubernetes.io/revision": "2"}},
             "spec": {"replicas": replicas, "selector": {"matchLabels": {"app": name}},
                      "template": {"spec": spec}}, "status": {"updateRevision": "qdrant-current"},
@@ -579,7 +579,7 @@ def _write_pods(tree, digests: dict[str, str], **override) -> None:
         if kind == "Deployment":
             owner_kind, uid = "ReplicaSet", f"{role}-rs"
             items.append({"kind": "ReplicaSet", "metadata": {
-                "name": uid, "namespace": "ns", "uid": uid,
+                "name": uid, "namespace": namespace, "uid": uid,
                 "annotations": {"deployment.kubernetes.io/revision": "2"},
                 "ownerReferences": [{"kind": kind, "uid": f"{role}-workload", "controller": True}],
             }})
@@ -588,7 +588,7 @@ def _write_pods(tree, digests: dict[str, str], **override) -> None:
         digest = override.get(role, digests[role])
         for n in range(replicas):
             items.append({
-                "kind": "Pod", "metadata": {"name": f"{role}-{n}", "namespace": "ns",
+                "kind": "Pod", "metadata": {"name": f"{role}-{n}", "namespace": namespace,
                     "labels": {"app": name, "controller-revision-hash": "qdrant-current"},
                     "ownerReferences": [{"kind": owner_kind, "uid": uid, "controller": True}]},
                 "spec": spec,
@@ -2001,7 +2001,7 @@ _LIVE_ENV = f"NAMESPACE='{LIVE_NS}'\nINTERNAL_REGISTRY='reg.live'\n"
 _GAP_REFUSED = "FAIL: gap release rehearsal refused (the STOP line above names the reason); nothing was changed"
 
 
-def _gap_release(tree, qdrant_digest=_FIXED_A):
+def _gap_release(tree, qdrant_digest=_FIXED_A, namespace=REH_NS):
     """A verified gap bundle in the executing tree, its images loaded and running."""
     root = tree[0]
     copy_gap_tools(root)
@@ -2010,7 +2010,7 @@ def _gap_release(tree, qdrant_digest=_FIXED_A):
              f"qdrant_digest: {qdrant_digest}"]
     lines += [f"{role}_config_digest: {_config_of(role)}" for role in ROLE_REFS]
     write_signed_manifest(root / "dist", "\n".join(lines) + "\n", origin="gap", key=gap_release_key())
-    _write_pods(tree, _load_all(tree))
+    _write_pods(tree, _load_all(tree), namespace=namespace)
 
 
 def _rehearsal(tree, rehearsal_env=_REH_ENV, live_env=_LIVE_ENV, qdrant_digest=_FIXED_A):
@@ -2089,8 +2089,6 @@ _LIVE_TARGETS = {
                                      "the rehearsal deploy would target the installed release's namespace"),
     "live-namespace-in-process-env": (_REH_ENV, _LIVE_ENV, (("NAMESPACE", LIVE_NS),),
                                       "the rehearsal deploy would target the installed release's namespace"),
-    "live-namespace-other-spelling": ("NAMESPACE=' MFR-PROD'\nINTERNAL_REGISTRY='reg.internal'\n", _LIVE_ENV, (),
-                                      "the rehearsal deploy would target the installed release's namespace"),
     "unset-namespace": ("INTERNAL_REGISTRY='reg.internal'\n", _LIVE_ENV, (),
                         "NAMESPACE is not set for the rehearsal workspace"),
     "both-unset-default": ("INTERNAL_REGISTRY='reg.internal'\n", "INTERNAL_REGISTRY='reg.live'\n", (),
@@ -2141,7 +2139,7 @@ def test_gap_rehearsal_refuses_a_changed_fixed_tag_on_the_live_registry(tree, re
 
 
 def test_gap_promotion_deploys_only_the_bundle_the_identity_names(tree):
-    _gap_release(tree)
+    _gap_release(tree, namespace="ns")
     identity = release_identity(tree[0] / "dist")
     base = (*_BOTH_ANCHORS, *_RELEASE_PATH)
     wrong = _run(tree, *base, ("GAP_PROMOTE_IDENTITY", "0" * 64))

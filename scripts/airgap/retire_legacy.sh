@@ -85,6 +85,8 @@ fi
 # points (AIRGAP_UNVERIFIED_CHECKOUT=1 only with CI_REHEARSAL=1).
 MANIFEST=$(find_manifest)
 check_checkout_sha
+# A gap bundle acts only as a declared rehearsal or promotion (#1338).
+check_gap_release_stage "$MANIFEST"
 require_kc
 KC=${KC:-$(kc)}
 

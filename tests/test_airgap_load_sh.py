@@ -27,6 +27,7 @@ from tests.helpers_airgap import (
     make_bin_tree,
     plant_stdlib_shadows,
     release_anchor,
+    release_identity,
     release_key,
     run_sh,
     sha256_bytes,
@@ -606,7 +607,8 @@ def test_load_accepts_a_gap_release_only_with_the_gap_anchor(load_tree):
     assert refused.returncode == 1
     assert "no release trust anchor is configured for the bundle's origin (gap)" in refused.stderr
     assert not _copies(skopeo_log)
-    ok = _run_load(load_tree, *_BOTH)
+    # A gap bundle loads only in a declared stage (#1338): here its promotion.
+    ok = _run_load(load_tree, *_BOTH, ("GAP_PROMOTE_IDENTITY", release_identity(dist)))
     assert ok.returncode == 0, ok.stderr
     assert _copies(skopeo_log)
 

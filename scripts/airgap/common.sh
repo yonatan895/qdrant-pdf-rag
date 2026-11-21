@@ -24,6 +24,12 @@ readonly _CI_REHEARSAL_PROCESS_ENV="${CI_REHEARSAL:-}"
 # AIRGAP_UNVERIFIED_CHECKOUT (#1118 F1, check_checkout_sha) is the same kind of
 # connected-only opt-out: process environment only, never the operator file.
 readonly _AIRGAP_UNVERIFIED_CHECKOUT_PROCESS_ENV="${AIRGAP_UNVERIFIED_CHECKOUT:-}"
+# The gap release stage (#1338, check_gap_release_stage) is declared the same
+# way: process environment only, so an operator file a rehearsal workspace was
+# written from can never declare a promotion or name the installed workspace.
+readonly _GAP_PROMOTE_IDENTITY_PROCESS_ENV="${GAP_PROMOTE_IDENTITY:-}"
+readonly _GAP_REHEARSAL_INSTALLED_WORKSPACE_PROCESS_ENV="${GAP_REHEARSAL_INSTALLED_WORKSPACE:-}"
+readonly _GAP_REHEARSAL_KUBE_CONTEXT_PROCESS_ENV="${GAP_REHEARSAL_KUBE_CONTEXT:-}"
 _cli_saved_keys=""
 for _k in $OPERATOR_ENV_KEYS; do
     eval "_is_set=\${$_k:+set}"
@@ -658,6 +664,8 @@ check_manifest_chain() {
         verify_release_anchor "$_chain_dir" "$_chain_origin"
     fi
     check_manifest_gap_fields "$1" "$_chain_origin"
+    # The origin this chain authenticated, for check_gap_release_stage (#1338).
+    VERIFIED_RELEASE_ORIGIN=$_chain_origin
     unset _chain_dir _chain_f _chain_want _chain_have _chain_rc _chain_origin
 }
 
@@ -741,6 +749,55 @@ check_checkout_sha() {
     printf '%s\n' "$_flags" | awk 'NF && substr($0, 1, 2) != "H " { bad=1 } END { exit bad }' || \
         die "executing checkout hides tracked files from change detection (assume-unchanged, skip-worktree or sparse checkout) — clear the flags (git update-index --no-assume-unchanged / --no-skip-worktree; git ls-files -v marks them) before running a release"
     unset _flags
+}
+
+# The gap release stage (#1338; #1207 Rev 2 §3h, D6). Called by every stage
+# that writes to the cluster or the registry (load, deploy, ingest,
+# retire_legacy) right after check_checkout_sha, before any such write. $1 =
+# the packed MANIFEST that guard read. A bundle that is not origin: gap
+# returns at once: upstream and unpacked runs are unchanged. The origin is the
+# one check_manifest_chain authenticated; in dry-run (nothing authenticated,
+# nothing mutated) the file's own origin line is read, which can only add a
+# refusal. A gap bundle runs only in a stage the process environment declares:
+#   - GAP_PROMOTE_IDENTITY: promotion (runbook step 8) of exactly the bundle
+#     whose signed SHA256SUMS has this sha256, the record's release identity;
+#   - GAP_REHEARSAL_INSTALLED_WORKSPACE and GAP_REHEARSAL_KUBE_CONTEXT: a
+#     rehearsal (step 7). This workspace's release.py (rehearse-guard) resolves
+#     this workspace and the installed one with their own common.sh and judges
+#     them with rehearse-check's refusals, in this process's environment.
+# Neither, both, or an identity naming another bundle is refused. Fixed
+# messages; the STOP line before a rehearsal refusal names the reason.
+check_gap_release_stage() {
+    if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
+        _grs_origin=$(manifest_origin "$1") || _grs_origin=""
+    else
+        _grs_origin=${VERIFIED_RELEASE_ORIGIN:-}
+    fi
+    if [ "$_grs_origin" != gap ]; then
+        unset _grs_origin
+        return 0
+    fi
+    _grs_rehearsal="$_GAP_REHEARSAL_INSTALLED_WORKSPACE_PROCESS_ENV$_GAP_REHEARSAL_KUBE_CONTEXT_PROCESS_ENV"
+    if [ -n "$_GAP_PROMOTE_IDENTITY_PROCESS_ENV" ]; then
+        [ -z "$_grs_rehearsal" ] ||
+            die "the process environment declares both a rehearsal and a promotion of this gap release — export only GAP_PROMOTE_IDENTITY to promote, or only the two GAP_REHEARSAL_* variables to rehearse; nothing was changed"
+        _grs_identity=$(sha256sum "$(dirname -- "$1")/SHA256SUMS" 2>/dev/null | awk '{print $1}') || _grs_identity=""
+        { [ -n "$_grs_identity" ] && [ "$_grs_identity" = "$_GAP_PROMOTE_IDENTITY_PROCESS_ENV" ]; } ||
+            die "GAP_PROMOTE_IDENTITY is not this bundle's release identity (the sha256 of its signed SHA256SUMS, as the gap release record states) — promote only the rehearsed bundle; nothing was changed"
+        echo "==> Gap release promotion: release identity $_grs_identity (the record must show its rehearsal passed)"
+        unset _grs_origin _grs_rehearsal _grs_identity
+        return 0
+    fi
+    { [ -n "$_GAP_REHEARSAL_INSTALLED_WORKSPACE_PROCESS_ENV" ] && [ -n "$_GAP_REHEARSAL_KUBE_CONTEXT_PROCESS_ENV" ]; } ||
+        die "this checkout is a gap release (origin: gap): it runs only as a declared rehearsal or promotion — export GAP_REHEARSAL_INSTALLED_WORKSPACE and GAP_REHEARSAL_KUBE_CONTEXT to rehearse it, or GAP_PROMOTE_IDENTITY to promote it (docs/runbooks/gap-release.md steps 7 and 8); nothing was changed"
+    python3 -I "$REPO_ROOT/scripts/gap/release.py" --repo-root "$REPO_ROOT" rehearse-guard \
+        --installed-workspace "$_GAP_REHEARSAL_INSTALLED_WORKSPACE_PROCESS_ENV" \
+        --kube-context "$_GAP_REHEARSAL_KUBE_CONTEXT_PROCESS_ENV" \
+        --candidate-manifest "$1" --namespace "${NAMESPACE:-}" --registry "${INTERNAL_REGISTRY:-}" \
+        --kc "${KC:-$(kc)}" --operator-keys "$_OPERATOR_ENV_KEYS $_RETIRED_ENV_KEYS" \
+        --process-env-keys "$_AIRGAP_ENV_CLI_KEYS" ||
+        die "gap release rehearsal refused (the STOP line above names the reason); nothing was changed"
+    unset _grs_origin _grs_rehearsal
 }
 
 # Pack-host twin of the checkout guard (#1030): fixed messages, no file names.
