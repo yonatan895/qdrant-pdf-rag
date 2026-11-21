@@ -444,3 +444,96 @@ async def test_http_shutdown_cancels_pending_work_before_closing_owned_client(mo
     assert upstream.released["a"].is_set() and upstream.closes == 1
     assert (await pending).status_code == 202
     await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_http_sessions_enforce_max_cap_and_idle_ttl_eviction():
+    """#1302: sessions dict is bounded by max_sessions and idle TTL; evicted
+    sessions are closed and return 404, while active/refreshed sessions stay alive."""
+    now = [1000.0]
+    upstream = _RecordingClient(body={"ok": True})
+    app = knowledge.create_app(
+        HttpKnowledgeBackend("http://agent", client=upstream),
+        max_sessions=2,
+        session_ttl_s=60.0,
+        clock=lambda: now[0],
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://mcp") as client,
+    ):
+        async def init() -> str:
+            r = await client.post("/mcp", json={"id": 1, "method": "initialize"})
+            assert r.status_code == 200
+            return r.headers["mcp-session-id"]
+
+        s1 = await init()
+        now[0] += 10.0
+        s2 = await init()
+        # Touch s1 so s2 becomes the LRU session before capacity eviction.
+        now[0] += 10.0
+        assert (await client.post("/mcp", headers={"Mcp-Session-Id": s1},
+                                  json={"id": 2, "method": "ping"})).status_code == 200
+        # 3rd initialize exceeds max_sessions=2 -> evicts LRU (s2), keeps s1 & s3.
+        now[0] += 10.0
+        s3 = await init()
+        assert (await client.post("/mcp", headers={"Mcp-Session-Id": s2},
+                                  json={"id": 3, "method": "ping"})).status_code == 404
+        assert (await client.post("/mcp", headers={"Mcp-Session-Id": s1},
+                                  json={"id": 4, "method": "ping"})).status_code == 200
+        assert (await client.post("/mcp", headers={"Mcp-Session-Id": s3},
+                                  json={"id": 5, "method": "ping"})).status_code == 200
+
+        # Idle TTL eviction: advance past 60s -> both s1 and s3 expire (404),
+        # and a fresh session initializes and serves normally.
+        now[0] += 61.0
+        assert (await client.post("/mcp", headers={"Mcp-Session-Id": s1},
+                                  json={"id": 6, "method": "ping"})).status_code == 404
+        assert (await client.post("/mcp", headers={"Mcp-Session-Id": s3},
+                                  json={"id": 7, "method": "ping"})).status_code == 404
+        s4 = await init()
+        ok = await client.post("/mcp", headers={"Mcp-Session-Id": s4}, json=_tool_message())
+        assert ok.status_code == 200 and _payload_of(ok.json()) == (False, {"ok": True})
+
+
+def test_http_knowledge_propagates_traceparent_without_forwarding_auth_or_x_headers():
+    """#1302: W3C traceparent/tracestate propagate to the agent backend while
+    preserving ADR-0007/#373 header-forwarding blindness (no Auth/Cookie/X-*)."""
+    traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    client = _RecordingClient(body={"ok": 1})
+    backend = HttpKnowledgeBackend("http://agent", client=client)
+    app = TestClient(knowledge.create_app(backend))
+
+    for tool_name, args in (
+        ("knowledge_search", {"query": "IEF142I"}),
+        ("evidence_read", {"reference": "ep1.abc"}),
+        ("sources_list", {}),
+    ):
+        r = app.post(
+            "/mcp",
+            headers={
+                "traceparent": traceparent,
+                "tracestate": "vendor=1",
+                "Authorization": "Bearer secret-caller-token",
+                "Cookie": "session=secret",
+                "X-Forwarded-User": "alice",
+                "X-Custom-Header": "forged",
+            },
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": tool_name, "arguments": args},
+            },
+        )
+        assert r.status_code == 200
+
+    assert len(client.requests) == 3
+    for _method, _url, kw in client.requests:
+        sent_headers = {k.lower(): v for k, v in kw["headers"].items()}
+        assert sent_headers["traceparent"] == traceparent
+        assert sent_headers["tracestate"] == "vendor=1"
+        assert set(sent_headers) <= {"traceparent", "tracestate"}
+    serialized = repr(client.requests)
+    for forbidden in ("secret-caller-token", "session=secret", "alice", "forged", "x-forwarded"):
+        assert forbidden not in serialized.lower()

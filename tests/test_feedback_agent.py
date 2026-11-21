@@ -109,6 +109,33 @@ def test_disabled_feedback_builds_no_client_and_records_nothing(monkeypatch, syn
         assert client.post("/v1/answer", json={"query": QUERY}).status_code == 200
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_zos_observation_history_suppresses_feedback_and_next_manual_turn_records(
+    feedback_client, stream
+):
+    """ADR-0012 D6 / Option 7A: a chat turn whose history carries the fixed
+    z/OS observation citation marker never records into the feedback store,
+    while the next ordinary manual-only turn still records normally."""
+    obs_messages = [
+        {"role": "user", "content": "Show SYS1.PARMLIB(IEASYS00)"},
+        {"role": "assistant", "content": f"Observed {app_mod.ZOS_OBSERVATION_MARKER}: LFAREA=1G"},
+        {"role": "user", "content": QUERY},
+    ]
+    r_suppressed = feedback_client.post(
+        "/v1/chat", json={"messages": obs_messages, "stream": stream}
+    )
+    assert r_suppressed.status_code == 200
+    assert _records() == []
+
+    # Next ordinary manual-only turn records feedback normally
+    r_manual = feedback_client.post(
+        "/v1/chat", json={"messages": [{"role": "user", "content": QUERY}], "stream": stream}
+    )
+    assert r_manual.status_code == 200
+    [record] = _records()
+    assert record.query == QUERY
+
+
 def test_a_failing_feedback_client_never_changes_the_answer(feedback_client, monkeypatch):
     baseline = feedback_client.post("/v1/answer", json={"query": QUERY}).json()
 

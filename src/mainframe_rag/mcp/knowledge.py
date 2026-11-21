@@ -36,14 +36,21 @@ import json
 import os
 import secrets
 import sys
+import time
+from collections import OrderedDict
+from collections.abc import Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import quote
 
 import httpx2
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
+from opentelemetry import context as otel_context
+from opentelemetry import propagate
 
+from mainframe_rag import tracing as tracing_mod
 from mainframe_rag.mcp.http import serve_http
 
 PROTOCOL_VERSION = "2025-03-26"
@@ -56,6 +63,9 @@ METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
 
 MAX_RESPONSE_BYTES = 1_100_000  # one read is capped at 1 MiB by the service
+DEFAULT_MAX_SESSIONS = 128
+DEFAULT_SESSION_TTL_S = 1800.0
+_TRACE_HEADER_NAMES = frozenset({"traceparent", "tracestate"})
 
 
 class KnowledgeBackend(Protocol):
@@ -96,27 +106,53 @@ class HttpKnowledgeBackend:
             return 502, {"code": "upstream_error", "message": failure}
         return response.status_code, body if isinstance(body, dict) else {}
 
+    @staticmethod
+    def _trace_headers() -> dict[str, str]:
+        """Inject W3C traceparent/tracestate only (fail-open, #1302).
+
+        Never reads or forwards caller Authorization, Cookie, or X-* headers
+        (ADR-0007 / #373 header-forwarding blindness).
+        """
+        carrier: dict[str, str] = {}
+        try:
+            propagate.inject(carrier)
+        except Exception:  # noqa: BLE001 — fail-open, request proceeds untraced
+            return {}
+        return {k: v for k, v in carrier.items() if k.lower() in _TRACE_HEADER_NAMES}
+
     async def search(self, query, product, version, limit):
         payload: dict[str, Any] = {"query": query, "limit": limit}
         if product is not None:
             payload["product"] = product
         if version is not None:
             payload["version"] = version
-        return await self._json(await self._client.post("/v1/search", json=payload))
+        headers = self._trace_headers()
+        kwargs: dict[str, Any] = {"json": payload}
+        if headers:
+            kwargs["headers"] = headers
+        return await self._json(await self._client.post("/v1/search", **kwargs))
 
     async def read(self, reference, max_bytes, product, version):
         params = {k: v for k, v in
                   (("max_bytes", max_bytes), ("product", product), ("version", version))
                   if v is not None}
         url = "/v1/evidence/" + quote(reference, safe="")
-        return await self._json(await self._client.get(url, params=params))
+        headers = self._trace_headers()
+        kwargs: dict[str, Any] = {"params": params}
+        if headers:
+            kwargs["headers"] = headers
+        return await self._json(await self._client.get(url, **kwargs))
 
     async def list_sources(self, limit, cursor, product, version):
         params = {k: v for k, v in
                   (("limit", limit), ("cursor", cursor), ("product", product), ("version", version))
                   if v is not None}
+        headers = self._trace_headers()
+        kwargs: dict[str, Any] = {"params": params}
+        if headers:
+            kwargs["headers"] = headers
         return await self._json(
-            await self._client.get("/v1/sources", params=params), "sources listing failed"
+            await self._client.get("/v1/sources", **kwargs), "sources listing failed"
         )
 
     async def aclose(self) -> None:
@@ -384,20 +420,62 @@ async def serve_stdio(backend: KnowledgeBackend) -> None:
             await backend.aclose()
 
 
-def create_app(backend: KnowledgeBackend) -> FastAPI:
+@dataclass
+class _SessionEntry:
+    dispatcher: RequestDispatcher
+    last_active: float
+
+
+def create_app(
+    backend: KnowledgeBackend,
+    *,
+    max_sessions: int = DEFAULT_MAX_SESSIONS,
+    session_ttl_s: float = DEFAULT_SESSION_TTL_S,
+    clock: Callable[[], float] = time.monotonic,
+) -> FastAPI:
     """Unary JSON-RPC POSTs. Initialization issues a session ID for explicit
     cancellation; legacy stateless POSTs have no cross-request cancellation.
     Disconnect alone does not cancel upstream work. No resumption is offered.
+
+    Sessions are bounded by `max_sessions` and idle `session_ttl_s` (#1302):
+    expired idle sessions and excess oldest sessions are evicted and closed.
     """
-    sessions: dict[str, RequestDispatcher] = {}
+    if max_sessions < 1:
+        raise ValueError("max_sessions must be >= 1")
+    if session_ttl_s <= 0:
+        raise ValueError("session_ttl_s must be positive")
+
+    sessions: OrderedDict[str, _SessionEntry] = OrderedDict()
     stateless: set[RequestDispatcher] = set()
+
+    async def _evict_expired(now: float) -> None:
+        expired_ids = [
+            sid
+            for sid, entry in list(sessions.items())
+            if not entry.dispatcher.tasks and (now - entry.last_active) >= session_ttl_s
+        ]
+        for sid in expired_ids:
+            entry = sessions.pop(sid, None)
+            if entry is not None:
+                await entry.dispatcher.aclose()
+
+    async def _evict_excess() -> None:
+        while len(sessions) >= max_sessions:
+            # Prefer evicting the oldest idle session; if all are busy, evict LRU.
+            victim_id = next(
+                (sid for sid, entry in sessions.items() if not entry.dispatcher.tasks),
+                next(iter(sessions)),
+            )
+            victim = sessions.pop(victim_id, None)
+            if victim is not None:
+                await victim.dispatcher.aclose()
 
     @asynccontextmanager
     async def lifespan(app):
         try:
             yield
         finally:
-            for dispatcher in [*sessions.values(), *stateless]:
+            for dispatcher in [*(e.dispatcher for e in sessions.values()), *stateless]:
                 await dispatcher.aclose()
             sessions.clear()
             stateless.clear()
@@ -412,19 +490,36 @@ def create_app(backend: KnowledgeBackend) -> FastAPI:
             message = await request.json()
         except ValueError:
             return JSONResponse(_error(None, PARSE_ERROR, "invalid JSON"), status_code=400)
+        now = clock()
+        await _evict_expired(now)
         session_id = request.headers.get("mcp-session-id")
         initialize = isinstance(message, dict) and message.get("method") == "initialize"
-        if session_id is not None and session_id not in sessions:
-            return Response(status_code=404)
-        dispatcher = sessions[session_id] if session_id else RequestDispatcher(backend)
-        if session_id is None:
+        if session_id is not None:
+            entry = sessions.get(session_id)
+            if entry is None:
+                return Response(status_code=404)
+            entry.last_active = now
+            sessions.move_to_end(session_id)
+            dispatcher = entry.dispatcher
+        else:
+            dispatcher = RequestDispatcher(backend)
             stateless.add(dispatcher)
+        # Extract only W3C traceparent/tracestate (never Authorization/Cookie/X-*).
+        trace_headers = {
+            k: v for k, v in request.headers.items() if k.lower() in _TRACE_HEADER_NAMES
+        }
+        parent_ctx = tracing_mod.parent_context(trace_headers) if trace_headers else None
+        token = otel_context.attach(parent_ctx) if parent_ctx is not None else None
         try:
             reply = await dispatcher.dispatch(message)
         except Exception:  # noqa: BLE001
             reply = _error(message.get("id") if isinstance(message, dict) else None,
                            -32000, "internal error")
         finally:
+            if token is not None:
+                otel_context.detach(token)
+            if session_id is not None and session_id in sessions:
+                sessions[session_id].last_active = clock()
             if session_id is None and not dispatcher.tasks:
                 stateless.discard(dispatcher)
             elif session_id is None:
@@ -434,18 +529,21 @@ def create_app(backend: KnowledgeBackend) -> FastAPI:
                 for task in dispatcher.tasks.values():
                     task.add_done_callback(discard_stateless)
         if initialize and session_id is None and reply is not None and "result" in reply:
+            await _evict_expired(clock())
+            await _evict_excess()
             session_id = secrets.token_urlsafe(32)
-            sessions[session_id] = dispatcher
+            sessions[session_id] = _SessionEntry(dispatcher=dispatcher, last_active=clock())
         headers = {"Mcp-Session-Id": session_id} if initialize and session_id else None
         return Response(status_code=202) if reply is None else JSONResponse(reply, headers=headers)
 
     @app.delete("/mcp")
     async def end_session(request: Request) -> Response:
+        await _evict_expired(clock())
         session_id = request.headers.get("mcp-session-id")
-        dispatcher = sessions.pop(session_id, None) if session_id else None
-        if dispatcher is None:
+        entry = sessions.pop(session_id, None) if session_id else None
+        if entry is None:
             return Response(status_code=404)
-        await dispatcher.aclose()
+        await entry.dispatcher.aclose()
         return Response(status_code=204)
 
     return app
@@ -465,11 +563,32 @@ def main(argv: list[str] | None = None) -> int:
         timeout = float(os.environ.get("KNOWLEDGE_API_TIMEOUT_S", "15"))
     except ValueError:
         timeout = 15.0
+    try:
+        max_sessions = int(os.environ.get("KNOWLEDGE_MCP_MAX_SESSIONS", str(DEFAULT_MAX_SESSIONS)))
+    except ValueError:
+        max_sessions = DEFAULT_MAX_SESSIONS
+    try:
+        session_ttl_s = float(
+            os.environ.get("KNOWLEDGE_MCP_SESSION_TTL_S", str(DEFAULT_SESSION_TTL_S))
+        )
+    except ValueError:
+        session_ttl_s = DEFAULT_SESSION_TTL_S
+    if max_sessions < 1 or session_ttl_s <= 0:
+        print(
+            "mcp knowledge: KNOWLEDGE_MCP_MAX_SESSIONS must be >= 1 and "
+            "KNOWLEDGE_MCP_SESSION_TTL_S must be positive",
+            file=sys.stderr,
+        )
+        return 2
     backend = HttpKnowledgeBackend(base_url, timeout)
     if args.transport == "stdio":
         asyncio.run(serve_stdio(backend))
         return 0
-    serve_http(create_app(backend), args.host, args.port)
+    serve_http(
+        create_app(backend, max_sessions=max_sessions, session_ttl_s=session_ttl_s),
+        args.host,
+        args.port,
+    )
     return 0
 
 

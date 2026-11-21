@@ -1,49 +1,100 @@
-"""FTP transport for the read-only Zowe MCP bridge (ADR-0003).
+"""FTP transport for the read-only Zowe MCP bridge (ADR-0003, ADR-0012).
 
-All four allowlisted tools speak the z/OS FTP server; nothing here opens
-any other connection. Text reads use TYPE A so the server converts
-EBCDIC on the wire. Credentials travel only inside ftplib and never enter
-error strings, logs, or tool results.
+All approved tools speak the z/OS FTP server; nothing here opens any other
+connection. Text reads use explicit TYPE A so the server converts EBCDIC on
+the wire and decode using a configurable code page. Credentials travel only
+inside ftplib and never enter error strings, logs, or tool results.
 
-JES addressing follows the FTP JES interface (`SITE FILETYPE=JES` plus
-JESOWNER/JESJOBNAME/JESSTATUS filters; spool files as `JOBID.n`):
-typical ids are 1=JCL, 2=system messages, 3+=SYSOUT, but JES2/JES3
-numbering varies — VERIFY the mapping on first contact with a site
-(see the operator checklist in the Phase-1 PR body) and never hardcode
-site-specific ids here.
+ADR-0012 pilot controls enforced here:
+- Pinned transport mode (D5): verified FTPS (CA bundle + hostname check,
+  fail-closed, zero downgrade fallback) or explicitly owner-accepted plain FTP.
+- Explicit passive mode (`ftp.set_pasv(True)`, D4/G5), mandatory behind
+  OpenShift EgressIP SNAT.
+- Exact-name dataset allowlist (D2/G1): every qualifier and member validated
+  before any FTP command; wildcards, relative GDG references, quotes, case/
+  member tricks, and PDS-without-member NLST fallback are refused.
+- Approved tool subset (`MCP_ENABLED_TOOLS`, D1/D7): default `dataset_read`
+  only; opt-in `job_status` and DD-scoped `jes_spool_read` (`JESMSGLG` and
+  `JESYSMSG` only, verified via `LIST` against bridge-side jobname/owner
+  prefix allowlists before any `RETR`, with explicit `TYPE A`); `uss_read`
+  stays unapproved and is refused.
+- Content screening & untrusted delimiting (D6): control/bidi characters
+  stripped, password-shaped strings redacted, output wrapped in untrusted
+  observation delimiters with breakout neutralization.
+- Logon-failure breaker (D9): FTP 530 maps to `logon_failed` and stops further
+  logons until cooldown elapses or an operator resets the breaker.
+- Logon-free connectivity probe (D5 point 5): tests `AUTH TLS` and certificate
+  verification without sending credentials.
 """
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import ftplib
 import io
+import re
 import socket
+import ssl
+import threading
+import time
+import unicodedata
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Any, Literal
 
+# Closed four-tool vocabulary (ADR-0003); adding a fifth tool requires a new ADR.
+CLOSED_TOOLS: tuple[str, ...] = ("dataset_read", "uss_read", "job_status", "jes_spool_read")
 
-@dataclass(frozen=True, slots=True)
-class FTPConfig:
-    """Connection + safety bounds. Password arrives via env only (there is
-    deliberately no CLI flag for it); use_tls upgrades to FTPS where the
-    site's AT-TLS policy supports it (plain FTP is the accepted default)."""
+# ADR-0012 D1/D7: approved pilot subset; `uss_read` remains unapproved.
+PILOT_APPROVED_TOOLS: tuple[str, ...] = ("dataset_read", "job_status", "jes_spool_read")
+DEFAULT_ENABLED_TOOLS: tuple[str, ...] = ("dataset_read",)
 
-    host: str
-    user: str
-    password: str
-    port: int = 21
-    timeout_s: float = 15.0
-    max_bytes: int = 262144
-    use_tls: bool = False
-
+# ADR-0012 D2/Option 4A: only JESMSGLG and JESYSMSG may be read from spool.
+ALLOWED_JES_DDS: frozenset[str] = frozenset({"JESMSGLG", "JESYSMSG"})
 
 TRUNCATION_SUFFIX = "\n[... truncated: output exceeded the byte cap ...]"
+OBS_BEGIN_PREFIX = "--- BEGIN UNTRUSTED Z/OS OBSERVATION"
+OBS_END_MARKER = "--- END UNTRUSTED Z/OS OBSERVATION ---"
 
-# Stable tool-error codes (client-visible; never exception text).
+# Stable tool-error codes (client-visible; never exception or upstream text).
 NOT_FOUND = "not_found"
+DENIED = "denied"
+LOGON_FAILED = "logon_failed"
+TLS_ERROR = "tls_error"
 JES_UNAVAILABLE = "jes_unavailable"
 TIMEOUT = "timeout"
 UPSTREAM_ERROR = "upstream_error"
+INVALID_PARAMS = "invalid_params"
+NOT_CONFIGURED = "not_configured"
+
+_QUALIFIER_RE = re.compile(r"^[A-Z#$@][A-Z0-9#$@-]{0,7}$")
+_MEMBER_RE = re.compile(r"^[A-Z#$@][A-Z0-9#$@]{0,7}$")
+_JOB_ID_RE = re.compile(r"^JOB\d{5,7}$")
+_JES_IDENT_RE = re.compile(r"^[A-Z#$@][A-Z0-9#$@]{0,7}$")
+_SPOOL_ID_RE = re.compile(r"^\d{1,5}$")
+_FORBIDDEN_NAME_CHARS = frozenset("'\"*?%/\\")
+
+# D6 redaction patterns (applied after control/bidi stripping).
+_PEM_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
+)
+_KV_SECRET_RE = re.compile(
+    r"(?i)\b(password|passwd|passphrase|pwd|secret|api[_-]?key|apikey|"
+    r"auth[_-]?token|access[_-]?token|bearer[_-]?token|token|credential)"
+    r"(\s*[=:]\s*)"
+    r"(?:\([^)\n]*\)|'[^'\n]*'|\"[^\"\n]*\"|[^\s,;]+)"
+)
+_SPACE_PASSWORD_RE = re.compile(
+    r"(?i)\b(password|passwd|passphrase)(\s+)"
+    r"(?!(?:is|was|were|for|to|in|of|not|must|should|cannot|expired|revoked|"
+    r"changed|required|invalid|failed|error|length|rules?|policy)\b)"
+    r"(?:'[^'\n]*'|\"[^\"\n]*\"|[^\s,;]+)"
+)
+_AUTH_SCHEME_RE = re.compile(r"(?i)\b(Bearer|Basic)(\s+)[A-Za-z0-9._~+/=-]{8,}")
+_OBS_BOUNDARY_RE = re.compile(
+    r"(?i)(---\s*(?:BEGIN|END)\s+UNTRUSTED\s+Z/OS\s+OBSERVATION[^\n]*)"
+)
 
 
 class _CapExceeded(Exception):
@@ -54,17 +105,447 @@ class _JesUnavailable(Exception):
     """SITE JES setup refused: the JES FTP interface (not a job) is missing."""
 
 
-def connect(config: FTPConfig, factory: type[ftplib.FTP] = ftplib.FTP):
-    """One FTP session per tool call (read tools are infrequent; shared
-    sessions would need reconnect logic for dead control connections).
-    Tests inject a FakeFTP subclass here — no network, no credentials."""
-    cls = ftplib.FTP_TLS if config.use_tls else factory
-    ftp = cls()
-    ftp.connect(config.host, config.port, timeout=config.timeout_s)
-    ftp.login(config.user, config.password)
-    if config.use_tls and isinstance(ftp, ftplib.FTP_TLS):
-        ftp.prot_p()
+class _LogonFailed(Exception):
+    """FTP 530 authentication failure (never retried)."""
+
+
+class _LogonBreakerOpen(Exception):
+    """Logon-failure breaker is open; no FTP connection or logon attempted."""
+
+
+class _TlsVerificationError(Exception):
+    """FTPS handshake or certificate/hostname verification failed (no fallback)."""
+
+
+class _DeniedError(Exception):
+    """Target or operation denied by bridge policy before or during execution."""
+
+
+class _InvalidParamsError(Exception):
+    """Malformed target or tool parameter rejected before any FTP command."""
+
+
+def _has_disallowed_chars(value: str) -> bool:
+    return any(ord(ch) < 32 or ord(ch) >= 127 or ch in _FORBIDDEN_NAME_CHARS for ch in value)
+
+
+def parse_dataset_target(dataset: str, member: str | None = None) -> tuple[str, str | None]:
+    """Validate and canonicalize an exact MVS dataset or PDS(MEMBER) target.
+
+    Refuses quotes, wildcards, relative GDG references (e.g. `(0)`, `(-1)`,
+    `(+1)`), control/non-ASCII characters, internal whitespace, double-member
+    specifications, and invalid qualifiers/member names.
+    """
+    if not isinstance(dataset, str) or _has_disallowed_chars(dataset):
+        raise _InvalidParamsError("dataset contains invalid characters")
+    raw_dsn = dataset.strip(" ")
+    if not raw_dsn or " " in raw_dsn:
+        raise _InvalidParamsError("dataset must be a single valid MVS name")
+
+    raw_mem: str | None = None
+    if member is not None:
+        if not isinstance(member, str) or _has_disallowed_chars(member):
+            raise _InvalidParamsError("member contains invalid characters")
+        if member != "":
+            stripped = member.strip(" ")
+            if not stripped or " " in stripped or "(" in stripped or ")" in stripped:
+                raise _InvalidParamsError("member must be a valid PDS member name")
+            raw_mem = stripped
+
+    mem_part: str | None
+    if "(" in raw_dsn or ")" in raw_dsn:
+        if raw_mem is not None:
+            raise _InvalidParamsError("member must not be specified both inline and separately")
+        if raw_dsn.count("(") != 1 or raw_dsn.count(")") != 1 or not raw_dsn.endswith(")"):
+            raise _InvalidParamsError("malformed PDS member syntax")
+        dsn_part, _, rest = raw_dsn.partition("(")
+        mem_part = rest[:-1]
+        if not mem_part:
+            raise _InvalidParamsError("PDS member name must not be empty")
+    else:
+        dsn_part = raw_dsn
+        mem_part = raw_mem
+
+    dsn = dsn_part.upper()
+    if not dsn or len(dsn) > 44 or dsn.startswith(".") or dsn.endswith(".") or ".." in dsn:
+        raise _InvalidParamsError("dataset name length or dot placement is invalid")
+    qualifiers = dsn.split(".")
+    if len(qualifiers) > 22 or any(not _QUALIFIER_RE.fullmatch(q) for q in qualifiers):
+        raise _InvalidParamsError("dataset qualifier is invalid")
+
+    mem: str | None = None
+    if mem_part is not None:
+        mem = mem_part.upper()
+        if not _MEMBER_RE.fullmatch(mem):
+            raise _InvalidParamsError("PDS member name is invalid")
+    return dsn, mem
+
+
+def canonical_dataset_name(dsn: str, member: str | None = None) -> str:
+    return f"{dsn}({member})" if member else dsn
+
+
+def _split_list(raw: str | Sequence[str]) -> list[str]:
+    if isinstance(raw, str):
+        return [item.strip() for item in re.split(r"[,\n]", raw) if item.strip()]
+    return [item.strip() for item in raw if isinstance(item, str) and item.strip()]
+
+
+def parse_dataset_allowlist(raw: str | Sequence[str]) -> tuple[str, ...]:
+    """Validate and canonicalize operator-configured exact dataset allowlist."""
+    entries: list[str] = []
+    seen: set[str] = set()
+    for item in _split_list(raw):
+        try:
+            dsn, mem = parse_dataset_target(item)
+        except _InvalidParamsError as exc:
+            raise ValueError(f"invalid dataset allowlist entry: {exc}") from exc
+        canonical = canonical_dataset_name(dsn, mem)
+        if canonical not in seen:
+            seen.add(canonical)
+            entries.append(canonical)
+    return tuple(entries)
+
+
+def parse_enabled_tools(raw: str | Sequence[str]) -> tuple[str, ...]:
+    """Validate `MCP_ENABLED_TOOLS` against the ADR-0012 pilot subset.
+
+    `uss_read` remains unapproved and is refused even if named. Any tool
+    outside the closed four is refused. Empty tool lists are refused.
+    """
+    items = _split_list(raw)
+    if not items:
+        raise ValueError("MCP_ENABLED_TOOLS must name at least one approved tool")
+    enabled: list[str] = []
+    seen: set[str] = set()
+    for name in items:
+        if name == "uss_read":
+            raise ValueError("uss_read is not approved for the ADR-0012 pilot")
+        if name not in PILOT_APPROVED_TOOLS:
+            raise ValueError(f"tool is not in the approved pilot subset: {name}")
+        if name not in seen:
+            seen.add(name)
+            enabled.append(name)
+    return tuple(enabled)
+
+
+def parse_jes_prefixes(raw: str | Sequence[str]) -> tuple[str, ...]:
+    """Validate JES jobname/owner prefixes (exact prefixes, never wildcards)."""
+    entries: list[str] = []
+    seen: set[str] = set()
+    for item in _split_list(raw):
+        if _has_disallowed_chars(item) or " " in item:
+            raise ValueError("JES prefix contains invalid or wildcard characters")
+        upper = item.upper()
+        if not _JES_IDENT_RE.fullmatch(upper):
+            raise ValueError("JES prefix must match [A-Z#$@][A-Z0-9#$@]{0,7}")
+        if upper not in seen:
+            seen.add(upper)
+            entries.append(upper)
+    return tuple(entries)
+
+
+@dataclass(frozen=True, slots=True)
+class FTPConfig:
+    """Connection + ADR-0012 policy bounds.
+
+    Password arrives via env only (there is deliberately no CLI flag for it).
+    `transport_mode` is pinned by configuration: `"ftps"` (verified TLS,
+    fail-closed default) or `"plain"` (requires explicit `plain_ftp_accepted=True`
+    recording site security owner acceptance). Zero automatic downgrade.
+    """
+
+    host: str
+    user: str
+    password: str
+    port: int = 21
+    timeout_s: float = 15.0
+    max_bytes: int = 262144
+    transport_mode: Literal["ftps", "plain"] = "ftps"
+    plain_ftp_accepted: bool = False
+    ca_file: str | None = None
+    encoding: str = "utf-8"
+    dataset_allowlist: tuple[str, ...] = ()
+    enabled_tools: tuple[str, ...] = DEFAULT_ENABLED_TOOLS
+    jes_jobname_prefixes: tuple[str, ...] = ()
+    jes_owner_prefixes: tuple[str, ...] = ()
+    logon_breaker_cooldown_s: float = 900.0
+    logon_breaker_threshold: int = 1
+
+    def __post_init__(self) -> None:
+        if self.transport_mode not in ("ftps", "plain"):
+            raise ValueError("transport_mode must be 'ftps' or 'plain'")
+        if self.transport_mode == "plain" and not self.plain_ftp_accepted:
+            raise ValueError("plain FTP requires explicit owner acceptance (plain_ftp_accepted=True)")
+        if self.timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+        if self.max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        if self.logon_breaker_cooldown_s <= 0:
+            raise ValueError("logon_breaker_cooldown_s must be positive")
+        if self.logon_breaker_threshold < 1:
+            raise ValueError("logon_breaker_threshold must be >= 1")
+        try:
+            codecs.lookup(self.encoding)
+        except LookupError as exc:
+            raise ValueError(f"unknown encoding: {self.encoding}") from exc
+        object.__setattr__(self, "enabled_tools", parse_enabled_tools(self.enabled_tools))
+        object.__setattr__(
+            self, "dataset_allowlist", parse_dataset_allowlist(self.dataset_allowlist)
+        )
+        object.__setattr__(
+            self, "jes_jobname_prefixes", parse_jes_prefixes(self.jes_jobname_prefixes)
+        )
+        object.__setattr__(
+            self, "jes_owner_prefixes", parse_jes_prefixes(self.jes_owner_prefixes)
+        )
+
+
+class LogonBreaker:
+    """Thread-safe FTP 530 logon-failure circuit breaker (ADR-0012 D9).
+
+    Trips after `threshold` consecutive 530 failures (default 1, preventing
+    RACF ID revocation) and blocks all further logon attempts until `cooldown_s`
+    passes or an operator calls `reset()`.
+    """
+
+    def __init__(
+        self,
+        *,
+        threshold: int = 1,
+        cooldown_s: float = 900.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if threshold < 1:
+            raise ValueError("threshold must be >= 1")
+        if cooldown_s <= 0:
+            raise ValueError("cooldown_s must be positive")
+        self._threshold = threshold
+        self._cooldown_s = cooldown_s
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._failures = 0
+        self._opened_until: float | None = None
+
+    def check(self) -> None:
+        with self._lock:
+            if self._opened_until is None:
+                return
+            if self._clock() < self._opened_until:
+                raise _LogonBreakerOpen("FTP logon breaker is open")
+            self._opened_until = None
+            self._failures = 0
+
+    def record_failure(self) -> None:
+        with self._lock:
+            self._failures += 1
+            if self._failures >= self._threshold:
+                self._opened_until = self._clock() + self._cooldown_s
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._failures = 0
+            self._opened_until = None
+
+    def reset(self) -> None:
+        with self._lock:
+            self._failures = 0
+            self._opened_until = None
+
+    def is_open(self) -> bool:
+        with self._lock:
+            if self._opened_until is None:
+                return False
+            if self._clock() < self._opened_until:
+                return True
+            self._opened_until = None
+            self._failures = 0
+            return False
+
+
+def build_verified_tls_context(ca_file: str | None = None) -> ssl.SSLContext:
+    """Strict server-verifying TLS context for FTPS (ADR-0012 D5).
+
+    Always requires certificate verification (`CERT_REQUIRED`), hostname
+    matching (`check_hostname=True`), and TLS 1.2+. Never uses ftplib's
+    unverified stdlib default context.
+    """
+    ctx = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH, cafile=ca_file)
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.check_hostname = True
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    return ctx
+
+
+@dataclass(frozen=True, slots=True)
+class TransportProbeResult:
+    """Outcome of the one-time logon-free FTP/FTPS connectivity probe (D5)."""
+
+    host: str
+    port: int
+    outcome: Literal["ftps_verified", "ftps_unverified", "plain_only", "unreachable"]
+    recommended_mode: Literal["ftps", "plain"] | None
+
+
+def probe_transport(
+    host: str,
+    port: int = 21,
+    *,
+    timeout_s: float = 15.0,
+    ca_file: str | None = None,
+    ftp_cls: type[ftplib.FTP_TLS] | None = None,
+) -> TransportProbeResult:
+    """Logon-free connectivity probe (ADR-0012 D5, point 5).
+
+    Connects to the FTP control port and tests `AUTH TLS` with verified CA and
+    hostname checking, then sends `QUIT`. Never sends `USER` or `PASS`.
+    """
+    cls = ftp_cls or ftplib.FTP_TLS
+    ctx = build_verified_tls_context(ca_file)
+    ftp = cls(context=ctx)
+    try:
+        try:
+            ftp.connect(host, port, timeout=timeout_s)
+        except (OSError, ftplib.Error):
+            return TransportProbeResult(
+                host=host, port=port, outcome="unreachable", recommended_mode=None
+            )
+        try:
+            ftp.auth()
+        except (ssl.SSLError, ssl.CertificateError):
+            return TransportProbeResult(
+                host=host, port=port, outcome="ftps_unverified", recommended_mode=None
+            )
+        except ftplib.error_perm:
+            return TransportProbeResult(
+                host=host, port=port, outcome="plain_only", recommended_mode="plain"
+            )
+        except (OSError, ftplib.Error):
+            return TransportProbeResult(
+                host=host, port=port, outcome="ftps_unverified", recommended_mode=None
+            )
+        return TransportProbeResult(
+            host=host, port=port, outcome="ftps_verified", recommended_mode="ftps"
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            ftp.quit()
+        with contextlib.suppress(Exception):
+            ftp.close()
+
+
+def _is_530_error(exc: Exception) -> bool:
+    return isinstance(exc, ftplib.error_perm) and str(exc).strip().startswith("530")
+
+
+def connect(
+    config: FTPConfig,
+    factory: type[ftplib.FTP] = ftplib.FTP,
+    *,
+    breaker: LogonBreaker | None = None,
+) -> Any:
+    """Open one FTP/FTPS session for a single tool call.
+
+    - Checks the 530 logon-failure breaker before opening any socket.
+    - In `ftps` mode, builds a verified TLS context (CA + hostname check),
+      completes `AUTH TLS` BEFORE `login()`, refuses any TLS failure with zero
+      downgrade fallback, and protects the data channel with `PROT P`.
+    - In `plain` mode, requires `plain_ftp_accepted=True`.
+    - Sets explicit passive mode (`ftp.set_pasv(True)`) on every session.
+    """
+    if breaker is not None:
+        breaker.check()
+
+    if config.transport_mode == "ftps":
+        ctx = build_verified_tls_context(config.ca_file)
+        ftp: Any = ftplib.FTP_TLS(context=ctx)
+        try:
+            ftp.connect(config.host, config.port, timeout=config.timeout_s)
+            try:
+                ftp.auth()
+            except (ssl.SSLError, ftplib.error_perm, ftplib.error_temp, OSError) as exc:
+                raise _TlsVerificationError("FTPS verification failed") from exc
+        except Exception:
+            with contextlib.suppress(Exception):
+                ftp.close()
+            raise
+    else:
+        if not config.plain_ftp_accepted:
+            raise ValueError("plain FTP requires explicit owner acceptance")
+        ftp = factory()
+        try:
+            ftp.connect(config.host, config.port, timeout=config.timeout_s)
+        except Exception:
+            with contextlib.suppress(Exception):
+                ftp.close()
+            raise
+
+    try:
+        if config.transport_mode == "ftps":
+            # TLS was already established and verified by ftp.auth() above.
+            ftp.login(config.user, config.password, secure=False)
+        else:
+            ftp.login(config.user, config.password)
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            ftp.close()
+        if _is_530_error(exc):
+            if breaker is not None:
+                breaker.record_failure()
+            raise _LogonFailed("FTP logon failed") from exc
+        raise
+
+    if breaker is not None:
+        breaker.record_success()
+
+    try:
+        if config.transport_mode == "ftps" and isinstance(ftp, ftplib.FTP_TLS):
+            ftp.prot_p()
+        ftp.set_pasv(True)
+    except Exception:
+        with contextlib.suppress(Exception):
+            ftp.close()
+        raise
     return ftp
+
+
+def screen_zos_text(text: str) -> str:
+    """Screen raw z/OS text before returning (ADR-0012 D6).
+
+    - Normalizes line endings (`\\r\\n`, `\\r`, Unicode line/paragraph seps -> `\\n`).
+    - Strips C0/C1 control characters and Unicode format/bidi characters
+      (category Cc/Cf), retaining only `\\n` and `\\t`.
+    - Redacts PEM private keys, password/secret/token key-value assignments,
+      space-separated password values, and Bearer/Basic auth headers.
+    """
+    normalized = (
+        text.replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\u2028", "\n")
+        .replace("\u2029", "\n")
+    )
+    cleaned = "".join(
+        ch
+        for ch in normalized
+        if ch in ("\n", "\t") or unicodedata.category(ch) not in ("Cc", "Cf")
+    )
+    cleaned = _PEM_PRIVATE_KEY_RE.sub("[REDACTED]", cleaned)
+    cleaned = _KV_SECRET_RE.sub(r"\1\2[REDACTED]", cleaned)
+    cleaned = _SPACE_PASSWORD_RE.sub(r"\1\2[REDACTED]", cleaned)
+    return _AUTH_SCHEME_RE.sub(r"\1\2[REDACTED]", cleaned)
+
+
+def frame_untrusted_observation(text: str, *, tool: str, target: str) -> str:
+    """Wrap screened z/OS text in untrusted observation delimiters (D6).
+
+    Any embedded delimiter markers inside the payload are neutralized so
+    untrusted dataset or spool lines cannot forge an early block close.
+    """
+    safe_body = _OBS_BOUNDARY_RE.sub("[neutralized-observation-marker]", text)
+    header = f"{OBS_BEGIN_PREFIX} (tool={tool} target={target}) ---"
+    if safe_body and not safe_body.endswith("\n"):
+        return f"{header}\n{safe_body}\n{OBS_END_MARKER}"
+    return f"{header}\n{safe_body}{OBS_END_MARKER}"
 
 
 def _capped_retr(ftp: ftplib.FTP, command: str, max_bytes: int) -> tuple[bytes, bool]:
@@ -87,10 +568,19 @@ def _capped_retr(ftp: ftplib.FTP, command: str, max_bytes: int) -> tuple[bytes, 
     return buf.getvalue(), False
 
 
-def _tool_result(text: str, truncated: bool = False) -> dict:
+def _tool_result(
+    text: str,
+    truncated: bool = False,
+    *,
+    frame_tool: str | None = None,
+    frame_target: str | None = None,
+) -> dict:
+    screened = screen_zos_text(text)
     if truncated:
-        text += TRUNCATION_SUFFIX
-    return {"content": [{"type": "text", "text": text}], "isError": False}
+        screened += TRUNCATION_SUFFIX
+    if frame_tool is not None and frame_target is not None:
+        screened = frame_untrusted_observation(screened, tool=frame_tool, target=frame_target)
+    return {"content": [{"type": "text", "text": screened}], "isError": False}
 
 
 def _tool_error(code: str, message: str) -> dict:
@@ -101,68 +591,204 @@ def _tool_error(code: str, message: str) -> dict:
 
 
 def _classify_ftp_error(exc: Exception) -> tuple[str, str]:
-    """Stable codes from ftplib failures. ftplib never echoes the password;
-    our messages interpolate only the operation and the server's reply."""
+    """Stable codes and fixed messages from ftplib/policy failures.
+
+    Never echoes exception text, upstream replies, or credentials.
+    """
+    if isinstance(exc, _InvalidParamsError):
+        return INVALID_PARAMS, "invalid target or parameters"
+    if isinstance(exc, _DeniedError):
+        return DENIED, "requested z/OS target is not permitted"
+    if isinstance(exc, _LogonBreakerOpen):
+        return LOGON_FAILED, "FTP logon paused by failure breaker"
+    if isinstance(exc, _LogonFailed) or _is_530_error(exc):
+        return LOGON_FAILED, "FTP logon failed"
+    if isinstance(exc, (_TlsVerificationError, ssl.SSLError)):
+        return TLS_ERROR, "FTPS server verification failed"
     if isinstance(exc, (socket.timeout, TimeoutError)):
         return TIMEOUT, "FTP operation timed out"
     if isinstance(exc, _JesUnavailable):
         return JES_UNAVAILABLE, "JES FTP interface refused the command"
-    text = str(exc)
-    if isinstance(exc, ftplib.error_perm) and text.startswith("550"):
+    if isinstance(exc, ftplib.error_perm) and str(exc).strip().startswith("550"):
         return NOT_FOUND, "no such dataset, member, path, job, or spool file"
     return UPSTREAM_ERROR, "FTP request failed"
 
 
 @dataclass
 class FTPSession:
-    """One logged-in session shared by a single tool call. Test doubles
-    subclass or duck-type this (FakeFTP below shows the surface)."""
+    """One logged-in session shared by a single tool call."""
 
-    ftp: ftplib.FTP = field(repr=False)
+    ftp: Any = field(repr=False)
     config: FTPConfig = field(repr=False)
 
     def read_text(self, command: str) -> tuple[str, bool]:
         raw, truncated = _capped_retr(self.ftp, command, self.config.max_bytes)
-        return raw.decode("utf-8", errors="replace"), truncated
+        return raw.decode(self.config.encoding, errors="replace"), truncated
+
+
+def _check_dataset_policy(config: FTPConfig, dataset: str, member: str | None = None) -> tuple[str, str | None]:
+    dsn, mem = parse_dataset_target(dataset, member)
+    canonical = canonical_dataset_name(dsn, mem)
+    if canonical not in config.dataset_allowlist:
+        raise _DeniedError("dataset is not on the allowlist")
+    return dsn, mem
+
+
+def _matches_jes_prefixes(config: FTPConfig, job_name: str, owner: str) -> bool:
+    if not config.jes_jobname_prefixes and not config.jes_owner_prefixes:
+        return False
+    upper_name = job_name.upper()
+    upper_owner = owner.upper()
+    if config.jes_jobname_prefixes and not any(
+        upper_name.startswith(p) for p in config.jes_jobname_prefixes
+    ):
+        return False
+    return not (
+        config.jes_owner_prefixes
+        and not any(upper_owner.startswith(p) for p in config.jes_owner_prefixes)
+    )
+
+
+def _validate_jes_identifier(value: str, label: str) -> str:
+    if not isinstance(value, str) or _has_disallowed_chars(value):
+        raise _InvalidParamsError(f"{label} contains invalid characters")
+    stripped = value.strip(" ")
+    if not stripped or " " in stripped:
+        raise _InvalidParamsError(f"{label} must be a single exact identifier")
+    upper = stripped.upper()
+    if not _JES_IDENT_RE.fullmatch(upper):
+        raise _InvalidParamsError(f"{label} is not a valid exact JES identifier")
+    return upper
+
+
+def _validate_job_id(value: str) -> str:
+    if not isinstance(value, str) or _has_disallowed_chars(value):
+        raise _InvalidParamsError("job_id contains invalid characters")
+    stripped = value.strip(" ")
+    if not stripped or " " in stripped:
+        raise _InvalidParamsError("job_id must be a single exact JOBnnnnn identifier")
+    upper = stripped.upper()
+    if not _JOB_ID_RE.fullmatch(upper):
+        raise _InvalidParamsError("job_id must match JOBnnnnn")
+    return upper
+
+
+def _validate_spool_id(value: str) -> str:
+    if not isinstance(value, str) or _has_disallowed_chars(value):
+        raise _InvalidParamsError("spool_id contains invalid characters")
+    stripped = value.strip(" ")
+    if not _SPOOL_ID_RE.fullmatch(stripped) or int(stripped) < 1:
+        raise _InvalidParamsError("spool_id must be a positive integer")
+    return str(int(stripped))
+
+
+def _check_job_status_policy(
+    config: FTPConfig,
+    job_name: str | None = None,
+    owner: str | None = None,
+    job_id: str | None = None,
+) -> tuple[str | None, str | None, str | None]:
+    clean_id = _validate_job_id(job_id) if job_id is not None and job_id != "" else None
+    clean_name = (
+        _validate_jes_identifier(job_name, "job_name")
+        if job_name is not None and job_name != ""
+        else None
+    )
+    clean_owner = (
+        _validate_jes_identifier(owner, "owner")
+        if owner is not None and owner != ""
+        else None
+    )
+    if clean_id is None and not (clean_name and clean_owner):
+        raise _InvalidParamsError("job_status requires an exact job_id or exact job_name + owner")
+    if not config.jes_jobname_prefixes and not config.jes_owner_prefixes:
+        raise _DeniedError("JES prefix allowlist is not configured")
+    if clean_name and config.jes_jobname_prefixes and not any(
+        clean_name.startswith(p) for p in config.jes_jobname_prefixes
+    ):
+        raise _DeniedError("job_name is outside the allowed JES jobname prefixes")
+    if clean_owner and config.jes_owner_prefixes and not any(
+        clean_owner.startswith(p) for p in config.jes_owner_prefixes
+    ):
+        raise _DeniedError("owner is outside the allowed JES owner prefixes")
+    return clean_name, clean_owner, clean_id
+
+
+def _check_jes_spool_policy(config: FTPConfig, job_id: str, spool_id: str) -> tuple[str, str]:
+    clean_id = _validate_job_id(job_id)
+    clean_sid = _validate_spool_id(spool_id)
+    if not config.jes_jobname_prefixes and not config.jes_owner_prefixes:
+        raise _DeniedError("JES prefix allowlist is not configured")
+    return clean_id, clean_sid
+
+
+def validate_tool_policy(name: str, args: dict[str, Any], config: FTPConfig) -> dict | None:
+    """Pre-connect policy check so denied/invalid calls never open FTP."""
+    try:
+        if name == "dataset_read":
+            dataset = args.get("dataset", "")
+            member = args.get("member")
+            _check_dataset_policy(config, dataset, member if member else None)
+        elif name == "job_status":
+            _check_job_status_policy(
+                config,
+                job_name=args.get("job_name") or None,
+                owner=args.get("owner") or None,
+                job_id=args.get("job_id") or None,
+            )
+        elif name == "jes_spool_read":
+            _check_jes_spool_policy(
+                config,
+                args.get("job_id", ""),
+                args.get("spool_id", ""),
+            )
+        elif name == "uss_read":
+            raise _DeniedError("uss_read is not approved")
+    except Exception as exc:  # noqa: BLE001
+        code, message = _classify_ftp_error(exc)
+        return _tool_error(code, message)
+    return None
 
 
 def dataset_read(session: FTPSession, dataset: str, member: str | None = None) -> dict:
-    """Read a sequential dataset or PDS member (TYPE A converts EBCDIC).
-    A PDS name without a member returns the member list instead."""
-    name = dataset.strip().upper()
-    if not name:
-        return _tool_error("invalid_params", "dataset must not be empty")
-    quoted = f"'{name}'"
+    """Read an allowlisted sequential dataset or PDS member (TYPE A).
+
+    No PDS-without-member NLST fallback (ADR-0012 D2 point 3): a 550 from RETR
+    returns `not_found` without sending NLST.
+    """
+    try:
+        dsn, mem = _check_dataset_policy(session.config, dataset, member)
+    except Exception as exc:  # noqa: BLE001
+        code, message = _classify_ftp_error(exc)
+        return _tool_error(code, message)
+
+    canonical = canonical_dataset_name(dsn, mem)
+    quoted = f"'{dsn}'"
     try:
         session.ftp.sendcmd("TYPE A")
-        if member:
-            text, truncated = session.read_text(f"RETR {quoted}({member.strip().upper()})")
-            return _tool_result(text, truncated)
-        try:
-            text, truncated = session.read_text(f"RETR {quoted}")
-            return _tool_result(text, truncated)
-        except ftplib.error_perm as exc:
-            if not str(exc).startswith("550"):
-                raise
-            members = session.ftp.nlst(quoted)
-            listed = "\n".join(members)
-            return _tool_result(f"Members of {name}:\n{listed}")
+        cmd = f"RETR {quoted}({mem})" if mem else f"RETR {quoted}"
+        text, truncated = session.read_text(cmd)
+        return _tool_result(text, truncated, frame_tool="dataset_read", frame_target=canonical)
     except Exception as exc:  # noqa: BLE001 — mapped to stable codes below
         code, message = _classify_ftp_error(exc)
         return _tool_error(code, message)
 
 
 def uss_read(session: FTPSession, path: str) -> dict:
-    """Read a USS file (TYPE A converts EBCDIC text)."""
+    """Read a USS file (TYPE A converts EBCDIC text).
+
+    Unapproved for the ADR-0012 pilot (`MCP_ENABLED_TOOLS` refuses it).
+    Kept in the closed four-tool module surface for ADR-0003 continuity.
+    """
     clean = path.strip()
     if not clean or ".." in clean.split("/"):
-        return _tool_error("invalid_params", "path must be absolute without .. segments")
+        return _tool_error(INVALID_PARAMS, "path must be absolute without .. segments")
     if not clean.startswith("/"):
-        return _tool_error("invalid_params", "path must be absolute")
+        return _tool_error(INVALID_PARAMS, "path must be absolute")
     try:
         session.ftp.sendcmd("TYPE A")
         text, truncated = session.read_text(f"RETR {clean}")
-        return _tool_result(text, truncated)
+        return _tool_result(text, truncated, frame_tool="uss_read", frame_target=clean)
     except Exception as exc:  # noqa: BLE001 — mapped to stable codes below
         code, message = _classify_ftp_error(exc)
         return _tool_error(code, message)
@@ -180,17 +806,20 @@ def _jes_mode(session: FTPSession, owner: str = "*", job_name: str = "*") -> Non
         raise _JesUnavailable(str(exc)) from exc
 
 
-def _parse_job_line(line: str) -> dict | None:
-    """Parse one JES LIST line defensively: unknown shapes pass through
-    with raw text rather than dropping a job the operator asked about."""
+def _parse_job_line(line: str) -> dict[str, Any] | None:
+    """Parse one JES LIST job summary line (skipping headers/separators)."""
     parts = line.split()
     if len(parts) < 4:
-        return {"raw": line} if line.strip() else None
-    job = {
-        "name": parts[0],
-        "job_id": parts[1],
-        "owner": parts[2],
-        "status": parts[3],
+        return None
+    if parts[0].upper() == "JOBNAME" and parts[1].upper() == "JOBID":
+        return None
+    if not _JOB_ID_RE.fullmatch(parts[1].upper()):
+        return None
+    job: dict[str, Any] = {
+        "name": parts[0].upper(),
+        "job_id": parts[1].upper(),
+        "owner": parts[2].upper(),
+        "status": parts[3].upper(),
         "return_code": None,
         "raw": line,
     }
@@ -201,51 +830,141 @@ def _parse_job_line(line: str) -> dict | None:
     return job
 
 
+def _parse_spool_table_line(line: str) -> tuple[int, str] | None:
+    """Parse one JESINTERFACELEVEL=2 spool row: returns (spool_id_int, ddname)."""
+    stripped = line.strip()
+    if not stripped or set(stripped) <= {"-"}:
+        return None
+    lower = stripped.lower()
+    if "spool file" in lower:
+        return None
+    parts = stripped.split()
+    if len(parts) < 4:
+        return None
+    if parts[0].upper() in ("ID", "JOBNAME"):
+        return None
+    if not parts[0].isdigit():
+        return None
+    # Exclude job summary lines (where parts[1] is JOBnnnnn).
+    if _JOB_ID_RE.fullmatch(parts[1].upper()):
+        return None
+    spool_num = int(parts[0])
+    # Standard z/OS JESINTERFACELEVEL=2 format:
+    #   ID STEPNAME [PROCSTEP] C DDNAME BYTE-COUNT
+    if parts[-1].isdigit() and len(parts) >= 5:
+        ddname = parts[-2].upper()
+    elif len(parts[-2]) == 1:
+        ddname = parts[-1].upper()
+    else:
+        return None
+    if not _JES_IDENT_RE.fullmatch(ddname):
+        return None
+    return spool_num, ddname
+
+
 def job_status(
     session: FTPSession,
     job_name: str | None = None,
     owner: str | None = None,
     job_id: str | None = None,
 ) -> dict:
-    """List jobs (optionally filtered) with status and return code."""
+    """List one exact job matching bridge-side JES prefix allowlists."""
     try:
-        _jes_mode(session, owner or "*", job_name or "*")
+        clean_name, clean_owner, clean_id = _check_job_status_policy(
+            session.config, job_name=job_name, owner=owner, job_id=job_id
+        )
+    except Exception as exc:  # noqa: BLE001
+        code, message = _classify_ftp_error(exc)
+        return _tool_error(code, message)
+
+    try:
+        _jes_mode(session, clean_owner or "*", clean_name or "*")
         lines: list[str] = []
         session.ftp.retrlines("LIST", lines.append)
-        jobs = []
+        matched_any_target = False
+        allowed_jobs: list[dict[str, Any]] = []
         for line in lines:
             parsed = _parse_job_line(line)
             if parsed is None:
                 continue
-            if job_id and parsed.get("job_id", "").upper() != job_id.strip().upper():
+            if clean_id and parsed["job_id"] != clean_id:
                 continue
-            jobs.append(parsed)
+            if clean_name and parsed["name"] != clean_name:
+                continue
+            if clean_owner and parsed["owner"] != clean_owner:
+                continue
+            matched_any_target = True
+            if _matches_jes_prefixes(session.config, parsed["name"], parsed["owner"]):
+                allowed_jobs.append(parsed)
+        if matched_any_target and not allowed_jobs:
+            return _tool_error(DENIED, "requested z/OS target is not permitted")
         rendered_lines = []
-        for j in jobs:
-            if j.get("name"):
-                line = f"{j['name']} {j.get('job_id', '?')} {j.get('status', '?')}"
-                if j.get("return_code"):
-                    line += f" RC={j['return_code']}"
-            else:
-                line = j["raw"]
+        for j in allowed_jobs:
+            line = f"{j['name']} {j['job_id']} {j['status']}"
+            if j.get("return_code"):
+                line += f" RC={j['return_code']}"
             rendered_lines.append(line)
-        return _tool_result("\n".join(rendered_lines) or "No matching jobs.")
+        target_label = clean_id or f"{clean_name}/{clean_owner}"
+        return _tool_result(
+            "\n".join(rendered_lines) or "No matching jobs.",
+            frame_tool="job_status",
+            frame_target=target_label,
+        )
     except Exception as exc:  # noqa: BLE001 — mapped to stable codes below
         code, message = _classify_ftp_error(exc)
         return _tool_error(code, message)
 
 
 def jes_spool_read(session: FTPSession, job_id: str, spool_id: str) -> dict:
-    """Read one spool file of a job (`JOBID.n`; typical ids 1=JCL,
-    2=system messages, 3+=SYSOUT — verify per site, see module docstring)."""
-    jid = job_id.strip().upper()
-    sid = spool_id.strip()
-    if not jid or not sid or not sid.isdigit():
-        return _tool_error("invalid_params", "job_id must not be empty and spool_id must be numeric")
+    """Read one DD-scoped spool file (`JESMSGLG`/`JESYSMSG` only, Option 4A).
+
+    Always runs `SITE FILETYPE=JES` + `LIST <JOBID>` BEFORE any `RETR` to
+    verify both the job's jobname/owner against the bridge-side prefix
+    allowlists and the spool file's DDNAME against `ALLOWED_JES_DDS`. Sends
+    explicit `TYPE A` before `RETR <JOBID>.<spool_id>`.
+    """
+    try:
+        jid, sid = _check_jes_spool_policy(session.config, job_id, spool_id)
+    except Exception as exc:  # noqa: BLE001
+        code, message = _classify_ftp_error(exc)
+        return _tool_error(code, message)
+
     try:
         _jes_mode(session)
+        lines: list[str] = []
+        session.ftp.retrlines(f"LIST {jid}", lines.append)
+
+        job_info: dict[str, Any] | None = None
+        spool_dds: dict[int, str] = {}
+        for line in lines:
+            parsed_job = _parse_job_line(line)
+            if parsed_job is not None and parsed_job["job_id"] == jid:
+                job_info = parsed_job
+                continue
+            parsed_spool = _parse_spool_table_line(line)
+            if parsed_spool is not None:
+                spool_num, ddname = parsed_spool
+                spool_dds[spool_num] = ddname
+
+        if job_info is None:
+            return _tool_error(NOT_FOUND, "no such dataset, member, path, job, or spool file")
+        if not _matches_jes_prefixes(session.config, job_info["name"], job_info["owner"]):
+            return _tool_error(DENIED, "requested z/OS target is not permitted")
+        if not spool_dds:
+            # Cannot verify DDNAME (e.g. JESINTERFACELEVEL=1): fail closed, no RETR.
+            return _tool_error(DENIED, "requested z/OS target is not permitted")
+        sid_num = int(sid)
+        if sid_num not in spool_dds:
+            return _tool_error(NOT_FOUND, "no such dataset, member, path, job, or spool file")
+        ddname = spool_dds[sid_num]
+        if ddname not in ALLOWED_JES_DDS:
+            return _tool_error(DENIED, "requested z/OS target is not permitted")
+
+        session.ftp.sendcmd("TYPE A")
         text, truncated = session.read_text(f"RETR {jid}.{sid}")
-        return _tool_result(text, truncated)
+        return _tool_result(
+            text, truncated, frame_tool="jes_spool_read", frame_target=f"{jid}.{sid}({ddname})"
+        )
     except Exception as exc:  # noqa: BLE001 — mapped to stable codes below
         code, message = _classify_ftp_error(exc)
         return _tool_error(code, message)

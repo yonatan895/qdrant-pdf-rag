@@ -758,6 +758,7 @@ class Settings(BaseSettings):
     # never the 300s answer budget.
     zowe_mcp_enabled: bool = False
     zowe_mcp_base_url: str | None = None
+    zowe_mcp_auth_token: str | None = None
     zowe_mcp_timeout_s: float = Field(default=15.0, gt=0.0, le=120.0)
     zowe_mcp_max_bytes: int = Field(default=262144, ge=1000, le=1000000)
     zowe_mcp_dry_run: bool = False

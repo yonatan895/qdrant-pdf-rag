@@ -39,14 +39,22 @@ def mock_root(tmp_path_factory) -> Path:
     return root
 
 
+_SIM_AUTH_TOKEN = "sim-bridge-test-token"
+
+
 @pytest.fixture(scope="session")
 def bridge_url(mock_root):
-    """Real bridge subprocess (HTTP transport, mock backend). Polls
-    tools/list until ready; fail-closed on timeout."""
+    """Real bridge subprocess (HTTP transport, mock backend, ADR-0012 pilot
+    allowlists + bearer auth). Polls tools/list until ready; fail-closed on timeout."""
     port = _free_port()
     env = {
         **os.environ,
         "MCP_MOCK_DIR": str(mock_root),
+        "MCP_ENABLED_TOOLS": "dataset_read,job_status,jes_spool_read",
+        "MCP_DATASET_ALLOWLIST": "USER.PARMLIB,USER.JCL(JOBCARD)",
+        "MCP_JES_JOBNAME_PREFIXES": "PAY,BACK",
+        "MCP_JES_OWNER_PREFIXES": "READER",
+        "MCP_BRIDGE_AUTH_TOKEN": _SIM_AUTH_TOKEN,
         "PYTHONPATH": str(REPO_ROOT / "src"),
     }
     proc = subprocess.Popen(
@@ -66,10 +74,11 @@ def bridge_url(mock_root):
         try:
             resp = httpx2.post(
                 f"{url}/mcp",
+                headers={"Authorization": f"Bearer {_SIM_AUTH_TOKEN}"},
                 json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
                 timeout=2.0,
             )
-            if resp.status_code == 200 and len(resp.json()["result"]["tools"]) == 4:
+            if resp.status_code == 200 and len(resp.json()["result"]["tools"]) == 3:
                 ready = True
                 break
         except (httpx2.HTTPError, ValueError, KeyError):
@@ -87,17 +96,27 @@ def bridge_url(mock_root):
 
 def test_fetch_live_over_wire(bridge_url) -> None:
     """fetch_live drives a real HttpZoweMCP against the subprocess bridge:
-    a job-failure query returns mock spool bytes; a manual query makes
-    zero bridge calls (proven by tools_used, not by mocking). The
-    access-log line itself is pinned hermetically in
-    test_mcp_ftp_bridge.py, not via this subprocess pipe."""
+    bearer auth is enforced, allowlisted dataset_read & DD-scoped jes_spool_read
+    succeed, forbidden DD (JESJCL) and off-allowlist datasets are denied."""
     from mainframe_rag.agent import live_state
-    from mainframe_rag.agent.zowe_mcp import HttpZoweMCP
+    from mainframe_rag.agent.zowe_mcp import HttpZoweMCP, ZoweMCPError
     from mainframe_rag.config import Settings
 
     url, _proc = bridge_url
+    # Unauthenticated request is rejected 401
+    unauth = httpx2.post(
+        f"{url}/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+        timeout=2.0,
+    )
+    assert unauth.status_code == 401
+
     settings = Settings(
-        zowe_mcp_enabled=True, zowe_mcp_base_url=url, zowe_mcp_max_bytes=100000, _env_file=None
+        zowe_mcp_enabled=True,
+        zowe_mcp_base_url=url,
+        zowe_mcp_auth_token=_SIM_AUTH_TOKEN,
+        zowe_mcp_max_bytes=100000,
+        _env_file=None,
     )
     client = HttpZoweMCP(settings)
     try:
@@ -105,14 +124,24 @@ def test_fetch_live_over_wire(bridge_url) -> None:
             settings, client, "sim-1", "Why did JOB00023 fail last night?",
             live_state.classify_live_need("Why did JOB00023 fail last night?"),
         )
+        assert out.degraded is None
+        assert out.tools_used == ("job_status", "jes_spool_read")
+        assert any("ABEND S0C4" in text for text in out.texts)
+
+        # Allowlisted dataset_read succeeds; off-allowlist and JESJCL spool are denied
+        ds = client.call_tool("dataset_read", {"dataset": "USER.PARMLIB"})
+        assert "LFAREA=(1G,64M)" in ds["content"][0]["text"]
+        with pytest.raises(ZoweMCPError) as denied_ds:
+            client.call_tool("dataset_read", {"dataset": "SYS1.SECRET"})
+        assert denied_ds.value.code == "denied"
+        with pytest.raises(ZoweMCPError) as denied_jcl:
+            client.call_tool("jes_spool_read", {"job_id": "JOB00023", "spool_id": "1"})
+        assert denied_jcl.value.code == "denied"
+
+        manual = live_state.fetch_live(
+            settings, client, "sim-2", "What does IEA500I mean?", "manual"
+        )
+        assert manual.texts == ()
     finally:
         client.close()
-    assert out.degraded is None
-    assert out.tools_used == ("job_status", "jes_spool_read")
-    assert any("ABEND S0C4" in text for text in out.texts)
-
-    manual = live_state.fetch_live(
-        settings, client, "sim-2", "What does IEA500I mean?", "manual"
-    )
-    assert manual.texts == ()
 

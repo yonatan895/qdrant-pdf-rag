@@ -48,6 +48,7 @@ JOBS = [
         "status": "OUTPUT",
         "return_code": "0008",
         "spool": {"1": "JOB00023.1", "2": "JOB00023.2"},
+        "spool_dds": {"1": "JESJCL", "2": "JESMSGLG"},
     },
     {
         "job_id": "JOB00024",
