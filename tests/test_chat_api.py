@@ -940,3 +940,227 @@ def test_chat_json_and_stream_carry_supplied_evidence(chat_client):
     terminal = chat_frames(resp.text)[-1]["choices"][0]
     assert terminal["supplied_evidence"] == body["supplied_evidence"]
     assert terminal["evidence_omitted"] == 0
+
+
+@pytest.mark.parametrize("path", ["/v1/chat", "/v1/chat/completions"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("value", [True, False])
+def test_chat_research_mode_refused_before_retrieval_when_switch_off(
+    chat_client, monkeypatch, path, stream, value
+):
+    """ADR-0013 D5 / #1325: with RESEARCH_MODE_ENABLED off, any /v1/chat* request
+    carrying research_mode fails with 422 research_mode_disabled before any
+    retrieval or model call, never a silent ordinary answer."""
+    search_calls: list[str] = []
+    llm_calls: list[object] = []
+
+    def fail_search(*args, **kwargs):
+        search_calls.append(args[3])
+        raise AssertionError("retrieval must not run when research mode is disabled")
+
+    class FailLLM:
+        def chat(self, *args, **kwargs):
+            llm_calls.append(args)
+            raise AssertionError("model must not run when research mode is disabled")
+
+    monkeypatch.setattr(app_mod.settings, "research_mode_enabled", False)
+    monkeypatch.setattr(app_mod, "retrieve_search", fail_search)
+    monkeypatch.setattr(app_mod, "llm", FailLLM())
+
+    resp = chat_client.post(
+        path,
+        json={
+            "messages": [{"role": "user", "content": "What does IEA400I mean?"}],
+            "stream": stream,
+            "research_mode": value,
+        },
+    )
+    assert resp.status_code == 422
+    assert resp.json() == {
+        "code": "research_mode_disabled",
+        "message": "research mode is not enabled on this deployment",
+    }
+    assert search_calls == []
+    assert llm_calls == []
+
+
+@pytest.mark.parametrize("path", ["/v1/chat", "/v1/chat/completions"])
+@pytest.mark.parametrize("bad_value", ["true", "yes", 1, 0, []])
+def test_chat_research_mode_rejects_non_boolean_values(chat_client, path, bad_value):
+    resp = chat_client.post(
+        path,
+        json={
+            "messages": [{"role": "user", "content": "What does IEA400I mean?"}],
+            "research_mode": bad_value,
+        },
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "invalid_request"
+
+
+@pytest.mark.parametrize("path", ["/v1/chat", "/v1/chat/completions"])
+def test_chat_research_mode_null_is_absent_when_switch_off(chat_client, monkeypatch, path):
+    monkeypatch.setattr(app_mod.settings, "research_mode_enabled", False)
+    resp = chat_client.post(
+        path,
+        json={
+            "messages": [{"role": "user", "content": "What does IEA400I mean?"}],
+            "research_mode": None,
+        },
+    )
+    assert resp.status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/v1/chat", "/v1/chat/completions"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_chat_research_mode_end_to_end_and_failed_followup_is_502(
+    chat_client, monkeypatch, path, stream
+):
+    """ADR-0013 D1/D2/D5/D6/D7: opted-in /v1/chat* runs follow-up search with
+    preserved scope and cites follow-up hits; failed follow-up search returns
+    fixed 502 upstream_error / retrieval failed."""
+    from mainframe_rag.retrieve.query import SearchHit
+
+    h1 = SearchHit(
+        chunk_id="r1-hit",
+        doc_id="SA22-7631-00",
+        title="MVS System Messages",
+        heading="IEA400I",
+        page_start=10,
+        page_label="10",
+        chunk_type="message",
+        text="IEA400I refers to IEASYSxx LFAREA configuration.",
+        score=0.9,
+        cite="SA22-7631-00 MVS System Messages, IEA400I, p. 10",
+        message_ids=["IEA400I"],
+    )
+    h2 = SearchHit(
+        chunk_id="r2-hit",
+        doc_id="SA23-1380-00",
+        title="MVS Initialization and Tuning Reference",
+        heading="IEASYSxx > LFAREA",
+        page_start=42,
+        page_label="42",
+        chunk_type="narrative",
+        text="LFAREA specifies real storage for 1 MB pages.",
+        score=0.85,
+        cite="SA23-1380-00 MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 42",
+        message_ids=[],
+    )
+    seen_searches: list[tuple[str, str | None, str | None]] = []
+
+    def two_round_search(_qdrant, _embed, _col, query, *, product=None, version=None, **_kw):
+        seen_searches.append((query, product, version))
+        if len(seen_searches) == 1:
+            return [h1], "identifier", {"embed_ms": 2, "qdrant_ms": 3}
+        return [h2], "nl", {"embed_ms": 1, "qdrant_ms": 2}
+
+    class TwoStageLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, messages, reasoning_effort=None, temperature=None):
+            self.calls += 1
+            if self.calls == 1:
+                return ChatResult(content='{"query": "IEASYSxx LFAREA real storage"}', finish_reason="stop")
+            if self.calls == 2:
+                return ChatResult(content='{"done": true}', finish_reason="stop")
+            return ChatResult(
+                content=(
+                    f"IEA400I points to LFAREA real storage. [1] [2]\n\n"
+                    f"Citations:\n- {h1.cite}\n- {h2.cite}"
+                ),
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr(app_mod.settings, "research_mode_enabled", True)
+    monkeypatch.setattr(app_mod.settings, "request_deadline_s", 270.0)
+    monkeypatch.setattr(app_mod, "retrieve_search", two_round_search)
+    monkeypatch.setattr(app_mod, "llm", TwoStageLLM())
+
+    resp = chat_client.post(
+        path,
+        json={
+            "messages": [{"role": "user", "content": "Diagnose IEA400I"}],
+            "product": "zos",
+            "version": "3.1",
+            "stream": stream,
+            "research_mode": True,
+        },
+    )
+    assert resp.status_code == 200
+    assert seen_searches == [
+        ("Diagnose IEA400I", "zos", "3.1"),
+        ("IEASYSxx LFAREA real storage", "zos", "3.1"),
+    ]
+    if not stream:
+        body = resp.json()
+        assert [h["chunk_id"] for h in body["hits"]] == ["r1-hit", "r2-hit"]
+        assert body["citations"] == [h1.cite, h2.cite]
+    else:
+        terminal = chat_frames(resp.text)[-1]["choices"][0]
+        assert [h["chunk_id"] for h in terminal["hits"]] == ["r1-hit", "r2-hit"]
+        assert terminal["citations"] == [h1.cite, h2.cite]
+
+    # Failed follow-up search -> fixed 502 upstream_error / retrieval failed (ADR-0013 D6 pt 5)
+    calls = 0
+
+    def failing_followup(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return [h1], "identifier", {}
+        raise RuntimeError("secret upstream backend failure")
+
+    monkeypatch.setattr(app_mod, "retrieve_search", failing_followup)
+    monkeypatch.setattr(app_mod, "llm", TwoStageLLM())
+    err_resp = chat_client.post(
+        path,
+        json={
+            "messages": [{"role": "user", "content": "Diagnose IEA400I"}],
+            "stream": stream,
+            "research_mode": True,
+        },
+    )
+    assert err_resp.status_code == 502
+    assert err_resp.json() == {"code": "upstream_error", "message": "retrieval failed"}
+
+
+def test_research_mode_not_on_answer_console_or_search(chat_client, monkeypatch):
+    """ADR-0013 D1, D5 pt 6: /v1/answer, /ui/chat*, and /v1/search have no
+    research_mode field and never invoke the planning stage."""
+    monkeypatch.setattr(app_mod.settings, "research_mode_enabled", True)
+    monkeypatch.setattr(app_mod.settings, "request_deadline_s", 270.0)
+    monkeypatch.setattr(app_mod.settings, "ui_enabled", True)
+
+    # /ui/chat/stream forbids unknown fields -> 422 invalid_request
+    ui_resp = chat_client.post(
+        "/ui/chat/stream",
+        json={"messages": [{"role": "user", "content": "Hello"}], "research_mode": True},
+    )
+    assert ui_resp.status_code == 422
+    assert ui_resp.json()["code"] == "invalid_request"
+
+    # /v1/answer never runs research mode even if switch is on and caller sends extra field
+    llm_calls = 0
+    orig_llm = app_mod.llm
+
+    class CountingLLM:
+        def chat(self, messages, reasoning_effort=None, temperature=None):
+            nonlocal llm_calls
+            llm_calls += 1
+            return orig_llm.chat(messages, reasoning_effort=reasoning_effort, temperature=temperature)
+
+    monkeypatch.setattr(app_mod, "llm", CountingLLM())
+    ans_resp = chat_client.post(
+        "/v1/answer",
+        json={"query": "What is LFAREA?", "research_mode": True},
+    )
+    assert ans_resp.status_code == 200
+    assert llm_calls == 1  # answer call only, zero planning calls
+
+    # /v1/search never calls any LLM even when research mode is enabled
+    llm_calls = 0
+    search_resp = chat_client.post("/v1/search", json={"query": "What is LFAREA?"})
+    assert search_resp.status_code == 200
+    assert llm_calls == 0
