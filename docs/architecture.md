@@ -15,7 +15,7 @@ Build a **citation-first expert mainframe agent** that answers operational quest
 | Layer | System | Job |
 |---|---|---|
 | Live state (caller-supplied) | Splunk (existing) | Events, jobs, messages *now* (context in, not crawl — ADR-0001) |
-| Live state (agent-fetched) | Zowe MCP server, read-only (ADR-0003) | Authorized typed read-only observations; only exact-target `job_status` is approved; an allowlisted `dataset_read` pilot is proposed (ADR-0012); other tools unapproved; bounded, audited, default-off, unwired (see [agent.md](agent.md#source-observations)) |
+| Live state (agent-fetched) | Zowe MCP server, read-only (ADR-0003) | Authorized typed read-only observations; only exact-target `job_status` is approved; a read-only pilot (`dataset_read` default, opt-in `job_status` and DD-scoped `jes_spool_read`) is proposed (ADR-0012); `uss_read` unapproved; bounded, audited, default-off, unwired (see [agent.md](agent.md#source-observations)) |
 | Knowledge | Qdrant (self-hosted) | Manuals, precedent, "what does this mean / how is this supposed to work" |
 | Reasoning | Internal vLLM / LiteLLM (platform team) | Thinking model for citation + solution / script generation |
 | Embeddings | Internal vLLM stack | Dense vectors only; OpenAI-compatible endpoint |

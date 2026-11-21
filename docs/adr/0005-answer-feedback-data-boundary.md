@@ -20,8 +20,10 @@
   2026-11-02: that chat history may also hold tool output returned in
   Team-model chats, under the same rules.)*
   *(Amendment, [ADR-0012](0012-zos-dataset-read-pilot.md), proposed: it may
-  also hold z/OS dataset observations from Docs-model chats, under the same
-  rules; the feedback store never holds them.)*
+  also hold z/OS pilot observations from Docs-model chats, under the same
+  rules; observation-bearing turns are suppressed from answer-record writes
+  and omit the answer reference, so the feedback store never holds them while
+  manual-only turns keep recording normally.)*
 - **Consequences / rules:**
   - No backend choice under #529 or #782 may ingest question, answer, excerpt or
     comment text. Using content for analytics means exporting from the feedback

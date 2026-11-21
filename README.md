@@ -61,7 +61,7 @@ the default reasoning/embedding pair.
 ## Live State (Optional, Default Off)
 
 - **Splunk (system of record):** caller-supplied context — pass `splunk_context` with `/v1/answer`, `/v1/chat`, or a console request; the agent never crawls Splunk itself.
-- **Zowe MCP (agent-fetched):** bridge/client code for read-only observations (`zowe_mcp_enabled=false` default, unwired from endpoints; only exact-target job status is approved by ADR-0003, and an allowlisted dataset-read pilot is proposed in ADR-0012; mock backend in sim). Answer-context and Helm sidecar integration remain incomplete. See [docs/architecture.md](docs/architecture.md).
+- **Zowe MCP (agent-fetched):** bridge/client code for read-only observations (`zowe_mcp_enabled=false` default, unwired from endpoints; only exact-target job status is approved by ADR-0003, and a read-only z/OS pilot — `dataset_read` default, opt-in `job_status` and DD-scoped `jes_spool_read` — is proposed in ADR-0012; mock backend in sim). Answer-context and Helm sidecar integration remain incomplete. See [docs/architecture.md](docs/architecture.md).
 
 ---
 

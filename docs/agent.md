@@ -2089,10 +2089,11 @@ deterministic and trap queries stay on the manuals path.
   the answer, chat and console routes (never `/v1/search`). The source port is
   separate from manual evidence and is not a query/command proxy.
 - **Approved operation:** `job_status` for one exact job id.
-  `dataset_read` is proposed for a pilot only, over an operator allowlist of
-  exact names ([ADR-0012](adr/0012-zos-dataset-read-pilot.md), #1294; still off
-  and unwired). `uss_read` and `jes_spool_read` are allowlisted in code but
-  not approved for use; a new tool is a new ADR.
+  [ADR-0012](adr/0012-zos-dataset-read-pilot.md) (#1294; proposed, still off
+  and unwired) proposes a pilot for `dataset_read` (operator allowlist of
+  exact names; default bridge tool) and opt-in `job_status` and DD-scoped
+  `jes_spool_read` (`JESMSGLG`/`JESYSMSG` only, gated by `MCP_ENABLED_TOOLS`).
+  `uss_read` stays unapproved; a new tool outside the closed four is a new ADR.
 - **Observation shape (contract for #91, not yet implemented):** exact `target`,
   `acquired_at` (agent clock), `observed_at` (source time or null), `outcome`
   in `complete | truncated | partial | not_found | unavailable | no_target |
