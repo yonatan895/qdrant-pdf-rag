@@ -482,6 +482,60 @@ def test_read_file_refusals(tmp_path: Path, arguments: dict[str, object], code: 
     assert _error(result)["code"] == code
 
 
+@pytest.mark.parametrize("tail_bytes", [2047, 2048, 2049, 8192, 1024 * 1024])
+def test_job_log_tail_keeps_the_end_at_and_above_the_result_cap(tmp_path: Path, tail_bytes: int):
+    # max_result_bytes is 2048; the log is 5011 bytes, so a tail at or above
+    # the cap must still end with the log's last line, never its start.
+    fake = FakeGitLab()
+    # Escaping-heavy lines (quotes, brackets) grow the framed body up to 6x.
+    fake.routes["/api/v4/projects/7/jobs/44/trace"] = httpx2.Response(
+        200, content=b'"<a>"\n' * 700 + b"\nTHE-END-MARKER\n")
+    gateway = _bearer_gateway(tmp_path, fake)
+    for job in (42, 44):
+        body = _body(_run(gateway, "read_job_log", project="team/app", job_id=job, tail_bytes=tail_bytes), "read_job_log")
+        assert body["truncated"] is False
+        assert isinstance(body["text"], str)
+        assert body["text"].startswith("[earlier log lines omitted]\n")
+        assert body["text"].endswith("LAST-LINE\n" if job == 42 else "THE-END-MARKER\n")
+
+
+def test_no_tool_argument_reaches_any_log_through_the_real_logging_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    # configure_logging replaces the root handlers, so caplog would not see
+    # what a deployment writes: capture the handler's own stream instead.
+    marker = "ARGMARKER-7f3a91"
+    root = logging.getLogger()
+    saved = (root.handlers[:], root.level)
+    named = {n: logging.getLogger(n).level for n in ("httpx2", "httpx", "httpcore")}
+    fake = FakeGitLab()
+    env, real_build = _env(tmp_path, "bearer", _config_doc(tmp_path, auth=False)), gitlab.build_gateway
+    monkeypatch.setattr(gitlab, "build_gateway", lambda: real_build(env, transport=fake.transport()))
+
+    def serve(app: object, **_: object) -> None:
+        headers = {"Authorization": f"Bearer {BEARER}"}
+        calls = [
+            _call("search_code", project="team/app", query=marker),
+            _call("read_file", project="team/app", file_path="src/main.py", ref=marker),
+            _call("list_issues", project="team/app", labels=marker),
+            _call("read_file", project=f"team/{marker}", file_path="x"),
+        ]
+        for call in calls:
+            _post(app, [call], headers)
+
+    monkeypatch.setattr(common, "serve", serve)
+    try:
+        assert gitlab.main([]) == 0
+    finally:
+        root.handlers[:], root.level = saved
+        for name, level in named.items():
+            logging.getLogger(name).setLevel(level)
+    seen = capsys.readouterr()
+    assert marker in "".join(r.url.query.decode() + r.url.path for r in fake.requests)  # the calls did go out
+    assert marker not in seen.out + seen.err
+    assert '"decision": "ok"' in seen.out + seen.err  # the real JSON handler was installed
+
+
 def test_job_log_tail_strips_ansi_and_refuses_oversized_logs(tmp_path: Path):
     gateway = _bearer_gateway(tmp_path, FakeGitLab())
     short = _body(_run(gateway, "read_job_log", project="team/app", job_id=41), "read_job_log")
