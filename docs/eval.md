@@ -523,10 +523,12 @@ bit-deterministic, so expect few verdict flips across repeats, not zero:
   citations, or **only inferred citations** (the agent mapped bare `[n]`
   markers with no explicit citation line; issue #269). The run report
   counts `inferred_citations` so fabrication is visible, never silently
-  grounded. `inferred_index_off_gold` maps an inferred index to the sibling
-  `/v1/search` pool rank; since issue #364 only supplied excerpts can be
-  inferred and prompt labels are the retrieval ranks of the packed prefix,
-  that mapping stays exact — an omitted hit can no longer surface at all.
+  grounded. `inferred_index_off_gold` maps an inferred prompt index via
+  `supplied_evidence_meta` (explicit `index` -> `doc_id`, #1314) when present,
+  falling back to `hit_doc_ids` (which itself carries the response's hits,
+  including any expanded neighbours, or the sibling `/v1/search` pool); since
+  issue #364 only supplied excerpts can be inferred, prompt positions past
+  `answer_hit_limit` stay exact and an omitted hit can no longer surface.
   Abstain behavior keeps the marker test: fails only when
   grounded *and* unrefusing; a grounded decline (hedged) or a silent
   abstention warns. Gold substring/identifier checks are case-fold
@@ -539,10 +541,12 @@ bit-deterministic, so expect few verdict flips across repeats, not zero:
   join stay out of the denominator. Reported by the answer eval and both
   harness summaries for observational tracking of the reader-side
   refusal/partial-answer track (excluded from `harness_l4` threshold gating).
-  The answer eval fetches the same sibling `/v1/search` pool as L2 and joins
-  doc-level citation recall per row (`apply_pool_join`, observational: an
-  unmapped citation never fails the row here), so it reports a number instead
-  of `None` (#307; a caller or failed search without a pool stays out of the
+  The answer eval joins doc-level citation precision/recall (`apply_pool_join`,
+  observational: an unmapped citation never fails the row here) against the
+  response's packed `supplied_evidence` / final `hits` when present (#1314),
+  falling back to the sibling `/v1/search` pool (pre-#635 agents, `--image-arm`,
+  or absent response fields), so it reports a number instead of `None` (#307; a
+  caller or failed search with neither response hits nor a pool stays out of the
   denominator). Non-200 rows record the envelope's top-level `code`
   (`prompt_budget_exceeded`, `invalid_request`, ...; the eval previously read a
   nested key that never exists and printed `?`) - code only, never the message.
@@ -1142,8 +1146,10 @@ stand-in lane, and its result is relative to that lane's model.
   between them and record the two values.
 - Read `final_hits` and `supplied_evidence_meta` (they are the selection):
   `evidence_gold_hit_rate`, then pass rate and citation precision/recall per
-  class. The sibling `/v1/search` fields (`gold_retrieved`, `hit_doc_ids`)
-  are the unselected pool at depth `N` in both arms and do not move.
+  class. With `--stream` (or when `supplied_evidence` diverges from `/v1/search`),
+  `gold_retrieved`, `hit_doc_ids`, and citation precision/recall join on the
+  response's own hits rather than the unselected sibling `/v1/search` pool
+  (#1314).
 - Cost: one extra lowest-effort model call per selected row; compare `timing`
   p50 as cost, never as the deciding signal.
 - Identifier rows bypass the stage, so they should not move; a difference
@@ -1169,15 +1175,20 @@ this arm cannot run at a site.
 - The control packs the same number of chunks by plain retrieval depth, so
   the difference is which chunks fill the extra slots, not how many. With
   the defaults that is `N=16`, `B=16` against `ANSWER_HIT_LIMIT=32`.
-- The eval does not see neighbours yet. Its retrieval fields
-  (`gold_retrieved`, `hit_doc_ids`, the judge's evidence for a citation) come
-  from the sibling `/v1/search` pool and join by cite string, which same-page
-  neighbours repeat: on `expand-on` rows a cited neighbour is unmapped and
-  positions past `N` do not line up. Until the eval joins on the final's
-  hits (the second #1314 change), read only `final_hits` and
-  `supplied_evidence_meta` from this arm, with `--stream`, and do not compare
-  pass rate or citation precision/recall across the two arms.
-- Run `expand-on` with `--hit-limit N` and the control with `--hit-limit N+B`.
+- Retrieval and citation joins see packed neighbours (#1314): `hit_doc_ids` and
+  `gold_retrieved` read the response's `hits` (streamed `/v1/answer` and
+  `/v1/chat`) or expanded `supplied_evidence` (buffered JSON `/v1/answer`),
+  falling back to `/v1/search` only when absent or when `expand-off` omitted
+  tail hits. Citation precision/recall (`apply_pool_join`, L2
+  `apply_l2_measurements`) and the faithfulness judge (`evidence_for_citations`)
+  join against packed `supplied_evidence` (then final `hits`, then `/v1/search`):
+  a `[n]`-prefixed citation selects slot `n`, a bare validated citation collects
+  every packed excerpt sharing that cite line (including same-page neighbours),
+  and omitted tail hits never leak to the judge. `inferred_index_off_gold`
+  resolves prompt indices past `N` via `supplied_evidence_meta` before falling
+  back to `hit_doc_ids`.
+- Run `expand-on` with `--stream` and `--hit-limit N` (fallback pool depth) and
+  the control with `--stream` and `--hit-limit N+B`.
 - Before reading results, confirm from the stand-in's traces that rows carry
   `rag.expand_mode=expanded` with `rag.expand_added` near `B`; a row with
   fewer added packed fewer chunks than its control row. `rag.expand_stopped`

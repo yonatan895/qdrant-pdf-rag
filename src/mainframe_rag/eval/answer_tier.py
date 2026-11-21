@@ -542,8 +542,13 @@ def run_l2(
                 # Sampling temperature (issue #596): L2/L4 stay on the server
                 # default (None) — their thresholds were recorded under it,
                 # so moving them to 0 needs its own threshold re-record PR.
-                row = run_query(client, entry, answers.signals, hits, temperature=None)
-                apply_l2_measurements(row, entry, hits, capture.alerts)
+                citation_hits: list[dict[str, Any]] = []
+                row = run_query(
+                    client, entry, answers.signals, hits, temperature=None,
+                    citation_hits_out=citation_hits,
+                )
+                join_hits = citation_hits if citation_hits else hits
+                apply_l2_measurements(row, entry, join_hits, capture.alerts)
 
                 # Faithfulness judge: grounded, non-refused model text.
                 if (
@@ -553,7 +558,7 @@ def run_l2(
                     and row.get("citations")
                     and not row.get("failures")
                 ):
-                    evidence, _unmapped = evidence_for_citations(row["citations"], hits)
+                    evidence, _unmapped = evidence_for_citations(row["citations"], join_hits)
                     try:
                         chat = judge_chat(judge_client, judge_messages(row["answer"], evidence))
                         row["judge_label"] = parse_judge_label(chat.content)

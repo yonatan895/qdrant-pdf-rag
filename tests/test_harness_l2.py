@@ -434,3 +434,157 @@ def test_judge_evidence_is_bounded_before_the_prompt():
     assert unmapped == []
     assert len(evidence) < JUDGE_MAX_EVIDENCE_CHARS + 100
     assert evidence.endswith("[truncated for the judge]")
+
+
+# -------------------------------------------- neighbour expansion join (#1314)
+
+
+def test_citation_to_hit_and_evidence_handle_same_page_neighbours():
+    """#1314 PR 2: same-page neighbours repeat their parent's cite string.
+    A [n]-prefixed citation selects that exact slot rather than letting the
+    first equal cite win; a bare citation (what /v1/answer and /v1/chat emit)
+    maps to every packed hit/excerpt carrying that cite, so the faithfulness
+    judge sees both parent and same-page neighbour text without duplication."""
+    from mainframe_rag.eval.judging import (
+        citation_to_hit,
+        citation_to_hits,
+        evidence_for_citations,
+    )
+
+    shared_cite = "SA23-1380-70 z/OS MVS Init Tuning Ref, IEASYSxx > LFAREA, p. 100"
+    other_cite = "SC34-6428-08 CICS Sys Def, p. 55"
+    hits = [
+        _hit(shared_cite, "SA23-1380-70", "Parent chunk step 1."),
+        _hit(other_cite, "SC34-6428-08", "Unrelated chunk."),
+        {**_hit(shared_cite, "SA23-1380-70", "Same-page neighbour step 2."), "neighbour_of": "c1"},
+    ]
+    # [3] selects the neighbour at position 3, not the first equal cite at position 1.
+    assert citation_to_hit(f"[3] {shared_cite}", hits) == hits[2]
+    assert citation_to_hits(f"[3] {shared_cite}", hits) == [hits[2]]
+    evidence, unmapped = evidence_for_citations([f"[3] {shared_cite}"], hits)
+    assert unmapped == []
+    assert evidence == "Same-page neighbour step 2."
+
+    # Bare citation collects both parent and same-page neighbour, deduped on repeats.
+    assert citation_to_hits(shared_cite, hits) == [hits[0], hits[2]]
+    evidence, unmapped = evidence_for_citations([shared_cite, shared_cite], hits)
+    assert unmapped == []
+    assert evidence == "Parent chunk step 1.\n\n---\n\nSame-page neighbour step 2."
+
+    # SuppliedExcerpt shape (`citation` + explicit `index`) works identically,
+    # including sparse/non-contiguous prompt indices.
+    supplied = [
+        {"index": 1, "citation": shared_cite, "doc_id": "SA23-1380-70", "text": "Parent slice."},
+        {"index": 17, "citation": shared_cite, "doc_id": "SA23-1380-70", "text": "Neighbour slice."},
+    ]
+    assert citation_to_hit(f"[17] {shared_cite}", supplied) == supplied[1]
+    assert evidence_for_citations([f"[17] {shared_cite}"], supplied) == ("Neighbour slice.", [])
+    assert evidence_for_citations([shared_cite], supplied) == (
+        "Parent slice.\n\n---\n\nNeighbour slice.",
+        [],
+    )
+    docs, unmatched = cited_doc_ids([shared_cite], supplied)
+    assert docs == {"SA23-1380-70"} and unmatched == []
+
+
+def test_run_l2_joins_expanded_neighbours_from_supplied_evidence(monkeypatch):
+    """#1314 PR 2: in run_l2, /v1/search returns only the base retrieved pool
+    while /v1/answer returns supplied_evidence including packed cross-page and
+    same-page neighbours. Citations to neighbours must map (never fail as
+    unmatched), hit_doc_ids must include neighbours, and the faithfulness judge
+    must see both cross-page and same-page neighbour text — never an omitted
+    chunk."""
+    import json
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+
+    from mainframe_rag import config
+    from mainframe_rag.agent import answer as answer_mod
+    from mainframe_rag.agent import app as app_mod
+    from mainframe_rag.eval.answer_tier import run_l2
+
+    app = FastAPI()
+    judge_prompts: list[str] = []
+    parent_cite = "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 5"
+    cross_page_cite = "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 6"
+
+    @app.post("/v1/search")
+    def search(body: dict):
+        return {
+            "hits": [
+                {"cite": parent_cite, "doc_id": "SA23-1380-70", "text": "Step 1: open panel."},
+            ]
+        }
+
+    @app.post("/v1/answer")
+    def answer(body: dict):
+        logger = logging.getLogger("agent")
+        logger.info(json.dumps({"action": "answer", "request_id": "req-expand", "finish_reason": "stop"}))
+        return {
+            "request_id": "req-expand",
+            "answer": "Open the panel, verify the status, and save on page 6.",
+            "citations": [parent_cite, cross_page_cite],
+            "citations_inferred": False,
+            "inferred_indices": [],
+            "verification_state": "accepted",
+            "script": None,
+            "supplied_evidence": [
+                {
+                    "index": 1, "citation": parent_cite, "duplicate_citation": True,
+                    "doc_id": "SA23-1380-70", "title": "Synthetic Reference",
+                    "heading": "Guide > Procedure", "page_label": "5",
+                    "pdf_page_start": 5, "pdf_page_end": 5,
+                    "start_char": 0, "end_char": 19, "source_chars": 19,
+                    "truncated_start": False, "truncated_end": False,
+                    "text_clipped": False, "text": "Step 1: open panel.",
+                },
+                {
+                    "index": 2, "citation": parent_cite, "duplicate_citation": True,
+                    "doc_id": "SA23-1380-70", "title": "Synthetic Reference",
+                    "heading": "Guide > Procedure", "page_label": "5",
+                    "pdf_page_start": 5, "pdf_page_end": 5,
+                    "start_char": 0, "end_char": 23, "source_chars": 23,
+                    "truncated_start": False, "truncated_end": False,
+                    "text_clipped": False, "text": "Step 2: verify status.",
+                },
+                {
+                    "index": 3, "citation": cross_page_cite, "duplicate_citation": False,
+                    "doc_id": "SA23-1380-70", "title": "Synthetic Reference",
+                    "heading": "Guide > Procedure", "page_label": "6",
+                    "pdf_page_start": 6, "pdf_page_end": 6,
+                    "start_char": 0, "end_char": 21, "source_chars": 21,
+                    "truncated_start": False, "truncated_end": False,
+                    "text_clipped": False, "text": "Step 3: save changes.",
+                },
+            ],
+            "evidence_omitted": 1,
+        }
+
+    class Judge:
+        def __init__(self, settings):
+            pass
+
+        def chat(self, messages, *, temperature, reasoning_effort):
+            judge_prompts.append(messages[1].content)
+            return SimpleNamespace(content='{"label": "entailed"}')
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(app_mod, "app", app)
+    monkeypatch.setattr(answer_mod, "HttpxLLMClient", Judge)
+    monkeypatch.setattr(config, "load_settings", lambda: object())
+    rows, metrics = run_l2([_entry("EXP-1", gold=["SA23-1380-70"])], None, judge_enabled=True)
+    [row] = rows
+    assert row["verdict"] == "pass", row["failures"]
+    assert row["unmatched_citations"] == []
+    assert row["cited_doc_ids"] == ["SA23-1380-70"]
+    assert row["citation_precision"] == 1.0 and row["citation_recall"] == 1.0
+    assert row["hit_doc_ids"] == ["SA23-1380-70"] * 3
+    assert row["gold_retrieved"] is True
+    assert metrics["unmapped_citations"] == 0
+    assert len(judge_prompts) == 1
+    assert "Step 1: open panel." in judge_prompts[0]
+    assert "Step 2: verify status." in judge_prompts[0]
+    assert "Step 3: save changes." in judge_prompts[0]
