@@ -25,7 +25,11 @@ ADR-0012 pilot controls enforced here:
 - Content screening & untrusted delimiting (D6): control/bidi characters
   stripped, password-shaped strings redacted (the forms `screen_zos_text`
   lists), output wrapped in untrusted observation delimiters with breakout
-  neutralization.
+  neutralization. Text reads pin `SITE NOTRAILINGBLANKS` and
+  `SITE SBSENDEOL=CRLF` (unconfirmed replies proceed, marked by code).
+- Spool window (D6): `jes_spool_read` returns the first quarter and last
+  three quarters of a job log that exceeds the cap (`_spool_window`), bounded
+  by `spool_stream_max_bytes` / `spool_stream_max_s`.
 - Logon-failure breaker (D9): FTP 530 maps to `logon_failed`; at most
   `threshold` failing logons can be in flight whatever the concurrency, and
   once tripped no logon reaches the server until cooldown elapses or an
@@ -42,12 +46,16 @@ import ftplib
 import re
 import socket
 import ssl
+import sys
 import threading
 import time
 import unicodedata
+from collections import deque
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
+
+from opentelemetry import trace
 
 # Closed four-tool vocabulary (ADR-0003); adding a fifth tool requires a new ADR.
 CLOSED_TOOLS: tuple[str, ...] = ("dataset_read", "uss_read", "job_status", "jes_spool_read")
@@ -62,6 +70,35 @@ ALLOWED_JES_DDS: frozenset[str] = frozenset({"JESMSGLG", "JESYSMSG"})
 TRUNCATION_SUFFIX = "\n[... truncated: output exceeded the byte cap ...]"
 OBS_BEGIN_PREFIX = "--- BEGIN UNTRUSTED Z/OS OBSERVATION"
 OBS_END_MARKER = "--- END UNTRUSTED Z/OS OBSERVATION ---"
+
+# Text-format SITE pins sent before every text read (one operand per SITE):
+# strip the trailing blanks of fixed-format records, and pin CRLF record ends
+# (the spool window cuts on line ends). Unverified on the site: ADR-0012 D8.
+TEXT_FORMAT_SITES: tuple[str, ...] = ("NOTRAILINGBLANKS", "SBSENDEOL=CRLF")
+
+# jes_spool_read start-and-end window (maintainer decision 2026-11-21): the
+# framed result fits max_bytes, so the agent's head-only live cap of the same
+# size never drops the tail or the END delimiter. FRAME_RESERVE_BYTES covers
+# the delimiters, the window header and the gap marker; of the rest, the first
+# 1/SPOOL_HEAD_DIVISOR goes to the head (job identity, first steps) and the
+# remainder to the tail (completion codes, abends).
+FRAME_RESERVE_BYTES = 1024
+SPOOL_HEAD_DIVISOR = 4
+# Extra tail bytes kept before the line trim, so the tail's first safe start
+# (`_tail_start`) usually lies before the last T bytes and a key there is in
+# view of its value. Safety does not rest on this size (separators span any
+# run of whitespace): no kept line starts where a match could span.
+TAIL_LOOKBEHIND_BYTES = 4096
+SPOOL_GAP_MARKER = (
+    "[... z/OS bridge omitted about {n} bytes between the first and last parts"
+    " of this spool file ...]"
+)
+SPOOL_STOP_MARKER = "[... z/OS bridge stopped reading after {n} bytes; the end was not read ...]"
+# The agent's default per-call bridge timeout (Settings.zowe_mcp_timeout_s);
+# the bridge cannot read the agent's setting, so the spool stream budget is
+# validated against this default (a test pins the two equal).
+AGENT_CALL_TIMEOUT_DEFAULT_S = 15.0
+_RECV_CHUNK = 8192
 
 # Stable tool-error codes (client-visible; never exception or upstream text).
 NOT_FOUND = "not_found"
@@ -109,9 +146,13 @@ _OPERAND_SECRET_RE = re.compile(
 )
 # TSO logon positional form: LOGON userid/password[/newpassword].
 _TSO_LOGON_RE = re.compile(r"(?i)\b(LOGON\s+[A-Z#$@][A-Z0-9#$@]{0,7})/[^\s/]*(?:/[^\s/]*)?")
+# Key words of the key-value form (shared with `_KEY_WORD_END_RE`).
+_KV_KEY_WORDS = (
+    rf"{_PASSWORD_WORDS}|secret|api[_-]?key|apikey|"
+    r"auth[_-]?token|access[_-]?token|bearer[_-]?token|token|credential"
+)
 _KV_SECRET_RE = re.compile(
-    rf"(?i)\b({_PASSWORD_WORDS}|secret|api[_-]?key|apikey|"
-    r"auth[_-]?token|access[_-]?token|bearer[_-]?token|token|credential)"
+    rf"(?i)\b({_KV_KEY_WORDS})"
     r"(\s*[=:]\s*)"
     # Closing ) or quote optional: the byte cap or a record end can cut it off.
     r"(?:\([^)\n]*\)?|'[^'\n]*'?|\"[^\"\n]*\"?|[^\s,;]+)"
@@ -126,6 +167,17 @@ _AUTH_SCHEME_RE = re.compile(r"(?i)\b(Bearer|Basic)(\s+)[A-Za-z0-9._~+/=-]{8,}")
 _OBS_BOUNDARY_RE = re.compile(
     r"(?i)(---\s*(?:BEGIN|END)\s+UNTRUSTED\s+Z/OS\s+OBSERVATION[^\n]*)"
 )
+# Spool text imitating the bridge's own window markers.
+_WINDOW_MARKER_RE = re.compile(r"(?i)\[\s*\.\.\.\s*z/OS\s+bridge\b[^\n]*")
+# Every key a single-line redaction pattern can carry across a line end to its
+# value (the D6 keywords and key-value keys, TSO LOGON, the auth schemes),
+# matched where the text before a candidate tail start ends. The keys are
+# words far shorter than _KEY_SEARCH_CHARS.
+_KEY_WORD_END_RE = re.compile(rf"(?i)(?:{_KV_KEY_WORDS}|logon|bearer|basic)\Z")
+_KEY_SEARCH_CHARS = 64
+# The word run at a tail ring's start, which may be the end of a key cut by the
+# receive (U+FFFD: a multibyte character split there).
+_LEAD_RUN_RE = re.compile(r"[\w#$@\ufffd-]*")
 
 
 class _CapExceeded(Exception):
@@ -302,6 +354,9 @@ class FTPConfig:
     jes_owner_prefixes: tuple[str, ...] = ()
     logon_breaker_cooldown_s: float = 900.0
     logon_breaker_threshold: int = 1
+    # jes_spool_read stream ceilings: past either, the read stops head-only.
+    spool_stream_max_bytes: int = 16 * 1024 * 1024
+    spool_stream_max_s: float = 8.0
 
     def __post_init__(self) -> None:
         if self.transport_mode not in ("ftps", "plain"):
@@ -316,6 +371,13 @@ class FTPConfig:
             raise ValueError("logon_breaker_cooldown_s must be positive")
         if self.logon_breaker_threshold < 1:
             raise ValueError("logon_breaker_threshold must be >= 1")
+        if self.spool_stream_max_bytes < self.max_bytes:
+            raise ValueError("spool_stream_max_bytes must be at least max_bytes")
+        if not 0 < self.spool_stream_max_s < AGENT_CALL_TIMEOUT_DEFAULT_S:
+            raise ValueError(
+                "spool_stream_max_s must be positive and below the agent's "
+                f"{AGENT_CALL_TIMEOUT_DEFAULT_S:g}s call timeout"
+            )
         try:
             codecs.lookup(self.encoding)
         except LookupError as exc:
@@ -584,17 +646,26 @@ def screen_zos_text(text: str) -> str:
       password/secret/token key-value assignments (`=` or `:`); space-separated
       password values; and Bearer/Basic auth headers.
     """
+    return _redact_zos_text(_normalize_zos_text(text))
+
+
+def _normalize_zos_text(text: str) -> str:
+    """Line ends to `\\n`; C0/C1 control and format/bidi characters dropped."""
     normalized = (
         text.replace("\r\n", "\n")
         .replace("\r", "\n")
         .replace("\u2028", "\n")
         .replace("\u2029", "\n")
     )
-    cleaned = "".join(
+    return "".join(
         ch
         for ch in normalized
         if ch in ("\n", "\t") or unicodedata.category(ch) not in ("Cc", "Cf")
     )
+
+
+def _redact_zos_text(cleaned: str) -> str:
+    """The D6 redactions over normalized text (see `screen_zos_text`)."""
     cleaned = _PEM_PRIVATE_KEY_RE.sub("[REDACTED]", cleaned)
     cleaned = _PEM_OPEN_BEGIN_RE.sub("[REDACTED]", cleaned)
     cleaned = _PEM_OPEN_END_RE.sub("[REDACTED]", cleaned)
@@ -605,47 +676,341 @@ def screen_zos_text(text: str) -> str:
     return _AUTH_SCHEME_RE.sub(r"\1\2[REDACTED]", cleaned)
 
 
-def frame_untrusted_observation(text: str, *, tool: str, target: str) -> str:
+def frame_untrusted_observation(
+    text: str, *, tool: str, target: str, window: str | None = None
+) -> str:
     """Wrap screened z/OS text in untrusted observation delimiters (D6).
 
     Any embedded delimiter markers inside the payload are neutralized so
     untrusted dataset or spool lines cannot forge an early block close.
+    `window` (bridge-authored, never data) repeats a spool window's facts in
+    the header, because the gap marker in the body could be forged by data.
     """
     safe_body = _OBS_BOUNDARY_RE.sub("[neutralized-observation-marker]", text)
-    header = f"{OBS_BEGIN_PREFIX} (tool={tool} target={target}) ---"
+    facts = f" {window}" if window else ""
+    header = f"{OBS_BEGIN_PREFIX} (tool={tool} target={target}{facts}) ---"
     if safe_body and not safe_body.endswith("\n"):
         return f"{header}\n{safe_body}\n{OBS_END_MARKER}"
     return f"{header}\n{safe_body}{OBS_END_MARKER}"
 
 
-def _capped_retr(ftp: ftplib.FTP, command: str, max_bytes: int) -> tuple[bytes, bool]:
-    """TYPE A (ASCII) receive aborting past max_bytes. Returns (payload, truncated).
+def _pin_text_format(ftp: Any) -> tuple[str, ...]:
+    """Send the `TEXT_FORMAT_SITES` pins before a text read; return the
+    names the server did not confirm.
+
+    Confirmed means a reply starting `200` with no "unrecognized" line (z/OS
+    is recalled, not verified, to answer 200 while ignoring an operand; ADR-0012
+    D8(d) checks the wording). A 202, a 200-unrecognized or a
+    5xx (`error_perm`) is a capacity loss (trailing blanks kept), not a
+    security failure: the read proceeds and the name is marked on stderr and
+    the span with the reply code only, never the reply text. A 4xx
+    (`error_temp`) or socket error propagates. Kept out of `connect`, so a
+    SITE failure never touches the logon breaker.
+    """
+    unconfirmed: list[str] = []
+    for operand in TEXT_FORMAT_SITES:
+        try:
+            reply = ftp.sendcmd(f"SITE {operand}")
+        except ftplib.error_perm as exc:
+            reply = str(exc)
+        if reply.startswith("200") and "unrecogni" not in reply.lower():
+            continue
+        name = operand.split("=", 1)[0]
+        unconfirmed.append(name)
+        code = reply[:3] if reply[:3].isdigit() else "???"
+        print(f"mcp bridge: SITE {name} unconfirmed reply_code={code}", file=sys.stderr, flush=True)
+    if unconfirmed:
+        trace.get_current_span().set_attribute("mcp.ftp.site_unconfirmed", ",".join(unconfirmed))
+    return tuple(unconfirmed)
+
+
+def _receive_ascii(
+    ftp: Any,
+    command: str,
+    accept: Callable[[bytes], bool],
+    *,
+    deadline: float | None = None,
+    timeout_s: float = 15.0,
+    clock: Callable[[], float] = time.monotonic,
+) -> Literal["complete", "stopped", "deadline"]:
+    """The TYPE A (ASCII) receive loop shared by every text read.
 
     Sends `TYPE A` itself and reads the data connection directly: ftplib's
     `retrbinary` would switch to `TYPE I` and receive untranslated EBCDIC,
     and `retrlines` drops record ends and refuses lines over 8 KiB. The
     payload is the server's translated output (its ASCII code page, CRLF
     record ends), decoded by the caller with `FTPConfig.encoding`.
+
+    `accept` takes each chunk and returns False to stop (`"stopped"`). With a
+    `deadline`, each receive waits at most `min(timeout_s, remaining)`; a
+    spent deadline returns `"deadline"`, while a stall inside it still raises
+    the socket timeout. The caller ends the transfer (reply, ABOR or close).
     """
     ftp.sendcmd("TYPE A")
-    buf = bytearray()
-    truncated = False
+    outcome: Literal["complete", "stopped", "deadline"] = "complete"
     with ftp.transfercmd(command) as conn:
-        while chunk := conn.recv(8192):
-            remaining = max_bytes - len(buf)
-            if len(chunk) > remaining:
-                buf += chunk[:remaining]
-                truncated = True
+        while True:
+            if deadline is not None:
+                remaining = deadline - clock()
+                if remaining <= 0:
+                    outcome = "deadline"
+                    break
+                conn.settimeout(min(timeout_s, remaining))
+            try:
+                chunk = conn.recv(_RECV_CHUNK)
+            except TimeoutError:
+                if deadline is not None and clock() >= deadline:
+                    outcome = "deadline"
+                    break
+                raise
+            if not chunk:
                 break
-            buf += chunk
-        if not truncated and isinstance(conn, ssl.SSLSocket):
+            if not accept(chunk):
+                outcome = "stopped"
+                break
+        if outcome == "complete" and isinstance(conn, ssl.SSLSocket):
             conn.unwrap()
+    return outcome
+
+
+def _capped_retr(ftp: ftplib.FTP, command: str, max_bytes: int) -> tuple[bytes, bool]:
+    """Head-only TYPE A receive aborting past max_bytes. Returns (payload, truncated)."""
+    buf = bytearray()
+
+    def accept(chunk: bytes) -> bool:
+        room = max_bytes - len(buf)
+        buf.extend(chunk[:room])
+        return len(chunk) <= room
+
+    truncated = _receive_ascii(ftp, command, accept) == "stopped"
     if truncated:
         with contextlib.suppress(Exception):  # best-effort abort only
             ftp.abort()
     else:
         ftp.voidresp()
     return bytes(buf), truncated
+
+
+def _spool_budget(max_bytes: int) -> tuple[int, int, int]:
+    """(body B, head H, tail T) in UTF-8 bytes of screened text. B leaves
+    FRAME_RESERVE_BYTES of max_bytes for the frame (half the cap when the cap
+    is too small for the full reserve; such caps cannot hold the frame)."""
+    body = max_bytes - min(FRAME_RESERVE_BYTES, max_bytes // 2)
+    head = body // SPOOL_HEAD_DIVISOR
+    return body, head, body - head
+
+
+@dataclass
+class _SpoolCapture:
+    """Receive state for the spool window: the first `head_cap` bytes, a
+    deque of the last chunks holding at least `tail_keep` bytes, and a byte
+    count. `head_only` stops once the head is full."""
+
+    head_cap: int
+    tail_keep: int
+    ceiling: int
+    head_only: bool = False
+    head: bytearray = field(default_factory=bytearray)
+    tail: deque[bytes] = field(default_factory=deque)
+    tail_len: int = 0
+    total: int = 0
+    evicted: bool = False
+    complete: bool = False
+
+    def accept(self, chunk: bytes) -> bool:
+        if self.total + len(chunk) > self.ceiling:
+            return False
+        self.total += len(chunk)
+        room = self.head_cap - len(self.head)
+        if room > 0:
+            self.head.extend(chunk[:room])
+            chunk = chunk[room:]
+        if self.head_only:
+            return len(self.head) < self.head_cap
+        if chunk:
+            self.tail.append(chunk)
+            self.tail_len += len(chunk)
+            while self.tail_len - len(self.tail[0]) >= self.tail_keep:
+                self.tail_len -= len(self.tail.popleft())
+                self.evicted = True
+        return True
+
+
+_LINE_RE = re.compile(r"[^\n]*\n|[^\n]+")
+
+
+def _utf8_len(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+def _screen_part(raw: bytes, encoding: str, *, final: bool) -> str:
+    """Decode one window part once (an incomplete trailing character is held
+    back unless `final`), screen it, and neutralize window-marker lookalikes."""
+    text = codecs.getincrementaldecoder(encoding)(errors="replace").decode(raw, final=final)
+    return _WINDOW_MARKER_RE.sub("[neutralized-window-marker]", screen_zos_text(text))
+
+
+def _keep_first_lines(text: str, budget: int) -> str:
+    """Whole lines from the start within budget UTF-8 bytes (a first line
+    longer than the budget is cut at a character boundary)."""
+    if _utf8_len(text) <= budget:
+        return text
+    kept: list[str] = []
+    used = 0
+    for line in _LINE_RE.findall(text):
+        size = _utf8_len(line)
+        if used + size > budget:
+            break
+        kept.append(line)
+        used += size
+    if not kept:
+        return text.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+    return "".join(kept)
+
+
+def _keep_last_lines(text: str, budget: int) -> str:
+    """Whole lines from the end within budget UTF-8 bytes (a last line longer
+    than the budget keeps its end, cut at a character boundary)."""
+    if _utf8_len(text) <= budget:
+        return text
+    kept: list[str] = []
+    used = 0
+    for line in reversed(_LINE_RE.findall(text)):
+        size = _utf8_len(line)
+        if used + size > budget:
+            break
+        kept.append(line)
+        used += size
+    if not kept:
+        if budget <= 0:
+            return ""
+        return text.encode("utf-8")[-budget:].decode("utf-8", errors="ignore")
+    return "".join(reversed(kept))
+
+
+def _may_carry_a_key(text: str, end: int, lead_run: int) -> bool:
+    """Whether a redaction match could span a line start whose preceding text
+    has its last non-whitespace character just before `end`: that text ends
+    in a key, then at most one `=`, `:` or `(` and whitespace (every
+    pattern's separator). A word run reaching the ring's start (`lead_run`)
+    may be a key cut by the receive, so it counts too."""
+    if end > 0 and text[end - 1] in "=:(":
+        end -= 1
+        while end > 0 and text[end - 1].isspace():
+            end -= 1
+    if end <= lead_run:
+        return True
+    return _KEY_WORD_END_RE.search(text, max(0, end - _KEY_SEARCH_CHARS), end) is not None
+
+
+def _tail_start(text: str) -> int:
+    """The first line start after a normalized tail ring's first line end that
+    no redaction match can span (`len(text)` if there is none).
+
+    Every non-PEM value is single-line, so a match spans a line start only
+    through its key's separator. From such a start, screening the rest on its
+    own pairs keys and values exactly as whole-file screening does; a PEM
+    block it starts inside is redacted from the start by the open-END rule.
+    Dropping the first line also drops a CR/LF or character split by the
+    receive. The size of the ring's lookbehind does not matter for safety.
+    """
+    lead = _LEAD_RUN_RE.match(text)
+    lead_run = lead.end() if lead else 0
+    end = 0
+    unsafe: bool | None = None
+    line_start = 0
+    while (line_end := text.find("\n", line_start)) >= 0:
+        content = len(text[line_start:line_end].rstrip())
+        if content:
+            end, unsafe = line_start + content, None
+        line_start = line_end + 1
+        if unsafe is None:
+            unsafe = _may_carry_a_key(text, end, lead_run)
+        if not unsafe:
+            return line_start
+    return len(text)
+
+
+def _screen_tail(raw: bytes, encoding: str) -> str:
+    """Decode an evicted tail ring and screen it from `_tail_start` on, then
+    neutralize window-marker lookalikes."""
+    decoded = codecs.getincrementaldecoder(encoding)(errors="replace").decode(raw, final=True)
+    text = _normalize_zos_text(decoded)
+    screened = _redact_zos_text(text[_tail_start(text) :])
+    return _WINDOW_MARKER_RE.sub("[neutralized-window-marker]", screened)
+
+
+def _join_window(head: str, marker: str, tail: str) -> str:
+    if head and not head.endswith("\n"):
+        head += "\n"
+    return f"{head}{marker}\n{tail}"
+
+
+def _spool_window(
+    capture: _SpoolCapture, encoding: str, max_bytes: int
+) -> tuple[str, dict[str, Any], str | None]:
+    """Assemble a spool read into (body, structured fields, header facts).
+
+    A complete, contiguous read is screened once as a whole, as a full read
+    would be: it returns whole if it fits B, otherwise its first lines within
+    H and last lines within T. With a gap in the read (the tail ring evicted
+    chunks), the head is cut back to its last line end, and each part is
+    decoded and screened on its own, so a single-line redaction cannot cross
+    the cut or eat the marker. The tail is screened from its first line
+    start that no redaction match can span (`_tail_start`), found over the
+    ring's partial first line and lookbehind, so its keys and values pair as
+    in whole-file screening. Only then are whole lines trimmed to H and T,
+    and the caller frames the joined body.
+    """
+    body_budget, head_budget, tail_budget = _spool_budget(max_bytes)
+    head_raw = bytes(capture.head)
+    tail_raw = b"".join(capture.tail)
+    if capture.complete and not capture.evicted:
+        whole = _screen_part(head_raw + tail_raw, encoding, final=True)
+        if _utf8_len(whole) <= body_budget:
+            fields = {
+                "truncated": False,
+                "window": "full",
+                "total_bytes": capture.total,
+                "omitted_bytes": 0,
+                "stream_complete": True,
+            }
+            return whole, fields, None
+        # H + T = B is under the text's size, so the two parts never overlap.
+        return _head_tail_window(
+            _keep_first_lines(whole, head_budget),
+            _keep_last_lines(whole, tail_budget),
+            capture.total,
+        )
+    cut = head_raw.rfind(b"\n")
+    if cut >= 0:
+        head_raw = head_raw[: cut + 1]
+    head = _keep_first_lines(_screen_part(head_raw, encoding, final=False), head_budget)
+    if not capture.complete:
+        body = _join_window(head, SPOOL_STOP_MARKER.format(n=capture.total), "")
+        fields = {
+            "truncated": True,
+            "window": "head_only",
+            "total_bytes": None,
+            "omitted_bytes": None,
+            "stream_complete": False,
+        }
+        return body, fields, f"window=head-only read_bytes={capture.total}"
+    tail = _keep_last_lines(_screen_tail(tail_raw, encoding), tail_budget)
+    return _head_tail_window(head, tail, capture.total)
+
+
+def _head_tail_window(head: str, tail: str, total: int) -> tuple[str, dict[str, Any], str]:
+    omitted = max(0, total - _utf8_len(head) - _utf8_len(tail))
+    body = _join_window(head, SPOOL_GAP_MARKER.format(n=omitted), tail)
+    fields = {
+        "truncated": True,
+        "window": "head_tail",
+        "total_bytes": total,
+        "omitted_bytes": omitted,
+        "stream_complete": True,
+    }
+    return body, fields, f"window=head+tail omitted_bytes={omitted} total_bytes={total}"
 
 
 def _tool_result(
@@ -700,10 +1065,47 @@ class FTPSession:
 
     ftp: Any = field(repr=False)
     config: FTPConfig = field(repr=False)
+    clock: Callable[[], float] = field(default_factory=lambda: time.monotonic, repr=False)
 
     def read_text(self, command: str) -> tuple[str, bool]:
+        """Head-only text read capped at max_bytes (dataset_read, uss_read)."""
+        _pin_text_format(self.ftp)
         raw, truncated = _capped_retr(self.ftp, command, self.config.max_bytes)
         return raw.decode(self.config.encoding, errors="replace"), truncated
+
+    def read_spool(self, command: str, *, size_hint: int | None = None) -> _SpoolCapture:
+        """Start-and-end windowed text read (jes_spool_read).
+
+        Streams the whole file, keeping the head and the last tail bytes, until
+        it ends or hits `spool_stream_max_bytes` or `spool_stream_max_s`. A
+        `size_hint` (LIST BYTE-COUNT) above the byte ceiling reads the head
+        only. On a ceiling the data and control connections are closed with
+        no ABOR or final reply wait, since either can block for timeout_s.
+        """
+        cfg = self.config
+        _, head_budget, tail_budget = _spool_budget(cfg.max_bytes)
+        capture = _SpoolCapture(
+            head_cap=head_budget,
+            tail_keep=tail_budget + TAIL_LOOKBEHIND_BYTES,
+            ceiling=cfg.spool_stream_max_bytes,
+            head_only=size_hint is not None and size_hint > cfg.spool_stream_max_bytes,
+        )
+        _pin_text_format(self.ftp)
+        outcome = _receive_ascii(
+            self.ftp,
+            command,
+            capture.accept,
+            deadline=self.clock() + cfg.spool_stream_max_s,
+            timeout_s=cfg.timeout_s,
+            clock=self.clock,
+        )
+        if outcome == "complete":
+            self.ftp.voidresp()
+            capture.complete = True
+        else:
+            with contextlib.suppress(Exception):  # the session ends here
+                self.ftp.close()
+        return capture
 
 
 def _check_dataset_policy(config: FTPConfig, dataset: str, member: str | None = None) -> tuple[str, str | None]:
@@ -927,8 +1329,11 @@ def _is_level2_header(line: str) -> bool:
     return [p.upper() for p in line.split()[:5]] == list(_LEVEL2_HEADER)
 
 
-def _parse_spool_table_line(line: str) -> tuple[int, str] | None:
-    """Parse one JESINTERFACELEVEL=2 spool row: returns (spool_id_int, ddname)."""
+def _parse_spool_table_line(line: str) -> tuple[int, str, int | None] | None:
+    """Parse one JESINTERFACELEVEL=2 spool row: (spool_id_int, ddname, byte_count).
+
+    BYTE-COUNT is None when the row has none; it is only a size hint (its
+    units are unverified until the D8 dry run)."""
     stripped = line.strip()
     if not stripped or set(stripped) <= {"-"}:
         return None
@@ -948,15 +1353,17 @@ def _parse_spool_table_line(line: str) -> tuple[int, str] | None:
     spool_num = int(parts[0])
     # Standard z/OS JESINTERFACELEVEL=2 format:
     #   ID STEPNAME [PROCSTEP] C DDNAME BYTE-COUNT
+    byte_count: int | None = None
     if parts[-1].isdigit() and len(parts) >= 5:
         ddname = parts[-2].upper()
+        byte_count = int(parts[-1])
     elif len(parts[-2]) == 1:
         ddname = parts[-1].upper()
     else:
         return None
     if not _JES_IDENT_RE.fullmatch(ddname):
         return None
-    return spool_num, ddname
+    return spool_num, ddname, byte_count
 
 
 def job_status(
@@ -1051,7 +1458,16 @@ def jes_spool_read(session: FTPSession, job_id: str, spool_id: str) -> dict:
     Always runs `SITE FILETYPE=JES` + `LIST <JOBID>` BEFORE any `RETR` to
     verify both the job's jobname/owner against the bridge-side prefix
     allowlists and the spool file's DDNAME against `ALLOWED_JES_DDS`. Sends
-    explicit `TYPE A` before `RETR <JOBID>.<spool_id>`.
+    the text-format SITE pins and explicit `TYPE A` before
+    `RETR <JOBID>.<spool_id>`.
+
+    The result is a start-and-end window (see `_spool_window`): a file whose
+    screened text fits the cap comes back whole; a longer one keeps its first
+    quarter and last three quarters around a gap marker, so completion codes
+    and abends at the end survive. The framed result stays within
+    `max_bytes`, and `structuredContent` carries `truncated`, `window`
+    (`full | head_tail | head_only`), `total_bytes`, `omitted_bytes`
+    (approximate) and `stream_complete`.
     """
     try:
         jid, sid = _check_jes_spool_policy(session.config, job_id, spool_id)
@@ -1068,7 +1484,7 @@ def jes_spool_read(session: FTPSession, job_id: str, spool_id: str) -> dict:
             # JESINTERFACELEVEL=1 (or unknown) layout: columns would be misread.
             raise _JesUnavailable("LIST lacks the JESINTERFACELEVEL=2 header")
         job_info: dict[str, Any] | None = None
-        spool_dds: dict[int, str] = {}
+        spool_dds: dict[int, tuple[str, int | None]] = {}
         for line in lines:
             parsed_job = _parse_job_line(line)
             if parsed_job is not None and parsed_job["job_id"] == jid:
@@ -1076,8 +1492,8 @@ def jes_spool_read(session: FTPSession, job_id: str, spool_id: str) -> dict:
                 continue
             parsed_spool = _parse_spool_table_line(line)
             if parsed_spool is not None:
-                spool_num, ddname = parsed_spool
-                spool_dds[spool_num] = ddname
+                spool_num, ddname, byte_count = parsed_spool
+                spool_dds[spool_num] = (ddname, byte_count)
 
         if job_info is None:
             return _tool_error(NOT_FOUND, "no such dataset, member, path, job, or spool file")
@@ -1089,14 +1505,22 @@ def jes_spool_read(session: FTPSession, job_id: str, spool_id: str) -> dict:
         sid_num = int(sid)
         if sid_num not in spool_dds:
             return _tool_error(NOT_FOUND, "no such dataset, member, path, job, or spool file")
-        ddname = spool_dds[sid_num]
+        ddname, byte_count = spool_dds[sid_num]
         if ddname not in ALLOWED_JES_DDS:
             return _tool_error(DENIED, "requested z/OS target is not permitted")
 
-        text, truncated = session.read_text(f"RETR {jid}.{sid}")  # TYPE A
-        return _tool_result(
-            text, truncated, frame_tool="jes_spool_read", frame_target=f"{jid}.{sid}({ddname})"
+        capture = session.read_spool(f"RETR {jid}.{sid}", size_hint=byte_count)  # TYPE A
+        body, fields, window = _spool_window(
+            capture, session.config.encoding, session.config.max_bytes
         )
+        framed = frame_untrusted_observation(
+            body, tool="jes_spool_read", target=f"{jid}.{sid}({ddname})", window=window
+        )
+        return {
+            "content": [{"type": "text", "text": framed}],
+            "structuredContent": fields,
+            "isError": False,
+        }
     except Exception as exc:  # noqa: BLE001 — mapped to stable codes below
         code, message = _classify_ftp_error(exc)
         return _tool_error(code, message)
