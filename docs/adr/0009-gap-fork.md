@@ -497,7 +497,12 @@ stays, and it is the gate. The procedure, commands and refusals are in the
    Nothing is executed, downloaded or pushed. The cumulative delta from the
    base release must stay inside the allow-list of
    `scripts/gap/allowlist.py`; a lock, pin, Containerfile, licence input or
-   any path not shown safe is refused and goes upstream.
+   any path not shown safe is refused and goes upstream. The same holds
+   for a nested `charts/mainframe-rag/charts/` subtree and any
+   `Chart.lock`. Increment 2 prerequisite: the ten licence-tracked paths
+   under `src/mainframe_rag/webui/static/vendor/` are refused, or checked
+   by the licence check on the tagged tree, before layer replacement is
+   enabled (increment 1 refuses all of `src/`).
 3. **Pack and sign.** `scripts/gap/release.sh pack` runs in the bastion from
    the installed signed release, in a session without cluster or registry
    credentials. The bundle has the upstream layout, so the same bootstrap,

@@ -858,6 +858,66 @@ def test_one_release_identity_per_tag_refuses_a_second_signed_bundle(tmp_path: P
     assert again["tarball_sha256"] == first["tarball_sha256"]
 
 
+def test_vendored_subchart_in_candidate_is_refused_by_pack_and_by_verify(
+    tmp_path: Path, keypairs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+):
+    """M1: a ledgered .tgz under charts/mainframe-rag/charts/ is refused by pack,
+    and verify refuses a signed bundle whose repo.bundle carries one."""
+    fx = _build_fixture(tmp_path, keypairs)
+    remote = Path(fx["remote"])
+    base_tar = Path(fx["base_tar"])
+    _git(remote, "checkout", "-b", "feat/subchart")
+    (remote / "charts/mainframe-rag/charts").mkdir()
+    (remote / "charts/mainframe-rag/charts/thirdparty-1.0.0.tgz").write_bytes(b"not-a-real-chart")
+    _git(remote, "add", "charts/mainframe-rag/charts/thirdparty-1.0.0.tgz")
+    _git(remote, "commit", "-m", "Vendor subchart\n\nGap-Patch: GL#50")
+    patch_sha = _git(remote, "rev-parse", "HEAD").stdout.strip()
+    ledger = (remote / "gap/patches.md").read_text(encoding="utf-8")
+    (remote / "gap/patches.md").write_text(
+        ledger + f"\n## GL#50 {patch_sha}\n- path: charts/mainframe-rag/charts/thirdparty-1.0.0.tgz\n",
+        encoding="utf-8",
+    )
+    _git(remote, "add", "gap/patches.md")
+    _git(remote, "commit", "-m", "Record GL#50 in ledger")
+    _git(remote, "checkout", "main")
+    _git(remote, "merge", "--no-ff", "feat/subchart", "-m", "Merge subchart (GL#50)")
+    sha = _git(remote, "rev-parse", "HEAD").stdout.strip()
+    _git(remote, "tag", "-a", "gap-subchart", "-m", "Gap-Release: GL#50", sha)
+
+    def _pack(wd: Path) -> dict[str, str]:
+        return release.cmd_pack(
+            tag="gap-subchart",
+            remote=str(remote),
+            base_bundle=base_tar,
+            work_dir=wd,
+            upstream_pub=keypairs["up_pub"],
+            gap_pub=keypairs["gap_pub"],
+            repo_root=REPO,
+            session_dir=Path(fx["session_dir"]),
+        )
+
+    with pytest.raises(release.ReleaseStop) as exc:
+        _pack(tmp_path / "w-refused")
+    assert str(exc.value) == allowlist.REFUSAL_MESSAGE
+
+    # Force a bundle through pack as a weaker allow-list would have, then verify
+    # it under the real allow-list: verify must refuse on its own.
+    real = allowlist.classify_paths
+    monkeypatch.setattr(allowlist, "classify_paths", lambda paths: real(["docs/deploy.md"]))
+    work_dir = tmp_path / "w-forced"
+    _pack(work_dir)
+    monkeypatch.setattr(allowlist, "classify_paths", real)
+    out = work_dir / "out"
+    (out / "SHA256SUMS").write_bytes(release._format_sha256sums(out, release._expected_members(sha, ())))
+    _sign_external_vault_style(out / "SHA256SUMS", keypairs["gap_priv"], out / "SHA256SUMS.sig")
+    with pytest.raises(release.ReleaseStop) as exc:
+        release.cmd_verify(
+            bundle=out, base_bundle=base_tar,
+            upstream_pub=keypairs["up_pub"], gap_pub=keypairs["gap_pub"], repo_root=REPO,
+        )
+    assert str(exc.value) == allowlist.REFUSAL_MESSAGE
+
+
 def _installed_release(root: Path, up_priv: Path) -> Path:
     """A verified signed release workspace as bootstrap leaves it: a git checkout
     of the release scripts whose HEAD equals the signed dist/MANIFEST.txt sha."""

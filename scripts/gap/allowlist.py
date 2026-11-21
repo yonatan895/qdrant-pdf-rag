@@ -77,6 +77,18 @@ ALLOWED_NO_LAYER_SUBTREES: tuple[str, ...] = (
     "/charts/mainframe-rag/",
 )
 
+# Refused inside the allowed chart subtree (fail-closed): a nested/vendored
+# subchart or lock file brings third-party chart code, with its own image
+# references, into the deployed chart with no licence or provenance record
+# (Rev 2 D2 refuses vendored charts). The allow-list sees paths only, so a
+# `dependencies:` edit in Chart.yaml is not visible here; without a
+# charts/ member or Chart.lock it cannot render offline.
+CHART_SUBTREE_EXCLUSIONS: tuple[tuple[str, str], ...] = (
+    ("/charts/mainframe-rag/charts", "nested or vendored subchart enters the deployed chart without licence or provenance record"),
+    ("/charts/mainframe-rag/Chart.lock", "pins vendored chart dependencies"),
+    ("/charts/mainframe-rag/*/Chart.lock", "pins vendored chart dependencies"),
+)
+
 # .agents/ is allowed except what feeds a member copied from the base (the
 # reference-docs member and the licence records): the vendored skill trees,
 # the Qdrant skills, and the provenance and pin files beside them.
@@ -230,6 +242,9 @@ def classify_path(raw_path: str) -> PathClassification:
 
     for prefix in ALLOWED_NO_LAYER_SUBTREES:
         if anchored.startswith(prefix):
+            for pattern, reason in CHART_SUBTREE_EXCLUSIONS:
+                if fnmatch.fnmatchcase(anchored, pattern) or fnmatch.fnmatchcase(anchored, pattern + "/*"):
+                    return PathClassification(path, "refused", f"excluded chart path: {reason}")
             return PathClassification(path, "allowed-no-layer", f"allowed subtree {prefix.lstrip('/')} (rendered from checkout)")
 
     if top == "src":
