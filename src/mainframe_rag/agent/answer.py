@@ -923,10 +923,11 @@ def supplied_evidence_max_chars(hit_limit: int) -> int:
 
 def _projection_hit_count(settings: Settings, offered: int) -> int:
     """The hit count the supplied-evidence total is sized from:
-    `answer_hit_limit`, and with neighbour expansion on (issue #1314) the
-    number of hits offered to packing when that is larger, so a neighbour the
-    prompt carried is not clipped from the response for being past the limit."""
-    if settings.answer_expand_enabled:
+    `answer_hit_limit`, and with neighbour expansion (#1314) or research mode
+    (#1325 / ADR-0013) enabled, the number of hits offered to packing when that
+    is larger, so appended hits the prompt carried are not clipped from the
+    response for being past the single-retrieval limit."""
+    if settings.answer_expand_enabled or settings.research_mode_enabled:
         return max(settings.answer_hit_limit, offered)
     return settings.answer_hit_limit
 

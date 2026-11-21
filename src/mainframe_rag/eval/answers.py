@@ -1837,7 +1837,7 @@ _ERROR_CODES = frozenset({
     "deadline_exceeded", "evidence_budget_exceeded", "http_error", "internal",
     "invalid_request", "method_not_allowed", "model_timeout", "not_configured", "not_found",
     "overloaded", "prompt_budget_exceeded", "qdrant_unready", "representation_unavailable",
-    "unsupported_image", "unsupported_reasoning_effort", "upstream_error",
+    "research_mode_disabled", "unsupported_image", "unsupported_reasoning_effort", "upstream_error",
 })
 _FIXED_FAILURE_LABELS = frozenset({
     "empty answer body", "explicit refusal on an answer-tier query",

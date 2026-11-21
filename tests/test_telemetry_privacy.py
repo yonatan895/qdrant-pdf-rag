@@ -431,6 +431,120 @@ def test_answer_depth_records_only_the_resolved_effort(client, caplog, monkeypat
     assert CANARY_QUERY not in "\n".join(_formatted_logs(caplog))
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("plan_reply", "expected_root", "expected_rounds"),
+    [
+        (
+            '{"query": "CANARY-FOLLOWUP-QUERY-9991"}',
+            {
+                "rag.research_mode": "searched",
+                "rag.research_rounds": 2,
+                "rag.research_searches": 2,
+                "rag.research_stop_reason": "model_done",
+            },
+            [
+                {"rag.research_round": 1, "rag.research_hits": 1, "rag.research_new_hits": 1},
+                {"rag.research_round": 2, "rag.research_hits": 0, "rag.research_new_hits": 0},
+            ],
+        ),
+        (
+            f"bad reply {CANARY_EXC}",
+            {
+                "rag.research_mode": "planned",
+                "rag.research_rounds": 1,
+                "rag.research_searches": 1,
+                "rag.research_stop_reason": "malformed_reply",
+            },
+            [{"rag.research_round": 1, "rag.research_hits": 0, "rag.research_new_hits": 0}],
+        ),
+        (
+            RuntimeError(f"CANARY-FOLLOWUP-QUERY-9991 {CANARY_EXC}"),
+            {
+                "rag.research_mode": "planned",
+                "rag.research_rounds": 1,
+                "rag.research_searches": 1,
+                "rag.research_stop_reason": "plan_error",
+            },
+            [{"rag.research_round": 1, "rag.research_hits": 0, "rag.research_new_hits": 0}],
+        ),
+    ],
+)
+def test_research_mode_hides_followup_query_from_spans_logs_and_feedback(
+    client, caplog, monkeypatch, stream, plan_reply, expected_root, expected_rounds
+):
+    """ADR-0013 D8 / #1325: root span records mode/rounds/searches/stop_reason,
+    per-round child spans carry counts only, and follow-up query text never enters
+    spans, logs, or the feedback record."""
+    c, exporter = client
+    followup_canary = "CANARY-FOLLOWUP-QUERY-9991"
+    h1 = _hit(doc_id=f"{CANARY_DOC}-1")
+    h2 = _hit(doc_id=f"{CANARY_DOC}-2").model_copy(update={"chunk_id": "followup-chunk-2"})
+    search_count = 0
+
+    def research_search(*_args, **_kwargs):
+        nonlocal search_count
+        search_count += 1
+        return ([h1] if search_count == 1 else [h2]), "nl", {"embed_ms": 1, "qdrant_ms": 1}
+
+    class _ResearchLLM(FakeLLM):
+        def __init__(self):
+            super().__init__()
+            self._step = 0
+
+        def chat(self, messages, reasoning_effort=None, temperature=None):
+            if any("JSON object" in m.content for m in messages):
+                self._step += 1
+                if self._step == 1:
+                    if isinstance(plan_reply, Exception):
+                        raise plan_reply
+                    return ChatResult(content=plan_reply, finish_reason="stop")
+                return ChatResult(content='{"done": true}', finish_reason="stop")
+            return super().chat(messages, reasoning_effort, temperature)
+
+    recorded_feedback: list[object] = []
+
+    class _CaptureFeedback:
+        def submit(self, record):
+            recorded_feedback.append(record)
+
+    monkeypatch.setattr(app_mod.settings, "research_mode_enabled", True)
+    monkeypatch.setattr(app_mod.settings, "request_deadline_s", 270.0)
+    monkeypatch.setattr(app_mod, "retrieve_search", research_search)
+    monkeypatch.setattr(app_mod, "llm", _ResearchLLM())
+    monkeypatch.setattr(app_mod, "feedback", _CaptureFeedback())
+
+    with caplog.at_level(logging.INFO):
+        resp = c.post(
+            "/v1/chat",
+            json={
+                "messages": [{"role": "user", "content": CANARY_QUERY}],
+                "stream": stream,
+                "research_mode": True,
+            },
+        )
+    assert resp.status_code == 200
+    spans = exporter.get_finished_spans()
+    root = next(s for s in spans if s.name == "v1.chat")
+    assert {k: v for k, v in root.attributes.items() if k.startswith("rag.research")} == expected_root
+    round_spans = [s for s in spans if s.name == "answer.research_round"]
+    assert len(round_spans) == len(expected_rounds)
+    for span, expected_attrs in zip(round_spans, expected_rounds, strict=True):
+        assert span.parent.span_id == root.context.span_id
+        assert dict(span.attributes) == expected_attrs
+
+    spans_blob = _span_text(spans)
+    logs_blob = "\n".join(_formatted_logs(caplog))
+    for canary in (*CANARIES, followup_canary):
+        assert canary not in spans_blob, f"{canary} leaked into spans"
+        assert canary not in logs_blob, f"{canary} leaked into stdout JSON"
+
+    # Feedback record keeps only the user's query, never any follow-up query text.
+    assert len(recorded_feedback) == 1
+    feedback_blob = repr(recorded_feedback[0])
+    assert followup_canary not in feedback_blob
+
+
 def test_failure_hides_canaries_but_keeps_error_type(client, caplog, monkeypatch):
     c, exporter = client
     monkeypatch.setattr(

@@ -1,19 +1,19 @@
 # ADR-0013: Research mode, a bounded model-directed search loop on the answer path
 
-- **Status:** proposed (issue
+- **Status:** accepted (issue
   [#1315](https://github.com/yonatan895/qdrant-pdf-rag/issues/1315), tracker
   #1191). On 2026-11-20 the maintainer decided all 16 open points as
   recommended; each is folded into its decision below and listed under "Decided
-  open points". The record itself is still proposed: it is accepted only when
-  the maintainer merges PR #1322. Accepting it enables nothing: no code exists,
-  the mode would ship default-off, and a default change is a later, separate
-  concern (D9).
-  **Dependency, not assumed:** `ROADMAP.md` still closes corrective retrieval
-  (#86) with "do not re-propose". Open PR #1313 proposes opening that verdict
-  for re-measurement and is **not merged**. Decided 2026-11-20 (maintainer,
+  open points". Accepted by the maintainer on 2026-11-20 in PR #1322
+  (`19d669c1`) after PR #1313 (`0f7eb07c`) merged. Accepting it enables nothing
+  by itself: the mode ships default-off (#1325), and a default change is a
+  later, separate concern (D9).
+  **Dependency (settled):** `ROADMAP.md` previously closed corrective retrieval
+  (#86) with "do not re-propose". PR #1313 opened that verdict for
+  re-measurement and **merged** (`0f7eb07c`). Decided 2026-11-20 (maintainer,
   points 1 and 14): the #86 and #82 gates are treated as covering this mode and
-  are not waived inside this ADR, so #1313 is merged or declined first and this
-  record is accepted only after that (D10). What #1313's merge does and does not
+  are not waived inside this ADR, so #1313 merged first and this record was
+  accepted after that (D10). What #1313's merge does and does not
   license is in D9 (point 15).
   **Number.** Decided 2026-11-20 (maintainer, point 11): 0012 is taken by open
   PR #1295; this is 0013 and is renumbered only on request. *Alternative
@@ -390,9 +390,8 @@ This record had 16 open points, each with a recommendation. On 2026-11-20 the
 maintainer decided all of them: "go ahead with your recommendations". Each
 recommendation is the decision, with no change of substance, and sits in the
 decision it belongs to together with the alternative considered. No open point
-remains. This does not accept the record: it stays
-proposed until the maintainer merges PR #1322, which waits on #1313 being merged
-or declined first (point 1).
+remains. Following PR #1313's merge (`0f7eb07c`, point 1), the maintainer
+accepted this record in PR #1322 (`19d669c1`).
 
 | Point | Decision (2026-11-20, maintainer) | Where it lives |
 |---|---|---|
