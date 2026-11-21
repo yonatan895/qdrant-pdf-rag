@@ -198,3 +198,25 @@ def test_verify_entry_code_mention_outside_lookup_rows_is_not_bound():
     entry = GoldenEntry(id="DIA-1", query="A program abended S0C4 in the dump: which guide covers it?",
                         query_class="diagnostic", expected_doc_ids=["SA99-0001-00"], source="s")
     assert verify_entry(entry, _code_facts()) == ([], [])
+
+
+def test_verify_entry_checks_gold_chunk_ids_when_present():
+    facts = _facts()
+    facts.chunk_ids = {"c1", "c2"}
+    ok = GoldenEntry(
+        id="GEN-1",
+        query="Which lever opens the valve?",
+        query_class="diagnostic",
+        expected_doc_ids=["SC23-6883-70"],
+        source="generated",
+        status="adjudicated",
+        reviewers=["alice"],
+        reviewed_by="alice",
+        reviewed_at="2026-11-21",
+        gold_chunk_ids=["c1", "c2"],
+    )
+    assert verify_entry(ok, facts) == ([], [])
+
+    missing = ok.model_copy(update={"gold_chunk_ids": ["c1", "c-missing"]})
+    fails, _ = verify_entry(missing, facts)
+    assert any("c-missing" in f for f in fails)

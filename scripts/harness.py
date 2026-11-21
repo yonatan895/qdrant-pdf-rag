@@ -42,8 +42,10 @@ if str(REPO / "src") not in sys.path:
     sys.path.insert(0, str(REPO / "src"))
 
 from mainframe_rag.eval.datasets import (
+    GENERATED_BASELINE_REFUSAL,
     HOLDOUT_FILENAME,
     DatasetError,
+    has_generated_entries,
     load_golden,
     require_rc_for_collection,
     resolve_harness_golden_paths,
@@ -343,6 +345,9 @@ def main(argv: list[str] | None = None) -> int:
             entries.extend(load_golden(p))
     except DatasetError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
+    if args.update_baseline and has_generated_entries(entries):
+        print(f"FAIL: {GENERATED_BASELINE_REFUSAL}", file=sys.stderr)
         return 2
     baseline = load_baseline(baseline_path)
     # Fail closed BEFORE anything runs: a gate (or any non-recording run)

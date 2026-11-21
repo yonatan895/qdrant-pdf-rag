@@ -47,7 +47,13 @@ if str(REPO_ROOT / "scripts") not in sys.path:
 from qdrant_sim import QdrantSimError, start_simulator
 
 from mainframe_rag.config import load_settings
-from mainframe_rag.eval.datasets import DatasetError, parse_golden_text, read_golden_text
+from mainframe_rag.eval.datasets import (
+    GENERATED_BASELINE_REFUSAL,
+    DatasetError,
+    has_generated_entries,
+    parse_golden_text,
+    read_golden_text,
+)
 from mainframe_rag.eval.reports import render_eval
 from mainframe_rag.eval.retrieval import (
     check_baseline,
@@ -203,6 +209,10 @@ def run_gate(
         if line.strip() and not line.strip().startswith("#")
     ]
     entries = parse_golden_text(golden_text)
+    if update_baseline_flag and has_generated_entries(entries):
+        msg = f"FAIL: {GENERATED_BASELINE_REFUSAL}"
+        print(msg, file=sys.stderr)
+        return 2, f"## Retrieval Evaluation Gate (L1)\n\n**ERROR:** {msg}\n"
     sim_url = qdrant_url or os.environ.get("QDRANT_SIM_URL") or os.environ.get("QDRANT_URL")
 
     # A skipped gate is not a pass: a missing or wrong-mode baseline, or a

@@ -44,6 +44,260 @@ L1_LIMIT = 8  # recall@8 headroom; matches the answer path's retrieval depth
 # gates only once a recorded baseline carries it.
 L1_KEYS = ("recall@1", "recall@5", "recall@8", "mrr", "ndcg@8")
 
+# Passage-level gold constants (#1317 PR 2).
+# Lexical overlap bands stratify results because passage-written questions
+# favour the lexical leg (docs/eval.md section 7.1).
+OVERLAP_BAND_BOUNDS: tuple[float, float] = (0.3, 0.6)
+OVERLAP_BANDS: tuple[str, ...] = ("low", "medium", "high")
+# #1310 retrieval-miss attribution buckets: exact source hit, sibling in final
+# hits (a), source in prefetch pool below the cut (b), source absent from
+# pool (c), or unclassifiable (no gold_chunk_ids or abstain row).
+ATTRIBUTION_BUCKETS: tuple[str, ...] = ("hit", "a", "b", "c", "unclassifiable")
+
+
+def overlap_band(lexical_overlap: float | None) -> str | None:
+    """Bucket a row's lexical overlap into ``low`` / ``medium`` / ``high``."""
+    if lexical_overlap is None:
+        return None
+    low_cut, high_cut = OVERLAP_BAND_BOUNDS
+    if lexical_overlap < low_cut:
+        return "low"
+    if lexical_overlap < high_cut:
+        return "medium"
+    return "high"
+
+
+def is_chunk_hit(hit_chunk_id: str, entry: GoldenEntry) -> bool:
+    """Exact source-chunk match: ``gold_chunk_ids[0]``."""
+    return bool(entry.gold_chunk_ids) and hit_chunk_id == entry.gold_chunk_ids[0]
+
+
+def is_section_chunk_hit(hit_chunk_id: str, entry: GoldenEntry) -> bool:
+    """Section-level chunk match: source chunk or any recorded section sibling."""
+    return bool(entry.gold_chunk_ids) and hit_chunk_id in set(entry.gold_chunk_ids)
+
+
+def score_passage_hits(
+    hits: Sequence[Any],
+    entry: GoldenEntry,
+    *,
+    ks: tuple[int, ...] = (1, 3, 5, 8),
+) -> dict[str, Any] | None:
+    """Chunk- and section-level retrieval metrics for entries carrying
+    ``gold_chunk_ids`` (None for doc/page-only or abstain entries).
+
+    Shared by ``score_entry`` and ``scripts/replay_sweep.score_hits`` so both
+    live evaluation and offline pool replay use one definition."""
+    if entry.expected_behavior == "abstain" or not entry.gold_chunk_ids:
+        return None
+    source_id = entry.gold_chunk_ids[0]
+    section_ids = set(entry.gold_chunk_ids)
+
+    chunk_rank: int | None = None
+    section_rank: int | None = None
+    for rank, hit in enumerate(hits, 1):
+        cid = str(getattr(hit, "chunk_id", "") or "")
+        if not cid:
+            continue
+        if chunk_rank is None and cid == source_id:
+            chunk_rank = rank
+        if section_rank is None and cid in section_ids:
+            section_rank = rank
+        if chunk_rank is not None and section_rank is not None:
+            break
+
+    out: dict[str, Any] = {
+        "chunk_rank": chunk_rank,
+        "chunk_mrr": round(1.0 / chunk_rank, 4) if chunk_rank is not None else 0.0,
+        "section_rank": section_rank,
+        "section_mrr": round(1.0 / section_rank, 4) if section_rank is not None else 0.0,
+        "gold_chunk_ids_truncated": bool(entry.gold_chunk_ids_truncated),
+        "unoutlined_section": not bool((entry.expected_heading or "").strip()),
+    }
+    for k in ks:
+        out[f"chunk_recall@{k}"] = 1.0 if chunk_rank is not None and chunk_rank <= k else 0.0
+        out[f"section_recall@{k}"] = 1.0 if section_rank is not None and section_rank <= k else 0.0
+    if entry.lexical_overlap is not None:
+        out["lexical_overlap"] = entry.lexical_overlap
+        out["overlap_band"] = overlap_band(entry.lexical_overlap)
+    return out
+
+
+def summarize_passage(
+    rows: list[dict[str, Any]],
+    *,
+    ks: tuple[int, ...] = (1, 3, 5, 8),
+) -> dict[str, Any]:
+    """Aggregate chunk, section and document metrics over passage-gold rows,
+    stratified by query class and lexical-overlap band."""
+    p_rows = [r for r in rows if "chunk_mrr" in r]
+
+    def mean_over(sub: list[dict[str, Any]], key: str) -> float | None:
+        vals = [r[key] for r in sub if key in r]
+        return round(sum(vals) / len(vals), 3) if vals else None
+
+    def level_block(sub: list[dict[str, Any]], prefix: str) -> dict[str, float | None]:
+        block: dict[str, float | None] = {}
+        for k in ks:
+            key = f"{prefix}recall@{k}"
+            if prefix == "" and not any(key in r for r in sub):
+                continue
+            block[f"recall@{k}"] = mean_over(sub, key)
+        block["mrr"] = mean_over(sub, f"{prefix}mrr")
+        return block
+
+    if not p_rows:
+        return {
+            "checked": 0,
+            "truncated": 0,
+            "unoutlined": 0,
+            "chunk": None,
+            "section": None,
+            "doc": None,
+            "by_class": {},
+            "by_overlap_band": {},
+        }
+
+    by_class: dict[str, dict[str, Any]] = {}
+    for cls in sorted({r["query_class"] for r in p_rows if r.get("query_class")}):
+        sub = [r for r in p_rows if r.get("query_class") == cls]
+        by_class[cls] = {
+            "n": len(sub),
+            "truncated": sum(1 for r in sub if r.get("gold_chunk_ids_truncated")),
+            "unoutlined": sum(1 for r in sub if r.get("unoutlined_section")),
+            "chunk": level_block(sub, "chunk_"),
+            "section": level_block(sub, "section_"),
+            "doc": level_block(sub, ""),
+        }
+
+    by_overlap_band: dict[str, dict[str, Any]] = {}
+    for band in OVERLAP_BANDS:
+        sub = [r for r in p_rows if r.get("overlap_band") == band]
+        if sub:
+            by_overlap_band[band] = {
+                "n": len(sub),
+                "truncated": sum(1 for r in sub if r.get("gold_chunk_ids_truncated")),
+                "unoutlined": sum(1 for r in sub if r.get("unoutlined_section")),
+                "chunk": level_block(sub, "chunk_"),
+                "section": level_block(sub, "section_"),
+                "doc": level_block(sub, ""),
+            }
+
+    return {
+        "checked": len(p_rows),
+        "truncated": sum(1 for r in p_rows if r.get("gold_chunk_ids_truncated")),
+        "unoutlined": sum(1 for r in p_rows if r.get("unoutlined_section")),
+        "chunk": level_block(p_rows, "chunk_"),
+        "section": level_block(p_rows, "section_"),
+        "doc": level_block(p_rows, ""),
+        "by_class": by_class,
+        "by_overlap_band": by_overlap_band,
+    }
+
+
+def attribute_entry(
+    hits: Sequence[Any],
+    pool_ids: set[str],
+    entry: GoldenEntry,
+) -> dict[str, Any]:
+    """Text-free #1310 attribution for one row at a given cut:
+
+    - ``hit``: source chunk (``gold_chunk_ids[0]``) is in ``hits``
+    - ``a``: source chunk missed ``hits``, but a section sibling is in ``hits``
+    - ``b``: source chunk missed ``hits`` (no sibling in ``hits``), but source
+      chunk is in ``pool_ids`` below the cut
+    - ``c``: source chunk absent from ``pool_ids`` and no sibling in ``hits``
+    - ``unclassifiable``: abstain row or entry lacks ``gold_chunk_ids``
+    """
+    base: dict[str, Any] = {
+        "id": entry.id,
+        "query_class": entry.query_class,
+        "gold_chunk_ids_truncated": bool(entry.gold_chunk_ids_truncated),
+        "unoutlined_section": bool(entry.gold_chunk_ids) and not bool((entry.expected_heading or "").strip()),
+        "overlap_band": overlap_band(entry.lexical_overlap),
+    }
+    if entry.expected_behavior != "answer" or not entry.gold_chunk_ids:
+        return {
+            **base,
+            "bucket": "unclassifiable",
+            "reason": "abstain" if entry.expected_behavior == "abstain" else "no_gold_chunk_ids",
+            "source_in_pool": None,
+            "sibling_in_hits": None,
+        }
+    source_id = entry.gold_chunk_ids[0]
+    sibling_ids = set(entry.gold_chunk_ids[1:])
+    final_ids = {str(getattr(h, "chunk_id", "") or "") for h in hits}
+    final_ids.discard("")
+    source_in_hits = source_id in final_ids
+    sibling_in_hits = bool(sibling_ids & final_ids)
+    source_in_pool = source_id in pool_ids
+    if source_in_hits:
+        bucket = "hit"
+    elif sibling_in_hits:
+        bucket = "a"
+    elif source_in_pool:
+        bucket = "b"
+    else:
+        bucket = "c"
+    return {
+        **base,
+        "bucket": bucket,
+        "reason": None,
+        "source_in_pool": source_in_pool,
+        "sibling_in_hits": sibling_in_hits,
+    }
+
+
+def summarize_attribution(
+    rows: list[dict[str, Any]],
+    *,
+    label: str,
+    cut: dict[str, int],
+    failures: int = 0,
+    unmatched: int = 0,
+) -> dict[str, Any]:
+    """Aggregate text-free #1310 attribution rows for one cut."""
+    def bucket_counts(sub: list[dict[str, Any]]) -> dict[str, int]:
+        counts = {b: sum(1 for r in sub if r["bucket"] == b) for b in ATTRIBUTION_BUCKETS}
+        counts["a_also_in_pool"] = sum(
+            1 for r in sub if r["bucket"] == "a" and r.get("source_in_pool") is True
+        )
+        return counts
+
+    by_class: dict[str, dict[str, Any]] = {}
+    for cls in sorted({r["query_class"] for r in rows if r.get("query_class")}):
+        sub = [r for r in rows if r.get("query_class") == cls]
+        by_class[cls] = {"n": len(sub), **bucket_counts(sub)}
+
+    by_overlap_band: dict[str, dict[str, Any]] = {}
+    for band in OVERLAP_BANDS:
+        sub = [r for r in rows if r.get("overlap_band") == band]
+        if sub:
+            by_overlap_band[band] = {"n": len(sub), **bucket_counts(sub)}
+
+    row_ids = {
+        b: sorted(str(r["id"]) for r in rows if r["bucket"] == b and r.get("id"))
+        for b in ATTRIBUTION_BUCKETS
+    }
+    truncated_ids = sorted(str(r["id"]) for r in rows if r.get("gold_chunk_ids_truncated") and r.get("id"))
+    unoutlined_ids = sorted(str(r["id"]) for r in rows if r.get("unoutlined_section") and r.get("id"))
+    return {
+        "label": label,
+        "cut": dict(cut),
+        "n": len(rows),
+        "failures": failures,
+        "unmatched": unmatched,
+        "counts": bucket_counts(rows),
+        "truncated": sum(1 for r in rows if r.get("gold_chunk_ids_truncated")),
+        "unoutlined": sum(1 for r in rows if r.get("unoutlined_section")),
+        "truncated_ids": truncated_ids,
+        "unoutlined_ids": unoutlined_ids,
+        "by_class": by_class,
+        "by_overlap_band": by_overlap_band,
+        "row_ids": row_ids,
+        "rows": rows,
+    }
+
 
 def is_sibling_exception(query_ids: set[str], doc_message_ids) -> bool:
     """Sibling-precision allowance, shared by must_not_violations (retrieval
@@ -191,6 +445,10 @@ def score_entry(hits: list[SearchHit], entry: GoldenEntry) -> dict:  # type: ign
         )
         row["page_hit@5"] = 1.0 if page_hit else 0.0
 
+    passage = score_passage_hits(hits, entry)
+    if passage is not None:
+        row.update(passage)
+
     return row
 
 
@@ -247,6 +505,7 @@ def summarize(
         "checked": len(page_rows),
         "hit@5": mean_over(page_rows, "page_hit@5"),
     }
+    passage_summary = summarize_passage(rows)
 
     return {
         "n": len(rows),
@@ -267,6 +526,7 @@ def summarize(
         "abstain": abstain_summary,
         "must_not": must_not_summary,
         "page": page_summary,
+        "passage": passage_summary,
         "rows": rows,
     }
 
@@ -459,6 +719,38 @@ def summary_markdown(report: dict, baseline: dict | None = None) -> str:
     page = report.get("page") or {}
     if page.get("checked"):
         lines.append(f"page_hit@5 (diagnostic): {page.get('hit@5')} over {page['checked']} entries with expected_page")
+
+    passage = report.get("passage") or {}
+    if passage.get("checked"):
+        lines += [
+            "",
+            f"### Passage-level gold (n={passage['checked']}, truncated={passage.get('truncated', 0)}, unoutlined={passage.get('unoutlined', 0)})",
+            "",
+            "| level | r@1 | r@3 | r@5 | r@8 | mrr |",
+            "|---|---|---|---|---|---|",
+        ]
+        for level in ("chunk", "section", "doc"):
+            stats = passage.get(level) or {}
+            cells = " | ".join(
+                "-" if stats.get(k) is None else str(stats.get(k))
+                for k in ("recall@1", "recall@3", "recall@5", "recall@8", "mrr")
+            )
+            lines.append(f"| {level} | {cells} |")
+        bands = passage.get("by_overlap_band") or {}
+        if bands:
+            lines += [
+                "",
+                "| overlap band | n | chunk r@1 | chunk r@5 | section r@1 | section r@5 | doc r@1 |",
+                "|---|---|---|---|---|---|---|",
+            ]
+            for band, stats in bands.items():
+                ch = stats.get("chunk") or {}
+                sec = stats.get("section") or {}
+                doc = stats.get("doc") or {}
+                lines.append(
+                    f"| {band} | {stats.get('n')} | {ch.get('recall@1')} | {ch.get('recall@5')} "
+                    f"| {sec.get('recall@1')} | {sec.get('recall@5')} | {doc.get('recall@1')} |"
+                )
 
     lines += ["", "| query | class | kind | r@1 | r@5 | mrr | viol | top hit doc_ids |", "|---|---|---|---|---|---|---|---|"]
     for row in report["rows"]:
