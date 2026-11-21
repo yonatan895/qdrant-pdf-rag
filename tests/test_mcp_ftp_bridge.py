@@ -982,6 +982,9 @@ def test_spool_over_cap_keeps_head_and_tail(factor: int | None) -> None:
     assert "window=head+tail" in header
     assert f"total_bytes={size}" in header and f"omitted_bytes={meta['omitted_bytes']}" in header
     assert fake.voidresp_calls == 1 and not fake.aborted
+    head_lines = text.split("\n")[1 : text.split("\n").index(next(ln for ln in text.split("\n") if _GAP in ln))]
+    assert head_lines[0] == "FIRST LINE"
+    assert all(ln.startswith("FILL ") and len(ln) == 39 for ln in head_lines[1:])  # whole lines only
 
 
 def test_spool_secret_straddling_cut_never_leaks() -> None:
@@ -989,11 +992,16 @@ def test_spool_secret_straddling_cut_never_leaks() -> None:
     is dropped with that line. (2) PASSWORD= on the last line before the tail
     window with its value on the window's first line is redacted, because
     screening runs over the lookbehind before the trim."""
-    run = b"PASSWORD=" + b"S" * 30000 + b"\n"
-    straddle = _lines("HEAD", 20) + run + _lines("TAIL", 100)
-    text = _assert_framed_within(_spool_out(_spool_fake(straddle), max_bytes=_SMALL_CAP), _SMALL_CAP)
-    assert "S" * 8 not in text
-    assert "HEAD 000019" in text and "TAIL 000099" in text
+    # ISO8859-1 high bytes push the screened text over B while the raw read
+    # stays contiguous and the tail fits T, so nothing but the drop rule keeps
+    # the value's end (on the tail's first, partial line) out.
+    high = (b"\xe9" * 39 + b"\n") * 24  # 960 raw bytes, 1896 in UTF-8
+    straddle = high + b"PASSWORD=" + b"S" * 30 + b"TAILSECRET\n" + _lines("TAIL", 60)
+    assert straddle.index(b"PASSWORD=") < 994 <= straddle.index(b"TAILSECRET")  # H cuts the value
+    out = _spool_out(_spool_fake(straddle), max_bytes=_SMALL_CAP, encoding="latin-1")
+    text = _assert_framed_within(out, _SMALL_CAP)
+    assert "TAILSECRET" not in text and "SSSS" not in text
+    assert "TAIL 000000" in text and "TAIL 000059" in text and _GAP in text
 
     _, _, t = _window_budget(_SMALL_CAP)
     after = t - len(b"SECRETVAL1\n")
