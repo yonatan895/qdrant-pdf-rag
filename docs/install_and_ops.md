@@ -508,7 +508,9 @@ directory: `upstream.pub` (the upstream release key; `oc cp` it in after the
 Windows anchor check) and, once the gap release key exists, `gap.pub`
 (ADR-0009 §5). Point `SNEAKERNET_TRUSTED_PUB=/work/anchors/upstream.pub` and
 `SNEAKERNET_GAP_TRUSTED_PUB=/work/anchors/gap.pub` at them, in the process
-environment or the workspace `airgap.env`. Each bundle's signed MANIFEST
+environment or the workspace `airgap.env` (`scripts/gap/release.sh` reads
+the process environment only). Bootstrap refuses an `origin: gap` bundle
+when `SNEAKERNET_GAP_TRUSTED_PUB` is unset. Each bundle's signed MANIFEST
 declares `origin: upstream` or `origin: gap`, and the live stages and
 `bootstrap.sh` accept only the matching anchor's signature. An anchor that is a
 link, lies inside the checkout or bundle, or holds the same key as the other
@@ -1329,17 +1331,20 @@ exists on `main` and points at it.
   Run `scripts/gap/import_release.sh` from the fork clone. Its `--help` lists
   the inputs, and ADR §4 gives the stop and rerun rules and the steps after
   `IMPORT READY`.
-- **Gap releases** ([ADR-0009 §5](adr/0009-gap-fork.md#5-gap-releases)). Not
-  implemented (F6). Decided so far
-  ([GH#1118 comment 6525955227](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6525955227)):
-  an approved GitLab issue names the commit and the gap maintainer creates a
-  protected tag on it. The release is built, packed and signed in the bastion,
-  never on a GitLab runner. That session holds only the gap signing key and a
-  read-only GitLab token, with no `oc` token, and runs the scripts of the
-  installed signed release. Rehearsal and promotion run in a separate deploy
-  session, without the signing key. The unprivileged image-build mechanism is
-  still open question 4. Until F6 lands, production deploys only upstream
-  signed releases.
+- **Gap releases** ([ADR-0009 §5](adr/0009-gap-fork.md#5-gap-releases),
+  decisions in [#1207](https://github.com/yonatan895/qdrant-pdf-rag/issues/1207)).
+  Follow the [gap release runbook](runbooks/gap-release.md). An approved
+  GitLab issue names the commit and the gap maintainer creates a protected
+  tag on it. `scripts/gap/release.sh pack` runs in the bastion from the
+  installed signed release, in a session with no `oc` token or registry auth
+  (run `mfr-session-logout` first), and builds nothing: the image layers are
+  the base upstream release's. The signature is made outside the bastion,
+  with a Vault-held key from the maintainer's workstation or, without Vault,
+  in a zero-egress signing pod. `release.sh verify` checks the signed bundle
+  from the installed release before rehearsal in a dedicated rehearsal
+  namespace and promotion. Increment 1 releases only changes that replace no
+  image layer; a `src/` change still reaches production through an upstream
+  release.
 
 ---
 

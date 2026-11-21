@@ -103,6 +103,7 @@ GAP_GATES = (
 SIGNING_ENTRY_POINTS = (
     'scripts/airgap/pack.sh', 'scripts/airgap/bootstrap.sh', 'scripts/airgap/load.sh',
     'scripts/devkit/pack.sh', 'scripts/devkit/install.sh', 'scripts/gap/import_release.sh',
+    'scripts/gap/release.sh', 'scripts/gap/sign_vault.py',
 )
 # Every tracked file those entry points source, run, import or read by name
 # (pins, manifests, files packed into the kit), derived by
@@ -126,8 +127,9 @@ SIGNING_CLOSURE = (
     'scripts/airgap/map_values.py', 'scripts/airgap/model_config.py', 'scripts/airgap/pack.sh',
     'scripts/airgap/reference-docs.json', 'scripts/airgap/reference_docs.py', 'scripts/dependency_lock.py',
     'scripts/devkit/install.sh', 'scripts/devkit/issue_snapshot.py', 'scripts/devkit/pack.sh',
-    'scripts/devkit/snapshot-issues.txt', 'scripts/devkit_key.py', 'scripts/gap/import_release.sh',
-    'scripts/image_inventory.py', 'scripts/license_inventory.py', 'scripts/tools/devkit-pin.txt',
+    'scripts/devkit/snapshot-issues.txt', 'scripts/devkit_key.py', 'scripts/gap/allowlist.py',
+    'scripts/gap/import_release.sh', 'scripts/gap/release.py', 'scripts/gap/release.sh',
+    'scripts/gap/sign_vault.py', 'scripts/image_inventory.py', 'scripts/license_inventory.py', 'scripts/tools/devkit-pin.txt',
     'scripts/tools/helm-pin.txt', 'scripts/tools/install-helm.sh', 'scripts/tools/install-task.sh',
     'scripts/tools/oc-pin.txt', 'scripts/tools/oras-pin.txt', 'scripts/tools/oras-windows-pin.txt',
     'scripts/tools/task-artifact.sh', 'scripts/tools/task-pin.txt',
@@ -141,10 +143,10 @@ SIGNING_CLOSURE = (
 # earlier directory beats a later one), so each such form is protected, present or
 # not (#588 N1 re-review R1, R4). Compiled forms (.so, .pyc, __pycache__/) are
 # refused outright: see COMPILED.
-SIGNING_IMPORT_DIRS = ('scripts', 'scripts/airgap')
+SIGNING_IMPORT_DIRS = ('scripts', 'scripts/airgap', 'scripts/gap')
 SIGNING_IMPORT_NAMES = (
-    'check_app_ownership', 'dependency_lock', 'devkit_key', 'image_inventory', 'image_manifest',
-    'license_inventory', 'model_config', 'scripts',
+    'allowlist', 'check_app_ownership', 'dependency_lock', 'devkit_key', 'image_inventory', 'image_manifest',
+    'license_inventory', 'model_config', 'scripts', 'sign_vault',
 )
 # Compiled Python loads without its source: an extension module or bytecode
 # beside a module (or an unchecked hash-based __pycache__ file) would run in a

@@ -1113,9 +1113,11 @@ def test_checkout_guard_opt_out_refuses_an_unknown_value(approved):
 
 _UP, _GAP = "SNEAKERNET_TRUSTED_PUB", "SNEAKERNET_GAP_TRUSTED_PUB"
 # The signed origin line each case writes, byte for byte.
+from tests.helpers_airgap import GAP_MANIFEST_LINES
+
 _ORIGIN_LINES = {
     "upstream": "origin: upstream\n",
-    "gap": "origin: gap\n",
+    "gap": "origin: gap\n" + GAP_MANIFEST_LINES,
     "missing": "",
     "capitalised": "origin: Gap\n",
     "trailing-space": "origin: gap \n",
@@ -1343,6 +1345,58 @@ def test_checkout_guard_an_edited_origin_is_refused_as_an_edit_not_an_origin(app
     assert r.stderr == ("FAIL: packed MANIFEST does not match its signed checksum entry (edited, or not listed "
                         "exactly once) — rerun bootstrap.sh from the signed bundle\n")
     assert "origin" not in r.stderr
+
+
+@pytest.mark.parametrize(("origin", "gap_block", "needle"), [
+    ("upstream", "gap_base: " + "1" * 40 + "\n", "declares origin: upstream but carries gap release metadata"),
+    ("upstream", "gap_tag: gap-release-1\n", "declares origin: upstream but carries gap release metadata"),
+    ("gap", "", "declares origin: gap but is missing or has malformed gap metadata"),
+    (
+        "gap",
+        "gap_base: " + "1" * 40 + "\ngap_issue: GL#1\ngap_tag: gap-release-1\n",  # missing gap_tree
+        "declares origin: gap but is missing or has malformed gap metadata",
+    ),
+    (
+        "gap",
+        "gap_base: not-a-sha\ngap_issue: GL#1\ngap_tag: gap-release-1\ngap_tree: " + "2" * 40 + "\n",
+        "declares origin: gap but is missing or has malformed gap metadata",
+    ),
+    (
+        "gap",
+        "gap_base: " + "1" * 40 + "\ngap_issue: GH#1\ngap_tag: gap-release-1\ngap_tree: " + "2" * 40 + "\n",
+        "declares origin: gap but is missing or has malformed gap metadata",
+    ),
+    (
+        "gap",
+        GAP_MANIFEST_LINES + "gap_tag: gap-release-2\n",  # duplicated gap_tag
+        "declares origin: gap but is missing or has malformed gap metadata",
+    ),
+])
+def test_checkout_guard_enforces_gap_manifest_field_consistency(approved, origin, gap_block, needle):
+    """GH#1207 Rev 2 §3e: shared check_manifest_chain enforces gap_* presence on gap bundles and absence on upstream."""
+    from tests.helpers_airgap import (
+        gap_release_anchor,
+        gap_release_key,
+        release_anchor,
+        release_key,
+    )
+
+    env = {_UP: str(release_anchor()), _GAP: str(gap_release_anchor())}
+    key = gap_release_key() if origin == "gap" else release_key()
+    head = _git(approved, "rev-parse", "HEAD")
+    write_signed_manifest(
+        approved / "dist",
+        f"sha: {head}\norigin: {origin}\n{gap_block}",
+        origin=None,
+        key=key,
+    )
+    r = _guard_run(approved, "dist/MANIFEST.txt", env)
+    assert r.returncode == 1
+    assert needle in r.stderr
+    # Next valid run passes cleanly.
+    write_signed_manifest(approved / "dist", f"sha: {head}\n", origin=origin, key=key)
+    ok = _guard_run(approved, "dist/MANIFEST.txt", env)
+    assert ok.returncode == 0, ok.stderr
 
 
 def test_checkout_guard_opt_out_reads_a_missing_origin_as_upstream(approved, third_key):
