@@ -53,8 +53,7 @@ def _pack_sh_tree_inputs(pack_sh: Path) -> list[str]:
             if tok in ("||", "&&") or tok.startswith("die"):
                 break
             cleaned = tok.strip("'\"")
-            if cleaned.startswith(":(glob)"):
-                cleaned = cleaned[len(":(glob)"):]
+            cleaned = cleaned.removeprefix(":(glob)")
             inputs.add(cleaned.rstrip("/*"))
     return sorted(inputs)
 
@@ -107,7 +106,10 @@ def test_audit_repo_coverage_passes_on_this_checkout():
     "README.md",
     "ROADMAP.md",
     "AGENTS.md",
-    "CLAUDE.md",
+    ".gitlab-ci.yml",
+    ".claude/skills/tdd/SKILL.md",
+    ".agents/skills/tdd/SKILL.md",
+    ".agents/skills/index.md",
     # .dockerignore-excluded scripts do not enter app images
     "scripts/mock_vllm.py",
     "scripts/ci/observability_lane.sh",
@@ -160,9 +162,13 @@ def test_layer_replacement_paths(path):
     "observability/otelcol.yaml",
     "pyproject.toml",
     ".dockerignore",
-    ".gitlab-ci.yml",
     ".github/workflows/ci.yml",
     ".agents/skills/qdrant-sizing/SKILL.md",
+    ".agents/skills/qdrant-sizing",
+    ".agents/vendor/pstack-skills/skills/x/SKILL.md",
+    ".agents/qdrant-skills-provenance.md",
+    ".agents/mattpocock-skills-provenance.md",
+    ".agents/pstack-skills.sha256",
     "site/index.html",
     # Unknown / future top-level path fails closed
     "brand_new_dir/file.txt",

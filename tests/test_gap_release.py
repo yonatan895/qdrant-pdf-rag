@@ -473,8 +473,7 @@ def test_two_separate_packs_with_different_repo_bundle_bytes_both_pass_verify(
         assert res["sha"] == merge_sha
 
 
-def test_pack_refuses_bastion_session_credentials_and_succeeds_once_cleared(tmp_path: Path, keypairs: dict[str, Path]):
-    fx = _build_fixture(tmp_path, keypairs)
+def test_pack_refuses_bastion_session_credentials_and_succeeds_once_cleared(tmp_path: Path):
     session_dir = tmp_path / "session"
     priv_dir = session_dir / "private"
     priv_dir.mkdir(parents=True)
@@ -588,13 +587,28 @@ def test_tag_binding_merge_commit_allowlist_and_ledger_refusals(tmp_path: Path, 
     ok = _pack("gap-release-1", tmp_path / "w-ok")
     assert ok["sha"] == merge_sha
 
-    # 9. Moved tag refused when request.txt already recorded another sha
-    (tmp_path / "w-ok" / "request.txt").write_text(
-        (tmp_path / "w-ok" / "request.txt").read_text().replace(merge_sha, "9" * 40),
-        encoding="utf-8",
-    )
+    # 9. A tag really moved on the remote (to another merge on main) is refused
+    #    in the work directory that pinned the first sha.
+    _git(remote, "checkout", "-b", "feat/site-note")
+    (remote / "gap/README.md").write_text("# Gap fork\nsite note\n", encoding="utf-8")
+    _git(remote, "add", "gap/README.md")
+    _git(remote, "commit", "-m", "Site note")
+    _git(remote, "checkout", "main")
+    _git(remote, "merge", "--no-ff", "feat/site-note", "-m", "Merge site note")
+    moved_sha = _git(remote, "rev-parse", "HEAD").stdout.strip()
+    _git(remote, "tag", "-f", "-a", "gap-release-1", "-m", "Gap release 1\n\nGap-Release: GL#42", moved_sha)
     with pytest.raises(release.ReleaseStop, match="moved"):
         _pack("gap-release-1", tmp_path / "w-ok")
+    assert (tmp_path / "w-ok" / "request.txt").read_text().count(f"sha={merge_sha}") == 1
+
+    # 10. A work directory belongs to one tag.
+    _git(remote, "tag", "-a", "gap-release-2", "-m", "Gap release 2\n\nGap-Release: GL#47", moved_sha)
+    with pytest.raises(release.ReleaseStop, match="one work directory per tag"):
+        _pack("gap-release-2", tmp_path / "w-ok")
+
+    # 11. The next ordinary pack, in a fresh work directory, packs the commit the tag names now.
+    assert _pack("gap-release-1", tmp_path / "w-moved")["sha"] == moved_sha
+    assert _pack("gap-release-2", tmp_path / "w-two")["sha"] == moved_sha
 
 
 def test_verify_tamper_and_bundle_identity_refusals(tmp_path: Path, keypairs: dict[str, Path]):
@@ -669,7 +683,7 @@ def test_verify_tamper_and_bundle_identity_refusals(tmp_path: Path, keypairs: di
     # 4. Wrong gap_tree refused
     d_tree = _clone_out("tamper-tree")
     m = (d_tree / "MANIFEST.txt").read_text()
-    old_tree = [line.split(": ")[1] for line in m.splitlines() if line.startswith("gap_tree: ")][0]
+    old_tree = next(line.split(": ")[1] for line in m.splitlines() if line.startswith("gap_tree: "))
     (d_tree / "MANIFEST.txt").write_text(m.replace(f"gap_tree: {old_tree}", f"gap_tree: {'0' * 40}"))
     _resign_dir(d_tree)
     with pytest.raises(release.ReleaseStop, match="gap_tree"):
@@ -681,6 +695,20 @@ def test_verify_tamper_and_bundle_identity_refusals(tmp_path: Path, keypairs: di
     _resign_dir(d_extra_ref)
     with pytest.raises(release.ReleaseStop, match="only HEAD"):
         release.cmd_verify(bundle=d_extra_ref, base_bundle=base_tar, upstream_pub=keypairs["up_pub"], gap_pub=keypairs["gap_pub"], repo_root=REPO)
+
+    # 5b. A gap MANIFEST missing one gap field is refused even when signed.
+    d_field = _clone_out("tamper-missing-field")
+    m = (d_field / "MANIFEST.txt").read_text()
+    (d_field / "MANIFEST.txt").write_text("".join(
+        line for line in m.splitlines(keepends=True) if not line.startswith("gap_issue: ")))
+    _resign_dir(d_field)
+    with pytest.raises(release.ReleaseStop, match="missing or duplicates gap_issue"):
+        release.cmd_verify(bundle=d_field, base_bundle=base_tar, upstream_pub=keypairs["up_pub"], gap_pub=keypairs["gap_pub"], repo_root=REPO)
+
+    # 5c. An upstream bundle offered as the gap candidate is refused: it does not
+    #     verify with the gap anchor (its key is the upstream one).
+    with pytest.raises(release.ReleaseStop, match="does not match the release trust anchor for origin: gap"):
+        release.cmd_verify(bundle=base_tar, base_bundle=base_tar, upstream_pub=keypairs["up_pub"], gap_pub=keypairs["gap_pub"], repo_root=REPO)
 
     # 6. repo.bundle with a smuggled unreachable object refused
     d_unreach = _clone_out("tamper-unreachable")
@@ -773,3 +801,114 @@ def test_release_sh_cli_contracts(tmp_path: Path, keypairs: dict[str, Path]):
     )
     assert proc_cls.returncode == 0, proc_cls.stderr
     assert json.loads(proc_cls.stdout)["all_allowed"] is True
+
+
+def test_one_release_identity_per_tag_refuses_a_second_signed_bundle(tmp_path: Path, keypairs: dict[str, Path]):
+    """Rev 2 §3e write-once: once a tag's SHA256SUMS is signed, a different
+    SHA256SUMS for that tag (here a second, differently encoded repo.bundle of
+    the same commit, B3) is refused; the signed release stays assemblable."""
+    fx = _build_fixture(tmp_path, keypairs)
+    merge_sha = str(fx["merge_sha"])
+    work_dir = tmp_path / "work"
+    release.cmd_pack(
+        tag="gap-release-1", remote=str(fx["remote"]), base_bundle=Path(fx["base_tar"]), work_dir=work_dir,
+        upstream_pub=keypairs["up_pub"], gap_pub=keypairs["gap_pub"], repo_root=REPO,
+        session_dir=Path(fx["session_dir"]),
+    )
+    first_sig = tmp_path / "first.sig"
+    _sign_external_vault_style(work_dir / "out" / "SHA256SUMS", keypairs["gap_priv"], first_sig)
+    first = release.cmd_assemble(work_dir=work_dir, signature_path=first_sig, upstream_pub=keypairs["up_pub"],
+                                 gap_pub=keypairs["gap_pub"], repo_root=REPO)
+    kept = tmp_path / "kept-out"
+    shutil.copytree(work_dir / "out", kept)
+
+    # A second encoding of the same history gives a different SHA256SUMS.
+    alt = tmp_path / "alt.git"
+    alt.mkdir()
+    _git(alt, "init", "--bare", "-q")
+    _git(alt, "fetch", "-q", "--no-tags", str(fx["remote"]), f"{merge_sha}:refs/heads/_p")
+    _git(alt, "update-ref", "HEAD", merge_sha)
+    _git(alt, "update-ref", "-d", "refs/heads/_p")
+    (work_dir / "out" / "SHA256SUMS.sig").unlink()
+    _git(alt, "-c", "pack.compression=0", "bundle", "create", str(work_dir / "out" / "repo.bundle"), "HEAD")
+    sums = release._format_sha256sums(work_dir / "out", release._expected_members(merge_sha, ()))
+    (work_dir / "out" / "SHA256SUMS").write_bytes(sums)
+    second_id = release._sha256_bytes(sums)
+    assert second_id != first["release_identity"]
+    req = work_dir / "request.txt"
+    req.write_text(req.read_text().replace(first["release_identity"], second_id), encoding="utf-8")
+    second_sig = tmp_path / "second.sig"
+    _sign_external_vault_style(work_dir / "out" / "SHA256SUMS", keypairs["gap_priv"], second_sig)
+    with pytest.raises(release.ReleaseStop, match="already signed for this tag"):
+        release.cmd_assemble(work_dir=work_dir, signature_path=second_sig, upstream_pub=keypairs["up_pub"],
+                             gap_pub=keypairs["gap_pub"], repo_root=REPO)
+    assert (work_dir / "signed.sha256").read_text().strip() == first["release_identity"]
+    assert not (work_dir / "out" / "SHA256SUMS.sig").exists()
+
+    # The next ordinary run with the signed members assembles the same release again.
+    shutil.rmtree(work_dir / "out")
+    shutil.copytree(kept, work_dir / "out")
+    req.write_text(req.read_text().replace(second_id, first["release_identity"]), encoding="utf-8")
+    again = release.cmd_assemble(work_dir=work_dir, signature_path=first_sig, upstream_pub=keypairs["up_pub"],
+                                 gap_pub=keypairs["gap_pub"], repo_root=REPO)
+    assert again["release_identity"] == first["release_identity"]
+    assert again["tarball_sha256"] == first["tarball_sha256"]
+
+
+def _installed_release(root: Path, up_priv: Path) -> Path:
+    """A verified signed release workspace as bootstrap leaves it: a git checkout
+    of the release scripts whose HEAD equals the signed dist/MANIFEST.txt sha."""
+    from tests.helpers_airgap import write_signed_manifest
+
+    for rel in ("scripts/airgap/common.sh", "scripts/airgap/image_manifest.py", "scripts/gap/release.sh",
+                "scripts/gap/release.py", "scripts/gap/allowlist.py", "scripts/gap/sign_vault.py"):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO / rel, root / rel)
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "installed release")
+    head = _git(root, "rev-parse", "HEAD").stdout.strip()
+    write_signed_manifest(root / "dist", f"sha: {head}\n", key=up_priv)
+    return root
+
+
+def test_release_sh_verify_runs_from_a_verified_installed_release_only(tmp_path: Path, keypairs: dict[str, Path]):
+    """Rev 2 §3e step 1 (I9): release.sh runs the release guard on its own
+    workspace first, from any working directory; an edited installed release
+    is refused before release.py runs, and the restored one verifies again."""
+    fx = _build_fixture(tmp_path, keypairs)
+    work_dir = tmp_path / "work"
+    release.cmd_pack(
+        tag="gap-release-1", remote=str(fx["remote"]), base_bundle=Path(fx["base_tar"]), work_dir=work_dir,
+        upstream_pub=keypairs["up_pub"], gap_pub=keypairs["gap_pub"], repo_root=REPO,
+        session_dir=Path(fx["session_dir"]),
+    )
+    sig = tmp_path / "SHA256SUMS.sig"
+    _sign_external_vault_style(work_dir / "out" / "SHA256SUMS", keypairs["gap_priv"], sig)
+    gap_tar = Path(release.cmd_assemble(work_dir=work_dir, signature_path=sig, upstream_pub=keypairs["up_pub"],
+                                        gap_pub=keypairs["gap_pub"], repo_root=REPO)["tarball"])
+    installed = _installed_release(tmp_path / "installed", keypairs["up_priv"])
+    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path),
+           "SNEAKERNET_TRUSTED_PUB": str(keypairs["up_pub"]),
+           "SNEAKERNET_GAP_TRUSTED_PUB": str(keypairs["gap_pub"])}
+
+    def verify() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["sh", str(installed / "scripts/gap/release.sh"), "verify",
+             "--bundle", str(gap_tar), "--base-bundle", str(fx["base_tar"])],
+            env=env, cwd=tmp_path, capture_output=True, text=True, check=False,
+        )
+
+    ok = verify()
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert f"VERIFIED {fx['merge_sha']} " in ok.stdout
+
+    with (installed / "scripts/gap/release.py").open("a", encoding="utf-8") as fh:
+        fh.write("\n# edited after install\n")
+    edited = verify()
+    assert edited.returncode == 1
+    assert "executing workspace is not a verified signed release" in edited.stderr
+    assert "VERIFIED" not in edited.stdout
+
+    _git(installed, "checkout", "--", "scripts/gap/release.py")
+    assert verify().returncode == 0

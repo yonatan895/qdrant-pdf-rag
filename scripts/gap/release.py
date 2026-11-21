@@ -43,6 +43,7 @@ import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import IO
 
 try:
     from scripts.airgap import image_manifest as oci
@@ -127,15 +128,30 @@ def _clean_git_env() -> dict[str, str]:
     return env
 
 
-def _git(repo: Path, *args: str, check: bool = True, input_bytes: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
-    proc = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        input=input_bytes,
-        env=_clean_git_env(),
-        capture_output=True,
-        check=False,
-        timeout=120,
-    )
+# A fetch from GitLab or an unpack of the whole history can take minutes on the
+# bastion; past this bound the step stops with a fixed message, never a traceback.
+GIT_TIMEOUT_S = 1800
+
+
+def _git(
+    repo: Path,
+    *args: str,
+    check: bool = True,
+    input_bytes: bytes | None = None,
+    stdin: IO[bytes] | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            input=input_bytes,
+            stdin=stdin,
+            env=_clean_git_env(),
+            capture_output=True,
+            check=False,
+            timeout=GIT_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        raise ReleaseStop(f"git {' '.join(args[:2])} did not finish in {GIT_TIMEOUT_S} s") from None
     if check and proc.returncode != 0:
         raise ReleaseStop(f"git {' '.join(args[:2])} failed")
     return proc
@@ -414,8 +430,9 @@ def inspect_and_unpack_tarball(tarball: Path, dest: Path) -> list[str]:
                 src = tf.extractfile(member)
                 if src is None:
                     raise ReleaseStop(f"cannot extract {member.name} from tarball")
-                with src:
-                    (dest / member.name).write_bytes(src.read())
+                # Image members are gigabytes: stream them, never hold one in memory.
+                with src, (dest / member.name).open("wb") as dst:
+                    shutil.copyfileobj(src, dst, 1024 * 1024)
     except tarfile.TarError:
         raise ReleaseStop("cannot read bundle tarball") from None
     return names
@@ -428,9 +445,9 @@ def check_directory_inventory(bundle_dir: Path) -> list[str]:
     names: list[str] = []
     for entry in sorted(bundle_dir.iterdir(), key=lambda p: p.name):
         if entry.is_symlink() or not entry.is_file():
-            raise ReleaseStop(f"bundle directory holds a non-regular entry ({entry.name})")
+            raise ReleaseStop("bundle directory holds a non-regular entry (a link, directory or device)")
         if not _PLAIN_NAME.fullmatch(entry.name):
-            raise ReleaseStop(f"bundle directory holds an unsafe member name ({entry.name})")
+            raise ReleaseStop("bundle directory holds a member with an unsafe name or unusual character")
         names.append(entry.name)
     return names
 
@@ -591,7 +608,9 @@ def verify_ledger_proof(repo: Path, base_sha: str, target_sha: str) -> list[str]
     if has_ledger:
         ledger_text = _git(repo, "show", f"{target_sha}:gap/patches.md").stdout.decode("utf-8")
         seen_commits: set[str] = set()
-        for lineno, line in enumerate(ledger_text.splitlines(), 1):
+        # split("\n"), not splitlines(): import_release.sh reads the ledger with
+        # sed and awk, which keep a CR or other separator as part of the line.
+        for lineno, line in enumerate(ledger_text.split("\n"), 1):
             if line.lstrip().startswith("##"):
                 m = _LEDGER_HEADING.fullmatch(line)
                 if not m:
@@ -623,24 +642,6 @@ def verify_repo_bundle_content(bundle_path: Path, expected_sha: str, expected_tr
     3. Prove expected_sha^{tree} == expected_tree.
     Returns path to the unpacked bare repository for downstream git reads.
     """
-    raw = bundle_path.read_bytes()
-    if not raw.startswith((b"# v2 git bundle\n", b"# v3 git bundle\n")):
-        raise ReleaseStop("repo.bundle is not a valid git bundle header")
-    sep = raw.find(b"\n\n")
-    if sep < 0:
-        raise ReleaseStop("repo.bundle header is malformed")
-    header_lines = raw[:sep].decode("utf-8", "replace").splitlines()[1:]
-    if any(line.startswith("-") for line in header_lines):
-        raise ReleaseStop("repo.bundle has prerequisite commits (not self-contained)")
-    ref_lines = [line for line in header_lines if not line.startswith("@")]
-    if ref_lines != [f"{expected_sha} HEAD"]:
-        raise ReleaseStop(
-            "repo.bundle must contain only HEAD pointing to the MANIFEST sha (no extra branches or tags)"
-        )
-    pack_bytes = raw[sep + 2:]
-    if not pack_bytes.startswith(b"PACK"):
-        raise ReleaseStop("repo.bundle does not contain a valid git packfile")
-
     bare = scratch / "bundle-repo.git"
     if bare.exists():
         shutil.rmtree(bare)
@@ -648,7 +649,35 @@ def verify_repo_bundle_content(bundle_path: Path, expected_sha: str, expected_tr
     _git(bare, "init", "--bare", "-q")
     _git(bare, "config", "core.hooksPath", "/dev/null")
 
-    unpack = _git(bare, "unpack-objects", "-q", check=False, input_bytes=pack_bytes)
+    # Read the header line by line and stream the packfile to unpack-objects:
+    # the bundle holds the whole history and is never read into memory at once.
+    with bundle_path.open("rb") as fh:
+        first = fh.readline(256)
+        if first not in (b"# v2 git bundle\n", b"# v3 git bundle\n"):
+            raise ReleaseStop("repo.bundle is not a valid git bundle header")
+        header_lines: list[str] = []
+        while True:
+            line = fh.readline(4096)
+            if not line or not line.endswith(b"\n") or len(header_lines) > 64:
+                raise ReleaseStop("repo.bundle header is malformed")
+            if line == b"\n":
+                break
+            header_lines.append(line[:-1].decode("utf-8", "replace"))
+        if any(line.startswith("-") for line in header_lines):
+            raise ReleaseStop("repo.bundle has prerequisite commits (not self-contained)")
+        ref_lines = [line for line in header_lines if not line.startswith("@")]
+        if ref_lines != [f"{expected_sha} HEAD"]:
+            raise ReleaseStop(
+                "repo.bundle must contain only HEAD pointing to the MANIFEST sha (no extra branches or tags)"
+            )
+        pack_start = fh.tell()
+        if fh.read(4) != b"PACK":
+            raise ReleaseStop("repo.bundle does not contain a valid git packfile")
+    # A buffered reader's descriptor offset is past its read-ahead: hand the
+    # child an unbuffered descriptor positioned at the packfile.
+    with bundle_path.open("rb", buffering=0) as raw:
+        raw.seek(pack_start)
+        unpack = _git(bare, "unpack-objects", "-q", check=False, stdin=raw)
     if unpack.returncode != 0:
         raise ReleaseStop("repo.bundle packfile could not be unpacked cleanly")
 
@@ -668,8 +697,11 @@ def verify_repo_bundle_content(bundle_path: Path, expected_sha: str, expected_tr
     if all_objs != reachable:
         raise ReleaseStop("repo.bundle contains unreachable objects outside the tagged commit history")
 
-    # Attach HEAD and verify standard `git bundle verify` also passes.
+    # Attach HEAD; the object store must pass a strict fsck and the standard
+    # `git bundle verify` (Rev 2 §3e, repo.bundle row).
     _git(bare, "update-ref", "HEAD", expected_sha)
+    if _git(bare, "fsck", "--strict", "--no-progress", check=False).returncode != 0:
+        raise ReleaseStop("repo.bundle objects fail git fsck --strict")
     if _git(bare, "bundle", "verify", str(bundle_path), check=False).returncode != 0:
         raise ReleaseStop("git bundle verify failed on repo.bundle")
     return bare
@@ -692,7 +724,7 @@ def create_clean_repo_bundle(source_bare: Path, target_sha: str, out_bundle: Pat
 
 def _commit_timestamp(repo: Path, sha: str) -> tuple[int, str]:
     ct = int(_git(repo, "show", "-s", "--format=%ct", sha).stdout.decode().strip())
-    iso = datetime.datetime.fromtimestamp(ct, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    iso = datetime.datetime.fromtimestamp(ct, tz=datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     return ct, iso
 
 
@@ -773,7 +805,7 @@ def render_gap_packing_record(
         "=" * 80,
         f"Commit SHA:       {sha}",
         f"Commit Date:      {commit_date}",
-        f"Release Origin:   gap",
+        "Release Origin:   gap",
         f"Gap Tag:          {gap_tag}",
         f"Gap Issue:        {gap_issue}",
         f"Gap Base SHA:     {gap_base}",
@@ -1036,6 +1068,10 @@ def cmd_pack(
         req_file = work_dir / "request.txt"
         if req_file.is_file():
             prev = _read_kv_file(req_file)
+            if prev.get("tag") and prev.get("tag") != tag:
+                raise ReleaseStop(
+                    f"work directory belongs to tag {prev['tag']}, not {tag} — use one work directory per tag"
+                )
             if prev.get("sha") and prev.get("sha") != sha:
                 raise ReleaseStop(
                     f"tag {tag} moved (request.txt recorded {prev['sha']}, now resolves to {sha}) — abandon the tag and increment"
@@ -1224,9 +1260,9 @@ def cmd_assemble(
         raise ReleaseStop("work directory is missing out/ or request.txt — run pack first")
     req = _read_kv_file(req_file)
     sha = req.get("sha", "")
-    commit_ts = int(req.get("commit_timestamp", "0"))
-    if not _HEX40.fullmatch(sha):
-        raise ReleaseStop("request.txt has an invalid sha")
+    if not _HEX40.fullmatch(sha) or not req.get("commit_timestamp", "").isdigit():
+        raise ReleaseStop("request.txt is malformed — rerun pack")
+    commit_ts = int(req["commit_timestamp"])
 
     sums_path = out_dir / "SHA256SUMS"
     if not sums_path.is_file():
@@ -1266,9 +1302,8 @@ def cmd_assemble(
         with tarfile.open(tmp_tar, "w:", format=tarfile.USTAR_FORMAT) as tf:
             for name in tar_members:
                 src = out_dir / name
-                data = src.read_bytes()
                 info = tarfile.TarInfo(name=name)
-                info.size = len(data)
+                info.size = src.stat().st_size
                 info.mtime = commit_ts
                 info.uid = 0
                 info.gid = 0
@@ -1285,7 +1320,7 @@ def cmd_assemble(
     tar_sha256 = _sha256_file(tarball)
     _atomic_write_bytes(
         Path(str(tarball) + ".sha256"),
-        f"{tar_sha256}  {tarball.name}\n".encode("utf-8"),
+        f"{tar_sha256}  {tarball.name}\n".encode(),
         mode=0o644,
     )
     print(f"upstream_anchor_sha256: {anchors.upstream_fp}")
@@ -1583,6 +1618,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     except OSError:
         print("STOP: gap release operation encountered an unreadable or unwritable path", file=sys.stderr)
+        return 1
+    except (ValueError, KeyError, subprocess.SubprocessError):
+        # Malformed input (bad UTF-8 or JSON, a missing field): fixed text, no traceback.
+        print("STOP: gap release input is malformed; nothing was trusted (see the step above)", file=sys.stderr)
         return 1
 
 

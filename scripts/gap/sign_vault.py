@@ -175,10 +175,17 @@ def _write_atomic(path: Path, data: bytes) -> None:
             tmp.unlink(missing_ok=True)
 
 
+_LOOPBACK_HTTP = re.compile(r"^http://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?(/.*)?$")
+
+
 def _vault_ssl_context(vault_addr: str, ca_file: Path | None) -> ssl.SSLContext | None:
     if not vault_addr.startswith(("https://", "http://")):
-        raise SignError("STOP: Vault address must start with https:// or http://")
+        raise SignError("STOP: Vault address must start with https://")
     if vault_addr.startswith("http://"):
+        # The token travels in a header: plain HTTP only to a loopback listener
+        # (a local Vault agent or a test stub), never across a network.
+        if not _LOOPBACK_HTTP.fullmatch(vault_addr):
+            raise SignError("STOP: Vault address must use https:// (plain http:// only to a loopback address)")
         return None
     if ca_file is not None:
         return ssl.create_default_context(cafile=str(ca_file))
@@ -360,7 +367,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_vsign.add_argument("--transit-mount", default=os.environ.get("VAULT_TRANSIT_MOUNT", "transit"))
     p_vsign.add_argument("--key-name", required=True)
     p_vsign.add_argument("--ca-file", type=Path, default=None)
-    p_vsign.add_argument("--expected-identity", default=None)
+    p_vsign.add_argument("--expected-identity", required=True,
+                         help="release identity pack printed; the signer reads it before signing (D4)")
     p_vsign.add_argument("--verify-pub", type=Path, default=None)
 
     p_vpub = sub.add_parser("vault-pubkey", help="export and normalize RSA-3072 public key from Vault transit")
@@ -381,7 +389,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_ksign.add_argument("--key", type=Path, required=True)
     p_ksign.add_argument("--out", type=Path, required=True)
     p_ksign.add_argument("--passin", default=None, help="openssl -passin source (e.g. fd:3 or env:VAR)")
-    p_ksign.add_argument("--expected-identity", default=None)
+    p_ksign.add_argument("--expected-identity", required=True,
+                         help="release identity pack printed; the signer reads it before signing (D4)")
     p_ksign.add_argument("--verify-pub", type=Path, default=None)
 
     p_ver = sub.add_parser("verify", help="verify raw SHA256SUMS.sig using bootstrap.sh's openssl command")

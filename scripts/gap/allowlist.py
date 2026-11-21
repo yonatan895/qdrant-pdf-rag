@@ -51,8 +51,8 @@ LAYER_REPLACEMENT_REFUSAL = (
 
 # Exact top-level files allowed (root-anchored patterns, no image layer impact).
 ALLOWED_TOP_LEVEL_FILES: frozenset[str] = frozenset({
+    "/.gitlab-ci.yml",
     "/AGENTS.md",
-    "/CLAUDE.md",
     "/README.md",
     "/ROADMAP.md",
     "/Taskfile.yml",
@@ -61,6 +61,7 @@ ALLOWED_TOP_LEVEL_FILES: frozenset[str] = frozenset({
 
 # Whole top-level directories allowed without image layer impact.
 ALLOWED_NO_LAYER_DIRS: frozenset[str] = frozenset({
+    "/.claude",
     "/.gitlab",
     "/benchmarks",
     "/deploy",
@@ -74,6 +75,17 @@ ALLOWED_NO_LAYER_DIRS: frozenset[str] = frozenset({
 # Subtrees allowed inside otherwise refused top-level directories.
 ALLOWED_NO_LAYER_SUBTREES: tuple[str, ...] = (
     "/charts/mainframe-rag/",
+)
+
+# .agents/ is allowed except what feeds a member copied from the base (the
+# reference-docs member and the licence records): the vendored skill trees,
+# the Qdrant skills, and the provenance and pin files beside them.
+AGENTS_DIR = "/.agents"
+AGENTS_EXCLUSIONS: tuple[tuple[str, str], ...] = (
+    ("/.agents/skills/qdrant-*", "feeds the copied reference-docs.tar.gz member and the licence records"),
+    ("/.agents/vendor/*", "vendored third-party skills feed the licence records"),
+    ("/.agents/*-provenance.md", "feeds the copied reference-docs.tar.gz member or the licence records"),
+    ("/.agents/*.sha256", "pins a vendored third-party skill set"),
 )
 
 # Top-level directories whose files enter the app images' COPY layers
@@ -104,13 +116,10 @@ DOCKERIGNORED_SCRIPT_PREFIXES: tuple[str, ...] = (
 # top-level entry in the repository is explicitly decided here or in the
 # allowed sets.
 REFUSED_TOP_LEVEL: dict[str, str] = {
-    "/.agents": "vendored skills and notices feed copied reference-docs.tar.gz and license inventory",
-    "/.claude": "agent skill wrappers kept in sync with .agents/",
     "/.dockerignore": "Containerfile build context filter affects image layers",
     "/.gitattributes": "repository git metadata not shown safe for gap releases",
     "/.github": "connected-side GitHub workflows and templates",
     "/.gitignore": "repository git metadata not shown safe for gap releases",
-    "/.gitlab-ci.yml": "CI pipeline definition is outside the gap release allow-list",
     "/LICENSE": "feeds copied THIRD-PARTY-NOTICES.txt and reference-docs.tar.gz",
     "/LICENSE.mattpocock-skills": "feeds third-party license records",
     "/LICENSE.pstack-skills": "feeds third-party license records",
@@ -147,7 +156,9 @@ DECLARED_EXCEPTIONS: dict[str, str] = {
 
 TOP_LEVEL_DECIDED: frozenset[str] = frozenset(
     entry.lstrip("/")
-    for entry in (ALLOWED_TOP_LEVEL_FILES | ALLOWED_NO_LAYER_DIRS | LAYER_DIRS | frozenset(REFUSED_TOP_LEVEL))
+    for entry in (
+        ALLOWED_TOP_LEVEL_FILES | ALLOWED_NO_LAYER_DIRS | LAYER_DIRS | frozenset(REFUSED_TOP_LEVEL) | {AGENTS_DIR}
+    )
 )
 
 
@@ -209,6 +220,13 @@ def classify_path(raw_path: str) -> PathClassification:
 
     if anchored_top in ALLOWED_NO_LAYER_DIRS:
         return PathClassification(path, "allowed-no-layer", f"allowed directory {top}/ (not in any image)")
+
+    if anchored_top == AGENTS_DIR:
+        for pattern, reason in AGENTS_EXCLUSIONS:
+            # fnmatch's * also matches "/", so a directory pattern covers its subtree.
+            if fnmatch.fnmatchcase(anchored, pattern) or fnmatch.fnmatchcase(anchored, pattern + "/*"):
+                return PathClassification(path, "refused", f"excluded .agents/ path: {reason}")
+        return PathClassification(path, "allowed-no-layer", "allowed .agents/ path (not in any image or copied member)")
 
     for prefix in ALLOWED_NO_LAYER_SUBTREES:
         if anchored.startswith(prefix):

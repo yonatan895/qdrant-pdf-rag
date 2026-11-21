@@ -1374,7 +1374,12 @@ def test_checkout_guard_an_edited_origin_is_refused_as_an_edit_not_an_origin(app
 ])
 def test_checkout_guard_enforces_gap_manifest_field_consistency(approved, origin, gap_block, needle):
     """GH#1207 Rev 2 §3e: shared check_manifest_chain enforces gap_* presence on gap bundles and absence on upstream."""
-    from tests.helpers_airgap import gap_release_anchor, gap_release_key, release_anchor, release_key
+    from tests.helpers_airgap import (
+        gap_release_anchor,
+        gap_release_key,
+        release_anchor,
+        release_key,
+    )
 
     env = {_UP: str(release_anchor()), _GAP: str(gap_release_anchor())}
     key = gap_release_key() if origin == "gap" else release_key()

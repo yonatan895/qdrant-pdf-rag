@@ -46,14 +46,16 @@ case "${1:-}" in
     pack|assemble|verify)
         # Enforce the installed-release guard (Rev 2 §3e step 1, I9): only a
         # verified signed release workspace may pack, assemble, or verify.
-        # Run in a subshell with an empty AIRGAP_ENV so common.sh checks the
-        # executing checkout without requiring operator deploy settings.
+        # Run in a subshell, from the workspace root (find_manifest reads
+        # dist/MANIFEST.txt relative to it), with an empty AIRGAP_ENV so
+        # common.sh checks the executing checkout without operator deploy
+        # settings: the anchors come from the process environment only.
         _guard_tmp=$(mktemp -d)
         trap 'rm -rf "$_guard_tmp"' EXIT
         : > "$_guard_tmp/empty.env"
         if ! AIRGAP_ENV="$_guard_tmp/empty.env" AIRGAP_DRYRUN=0 \
-                sh -c '. "$1" && MANIFEST=$(find_manifest) && check_checkout_sha' \
-                "$0" "$COMMON"; then
+                sh -c 'cd "$2" && . "$1" && MANIFEST=$(find_manifest) && check_checkout_sha' \
+                "$REPO_ROOT/scripts/gap/release.sh" "$COMMON" "$REPO_ROOT"; then
             echo "STOP: gap release refused: executing workspace is not a verified signed release (FAIL line above)." >&2
             exit 1
         fi
