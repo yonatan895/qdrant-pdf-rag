@@ -178,7 +178,10 @@
    7A).**
    - Text only (explicit `TYPE A` for both `dataset_read` and `jes_spool_read`),
      under the byte cap (`zowe_mcp_max_bytes`, 256 KiB default; hitting it is
-     `truncated`), with a configurable code page.
+     `truncated`), with a configurable code page (default `latin-1`, decided 2026-11-21: text-mode
+     FTP output is a single-byte ASCII page, usually ISO8859-1 per the server's
+     `SBDATACONN`; bytes above 0x7F such as `¬` are invalid UTF-8 and would decode
+     to U+FFFD; a site with UTF-8 output sets `MCP_FTP_ENCODING=utf-8`).
    - Screened before it reaches the prompt: control and bidi characters
      stripped, password-shaped strings redacted.
    - Framed as an untrusted, delimited observation block, cited distinctly from
@@ -224,7 +227,8 @@
      alias, binds the dedicated READ-only RACF ID to that alias, and opens the
      firewall to the LPAR IP on TCP 21 and `FTP.DATA` `PASSIVEPORTRANGE`;
    - (c) **Phased validation:** first the logon-free transport probe, then a
-     `dry_run` plan without FTP calls, then one live `dataset_read` of an
+     `dry_run` plan without FTP calls (recording the FTP server's `SBDATACONN`
+     code page, to confirm or override `MCP_FTP_ENCODING`), then one live `dataset_read` of an
      allowlisted member on a test LPAR (recorded with ids, outcome and bytes
      only). Opting in `job_status,jes_spool_read` in `MCP_ENABLED_TOOLS` waits
      until z/OS `JESINTERFACELEVEL=2`, scoped `JESSPOOL` READ profiles (never

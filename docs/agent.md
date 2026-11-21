@@ -51,7 +51,10 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   chunk or an explicit refusal, never a prefix. Contract, outcome mapping and
   limits: [stored-payload profile](evidence-contract.md#stored-payload-profile).
   The downstream MCP consumer is `python -m mainframe_rag.mcp.knowledge`
-  (tools `knowledge_search`, `evidence_read`, `sources_list`) over this HTTP surface.
+  (tools `knowledge_search`, `evidence_read`, `sources_list`) over this HTTP surface;
+  its HTTP transport bounds sessions by `KNOWLEDGE_MCP_MAX_SESSIONS` (default 128)
+  and idle `KNOWLEDGE_MCP_SESSION_TTL_S` (default 1800 s), and propagates W3C
+  `traceparent`/`tracestate` without forwarding caller auth or `X-*` headers (#1302).
 - `POST /v1/answer` — `AnswerRequest{query, product?, version?,
   splunk_context?, stream (default false), temperature?}` → `AnswerResponse{request_id,
   answer, citations, citations_inferred, inferred_indices, script,
@@ -1213,7 +1216,7 @@ readers:
 | `acronym_expansion_enabled` / `comparative_split_enabled` / `diagnostic_dualpath_enabled` | `false` / `true` / `false` | rewrite + multipath (see `retrieval.md` §§3b,7) |
 | `ingest_max_pdf_bytes` / `ingest_max_doc_pages` / `ingest_max_doc_chunks` | 0 / 0 / 0 (unbounded) | per-document ingest refusal (`docs/ingest.md` §9, issue #374) |
 | ingest-only (`ingest_workers` = CPU-1, counting the cgroup quota and affinity (#840), `batch_size` 128, `ingest_upsert_streams` 4, `ingest_bulk_load` false, `bm25_model`, `bm25_cache_dir` unset, `contextual_*` incl. `context_llm_timeout_s` 30.0 / `context_max_chars` 500 / `context_cache_path` unset) | — | ingest; see `docs/ingest.md` §§6–9 |
-| `zowe_mcp_enabled` / `zowe_mcp_base_url` / `zowe_mcp_timeout_s` / `zowe_mcp_max_bytes` / `zowe_mcp_dry_run` | `false` (client not constructed unless enabled) / unset / 15.0 / 262144 / `false` | live-state client (default off; unwired from every endpoint; contract: [source observations](#source-observations)) |
+| `zowe_mcp_enabled` / `zowe_mcp_base_url` / `zowe_mcp_auth_token` / `zowe_mcp_timeout_s` / `zowe_mcp_max_bytes` / `zowe_mcp_dry_run` | `false` (client not constructed unless enabled) / unset / unset / 15.0 / 262144 / `false` | live-state client (default off; unwired from every endpoint; `zowe_mcp_auth_token` is a Secret reference for bridge bearer auth, never logged; contract: [source observations](#source-observations)) |
 
 ## 8. Log and trace contract
 
@@ -2191,21 +2194,70 @@ deterministic and trap queries stay on the manuals path.
   record (question, answer, citations, telemetry) per finalized answer from
   the answer, chat and console routes (never `/v1/search`). The source port is
   separate from manual evidence and is not a query/command proxy.
-- **Approved operation:** `job_status` for one exact job id.
-  [ADR-0012](adr/0012-zos-dataset-read-pilot.md) (#1294; proposed, still off
-  and unwired) proposes a pilot for `dataset_read` (operator allowlist of
-  exact names; default bridge tool) and opt-in `job_status` and DD-scoped
-  `jes_spool_read` (`JESMSGLG`/`JESYSMSG` only, gated by `MCP_ENABLED_TOOLS`).
-  `uss_read` stays unapproved; a new tool outside the closed four is a new ADR.
-- **Observation shape (contract for #91, not yet implemented):** exact `target`,
-  `acquired_at` (agent clock), `observed_at` (source time or null), `outcome`
-  in `complete | truncated | partial | not_found | unavailable | no_target |
-  dry_run | denied`, plus `truncated`. Limits: 2 calls, `zowe_mcp_max_bytes`,
-  `zowe_mcp_timeout_s` per call, no polling, no cross-request cache.
-- **Today in code:** `fetch_live` returns `degraded` codes
-  (`dry_run`, `not_configured`, `no_target`, `timeout`, `tool_error`,
-  `upstream_error`); `job_status` is planned only with an exact job id.
+- **Approved pilot operations (ADR-0012 / #1294 PR 1):** the FTP bridge
+  (`python -m mainframe_rag.mcp`) registers `MCP_ENABLED_TOOLS` (default
+  `dataset_read` only; opt-in `dataset_read,job_status,jes_spool_read`;
+  `uss_read` remains unapproved and is refused even if named). `dataset_read`
+  enforces an operator-configured exact-name allowlist (`MCP_DATASET_ALLOWLIST`),
+  validates qualifiers and members before any FTP command (refusing quotes,
+  wildcards, relative GDG references, and PDS-without-member `NLST` fallback).
+  Opt-in `job_status` and `jes_spool_read` require exact targets checked against
+  bridge-side JES jobname/owner prefix allowlists (`MCP_JES_JOBNAME_PREFIXES`,
+  `MCP_JES_OWNER_PREFIXES`), and `jes_spool_read` verifies both prefix and DD
+  scope (`JESMSGLG`/`JESYSMSG` only) via `LIST <JOBID>` before explicit
+  `TYPE A` and `RETR`. `job_status` by `job_id` also sends `LIST <JOBID>`
+  (a bare `LIST` is bounded by JESENTRYLIMIT), reports `RC=`, `ABEND=`,
+  `JCL ERROR` and `SYS FAIL` completions from validated tokens only, and an
+  unknown job is `not_found`. Both JES tools require the JESINTERFACELEVEL=2
+  `LIST` header and otherwise fail closed with `jes_unavailable` before any
+  `RETR`.
+- **Bridge transport, auth, screening & reliability (#1294 PR 1, #1302):**
+  `MCP_FTP_TRANSPORT_MODE` pins either verified FTPS (`ftps`, default: CA bundle
+  `MCP_FTP_CA_FILE`, `CERT_REQUIRED`, hostname check, `PROT P`, zero downgrade
+  fallback) or owner-accepted plain FTP (`plain` + `MCP_FTP_PLAIN_ACCEPTED=true`);
+  `--probe` runs a logon-free `AUTH TLS` connectivity probe without credentials.
+  Every session sets explicit passive mode (`ftp.set_pasv(True)`). HTTP mode
+  offloads blocking FTP I/O via `asyncio.to_thread`, enforces bearer caller auth
+  (`MCP_BRIDGE_AUTH_TOKEN`, except `GET /healthz`), and bounds logons with an
+  FTP 530 breaker (`logon_failed`): at most the breaker threshold (default 1) of failing logons
+  can be in flight however many calls arrive at once, later callers are refused
+  without contacting the server, and none logs on until the cooldown
+  (`MCP_FTP_LOGON_COOLDOWN_S`) passes or an operator resets it
+  (`POST /admin/reset-logon-breaker`); only session setup is bounded, reads
+  run concurrently. Every tool output, `job_status` included, is capped at
+  `MCP_FTP_MAX_BYTES` with a truncation suffix. Text reads stay in `TYPE A`
+  end to end (the server translates EBCDIC); `MCP_FTP_ENCODING` is the code
+  page of the server's ASCII output (default `latin-1`, because z/OS FTP usually sends
+  ISO8859-1 and bytes above 0x7F such as `¬` or `¢` are invalid UTF-8; set `utf-8` only if the site
+  configures UTF-8 output), not the dataset's EBCDIC page. The bridge strips control/bidi characters, and
+  redacts PEM private keys (also one cut open by the byte cap), RACF/TSO/JCL password and passphrase operands
+  (`PASSWORD(...)`, `PHRASE('...')`, `PW`/`PASS`/`PWD`, the `NEW*`
+  forms, `KEYMASKED`/`KEYENCRYPTED`/`SESSKEY`; any case, quoted or bare,
+  also when the byte cap cuts them open), TSO `LOGON user/password`, `=`/`:`
+  password, secret and token assignments, `password <value>` and
+  Bearer/Basic credentials, then wraps outputs in untrusted observation
+  delimiters.
+  `HttpZoweMCP` maps `isError` responses to fixed messages and stable codes only
+  (never echoing upstream text).
+- **Feedback suppression (ADR-0012 Option 7A):** `_record_feedback` in
+  `agent/app.py` suppresses recording whenever `request.state.feedback_suppressed`
+  is set, any message in chat history carries `ZOS_OBSERVATION_MARKER`
+  (`[z/OS observation]`), or the finalized answer carries that marker, while
+  normal manual-only turns continue recording when `FEEDBACK_ENABLED=true`.
+  Omitting the `Answer reference:` footer on observation turns and the
+  `fetch_live`-called trigger land with the PR 2 wiring (nothing sets the marker today).
+- **Observation shape (contract for #1294 PR 2, not yet wired to answer/chat):**
+  exact `target`, `acquired_at` (agent clock), `observed_at` (source time or
+  null), `outcome` in `complete | truncated | partial | not_found | unavailable |
+  no_target | dry_run | denied`, plus `truncated`. Limits: 2 calls,
+  `zowe_mcp_max_bytes`, `zowe_mcp_timeout_s` per call, no polling, no
+  cross-request cache.
+- **Today in code:** `fetch_live` remains unwired from `/v1/answer` and
+  `/v1/chat` (PR 2 scope); `fetch_live` returns `degraded` codes (`dry_run`,
+  `not_configured`, `no_target`, `not_found`, `denied`, `logon_failed`,
+  `tls_error`, `timeout`, `jes_unavailable`, `tool_error`, `upstream_error`).
   Failures are fixed codes; logs and spans carry ids, tool names and byte
   counts, never source text.
-- **Gate:** enabling needs a named investigation manuals cannot answer plus
-  source-owner and site-security approval (ADR-0003 reactivation gate).
+- **Gate:** enabling needs the named investigation, written source-owner and
+  site-security approvals, `EgressIP` RACF terminal-alias binding, and phased
+  validation (ADR-0012 D8).

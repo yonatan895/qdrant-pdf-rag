@@ -22,7 +22,15 @@ import math
 import os
 import time
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable, Iterator
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Iterator,
+    Sequence,
+)
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import replace
 
@@ -768,6 +776,18 @@ def _unpublish_feedback() -> None:
     feedback = None
 
 
+# Fixed citation marker for z/OS pilot observations (ADR-0012 D6, Option 7A).
+# Any turn flagged via `request.state.feedback_suppressed`, carrying this
+# marker in prior chat history, or emitting it in the answer is suppressed from
+# `_record_feedback` so z/OS data never enters the 180-day feedback store or
+# `feedback/exchange.py` exports.
+ZOS_OBSERVATION_MARKER = "[z/OS observation]"
+
+
+def _messages_carry_zos_observation(messages: Sequence[ChatMessage]) -> bool:
+    return any(ZOS_OBSERVATION_MARKER in (msg.content or "") for msg in messages)
+
+
 def _record_feedback(
     request: Request, endpoint: FeedbackEndpoint, output: AnswerCoreOutput, fields: dict
 ) -> None:
@@ -778,6 +798,8 @@ def _record_feedback(
     client = feedback
     query = getattr(request.state, "feedback_query", None)
     if client is None or not isinstance(query, str):
+        return
+    if getattr(request.state, "feedback_suppressed", False) or ZOS_OBSERVATION_MARKER in output.answer:
         return
     request_id = request.state.request_id
     try:
@@ -2472,6 +2494,8 @@ async def prepare_chat_core(
     )
 
     owner.request.state.feedback_query = turn.query
+    if _messages_carry_zos_observation(messages):
+        owner.request.state.feedback_suppressed = True
     core_input = AnswerCoreInput(
         query=turn.query,
         messages=turn.messages,
