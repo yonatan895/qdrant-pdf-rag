@@ -239,6 +239,76 @@ def test_offline_preparation_fails_before_any_mutation_or_process(locked, monkey
     assert not environment.exists()
 
 
+CI_WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml"
+LOCK_FILES = ("locks/cp314-linux-x86_64.json", "requirements.dev.lock.txt")
+
+
+def _ci_wheel_steps():
+    """Per ci.yml job: (cache step, cache-hit prepare step, cache-miss prepare step)."""
+    import yaml
+
+    result = {}
+    for name, job in yaml.safe_load(CI_WORKFLOW.read_text())["jobs"].items():
+        steps = job.get("steps", [])
+        prepares = [s for s in steps if "scripts/prepare_python.py" in s.get("run", "")]
+        if not prepares:
+            continue
+        caches = [s for s in steps if s.get("uses", "").startswith("actions/cache@")]
+        assert len(caches) == 1 and len(prepares) == 2, name
+        hit = next(s for s in prepares if s.get("if") == "steps.wheels.outputs.cache-hit == 'true'")
+        miss = next(s for s in prepares if s.get("if") == "steps.wheels.outputs.cache-hit != 'true'")
+        assert steps.index(caches[0]) < min(steps.index(hit), steps.index(miss)), name
+        result[name] = caches[0], hit, miss
+    return result
+
+
+def test_ci_wheelhouse_cache_is_keyed_on_the_lock_and_never_restores_a_partial_match():
+    """#1299: a hit can only come from the identical lock; no prefix restore."""
+    steps = _ci_wheel_steps()
+    assert {"lint", "unit", "hazards", "sim", "gate-l1", "runner-canary"} <= set(steps)
+    for name, (cache, hit, miss) in steps.items():
+        assert re.fullmatch(r"actions/cache@[0-9a-f]{40}", cache["uses"]), name
+        assert cache["id"] == "wheels" and cache["with"]["path"] == ".tools/python-wheels/dev", name
+        assert "restore-keys" not in cache["with"], name
+        key = cache["with"]["key"]
+        assert "${{ runner.os }}" in key and "${{ runner.arch }}" in key, name
+        assert re.search(r"hashFiles\('([^)]*)'\)", key).group(1).split("', '") == list(LOCK_FILES), name
+        assert "--connected" not in hit["run"] and "--download-workers" not in hit["run"], name
+        assert "--connected --download-workers 8" in miss["run"], name
+        assert hit["run"] == miss["run"].replace(" --connected --download-workers 8", ""), name
+
+
+@pytest.mark.parametrize("damage", ["corrupt", "unselected", "missing", "symlink", None])
+def test_ci_cache_hit_command_verifies_every_wheel_offline_before_any_process(locked, monkeypatch, damage):
+    """The exact cache-hit command refuses a damaged restored wheelhouse with no network or install."""
+    root, _, wheels = locked
+    _, hit, _ = _ci_wheel_steps()["unit"]
+    argv = hit["run"].replace('"$(command -v python)"', "PYTHON").split()
+    argv = argv[argv.index("scripts/prepare_python.py") + 1:]
+    argv[argv.index("PYTHON")] = str(root / "python")
+    argv[argv.index(".tools/python-wheels/dev")] = str(wheels)
+    (root / "python").touch()
+    target = wheels / "example-1.0-py3-none-any.whl"
+    if damage == "corrupt":
+        target.write_bytes(b"poisoned cache entry")
+    elif damage == "unselected":
+        (wheels / "extra-1.0-py3-none-any.whl").write_bytes(b"unselected")
+    elif damage == "missing":
+        target.unlink()
+    elif damage == "symlink":
+        saved = root / "outside.whl"
+        target.rename(saved)
+        target.symlink_to(saved)
+    calls = []
+    monkeypatch.setattr(locks.urllib.request, "urlopen", lambda *a, **kw: pytest.fail("network used"))
+    monkeypatch.setattr(prepare_python.subprocess, "run", lambda *a, **kw: calls.append(a[0]))
+    assert prepare_python.main(["--root", str(root), *argv]) == (0 if damage is None else 2)
+    # A refusal starts nothing; a verified hit installs only from the hash-pinned wheelhouse.
+    assert bool(calls) == (damage is None)
+    if calls:
+        assert {"--no-index", "--require-hashes"} <= set(calls[1])
+
+
 def test_report_cannot_change_resolver_or_target(locked):
     root, reports, _ = locked
     path = reports / "runtime.json"

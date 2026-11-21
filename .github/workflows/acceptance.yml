@@ -5,11 +5,11 @@ on:
     branches: [main]
   workflow_run:
     workflows: [agent-context, ci, e2e, load, ha, agent-probes, Verifier update decision]
-    types: [requested, in_progress, completed]
+    types: [requested, completed]
   push:
     branches: [main]
   schedule:
-    - cron: '3-58/5 * * * *'
+    - cron: '7-52/15 * * * *'
   workflow_dispatch:
 permissions:
   contents: read
