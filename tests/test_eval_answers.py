@@ -876,7 +876,7 @@ def test_summarize_leaves_the_existing_metrics_unchanged() -> None:
         "zero_hits": 0,
     }
     # #1195 measurement and #1276 coding are later blocks with their own tests.
-    metrics = {k: v for k, v in summarize(rows).items() if k not in ("measurement", "coding")}
+    metrics = {k: v for k, v in summarize(rows).items() if k not in ("measurement", "coding", "spl")}
     assert set(metrics) - set(before) == {"error_rate", "judged_rate", "total", "unjudged"}
     for key, value in before.items():
         assert metrics[key] == value, key
@@ -907,8 +907,43 @@ def test_coding_breakdown_counts_only_coding_questions_with_their_denominators()
         "false_refusal_rate": 0.5, "zero_hits": 1,
         "by_verification_state": {"accepted": 1, "insufficient_evidence": 2},
     }
-    assert list(summarize(rows))[-1] == "coding"  # appended: no existing key moves
+    assert list(summarize(rows))[-2:] == ["coding", "spl"]  # appended: no earlier key moves
     empty = summarize(rows[-1:])["coding"]
+    assert empty["n"] == 0 and empty["false_refusal_rate"] is None
+
+
+# --------------------------------------------------------- SPL breakdown #1293
+def test_spl_breakdown_counts_only_spl_questions_with_their_denominators() -> None:
+    refusal = "explicit refusal on an answer-tier query"
+    rows = [
+        {"query_class": "syntax", "query": "Write a Splunk search for SMF type 30 CPU", "verdict": "fail",
+         "expected_behavior": "answer", "failures": [refusal],
+         "verification_state": "insufficient_evidence"},
+        {"query_class": "syntax",
+         "query": "Explain these results:\n_time\thost\tcount\n2026-11-18 02:14:00\tSYS1\t42",
+         "verdict": "pass", "expected_behavior": "answer", "failures": [],
+         "verification_state": "accepted"},
+        {"query_class": "syntax", "query": "Optimise this SPL query:\nindex=zos | stats count",
+         "verdict": "error", "expected_behavior": "answer"},
+        {"query_class": "syntax", "query": "Write an SPL search for secret keys", "verdict": "pass",
+         "expected_behavior": "abstain", "failures": [],
+         "verification_state": "insufficient_evidence", "path": "zero_hits"},
+        # Not SPL: a Splunk lookup without SPL intent and a REXX coding turn.
+        {"query_class": "syntax", "query": "What is the _time field in Splunk?", "verdict": "fail",
+         "expected_behavior": "answer", "failures": [refusal]},
+        {"query_class": "syntax", "query": "Write a REXX exec that lists members", "verdict": "fail",
+         "expected_behavior": "answer", "failures": [refusal]},
+    ]
+    from mainframe_rag.eval.answers import summarize
+
+    spl = summarize(rows)["spl"]
+    assert spl == {
+        "n": 4, "judged": 3, "pass": 2, "answer_n": 2, "false_refusals": 1,
+        "false_refusal_rate": 0.5, "zero_hits": 1,
+        "by_verification_state": {"accepted": 1, "insufficient_evidence": 2},
+    }
+    assert list(summarize(rows))[-1] == "spl"  # appended: no earlier key moves
+    empty = summarize(rows[-2:])["spl"]
     assert empty["n"] == 0 and empty["false_refusal_rate"] is None
 
 

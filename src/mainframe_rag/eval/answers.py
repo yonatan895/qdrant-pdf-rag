@@ -98,6 +98,7 @@ import re
 import sys
 import time
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
@@ -177,6 +178,7 @@ from mainframe_rag.agent.answer import (
     is_abstention,
     is_coding_request,
     is_refusal,
+    is_spl_request,
 )
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.eval.datasets import (
@@ -574,20 +576,21 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     metrics["unjudged"] = total - len(judged) - metrics["errors"]
     metrics["error_rate"] = round(metrics["errors"] / total, 4) if total else None
     metrics["judged_rate"] = round(len(judged) / total, 4) if total else None
-    # Coding requests (issue #1276), appended last so no key order moves.
+    # Coding requests (issue #1276) and SPL requests (issue #1293), appended
+    # last in order so no earlier key moves.
     metrics["coding"] = coding_breakdown(results)
+    metrics["spl"] = spl_breakdown(results)
     return metrics
 
 
-def coding_breakdown(results: list[dict[str, Any]]) -> dict[str, Any]:
-    """Counts for the rows whose question is a coding request (issue #1276).
+def _mode_breakdown(results: list[dict[str, Any]], predicate: Callable[[str], bool]) -> dict[str, Any]:
+    """Text-free counts for the rows matching `predicate(query)`.
 
-    The class is derived on the evaluator side from each row's question with
-    the agent's own deterministic classifier, never from a dataset field, so
-    the old build, the candidate and a `coding-off` arm count the same rows.
-    Text-free: counts, rates with their denominators and state labels only.
-    The refusal rule is summarize()'s false-refusal rule."""
-    rows = [r for r in results if is_coding_request(str(r.get("query") or ""))]
+    Derived on the evaluator side from each row's question with the agent's
+    own deterministic classifier, never from a dataset field, so old builds,
+    the candidate and mode-off arms count the same rows. The refusal rule is
+    summarize()'s false-refusal rule."""
+    rows = [r for r in results if predicate(str(r.get("query") or ""))]
     judged = [r for r in rows if r.get("verdict") in ("pass", "fail")]
     answer_rows = [r for r in judged if r.get("expected_behavior") == "answer"]
     refusals = sum(1 for r in answer_rows
@@ -604,6 +607,17 @@ def coding_breakdown(results: list[dict[str, Any]]) -> dict[str, Any]:
         "by_verification_state": dict(sorted(Counter(
             str(r.get("verification_state") or "unknown") for r in judged).items())),
     }
+
+
+def coding_breakdown(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Counts for the rows whose question is a coding request (issue #1276)."""
+    return _mode_breakdown(results, is_coding_request)
+
+
+def spl_breakdown(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Counts for the rows whose question is an SPL request or pasted Splunk
+    results (issue #1293)."""
+    return _mode_breakdown(results, is_spl_request)
 
 
 def _mean(values: list[Any]) -> float | None:
@@ -1997,6 +2011,13 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
             f"- coding requests (#1276): {coding['n']} rows, pass {coding['pass']}/{coding['judged']}, "
             f"false refusals {coding['false_refusals']} "
             f"(rate {coding['false_refusal_rate']}, n={coding['answer_n']})"
+        )
+    spl = metrics.get("spl")
+    if spl:
+        lines.append(
+            f"- SPL requests (#1293): {spl['n']} rows, pass {spl['pass']}/{spl['judged']}, "
+            f"false refusals {spl['false_refusals']} "
+            f"(rate {spl['false_refusal_rate']}, n={spl['answer_n']})"
         )
     lines.append("")
     lines.append("| class | n | pass |")
