@@ -27,11 +27,30 @@ import ftplib
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from mainframe_rag.mcp.bridge import FTPConfig
 
 _CHUNK = 8192
+
+
+class _MockDataConn:
+    """In-memory data connection: `recv` serves the payload in chunks."""
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+        self._pos = 0
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def recv(self, n: int) -> bytes:
+        chunk = self._payload[self._pos : self._pos + min(n, _CHUNK)]
+        self._pos += len(chunk)
+        return chunk
 
 
 class MockFTPSession:
@@ -76,12 +95,14 @@ class MockFTPSession:
             raise ftplib.error_perm("550 JES interface not available")
         return "200 ok"
 
-    def retrbinary(self, cmd: str, callback) -> str:
+    def transfercmd(self, cmd: str, rest: Any = None) -> _MockDataConn:
+        # Text reads only (the bridge sends TYPE A first); no retrbinary,
+        # which would switch to TYPE I on a real server.
         self.commands.append(cmd)
         _, _, arg = cmd.partition(" ")
-        data = self._read_bytes(arg.strip())
-        for i in range(0, len(data), _CHUNK):
-            callback(data[i : i + _CHUNK])
+        return _MockDataConn(self._read_bytes(arg.strip()))
+
+    def voidresp(self) -> str:
         return "226 done"
 
     def retrlines(self, cmd: str, callback) -> str:
@@ -90,6 +111,7 @@ class MockFTPSession:
             raise ftplib.error_perm("550 Not in JES mode")
         _, _, arg = cmd.partition(" ")
         target_job_id = arg.strip().upper()
+        callback("JOBNAME  JOBID    OWNER    STATUS CLASS")  # JESINTERFACELEVEL=2
         for line in self._job_lines(target_job_id or None):
             callback(line)
         return "226 done"
@@ -160,7 +182,7 @@ class MockFTPSession:
                 continue
             if status != "ALL" and status != str(job.get("status", "")).upper():
                 continue
-            line = f"{job['name']}  {job['job_id']} {job['owner']}   {job['status']}"
+            line = f"{job['name']}  {job['job_id']} {job['owner']}   {job['status']} A"
             if job.get("return_code"):
                 line += f" RC={job['return_code']}"
             lines.append(line)

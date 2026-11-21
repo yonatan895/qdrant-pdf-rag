@@ -2205,7 +2205,12 @@ deterministic and trap queries stay on the manuals path.
   bridge-side JES jobname/owner prefix allowlists (`MCP_JES_JOBNAME_PREFIXES`,
   `MCP_JES_OWNER_PREFIXES`), and `jes_spool_read` verifies both prefix and DD
   scope (`JESMSGLG`/`JESYSMSG` only) via `LIST <JOBID>` before explicit
-  `TYPE A` and `RETR`.
+  `TYPE A` and `RETR`. `job_status` by `job_id` also sends `LIST <JOBID>`
+  (a bare `LIST` is bounded by JESENTRYLIMIT), reports `RC=`, `ABEND=`,
+  `JCL ERROR` and `SYS FAIL` completions from validated tokens only, and an
+  unknown job is `not_found`. Both JES tools require the JESINTERFACELEVEL=2
+  `LIST` header and otherwise fail closed with `jes_unavailable` before any
+  `RETR`.
 - **Bridge transport, auth, screening & reliability (#1294 PR 1, #1302):**
   `MCP_FTP_TRANSPORT_MODE` pins either verified FTPS (`ftps`, default: CA bundle
   `MCP_FTP_CA_FILE`, `CERT_REQUIRED`, hostname check, `PROT P`, zero downgrade
@@ -2220,8 +2225,10 @@ deterministic and trap queries stay on the manuals path.
   (`MCP_FTP_LOGON_COOLDOWN_S`) passes or an operator resets it
   (`POST /admin/reset-logon-breaker`); only session setup is bounded, reads
   run concurrently. Every tool output, `job_status` included, is capped at
-  `MCP_FTP_MAX_BYTES` with a truncation suffix. The bridge decodes with
-  configurable `MCP_FTP_ENCODING`, strips control/bidi characters, and
+  `MCP_FTP_MAX_BYTES` with a truncation suffix. Text reads stay in `TYPE A`
+  end to end (the server translates EBCDIC); `MCP_FTP_ENCODING` is the code
+  page of the server's ASCII output (default `utf-8`; z/OS FTP usually sends
+  ISO8859-1), not the dataset's EBCDIC page. The bridge strips control/bidi characters, and
   redacts PEM private keys, RACF/TSO/JCL password and passphrase operands
   (`PASSWORD(...)`, `PHRASE('...')`, `PW`/`PASS`/`PWD`, the `NEW*`
   forms, `KEYMASKED`/`KEYENCRYPTED`/`SESSKEY`; any case, quoted or bare,

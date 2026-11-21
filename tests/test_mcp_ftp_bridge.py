@@ -71,14 +71,16 @@ class FakeFTP:
             raise ftplib.error_perm("550 JES interface not available")
         return "200 ok"
 
-    def retrbinary(self, cmd: str, callback) -> str:
+    # No retrbinary: it would send TYPE I. Text reads go through transfercmd
+    # after an explicit TYPE A (see WireFTP for the real ftplib path).
+    def transfercmd(self, cmd: str, rest=None) -> _FakeDataConn:
         self.commands.append(cmd)
         arg = cmd.split(" ", 1)[1]
         if arg not in self.files:
             raise ftplib.error_perm("550 File not found")
-        data = self.files[arg]
-        for i in range(0, len(data), 8192):
-            callback(data[i : i + 8192])
+        return _FakeDataConn(self.files[arg])
+
+    def voidresp(self) -> str:
         return "226 done"
 
     def retrlines(self, cmd: str, callback) -> str:
@@ -779,7 +781,7 @@ def test_job_status_output_is_byte_capped_and_stops_the_listing() -> None:
 
 def test_timeout_and_jes_refusal_map_to_stable_codes_per_tool() -> None:
     class SlowFTP(FakeFTP):
-        def retrbinary(self, cmd: str, callback) -> str:
+        def transfercmd(self, cmd: str, rest=None) -> _FakeDataConn:
             raise TimeoutError("timed out")
 
     out = bridge.dataset_read(_session(SlowFTP()), "BIG.DATA")
@@ -1201,11 +1203,10 @@ def test_logon_breaker_keeps_successful_reads_concurrent() -> None:
     read_barrier = threading.Barrier(n, timeout=5.0)
 
     class ParallelReadFTP(FakeFTP):
-        def retrbinary(self, cmd: str, callback) -> str:
+        def transfercmd(self, cmd: str, rest=None) -> _FakeDataConn:
             self.commands.append(cmd)
             read_barrier.wait()
-            callback(b"PARALLEL-OK\n")
-            return "226 done"
+            return _FakeDataConn(b"PARALLEL-OK\n")
 
     breaker = LogonBreaker(threshold=1, cooldown_s=60.0)
     replies = _burst(

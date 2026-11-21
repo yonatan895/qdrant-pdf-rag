@@ -1,8 +1,11 @@
 """FTP transport for the read-only Zowe MCP bridge (ADR-0003, ADR-0012).
 
 All approved tools speak the z/OS FTP server; nothing here opens any other
-connection. Text reads use explicit TYPE A so the server converts EBCDIC on
-the wire and decode using a configurable code page. Credentials travel only
+connection. Text reads stay in TYPE A end to end (never ftplib's retrbinary,
+which switches to TYPE I), so the server translates EBCDIC on the wire; the
+received bytes are decoded with `FTPConfig.encoding` (`MCP_FTP_ENCODING`), the
+code page of the server's ASCII output (ISO8859-1 unless the site's FTP.DATA
+SBDATACONN says otherwise), not the dataset's EBCDIC page. Credentials travel only
 inside ftplib and never enter error strings, logs, or tool results.
 
 ADR-0012 pilot controls enforced here:
@@ -35,7 +38,6 @@ from __future__ import annotations
 import codecs
 import contextlib
 import ftplib
-import io
 import re
 import socket
 import ssl
@@ -76,6 +78,8 @@ _MEMBER_RE = re.compile(r"^[A-Z#$@][A-Z0-9#$@]{0,7}$")
 _JOB_ID_RE = re.compile(r"^JOB\d{5,7}$")
 _JES_IDENT_RE = re.compile(r"^[A-Z#$@][A-Z0-9#$@]{0,7}$")
 _SPOOL_ID_RE = re.compile(r"^\d{1,5}$")
+_COMPLETION_CODE_RE = re.compile(r"^[A-Z0-9]{1,8}$")
+_LEVEL2_HEADER = ("JOBNAME", "JOBID", "OWNER", "STATUS", "CLASS")
 _FORBIDDEN_NAME_CHARS = frozenset("'\"*?%/\\")
 
 # D6 redaction patterns (applied after control/bidi stripping).
@@ -284,7 +288,7 @@ class FTPConfig:
     transport_mode: Literal["ftps", "plain"] = "ftps"
     plain_ftp_accepted: bool = False
     ca_file: str | None = None
-    encoding: str = "utf-8"
+    encoding: str = "utf-8"  # server's TYPE A output code page (see module doc)
     dataset_allowlist: tuple[str, ...] = ()
     enabled_tools: tuple[str, ...] = DEFAULT_ENABLED_TOOLS
     jes_jobname_prefixes: tuple[str, ...] = ()
@@ -604,23 +608,33 @@ def frame_untrusted_observation(text: str, *, tool: str, target: str) -> str:
 
 
 def _capped_retr(ftp: ftplib.FTP, command: str, max_bytes: int) -> tuple[bytes, bool]:
-    """RETR aborting past max_bytes. Returns (payload, truncated)."""
-    buf = io.BytesIO()
+    """TYPE A (ASCII) receive aborting past max_bytes. Returns (payload, truncated).
 
-    def _sink(chunk: bytes) -> None:
-        remaining = max_bytes - buf.tell()
-        if len(chunk) > remaining:
-            buf.write(chunk[:remaining])
-            raise _CapExceeded
-        buf.write(chunk)
-
-    try:
-        ftp.retrbinary(command, _sink)
-    except _CapExceeded:
+    Sends `TYPE A` itself and reads the data connection directly: ftplib's
+    `retrbinary` would switch to `TYPE I` and receive untranslated EBCDIC,
+    and `retrlines` drops record ends and refuses lines over 8 KiB. The
+    payload is the server's translated output (its ASCII code page, CRLF
+    record ends), decoded by the caller with `FTPConfig.encoding`.
+    """
+    ftp.sendcmd("TYPE A")
+    buf = bytearray()
+    truncated = False
+    with ftp.transfercmd(command) as conn:
+        while chunk := conn.recv(8192):
+            remaining = max_bytes - len(buf)
+            if len(chunk) > remaining:
+                buf += chunk[:remaining]
+                truncated = True
+                break
+            buf += chunk
+        if not truncated and isinstance(conn, ssl.SSLSocket):
+            conn.unwrap()
+    if truncated:
         with contextlib.suppress(Exception):  # best-effort abort only
             ftp.abort()
-        return buf.getvalue(), True
-    return buf.getvalue(), False
+    else:
+        ftp.voidresp()
+    return bytes(buf), truncated
 
 
 def _tool_result(
@@ -820,7 +834,6 @@ def dataset_read(session: FTPSession, dataset: str, member: str | None = None) -
     canonical = canonical_dataset_name(dsn, mem)
     quoted = f"'{dsn}'"
     try:
-        session.ftp.sendcmd("TYPE A")
         cmd = f"RETR {quoted}({mem})" if mem else f"RETR {quoted}"
         text, truncated = session.read_text(cmd)
         return _tool_result(text, truncated, frame_tool="dataset_read", frame_target=canonical)
@@ -841,7 +854,6 @@ def uss_read(session: FTPSession, path: str) -> dict:
     if not clean.startswith("/"):
         return _tool_error(INVALID_PARAMS, "path must be absolute")
     try:
-        session.ftp.sendcmd("TYPE A")
         text, truncated = session.read_text(f"RETR {clean}")
         return _tool_result(text, truncated, frame_tool="uss_read", frame_target=clean)
     except Exception as exc:  # noqa: BLE001 — mapped to stable codes below
@@ -875,14 +887,33 @@ def _parse_job_line(line: str) -> dict[str, Any] | None:
         "job_id": parts[1].upper(),
         "owner": parts[2].upper(),
         "status": parts[3].upper(),
-        "return_code": None,
+        "completion": None,
         "raw": line,
     }
+    # Completion is rendered from validated tokens only, never raw line text.
+    # Wire spellings beyond RC= are unverified until the D8(c) dry run.
+    rest = " ".join(parts[4:]).upper()
     for token in parts[4:]:
         upper = token.upper()
         if upper.startswith(("RC=", "CC")):
-            job["return_code"] = token.split("=", 1)[-1]
+            value = upper.split("=", 1)[-1]
+            if _COMPLETION_CODE_RE.fullmatch(value):
+                job["completion"] = f"RC={value}"
+        elif upper.startswith("ABEND="):
+            value = upper.split("=", 1)[1]
+            if _COMPLETION_CODE_RE.fullmatch(value):
+                job["completion"] = f"ABEND={value}"
+    if "JCL ERROR" in rest:
+        job["completion"] = "JCL ERROR"
+    elif "SYS FAIL" in rest:
+        job["completion"] = "SYS FAIL"
     return job
+
+
+def _is_level2_header(line: str) -> bool:
+    """The JESINTERFACELEVEL=2 LIST header; at level 1 the columns differ
+    (no OWNER) and would be misread, so the JES tools require it."""
+    return [p.upper() for p in line.split()[:5]] == list(_LEVEL2_HEADER)
 
 
 def _parse_spool_table_line(line: str) -> tuple[int, str] | None:
@@ -925,6 +956,10 @@ def job_status(
 ) -> dict:
     """List one exact job matching bridge-side JES prefix allowlists.
 
+    An exact `job_id` sends `LIST <jobid>` (a bare `LIST` is bounded by
+    JESENTRYLIMIT and could miss the job); a name/owner query sends a bare
+    `LIST` under the `SITE` filters. The listing must carry the
+    JESINTERFACELEVEL=2 header or the call fails closed (`jes_unavailable`).
     Lines are filtered as the `LIST` streams in; the rendered output is capped
     at `max_bytes` like `dataset_read` (truncation suffix, transfer aborted),
     so a large listing is never buffered whole.
@@ -944,9 +979,13 @@ def job_status(
         used = 0
         matched_any_target = False
         allowed_any = False
+        saw_header = False
 
         def _collect(line: str) -> None:
-            nonlocal used, matched_any_target, allowed_any
+            nonlocal used, matched_any_target, allowed_any, saw_header
+            if not saw_header:
+                saw_header = _is_level2_header(line)
+                return
             parsed = _parse_job_line(line)
             if parsed is None:
                 return
@@ -961,8 +1000,8 @@ def job_status(
                 return
             allowed_any = True
             piece = f"{parsed['name']} {parsed['job_id']} {parsed['status']}"
-            if parsed.get("return_code"):
-                piece += f" RC={parsed['return_code']}"
+            if parsed.get("completion"):
+                piece += f" {parsed['completion']}"
             if rendered:
                 piece = "\n" + piece
             encoded = piece.encode("utf-8")
@@ -974,11 +1013,13 @@ def job_status(
 
         truncated = False
         try:
-            session.ftp.retrlines("LIST", _collect)
+            session.ftp.retrlines(f"LIST {clean_id}" if clean_id else "LIST", _collect)
         except _CapExceeded:
             truncated = True
             with contextlib.suppress(Exception):  # best-effort abort only
                 session.ftp.abort()
+        if not saw_header:
+            raise _JesUnavailable("LIST lacks the JESINTERFACELEVEL=2 header")
         if matched_any_target and not allowed_any:
             return _tool_error(DENIED, "requested z/OS target is not permitted")
         target_label = clean_id or f"{clean_name}/{clean_owner}"
@@ -1012,6 +1053,9 @@ def jes_spool_read(session: FTPSession, job_id: str, spool_id: str) -> dict:
         lines: list[str] = []
         session.ftp.retrlines(f"LIST {jid}", lines.append)
 
+        if not any(_is_level2_header(line) for line in lines):
+            # JESINTERFACELEVEL=1 (or unknown) layout: columns would be misread.
+            raise _JesUnavailable("LIST lacks the JESINTERFACELEVEL=2 header")
         job_info: dict[str, Any] | None = None
         spool_dds: dict[int, str] = {}
         for line in lines:
@@ -1038,8 +1082,7 @@ def jes_spool_read(session: FTPSession, job_id: str, spool_id: str) -> dict:
         if ddname not in ALLOWED_JES_DDS:
             return _tool_error(DENIED, "requested z/OS target is not permitted")
 
-        session.ftp.sendcmd("TYPE A")
-        text, truncated = session.read_text(f"RETR {jid}.{sid}")
+        text, truncated = session.read_text(f"RETR {jid}.{sid}")  # TYPE A
         return _tool_result(
             text, truncated, frame_tool="jes_spool_read", frame_target=f"{jid}.{sid}({ddname})"
         )
