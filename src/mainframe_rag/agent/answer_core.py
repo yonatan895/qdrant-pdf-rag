@@ -20,7 +20,7 @@ from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
-from mainframe_rag.agent import answer_expand, answer_select
+from mainframe_rag.agent import answer_expand, answer_research, answer_select
 from mainframe_rag.agent.answer import (
     REASON_MALFORMED_FRAME,
     REASON_MISSING_FINISH,
@@ -112,6 +112,9 @@ class AnswerCoreInput:
     # The latest user message's images and their reads (#1287, /v1/chat
     # only); None on every other turn, which keeps its exact prompt bytes.
     images: TurnImages | None = None
+    # Per-request research mode opt-in (ADR-0013 / #1325, /v1/chat* only);
+    # False on every other turn, which keeps its exact behavior and bytes.
+    research_mode: bool = False
 
 
 @dataclass
@@ -350,6 +353,10 @@ async def retrieve_for_answer(
     retrieval failure. `parent_span` gets the outcome as fixed labels and
     counts, never text."""
     found = await _retrieve_selected(plan, source, deps, parent_span)
+    if deps.settings.research_mode_enabled and source.research_mode:
+        found, _research = await answer_research.run_research(
+            plan, found, source, deps, parent_span, span_tracer=tracer,
+        )
     if not deps.settings.answer_expand_enabled:
         return found
     ctx = trace.set_span_in_context(parent_span) if parent_span is not None else None
@@ -371,11 +378,18 @@ async def _retrieve_selected(
     plan: SearchPlan, source: AnswerCoreInput, deps: AnswerCoreDeps,
     parent_span: trace.Span | None,
 ) -> RetrievalResult:
-    """Retrieval, then candidate selection when it is on (issue #1309)."""
+    """Retrieval, then candidate selection when it is on (issue #1309).
+    Exclusive per request with research mode in the first release (ADR-0013 D1):
+    when research mode runs on this turn, selection bypasses with reason
+    `research_mode` and makes no wide retrieval or selection model call."""
     settings = deps.settings
     if not settings.answer_select_enabled:
         return await retrieve_planned(plan, source, deps)
-    reason = answer_select.bypass_reason(plan.query, plan.anchor)
+    reason: answer_select.SelectReason | None = (
+        "research_mode"
+        if settings.research_mode_enabled and source.research_mode
+        else answer_select.bypass_reason(plan.query, plan.anchor)
+    )
     if reason is None and settings.answer_select_candidates <= settings.answer_hit_limit:
         reason = "few_candidates"
     if reason is not None:
