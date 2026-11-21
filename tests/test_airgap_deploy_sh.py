@@ -424,6 +424,33 @@ def test_unset_coding_mode_adds_no_pod_variable(tree):
     assert result.returncode == 0, result.stderr
     pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
     assert "ANSWER_CODING_MODE_ENABLED" not in pod
+    assert "ANSWER_SPL_MODE_ENABLED" not in pod
+
+
+@pytest.mark.parametrize("source", ["file", "environment"])
+def test_spl_mode_one_line_enable_reaches_the_pod_settings(tree, source):
+    """Issue #1293 through real common.sh, mapper and Helm: the one airgap.env
+    line ANSWER_SPL_MODE_ENABLED=true reaches the Deployment and Settings reads
+    it as on; an environment value beats the file; unset renders no variable."""
+    from mainframe_rag.config import Settings
+
+    root, _log = tree
+    file_values = {
+        "INTERNAL_REGISTRY": "reg.internal", "NAMESPACE": "ns",
+        "STORAGE_CLASS": "standard", "IMAGE_SHA": IMAGE_SHA,
+        "EMBED_MODEL": "embed", "DENSE_DIM": "64", "EMBED_MODEL_REVISION": "rev-1",
+        "EMBED_BASE_URL": "http://vllm:8000/v1", "OPENWEBUI_ENABLED": "false",
+        "ANSWER_SPL_MODE_ENABLED": "true" if source == "file" else "false",
+    }
+    env_file = root / "airgap.env"
+    env_file.write_text("".join(f"{key}={value}\n" for key, value in file_values.items()))
+    overrides = [("ANSWER_SPL_MODE_ENABLED", "true")] if source == "environment" else []
+    result = _run(tree, ("AIRGAP_ENV", str(env_file)), *overrides)
+    assert result.returncode == 0, result.stderr
+    pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
+    assert pod.get("ANSWER_SPL_MODE_ENABLED") == "true"
+    assert Settings(_env_file=None, answer_spl_mode_enabled=pod["ANSWER_SPL_MODE_ENABLED"]
+                    ).answer_spl_mode_enabled is True
 
 
 @pytest.mark.parametrize("source", ["file", "environment"])

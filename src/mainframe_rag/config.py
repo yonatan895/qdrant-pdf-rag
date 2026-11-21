@@ -285,6 +285,13 @@ class Settings(BaseSettings):
     # (Metal) C takes the complex path and the coding prompt extension. False
     # restores the pre-#1276 complexity and prompt bytes for every request.
     answer_coding_mode_enabled: bool = True
+    # SPL mode (issue #1293, default off pending maintainer sign-off on prompt
+    # wording and default-on flip): a request to write, fix, optimise or
+    # explain Splunk SPL over z/OS data, or pasted Splunk results, takes the
+    # complex path and the SPL prompt extension (taking precedence over coding
+    # mode when both match). False restores the pre-#1293 complexity and prompt
+    # bytes for every request (the `spl` fence tag in SCRIPT_LANGS is not gated).
+    answer_spl_mode_enabled: bool = False
 
     # Dense query instruction prefix for asymmetric embedders (e.g. Qwen3-Embedding).
     # Applied to query vector embeddings; chunks during ingest remain raw text.

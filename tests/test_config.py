@@ -305,6 +305,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "splunk_context_max_chars": 4000,
     "prompt_order": "retrieval",
     "answer_coding_mode_enabled": True,  # #1276: on by default (maintainer, 2026-11-16)
+    "answer_spl_mode_enabled": False,  # #1293: off by default pending maintainer sign-off
     "dense_query_prefix": (
         "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: "
     ),
@@ -663,6 +664,15 @@ def test_coding_mode_is_on_by_default_and_one_env_line_turns_it_off(monkeypatch,
     assert Settings(_env_file=None).answer_coding_mode_enabled is True
     monkeypatch.setenv("ANSWER_CODING_MODE_ENABLED", raw)
     assert Settings(_env_file=None).answer_coding_mode_enabled is expected
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("true", True), ("1", True), ("false", False)])
+def test_spl_mode_is_off_by_default_and_one_env_line_toggles_it(monkeypatch, raw, expected):
+    """Issue #1293: SPL mode ships off pending maintainer decision; one
+    ANSWER_SPL_MODE_ENABLED line in airgap.env toggles it."""
+    assert Settings(_env_file=None).answer_spl_mode_enabled is False
+    monkeypatch.setenv("ANSWER_SPL_MODE_ENABLED", raw)
+    assert Settings(_env_file=None).answer_spl_mode_enabled is expected
 
 
 def test_condensation_and_anchoring_cannot_both_be_enabled(monkeypatch):

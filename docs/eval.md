@@ -1273,6 +1273,20 @@ not edited for this.
   setting: `false` restores the prompts and the complexity, not the parse. The old build (A sessions) predates the setting and is
   already the coding-off prompt with the old fence handling.
 
+<a id="site-spl-arm"></a>
+**SPL mode (issue #1293).** Every report and export carries `metrics.spl`
+(appended after `metrics.coding` so no earlier key moves): the rows whose
+question the agent's own classifier (`is_spl_request`) marks as an SPL request
+or pasted Splunk results, derived on the evaluator side from the question, with
+the same text-free count shape as `metrics.coding` (`n`, `judged`, `pass`,
+`answer_n`, `false_refusals`, `false_refusal_rate`, `zero_hits`,
+`by_verification_state`). The pinned `evals/golden.jsonl` has zero SPL rows and
+is not edited for this: measuring SPL authoring and interpretation uses
+team-authored SPL rows in the site graded eval (#1191 D3), comparing default
+off against an `ANSWER_SPL_MODE_ENABLED=true` arm on the same build. Because
+`judge()` reads both `answer` and `script` for gold strings, `spl` fences moved
+into `script` score identically across builds.
+
 **Decision rule.** The [protocol above](#measurement-protocol)
 applies: decide on the hardware-independent group only, and a difference
 smaller than the range either arm shows across its own repeats is noise. At a

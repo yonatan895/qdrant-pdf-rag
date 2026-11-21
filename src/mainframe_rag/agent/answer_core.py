@@ -39,6 +39,7 @@ from mainframe_rag.agent.answer import (
     condense_query,
     names_identifier,
     parse_answer,
+    spl_mode_applies,
     verification_state_for,
 )
 from mainframe_rag.agent.chat_turn import (
@@ -576,13 +577,15 @@ async def _build_prepared_prompt(
     root_ctx: Context | None,
     temperature: float | None = None,
     coding: bool = False,
+    spl: bool = False,
 ) -> PreparedPrompt:
     """One prompt-build owner for the JSON and streaming executors: identical
     budget inputs, identical evidence manifest, one prompt.build span."""
     settings = deps.settings
-    # Passed only when it fires (issue #1276), like search_query, so a
-    # non-coding call keeps its exact keyword set.
-    coding_kw: dict[str, Any] = {"coding": True} if coding else {}
+    # Passed only when a mode fires (#1276 coding, #1293 SPL), like
+    # search_query, so every other call keeps its exact keyword set. SPL takes
+    # precedence over coding when both match.
+    mode_kw: dict[str, Any] = {"spl": True} if spl else ({"coding": True} if coding else {})
     max_context = (
         settings.prompt_max_context_chars_complex
         if complexity == "complex"
@@ -635,7 +638,7 @@ async def _build_prepared_prompt(
                 reasoning_effort=effort,
                 temperature=temperature,
                 **extra,
-                **coding_kw,
+                **mode_kw,
                 **image_kw,
             )
         build_msg_fn = deps.build_messages_fn or build_messages
@@ -658,7 +661,7 @@ async def _build_prepared_prompt(
             order=settings.prompt_order,
             reasoning_effort=effort,
             temperature=temperature,
-            **coding_kw,
+            **mode_kw,
         )
 
 
@@ -818,11 +821,14 @@ async def execute_answer_core(
     # is the message itself within `query_max_chars` (issue #1192) unless a
     # chat follow-up was condensed (issue #1268).
     search_text = _search_text(input_data, settings)
-    # Coding mode (issue #1276) is decided once here, from the operator
-    # setting and the turn's own text, and routes the turn to the complex
-    # path; with the setting off every turn keeps the classifier's result.
-    coding = coding_mode_applies(_coding_text(input_data), settings)
-    complexity = "complex" if coding else classify_fn(search_text)
+    # SPL mode (#1293) and coding mode (#1276) are decided once here, from the
+    # operator settings and the turn's own text, and route the turn to the
+    # complex path; SPL takes precedence when both match. With both settings
+    # off every turn keeps the classifier's result.
+    mode_text = _coding_text(input_data)
+    spl = spl_mode_applies(mode_text, settings)
+    coding = not spl and coding_mode_applies(mode_text, settings)
+    complexity = "complex" if (spl or coding) else classify_fn(search_text)
 
     if not hits:
         return _empty_output(search_text, kind, timings, complexity)
@@ -834,7 +840,7 @@ async def execute_answer_core(
         input_data.temperature if input_data.temperature is not None else settings.llm_temperature
     )
     prepared = await _build_prepared_prompt(
-        input_data, deps, hits, complexity, effort, root_ctx, temperature, coding
+        input_data, deps, hits, complexity, effort, root_ctx, temperature, coding, spl
     )
     _require_supplied_evidence(prepared, len(hits))
 
@@ -904,11 +910,14 @@ async def execute_answer_core_stream(
     # is the message itself within `query_max_chars` (issue #1192) unless a
     # chat follow-up was condensed (issue #1268).
     search_text = _search_text(input_data, settings)
-    # Coding mode (issue #1276) is decided once here, from the operator
-    # setting and the turn's own text, and routes the turn to the complex
-    # path; with the setting off every turn keeps the classifier's result.
-    coding = coding_mode_applies(_coding_text(input_data), settings)
-    complexity = "complex" if coding else classify_fn(search_text)
+    # SPL mode (#1293) and coding mode (#1276) are decided once here, from the
+    # operator settings and the turn's own text, and route the turn to the
+    # complex path; SPL takes precedence when both match. With both settings
+    # off every turn keeps the classifier's result.
+    mode_text = _coding_text(input_data)
+    spl = spl_mode_applies(mode_text, settings)
+    coding = not spl and coding_mode_applies(mode_text, settings)
+    complexity = "complex" if (spl or coding) else classify_fn(search_text)
 
     # 2. Empty hits short-circuit: only the terminal record is yielded. The
     # empty answer is not a streamed token — /v1/answer's contract is a
@@ -925,7 +934,7 @@ async def execute_answer_core_stream(
         input_data.temperature if input_data.temperature is not None else settings.llm_temperature
     )
     prepared = await _build_prepared_prompt(
-        input_data, deps, hits, complexity, effort, root_ctx, temperature, coding
+        input_data, deps, hits, complexity, effort, root_ctx, temperature, coding, spl
     )
     _require_supplied_evidence(prepared, len(hits))
 

@@ -731,6 +731,22 @@ def test_export_carries_the_coding_breakdown_without_the_question(site_eval, end
     assert coding["n"] == 1 and coding["judged"] == 1 and coding["answer_n"] == 1
 
 
+@pytest.mark.parametrize("endpoint", ["answer", "chat"])
+def test_export_carries_the_spl_breakdown_without_the_question(site_eval, endpoint):
+    """Issue #1293: the SPL class is derived from the question on the
+    evaluator side and leaves the gap as counts only."""
+    query = f"Write a Splunk SPL search for {CANARIES['query']} one"
+    _, report, export, _ = site_eval(
+        _canary_agent(endpoint), [_entry(id="SPL1", query=query, query_class="syntax"),
+                                  _entry(id="LOOK", query=f"{CANARIES['query']} one")],
+        ["--endpoint", endpoint, "--stream"])
+    text = export.decode("utf-8")
+    assert CANARIES["query"] not in text and "Splunk" not in text
+    spl = json.loads(text)["metrics"]["spl"]
+    assert spl == report["metrics"]["spl"]
+    assert spl["n"] == 1 and spl["judged"] == 1 and spl["answer_n"] == 1
+
+
 def test_export_of_a_health_failure_holds_no_golden_text(site_eval):
     import httpx2
 

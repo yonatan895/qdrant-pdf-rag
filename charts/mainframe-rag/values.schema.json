@@ -123,6 +123,7 @@
             "retrieveMaxChunksPerDoc": { "type": "integer", "minimum": 1, "maximum": 10 },
             "followupAnchorEnabled": { "type": "boolean" },
             "codingModeEnabled": { "type": "boolean" },
+            "splModeEnabled": { "type": "boolean" },
             "chatImagesEnabled": { "type": "boolean" },
             "imageTokenReserve": { "type": "integer", "minimum": 256, "maximum": 65536 },
             "maxModelLen": { "type": "integer", "minimum": 512, "maximum": 262144 },

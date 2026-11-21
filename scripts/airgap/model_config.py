@@ -62,11 +62,13 @@ CHAT_FOLLOWUP_MODES_CONFLICT = (
 )
 # Coding mode (#1276): optional boolean, default on in Settings; empty keeps it.
 CODING_MODE_KEY = "ANSWER_CODING_MODE_ENABLED"
+# SPL mode (#1293): optional boolean, default off in Settings; empty keeps it.
+SPL_MODE_KEY = "ANSWER_SPL_MODE_ENABLED"
 # Pasted chat images (#1287): optional boolean, default off in Settings; empty keeps it.
 CHAT_IMAGES_KEY = "CHAT_IMAGES_ENABLED"
 REASONING_ENV_KEYS = (*REASONING_INTEGER_FIELDS, *REASONING_EFFORT_FIELDS, "LLM_REASONING_EFFORTS", "LLM_STREAM",
                       *MODEL_ARGUMENT_ENV_KEYS, TOKEN_COUNT_SOURCE_KEY, FOLLOWUP_ANCHOR_KEY, CODING_MODE_KEY,
-                      CHAT_IMAGES_KEY)
+                      SPL_MODE_KEY, CHAT_IMAGES_KEY)
 
 # Request admission and total deadline (#374 handoff, #843 D1). Empty keeps the
 # chart default (deadline 270; admission 4/4/30, #843); zero is an explicit selection. Limits match config.Settings and the
@@ -94,7 +96,7 @@ OPERATOR_BOOL_KEYS = (
     "UI_ENABLED", "CONTEXTUAL_EMBED_ENABLED", "INGEST_ALIAS_PUBLISH",
     "INGEST_REINGEST", "INGEST_AUTHORIZE_FROM_CATALOG", "CHAT_CONDENSE_ENABLED", "LLM_STREAM", "AGENT_NETWORK_POLICY",
     "FEEDBACK_ENABLED", "OPENWEBUI_ENABLED", "CHAT_FOLLOWUP_ANCHOR_ENABLED", "ANSWER_CODING_MODE_ENABLED",
-    "OPENWEBUI_RATINGS_ENABLED", "CHAT_IMAGES_ENABLED",
+    "ANSWER_SPL_MODE_ENABLED", "OPENWEBUI_RATINGS_ENABLED", "CHAT_IMAGES_ENABLED",
 )
 
 # Agent ingress NetworkPolicy (issue #373): default ON; the allow-list names
@@ -566,6 +568,8 @@ def reasoning_overrides(values: Mapping[str, str]) -> dict[str, object]:
         result["followupAnchorEnabled"] = parse_strict_bool(FOLLOWUP_ANCHOR_KEY, values[FOLLOWUP_ANCHOR_KEY], False)
     if values.get(CODING_MODE_KEY, "") != "":
         result["codingModeEnabled"] = parse_strict_bool(CODING_MODE_KEY, values[CODING_MODE_KEY], True)
+    if values.get(SPL_MODE_KEY, "") != "":
+        result["splModeEnabled"] = parse_strict_bool(SPL_MODE_KEY, values[SPL_MODE_KEY], False)
     if values.get(CHAT_IMAGES_KEY, "") != "":
         result["chatImagesEnabled"] = parse_strict_bool(CHAT_IMAGES_KEY, values[CHAT_IMAGES_KEY], False)
     source = values.get(TOKEN_COUNT_SOURCE_KEY, "")
