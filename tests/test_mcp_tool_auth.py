@@ -1551,6 +1551,112 @@ def test_upstream_body_cap_and_timeout_are_fixed_codes():
                                                           headers={"Authorization": "Bearer " + CANARY}))
 
 
+def _stream_tail(transport: httpx2.AsyncBaseTransport, **options: object) -> gw.UpstreamTail:
+    """`UpstreamClient.stream_tail` against `transport`, with test bounds."""
+    kwargs: dict[str, object] = {"keep_bytes": 4096, "max_read_bytes": 64 * 1024 * 1024, "deadline_s": 30.0}
+    kwargs.update(options)
+
+    async def run() -> gw.UpstreamTail:
+        client = gw.UpstreamClient("https://gitlab.example.test/api/v4", timeout_s=2.0, max_bytes=1024,
+                                   transport=transport)
+        try:
+            return await client.stream_tail("GET", "/projects/7/jobs/1/trace", **kwargs)  # type: ignore[arg-type]
+        finally:
+            await client.aclose()
+
+    return asyncio.run(run())
+
+
+def test_stream_tail_keeps_the_last_bytes_in_bounded_memory():
+    # 16 MiB streamed through a 4 KiB tail: memory stays far below the body
+    # size (request() would hold all of it), and the tail is the exact end.
+    import tracemalloc
+
+    chunk = bytes(range(256)) * 256  # 64 KiB, the same object every time
+    last = b"THE-LAST-BYTES\n"
+
+    async def body():
+        for _ in range(256):
+            yield chunk
+        yield last
+
+    transport = httpx2.MockTransport(lambda request: httpx2.Response(200, content=body()))
+    tracemalloc.start()
+    try:
+        read = _stream_tail(transport)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert read.complete is True
+    assert read.total == 256 * 65536 + len(last)
+    assert read.tail == (chunk + last)[-4096:]
+    assert peak < 4 * 1024 * 1024, peak
+
+
+def test_stream_tail_stops_at_the_byte_ceiling_without_reading_on():
+    pulled: list[int] = []
+
+    async def body():
+        for _ in range(40):
+            pulled.append(1000)
+            yield b"y" * 999 + b"\n"
+
+    read = _stream_tail(httpx2.MockTransport(lambda request: httpx2.Response(200, content=body())),
+                        max_read_bytes=10_010, keep_bytes=100)
+    assert read.complete is False and read.total == 10_010
+    assert read.tail == (b"y" * 999 + b"\n")[-90:] + b"y" * 10
+    assert sum(pulled) <= 11_000
+
+
+def test_stream_tail_returns_what_it_has_at_the_deadline():
+    async def body():
+        yield b"first line\n"
+        await asyncio.sleep(3600)
+        yield b"never\n"
+
+    started = time.monotonic()
+    read = _stream_tail(httpx2.MockTransport(lambda request: httpx2.Response(200, content=body())),
+                        deadline_s=0.3)
+    assert time.monotonic() - started < 5
+    assert (read.complete, read.total, read.tail) == (False, 11, b"first line\n")
+
+
+def test_stream_tail_maps_statuses_and_an_unanswered_request_to_fixed_codes():
+    for status, code in ((404, "not_found"), (401, "upstream_refused"), (302, "upstream_unavailable")):
+        backend = _Backend(status, body=f"stack {CANARY}".encode())
+        with pytest.raises(gw.GatewayError) as caught:
+            _stream_tail(httpx2.MockTransport(backend.handler))
+        assert caught.value.code == code
+    # No answer before the deadline is a timeout, never an empty success.
+    with pytest.raises(gw.GatewayError) as caught:
+        _stream_tail(_HangingTransport(), deadline_s=0.2)
+    assert caught.value.code == "upstream_timeout"
+
+
+def test_limit_defaults_fill_only_the_keys_the_document_leaves_out():
+    doc = _config_doc(limits={"rate_per_minute": 7})
+    defaults = {"max_concurrent_per_user": 4, "rate_per_minute": 120}
+    limits = gw.config_from_document(doc, "splunk", limit_defaults=defaults).limits
+    assert (limits.max_concurrent_per_user, limits.rate_per_minute) == (4, 7)
+    explicit = {**doc, "limits": {"max_concurrent_per_user": 1}}
+    limits = gw.config_from_document(explicit, "splunk", limit_defaults=defaults).limits
+    assert (limits.max_concurrent_per_user, limits.rate_per_minute) == (1, 120)
+    limits = gw.config_from_document({**doc, "limits": {}}, "splunk").limits
+    assert (limits.max_concurrent_per_user, limits.rate_per_minute) == (1, 30)
+    with pytest.raises(ValueError):
+        gw.config_from_document(doc, "splunk", limit_defaults={"no_such_limit": 1})
+
+
+def test_rows_can_name_the_next_page():
+    result = _result(_post_all(_gateway(_Handler(gw.ToolOutput(rows=[{"n": 1}], next_page=3))).app, [_call()])[0])
+    _, body = _frame(result)
+    assert body == {"rows": [{"n": 1}], "row_count": 1, "truncated": False, "next_page": 3}
+    _, plain = _frame(_result(_post_all(_gateway(_Handler()).app, [_call()])[0]))
+    assert "next_page" not in plain
+    with pytest.raises(ValueError):
+        gw.ToolOutput(text="t", next_page=2)
+
+
 def test_a_client_that_disconnects_mid_body_gets_no_reply():
     inner = _gateway(_Handler()).app
     sent: list[object] = []
