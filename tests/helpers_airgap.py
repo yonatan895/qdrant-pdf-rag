@@ -368,17 +368,28 @@ def gap_release_anchor() -> Path:
     return _anchor_of(gap_release_key())
 
 
+GAP_MANIFEST_LINES = (
+    "gap_base: " + "1" * 40 + "\n"
+    "gap_issue: GL#1\n"
+    "gap_tag: gap-release-1\n"
+    "gap_tree: " + "2" * 40 + "\n"
+)
+
+
 def write_signed_manifest(dist: Path, content: str, *, origin: str | None = "upstream",
-                          key: Path | None = None) -> None:
+                          key: Path | None = None, gap_fields: bool = True) -> None:
     """Write dist/MANIFEST.txt plus a real signature chain for it: SHA256SUMS
     listing exactly MANIFEST.txt, SHA256SUMS.sig and sneakernet-signing.pub
     (throwaway RSA key, reused per process). The guard verifies this chain
     before trusting the MANIFEST (issue #414). `origin` appends the signed
     `origin:` line pack.sh writes (#1118 F2; None leaves it out), and `key`
-    signs instead of the upstream release key."""
+    signs instead of the upstream release key. When `origin == "gap"` and
+    `gap_fields` is True, appends valid gap_* metadata lines (GH#1207 F6)."""
     key = key or release_key()
     if origin is not None:
         content = content + ("" if content.endswith("\n") or not content else "\n") + f"origin: {origin}\n"
+        if origin == "gap" and gap_fields and "gap_base:" not in content:
+            content = content + GAP_MANIFEST_LINES
     dist.mkdir(parents=True, exist_ok=True)
     (dist / "MANIFEST.txt").write_text(content)
     (dist / "SHA256SUMS").write_text(f"{sha256_bytes(content.encode())}  MANIFEST.txt\n")

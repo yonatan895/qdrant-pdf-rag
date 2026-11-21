@@ -592,7 +592,12 @@ def test_load_accepts_a_gap_release_only_with_the_gap_anchor(load_tree):
     tmp_path, skopeo_log = load_tree
     dist = tmp_path / "dist"
     _make_artifacts(dist)
-    _edit_manifest_and_resign(dist, lambda text: text.replace("origin: upstream\n", "origin: gap\n"))
+    from tests.helpers_airgap import GAP_MANIFEST_LINES
+
+    _edit_manifest_and_resign(
+        dist,
+        lambda text: text.replace("origin: upstream\n", "origin: gap\n" + GAP_MANIFEST_LINES),
+    )
     _sign_artifacts(dist, gap_release_key())
     refused = _run_load(load_tree)
     assert refused.returncode == 1
