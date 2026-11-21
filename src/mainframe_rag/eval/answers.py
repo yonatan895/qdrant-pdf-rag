@@ -1109,11 +1109,93 @@ def run_session(client: Any, entry: dict[str, Any], pipe_mod: Any,
     return row
 
 
+def _valid_response_hits(raw: Any) -> list[dict[str, Any]] | None:
+    """Non-empty `hits` list from a response payload (SSE `final` or `/v1/chat`
+    finish chunk) carrying real hit shape (`doc_id` and `cite`), including any
+    appended `NeighbourHit`s (#1314). None when absent, empty, or malformed."""
+    if not isinstance(raw, list) or not raw:
+        return None
+    if any(
+        not isinstance(h, dict)
+        or not isinstance(h.get("doc_id"), str)
+        or not isinstance(h.get("cite"), str)
+        for h in raw
+    ):
+        return None
+    return raw
+
+
+def _valid_supplied_evidence(raw: Any) -> list[dict[str, Any]] | None:
+    """Non-empty `supplied_evidence` list from an answer response (JSON or SSE),
+    carrying valid `index`, `doc_id`, `citation`, and `text`. None when absent,
+    empty, or malformed."""
+    if not isinstance(raw, list) or not raw:
+        return None
+    if any(
+        not isinstance(item, dict)
+        or type(item.get("index")) is not int
+        or not isinstance(item.get("doc_id"), str)
+        or not isinstance(item.get("citation"), str)
+        or not isinstance(item.get("text"), str)
+        for item in raw
+    ):
+        return None
+    return raw
+
+
+def resolve_retrieval_hits(
+    data: dict[str, Any], pool: list[dict[str, Any]] | None
+) -> list[dict[str, Any]] | None:
+    """Hit list behind `hit_doc_ids` and `gold_retrieved` (#1314).
+
+    Streamed `/v1/answer` and `/v1/chat` carry `hits` (every retrieved hit plus
+    appended `NeighbourHit`s). Buffered `/v1/answer` carries only
+    `supplied_evidence`: use it when there is no sibling `/v1/search` pool,
+    when more excerpts were packed than `/v1/search` returned (neighbours
+    survived packing), or when a packed citation is absent from `pool`
+    (cross-page neighbour or selected hit). Otherwise keep `pool` so
+    `expand-off` with tail omission keeps all retrieved hits byte-identically.
+    """
+    resp_hits = _valid_response_hits(data.get("hits"))
+    if resp_hits is not None:
+        return resp_hits
+    supplied = _valid_supplied_evidence(data.get("supplied_evidence"))
+    if supplied is not None:
+        if pool is None or len(supplied) > len(pool):
+            return supplied
+        pool_cites = {h.get("cite") for h in pool if isinstance(h.get("cite"), str)}
+        if pool_cites and any(item["citation"] not in pool_cites for item in supplied):
+            return supplied
+    return pool
+
+
+def resolve_citation_hits(
+    data: dict[str, Any], pool: list[dict[str, Any]] | None
+) -> list[dict[str, Any]] | None:
+    """Hit/excerpt list behind citation P/R and judge evidence (#1314).
+
+    Validated citations come exclusively from the final packed evidence
+    manifest (`supplied_evidence`, issue #364), so prefer valid
+    `supplied_evidence` first (omitted tail hits never leak to the judge, and
+    both JSON and SSE surfaces carry packed neighbours with explicit prompt
+    indices), then streamed `hits`, then the sibling `/v1/search` pool.
+    """
+    supplied = _valid_supplied_evidence(data.get("supplied_evidence"))
+    if supplied is not None:
+        return supplied
+    resp_hits = _valid_response_hits(data.get("hits"))
+    if resp_hits is not None:
+        return resp_hits
+    return pool
+
+
 def _fetch_pool(client: Any, query: str, limit: int = 8) -> list[dict[str, Any]] | None:
     """Sibling /v1/search pool (the same call the answer retrieval makes, at
     the deployed `answer_hit_limit`, the agent default unless `--hit-limit` declares another,
-    issue #1191). None on any failure: a missing pool is a missing signal,
-    not an empty pool."""
+    issue #1191). Used as fallback when a response carries no `hits` or
+    `supplied_evidence`, for `--image-arm`, and on buffered JSON `expand-off`
+    runs with tail omission (#1314). None on any failure: a missing pool is a
+    missing signal, not an empty pool."""
     try:
         resp = client.post("/v1/search", json={"query": query, "limit": limit})
         if resp.status_code != 200:
@@ -1211,6 +1293,8 @@ def run_query(
     frames: list[str] | None = None,
     evidence: bool = False,
     keep_evidence_text: bool = False,
+    prefer_response_hits: bool | None = None,
+    citation_hits_out: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """One live /v1/answer call + verdict. Records everything the report and
     the manifest need, including the failure detail (the answer body is the
@@ -1240,6 +1324,8 @@ def run_query(
     Every judged row, on every transport, keeps the packed evidence and the
     final hits as text-free metadata (`eval.capture`, issue #1191);
     `keep_evidence_text` adds the excerpt text for the private report."""
+    if citation_hits_out is not None:
+        citation_hits_out.clear()
     t0 = time.monotonic()
     row = _base_row(entry, temperature)
     body: dict[str, Any] = {"query": entry["query"], "temperature": temperature}
@@ -1278,6 +1364,8 @@ def run_query(
         row = _judge_response(
             row, entry, _chat_answer_data(outcome.final, answer, script), elapsed_ms,
             answer_signals, hits, measured, keep_evidence_text,
+            prefer_response_hits=prefer_response_hits,
+            citation_hits_out=citation_hits_out,
         )
         if evidence and row.get("verdict") in ("pass", "fail"):
             apply_evidence(row, entry, outcome.final["supplied_evidence"])
@@ -1293,9 +1381,14 @@ def run_query(
         return _judge_response(
             row, entry, outcome.final, elapsed_ms, answer_signals, hits, measured,
             keep_evidence_text,
+            prefer_response_hits=prefer_response_hits,
+            citation_hits_out=citation_hits_out,
         )
-    return _judge_http_response(row, entry, resp, elapsed_ms, answer_signals, hits,
-                                keep_evidence_text)
+    return _judge_http_response(
+        row, entry, resp, elapsed_ms, answer_signals, hits, keep_evidence_text,
+        prefer_response_hits=prefer_response_hits,
+        citation_hits_out=citation_hits_out,
+    )
 
 
 def _base_row(entry: dict[str, Any], temperature: float | None) -> dict[str, Any]:
@@ -1324,6 +1417,8 @@ def _judge_http_response(
     answer_signals: dict[str, dict[str, Any]] | None,
     hits: list[dict[str, Any]] | None,
     keep_evidence_text: bool = False,
+    prefer_response_hits: bool | None = None,
+    citation_hits_out: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """A buffered /v1/answer response, or a non-200 stream response."""
     if resp.status_code != 200:
@@ -1344,8 +1439,12 @@ def _judge_http_response(
     # server measured it, i.e. with LLM_STREAM). Absent stays absent.
     headers = getattr(resp, "headers", None)
     measured = parse_server_timing(headers.get("Server-Timing") if headers is not None else None)
-    return _judge_response(row, entry, data, elapsed_ms, answer_signals, hits, measured,
-                           keep_evidence_text)
+    return _judge_response(
+        row, entry, data, elapsed_ms, answer_signals, hits, measured,
+        keep_evidence_text,
+        prefer_response_hits=prefer_response_hits,
+        citation_hits_out=citation_hits_out,
+    )
 
 
 def _judge_response(
@@ -1357,6 +1456,8 @@ def _judge_response(
     hits: list[dict[str, Any]] | None,
     measured: dict[str, Any],
     keep_evidence_text: bool = False,
+    prefer_response_hits: bool | None = None,
+    citation_hits_out: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Validate and judge one answer object (the JSON body or the SSE
     `final`: same answer fields). `measured` holds the count/timing signals
@@ -1442,10 +1543,16 @@ def _judge_response(
         prompt_tokens = completion_tokens = reasoning_tokens = total_tokens = None
         warns.append("zero prompt tokens: model usage not reported (unknown)")
     gold_ids = sorted({str(d) for d in (entry.get("expected_doc_ids") or [])})
+    use_response = (hits is not None) if prefer_response_hits is None else prefer_response_hits
+    retrieval_hits = resolve_retrieval_hits(data, hits) if use_response else hits
+    if citation_hits_out is not None:
+        resolved_citations = resolve_citation_hits(data, hits) if use_response else hits
+        if resolved_citations is not None:
+            citation_hits_out[:] = resolved_citations
     hit_ids = (
         None
-        if hits is None
-        else [str(h.get("doc_id") or "") for h in hits]
+        if retrieval_hits is None
+        else [str(h.get("doc_id") or "") for h in retrieval_hits]
     )
     supplied_n, supplied_doc_n = _supplied_counts(data.get("supplied_evidence"))
     row.update(
@@ -1600,19 +1707,37 @@ def why_mode(row: dict[str, Any]) -> str:
 def inferred_index_off_gold(row: dict[str, Any]) -> bool:
     """True when every inferred citation's 1-based excerpt index points at a
     hit whose doc id is not in the expected set — the measurable slice of
-    right-doc/wrong-index on the inferred path (issue #299). Pure; False
-    when the inputs are missing or uncoercible (never fabricated)."""
+    right-doc/wrong-index on the inferred path (issue #299). Uses the
+    response's explicit prompt-index map (`supplied_evidence_meta`, #1314)
+    when present, falling back to positional `hit_doc_ids` otherwise. Pure;
+    False when the inputs are missing or uncoercible (never fabricated)."""
     indices = row.get("inferred_indices") or []
     expected = set(row.get("expected_doc_ids") or [])
+    if not indices or not expected:
+        return False
+    supplied_meta = row.get("supplied_evidence_meta")
+    by_index: dict[int, str] | None = None
+    if isinstance(supplied_meta, list) and supplied_meta and all(
+        isinstance(item, dict)
+        and type(item.get("index")) is int
+        and isinstance(item.get("doc_id"), str)
+        for item in supplied_meta
+    ):
+        by_index = {item["index"]: item["doc_id"] for item in supplied_meta}
     hits = row.get("hit_doc_ids")
-    if not indices or not expected or not hits:
+    if by_index is None and not hits:
         return False
     for i in indices:
+        if isinstance(i, bool):
+            return False
         try:
             idx = int(i)
         except (TypeError, ValueError):
             return False
-        if 1 <= idx <= len(hits) and str(hits[idx - 1]) in expected:
+        if by_index is not None:
+            if by_index.get(idx) in expected:
+                return False
+        elif hits and 1 <= idx <= len(hits) and str(hits[idx - 1]) in expected:
             return False
     return True
 
@@ -2520,19 +2645,23 @@ def main(argv: list[str] | None = None) -> int:
                         image_turn = build_turn(args.image_arm, entry["query"])
                     frames: list[str] | None = (
                         [] if two_turn or image_turn is not None else None)
+                    join_hits: list[dict[str, Any]] = []
                     row = run_query(
                         client, entry, signals, pool, temperature=args.temperature,
                         stream=args.stream, endpoint=args.endpoint,
                         chat_body=None if image_turn is None else image_turn.body,
                         frames=frames, evidence=two_turn,
                         keep_evidence_text=args.keep_evidence_text,
+                        prefer_response_hits=image_turn is None,
+                        citation_hits_out=join_hits,
                     )
                     if image_turn is not None:
                         from mainframe_rag.eval.image_arm import apply_image_reads
 
                         apply_image_reads(row, image_turn, frames)
-                    if pool is not None:
-                        apply_pool_join(row, entry, pool)
+                    effective_join = join_hits if join_hits else pool
+                    if effective_join is not None:
+                        apply_pool_join(row, entry, effective_join)
                 session = [row]
                 if two_turn:
                     row["turn"] = 1
