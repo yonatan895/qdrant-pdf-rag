@@ -12,6 +12,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -1200,6 +1201,29 @@ def test_rehearse_check_refuses_a_rehearsal_workspace_without_the_deploy_scripts
     # A workspace whose airgap.env makes common.sh die is refused, not trusted.
     (sites.rehearsal / "airgap.env").write_text("AIRGAP_DRYRUN=maybe\n", encoding="utf-8")
     _refused(sites.run(), "cannot resolve the deploy target of the rehearsal workspace")
+
+
+def test_rehearse_check_resolver_is_the_deploys_only_target_resolution():
+    """The resolver sources common.sh and repeats one deploy.sh line (KC). Pin that
+    nothing else in scripts/airgap assigns the target variables, so a new override
+    in the deploy path cannot leave rehearse-check resolving something else."""
+    assigns = re.compile(r"^\s*(?:export\s+)?(NAMESPACE|INTERNAL_REGISTRY|QDRANT_RELEASE|KC)=(.*)$")
+    found = set()
+    for path in sorted((REPO / "scripts/airgap").glob("*.sh")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            match = assigns.match(line)
+            if match:
+                found.add((path.name, match.group(1), match.group(2).strip()))
+    deploy_side = {(n, v, a) for n, v, a in found if n in ("common.sh", "deploy.sh", "load.sh", "pipeline.sh")}
+    assert deploy_side == {
+        ("common.sh", "INTERNAL_REGISTRY", "${INTERNAL_REGISTRY:-}"),
+        ("common.sh", "NAMESPACE", "${NAMESPACE:-mainframe-rag}"),
+        ("common.sh", "QDRANT_RELEASE", "${QDRANT_RELEASE:-qdrant}"),
+        ("deploy.sh", "KC", "${KC:-$(kc)}"),
+        ("pipeline.sh", "KC", "${KC:-$(kc)}"),
+    }
+    assert "KC=${KC:-$(kc)}" in release._RESOLVE_DEPLOY_TARGET_SH
+    assert "resolve_aliases" in release._RESOLVE_DEPLOY_TARGET_SH
 
 
 def test_member_set_and_manifest_fields_match_pack_sh(tmp_path: Path, keypairs: dict[str, Path]):
