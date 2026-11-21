@@ -27,11 +27,30 @@ import ftplib
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from mainframe_rag.mcp.bridge import FTPConfig
 
 _CHUNK = 8192
+
+
+class _MockDataConn:
+    """In-memory data connection: `recv` serves the payload in chunks."""
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+        self._pos = 0
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def recv(self, n: int) -> bytes:
+        chunk = self._payload[self._pos : self._pos + min(n, _CHUNK)]
+        self._pos += len(chunk)
+        return chunk
 
 
 class MockFTPSession:
@@ -43,6 +62,10 @@ class MockFTPSession:
         self._jes_mode = False
         self._filters: dict[str, str] = {}
         self.aborted = False
+        self.pasv = False
+
+    def set_pasv(self, val: bool) -> None:
+        self.pasv = bool(val)
 
     # ---------------------------------------------------------- wire verbs
     def sendcmd(self, cmd: str) -> str:
@@ -72,19 +95,24 @@ class MockFTPSession:
             raise ftplib.error_perm("550 JES interface not available")
         return "200 ok"
 
-    def retrbinary(self, cmd: str, callback) -> str:
+    def transfercmd(self, cmd: str, rest: Any = None) -> _MockDataConn:
+        # Text reads only (the bridge sends TYPE A first); no retrbinary,
+        # which would switch to TYPE I on a real server.
         self.commands.append(cmd)
         _, _, arg = cmd.partition(" ")
-        data = self._read_bytes(arg.strip())
-        for i in range(0, len(data), _CHUNK):
-            callback(data[i : i + _CHUNK])
+        return _MockDataConn(self._read_bytes(arg.strip()))
+
+    def voidresp(self) -> str:
         return "226 done"
 
     def retrlines(self, cmd: str, callback) -> str:
         self.commands.append(cmd)
         if not self._jes_mode:
             raise ftplib.error_perm("550 Not in JES mode")
-        for line in self._job_lines():
+        _, _, arg = cmd.partition(" ")
+        target_job_id = arg.strip().upper()
+        callback("JOBNAME  JOBID    OWNER    STATUS CLASS")  # JESINTERFACELEVEL=2
+        for line in self._job_lines(target_job_id or None):
             callback(line)
         return "226 done"
 
@@ -140,9 +168,11 @@ class MockFTPSession:
             return []
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def _job_lines(self) -> list[str]:
+    def _job_lines(self, target_job_id: str | None = None) -> list[str]:
         lines = []
         for job in self._jobs():
+            if target_job_id and job.get("job_id", "").upper() != target_job_id:
+                continue
             owner = self._filters.get("JESOWNER", "*")
             name = self._filters.get("JESJOBNAME", "*")
             status = self._filters.get("JESSTATUS", "ALL").upper()
@@ -152,10 +182,26 @@ class MockFTPSession:
                 continue
             if status != "ALL" and status != str(job.get("status", "")).upper():
                 continue
-            line = f"{job['name']}  {job['job_id']} {job['owner']}   {job['status']}"
+            line = f"{job['name']}  {job['job_id']} {job['owner']}   {job['status']} A"
             if job.get("return_code"):
                 line += f" RC={job['return_code']}"
             lines.append(line)
+            if target_job_id:
+                spool_dds = job.get("spool_dds") or {}
+                if spool_dds:
+                    lines.append("--------")
+                    lines.append("         ID  STEPNAME PROCSTEP C DDNAME   BYTE-COUNT")
+                    for sid, ddname in sorted(spool_dds.items(), key=lambda kv: int(kv[0])):
+                        filename = (job.get("spool") or {}).get(sid, "")
+                        size = 0
+                        if filename:
+                            target = self._root / "jobs" / "spool" / filename
+                            if target.is_file():
+                                size = target.stat().st_size
+                        lines.append(
+                            f"         {int(sid):03d} JES2              A {ddname:<8} {size}"
+                        )
+                    lines.append(f"{len(spool_dds)} spool files")
         return lines
 
     def _spool_bytes(self, job_id: str, spool_id: str) -> bytes:

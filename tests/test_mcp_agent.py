@@ -90,15 +90,38 @@ def test_call_tool_rejects_off_allowlist_without_http() -> None:
     client.close()
 
 
-def test_call_tool_failures_raise_stable_errors() -> None:
-    def is_error(_request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {
-            "content": [{"type": "text", "text": "not_found: gone"}], "isError": True}})
+def test_call_tool_failures_raise_stable_errors_and_never_echo_upstream_text() -> None:
+    """#1302: ZoweMCPError carries fixed messages and stable codes only —
+    never raw upstream isError text or secret details."""
+    for raw_text, expected_code, secret_token in (
+        ("not_found: secret-dsn-SYS1.PAYROLL", "not_found", "secret-dsn-SYS1.PAYROLL"),
+        ("denied: private-dataset-name", "denied", "private-dataset-name"),
+        ("logon_failed: RACF ICH408I USER(READER)", "logon_failed", "ICH408I"),
+        ("tls_error: self-signed cert cn=internal", "tls_error", "cn=internal"),
+        ("timeout: 10.0.0.5:21 hung", "timeout", "10.0.0.5"),
+        ("jes_unavailable: SITE JES detail", "jes_unavailable", "SITE JES detail"),
+        ("RAW STACK TRACE SECRET=xyz987", "tool_error", "RAW STACK TRACE"),
+    ):
+        def is_error(_request: httpx2.Request, body_text: str = raw_text) -> httpx2.Response:
+            return httpx2.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {
+                "content": [{"type": "text", "text": body_text}], "isError": True}})
 
-    client = HttpZoweMCP(_settings(), client=httpx2.Client(transport=_transport(is_error)))
+        client = HttpZoweMCP(_settings(), client=httpx2.Client(transport=_transport(is_error)))
+        with pytest.raises(ZoweMCPError) as excinfo:
+            client.call_tool("dataset_read", {"dataset": "NOPE"})
+        assert excinfo.value.code == expected_code
+        assert secret_token not in excinfo.value.message
+        assert "xyz987" not in excinfo.value.message
+        client.close()
+
+    def http_401(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(401, json={"code": "unauthorized", "message": "raw secret"})
+
+    client = HttpZoweMCP(_settings(), client=httpx2.Client(transport=_transport(http_401)))
     with pytest.raises(ZoweMCPError) as excinfo:
-        client.call_tool("dataset_read", {"dataset": "NOPE"})
-    assert excinfo.value.code == "tool_error"
+        client.call_tool("dataset_read", {"dataset": "X"})
+    assert excinfo.value.code == "unauthorized"
+    assert "raw secret" not in excinfo.value.message
     client.close()
 
     def http_500(_request: httpx2.Request) -> httpx2.Response:
@@ -116,6 +139,23 @@ def test_call_tool_failures_raise_stable_errors() -> None:
     client = HttpZoweMCP(_settings(), client=httpx2.Client(transport=_transport(bad_shape)))
     with pytest.raises(ZoweMCPError):
         client.call_tool("dataset_read", {"dataset": "X"})
+    client.close()
+
+
+def test_call_tool_sends_bearer_token_when_configured() -> None:
+    seen_auth: list[str | None] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen_auth.append(request.headers.get("Authorization"))
+        return httpx2.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": "OK"}], "isError": False}})
+
+    client = HttpZoweMCP(
+        _settings(zowe_mcp_auth_token="  bridge-secret-123\n"),
+        client=httpx2.Client(transport=_transport(handler)),
+    )
+    client.call_tool("dataset_read", {"dataset": "SYS1.PARMLIB"})
+    assert seen_auth == ["Bearer bridge-secret-123"]
     client.close()
 
 
@@ -372,3 +412,68 @@ def test_dead_bridge_is_warn_only_and_never_blocks_agent_startup(monkeypatch, ca
         assert client.get("/healthz").status_code == 503
     warnings = [x for x in capsys.readouterr().err.splitlines() if "zowe_mcp_unreachable" in x]
     assert len(warnings) == 1 and "127.0.0.1" not in warnings[0]
+
+
+def test_option_7a_record_feedback_suppression_on_zos_observation_turns(monkeypatch) -> None:
+    """ADR-0012 D6 / Option 7A: `_record_feedback` is suppressed when a turn
+    sets `feedback_suppressed` (e.g. fetch_live), when chat history carries the
+    fixed z/OS observation citation marker, or when the answer carries it;
+    normal manual-only turns still record feedback normally."""
+    from types import SimpleNamespace
+
+    from mainframe_rag.agent import app as app_mod
+    from mainframe_rag.agent.answer import ChatMessage
+
+    submitted: list = []
+
+    class RecordingFeedback:
+        def submit(self, record) -> None:
+            submitted.append(record)
+
+    monkeypatch.setattr(app_mod, "feedback", RecordingFeedback())
+
+    def _output(answer: str = "Manual explanation."):
+        return SimpleNamespace(
+            answer=answer,
+            citations=[],
+            script=None,
+            supplied=[],
+            reasoning_effort="low",
+        )
+
+    def _req(request_id: str, *, suppressed: bool = False):
+        state = SimpleNamespace(request_id=request_id, feedback_query="What is LFAREA?")
+        if suppressed:
+            state.feedback_suppressed = True
+        return SimpleNamespace(state=state)
+
+    # 1. Suppressed via request.state.feedback_suppressed (live-fetch turn)
+    app_mod._record_feedback(_req("000000000001", suppressed=True), "chat", _output(), {})
+    assert submitted == []
+
+    # 2. Suppressed when answer carries the fixed z/OS observation citation marker
+    app_mod._record_feedback(
+        _req("000000000002"),
+        "chat",
+        _output(f"Member content shows LFAREA {app_mod.ZOS_OBSERVATION_MARKER}"),
+        {},
+    )
+    assert submitted == []
+
+    # 3. Prior chat messages carrying the observation marker flag suppression
+    prior_with_obs = [
+        ChatMessage(role="user", content="Show SYS1.PARMLIB(IEASYS00)"),
+        ChatMessage(role="assistant", content=f"From {app_mod.ZOS_OBSERVATION_MARKER}: LFAREA=1G"),
+        ChatMessage(role="user", content="What does that mean?"),
+    ]
+    assert app_mod._messages_carry_zos_observation(prior_with_obs) is True
+    manual_only = [
+        ChatMessage(role="user", content="What does IEA500I mean?"),
+        ChatMessage(role="assistant", content="IEA500I is documented in System Messages."),
+    ]
+    assert app_mod._messages_carry_zos_observation(manual_only) is False
+
+    # 4. Next ordinary manual-only turn records feedback normally
+    app_mod._record_feedback(_req("000000000003"), "chat", _output(), {})
+    assert len(submitted) == 1
+    assert submitted[0].request_id == "000000000003"

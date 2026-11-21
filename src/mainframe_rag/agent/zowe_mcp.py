@@ -1,4 +1,4 @@
-"""Agent-side MCP client for the read-only FTP bridge (ADR-0003, phase 2).
+"""Agent-side MCP client for the read-only FTP bridge (ADR-0003, ADR-0012).
 
 Minimal Streamable-HTTP JSON-RPC over httpx2 — initialize, tools/list,
 tools/call only. No new dependency. Sync by protocol (callers offload
@@ -8,6 +8,12 @@ First egress W3C injection in the codebase: traceparent headers ride the
 bridge POST so tools.call joins the request trace. Scoped to this client
 only — embed/LLM/Qdrant calls are other teams' services and stay as-is.
 Fail-open: injection failure logs at debug, the request proceeds untraced.
+
+Security invariants (#1302, ADR-0012):
+- `ZoweMCPError` carries fixed, allowlisted messages and stable codes only —
+  never raw upstream `isError` text or exception bodies.
+- When `zowe_mcp_auth_token` is configured, sends `Authorization: Bearer ...`
+  matching the bridge's caller authentication middleware (ADR-0012 D4 point 2).
 """
 
 from __future__ import annotations
@@ -34,10 +40,24 @@ ALLOWLIST = ("dataset_read", "uss_read", "job_status", "jes_spool_read")
 
 _MCP_PATH = "/mcp"
 
+# Closed mapping from bridge error-code prefixes to fixed client-safe messages.
+# Upstream text after `:` (or any unrecognized payload) is NEVER echoed (#1302).
+_BRIDGE_ERROR_MAP: dict[str, tuple[str, str]] = {
+    "not_found": ("not_found", "requested z/OS target was not found"),
+    "denied": ("denied", "z/OS target is not permitted"),
+    "logon_failed": ("logon_failed", "z/OS FTP authentication failed"),
+    "tls_error": ("tls_error", "z/OS FTPS verification failed"),
+    "timeout": ("timeout", "z/OS bridge request timed out"),
+    "jes_unavailable": ("jes_unavailable", "z/OS JES interface is unavailable"),
+    "invalid_params": ("invalid_request", "z/OS bridge request parameters were invalid"),
+    "not_configured": ("not_configured", "z/OS bridge is not configured"),
+    "upstream_error": ("upstream_error", "z/OS bridge request failed"),
+}
+
 
 class ZoweMCPError(Exception):
-    """Stable client-visible failure for one tool call (code + message only;
-    upstream bodies and exception text stay in logs)."""
+    """Stable client-visible failure for one tool call (code + fixed message only;
+    upstream bodies and exception text never enter this exception)."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -45,8 +65,24 @@ class ZoweMCPError(Exception):
         self.message = message
 
 
+def _classify_tool_error(content: list) -> tuple[str, str]:
+    """Map bridge `isError` content to a fixed (code, message) pair.
+
+    Reads only the leading code prefix before `:` on the first text item and
+    matches against `_BRIDGE_ERROR_MAP`. Never echoes arbitrary upstream text.
+    """
+    for item in content:
+        if isinstance(item, dict) and isinstance(item.get("text"), str):
+            prefix = item["text"].split(":", 1)[0].strip()
+            mapped = _BRIDGE_ERROR_MAP.get(prefix)
+            if mapped is not None:
+                return mapped
+            break
+    return "tool_error", "z/OS bridge tool call failed"
+
+
 class HttpZoweMCP:
-    """Production client: JSON-RPC POSTs to the sidecar bridge."""
+    """Production client: JSON-RPC POSTs to the FTP bridge."""
 
     def __init__(
         self,
@@ -55,6 +91,7 @@ class HttpZoweMCP:
     ) -> None:
         self._settings = settings
         self._base_url = (settings.zowe_mcp_base_url or "").rstrip("/")
+        self._auth_token = (settings.zowe_mcp_auth_token or "").strip() or None
         self._timeout = settings.zowe_mcp_timeout_s
         self._client = client
         self._ids = itertools.count(1)
@@ -66,6 +103,8 @@ class HttpZoweMCP:
 
     def _post(self, payload: dict) -> dict:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if self._auth_token is not None:
+            headers["Authorization"] = f"Bearer {self._auth_token}"
         try:
             propagate.inject(headers)
         except Exception:  # noqa: BLE001 — fail-open, request proceeds untraced
@@ -74,8 +113,12 @@ class HttpZoweMCP:
             resp = self._http().post(
                 f"{self._base_url}{_MCP_PATH}", json=payload, headers=headers, timeout=self._timeout
             )
+            if resp.status_code in (401, 403):
+                raise ZoweMCPError("unauthorized", "live state authentication failed")
             resp.raise_for_status()
             data = resp.json()
+        except ZoweMCPError:
+            raise
         except (httpx2.HTTPStatusError, httpx2.RequestError, ValueError) as exc:
             raise ZoweMCPError("upstream_error", "live state request failed") from exc
         if not isinstance(data, dict) or "result" not in data:
@@ -95,9 +138,9 @@ class HttpZoweMCP:
 
     def call_tool(self, name: str, arguments: dict[str, str]) -> dict:
         """One tool call. MCP isError results and transport failures both
-        raise ZoweMCPError — the orchestrator degrades, never leaks."""
+        raise ZoweMCPError with fixed messages — never leaking upstream text."""
         if name not in ALLOWLIST:
-            raise ZoweMCPError("invalid_request", f"tool not allowlisted: {name}")
+            raise ZoweMCPError("invalid_request", "tool is not allowlisted")
         result = self._post(
             {
                 "jsonrpc": "2.0",
@@ -109,12 +152,8 @@ class HttpZoweMCP:
         if not isinstance(result, dict) or not isinstance(result.get("content"), list):
             raise ZoweMCPError("upstream_error", "live state request failed")
         if result.get("isError"):
-            texts = [
-                item.get("text", "")
-                for item in result["content"]
-                if isinstance(item, dict) and isinstance(item.get("text"), str)
-            ]
-            raise ZoweMCPError("tool_error", "; ".join(texts)[:500] or "tool reported failure")
+            code, message = _classify_tool_error(result["content"])
+            raise ZoweMCPError(code, message)
         return result
 
     def close(self) -> None:
@@ -123,7 +162,7 @@ class HttpZoweMCP:
 
 
 def build_zowe_mcp(settings: Settings, client: httpx2.Client | None = None) -> HttpZoweMCP | None:
-    """Single dispatch point (never branch on zowe flags elsewhere): off →
+    """Single dispatch point (never branch on zowe flags elsewhere): off ->
     None; on without a base URL raises fail-closed at lifespan."""
     if not settings.zowe_mcp_enabled:
         return None
