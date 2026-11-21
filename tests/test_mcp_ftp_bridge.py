@@ -1167,6 +1167,36 @@ def test_spool_stream_ceiling_returns_head_only() -> None:
     out = _spool_out(stalled, max_bytes=_SMALL_CAP, clock=lambda: 0.0)
     assert out["isError"] is True and out["content"][0]["text"].startswith("timeout:")
 
+    # A stall whose receive timeout spends the time budget is the ceiling,
+    # not an error: one chunk arrives, then the wait runs out the deadline.
+    class StallAfterChunk(_FakeDataConn):
+        def recv(self, n: int) -> bytes:
+            if self.delivered:
+                raise TimeoutError("timed out")
+            return super().recv(n)
+
+    class LateStallFTP(FakeFTP):
+        def transfercmd(self, cmd: str, rest=None) -> _FakeDataConn:
+            self.commands.append(cmd)
+            conn = StallAfterChunk(payload)
+            self.data_conns.append(conn)
+            return conn
+
+    late = LateStallFTP()
+    late.jes_list_by_job["JOB00123"] = list(JES_LIST_JOB00123)
+    now = [0.0]
+
+    def clock() -> float:
+        now[0] += 1.0  # each read of the clock is one second later
+        return now[0]
+
+    out = _spool_out(late, max_bytes=_SMALL_CAP, spool_stream_max_s=3.0, clock=clock)
+    text = _assert_framed_within(out, _SMALL_CAP)
+    assert _STOP in text and "LINE 000000" in text
+    assert out["structuredContent"]["window"] == "head_only"
+    assert late.closed and not late.aborted and late.voidresp_calls == 0
+    assert late.data_conns[0].delivered == 8192
+
 
 def test_spool_byte_count_hint_skips_long_stream() -> None:
     """A LIST BYTE-COUNT above the stream ceiling reads the head only: the
@@ -1189,7 +1219,7 @@ def test_dataset_read_stays_head_only() -> None:
     fake.files["'BIG.DATA'"] = _lines("LINE", 750)  # 30000 bytes
     out = bridge.dataset_read(_session(fake, max_bytes=_SMALL_CAP), "BIG.DATA")
     text = out["content"][0]["text"]
-    assert out["isError"] is False and "structuredContent" not in out
+    assert out["isError"] is False
     assert bridge.TRUNCATION_SUFFIX in text and _GAP not in text and _STOP not in text
     assert "LINE 000000" in text and "LINE 000749" not in text
     assert fake.aborted

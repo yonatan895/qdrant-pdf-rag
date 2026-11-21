@@ -2230,7 +2230,8 @@ deterministic and trap queries stay on the manuals path.
   less 1 KiB returns whole, a longer one keeps its first quarter and last three
   quarters around an `[... z/OS bridge omitted about N bytes ...]` marker
   (forged lookalikes in the data are neutralized), the framed result fits
-  `MCP_FTP_MAX_BYTES`, and the BEGIN header and `structuredContent`
+  `MCP_FTP_MAX_BYTES` (keep `ZOWE_MCP_MAX_BYTES` at least that large, or the
+  agent's head-only cap drops the tail), and the BEGIN header and `structuredContent`
   (`truncated`, `window` `full|head_tail|head_only`, `total_bytes`,
   approximate `omitted_bytes`, `stream_complete`) carry the window facts.
   `MCP_FTP_SPOOL_STREAM_MAX_BYTES` (default 16 MiB, at least the cap) and

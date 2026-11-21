@@ -675,7 +675,8 @@ def _pin_text_format(ftp: Any) -> tuple[str, ...]:
     names the server did not confirm.
 
     Confirmed means a reply starting `200` with no "unrecognized" line (z/OS
-    can answer 200 while ignoring an operand). A 202, a 200-unrecognized or a
+    is recalled, not verified, to answer 200 while ignoring an operand; ADR-0012
+    D8(d) checks the wording). A 202, a 200-unrecognized or a
     5xx (`error_perm`) is a capacity loss (trailing blanks kept), not a
     security failure: the read proceeds and the name is marked on stderr and
     the span with the reply code only, never the reply text. A 4xx

@@ -192,8 +192,10 @@
      for the frame; a longer one keeps its first quarter and last three
      quarters (module constants, no setting) around a gap marker, with the
      window facts repeated in the bridge-authored header and in
-     `structuredContent`. The framed result fits the cap, so the agent's
-     head-only live cap never drops the tail or the END delimiter. Each part is
+     `structuredContent`. The framed result fits `MCP_FTP_MAX_BYTES`, so the
+     agent's head-only live cap keeps the tail and the END delimiter as long as
+     `ZOWE_MCP_MAX_BYTES` is at least `MCP_FTP_MAX_BYTES` (both 256 KiB by
+     default; nothing enforces the pairing across the two processes). Each part is
      screened on its own before a whole-line trim. `MCP_FTP_SPOOL_STREAM_MAX_BYTES`
      (16 MiB) and `MCP_FTP_SPOOL_STREAM_MAX_S` (8 s, below the agent's default
      15 s call timeout) stop a longer stream, which returns the head with a
