@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
+import http.client
 import json
+import os
 import re
+import ssl
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Any
-from urllib.parse import quote
+from typing import Any, Self
+from urllib.parse import quote, urljoin, urlsplit
 
 from scripts.acceptance_evidence import (
     LIMIT,
@@ -43,20 +47,182 @@ VERIFICATION_INPUTS = (
 
 
 class GitHub:
-    """Use the runner's existing gh authentication without exposing credentials."""
+    """Persistent HTTP/1.1 keep-alive GitHub API client using stdlib only (#1299).
 
-    def __init__(self, repository: str):
+    Auth comes from GH_TOKEN/GITHUB_TOKEN (or a single `gh auth token` lookup
+    when unset) and is never echoed or forwarded on cross-origin redirects.
+    Only strictly immutable 40-hex-SHA commit/blob reads are memoized within
+    one client lifetime; every mutable endpoint is fetched live.
+    """
+
+    _API_VERSION = '2022-11-28'
+    _USER_AGENT = 'mainframe-rag-acceptance'
+    _LOOPBACK = frozenset({'127.0.0.1', 'localhost'})
+    _MAX_REDIRECTS = 5
+    _TIMEOUT = 60
+
+    def __init__(self, repository: str, *, base_url: str = 'https://api.github.com', token: str | None = None):
         require(bool(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository)))
+        parsed = urlsplit(base_url)
+        require(parsed.scheme in {'https', 'http'} and bool(parsed.hostname)
+                and not parsed.username and not parsed.password
+                and not parsed.query and not parsed.fragment)
+        require(parsed.scheme == 'https' or parsed.hostname in self._LOOPBACK)
         self.repository = repository
         self.prefix = 'repos/' + repository + '/'
+        self._scheme = parsed.scheme
+        self._host = parsed.hostname or ''
+        self._port = parsed.port
+        self._base_path = parsed.path.rstrip('/')
+        self._origin = (self._scheme, self._host.lower(), self._default_port(self._scheme, self._port))
+        self._token = token
+        self._conn: http.client.HTTPConnection | None = None
+        self._commit_pattern = re.compile(re.escape(self.prefix) + r'commits/[a-f0-9]{40}')
+        self._commit_cache: dict[str, dict[str, Any]] = {}
+        self._blob_cache: dict[tuple[str, str], bytes] = {}
+
+    @staticmethod
+    def _default_port(scheme: str, port: int | None) -> int:
+        if port is not None:
+            return port
+        return 443 if scheme == 'https' else 80
+
+    def close(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            finally:
+                self._conn = None
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def _auth_token(self) -> str:
+        if self._token is None:
+            env_token = (os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN') or '').strip()
+            if env_token:
+                self._token = env_token
+            else:
+                result = subprocess.run(['gh', 'auth', 'token'], capture_output=True, text=True,
+                                        check=False, timeout=15)
+                require(result.returncode == 0)
+                self._token = result.stdout.strip()
+        require(bool(self._token) and '\r' not in self._token and '\n' not in self._token)
+        return self._token
+
+    def _open(self, scheme: str, host: str, port: int | None) -> http.client.HTTPConnection:
+        if scheme == 'https':
+            return http.client.HTTPSConnection(host, port=port, timeout=self._TIMEOUT,
+                                               context=ssl.create_default_context())
+        require(scheme == 'http' and self._scheme == 'http' and host in self._LOOPBACK)
+        return http.client.HTTPConnection(host, port=port, timeout=self._TIMEOUT)
+
+    def _headers(self, *, same_origin: bool, keep_alive: bool, has_body: bool = False) -> dict[str, str]:
+        headers = {
+            'User-Agent': self._USER_AGENT,
+            'Connection': 'keep-alive' if keep_alive else 'close',
+        }
+        if same_origin:
+            headers['Accept'] = 'application/vnd.github+json'
+            headers['X-GitHub-Api-Version'] = self._API_VERSION
+            headers['Authorization'] = f'Bearer {self._auth_token()}'
+            if has_body:
+                headers['Content-Type'] = 'application/json'
+        return headers
+
+    def _read_bounded(self, response: http.client.HTTPResponse) -> bytes:
+        data = response.read(LIMIT + 1)
+        require(len(data) <= LIMIT)
+        return data
+
+    def _follow_redirect(self, current_url: str, location: str) -> bytes:
+        url = current_url
+        for _ in range(self._MAX_REDIRECTS):
+            url = urljoin(url, location)
+            parsed = urlsplit(url)
+            require(parsed.scheme in {'https', 'http'} and bool(parsed.hostname)
+                    and not parsed.username and not parsed.password)
+            require(parsed.scheme == 'https' or (self._scheme == 'http' and parsed.hostname in self._LOOPBACK))
+            host = parsed.hostname or ''
+            same_origin = (parsed.scheme, host.lower(), self._default_port(parsed.scheme, parsed.port)) == self._origin
+            target = (parsed.path or '/') + (f'?{parsed.query}' if parsed.query else '')
+            conn = self._open(parsed.scheme, host, parsed.port)
+            try:
+                conn.request('GET', target, headers=self._headers(same_origin=same_origin, keep_alive=False))
+                resp = conn.getresponse()
+                if resp.status in {301, 302, 303, 307, 308}:
+                    next_location = resp.getheader('Location')
+                    require(isinstance(next_location, str) and bool(next_location))
+                    assert next_location is not None
+                    location = next_location
+                    continue
+                require(200 <= resp.status < 300)
+                return self._read_bounded(resp)
+            except (http.client.HTTPException, OSError):
+                raise ValueError('native API redirect request failed') from None
+            finally:
+                conn.close()
+        raise ValueError('native API redirect limit reached')
+
+    def _request(self, method: str, endpoint: str, body: bytes | None = None) -> bytes:
+        path = f"{self._base_path}/{endpoint.lstrip('/')}"
+        headers = self._headers(same_origin=True, keep_alive=True, has_body=body is not None)
+        attempts = 2 if method in {'GET', 'PATCH'} else 1
+        for attempt in range(attempts):
+            reused = self._conn is not None
+            if self._conn is None:
+                self._conn = self._open(self._scheme, self._host, self._port)
+            try:
+                self._conn.request(method, path, body=body, headers=headers)
+                resp = self._conn.getresponse()
+            except (http.client.HTTPException, OSError):
+                self.close()
+                if method in {'GET', 'PATCH'} and reused and attempt + 1 < attempts:
+                    continue
+                raise ValueError('native API request failed') from None
+            if method == 'GET' and resp.status in {301, 302, 303, 307, 308}:
+                location = resp.getheader('Location')
+                if resp.will_close or (resp.getheader('Connection') or '').lower() == 'close':
+                    self.close()
+                else:
+                    try:
+                        # Drain small redirect body to keep the persistent socket synchronized.
+                        if len(resp.read(LIMIT + 1)) > LIMIT:
+                            self.close()
+                    except (http.client.HTTPException, OSError):
+                        self.close()
+                require(isinstance(location, str) and bool(location))
+                assert location is not None
+                base = f'{self._scheme}://{self._host}' + (f':{self._port}' if self._port is not None else '')
+                return self._follow_redirect(base + path, location)
+            if not (200 <= resp.status < 300):
+                self.close()
+                raise ValueError('native evidence identity or execution does not satisfy policy')
+            try:
+                data = self._read_bounded(resp)
+            except (http.client.HTTPException, OSError, ValueError):
+                self.close()
+                raise ValueError('native API response exceeded bounds or failed') from None
+            if resp.will_close or (resp.getheader('Connection') or '').lower() == 'close':
+                self.close()
+            return data
+        raise ValueError('native API request failed')
 
     def raw(self, endpoint: str) -> bytes:
         require(endpoint.startswith(self.prefix))
-        result = subprocess.run(['gh', 'api', endpoint], capture_output=True, check=False, timeout=60)
-        require(result.returncode == 0 and len(result.stdout) <= LIMIT)
-        return result.stdout
+        return self._request('GET', endpoint)
 
     def get(self, endpoint: str) -> Any:
+        require(endpoint.startswith(self.prefix))
+        if self._commit_pattern.fullmatch(endpoint):
+            if endpoint not in self._commit_cache:
+                value = json.loads(self.raw(endpoint))
+                require(isinstance(value, dict))
+                self._commit_cache[endpoint] = value
+            return copy.deepcopy(self._commit_cache[endpoint])
         return json.loads(self.raw(endpoint))
 
     def write(self, endpoint: str, payload: dict[str, Any], *, method: str) -> dict[str, Any]:
@@ -64,11 +230,8 @@ class GitHub:
             re.escape(self.prefix) + r'check-runs/[0-9]+', endpoint))
         comment_endpoint = bool(re.fullmatch(re.escape(self.prefix) + r'issues/[1-9][0-9]*/comments', endpoint))
         require((check_endpoint and method in {'POST', 'PATCH'}) or (comment_endpoint and method == 'POST'))
-        result = subprocess.run(['gh', 'api', '--method', method, endpoint, '--input', '-'],
-                                input=json.dumps(payload), capture_output=True, text=True,
-                                check=False, timeout=60)
-        require(result.returncode == 0 and len(result.stdout) <= LIMIT)
-        value = json.loads(result.stdout)
+        raw = self._request(method, endpoint, body=json.dumps(payload).encode('utf-8'))
+        value = json.loads(raw)
         require(isinstance(value, dict))
         return value
 
@@ -76,10 +239,14 @@ class GitHub:
         require(bool(re.fullmatch('[a-f0-9]{40}', sha)))
         require(path in VERIFICATION_INPUTS or bool(re.fullmatch(r'taskfiles/[A-Za-z0-9_-]+\.yml', path)) or
                 path in {'.github/workflows/' + p.workflow for p in PRODUCERS})
+        key = (sha, path)
+        if key in self._blob_cache:
+            return self._blob_cache[key]
         data = self.get(self.prefix + f'contents/{path}?ref={sha}')
         require(data['type'] == 'file' and data['encoding'] == 'base64')
         raw = base64.b64decode(data['content'].replace('\n', ''), validate=True)
         require(len(raw) <= LIMIT)
+        self._blob_cache[key] = raw
         return raw
 
 
@@ -377,6 +544,7 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
         workflow_digest = policy_inputs['.github/workflows/' + workflow]
         if workflow == 'ci.yml':
             producers = tuple(producer for producer in producers if producer.lane != 'unit_tests') + unit_producers(source, workflow_digest)
+        downloaded_archives: dict[int, bytes] = {}
         for producer in (definition for definition in producers if definition.workflow == workflow):
             record: dict[str, Any] = {'lane': producer.lane, 'job': producer.job, 'status': 'missing'}
             try:
@@ -413,7 +581,10 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
                 require(len(selected_artifacts) == 1)
                 artifact = selected_artifacts[0]
                 require(type(artifact['id']) is int and 0 < artifact['size_in_bytes'] <= LIMIT)
-                archive = api.raw(api.prefix + f"actions/artifacts/{artifact['id']}/zip")
+                artifact_id = artifact['id']
+                if artifact_id not in downloaded_archives:
+                    downloaded_archives[artifact_id] = api.raw(api.prefix + f"actions/artifacts/{artifact_id}/zip")
+                archive = downloaded_archives[artifact_id]
                 report = object_json(artifact_members(archive, artifact['digest'])['evidence.json'])
                 tested_sha = report['execution_sha']
                 require(isinstance(tested_sha, str) and re.fullmatch('[a-f0-9]{40}', tested_sha) is not None)
@@ -733,6 +904,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.post_review_templates and (not args.publish or args.review_templates_dir is None):
         parser.error('--post-review-templates requires --publish and --review-templates-dir')
     results = []
+    api: GitHub | None = None
     try:
         api = GitHub(args.repository)
         if args.review_template:
@@ -777,6 +949,10 @@ def main(argv: list[str] | None = None) -> int:
                           'verification_status': 'incomplete',
                           'error': 'acceptance_evidence_unavailable_or_changed'}))
         return 1
+    finally:
+        close = getattr(api, 'close', None)
+        if callable(close):
+            close()
     print(json.dumps(results if bulk else results[0], sort_keys=True))
     # Bulk publisher health is separate from each PR's technical result.
     # API/publication errors above still exit nonzero; red candidate checks
