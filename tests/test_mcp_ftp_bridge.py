@@ -17,6 +17,7 @@ import socket
 import ssl
 import subprocess
 import threading
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Self
@@ -1025,6 +1026,180 @@ def test_spool_secret_straddling_cut_never_leaks() -> None:
     text = _assert_framed_within(_spool_out(_spool_fake(split), max_bytes=_SMALL_CAP), _SMALL_CAP)
     assert "SECRETVAL1" not in text
     assert _GAP in text and "[REDACTED]" in text
+
+
+# --- Review B1: a value whose key sits before the tail's first kept line.
+_B1_VALUE = "HUNTER2XYZ"
+
+
+def _pad(size: int, prefix: str = "FILL", *, eol: bytes = b"\n") -> bytes:
+    """Exactly size bytes of whole lines (a short last line pads the rest)."""
+    width = 40
+    whole = _lines(prefix, size // width, width=width, eol=eol)
+    rest = size - len(whole)
+    if rest == 0:
+        return whole
+    if rest < len(eol):  # 1 byte left with CRLF: widen the last line instead
+        if not whole:
+            return b"\n" * size
+        return whole[:-width] + _lines(prefix, 1, width=width + rest, eol=eol)
+    return whole + b"Q" * (rest - len(eol)) + eol
+
+
+def _assert_value_screened_whole(payload: bytes, value: str = _B1_VALUE) -> None:
+    """Independent oracle: whole-file screening redacts the value, so it is a
+    secret by the D6 patterns, not an artefact of the window."""
+    assert value not in bridge.screen_zos_text(payload.decode("latin-1"))
+
+
+def test_spool_value_after_key_at_the_head_cut_never_leaks() -> None:
+    """Review B1 repro 1: a contiguous LF read 2 bytes over B with
+    '//S1 EXEC PGM=X,PASSWORD=' on the line at or straddling H and its value
+    on the next line. Dropping the tail's first line before screening left the
+    value right after the gap marker."""
+    cap = 262144
+    b, h, _ = _window_budget(cap)
+    pair = b"//S1 EXEC PGM=X,PASSWORD=\n" + _B1_VALUE.encode() + b"\n"
+    last = b"LAST LINE\n"
+    for start in range(h - len(pair), h + 2):
+        before = _pad(start, "HEAD")
+        payload = before + pair + _pad(b + 2 - start - len(pair) - len(last), "TAIL") + last
+        assert len(payload) == b + 2
+        out = _spool_out(_spool_fake(payload), max_bytes=cap)
+        text = _assert_framed_within(out, cap)
+        assert out["structuredContent"]["window"] == "head_tail"
+        assert _B1_VALUE not in text, start
+        assert "LAST LINE" in text and "HEAD 000000" in text
+    _assert_value_screened_whole(payload)
+
+
+@pytest.mark.parametrize("width", [16, 24])
+def test_spool_value_after_key_at_the_tail_ring_start_never_leaks(width: int) -> None:
+    """Review B1 repro 2: 600 KB of short CRLF records (evicted), the key line
+    at the start of the retained tail ring and its value on the next record.
+    CR stripping shrank the screened tail under T, so the trim removed nothing
+    and the value followed the gap marker."""
+    n = 600000 // width
+
+    def payload(pos: int) -> bytes:
+        lines = []
+        for i in range(n):
+            if i == pos:
+                lines.append(b"//S1 EXEC PGM=X,PASSWORD=")
+            elif i == pos + 1:
+                lines.append(_B1_VALUE.encode())
+            else:
+                lines.append(f"L{i:07d}".encode().ljust(width - 2, b"."))
+        return b"\r\n".join(lines) + b"\r\n"
+
+    def ring_start(data: bytes) -> int:
+        capture = bridge.FTPSession(_spool_fake(data), _jes_config()).read_spool("RETR JOB00123.2")
+        assert capture.evicted and capture.complete
+        return len(data) - sum(len(chunk) for chunk in capture.tail)
+
+    line = ring_start(payload(-5)) // width
+    straddled = 0
+    for pos in range(line - 3, line + 3):
+        data = payload(pos)
+        start = ring_start(data)
+        key_at = data.index(b"//S1 EXEC")
+        straddled += key_at <= start <= data.index(_B1_VALUE.encode())
+        out = _spool_out(_spool_fake(data))
+        text = _assert_framed_within(out, 262144)
+        assert out["structuredContent"]["window"] == "head_tail"
+        assert _B1_VALUE not in text, pos
+        assert f"L{n - 1:07d}" in text
+    assert straddled  # the ring start fell on the key line or between key and value
+    _assert_value_screened_whole(data)
+
+
+def test_spool_value_after_a_long_record_key_never_leaks() -> None:
+    """Review B1 repro 3: a record of about 9.5 KB or more ending in
+    ' PASSWORD=' with the value on the next record; the ring starts inside the
+    long record, so the key was on the dropped partial first line."""
+    filler = _pad(5000 * 80, "F")
+    trail = _pad(2400 * 80, "T") + b"LAST LINE\n"
+    for length in range(9500, 20000, 500):
+        payload = filler + b"X" * length + b" PASSWORD=\n" + b"LONGLINESECRET\n" + trail
+        out = _spool_out(_spool_fake(payload))
+        text = _assert_framed_within(out, 262144)
+        assert out["structuredContent"]["window"] == "head_tail"
+        assert "LONGLINESECRET" not in text, length
+        assert "LAST LINE" in text
+        _assert_value_screened_whole(payload, "LONGLINESECRET")
+
+
+# Key, separator and value shapes from every single-line D6 family, including
+# separators that span lines and runs longer than TAIL_LOOKBEHIND_BYTES.
+_B1_PAIRS: dict[str, bytes] = {
+    "kv_same_line": b"//S1 EXEC PGM=X,PASSWORD=HUNTER2XYZ",
+    "kv_next_line": b"//S1 EXEC PGM=X,PASSWORD=\nHUNTER2XYZ",
+    "kv_colon_own_line": b"SET NEWPASSPHRASE\n  :\n\n  HUNTER2XYZ",
+    "space_form": b"PASSWORD\n\n\nHUNTER2XYZ REST",
+    "operand": b"ALTUSER BOB PASSWORD(\n  HUNTER2XYZ)",
+    "tso_logon": b"LOGON\n  BOB/HUNTER2XYZ",
+    "auth_scheme": b"HDR Bearer\n  HUNTER2XYZ",
+    "long_blank_separator": b"PASSWORD =" + b" " * 5000 + b"\nHUNTER2XYZ",
+    "long_blank_lines": b"PASSWORD" + b"\n" * 4200 + b"HUNTER2XYZ",
+    "nul_run": b"PASSWORD=" + b"\x00" * 5000 + b"HUNTER2XYZ",
+    "long_record": b"X" * 9000 + b" PASSWORD=\nHUNTER2XYZ",
+}
+
+
+def _sweep_offsets(start: int, end: int) -> list[int]:
+    """Every byte near the ends of [start, end), a stride through the middle."""
+    edge = 48
+    if end - start <= 2 * edge:
+        return list(range(start - 3, end + 3))
+    return [*range(start - 3, start + edge), *range(start + edge, end - edge, 97), *range(end - edge, end + 3)]
+
+
+@pytest.mark.parametrize("eol", [b"\n", b"\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize("family", list(_B1_PAIRS))
+def test_spool_window_split_anywhere_in_a_key_value_pair_never_leaks(family: str, eol: bytes) -> None:
+    """Property sweep (review B1): the window's cut moves across every byte of
+    a key, separator and value. Evicted reads cut where the tail ring starts
+    (built directly, so the start is exact rather than 8 KiB-granular);
+    contiguous reads cut at H. The value never appears, the last line always
+    does, and whole-file screening redacts the same value."""
+    pair = _B1_PAIRS[family].replace(b"\n", eol) + eol
+    last = b"LAST LINE" + eol
+    _assert_value_screened_whole(pair)
+    b, h, t = _window_budget(_SMALL_CAP)
+
+    # Evicted: the ring holds about T + 4 KiB, and is cut at offset o.
+    before = _pad(6000, "PRE", eol=eol)
+    full = before + pair + _pad(t, "TAIL", eol=eol) + last
+    head = _pad(h, "HEAD", eol=eol)
+    for o in _sweep_offsets(len(before), len(before) + len(pair)):
+        ring = full[o:]
+        capture = bridge._SpoolCapture(
+            head_cap=h,
+            tail_keep=t + bridge.TAIL_LOOKBEHIND_BYTES,
+            ceiling=1 << 30,
+            head=bytearray(head),
+            tail=deque([ring]),
+            tail_len=len(ring),
+            total=len(head) + 50000 + len(ring),
+            evicted=True,
+            complete=True,
+        )
+        body, fields, _ = bridge._spool_window(capture, "latin-1", _SMALL_CAP)
+        assert fields["window"] == "head_tail"
+        assert _B1_VALUE not in body, ("evicted", o - len(before))
+        assert "LAST LINE" in body
+
+    # Contiguous (too short to evict at this cap): the cut is H, swept across
+    # the pair by the length of the lines before it.
+    after = _pad(b, "TAIL", eol=eol) + last
+    for start in _sweep_offsets(h - len(pair), h):
+        if start < 2:
+            continue
+        payload = _pad(start, "HEAD", eol=eol) + pair + after
+        out = _spool_out(_spool_fake(payload), max_bytes=_SMALL_CAP)
+        text = _assert_framed_within(out, _SMALL_CAP)
+        assert _B1_VALUE not in text, ("contiguous", start)
+        assert "LAST LINE" in text
 
 
 def test_spool_pem_cut_by_window_is_redacted() -> None:
