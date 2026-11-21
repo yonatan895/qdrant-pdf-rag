@@ -112,13 +112,14 @@ _KV_SECRET_RE = re.compile(
     rf"(?i)\b({_PASSWORD_WORDS}|secret|api[_-]?key|apikey|"
     r"auth[_-]?token|access[_-]?token|bearer[_-]?token|token|credential)"
     r"(\s*[=:]\s*)"
-    r"(?:\([^)\n]*\)|'[^'\n]*'|\"[^\"\n]*\"|[^\s,;]+)"
+    # Closing ) or quote optional: the byte cap or a record end can cut it off.
+    r"(?:\([^)\n]*\)?|'[^'\n]*'?|\"[^\"\n]*\"?|[^\s,;]+)"
 )
 _SPACE_PASSWORD_RE = re.compile(
     r"(?i)\b(password|passwd|passphrase)(\s+)"
     r"(?!(?:is|was|were|for|to|in|of|not|must|should|cannot|expired|revoked|"
     r"changed|required|invalid|failed|error|length|rules?|policy)\b)"
-    r"(?:'[^'\n]*'|\"[^\"\n]*\"|[^\s,;]+)"
+    r"(?:'[^'\n]*'?|\"[^\"\n]*\"?|[^\s,;]+)"
 )
 _AUTH_SCHEME_RE = re.compile(r"(?i)\b(Bearer|Basic)(\s+)[A-Za-z0-9._~+/=-]{8,}")
 _OBS_BOUNDARY_RE = re.compile(
