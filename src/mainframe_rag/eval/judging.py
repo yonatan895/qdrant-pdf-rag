@@ -66,6 +66,53 @@ def cited_doc_ids(citations: list[str], hits: list[dict[str, Any]]) -> tuple[set
     return docs, unmatched
 
 
+def _packed_cite(item: dict[str, Any]) -> str | None:
+    """Cite line of a packed entry: `citation` on a SuppliedExcerpt, `cite` on
+    a response hit (retrieved or NeighbourHit)."""
+    raw = item.get("citation") if "citation" in item else item.get("cite")
+    return raw if isinstance(raw, str) else None
+
+
+def packed_citation_hits(citation: str, packed: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every packed entry behind a validated citation, for rows whose response
+    shows neighbour expansion ran (#1314; `answers.ResponseJoin`). Same-page
+    neighbours repeat their parent's cite line, so a bare citation maps to
+    every entry carrying it, as the agent and the Pipe map it
+    (`capture.RowCitations.cites`). A `[n]` prefix whose prompt slot (an
+    explicit `index`, else the 1-based position) carries the cite selects
+    that slot alone. Never used on the sibling-pool join, which keeps
+    `citation_to_hit`'s first match."""
+    match = CITE_PREFIX_RE.match(citation)
+    cite = citation[match.end():] if match is not None else citation
+    if match is not None:
+        slot = int(citation[: match.end()].strip().strip("[]"))
+        if any(type(item.get("index")) is int for item in packed):
+            exact = [item for item in packed
+                     if type(item.get("index")) is int and item["index"] == slot
+                     and _packed_cite(item) == cite]
+            if exact:
+                return exact
+        elif 1 <= slot <= len(packed) and _packed_cite(packed[slot - 1]) == cite:
+            return [packed[slot - 1]]
+    return [item for item in packed if _packed_cite(item) == cite]
+
+
+def packed_cited_doc_ids(
+    citations: list[str], packed: list[dict[str, Any]]
+) -> tuple[set[str], list[str]]:
+    """`cited_doc_ids` over the packed join of an expanded response (#1314):
+    the doc ids of every entry `packed_citation_hits` maps, plus the
+    citations that map to none."""
+    docs: set[str] = set()
+    unmatched: list[str] = []
+    for c in citations:
+        matched = packed_citation_hits(c, packed)
+        if not matched:
+            unmatched.append(c)
+        docs.update(str(item.get("doc_id") or "") for item in matched)
+    return docs, unmatched
+
+
 def precision_recall(cited: set[str], gold: set[str]) -> tuple[float | None, float | None]:
     """Doc-level citation precision/recall. None denominators (no citations
     / no gold) stay None so abstain rows and zero-hit paths never dilute

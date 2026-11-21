@@ -764,8 +764,16 @@ def _repack(bundle_dir, *, origin="upstream", key=None):
         shutil.copy(bundle_dir / "signing.key", packer)
     shutil.copy(key or packer, bundle_dir / "signing.key")
     manifest = bundle_dir / "MANIFEST.txt"
-    kept = [line for line in manifest.read_text().splitlines(keepends=True) if not line.startswith("origin:")]
-    manifest.write_text("".join(kept) + (f"origin: {origin}\n" if origin else ""))
+    kept = [
+        line for line in manifest.read_text().splitlines(keepends=True)
+        if not line.startswith(("origin:", "gap_base:", "gap_issue:", "gap_tag:", "gap_tree:"))
+    ]
+    extra = f"origin: {origin}\n" if origin else ""
+    if origin == "gap":
+        from tests.helpers_airgap import GAP_MANIFEST_LINES
+
+        extra += GAP_MANIFEST_LINES
+    manifest.write_text("".join(kept) + extra)
     _pub_of(bundle_dir / "signing.key", bundle_dir / "sneakernet-signing.pub")
     _resign(bundle_dir)
 
@@ -895,4 +903,41 @@ def test_bootstrap_refuses_a_flipped_origin_before_reading_it(bundle_dir, anchor
     else:
         assert "MANIFEST.txt: FAILED" in r.stdout
     assert "origin" not in r.stderr
+    assert not (bundle_dir / "operator workspace").exists()
+
+
+def test_bootstrap_refuses_gap_bundle_without_gap_anchor_even_when_no_anchors_set(bundle_dir):
+    """GH#1207 Rev 2 §3e: unlike upstream bundles, origin: gap is NEVER TOFU."""
+    from tests.helpers_airgap import gap_release_key
+
+    _repack(bundle_dir, origin="gap", key=gap_release_key())
+    r = _bootstrap(bundle_dir, _offline_env(bundle_dir))
+    assert r.returncode == 1
+    assert "no release trust anchor is configured for the bundle's origin (gap)" in r.stderr
+    assert not (bundle_dir / "operator workspace").exists()
+    # With both anchors configured, the exact same bundle bootstraps cleanly.
+    ok = _bootstrap(bundle_dir, {**_offline_env(bundle_dir), **_anchors(bundle_dir)})
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+
+@pytest.mark.parametrize(("origin", "extra_line", "drop_prefix", "needle"), [
+    ("upstream", "gap_base: " + "1" * 40 + "\n", None, "declares origin: upstream but carries gap release metadata"),
+    ("gap", "", "gap_base:", "declares origin: gap but is missing or has malformed gap metadata"),
+    ("gap", "", "gap_tree:", "declares origin: gap but is missing or has malformed gap metadata"),
+    ("gap", "gap_issue: GL#99\n", None, "declares origin: gap but is missing or has malformed gap metadata"),
+])
+def test_bootstrap_enforces_manifest_gap_field_consistency(bundle_dir, origin, extra_line, drop_prefix, needle):
+    """GH#1207 Rev 2 §3e: upstream bundles must carry no gap_* fields; gap bundles must carry all four once."""
+    from tests.helpers_airgap import gap_release_key
+
+    _repack(bundle_dir, origin=origin, key=gap_release_key() if origin == "gap" else None)
+    manifest = bundle_dir / "MANIFEST.txt"
+    lines = manifest.read_text().splitlines(keepends=True)
+    if drop_prefix:
+        lines = [line for line in lines if not line.startswith(drop_prefix)]
+    manifest.write_text("".join(lines) + extra_line)
+    _resign(bundle_dir)
+    r = _bootstrap(bundle_dir, {**_offline_env(bundle_dir), **_anchors(bundle_dir)})
+    assert r.returncode == 1
+    assert needle in r.stderr
     assert not (bundle_dir / "operator workspace").exists()

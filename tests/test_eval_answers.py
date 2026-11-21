@@ -1962,3 +1962,26 @@ def test_repeats_outside_the_declared_range_are_refused(value):
     with pytest.raises(SystemExit) as refused:
         answers.main(["--agent-url", "http://deployed-agent:8087", "--repeats", value])
     assert refused.value.code == 2
+
+
+# -------------------------------------------- neighbour expansion join (#1314)
+
+
+def test_only_neighbour_hits_show_that_expansion_ran() -> None:
+    """#1314 review B1/B2: the response join is used only when the response's
+    own hits show expansion ran (a 'neighbour_of' hit). Hits without one
+    (expansion off, or on with nothing appended) and the buffered body,
+    which has no 'hits' however many excerpts it packed, keep the pool."""
+    from mainframe_rag.eval.answers import expanded_response_hits
+
+    retrieved = [{"doc_id": "D1", "cite": "D1 Ref, p. 1", "text": "p1"},
+                 {"doc_id": "D2", "cite": "D2 Ref, p. 2", "text": "p2"}]
+    neighbour = {"doc_id": "D1", "cite": "D1 Ref, p. 1", "text": "n2", "neighbour_of": "c1"}
+    supplied = [{"index": i, "doc_id": "D1", "citation": f"D1 Ref, p. {i}", "text": "x"}
+                for i in range(1, 4)]
+    assert expanded_response_hits({"hits": retrieved, "supplied_evidence": supplied}) is None
+    assert expanded_response_hits({"supplied_evidence": supplied, "evidence_omitted": 0}) is None
+    assert expanded_response_hits({"hits": []}) is None
+    assert expanded_response_hits({"hits": [*retrieved, {**neighbour, "neighbour_of": None}]}) is None
+    assert expanded_response_hits({"hits": [*retrieved, {"neighbour_of": "c1"}]}) is None
+    assert expanded_response_hits({"hits": [*retrieved, neighbour]}) == [*retrieved, neighbour]

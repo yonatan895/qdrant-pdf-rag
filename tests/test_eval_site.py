@@ -2478,3 +2478,341 @@ def test_image_arm_and_sessions_are_refused_together(capsys):
                       "--sessions", "sessions.jsonl", "--image-arm", "image"])
     assert exc.value.code == 2
     assert "--image-arm draws dev golden questions: drop --sessions" in capsys.readouterr().err
+
+
+# ------------------------------------ neighbour expansion eval join (#1314 PR 2)
+
+
+@pytest.mark.parametrize("transport", ["json", "sse", "chat"])
+def test_expand_on_eval_join_sees_neighbours_on_streamed_transports(site_eval, transport):
+    """#1314 PR 2: on expand-on rows, the sibling /v1/search pool only holds the
+    base retrieved hits while the answer response carries appended neighbours.
+    SSE /v1/answer and /v1/chat carry the hits, whose 'neighbour_of' shows
+    that expansion ran: hit_doc_ids, gold_retrieved, citation precision/recall,
+    answer_completeness and export reflect the neighbours without leaking text
+    canaries. The buffered body has no hits, cannot show it, and keeps the
+    pool join: the cited cross-page neighbour stays unmatched."""
+    import httpx2
+
+    parent_cite = f"SA22-0000-00 {CANARIES['cite']}, {CANARIES['heading']}, p. 6"
+    same_page_cite = parent_cite
+    next_page_cite = f"SA22-0000-00 {CANARIES['cite']}, {CANARIES['heading']}, p. 7"
+    other_cite = f"{OTHER_DOC} Other Reference, Chapter 9, p. 1"
+
+    base_pool = [
+        {"doc_id": OTHER_DOC, "cite": other_cite, "text": "Unrelated hit."},
+        {"doc_id": "SA22-0000-00", "cite": parent_cite, "text": CANARIES["excerpt"]},
+    ]
+    expanded_hits = [
+        _hit(chunk_id="c0", doc_id=OTHER_DOC, cite=other_cite, page_label="1",
+             page_start=0, page_end=0, text="Unrelated hit."),
+        _hit(chunk_id="c1", doc_id="SA22-0000-00", cite=parent_cite, page_label="6",
+             page_start=5, page_end=5, text=CANARIES["excerpt"]),
+        {**_hit(chunk_id="c2", doc_id="SA22-0000-00", cite=same_page_cite, page_label="6",
+                page_start=5, page_end=5, text=f"{CANARIES['excerpt']} same-page"),
+         "neighbour_of": "c1"},
+        {**_hit(chunk_id="c3", doc_id="SA22-0000-00", cite=next_page_cite, page_label="7",
+                page_start=6, page_end=6, text=f"{CANARIES['excerpt']} next-page"),
+         "neighbour_of": "c1"},
+    ]
+    supplied = [
+        _excerpt(index=1, doc_id=OTHER_DOC, citation=other_cite, page_label="1",
+                 pdf_page_start=1, pdf_page_end=1, text="Unrelated hit."),
+        _excerpt(index=2, doc_id="SA22-0000-00", citation=parent_cite, duplicate_citation=True,
+                 page_label="6", pdf_page_start=6, pdf_page_end=6, text=CANARIES["excerpt"]),
+        _excerpt(index=3, doc_id="SA22-0000-00", citation=same_page_cite, duplicate_citation=True,
+                 page_label="6", pdf_page_start=6, pdf_page_end=6,
+                 text=f"{CANARIES['excerpt']} same-page"),
+        _excerpt(index=4, doc_id="SA22-0000-00", citation=next_page_cite,
+                 page_label="7", pdf_page_start=7, pdf_page_end=7,
+                 text=f"{CANARIES['excerpt']} next-page"),
+    ]
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": base_pool})
+        # Model cites ONLY the cross-page neighbour (not in /v1/search!).
+        if transport == "chat":
+            return _sse(chat_stream(
+                "IEA500I resolution is on page 7 [4].",
+                citations=(next_page_cite,), supplied=supplied, hits=expanded_hits,
+            ))
+        if transport == "sse":
+            return _sse(_answer_final(
+                answer="IEA500I resolution is on page 7.",
+                citations=[next_page_cite], supplied_evidence=supplied,
+                evidence_omitted=0, hits=expanded_hits,
+            ))
+        return httpx2.Response(200, json={
+            "request_id": "r1",
+            "answer": "IEA500I resolution is on page 7.",
+            "citations": [next_page_cite],
+            "citations_inferred": False,
+            "inferred_indices": [],
+            "verification_state": "accepted",
+            "script": None,
+            "supplied_evidence": supplied,
+            "evidence_omitted": 0,
+        })
+
+    status, report, export, _ = site_eval(respond, [_entry()], CAPTURE_ARGS[transport])
+    assert status == 0, report["results"]
+    [row] = report["results"]
+    assert row["verdict"] == "pass"
+    if transport == "json":
+        assert row["hit_doc_ids"] == [OTHER_DOC, "SA22-0000-00"]
+        assert row["gold_retrieved"] is True
+        assert row["unmatched_citations"] == [next_page_cite]
+        assert row["cited_doc_ids"] == []
+        assert row["citation_precision"] is None and row["citation_recall"] == 0.0
+    else:
+        # Retrieval and citation joins see all 4 hits (2 base + 2 neighbours).
+        assert row["hit_doc_ids"] == [OTHER_DOC, "SA22-0000-00", "SA22-0000-00", "SA22-0000-00"]
+        assert row["gold_retrieved"] is True
+        assert row["unmatched_citations"] == []
+        assert row["cited_doc_ids"] == ["SA22-0000-00"]
+        assert row["citation_precision"] == 1.0 and row["citation_recall"] == 1.0
+        assert report["metrics"]["answer_completeness"] == 1.0
+    # Text-free export keeps the exact key set and leaks no canaries, also
+    # when the unmatched citation (buffered JSON) carries them.
+    export_text = export.decode("utf-8")
+    for name in ("excerpt", "heading", "title", "cite"):
+        assert CANARIES[name] not in export_text, name
+    [exported] = json.loads(export_text)["rows"]
+    assert set(exported) == EXPORT_ROW_KEYS
+    assert exported["hit_doc_ids"] == row["hit_doc_ids"]
+    assert exported["cited_doc_ids"] == row["cited_doc_ids"]
+    assert exported["citation_recall"] == row["citation_recall"]
+
+
+def test_image_arm_still_joins_on_typed_search_pool(site_eval):
+    """docs/eval.md: --image-arm pins gold_retrieved, hit_doc_ids, and citation
+    P/R to the typed question's /v1/search pool rather than transcript hits,
+    even when those hits show expansion ran (#1314)."""
+    import httpx2
+
+    typed_cite = "SA22-0000-00 Typed Pool Reference, p. 1"
+    transcript_cite = f"{OTHER_DOC} Transcript Hit, p. 9"
+    transcript_hits = [
+        _hit(chunk_id="t1", doc_id=OTHER_DOC, cite=transcript_cite),
+        {**_hit(chunk_id="t2", doc_id=OTHER_DOC, cite=transcript_cite), "neighbour_of": "t1"},
+    ]
+    transcript_supplied = [_excerpt(index=1, doc_id=OTHER_DOC, citation=transcript_cite)]
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": [{"doc_id": "SA22-0000-00", "cite": typed_cite}]})
+        return _sse(chat_stream(
+            "Answered from transcript [1].",
+            citations=(transcript_cite,),
+            supplied=transcript_supplied,
+            hits=transcript_hits,
+        ))
+
+    status, report, _, _ = site_eval(respond, [_entry()], [*IMAGE_CHAT, "image"])
+    assert status == 0
+    [row] = report["results"]
+    assert row["hit_doc_ids"] == ["SA22-0000-00"]
+    assert row["gold_retrieved"] is True
+    assert row["unmatched_citations"] == [transcript_cite]
+
+
+# Expand-off fixtures (#1314 review B1/B2): the response's hits carry no
+# 'neighbour_of', so every row keeps the sibling-pool join. Expected values
+# observed on origin/main a94cf865 with the same inputs.
+_GOLD_CITE = "SA22-0000-00 Synthetic Reference, Chapter 2 > Restart, p. 6"
+_OTHER_CITE = f"{OTHER_DOC} Other Reference, Chapter 9, p. 1"
+_DEEP_CITE = "SA22-0000-00 Synthetic Reference, Chapter 3 > Verify, p. 9"
+_POOL_JOIN_CASES: dict[str, dict] = {
+    # A bare cite line shared by two packed chunks of two docs: first match only.
+    "shared_cite": {
+        "pool": [("c1", "SA22-0000-00", _GOLD_CITE), ("c2", OTHER_DOC, _GOLD_CITE)],
+        "packed": [("c1", "SA22-0000-00", _GOLD_CITE), ("c2", OTHER_DOC, _GOLD_CITE)],
+        "citations": [_GOLD_CITE], "inferred": [],
+        "row": {"hit_doc_ids": ["SA22-0000-00", OTHER_DOC], "gold_retrieved": True,
+                "cited_doc_ids": ["SA22-0000-00"], "unmatched_citations": [],
+                "citation_precision": 1.0, "citation_recall": 1.0},
+        "off_gold": 0},
+    # A [n] prefix naming the second of two equal cites: still the first match.
+    "prefixed_cite": {
+        "pool": [("c1", "SA22-0000-00", _GOLD_CITE), ("c2", OTHER_DOC, _GOLD_CITE)],
+        "packed": [("c1", "SA22-0000-00", _GOLD_CITE), ("c2", OTHER_DOC, _GOLD_CITE)],
+        "citations": [f"[2] {_GOLD_CITE}"], "inferred": [],
+        "row": {"hit_doc_ids": ["SA22-0000-00", OTHER_DOC], "gold_retrieved": True,
+                "cited_doc_ids": ["SA22-0000-00"], "unmatched_citations": [],
+                "citation_precision": 1.0, "citation_recall": 1.0},
+        "off_gold": 0},
+    # The pool drifted from the answer's retrieval: the cite stays unmatched.
+    "pool_drift": {
+        "pool": [("c9", OTHER_DOC, _OTHER_CITE)],
+        "packed": [("c1", "SA22-0000-00", _GOLD_CITE)],
+        "citations": [_GOLD_CITE], "inferred": [],
+        "row": {"hit_doc_ids": [OTHER_DOC], "gold_retrieved": False, "cited_doc_ids": [],
+                "unmatched_citations": [_GOLD_CITE], "citation_precision": None,
+                "citation_recall": 0.0},
+        "off_gold": 0},
+    # Packed deeper than the pool, inferred index past it: off gold.
+    "inferred_past_pool": {
+        "pool": [("c2", OTHER_DOC, _OTHER_CITE), ("c1", OTHER_DOC, _GOLD_CITE)],
+        "packed": [("c2", OTHER_DOC, _OTHER_CITE), ("c1", OTHER_DOC, _GOLD_CITE),
+                   ("c3", "SA22-0000-00", _DEEP_CITE)],
+        "citations": [_DEEP_CITE], "inferred": [3],
+        "row": {"hit_doc_ids": [OTHER_DOC, OTHER_DOC], "gold_retrieved": False,
+                "cited_doc_ids": [], "unmatched_citations": [_DEEP_CITE],
+                "citation_precision": None, "citation_recall": 0.0},
+        "off_gold": 1},
+}
+
+
+@pytest.mark.parametrize("transport", ["json", "sse", "chat"])
+@pytest.mark.parametrize("case", sorted(_POOL_JOIN_CASES))
+def test_rows_without_neighbours_keep_the_pool_join(site_eval, case, transport):
+    """#1314 review B1/B2: with no 'neighbour_of' hit in the response
+    (expansion off, or on with nothing appended), retrieval, citation and
+    inferred-index fields join on the sibling /v1/search pool exactly as
+    before, on multi-hit fixtures where the response join would differ."""
+    import httpx2
+
+    spec = _POOL_JOIN_CASES[case]
+    pool = [_hit(chunk_id=c, doc_id=d, cite=cite, text=f"text {c}") for c, d, cite in spec["pool"]]
+    hits = [_hit(chunk_id=c, doc_id=d, cite=cite, text=f"text {c}") for c, d, cite in spec["packed"]]
+    supplied = [_excerpt(index=i, doc_id=d, citation=cite, text=f"text {c}")
+                for i, (c, d, cite) in enumerate(spec["packed"], 1)]
+    inferred = bool(spec["inferred"])
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=HEALTH)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": pool})
+        if transport == "chat":
+            return _sse(chat_stream("Restart it as described [1].",
+                                    citations=tuple(spec["citations"]), supplied=supplied,
+                                    hits=hits, inferred=inferred, indices=spec["inferred"]))
+        body = {"request_id": "r1", "answer": "Restart it as described.",
+                "citations": spec["citations"], "citations_inferred": inferred,
+                "inferred_indices": spec["inferred"], "verification_state": "accepted",
+                "script": None, "supplied_evidence": supplied, "evidence_omitted": 0}
+        if transport == "sse":
+            return _sse(_answer_final(**body, hits=hits))
+        return httpx2.Response(200, json=body)
+
+    _, report, export, _ = site_eval(respond, [_entry()], CAPTURE_ARGS[transport])
+    [row] = report["results"]
+    assert {key: row[key] for key in spec["row"]} == spec["row"]
+    assert report["metrics"]["inferred_index_off_gold"] == spec["off_gold"]
+    [exported] = json.loads(export)["rows"]
+    assert {key: exported[key] for key in spec["row"] if key != "unmatched_citations"} == {
+        key: value for key, value in spec["row"].items() if key != "unmatched_citations"}
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_real_app_expand_off_keeps_the_pool_join_and_expand_on_joins_neighbours(
+    monkeypatch, servable_representation_gate, stream,
+):
+    """Real app end-to-end (#1314 PR 2): real 'retrieve_for_answer' and
+    'expand_hits' through FastAPI TestClient, then 'run_query' with a
+    'ResponseJoin' and 'apply_pool_join', as the answer eval wires them.
+    Expansion off, and on with no stored neighbour to append, two packed
+    chunks share one page's cite line: the row keeps the sibling-pool join
+    (values observed on origin/main a94cf865). Expansion on with neighbours,
+    streamed: they reach hit_doc_ids, citation recall and the inferred-index
+    lookup. Buffered, the body cannot show expansion and keeps the pool."""
+    import mainframe_rag.agent.app as app_mod
+    from mainframe_rag.eval.answers import (
+        ResponseJoin,
+        apply_pool_join,
+        inferred_index_off_gold,
+        run_query,
+    )
+    from mainframe_rag.eval.judging import packed_citation_hits
+    from mainframe_rag.ingest.chunk import make_chunk_id
+    from mainframe_rag.ports import ChatResult, TokenUsage
+    from mainframe_rag.retrieve.query import hit_from_payload
+    from tests.fakes import StoredChunksFake
+    from tests.helpers_agent_local import StreamStubLLM, agent_client
+
+    rev = "rev-eval-expand"
+    heading = "Guide > Restart Procedure"
+    texts = ("Step 1: drain queues.", "Step 2: stop the widget cleanly.",
+             "Step 3: restart and verify status.")
+    ids = [make_chunk_id(rev, heading, page, i) for i, page in enumerate((0, 0, 1))]
+    payloads = {
+        cid: {"doc_id": "SYN-0001-00", "title": "Synthetic Reference", "source_rev": rev,
+              "heading_path": heading, "page_start": page, "page_end": page,
+              "page_label": str(page + 1), "chunk_type": "narrative", "text": text,
+              "product": "z/OS", "version": "9.9", "message_ids": []}
+        for cid, page, text in zip(ids, (0, 0, 1), texts, strict=True)
+    }
+    same_page_cite = hit_from_payload(ids[0], payloads[ids[0]], 0.85).cite
+    next_page_cite = hit_from_payload(ids[2], payloads[ids[2]], 0.85).cite
+    entry = _entry(id="PROC-01", query="How do I restart the widget service cleanly?",
+                   query_class="procedural", expected_doc_ids=["SYN-0001-00"])
+
+    def run_once(expand_enabled: bool, retrieved: list[str], stored: list[str], model_output: str):
+        hits = [hit_from_payload(cid, payloads[cid], 0.85 - i / 100) for i, cid in enumerate(retrieved)]
+
+        def search(*args, **kwargs):
+            return list(hits), "nl", {"embed_ms": 1, "qdrant_ms": 1}
+
+        class StubLLM(StreamStubLLM):
+            def chat(self, *args, **kwargs):
+                return ChatResult(content=model_output, usage=TokenUsage(
+                    prompt_tokens=20, completion_tokens=10, total_tokens=30))
+
+        llm = StubLLM((
+            {"type": "token", "delta": model_output, "ttft_ms": 5},
+            {"type": "done", "finish_reason": "stop", "ttft_ms": 5,
+             "usage": TokenUsage(prompt_tokens=20, completion_tokens=10, total_tokens=30)},
+        ))
+        env = {"ANSWER_EXPAND_ENABLED": "true" if expand_enabled else "false",
+               "ANSWER_EXPAND_BUDGET": "4", "ANSWER_EXPAND_PER_HIT": "4"}
+        with agent_client(monkeypatch, llm=llm, search=search, env=env) as client:
+            monkeypatch.setattr(app_mod, "qdrant",
+                                StoredChunksFake({cid: payloads[cid] for cid in stored}))
+            pool = client.post("/v1/search", json={"query": entry["query"], "limit": 16}).json()["hits"]
+            join = ResponseJoin()
+            row = run_query(client, entry, None, pool, stream=stream, response_join=join)
+            if join.packed is not None:
+                apply_pool_join(row, entry, join.packed, packed=True)
+            else:
+                apply_pool_join(row, entry, pool)
+            return row, pool, join
+
+    pool_join = {"hit_doc_ids": ["SYN-0001-00", "SYN-0001-00"], "gold_retrieved": True,
+                 "cited_doc_ids": ["SYN-0001-00"], "unmatched_citations": [],
+                 "citation_precision": 1.0, "citation_recall": 1.0}
+    off_text = f"Drain queues, then stop [1][2].\n\nCitations:\n- {same_page_cite}"
+    for expand in (False, True):
+        row, pool, join = run_once(expand, ids[:2], ids[:2], off_text)
+        assert row["verdict"] == "pass", row["failures"]
+        assert join.packed is None
+        assert [h["doc_id"] for h in pool] == row["hit_doc_ids"]
+        assert {key: row[key] for key in pool_join} == pool_join
+
+    on_text = ("Drain queues, stop cleanly, and restart [1][2][3].\n\n"
+               f"Citations:\n- {same_page_cite}\n- {next_page_cite}")
+    on_row, on_pool, on_join = run_once(True, ids[:1], ids, on_text)
+    assert len(on_pool) == 1  # /v1/search stays untouched
+    assert on_row["verdict"] == "pass", on_row["failures"]
+    if not stream:
+        assert on_join.packed is None
+        assert on_row["hit_doc_ids"] == ["SYN-0001-00"]
+        assert on_row["unmatched_citations"] == [next_page_cite]
+        return
+    assert on_join.packed is not None and len(on_join.packed) == 3
+    assert on_row["hit_doc_ids"] == ["SYN-0001-00"] * 3
+    assert on_row["gold_retrieved"] is True
+    assert on_row["unmatched_citations"] == []
+    assert on_row["cited_doc_ids"] == ["SYN-0001-00"]
+    assert on_row["citation_precision"] == 1.0 and on_row["citation_recall"] == 1.0
+    assert [x["text"] for c in on_row["citations"] for x in packed_citation_hits(c, on_join.packed)] == list(texts)
+
+    inferred_row, _, _ = run_once(True, ids[:1], ids, "Restart and verify status [3].")
+    assert inferred_row["citations_inferred"] is True
+    assert inferred_row["inferred_indices"] == [3]
+    assert inferred_index_off_gold(inferred_row) is False
