@@ -262,23 +262,22 @@ class ToolContext:
 
 @dataclass(frozen=True)
 class ToolOutput:
-    """A handler's result: structured `rows`, or one `text`. `next_page`
-    (rows only) names the next page a paged tool can be asked for."""
+    """A handler's result: structured `rows`, or one `text`.
+
+    `continuation` (rows only) is given how many rows the result shows and
+    returns the fixed line that tells the model how to read the rest (the
+    first row not shown, or the next page), or None when nothing is left.
+    `render_untrusted` writes it after the frame, as the gateway's own line."""
 
     rows: Sequence[Mapping[str, Any]] | None = None
     text: str | None = None
-    next_page: int | None = None
+    continuation: Callable[[int], str | None] | None = None
 
     def __post_init__(self) -> None:
         if (self.rows is None) == (self.text is None):
             raise ValueError("a ToolOutput holds exactly one of rows or text")
-        if self.next_page is not None and (
-            self.rows is None
-            or isinstance(self.next_page, bool)
-            or not isinstance(self.next_page, int)
-            or self.next_page < 1
-        ):
-            raise ValueError("next_page is a positive page number for rows")
+        if self.continuation is not None and self.rows is None:
+            raise ValueError("a continuation belongs to rows")
 
 
 Handler = Callable[[ToolContext, dict[str, Any]], Awaitable[ToolOutput]]
@@ -604,14 +603,56 @@ class RenderStats:
     truncated: bool
 
 
+def _clip_strings(value: object, cap: int) -> object:
+    if isinstance(value, str):
+        return value[:cap]
+    if isinstance(value, dict):
+        return {k: _clip_strings(v, cap) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_clip_strings(v, cap) for v in value]
+    return value
+
+
+def _fit_row(row: dict[str, object], room: int, limits: Limits) -> dict[str, object] | None:
+    """`row` with every string clipped to the longest common length whose
+    escaped row fits `room` bytes, or None when not even empty strings fit."""
+
+    def size(candidate: object) -> int:
+        return len(_frame_body(candidate).encode("utf-8")) + 1  # type: ignore[arg-type]
+
+    if size(_clip_strings(row, 0)) > room:
+        return None
+    low, high = 0, limits.max_field_chars
+    while low < high:
+        middle = (low + high + 1) // 2
+        if size(_clip_strings(row, middle)) <= room:
+            low = middle
+        else:
+            high = middle - 1
+    clipped = _clip_strings(row, low)
+    assert isinstance(clipped, dict)
+    return clipped
+
+
+def _continuation_line(line: str) -> str:
+    if not line or "\n" in line or "\r" in line or any(b in line for b in _BRACKETS):
+        raise ValueError("a continuation is one line with no tag bracket")
+    return line
+
+
 def render_untrusted(
     gateway: str, tool: str, output: ToolOutput, limits: Limits
 ) -> tuple[str, RenderStats]:
     """The framed, sanitized and capped text a model receives for one result.
 
     Rows beyond `max_rows`, or beyond `max_result_bytes` once serialized, are
-    dropped whole (so the body stays valid JSON); a text result is cut on a
-    UTF-8 boundary. `truncated` tells the model either happened."""
+    dropped whole (so the body stays valid JSON); a first row too large on
+    its own is kept with its strings clipped to fit instead, so a result
+    always shows a row when it has one. A text result is cut on a UTF-8
+    boundary. `truncated` tells the model either happened. A rows result
+    with a `continuation` ends with that line after the frame; the cap
+    bounds the body and that line together."""
+    hint = ""
     if output.text is not None:
         text, cut = _clip_utf8(clean_text(output.text), limits.max_result_bytes)
         body = _frame_body({"text": text, "truncated": cut})
@@ -631,26 +672,41 @@ def render_untrusted(
         rows = 0
     else:
         assert output.rows is not None
+        source = output.rows[: limits.max_rows]
+        # Room for the widest line the continuation could write.
+        reserve = 0
+        if output.continuation is not None:
+            for shown in range(len(source) + 1):
+                line = output.continuation(shown)
+                if line is not None:
+                    reserve = max(reserve, len(_continuation_line(line).encode("utf-8")) + 1)
+        budget = limits.max_result_bytes - reserve
         kept: list[dict[str, object]] = []
         cut = len(output.rows) > limits.max_rows
         # Start from the empty wrapper (row_count padded to 10 digits), so the
         # whole escaped body stays within the cap.
-        paging: dict[str, object] = (
-            {} if output.next_page is None else {"next_page": output.next_page}
-        )
-        size = len(_frame_body({"rows": [], "row_count": 10**9, "truncated": False, **paging}))
-        for row in output.rows[: limits.max_rows]:
+        size = len(_frame_body({"rows": [], "row_count": 10**9, "truncated": False}))
+        for row in source:
             cleaned, row_cut = _clean_row(row, limits) if isinstance(row, Mapping) else ({}, True)
             row_size = len(_frame_body(cleaned).encode("utf-8")) + 1
-            if size + row_size > limits.max_result_bytes:
+            if size + row_size > budget:
                 cut = True
+                fitted = None if kept else _fit_row(cleaned, budget - size, limits)
+                if fitted is not None:
+                    kept.append(fitted)
                 break
             kept.append(cleaned)
             size += row_size
             cut = cut or row_cut
         rows = len(kept)
-        body = _frame_body({"rows": kept, "row_count": rows, "truncated": cut, **paging})
-    framed = f'{UNTRUSTED_PREAMBLE}\n<tool-output gateway="{gateway}" tool="{tool}">\n{body}\n</tool-output>'
+        body = _frame_body({"rows": kept, "row_count": rows, "truncated": cut})
+        if output.continuation is not None:
+            line = output.continuation(rows)
+            hint = "" if line is None else "\n" + _continuation_line(line)
+    framed = (
+        f'{UNTRUSTED_PREAMBLE}\n<tool-output gateway="{gateway}" tool="{tool}">\n{body}\n'
+        f"</tool-output>{hint}"
+    )
     return framed, RenderStats(rows=rows, bytes_out=len(framed.encode("utf-8")), truncated=cut)
 
 

@@ -1703,14 +1703,45 @@ def test_limit_defaults_fill_only_the_keys_the_document_leaves_out():
         gw.config_from_document(doc, "splunk", limit_defaults={"no_such_limit": 1})
 
 
-def test_rows_can_name_the_next_page():
-    result = _result(_post_all(_gateway(_Handler(gw.ToolOutput(rows=[{"n": 1}], next_page=3))), [_call()])[0])
-    _, body = _frame(result)
-    assert body == {"rows": [{"n": 1}], "row_count": 1, "truncated": False, "next_page": 3}
-    _, plain = _frame(_result(_post_all(_gateway(_Handler()), [_call()])[0]))
-    assert "next_page" not in plain
+def _hint(shown: int) -> str | None:
+    return None if shown >= 5 else f"[gateway: call find_jobs again with start={shown}]"
+
+
+def test_a_continuation_line_follows_the_frame_and_names_the_first_row_not_shown():
+    rows = [{"i": i, "v": "x" * 40} for i in range(5)]
+    whole, stats = gw.render_untrusted("splunk", "find_jobs", gw.ToolOutput(rows=rows, continuation=_hint), gw.Limits())
+    assert whole.endswith("\n</tool-output>") and stats.rows == 5  # every row shown: no line
+    # 3 rows fit in 200 bytes only once the widest line (start=0..4) is reserved.
+    out, stats = gw.render_untrusted("splunk", "find_jobs", gw.ToolOutput(rows=rows, continuation=_hint),
+                                     gw.Limits(max_result_bytes=200))
+    frame, _, line = out.rpartition("\n")
+    assert frame.endswith("</tool-output>") and out.count("</tool-output>") == 1
+    body = frame.split("\n")[2]
+    assert line == f"[gateway: call find_jobs again with start={stats.rows}]"
+    assert len(body.encode()) + 1 + len(line.encode()) <= 200
+    assert json.loads(body)["row_count"] == stats.rows and json.loads(body)["truncated"] is True
+    # The same rows with no continuation render exactly as before: no line.
+    plain, _ = gw.render_untrusted("splunk", "find_jobs", gw.ToolOutput(rows=rows), gw.Limits(max_result_bytes=200))
+    assert plain.endswith("</tool-output>")
     with pytest.raises(ValueError):
-        gw.ToolOutput(text="t", next_page=2)
+        gw.ToolOutput(text="t", continuation=_hint)
+    for bad in ("two\nlines", "<tag>", ""):
+        with pytest.raises(ValueError):
+            gw.render_untrusted("splunk", "find_jobs", gw.ToolOutput(rows=rows, continuation=lambda _n, b=bad: b),
+                                gw.Limits())
+
+
+@pytest.mark.parametrize("char", ["a", chr(0x2713), chr(0x1D11E), "<"])
+def test_a_first_row_too_large_alone_is_clipped_to_fit_never_dropped(char: str):
+    # One 4000-character field against a 2048-byte cap: dropped whole, the
+    # result would show nothing and a continuation would point at it again.
+    rows = [{"id": 1, "body": char * 4000}, {"id": 2, "body": "short"}]
+    out, stats = gw.render_untrusted("splunk", "find_jobs", gw.ToolOutput(rows=rows), gw.Limits(max_result_bytes=2048))
+    body = json.loads(out.split("\n")[2])
+    assert stats.rows == 1 and body["truncated"] is True and body["rows"][0]["id"] == 1
+    clipped = body["rows"][0]["body"]
+    assert 100 < len(clipped) < 4000 and clipped == char * len(clipped)
+    assert len(out.split("\n")[2].encode()) <= 2048
 
 
 def test_a_client_that_disconnects_mid_body_gets_no_reply():

@@ -95,9 +95,23 @@ BEARER_LIMIT_DEFAULTS: Final = {"max_concurrent_per_user": 4, "rate_per_minute":
 # (maintainer, 2026-11-21, item f): the runtime clips every string at 4096
 # characters, which cut the team's runbooks, so GitLab raises it to 32768.
 # GitLab titles and names are short, so the one cap does not lengthen them.
-# max_result_bytes (64 KiB by default) holds one full 32768-character field.
-# The shared `Limits` default, and so Splunk, stays at 4096.
-LONG_TEXT_LIMIT_DEFAULTS: Final = {"max_field_chars": 32768}
+# The result cap is 128 KiB for GitLab (maintainer, 2026-11-21, round 3):
+# room for a full 32768-character field of up to three-byte characters; a
+# field of four-byte or escape-heavy characters is clipped to fit
+# (render_untrusted). The shared `Limits` defaults, and so Splunk's, stay
+# at 4096 characters and 64 KiB. Explicit configuration wins over both.
+LONG_TEXT_LIMIT_DEFAULTS: Final = {"max_field_chars": 32768, "max_result_bytes": 128 * 1024}
+
+# The fixed line after a list result that leaves rows out (maintainer,
+# 2026-11-21, round 3): it names the start of the first row not shown.
+CONTINUE_LINE: Final = (
+    "[gateway: {count}more {noun} not shown; call {tool} again with start={start}"
+    " and the other arguments unchanged]"
+)
+CONTINUE_PAST_LIMIT: Final = (
+    "[gateway: more {noun} exist past start={limit}, the last {tool} can read;"
+    " narrow the request]"
+)
 
 # The bridge-authored lines around a cut job log (docs/team-tools.md).
 JOB_LOG_OMITTED: Final = "[gateway: about {} of earlier log omitted]\n"
@@ -275,16 +289,27 @@ class GitLabClient:
 
     async def get_json_page(
         self, principal: Principal, path: str, params: Mapping[str, str | int]
-    ) -> tuple[Any, int | None]:
-        """A JSON page and GitLab's `x-next-page` (None when absent, empty or
-        not a page number)."""
+    ) -> tuple[Any, bool | None, int | None]:
+        """A JSON page, whether GitLab names a following page (`x-next-page`
+        a page number: True; present but empty: False; absent or not a
+        number: None) and its `x-total` (None when absent)."""
         token = await self.provider.token_for(principal)
         response = await self.upstream.request(
             "GET", path, params=params, headers={"PRIVATE-TOKEN": token}
         )
-        raw = response.headers.get("x-next-page", "")
-        next_page = int(raw) if raw.isascii() and raw.isdigit() and int(raw) > 0 else None
-        return response.json(), next_page
+
+        def number(name: str) -> int | None:
+            raw = response.headers.get(name, "").strip()
+            return int(raw) if raw.isascii() and raw.isdigit() else None
+
+        raw_next = response.headers.get("x-next-page")
+        following = number("x-next-page")
+        more: bool | None = None
+        if raw_next is not None and not raw_next.strip():
+            more = False  # GitLab's last page
+        elif following is not None and following > 0:
+            more = True
+        return response.json(), more, number("x-total")
 
     async def get_tail(
         self,
@@ -445,6 +470,10 @@ def _pick(item: object, keys: Sequence[str]) -> dict[str, Any]:
     return out
 
 
+def _not_system(item: object) -> bool:
+    return not (isinstance(item, Mapping) and item.get("system") is True)
+
+
 def _rows(items: object, keys: Sequence[str]) -> list[dict[str, Any]]:
     if not isinstance(items, list):
         raise GatewayError("upstream_error")
@@ -567,12 +596,81 @@ class GitLabTools:
             raise GatewayError("project_not_allowed")
         return project_id, doc
 
-    def _paging(self, args: Mapping[str, Any]) -> dict[str, str | int]:
-        return {"per_page": self.backend.per_page, "page": int(args.get("page", 1))}
+    @property
+    def max_start(self) -> int:
+        """The last row a paged tool may start at: as deep as `max_page` pages
+        of `per_page` rows."""
+        return self.backend.max_page * self.backend.per_page - 1
+
+    async def _list(
+        self,
+        ctx: ToolContext,
+        args: Mapping[str, Any],
+        *,
+        tool: str,
+        noun: str,
+        path: str,
+        params: Mapping[str, str | int],
+        keys: Sequence[str],
+        per_page: int | None = None,
+        keep: Callable[[object], bool] | None = None,
+    ) -> ToolOutput:
+        """One GitLab list call from row `start` (args), as rows with a
+        continuation. GitLab pages by number, so the page holding `start` is
+        read and the rows before it skipped; every row keeps its index in
+        GitLab's order, so the continuation names the first row the result
+        did not show (dropped to fit the cap, or on the next page). `keep`
+        filters rows here; those rows still count in the index, and the
+        remaining count is then given as "up to". A page larger than
+        `max_response_bytes` is asked for again with fewer rows."""
+        size = per_page or self.backend.per_page
+        start = int(args.get("start", 0))
+        while True:
+            page = start // size + 1
+            first = (page - 1) * size
+            try:
+                items, more, total = await self.client.get_json_page(
+                    ctx.principal, path, {**params, "per_page": size, "page": page}
+                )
+                break
+            except GatewayError as exc:
+                # A page of long rows can pass max_response_bytes: `start` does
+                # not depend on the page size, so ask for fewer rows (20, 5, 1).
+                if exc.code != "upstream_too_large" or size == 1:
+                    raise
+                size = max(1, size // 4)
+        if not isinstance(items, list):
+            raise GatewayError("upstream_error")
+        if more is None:  # no usable header: a full page may have a next one
+            more = len(items) >= size
+        indexed = [
+            (first + index, item)
+            for index, item in enumerate(items)
+            if first + index >= start and (keep is None or keep(item))
+        ]
+        rows = [_pick(item, keys) for _, item in indexed]
+        limit = self.max_start
+
+        def continuation(shown: int) -> str | None:
+            if shown < len(indexed):
+                following = indexed[shown][0]
+            elif more:
+                following = first + size
+            else:
+                return None
+            if following > limit:
+                return CONTINUE_PAST_LIMIT.format(noun=noun, limit=limit, tool=tool)
+            count = ""
+            if total is not None and total > following:
+                count = f"{'up to ' if keep is not None else ''}{total - following} "
+            return CONTINUE_LINE.format(count=count, noun=noun, tool=tool, start=following)
+
+        return ToolOutput(rows=rows, continuation=continuation)
 
     async def list_projects(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
         params: dict[str, str | int] = {
-            **self._paging(args),
+            "per_page": self.backend.per_page,
+            "page": int(args.get("page", 1)),
             "include_subgroups": "true",
             "archived": "false",
             "order_by": "last_activity_at",
@@ -613,16 +711,20 @@ class GitLabTools:
     async def list_tree(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
         project_id, _ = await self._project(ctx, args["project"])
         params: dict[str, str | int] = {
-            **self._paging(args),
             "recursive": str(bool(args.get("recursive", False))).lower(),
         }
         for key in ("path", "ref"):
             if args.get(key):
                 params[key] = args[key]
-        items = await self.client.get_json(
-            ctx.principal, f"/projects/{project_id}/repository/tree", params
+        return await self._list(
+            ctx,
+            args,
+            tool="list_repository_tree",
+            noun="entries",
+            path=f"/projects/{project_id}/repository/tree",
+            params=params,
+            keys=("path", "type", "name"),
         )
-        return ToolOutput(rows=_rows(items, ("path", "type", "name")))
 
     async def read_file(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
         project_id, project = await self._project(ctx, args["project"])
@@ -640,39 +742,50 @@ class GitLabTools:
 
     async def search_code(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
         project_id, _ = await self._project(ctx, args["project"])
-        params: dict[str, str | int] = {
-            **self._paging(args),
-            "scope": "blobs",
-            "search": args["query"],
-        }
+        params: dict[str, str | int] = {"scope": "blobs", "search": args["query"]}
         if args.get("ref"):
             params["ref"] = args["ref"]
-        items = await self.client.get_json(ctx.principal, f"/projects/{project_id}/search", params)
-        return ToolOutput(rows=_rows(items, ("path", "ref", "startline", "data")))
+        return await self._list(
+            ctx,
+            args,
+            tool="search_code",
+            noun="matches",
+            path=f"/projects/{project_id}/search",
+            params=params,
+            keys=("path", "ref", "startline", "data"),
+        )
 
     async def list_commits(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
         project_id, _ = await self._project(ctx, args["project"])
-        params: dict[str, str | int] = self._paging(args)
+        params: dict[str, str | int] = {}
         if args.get("ref"):
             params["ref_name"] = args["ref"]
         if args.get("path"):
             params["path"] = args["path"]
-        items = await self.client.get_json(
-            ctx.principal, f"/projects/{project_id}/repository/commits", params
-        )
-        return ToolOutput(
-            rows=_rows(items, ("short_id", "title", "author_name", "created_at", "web_url"))
+        return await self._list(
+            ctx,
+            args,
+            tool="list_commits",
+            noun="commits",
+            path=f"/projects/{project_id}/repository/commits",
+            params=params,
+            keys=("short_id", "title", "author_name", "created_at", "web_url"),
         )
 
     async def list_merge_requests(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
         project_id, _ = await self._project(ctx, args["project"])
-        params: dict[str, str | int] = {**self._paging(args), "state": args.get("state", "opened")}
+        params: dict[str, str | int] = {"state": args.get("state", "opened")}
         if args.get("search"):
             params["search"] = args["search"]
-        items = await self.client.get_json(
-            ctx.principal, f"/projects/{project_id}/merge_requests", params
+        return await self._list(
+            ctx,
+            args,
+            tool="list_merge_requests",
+            noun="merge requests",
+            path=f"/projects/{project_id}/merge_requests",
+            params=params,
+            keys=_MR_KEYS,
         )
-        return ToolOutput(rows=_rows(items, _MR_KEYS))
 
     async def get_merge_request(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
         project_id, _ = await self._project(ctx, args["project"])
@@ -683,22 +796,31 @@ class GitLabTools:
 
     async def get_merge_request_diffs(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
         project_id, _ = await self._project(ctx, args["project"])
-        items = await self.client.get_json(
-            ctx.principal,
-            f"/projects/{project_id}/merge_requests/{args['iid']}/diffs",
-            self._paging(args),
+        return await self._list(
+            ctx,
+            args,
+            tool="get_merge_request_diffs",
+            noun="file diffs",
+            path=f"/projects/{project_id}/merge_requests/{args['iid']}/diffs",
+            params={},
+            keys=("old_path", "new_path", "new_file", "deleted_file", "renamed_file", "diff"),
         )
-        keys = ("old_path", "new_path", "new_file", "deleted_file", "renamed_file", "diff")
-        return ToolOutput(rows=_rows(items, keys))
 
     async def list_issues(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
         project_id, _ = await self._project(ctx, args["project"])
-        params: dict[str, str | int] = {**self._paging(args), "state": args.get("state", "opened")}
+        params: dict[str, str | int] = {"state": args.get("state", "opened")}
         for key in ("search", "labels"):
             if args.get(key):
                 params[key] = args[key]
-        items = await self.client.get_json(ctx.principal, f"/projects/{project_id}/issues", params)
-        return ToolOutput(rows=_rows(items, _ISSUE_KEYS))
+        return await self._list(
+            ctx,
+            args,
+            tool="list_issues",
+            noun="issues",
+            path=f"/projects/{project_id}/issues",
+            params=params,
+            keys=_ISSUE_KEYS,
+        )
 
     async def get_issue(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
         project_id, _ = await self._project(ctx, args["project"])
@@ -709,23 +831,31 @@ class GitLabTools:
 
     async def list_pipelines(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
         project_id, _ = await self._project(ctx, args["project"])
-        params: dict[str, str | int] = self._paging(args)
+        params: dict[str, str | int] = {}
         for key in ("ref", "status"):
             if args.get(key):
                 params[key] = args[key]
-        items = await self.client.get_json(
-            ctx.principal, f"/projects/{project_id}/pipelines", params
+        return await self._list(
+            ctx,
+            args,
+            tool="list_pipelines",
+            noun="pipelines",
+            path=f"/projects/{project_id}/pipelines",
+            params=params,
+            keys=_PIPELINE_KEYS,
         )
-        return ToolOutput(rows=_rows(items, _PIPELINE_KEYS))
 
     async def list_pipeline_jobs(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
         project_id, _ = await self._project(ctx, args["project"])
-        items = await self.client.get_json(
-            ctx.principal,
-            f"/projects/{project_id}/pipelines/{args['pipeline_id']}/jobs",
-            self._paging(args),
+        return await self._list(
+            ctx,
+            args,
+            tool="list_pipeline_jobs",
+            noun="jobs",
+            path=f"/projects/{project_id}/pipelines/{args['pipeline_id']}/jobs",
+            params={},
+            keys=_JOB_KEYS,
         )
-        return ToolOutput(rows=_rows(items, _JOB_KEYS))
 
     async def list_issue_notes(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
         """One issue's notes, oldest first by default. System notes (label,
@@ -734,24 +864,20 @@ class GitLabTools:
         a GitLab without that parameter (assumed to ignore it: a site check)."""
         project_id, _ = await self._project(ctx, args["project"])
         include_system = bool(args.get("include_system", False))
-        params: dict[str, str | int] = {
-            "per_page": int(args.get("per_page", self.backend.per_page)),
-            "page": int(args.get("page", 1)),
-            "sort": args.get("sort", "asc"),
-            "order_by": "created_at",
-        }
+        params: dict[str, str | int] = {"sort": args.get("sort", "asc"), "order_by": "created_at"}
         if not include_system:
             params["activity_filter"] = "only_comments"
-        items, next_page = await self.client.get_json_page(
-            ctx.principal, f"/projects/{project_id}/issues/{args['iid']}/notes", params
+        return await self._list(
+            ctx,
+            args,
+            tool="list_issue_notes",
+            noun="notes",
+            path=f"/projects/{project_id}/issues/{args['iid']}/notes",
+            params=params,
+            keys=_NOTE_KEYS,
+            per_page=int(args.get("per_page", self.backend.per_page)),
+            keep=None if include_system else _not_system,
         )
-        if not isinstance(items, list):
-            raise GatewayError("upstream_error")
-        if not include_system:
-            items = [i for i in items if not (isinstance(i, Mapping) and i.get("system") is True)]
-        if next_page is not None and next_page > self.backend.max_page:
-            next_page = None  # a page no call may ask for
-        return ToolOutput(rows=_rows(items, _NOTE_KEYS), next_page=next_page)
 
     async def read_job_log(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
         """The end of a job log, streamed: only the last `tail_bytes` are kept
@@ -785,6 +911,12 @@ class GitLabTools:
             "Project full path, e.g. group/subgroup/project", _PROJECT_RE.pattern, 1024
         )
         page = _int("Result page, from 1", 1, b.max_page)
+        start = _int(
+            "Index of the first row to return, from 0. A result that leaves rows"
+            " out ends with a line naming the start to call next.",
+            0,
+            b.max_page * b.per_page - 1,
+        )
         ref = _string("Branch, tag or commit SHA", _REF_PATTERN, 255)
         iid = _int("Project-scoped number (iid)", 1, 2**31 - 1)
         search = _string("Text to search for", _SEARCH_PATTERN, 200)
@@ -838,7 +970,7 @@ class GitLabTools:
                     "path": path,
                     "ref": ref,
                     "recursive": {"type": "boolean"},
-                    "page": page,
+                    "start": start,
                 },
                 ["project"],
             ),
@@ -853,21 +985,21 @@ class GitLabTools:
                 "search_code",
                 "Search file contents in one project.",
                 self.search_code,
-                {"project": project, "query": search, "ref": ref, "page": page},
+                {"project": project, "query": search, "ref": ref, "start": start},
                 ["project", "query"],
             ),
             tool(
                 "list_commits",
                 "List commits on a ref, optionally for one path.",
                 self.list_commits,
-                {"project": project, "ref": ref, "path": path, "page": page},
+                {"project": project, "ref": ref, "path": path, "start": start},
                 ["project"],
             ),
             tool(
                 "list_merge_requests",
                 "List merge requests.",
                 self.list_merge_requests,
-                {"project": project, "state": state, "search": search, "page": page},
+                {"project": project, "state": state, "search": search, "start": start},
                 ["project"],
             ),
             tool(
@@ -881,7 +1013,7 @@ class GitLabTools:
                 "get_merge_request_diffs",
                 "Read the file diffs of one merge request.",
                 self.get_merge_request_diffs,
-                {"project": project, "iid": iid, "page": page},
+                {"project": project, "iid": iid, "start": start},
                 ["project", "iid"],
             ),
             tool(
@@ -893,7 +1025,7 @@ class GitLabTools:
                     "state": issue_state,
                     "search": search,
                     "labels": _string("Comma-separated labels", r"[^\x00-\x1f\x7f]{1,200}", 200),
-                    "page": page,
+                    "start": start,
                 },
                 ["project"],
             ),
@@ -907,13 +1039,13 @@ class GitLabTools:
             tool(
                 "list_issue_notes",
                 "List the comments on one issue, oldest first (sort=desc for newest"
-                " first); system notes only with include_system. next_page names"
-                " the following page; if truncated, ask again with a smaller per_page.",
+                " first); system notes only with include_system. A result that"
+                " leaves notes out ends with a line naming the start to call next.",
                 self.list_issue_notes,
                 {
                     "project": project,
                     "iid": iid,
-                    "page": page,
+                    "start": start,
                     "per_page": _int("Notes per page", 1, b.per_page),
                     "sort": {"type": "string", "enum": ["asc", "desc"]},
                     "include_system": {"type": "boolean"},
@@ -924,14 +1056,14 @@ class GitLabTools:
                 "list_pipelines",
                 "List CI pipelines.",
                 self.list_pipelines,
-                {"project": project, "ref": ref, "status": pipeline_status, "page": page},
+                {"project": project, "ref": ref, "status": pipeline_status, "start": start},
                 ["project"],
             ),
             tool(
                 "list_pipeline_jobs",
                 "List the jobs of one pipeline.",
                 self.list_pipeline_jobs,
-                {"project": project, "pipeline_id": _int("Pipeline id", 1, 2**53), "page": page},
+                {"project": project, "pipeline_id": _int("Pipeline id", 1, 2**53), "start": start},
                 ["project", "pipeline_id"],
             ),
             tool(
