@@ -108,6 +108,85 @@ class FakeFTP:
         return "226 aborted"
 
 
+class _FakeDataConn:
+    """Data-connection stand-in: raw bytes for recv(), text for makefile()."""
+
+    def __init__(self, payload: bytes) -> None:
+        self._buf = io.BytesIO(payload)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args) -> None:
+        self.close()
+
+    def recv(self, n: int) -> bytes:
+        return self._buf.read(n)
+
+    def makefile(self, mode: str = "r", encoding: str | None = None):
+        return io.TextIOWrapper(io.BytesIO(self._buf.read()), encoding=encoding, newline="")
+
+    def close(self) -> None:
+        pass
+
+
+class WireFTP(ftplib.FTP):
+    """The real ftplib.FTP with only its sockets replaced.
+
+    Every command goes through ftplib's own putcmd/getline, so commands that
+    ftplib issues internally (retrbinary's `TYPE I`, retrlines' `TYPE A`)
+    are recorded in `sent`. The server side models z/OS: under TYPE A it
+    translates the stored text to its ASCII code page (ISO8859-1) with CRLF
+    record ends; under TYPE I it returns the untranslated EBCDIC bytes.
+    `texts` maps the RETR/LIST argument to the stored text."""
+
+    def __init__(self, texts: dict[str, str]) -> None:
+        super().__init__()
+        self.texts = texts
+        self.sent: list[str] = []
+        self.mode = "A"
+        self._replies: list[str] = []
+
+    def putcmd(self, line: str) -> None:
+        self.sent.append(line)
+        verb, _, arg = line.partition(" ")
+        if verb.upper() == "TYPE":
+            self.mode = arg.strip().upper()[:1]
+        self._replies.append("200 OK")
+
+    def getline(self) -> str:
+        return self._replies.pop(0)
+
+    def ntransfercmd(self, cmd: str, rest=None):
+        self.sent.append(cmd)
+        _, _, arg = cmd.partition(" ")
+        if arg not in self.texts:
+            raise ftplib.error_perm("550 Data set not found")
+        text = self.texts[arg]
+        if self.mode == "A":
+            payload = text.replace("\n", "\r\n").encode("latin-1")
+        else:
+            payload = text.encode("cp037")
+        self._replies.append("250 Transfer completed successfully.")
+        return _FakeDataConn(payload), None
+
+    def abort(self) -> str:
+        self.sent.append("ABOR")
+        self._replies.clear()
+        return "226 Abort successful"
+
+
+def _types_before_each_retr(sent: list[str]) -> list[str]:
+    current = ""
+    seen: list[str] = []
+    for cmd in sent:
+        if cmd.startswith("TYPE"):
+            current = cmd
+        elif cmd.startswith("RETR"):
+            seen.append(current)
+    return seen
+
+
 def _config(**overrides) -> FTPConfig:
     base: dict = {
         "host": "mf.example.com",
@@ -421,9 +500,12 @@ def test_jes_spool_read_option_4a_list_prefix_dd_scope_and_type_a() -> None:
     assert res_off["content"][0]["text"].startswith("denied:")
     assert not any(c.startswith("RETR") for c in off_fake.commands)
 
-    # Unverifiable spool table (e.g. JESINTERFACELEVEL=1) -> fail-closed DENIED, ZERO RETR
+    # Level-2 header but no spool table (DDNAME unverifiable) -> fail-closed DENIED, ZERO RETR
+    # (the header-less JESINTERFACELEVEL=1 shape is jes_unavailable: see
+    # test_jes_tools_fail_closed_without_the_interface_level_2_header)
     no_table = FakeFTP()
     no_table.jes_list_by_job["JOB00123"] = [
+        "JOBNAME  JOBID    OWNER    STATUS CLASS",
         "PAYROLL  JOB00123 READER   OUTPUT A        RC=0000",
     ]
     no_table.files["JOB00123.2"] = b"UNVERIFIED\n"
@@ -438,6 +520,114 @@ def test_jes_spool_read_option_4a_list_prefix_dd_scope_and_type_a() -> None:
     assert bridge.jes_spool_read(bridge.FTPSession(bad_fake, cfg), "PAY*", "2")["isError"] is True
     assert bridge.jes_spool_read(bridge.FTPSession(bad_fake, cfg), "", "2")["isError"] is True
     assert bad_fake.commands == []
+
+
+# ------------------------------------------- Text transfer mode on the real ftplib wire
+
+
+def test_text_reads_stay_in_type_a_on_the_real_ftplib_wire() -> None:
+    """dataset_read and jes_spool_read must receive in TYPE A so z/OS
+    translates EBCDIC; ftplib's retrbinary would switch to TYPE I and return
+    raw EBCDIC. The decode uses the server's ASCII code page (MCP_FTP_ENCODING)."""
+    member = "LFAREA=(1G,64M) #$@ \u00a2\u00ac\nSECOND RECORD\n"
+    wire = WireFTP({"'SYS1.PARMLIB'": member})
+    out = bridge.dataset_read(bridge.FTPSession(wire, _config(encoding="latin-1")), "SYS1.PARMLIB")
+    assert out["isError"] is False
+    text = out["content"][0]["text"]
+    assert "LFAREA=(1G,64M) #$@ \u00a2\u00ac\nSECOND RECORD\n" in text
+    assert "TYPE I" not in wire.sent
+    assert _types_before_each_retr(wire.sent) == ["TYPE A"]
+
+    # Truncation path: still TYPE A, transfer aborted.
+    capped = WireFTP({"'BIG.DATA'": "Y" * 5000 + "\n"})
+    out = bridge.dataset_read(bridge.FTPSession(capped, _config(max_bytes=100)), "BIG.DATA")
+    assert bridge.TRUNCATION_SUFFIX in out["content"][0]["text"]
+    assert "Y" * 100 in out["content"][0]["text"] and "Y" * 101 not in out["content"][0]["text"]
+    assert "TYPE I" not in capped.sent and "ABOR" in capped.sent
+    assert _types_before_each_retr(capped.sent) == ["TYPE A"]
+
+    spool = WireFTP(
+        {
+            "JOB00123": "\n".join(JES_LIST_JOB00123) + "\n",
+            "JOB00123.2": "IEF142I PAYROLL ENDED \u00a7 RC=0\n",
+        }
+    )
+    out = bridge.jes_spool_read(bridge.FTPSession(spool, _jes_config(encoding="latin-1")), "JOB00123", "2")
+    assert out["isError"] is False
+    assert "IEF142I PAYROLL ENDED \u00a7 RC=0" in out["content"][0]["text"]
+    assert "TYPE I" not in spool.sent
+    assert _types_before_each_retr(spool.sent) == ["TYPE A"]
+
+
+# ------------------------------------------- JES listing shape (Option 4A)
+
+
+def test_job_status_by_job_id_lists_that_job_not_the_whole_queue() -> None:
+    """A bare LIST is bounded by JESENTRYLIMIT, so a job_id lookup must send
+    LIST <jobid>. A job the server does not know (550) is not_found."""
+    fake = FakeFTP()
+    fake.jes_lines = ["JOBNAME  JOBID    OWNER    STATUS CLASS", JES_FIXTURE[2]]
+    fake.jes_list_by_job["JOB00123"] = list(JES_LIST_JOB00123)
+    out = bridge.job_status(bridge.FTPSession(fake, _jes_config()), job_id="JOB00123")
+    assert out["isError"] is False
+    assert "PAYROLL JOB00123 OUTPUT RC=0000" in out["content"][0]["text"]
+    assert "LIST JOB00123" in fake.commands
+    assert "LIST" not in fake.commands
+
+    class UnknownJobFTP(FakeFTP):
+        def retrlines(self, cmd: str, callback) -> str:
+            self.commands.append(cmd)
+            raise ftplib.error_perm("550 No jobs found for JESJOBNAME=*, JESSTATUS=ALL and JESOWNER=*")
+
+    missing = UnknownJobFTP()
+    out = bridge.job_status(bridge.FTPSession(missing, _jes_config()), job_id="JOB00777")
+    assert out["content"][0]["text"].startswith("not_found:")
+    assert missing.commands[-1] == "LIST JOB00777"
+
+
+def test_job_status_reports_abend_jcl_error_and_sys_fail_completions() -> None:
+    """Completion states beyond RC= are rendered from validated tokens only
+    (wire spellings unverified until the D8(c) dry run)."""
+    fake = FakeFTP()
+    fake.jes_lines = [
+        "JOBNAME  JOBID    OWNER    STATUS CLASS",
+        "PAYROLL  JOB00201 READER   OUTPUT A        ABEND=806 3 spool files",
+        "PAYROLL  JOB00202 READER   OUTPUT A        ABEND=S0C4 3 spool files",
+        "PAYROLL  JOB00203 READER   OUTPUT A        (JCL error) 3 spool files",
+        "PAYROLL  JOB00204 READER   OUTPUT A        SYS FAIL 3 spool files",
+        "PAYROLL  JOB00205 READER   OUTPUT A        RC=0004 3 spool files",
+        "PAYROLL  JOB00206 READER   OUTPUT A        ABEND=<script> 3 spool files",
+    ]
+    out = bridge.job_status(bridge.FTPSession(fake, _jes_config()), job_name="PAYROLL", owner="READER")
+    text = out["content"][0]["text"]
+    assert "PAYROLL JOB00201 OUTPUT ABEND=806\n" in text
+    assert "PAYROLL JOB00202 OUTPUT ABEND=S0C4\n" in text
+    assert "PAYROLL JOB00203 OUTPUT JCL ERROR\n" in text
+    assert "PAYROLL JOB00204 OUTPUT SYS FAIL\n" in text
+    assert "PAYROLL JOB00205 OUTPUT RC=0004\n" in text
+    assert "PAYROLL JOB00206 OUTPUT\n" in text
+    assert "<script>" not in text
+
+
+def test_jes_tools_fail_closed_without_the_interface_level_2_header() -> None:
+    """At JESINTERFACELEVEL=1 the LIST columns shift (no OWNER), so both JES
+    tools refuse with jes_unavailable and send no RETR."""
+    level1 = [
+        "JOBNAME  JOBID    STATUS SPOOL FILES",
+        "PAYROLL  JOB00123 OUTPUT 5 spool files",
+    ]
+    fake = FakeFTP()
+    fake.jes_lines = list(level1)
+    fake.jes_list_by_job["JOB00123"] = list(level1)
+    fake.files["JOB00123.2"] = b"LEVEL1\n"
+    cfg = _jes_config()
+    by_name = bridge.job_status(bridge.FTPSession(fake, cfg), job_name="PAYROLL", owner="READER")
+    assert by_name["content"][0]["text"].startswith("jes_unavailable:")
+    by_id = bridge.job_status(bridge.FTPSession(fake, cfg), job_id="JOB00123")
+    assert by_id["content"][0]["text"].startswith("jes_unavailable:")
+    spool = bridge.jes_spool_read(bridge.FTPSession(fake, cfg), "JOB00123", "2")
+    assert spool["content"][0]["text"].startswith("jes_unavailable:")
+    assert not any(c.startswith("RETR") for c in fake.commands)
 
 
 # ------------------------------------------- D6: screening, delimiting, code page
@@ -479,12 +669,13 @@ def test_d6_screening_redaction_delimiting_and_code_page() -> None:
     assert "[neutralized-observation-marker]" in text
     assert text.endswith(bridge.OBS_END_MARKER)
 
-    # Configurable code page (e.g. cp037 EBCDIC / latin-1 national chars)
-    ebcdic_fake = FakeFTP()
-    ebcdic_fake.files["'SYS1.PARMLIB'"] = "LFAREA=(1G,64M) #$@\n".encode("cp037")
-    ebcdic_out = bridge.dataset_read(_session(ebcdic_fake, encoding="cp037"), "SYS1.PARMLIB")
-    assert ebcdic_out["isError"] is False
-    assert "LFAREA=(1G,64M) #$@" in ebcdic_out["content"][0]["text"]
+    # Configurable code page: the server's TYPE A output page (here ISO8859-1
+    # national characters), not the dataset's EBCDIC page (z/OS translates).
+    latin_fake = FakeFTP()
+    latin_fake.files["'SYS1.PARMLIB'"] = "LFAREA=(1G,64M) #$@ \u00a2\u00a7\n".encode("latin-1")
+    latin_out = bridge.dataset_read(_session(latin_fake, encoding="latin-1"), "SYS1.PARMLIB")
+    assert latin_out["isError"] is False
+    assert "LFAREA=(1G,64M) #$@ \u00a2\u00a7" in latin_out["content"][0]["text"]
 
     with pytest.raises(ValueError, match="unknown encoding"):
         _config(encoding="no-such-codepage-999")
@@ -559,6 +750,7 @@ def test_job_status_output_is_byte_capped_and_stops_the_listing() -> None:
     instead of being buffered whole."""
     total = 60000
     rows = [f"PAYROLL  JOB{i:05d} READER   OUTPUT A        RC=0000" for i in range(total)]
+    rows.insert(0, "JOBNAME  JOBID    OWNER    STATUS CLASS")
 
     class ManyJobsFTP(FakeFTP):
         delivered = 0
