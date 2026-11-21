@@ -533,7 +533,7 @@ def test_no_tool_argument_reaches_any_log_through_the_real_logging_setup(
     seen = capsys.readouterr()
     assert marker in "".join(r.url.query.decode() + r.url.path for r in fake.requests)  # the calls did go out
     assert marker not in seen.out + seen.err
-    assert '"decision": "ok"' in seen.out + seen.err  # the real JSON handler was installed
+    assert '"decision":"ok"' in seen.out + seen.err  # the real JSON handler was installed
 
 
 def test_job_log_tail_strips_ansi_and_refuses_oversized_logs(tmp_path: Path):
