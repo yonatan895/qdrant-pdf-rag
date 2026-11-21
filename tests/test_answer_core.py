@@ -2456,6 +2456,216 @@ async def test_core_anchored_lookup_after_a_coding_turn_is_not_a_coding_turn(str
     assert output.complexity == "simple"
 
 
+# ---------------------------------------------------- SPL mode (issue #1293)
+
+_SPL_REQUEST = "Write a Splunk SPL search for SMF type 30 CPU usage"
+_BOTH_SPL_AND_CODING = "Write a Splunk SPL search to find JCL errors in JES2 SYSLOG"
+_SPL_BLOCK = (
+    "```spl\n"
+    "index=VERIFY_index sourcetype=VERIFY_sourcetype earliest=-24h latest=now\n"
+    "| stats sum(SMF30CPT) by SMF30JBN\n"
+    "```"
+)
+
+
+async def _spl_core(
+    content, *, stream=False, spl_enabled=True, coding_enabled=True,
+    query=_SPL_REQUEST, hits=True,
+):
+    def retrieve(*_args, **_kwargs):
+        return ([_hit()] if hits else []), "nl", {}
+
+    llm = CoreFakeLLM()
+    llm.content = content
+    deps = _deps(
+        _settings(
+            answer_spl_mode_enabled=spl_enabled,
+            answer_coding_mode_enabled=coding_enabled,
+        ),
+        llm,
+        retrieve,
+    )
+    source = AnswerCoreInput(query=query)
+    if stream:
+        events = [event async for event in execute_answer_core_stream(source, deps)]
+        output = events[-1]["output"]
+    else:
+        output = await execute_answer_core(source, deps)
+    return output, llm
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_core_routes_an_spl_request_to_the_complex_spl_prompt_only_when_enabled(
+    stream, enabled
+):
+    """Issue #1293: on, an SPL request takes the complex path with the SPL
+    extension; off, it keeps the classifier's simple path and exact pre-#1293
+    prompt bytes."""
+    from mainframe_rag.agent.answer import SYSTEM_PROMPT, SYSTEM_PROMPT_SPL_EXTENSION
+
+    settings = _settings()
+    output, llm = await _spl_core(
+        f"Done.\nCitations:\n{_hit().cite}", stream=stream, spl_enabled=enabled,
+    )
+    system = llm.calls[0]["messages"][0].content
+    user = llm.calls[0]["messages"][-1].content
+    if enabled:
+        assert output.complexity == "complex"
+        assert llm.calls[0]["reasoning_effort"] == settings.llm_reasoning_effort_complex
+        assert system.endswith(SYSTEM_PROMPT_SPL_EXTENSION)
+        assert "Coding Protocol" not in system
+        assert "strictly" not in user
+    else:
+        assert output.complexity == "simple"
+        assert llm.calls[0]["reasoning_effort"] == settings.llm_reasoning_effort_simple
+        assert system == SYSTEM_PROMPT
+        assert "Please answer based strictly" in user
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("spl_enabled", [True, False])
+async def test_core_spl_takes_precedence_over_coding_when_both_match(stream, spl_enabled):
+    """Issue #1293 precedence decision: when a request matches both SPL mode
+    and coding mode ('Write a Splunk SPL search to find JCL errors'), SPL mode
+    wins when enabled; with SPL mode off, coding mode applies unchanged."""
+    from mainframe_rag.agent.answer import (
+        SYSTEM_PROMPT_CODING_EXTENSION,
+        SYSTEM_PROMPT_SPL_EXTENSION,
+    )
+
+    output, llm = await _spl_core(
+        f"Done.\nCitations:\n{_hit().cite}",
+        stream=stream,
+        spl_enabled=spl_enabled,
+        coding_enabled=True,
+        query=_BOTH_SPL_AND_CODING,
+    )
+    system = llm.calls[0]["messages"][0].content
+    assert output.complexity == "complex"
+    if spl_enabled:
+        assert system.endswith(SYSTEM_PROMPT_SPL_EXTENSION)
+        assert "Coding Protocol" not in system
+    else:
+        assert system.endswith(SYSTEM_PROMPT_CODING_EXTENSION)
+        assert "SPL Protocol" not in system
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "content,citations,state,abstained_script",
+    [
+        (f"Filter SMF type 30 [1].\n{_SPL_BLOCK}\nCitations:\n{{cite}}",
+         ["{cite}"], "accepted", False),
+        (f"Filter SMF type 30.\n{_SPL_BLOCK}", [], "unverified_draft", False),
+        (f"Filter SMF type 30 [1].\n{_SPL_BLOCK}", ["{cite}"], "unverified_draft", False),
+        (f"{_SPL_BLOCK}\nCitations:\n{{cite}}", ["{cite}"], "unverified_draft", False),
+        (f"The excerpts do not contain an SPL example.\n{_SPL_BLOCK}\nCitations:\n{{cite}}",
+         [], "insufficient_evidence", True),
+    ],
+)
+async def test_core_spl_turn_verification_states_stay_honest(
+    content, citations, state, abstained_script
+):
+    cite = _hit().cite
+    output, _llm = await _spl_core(content.format(cite=cite))
+    assert output.verification_state == state
+    assert output.citations == [c.format(cite=cite) for c in citations]
+    assert output.script is not None and "SMF30CPT" in output.script
+    assert output.script_lang == "spl"
+    assert output.script_review_required is True
+    assert "SMF30CPT" not in output.answer
+    if abstained_script:
+        assert output.citations == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_core_spl_request_without_hits_makes_no_model_call(stream):
+    """The zero-hits short circuit holds on an SPL turn: no model call."""
+    output, llm = await _spl_core("unused", stream=stream, hits=False)
+    assert llm.calls == []
+    assert output.answer == "No supporting manual excerpts were found for this question."
+    assert output.verification_state == "insufficient_evidence"
+    assert output.complexity == "complex"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
+@pytest.mark.parametrize("chat", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("query", [
+    "What does IEA500I mean?",
+    "What is the _time field in Splunk?",
+    "How do I fix IEA500I in Splunk?",
+    "Write a REXX exec that lists the members of a PDS",
+])
+async def test_core_sends_identical_messages_with_spl_mode_on_or_off_for_other_turns(
+    order, chat, stream, query
+):
+    """Issue #1293 forbidden outcome: a non-SPL question gets byte-identical
+    prompt messages and reasoning effort with SPL mode on or off."""
+    async def run(spl_enabled: bool):
+        def retrieve(*_args, **_kwargs):
+            return [_hit()], "nl", {}
+
+        llm = CoreFakeLLM()
+        deps = _deps(
+            _settings(answer_spl_mode_enabled=spl_enabled, prompt_order=order),
+            llm,
+            retrieve,
+        )
+        if chat:
+            source = AnswerCoreInput(query=query, is_chat=True, messages=[
+                ChatMessage(role="user", content="What does IEA500I mean?"),
+                ChatMessage(role="assistant", content="It reports a rejected command."),
+                ChatMessage(role="user", content=query)])
+        else:
+            source = AnswerCoreInput(query=query)
+        if stream:
+            output = [e async for e in execute_answer_core_stream(source, deps)][-1]["output"]
+        else:
+            output = await execute_answer_core(source, deps)
+        (call,) = llm.calls
+        return [(m.role, m.content) for m in call["messages"]], call["reasoning_effort"], output
+
+    on = await run(True)
+    off = await run(False)
+    assert on[:2] == off[:2]
+    assert on[2].complexity == off[2].complexity
+    assert "SPL Protocol" not in on[0][0][1]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_core_anchored_lookup_after_an_spl_turn_is_not_an_spl_turn(stream):
+    """SPL mode reads the active user message only, not the anchored antecedent."""
+    from mainframe_rag.agent.answer import SYSTEM_PROMPT
+
+    def retrieve(*_args, **_kwargs):
+        return [_hit()], "nl", {}
+
+    llm = CoreFakeLLM()
+    deps = _deps(
+        _settings(chat_followup_anchor_enabled=True, answer_spl_mode_enabled=True),
+        llm,
+        retrieve,
+    )
+    follow_up = "What does that parameter mean?"
+    source = AnswerCoreInput(query=follow_up, is_chat=True, messages=[
+        ChatMessage(role="user", content=_SPL_REQUEST),
+        ChatMessage(role="assistant", content="Here is the SPL search."),
+        ChatMessage(role="user", content=follow_up)])
+    if stream:
+        output = [e async for e in execute_answer_core_stream(source, deps)][-1]["output"]
+    else:
+        output = await execute_answer_core(source, deps)
+    assert llm.calls[-1]["messages"][0].content == SYSTEM_PROMPT
+    assert output.complexity == "simple"
+
+
 @pytest.mark.anyio
 async def test_retrieve_planned_runs_literal_and_anchor_concurrently_with_parity():
     """Issue #1297: retrieve_planned runs literal and anchor legs concurrently

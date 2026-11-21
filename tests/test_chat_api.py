@@ -663,11 +663,12 @@ class _OneFenceChatLLM:
     ("c", "#include <stdio.h>\nint main(void) { return 0; }"),
     ("hlasm", "HELLO    CSECT\n         BR    14"),
     ("jcl", "//STEP1 EXEC PGM=IEFBR14"),
+    ("spl", "index=zos_smf sourcetype=smf30 earliest=-24h latest=now | stats count by host"),
 ])
 def test_chat_json_content_keeps_the_script_as_a_tagged_fence(chat_client, monkeypatch, lang, code):
-    """#1276 maintainer decision 1: a non-streaming /v1/chat answer never
-    loses its code. The script parse_answer moved into `script` comes back
-    into `message.content` as a fence with its language tag, before the
+    """#1276 maintainer decision 1 & #1293: a non-streaming /v1/chat answer
+    never loses its code. The script parse_answer moved into `script` comes
+    back into `message.content` as a fence with its language tag, before the
     validated list (the console's re-append format)."""
     monkeypatch.setattr(app_mod, "llm", _OneFenceChatLLM(lang, code))
     data = chat_client.post(
@@ -681,22 +682,31 @@ def test_chat_json_content_keeps_the_script_as_a_tagged_fence(chat_client, monke
     assert (data["script"], data["script_lang"]) == (code, lang)
 
 
-@pytest.mark.parametrize("lang", ["c", "hlasm"])
+@pytest.mark.parametrize("lang", ["c", "hlasm", "spl"])
 def test_chat_stream_and_answer_keep_their_bodies_for_new_fences(chat_client, monkeypatch, lang):
     """The re-append is non-streaming /v1/chat only: the stream's deltas are
     the model's raw text (the fence once, not twice) and /v1/answer keeps
     the script out of `answer`."""
-    code = "HELLO    CSECT" if lang == "hlasm" else "int main(void) { return 0; }"
+    code = (
+        "index=zos_smf sourcetype=smf30 | stats count by host"
+        if lang == "spl"
+        else ("HELLO    CSECT" if lang == "hlasm" else "int main(void) { return 0; }")
+    )
     monkeypatch.setattr(app_mod, "llm", _OneFenceChatLLM(lang, code))
     resp = chat_client.post(
         "/v1/chat/completions",
         json={"messages": [{"role": "user", "content": "Write the program"}], "stream": True},
     )
+    frames = chat_frames(resp.text)
     deltas = "".join(
-        f["choices"][0]["delta"].get("content", "") for f in chat_frames(resp.text))
+        f["choices"][0]["delta"].get("content", "") for f in frames)
     assert deltas.count(f"```{lang}\n") == 1 and deltas.count(code) == 1
+    terminal = frames[-1]["choices"][0]
+    assert (terminal["script"], terminal["script_lang"]) == (code, lang)
+    assert terminal["script_review_required"] is True
     answer = chat_client.post("/v1/answer", json={"query": "Write the program"}).json()
     assert code not in answer["answer"] and answer["script"] == code
+    assert answer["script_lang"] == lang and answer["script_review_required"] is True
 
 
 def test_chat_stream_terminal_chunk_carries_state_and_script(chat_client, monkeypatch):

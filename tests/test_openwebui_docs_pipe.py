@@ -888,6 +888,19 @@ def test_script_review_warning_rides_the_banner():
     )
 
 
+def test_spl_fence_survives_the_pipe_and_rides_the_review_banner():
+    """Issue #1293: a ```spl fence in the agent's streamed text reaches Open
+    WebUI unchanged, and its script review flag rides the banner."""
+    code = "index=zos_smf sourcetype=smf30 earliest=-24h latest=now | stats count by host"
+    meta = _final_meta(script=code, script_lang="spl", script_review_required=True)
+    content, events = run_pipe(FakeAgent(_frames(f"Answer.\n\n```spl\n{code}\n```", meta=meta)))
+    assert f"```spl\n{code}\n```" in content
+    assert _final_status(events) == (
+        "Source-matched · 1 citation · "
+        "Human review required — draft script, not certified executable"
+    )
+
+
 # --- Citations section display (issue #1098) ---------------------------------
 # The model ends its reply with its own unvalidated citations section (answer
 # prompt rule 7); the agent then appends its validated list as one more delta

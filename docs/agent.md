@@ -765,6 +765,49 @@ fires, like `search_query`), so with the setting off, or for any other turn,
 every prompt keeps its pre-#1276 bytes (`tests/test_prompt_order.py` pins the
 constants' hashes and on/off equality).
 
+SPL mode (#1293, `answer_spl_mode_enabled`, default **off** pending maintainer
+approval of prompt wording and default-on flip; operator input
+`ANSWER_SPL_MODE_ENABLED`). Both executors decide it once per turn next to
+coding mode, reading the user's own active message (plus image screen text on
+an image turn, never the searched/anchored antecedent):
+`spl_mode_applies(message, settings)` is true when the setting is on and
+`is_spl_request` holds. The classifier is deterministic, word-bounded, linear
+in message length, and fires on either:
+
+- pasted Splunk results: a tabular `_time` block (tab, CSV, pipe or multi-space
+  header carrying `_time` plus another column and at least one data row) or a
+  forwarder-shaped structured JSON / key=value event;
+- pasted SPL (a line starting with `|` and a known SPL command, or a fenced
+  `` ```spl `` block) with an SPL intent or a looser pasted ask; or
+- an SPL intent (write, generate, create, build, rewrite, convert, optimise,
+  tune, speed up, fix, debug, troubleshoot, review/interpret/explain/what
+  does/why does this) paired with an SPL marker (`splunk`, `spl`, `index=<name>`
+  excluding bare numeric `index=0`, `sourcetype=<val>`).
+
+As in coding mode, a message naming a z/OS message identifier stays a lookup
+unless it asks to produce/optimise/convert SPL, pastes SPL, or pastes Splunk
+results ("How do I fix IEA500I in Splunk?" stays a lookup; "Write an SPL search
+for IEA500I" and pasted Splunk results carrying IEA500I trigger SPL mode).
+**Precedence with coding mode:** when both match (for example "Write a Splunk
+SPL search to find JCL errors"), SPL mode takes precedence over coding mode so
+only `SYSTEM_PROMPT_SPL_EXTENSION` is appended; with `ANSWER_SPL_MODE_ENABLED`
+off, coding mode applies unchanged. An SPL turn:
+
+- is `complex` (effort, context, thinking reserve, output cap), overriding the
+  injected `classify_query_complexity`, which itself is unchanged;
+- gets `SYSTEM_PROMPT + SYSTEM_PROMPT_COMPLEX_EXTENSION +
+  SYSTEM_PROMPT_SPL_EXTENSION`, an SPL tail without "strictly", and under
+  `stable_cache` the `STABLE_CACHE_INSTRUCTIONS_SPL` block;
+- keeps every verification rule unchanged: `accepted` still requires validated
+  explicit citations, uncited or inferred-only SPL stays `unverified_draft`,
+  empty hits short-circuit with no model call, and `spl` fences in `SCRIPT_LANGS`
+  (ungated by the setting) survive every answer path (`/v1/answer`, `/v1/chat*`
+  buffered and streamed, console `/ui`, and the Open WebUI Pipe) with
+  `script_lang="spl"` and `script_review_required=true`.
+
+The builders receive `spl=True` only from the executors when it fires, so with
+the setting off or for any non-SPL turn every prompt keeps its exact bytes.
+
 - Defaults (#777 sizing for Qwen3.8-27B at a 32768-token window, the
   Colab stand-in's; since #1274 the window default is 262144, which assumes
   the served model's window is at least that, and the excerpt caps and reserves below are unchanged; effort
@@ -1178,6 +1221,7 @@ readers:
 | `retrieve_max_chunks_per_page` / `retrieve_max_chunks_per_doc` | 1 / 5 (#1274, was 3; 1..10 each) | diversity caps in `diversify_hits`, for every retrieval (`/v1/search` and MCP included); a capped hit is backfilled only when the pool runs short. Operator input `RETRIEVE_MAX_CHUNKS_PER_DOC` (#1191; unset renders no variable) |
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
 | `answer_coding_mode_enabled` | `true` (#1276) | coding mode: coding requests take the complex path and the coding prompt extension ([prompt assembly](#4-prompt-assembly-and-budgets)); operator input `ANSWER_CODING_MODE_ENABLED`, unset renders no variable |
+| `answer_spl_mode_enabled` | `false` (#1293) | SPL mode: Splunk SPL requests and pasted Splunk results take the complex path and the SPL prompt extension, taking precedence over coding mode when both match ([prompt assembly](#4-prompt-assembly-and-budgets)); operator input `ANSWER_SPL_MODE_ENABLED`, unset renders no variable; the `spl` tag in `SCRIPT_LANGS` is not gated |
 | `chat_images_enabled` | `false` (#1287) | pasted images on `/v1/chat*` ([chat images](#chat-images)); operator input `CHAT_IMAGES_ENABLED`, unset renders no variable. Off: a content-part list is the fixed 422 `invalid_request`, and requests for messages without attachments are byte-identical (the Pipe drops Open WebUI's `<attached_files>` text, which appears only when a file is attached; uploads are off) |
 | `chat_image_max_bytes` / `chat_image_max_count` / `chat_image_max_pixels` | 5242880 / 3 / 4194304 | per-image decoded bytes, images per request (latest user message only) and pixels per image (decision 7; the chart's Open WebUI caps and the Pipe valves `MAX_IMAGE_BYTES`/`MAX_IMAGES` match) |
 | `chat_image_types` | `png,jpeg,webp` | accepted types from `png,jpeg,webp,gif`; GIF is parsed but off by default (decision 7) |

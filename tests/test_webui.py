@@ -223,6 +223,52 @@ def test_ui_chat_stream_final_matches_answer_stream_final(ui_client):
     assert console_final["supplied_evidence"]
 
 
+def test_ui_chat_and_stream_preserve_spl_fences(
+    monkeypatch, synthetic_pdf, servable_representation_gate
+):
+    """Issue #1293: ```spl fences survive both buffered /ui/chat (re-appended
+    as a tagged ```spl block in rendered HTML) and /ui/chat/stream (script,
+    script_lang='spl', script_review_required=True on the final frame)."""
+    spl_code = "index=zos_smf sourcetype=smf30 earliest=-24h latest=now | stats count by host"
+    reply = (
+        f"Count events per host.\n\n```spl\n{spl_code}\n```\n\n"
+        "Citations:\n"
+        "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+    )
+
+    class SplFakeLLM:
+        def chat(self, messages, reasoning_effort=None, temperature=None):
+            return ChatResult(
+                content=reply,
+                finish_reason="stop",
+                usage=TokenUsage(prompt_tokens=10, completion_tokens=10, total_tokens=20),
+            )
+
+        async def chat_stream(self, messages, reasoning_effort=None, temperature=None):
+            yield {"type": "token", "delta": reply, "ttft_ms": 5}
+            yield {
+                "type": "done",
+                "finish_reason": "stop",
+                "usage": TokenUsage(prompt_tokens=10, completion_tokens=10, total_tokens=20),
+                "ttft_ms": 5,
+            }
+
+    client = next(_client(monkeypatch, ui_enabled=True, synthetic_pdf=synthetic_pdf, llm=SplFakeLLM()))
+    buffered = client.post("/ui/chat", data={"message": "Write an SPL search", "messages": ""})
+    assert buffered.status_code == 200
+    assert "```spl" in buffered.text and spl_code in buffered.text
+    streamed = client.post(
+        "/ui/chat/stream",
+        json={"messages": [{"role": "user", "content": "Write an SPL search"}]},
+    )
+    assert streamed.status_code == 200
+    final = next(payload for name, payload in _parse_sse_events(streamed.text) if name == "final")
+    assert final["script"] == spl_code
+    assert final["script_lang"] == "spl"
+    assert final["script_review_required"] is True
+    assert spl_code not in final["answer"]
+
+
 def test_ui_chat_stream_error_emits_error_event_without_final(
     monkeypatch, synthetic_pdf, servable_representation_gate
 ):
