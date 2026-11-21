@@ -11,7 +11,11 @@
   as "Amendments and unchanged clauses" lists. It also supersedes the
   per-user requirement in #1078's issue body. Accepting it deploys nothing:
   the gateway ships default-off, and its chart and Open WebUI registration
-  are a later pull request.
+  are a later pull request. The maintainer's review-round decisions of
+  2026-11-21 (PR #1333) are part of this record:
+  - D3: a long job log is streamed and its end kept, not refused;
+  - D3: a read-only tool for issue comments;
+  - D4: bearer-mode limit defaults.
 - **Context:**
   - ADR-0010 TD4 gives each user their own `read_api` personal access token,
     stored in Vault and read through Vault JWT auth with the user's own
@@ -57,8 +61,9 @@
    at the next pod start, which runs the check again.
 3. **D3, a full read-only tool set.** The tools read projects, repository
    trees and files, code search in one project, commits, merge requests and
-   their diffs, issues, pipelines, pipeline jobs, and the tail of a job log.
-   No write tool exists. The REST client:
+   their diffs, issues and their comments (notes; the team documents its work
+   in issues), pipelines, pipeline jobs, and the end of a job log. Merge-request
+   comments are not read. No write tool exists. The REST client:
    - issues GET only, under `/api/v4` on the configured https origin, with
      no redirects and no proxy environment, verifying the site CA;
    - refuses any project outside `allowed_groups` (at a path-segment
@@ -67,8 +72,14 @@
      moved project still answers under its old path, and uses the numeric id
      after that;
    - uses project-scoped endpoints only, never instance-wide search;
-   - caps every response (a file, a job log and a JSON answer each have a
-     byte cap; a larger body is refused), the page size and the page number;
+   - caps every response. A file and a JSON answer each have a byte cap, and a
+     larger body is refused. The page size and the page number are capped too;
+   - streams a job log, of any length, and keeps only its end in memory. It
+     stops reading at a byte ceiling or a time ceiling below the tool timeout.
+     It returns the last whole lines within the result cap, behind a fixed
+     marker line saying how much came before, and says when the end was not
+     read. Partial lines at a cut are dropped, so a cut cannot leave a secret
+     fragment that redaction would miss;
    - returns selected fields only (usernames, no e-mail addresses), redacted,
      capped and framed as untrusted data by the shared gateway runtime, with
      fixed `{code, message}` errors.
@@ -82,7 +93,9 @@
      gateway then knows no user: the caller is `service:openwebui`, so the
      rate and concurrency limits and the decision log cover the whole
      instance, and per-user attribution exists only in Open WebUI's chat
-     history. Required guards, which the deployment pull request enforces at
+     history. In this mode the defaults are 4 calls in flight and 120 calls a
+     minute for the instance, unless the configuration sets them. `oidc` mode
+     keeps the runtime's per-user defaults. Required guards, which the deployment pull request enforces at
      render and deploy:
      - (a) an ingress NetworkPolicy admitting only `app: rag-openwebui` pods;
      - (b) one of these holds: every value in `OPENWEBUI_OIDC_ALLOWED_ROLES`
@@ -154,7 +167,9 @@
 - GitLab's own audit log shows the token's bot user, not the person. In
   `bearer` mode the gateway's log shows only the instance; per-person
   attribution is the Open WebUI chat history.
-- Rate limits in `bearer` mode apply to the whole instance; the operator
-  sizes them for the team.
+- Rate limits in `bearer` mode apply to the whole instance. The defaults (4 in
+  flight, 120 a minute) suit a small team, and the operator may set others.
+- Issue comments and job logs are untrusted text from many authors. They
+  reach the model only redacted and framed as data, like every other result.
 - Verification: the prose row for this record; the HTTP/lifecycle row for
   the gateway ([live-stack](../live-stack.md#verification-minimums)).

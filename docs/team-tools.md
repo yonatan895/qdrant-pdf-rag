@@ -181,7 +181,8 @@ validates its content (for example Splunk template parameters). Any mismatch is
    text result on a UTF-8 boundary. Nested values deeper than four levels
    become `[omitted]`.
 
-The body is JSON (`{"rows", "row_count", "truncated"}` or `{"text", "truncated"}`)
+The body is JSON (`{"rows", "row_count", "truncated"}`, plus `next_page` when a paged
+tool names one, or `{"text", "truncated"}`)
 with `<` and its lookalikes escaped as `\uXXXX`, so tool data can never open or
 close the frame. `max_result_bytes` bounds the escaped body, so escaping cannot
 grow a result past it. It is sent as one text item:
@@ -245,12 +246,21 @@ variables are ignored. Status mapping: 401/403 `upstream_refused`, 404
 `upstream_error`; transport errors `upstream_unavailable`; a timeout
 `upstream_timeout`; a body over `max_bytes` (or the call's own `max_bytes`) `upstream_too_large`. Its `repr`
 never shows the headers that carry the credential.
+`stream_tail(method, path, keep_bytes, max_read_bytes, deadline_s)` streams one
+answer of any length and keeps only its last `keep_bytes` in memory
+(`UpstreamTail(tail, total, complete)`). It stops reading after
+`max_read_bytes` or `deadline_s`, whichever comes first, and returns what it
+read with `complete=False`. Statuses map as above. No answer by the deadline is
+`upstream_timeout`. A transport failure mid-body keeps its fixed code and is
+never returned as a partial result.
 
 **Configuration.** `GATEWAY_CONFIG_FILE` names one JSON file (a mounted
 ConfigMap) with exactly these keys: `gateway` (must equal the module's name),
 `auth` (the `GatewayAuthConfig` fields; `allowed_groups` must be non-empty),
 `token_exchange` (optional `TokenExchangeConfig`; its secret is the environment
-variable it names), `limits` and `backend` (the gateway's own section). Unknown
+variable it names), `limits` and `backend` (the gateway's own section). A gateway
+may pass `limit_defaults` for one mode. They replace the `Limits` defaults only for
+keys the file's `limits` section leaves out; a key the file sets always wins. Unknown
 keys, wrong types and an empty group list are start-up errors, whose messages
 name keys and never values. Secrets never appear in the file.
 
@@ -310,7 +320,11 @@ bearer secret are never logged.
 [caller verification](#caller-verification) with `require_single_audience`
 fixed on by the entry point, whatever the file says (TD6). `bearer` uses
 [bearer mode](#service-bearer) with the secret from
-`GITLAB_GATEWAY_BEARER_SECRET` and the caller `openwebui`. Its deployment
+`GITLAB_GATEWAY_BEARER_SECRET` and the caller `openwebui`. Every Open WebUI user is
+then one caller, so the limits are instance-wide. In this mode the defaults are
+`max_concurrent_per_user` 4 and `rate_per_minute` 120 (maintainer, 2026-11-21).
+A key set in the file's `limits` keeps its value; `oidc` mode keeps the runtime
+defaults (1 and 30). Its deployment
 guards (ingress from Open WebUI only; team-only sign-in or a team-only model
 grant) are ADR-0014 D4 and belong to the deployment.
 
@@ -340,13 +354,16 @@ refuses with a fixed reason:
 | `timeout_s` | 15 | per request, in (0, 120] |
 | `max_response_bytes` | 1 MiB | a JSON answer |
 | `max_file_bytes` | 1 MiB | `read_file` |
-| `max_job_log_bytes` | 8 MiB | `read_job_log`; a longer log is refused, never read on |
+| `max_job_log_read_bytes` | 64 MiB | `read_job_log` stops reading after this many bytes and returns the end of what it read, marked (below) |
+| `max_job_log_read_s` | 20 | `read_job_log` stops reading this many seconds after the call starts, as above; in (0, 120] and below `limits.tool_timeout_s` (start-up error otherwise) |
 | `per_page` | 20 | at most 100 |
 | `max_page` | 10 | the highest `page` a tool accepts |
 
-Paths compare case-insensitively. A larger body than its cap is
-`upstream_too_large`; the runtime's `max_result_bytes` then bounds what the
-model receives.
+Paths compare case-insensitively. A file or JSON answer larger than its cap is
+`upstream_too_large`. A job log is never refused for its size (below). The
+runtime's `max_result_bytes` then bounds what the model receives. The key
+`max_job_log_bytes` (refuse above) was removed on 2026-11-21. A file that still
+names it fails at start-up as an unknown key.
 
 **Tools** (all read-only; `project` is a full path):
 `list_projects(search, page)`, `get_project(project)`,
@@ -356,6 +373,7 @@ model receives.
 `list_merge_requests(project, state, search, page)`,
 `get_merge_request(project, iid)`, `get_merge_request_diffs(project, iid, page)`,
 `list_issues(project, state, search, labels, page)`, `get_issue(project, iid)`,
+`list_issue_notes(project, iid, page, per_page, sort, include_system)`,
 `list_pipelines(project, ref, status, page)`,
 `list_pipeline_jobs(project, pipeline_id, page)`,
 `read_job_log(project, job_id, tail_bytes)`.
@@ -373,11 +391,46 @@ model receives.
 - Rows carry selected fields only; people appear as usernames, never e-mail
   addresses.
 - `read_file` returns text; a body with a NUL byte is `binary_content`.
-  `read_job_log` returns the last `tail_bytes` (default half of
-  `max_result_bytes`; a larger value is clamped to `max_result_bytes`) with ANSI
-  escape sequences removed, prefixed `[earlier log lines omitted]` when cut. The
-  end of the log is always kept: if the framed, escaped text still exceeds the
-  result cap, lines are dropped from the start, never the end.
+- `read_job_log` streams `GET /projects/:id/jobs/:job_id/trace` and keeps only
+  the last `tail_bytes` in memory. `tail_bytes` defaults to half of
+  `max_result_bytes`, and a larger value is clamped to `max_result_bytes`. No
+  `Range` request is sent; a plain 200 is read through. How the tail is cut:
+  - It is cut at a line boundary. A partial first line is dropped, and so is a
+    partial last line when reading stopped early, so a cut never leaves a
+    fragment of a secret that redaction would miss.
+  - A private key whose `BEGIN` line was cut off is redacted through its `END`
+    line.
+  - ANSI sequences are removed, and the kept lines are cleaned and redacted whole.
+  - If the framed, escaped text still exceeds the result cap, whole lines are
+    dropped from the start, never from the end.
+  - A cut tail starts with
+    `[gateway: about <n> of earlier log omitted]` (bytes, KiB or MiB, rounded).
+  - When `max_job_log_read_bytes` or `max_job_log_read_s` stopped the read, the
+    text starts with `[gateway: the end of the log was not read; reading stopped
+    after about <n>]` and ends with `[gateway: reading stopped here; the end of the
+    log was not read]`.
+
+  A log is no longer refused for its size.
+- `list_issue_notes` reads `GET /projects/:id/issues/:iid/notes` with
+  `order_by=created_at` and `sort=asc` (oldest first; `sort=desc` gives
+  newest first, which reaches the latest comments on threads longer than
+  `per_page × max_page`). Arguments and results:
+  - `per_page` is at most the backend `per_page`, and `page` at most `max_page`.
+  - System notes (label, state and description changes) are left out unless
+    `include_system` is true. The gateway asks GitLab with
+    `activity_filter=only_comments` and also filters on each note's `system`
+    field, because an older GitLab ignores the parameter. A page can therefore
+    hold fewer notes than `per_page`.
+  - Rows carry `id`, `author` (username), `body`, `created_at`, `updated_at`,
+    `system` and `internal`. Internal notes are included, because the team token
+    can read them.
+  - `next_page` is GitLab's `x-next-page`, given only when it is within
+    `max_page`.
+  - Each body is cut at `max_field_chars`, and a page that exceeds
+    `max_result_bytes` drops its last notes (`truncated` is then true). Ask again
+    with a smaller `per_page` to get them.
+- `list_issues` and `get_issue` carry `user_notes_count`, the number of comments
+  `list_issue_notes` can read. `get_issue` adds the description.
 - Search is project-scoped (`scope=blobs`); there is no instance-wide search.
 
 GitLab's built-in MCP server (19.5 and later) is an optional later swap; with
