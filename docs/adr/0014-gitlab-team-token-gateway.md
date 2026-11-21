@@ -73,13 +73,16 @@
      after that;
    - uses project-scoped endpoints only, never instance-wide search;
    - caps every response. A file and a JSON answer each have a byte cap, and a
-     larger body is refused. The page size and the page number are capped too;
+     larger body is refused (a list page is first asked for again with fewer
+     rows). The page size and the depth a list reads (`start`) are capped too;
    - streams a job log, of any length, and keeps only its end in memory. It
      stops reading at a byte ceiling or a time ceiling below the tool timeout.
      It returns the last whole lines within the result cap, behind a fixed
      marker line saying how much came before, and says when the end was not
      read. Partial lines at a cut are dropped, so a cut cannot leave a secret
-     fragment that redaction would miss;
+     fragment that redaction would miss, and private keys are tracked across
+     the whole stream, so a tail that starts or stops inside a key shows none
+     of it;
    - returns selected fields only (usernames, no e-mail addresses), redacted,
      capped and framed as untrusted data by the shared gateway runtime, with
      fixed `{code, message}` errors.
@@ -174,7 +177,11 @@
 - Rate limits in `bearer` mode apply to the whole instance. The defaults (4 in
   flight, 120 a minute) suit a small team, and the operator may set others.
 - Descriptions and note bodies are cut at 32768 characters, not the runtime's 4096
-  (maintainer, 2026-11-21); the 64 KiB result cap holds one full field.
+  (maintainer, 2026-11-21). The GitLab result cap is 128 KiB, not the runtime's
+  64 KiB (maintainer, 2026-11-21, round 3): it holds one full field of up to
+  three-byte characters; a field of four-byte or bracket characters is clipped
+  to fit. A list result that leaves rows out names the `start` of the first
+  row not shown, so following it reads every row once.
 - Issue comments and job logs are untrusted text from many authors. They
   reach the model only redacted and framed as data, like every other result.
 - Verification: the prose row for this record; the HTTP/lifecycle row for

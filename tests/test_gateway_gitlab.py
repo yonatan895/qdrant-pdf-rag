@@ -1185,6 +1185,20 @@ def test_the_default_result_cap_holds_one_full_long_field_and_a_configured_limit
     assert row["description"] == ("ab" * 500)
 
 
+def test_job_log_default_tail_is_half_the_128_kib_result_cap(tmp_path: Path):
+    fake = FakeGitLab()
+    fake.routes["/api/v4/projects/7/jobs/50/trace"] = _stream(b"".join(_lines(8000, 25)), 65536)  # 200 KB
+    doc = _config_doc(tmp_path, auth=False, max_job_log_read_bytes=1_000_000)
+    doc["limits"] = {"rate_per_minute": 1000}  # every other limit at its GitLab default
+    gateway = gitlab.build_gateway(_env(tmp_path, "bearer", doc), transport=fake.transport())
+    body = _body(_run(gateway, "read_job_log", project="team/app", job_id=50), "read_job_log")
+    text = body["text"]
+    assert isinstance(text, str) and body["truncated"] is False
+    marker, _, kept = text.partition("\n")
+    assert marker + "\n" == OMITTED.format("131 KiB")  # 200000 - 65525 bytes
+    assert len(kept.encode()) == 65525 and kept.endswith("log line 007999 ........\n")
+
+
 def test_other_gateways_keep_the_4096_character_default():
     from mainframe_rag.gateways import common
     assert common.Limits().max_field_chars == 4096
