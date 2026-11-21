@@ -84,11 +84,10 @@ TEXT_FORMAT_SITES: tuple[str, ...] = ("NOTRAILINGBLANKS", "SBSENDEOL=CRLF")
 # remainder to the tail (completion codes, abends).
 FRAME_RESERVE_BYTES = 1024
 SPOOL_HEAD_DIVISOR = 4
-# Extra tail bytes kept and screened before the line trim, so a key whose
-# value starts the tail window is usually redacted with its key in view. Safety
-# does not rest on this size (separators span any run of whitespace):
-# `_drop_cross_start_lead` drops whatever a match from before the ring could
-# have reached.
+# Extra tail bytes kept before the line trim, so the tail's first safe start
+# (`_tail_start`) usually lies before the last T bytes and a key there is in
+# view of its value. Safety does not rest on this size (separators span any
+# run of whitespace): no kept line starts where a match could span.
 TAIL_LOOKBEHIND_BYTES = 4096
 SPOOL_GAP_MARKER = (
     "[... z/OS bridge omitted about {n} bytes between the first and last parts"
@@ -147,9 +146,13 @@ _OPERAND_SECRET_RE = re.compile(
 )
 # TSO logon positional form: LOGON userid/password[/newpassword].
 _TSO_LOGON_RE = re.compile(r"(?i)\b(LOGON\s+[A-Z#$@][A-Z0-9#$@]{0,7})/[^\s/]*(?:/[^\s/]*)?")
+# Key words of the key-value form (shared with `_KEY_WORD_END_RE`).
+_KV_KEY_WORDS = (
+    rf"{_PASSWORD_WORDS}|secret|api[_-]?key|apikey|"
+    r"auth[_-]?token|access[_-]?token|bearer[_-]?token|token|credential"
+)
 _KV_SECRET_RE = re.compile(
-    rf"(?i)\b({_PASSWORD_WORDS}|secret|api[_-]?key|apikey|"
-    r"auth[_-]?token|access[_-]?token|bearer[_-]?token|token|credential)"
+    rf"(?i)\b({_KV_KEY_WORDS})"
     r"(\s*[=:]\s*)"
     # Closing ) or quote optional: the byte cap or a record end can cut it off.
     r"(?:\([^)\n]*\)?|'[^'\n]*'?|\"[^\"\n]*\"?|[^\s,;]+)"
@@ -166,11 +169,15 @@ _OBS_BOUNDARY_RE = re.compile(
 )
 # Spool text imitating the bridge's own window markers.
 _WINDOW_MARKER_RE = re.compile(r"(?i)\[\s*\.\.\.\s*z/OS\s+bridge\b[^\n]*")
-# What a redaction match that began before the screened text can leave at its
-# start: the rest of a key word (`LOGON`, `Bearer`, a D6 keyword), then its
-# separator (whitespace, which spans lines, and at most one `=`, `:` or `(`).
-# Every such match's value is single-line and starts where this lead ends.
-_CROSS_START_LEAD_RE = re.compile(r"[\w#$@-]*\s*(?:[=:(]\s*)?")
+# Every key a single-line redaction pattern can carry across a line end to its
+# value (the D6 keywords and key-value keys, TSO LOGON, the auth schemes),
+# matched where the text before a candidate tail start ends. The keys are
+# words far shorter than _KEY_SEARCH_CHARS.
+_KEY_WORD_END_RE = re.compile(rf"(?i)(?:{_KV_KEY_WORDS}|logon|bearer|basic)\Z")
+_KEY_SEARCH_CHARS = 64
+# The word run at a tail ring's start, which may be the end of a key cut by the
+# receive (U+FFFD: a multibyte character split there).
+_LEAD_RUN_RE = re.compile(r"[\w#$@\ufffd-]*")
 
 
 class _CapExceeded(Exception):
@@ -639,17 +646,26 @@ def screen_zos_text(text: str) -> str:
       password/secret/token key-value assignments (`=` or `:`); space-separated
       password values; and Bearer/Basic auth headers.
     """
+    return _redact_zos_text(_normalize_zos_text(text))
+
+
+def _normalize_zos_text(text: str) -> str:
+    """Line ends to `\\n`; C0/C1 control and format/bidi characters dropped."""
     normalized = (
         text.replace("\r\n", "\n")
         .replace("\r", "\n")
         .replace("\u2028", "\n")
         .replace("\u2029", "\n")
     )
-    cleaned = "".join(
+    return "".join(
         ch
         for ch in normalized
         if ch in ("\n", "\t") or unicodedata.category(ch) not in ("Cc", "Cf")
     )
+
+
+def _redact_zos_text(cleaned: str) -> str:
+    """The D6 redactions over normalized text (see `screen_zos_text`)."""
     cleaned = _PEM_PRIVATE_KEY_RE.sub("[REDACTED]", cleaned)
     cleaned = _PEM_OPEN_BEGIN_RE.sub("[REDACTED]", cleaned)
     cleaned = _PEM_OPEN_END_RE.sub("[REDACTED]", cleaned)
@@ -872,20 +888,56 @@ def _keep_last_lines(text: str, budget: int) -> str:
     return "".join(reversed(kept))
 
 
-def _drop_cross_start_lead(text: str) -> str:
-    """Drop a screened tail ring's start through the end of the line where its
-    key-and-separator-shaped lead ends.
+def _may_carry_a_key(text: str, end: int, lead_run: int) -> bool:
+    """Whether a redaction match could span a line start whose preceding text
+    has its last non-whitespace character just before `end`: that text ends
+    in a key, then at most one `=`, `:` or `(` and whitespace (every
+    pattern's separator). A word run reaching the ring's start (`lead_run`)
+    may be a key cut by the receive, so it counts too."""
+    if end > 0 and text[end - 1] in "=:(":
+        end -= 1
+        while end > 0 and text[end - 1].isspace():
+            end -= 1
+    if end <= lead_run:
+        return True
+    return _KEY_WORD_END_RE.search(text, max(0, end - _KEY_SEARCH_CHARS), end) is not None
 
-    A match that began before the ring (its key out of view) covers only that
-    lead, so its value lies on the line the lead ends on or earlier, and is
-    dropped here. This removes at least the partial first line (a CR/LF or a
-    character split by the receive); a ring with no line end after the lead is
-    omitted (fail closed). A match that starts inside the ring was redacted by
-    screening, with its key in view.
+
+def _tail_start(text: str) -> int:
+    """The first line start after a normalized tail ring's first line end that
+    no redaction match can span (`len(text)` if there is none).
+
+    Every non-PEM value is single-line, so a match spans a line start only
+    through its key's separator. From such a start, screening the rest on its
+    own pairs keys and values exactly as whole-file screening does; a PEM
+    block it starts inside is redacted from the start by the open-END rule.
+    Dropping the first line also drops a CR/LF or character split by the
+    receive. The size of the ring's lookbehind does not matter for safety.
     """
-    lead = _CROSS_START_LEAD_RE.match(text)
-    line_end = text.find("\n", lead.end() if lead else 0)
-    return text[line_end + 1 :] if line_end >= 0 else ""
+    lead = _LEAD_RUN_RE.match(text)
+    lead_run = lead.end() if lead else 0
+    end = 0
+    unsafe: bool | None = None
+    line_start = 0
+    while (line_end := text.find("\n", line_start)) >= 0:
+        content = len(text[line_start:line_end].rstrip())
+        if content:
+            end, unsafe = line_start + content, None
+        line_start = line_end + 1
+        if unsafe is None:
+            unsafe = _may_carry_a_key(text, end, lead_run)
+        if not unsafe:
+            return line_start
+    return len(text)
+
+
+def _screen_tail(raw: bytes, encoding: str) -> str:
+    """Decode an evicted tail ring and screen it from `_tail_start` on, then
+    neutralize window-marker lookalikes."""
+    decoded = codecs.getincrementaldecoder(encoding)(errors="replace").decode(raw, final=True)
+    text = _normalize_zos_text(decoded)
+    screened = _redact_zos_text(text[_tail_start(text) :])
+    return _WINDOW_MARKER_RE.sub("[neutralized-window-marker]", screened)
 
 
 def _join_window(head: str, marker: str, tail: str) -> str:
@@ -904,10 +956,10 @@ def _spool_window(
     H and last lines within T. With a gap in the read (the tail ring evicted
     chunks), the head is cut back to its last line end, and each part is
     decoded and screened on its own, so a single-line redaction cannot cross
-    the cut or eat the marker. The tail is screened over its whole ring,
-    including its partial first line and lookbehind, so a key there redacts
-    its value; then `_drop_cross_start_lead` drops what a match from before
-    the ring could have reached. Only then are whole lines trimmed to H and T,
+    the cut or eat the marker. The tail is screened from its first line
+    start that no redaction match can span (`_tail_start`), found over the
+    ring's partial first line and lookbehind, so its keys and values pair as
+    in whole-file screening. Only then are whole lines trimmed to H and T,
     and the caller frames the joined body.
     """
     body_budget, head_budget, tail_budget = _spool_budget(max_bytes)
@@ -944,8 +996,8 @@ def _spool_window(
             "stream_complete": False,
         }
         return body, fields, f"window=head-only read_bytes={capture.total}"
-    tail = _drop_cross_start_lead(_screen_part(tail_raw, encoding, final=True))
-    return _head_tail_window(head, _keep_last_lines(tail, tail_budget), capture.total)
+    tail = _keep_last_lines(_screen_tail(tail_raw, encoding), tail_budget)
+    return _head_tail_window(head, tail, capture.total)
 
 
 def _head_tail_window(head: str, tail: str, total: int) -> tuple[str, dict[str, Any], str]:

@@ -197,10 +197,11 @@
      `ZOWE_MCP_MAX_BYTES` is at least `MCP_FTP_MAX_BYTES` (both 256 KiB by
      default; nothing enforces the pairing across the two processes). A
      contiguous read is screened once as a whole and both parts are cut from
-     it. With a gap, each part is screened on its own, the tail over its whole
-     retained ring, and the tail's start is dropped through the line where any
-     key and separator a match from before the ring could carry end, so no
-     value whose key fell in the gap survives. Whole lines are trimmed last.
+     it. With a gap, each part is screened on its own, and the tail from its
+     first line start (after the retained ring's partial first line) that no
+     redaction match can span, so its keys and values pair as whole-file
+     screening pairs them and no value whose key fell in the gap survives.
+     Whole lines are trimmed last.
      `MCP_FTP_SPOOL_STREAM_MAX_BYTES`
      (16 MiB) and `MCP_FTP_SPOOL_STREAM_MAX_S` (8 s, below the agent's default
      15 s call timeout) stop a longer stream, which returns the head with a
