@@ -820,6 +820,68 @@ def test_issue_notes_refuse_projects_outside_the_allowlist(tmp_path: Path, proje
     assert fake.paths() == ["/api/v4/projects/team%2Fmoved"]
 
 
+# --- long text fields (maintainer, 2026-11-21, item f: 32768 characters) ------------------
+
+def _long_gateway(tmp_path: Path, fake: FakeGitLab, **limits: int) -> gitlab.Gateway:
+    doc = _config_doc(tmp_path, auth=False)
+    doc["limits"] = {"rate_per_minute": 1000, **limits}
+    return gitlab.build_gateway(_env(tmp_path, "bearer", doc), transport=fake.transport())
+
+
+def _long_texts(fake: FakeGitLab, size: int) -> None:
+    text = "ab" * (size // 2)
+    fake.routes["/api/v4/projects/7/issues/5"] = httpx2.Response(
+        200, json={"iid": 5, "title": "T" * 300, "description": text, "user_notes_count": 1})
+    fake.routes["/api/v4/projects/7/merge_requests/3"] = httpx2.Response(
+        200, json={"iid": 3, "title": "MR", "description": text, "author": {"username": "ann"}})
+    fake.routes["/api/v4/projects/7/issues/5/notes"] = httpx2.Response(
+        200, json=[{"id": 1, "author": {"username": "ann"}, "body": text, "system": False, "internal": False}])
+
+
+@pytest.mark.parametrize(("tool", "args", "field"), [
+    ("get_issue", {"iid": 5}, "description"),
+    ("get_merge_request", {"iid": 3}, "description"),
+    ("list_issue_notes", {"iid": 5}, "body"),
+])
+def test_a_20k_text_field_comes_through_whole(tmp_path: Path, tool: str, args: dict[str, int], field: str):
+    fake = FakeGitLab()
+    _long_texts(fake, 20000)
+    row = _body(_run(_long_gateway(tmp_path, fake), tool, project="team/app", **args), tool)["rows"][0]  # type: ignore[index]
+    assert row[field] == "ab" * 10000
+
+
+@pytest.mark.parametrize(("tool", "args", "field"), [
+    ("get_issue", {"iid": 5}, "description"),
+    ("get_merge_request", {"iid": 3}, "description"),
+    ("list_issue_notes", {"iid": 5}, "body"),
+])
+def test_a_40k_text_field_is_clipped_at_32768_with_the_marker(tmp_path: Path, tool: str, args: dict[str, int], field: str):
+    fake = FakeGitLab()
+    _long_texts(fake, 40000)
+    body = _body(_run(_long_gateway(tmp_path, fake), tool, project="team/app", **args), tool)
+    assert body["rows"][0][field] == ("ab" * 20000)[:32768]  # type: ignore[index]
+    assert body["truncated"] is True
+
+
+def test_the_default_result_cap_holds_one_full_long_field_and_a_configured_limit_wins(tmp_path: Path):
+    fake = FakeGitLab()
+    _long_texts(fake, 40000)
+    default = _long_gateway(tmp_path, fake)
+    assert default.limits.max_field_chars == 32768
+    assert default.limits.max_result_bytes >= 32768 + 8192
+    result = _run(default, "get_issue", project="team/app", iid=5)
+    assert len(result["content"][0]["text"].encode()) <= default.limits.max_result_bytes  # type: ignore[index]
+    configured = _long_gateway(tmp_path, fake, max_field_chars=1000)
+    row = _body(_run(configured, "get_issue", project="team/app", iid=5), "get_issue")["rows"][0]  # type: ignore[index]
+    assert row["description"] == ("ab" * 500)
+
+
+def test_other_gateways_keep_the_4096_character_default():
+    from mainframe_rag.gateways import common
+    assert common.Limits().max_field_chars == 4096
+    assert common.Limits().max_result_bytes == 64 * 1024
+
+
 def test_issues_carry_their_comment_count(tmp_path: Path):
     gateway = _bearer_gateway(tmp_path, FakeGitLab())
     issue = _body(_run(gateway, "get_issue", project="team/app", iid=5), "get_issue")["rows"][0]  # type: ignore[index]

@@ -202,7 +202,8 @@ scoped queries remain the primary control.
 `tool_timeout_s` (30), after which the handler is cancelled and its slot freed;
 `max_request_bytes` (64 KiB, else HTTP 413; a client that disconnects mid-body
 gets no reply); `max_result_bytes` (64 KiB);
-`max_rows` (200); `max_field_chars` (4096); `max_string_arg_chars` (1024). The
+`max_rows` (200); `max_field_chars` (4096; the GitLab gateway defaults it to 32768,
+so a description or note body of 20k characters arrives whole); `max_string_arg_chars` (1024). The
 limiter lives in memory, which suits the one replica per gateway; idle users are
 forgotten.
 
@@ -430,7 +431,7 @@ names it fails at start-up as an unknown key.
     can read them.
   - `next_page` is GitLab's `x-next-page`, given only when it is within
     `max_page`.
-  - Each body is cut at `max_field_chars`, and a page that exceeds
+  - Each body is cut at `max_field_chars` (32768 here), and a page that exceeds
     `max_result_bytes` drops its last notes (`truncated` is then true). Ask again
     with a smaller `per_page` to get them.
 - `list_issues` and `get_issue` carry `user_notes_count`, the number of comments

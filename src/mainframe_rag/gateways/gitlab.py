@@ -87,6 +87,14 @@ _ORPHAN_KEY_END_RE: Final = re.compile(r"-----END [A-Z0-9 ]{0,40}PRIVATE KEY----
 # (maintainer, 2026-11-21); oidc mode keeps the runtime defaults.
 BEARER_LIMIT_DEFAULTS: Final = {"max_concurrent_per_user": 4, "rate_per_minute": 120}
 
+# Issue and merge-request descriptions and note bodies are long documents
+# (maintainer, 2026-11-21, item f): the runtime clips every string at 4096
+# characters, which cut the team's runbooks, so GitLab raises it to 32768.
+# GitLab titles and names are short, so the one cap does not lengthen them.
+# max_result_bytes (64 KiB by default) holds one full 32768-character field.
+# The shared `Limits` default, and so Splunk, stays at 4096.
+LONG_TEXT_LIMIT_DEFAULTS: Final = {"max_field_chars": 32768}
+
 # The bridge-authored lines around a cut job log (docs/team-tools.md).
 JOB_LOG_OMITTED: Final = "[gateway: about {} of earlier log omitted]\n"
 JOB_LOG_UNREAD: Final = (
@@ -939,7 +947,7 @@ def build_gateway(
         GATEWAY,
         env,
         require_auth=mode == "oidc",
-        limit_defaults=BEARER_LIMIT_DEFAULTS if mode == "bearer" else None,
+        limit_defaults={**LONG_TEXT_LIMIT_DEFAULTS, **(BEARER_LIMIT_DEFAULTS if mode == "bearer" else {})},
     )
     backend = backend_from_config(config)
     if backend.max_job_log_read_s >= config.limits.tool_timeout_s:

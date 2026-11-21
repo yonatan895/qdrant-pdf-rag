@@ -173,6 +173,8 @@
   attribution is the Open WebUI chat history.
 - Rate limits in `bearer` mode apply to the whole instance. The defaults (4 in
   flight, 120 a minute) suit a small team, and the operator may set others.
+- Descriptions and note bodies are cut at 32768 characters, not the runtime's 4096
+  (maintainer, 2026-11-21); the 64 KiB result cap holds one full field.
 - Issue comments and job logs are untrusted text from many authors. They
   reach the model only redacted and framed as data, like every other result.
 - Verification: the prose row for this record; the HTTP/lifecycle row for
