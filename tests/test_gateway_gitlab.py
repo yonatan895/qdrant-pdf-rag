@@ -238,9 +238,10 @@ def test_main_refuses_to_serve_on_a_write_scope_and_never_logs_the_token(
 ):
     fake = FakeGitLab(scopes=["read_api", "api"])
     built: list[gitlab.Gateway] = []
+    env, real_build = _env(tmp_path, "bearer", _config_doc(tmp_path, auth=False)), gitlab.build_gateway
 
     def build() -> gitlab.Gateway:
-        built.append(_bearer_gateway(tmp_path, fake))
+        built.append(real_build(env, transport=fake.transport()))
         return built[-1]
 
     served: list[object] = []
