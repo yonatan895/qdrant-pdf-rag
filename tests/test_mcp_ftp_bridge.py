@@ -746,6 +746,30 @@ def test_d6_redacts_operand_cut_open_by_the_byte_cap(operand: str, leak: str) ->
     assert leak not in text
 
 
+def test_d6_redacts_private_key_cut_open_by_the_byte_cap() -> None:
+    """A private key whose END line falls past the byte cap is redacted from
+    BEGIN to the end of the text; an END without its BEGIN (a window that
+    starts inside a key) is redacted from the start of the text to END."""
+    key_body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7"
+    data = (
+        "HEADER LINE\n-----BEGIN PRIVATE KEY-----\n" + key_body + "\n" + key_body + "\n"
+        "-----END PRIVATE KEY-----\nTAIL LINE\n"
+    ).encode("ascii")
+    cut = data.index(key_body.encode("ascii")) + 20
+    fake = FakeFTP()
+    fake.files["'BIG.DATA'"] = data
+    out = bridge.dataset_read(_session(fake, max_bytes=cut), "BIG.DATA")
+    text = out["content"][0]["text"]
+    assert bridge.TRUNCATION_SUFFIX in text
+    assert "HEADER LINE" in text
+    assert key_body[:20] not in text
+
+    tail_window = key_body + "\n-----END RSA PRIVATE KEY-----\nAFTER THE KEY\n"
+    screened = bridge.screen_zos_text(tail_window)
+    assert key_body not in screened
+    assert "AFTER THE KEY" in screened
+
+
 def test_job_status_output_is_byte_capped_and_stops_the_listing() -> None:
     """job_status follows dataset_read's cap: at most max_bytes of rendered
     job lines plus the truncation suffix, and the LIST transfer is aborted
