@@ -439,61 +439,64 @@ def test_judge_evidence_is_bounded_before_the_prompt():
 # -------------------------------------------- neighbour expansion join (#1314)
 
 
-def test_citation_to_hit_and_evidence_handle_same_page_neighbours():
-    """#1314 PR 2: same-page neighbours repeat their parent's cite string.
-    A [n]-prefixed citation selects that exact slot rather than letting the
-    first equal cite win; a bare citation (what /v1/answer and /v1/chat emit)
-    maps to every packed hit/excerpt carrying that cite, so the faithfulness
-    judge sees both parent and same-page neighbour text without duplication."""
-    from mainframe_rag.eval.judging import (
-        citation_to_hit,
-        citation_to_hits,
-        evidence_for_citations,
-    )
+def test_pool_join_keeps_the_first_match_for_shared_cites():
+    """#1314 review B1: the sibling-pool join is unchanged. Two hits sharing
+    one cite line (same-page chunks) map a bare or [n]-prefixed citation to
+    the first of them only, and the judge sees that hit's text once per
+    citation. Literals observed on origin/main a94cf865."""
+    from mainframe_rag.eval.judging import citation_to_hit, evidence_for_citations
 
     shared_cite = "SA23-1380-70 z/OS MVS Init Tuning Ref, IEASYSxx > LFAREA, p. 100"
-    other_cite = "SC34-6428-08 CICS Sys Def, p. 55"
     hits = [
         _hit(shared_cite, "SA23-1380-70", "Parent chunk step 1."),
-        _hit(other_cite, "SC34-6428-08", "Unrelated chunk."),
-        {**_hit(shared_cite, "SA23-1380-70", "Same-page neighbour step 2."), "neighbour_of": "c1"},
+        _hit("SC34-6428-08 CICS Sys Def, p. 55", "SC34-6428-08", "Unrelated chunk."),
+        _hit(shared_cite, "SC34-6428-08", "Same-page chunk step 2."),
     ]
-    # [3] selects the neighbour at position 3, not the first equal cite at position 1.
-    assert citation_to_hit(f"[3] {shared_cite}", hits) == hits[2]
-    assert citation_to_hits(f"[3] {shared_cite}", hits) == [hits[2]]
-    evidence, unmapped = evidence_for_citations([f"[3] {shared_cite}"], hits)
-    assert unmapped == []
-    assert evidence == "Same-page neighbour step 2."
+    assert citation_to_hit(f"[3] {shared_cite}", hits) == hits[0]
+    assert cited_doc_ids([shared_cite, f"[3] {shared_cite}"], hits) == ({"SA23-1380-70"}, [])
+    assert evidence_for_citations([shared_cite, shared_cite], hits) == (
+        "Parent chunk step 1.\n\n---\n\nParent chunk step 1.", [])
 
-    # Bare citation collects both parent and same-page neighbour, deduped on repeats.
-    assert citation_to_hits(shared_cite, hits) == [hits[0], hits[2]]
-    evidence, unmapped = evidence_for_citations([shared_cite, shared_cite], hits)
-    assert unmapped == []
-    assert evidence == "Parent chunk step 1.\n\n---\n\nSame-page neighbour step 2."
 
-    # SuppliedExcerpt shape (`citation` + explicit `index`) works identically,
-    # including sparse/non-contiguous prompt indices.
+def test_packed_join_maps_shared_cites_to_every_packed_entry():
+    """#1314: on an expanded response the packed join maps a bare citation to
+    every packed entry carrying its line (same-page neighbours repeat their
+    parent's cite) and a [n] prefix to that prompt slot alone."""
+    from mainframe_rag.eval.judging import packed_citation_hits, packed_cited_doc_ids
+
+    shared_cite = "SA23-1380-70 z/OS MVS Init Tuning Ref, IEASYSxx > LFAREA, p. 100"
+    hits = [
+        _hit(shared_cite, "SA23-1380-70", "Parent chunk step 1."),
+        _hit("SC34-6428-08 CICS Sys Def, p. 55", "SC34-6428-08", "Unrelated chunk."),
+        {**_hit(shared_cite, "SA23-1380-71", "Same-page neighbour step 2."), "neighbour_of": "c1"},
+    ]
+    assert packed_citation_hits(f"[3] {shared_cite}", hits) == [hits[2]]
+    assert packed_citation_hits(shared_cite, hits) == [hits[0], hits[2]]
+    assert packed_citation_hits("SX00-0000-00 Absent, p. 1", hits) == []
+
     supplied = [
         {"index": 1, "citation": shared_cite, "doc_id": "SA23-1380-70", "text": "Parent slice."},
-        {"index": 17, "citation": shared_cite, "doc_id": "SA23-1380-70", "text": "Neighbour slice."},
+        {"index": 17, "citation": shared_cite, "doc_id": "SA23-1380-71", "text": "Neighbour slice."},
     ]
-    assert citation_to_hit(f"[17] {shared_cite}", supplied) == supplied[1]
-    assert evidence_for_citations([f"[17] {shared_cite}"], supplied) == ("Neighbour slice.", [])
-    assert evidence_for_citations([shared_cite], supplied) == (
-        "Parent slice.\n\n---\n\nNeighbour slice.",
-        [],
-    )
-    docs, unmatched = cited_doc_ids([shared_cite], supplied)
-    assert docs == {"SA23-1380-70"} and unmatched == []
+    assert packed_citation_hits(f"[17] {shared_cite}", supplied) == [supplied[1]]
+    # A prefix whose slot does not carry the cite falls back to the bare line.
+    assert packed_citation_hits(f"[9] {shared_cite}", supplied) == supplied
+    assert packed_cited_doc_ids([shared_cite, "SX00-0000-00 Absent, p. 1"], supplied) == (
+        {"SA23-1380-70", "SA23-1380-71"}, ["SX00-0000-00 Absent, p. 1"])
 
 
-def test_run_l2_joins_expanded_neighbours_from_supplied_evidence(monkeypatch):
-    """#1314 PR 2: in run_l2, /v1/search returns only the base retrieved pool
-    while /v1/answer returns supplied_evidence including packed cross-page and
-    same-page neighbours. Citations to neighbours must map (never fail as
-    unmatched), hit_doc_ids must include neighbours, and the faithfulness judge
-    must see both cross-page and same-page neighbour text — never an omitted
-    chunk."""
+def _excerpt(index: int, cite: str, doc_id: str, text: str) -> dict:
+    return {"index": index, "citation": cite, "duplicate_citation": False, "doc_id": doc_id,
+            "title": "Synthetic Reference", "heading": "Guide > Procedure", "page_label": "5",
+            "pdf_page_start": 5, "pdf_page_end": 5, "start_char": 0, "end_char": len(text),
+            "source_chars": len(text), "truncated_start": False, "truncated_end": False,
+            "text_clipped": False, "text": text}
+
+
+def _run_l2_buffered(monkeypatch, pool: list[dict], supplied: list[dict]):
+    """run_l2 over a stub app: /v1/search returns 'pool', the buffered
+    /v1/answer cites every distinct line of 'supplied'. Returns the row, the
+    metrics and the faithfulness judge's prompts."""
     import json
     from types import SimpleNamespace
 
@@ -505,68 +508,28 @@ def test_run_l2_joins_expanded_neighbours_from_supplied_evidence(monkeypatch):
     from mainframe_rag.eval.answer_tier import run_l2
 
     app = FastAPI()
-    judge_prompts: list[str] = []
-    parent_cite = "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 5"
-    cross_page_cite = "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 6"
+    prompts: list[str] = []
 
     @app.post("/v1/search")
     def search(body: dict):
-        return {
-            "hits": [
-                {"cite": parent_cite, "doc_id": "SA23-1380-70", "text": "Step 1: open panel."},
-            ]
-        }
+        return {"hits": pool}
 
     @app.post("/v1/answer")
     def answer(body: dict):
-        logger = logging.getLogger("agent")
-        logger.info(json.dumps({"action": "answer", "request_id": "req-expand", "finish_reason": "stop"}))
-        return {
-            "request_id": "req-expand",
-            "answer": "Open the panel, verify the status, and save on page 6.",
-            "citations": [parent_cite, cross_page_cite],
-            "citations_inferred": False,
-            "inferred_indices": [],
-            "verification_state": "accepted",
-            "script": None,
-            "supplied_evidence": [
-                {
-                    "index": 1, "citation": parent_cite, "duplicate_citation": True,
-                    "doc_id": "SA23-1380-70", "title": "Synthetic Reference",
-                    "heading": "Guide > Procedure", "page_label": "5",
-                    "pdf_page_start": 5, "pdf_page_end": 5,
-                    "start_char": 0, "end_char": 19, "source_chars": 19,
-                    "truncated_start": False, "truncated_end": False,
-                    "text_clipped": False, "text": "Step 1: open panel.",
-                },
-                {
-                    "index": 2, "citation": parent_cite, "duplicate_citation": True,
-                    "doc_id": "SA23-1380-70", "title": "Synthetic Reference",
-                    "heading": "Guide > Procedure", "page_label": "5",
-                    "pdf_page_start": 5, "pdf_page_end": 5,
-                    "start_char": 0, "end_char": 23, "source_chars": 23,
-                    "truncated_start": False, "truncated_end": False,
-                    "text_clipped": False, "text": "Step 2: verify status.",
-                },
-                {
-                    "index": 3, "citation": cross_page_cite, "duplicate_citation": False,
-                    "doc_id": "SA23-1380-70", "title": "Synthetic Reference",
-                    "heading": "Guide > Procedure", "page_label": "6",
-                    "pdf_page_start": 6, "pdf_page_end": 6,
-                    "start_char": 0, "end_char": 21, "source_chars": 21,
-                    "truncated_start": False, "truncated_end": False,
-                    "text_clipped": False, "text": "Step 3: save changes.",
-                },
-            ],
-            "evidence_omitted": 1,
-        }
+        logging.getLogger("agent").info(
+            json.dumps({"action": "answer", "request_id": "req-1", "finish_reason": "stop"}))
+        return {"request_id": "req-1", "answer": "Open the panel, then verify the status.",
+                "citations": list(dict.fromkeys(x["citation"] for x in supplied)),
+                "citations_inferred": False, "inferred_indices": [],
+                "verification_state": "accepted", "script": None,
+                "supplied_evidence": supplied, "evidence_omitted": 0}
 
     class Judge:
         def __init__(self, settings):
             pass
 
         def chat(self, messages, *, temperature, reasoning_effort):
-            judge_prompts.append(messages[1].content)
+            prompts.append(messages[1].content)
             return SimpleNamespace(content='{"label": "entailed"}')
 
         def close(self):
@@ -577,14 +540,56 @@ def test_run_l2_joins_expanded_neighbours_from_supplied_evidence(monkeypatch):
     monkeypatch.setattr(config, "load_settings", lambda: object())
     rows, metrics = run_l2([_entry("EXP-1", gold=["SA23-1380-70"])], None, judge_enabled=True)
     [row] = rows
+    return row, metrics, prompts
+
+
+def test_l2_judge_sees_the_first_pool_hit_for_a_shared_cite(monkeypatch):
+    """#1314 review B1 (expand off): two packed chunks on one page share a
+    cite line and the answer cites it bare. The judge's evidence is the first
+    pool hit only, as on origin/main a94cf865, not both packed texts."""
+    cite = "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 5"
+    pool = [_hit(cite, "SA23-1380-70", "STEP1 open the panel."),
+            _hit(cite, "SA23-1380-70", "STEP2 verify the status.")]
+    supplied = [_excerpt(1, cite, "SA23-1380-70", "STEP1 open the panel."),
+                _excerpt(2, cite, "SA23-1380-70", "STEP2 verify the status.")]
+    row, metrics, prompts = _run_l2_buffered(monkeypatch, pool, supplied)
     assert row["verdict"] == "pass", row["failures"]
-    assert row["unmatched_citations"] == []
-    assert row["cited_doc_ids"] == ["SA23-1380-70"]
-    assert row["citation_precision"] == 1.0 and row["citation_recall"] == 1.0
-    assert row["hit_doc_ids"] == ["SA23-1380-70"] * 3
-    assert row["gold_retrieved"] is True
-    assert metrics["unmapped_citations"] == 0
-    assert len(judge_prompts) == 1
-    assert "Step 1: open panel." in judge_prompts[0]
-    assert "Step 2: verify status." in judge_prompts[0]
-    assert "Step 3: save changes." in judge_prompts[0]
+    assert prompts == [
+        "EXCERPTS:\nSTEP1 open the panel.\n\nANSWER:\nOpen the panel, then verify the status."]
+    assert (row["citation_precision"], row["citation_recall"]) == (1.0, 1.0)
+    assert metrics["faithfulness"]["judged"] == 1
+
+
+def test_l2_pool_drift_still_fails_closed(monkeypatch):
+    """#1314 review B2 (expand off): the /v1/search pool differs from the
+    answer's retrieval, so the validated citation does not map to the pool.
+    The row fails closed with no judge call, as on origin/main a94cf865,
+    even though the citation maps to the response's own supplied evidence."""
+    cite = "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 5"
+    pool = [_hit("SC34-6428-08 CICS Sys Def, p. 55", "SC34-6428-08", "Unrelated chunk.")]
+    supplied = [_excerpt(1, cite, "SA23-1380-70", "STEP1 open the panel.")]
+    row, metrics, prompts = _run_l2_buffered(monkeypatch, pool, supplied)
+    assert row["verdict"] == "fail"
+    assert row["unmatched_citations"] == [cite]
+    assert row["failures"] == [f"1 validated citation(s) not in the fetched hit set: {[cite]}"]
+    assert row["citation_precision"] is None and row["citation_recall"] == 0.0
+    assert row["hit_doc_ids"] == ["SC34-6428-08"] and row["gold_retrieved"] is False
+    assert prompts == []
+    assert metrics["structural_fails"] == 1 and metrics["unmapped_citations"] == 1
+
+
+def test_l2_keeps_the_pool_join_when_more_was_packed_than_pooled(monkeypatch):
+    """#1314: the buffered /v1/answer body carries no 'hits', so it cannot
+    show that expansion ran; more packed excerpts than pool hits (an
+    'answer_hit_limit' above L2's pool depth, or neighbours) keep the pool
+    join and a citation outside the pool fails closed."""
+    cite, deep = ("SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 5",
+                  "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 6")
+    pool = [_hit(cite, "SA23-1380-70", "STEP1 open the panel.")]
+    supplied = [_excerpt(1, cite, "SA23-1380-70", "STEP1 open the panel."),
+                _excerpt(2, deep, "SA23-1380-70", "STEP3 save the changes.")]
+    row, _, prompts = _run_l2_buffered(monkeypatch, pool, supplied)
+    assert row["verdict"] == "fail"
+    assert row["unmatched_citations"] == [deep]
+    assert row["hit_doc_ids"] == ["SA23-1380-70"]
+    assert prompts == []

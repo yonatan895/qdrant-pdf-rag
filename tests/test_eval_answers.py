@@ -1932,101 +1932,21 @@ def test_repeats_outside_the_declared_range_are_refused(value):
 # -------------------------------------------- neighbour expansion join (#1314)
 
 
-def test_inferred_index_off_gold_maps_neighbour_indices_via_supplied_evidence_meta() -> None:
-    """#1314 PR 2: inferred indices past the base /v1/search pool depth (e.g.
-    [17], a packed neighbour) resolve through `supplied_evidence_meta`'s
-    explicit prompt index -> doc_id mapping first, falling back to `hit_doc_ids`
-    only when metadata is absent."""
-    from mainframe_rag.eval.answers import inferred_index_off_gold
+def test_only_neighbour_hits_show_that_expansion_ran() -> None:
+    """#1314 review B1/B2: the response join is used only when the response's
+    own hits show expansion ran (a 'neighbour_of' hit). Hits without one
+    (expansion off, or on with nothing appended) and the buffered body,
+    which has no 'hits' however many excerpts it packed, keep the pool."""
+    from mainframe_rag.eval.answers import expanded_response_hits
 
-    # Neighbour at prompt index 17 (past a 2-hit base pool) is a gold doc.
-    gold_neighbour = {
-        "verdict": "fail",
-        "inferred_indices": [17],
-        "expected_doc_ids": ["SA23-1380-09"],
-        "hit_doc_ids": ["OTHER-01", "OTHER-02"],
-        "supplied_evidence_meta": [
-            {"index": 1, "doc_id": "OTHER-01"},
-            {"index": 17, "doc_id": "SA23-1380-09"},
-        ],
-    }
-    assert inferred_index_off_gold(gold_neighbour) is False
-
-    # Neighbour at prompt index 17 is NOT a gold doc -> off-gold is True.
-    non_gold_neighbour = {
-        **gold_neighbour,
-        "supplied_evidence_meta": [
-            {"index": 1, "doc_id": "SA23-1380-09"},
-            {"index": 17, "doc_id": "OTHER-99"},
-        ],
-    }
-    assert inferred_index_off_gold(non_gold_neighbour) is True
-
-    # Missing supplied_evidence_meta falls back to hit_doc_ids (expanded list).
-    via_expanded_hits = {
-        "verdict": "fail",
-        "inferred_indices": [3],
-        "expected_doc_ids": ["SA23-1380-09"],
-        "hit_doc_ids": ["OTHER-01", "OTHER-02", "SA23-1380-09"],
-        "supplied_evidence_meta": None,
-    }
-    assert inferred_index_off_gold(via_expanded_hits) is False
-
-    # Out-of-range index against supplied_evidence_meta is still off-gold.
-    out_of_range = {
-        **gold_neighbour,
-        "inferred_indices": [18],
-    }
-    assert inferred_index_off_gold(out_of_range) is True
-
-
-def test_resolve_hits_keeps_pool_on_expand_off_with_omission_and_uses_expanded_supplied() -> None:
-    """#1314 PR 2: on buffered JSON (no `hits` key), expand-off with
-    evidence_omitted keeps the full sibling `/v1/search` pool for retrieval
-    coverage (`hit_doc_ids`), whereas expand-on (more packed excerpts than
-    pool, or a cross-page neighbour cite absent from pool) uses the response's
-    packed excerpts."""
-    from mainframe_rag.eval.answers import resolve_citation_hits, resolve_retrieval_hits
-
-    pool = [
-        {"doc_id": "D1", "cite": "D1 Ref, p. 1", "text": "p1"},
-        {"doc_id": "D2", "cite": "D2 Ref, p. 2", "text": "p2"},
-    ]
-    # Expand-off with tail omission: supplied is a strict prefix of pool.
-    off_omitted = {
-        "supplied_evidence": [
-            {"index": 1, "doc_id": "D1", "citation": "D1 Ref, p. 1", "text": "p1"},
-        ],
-        "evidence_omitted": 1,
-    }
-    assert resolve_retrieval_hits(off_omitted, pool) == pool
-    assert resolve_citation_hits(off_omitted, pool) == off_omitted["supplied_evidence"]
-
-    # Expand-on buffered JSON: 2 retrieved + 1 neighbour = 3 > 2.
-    on_expanded = {
-        "supplied_evidence": [
-            {"index": 1, "doc_id": "D1", "citation": "D1 Ref, p. 1", "text": "p1"},
-            {"index": 2, "doc_id": "D2", "citation": "D2 Ref, p. 2", "text": "p2"},
-            {"index": 3, "doc_id": "D1", "citation": "D1 Ref, p. 3", "text": "n3"},
-        ],
-        "evidence_omitted": 0,
-    }
-    assert resolve_retrieval_hits(on_expanded, pool) == on_expanded["supplied_evidence"]
-    assert resolve_citation_hits(on_expanded, pool) == on_expanded["supplied_evidence"]
-
-    # SSE expand-on with tail omission: retrieval sees all offered `hits` (3),
-    # while citation/judge join sees only packed `supplied_evidence` (2).
-    sse_expanded = {
-        "hits": [
-            {"doc_id": "D1", "cite": "D1 Ref, p. 1", "text": "p1"},
-            {"doc_id": "D1", "cite": "D1 Ref, p. 1", "text": "n2", "neighbour_of": "c1"},
-            {"doc_id": "D1", "cite": "D1 Ref, p. 1", "text": "n3-omitted", "neighbour_of": "c1"},
-        ],
-        "supplied_evidence": [
-            {"index": 1, "doc_id": "D1", "citation": "D1 Ref, p. 1", "text": "p1"},
-            {"index": 2, "doc_id": "D1", "citation": "D1 Ref, p. 1", "text": "n2"},
-        ],
-        "evidence_omitted": 1,
-    }
-    assert resolve_retrieval_hits(sse_expanded, pool) == sse_expanded["hits"]
-    assert resolve_citation_hits(sse_expanded, pool) == sse_expanded["supplied_evidence"]
+    retrieved = [{"doc_id": "D1", "cite": "D1 Ref, p. 1", "text": "p1"},
+                 {"doc_id": "D2", "cite": "D2 Ref, p. 2", "text": "p2"}]
+    neighbour = {"doc_id": "D1", "cite": "D1 Ref, p. 1", "text": "n2", "neighbour_of": "c1"}
+    supplied = [{"index": i, "doc_id": "D1", "citation": f"D1 Ref, p. {i}", "text": "x"}
+                for i in range(1, 4)]
+    assert expanded_response_hits({"hits": retrieved, "supplied_evidence": supplied}) is None
+    assert expanded_response_hits({"supplied_evidence": supplied, "evidence_omitted": 0}) is None
+    assert expanded_response_hits({"hits": []}) is None
+    assert expanded_response_hits({"hits": [*retrieved, {**neighbour, "neighbour_of": None}]}) is None
+    assert expanded_response_hits({"hits": [*retrieved, {"neighbour_of": "c1"}]}) is None
+    assert expanded_response_hits({"hits": [*retrieved, neighbour]}) == [*retrieved, neighbour]

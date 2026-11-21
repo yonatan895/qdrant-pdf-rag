@@ -16,7 +16,6 @@ from mainframe_rag.ports import ChatMessage
 JUDGE_MAX_EVIDENCE_CHARS = 6000
 
 CITE_PREFIX_RE = re.compile(r"^\s*\[\d+\]\s*")
-_CITE_INDEX_RE = re.compile(r"^\s*\[(\d+)\]\s*")
 JUDGE_LABELS = ("entailed", "neutral", "contradiction")
 RELEVANCE_LABELS = ("relevant", "partial", "irrelevant")
 JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -42,57 +41,15 @@ def judge_chat(client: Any, messages: list[ChatMessage]) -> Any:
     return client.chat(messages, temperature=0.0, reasoning_effort=JUDGE_REASONING_EFFORT)
 
 
-def _hit_cite(hit: dict[str, Any]) -> str | None:
-    """Cite text of either a SearchHit/NeighbourHit (`cite`) or a
-    SuppliedExcerpt (`citation`)."""
-    raw = hit.get("cite") if "cite" in hit else hit.get("citation")
-    return raw if isinstance(raw, str) else None
-
-
-def _citation_hit_positions(citation: str, hits: list[dict[str, Any]]) -> list[int]:
-    """Indices into `hits` matching a validated citation string.
-
-    When `citation` carries a 1-based `[n]` prompt prefix and slot `n`
-    (explicit integer `index` on SuppliedExcerpt dicts, else 1-based position
-    in `hits`) carries that cite, return only that exact slot so same-page
-    neighbours repeating a cite string (#1314) are disambiguated. Otherwise (a
-    bare validated citation line as emitted by `/v1/answer` and `/v1/chat`, or
-    a prefix whose slot does not match), return every hit carrying that exact
-    cite: bare citations map to every packed excerpt sharing the line
-    (docs/agent.md, eval/capture.py).
-    """
-    match = _CITE_INDEX_RE.match(citation)
-    cite = citation[match.end() :] if match is not None else citation
-    if match is not None:
-        idx = int(match.group(1))
-        has_explicit_index = any(type(h.get("index")) is int for h in hits)
-        if has_explicit_index:
-            exact = [
-                pos
-                for pos, h in enumerate(hits)
-                if type(h.get("index")) is int and h["index"] == idx and _hit_cite(h) == cite
-            ]
-            if exact:
-                return exact
-        elif 1 <= idx <= len(hits) and _hit_cite(hits[idx - 1]) == cite:
-            return [idx - 1]
-    return [pos for pos, h in enumerate(hits) if _hit_cite(h) == cite]
-
-
-def citation_to_hits(citation: str, hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Map a validated citation string (`{hit.cite}` or `[n] {hit.cite}`) back
-    to its matching hit(s)/excerpt(s) in `hits` (#1314)."""
-    return [hits[pos] for pos in _citation_hit_positions(citation, hits)]
-
-
 def citation_to_hit(citation: str, hits: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Map a validated citation string (`[n] {hit.cite}` or bare `{hit.cite}`)
-    back to its hit. When `[n]` matches that slot's cite, that exact hit wins
-    over an earlier duplicate cite (#1314); otherwise the first exact cite
-    match is returned. None when not in `hits` — the caller records it rather
-    than guessing a doc id with a regex."""
-    matches = citation_to_hits(citation, hits)
-    return matches[0] if matches else None
+    """Map a validated citation string (`[n] {hit.cite}`) back to its hit by
+    exact cite match. None when the hit is not in the fetched search rows —
+    the caller records it rather than guessing a doc id with a regex."""
+    cite = CITE_PREFIX_RE.sub("", citation)
+    for h in hits:
+        if h.get("cite") == cite:
+            return h
+    return None
 
 
 def cited_doc_ids(citations: list[str], hits: list[dict[str, Any]]) -> tuple[set[str], list[str]]:
@@ -101,12 +58,58 @@ def cited_doc_ids(citations: list[str], hits: list[dict[str, Any]]) -> tuple[set
     docs: set[str] = set()
     unmatched: list[str] = []
     for c in citations:
-        matched = citation_to_hits(c, hits)
-        if not matched:
+        hit = citation_to_hit(c, hits)
+        if hit is None:
             unmatched.append(c)
         else:
-            for hit in matched:
-                docs.add(str(hit.get("doc_id") or ""))
+            docs.add(str(hit.get("doc_id") or ""))
+    return docs, unmatched
+
+
+def _packed_cite(item: dict[str, Any]) -> str | None:
+    """Cite line of a packed entry: `citation` on a SuppliedExcerpt, `cite` on
+    a response hit (retrieved or NeighbourHit)."""
+    raw = item.get("citation") if "citation" in item else item.get("cite")
+    return raw if isinstance(raw, str) else None
+
+
+def packed_citation_hits(citation: str, packed: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every packed entry behind a validated citation, for rows whose response
+    shows neighbour expansion ran (#1314; `answers.ResponseJoin`). Same-page
+    neighbours repeat their parent's cite line, so a bare citation maps to
+    every entry carrying it, as the agent and the Pipe map it
+    (`capture.RowCitations.cites`). A `[n]` prefix whose prompt slot (an
+    explicit `index`, else the 1-based position) carries the cite selects
+    that slot alone. Never used on the sibling-pool join, which keeps
+    `citation_to_hit`'s first match."""
+    match = CITE_PREFIX_RE.match(citation)
+    cite = citation[match.end():] if match is not None else citation
+    if match is not None:
+        slot = int(citation[: match.end()].strip().strip("[]"))
+        if any(type(item.get("index")) is int for item in packed):
+            exact = [item for item in packed
+                     if type(item.get("index")) is int and item["index"] == slot
+                     and _packed_cite(item) == cite]
+            if exact:
+                return exact
+        elif 1 <= slot <= len(packed) and _packed_cite(packed[slot - 1]) == cite:
+            return [packed[slot - 1]]
+    return [item for item in packed if _packed_cite(item) == cite]
+
+
+def packed_cited_doc_ids(
+    citations: list[str], packed: list[dict[str, Any]]
+) -> tuple[set[str], list[str]]:
+    """`cited_doc_ids` over the packed join of an expanded response (#1314):
+    the doc ids of every entry `packed_citation_hits` maps, plus the
+    citations that map to none."""
+    docs: set[str] = set()
+    unmatched: list[str] = []
+    for c in citations:
+        matched = packed_citation_hits(c, packed)
+        if not matched:
+            unmatched.append(c)
+        docs.update(str(item.get("doc_id") or "") for item in matched)
     return docs, unmatched
 
 
@@ -194,24 +197,17 @@ def parse_relevance_label(text: str) -> str:
 
 
 def evidence_for_citations(citations: list[str], hits: list[dict[str, Any]]) -> tuple[str, list[str]]:
-    """Excerpt text behind the cited hits/excerpts (from the response's
-    packed `supplied_evidence` / final `hits`, or the sibling `/v1/search`
-    pool), bounded for the judge prompt. Same-page neighbours sharing a bare
-    citation line are all included, deduplicated by hit position (#1314).
-    Returns (evidence, unmapped citations)."""
+    """Excerpt text behind the cited hits (deterministic retrieval makes the
+    /v1/search rows the same pool the agent answered from), bounded for the
+    judge prompt. Returns (evidence, unmapped citations)."""
     texts: list[str] = []
     unmapped: list[str] = []
-    seen: set[int] = set()
     for c in citations:
-        positions = _citation_hit_positions(c, hits)
-        if not positions:
+        hit = citation_to_hit(c, hits)
+        if hit is None:
             unmapped.append(c)
-            continue
-        for pos in positions:
-            if pos in seen:
-                continue
-            seen.add(pos)
-            texts.append(str(hits[pos].get("text") or ""))
+        else:
+            texts.append(str(hit.get("text") or ""))
     evidence = "\n\n---\n\n".join(texts)
     if len(evidence) > JUDGE_MAX_EVIDENCE_CHARS:
         evidence = evidence[:JUDGE_MAX_EVIDENCE_CHARS] + "\n…[truncated for the judge]"
