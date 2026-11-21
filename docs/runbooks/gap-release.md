@@ -34,6 +34,7 @@ The record each release fills in is the
   ```sh
   export SNEAKERNET_TRUSTED_PUB=/work/anchors/upstream.pub
   export SNEAKERNET_GAP_TRUSTED_PUB=/work/anchors/gap.pub
+  export TMPDIR=/work/tmp   # bundles unpack to GBs; the pod's /tmp is small
   ```
 
 - The base upstream bundle (tarball and `.sha256`) of the release the fork's
@@ -110,7 +111,8 @@ line; rerun the same command after fixing the cause.
    anchor, fetches only the tag and `main` into a bare repository, checks
    the tag, the allow-list and the ledger (outside `gap/` and `.gitlab/`,
    the tree equals the base except the paths `gap/patches.md` lists), and
-   writes `out/`, `out/SHA256SUMS` and `request.txt`. It prints both anchor
+   writes `out/`, `out/SHA256SUMS` and `request.txt` (it unpacks the base
+   into `<work-dir>/scratch/`, which it removes on entry and exit). It prints both anchor
    fingerprints, the release identity (the sha256 of `SHA256SUMS`) and
    `PACKED <sha> <identity>`. Compare the fingerprints with the recorded ones.
 3. **Sign** (outside the bastion). Copy `SHA256SUMS` out, recompute its
@@ -137,8 +139,8 @@ line; rerun the same command after fixing the cause.
      encrypted key and `sign_vault.py`, then run
      `python3 -I sign_vault.py key-sign --sums SHA256SUMS --key gap-release.key.enc
      --expected-identity <identity> --verify-pub gap.pub --out SHA256SUMS.sig`
-     (openssl prompts for the passphrase), pipe the signature out and delete
-     the pod.
+     (openssl prompts for the passphrase, so use `oc exec -it`), pipe the
+     signature out and delete the pod.
 
    Copy `SHA256SUMS.sig` into `/work/gap-release/<tag>/`.
 4. **Assemble** (bastion).
@@ -155,7 +157,8 @@ line; rerun the same command after fixing the cause.
 
    ```sh
    sh scripts/gap/release.sh verify --bundle /work/gap-release/gap-release-<n>/qdrant-pdf-rag-<sha>.tar \
-     --base-bundle /work/<base>/qdrant-pdf-rag-<base sha>.tar [--remote <read-only GitLab URL>]
+     --base-bundle /work/<base>/qdrant-pdf-rag-<base sha>.tar --scratch-dir /work/tmp \
+     [--remote <read-only GitLab URL>]
    ```
 
    In order: the release guard on the installed workspace; the member
