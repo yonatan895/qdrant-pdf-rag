@@ -7,7 +7,18 @@ result shape (bridge.py), never protocol errors.
 
 Transports: newline-delimited JSON-RPC on stdio (logs go to stderr only),
 and unary JSON-RPC POSTs at `/mcp` over HTTP (plain JSON replies are
-spec-legal for non-streaming tools).
+spec-legal for non-streaming tools). Blocking FTP I/O in HTTP mode is
+offloaded via `asyncio.to_thread` (#1302) so slow FTP calls never stall
+uvicorn's event loop.
+
+Security controls (ADR-0012):
+- `tools/list` and `tools/call` expose only `config.enabled_tools` (D7).
+- Pre-connect policy validation rejects off-allowlist targets before any FTP
+  connection is opened (D2).
+- Thread-safe `LogonBreaker` stops further logons on FTP 530 until cooldown
+  elapses or an operator resets it via `POST /admin/reset-logon-breaker` (D9).
+- Optional/required bearer-secret caller authentication on HTTP endpoints
+  (except `/healthz`), matching the feedback service pattern (D4 point 2).
 
 Tracing: the HTTP transport joins the caller's trace (W3C traceparent
 extracted per request, `tools.call` span as its child); stdio carries no
@@ -19,7 +30,9 @@ log-and-drop, and telemetry never gates serving.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import hmac
 import json
 import os
 import sys
@@ -34,7 +47,7 @@ from opentelemetry import trace
 
 from mainframe_rag import tracing as tracing_mod
 from mainframe_rag.mcp import bridge
-from mainframe_rag.mcp.bridge import FTPConfig
+from mainframe_rag.mcp.bridge import FTPConfig, LogonBreaker
 
 ConnectFn = Callable[[FTPConfig], Any]
 
@@ -70,45 +83,100 @@ def _str_arg(args: dict, name: str, required: bool = False, default: str = "") -
     return value
 
 
-def _run_tool(name: str, args: dict, config: bridge.FTPConfig, connect: ConnectFn) -> dict:
-    """Dispatch one tools/call. Unknown tools and malformed args raise
-    KeyError/ValueError, which handle_request maps to -32602."""
-    session = bridge.FTPSession(connect(config), config)
+def _extract_tool_args(name: str, args: dict) -> dict[str, Any]:
+    """Type-validate arguments before policy check or FTP connect."""
+    if name == "dataset_read":
+        dataset = _str_arg(args, "dataset", required=True)
+        member = _str_arg(args, "member")
+        if dataset is None or member is None:
+            raise ValueError("dataset (required) and member (optional) must be strings")
+        return {"dataset": dataset, "member": member or None}
+    if name == "uss_read":
+        path = _str_arg(args, "path", required=True)
+        if path is None:
+            raise ValueError("path (required) must be a string")
+        return {"path": path}
+    if name == "job_status":
+        job_name = _str_arg(args, "job_name")
+        owner = _str_arg(args, "owner")
+        job_id = _str_arg(args, "job_id")
+        if job_name is None or owner is None or job_id is None:
+            raise ValueError("job_name, owner, and job_id must be strings when provided")
+        return {
+            "job_name": job_name or None,
+            "owner": owner or None,
+            "job_id": job_id or None,
+        }
+    if name == "jes_spool_read":
+        job_id = _str_arg(args, "job_id", required=True)
+        spool_id = _str_arg(args, "spool_id", required=True)
+        if job_id is None or spool_id is None:
+            raise ValueError("job_id and spool_id (required) must be strings")
+        return {"job_id": job_id, "spool_id": spool_id}
+    raise KeyError(name)
+
+
+def _run_tool(
+    name: str,
+    args: dict,
+    config: bridge.FTPConfig,
+    connect: ConnectFn,
+    breaker: LogonBreaker | None = None,
+) -> dict:
+    """Dispatch one tools/call. Unknown tools and malformed arg types raise
+    KeyError/ValueError, which handle_request maps to -32602. Policy denials
+    and connect/FTP failures return MCP isError tool results with stable codes."""
+    if name not in config.enabled_tools:
+        raise KeyError(name)
+    parsed_args = _extract_tool_args(name, args)
+
+    # Pre-connect policy check: off-allowlist targets never open FTP or log on.
+    policy_error = bridge.validate_tool_policy(name, parsed_args, config)
+    if policy_error is not None:
+        return policy_error
+
+    try:
+        if breaker is not None:
+            breaker.check()
+        ftp = connect(config)
+    except Exception as exc:  # noqa: BLE001 — mapped to stable error codes
+        if breaker is not None and (
+            isinstance(exc, bridge._LogonFailed) or bridge._is_530_error(exc)
+        ):
+            breaker.record_failure()
+        code, message = bridge._classify_ftp_error(exc)
+        return bridge._tool_error(code, message)
+
+    if breaker is not None:
+        breaker.record_success()
+
+    session = bridge.FTPSession(ftp, config)
     try:
         if name == "dataset_read":
-            dataset = _str_arg(args, "dataset", required=True)
-            member = _str_arg(args, "member")
-            if dataset is None or member is None:
-                raise ValueError("dataset (required) and member (optional) must be strings")
-            return bridge.dataset_read(session, dataset, member or None)
+            return bridge.dataset_read(session, parsed_args["dataset"], parsed_args["member"])
         if name == "uss_read":
-            path = _str_arg(args, "path", required=True)
-            if path is None:
-                raise ValueError("path (required) must be a string")
-            return bridge.uss_read(session, path)
+            return bridge.uss_read(session, parsed_args["path"])
         if name == "job_status":
             return bridge.job_status(
                 session,
-                job_name=_str_arg(args, "job_name") or None,
-                owner=_str_arg(args, "owner") or None,
-                job_id=_str_arg(args, "job_id") or None,
+                job_name=parsed_args["job_name"],
+                owner=parsed_args["owner"],
+                job_id=parsed_args["job_id"],
             )
         if name == "jes_spool_read":
-            job_id = _str_arg(args, "job_id", required=True)
-            spool_id = _str_arg(args, "spool_id", required=True)
-            if job_id is None or spool_id is None:
-                raise ValueError("job_id and spool_id (required) must be strings")
-            return bridge.jes_spool_read(session, job_id, spool_id)
+            return bridge.jes_spool_read(session, parsed_args["job_id"], parsed_args["spool_id"])
     finally:
         with contextlib.suppress(Exception):  # best-effort close only
             session.ftp.quit()
     raise KeyError(name)
 
 
+# Closed four-tool registry (ADR-0003); active tools are filtered by
+# `config.enabled_tools` (ADR-0012 D7).
 TOOL_SCHEMAS: dict[str, dict] = {
     "dataset_read": {
-        "description": "Read a z/OS sequential dataset or PDS member (EBCDIC converted). "
-        "A PDS name without member returns the member list.",
+        "description": "Read an allowlisted z/OS sequential dataset or PDS member "
+        "(TYPE A, EBCDIC converted; exact allowlist only, no PDS member listing).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -119,7 +187,7 @@ TOOL_SCHEMAS: dict[str, dict] = {
         },
     },
     "uss_read": {
-        "description": "Read a z/OS UNIX file (absolute path, EBCDIC converted).",
+        "description": "Read a z/OS UNIX file (unapproved for ADR-0012 pilot).",
         "inputSchema": {
             "type": "object",
             "properties": {"path": {"type": "string", "description": "Absolute USS path"}},
@@ -127,7 +195,8 @@ TOOL_SCHEMAS: dict[str, dict] = {
         },
     },
     "job_status": {
-        "description": "List batch jobs with status and return code, optionally filtered.",
+        "description": "Query one exact batch job (exact job_id or exact job_name + owner) "
+        "within the configured JES prefix allowlist.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -138,8 +207,8 @@ TOOL_SCHEMAS: dict[str, dict] = {
         },
     },
     "jes_spool_read": {
-        "description": "Read one spool file of a job (JOBID.n; typical ids 1=JCL, "
-        "2=system messages, 3+=SYSOUT — verify per site).",
+        "description": "Read one DD-scoped spool file (JESMSGLG or JESYSMSG only) of an "
+        "allowlisted job (JOBID.n), verified via LIST before RETR.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -169,6 +238,7 @@ def handle_request(
     config: FTPConfig,
     connect: ConnectFn,
     parent_context: Any | None = None,
+    breaker: LogonBreaker | None = None,
 ) -> dict | None:
     """Handle one decoded JSON-RPC message. Returns None for notifications
     (no reply) and for anything that must not produce output."""
@@ -202,15 +272,17 @@ def handle_request(
             msg_id,
             {
                 "tools": [
-                    {"name": name, **schema} for name, schema in TOOL_SCHEMAS.items()
+                    {"name": name, **TOOL_SCHEMAS[name]}
+                    for name in config.enabled_tools
+                    if name in TOOL_SCHEMAS
                 ]
             },
         )
     if method == "tools/call":
         tool_name = params.get("name")
         arguments = params.get("arguments") or {}
-        if not isinstance(tool_name, str) or tool_name not in TOOL_SCHEMAS:
-            return _error(msg_id, INVALID_PARAMS, f"unknown tool: {tool_name!r}")
+        if not isinstance(tool_name, str) or tool_name not in config.enabled_tools:
+            return _error(msg_id, INVALID_PARAMS, "unknown or disabled tool")
         if not isinstance(arguments, dict):
             return _error(msg_id, INVALID_PARAMS, "arguments must be an object")
         # Access log: tool name only (never args, content, or credentials).
@@ -223,7 +295,7 @@ def handle_request(
             attributes={"mcp.tool": tool_name},
         ) as span:
             try:
-                result = _run_tool(tool_name, arguments, config, connect)
+                result = _run_tool(tool_name, arguments, config, connect, breaker=breaker)
             except (KeyError, ValueError) as exc:
                 return _error(msg_id, INVALID_PARAMS, f"invalid tool call: {exc}")
             span.set_attributes(
@@ -237,9 +309,18 @@ def handle_request(
     return _error(msg_id, METHOD_NOT_FOUND, f"unsupported method: {method}")
 
 
-def serve_stdio(config: FTPConfig, connect: ConnectFn) -> None:
+def serve_stdio(
+    config: FTPConfig,
+    connect: ConnectFn,
+    *,
+    breaker: LogonBreaker | None = None,
+) -> None:
     """Newline-delimited JSON-RPC loop. stdout carries replies only;
     everything else (including tracebacks) goes to stderr."""
+    active_breaker = breaker or LogonBreaker(
+        threshold=config.logon_breaker_threshold,
+        cooldown_s=config.logon_breaker_cooldown_s,
+    )
     for raw in sys.stdin:
         line = raw.strip()
         if not line:
@@ -251,10 +332,12 @@ def serve_stdio(config: FTPConfig, connect: ConnectFn) -> None:
             sys.stdout.flush()
             continue
         try:
-            reply = handle_request(message, config, connect)
+            reply = handle_request(message, config, connect, breaker=active_breaker)
         except Exception as exc:  # noqa: BLE001 — framing must never die
             print(f"mcp bridge error: {type(exc).__name__}", file=sys.stderr)
-            reply = _error(message.get("id") if isinstance(message, dict) else None, -32000, "internal error")
+            reply = _error(
+                message.get("id") if isinstance(message, dict) else None, -32000, "internal error"
+            )
         if reply is not None:
             sys.stdout.write(json.dumps(reply) + "\n")
             sys.stdout.flush()
@@ -268,11 +351,52 @@ def sample_ratio_from_env() -> float:
         return 1.0
 
 
-def create_app(config: FTPConfig, connect: ConnectFn) -> FastAPI:
-    """Streamable-HTTP transport: unary JSON-RPC POSTs at /mcp. Lifespan
-    owns the tracer (setup on startup, flush on shutdown); W3C parents
-    are extracted per request so tools.call joins the caller's trace."""
-    app = FastAPI(title="mainframe-ftp-bridge", version=SERVER_INFO["version"])
+def _expected_bearer(token: str) -> bytes:
+    return f"Bearer {token.strip()}".encode()
+
+
+def _valid_bearer(supplied: str, expected: bytes) -> bool:
+    if not supplied.startswith("Bearer "):
+        return False
+    token = supplied[len("Bearer ") :].strip()
+    if not token:
+        return False
+    return hmac.compare_digest(f"Bearer {token}".encode(), expected)
+
+
+def create_app(
+    config: FTPConfig,
+    connect: ConnectFn,
+    *,
+    auth_token: str | None = None,
+    breaker: LogonBreaker | None = None,
+) -> FastAPI:
+    """Streamable-HTTP transport: unary JSON-RPC POSTs at /mcp.
+
+    - Offloads synchronous `handle_request` (blocking ftplib I/O) to a worker
+      thread via `asyncio.to_thread` (#1302).
+    - Enforces constant-time bearer caller authentication when `auth_token` is
+      configured (ADR-0012 D4 point 2), keeping `GET /healthz` open for probes.
+    - Exposes `POST /admin/reset-logon-breaker` (bearer-protected) for D9.
+    - Lifespan owns the tracer; W3C parents are extracted per request.
+    """
+    expected_auth: bytes | None = None
+    if auth_token is not None:
+        if not auth_token.strip():
+            raise RuntimeError("MCP_BRIDGE_AUTH_TOKEN must not be empty")
+        expected_auth = _expected_bearer(auth_token)
+
+    active_breaker = breaker or LogonBreaker(
+        threshold=config.logon_breaker_threshold,
+        cooldown_s=config.logon_breaker_cooldown_s,
+    )
+    app = FastAPI(
+        title="mainframe-ftp-bridge",
+        version=SERVER_INFO["version"],
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -285,15 +409,45 @@ def create_app(config: FTPConfig, connect: ConnectFn) -> FastAPI:
 
     app.router.lifespan_context = lifespan
 
+    if expected_auth is not None:
+        expected_bytes = expected_auth
+
+        @app.middleware("http")
+        async def authorize(request: Request, call_next):  # type: ignore[no-untyped-def]
+            if request.url.path == "/healthz" and request.method == "GET":
+                return await call_next(request)
+            supplied = request.headers.get("authorization", "")
+            if not _valid_bearer(supplied, expected_bytes):
+                return JSONResponse(
+                    {"code": "unauthorized", "message": "a valid bridge token is required"},
+                    status_code=401,
+                )
+            return await call_next(request)
+
+    @app.get("/healthz")
+    async def healthz() -> dict[str, Any]:
+        return {"status": "ok", "logon_breaker_open": active_breaker.is_open()}
+
+    @app.post("/admin/reset-logon-breaker")
+    async def reset_logon_breaker() -> dict[str, str]:
+        active_breaker.reset()
+        return {"status": "reset"}
+
     @app.post("/mcp")
     async def mcp_endpoint(request: Request) -> JSONResponse:
         try:
             message = await request.json()
         except ValueError:
             return JSONResponse(_error(None, PARSE_ERROR, "invalid JSON"), status_code=400)
+        parent_ctx = tracing_mod.parent_context(request.headers)
         try:
-            reply = handle_request(
-                message, config, connect, parent_context=tracing_mod.parent_context(request.headers)
+            reply = await asyncio.to_thread(
+                handle_request,
+                message,
+                config,
+                connect,
+                parent_context=parent_ctx,
+                breaker=active_breaker,
             )
         except Exception:  # noqa: BLE001 — framing must never die
             reply = _error(

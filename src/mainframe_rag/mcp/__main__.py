@@ -1,44 +1,86 @@
-"""Serve the read-only FTP MCP bridge (sidecar entrypoint: python -m mainframe_rag.mcp).
+"""Serve the read-only FTP MCP bridge (entrypoint: python -m mainframe_rag.mcp).
 
 Config is environment-only; in particular there is NO password flag —
 MCP_FTP_PASSWORD must arrive via a mounted secret or the environment.
---mock DIR (or MCP_MOCK_DIR) serves a deterministic fixture tree instead
+`--probe` runs a one-time logon-free connectivity probe (ADR-0012 D5 point 5)
+without credentials to verify whether the target supports verified FTPS.
+`--mock DIR` (or `MCP_MOCK_DIR`) serves a deterministic fixture tree instead
 of the wire: test-only, never in prod manifests (hygiene-gated).
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+from typing import Literal, cast
 
 from mainframe_rag import tracing as tracing_mod
-from mainframe_rag.mcp.bridge import FTPConfig, connect
+from mainframe_rag.mcp.bridge import (
+    DEFAULT_ENABLED_TOOLS,
+    FTPConfig,
+    connect,
+    parse_dataset_allowlist,
+    parse_enabled_tools,
+    parse_jes_prefixes,
+    probe_transport,
+)
 from mainframe_rag.mcp.http import serve_http
 from mainframe_rag.mcp.server import create_app, sample_ratio_from_env, serve_stdio
 
 
+def _env_bool(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
+
+
 def _config_from_env() -> FTPConfig:
     def _float(name: str, default: float) -> float:
-        try:
-            return float(os.environ.get(name, default))
-        except ValueError:
+        raw = os.environ.get(name)
+        if raw is None or not raw.strip():
             return default
+        try:
+            return float(raw)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be a number") from exc
 
     def _int(name: str, default: int) -> int:
-        try:
-            return int(os.environ.get(name, default))
-        except ValueError:
+        raw = os.environ.get(name)
+        if raw is None or not raw.strip():
             return default
+        try:
+            return int(raw)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be an integer") from exc
+
+    raw_mode = os.environ.get("MCP_FTP_TRANSPORT_MODE", "ftps").strip().lower()
+    if raw_mode not in ("ftps", "plain"):
+        raise ValueError("MCP_FTP_TRANSPORT_MODE must be 'ftps' or 'plain'")
+    transport_mode = cast(Literal["ftps", "plain"], raw_mode)
+
+    raw_tools = os.environ.get("MCP_ENABLED_TOOLS", "").strip()
+    enabled_tools = (
+        parse_enabled_tools(raw_tools) if raw_tools else DEFAULT_ENABLED_TOOLS
+    )
+    ca_file = os.environ.get("MCP_FTP_CA_FILE", "").strip() or None
+    encoding = os.environ.get("MCP_FTP_ENCODING", "utf-8").strip() or "utf-8"
 
     return FTPConfig(
-        host=os.environ.get("MCP_FTP_HOST", ""),
+        host=os.environ.get("MCP_FTP_HOST", "").strip(),
         user=os.environ.get("MCP_FTP_USER", ""),
         password=os.environ.get("MCP_FTP_PASSWORD", ""),
         port=_int("MCP_FTP_PORT", 21),
         timeout_s=_float("MCP_FTP_TIMEOUT_S", 15.0),
         max_bytes=_int("MCP_FTP_MAX_BYTES", 262144),
-        use_tls=os.environ.get("MCP_FTP_TLS", "").strip().lower() in ("1", "true", "yes"),
+        transport_mode=transport_mode,
+        plain_ftp_accepted=_env_bool("MCP_FTP_PLAIN_ACCEPTED"),
+        ca_file=ca_file,
+        encoding=encoding,
+        dataset_allowlist=parse_dataset_allowlist(os.environ.get("MCP_DATASET_ALLOWLIST", "")),
+        enabled_tools=enabled_tools,
+        jes_jobname_prefixes=parse_jes_prefixes(os.environ.get("MCP_JES_JOBNAME_PREFIXES", "")),
+        jes_owner_prefixes=parse_jes_prefixes(os.environ.get("MCP_JES_OWNER_PREFIXES", "")),
+        logon_breaker_cooldown_s=_float("MCP_FTP_LOGON_COOLDOWN_S", 900.0),
     )
 
 
@@ -47,11 +89,51 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--transport", choices=("stdio", "http"), default="stdio")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8081)
-    parser.add_argument("--mock", default=None, help="fixture dir: serve mock z/OS instead of FTP (test-only)")
+    parser.add_argument(
+        "--mock", default=None, help="fixture dir: serve mock z/OS instead of FTP (test-only)"
+    )
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="run a one-time logon-free FTPS/FTP connectivity probe and exit",
+    )
     args = parser.parse_args(argv)
 
+    if args.probe:
+        host = os.environ.get("MCP_FTP_HOST", "").strip()
+        if not host:
+            print("mcp bridge probe: MCP_FTP_HOST must be set", file=sys.stderr)
+            return 2
+        try:
+            port = int(os.environ.get("MCP_FTP_PORT", "21") or "21")
+            timeout_s = float(os.environ.get("MCP_FTP_TIMEOUT_S", "15.0") or "15.0")
+        except ValueError:
+            print("mcp bridge probe: MCP_FTP_PORT and MCP_FTP_TIMEOUT_S must be numeric", file=sys.stderr)
+            return 2
+        ca_file = os.environ.get("MCP_FTP_CA_FILE", "").strip() or None
+        result = probe_transport(host, port, timeout_s=timeout_s, ca_file=ca_file)
+        print(
+            json.dumps(
+                {
+                    "host": result.host,
+                    "port": result.port,
+                    "outcome": result.outcome,
+                    "recommended_mode": result.recommended_mode,
+                }
+            )
+        )
+        return 0 if result.outcome in ("ftps_verified", "plain_only") else 1
+
     mock_dir = args.mock or os.environ.get("MCP_MOCK_DIR", "").strip()
-    config = _config_from_env()
+    try:
+        config = _config_from_env()
+    except ValueError as exc:
+        print(f"mcp bridge: invalid configuration ({exc})", file=sys.stderr)
+        return 2
+
+    raw_auth_token = os.environ.get("MCP_BRIDGE_AUTH_TOKEN", "").strip()
+    auth_token: str | None = raw_auth_token or None
+
     if mock_dir:
         # Mock mode serves fixtures, never the wire: credentials are
         # unused, so the credential gate is skipped (not weakened — the
@@ -67,7 +149,14 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+        if args.transport == "http" and auth_token is None:
+            print(
+                "mcp bridge: MCP_BRIDGE_AUTH_TOKEN must be set for HTTP transport",
+                file=sys.stderr,
+            )
+            return 2
         connect_fn = connect
+
     if args.transport == "stdio":
         tracing_mod.setup_tracing(
             os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"),
@@ -78,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             tracing_mod.shutdown_tracing()
         return 0
-    serve_http(create_app(config, connect_fn), args.host, args.port)
+    serve_http(create_app(config, connect_fn, auth_token=auth_token), args.host, args.port)
     return 0
 
 

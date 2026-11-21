@@ -413,6 +413,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "rerank_fusion_alpha": 1.0,
     "zowe_mcp_enabled": False,
     "zowe_mcp_base_url": None,
+    "zowe_mcp_auth_token": None,
     "zowe_mcp_timeout_s": 15.0,
     "zowe_mcp_max_bytes": 262144,
     "zowe_mcp_dry_run": False,
