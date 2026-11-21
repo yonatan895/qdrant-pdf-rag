@@ -2551,23 +2551,24 @@ def test_expand_on_eval_join_sees_neighbours_on_streamed_transports(site_eval, t
         assert row["unmatched_citations"] == [next_page_cite]
         assert row["cited_doc_ids"] == []
         assert row["citation_precision"] is None and row["citation_recall"] == 0.0
-        return
-    # Retrieval and citation joins see all 4 hits (2 base + 2 neighbours).
-    assert row["hit_doc_ids"] == [OTHER_DOC, "SA22-0000-00", "SA22-0000-00", "SA22-0000-00"]
-    assert row["gold_retrieved"] is True
-    assert row["unmatched_citations"] == []
-    assert row["cited_doc_ids"] == ["SA22-0000-00"]
-    assert row["citation_precision"] == 1.0 and row["citation_recall"] == 1.0
-    assert report["metrics"]["answer_completeness"] == 1.0
-    # Text-free export keeps the exact key set and leaks no canaries.
+    else:
+        # Retrieval and citation joins see all 4 hits (2 base + 2 neighbours).
+        assert row["hit_doc_ids"] == [OTHER_DOC, "SA22-0000-00", "SA22-0000-00", "SA22-0000-00"]
+        assert row["gold_retrieved"] is True
+        assert row["unmatched_citations"] == []
+        assert row["cited_doc_ids"] == ["SA22-0000-00"]
+        assert row["citation_precision"] == 1.0 and row["citation_recall"] == 1.0
+        assert report["metrics"]["answer_completeness"] == 1.0
+    # Text-free export keeps the exact key set and leaks no canaries, also
+    # when the unmatched citation (buffered JSON) carries them.
     export_text = export.decode("utf-8")
     for name in ("excerpt", "heading", "title", "cite"):
         assert CANARIES[name] not in export_text, name
     [exported] = json.loads(export_text)["rows"]
     assert set(exported) == EXPORT_ROW_KEYS
     assert exported["hit_doc_ids"] == row["hit_doc_ids"]
-    assert exported["cited_doc_ids"] == ["SA22-0000-00"]
-    assert exported["citation_recall"] == 1.0
+    assert exported["cited_doc_ids"] == row["cited_doc_ids"]
+    assert exported["citation_recall"] == row["citation_recall"]
 
 
 def test_image_arm_still_joins_on_typed_search_pool(site_eval):
