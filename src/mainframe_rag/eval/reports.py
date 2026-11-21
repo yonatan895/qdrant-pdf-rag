@@ -180,7 +180,7 @@ def render_eval(report: dict[str, Any], baseline: dict[str, Any] | None, fmt: st
 
         query_rows = ""
         for row in report.get("rows", []):
-            q_text = _html_esc(row.get("query", ""))
+            q_text = _html_esc(row.get("query", row.get("id") or ""))
             kind = _html_esc(row.get("kind", ""))
             if "error" in row:
                 status = '<span class="badge badge-fail">ERROR</span>'

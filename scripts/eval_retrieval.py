@@ -69,8 +69,11 @@ from mainframe_rag.eval.retrieval import (
     _get,
     check_baseline,
     evaluate,
+    refuse_generated_report_path,
     summary_markdown,
+    text_free_report,
     update_baseline,
+    write_generated_report,
 )
 from mainframe_rag.manifest import write_run_manifest
 
@@ -182,7 +185,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.update_baseline and has_generated_entries(entries):
         print(f"FAIL: {GENERATED_BASELINE_REFUSAL}", file=sys.stderr)
         return 2
+    generated = has_generated_entries(entries)
+    if generated:
+        # Generated rows are text-free, 0600 and outside git (#1317): refuse a
+        # report path that git could track before any query runs.
+        for report_path in (args.out, args.summary):
+            refusal = refuse_generated_report_path(report_path)
+            if refusal:
+                print(f"FAIL: {refusal}", file=sys.stderr)
+                return 2
     report = evaluate(entries, settings)
+    if generated:
+        report = text_free_report(report)
     servable = report["representation"]["servable"]
     if args.update_baseline and not servable:
         print(
@@ -274,14 +288,26 @@ def main(argv: list[str] | None = None) -> int:
     summary = summary_markdown(report, baseline)
     summary += f"\n\nGate: {gate_status} (ungated diagnostics are not acceptance).\n"
     print(summary, file=sys.stderr)
-    if args.summary:
-        args.summary.parent.mkdir(parents=True, exist_ok=True)
-        args.summary.write_text(summary)
     payload = json.dumps(report, indent=2, ensure_ascii=False)
-    if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(payload + "\n")
-    else:
+    try:
+        if args.summary:
+            if generated:
+                write_generated_report(args.summary, summary)
+            else:
+                args.summary.parent.mkdir(parents=True, exist_ok=True)
+                args.summary.write_text(summary)
+        if args.out:
+            if generated:
+                write_generated_report(args.out, payload + "\n")
+            else:
+                args.out.parent.mkdir(parents=True, exist_ok=True)
+                args.out.write_text(payload + "\n")
+    except OSError as exc:
+        if not generated:
+            raise
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
+    if not args.out:
         print(payload)
 
     try:

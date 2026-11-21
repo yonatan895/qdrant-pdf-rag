@@ -675,6 +675,53 @@ def update_baseline(report: dict, baseline_path: Path) -> None:
     baseline_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
 
 
+def text_free_report(report: dict) -> dict:
+    """Copy of an eval report carrying row ids, scores, counts and classes only.
+
+    Used for sets with generated rows (#1317): each row's ``query`` becomes its
+    row id (or ``row-N``) so renderers keep working, and an error becomes the
+    fixed code ``query_error``; no question text, heading or upstream message
+    survives. The input is not mutated.
+    """
+    out = dict(report)
+    rows = []
+    for index, row in enumerate(report.get("rows") or [], 1):
+        clean = dict(row)
+        label = str(clean.get("id") or f"row-{index}")
+        if "query" in clean:
+            clean["query"] = label
+        if "error" in clean:
+            clean["error"] = "query_error"
+        rows.append(clean)
+    out["rows"] = rows
+    return out
+
+
+def refuse_generated_report_path(path: Path | None) -> str | None:
+    """Fixed refusal message when a report path may not take a generated-set report."""
+    if path is None:
+        return None
+    from mainframe_rag.eval import gold_candidates as gc
+    from mainframe_rag.eval.datasets import GENERATED_REPORT_OUTPUT_REFUSAL
+
+    try:
+        gc.refuse_output(path)
+    except gc.Refused:
+        return GENERATED_REPORT_OUTPUT_REFUSAL
+    return None
+
+
+def write_generated_report(path: Path, text: str) -> None:
+    """Create a generated-set report new, mode 0600, outside git (gold_candidates guards)."""
+    from mainframe_rag.eval import gold_candidates as gc
+    from mainframe_rag.eval.datasets import GENERATED_REPORT_OUTPUT_REFUSAL
+
+    try:
+        gc.write_private(path, text.encode("utf-8"))
+    except gc.Refused:
+        raise OSError(GENERATED_REPORT_OUTPUT_REFUSAL) from None
+
+
 def summary_markdown(report: dict, baseline: dict | None = None) -> str:
     lines = [
         "## Retrieval eval",

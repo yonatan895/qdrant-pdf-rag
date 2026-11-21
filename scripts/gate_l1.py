@@ -49,6 +49,7 @@ from qdrant_sim import QdrantSimError, start_simulator
 from mainframe_rag.config import load_settings
 from mainframe_rag.eval.datasets import (
     GENERATED_BASELINE_REFUSAL,
+    GENERATED_REPORT_OUTPUT_REFUSAL,
     DatasetError,
     has_generated_entries,
     parse_golden_text,
@@ -58,7 +59,10 @@ from mainframe_rag.eval.reports import render_eval
 from mainframe_rag.eval.retrieval import (
     check_baseline,
     evaluate,
+    refuse_generated_report_path,
+    text_free_report,
     update_baseline,
+    write_generated_report,
 )
 from mainframe_rag.ingest import run_ingest
 from mainframe_rag.manifest import write_run_manifest
@@ -213,6 +217,14 @@ def run_gate(
         msg = f"FAIL: {GENERATED_BASELINE_REFUSAL}"
         print(msg, file=sys.stderr)
         return 2, f"## Retrieval Evaluation Gate (L1)\n\n**ERROR:** {msg}\n"
+    generated = has_generated_entries(entries)
+    if generated and any(
+        refuse_generated_report_path(p) for p in (out_path, summary_path, delta_path)
+    ):
+        # Generated rows: text-free, 0600, outside git (#1317); refuse before any work.
+        msg = f"FAIL: {GENERATED_REPORT_OUTPUT_REFUSAL}"
+        print(msg, file=sys.stderr)
+        return 2, f"## Retrieval Evaluation Gate (L1)\n\n**ERROR:** {msg}\n"
     sim_url = qdrant_url or os.environ.get("QDRANT_SIM_URL") or os.environ.get("QDRANT_URL")
 
     # A skipped gate is not a pass: a missing or wrong-mode baseline, or a
@@ -281,6 +293,8 @@ def run_gate(
             settings = settings.model_copy(update={"rerank_enabled": True})
         t_ev0 = time.monotonic()
         report = evaluate(entries, settings)
+        if generated:
+            report = text_free_report(report)
         ev_time = round(time.monotonic() - t_ev0, 2)
         if not report["representation"]["servable"]:
             msg = (
@@ -336,15 +350,27 @@ def run_gate(
         # Render reports
         delta_md = render_eval(report, baseline, fmt="markdown")
 
-        if out_path:
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        if summary_path:
-            summary_path.parent.mkdir(parents=True, exist_ok=True)
-            summary_path.write_text(delta_md, encoding="utf-8")
-        if delta_path:
-            delta_path.parent.mkdir(parents=True, exist_ok=True)
-            delta_path.write_text(delta_md, encoding="utf-8")
+        if generated:
+            try:
+                if out_path:
+                    write_generated_report(out_path, json.dumps(report, indent=2, ensure_ascii=False) + "\n")
+                for text_path in (summary_path, delta_path):
+                    if text_path:
+                        write_generated_report(text_path, delta_md)
+            except OSError as exc:
+                msg = f"FAIL: {exc}"
+                print(msg, file=sys.stderr)
+                return 2, f"## Retrieval Evaluation Gate (L1)\n\n**ERROR:** {msg}\n"
+        else:
+            if out_path:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            if summary_path:
+                summary_path.parent.mkdir(parents=True, exist_ok=True)
+                summary_path.write_text(delta_md, encoding="utf-8")
+            if delta_path:
+                delta_path.parent.mkdir(parents=True, exist_ok=True)
+                delta_path.write_text(delta_md, encoding="utf-8")
 
         if regressions:
             print("[!] REGRESSIONS vs baseline detected:", file=sys.stderr)

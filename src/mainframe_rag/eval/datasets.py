@@ -122,9 +122,14 @@ class GoldenEntry(BaseModel):
         return self
 
 
+def is_generated_source(value: object) -> bool:
+    """True for the ``generated`` source marker in any case or surrounding space (#1317)."""
+    return isinstance(value, str) and value.strip().casefold() == "generated"
+
+
 def has_generated_entries(entries: Sequence[GoldenEntry]) -> bool:
-    """True when any entry carries ``source == 'generated'`` (#1317)."""
-    return any(entry.source == "generated" for entry in entries)
+    """True when any entry carries source ``generated``, in any case (#1317)."""
+    return any(is_generated_source(entry.source) for entry in entries)
 
 
 def load_golden(path: Path) -> list[GoldenEntry]:
@@ -255,6 +260,10 @@ UNREVIEWED_GENERATED_REFUSAL = (
     "refused: generated gold rows (source \"generated\") require human review provenance "
     "(status \"adjudicated\" or \"spot_checked\" with named reviewers)"
 )
+GENERATED_REPORT_OUTPUT_REFUSAL = (
+    "refused: reports for eval sets with generated rows must be written to a new file "
+    "outside any git work tree (mode 0600)"
+)
 GENERATED_BASELINE_REFUSAL = (
     "refused: generated gold rows (source \"generated\") cannot enter a baseline; "
     "model-written gold is never a baseline input"
@@ -321,10 +330,10 @@ def has_spot_check_record(text: str) -> bool:
 def is_unreviewed_generated_record(line: str) -> bool:
     """True when a JSON object declares ``source == 'generated'`` without
     valid human adjudication or batch spot-check provenance."""
-    if '"generated"' not in line and "\\u" not in line and "\\U" not in line:
+    if "generated" not in line.casefold() and "\\u" not in line and "\\U" not in line:
         return False
     obj = _parse_json_object(line)
-    if obj is None or obj.get("source") != "generated":
+    if obj is None or not is_generated_source(obj.get("source")):
         return False
     status = obj.get("status")
     if status not in ADJUDICATED_STATUSES:
@@ -348,7 +357,7 @@ def is_unreviewed_generated_record(line: str) -> bool:
 
 def has_unreviewed_generated_record(text: str) -> bool:
     return (
-        ('"generated"' in text or "\\u" in text or "\\U" in text)
+        ("generated" in text.casefold() or "\\u" in text or "\\U" in text)
         and any(is_unreviewed_generated_record(line) for line in text.splitlines())
     )
 

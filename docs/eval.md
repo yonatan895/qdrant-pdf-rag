@@ -1577,6 +1577,19 @@ release set and writes no baseline.
   entry point exits 2 before it scores or writes). `verify_golden`, which reads
   its files itself, reports the same fixed message as a FAIL for the file,
   verifies none of its rows and exits 1.
+- **Reports on sets with generated rows are text-free, private and outside git.**
+  When any loaded row has `source` `generated` (matched in any case and
+  ignoring surrounding space, so `Generated` is the same marker),
+  `eval_retrieval.py`, `gate_l1.py`, `harness.py` and `replay_sweep.py` write
+  reports whose rows carry row ids, scores, counts and classes only: the
+  question text becomes the row id (`row-N` without one), a query error becomes
+  the fixed code `query_error`, and no heading or row text reaches the report
+  file, the markdown summary, stdout or stderr. `--out`, `--summary`,
+  `--delta` and `--json` paths are checked before any query runs and refused
+  with exit 2 and one fixed message when they resolve inside a git work tree,
+  already exist, or are named like the holdout or release set; accepted paths
+  are created new with mode 0600 through the `gold_candidates` writer. Sets
+  without generated rows keep their reports byte-for-byte unchanged.
 - **Privacy.** Questions derive from manual text. Outputs of both
   `gold_candidates` and `spot_check` are refused (exit 2, one fixed message,
   before any Qdrant or model call) when the path or its parent resolves inside

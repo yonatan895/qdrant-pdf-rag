@@ -43,6 +43,7 @@ if str(REPO / "src") not in sys.path:
 
 from mainframe_rag.eval.datasets import (
     GENERATED_BASELINE_REFUSAL,
+    GENERATED_REPORT_OUTPUT_REFUSAL,
     HOLDOUT_FILENAME,
     DatasetError,
     has_generated_entries,
@@ -51,6 +52,7 @@ from mainframe_rag.eval.datasets import (
     resolve_harness_golden_paths,
 )
 from mainframe_rag.eval.promotion import DEFAULT_CLASS_FLOOR, gate_verdict
+from mainframe_rag.eval.retrieval import refuse_generated_report_path, write_generated_report
 
 
 # ------------------------------------------------------------------ baseline
@@ -349,6 +351,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.update_baseline and has_generated_entries(entries):
         print(f"FAIL: {GENERATED_BASELINE_REFUSAL}", file=sys.stderr)
         return 2
+    generated = has_generated_entries(entries)
+    if generated and refuse_generated_report_path(args.out):
+        # Generated rows: report 0600 and outside git (#1317); refuse before any work.
+        print(f"FAIL: {GENERATED_REPORT_OUTPUT_REFUSAL}", file=sys.stderr)
+        return 2
     baseline = load_baseline(baseline_path)
     # Fail closed BEFORE anything runs: a gate (or any non-recording run)
     # without a baseline would otherwise be invited to create one from
@@ -447,12 +454,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"    - {r}", file=sys.stderr)
 
     if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(
-            json.dumps({"verdict": verdict, "reasons": reasons, "summary": summary,
-                        "snapshot": pin, "restore_s": restore_s}, indent=1, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        out_text = json.dumps({"verdict": verdict, "reasons": reasons, "summary": summary,
+                               "snapshot": pin, "restore_s": restore_s}, indent=1, ensure_ascii=False) + "\n"
+        if generated:
+            try:
+                write_generated_report(args.out, out_text)
+            except OSError as exc:
+                print(f"FAIL: {exc}", file=sys.stderr)
+                return 2
+        else:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(out_text, encoding="utf-8")
     try:
         write_run_manifest("harness", settings, {"verdict": verdict, **summary["overall"],
                                                  "traps": summary["traps"], "restore_s": restore_s})

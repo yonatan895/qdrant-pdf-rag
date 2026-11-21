@@ -49,13 +49,20 @@ if str(REPO / "src") not in sys.path:
 
 from capture_pool import record_to_rows, replay_pool
 
-from mainframe_rag.eval.datasets import GoldenEntry, load_golden
+from mainframe_rag.eval.datasets import (
+    GENERATED_REPORT_OUTPUT_REFUSAL,
+    GoldenEntry,
+    has_generated_entries,
+    load_golden,
+)
 from mainframe_rag.eval.retrieval import (
     attribute_entry,
     is_relevant_hit,
+    refuse_generated_report_path,
     score_passage_hits,
     summarize_attribution,
     summarize_passage,
+    write_generated_report,
 )
 
 # Production prefetch depth for the non-rerank path (query.PREFETCH_LIMIT):
@@ -511,6 +518,21 @@ def warn_if_no_ce_scored(grid: str, records: list[dict]) -> bool:
     return True
 
 
+def _write_json(path: Path, payload: Any, generated: bool) -> bool:
+    """Write the per-query JSON; sets with generated rows go through the private writer."""
+    text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+    if not generated:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return True
+    try:
+        write_generated_report(path, text)
+    except OSError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return False
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--pools", type=Path, required=True, help="capture_pool.py output JSONL")
@@ -548,6 +570,12 @@ def main(argv: list[str] | None = None) -> int:
         entries = load_golden(args.golden)
     except DatasetError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
+
+    generated = has_generated_entries(entries)
+    if generated and refuse_generated_report_path(args.json):
+        # Generated rows: report 0600 and outside git (#1317); refuse before any work.
+        print(f"FAIL: {GENERATED_REPORT_OUTPUT_REFUSAL}", file=sys.stderr)
         return 2
 
     from mainframe_rag.config import load_settings
@@ -594,9 +622,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"{c['c']:>4} {c['unclassifiable']:>5} {c['a_also_in_pool']:>6} "
                 f"{result['truncated']:>5} {result['unoutlined']:>5} {result['failures']:>4}"
             )
-        if args.json:
-            args.json.parent.mkdir(parents=True, exist_ok=True)
-            args.json.write_text(json.dumps(attr_results, indent=2, ensure_ascii=False) + "\n")
+        if args.json and not _write_json(args.json, attr_results, generated):
+            return 2
         return 1 if sum(result.get("failures", 0) for result in attr_results) else 0
 
     results = [
@@ -622,9 +649,8 @@ def main(argv: list[str] | None = None) -> int:
             f"{result['failures']:>4} {ident.get('recall@1')!s:>6} {ident.get('mrr')!s:>6} "
             f"{nl.get('recall@1')!s:>6} {nl.get('mrr')!s:>6}"
         )
-    if args.json:
-        args.json.parent.mkdir(parents=True, exist_ok=True)
-        args.json.write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n")
+    if args.json and not _write_json(args.json, results, generated):
+        return 2
     return 1 if sum(result.get("failures", 0) for result in results) else 0
 
 
