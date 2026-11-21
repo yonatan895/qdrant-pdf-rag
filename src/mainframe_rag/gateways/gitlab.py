@@ -480,8 +480,9 @@ class GitLabTools:
         return ToolOutput(rows=_rows(items, ("path", "type", "name")))
 
     async def read_file(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
-        project_id, _ = await self._project(ctx, args["project"])
-        params: dict[str, str | int] = {"ref": args["ref"]} if args.get("ref") else {}
+        project_id, project = await self._project(ctx, args["project"])
+        ref = args.get("ref") or project.get("default_branch")
+        params: dict[str, str | int] = {"ref": ref} if isinstance(ref, str) and ref else {}
         body = await self.client.get_bytes(
             ctx.principal,
             f"/projects/{project_id}/repository/files/{_enc(args['file_path'])}/raw",

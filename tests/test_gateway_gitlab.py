@@ -289,6 +289,39 @@ def test_bearer_mode_admits_only_the_shared_secret(tmp_path: Path, caplog: pytes
     assert decisions[-1] == {"action": "tool_auth", "gateway": "gitlab", "sub": "service:openwebui", "decision": "allow"}
 
 
+def test_bearer_mode_limits_cover_the_whole_instance(tmp_path: Path):
+    """ADR-0014 D4: in bearer mode every Open WebUI user is one caller, so a
+    second call while one is running is `busy` (default concurrency 1)."""
+    fake = FakeGitLab()
+
+    async def run() -> tuple[dict[str, object], dict[str, object]]:
+        gate = asyncio.Event()
+
+        async def slow(request: httpx2.Request) -> httpx2.Response:
+            if request.url.raw_path.startswith(b"/api/v4/projects/team%2Fapp"):
+                await gate.wait()
+            return fake.handler(request)
+
+        env = _env(tmp_path, "bearer", _config_doc(tmp_path, auth=False))
+        gateway = gitlab.build_gateway(env, transport=httpx2.MockTransport(slow))
+        transport = httpx2.ASGITransport(app=gateway.app)
+        headers = {"Authorization": f"Bearer {BEARER}"}
+        async with httpx2.AsyncClient(transport=transport, base_url="http://gw") as client:
+            first = asyncio.create_task(
+                client.post("/mcp", headers=headers, json=_call("get_project", project="team/app")))
+            for _ in range(1000):
+                if fake.requests or first.done():
+                    break
+                await asyncio.sleep(0)
+            second = await client.post("/mcp", headers=headers, json=_call("get_project", project="solo/tool"))
+            gate.set()
+            return (await first).json()["result"], second.json()["result"]
+
+    first, second = asyncio.run(run())
+    assert first["isError"] is False
+    assert _error(second) == {"code": "busy", "message": "another tool call for this user is still running"}
+
+
 def test_oidc_mode_is_the_default_and_fixes_a_single_audience(tmp_path: Path):
     fake = FakeGitLab()
     gateway = gitlab.build_gateway(_env(tmp_path, None, _config_doc(tmp_path)), transport=fake.transport())
@@ -425,6 +458,12 @@ def test_file_content_is_framed_redacted_and_escaped(tmp_path: Path):
     assert "hunter2" not in text and TEAM_TOKEN not in text and "[REDACTED]" in text
     # The file's own closing tag stays data: the framed text closes exactly once.
     assert result["content"][0]["text"].count("</tool-output>") == 1  # type: ignore[index]
+
+
+def test_read_file_without_ref_names_the_default_branch(tmp_path: Path):
+    fake = FakeGitLab()
+    _run(_bearer_gateway(tmp_path, fake), "read_file", project="team/app", file_path="src/main.py")
+    assert dict(fake.requests[-1].url.params) == {"ref": "main"}
 
 
 @pytest.mark.parametrize(("arguments", "code"), [

@@ -131,8 +131,9 @@
 | ADR-0010 amendments table, ADR-0007 V2 tool servers (`auth_type: system_oauth`) | `system_oauth` only | Also a static bearer key (Open WebUI's `bearer` auth type) for the GitLab gateway in bearer mode (B1); the registration pull request verifies the type against the pinned Open WebUI |
 | ADR-0011 policy matrix, GitLab, user class | ADR-0010 TD4, the user's own token | E4 through this gateway; agent class unchanged (no access through this gateway) |
 | ADR-0011 shared credentials | No GitLab row | E4 and B1 (table above) |
+| ADR-0011 D1 ("the product acts only as the signed-in user") and G1 ("a user-class call runs as one verified user") | Every user-class gateway call carries one verified user | Unchanged in `oidc` mode. In `bearer` mode, B1 is the stated exception: calls run as `service:openwebui`, no user is verified by the gateway, and team membership rests on D4's guards (G3 above) |
 | #1078 issue body, "act as the end user, never as a shared write-capable account" | Per-user tokens | One shared **read-only** token (E4); write actions would still need per-user tokens |
-| ADR-0010 TD1–TD3, TD5, TD7, TD8; ADR-0011 D2–D4, G1–G6 | | Unchanged |
+| ADR-0010 TD1–TD3, TD5, TD7, TD8; ADR-0011 D2–D4, G2–G6 | | Unchanged |
 
 ## Open site checks (before go-live)
 
