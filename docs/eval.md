@@ -1169,15 +1169,21 @@ this arm cannot run at a site.
 - The control packs the same number of chunks by plain retrieval depth, so
   the difference is which chunks fill the extra slots, not how many. With
   the defaults that is `N=16`, `B=16` against `ANSWER_HIT_LIMIT=32`.
-- The eval does not see neighbours yet. Its retrieval fields
-  (`gold_retrieved`, `hit_doc_ids`, the judge's evidence for a citation) come
-  from the sibling `/v1/search` pool and join by cite string, which same-page
-  neighbours repeat: on `expand-on` rows a cited neighbour is unmapped and
-  positions past `N` do not line up. Until the eval joins on the final's
-  hits (the second #1314 change), read only `final_hits` and
-  `supplied_evidence_meta` from this arm, with `--stream`, and do not compare
-  pass rate or citation precision/recall across the two arms.
-- Run `expand-on` with `--hit-limit N` and the control with `--hit-limit N+B`.
+- The eval joins on neighbours only where the response shows them (#1314):
+  a streamed `/v1/answer` or `/v1/chat` row whose `hits` include a hit
+  with `neighbour_of`. On such a row `hit_doc_ids` and `gold_retrieved`
+  read those hits (prompt label `[n]` is hit `n`, so
+  `inferred_index_off_gold` stays positional), and citation
+  precision/recall join on the packed `supplied_evidence`, else those hits:
+  a bare citation maps to every packed excerpt carrying its line (same-page
+  neighbours repeat it), a `[n]` prefix to slot `n`. Every other row
+  (expansion off, on with nothing appended, the buffered body, which has no
+  `hits`, and `--image-arm`) keeps the sibling `/v1/search` join exactly
+  as before #1314. Harness L2/L4 call the buffered `/v1/answer`, so they
+  keep that join on `expand-on` too, where a cited cross-page neighbour is
+  unmapped and fails the row: do not run L2/L4 on this arm.
+- Run `expand-on` with `--stream` and `--hit-limit N` (the sibling pool depth) and
+  the control with `--stream` and `--hit-limit N+B`.
 - Before reading results, confirm from the stand-in's traces that rows carry
   `rag.expand_mode=expanded` with `rag.expand_added` near `B`; a row with
   fewer added packed fewer chunks than its control row. `rag.expand_stopped`
