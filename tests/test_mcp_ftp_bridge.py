@@ -1143,7 +1143,30 @@ _B1_PAIRS: dict[str, bytes] = {
     "long_blank_lines": b"PASSWORD" + b"\n" * 4200 + b"HUNTER2XYZ",
     "nul_run": b"PASSWORD=" + b"\x00" * 5000 + b"HUNTER2XYZ",
     "long_record": b"X" * 9000 + b" PASSWORD=\nHUNTER2XYZ",
+    # Chains: a match aligned to the cut pairs each key with the next key, so
+    # the pairing drifts and the last key's value is left bare unless the tail
+    # starts where no match can span.
+    "kv_chain3": b"PASSWORD=\nTOKEN=\nPW=\nHUNTER2XYZ",
+    "kv_chain5": b"SECRET=\nPASSWORD:\nTOKEN=\nPW=\nAPI_KEY=\nHUNTER2XYZ",
+    "space_chain3": b"PASSWORD\nPASSWORD\nPASSWORD\nHUNTER2XYZ",
 }
+
+
+def _screened_oracle(payload: bytes) -> str:
+    """Whole-file screening with the window's marker neutralization: the
+    text a full read of the same bytes would return."""
+    text = bridge.screen_zos_text(payload.decode("latin-1"))
+    return bridge._WINDOW_MARKER_RE.sub("[neutralized-window-marker]", text)
+
+
+def _assert_line_suffix(part: str, oracle: str) -> None:
+    """part is whole lines from the end of the whole-file screened text."""
+    assert part and oracle.endswith(part)
+    assert len(part) == len(oracle) or oracle[-len(part) - 1] == "\n"
+
+
+def _after_gap_marker(body: str) -> str:
+    return body[body.index("\n", body.index(_GAP)) + 1 :]
 
 
 def _sweep_offsets(start: int, end: int) -> list[int]:
@@ -1161,7 +1184,8 @@ def test_spool_window_split_anywhere_in_a_key_value_pair_never_leaks(family: str
     a key, separator and value. Evicted reads cut where the tail ring starts
     (built directly, so the start is exact rather than 8 KiB-granular);
     contiguous reads cut at H. The value never appears, the last line always
-    does, and whole-file screening redacts the same value."""
+    does, whole-file screening redacts the same value, and the kept tail is a
+    line suffix of the whole-file screened text (no pairing drift)."""
     pair = _B1_PAIRS[family].replace(b"\n", eol) + eol
     last = b"LAST LINE" + eol
     _assert_value_screened_whole(pair)
@@ -1171,6 +1195,7 @@ def test_spool_window_split_anywhere_in_a_key_value_pair_never_leaks(family: str
     # so the whole-line trim alone cannot remove the value.
     before = _pad(6000, "PRE", eol=eol)
     full = before + pair + _pad(t // 2, "TAIL", eol=eol) + last
+    oracle = _screened_oracle(full)
     head = _pad(h, "HEAD", eol=eol)
     for o in _sweep_offsets(len(before), len(before) + len(pair)):
         ring = full[o:]
@@ -1189,6 +1214,7 @@ def test_spool_window_split_anywhere_in_a_key_value_pair_never_leaks(family: str
         assert fields["window"] == "head_tail"
         assert _B1_VALUE not in body, ("evicted", o - len(before))
         assert "LAST LINE" in body
+        _assert_line_suffix(_after_gap_marker(body), oracle)
 
     # Contiguous (too short to evict at this cap): the cut is H, swept across
     # the pair by the length of the lines before it; the file is 2 bytes over
@@ -1202,6 +1228,9 @@ def test_spool_window_split_anywhere_in_a_key_value_pair_never_leaks(family: str
         text = _assert_framed_within(out, _SMALL_CAP)
         assert _B1_VALUE not in text, ("contiguous", start)
         assert "LAST LINE" in text
+        if _GAP in text:
+            tail = _after_gap_marker(text).removesuffix(bridge.OBS_END_MARKER)
+            _assert_line_suffix(tail, _screened_oracle(payload))
 
 
 def test_spool_pem_cut_by_window_is_redacted() -> None:
