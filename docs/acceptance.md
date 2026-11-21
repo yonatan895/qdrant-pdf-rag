@@ -225,12 +225,12 @@ of the four named transport/lifecycle tests exactly once: live contracts and a
 fresh trace, fixed overlong error, buffered/streamed final integrity, and upstream
 cancellation followed by a successful ordinary request. Scripted refusal checks
 propagation and citation labeling, not semantic model security or quality.
-`eval_retrieval` is supplied by the dedicated `ci.yml` `eval-retrieval`
-producer, which runs the same `scripts/gate_l1.py` L1 retrieval eval the gate
-lane runs (synthetic fixtures, disposable Qdrant, hash-mode pipeline integrity:
-ingest, indexing, prefetch filters, RRF, scoring — not live-model semantic
-quality). Its receipt carries the structured per-class report. A review comment
-never supplies execution evidence or waives a lane.
+`eval_retrieval` shares the single `ci.yml` `gate-l1` producer (#1299),
+which runs `scripts/gate_l1.py` once (synthetic fixtures, disposable Qdrant,
+hash-mode pipeline integrity: ingest, indexing, prefetch filters, RRF, scoring —
+not live-model semantic quality) and supplies the structured per-class report
+receipt for both `gate_l1` and `eval_retrieval`. A review comment never supplies
+execution evidence or waives a lane.
 
 Evaluation code under `src/mainframe_rag/eval/` is tooling, including code moved
 from the evaluation scripts under #508. Package and `scripts/eval_retrieval.py`
@@ -253,8 +253,10 @@ candidate's proposed lane-selection rules before adoption.
 The separate missing real-model producer remains unresolved for changes that
 actually select `eval_retrieval`.
 
-`acceptance.yml` schedules on PR metadata, native workflow activity and base
-pushes, with periodic reconciliation for missed signals. Review/comment activity
+`acceptance.yml` schedules on PR metadata, native workflow `requested`/`completed`
+events and base pushes, with 15-minute periodic reconciliation for missed signals
+(#1299). `scripts/acceptance.py` uses stdlib HTTP/1.1 keep-alive and memoizes
+only immutable 40-hex-SHA commit/blob reads within one run. Review/comment activity
 is not an input to technical verification. Both publisher paths check out `main`
 explicitly with no persisted git
 credentials, install no project dependencies, and never execute candidate code
