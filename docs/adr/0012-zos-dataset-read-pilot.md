@@ -195,8 +195,13 @@
      `structuredContent`. The framed result fits `MCP_FTP_MAX_BYTES`, so the
      agent's head-only live cap keeps the tail and the END delimiter as long as
      `ZOWE_MCP_MAX_BYTES` is at least `MCP_FTP_MAX_BYTES` (both 256 KiB by
-     default; nothing enforces the pairing across the two processes). Each part is
-     screened on its own before a whole-line trim. `MCP_FTP_SPOOL_STREAM_MAX_BYTES`
+     default; nothing enforces the pairing across the two processes). A
+     contiguous read is screened once as a whole and both parts are cut from
+     it. With a gap, each part is screened on its own, the tail over its whole
+     retained ring, and the tail's start is dropped through the line where any
+     key and separator a match from before the ring could carry end, so no
+     value whose key fell in the gap survives. Whole lines are trimmed last.
+     `MCP_FTP_SPOOL_STREAM_MAX_BYTES`
      (16 MiB) and `MCP_FTP_SPOOL_STREAM_MAX_S` (8 s, below the agent's default
      15 s call timeout) stop a longer stream, which returns the head with a
      stop marker; a `LIST` BYTE-COUNT above the byte ceiling reads the head

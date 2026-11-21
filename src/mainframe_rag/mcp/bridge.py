@@ -85,7 +85,10 @@ TEXT_FORMAT_SITES: tuple[str, ...] = ("NOTRAILINGBLANKS", "SBSENDEOL=CRLF")
 FRAME_RESERVE_BYTES = 1024
 SPOOL_HEAD_DIVISOR = 4
 # Extra tail bytes kept and screened before the line trim, so a key whose
-# value starts the tail window is redacted with its key in view.
+# value starts the tail window is usually redacted with its key in view. Safety
+# does not rest on this size (separators span any run of whitespace):
+# `_drop_cross_start_lead` drops whatever a match from before the ring could
+# have reached.
 TAIL_LOOKBEHIND_BYTES = 4096
 SPOOL_GAP_MARKER = (
     "[... z/OS bridge omitted about {n} bytes between the first and last parts"
@@ -163,6 +166,11 @@ _OBS_BOUNDARY_RE = re.compile(
 )
 # Spool text imitating the bridge's own window markers.
 _WINDOW_MARKER_RE = re.compile(r"(?i)\[\s*\.\.\.\s*z/OS\s+bridge\b[^\n]*")
+# What a redaction match that began before the screened text can leave at its
+# start: the rest of a key word (`LOGON`, `Bearer`, a D6 keyword), then its
+# separator (whitespace, which spans lines, and at most one `=`, `:` or `(`).
+# Every such match's value is single-line and starts where this lead ends.
+_CROSS_START_LEAD_RE = re.compile(r"[\w#$@-]*\s*(?:[=:(]\s*)?")
 
 
 class _CapExceeded(Exception):
@@ -864,6 +872,22 @@ def _keep_last_lines(text: str, budget: int) -> str:
     return "".join(reversed(kept))
 
 
+def _drop_cross_start_lead(text: str) -> str:
+    """Drop a screened tail ring's start through the end of the line where its
+    key-and-separator-shaped lead ends.
+
+    A match that began before the ring (its key out of view) covers only that
+    lead, so its value lies on the line the lead ends on or earlier, and is
+    dropped here. This removes at least the partial first line (a CR/LF or a
+    character split by the receive); a ring with no line end after the lead is
+    omitted (fail closed). A match that starts inside the ring was redacted by
+    screening, with its key in view.
+    """
+    lead = _CROSS_START_LEAD_RE.match(text)
+    line_end = text.find("\n", lead.end() if lead else 0)
+    return text[line_end + 1 :] if line_end >= 0 else ""
+
+
 def _join_window(head: str, marker: str, tail: str) -> str:
     if head and not head.endswith("\n"):
         head += "\n"
@@ -875,14 +899,16 @@ def _spool_window(
 ) -> tuple[str, dict[str, Any], str | None]:
     """Assemble a spool read into (body, structured fields, header facts).
 
-    A complete, contiguous read whose screened text fits B returns whole.
-    Otherwise the head is cut back to its last line end and the tail is
-    dropped through its first line end (covering a CR/LF or a character
-    split by the receive; a tail with no line end is omitted). Each part is
+    A complete, contiguous read is screened once as a whole, as a full read
+    would be: it returns whole if it fits B, otherwise its first lines within
+    H and last lines within T. With a gap in the read (the tail ring evicted
+    chunks), the head is cut back to its last line end, and each part is
     decoded and screened on its own, so a single-line redaction cannot cross
-    the cut or eat the marker, and screening the tail over its lookbehind
-    redacts a value whose key sits just before the window. Only then are whole
-    lines trimmed to H and T, and the caller frames the joined body.
+    the cut or eat the marker. The tail is screened over its whole ring,
+    including its partial first line and lookbehind, so a key there redacts
+    its value; then `_drop_cross_start_lead` drops what a match from before
+    the ring could have reached. Only then are whole lines trimmed to H and T,
+    and the caller frames the joined body.
     """
     body_budget, head_budget, tail_budget = _spool_budget(max_bytes)
     head_raw = bytes(capture.head)
@@ -898,6 +924,12 @@ def _spool_window(
                 "stream_complete": True,
             }
             return whole, fields, None
+        # H + T = B is under the text's size, so the two parts never overlap.
+        return _head_tail_window(
+            _keep_first_lines(whole, head_budget),
+            _keep_last_lines(whole, tail_budget),
+            capture.total,
+        )
     cut = head_raw.rfind(b"\n")
     if cut >= 0:
         head_raw = head_raw[: cut + 1]
@@ -912,19 +944,21 @@ def _spool_window(
             "stream_complete": False,
         }
         return body, fields, f"window=head-only read_bytes={capture.total}"
-    first = tail_raw.find(b"\n")
-    tail_raw = tail_raw[first + 1 :] if first >= 0 else b""
-    tail = _keep_last_lines(_screen_part(tail_raw, encoding, final=True), tail_budget) if tail_raw else ""
-    omitted = max(0, capture.total - _utf8_len(head) - _utf8_len(tail))
+    tail = _drop_cross_start_lead(_screen_part(tail_raw, encoding, final=True))
+    return _head_tail_window(head, _keep_last_lines(tail, tail_budget), capture.total)
+
+
+def _head_tail_window(head: str, tail: str, total: int) -> tuple[str, dict[str, Any], str]:
+    omitted = max(0, total - _utf8_len(head) - _utf8_len(tail))
     body = _join_window(head, SPOOL_GAP_MARKER.format(n=omitted), tail)
     fields = {
         "truncated": True,
         "window": "head_tail",
-        "total_bytes": capture.total,
+        "total_bytes": total,
         "omitted_bytes": omitted,
         "stream_complete": True,
     }
-    return body, fields, f"window=head+tail omitted_bytes={omitted} total_bytes={capture.total}"
+    return body, fields, f"window=head+tail omitted_bytes={omitted} total_bytes={total}"
 
 
 def _tool_result(
