@@ -17,6 +17,7 @@ import socket
 import ssl
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Self
 
@@ -501,6 +502,89 @@ def test_byte_cap_truncates_with_suffix() -> None:
     assert fake.aborted  # transfer aborted, not downloaded whole
 
 
+@pytest.mark.parametrize(
+    ("line", "secrets", "kept"),
+    [
+        ("ALTUSER IBMUSER PASSWORD(NEWPW1) NOEXPIRED", ["NEWPW1"], ["ALTUSER IBMUSER", "NOEXPIRED"]),
+        ("ALU IBMUSER PHRASE('correct horse battery')", ["correct", "horse", "battery"], ["ALU IBMUSER"]),
+        ("PW(SECRET99)", ["SECRET99"], ["PW([REDACTED])"]),
+        ("pass(Lower7x) pw(lower8y)", ["Lower7x", "lower8y"], []),
+        ("Password ( Mixed8Case )", ["Mixed8Case"], []),
+        ("PHRASE ('it''s ) a tricky one')", ["it''s", "tricky one"], []),
+        ('PASSPHRASE("dq phrase val")', ["dq phrase val"], []),
+        ("NEWPASSWORD(NPW77) PASSWD(PWD88) PWD(PW999) NEWPHRASE('np phrase')", ["NPW77", "PWD88", "PW999", "np phrase"], []),
+        ("PASSWORD PASSWORD(OLDPW1 NEWPW2)", ["OLDPW1", "NEWPW2"], []),
+        ("//STEP1 EXEC PGM=X,PARM='PW=JCLPW1,PASS=JCLPW2,NEWPASSWORD=JCLPW3'", ["JCLPW1", "JCLPW2", "JCLPW3"], ["PGM=X"]),
+        ("RDEFINE PTKTDATA APPL1 SSIGNON(KEYMASKED(0123456789ABCDEF))", ["0123456789ABCDEF"], ["RDEFINE PTKTDATA APPL1"]),
+        ("LOGON IBMUSER/TSOPW1/TSONEW2 SIZE(4096)", ["TSOPW1", "TSONEW2"], ["LOGON IBMUSER", "SIZE(4096)"]),
+        ("ALU IBMUSER NOPASSWORD NOPHRASE", [], ["ALU IBMUSER NOPASSWORD NOPHRASE"]),
+    ],
+)
+def test_d6_redacts_zos_password_operand_forms(line: str, secrets: list[str], kept: list[str]) -> None:
+    """B2 (#1331 review): RACF/TSO/JCL password and passphrase operands are
+    redacted in the tool result, quoted or not, any case, without eating the
+    neighbouring operands."""
+    fake = FakeFTP()
+    fake.files["'SYS1.PARMLIB'"] = (line + "\n").encode("utf-8")
+    out = bridge.dataset_read(_session(fake), "SYS1.PARMLIB")
+    assert out["isError"] is False
+    text = out["content"][0]["text"]
+    for secret in secrets:
+        assert secret not in text, secret
+    for neighbour in kept:
+        assert neighbour in text, neighbour
+
+
+@pytest.mark.parametrize(
+    ("operand", "leak"),
+    [("PASSWORD(SECRETPW99)", "SECR"), ("PHRASE('cut phrase words')", "cut ph")],
+)
+def test_d6_redacts_operand_cut_open_by_the_byte_cap(operand: str, leak: str) -> None:
+    """The cap cuts raw bytes before screening; an operand left unclosed at the
+    cut must not leak its prefix."""
+    prefix = b"X" * 980 + b" ALU IBMUSER "
+    data = prefix + operand.encode("ascii") + b" NOEXPIRED\n"
+    cut = len(prefix) + operand.index(leak[0]) + len(leak)
+    fake = FakeFTP()
+    fake.files["'BIG.DATA'"] = data
+    out = bridge.dataset_read(_session(fake, max_bytes=cut), "BIG.DATA")
+    text = out["content"][0]["text"]
+    assert bridge.TRUNCATION_SUFFIX in text
+    assert leak not in text
+
+
+def test_job_status_output_is_byte_capped_and_stops_the_listing() -> None:
+    """job_status follows dataset_read's cap: at most max_bytes of rendered
+    job lines plus the truncation suffix, and the LIST transfer is aborted
+    instead of being buffered whole."""
+    total = 60000
+    rows = [f"PAYROLL  JOB{i:05d} READER   OUTPUT A        RC=0000" for i in range(total)]
+
+    class ManyJobsFTP(FakeFTP):
+        delivered = 0
+
+        def retrlines(self, cmd: str, callback) -> str:
+            self.commands.append(cmd)
+            for row in rows:
+                self.delivered += 1
+                callback(row)
+            return "226 done"
+
+    fake = ManyJobsFTP()
+    out = bridge.job_status(
+        bridge.FTPSession(fake, _jes_config(max_bytes=1000)), job_name="PAYROLL", owner="READER"
+    )
+    assert out["isError"] is False
+    text = out["content"][0]["text"]
+    assert bridge.TRUNCATION_SUFFIX in text
+    body = text.split("\n", 1)[1]
+    payload = body[: body.index(bridge.TRUNCATION_SUFFIX)]
+    assert len(payload.encode("utf-8")) == 1000
+    assert payload.startswith("PAYROLL JOB00000 OUTPUT RC=0000\n")
+    assert fake.aborted
+    assert fake.delivered < total
+
+
 def test_timeout_and_jes_refusal_map_to_stable_codes_per_tool() -> None:
     class SlowFTP(FakeFTP):
         def retrbinary(self, cmd: str, callback) -> str:
@@ -828,6 +912,164 @@ def test_logon_530_breaker_trips_blocks_repeats_and_recovers_on_cooldown_or_rese
     )
     assert recovered.status_code == 200
     assert recovered.json()["result"]["isError"] is False
+
+
+_READ_CALL = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {"name": "dataset_read", "arguments": {"dataset": "SYS1.PARMLIB"}},
+}
+
+
+def _burst(n: int, call) -> list:
+    """Run `call` from n threads at once and return every result."""
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        return list(pool.map(lambda _i: call(), range(n)))
+
+
+class _CountingLogon:
+    """Fake connect that counts logon attempts. Each attempt parks on a barrier
+    sized for the whole burst, so every caller the breaker admits is in flight
+    together: an unbounded breaker lets all n through (the barrier fills), a
+    bounded one admits only `threshold` (the barrier times out, they fail)."""
+
+    def __init__(self, n: int) -> None:
+        self.n = n
+        self.attempts = 0
+        self._lock = threading.Lock()
+        self.rearm()
+
+    def rearm(self) -> None:
+        self.barrier = threading.Barrier(self.n, timeout=1.5)
+
+    def __call__(self, _cfg: FTPConfig) -> FakeFTP:
+        with self._lock:
+            self.attempts += 1
+        with contextlib.suppress(threading.BrokenBarrierError):
+            self.barrier.wait()
+        raise ftplib.error_perm("530 PASS command failed secret-detail")
+
+
+@pytest.mark.parametrize("threshold", [1, 2])
+def test_logon_breaker_bounds_concurrent_530_logons_to_threshold(threshold: int) -> None:
+    """B1 (#1331 review): under concurrency at most `threshold` failing logons
+    are in flight; every later caller is refused without touching the server,
+    and the same bound holds again when the cooldown expires."""
+    n = 6
+    now = [100.0]
+    breaker = LogonBreaker(threshold=threshold, cooldown_s=60.0, clock=lambda: now[0])
+    logon = _CountingLogon(n)
+    cfg = _config()
+
+    def call() -> dict:
+        return server.handle_request(_READ_CALL, cfg, logon, breaker=breaker)
+
+    replies = _burst(n, call)
+    assert logon.attempts == threshold
+    for reply in replies:
+        text = reply["result"]["content"][0]["text"]
+        assert reply["result"]["isError"] is True
+        assert text.startswith("logon_failed:")
+        assert "secret-detail" not in text
+    assert breaker.is_open() is True
+
+    # Half-open after the cooldown: the next burst is bounded the same way.
+    now[0] += 61.0
+    logon.rearm()
+    _burst(n, call)
+    assert logon.attempts == 2 * threshold
+    assert breaker.is_open() is True
+
+
+def test_http_concurrent_wrong_password_burst_makes_one_logon() -> None:
+    """The review's counterexample through the real HTTP transport
+    (asyncio.to_thread offload): 6 concurrent POSTs at the default threshold 1
+    make exactly one logon attempt."""
+    n = 6
+    logon = _CountingLogon(n)
+    cfg = _config()
+    assert cfg.logon_breaker_threshold == 1
+    app = server.create_app(cfg, logon, auth_token="tok")
+    headers = {"Authorization": "Bearer tok"}
+    with TestClient(app) as client:
+        responses = _burst(n, lambda: client.post("/mcp", json=_READ_CALL, headers=headers))
+        assert logon.attempts == 1
+        for resp in responses:
+            assert resp.status_code == 200
+            assert resp.json()["result"]["content"][0]["text"].startswith("logon_failed:")
+        assert client.get("/healthz").json() == {"status": "ok", "logon_breaker_open": True}
+
+
+def test_logon_breaker_keeps_successful_reads_concurrent() -> None:
+    """Only the logon is bounded: admitted sessions read in parallel. Every read
+    waits on a barrier sized for the whole burst, which breaks (failing the
+    read) if reads were serialized behind the breaker."""
+    n = 4
+    read_barrier = threading.Barrier(n, timeout=5.0)
+
+    class ParallelReadFTP(FakeFTP):
+        def retrbinary(self, cmd: str, callback) -> str:
+            self.commands.append(cmd)
+            read_barrier.wait()
+            callback(b"PARALLEL-OK\n")
+            return "226 done"
+
+    breaker = LogonBreaker(threshold=1, cooldown_s=60.0)
+    replies = _burst(
+        n,
+        lambda: server.handle_request(
+            _READ_CALL, _config(), lambda _cfg: ParallelReadFTP(), breaker=breaker
+        ),
+    )
+    for reply in replies:
+        assert reply["result"]["isError"] is False
+        assert "PARALLEL-OK" in reply["result"]["content"][0]["text"]
+    assert breaker.is_open() is False
+
+
+def test_logon_slot_released_on_non_530_failure_and_bounded_wait_times_out() -> None:
+    """A non-530 connect failure frees the logon slot (the next ordinary call
+    logs on), and a caller queued behind a hung logon gives up after the FTP
+    timeout with the fixed `timeout` code, without a logon of its own."""
+    breaker = LogonBreaker(threshold=1, cooldown_s=60.0)
+    cfg = _config(timeout_s=0.3)
+    outcomes = iter([OSError("connection reset secret-detail"), None])
+
+    def flaky_connect(_cfg: FTPConfig) -> FakeFTP:
+        exc = next(outcomes)
+        if exc is not None:
+            raise exc
+        fake = FakeFTP()
+        fake.files["'SYS1.PARMLIB'"] = b"AFTER-RESET-OK\n"
+        return fake
+
+    first = server.handle_request(_READ_CALL, cfg, flaky_connect, breaker=breaker)
+    assert first["result"]["content"][0]["text"].startswith("upstream_error:")
+    assert breaker.is_open() is False
+    second = server.handle_request(_READ_CALL, cfg, flaky_connect, breaker=breaker)
+    assert second["result"]["isError"] is False
+    assert "AFTER-RESET-OK" in second["result"]["content"][0]["text"]
+
+    entered = threading.Event()
+    release = threading.Event()
+    attempts = 0
+
+    def hung_connect(_cfg: FTPConfig) -> FakeFTP:
+        nonlocal attempts
+        attempts += 1
+        entered.set()
+        release.wait(timeout=5.0)
+        return FakeFTP()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        holder = pool.submit(server.handle_request, _READ_CALL, cfg, hung_connect, breaker=breaker)
+        assert entered.wait(timeout=5.0)
+        queued = server.handle_request(_READ_CALL, cfg, hung_connect, breaker=breaker)
+        assert queued["result"]["content"][0]["text"].startswith("timeout:")
+        assert attempts == 1
+        release.set()
+        holder.result(timeout=5.0)
 
 
 # ------------------------------------------- D4 Point 2: bearer caller auth
