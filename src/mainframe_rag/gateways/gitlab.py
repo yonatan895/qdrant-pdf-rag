@@ -43,6 +43,7 @@ from mainframe_rag.gateways.common import (
     GatewayConfigError,
     GatewayError,
     Limits,
+    PrivateKeySpans,
     Tool,
     ToolContext,
     ToolOutput,
@@ -78,8 +79,11 @@ _REF_PATTERN: Final = r"(?!.*\.\.)[A-Za-z0-9_][A-Za-z0-9_./+-]{0,254}"
 _FILE_PATTERN: Final = r"(?!/)(?!.*(?:^|/)\.{1,2}(?:/|$))[^\x00-\x1f\x7f\\]{1,1024}"
 _SEARCH_PATTERN: Final = r"[^\x00-\x1f\x7f]{1,200}"
 _ANSI_RE: Final = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]{0,256}(?:\x07|\x1b\\)")
-# A private key's END line whose BEGIN line fell before the kept tail.
-_ORPHAN_KEY_END_RE: Final = re.compile(r"-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----")
+# Log text that reads like one of the gateway's marker lines (below) is
+# replaced, so a log cannot tell the model its end was not read (review N1;
+# the z/OS bridge neutralises its observation delimiters the same way).
+_MARKER_LOOKALIKE_RE: Final = re.compile(r"(?i)[\[\uff3b]\s*gateway\s*:[^\n]*")
+NEUTRALIZED_MARKER: Final = "[neutralized-gateway-marker]"
 
 # Bearer mode (ADR-0014 D4): every Open WebUI user is the one caller
 # `service:openwebui`, so the per-caller limits are instance-wide. These
@@ -290,6 +294,7 @@ class GitLabClient:
         keep_bytes: int,
         max_read_bytes: int,
         deadline_s: float,
+        observe: Callable[[bytes], None] | None = None,
     ) -> UpstreamTail:
         token = await self.provider.token_for(principal)
         return await self.upstream.stream_tail(
@@ -299,6 +304,7 @@ class GitLabClient:
             keep_bytes=keep_bytes,
             max_read_bytes=max_read_bytes,
             deadline_s=deadline_s,
+            observe=observe,
         )
 
     async def get_bytes(
@@ -357,29 +363,55 @@ def _about(size: int) -> str:
     return f"{size / (1024 * 1024):.1f} MiB"
 
 
-def job_log_text(read: UpstreamTail, tail_bytes: int, limits: Limits) -> str:
+def _redact_keys(data: bytes, start: int, keys: Sequence[tuple[int, int | None]]) -> bytes:
+    """`data` (stream offset `start`) with every byte of a key span replaced
+    by the redaction marker. A key open at the end runs to the end, short of
+    the last newline."""
+    out = bytearray()
+    pos = 0
+    for key_start, key_end in keys:
+        low = max(key_start - start, pos)
+        high = len(data) if key_end is None else min(key_end - start, len(data))
+        if high == len(data) and data.endswith(b"\n"):
+            high -= 1
+        if high <= low:
+            continue
+        out += data[pos:low] + REDACTED.encode()
+        pos = high
+    return bytes(out + data[pos:])
+
+
+def job_log_text(
+    read: UpstreamTail,
+    tail_bytes: int,
+    limits: Limits,
+    keys: Sequence[tuple[int, int | None]] = (),
+) -> str:
     """The end of a streamed job log as whole, cleaned lines, with marker lines.
 
     Of the last `tail_bytes` read, a partial first line is dropped (and, when
     the read stopped before the end, a partial last line), so a cut never
-    leaves a fragment of a secret that redaction would no longer recognise;
-    a private key whose BEGIN line was cut off is redacted through its END
-    line. The kept lines are cleaned whole, then lines are dropped from the
-    start until the framed text fits `max_result_bytes`. A marker line says
-    roughly how much came before; when the end was not read, a line before
-    and after the text says so."""
+    leaves a fragment of a secret that redaction would no longer recognise.
+    `keys` are the private-key spans of the whole stream (`PrivateKeySpans`):
+    every kept byte inside one is redacted, so a key whose BEGIN line lies
+    before the kept lines, or whose END line was never read, leaves no line
+    of its body. Log lines that read like a marker line are neutralised. The
+    kept lines are cleaned whole, then lines are dropped from the start until
+    the framed text fits `max_result_bytes`. A marker line says roughly how
+    much came before; when the end was not read, a line before and after the
+    text says so."""
     data = read.tail
-    head_cut = read.total > tail_bytes
-    if head_cut:
+    if read.total > tail_bytes:
         data = data[-(tail_bytes + 1) :]
         newline = data.find(b"\n")
         data = data[newline + 1 :] if newline >= 0 else b""
-    skipped = read.total - len(data)
+    start = read.total - len(data)  # the stream offset of the first kept byte
+    skipped = start
     if not read.complete:
         data = data[: data.rfind(b"\n") + 1]
+    data = _redact_keys(data, start, keys)
     text = clean_text(_ANSI_RE.sub("", data.decode("utf-8", errors="replace")))
-    if head_cut and (orphan := _ORPHAN_KEY_END_RE.search(text)):
-        text = REDACTED + text[orphan.end() :]
+    text = _MARKER_LOOKALIKE_RE.sub(NEUTRALIZED_MARKER, text)
     unread = "" if read.complete else JOB_LOG_UNREAD.format(_about(read.total))
     stopped = "" if read.complete else JOB_LOG_STOPPED
     kept = fit_text_tail(text, limits, prefix=unread, suffix=stopped)
@@ -736,14 +768,16 @@ class GitLabTools:
         remaining = self.backend.max_job_log_read_s - (time.monotonic() - started)
         if remaining <= 0:
             raise GatewayError("upstream_timeout")
+        keys = PrivateKeySpans(horizon=tail_bytes + 1)
         read = await self.client.get_tail(
             ctx.principal,
             f"/projects/{project_id}/jobs/{args['job_id']}/trace",
             keep_bytes=tail_bytes + 1,
             max_read_bytes=self.backend.max_job_log_read_bytes,
             deadline_s=remaining,
+            observe=keys.feed,
         )
-        return ToolOutput(text=job_log_text(read, tail_bytes, ctx.limits))
+        return ToolOutput(text=job_log_text(read, tail_bytes, ctx.limits, keys.finish()))
 
     def tools(self) -> list[Tool]:
         b = self.backend

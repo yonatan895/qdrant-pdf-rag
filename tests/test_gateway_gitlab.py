@@ -692,9 +692,42 @@ def test_job_log_second_key_open_at_the_window_keeps_the_text_between(tmp_path: 
     text = _job_log(FakeGitLab(), tmp_path, _stream(log, 333), tail_bytes=1024)
     _assert_no_key_body(text)
     assert text.endswith("[REDACTED]\nafter the second key\n")
-    whole = _job_log(FakeGitLab(), tmp_path, _stream(log, 333), tail_bytes=16384)
+    # Both keys inside the window (the result cap here is 2048 bytes): each is
+    # one redaction, and the lines between them stay.
+    small = KEY[:32] + KEY[32:32 + 5 * 65] + KEY[-30:]
+    log = KEY_LOG_HEAD + small + between + small + b"after the second key\n"
+    whole = _job_log(FakeGitLab(), tmp_path, _stream(log, 333), tail_bytes=2048)
     _assert_no_key_body(whole)
     assert "[REDACTED]\n" + between.decode() + "[REDACTED]\nafter the second key\n" in whole
+
+
+_KEY_ORACLE = re.compile(rb"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----|\Z)",
+                         re.DOTALL)
+
+
+@pytest.mark.parametrize("chunk", [1, 999, 8192, 40_000, 1 << 20])
+def test_private_key_spans_match_the_whole_stream_redaction_at_any_chunking(chunk: int):
+    # Keys at offsets that straddle the scanner's 32 KiB batches and 8 KiB
+    # carry, a stray END first, an END followed at once by a BEGIN, and a key
+    # still open at the end; the expected spans come from one regex over the
+    # whole stream (clean_text's rule), not from the scanner.
+    filler = b"".join(_lines(3000, 30))  # 90 KB
+    stream = (b"-----END PRIVATE KEY-----\n" + filler[:30_000] + KEY + filler[:2_700]
+              + b"-----BEGIN EC PRIVATE KEY-----\nAAAA\n-----END EC PRIVATE KEY-----"
+              + b"-----BEGIN PRIVATE KEY-----\nBBBB\n-----END PRIVATE KEY-----\n"
+              + filler[:32_700] + KEY + filler + KEY[:900])
+    expected = [(m.start(), m.end()) for m in _KEY_ORACLE.finditer(stream)]
+    expected = [(s, None if e == len(stream) else e) for s, e in expected]
+    spans = common.PrivateKeySpans(horizon=len(stream))
+    for offset in range(0, len(stream), chunk):
+        spans.feed(stream[offset:offset + chunk])
+    assert spans.finish() == expected
+    assert len(expected) == 5 and expected[-1][1] is None
+    # A short horizon keeps only the spans that reach into the last bytes.
+    recent = common.PrivateKeySpans(horizon=1000)
+    for offset in range(0, len(stream), chunk):
+        recent.feed(stream[offset:offset + chunk])
+    assert recent.finish() == [expected[-1]]
 
 
 def test_job_log_end_line_with_no_begin_keeps_the_text_around_it(tmp_path: Path):

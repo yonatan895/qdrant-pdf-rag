@@ -443,6 +443,104 @@ def clean_text(text: str) -> str:
     return kept
 
 
+
+# --- private keys across a streamed read ------------------------------------------------
+
+# What clean_text (or the job-log ANSI strip) removes between two characters of
+# a key marker: a CSI escape, a control byte other than tab and newline, or any
+# non-ASCII byte (a superset of the characters it drops). Bounded, so one
+# marker spans at most _KEY_MARKER_MAX raw bytes.
+_NOISE: Final = rb"(?:\x1b\[[0-9;?]{0,12}[A-Za-z]|[\x00-\x08\x0b-\x1f\x7f-\xff]){0,8}"
+
+
+def _spaced(literal: bytes) -> bytes:
+    return _NOISE.join(re.escape(bytes([c])) for c in literal)
+
+
+_KEY_LABEL: Final = rb"(?:" + _NOISE + rb"[A-Z0-9 ]){0,40}" + _NOISE + _spaced(b"PRIVATE KEY-----")
+# The BEGIN and END lines of the private-key pattern in _REDACTIONS, on raw
+# bytes, with noise allowed between characters.
+_KEY_MARKER_RE: Final = re.compile(
+    _spaced(b"-----")
+    + _NOISE
+    + rb"(?:(?P<begin>"
+    + _spaced(b"BEGIN ")
+    + _KEY_LABEL
+    + rb")|"
+    + _spaced(b"END ")
+    + _KEY_LABEL
+    + rb")"
+)
+# 67 characters at most, 66 gaps of at most 8 noise items of at most 15 bytes.
+_KEY_MARKER_MAX: Final = 8 * 1024
+
+
+class PrivateKeySpans:
+    """Where private keys lie in a byte stream that is read once, in order,
+    through `feed`. `UpstreamClient.stream_tail` feeds every byte it reads,
+    including the ones it no longer keeps, so a kept tail that starts inside
+    a key can still be redacted although its BEGIN line was dropped.
+
+    A key runs from a BEGIN line to the next END line, or to the end of what
+    was read: the rule of clean_text's private-key pattern. An END line with
+    no open key is not a key. Markers are matched on the raw bytes, through
+    the escapes and characters cleaning removes. Only spans that reach into
+    the last `horizon` bytes are kept, and small feeds are scanned together,
+    so memory and time stay linear in the stream."""
+
+    def __init__(self, horizon: int) -> None:
+        if horizon <= 0:
+            raise ValueError("horizon must be positive")
+        self._horizon = horizon
+        self._pending = bytearray()
+        self._pending_at = 0  # stream offset of _pending[0]
+        self._open: int | None = None  # stream offset of the open key's BEGIN
+        self._spans: list[tuple[int, int]] = []
+        self._finished = False
+
+    def feed(self, data: bytes) -> None:
+        if self._finished:
+            raise RuntimeError("feed after finish")
+        self._pending += data
+        if len(self._pending) >= 4 * _KEY_MARKER_MAX:
+            self._scan(final=False)
+
+    def finish(self) -> list[tuple[int, int | None]]:
+        """The key spans (start, end) reaching into the last `horizon`
+        bytes, as stream offsets in order; `end` is None for a key still
+        open where the stream stopped."""
+        if not self._finished:
+            self._scan(final=True)
+            self._finished = True
+        spans: list[tuple[int, int | None]] = list(self._spans)
+        if self._open is not None:
+            spans.append((self._open, None))
+        return spans
+
+    def _scan(self, *, final: bool) -> None:
+        buf = bytes(self._pending)
+        base = self._pending_at
+        # A marker starting this close to the end may continue in a later feed.
+        cut = len(buf) if final else len(buf) - _KEY_MARKER_MAX
+        consumed = 0
+        for match in _KEY_MARKER_RE.finditer(buf):
+            if match.start() >= cut:
+                break
+            consumed = match.end()
+            if match.group("begin") is not None:
+                if self._open is None:
+                    self._open = base + match.start()
+            elif self._open is not None:
+                self._spans.append((self._open, base + match.end()))
+                self._open = None
+        keep_from = len(buf) if final else max(cut, consumed)
+        del self._pending[:keep_from]
+        self._pending_at = base + keep_from
+        floor = base + len(buf) - self._horizon
+        if self._spans and self._spans[0][1] <= floor:
+            self._spans = [span for span in self._spans if span[1] > floor]
+
+
 def _clip(text: str, cap: int) -> tuple[str, bool]:
     return (text, False) if len(text) <= cap else (text[:cap], True)
 
@@ -824,6 +922,7 @@ class UpstreamClient:
         deadline_s: float,
         params: Mapping[str, str | int] | None = None,
         headers: Mapping[str, str] | None = None,
+        observe: Callable[[bytes], None] | None = None,
     ) -> UpstreamTail:
         """Stream one backend answer, keeping only its last `keep_bytes` in
         memory (a log far larger than any cap). Reading stops after
@@ -833,7 +932,9 @@ class UpstreamClient:
         Memory holds the tail plus one chunk; the call asks for identity
         encoding, so a chunk is its wire size. Statuses map as in `request`;
         no answer by the deadline is `upstream_timeout`, and any other
-        transport failure mid-body keeps its fixed code (never a partial)."""
+        transport failure mid-body keeps its fixed code (never a partial).
+        `observe` is called with every byte read, in order, the dropped ones
+        too (a `PrivateKeySpans` scan)."""
         if keep_bytes <= 0 or max_read_bytes <= 0 or not deadline_s > 0:
             raise ValueError("keep_bytes, max_read_bytes and deadline_s must be positive")
         if method not in self._methods:
@@ -862,6 +963,8 @@ class UpstreamClient:
                         over = len(chunk) > room
                         if over:
                             chunk = chunk[:room]
+                        if observe is not None:
+                            observe(chunk)
                         tail += chunk
                         total += len(chunk)
                         if len(tail) > keep_bytes:
