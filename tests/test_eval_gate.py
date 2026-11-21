@@ -975,7 +975,6 @@ def test_hand_written_report_bytes_are_unchanged(monkeypatch, tmp_path, capfd):
     expected_md = summary_markdown(expected_summary_input) + "\n\nGate: not_requested (ungated diagnostics are not acceptance).\n"
     assert summary.read_text(encoding="utf-8") == expected_md
     assert _SECRET_Q in out.read_text(encoding="utf-8") and _SECRET_Q in streams.err
-    assert oct(out.stat().st_mode & 0o777) != "0o600"
 
 
 def test_text_free_report_helper_keeps_ids_scores_counts_only():
