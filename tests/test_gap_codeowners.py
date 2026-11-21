@@ -48,7 +48,9 @@ GAP_GATES = {'.gitlab-ci.yml', '.gitlab/CODEOWNERS', 'scripts/check_junit_clean.
 # ADR-0009 section 6, written out: the entry points that pack, sign or verify a
 # release or kit (#588 N1). Every file they run or read by name is protected.
 SIGNING_ENTRY_POINTS = {'scripts/airgap/pack.sh', 'scripts/airgap/bootstrap.sh', 'scripts/airgap/load.sh',
-                        'scripts/devkit/pack.sh', 'scripts/devkit/install.sh', 'scripts/gap/import_release.sh'}
+                        'scripts/devkit/pack.sh', 'scripts/devkit/install.sh', 'scripts/gap/import_release.sh',
+                        # F6 (#1207): the gap release packer/verifier and the signer.
+                        'scripts/gap/release.sh', 'scripts/gap/sign_vault.py'}
 # Isolated: no script directory or cwd on sys.path and no PYTHON* variables,
 # so no group-owned file can shadow a module the check imports.
 CHECK_STEP = 'python3 -I scripts/gap_codeowners.py check'
