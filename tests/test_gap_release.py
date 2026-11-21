@@ -977,50 +977,229 @@ def test_release_sh_verify_runs_from_a_verified_installed_release_only(tmp_path:
     assert verify().returncode == 0
 
 
-def test_rehearse_check_enforces_d6_guards(tmp_path: Path):
-    cand = tmp_path / "cand-MANIFEST.txt"
-    inst = tmp_path / "inst-MANIFEST.txt"
-    base_txt = "qdrant_digest: sha256:" + "a" * 64 + "\nopenobserve_digest: sha256:" + "b" * 64 + "\n"
-    cand.write_text(base_txt, encoding="utf-8")
-    inst.write_text(base_txt, encoding="utf-8")
+# --- rehearse-check (Rev 2 §3h, D6): the target the deploy will use ----------
+#
+# Each workspace is a bare tree holding a copy of the shipped common.sh and an
+# untracked airgap.env, so the check resolves NAMESPACE, INTERNAL_REGISTRY, KC
+# and the kube context through the deploy's own code. The fake kubectl answers
+# `config current-context` from a file and lists objects per namespace, logging
+# every namespace it is asked about.
 
-    empty_ns = tmp_path / "empty.json"
-    empty_ns.write_text('{"items": []}\n', encoding="utf-8")
-    nonempty_ns = tmp_path / "nonempty.json"
-    nonempty_ns.write_text('{"items": [{"kind": "Deployment", "metadata": {"name": "rag-agent"}}]}\n', encoding="utf-8")
+_FAKE_KUBECTL = """#!/bin/sh
+if [ "$1" = config ] && [ "$2" = current-context ]; then
+    [ -s "$FAKE_KUBE_CTX" ] || exit 1
+    cat "$FAKE_KUBE_CTX"
+    exit 0
+fi
+printf '%s %s\n' "$2" "$4" >> "$FAKE_KUBE_LOG"
+if [ -n "${FAKE_KUBE_RAW:-}" ]; then
+    cat "$FAKE_KUBE_RAW"
+    exit 0
+fi
+if [ -f "$FAKE_KUBE_DIR/$2.json" ]; then cat "$FAKE_KUBE_DIR/$2.json"; else echo '{"items": []}'; fi
+"""
+_DIGEST_A = "sha256:" + "a" * 64
+_DIGEST_C = "sha256:" + "c" * 64
+LIVE_NS, REH_NS = "mfr-prod", "mfr-reh"
+LIVE_REG, REH_REG = "reg.example/mfr", "reg.example/mfr-reh"
+CTX = "mfr/api-site-example:6443/operator"
 
-    # 1. Same namespace as prod -> refused
-    with pytest.raises(release.ReleaseStop, match="equals the installed release namespace"):
-        release.cmd_rehearse_check(
-            rehearsal_namespace="mfr-prod", prod_namespace="mfr-prod",
-            rehearsal_registry="reg/mfr", prod_registry="reg/mfr",
-            candidate_manifest=cand, installed_manifest=inst, namespace_objects_json=empty_ns,
+
+class RehearsalSites:
+    """An installed (live) workspace, a rehearsal workspace and a fake cluster."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.bin = root / "bin"
+        self.bin.mkdir()
+        self.kubectl = self.bin / "kubectl"
+        self.kubectl.write_text(_FAKE_KUBECTL, encoding="utf-8")
+        self.kubectl.chmod(0o755)
+        self.ctx = root / "context"
+        self.ctx.write_text(CTX + "\n", encoding="utf-8")
+        self.kube_dir = root / "cluster"
+        self.kube_dir.mkdir()
+        self.log = root / "kubectl.log"
+        self.installed = self.workspace("installed", NAMESPACE=LIVE_NS, INTERNAL_REGISTRY=LIVE_REG)
+        self.rehearsal = self.workspace("rehearsal", NAMESPACE=REH_NS, INTERNAL_REGISTRY=REH_REG)
+        self.candidate = root / "cand-MANIFEST.txt"
+        self.inst_manifest = root / "inst-MANIFEST.txt"
+        self.inst_manifest.write_text(f"qdrant_digest: {_DIGEST_A}\n", encoding="utf-8")
+        self.candidate.write_text(f"qdrant_digest: {_DIGEST_A}\n", encoding="utf-8")
+        self.env: dict[str, str] = {
+            "PATH": f"{self.bin}:{os.environ['PATH']}",
+            "HOME": str(root),
+            "FAKE_KUBE_CTX": str(self.ctx),
+            "FAKE_KUBE_DIR": str(self.kube_dir),
+            "FAKE_KUBE_LOG": str(self.log),
+        }
+
+    def workspace(self, name: str, **values: str) -> Path:
+        ws = self.root / name
+        (ws / "scripts" / "airgap").mkdir(parents=True)
+        shutil.copy2(REPO / "scripts/airgap/common.sh", ws / "scripts/airgap/common.sh")
+        self.write_env(ws, **values)
+        return ws
+
+    def write_env(self, ws: Path, **values: str) -> None:
+        values.setdefault("KC", str(self.kubectl))
+        (ws / "airgap.env").write_text(
+            "".join(f"{k}='{v}'\n" for k, v in values.items()), encoding="utf-8"
         )
 
-    # 2. Non-empty rehearsal namespace -> refused
-    with pytest.raises(release.ReleaseStop, match="is not empty"):
-        release.cmd_rehearse_check(
-            rehearsal_namespace="mfr-rehearsal", prod_namespace="mfr-prod",
-            rehearsal_registry="reg/mfr", prod_registry="reg/mfr",
-            candidate_manifest=cand, installed_manifest=inst, namespace_objects_json=nonempty_ns,
+    def args(self, **typed: str) -> list[str]:
+        flags = {
+            "rehearsal-workspace": str(self.rehearsal),
+            "installed-workspace": str(self.installed),
+            "rehearsal-namespace": REH_NS,
+            "prod-namespace": LIVE_NS,
+            "rehearsal-registry": REH_REG,
+            "prod-registry": LIVE_REG,
+            "kube-context": CTX,
+            "candidate-manifest": str(self.candidate),
+            "installed-manifest": str(self.inst_manifest),
+        }
+        flags.update({k.replace("_", "-"): v for k, v in typed.items()})
+        out: list[str] = []
+        for key, value in flags.items():
+            out += [f"--{key}", value]
+        return out
+
+    def run(self, extra_env: dict[str, str] | None = None, **typed: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["sh", str(REPO / "scripts/gap/release.sh"), "rehearse-check", *self.args(**typed)],
+            env={**self.env, **(extra_env or {})},
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
         )
 
-    # 3. Changed fixed-tag third-party image on shared registry -> refused
-    cand.write_text("qdrant_digest: sha256:" + "c" * 64 + "\n", encoding="utf-8")
-    with pytest.raises(release.ReleaseStop, match="fixed-tag third-party image"):
-        release.cmd_rehearse_check(
-            rehearsal_namespace="mfr-rehearsal", prod_namespace="mfr-prod",
-            rehearsal_registry="reg/mfr", prod_registry="reg/mfr",
-            candidate_manifest=cand, installed_manifest=inst, namespace_objects_json=empty_ns,
-        )
+    def queried(self) -> list[str]:
+        if not self.log.exists():
+            return []
+        return [line.split(" ", 1)[0] for line in self.log.read_text(encoding="utf-8").splitlines()]
 
-    # 4. Separate registry path + separate empty rehearsal namespace -> passes!
-    res = release.cmd_rehearse_check(
-        rehearsal_namespace="mfr-rehearsal", prod_namespace="mfr-prod",
-        rehearsal_registry="reg/mfr-rehearsal", prod_registry="reg/mfr",
-        candidate_manifest=cand, installed_manifest=inst, namespace_objects_json=empty_ns,
+
+@pytest.fixture
+def sites(tmp_path: Path) -> RehearsalSites:
+    return RehearsalSites(tmp_path)
+
+
+def _refused(proc: subprocess.CompletedProcess[str], fragment: str) -> None:
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "REHEARSE READY" not in proc.stdout
+    assert "Traceback" not in proc.stderr
+    assert fragment in proc.stderr, proc.stderr
+
+
+def test_rehearse_check_ready_reports_the_effective_target(sites: RehearsalSites):
+    proc = sites.run()
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == (
+        f"REHEARSE READY namespace={REH_NS} registry={REH_REG} context={CTX} "
+        "qdrant_release=qdrant app_release=mainframe-rag"
     )
-    assert res["rehearsal_namespace"] == "mfr-rehearsal"
+    # The emptiness check asked the deploy's KC about the effective namespace only.
+    assert set(sites.queried()) == {REH_NS}
+
+
+def test_rehearse_check_refuses_process_env_namespace_pointing_at_live(sites: RehearsalSites):
+    """The reviewer's run (#1336 B1): NAMESPACE=live in the environment wins over the
+    rehearsal workspace's airgap.env in the deploy, whatever the operator typed."""
+    proc = sites.run(extra_env={"NAMESPACE": LIVE_NS, "INTERNAL_REGISTRY": LIVE_REG})
+    _refused(proc, "the rehearsal deploy would target the installed release's namespace")
+    assert sites.queried() == []
+
+
+def test_rehearse_check_refuses_airgap_env_namespace_pointing_at_live(sites: RehearsalSites):
+    sites.write_env(sites.rehearsal, NAMESPACE=LIVE_NS, INTERNAL_REGISTRY=REH_REG)
+    _refused(sites.run(), "the rehearsal deploy would target the installed release's namespace")
+
+
+def test_rehearse_check_refuses_selected_env_file_pointing_at_live(sites: RehearsalSites):
+    # AIRGAP_ENV selects a file (here the live one) over ./airgap.env in both workspaces.
+    proc = sites.run(extra_env={"AIRGAP_ENV": str(sites.installed / "airgap.env")})
+    _refused(proc, "the rehearsal deploy would target the installed release's namespace")
+
+
+def test_rehearse_check_refuses_an_unset_namespace_that_deploy_would_default(sites: RehearsalSites):
+    # deploy.sh defaults NAMESPACE to mainframe-rag; the check never accepts the default.
+    sites.write_env(sites.rehearsal, INTERNAL_REGISTRY=REH_REG)
+    _refused(sites.run(rehearsal_namespace="mainframe-rag"), "NAMESPACE is not set for the rehearsal workspace")
+    sites.write_env(sites.rehearsal, NAMESPACE="", INTERNAL_REGISTRY=REH_REG)
+    _refused(sites.run(rehearsal_namespace="mainframe-rag"), "NAMESPACE is not set for the rehearsal workspace")
+
+
+def test_rehearse_check_refuses_typed_values_that_disagree_with_effective_ones(sites: RehearsalSites):
+    sites.write_env(sites.rehearsal, NAMESPACE="mfr-reh-2", INTERNAL_REGISTRY=REH_REG)
+    _refused(sites.run(), "--rehearsal-namespace does not match")
+    sites.write_env(sites.rehearsal, NAMESPACE=REH_NS, INTERNAL_REGISTRY=REH_REG)
+    _refused(sites.run(prod_namespace="mfr-other"), "--prod-namespace does not match")
+    _refused(sites.run(rehearsal_registry="reg.example/other"), "--rehearsal-registry does not match")
+    _refused(sites.run(prod_registry="reg.example/other"), "--prod-registry does not match")
+    _refused(sites.run(kube_context="other-context"), "--kube-context does not match")
+    _refused(sites.run(rehearsal_namespace=f" {REH_NS}"), "--rehearsal-namespace does not match")
+
+
+def test_rehearse_check_refuses_an_unresolvable_context_or_registry(sites: RehearsalSites):
+    sites.ctx.write_text("", encoding="utf-8")
+    _refused(sites.run(), "no current kube context")
+    sites.ctx.write_text(CTX + "\n", encoding="utf-8")
+    # Helm reads HELM_KUBECONTEXT; kubectl does not: the deploy would split clusters.
+    _refused(sites.run(extra_env={"HELM_KUBECONTEXT": "other"}), "HELM_KUBECONTEXT")
+    sites.write_env(sites.rehearsal, NAMESPACE=REH_NS)
+    _refused(sites.run(), "INTERNAL_REGISTRY is not set for the rehearsal workspace")
+    sites.write_env(sites.rehearsal, NAMESPACE=REH_NS, INTERNAL_REGISTRY=REH_REG, KC="kubectl --context x")
+    _refused(sites.run(), "KC must name one command")
+
+
+@pytest.mark.parametrize(
+    "rehearsal_registry", [LIVE_REG, "REG.example/mfr", "reg.example:443/mfr", "reg.example/mfr/"]
+)
+def test_rehearse_check_refuses_a_shared_registry_when_a_fixed_tag_changes(
+    sites: RehearsalSites, rehearsal_registry: str
+):
+    sites.candidate.write_text(f"qdrant_digest: {_DIGEST_C}\n", encoding="utf-8")
+    sites.write_env(sites.rehearsal, NAMESPACE=REH_NS, INTERNAL_REGISTRY=rehearsal_registry)
+    _refused(sites.run(rehearsal_registry=rehearsal_registry), "fixed-tag third-party image")
+    # The same registry is allowed while every fixed-tag digest is unchanged (D6).
+    sites.candidate.write_text(f"qdrant_digest: {_DIGEST_A}\n", encoding="utf-8")
+    assert sites.run(rehearsal_registry=rehearsal_registry).returncode == 0
+
+
+def test_rehearse_check_refuses_the_installed_workspace_itself(sites: RehearsalSites):
+    _refused(
+        sites.run(rehearsal_workspace=str(sites.installed), rehearsal_namespace=LIVE_NS,
+                  rehearsal_registry=LIVE_REG),
+        "the rehearsal workspace is the installed workspace",
+    )
+
+
+def test_rehearse_check_refuses_a_non_empty_effective_namespace(sites: RehearsalSites):
+    (sites.kube_dir / f"{REH_NS}.json").write_text(
+        '{"items": [{"kind": "Deployment", "metadata": {"name": "rag-agent"}}]}', encoding="utf-8"
+    )
+    _refused(sites.run(), f"target namespace {REH_NS} is not empty")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["", "not json", "[]", '{"items": {}}', '{"items": ["rag-agent"]}', '{"items": [{"metadata": []}]}'],
+)
+def test_rehearse_check_refuses_unreadable_cluster_output_with_a_fixed_message(
+    sites: RehearsalSites, raw: str
+):
+    out = sites.root / "raw.json"
+    out.write_text(raw, encoding="utf-8")
+    _refused(sites.run(extra_env={"FAKE_KUBE_RAW": str(out)}), "STOP:")
+
+
+def test_rehearse_check_refuses_a_rehearsal_workspace_without_the_deploy_scripts(sites: RehearsalSites):
+    _refused(sites.run(rehearsal_workspace=str(sites.root / "cluster")), "not a release workspace")
+    # A workspace whose airgap.env makes common.sh die is refused, not trusted.
+    (sites.rehearsal / "airgap.env").write_text("AIRGAP_DRYRUN=maybe\n", encoding="utf-8")
+    _refused(sites.run(), "cannot resolve the deploy target of the rehearsal workspace")
 
 
 def test_member_set_and_manifest_fields_match_pack_sh(tmp_path: Path, keypairs: dict[str, Path]):
