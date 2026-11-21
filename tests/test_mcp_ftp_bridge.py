@@ -544,7 +544,7 @@ def test_d6_redacts_operand_cut_open_by_the_byte_cap(operand: str, leak: str) ->
     cut must not leak its prefix."""
     prefix = b"X" * 980 + b" ALU IBMUSER "
     data = prefix + operand.encode("ascii") + b" NOEXPIRED\n"
-    cut = len(prefix) + operand.index(leak[0]) + len(leak)
+    cut = len(prefix) + operand.index(leak) + len(leak)
     fake = FakeFTP()
     fake.files["'BIG.DATA'"] = data
     out = bridge.dataset_read(_session(fake, max_bytes=cut), "BIG.DATA")
