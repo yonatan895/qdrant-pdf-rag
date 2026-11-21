@@ -44,7 +44,9 @@ from mainframe_rag.gateways.common import (
     ToolContext,
     ToolOutput,
     UpstreamClient,
+    configure_gateway_logging,
     create_gateway_app,
+    fit_text_tail,
     load_config,
 )
 from mainframe_rag.mcp.tool_auth import ASGIApp, JwksCache, Principal
@@ -591,11 +593,18 @@ class GitLabTools:
             f"/projects/{project_id}/jobs/{args['job_id']}/trace",
             max_bytes=self.backend.max_job_log_bytes,
         )
-        tail_bytes = int(args.get("tail_bytes", ctx.limits.max_result_bytes // 2))
+        # The result cap clamps the tail, and whatever still does not fit once
+        # framed and escaped is cut from the start: the end is always kept.
+        tail_bytes = min(
+            int(args.get("tail_bytes", ctx.limits.max_result_bytes // 2)),
+            ctx.limits.max_result_bytes,
+        )
         text = _ANSI_RE.sub("", body[-tail_bytes:].decode("utf-8", errors="replace"))
-        if len(body) > tail_bytes:
-            text = "[earlier log lines omitted]\n" + text
-        return ToolOutput(text=text)
+        omitted = "[earlier log lines omitted]\n"
+        fitted = fit_text_tail(text, ctx.limits)
+        if len(body) > tail_bytes or len(fitted) < len(text):
+            fitted = fit_text_tail(text, ctx.limits, prefix=omitted)
+        return ToolOutput(text=fitted)
 
     def tools(self) -> list[Tool]:
         b = self.backend
@@ -811,10 +820,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Start-up: configuration, then the token scope check, then serve. Any
     failure exits non-zero with a fixed reason; the token is never logged."""
     from mainframe_rag.gateways.common import serve
-    from mainframe_rag.logs import configure_logging
 
     del argv
-    configure_logging("info")
+    configure_gateway_logging()
     try:
         scopes = asyncio.run(_checked_scopes(build_gateway()))
         gateway = build_gateway()

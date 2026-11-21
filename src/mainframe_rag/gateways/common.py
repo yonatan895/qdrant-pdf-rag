@@ -527,6 +527,26 @@ def render_untrusted(
     return framed, RenderStats(rows=rows, bytes_out=len(framed.encode("utf-8")), truncated=cut)
 
 
+def fit_text_tail(text: str, limits: Limits, *, prefix: str = "") -> str:
+    """`prefix` plus the longest suffix of `text` that `render_untrusted` keeps
+    whole: the end is what survives, never the start. Escaping can grow the
+    body, so the suffix is searched against the framed, escaped size."""
+    text = clean_text(text)
+
+    def fits(start: int) -> bool:
+        body = _frame_body({"text": prefix + text[start:], "truncated": False})
+        return len(body.encode("utf-8")) <= limits.max_result_bytes
+
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high) // 2
+        if fits(middle):
+            high = middle
+        else:
+            low = middle + 1
+    return prefix + text[low:]
+
+
 # --- per-user limits -------------------------------------------------------------------
 
 
@@ -1001,12 +1021,25 @@ def create_gateway_app(
     )
 
 
+# HTTP client libraries log every request URL at INFO, and the URL carries the
+# tool arguments (search text, paths, refs, labels): they stay at WARNING.
+_CLIENT_LOGGERS: Final = ("httpx", "httpx2", "httpcore")
+
+
+def configure_gateway_logging() -> None:
+    """The repository JSON log at INFO (the decision log is INFO), with the
+    HTTP client loggers raised to WARNING so no tool argument is ever logged."""
+    from mainframe_rag.logs import configure_logging
+
+    configure_logging("info")
+    for name in _CLIENT_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def serve(app: Any, *, host: str = "0.0.0.0", port: int = 8080) -> None:
     """Run a gateway under uvicorn with the repository JSON log at INFO (the
     decision log is INFO) and no access log (one line per call is ours)."""
     import uvicorn
 
-    from mainframe_rag.logs import configure_logging
-
-    configure_logging("info")
+    configure_gateway_logging()
     uvicorn.run(app, host=host, port=port, log_level="warning", log_config=None, access_log=False)

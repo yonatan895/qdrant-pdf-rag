@@ -260,7 +260,8 @@ name keys and never values. Secrets never appear in the file.
 otherwise. A call naming an unknown tool logs `{"action": "gateway_call",
 "gateway", "sub", "tool": null, "decision": "unknown_tool"}`. A handler fault adds `{"action": "gateway_fault", "gateway",
 "request_id", "tool", "error_type"}`. Arguments, results, tokens and exception
-text are never logged. A handler that swallows its cancellation can outlive
+text are never logged; the HTTP client loggers (`httpx`, `httpx2`, `httpcore`) are
+held at WARNING because they log request URLs, which carry the arguments. A handler that swallows its cancellation can outlive
 `tool_timeout_s`; handlers must let `CancelledError` propagate. `sub_hash` is the first 16 hex digits of SHA-256 over a
 fixed prefix and `sub` (TD5). A gateway that sends it to a backend (the Splunk
 SPL comment) relies on this line for the hash-to-user map. It hides identity
@@ -373,8 +374,10 @@ model receives.
   addresses.
 - `read_file` returns text; a body with a NUL byte is `binary_content`.
   `read_job_log` returns the last `tail_bytes` (default half of
-  `max_result_bytes`) with ANSI escape sequences removed, prefixed
-  `[earlier log lines omitted]` when cut.
+  `max_result_bytes`; a larger value is clamped to `max_result_bytes`) with ANSI
+  escape sequences removed, prefixed `[earlier log lines omitted]` when cut. The
+  end of the log is always kept: if the framed, escaped text still exceeds the
+  result cap, lines are dropped from the start, never the end.
 - Search is project-scoped (`scope=blobs`); there is no instance-wide search.
 
 GitLab's built-in MCP server (19.5 and later) is an optional later swap; with
