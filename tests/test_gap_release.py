@@ -332,6 +332,7 @@ def test_full_end_to_end_classify_pack_vault_sign_assemble_verify_and_bootstrap(
     assert packed["sha"] == merge_sha
     assert packed["gap_base"] == base_sha
     assert packed["gap_issue"] == "GL#42"
+    assert not (work_dir / "scratch").exists()
     # D7: reference-docs.tar.gz copied unchanged from base
     assert (work_dir / "out" / "reference-docs.tar.gz").read_bytes() == (
         Path(fx["base_dir"]) / "reference-docs.tar.gz"
@@ -399,10 +400,12 @@ def test_crash_recovery_rerun_converges_to_identical_release_identity(tmp_path: 
         (work_dir / "out" / victim).unlink()
     (work_dir / "out.partial").mkdir(exist_ok=True)
     (work_dir / "out.partial" / "leftover.tmp").write_text("partial\n", encoding="utf-8")
+    (work_dir / "scratch" / "base-bundle").mkdir(parents=True)
 
     second = release.cmd_pack(**kwargs)
     assert second["release_identity"] == first["release_identity"]
     assert not (work_dir / "out.partial").exists()
+    assert not (work_dir / "scratch").exists()
 
 
 def test_two_separate_packs_with_different_repo_bundle_bytes_both_pass_verify(
@@ -912,3 +915,32 @@ def test_release_sh_verify_runs_from_a_verified_installed_release_only(tmp_path:
 
     _git(installed, "checkout", "--", "scripts/gap/release.py")
     assert verify().returncode == 0
+
+
+def test_member_set_and_manifest_fields_match_pack_sh(tmp_path: Path, keypairs: dict[str, Path]):
+    """The member inventory and MANIFEST fields here are pinned to what pack.sh
+    signs (derived independently from pack.sh by scripts/extension_surface.py),
+    so a real upstream base bundle is not refused and the fixture stays faithful."""
+    from scripts import extension_surface
+
+    layout = extension_surface.bundle_layout(REPO)
+    asset = next(line.split(":", 1)[1].strip()
+                 for line in (REPO / "scripts/tools/task-pin.txt").read_text(encoding="utf-8").splitlines()
+                 if line.startswith("asset:"))
+    sha = "a" * 40
+    packed = {item.split(" ", 1)[1].replace("{IMAGE_SHA}", sha).replace("{TASK_ASSET}", asset)
+              for item in layout if item.startswith("member ")}
+    assert set(release._expected_members(sha, release.OPTIONAL_IMAGE_MEMBERS)) == packed - {
+        "SHA256SUMS", "SHA256SUMS.sig"}
+    assert set(release.OPTIONAL_IMAGE_MEMBERS) <= packed
+
+    fields = {item.split(" ", 1)[1] for item in layout if item.startswith("manifest ")}
+    rendered = release.render_gap_manifest(
+        "", sha=sha, commit_date="d", gap_base=sha, gap_issue="GL#1", gap_tag="t", gap_tree=sha,
+        ingest_digest="x", ingest_config_digest="x", agent_digest="x", agent_config_digest="x")
+    assert {line.split(": ", 1)[0] for line in rendered.splitlines()} <= fields
+
+    fx = _build_fixture(tmp_path, keypairs)
+    base_keys = set(release.parse_manifest((Path(fx["base_dir"]) / "MANIFEST.txt").read_text())[0])
+    optional = {f for f in fields if f.startswith(("oauth_proxy", "openwebui"))}
+    assert base_keys == fields - optional - set(release.GAP_MANIFEST_FIELDS)

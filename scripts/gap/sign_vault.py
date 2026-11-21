@@ -330,7 +330,8 @@ def sign_with_encrypted_key(
         cmd.extend(["-passin", passin])
     cmd.extend(["-out", str(tmp), str(sums_path)])
     try:
-        proc = subprocess.run(cmd, capture_output=True, check=False, timeout=60)
+        # openssl prompts on the terminal when no -passin is given: no timeout then.
+        proc = subprocess.run(cmd, capture_output=True, check=False, timeout=60 if passin is not None else None)
         if proc.returncode != 0 or not tmp.is_file():
             raise SignError("STOP: openssl signing failed (bad passphrase or invalid private key)")
         raw_sig = tmp.read_bytes()
@@ -456,6 +457,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     except OSError:
         print("STOP: signing input or output file could not be read or written", file=sys.stderr)
+        return 1
+    except subprocess.SubprocessError:
+        print("STOP: openssl did not finish; nothing was signed", file=sys.stderr)
         return 1
     return 0
 

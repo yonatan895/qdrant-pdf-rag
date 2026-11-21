@@ -1053,189 +1053,211 @@ def cmd_pack(
         require_gap_rsa3072=require_gap_rsa3072,
     )
 
-    with tempfile.TemporaryDirectory(prefix="mfr-gap-pack-") as td:
-        scratch = Path(td)
-        # 3. Verify base upstream bundle.
-        base = load_verified_base_bundle(base_bundle, anchors, scratch)
+    # Scratch lives in the work directory, which is on /work: the base bundle
+    # unpacks to several GB, more than a pod's ephemeral /tmp holds. Pack owns
+    # it by name (like out.partial) and removes it on entry and exit.
+    work_dir.mkdir(parents=True, exist_ok=True)
+    scratch = work_dir / "scratch"
+    if scratch.exists():
+        shutil.rmtree(scratch)
+    scratch.mkdir()
+    try:
+        return _pack_into(tag=tag, remote=remote, base_bundle=base_bundle, work_dir=work_dir,
+                          anchors=anchors, scratch=scratch, signed_label=signed_label)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
-        # 4. Fetch ONLY the tag and main into bare repo inside work_dir (no checkout, no hooks).
-        work_dir.mkdir(parents=True, exist_ok=True)
-        bare = work_dir / "repo.git"
-        _fetch_tag_and_main(remote, tag, bare)
 
-        # 5. Tag binding, merge-commit check (D4), base ancestry, and tag-move refusal.
-        sha, tree, gap_issue = _verify_tag_merge_commit_and_base(bare, tag, base.sha)
-        req_file = work_dir / "request.txt"
-        if req_file.is_file():
-            prev = _read_kv_file(req_file)
-            if prev.get("tag") and prev.get("tag") != tag:
-                raise ReleaseStop(
-                    f"work directory belongs to tag {prev['tag']}, not {tag} — use one work directory per tag"
-                )
-            if prev.get("sha") and prev.get("sha") != sha:
-                raise ReleaseStop(
-                    f"tag {tag} moved (request.txt recorded {prev['sha']}, now resolves to {sha}) — abandon the tag and increment"
-                )
+def _pack_into(
+    *,
+    tag: str,
+    remote: str,
+    base_bundle: Path,
+    work_dir: Path,
+    anchors: AnchorSet,
+    scratch: Path,
+    signed_label: str,
+) -> dict[str, str]:
+    # 3. Verify base upstream bundle.
+    base = load_verified_base_bundle(base_bundle, anchors, scratch)
 
-        # 6. Allow-list check (D2) on cumulative delta base.sha..sha.
-        diff_raw = _git(bare, "diff", "--no-renames", "-z", "--name-only", base.sha, sha).stdout
-        delta_paths = [p.decode("utf-8", "surrogateescape") for p in diff_raw.split(b"\x00") if p]
-        report = allowlist.classify_paths(delta_paths)
-        if not report.all_allowed:
-            raise ReleaseStop(allowlist.REFUSAL_MESSAGE)
-        if report.needs_layer_replacement:
-            raise ReleaseStop(allowlist.LAYER_REPLACEMENT_REFUSAL)
+    # 4. Fetch ONLY the tag and main into bare repo inside work_dir (no checkout, no hooks).
+    bare = work_dir / "repo.git"
+    _fetch_tag_and_main(remote, tag, bare)
 
-        # 7. Ledger proof (upstream-owned paths differing from base.sha == gap/patches.md).
-        changed_upstream = verify_ledger_proof(bare, base.sha, sha)
+    # 5. Tag binding, merge-commit check (D4), base ancestry, and tag-move refusal.
+    sha, tree, gap_issue = _verify_tag_merge_commit_and_base(bare, tag, base.sha)
+    req_file = work_dir / "request.txt"
+    if req_file.is_file():
+        prev = _read_kv_file(req_file)
+        if prev.get("tag") and prev.get("tag") != tag:
+            raise ReleaseStop(
+                f"work directory belongs to tag {prev['tag']}, not {tag} — use one work directory per tag"
+            )
+        if prev.get("sha") and prev.get("sha") != sha:
+            raise ReleaseStop(
+                f"tag {tag} moved (request.txt recorded {prev['sha']}, now resolves to {sha}) — abandon the tag and increment"
+            )
 
-        # 8. OCI consistency check on both base app archives (Rev 2 §3a condition 3).
-        base_agent = base.directory / f"app-agent-{base.sha}.tar"
-        base_ingest = base.directory / f"app-ingest-{base.sha}.tar"
-        agent_digest, agent_cfg_digest, _ = verify_oci_archive_consistency(base_agent)
-        ingest_digest, ingest_cfg_digest, _ = verify_oci_archive_consistency(base_ingest)
-        if agent_digest != base.manifest.get("agent_digest") or agent_cfg_digest != base.manifest.get("agent_config_digest"):
-            raise ReleaseStop("base app-agent archive digest differs from base MANIFEST")
-        if ingest_digest != base.manifest.get("ingest_digest") or ingest_cfg_digest != base.manifest.get("ingest_config_digest"):
-            raise ReleaseStop("base app-ingest archive digest differs from base MANIFEST")
+    # 6. Allow-list check (D2) on cumulative delta base.sha..sha.
+    diff_raw = _git(bare, "diff", "--no-renames", "-z", "--name-only", base.sha, sha).stdout
+    delta_paths = [p.decode("utf-8", "surrogateescape") for p in diff_raw.split(b"\x00") if p]
+    report = allowlist.classify_paths(delta_paths)
+    if not report.all_allowed:
+        raise ReleaseStop(allowlist.REFUSAL_MESSAGE)
+    if report.needs_layer_replacement:
+        raise ReleaseStop(allowlist.LAYER_REPLACEMENT_REFUSAL)
 
-        # Verify task-pin.txt in tagged commit equals base bundle's task-pin.txt.
-        tree_task_pin = _git(bare, "show", f"{sha}:scripts/tools/task-pin.txt").stdout
-        if tree_task_pin != (base.directory / "task-pin.txt").read_bytes():
-            raise ReleaseStop("tagged commit scripts/tools/task-pin.txt differs from base bundle task-pin.txt")
+    # 7. Ledger proof (upstream-owned paths differing from base.sha == gap/patches.md).
+    changed_upstream = verify_ledger_proof(bare, base.sha, sha)
 
-        # Clean any stale out.partial from a crashed earlier run, NEVER delete out/.
-        partial_dir = work_dir / "out.partial"
-        if partial_dir.exists():
-            shutil.rmtree(partial_dir)
-        out_dir = work_dir / "out"
-        out_dir.mkdir(parents=True, exist_ok=True)
+    # 8. OCI consistency check on both base app archives (Rev 2 §3a condition 3).
+    base_agent = base.directory / f"app-agent-{base.sha}.tar"
+    base_ingest = base.directory / f"app-ingest-{base.sha}.tar"
+    agent_digest, agent_cfg_digest, _ = verify_oci_archive_consistency(base_agent)
+    ingest_digest, ingest_cfg_digest, _ = verify_oci_archive_consistency(base_ingest)
+    if agent_digest != base.manifest.get("agent_digest") or agent_cfg_digest != base.manifest.get("agent_config_digest"):
+        raise ReleaseStop("base app-agent archive digest differs from base MANIFEST")
+    if ingest_digest != base.manifest.get("ingest_digest") or ingest_cfg_digest != base.manifest.get("ingest_config_digest"):
+        raise ReleaseStop("base app-ingest archive digest differs from base MANIFEST")
 
-        # 9. Write-once copied members from verified base bundle.
-        copied_same_name = [
-            "reference-docs.tar.gz",
-            "task_linux_amd64.tar.gz",
-            "task-pin.txt",
-            "task-LICENSE",
-            "qdrant-image.tar",
-            "openobserve-image.tar",
-            "otelcol-image.tar",
-            "THIRD-PARTY-NOTICES.txt",
-            *base.optional_images,
-        ]
-        for name in copied_same_name:
-            _write_once_copy(out_dir, name, base.directory / name, base.sums[name])
-        _write_once_copy(out_dir, f"app-ingest-{sha}.tar", base_ingest, base.sums[f"app-ingest-{base.sha}.tar"])
-        _write_once_copy(out_dir, f"app-agent-{sha}.tar", base_agent, base.sums[f"app-agent-{base.sha}.tar"])
+    # Verify task-pin.txt in tagged commit equals base bundle's task-pin.txt.
+    tree_task_pin = _git(bare, "show", f"{sha}:scripts/tools/task-pin.txt").stdout
+    if tree_task_pin != (base.directory / "task-pin.txt").read_bytes():
+        raise ReleaseStop("tagged commit scripts/tools/task-pin.txt differs from base bundle task-pin.txt")
 
-        # 10. Write-once derived members.
-        _write_once_bytes(out_dir, "sneakernet-signing.pub", anchors.gap_path.read_bytes(), mode=0o644)
-        bootstrap_bytes = _git(bare, "show", f"{sha}:scripts/airgap/bootstrap.sh").stdout
-        _write_once_bytes(out_dir, "bootstrap.sh", bootstrap_bytes, mode=0o755)
+    # Clean any stale out.partial from a crashed earlier run, NEVER delete out/.
+    partial_dir = work_dir / "out.partial"
+    if partial_dir.exists():
+        shutil.rmtree(partial_dir)
+    out_dir = work_dir / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-        # repo.bundle: write-once with content identity check on existing file (D10).
-        repo_bundle_target = out_dir / "repo.bundle"
-        if repo_bundle_target.exists():
-            if repo_bundle_target.is_symlink() or not repo_bundle_target.is_file():
-                raise ReleaseStop("output repo.bundle is not a regular file")
-            verify_repo_bundle_content(repo_bundle_target, sha, tree, scratch)
-        else:
-            partial_dir.mkdir(parents=True, exist_ok=True)
-            tmp_bundle = partial_dir / f"repo.bundle.tmp.{os.getpid()}"
-            create_clean_repo_bundle(bare, sha, tmp_bundle, scratch)
-            verify_repo_bundle_content(tmp_bundle, sha, tree, scratch)
-            tmp_bundle.replace(repo_bundle_target)
+    # 9. Write-once copied members from verified base bundle.
+    copied_same_name = [
+        "reference-docs.tar.gz",
+        "task_linux_amd64.tar.gz",
+        "task-pin.txt",
+        "task-LICENSE",
+        "qdrant-image.tar",
+        "openobserve-image.tar",
+        "otelcol-image.tar",
+        "THIRD-PARTY-NOTICES.txt",
+        *base.optional_images,
+    ]
+    for name in copied_same_name:
+        _write_once_copy(out_dir, name, base.directory / name, base.sums[name])
+    _write_once_copy(out_dir, f"app-ingest-{sha}.tar", base_ingest, base.sums[f"app-ingest-{base.sha}.tar"])
+    _write_once_copy(out_dir, f"app-agent-{sha}.tar", base_agent, base.sums[f"app-agent-{base.sha}.tar"])
 
-        commit_ts, commit_date = _commit_timestamp(bare, sha)
-        manifest_text = render_gap_manifest(
-            base.manifest_text,
-            sha=sha,
-            commit_date=commit_date,
-            gap_base=base.sha,
-            gap_issue=gap_issue,
-            gap_tag=tag,
-            gap_tree=tree,
-            ingest_digest=ingest_digest,
-            ingest_config_digest=ingest_cfg_digest,
-            agent_digest=agent_digest,
-            agent_config_digest=agent_cfg_digest,
-            signed_label=signed_label,
-        )
-        _write_once_bytes(out_dir, "MANIFEST.txt", manifest_text.encode("utf-8"), mode=0o644)
+    # 10. Write-once derived members.
+    _write_once_bytes(out_dir, "sneakernet-signing.pub", anchors.gap_path.read_bytes(), mode=0o644)
+    bootstrap_bytes = _git(bare, "show", f"{sha}:scripts/airgap/bootstrap.sh").stdout
+    _write_once_bytes(out_dir, "bootstrap.sh", bootstrap_bytes, mode=0o755)
 
-        packing_record = render_gap_packing_record(
-            sha=sha,
-            commit_date=commit_date,
-            gap_base=base.sha,
-            gap_issue=gap_issue,
-            gap_tag=tag,
-            gap_tree=tree,
-            gap_anchor_fp=anchors.gap_fp,
-            upstream_anchor_fp=anchors.upstream_fp,
-            base_manifest=base.manifest,
-            optional_images=base.optional_images,
-            replaced_layers=0,
-        )
-        _write_once_bytes(out_dir, "PACKING_RECORD.txt", packing_record.encode("utf-8"), mode=0o644)
+    # repo.bundle: write-once with content identity check on existing file (D10).
+    repo_bundle_target = out_dir / "repo.bundle"
+    if repo_bundle_target.exists():
+        if repo_bundle_target.is_symlink() or not repo_bundle_target.is_file():
+            raise ReleaseStop("output repo.bundle is not a regular file")
+        verify_repo_bundle_content(repo_bundle_target, sha, tree, scratch)
+    else:
+        partial_dir.mkdir(parents=True, exist_ok=True)
+        tmp_bundle = partial_dir / f"repo.bundle.tmp.{os.getpid()}"
+        create_clean_repo_bundle(bare, sha, tmp_bundle, scratch)
+        verify_repo_bundle_content(tmp_bundle, sha, tree, scratch)
+        tmp_bundle.replace(repo_bundle_target)
 
-        sbom_bytes = render_gap_sbom(
-            (base.directory / "sbom.json").read_bytes(),
-            sha=sha,
-            commit_date=commit_date,
-            gap_base=base.sha,
-            gap_issue=gap_issue,
-            gap_tag=tag,
-            ingest_digest=ingest_digest,
-            agent_digest=agent_digest,
-        )
-        _write_once_bytes(out_dir, "sbom.json", sbom_bytes, mode=0o644)
+    commit_ts, commit_date = _commit_timestamp(bare, sha)
+    manifest_text = render_gap_manifest(
+        base.manifest_text,
+        sha=sha,
+        commit_date=commit_date,
+        gap_base=base.sha,
+        gap_issue=gap_issue,
+        gap_tag=tag,
+        gap_tree=tree,
+        ingest_digest=ingest_digest,
+        ingest_config_digest=ingest_cfg_digest,
+        agent_digest=agent_digest,
+        agent_config_digest=agent_cfg_digest,
+        signed_label=signed_label,
+    )
+    _write_once_bytes(out_dir, "MANIFEST.txt", manifest_text.encode("utf-8"), mode=0o644)
 
-        members = _expected_members(sha, base.optional_images)
-        sums_bytes = _format_sha256sums(out_dir, members)
-        release_identity = _sha256_bytes(sums_bytes)
+    packing_record = render_gap_packing_record(
+        sha=sha,
+        commit_date=commit_date,
+        gap_base=base.sha,
+        gap_issue=gap_issue,
+        gap_tag=tag,
+        gap_tree=tree,
+        gap_anchor_fp=anchors.gap_fp,
+        upstream_anchor_fp=anchors.upstream_fp,
+        base_manifest=base.manifest,
+        optional_images=base.optional_images,
+        replaced_layers=0,
+    )
+    _write_once_bytes(out_dir, "PACKING_RECORD.txt", packing_record.encode("utf-8"), mode=0o644)
 
-        # Write-once SHA256SUMS and signed.sha256 guard.
-        _write_once_bytes(out_dir, "SHA256SUMS", sums_bytes, mode=0o644)
-        signed_marker = work_dir / "signed.sha256"
-        if signed_marker.is_file():
-            recorded = signed_marker.read_text(encoding="utf-8").strip()
-            if recorded != release_identity:
-                raise ReleaseStop(
-                    f"tag {tag} was already signed with release identity {recorded}; refusing a different SHA256SUMS"
-                )
+    sbom_bytes = render_gap_sbom(
+        (base.directory / "sbom.json").read_bytes(),
+        sha=sha,
+        commit_date=commit_date,
+        gap_base=base.sha,
+        gap_issue=gap_issue,
+        gap_tag=tag,
+        ingest_digest=ingest_digest,
+        agent_digest=agent_digest,
+    )
+    _write_once_bytes(out_dir, "sbom.json", sbom_bytes, mode=0o644)
 
-        if partial_dir.exists():
-            shutil.rmtree(partial_dir)
+    members = _expected_members(sha, base.optional_images)
+    sums_bytes = _format_sha256sums(out_dir, members)
+    release_identity = _sha256_bytes(sums_bytes)
 
-        request_lines = [
-            f"tag={tag}",
-            f"sha={sha}",
-            f"tree={tree}",
-            f"commit_timestamp={commit_ts}",
-            f"commit_date={commit_date}",
-            f"gap_base={base.sha}",
-            f"gap_issue={gap_issue}",
-            f"release_identity={release_identity}",
-            f"upstream_anchor_sha256={anchors.upstream_fp}",
-            f"gap_anchor_sha256={anchors.gap_fp}",
-            f"changed_upstream_count={len(changed_upstream)}",
-        ]
-        _atomic_write_bytes(req_file, ("\n".join(request_lines) + "\n").encode("utf-8"), mode=0o644)
+    # Write-once SHA256SUMS and signed.sha256 guard.
+    _write_once_bytes(out_dir, "SHA256SUMS", sums_bytes, mode=0o644)
+    signed_marker = work_dir / "signed.sha256"
+    if signed_marker.is_file():
+        recorded = signed_marker.read_text(encoding="utf-8").strip()
+        if recorded != release_identity:
+            raise ReleaseStop(
+                f"tag {tag} was already signed with release identity {recorded}; refusing a different SHA256SUMS"
+            )
 
-        print(f"upstream_anchor_sha256: {anchors.upstream_fp}")
-        print(f"gap_anchor_sha256: {anchors.gap_fp}")
-        print(f"release_identity: {release_identity}")
-        print(f"PACKED {sha} {release_identity}")
-        return {
-            "tag": tag,
-            "sha": sha,
-            "tree": tree,
-            "gap_base": base.sha,
-            "gap_issue": gap_issue,
-            "release_identity": release_identity,
-            "upstream_anchor_sha256": anchors.upstream_fp,
-            "gap_anchor_sha256": anchors.gap_fp,
-        }
+    if partial_dir.exists():
+        shutil.rmtree(partial_dir)
+
+    request_lines = [
+        f"tag={tag}",
+        f"sha={sha}",
+        f"tree={tree}",
+        f"commit_timestamp={commit_ts}",
+        f"commit_date={commit_date}",
+        f"gap_base={base.sha}",
+        f"gap_issue={gap_issue}",
+        f"release_identity={release_identity}",
+        f"upstream_anchor_sha256={anchors.upstream_fp}",
+        f"gap_anchor_sha256={anchors.gap_fp}",
+        f"changed_upstream_count={len(changed_upstream)}",
+    ]
+    _atomic_write_bytes(req_file, ("\n".join(request_lines) + "\n").encode("utf-8"), mode=0o644)
+
+    print(f"upstream_anchor_sha256: {anchors.upstream_fp}")
+    print(f"gap_anchor_sha256: {anchors.gap_fp}")
+    print(f"release_identity: {release_identity}")
+    print(f"PACKED {sha} {release_identity}")
+    return {
+        "tag": tag,
+        "sha": sha,
+        "tree": tree,
+        "gap_base": base.sha,
+        "gap_issue": gap_issue,
+        "release_identity": release_identity,
+        "upstream_anchor_sha256": anchors.upstream_fp,
+        "gap_anchor_sha256": anchors.gap_fp,
+    }
 
 
 def cmd_assemble(
@@ -1342,8 +1364,12 @@ def cmd_verify(
     gap_pub: Path,
     repo_root: Path,
     remote: str | None = None,
+    scratch_dir: Path | None = None,
 ) -> dict[str, object]:
-    """Trusted pre-promotion verification in Rev 2 §3e 6-step order."""
+    """Trusted pre-promotion verification in Rev 2 §3e 6-step order.
+
+    The candidate and the base tarball are unpacked into scratch_dir (default:
+    TMPDIR); on the bastion point it at /work, not the pod's ephemeral /tmp."""
     # Step 1 (release guard) is enforced by scripts/gap/release.sh before invoking python3 -I.
     anchors = validate_anchors(
         upstream_pub,
@@ -1355,7 +1381,7 @@ def cmd_verify(
         ),
     )
 
-    with tempfile.TemporaryDirectory(prefix="mfr-gap-verify-") as td:
+    with tempfile.TemporaryDirectory(prefix="mfr-gap-verify-", dir=scratch_dir) as td:
         scratch = Path(td)
         # Step 2: Member inventory (regular files only, plain names, no links/duplicates).
         if bundle.is_file():
@@ -1560,6 +1586,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_ver.add_argument("--upstream-pub", type=Path, default=_env_path("SNEAKERNET_TRUSTED_PUB"))
     p_ver.add_argument("--gap-pub", type=Path, default=_env_path("SNEAKERNET_GAP_TRUSTED_PUB"))
     p_ver.add_argument("--remote", default=None, help="optional GitLab remote to check gap_tag still resolves to sha")
+    p_ver.add_argument("--scratch-dir", type=Path, default=None,
+                       help="directory to unpack the candidate and base into (default TMPDIR; use /work on the bastion)")
 
     args = parser.parse_args(argv)
     try:
@@ -1610,6 +1638,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 gap_pub=args.gap_pub,
                 repo_root=args.repo_root,
                 remote=args.remote,
+                scratch_dir=args.scratch_dir,
             )
             return 0
         raise ReleaseStop("unknown subcommand")
