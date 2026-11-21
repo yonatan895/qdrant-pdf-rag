@@ -746,6 +746,23 @@ def test_d6_redacts_operand_cut_open_by_the_byte_cap(operand: str, leak: str) ->
     assert leak not in text
 
 
+@pytest.mark.parametrize(
+    ("line", "secret"),
+    [
+        ("//J JOB PASSWORD='correct horse", "horse"),
+        ("PASSWD=(OLD123,NEW4", "NEW4"),
+        ('password "two words', "words"),
+    ],
+)
+def test_d6_redacts_assignment_values_cut_open(line: str, secret: str) -> None:
+    """The = / : and space forms also redact a quoted or parenthesised value
+    whose closing quote or parenthesis was cut off (byte cap, record end)."""
+    fake = FakeFTP()
+    fake.files["'SYS1.PARMLIB'"] = (line + "\n").encode("ascii")
+    text = bridge.dataset_read(_session(fake), "SYS1.PARMLIB")["content"][0]["text"]
+    assert secret not in text
+
+
 def test_d6_redacts_private_key_cut_open_by_the_byte_cap() -> None:
     """A private key whose END line falls past the byte cap is redacted from
     BEGIN to the end of the text; an END without its BEGIN (a window that
