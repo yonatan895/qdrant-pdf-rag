@@ -5,6 +5,11 @@
   nothing: live fetching stays off and unwired until the
   [reactivation gate](#reactivation-gate) is met. Supersedes ADR-0001 only for
   agent-fetched source observations; everything else in ADR-0001 stands.
+  Amended by [ADR-0012](0012-zos-dataset-read-pilot.md) (proposed): a
+  read-only z/OS pilot (`dataset_read` default; opt-in `job_status` and
+  DD-scoped `jes_spool_read`; decisions 2, 3, 6, 8, the audit-record clause,
+  the "Required of #91" list, the registry pin and the gate, as its table
+  lists).
 - **Context:** ADR-0001 keeps Splunk as system of record (context in, not
   crawl) and `/v1/answer` accepts caller-supplied `splunk_context`. Operators
   also ask live-state questions manuals cannot answer ("why did JOB00123 fail
