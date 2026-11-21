@@ -141,6 +141,11 @@ def test_layer_replacement_paths(path):
     "scripts/tools/devkit-pin.txt",
     "scripts/airgap/reference-docs.json",
     "scripts/airgap/reference-docs-openshift.paths",
+    # Vendored/nested subcharts and chart locks inside the allowed chart subtree (M1)
+    "charts/mainframe-rag/charts/thirdparty-1.0.0.tgz",
+    "charts/mainframe-rag/charts/sub/templates/pod.yaml",
+    "charts/mainframe-rag/charts",
+    "charts/mainframe-rag/Chart.lock",
     # Build inputs / image pins / vendored charts / notices / unknown top-level
     "requirements.lock.txt",
     "requirements.dev.lock.txt",

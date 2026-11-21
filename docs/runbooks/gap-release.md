@@ -20,7 +20,11 @@ The record each release fills in is the
 - A change under `src/`, or under `scripts/` where it enters the image,
   needs layer replacement (increment 2) and is refused. A change to a lock,
   pin, Containerfile, licence input or any other refused path is never
-  released from the gap: report it upstream (D2).
+  released from the gap: report it upstream (D2). Inside
+  `charts/mainframe-rag/`, a nested `charts/` subtree (vendored subchart)
+  and any `Chart.lock` are refused too: third-party chart code would reach
+  the deployment with no licence or provenance record. The allow-list sees
+  paths only, so it cannot see a `dependencies:` edit in `Chart.yaml`.
 - `release.sh classify` lists every changed path with its verdict.
 
 ## Before the first release
@@ -192,7 +196,11 @@ guard refuses gap fields on an `origin: upstream` MANIFEST.
 ## Not in this increment
 
 - Layer replacement for `src/` and image-bound `scripts/` changes, with the
-  base-layer self-check at `diff_id` level (increment 2).
+  base-layer self-check at `diff_id` level (increment 2). Prerequisite: the
+  ten licence-tracked paths under `src/mainframe_rag/webui/static/vendor/`
+  (htmx, IBM Plex and their licence and SHA256SUMS files) are refused, or
+  run through the licence check on the tagged tree, before replacement is
+  enabled. Today `src/` is wholly refused, so they cannot ship unchecked.
 - The `sign` workspace role (zero-egress and Vault-egress signing pods),
   the Vault address as an isolation-proof negative probe from the bastion,
   the rehearsal namespace egress policy and a `rehearse-check` command for
