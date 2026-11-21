@@ -1167,9 +1167,10 @@ def test_spool_window_split_anywhere_in_a_key_value_pair_never_leaks(family: str
     _assert_value_screened_whole(pair)
     b, h, t = _window_budget(_SMALL_CAP)
 
-    # Evicted: the ring holds about T + 4 KiB, and is cut at offset o.
+    # Evicted: the ring is cut at offset o. The lines after the pair fit T,
+    # so the whole-line trim alone cannot remove the value.
     before = _pad(6000, "PRE", eol=eol)
-    full = before + pair + _pad(t, "TAIL", eol=eol) + last
+    full = before + pair + _pad(t // 2, "TAIL", eol=eol) + last
     head = _pad(h, "HEAD", eol=eol)
     for o in _sweep_offsets(len(before), len(before) + len(pair)):
         ring = full[o:]
@@ -1190,12 +1191,13 @@ def test_spool_window_split_anywhere_in_a_key_value_pair_never_leaks(family: str
         assert "LAST LINE" in body
 
     # Contiguous (too short to evict at this cap): the cut is H, swept across
-    # the pair by the length of the lines before it.
-    after = _pad(b, "TAIL", eol=eol) + last
+    # the pair by the length of the lines before it; the file is 2 bytes over
+    # B where the pair allows, so the trim alone cannot remove the value.
     for start in _sweep_offsets(h - len(pair), h):
         if start < 2:
             continue
-        payload = _pad(start, "HEAD", eol=eol) + pair + after
+        rest = max(40, b + 2 - start - len(pair) - len(last))
+        payload = _pad(start, "HEAD", eol=eol) + pair + _pad(rest, "TAIL", eol=eol) + last
         out = _spool_out(_spool_fake(payload), max_bytes=_SMALL_CAP)
         text = _assert_framed_within(out, _SMALL_CAP)
         assert _B1_VALUE not in text, ("contiguous", start)
