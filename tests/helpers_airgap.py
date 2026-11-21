@@ -796,3 +796,33 @@ INGEST_ALIAS_PUBLISH=true
 def retired_keys_listed(stderr: str) -> list[str]:
     """Keys named in the refusal, read from its fixed one-key-per-line layout."""
     return re.findall(r"(?m)^  ([A-Z][A-Z0-9_]+) \(retired in ", stderr)
+
+
+# --- #1338: gap release stage fixtures (rehearsal / promotion) -----------------
+
+GAP_TOOLS = ("release.py", "allowlist.py", "sign_vault.py")
+
+
+def copy_gap_tools(tree: Path) -> None:
+    """Every release workspace ships scripts/gap/: the deploy-path rehearsal guard
+    runs the workspace's own release.py (#1338)."""
+    (tree / "scripts" / "gap").mkdir(parents=True, exist_ok=True)
+    for name in GAP_TOOLS:
+        shutil.copy(REPO / "scripts" / "gap" / name, tree / "scripts" / "gap" / name)
+
+
+def installed_workspace(root: Path, env_text: str, manifest_text: str = "") -> Path:
+    """The installed (live) release's workspace as rehearse-check resolves it: the
+    shipped common.sh, its own untracked airgap.env and its packed MANIFEST."""
+    ws = root / "installed"
+    (ws / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
+    shutil.copy(REPO / "scripts" / "airgap" / "common.sh", ws / "scripts" / "airgap" / "common.sh")
+    (ws / "airgap.env").write_text(env_text)
+    (ws / "dist").mkdir(exist_ok=True)
+    (ws / "dist" / "MANIFEST.txt").write_text(manifest_text or "sha: " + "0" * 40 + "\n")
+    return ws
+
+
+def release_identity(bundle_dir: Path) -> str:
+    """The gap release identity the record states: the sha256 of the signed SHA256SUMS."""
+    return sha256_bytes((bundle_dir / "SHA256SUMS").read_bytes())

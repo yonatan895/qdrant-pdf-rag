@@ -18,8 +18,13 @@ from tests.helpers_airgap import (
     assert_no_placeholders,
     assert_pull_secret_wired,
     connected_checkout,
+    copy_gap_tools,
+    gap_release_anchor,
+    gap_release_key,
     install_rendering_helm,
+    installed_workspace,
     make_bin_tree,
+    release_anchor,
     rendered_container,
     rendered_env,
     run_sh,
@@ -912,3 +917,31 @@ def test_ingest_refuses_a_d53595e_shaped_env_before_any_cluster_call(ingest_tree
     log = ingest_tree[1]
     assert not log.exists() or log.read_text() == ""
     assert not ((ingest_tree[0]) / "dist").exists() or not list((ingest_tree[0] / "dist").glob("*rendered*"))
+
+
+# --- #1338: a gap rehearsal's ingest never targets the live namespace ---------
+
+
+def test_gap_rehearsal_ingest_refuses_the_live_namespace_before_any_cluster_write(ingest_tree):
+    """NAMESPACE=<live> in the process environment wins over the rehearsal
+    workspace's airgap.env (#1336 B1): ingest of a gap bundle would then write
+    the candidate's data into the live release. Refused before any apply."""
+    tmp_path, kc_log = ingest_tree
+    _release_ingest(ingest_tree)
+    write_signed_manifest(tmp_path / "dist", f"sha: {IMAGE_SHA}\ningest_config_digest: {INGEST_CONFIG}\n",
+                          origin="gap", key=gap_release_key())
+    copy_gap_tools(tmp_path)
+    (tmp_path / "airgap.env").write_text("NAMESPACE='mfr-reh'\n")
+    installed_workspace(tmp_path, "NAMESPACE='test-ns'\nINTERNAL_REGISTRY='reg.live'\n")
+    stage = (("AIRGAP_DRYRUN", "0"), ("SKOPEO_REGISTRY", str(tmp_path / "registry")),
+             ("SNEAKERNET_TRUSTED_PUB", str(release_anchor())),
+             ("SNEAKERNET_GAP_TRUSTED_PUB", str(gap_release_anchor())),
+             ("AIRGAP_UNVERIFIED_CHECKOUT", ""), ("CI_REHEARSAL", ""),
+             ("GAP_REHEARSAL_INSTALLED_WORKSPACE", str(tmp_path / "installed")),
+             ("GAP_REHEARSAL_KUBE_CONTEXT", "rehearsal-ctx"))
+    refused = _run_ingest(ingest_tree, *stage)  # the fixture exports NAMESPACE=test-ns
+    assert refused.returncode == 1
+    assert "the rehearsal deploy would target the installed release's namespace" in refused.stderr
+    calls = kc_log.read_text().splitlines() if kc_log.exists() else []
+    assert [c for c in calls if c.split()[:1] != ["config"]] == [], "only the context lookup ran"
+    assert not (tmp_path / "dist" / "ingest-rendered.yaml").exists()

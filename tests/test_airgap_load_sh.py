@@ -17,10 +17,13 @@ import pytest
 from scripts.airgap import image_manifest
 
 from tests.helpers_airgap import (
+    GAP_MANIFEST_LINES,
     REPO,
+    copy_gap_tools,
     gap_release_anchor,
     gap_release_key,
     gen_other_pub,
+    installed_workspace,
     make_bin_tree,
     plant_stdlib_shadows,
     release_anchor,
@@ -923,3 +926,49 @@ def test_load_preserves_layer_count_requirement(load_tree):
     result = _run_load(load_tree)
     assert result.returncode != 0
     assert "is not the packed image" in result.stderr
+
+
+# --- #1338: a gap rehearsal's load refuses the live registry before any push --
+
+
+def _gap_load(tree, rehearsal_registry: str):
+    """A gap bundle (gap key) whose Qdrant image differs from the installed
+    release's, loaded from a rehearsal workspace into `rehearsal_registry`."""
+    tmp_path, _ = tree
+    artdir = tmp_path / "dist"
+    _make_artifacts(artdir, sha=IMAGE_SHA)
+    shutil.copy(gap_release_key(), artdir / "signing.key")
+    (artdir / "sneakernet-signing.pub").unlink()
+    _edit_manifest_and_resign(artdir, lambda text: text.replace("origin: upstream\n",
+                                                                "origin: gap\n" + GAP_MANIFEST_LINES))
+    copy_gap_tools(tmp_path)
+    write_stub(tmp_path / "bin" / "kubectl", "#!/bin/sh\n[ \"$*\" = 'config current-context' ] && echo rehearsal-ctx\n")
+    (tmp_path / "airgap.env").write_text(f"NAMESPACE='mfr-reh'\nINTERNAL_REGISTRY='{rehearsal_registry}'\n")
+    installed_workspace(tmp_path, "NAMESPACE='mfr-prod'\nINTERNAL_REGISTRY='reg.internal:5000'\n",
+                        "qdrant_digest: sha256:" + "0" * 64 + "\n")
+    return (("INTERNAL_REGISTRY", ""), ("SNEAKERNET_GAP_TRUSTED_PUB", str(gap_release_anchor())),
+            ("GAP_REHEARSAL_INSTALLED_WORKSPACE", str(tmp_path / "installed")),
+            ("GAP_REHEARSAL_KUBE_CONTEXT", "rehearsal-ctx"))
+
+
+def test_gap_rehearsal_load_refuses_a_changed_fixed_tag_on_the_live_registry(load_tree):
+    """load pushes third-party images under fixed tags (#1336): from a rehearsal
+    of a bundle that changes one, the installed release's registry path is
+    refused before any push, as is an undeclared stage; the rehearsal's own
+    registry path then loads."""
+    tmp_path, log = load_tree
+    env = _gap_load(load_tree, "reg.internal:5000")
+    refused = _run_load(load_tree, *env)
+    assert refused.returncode == 1
+    assert "fixed-tag third-party image" in refused.stderr
+    assert "gap release rehearsal refused" in refused.stderr
+    assert not _copies(log)
+    undeclared = _run_load(load_tree, *env[:2])
+    assert undeclared.returncode == 1
+    assert "this checkout is a gap release (origin: gap)" in undeclared.stderr
+    assert not _copies(log)
+    (tmp_path / "airgap.env").write_text("NAMESPACE='mfr-reh'\nINTERNAL_REGISTRY='reg.internal:5000/rehearsal'\n")
+    ok = _run_load(load_tree, *env)
+    assert ok.returncode == 0, ok.stderr
+    assert _copies(log)
+    assert all("reg.internal:5000/rehearsal/" in line for line in _copies(log))

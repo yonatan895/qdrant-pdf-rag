@@ -708,3 +708,23 @@ def test_dry_run_needs_no_verified_release(tree, qdrant):
     result = _retire(tree, qdrant, AIRGAP_DRYRUN="1", **_RELEASE)
     assert result.returncode == 0, result.stderr
     assert _log(tree) == "" and qdrant.ops == []
+
+
+# --- #1338: a gap bundle runs only in a declared stage --------------------------
+
+
+@pytest.mark.parametrize("mode", _MODES, ids=["copy", "retire", "rollback"])
+def test_a_gap_release_without_a_declared_stage_is_refused_before_any_cluster_or_qdrant_call(tree, qdrant, mode):
+    """A gap bundle is a rehearsal or a promotion; retire_legacy from it with
+    neither declared would act on whatever NAMESPACE resolves to."""
+    from tests.helpers_airgap import gap_release_anchor, gap_release_key, write_signed_manifest
+
+    _legacy_site(qdrant)
+    head = _git_release(tree)
+    write_signed_manifest(tree / "dist", f"sha: {head}\n", origin="gap", key=gap_release_key())
+    result = _run(tree, qdrant, *mode, "--confirm", L, SNEAKERNET_TRUSTED_PUB=_anchor(),
+                  SNEAKERNET_GAP_TRUSTED_PUB=str(gap_release_anchor()), **_RELEASE)
+    assert result.returncode == 1
+    assert "this checkout is a gap release (origin: gap)" in result.stderr
+    assert _log(tree) == "", "kubectl/oc was invoked before the guard"
+    assert qdrant.ops == [], "Qdrant was contacted before the guard"
