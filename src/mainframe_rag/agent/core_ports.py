@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
+from uuid import UUID
 
 from mainframe_rag.agent.answer import PreparedPrompt
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage, ChatResult, Tokenizer, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
+
+if TYPE_CHECKING:
+    from qdrant_client import models
 
 
 @dataclass(frozen=True)
@@ -21,8 +25,29 @@ class RetrievalResult:
 
 class Retriever(Protocol):
     async def __call__(
-        self, query: str, *, product: str | None, version: str | None, settings: Settings
-    ) -> RetrievalResult: ...
+        self, query: str, *, product: str | None, version: str | None, settings: Settings,
+        limit: int | None = ...,
+    ) -> RetrievalResult:
+        """`limit` is passed only for a wider candidate list (issue #1309);
+        without it the hit count is the operator's `answer_hit_limit`."""
+        ...
+
+
+class StoredChunkReader(Protocol):
+    """The two stored-point reads neighbour expansion makes (issue #1314): a
+    read-only subset of `AsyncQdrantReader`, the port GET /v1/evidence reads
+    through. No search, write or admin surface."""
+
+    async def retrieve(
+        self, collection_name: str, ids: list[str], *,
+        with_payload: bool | list[str], with_vectors: bool = False,
+    ) -> list[models.Record]: ...
+
+    async def scroll(
+        self, collection_name: str, *,
+        scroll_filter: models.Filter | None = None, limit: int = 10,
+        with_payload: bool | list[str], offset: int | str | UUID | None = None,
+    ) -> tuple[list[models.Record], int | str | UUID | None]: ...
 
 
 class PromptBuilder[T](Protocol):

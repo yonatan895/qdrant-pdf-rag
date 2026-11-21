@@ -34,7 +34,15 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SerializeAsAny,
+    field_validator,
+    model_validator,
+)
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from mainframe_rag.agent.admission import (
@@ -59,10 +67,11 @@ from mainframe_rag.agent.answer_core import (
     AnswerCoreInput,
     AnswerCoreOutput,
     LLMChatError,
+    SearchPlan,
     execute_answer_core,
     execute_answer_core_stream,
     plan_search,
-    retrieve_planned,
+    retrieve_for_answer,
 )
 from mainframe_rag.agent.chat_turn import (
     InvalidChatTurn,
@@ -1269,7 +1278,10 @@ class ChatCompletionsResponse(BaseModel):
     citations: list[str] = Field(default_factory=list)
     citations_inferred: bool = False
     inferred_indices: list[int] = Field(default_factory=list)
-    hits: list[SearchHit] = Field(default_factory=list)
+    # Serialized by each hit's own type: a neighbour hit (issue #1314) keeps
+    # its `neighbour_of`, as the stream's `final` does; a retrieved hit's
+    # keys and the schema are unchanged.
+    hits: list[SerializeAsAny[SearchHit]] = Field(default_factory=list)
     # Verification state (issue #365): same vocabulary as AnswerResponse.
     verification_state: str = "unverified_draft"
     # Scripts ride chat too (issue #365): previously dropped on both chat
@@ -2197,14 +2209,19 @@ async def _answer_response(req, response, is_stream, owner):
     # to the same code+message on every endpoint — a retrieval failure reads
     # "retrieval failed" here exactly as it does on /v1/search, and a model or
     # parse failure must not be mislabeled as a retrieval fault (AGENTS rule 2).
+    deps = replace(core_deps(rsc), settings=bound)
     try:
         # retrieve.* stage spans must land under this request's trace, so the
         # root is made current for the retrieval leg (the root span itself is
         # not created "as current" — the SSE generator outlives this block).
         with use_span(root_span, end_on_exit=False):
-            found = await rsc.retrieve(
-                derive_retrieval_query(req.query, bound),
-                product=req.product, version=req.version, settings=bound,
+            # One literal search of the derived retrieval query, then the
+            # answer-path stage owner (candidate selection, #1309; off = this
+            # one retrieval, unchanged).
+            found = await retrieve_for_answer(
+                SearchPlan("literal", derive_retrieval_query(req.query, bound)),
+                AnswerCoreInput(query=req.query, product=req.product, version=req.version),
+                deps, root_span,
             )
             hits, kind, timings = found.hits, found.kind, found.timings
     except Exception as exc:
@@ -2222,7 +2239,6 @@ async def _answer_response(req, response, is_stream, owner):
         query_kind=kind,
         timings=timings,
     )
-    deps = replace(core_deps(rsc), settings=bound)
 
     if not is_stream:
         output = await _execute_core_or_raise(
@@ -2486,7 +2502,7 @@ async def prepare_chat_core(
     try:
         with use_span(owner.span, end_on_exit=False):
             plan = await plan_search(search_input, deps, parent_span=owner.span)
-            found = await retrieve_planned(plan, search_input, deps)
+            found = await retrieve_for_answer(plan, search_input, deps, owner.span)
     except Exception as exc:
         raise _retrieval_failed(owner, owner.endpoint, f"{owner.endpoint}_retrieval", exc) from exc
 

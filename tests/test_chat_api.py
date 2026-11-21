@@ -380,6 +380,31 @@ async def test_condense_query_cuts_prior_turns_at_the_history_setting(cut):
 
 
 @pytest.mark.anyio
+async def test_condense_query_without_settings_cuts_at_the_settings_default():
+    """Issue #1320: the cut without Settings is read from the Settings field
+    per call (no import-time read), and is still the #1274 default."""
+    from mainframe_rag.agent import answer
+    from mainframe_rag.config import Settings
+
+    assert Settings.model_fields["chat_max_prior_turn_chars"].default == 4000
+    assert answer._max_prior_turn_chars(None) == 4000
+    assert answer._max_prior_turn_chars(Settings(_env_file=None)) == 4000
+    assert answer._max_prior_turn_chars(
+        Settings(_env_file=None, chat_max_prior_turn_chars=1000)) == 1000
+    prior = "".join(chr(ord("a") + i % 26) for i in range(6000))
+    llm = _RewriteLLM("rewritten query")
+    messages = [
+        ChatMessage(role="user", content=prior),
+        ChatMessage(role="assistant", content="An earlier answer"),
+        ChatMessage(role="user", content="What should the operator do next?"),
+    ]
+    assert await condense_query(llm, messages) == "rewritten query"  # type: ignore[arg-type]
+    prompt = llm.prompts[0][-1].content
+    assert f"User: {prior[:4000]}\n" in prompt
+    assert prior[:4001] not in prompt
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("acronyms", [False, True])
 async def test_condense_query_falls_back_to_the_follow_up_on_an_over_long_rewrite(acronyms):
     """Issue #1268: a rewrite is used only when retrieval can search it whole:

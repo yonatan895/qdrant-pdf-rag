@@ -9,6 +9,8 @@
   amended for the docs Pipe's answer-depth entries (#1255, maintainer
   decision 2026-11-16). Amended for pasted images in temporary chats
   (#1287, maintainer decisions 2026-11-17: V1, V2, V3, E1, S2, S4).
+  [ADR-0013](0013-research-mode.md) (proposed, not in effect) would add one
+  docs Pipe entry that is not an answer depth (V2).
   Accepting this record does not enable anything: the chart component stays
   off by default (superseded by ADR-0008: default on), and a site enables it only after every condition below
   passes. Amends [ADR-0004](0004-operator-console-htmx.md) and

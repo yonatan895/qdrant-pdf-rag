@@ -1116,6 +1116,79 @@ recount each repeat from the export rows (`repeat`, `follow_up_kind`,
 `--out` and `--summary` hold questions, follow-ups and answers and stay. Any
 default change after the comparison is a separate maintainer decision.
 
+<a id="select-arm"></a>
+**Candidate-selection arm (`select-on`, issue #1309; stand-in lane only).**
+[Candidate selection](agent.md#candidate-selection) has no operator key, so
+this arm cannot run at a site: it is set in the agent's environment on the
+stand-in lane, and its result is relative to that lane's model.
+
+| Arm | Agent environment | Compare with |
+|---|---|---|
+| `select-on` | `ANSWER_SELECT_ENABLED=true`, `ANSWER_SELECT_CANDIDATES=40`, `ANSWER_HIT_LIMIT=N` | `select-off` |
+| `select-off` (control) | `ANSWER_HIT_LIMIT=N` only | n/a |
+
+- Run both with `--stream` (the buffered `/v1/answer` body carries no hits,
+  so `final_hits` is null there).
+- Before reading results, confirm from the stand-in's traces that most
+  non-identifier rows carry `rag.select_mode=selected`. Eval rows carry no
+  selection label, and the selection prompt is not budgeted (about 1,000
+  characters per candidate): on a window too small for it every row is a
+  `fallback` and the arm measures nothing. Lower `ANSWER_SELECT_CANDIDATES`
+  until the list fits.
+- Both arms pack the same number of excerpts (`N`, run with `--hit-limit N`),
+  so the difference is which candidates are packed, not how many. Raising
+  `ANSWER_HIT_LIMIT` instead is a different arm ([depth](#site-depth-arm)).
+- Same rows, flags, build and `--repeats` in both arms; restart the agent
+  between them and record the two values.
+- Read `final_hits` and `supplied_evidence_meta` (they are the selection):
+  `evidence_gold_hit_rate`, then pass rate and citation precision/recall per
+  class. The sibling `/v1/search` fields (`gold_retrieved`, `hit_doc_ids`)
+  are the unselected pool at depth `N` in both arms and do not move.
+- Cost: one extra lowest-effort model call per selected row; compare `timing`
+  p50 as cost, never as the deciding signal.
+- Identifier rows bypass the stage, so they should not move; a difference
+  there inside the repeat range is noise. An anchored follow-up row whose
+  antecedent names an identifier is not bypassed: its antecedent leg's head
+  is pinned and the model picks the remaining hits.
+- The wider retrieval's head can differ from the narrow retrieval's hits,
+  because the fuse cut depends on the limit: a `select-on` row that falls
+  back is not always the `select-off` row.
+- Read `rag.select_pinned` and the selected share from traces before
+  interpreting follow-up rows.
+
+<a id="expand-arm"></a>
+**Neighbour-expansion arm (`expand-on`, issue #1314; stand-in lane only).**
+[Neighbour expansion](agent.md#neighbour-expansion) has no operator key, so
+this arm cannot run at a site.
+
+| Arm | Agent environment | Compare with |
+|---|---|---|
+| `expand-on` | `ANSWER_EXPAND_ENABLED=true`, `ANSWER_HIT_LIMIT=N`, `ANSWER_EXPAND_BUDGET=B` (`ANSWER_EXPAND_PER_HIT` at its default 4) | `expand-control` |
+| `expand-control` | `ANSWER_HIT_LIMIT=N+B` only (at most 32) | n/a |
+
+- The control packs the same number of chunks by plain retrieval depth, so
+  the difference is which chunks fill the extra slots, not how many. With
+  the defaults that is `N=16`, `B=16` against `ANSWER_HIT_LIMIT=32`.
+- The eval does not see neighbours yet. Its retrieval fields
+  (`gold_retrieved`, `hit_doc_ids`, the judge's evidence for a citation) come
+  from the sibling `/v1/search` pool and join by cite string, which same-page
+  neighbours repeat: on `expand-on` rows a cited neighbour is unmapped and
+  positions past `N` do not line up. Until the eval joins on the final's
+  hits (the second #1314 change), read only `final_hits` and
+  `supplied_evidence_meta` from this arm, with `--stream`, and do not compare
+  pass rate or citation precision/recall across the two arms.
+- Run `expand-on` with `--hit-limit N` and the control with `--hit-limit N+B`.
+- Before reading results, confirm from the stand-in's traces that rows carry
+  `rag.expand_mode=expanded` with `rag.expand_added` near `B`; a row with
+  fewer added packed fewer chunks than its control row. `rag.expand_stopped`
+  counts the directions the order rules refused, and on identifier rows
+  `rag.expand_identifier_skipped` the neighbours the
+  [identifier rule](agent.md#neighbour-expansion) left out.
+- A 32,768-token window may cut the tail of 32 chunks (neighbours first in
+  `expand-on`, the lowest-ranked hits in the control): check
+  `evidence_omitted` in both arms before comparing.
+- Cost: one identity read and up to `N` scrolls per row, no model call.
+
 <a id="site-depth-arm"></a>
 **Retrieval depth arm (issue #1191, `depth-8-3`).** Not the Pipe's answer
 depths (#1255, reasoning effort). Since #1274 the release retrieves 16 hits
@@ -1472,6 +1545,97 @@ scratch checkout and compare only the holdout sha with its pin.
   `EXPECTED_STATE_OVERRIDES`). The dev golden sha pin moves with the field;
   the frozen holdout receives it only in an adjudicated re-freeze, so dev
   acceptance and holdout acceptance stay separate rulers.
+
+### 7.1 Generated gold candidates (#1317)
+
+`python -m mainframe_rag.eval.gold_candidates --out PATH --count N --seed S
+--model-label LABEL [--collection NAME] [--classes a,b]` samples stored points
+of one collection through the read-only Qdrant port, has the reasoning model
+write one question per sampled passage, filters the result and writes
+**candidate** rows with chunk-level gold. It reads no golden set, holdout or
+release set and writes no baseline.
+
+- **Candidates, not an eval set.** Every row carries `status: "candidate"`, an
+  empty `reviewers` list and null `reviewed_by`/`reviewed_at`. A row needs human
+  adjudication before it enters any eval set (#806); model-written gold is
+  never reported as expert gold. No spot-check rate is defined yet (#1317,
+  maintainer decision); until then no candidate file is an input to a
+  baseline, a gate, a tuning sweep or an A/B.
+- **Candidates are unreadable as gold.** Every golden reader refuses a file
+  holding any row whose `status` is `"candidate"`, by content and whatever
+  the file is called, with one fixed message and no row text:
+  `parse_golden_text` (a `SystemExit`, before any row is validated) and the
+  byte readers behind `load_golden`, `load_golden_records`,
+  `load_golden_records_with_identity`, `read_golden_text` and
+  `read_dev_only_bytes` (a `DatasetError`, so every `--golden`,
+  `--subset`, `--repeats`, `--sessions` and `--update-baseline` entry
+  point exits 2 before it scores or writes). `verify_golden`, which reads
+  its files itself, reports the same message as a FAIL for the file, verifies
+  none of its rows and exits 1. This is the whole state today: there is no accepted
+  status and no adjudication workflow, so no generated row can enter an eval
+  set through these tools. The refusal reads the status field; it is not
+  itself an adjudication record, and what replaces `"candidate"` after human
+  review is a maintainer decision (#1317, PR 2/3).
+- **Privacy.** Questions derive from manual text. The output is refused (exit
+  2, one fixed message, before any Qdrant or model call) when it or its parent
+  resolves inside any git work tree, has a name that is or starts with
+  `holdout.jsonl` or `release_set.jsonl` in any case (`HOLDOUT.jsonl`,
+  `holdout.jsonl.bak`), already exists, or its directory is missing or not
+  writable; files are created with mode 0600.
+  Stdout, logs and the manifest carry ids, counts and hashes only. The
+  real-corpus collection needs `VENUE=rc`, by name and through an alias.
+- **Row.** The `GoldenEntry` fields (`id`, `query`, `expected_doc_ids`,
+  `expected_heading` and `expected_page` as a search hit exposes them,
+  `query_class`, `source: "generated"`) plus `gold_chunk_ids` (the source
+  chunk first, then the other chunks with the same source revision and heading
+  path in id order, at most `MAX_SECTION_SIBLINGS` = 64 of them),
+  `section_chunk_count` (the size of that section) and
+  `gold_chunk_ids_truncated` (true when the section is larger than the list:
+  such a row's gold is incomplete at section level), `chunk_type`, `physical_page` (1-based), `lexical_overlap` (share of
+  the question's non-stopword tokens found in the passage) and `provenance`
+  (`text_sha256` of the stored text, both prompt sha256s, the model label, the
+  seed). Report any result by overlap band: a question written from its
+  passage favours the lexical leg.
+- **Sampling.** Identity fields are scrolled without text; documents are
+  drawn in turn, then chunk types inside a document; each point gets the
+  eligible target class with the fewest rows so far (`diagnostic` any point,
+  `syntax` and `table` their chunk type, `message_id` a point with message
+  ids). Text is fetched for the sampled ids only. The seed fixes the sample;
+  the model is called at temperature 0. The draw is a round-robin per
+  document, not proportional to size: each turn gives every document that
+  still has eligible chunks one sample, so a 3,000-chunk document gets the
+  same share as a one-chunk document, and with more documents than `--count`
+  some documents get none. A requested class with no eligible chunk in the
+  collection is refused (exit 2, one fixed message) after the identity scan
+  and before any text fetch or model call.
+- **Model input.** The passage and the question are framed by
+  `<passage>`/`<question>` tags. Any such tag inside the stored text or the
+  generated question (any case, inner whitespace) has its opening bracket
+  escaped before the call, so data cannot close its block or open another;
+  `text_sha256` stays over the stored text. Only a reply that is exactly
+  `YES` after trimming whitespace, in any case, counts as answerable; every
+  other reply is a no.
+- **Filters**, in order, one drop code per row: `text_unavailable`,
+  `model_error`, `malformed_question` (not exactly one line), `too_short`,
+  `too_long`, `heading_copy` (a heading element of three or more words
+  verbatim), `identifier_only` (an identifier and fewer than two content
+  words, unless the class is `message_id`), `duplicate`, then the second model
+  pass: `not_answerable`.
+- **Manifest** (`PATH.manifest.json`): alias and resolved collection, the
+  stored `rules_v` (a collection mixing versions is refused), seed, model
+  label, classes, `max_section_siblings`, prompt sha256s, the hash rule,
+  `rows_sha256`, and counts scanned, sampled, kept, `gold_truncated` (kept
+  rows with a truncated gold list), dropped per code (sampled = kept +
+  dropped) and per class `requested` (the even share of `--count`, the
+  remainder to the classes named first), `eligible` (scanned points that can
+  carry the class), `sampled` and `kept`. Exit 0 with at least one row kept;
+  1 with none, and then no file is written (the counts are on stdout), so the
+  same path serves the next run; 2 on a refusal.
+
+Planned in #1317, not built: the retrieval eval and replay attribution reading `gold_chunk_ids` (PR
+2), and the qualification any eval set built from adjudicated candidates must
+pass before an A/B uses it (PR 2/3): measurable headroom at the default cut,
+and reproducing a known direction such as `rrf_k` 2 against 60.
 
 <a id="benchmarks"></a>
 ## 8. Benchmarks (`benchmark.py`, `loadtest.py`)

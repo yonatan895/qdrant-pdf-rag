@@ -37,7 +37,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mainframe_rag.config import load_settings
-from mainframe_rag.eval.datasets import QUERY_CLASSES, GoldenEntry
+from mainframe_rag.eval.datasets import (
+    CANDIDATE_REFUSAL,
+    QUERY_CLASSES,
+    GoldenEntry,
+    has_candidate_record,
+)
 from mainframe_rag.eval.retrieval import is_sibling_exception
 from mainframe_rag.retrieve.filters import parse_query
 
@@ -190,7 +195,13 @@ def load_entries(path: Path) -> tuple[list[GoldenEntry], list[str]]:
     of aborting the whole run."""
     entries: list[GoldenEntry] = []
     errors: list[str] = []
-    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    text = path.read_text(encoding="utf-8")
+    if has_candidate_record(text):
+        # Generated, unadjudicated rows are not golden entries (#1317): the
+        # whole file is refused before a row is parsed or echoed.
+        print(f"FAIL [{path.name}] {CANDIDATE_REFUSAL}", file=sys.stderr)
+        return [], [CANDIDATE_REFUSAL]
+    for lineno, line in enumerate(text.splitlines(), 1):
         line = line.strip()
         if not line or line.startswith("#"):
             continue

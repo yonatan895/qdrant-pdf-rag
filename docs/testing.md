@@ -291,6 +291,11 @@ mock or an entry point, not a defect:
 A per-package ratchet or delta check is deliberately not part of this baseline;
 it follows the maintainer's review of these numbers.
 
+<a id="reference-build"></a>
+### Reference build (`sh scripts/build_reference.sh <dir>`, `.github/workflows/pages.yml` job `reference-build`, #1320)
+
+Pull requests touching `src/`, `site-src/`, the script or the workflow run the warnings-as-errors Sphinx build (docs-only hash lock, about a minute; GitHub-only, not an acceptance producer). Modules are imported with third-party dependencies mocked, so module import must not read attributes of a mocked class (for example `Settings.model_fields`).
+
 <a id="airgap-tier"></a>
 ### Air-gap deployment tier (`sh scripts/tools/run-task.sh airgap:dryrun`, `tests/test_airgap_*.py`, local Kind)
 
