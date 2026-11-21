@@ -90,8 +90,49 @@ if [ -n "${SNEAKERNET_TRUSTED_PUB:-}${SNEAKERNET_GAP_TRUSTED_PUB:-}" ]; then
     cmp -s "$ANCHOR" sneakernet-signing.pub || {
         echo "FAIL: bundle pubkey does not match $ANCHOR_VAR, the release trust anchor for the bundle's origin ($ORIGIN) — untrusted bundle." >&2; exit 1;
     }
+    awk -v origin="$ORIGIN" '
+        /^gap_(base|issue|tag|tree):/ {
+            k = substr($0, 1, index($0, ":") - 1)
+            c[k]++
+            if (substr($0, length(k) + 1, 2) != ": ") bad = 1
+            v[k] = substr($0, length(k) + 3)
+        }
+        END {
+            if (origin == "upstream") {
+                if (c["gap_base"] || c["gap_issue"] || c["gap_tag"] || c["gap_tree"]) exit 1
+                exit 0
+            }
+            if (origin == "gap") {
+                if (bad) exit 1
+                if (c["gap_base"] != 1 || c["gap_issue"] != 1 || c["gap_tag"] != 1 || c["gap_tree"] != 1) exit 1
+                if (length(v["gap_base"]) != 40 || v["gap_base"] !~ /^[0-9a-f]+$/) exit 1
+                if (length(v["gap_tree"]) != 40 || v["gap_tree"] !~ /^[0-9a-f]+$/) exit 1
+                if (v["gap_issue"] !~ /^GL#[0-9]+$/) exit 1
+                if (v["gap_tag"] !~ /^[A-Za-z0-9._\/-]+$/) exit 1
+                exit 0
+            }
+            exit 0
+        }
+    ' MANIFEST.txt || {
+        if [ "$ORIGIN" = upstream ]; then
+            echo "FAIL: packed MANIFEST declares origin: upstream but carries gap release metadata (gap_base/gap_issue/gap_tag/gap_tree) — do not trust this bundle." >&2; exit 1;
+        fi
+        echo "FAIL: packed MANIFEST declares origin: gap but is missing or has malformed gap metadata (gap_base, gap_issue, gap_tag and gap_tree are each required once) — use a bundle packed by release.sh." >&2; exit 1;
+    }
 fi
 sha256sum -c SHA256SUMS
+# GH#1207 Rev 2 §3e (F6): unlike upstream bundles (which have the transfer-side
+# fingerprint anchor), a gap bundle is NEVER trust-on-first-use. After
+# SHA256SUMS has authenticated MANIFEST.txt, refuse origin: gap without
+# SNEAKERNET_GAP_TRUSTED_PUB and refuse gap metadata on a non-gap MANIFEST.
+if [ -z "${SNEAKERNET_TRUSTED_PUB:-}${SNEAKERNET_GAP_TRUSTED_PUB:-}" ]; then
+    if grep -qx 'origin: gap' MANIFEST.txt; then
+        echo "FAIL: no release trust anchor is configured for the bundle's origin (gap) — set SNEAKERNET_GAP_TRUSTED_PUB to the gap release signing public key obtained out of band." >&2; exit 1;
+    fi
+    if grep -Eq '^gap_(base|issue|tag|tree):' MANIFEST.txt; then
+        echo "FAIL: packed MANIFEST declares origin: upstream but carries gap release metadata (gap_base/gap_issue/gap_tag/gap_tree) — do not trust this bundle." >&2; exit 1;
+    fi
+fi
 BUNDLE_HEAD=$(git bundle list-heads repo.bundle HEAD | awk '{print $1}')
 [ "$BUNDLE_HEAD" = "$PACKED_SHA" ] || { echo "FAIL: repo.bundle HEAD does not match MANIFEST SHA." >&2; exit 1; }
 [ "$(uname -s)/$(uname -m)" = Linux/x86_64 ] || {

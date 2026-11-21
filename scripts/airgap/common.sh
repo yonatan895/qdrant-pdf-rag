@@ -572,6 +572,42 @@ verify_release_anchor() {
     unset _anchor_path
 }
 
+# $1 = MANIFEST, $2 = verified origin (upstream or gap).
+# GH#1207 Rev 2 §3e (F6): gap metadata lines (gap_base, gap_issue, gap_tag,
+# gap_tree) must all appear exactly once with valid syntax when origin is gap,
+# and none may appear when origin is upstream. Fixed messages only.
+check_manifest_gap_fields() {
+    awk -v origin="$2" '
+        /^gap_(base|issue|tag|tree):/ {
+            k = substr($0, 1, index($0, ":") - 1)
+            c[k]++
+            if (substr($0, length(k) + 1, 2) != ": ") bad = 1
+            v[k] = substr($0, length(k) + 3)
+        }
+        END {
+            if (origin == "upstream") {
+                if (c["gap_base"] || c["gap_issue"] || c["gap_tag"] || c["gap_tree"]) exit 1
+                exit 0
+            }
+            if (origin == "gap") {
+                if (bad) exit 1
+                if (c["gap_base"] != 1 || c["gap_issue"] != 1 || c["gap_tag"] != 1 || c["gap_tree"] != 1) exit 1
+                if (length(v["gap_base"]) != 40 || v["gap_base"] !~ /^[0-9a-f]+$/) exit 1
+                if (length(v["gap_tree"]) != 40 || v["gap_tree"] !~ /^[0-9a-f]+$/) exit 1
+                if (v["gap_issue"] !~ /^GL#[0-9]+$/) exit 1
+                if (v["gap_tag"] !~ /^[A-Za-z0-9._\/-]+$/) exit 1
+                exit 0
+            }
+            exit 0
+        }
+    ' "$1" || {
+        if [ "$2" = upstream ]; then
+            die "packed MANIFEST declares origin: upstream but carries gap release metadata (gap_base/gap_issue/gap_tag/gap_tree) — do not trust this bundle"
+        fi
+        die "packed MANIFEST declares origin: gap but is missing or has malformed gap metadata (gap_base, gap_issue, gap_tag and gap_tree are each required once) — use a bundle packed by release.sh"
+    }
+}
+
 # Signature and checksum chain for the MANIFEST the guard is about to trust
 # (issue #414): the guard may not read a bare file. $1 = MANIFEST path; its
 # directory must hold SHA256SUMS, SHA256SUMS.sig and sneakernet-signing.pub.
@@ -621,6 +657,7 @@ check_manifest_chain() {
     else
         verify_release_anchor "$_chain_dir" "$_chain_origin"
     fi
+    check_manifest_gap_fields "$1" "$_chain_origin"
     unset _chain_dir _chain_f _chain_want _chain_have _chain_rc _chain_origin
 }
 

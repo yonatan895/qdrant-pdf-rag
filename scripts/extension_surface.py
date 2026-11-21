@@ -14,7 +14,9 @@ Every category is derived from its owner, never from a hand list:
   airgap task runs, plus the inputs of the release import script
   (scripts/gap/import_release.sh, its INPUTS line);
 - gap_paths: the site-layer table of ADR-0009 §3;
-- bundle_layout: the tarball and member names and MANIFEST fields of pack.sh.
+- bundle_layout: the tarball and member names and MANIFEST fields of pack.sh,
+  plus the gap MANIFEST fields of the gap release packer (GAP_MANIFEST_FIELDS
+  in scripts/gap/release.py).
 
 A task or flag whose definition only refuses (a stub left under the old name)
 counts as retired, not current. An item that leaves the surface needs a
@@ -46,6 +48,7 @@ IMPORT_SCRIPT = Path("scripts/gap/import_release.sh")
 EXAMPLE = Path("airgap.env.example")
 MODEL_CONFIG = Path("scripts/airgap/model_config.py")
 PACK = Path("scripts/airgap/pack.sh")
+GAP_RELEASE = Path("scripts/gap/release.py")
 DEPLOY = Path("scripts/airgap/deploy.sh")
 AIRGAP_TASKS = Path("taskfiles/airgap.yml")
 MAP_VALUES = Path("scripts/airgap/map_values.py")
@@ -53,7 +56,7 @@ ROUTE_CA = Path("charts/mainframe-rag/ci/openwebui-route-ca.pem")
 IDP_CA = Path("tests/fixtures/extension-surface-idp-ca.pem")  # A loadable certificate; no key exists.
 # The files the derivation reads (tests copy exactly these).
 INPUTS = (EXAMPLE, Path("scripts/__init__.py"), Path("scripts/airgap"), Path("Taskfile.yml"),
-          Path("taskfiles"), ADR, IMPORT_SCRIPT, ROUTE_CA, IDP_CA, RELEASE_NOTES, SNAPSHOT)
+          Path("taskfiles"), ADR, IMPORT_SCRIPT, GAP_RELEASE, ROUTE_CA, IDP_CA, RELEASE_NOTES, SNAPSHOT)
 CATEGORIES = ("airgap_env_keys", "retired_env_keys", "task_names", "chart_values",
               "script_flags", "gap_paths", "bundle_layout")
 REFRESH = ".venv/bin/python scripts/extension_surface.py --write"
@@ -326,6 +329,11 @@ def bundle_layout(root: Path) -> list[str]:
     items = [f"tarball {outer}", f"tarball {outer}.sha256"]
     items += [f"member {name(word)}" for word in command[1].split()]
     items += [f"manifest {field}" for field in re.findall(r'echo "([a-z0-9_]+): ', manifest[1])]
+    gap = re.search(r"(?ms)^GAP_MANIFEST_FIELDS: tuple\[str, \.\.\.\] = \((.*?)\)$",
+                    (root / GAP_RELEASE).read_text(encoding="utf-8"))
+    if not gap:
+        raise ValueError("scripts/gap/release.py no longer has GAP_MANIFEST_FIELDS")
+    items += [f"manifest {field}" for field in re.findall(r'"([a-z0-9_]+)"', gap[1])]
     return sorted(set(items))
 
 
@@ -361,7 +369,8 @@ def _owners(category: str, item: str) -> tuple[str, ...]:
     if category == "chart_values":
         return (MAP_VALUES.as_posix(),) if scope == "mainframe-rag:" else (DEPLOY.as_posix(),)
     if category == "bundle_layout":  # The packer, and the bundle's readers.
-        return tuple(f"scripts/airgap/{name}" for name in ("pack.sh", "bootstrap.sh", "load.sh", "common.sh"))
+        return (*(f"scripts/airgap/{name}" for name in ("pack.sh", "bootstrap.sh", "load.sh", "common.sh")),
+                GAP_RELEASE.as_posix())
     if category == "gap_paths" or scope == "import-script ":  # The import script reads gap/.
         return (IMPORT_SCRIPT.as_posix(),)
     return ()
