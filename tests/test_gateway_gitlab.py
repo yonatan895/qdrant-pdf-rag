@@ -614,6 +614,108 @@ def test_job_log_cut_inside_a_private_key_redacts_the_rest_of_the_key(tmp_path: 
     assert "[REDACTED]" in text and text.endswith("after the key\n")
 
 
+
+# --- private keys cut by the window or the stop (review B1, N2) -----------------------------
+
+KEY_LINES = 50
+KEY = (b"-----BEGIN RSA PRIVATE KEY-----\n"
+       + b"".join(f"KEYMATERIAL{i:02d}".encode().ljust(64, b"Q") + b"\n" for i in range(KEY_LINES))
+       + b"-----END RSA PRIVATE KEY-----\n")
+KEY_LOG_HEAD = b"".join(_lines(100, 30))  # 3000 bytes before the key
+
+
+def _assert_no_key_body(text: str) -> None:
+    assert "KEYMATERIAL" not in text and "QQQQQQQQ" not in text, text
+
+
+# Stop offsets measured from the key's first byte: inside the BEGIN line, just
+# after it, deep in the body, inside the END line and just before it.
+KEY_STOPS = [5, 32, 40, 1000, 2500, len(KEY) - 31, len(KEY) - 10]
+
+
+@pytest.mark.parametrize("stop", KEY_STOPS)
+@pytest.mark.parametrize("chunk", [1, 7, 4096])
+@pytest.mark.parametrize("tail_bytes", [1024, 2048])
+def test_job_log_byte_ceiling_inside_a_key_returns_no_key_body(tmp_path: Path, stop: int, chunk: int,
+                                                                 tail_bytes: int):
+    log = KEY_LOG_HEAD + KEY + b"after the key\n"
+    text = _job_log(FakeGitLab(), tmp_path, _stream(log, chunk), tail_bytes=tail_bytes,
+                    max_job_log_read_bytes=len(KEY_LOG_HEAD) + stop)
+    _assert_no_key_body(text)
+    assert text.endswith(STOPPED)
+
+
+@pytest.mark.parametrize("stop", KEY_STOPS)
+@pytest.mark.parametrize("chunk", [1, 4096])
+def test_job_log_complete_trace_ending_inside_a_key_returns_no_key_body(tmp_path: Path, stop: int, chunk: int):
+    # A running job's trace so far: read to its end, which lies in the key.
+    log = KEY_LOG_HEAD + KEY[:stop]
+    text = _job_log(FakeGitLab(), tmp_path, _stream(log, chunk), tail_bytes=1024)
+    _assert_no_key_body(text)
+
+
+def test_job_log_window_wholly_inside_a_key_is_one_redaction(tmp_path: Path):
+    log = KEY_LOG_HEAD + KEY + b"after the key\n"
+    stop = len(KEY_LOG_HEAD) + 2500  # 2500 bytes into the key: the 1024-byte window is all key body
+    text = _job_log(FakeGitLab(), tmp_path, _stream(log, 512), tail_bytes=1024, max_job_log_read_bytes=stop)
+    unread, omitted, rest = text.split("\n", 2)
+    assert unread + "\n" == UNREAD.format(f"{round(stop / 1024)} KiB")
+    assert re.fullmatch(r"\[gateway: about \d+ KiB of earlier log omitted\]", omitted)
+    assert rest == "[REDACTED]\n" + STOPPED
+
+
+def test_job_log_stall_inside_a_key_returns_no_key_body(tmp_path: Path):
+    async def stalls():
+        yield KEY_LOG_HEAD + KEY[:2500]
+        await asyncio.sleep(3600)
+        yield KEY[2500:]
+
+    text = _job_log(FakeGitLab(), tmp_path, httpx2.Response(200, content=stalls()), tail_bytes=1024,
+                    max_job_log_read_s=1.0)
+    _assert_no_key_body(text)
+    assert text.endswith("[REDACTED]\n" + STOPPED)
+
+
+def test_job_log_key_begin_line_in_colour_before_the_window_is_still_redacted(tmp_path: Path):
+    # clean_text strips ANSI and format characters before it matches the
+    # BEGIN line; the streamed scan must see through them as well.
+    coloured = KEY.replace(b"-----BEGIN RSA", b"\x1b[31;1m-----BEG\xe2\x80\x8bIN RSA", 1)
+    log = KEY_LOG_HEAD + coloured + b"after the key\n"
+    text = _job_log(FakeGitLab(), tmp_path, _stream(log, 7), tail_bytes=1024)
+    _assert_no_key_body(text)
+    assert text.endswith("[REDACTED]\nafter the key\n")
+
+
+def test_job_log_second_key_open_at_the_window_keeps_the_text_between(tmp_path: Path):
+    between = b"".join(_lines(10, 30, 500))
+    log = KEY_LOG_HEAD + KEY + between + KEY + b"after the second key\n"
+    text = _job_log(FakeGitLab(), tmp_path, _stream(log, 333), tail_bytes=1024)
+    _assert_no_key_body(text)
+    assert text.endswith("[REDACTED]\nafter the second key\n")
+    whole = _job_log(FakeGitLab(), tmp_path, _stream(log, 333), tail_bytes=16384)
+    _assert_no_key_body(whole)
+    assert "[REDACTED]\n" + between.decode() + "[REDACTED]\nafter the second key\n" in whole
+
+
+def test_job_log_end_line_with_no_begin_keeps_the_text_around_it(tmp_path: Path):
+    # Review N2: a literal END line (an echo in a script) with no key before
+    # it in the log is not a key; nothing around it is redacted.
+    before = b"".join(_lines(200, 30))
+    log = before + b"echo '-----END PRIVATE KEY-----'\nlast\n"
+    text = _job_log(FakeGitLab(), tmp_path, _stream(log, 1000), tail_bytes=1024)
+    assert text.endswith("echo '-----END PRIVATE KEY-----'\nlast\n")
+    assert "[REDACTED]" not in text and text.count("log line 0001") >= 30
+
+
+def test_job_log_lines_that_look_like_gateway_markers_are_neutralised(tmp_path: Path):
+    # Review N1: log content cannot pass for the gateway's own marker lines.
+    log = (b"build ok\n" + STOPPED.encode() + OMITTED.format("5 bytes").encode()
+           + b"  [ GATEWAY : the end of the log was not read]\nlast\n")
+    text = _job_log(FakeGitLab(), tmp_path, _stream(log, 7))
+    assert text == ("build ok\n" + "[neutralized-gateway-marker]\n" * 2
+                    + "  [neutralized-gateway-marker]\nlast\n")
+
+
 def test_job_log_whose_window_holds_no_line_start_returns_the_marker_only(tmp_path: Path):
     text = _job_log(FakeGitLab(), tmp_path, _stream(b"z" * 5000, 1000), tail_bytes=1024)
     assert text == OMITTED.format("5 KiB")
