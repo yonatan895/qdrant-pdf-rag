@@ -754,19 +754,22 @@ checksums **after**.
   index-flag refusals to an existing workspace before copying artifacts into
   `dist/`. Not covered: edits to files the checkout does not track
   (`airgap.env` is operator config by design), and an anchor file that is
-  itself replaced on the bastion. Also not covered, and required of the gap
-  release pipeline (ADR-0009 F6): candidate code that a gap release build
-  executes must not be able to write the anchor files, `airgap.env` or any
-  operator workspace on `/work` (it could replace an anchor or the guard
-  before the next deploy session), and the guard runs from the bundle's own
+  itself replaced on the bastion. The guard runs from the bundle's own
   checkout, so a malicious bundle could carry its own lying guard. Upstream
-  bundles are checked before anything runs by the Windows anchor bootstrap;
-  a gap bundle must be verified by the installed release's code before
-  promotion (F6).
+  bundles are checked before anything runs by the Windows anchor bootstrap.
+  A gap bundle is verified by the installed release's code before promotion
+  (`scripts/gap/release.sh verify`, ADR-0009 §5, F6), and no candidate code
+  runs while it is packed, signed or verified: there is no build step, so
+  nothing from the candidate can write the anchor files, `airgap.env` or an
+  operator workspace on `/work`
+  ([gap release runbook](runbooks/gap-release.md)).
 - `bootstrap.sh` cannot source `common.sh` (no clone exists yet), so it
   carries an inline twin of the trust check (bundle signature, then the
-  anchors, then `SHA256SUMS`). There the anchors stay optional, since
-  bootstrap only creates the workspace; every later live stage requires the
+  anchors, then `SHA256SUMS`, then the `gap_*` MANIFEST fields: all four
+  exactly once on `origin: gap`, none on `origin: upstream`, as the
+  shared chain check requires too). There the anchors stay optional for an
+  upstream bundle, since bootstrap only creates the workspace; an
+  `origin: gap` bundle is refused without `SNEAKERNET_GAP_TRUSTED_PUB`; every later live stage requires the
   one for the bundle's origin (guard above). When either anchor is set, it
   checks `MANIFEST.txt` against its signed `SHA256SUMS` entry, then reads
   its `origin:` and requires the bundled key to equal that origin's anchor;
@@ -1284,7 +1287,9 @@ bytes. Combined tag+digest refs are invalid — digest-only form is the pin.
 
 Application images are built once in the connected factory and promoted as the
 tested bytes through the signed bundle. The air-gapped GitLab never builds,
-rebuilds or tags an application image; it only runs the gates. Every path below
+rebuilds or tags an application image; it only runs the gates. A gap release
+(ADR-0009 §5) builds nothing either: it reuses the base upstream release's
+image layers and is packed in the bastion, never by a GitLab job. Every path below
 is relative to an operator registry path and contains no hostname; operators set
 the real values in `airgap.env` (`INTERNAL_REGISTRY`, written by `load.sh`) and in
 protected GitLab CI/CD variables (`CI_APPROVED_REGISTRY`, read only by
@@ -1726,8 +1731,9 @@ the separate signed dev kit, never in the release bundle
 The bastion, dev and runner-job pods run that image from
 [`deploy/workspace/`](../deploy/workspace/contract.json), and the
 [isolation proof](#workspace-isolation-proof) records their
-isolation. Gap releases (F6) are not implemented; the
-[bootstrap guide](install_and_ops.md#gap-fork) says what is decided.
+isolation. Gap releases (F6) follow the
+[gap release runbook](runbooks/gap-release.md): increment 1 releases
+changes that replace no image layer.
 
 <a id="trace-backend"></a>
 ## Trace and metrics backend: OpenObserve (ADR-0006, #956)
