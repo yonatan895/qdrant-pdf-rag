@@ -376,8 +376,8 @@ class Settings(BaseSettings):
     research_stage_budget_s: float = Field(default=30.0, gt=0.0, le=120.0, allow_inf_nan=False)
     research_max_packed_excerpts: int = Field(default=24, ge=1, le=64)
     research_plan_max_excerpts: int = Field(default=16, ge=1, le=32)
-    research_plan_excerpt_chars: int = Field(default=600, ge=100, le=2000)
-    research_plan_max_tokens: int = Field(default=1024, ge=32, le=4096)
+    research_plan_excerpt_chars: int = Field(default=2000, ge=100, le=4000)
+    research_plan_max_tokens: int = Field(default=8192, ge=32, le=16384)
 
     # Reasoning effort control: directs the reasoning model to think more thoroughly
     # on complex operational, diagnostic, and comparative inquiries while conserving

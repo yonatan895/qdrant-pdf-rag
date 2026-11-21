@@ -337,8 +337,8 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "research_stage_budget_s": 30.0,
     "research_max_packed_excerpts": 24,
     "research_plan_max_excerpts": 16,
-    "research_plan_excerpt_chars": 600,
-    "research_plan_max_tokens": 1024,
+    "research_plan_excerpt_chars": 2000,
+    "research_plan_max_tokens": 8192,
     "llm_reasoning_efforts": "low,medium,xhigh",
     "llm_temperature": 0.2,
     "llm_extra_body": "",
@@ -735,8 +735,8 @@ def test_chat_image_types_refuse_unknown_or_duplicate_entries(raw):
     ("research_max_searches", 1, 3),
     ("research_max_packed_excerpts", 1, 64),
     ("research_plan_max_excerpts", 1, 32),
-    ("research_plan_excerpt_chars", 100, 2000),
-    ("research_plan_max_tokens", 32, 4096),
+    ("research_plan_excerpt_chars", 100, 4000),
+    ("research_plan_max_tokens", 32, 16384),
 ])
 def test_research_mode_hard_ceilings_are_enforced(field, low, high):
     """ADR-0013 D4 / #1325: hard ceilings in code (max_rounds <= 2,
