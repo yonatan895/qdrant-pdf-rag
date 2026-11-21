@@ -17,7 +17,7 @@ class's.
 
 ```text
 Contract / scope: who may call a team-tool gateway
-Status: implemented with evidence (library and middleware; no gateway mounts it yet)
+Status: implemented with evidence (library and middleware; mounted by the GitLab gateway, #1078)
 Identity-team path: #1088 (a) token exchange or (b) extra audiences, both configurable
 Source of authority: #1076 under tracker #1075; dependency approved in #1079/#1082 (PyJWT[crypto])
 Decision owner: src/mainframe_rag/mcp/tool_auth.py (verify_token, JwksCache, GatewayAuthMiddleware)
@@ -224,6 +224,8 @@ never returned. A gateway adds its own codes to `ERRORS` in its PR.
 | `upstream_too_large` | the backend answer is too large |
 | `upstream_error` | the backend could not answer this request |
 | `internal` | the tool failed |
+| `project_not_allowed` | the project is not available through this gateway |
+| `binary_content` | the file is not text |
 
 **Backend client (read-only).** `UpstreamClient(base_url, timeout_s, max_bytes,
 ca_file, allowed_methods, headers)` is the only backend client. It requires
@@ -241,7 +243,7 @@ logged. Redirects are never followed and proxy environment
 variables are ignored. Status mapping: 401/403 `upstream_refused`, 404
 `not_found`, 3xx, 429 and 5xx `upstream_unavailable`, other non-2xx
 `upstream_error`; transport errors `upstream_unavailable`; a timeout
-`upstream_timeout`; a body over `max_bytes` `upstream_too_large`. Its `repr`
+`upstream_timeout`; a body over `max_bytes` (or the call's own `max_bytes`) `upstream_too_large`. Its `repr`
 never shows the headers that carry the credential.
 
 **Configuration.** `GATEWAY_CONFIG_FILE` names one JSON file (a mounted
@@ -264,3 +266,116 @@ fixed prefix and `sub` (TD5). A gateway that sends it to a backend (the Splunk
 SPL comment) relies on this line for the hash-to-user map. It hides identity
 from casual readers of the backend's audit log, not from someone holding the
 user list.
+
+<a id="service-bearer"></a>
+### Bearer mode: one caller service (ADR-0014 B1)
+
+`ServiceBearerMiddleware(app, gateway=, secret=, caller=, exempt_paths=...,
+strip_openwebui_headers=True)` is the named exception of
+[ADR-0014](adr/0014-gitlab-team-token-gateway.md) D4: one caller service
+presents one shared secret in a single `Authorization: Bearer` header,
+compared in constant time. The secret must be at least 32 characters with no
+surrounding space. The app receives `Principal(sub="service:<caller>",
+groups=frozenset())`: no user is known, so per-user limits and the decision log
+cover the whole caller. A refusal is the same fixed `unauthenticated` 401 as
+above, logged with `sub: null`. `X-OpenWebUI-*` headers are stripped and never
+authorize. `create_gateway_app(config, tools, bearer_secret=...)` mounts it in
+place of `GatewayAuthMiddleware`; the configuration's `auth` section is then
+optional (`load_config(..., require_auth=False)`). Exactly one caller check is
+always mounted.
+
+<a id="gitlab-gateway"></a>
+## GitLab gateway (#1078)
+
+```text
+Contract / scope: the read-only GitLab gateway process
+Status: implemented with evidence (process and tools; no chart, NetworkPolicy or Open WebUI registration yet)
+Source of authority: ADR-0010 (TD2, TD3, TD6), ADR-0014 (E4, B1; proposed, approved in session 2026-11-21)
+Decision owner: src/mainframe_rag/gateways/gitlab.py (build_gateway, check_token_scopes, GitLabTools, GitLabBackend)
+Inputs and identities: GATEWAY_CONFIG_FILE (backend section below); GITLAB_TOKEN; GITLAB_AUTH_MODE; GITLAB_GATEWAY_BEARER_SECRET (bearer mode)
+Producers -> persisted state -> consumers: Open WebUI tool call -> gateway (no state) -> GitLab REST v4 GET -> framed text to the model
+Evidence: tests/test_gateway_gitlab.py (fake GitLab REST v4 server; any non-GET is a recorded violation)
+```
+
+**Process.** `python -m mainframe_rag.gateways.gitlab` on the agent image.
+Start-up reads the configuration and secrets, then checks the team token, then
+serves. It exits 2 on a configuration error (the message names the rule, never a
+value) and 3 when the token check refuses, logging
+`{"action": "gitlab_gateway_start", "decision": <code>}`. The token and the
+bearer secret are never logged.
+
+**Caller mode.** `GITLAB_AUTH_MODE` is `oidc` (default; also when unset) or
+`bearer`; anything else is a start-up error. `oidc` uses
+[caller verification](#caller-verification) with `require_single_audience`
+fixed on by the entry point, whatever the file says (TD6). `bearer` uses
+[bearer mode](#service-bearer) with the secret from
+`GITLAB_GATEWAY_BEARER_SECRET` and the caller `openwebui`. Its deployment
+guards (ingress from Open WebUI only; team-only sign-in or a team-only model
+grant) are ADR-0014 D4 and belong to the deployment.
+
+**Team token (ADR-0014 E4).** `GITLAB_TOKEN` holds a group access token. The
+tools get it through `GitLabTokenProvider.token_for(principal)`;
+`StaticGroupTokenProvider` returns the same token for every caller. It is sent
+only as `PRIVATE-TOKEN` to the configured GitLab; the caller's own token is
+never forwarded. `check_token_scopes` reads `personal_access_tokens/self` and
+refuses with a fixed reason:
+
+| Reason | When |
+|---|---|
+| `token_scope_too_wide` | any scope outside `read_api`, `read_repository` |
+| `token_scope_missing` | `read_api` absent |
+| `token_inactive` | `active` is not true or `revoked` is not false |
+| `scope_unverifiable` | 404, a body that is not JSON, or no list of string scopes |
+| `upstream_refused`, `upstream_unavailable`, `upstream_timeout`, `upstream_too_large`, `upstream_error` | as the backend client maps them |
+
+**Configuration `backend` section.** Unknown keys are refused.
+
+| Key | Default | Rule |
+|---|---|---|
+| `base_url` | required | https; no query, fragment or user info. Calls go to `<base_url>/api/v4` |
+| `allowed_groups` | `[]` | GitLab full paths; a project is in scope under a group at a segment boundary (`team` never admits `team-x`) |
+| `allowed_projects` | `[]` | project full paths (at least two segments). At least one of the two lists is non-empty |
+| `ca_file` | system trust | the site CA bundle; verification always on |
+| `timeout_s` | 15 | per request, in (0, 120] |
+| `max_response_bytes` | 1 MiB | a JSON answer |
+| `max_file_bytes` | 1 MiB | `read_file` |
+| `max_job_log_bytes` | 8 MiB | `read_job_log`; a longer log is refused, never read on |
+| `per_page` | 20 | at most 100 |
+| `max_page` | 10 | the highest `page` a tool accepts |
+
+Paths compare case-insensitively. A larger body than its cap is
+`upstream_too_large`; the runtime's `max_result_bytes` then bounds what the
+model receives.
+
+**Tools** (all read-only; `project` is a full path):
+`list_projects(search, page)`, `get_project(project)`,
+`list_repository_tree(project, path, ref, recursive, page)`,
+`read_file(project, file_path, ref)`, `search_code(project, query, ref, page)`,
+`list_commits(project, ref, path, page)`,
+`list_merge_requests(project, state, search, page)`,
+`get_merge_request(project, iid)`, `get_merge_request_diffs(project, iid, page)`,
+`list_issues(project, state, search, labels, page)`, `get_issue(project, iid)`,
+`list_pipelines(project, ref, status, page)`,
+`list_pipeline_jobs(project, pipeline_id, page)`,
+`read_job_log(project, job_id, tail_bytes)`.
+
+- Every per-project tool first refuses a path outside the allowlists
+  (`project_not_allowed`, no request sent), then reads `GET /projects/:path` and
+  refuses again unless the returned `path_with_namespace` is in scope (a moved
+  project answers under its old path). Later calls use the numeric id.
+- `list_projects` lists each allowed group's projects (with subgroups,
+  unarchived) and, on page 1, each allowed project outside those groups; rows
+  outside the allowlists are dropped.
+- `ref` refuses `..`; `file_path` refuses a leading `/`, `.` and `..` segments,
+  backslashes and control characters. Free-text arguments are at most 200
+  characters.
+- Rows carry selected fields only; people appear as usernames, never e-mail
+  addresses.
+- `read_file` returns text; a body with a NUL byte is `binary_content`.
+  `read_job_log` returns the last `tail_bytes` (default half of
+  `max_result_bytes`) with ANSI escape sequences removed, prefixed
+  `[earlier log lines omitted]` when cut.
+- Search is project-scoped (`scope=blobs`); there is no instance-wide search.
+
+GitLab's built-in MCP server (19.5 and later) is an optional later swap; with
+it, read-only would be only a client-side filter.

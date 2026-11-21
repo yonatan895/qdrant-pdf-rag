@@ -5,12 +5,15 @@ an IdP-issued OIDC JWT, checked against the IdP's JWKS for signature, issuer,
 audience, expiry and not-before, then group membership from a configured
 claim. Headers set by Open WebUI never authorize on their own. An optional
 RFC 8693 token exchange turns the token Open WebUI forwards into one
-addressed to this gateway (#1088). Contract: docs/team-tools.md.
+addressed to this gateway (#1088). `ServiceBearerMiddleware` is the named
+exception of ADR-0014: one caller service with a shared secret, no user.
+Contract: docs/team-tools.md.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import math
@@ -564,3 +567,68 @@ async def _refuse(
         headers.append((b"www-authenticate", b'Bearer error="insufficient_scope"'))
     await send({"type": "http.response.start", "status": exc.status, "headers": headers})
     await send({"type": "http.response.body", "body": body})
+
+
+SERVICE_SUB_PREFIX: Final = "service:"
+
+
+class ServiceBearerMiddleware:
+    """ASGI middleware for a gateway's bearer mode (ADR-0014): one trusted
+    caller service (Open WebUI) presents one shared secret, compared in
+    constant time. It hands the app a Principal whose `sub` is
+    `service:<caller>` and whose groups are empty: the gateway learns no user,
+    so per-user limits and the decision log apply to the whole caller.
+    `X-OpenWebUI-*` headers are removed, exactly as GatewayAuthMiddleware does,
+    and never authorize. `exempt_paths` behave as there."""
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        gateway: str,
+        secret: str,
+        caller: str,
+        exempt_paths: frozenset[str] = frozenset(),
+        strip_openwebui_headers: bool = True,
+    ) -> None:
+        if not isinstance(secret, str) or len(secret.strip()) < 32 or secret != secret.strip():
+            raise ValueError("the bearer secret must be at least 32 characters, without surrounding space")
+        for name, value in (("gateway", gateway), ("caller", caller)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string")
+        self.app = app
+        self.gateway = gateway
+        self._secret = secret.encode("utf-8")
+        self.principal = Principal(sub=SERVICE_SUB_PREFIX + caller, groups=frozenset())
+        self.exempt_paths = _str_set("exempt_paths", exempt_paths)
+        self.strip_openwebui_headers = strip_openwebui_headers
+
+    def __repr__(self) -> str:  # never the secret
+        return f"ServiceBearerMiddleware(gateway={self.gateway!r}, sub={self.principal.sub!r})"
+
+    def _forward(self, scope: MutableMapping[str, Any], **extra: Any) -> MutableMapping[str, Any]:
+        headers = scope.get("headers", [])
+        if self.strip_openwebui_headers:
+            headers = [(n, v) for n, v in headers if not n.lower().startswith(_OPENWEBUI_PREFIX)]
+        return {**scope, "headers": headers, **extra}
+
+    async def __call__(
+        self,
+        scope: MutableMapping[str, Any],
+        receive: Callable[[], Awaitable[Any]],
+        send: Callable[[Any], Awaitable[None]],
+    ) -> None:
+        kind = scope["type"]
+        if kind == "lifespan":
+            await self.app(scope, receive, send)
+            return
+        if kind == "http" and scope.get("path") in self.exempt_paths:
+            await self.app(self._forward(scope), receive, send)
+            return
+        token = _bearer(scope.get("headers", ()))
+        if token is None or not hmac.compare_digest(token.encode("utf-8"), self._secret):
+            _log_decision(self.gateway, None, UNAUTHENTICATED)
+            await _refuse(kind, AuthError(UNAUTHENTICATED), send, presented=token is not None)
+            return
+        _log_decision(self.gateway, self.principal.sub, "allow")
+        await self.app(self._forward(scope, **{_SCOPE_KEY: self.principal}), receive, send)

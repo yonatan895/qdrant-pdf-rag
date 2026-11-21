@@ -132,6 +132,7 @@ module = [
     "mainframe_rag.feedback.store",
     "mainframe_rag.gateways",
     "mainframe_rag.gateways.common",
+    "mainframe_rag.gateways.gitlab",
     "mainframe_rag.ingest",
     "mainframe_rag.ingest.bounds",
     "mainframe_rag.ingest.chrome",

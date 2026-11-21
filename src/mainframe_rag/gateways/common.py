@@ -57,6 +57,7 @@ from mainframe_rag.mcp.tool_auth import (
     GatewayAuthMiddleware,
     JwksCache,
     Principal,
+    ServiceBearerMiddleware,
     TokenExchangeConfig,
     TokenExchanger,
     principal_from_scope,
@@ -82,6 +83,9 @@ ERRORS: Final[dict[str, str]] = {
     "upstream_too_large": "the backend answer is too large",
     "upstream_error": "the backend could not answer this request",
     "internal": "the tool failed",
+    # GitLab gateway (#1078)
+    "project_not_allowed": "the project is not available through this gateway",
+    "binary_content": "the file is not text",
 }
 
 
@@ -134,7 +138,7 @@ class GatewayConfig:
     by the gateway module)."""
 
     gateway: str
-    auth: GatewayAuthConfig
+    auth: GatewayAuthConfig | None
     exchange: TokenExchangeConfig | None = None
     limits: Limits = field(default_factory=Limits)
     backend: Mapping[str, Any] = field(default_factory=dict)
@@ -163,11 +167,13 @@ def _section(
     return dict(value)
 
 
-def config_from_document(doc: object, gateway: str) -> GatewayConfig:
+def config_from_document(doc: object, gateway: str, *, require_auth: bool = True) -> GatewayConfig:
     """Validate a parsed configuration document for `gateway`. Unknown keys are
     refused (a misspelt limit must not silently fall back to its default), and
     an empty `allowed_groups` is refused (a gateway nobody may call is a
-    misconfiguration, not a safe default)."""
+    misconfiguration, not a safe default). With `require_auth=False` (a
+    gateway in bearer mode, ADR-0014) the `auth` section may be absent; when
+    present it is still validated."""
     if not isinstance(doc, dict):
         raise GatewayConfigError("the configuration must be a JSON object")
     unknown = sorted(set(doc) - _TOP_KEYS)
@@ -175,13 +181,13 @@ def config_from_document(doc: object, gateway: str) -> GatewayConfig:
         raise GatewayConfigError(f"unknown top-level keys: {', '.join(unknown)}")
     if doc.get("gateway") != gateway:
         raise GatewayConfigError("gateway does not name this gateway")
-    auth = _section(doc, "auth", _AUTH_KEYS, required=True)
+    auth = _section(doc, "auth", _AUTH_KEYS, required=require_auth)
     for key in _AUTH_LISTS & set(auth):
         items = auth[key]
         if not isinstance(items, list) or not all(isinstance(i, str) for i in items):
             raise GatewayConfigError(f"auth.{key} must be a list of strings")
         auth[key] = tuple(items) if key == "algorithms" else frozenset(items)
-    if not auth.get("allowed_groups"):
+    if (auth or require_auth) and not auth.get("allowed_groups"):
         raise GatewayConfigError("auth.allowed_groups must name at least one group")
     if not isinstance(auth.get("require_single_audience", False), bool):
         raise GatewayConfigError("auth.require_single_audience must be true or false")
@@ -195,7 +201,7 @@ def config_from_document(doc: object, gateway: str) -> GatewayConfig:
     if not isinstance(backend, dict):
         raise GatewayConfigError("backend must be an object")
     try:
-        auth_config = GatewayAuthConfig(gateway=gateway, **auth)
+        auth_config = GatewayAuthConfig(gateway=gateway, **auth) if auth else None
         exchange = TokenExchangeConfig(**exchange_doc) if exchange_doc else None
     except (TypeError, ValueError, OSError) as exc:
         # tool_auth's messages name fields only; TypeError is a missing field.
@@ -205,7 +211,9 @@ def config_from_document(doc: object, gateway: str) -> GatewayConfig:
     return GatewayConfig(gateway, auth_config, exchange, Limits(**limits_doc), backend)
 
 
-def load_config(gateway: str, environ: Mapping[str, str] | None = None) -> GatewayConfig:
+def load_config(
+    gateway: str, environ: Mapping[str, str] | None = None, *, require_auth: bool = True
+) -> GatewayConfig:
     """Read the file named by `GATEWAY_CONFIG_FILE` (a mounted ConfigMap)."""
     env = os.environ if environ is None else environ
     path = env.get(CONFIG_ENV, "")
@@ -217,7 +225,7 @@ def load_config(gateway: str, environ: Mapping[str, str] | None = None) -> Gatew
         raise GatewayConfigError("the configuration file is unreadable") from None
     except ValueError:
         raise GatewayConfigError("the configuration file is not JSON") from None
-    return config_from_document(doc, gateway)
+    return config_from_document(doc, gateway, require_auth=require_auth)
 
 
 # --- tools and argument validation ----------------------------------------------------
@@ -691,7 +699,13 @@ class UpstreamClient:
         data: Mapping[str, str] | None = None,
         json_body: object | None = None,
         headers: Mapping[str, str] | None = None,
+        max_bytes: int | None = None,
     ) -> UpstreamResponse:
+        """One backend call. `max_bytes` lowers or raises the body cap for this
+        call only (a GitLab job log); the default is the client's cap."""
+        cap = self._max_bytes if max_bytes is None else max_bytes
+        if cap <= 0:
+            raise ValueError("max_bytes must be positive")
         if method not in self._methods:
             raise RuntimeError("this gateway does not allow that method")  # programming error
         url = self._url(path)
@@ -718,7 +732,7 @@ class UpstreamClient:
                 body = bytearray()
                 async for chunk in response.aiter_bytes():
                     body += chunk
-                    if len(body) > self._max_bytes:
+                    if len(body) > cap:
                         raise GatewayError("upstream_too_large")
                 content_type = response.headers.get("content-type", "")
                 kept = {k.lower(): v for k, v in response.headers.items()}
@@ -940,20 +954,43 @@ def create_gateway_app(
     exchanger: TokenExchanger | None = None,
     limiter: UserLimiter | None = None,
     version: str = "0.1.0",
-) -> GatewayAuthMiddleware:
+    bearer_secret: str | None = None,
+    bearer_caller: str = "openwebui",
+) -> ASGIApp:
     """The gateway's ASGI app: `GatewayApp` behind `GatewayAuthMiddleware`,
     with `/healthz` the only exempt path and `X-OpenWebUI-*` headers always
     stripped. Tests inject `jwks`, `exchanger` and `limiter`; production builds
-    them from `config`."""
+    them from `config`.
+
+    Bearer mode (ADR-0014): with `bearer_secret`, `ServiceBearerMiddleware`
+    for the one caller service `bearer_caller` replaces the OIDC middleware,
+    with the same exempt path and header stripping. Exactly one caller check
+    is always mounted."""
     if not _NAME_RE.fullmatch(config.gateway):
         raise GatewayConfigError("the gateway name is a lower-case identifier")
     inner = GatewayApp(
         config.gateway, tools, config.limits, limiter or UserLimiter(config.limits), version
     )
+    app: ASGIApp = inner
+    if bearer_secret is not None:
+        if jwks is not None or exchanger is not None:
+            raise GatewayConfigError("bearer mode takes no JWKS or token exchange")
+        try:
+            return ServiceBearerMiddleware(
+                app,
+                gateway=config.gateway,
+                secret=bearer_secret,
+                caller=bearer_caller,
+                exempt_paths=frozenset({HEALTH_PATH}),
+                strip_openwebui_headers=True,
+            )
+        except ValueError as exc:  # the message names the rule, never the value
+            raise GatewayConfigError(str(exc)) from None
+    if config.auth is None:
+        raise GatewayConfigError("auth is required unless the gateway runs in bearer mode")
     jwks = jwks or JwksCache(config.auth)
     if exchanger is None and config.exchange is not None:
         exchanger = TokenExchanger(config.exchange)
-    app: ASGIApp = inner
     return GatewayAuthMiddleware(
         app,
         config.auth,
