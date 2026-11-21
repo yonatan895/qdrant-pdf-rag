@@ -22,8 +22,10 @@ unaffected.
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
+import math
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -43,6 +45,24 @@ QUERY_CLASSES = (
     "table",
 )
 
+# Status vocabulary for generated passage-level gold rows (#1317).
+# "candidate" and "rejected" are refused by every golden reader;
+# "adjudicated" (individually reviewed and accepted) and "spot_checked"
+# (batch passed a human spot-check threshold) may be loaded for private evals,
+# never for baseline recording.
+ADJUDICATED_STATUSES = frozenset({"adjudicated", "spot_checked"})
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _is_iso_date(value: str | None) -> bool:
+    if not isinstance(value, str) or not _ISO_DATE_RE.match(value):
+        return False
+    try:
+        datetime.date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
 
 class GoldenEntry(BaseModel):
     query: str = Field(min_length=1)
@@ -56,6 +76,16 @@ class GoldenEntry(BaseModel):
     id: str | None = None
     source: str | None = None
     note: str | None = None
+    # Passage-level gold fields (#1317 PR 2): optional, backward compatible.
+    # gold_chunk_ids[0] is the source chunk; gold_chunk_ids[1:] are section siblings.
+    gold_chunk_ids: list[str] = Field(default_factory=list)
+    gold_chunk_ids_truncated: bool = False
+    section_chunk_count: int | None = None
+    lexical_overlap: float | None = None
+    status: str | None = None
+    reviewers: list[str] = Field(default_factory=list)
+    reviewed_by: str | None = None
+    reviewed_at: str | None = None
 
     @model_validator(mode="after")
     def _behavior_matches_expectations(self) -> GoldenEntry:
@@ -64,12 +94,37 @@ class GoldenEntry(BaseModel):
                 "abstain entries must not set expected_doc_ids; "
                 "expectations are expressed via must_not_retrieve/must_not_message_ids"
             )
+        if self.expected_behavior == "abstain" and self.gold_chunk_ids:
+            raise ValueError("abstain entries must not set gold_chunk_ids")
         if self.expected_behavior == "answer" and not self.expected_doc_ids:
             raise ValueError(
                 "answer entries require expected_doc_ids; "
                 "use expected_behavior='abstain' for negative/trap queries"
             )
+        if self.gold_chunk_ids:
+            if any(not isinstance(cid, str) or not cid.strip() for cid in self.gold_chunk_ids):
+                raise ValueError("gold_chunk_ids entries must be non-empty strings")
+            if len(set(self.gold_chunk_ids)) != len(self.gold_chunk_ids):
+                raise ValueError("gold_chunk_ids must not contain duplicates")
+        if self.section_chunk_count is not None:
+            if type(self.section_chunk_count) is not int or self.section_chunk_count < 1:
+                raise ValueError("section_chunk_count must be a positive integer")
+            if self.gold_chunk_ids and self.section_chunk_count < len(self.gold_chunk_ids):
+                raise ValueError("section_chunk_count cannot be less than len(gold_chunk_ids)")
+        if self.lexical_overlap is not None and (
+            isinstance(self.lexical_overlap, bool)
+            or not math.isfinite(self.lexical_overlap)
+            or not (0.0 <= self.lexical_overlap <= 1.0)
+        ):
+            raise ValueError("lexical_overlap must be a finite number in [0.0, 1.0]")
+        if self.reviewed_at is not None and not _is_iso_date(self.reviewed_at):
+            raise ValueError("reviewed_at must be an ISO calendar date (YYYY-MM-DD)")
         return self
+
+
+def has_generated_entries(entries: Sequence[GoldenEntry]) -> bool:
+    """True when any entry carries ``source == 'generated'`` (#1317)."""
+    return any(entry.source == "generated" for entry in entries)
 
 
 def load_golden(path: Path) -> list[GoldenEntry]:
@@ -118,8 +173,9 @@ def load_golden_records_with_identity(
 def parse_golden_text(text: str) -> list[GoldenEntry]:
     """Parse an already acquired dataset without reopening its source."""
     # Before any row is validated: an invalid-entry message echoes row text.
-    if has_candidate_record(text):
-        raise SystemExit(CANDIDATE_REFUSAL)
+    refusal = refusal_for_golden_text(text)
+    if refusal is not None:
+        raise SystemExit(refusal)
     entries: list[GoldenEntry] = []
     for line in text.splitlines():
         line = line.strip()
@@ -182,36 +238,144 @@ class CandidateDatasetError(DatasetError):
     """A file holding generated, unadjudicated rows was passed as a dataset."""
 
 
-# One fixed message for every reader; it never carries row text.
+# One fixed message per refusal class; never carries row text.
 CANDIDATE_REFUSAL = (
     "refused: the file holds generated gold candidates (status \"candidate\"); "
     "an unadjudicated row is not an eval row and is never read as gold"
 )
+REJECTED_REFUSAL = (
+    "refused: the file holds rejected gold candidates (status \"rejected\"); "
+    "rejected rows are never read as gold"
+)
+SPOT_CHECK_REFUSAL = (
+    "refused: the file holds spot-check review records; "
+    "review sheets are not eval datasets and are never read as gold"
+)
+UNREVIEWED_GENERATED_REFUSAL = (
+    "refused: generated gold rows (source \"generated\") require human review provenance "
+    "(status \"adjudicated\" or \"spot_checked\" with named reviewers)"
+)
+GENERATED_BASELINE_REFUSAL = (
+    "refused: generated gold rows (source \"generated\") cannot enter a baseline; "
+    "model-written gold is never a baseline input"
+)
+_SPOT_CHECK_RECORD_TYPES = frozenset({"spot_check_header", "spot_check_item"})
+
+
+def _parse_json_object(line: str) -> dict[str, Any] | None:
+    try:
+        obj = json.loads(line.lstrip("\ufeff"))
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
 
 
 def is_candidate_record(line: str) -> bool:
     """Content identity of a generated gold candidate (issue #1317): a JSON
     object whose ``status`` is ``"candidate"``. The status alone decides,
     whatever the file is called and whichever other fields the row keeps."""
-    if '"candidate"' not in line:
+    if '"candidate"' not in line and "\\u" not in line and "\\U" not in line:
         return False
-    try:
-        obj = json.loads(line)
-    except ValueError:
-        return False
-    return isinstance(obj, dict) and obj.get("status") == "candidate"
+    obj = _parse_json_object(line)
+    return obj is not None and obj.get("status") == "candidate"
 
 
 def has_candidate_record(text: str) -> bool:
-    return '"candidate"' in text and any(is_candidate_record(line) for line in text.splitlines())
+    return (
+        ('"candidate"' in text or "\\u" in text or "\\U" in text)
+        and any(is_candidate_record(line) for line in text.splitlines())
+    )
+
+
+def is_rejected_record(line: str) -> bool:
+    """Content identity of a rejected gold candidate: a JSON object whose
+    ``status`` is ``"rejected"``."""
+    if '"rejected"' not in line and "\\u" not in line and "\\U" not in line:
+        return False
+    obj = _parse_json_object(line)
+    return obj is not None and obj.get("status") == "rejected"
+
+
+def has_rejected_record(text: str) -> bool:
+    return (
+        ('"rejected"' in text or "\\u" in text or "\\U" in text)
+        and any(is_rejected_record(line) for line in text.splitlines())
+    )
+
+
+def is_spot_check_record(line: str) -> bool:
+    """Content identity of a spot-check review record (header or item)."""
+    if '"record"' not in line and "\\u" not in line and "\\U" not in line:
+        return False
+    obj = _parse_json_object(line)
+    return obj is not None and obj.get("record") in _SPOT_CHECK_RECORD_TYPES
+
+
+def has_spot_check_record(text: str) -> bool:
+    return (
+        ('"record"' in text or "\\u" in text or "\\U" in text)
+        and any(is_spot_check_record(line) for line in text.splitlines())
+    )
+
+
+def is_unreviewed_generated_record(line: str) -> bool:
+    """True when a JSON object declares ``source == 'generated'`` without
+    valid human adjudication or batch spot-check provenance."""
+    if '"generated"' not in line and "\\u" not in line and "\\U" not in line:
+        return False
+    obj = _parse_json_object(line)
+    if obj is None or obj.get("source") != "generated":
+        return False
+    status = obj.get("status")
+    if status not in ADJUDICATED_STATUSES:
+        return True
+    reviewers = obj.get("reviewers")
+    if (
+        not isinstance(reviewers, list)
+        or not reviewers
+        or any(not isinstance(r, str) or not r.strip() for r in reviewers)
+    ):
+        return True
+    if status == "adjudicated":
+        reviewed_by = obj.get("reviewed_by")
+        reviewed_at = obj.get("reviewed_at")
+        if not isinstance(reviewed_by, str) or not reviewed_by.strip():
+            return True
+        if not _is_iso_date(reviewed_at):
+            return True
+    return False
+
+
+def has_unreviewed_generated_record(text: str) -> bool:
+    return (
+        ('"generated"' in text or "\\u" in text or "\\U" in text)
+        and any(is_unreviewed_generated_record(line) for line in text.splitlines())
+    )
+
+
+def refusal_for_golden_text(text: str) -> str | None:
+    """Fixed refusal message when ``text`` contains unadjudicated candidates,
+    rejected rows, spot-check review records, or generated rows missing human
+    review provenance; None otherwise."""
+    if has_candidate_record(text):
+        return CANDIDATE_REFUSAL
+    if has_rejected_record(text):
+        return REJECTED_REFUSAL
+    if has_spot_check_record(text):
+        return SPOT_CHECK_REFUSAL
+    if has_unreviewed_generated_record(text):
+        return UNREVIEWED_GENERATED_REFUSAL
+    return None
 
 
 def _refuse_candidate_rows(text: str) -> None:
-    """Refuse a dataset holding any candidate row (#806: a row needs human
-    adjudication before it enters an eval set). Every golden reader calls
-    this on the content it acquired, before parsing or scoring a row."""
-    if has_candidate_record(text):
-        raise CandidateDatasetError(CANDIDATE_REFUSAL)
+    """Refuse a dataset holding any candidate, rejected, or review record
+    (#806/#1317: a row needs human adjudication before it enters an eval set).
+    Every golden reader calls this on the content it acquired, before parsing
+    or scoring a row."""
+    refusal = refusal_for_golden_text(text)
+    if refusal is not None:
+        raise CandidateDatasetError(refusal)
 
 
 def resolve_venue(environ: Mapping[str, str] | None = None) -> str:

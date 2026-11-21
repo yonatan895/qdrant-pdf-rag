@@ -432,3 +432,144 @@ def test_main_exits_1_over_a_captured_error_row_and_still_reports(tmp_path, monk
     assert [r["label"] for r in results] == [c.label for c in candidate_configs(_settings())]
     assert {(r["failures"], r["n"]) for r in results} == {(1, 1)}
     assert len(capsys.readouterr().out.splitlines()) == 2 + len(results)
+
+
+# ------------------------------------- passage gold & #1310 attribution (#1317)
+def _passage_entry(
+    row_id: str,
+    query: str,
+    doc: str,
+    gold_chunk_ids: list[str],
+    *,
+    query_class: str = "diagnostic",
+    heading: str | None = "Part A > Valves",
+    truncated: bool = False,
+    overlap: float | None = 0.5,
+) -> GoldenEntry:
+    return GoldenEntry(
+        id=row_id,
+        query=query,
+        expected_doc_ids=[doc],
+        expected_heading=heading,
+        query_class=query_class,
+        source="generated",
+        status="adjudicated",
+        reviewers=["alice"],
+        reviewed_by="alice",
+        reviewed_at="2026-11-21",
+        gold_chunk_ids=gold_chunk_ids,
+        gold_chunk_ids_truncated=truncated,
+        section_chunk_count=len(gold_chunk_ids) + (5 if truncated else 0),
+        lexical_overlap=overlap,
+    )
+
+
+def test_replay_score_hits_and_run_config_support_gold_chunk_ids_without_heading_join():
+    # Plain entries without gold_chunk_ids emit no passage summary block.
+    plain = GoldenEntry(id="P-1", query="q", expected_doc_ids=["D1"], query_class="syntax")
+    plain_rec = _record(["c1"], docs={"c1": "D1"})
+    plain_res = run_config([plain_rec], {"q": plain}, SweepConfig(label="p"), _settings())
+    assert "passage" not in plain_res
+
+    # Entry with gold_chunk_ids: sibling c_sib at rank 1, source c_src at rank 3.
+    entry = _passage_entry("GEN-1", "q", "D1", ["c_src", "c_sib"], overlap=0.2)
+    rec = _record(["c_sib", "c_other", "c_src"], docs={"c_sib": "D1", "c_other": "D2", "c_src": "D1"})
+    # Ensure distinct physical pages so max_per_page=1 does not defer c_src.
+    rec["chunks"]["c_sib"]["page_start"] = 1
+    rec["chunks"]["c_other"]["page_start"] = 2
+    rec["chunks"]["c_src"]["page_start"] = 3
+    res = run_config([rec], {"q": entry}, SweepConfig(label="p", max_per_doc=3), _settings())
+    assert res["recall@1"] == 1.0
+    passage = res["passage"]
+    assert passage["checked"] == 1
+    assert passage["chunk"]["recall@1"] == 0.0
+    assert passage["chunk"]["recall@5"] == 1.0
+    assert passage["chunk"]["mrr"] == round(1 / 3, 3)
+    assert passage["section"]["recall@1"] == 1.0
+    assert passage["section"]["mrr"] == 1.0
+    assert passage["by_overlap_band"]["low"]["n"] == 1
+
+
+def test_attribution_classifies_hit_a_b_c_and_unclassifiable_across_1310_cuts():
+    from scripts.replay_sweep import attribute_config, attribution_configs
+
+    # 35 unique chunks on distinct docs/pages so RRF order equals dense order.
+    ids = [f"c{i:02d}" for i in range(35)]
+    base_docs = {cid: f"DOC-{i:02d}" for i, cid in enumerate(ids)}
+
+    def make_rec(query: str) -> dict[str, Any]:
+        legs = [{"effective_text": query,
+                 "dense": [_cp(cid, base_docs[cid], page=str(i), page_start=i) for i, cid in enumerate(ids)],
+                 "sparse": []}]
+        return legs_to_record(query, "nl", legs, {}, {"depth": 40})
+
+    entries = {
+        # Source c00 is rank 1 -> hit at every cut.
+        "q-hit": _passage_entry("GEN-HIT", "q-hit", "DOC-00", ["c00", "c01"], overlap=0.8),
+        # Source c25 is rank 26 (below 8/3 and 16/5, hit at 32/5), sibling c02 is rank 3 -> 'a' at 8/3 & 16/5 with source_in_pool=True!
+        "q-a": _passage_entry("GEN-A", "q-a", "DOC-25", ["c25", "c02"], overlap=0.45, truncated=True),
+        # Source c10 is rank 11, no sibling in hits -> 'b' at 8/3, 'hit' at 16/5 & 32/5!
+        "q-b": _passage_entry("GEN-B", "q-b", "DOC-10", ["c10", "c99"], overlap=0.15, heading=None),
+        # Source c_absent not in pool at all -> 'c' at every cut.
+        "q-c": _passage_entry("GEN-C", "q-c", "DOC-99", ["c_absent", "c_absent_sib"], query_class="syntax"),
+        # Doc-only entry without gold_chunk_ids -> unclassifiable.
+        "q-plain": GoldenEntry(id="DOC-ONLY", query="q-plain", expected_doc_ids=["DOC-00"], query_class="diagnostic"),
+        # Abstain entry -> unclassifiable.
+        "q-abstain": GoldenEntry(id="NEG-1", query="q-abstain", expected_behavior="abstain", query_class="negative"),
+    }
+    records = [make_rec(q) for q in entries]
+
+    configs = attribution_configs(_settings())
+    assert [(c.label, c.limit, c.max_per_doc, c.max_per_page) for c in configs] == [
+        ("16/5", 16, 5, 1),
+        ("8/3", 8, 3, 1),
+        ("32/5", 32, 5, 1),
+    ]
+    by_cut = {c.label: attribute_config(records, entries, c, _settings()) for c in configs}
+
+    assert by_cut["8/3"]["counts"] == {
+        "hit": 1, "a": 1, "b": 1, "c": 1, "unclassifiable": 2, "a_also_in_pool": 1,
+    }
+    assert by_cut["8/3"]["row_ids"] == {
+        "hit": ["GEN-HIT"], "a": ["GEN-A"], "b": ["GEN-B"], "c": ["GEN-C"],
+        "unclassifiable": ["DOC-ONLY", "NEG-1"],
+    }
+    # At 16/5, GEN-B (rank 11) moves from b -> hit; GEN-A stays 'a'.
+    assert by_cut["16/5"]["counts"]["hit"] == 2
+    assert by_cut["16/5"]["counts"]["a"] == 1
+    assert by_cut["16/5"]["counts"]["b"] == 0
+    # At 32/5, GEN-A (rank 26) moves from a -> hit.
+    assert by_cut["32/5"]["counts"]["hit"] == 3
+    assert by_cut["32/5"]["counts"]["a"] == 0
+    assert by_cut["16/5"]["truncated"] == 1 and by_cut["16/5"]["truncated_ids"] == ["GEN-A"]
+    assert by_cut["16/5"]["unoutlined"] == 1 and by_cut["16/5"]["unoutlined_ids"] == ["GEN-B"]
+
+
+def test_replay_sweep_cli_attribute_mode_is_text_free_and_honors_exit_codes(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("VENUE", raising=False)
+    monkeypatch.setattr("mainframe_rag.config.load_settings", lambda: _settings())
+    sentinel_query = "How does secret_quibble_lever_99 open the valve?"
+    sentinel_heading = "Secret_Heading_Zorblatt > Sub"
+    entry = _passage_entry("GEN-77", sentinel_query, "D1", ["c0", "c1"], heading=sentinel_heading)
+    pools = tmp_path / "pools.jsonl"
+    rec = legs_to_record(
+        sentinel_query, "nl",
+        [{"effective_text": sentinel_query, "dense": [_cp("c1", "D1", "1", page_start=1)], "sparse": []}],
+        {}, {"depth": 40},
+    )
+    pools.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+    golden = tmp_path / "adjudicated.jsonl"
+    golden.write_text(json.dumps(entry.model_dump()) + "\n", encoding="utf-8")
+    out = tmp_path / "attr.json"
+
+    rc = replay_sweep.main(["--pools", str(pools), "--golden", str(golden), "--attribute", "--json", str(out)])
+    assert rc == 0
+    captured = capsys.readouterr()
+    raw_json = out.read_text(encoding="utf-8")
+    # Text-free contract: no query text or heading leaks to stdout or JSON output.
+    for leak in (sentinel_query, "secret_quibble_lever_99", sentinel_heading, "Secret_Heading_Zorblatt"):
+        assert leak not in captured.out
+        assert leak not in raw_json
+    parsed = json.loads(raw_json)
+    assert [r["label"] for r in parsed] == ["16/5", "8/3", "32/5"]
+    assert parsed[0]["counts"]["a"] == 1 and parsed[0]["row_ids"]["a"] == ["GEN-77"]

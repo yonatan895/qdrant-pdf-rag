@@ -38,10 +38,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mainframe_rag.config import load_settings
 from mainframe_rag.eval.datasets import (
-    CANDIDATE_REFUSAL,
     QUERY_CLASSES,
     GoldenEntry,
-    has_candidate_record,
+    refusal_for_golden_text,
 )
 from mainframe_rag.eval.retrieval import is_sibling_exception
 from mainframe_rag.retrieve.filters import parse_query
@@ -63,6 +62,7 @@ class DocFacts:
 class CorpusFacts:
     docs: dict[str, DocFacts] = field(default_factory=dict)
     msg_docs: dict[str, set[str]] = field(default_factory=dict)
+    chunk_ids: set[str] = field(default_factory=set)
     points: int = 0
 
 
@@ -84,6 +84,7 @@ def build_corpus_facts(client, collection: str) -> CorpusFacts:
             doc_id = str(payload.get("doc_id") or "")
             if not doc_id:
                 continue
+            facts.chunk_ids.add(str(point.id))
             doc = facts.docs.setdefault(doc_id, DocFacts())
             doc.title = doc.title or str(payload.get("title") or "")
             page = str(payload.get("page_label") or "")
@@ -125,6 +126,11 @@ def verify_entry(entry: GoldenEntry, facts: CorpusFacts) -> tuple[list[str], lis
         entry.expected_page in doc.pages for doc in expected_docs
     ):
         fails.append(f"page {entry.expected_page!r} not among expected docs' page labels")
+
+    if entry.gold_chunk_ids and facts.chunk_ids:
+        missing_chunks = [cid for cid in entry.gold_chunk_ids if cid not in facts.chunk_ids]
+        if missing_chunks:
+            fails.append(f"gold_chunk_ids not in collection: {missing_chunks}")
 
     if entry.query_class == "message_id":
         for msg in parse_query(entry.query).message_ids:
@@ -196,11 +202,12 @@ def load_entries(path: Path) -> tuple[list[GoldenEntry], list[str]]:
     entries: list[GoldenEntry] = []
     errors: list[str] = []
     text = path.read_text(encoding="utf-8")
-    if has_candidate_record(text):
-        # Generated, unadjudicated rows are not golden entries (#1317): the
-        # whole file is refused before a row is parsed or echoed.
-        print(f"FAIL [{path.name}] {CANDIDATE_REFUSAL}", file=sys.stderr)
-        return [], [CANDIDATE_REFUSAL]
+    refusal = refusal_for_golden_text(text)
+    if refusal is not None:
+        # Generated, unadjudicated, rejected or review rows are not golden entries (#1317):
+        # the whole file is refused before a row is parsed or echoed.
+        print(f"FAIL [{path.name}] {refusal}", file=sys.stderr)
+        return [], [refusal]
     for lineno, line in enumerate(text.splitlines(), 1):
         line = line.strip()
         if not line or line.startswith("#"):

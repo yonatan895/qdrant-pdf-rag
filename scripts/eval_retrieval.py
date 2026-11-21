@@ -54,8 +54,10 @@ if str(_REPO / "src") not in sys.path:
 
 from mainframe_rag.config import load_settings
 from mainframe_rag.eval.datasets import (
+    GENERATED_BASELINE_REFUSAL,
     DatasetError,
     default_retrieval_paths,
+    has_generated_entries,
     load_golden,
     require_rc_for_collection,
     require_rc_for_golden,
@@ -177,6 +179,9 @@ def main(argv: list[str] | None = None) -> int:
     except DatasetError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2
+    if args.update_baseline and has_generated_entries(entries):
+        print(f"FAIL: {GENERATED_BASELINE_REFUSAL}", file=sys.stderr)
+        return 2
     report = evaluate(entries, settings)
     servable = report["representation"]["servable"]
     if args.update_baseline and not servable:
@@ -290,6 +295,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             if k in report
         }
+        if (report.get("passage") or {}).get("checked"):
+            metrics["passage"] = report["passage"]
         manifest = write_run_manifest("eval", settings, metrics)
         print(
             f"run manifest appended to evals/runs/eval_runs.jsonl (sha={manifest['git_sha'][:8]})",

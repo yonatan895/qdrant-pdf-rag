@@ -1555,35 +1555,40 @@ write one question per sampled passage, filters the result and writes
 **candidate** rows with chunk-level gold. It reads no golden set, holdout or
 release set and writes no baseline.
 
-- **Candidates, not an eval set.** Every row carries `status: "candidate"`, an
-  empty `reviewers` list and null `reviewed_by`/`reviewed_at`. A row needs human
-  adjudication before it enters any eval set (#806); model-written gold is
-  never reported as expert gold. No spot-check rate is defined yet (#1317,
-  maintainer decision); until then no candidate file is an input to a
-  baseline, a gate, a tuning sweep or an A/B.
-- **Candidates are unreadable as gold.** Every golden reader refuses a file
-  holding any row whose `status` is `"candidate"`, by content and whatever
-  the file is called, with one fixed message and no row text:
+- **Candidates, not an eval set.** Every generated row starts with
+  `status: "candidate"`, an empty `reviewers` list and null
+  `reviewed_by`/`reviewed_at`. A row needs human review before it enters any
+  eval set (#806); model-written gold keeps `source: "generated"` and is never
+  reported as expert gold or written into a tracked eval set or baseline
+  (`eval_retrieval.py`, `gate_l1.py` and `harness.py` refuse
+  `--update-baseline` with exit 2 whenever any row has `source: "generated"`).
+- **Unadjudicated rows are unreadable as gold.** Every golden reader refuses a
+  file holding any row with `status: "candidate"`, `status: "rejected"`,
+  spot-check review records (`spot_check_header` / `spot_check_item`), or
+  `source: "generated"` lacking valid human review provenance (`status` in
+  `"adjudicated"` / `"spot_checked"`, non-empty `reviewers`, and for
+  `"adjudicated"` a named `reviewed_by` and ISO `reviewed_at`), by content and
+  whatever the file is called, with a fixed message and no row text:
   `parse_golden_text` (a `SystemExit`, before any row is validated) and the
   byte readers behind `load_golden`, `load_golden_records`,
   `load_golden_records_with_identity`, `read_golden_text` and
-  `read_dev_only_bytes` (a `DatasetError`, so every `--golden`,
-  `--subset`, `--repeats`, `--sessions` and `--update-baseline` entry
-  point exits 2 before it scores or writes). `verify_golden`, which reads
-  its files itself, reports the same message as a FAIL for the file, verifies
-  none of its rows and exits 1. This is the whole state today: there is no accepted
-  status and no adjudication workflow, so no generated row can enter an eval
-  set through these tools. The refusal reads the status field; it is not
-  itself an adjudication record, and what replaces `"candidate"` after human
-  review is a maintainer decision (#1317, PR 2/3).
-- **Privacy.** Questions derive from manual text. The output is refused (exit
-  2, one fixed message, before any Qdrant or model call) when it or its parent
-  resolves inside any git work tree, has a name that is or starts with
-  `holdout.jsonl` or `release_set.jsonl` in any case (`HOLDOUT.jsonl`,
-  `holdout.jsonl.bak`), already exists, or its directory is missing or not
-  writable; files are created with mode 0600.
-  Stdout, logs and the manifest carry ids, counts and hashes only. The
-  real-corpus collection needs `VENUE=rc`, by name and through an alias.
+  `read_dev_only_bytes` (a `CandidateDatasetError` / `DatasetError`, so every
+  `--golden`, `--subset`, `--repeats`, `--sessions` and `--update-baseline`
+  entry point exits 2 before it scores or writes). `verify_golden`, which reads
+  its files itself, reports the same fixed message as a FAIL for the file,
+  verifies none of its rows and exits 1.
+- **Privacy.** Questions derive from manual text. Outputs of both
+  `gold_candidates` and `spot_check` are refused (exit 2, one fixed message,
+  before any Qdrant or model call) when the path or its parent resolves inside
+  any git work tree, has a name that is or starts with `holdout.jsonl` or
+  `release_set.jsonl` in any case (`HOLDOUT.jsonl`, `holdout.jsonl.bak`),
+  already exists (for new files), or its directory is missing or not writable;
+  files are created with mode 0600 (`O_EXCL | O_NOFOLLOW`; in-place review
+  updates replace atomically via a mode-0600 temp file and refuse symlinks).
+  The frozen holdout and release set are refused as inputs as well, regardless
+  of `VENUE`. Stdout, stderr, logs, manifests and reports carry ids, counts,
+  rates, reviewer names, dates and hashes only. The real-corpus collection
+  needs `VENUE=rc`, by name and through an alias.
 - **Row.** The `GoldenEntry` fields (`id`, `query`, `expected_doc_ids`,
   `expected_heading` and `expected_page` as a search hit exposes them,
   `query_class`, `source: "generated"`) plus `gold_chunk_ids` (the source
@@ -1632,10 +1637,64 @@ release set and writes no baseline.
   1 with none, and then no file is written (the counts are on stdout), so the
   same path serves the next run; 2 on a refusal.
 
-Planned in #1317, not built: the retrieval eval and replay attribution reading `gold_chunk_ids` (PR
-2), and the qualification any eval set built from adjudicated candidates must
-pass before an A/B uses it (PR 2/3): measurable headroom at the default cut,
-and reproducing a known direction such as `rrf_k` 2 against 60.
+- **Human spot-check and adjudication (`python -m mainframe_rag.eval.spot_check`).**
+  Four subcommands turn a private candidate file into a reviewed private eval
+  set (rating-mining stays in #806/#1199):
+  1. `export --candidates PATH --out REVIEW --sample N --seed S [--with-passages --collection NAME]`:
+     verifies the candidate file (and adjacent `.manifest.json` `rows_sha256`
+     when present), draws a deterministic sample stratified across
+     `query_class` and lexical-overlap band, and writes a private mode-0600
+     `gold-spot-check-review` JSONL bound to `candidates_sha256`. With
+     `--with-passages`, fetches source-chunk text through `QdrantReader` and
+     refuses (exit 2) if any passage's SHA-256 disagrees with `text_sha256`.
+  2. `record --review REVIEW --id ROW_ID --verdict accept|reject --reviewer NAME --reviewed-at YYYY-MM-DD [--reason TEXT] [--overwrite]`:
+     validates reviewer and ISO date, refuses overwriting an existing verdict
+     without `--overwrite`, and updates the private review sheet atomically.
+  3. `report --candidates PATH --review REVIEW [--min-accept-rate 0.85] [--min-sample 20] [--out REPORT]`:
+     verifies exact `candidates_sha256`, row count, row ids, `query_class` and
+     `text_sha256` binding, and outputs a text-free JSON report (overall,
+     `by_class`, `by_overlap_band`, and sorted id lists). Default pass policy:
+     zero unreviewed rows, `reviewed_n >= min(min_sample, total_candidates)`
+     (default `min_sample = 20`), and `accept_rate >= 0.85`. Verdict is
+     `passed` (exit 0), `incomplete` or `failed` (exit 1); refusal exits 2.
+  4. `promote --candidates PATH --review REVIEW --out EVAL [--mode adjudicated|spot-checked] [--min-accept-rate 0.85] [--min-sample 20]`:
+     writes nothing and exits 1 unless the spot-check verdict is `passed`.
+     Default `--mode adjudicated` (#806 strict per-row review) emits only
+     individually accepted rows with `status: "adjudicated"`, `reviewed_by`,
+     `reviewed_at` and `reviewers`. Explicit `--mode spot-checked` emits
+     accepted rows as `"adjudicated"`, excludes every rejected row, and marks
+     remaining unreviewed batch rows `status: "spot_checked"` with
+     `reviewed_by: None`, `reviewed_at: None`, the spot-check `reviewers` and
+     `spot_check` summary metadata. Every emitted row retains
+     `source: "generated"` and writes an adjacent `EVAL.manifest.json`.
+- **Passage-level scoring and `#1310` attribution.** `GoldenEntry` accepts
+  optional `gold_chunk_ids`, `gold_chunk_ids_truncated`, `section_chunk_count`,
+  `lexical_overlap`, `status`, `reviewers`, `reviewed_by` and `reviewed_at`
+  while keeping doc/page-only datasets byte-compatible.
+  - `eval.retrieval.score_passage_hits` and `summarize_passage` score
+    entries carrying `gold_chunk_ids` at **chunk** (`gold_chunk_ids[0]`),
+    **section** (any id in `gold_chunk_ids`) and **doc** level over the same
+    denominator, stratified by `query_class` and lexical-overlap band
+    (`low` < 0.3, `medium` 0.3–0.6, `high` >= 0.6), and report `truncated`
+    (section exceeded `MAX_SECTION_SIBLINGS`) and `unoutlined` (empty
+    `expected_heading`, where section equals document) counts explicitly.
+    `eval_retrieval.py` includes this block in JSON reports and Markdown
+    summaries only when passage-gold rows are present; `verify_golden.py`
+    verifies `gold_chunk_ids` exist in the collection.
+  - `scripts/replay_sweep.py` scores `gold_chunk_ids` directly from captured
+    chunk IDs (no `--headings-from` join needed) and adds `--attribute` for
+    text-free `#1310` classification across the `16/5`, `8/3` and `32/5` cuts
+    (per-page 1): `hit` (source chunk in final hits), `a` (sibling in final
+    hits; `a_also_in_pool` counts rows whose source is also in the prefetch
+    pool), `b` (source in prefetch pool below the cut, no sibling in hits),
+    `c` (source absent from pool), and `unclassifiable` (abstain or doc-only
+    rows), plus `truncated`/`unoutlined` counts, per-class and per-overlap-band
+    breakdowns, and row IDs only.
+
+Remaining in #1317 (PR 3 / stand-in lane): a live stand-in rerun of `#1310`'s
+attribution on a spot-checked generated set, and the qualification check before
+an A/B uses a generated set (measurable headroom at the default cut and
+reproducing a known direction such as `rrf_k` 2 against 60).
 
 <a id="benchmarks"></a>
 ## 8. Benchmarks (`benchmark.py`, `loadtest.py`)

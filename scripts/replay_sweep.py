@@ -50,7 +50,13 @@ if str(REPO / "src") not in sys.path:
 from capture_pool import record_to_rows, replay_pool
 
 from mainframe_rag.eval.datasets import GoldenEntry, load_golden
-from mainframe_rag.eval.retrieval import is_relevant_hit
+from mainframe_rag.eval.retrieval import (
+    attribute_entry,
+    is_relevant_hit,
+    score_passage_hits,
+    summarize_attribution,
+    summarize_passage,
+)
 
 # Production prefetch depth for the non-rerank path (query.PREFETCH_LIMIT):
 # pools may be captured deeper, so replays that mimic production must trim.
@@ -159,9 +165,7 @@ def replay_record(
     meta = record.get("_meta") or {}
     mode = str(meta.get("split_mode") or "single")
     rerank_active = bool(config.rerank) and meta.get("ce_scored") is True
-    prefetch = config.prefetch_limit
-    if prefetch is None:
-        prefetch = int(settings.rerank_candidates) if rerank_active else PREFETCH_LIMIT
+    prefetch = _prefetch_depth(record, config, settings)
     depth = _recorded_depth(record)
     if config.prefetch_limit is not None and depth < config.prefetch_limit:
         raise ValueError(
@@ -217,11 +221,32 @@ def _leg_weights(settings, text: str) -> tuple[float, float]:
     return _ranking_params(settings, parse_query(text).has_identifiers)[0]
 
 
+def _prefetch_depth(record: dict[str, Any], config: SweepConfig, settings) -> int:
+    """Exact per-leg prefetch depth applied by ``replay_record``."""
+    meta = record.get("_meta") or {}
+    rerank_active = bool(config.rerank) and meta.get("ce_scored") is True
+    if config.prefetch_limit is not None:
+        return config.prefetch_limit
+    return int(settings.rerank_candidates) if rerank_active else PREFETCH_LIMIT
+
+
+def replay_pool_ids(record: dict[str, Any], config: SweepConfig, settings) -> set[str]:
+    """All chunk IDs present in the config's trimmed prefetch pool across legs."""
+    prefetch = _prefetch_depth(record, config, settings)
+    ids: set[str] = set()
+    for leg in record.get("legs") or []:
+        ids.update(str(cid) for cid in (leg.get("dense") or [])[:prefetch])
+        ids.update(str(cid) for cid in (leg.get("sparse") or [])[:prefetch])
+    return ids
+
+
 def score_hits(hits: list, entry: GoldenEntry, *, section_level: bool = False) -> dict | None:
     """Relevance row for one replayed query (None for non-answer).
 
     Doc-level by default; ``section_level`` (headings joined) applies the
-    shared ``is_relevant_hit``, so ``expected_heading`` must match too."""
+    shared ``is_relevant_hit``, so ``expected_heading`` must match too.
+    Entries carrying ``gold_chunk_ids`` also receive chunk- and section-level
+    metrics from ``score_passage_hits`` without requiring a heading join."""
     expected = set(entry.expected_doc_ids)
     if entry.expected_behavior != "answer" or not expected:
         return None
@@ -243,6 +268,9 @@ def score_hits(hits: list, entry: GoldenEntry, *, section_level: bool = False) -
     violations = [h.doc_id for h in hits[:MUST_NOT_WINDOW] if h.doc_id in set(entry.must_not_retrieve)]
     if violations:
         row["violations"] = violations
+    passage = score_passage_hits(hits, entry, ks=(1, 5))
+    if passage is not None:
+        row.update(passage)
     return row
 
 
@@ -262,7 +290,7 @@ def summarize(rows: list[dict]) -> dict:
         sub = [r for r in rows if r.get("kind") == kind]
         kinds[kind] = {"n": len(sub), **{key: mean(sub, key) for key in ("recall@1", "recall@5", "mrr")}}
     violations = [v for r in rows for v in r.get("violations", [])]
-    return {
+    summary: dict[str, Any] = {
         "n": len(rows),
         "recall@1": mean(rows, "recall@1"),
         "recall@5": mean(rows, "recall@5"),
@@ -271,6 +299,9 @@ def summarize(rows: list[dict]) -> dict:
         "classes": classes,
         "kinds": kinds,
     }
+    if any("chunk_mrr" in r for r in rows):
+        summary["passage"] = summarize_passage(rows, ks=(1, 5))
+    return summary
 
 
 def run_config(
@@ -305,6 +336,52 @@ def run_config(
         "label": config.label, "scoring": scoring, "failures": failures, "unmatched": unmatched,
         **summarize(rows), "rows": rows,
     }
+
+
+def attribution_configs(settings) -> list[SweepConfig]:
+    """The three #1310 cuts: default 16/5, legacy 8/3, and deep 32/5 (per-page 1)."""
+    max_per_page = settings.retrieve_max_chunks_per_page
+    return [
+        SweepConfig(label="16/5", limit=16, max_per_doc=5, max_per_page=max_per_page),
+        SweepConfig(label="8/3", limit=8, max_per_doc=3, max_per_page=max_per_page),
+        SweepConfig(label="32/5", limit=32, max_per_doc=5, max_per_page=max_per_page),
+    ]
+
+
+def attribute_config(
+    records: list[dict],
+    entries_by_query: dict[str, GoldenEntry],
+    config: SweepConfig,
+    settings,
+    headings: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Text-free #1310 attribution over recorded pools at one cut."""
+    cut = {
+        "limit": config.limit,
+        "max_per_doc": config.max_per_doc,
+        "max_per_page": config.max_per_page,
+        "prefetch_limit": config.prefetch_limit or PREFETCH_LIMIT,
+    }
+    reason = unsupported_reason(records, config)
+    if reason is not None:
+        return {"label": config.label, "cut": cut, "skipped": reason}
+    rows: list[dict[str, Any]] = []
+    failures = 0
+    unmatched = 0
+    for record in records:
+        if "error" in record:
+            failures += 1
+            continue
+        entry = entries_by_query.get(str(record.get("query") or ""))
+        if entry is None:
+            unmatched += 1
+            continue
+        hits = replay_record(record, config, settings, headings)
+        pool_ids = replay_pool_ids(record, config, settings)
+        rows.append(attribute_entry(hits, pool_ids, entry))
+    return summarize_attribution(
+        rows, label=config.label, cut=cut, failures=failures, unmatched=unmatched
+    )
 
 
 def candidate_configs(settings) -> list[SweepConfig]:
@@ -448,7 +525,13 @@ def main(argv: list[str] | None = None) -> int:
         help="default: the pre-registered axes; rrf: rrf_k x sparse weight per query kind (#845); "
         "rerank: rrf_k x candidate depth x fusion alpha over CE-scored pools (#862)",
     )
+    parser.add_argument(
+        "--attribute", action="store_true",
+        help="run text-free #1310 (a)/(b)/(c)/unclassifiable attribution at 16/5, 8/3, and 32/5 cuts",
+    )
     args = parser.parse_args(argv)
+    if args.attribute and args.grid != "default":
+        parser.error("--attribute cannot be combined with a non-default --grid")
 
     from mainframe_rag.eval.datasets import (
         DatasetError,
@@ -490,6 +573,31 @@ def main(argv: list[str] | None = None) -> int:
         except HeadingJoinError as exc:
             print(f"FAIL: heading join refused: {exc}", file=sys.stderr)
             return 2
+
+    if args.attribute:
+        attr_results = [
+            attribute_config(records, entries_by_query, cfg, settings, headings)
+            for cfg in attribution_configs(settings)
+        ]
+        print("attribution: #1310 (hit / a: sibling in hits / b: in pool below cut / c: absent / unclassifiable)")
+        print(
+            f"{'cut':<8} {'n':>4} {'hit':>4} {'a':>4} {'b':>4} {'c':>4} {'uncls':>5} "
+            f"{'a+pool':>6} {'trunc':>5} {'unout':>5} {'fail':>4}"
+        )
+        for result in attr_results:
+            if "skipped" in result:
+                print(f"{result['label']:<8} skipped: {result['skipped']}")
+                continue
+            c = result["counts"]
+            print(
+                f"{result['label']:<8} {result['n']:>4} {c['hit']:>4} {c['a']:>4} {c['b']:>4} "
+                f"{c['c']:>4} {c['unclassifiable']:>5} {c['a_also_in_pool']:>6} "
+                f"{result['truncated']:>5} {result['unoutlined']:>5} {result['failures']:>4}"
+            )
+        if args.json:
+            args.json.parent.mkdir(parents=True, exist_ok=True)
+            args.json.write_text(json.dumps(attr_results, indent=2, ensure_ascii=False) + "\n")
+        return 1 if sum(result.get("failures", 0) for result in attr_results) else 0
 
     results = [
         run_config(records, entries_by_query, cfg, settings, headings)
