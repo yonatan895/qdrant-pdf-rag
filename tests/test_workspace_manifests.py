@@ -15,6 +15,7 @@ import copy
 import ipaddress
 import json
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -948,3 +949,204 @@ def test_runner_check_catches_an_override_privilege_or_token(line, expected):
         text = text.replace("    privileged = false", "    privileged = false\n" + line)
     config = render_runner(text, RUNNER_PARAMS)
     assert any(expected in v for v in runner_violations(config, "gate", RUNNER_PARAMS))
+
+
+# --- F6 ephemeral sign role and rehearsal egress (GH#1207 Rev 2 D3, D6) --------
+
+
+@pytest.mark.parametrize("mode", ["zero_egress", "vault"])
+def test_ephemeral_sign_templates_meet_f9_and_d3_invariants(mode):
+    sign_contract = CONTRACT["ephemeral_roles"]["sign"]
+    mode_spec = sign_contract["templates"][mode]
+    template = yaml.safe_load((ROOT / mode_spec["template"]).read_text(encoding="utf-8"))
+    declared = {p["name"] for p in template["parameters"]}
+    raw = json.dumps(template["objects"])
+    referenced = set(_STRING_PARAM.findall(raw)) | set(_JSON_PARAM.findall(raw))
+    assert referenced == declared
+
+    params = {
+        "SIGN_NAMESPACE": "site-rag-sign",
+        "DEVKIT_REPOSITORY": f"{REGISTRY_PATH}/devkit",
+        "DEVKIT_DIGEST": DIGEST,
+        "PULL_SECRET": "mfr-prod-pull",
+    }
+    if mode == "vault":
+        params["VAULT_CIDRS"] = _peers("10.9.0.4/32")
+    objects = render(template, params)
+    assert "${" not in json.dumps(objects)
+    assert {o["kind"] for o in objects} == {"NetworkPolicy", "ServiceAccount", "Pod"}
+
+    # Policies precede pod so pod never starts without default-deny egress.
+    kinds = [o["kind"] for o in objects]
+    assert max(i for i, k in enumerate(kinds) if k == "NetworkPolicy") < kinds.index("Pod")
+
+    for obj in objects:
+        assert forbidden_label_violations(obj) == []
+        assert obj["metadata"]["namespace"] == "site-rag-sign"
+
+    sa = _named(objects, "ServiceAccount", sign_contract["service_account"])
+    assert service_account_violations(sa, "sign") == []
+
+    pod = _named(objects, "Pod", "mfr-sign")
+    spec = pod["spec"]
+    assert pod["metadata"]["labels"] == {LABEL_KEY: "sign"}
+    assert spec["serviceAccountName"] == "mfr-sign"
+    assert spec["automountServiceAccountToken"] is False
+    assert spec["restartPolicy"] == "Never"
+    assert spec["activeDeadlineSeconds"] > 0
+    assert spec["imagePullSecrets"] == [{"name": "mfr-prod-pull"}]
+    # No Secret mounts and no /work PVC (only memory-only /run/mfr-session).
+    refs = secret_references(spec)
+    assert {n for k, n in refs if k != "imagePullSecrets"} == set()
+    volumes = {v["name"]: v for v in spec["volumes"]}
+    assert list(volumes) == ["session"]
+    assert volumes["session"]["emptyDir"]["medium"] == "Memory"
+    assert not any("persistentVolumeClaim" in v for v in spec["volumes"])
+    [container] = spec["containers"]
+    assert _DIGEST_REF.match(container["image"])
+    assert container["securityContext"]["allowPrivilegeEscalation"] is False
+    assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
+
+    policies = {p["metadata"]["name"]: p for p in _of_kind(objects, "NetworkPolicy")}
+    deny = policies[mode_spec["default_deny"]]
+    assert deny["spec"] == {
+        "podSelector": {"matchLabels": {LABEL_KEY: "sign"}},
+        "policyTypes": ["Egress"],
+    }
+    if mode == "zero_egress":
+        assert set(policies) == {mode_spec["default_deny"]}
+    else:
+        assert set(policies) == {mode_spec["default_deny"], mode_spec["allow_policy"]}
+        allow = policies[mode_spec["allow_policy"]]
+        assert allow["spec"]["policyTypes"] == ["Egress"]
+        assert allow["spec"]["egress"][0] == {
+            "to": [{"ipBlock": {"cidr": "10.9.0.4/32"}}],
+            "ports": [{"protocol": "TCP", "port": 8200}],
+        }
+
+
+def test_rehearsal_egress_template_isolates_rehearsal_namespace():
+    reh_contract = CONTRACT["rehearsal"]
+    template = yaml.safe_load((ROOT / reh_contract["template"]).read_text(encoding="utf-8"))
+    declared = {p["name"] for p in template["parameters"]}
+    raw = json.dumps(template["objects"])
+    assert (set(_STRING_PARAM.findall(raw)) | set(_JSON_PARAM.findall(raw))) == declared
+
+    objects = render(
+        template,
+        {
+            "REHEARSAL_NAMESPACE": "site-rag-rehearsal",
+            "GATEWAY_CIDRS": _peers("10.3.0.9/32"),
+            "GATEWAY_PORT": "443",
+        },
+    )
+    assert "${" not in json.dumps(objects)
+    policies = {p["metadata"]["name"]: p for p in _of_kind(objects, "NetworkPolicy")}
+    assert set(policies) == {reh_contract["default_deny"], reh_contract["allow_policy"]}
+    deny = policies[reh_contract["default_deny"]]
+    assert deny["spec"] == {"podSelector": {}, "policyTypes": ["Egress"]}
+    allow = policies[reh_contract["allow_policy"]]
+    assert allow["spec"]["podSelector"] == {}
+    assert allow["spec"]["egress"][0] == {"to": [{"podSelector": {}}]}
+    assert allow["spec"]["egress"][1] == {
+        "to": [{"ipBlock": {"cidr": "10.3.0.9/32"}}],
+        "ports": [{"protocol": "TCP", "port": 443}],
+    }
+
+
+# --- release.sh render-role: the operator's render path refuses allow-all egress --
+
+
+_SIGN_PARAMS = {
+    "SIGN_NAMESPACE": "site-rag-sign",
+    "DEVKIT_REPOSITORY": f"{REGISTRY_PATH}/devkit",
+    "DEVKIT_DIGEST": DIGEST,
+    "PULL_SECRET": "mfr-prod-pull",
+}
+_ROLE_RENDERS = {
+    "sign": ({**_SIGN_PARAMS}, None),
+    "sign-vault": ({**_SIGN_PARAMS, "VAULT_CIDRS": _peers("10.9.0.4/32")}, "VAULT_CIDRS"),
+    "rehearsal-egress": (
+        {"REHEARSAL_NAMESPACE": "site-rag-rehearsal", "GATEWAY_CIDRS": _peers("10.3.0.9/32")},
+        "GATEWAY_CIDRS",
+    ),
+}
+
+
+def _render_role(tmp_path: Path, template: str, objects: list[Obj]) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Run release.sh render-role with a fake `oc` that prints what `oc process`
+    would (the renderer above) and records its argv."""
+    canned = tmp_path / "oc-output.json"
+    canned.write_text(json.dumps({"kind": "List", "apiVersion": "v1", "items": objects}))
+    argv_log = tmp_path / "oc-argv"
+    oc = tmp_path / "oc"
+    oc.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > "{argv_log}"\ncat "{canned}"\n')
+    oc.chmod(0o755)
+    params = tmp_path / "params.env"
+    params.write_text("UNUSED=1\n")
+    proc = subprocess.run(
+        ["sh", str(ROOT / "scripts/gap/release.sh"), "render-role", "--template", template,
+         "--param-file", str(params), "--oc", str(oc)],
+        capture_output=True, text=True, check=False, timeout=60,
+    )
+    argv = argv_log.read_text().splitlines() if argv_log.exists() else []
+    return proc, argv
+
+
+@pytest.mark.parametrize("template", sorted(_ROLE_RENDERS))
+def test_render_role_passes_a_bounded_render_through(tmp_path: Path, template: str):
+    params, _ = _ROLE_RENDERS[template]
+    tpl = yaml.safe_load((WORKSPACE / f"{template}.template.yaml").read_text(encoding="utf-8"))
+    objects = render(tpl, params)
+    proc, argv = _render_role(tmp_path, template, objects)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["items"] == objects
+    assert argv == ["process", "--local", "-f", str(WORKSPACE / f"{template}.template.yaml"),
+                    "--param-file", str(tmp_path / "params.env"), "-o", "json"]
+
+
+@pytest.mark.parametrize("template", ["sign-vault", "rehearsal-egress"])
+def test_render_role_refuses_an_empty_peer_list(tmp_path: Path, template: str):
+    """`-p VAULT_CIDRS=[]` / `GATEWAY_CIDRS=[]`: `oc process` renders `to: []`, which
+    allows every destination on that port (#1336 P4). Nothing reaches stdout."""
+    params, cidr_param = _ROLE_RENDERS[template]
+    assert cidr_param is not None
+    tpl = yaml.safe_load((WORKSPACE / f"{template}.template.yaml").read_text(encoding="utf-8"))
+    objects = render(tpl, {**params, cidr_param: "[]"})
+    assert any(rule.get("to") == [] for o in objects if o["kind"] == "NetworkPolicy"
+               for rule in o["spec"].get("egress", []))
+    proc, _ = _render_role(tmp_path, template, objects)
+    assert proc.returncode != 0
+    assert proc.stdout == ""
+    assert "Traceback" not in proc.stderr
+    assert "allows every destination" in proc.stderr
+
+
+@pytest.mark.parametrize("rule", [{}, {"ports": [{"protocol": "TCP", "port": 8200}]}, {"to": [{}]}])
+def test_render_role_refuses_any_egress_rule_without_a_bounded_peer(tmp_path: Path, rule: Obj):
+    params, _ = _ROLE_RENDERS["sign-vault"]
+    tpl = yaml.safe_load((WORKSPACE / "sign-vault.template.yaml").read_text(encoding="utf-8"))
+    objects = render(tpl, params)
+    _named(objects, "NetworkPolicy", "mfr-sign-vault-egress")["spec"]["egress"].append(rule)
+    proc, _ = _render_role(tmp_path, "sign-vault", objects)
+    assert (proc.returncode, proc.stdout) == (1, "")
+    assert "allows every destination" in proc.stderr
+
+
+@pytest.mark.parametrize("output", ["", "not json", '{"kind": "List"}', '{"items": ["x"]}'])
+def test_render_role_refuses_unreadable_oc_output_with_a_fixed_message(tmp_path: Path, output: str):
+    oc = tmp_path / "oc"
+    canned = tmp_path / "out"
+    canned.write_text(output)
+    oc.write_text(f'#!/bin/sh\ncat "{canned}"\n')
+    oc.chmod(0o755)
+    params = tmp_path / "params.env"
+    params.write_text("UNUSED=1\n")
+    proc = subprocess.run(
+        ["sh", str(ROOT / "scripts/gap/release.sh"), "render-role", "--template", "sign",
+         "--param-file", str(params), "--oc", str(oc)],
+        capture_output=True, text=True, check=False, timeout=60,
+    )
+    assert (proc.returncode, proc.stdout) == (1, "")
+    assert "Traceback" not in proc.stderr
+    assert "STOP:" in proc.stderr

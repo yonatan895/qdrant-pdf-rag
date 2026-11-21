@@ -1,0 +1,145 @@
+# F6 ephemeral Vault-signing pod (GH#1207 Rev 2 §3b, D3 option i/ii when the
+# maintainer's workstation cannot reach Vault directly).
+#
+# Invariants:
+#   - Egress ONLY to Vault and openshift-dns (default-deny + mfr-sign-vault-egress).
+#   - No RBAC, no ServiceAccount token automount, no Secret mount.
+#   - No /work PVC mount (only a memory-backed /run/mfr-session emptyDir).
+#   - Operator pipes a short-lived Vault token in for one call, then deletes the pod.
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: mfr-sign-vault
+  annotations:
+    description: F6 ephemeral Vault-signing pod, ServiceAccount, and Vault+DNS egress policies (D3).
+parameters:
+  - name: SIGN_NAMESPACE
+    description: Namespace where the ephemeral signing pod runs (never the CI namespace).
+    required: true
+  - name: DEVKIT_REPOSITORY
+    description: Dev kit image repository in the site registry (<registry>/<path>, no tag or digest).
+    required: true
+  - name: DEVKIT_DIGEST
+    description: Dev kit image manifest digest (sha256:<64 lowercase hex>).
+    required: true
+  - name: PULL_SECRET
+    description: Pull-only registry robot Secret (kubelet image pulls only; never mounted).
+    required: true
+  - name: VAULT_CIDRS
+    description: JSON list of NetworkPolicy ipBlock peers for the site Vault endpoint; never empty.
+    required: true
+  - name: VAULT_PORT
+    description: Site Vault API TCP port.
+    value: "8200"
+  - name: SIGN_CPU_REQUEST
+    value: 100m
+  - name: SIGN_CPU_LIMIT
+    value: 500m
+  - name: SIGN_MEMORY_REQUEST
+    value: 128Mi
+  - name: SIGN_MEMORY_LIMIT
+    value: 256Mi
+  - name: SIGN_EPHEMERAL_STORAGE_REQUEST
+    value: 64Mi
+  - name: SIGN_EPHEMERAL_STORAGE_LIMIT
+    value: 256Mi
+objects:
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: mfr-sign-default-deny-egress
+      namespace: ${SIGN_NAMESPACE}
+      labels:
+        workspace.mainframe-rag.io/role: sign
+    spec:
+      podSelector:
+        matchLabels:
+          workspace.mainframe-rag.io/role: sign
+      policyTypes: [Egress]
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: mfr-sign-vault-egress
+      namespace: ${SIGN_NAMESPACE}
+      labels:
+        workspace.mainframe-rag.io/role: sign
+    spec:
+      podSelector:
+        matchLabels:
+          workspace.mainframe-rag.io/role: sign
+      policyTypes: [Egress]
+      egress:
+        - to: "${{VAULT_CIDRS}}"
+          ports:
+            - protocol: TCP
+              port: "${{VAULT_PORT}}"
+        - to:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: openshift-dns
+          ports:
+            - protocol: UDP
+              port: 53
+            - protocol: TCP
+              port: 53
+            - protocol: UDP
+              port: 5353
+            - protocol: TCP
+              port: 5353
+  - apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: mfr-sign
+      namespace: ${SIGN_NAMESPACE}
+      labels:
+        workspace.mainframe-rag.io/role: sign
+    automountServiceAccountToken: false
+  - apiVersion: v1
+    kind: Pod
+    metadata:
+      name: mfr-sign
+      namespace: ${SIGN_NAMESPACE}
+      labels:
+        workspace.mainframe-rag.io/role: sign
+    spec:
+      serviceAccountName: mfr-sign
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      imagePullSecrets:
+        - name: ${PULL_SECRET}
+      restartPolicy: Never
+      activeDeadlineSeconds: 1800
+      terminationGracePeriodSeconds: 5
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: sign
+          image: ${DEVKIT_REPOSITORY}@${DEVKIT_DIGEST}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 60 & wait $!; done"]
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: ${SIGN_CPU_REQUEST}
+              memory: ${SIGN_MEMORY_REQUEST}
+              ephemeral-storage: ${SIGN_EPHEMERAL_STORAGE_REQUEST}
+            limits:
+              cpu: ${SIGN_CPU_LIMIT}
+              memory: ${SIGN_MEMORY_LIMIT}
+              ephemeral-storage: ${SIGN_EPHEMERAL_STORAGE_LIMIT}
+          volumeMounts:
+            - name: session
+              mountPath: /run/mfr-session
+      volumes:
+        - name: session
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
