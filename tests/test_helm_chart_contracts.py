@@ -537,6 +537,21 @@ def test_coding_mode_off_reaches_the_pod_settings_and_unset_renders_nothing(monk
     assert Settings(_env_file=None).answer_coding_mode_enabled is False
 
 
+def test_spl_mode_on_reaches_the_pod_settings_and_unset_renders_nothing(monkeypatch):
+    """Issue #1293: default off renders no variable (the pod keeps the off
+    default and unset manifests are unchanged); true crosses the chart into
+    Settings."""
+    from mainframe_rag.config import Settings
+
+    default = env_map(run_new_template({})["Deployment", "rag-agent"])
+    assert "ANSWER_SPL_MODE_ENABLED" not in default
+    assert Settings(_env_file=None).answer_spl_mode_enabled is False
+    pod = env_map(run_new_template({"models": {"reasoning": {"splModeEnabled": True}}})[
+        "Deployment", "rag-agent"])
+    monkeypatch.setenv("ANSWER_SPL_MODE_ENABLED", pod["ANSWER_SPL_MODE_ENABLED"]["value"])
+    assert Settings(_env_file=None).answer_spl_mode_enabled is True
+
+
 def test_chat_images_on_reaches_the_pod_settings_and_unset_renders_nothing(monkeypatch):
     """Issue #1287: default off renders no variable (the pod keeps the off
     default and unset manifests are unchanged); true crosses the chart into
