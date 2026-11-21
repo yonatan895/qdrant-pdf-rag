@@ -69,7 +69,7 @@ exists here. "Site record" items cannot be verified from this tree.
 | Item | What exists today | Verified by |
 |---|---|---|
 | F1 | Unverified-checkout refusal: `check_checkout_sha` in `scripts/airgap/common.sh` refuses, outside dry-run, a checkout that is not a verified signed release, except under the documented connected-rehearsal opt-out `AIRGAP_UNVERIFIED_CHECKOUT=1` together with `CI_REHEARSAL=1`. Its callers are `scripts/airgap/validate.sh`, `ingest.sh`, `load.sh`, `deploy.sh` and `retire_legacy.sh`. **Enforced.** | The function and those callers are in the files; `grep -rn check_checkout_sha scripts` finds them. |
-| F2 | Origin-bound anchors: `scripts/airgap/bootstrap.sh` reads exactly one `origin:` line and, when an anchor is set, verifies with `SNEAKERNET_TRUSTED_PUB` for upstream or `SNEAKERNET_GAP_TRUSTED_PUB` for gap; without one it is trust-on-first-use. **In code.** | The anchor and origin handling is in the file. |
+| F2 | Origin-bound anchors: `scripts/airgap/bootstrap.sh` reads exactly one `origin:` line and, when an anchor is set, verifies with `SNEAKERNET_TRUSTED_PUB` for upstream or `SNEAKERNET_GAP_TRUSTED_PUB` for gap; without one it is trust-on-first-use for an upstream bundle and refuses an `origin: gap` bundle (F6). **In code.** | The anchor and origin handling is in the file. |
 | F3 | `gap/` and `.gitlab/` absent upstream: `tests/test_hygiene.py` fails on GitHub Actions when either path exists. **Enforced by test.** | The test exists. |
 | F4 | CODEOWNERS generator: `scripts/gap_codeowners.py`. **In code.** The GitLab-side protection settings are site records, not verifiable here. | The script exists. |
 | F5 | Dev kit: the pack, install and `agent_doctor` path. **In code.** | `scripts/devkit/pack.sh`, `scripts/devkit/install.sh` and `scripts/agent_doctor.py` exist. |
@@ -78,11 +78,11 @@ exists here. "Site record" items cannot be verified from this tree.
 | F8 | Owner-document updates. **Partly:** `docs/deploy.md`, `docs/task-runner.md`, `docs/live-stack.md`, `docs/licensing.md` and `docs/install_and_ops.md` carry gap content; the remaining Consequences entries are not confirmed updated here. | Those files contain the gap sections. |
 | F9 | Namespace isolation: the manifests in `deploy/workspace/` and `scripts/devkit/isolation_proof.py` exist. **Partly:** the live proof at a site is not recorded here. | The directory and script exist. |
 | F11 | GitLab CI iteration: `.gitlab-ci.yml` shards the unit job (`parallel: 4`), marks every job `interruptible` with automatic cancellation of redundant pipelines, sets the `gate` and `wip` runner tags, and selects lanes on branch pipelines through `scripts/gitlab_lanes.py`; `tests/test_ci_gitlab_parity.py` pins the pipeline shape. **Enforced by test.** Running it on a real site runner is not recorded here. | `grep -n 'F11\|interruptible\|parallel:' .gitlab-ci.yml` finds the markers; the pipeline-shape cases in `tests/test_ci_gitlab_parity.py` and `scripts/gitlab_lanes.py` cover them. |
-| F6 | Gap release pipeline: protected-tag build and sign jobs, the unprivileged in-namespace build, the `origin: gap` pack and the key-generation runbook. **Not started.** The release record template exists at [`../release-record.md`](../release-record.md). | No such pipeline or pack exists; `scripts/airgap/pack.sh` writes only `origin: upstream`. |
+| F6 | Gap release pipeline (§5). **Partly, in code:** increment 1, `scripts/gap/release.sh` (classify, pack, assemble, verify) for releases that replace no image layer, `scripts/gap/sign_vault.py`, the `gap_*` MANIFEST checks in `bootstrap.sh` and the shared chain check, the [runbook](../runbooks/gap-release.md) and the [record template](../gap-release-record.md). Not started: layer replacement, the signing and rehearsal workspace roles, the generated gate table and the D8 guard; no site has run it. | The scripts and `tests/test_gap_release.py`, `tests/test_gap_allowlist.py`, `tests/test_gap_sign_vault.py` exist. |
 
-Until F6 exists, no gap release can be produced, so gap-developed code has no
-route to production; an upstream release is the only route. The maintainer
-raised F6 in priority on 2026-11-13.
+Until increment 2 exists, a gap release cannot carry a `src/` or image-bound
+`scripts/` change; such a change reaches production only through an
+upstream release. The maintainer raised F6 in priority on 2026-11-13.
 
 ## 1. One-way flow and release trust
 
@@ -152,8 +152,8 @@ raised F6 in priority on 2026-11-13.
     the dev pod. The platform team creates it. Nothing in it holds
     production deploy authority, and the gap release signing key and any
     image push credential never enter it: the runner manager can read every
-    Secret there and exec into every pod. The F6 build and sign jobs
-    therefore run outside the CI namespace (open question 4).
+    Secret there and exec into every pod. F6 has no build or sign job: the
+    gap pack runs in the bastion and signing happens outside it (§5).
   - The namespace in use on 2026-10-28 is torn down, not remediated. The
     fresh install starts with every rule below in place, so F9 and F5 land
     before it.
@@ -170,7 +170,8 @@ raised F6 in priority on 2026-11-13.
   | runner job | CI | `mfr-runner-job` | GitLab, DNS |
   | runner manager | CI | created by the site's GitLab Runner Operator | `kubernetes.default.svc` at the API server addresses in site config, GitLab, DNS |
 
-  The F6 build and sign jobs use their own identity, never `mfr-runner-job`.
+  No F6 step runs as `mfr-runner-job`: the gap pack and verify run in the
+  bastion, and the signature is made outside the bastion (§5).
 - **Labels.** F9-defined pods carry only the
   `workspace.mainframe-rag.io/role` key (`bastion`, `dev`, `runner`), never
   `app` or `app.kubernetes.io/*`. Chart NetworkPolicies, Services and the
@@ -192,8 +193,8 @@ raised F6 in priority on 2026-11-13.
   Dev and runner-job pods have no route to either, so the network enforces "only the
   bastion holds production authority". No F9-defined pod can read a
   production Secret (the Qdrant writer and admin keys, the gateway keys,
-  the OIDC client secret, the gap signing key) or write any production
-  workload object.
+  the OIDC client secret) or write any production workload object. The gap
+  signing key is not a production Secret at all (§5).
 - **Runner manager (D-1, revised 2026-10-30).** CI runs in the CI namespace
   through the site's GitLab Runner Operator, with the Kubernetes executor.
   Each job runs in a fresh pod under `mfr-runner-job`; GitLab `services:`,
@@ -229,8 +230,8 @@ raised F6 in priority on 2026-11-13.
     draft merge request pipelines, a draft read from its title (GitLab 17.0
     or later). A draft still runs every lane.
     Agent work never queues ahead of a merge gate. Tag pipelines on `gate`
-    run only the verification lanes; the F6 build and sign jobs do not run
-    on these runners.
+    run only the verification lanes; F6 has no build or sign job on any
+    runner (§5).
   - The unit job is sharded (`parallel: 4`). Jobs are `interruptible`, and
     redundant pipelines are cancelled automatically, so only a branch's
     newest commit holds slots.
@@ -477,63 +478,87 @@ After `IMPORT READY`:
 ## 5. Gap releases
 
 Gap-developed code reaches production only as a signed gap release
-(follow-up F6). AGENTS.md "No builds in the gap without an approved issue"
-stays, and it is the gate.
+(follow-up F6, design and decisions D1–D12 in
+[#1207](https://github.com/yonatan895/qdrant-pdf-rag/issues/1207), approved
+2026-11-21). AGENTS.md "No builds in the gap without an approved issue"
+stays, and it is the gate. The procedure, commands and refusals are in the
+[gap release runbook](../runbooks/gap-release.md).
 
 1. **Authorise.** An approved GitLab issue names the fork commit to
-   release. The gap maintainer creates a protected tag on it. Only
-   protected-tag pipelines can build or sign.
-2. **Build.** The release-build job builds the agent and ingest images
-   unprivileged (`restricted-v2`, no `anyuid`), isolated as in §2. Every
-   input is already in the gap:
-   - base images by digest;
-   - the hash-locked runtime and build wheels (carried by a later dev kit;
-     kit v1 has none, §8);
-   - the BM25 weights from the upstream bundle.
+   release. The gap maintainer creates a protected annotated tag on it, a
+   merge commit on the first-parent chain of `main`, with one
+   `Gap-Release: GL#<n>` line. No pipeline builds or signs: the tag
+   pipeline's status is recorded, and the authorisation is the signer who
+   reads the printed commit and release identity and signs (D4).
+2. **No build step (D1, D2).** A gap release reuses every image layer of its
+   base upstream release byte for byte; only the two layers that hold
+   `src/` and `scripts/` may be replaced, written from the tagged commit's
+   git objects (layer replacement is increment 2; increment 1 replaces none).
+   Nothing is executed, downloaded or pushed. The cumulative delta from the
+   base release must stay inside the allow-list of
+   `scripts/gap/allowlist.py`; a lock, pin, Containerfile, licence input or
+   any path not shown safe is refused and goes upstream.
+3. **Pack and sign.** `scripts/gap/release.sh pack` runs in the bastion from
+   the installed signed release, in a session without cluster or registry
+   credentials. The bundle has the upstream layout, so the same bootstrap,
+   load and deploy path runs it:
+   - members copied from the verified base bundle (third-party images, Task,
+     reference docs (D7), notices), `repo.bundle` holding exactly the
+     tagged history (D10), `bootstrap.sh` from the commit, and the base app
+     archives under the new sha's names;
+   - `MANIFEST.txt` with `origin: gap` and `gap_base`, `gap_issue`,
+     `gap_tag`, `gap_tree`; `PACKING_RECORD.txt` and `sbom.json` dated by the
+     commit;
+   - `SHA256SUMS`, whose sha256 is the **release identity**, and its
+     signature. Each member is written once and checked by its rule, so a
+     rerun converges and a tag has one signed identity.
 
-   Nothing is downloaded.
-3. **Pack and sign.** The bundle has the upstream layout, so the same
-   bootstrap, load and deploy path runs it:
-   - `repo.bundle` of the fork;
-   - the image archives;
-   - `MANIFEST.txt`, with `origin: gap`, the upstream release it is based on
-     and the `GL#` issue;
-   - `PACKING_RECORD.txt`, `sbom.json`, the third-party notices and the
-     [licence](../licensing.md) check;
-   - `SHA256SUMS` and its signature.
-
-   The **gap release key** signs it:
-   - The gap maintainer generates the key in the gap and holds it in the
-     site's secret store.
-   - It never leaves the gap and is a separate trust anchor.
+   The **gap release key** signs it, outside the bastion (D3):
+   - Preferred: an RSA-3072 key created in, and never leaving, the site
+     Vault; the maintainer's own Vault login signs the prehashed digest with
+     PKCS#1 v1.5 and SHA-256 from the workstation. Fallback where Vault is
+     not available: a passphrase-encrypted RSA-3072 key from the site secret
+     store, used in a zero-egress signing pod that is deleted afterwards
+     (every namespace admin can reach that pod while it runs).
+   - The bastion never holds a private key, a passphrase or a signing
+     credential, and has no sign step. It is a separate trust anchor.
    - Its public key reaches operators inside the site, and its fingerprint
-     is recorded in `gap/records/`. The anchor operators use is a file
-     outside the fork, `/work/anchors/gap.pub` on the bastion
-     (`SNEAKERNET_GAP_TRUSTED_PUB`): the guard refuses an anchor inside the
-     executing checkout, so a gap MR can never change it.
-4. **Record.** A release record goes in `gap/records/`, shaped like
-   [the release record](../release-record.md). Each release-gate check is
-   marked run with its evidence, or NOT RUN. A NOT RUN required check blocks
-   promotion, as AGENTS.md requires.
-5. **Rehearse.** Bootstrap the tarball into a fresh workspace. Deploy it
-   either to a rehearsal namespace or to a non-production release name in
-   the production namespace, with its own Qdrant instance and PVCs and
-   never the production collection or alias. Pass the
-   [go-live checks](../install_and_ops.md#site-openshift-acceptance) there
-   and record them.
-6. **Promote.** Bootstrap the identical rehearsed tarball (no repack) into a
-   fresh operator workspace and deploy it to the production release. It is
-   verified against the gap anchor.
+     is recorded in `gap/records/` and carried outside the bastion. The
+     anchor operators use is a file outside the fork, `/work/anchors/gap.pub`
+     on the bastion (`SNEAKERNET_GAP_TRUSTED_PUB`): the guard refuses an
+     anchor inside the executing checkout, so a gap MR can never change it.
+4. **Verify and record.** `release.sh verify`, from the installed release,
+   checks the signature with the gap anchor, `repo.bundle` by content, the
+   base bundle with the upstream anchor, the allow-list and ledger, and
+   every member by its rule, before anything from the bundle runs.
+   Bootstrap refuses `origin: gap` without the gap anchor. A release record
+   from [the gap template](../gap-release-record.md) goes in
+   `gap/records/`. Each check is `PASS`, `INHERITED`, `WAIVED`, `NOT RUN`
+   or `FAIL`; a NOT RUN required check blocks promotion, as AGENTS.md
+   requires (D5).
+5. **Rehearse.** Bootstrap the tarball into a fresh workspace and deploy it
+   to a dedicated rehearsal namespace, never the production namespace or a
+   second release in it (D6: the application release and object names are
+   fixed), with its own Qdrant instance and PVCs and never the production
+   collection or alias. Pass the
+   [go-live checks](../install_and_ops.md#site-openshift-acceptance) there,
+   record them, and empty the namespace afterwards.
+6. **Promote.** Deploy the identical rehearsed release (the same release
+   identity, no repack) from a fresh operator workspace to the production
+   release. It is verified against the gap anchor.
 7. **Roll back** to the previous signed release, upstream or gap. Deploy it
    from its own retained bootstrap workspace and bundle, as the
    [bootstrap guide](../install_and_ops.md) requires. Data follows the
    [upgrade and recovery runbook](../install_and_ops.md#upgrade-and-recovery-runbook-issue-272).
-   Keep the previous release's tarball and workspace until the new one has
-   passed its go-live checks.
+   Keep the previous release's tarball and workspace, and the base bundle of
+   each kept gap release, until the new one has passed its go-live checks.
 
 An upstream release may take the same rehearse-then-promote path. Later
 upstream imports merge into a fork `main` that contains gap releases. Their
-gap patches stay ledgered.
+gap patches stay ledgered. While the installed release is a gap release, an
+upstream release is promoted only if each ledgered patch is contained in it
+or released as dropped by `GL#` in the record (D8; a record row until the
+mechanical check lands, which it must before the first such import).
 
 ## 6. Governance in the gap
 
@@ -557,20 +582,20 @@ gap patches stay ledgered.
     workflows), plus the gap's own gates: `.gitlab-ci.yml`,
     `.gitlab/CODEOWNERS`, `scripts/check_junit_clean.py`,
     `scripts/gate_l1.py`, the dev kit pin, and the gap release pipeline and
-    signing files (today both `pack.sh` signers; F6 adds its own), the
+    signing files (both `pack.sh` signers and the F6 gap release tools), the
     generator itself, and `CODEOWNERS` and `docs/CODEOWNERS`, which GitLab
     reads before `.gitlab/CODEOWNERS`. Each approver is a single user, never
     a group; one person may give both approvals (maintainer, 2026-10-31).
   - **The signers' dependencies** are on the list too (#588 N1, maintainer,
     2026-11-02). The entry points that pack, sign or verify a release or a
     kit are `scripts/airgap/pack.sh`, `bootstrap.sh` and `load.sh`,
-    `scripts/devkit/pack.sh` and `install.sh`, and
-    `scripts/gap/import_release.sh`. The release guard and its anchor
+    `scripts/devkit/pack.sh` and `install.sh`,
+    `scripts/gap/import_release.sh`, and the F6 `scripts/gap/release.sh` and
+    `scripts/gap/sign_vault.py`. The release guard and its anchor
     checks live in the `common.sh` they source. Every tracked file these
     run or read by name is protected: sourced files, invoked scripts,
     Python imports, pins and the files packed into the kit. The generator
-    holds this list as data (`SIGNING_CLOSURE`); F6 adds its pack and sign
-    entry points.
+    holds this list as data (`SIGNING_CLOSURE`).
     `tests/helpers_signing_closure.py` derives it from the scripts, and an
     upstream test pins the two equal. A new dependency fails that test
     until the generator lists it. The derivation fails closed: a reference
@@ -768,8 +793,8 @@ refreshed with each kit (Q9).
     `scripts/devkit/snapshot-issues.txt` with all their comments; a
     credential-shaped string refuses the pack).
 - **Cadence (D-9).** A release ships a new kit only when the key changes, and
-  the release MANIFEST names the key in a `devkit_key:` field. Kit v1 has no
-  gap-release build inputs; F6 adds them under a new key. The first kit
+  the release MANIFEST names the key in a `devkit_key:` field. A gap release
+  needs no build inputs (§5, no build step), so no kit carries them. The first kit
   rides with the signed release candidate, before the fresh install. A
   re-sign under the same key is
   allowed when only the issue snapshot changes: the MANIFEST records the new
@@ -912,7 +937,7 @@ The names the gap builds on are a **public API**, limited to this list:
 | F3 | Done in this PR: `tests/test_hygiene.py` fails on GitHub Actions when `gap/` or `.gitlab/` exists | No |
 | F4 | Done: `scripts/gap_codeowners.py`, its equality test and the GitLab hygiene check (§6) | No |
 | F5 | The dev kit (§8), as [plan](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6480613459) PR-2, PR-4 (with `prepare_python.py --kit`) and PR-5 (with `scripts/gap/ci_status.py`) | `agent_doctor.py` and `prepare_python.py`: yes. `devkit_key.py` is not a unit-evidence input: both import it only to word the refusal, with a fixed fallback (#1152, #1162). The factory workflow is separate from `e2e.yml` and not an acceptance producer: no |
-| F6 | The gap release pipeline: protected-tag build and sign jobs, the unprivileged in-namespace build, the gap pack (`origin: gap`), the key-generation runbook and the release record template | Pack and taskfiles: yes |
+| F6 | The gap release pipeline, as decided in [#1207](https://github.com/yonatan895/qdrant-pdf-rag/issues/1207) (§5): increment 1 is `scripts/gap/release.sh` (classify, pack, assemble, verify), the signing helper, the `gap_*` MANIFEST fields and their checks, the [runbook](../runbooks/gap-release.md) and the [record template](../gap-release-record.md); increment 2 the layer replacement; then the gate table, the D8 guard and the signing and rehearsal workspace roles | Pack and taskfiles: yes |
 | F7 | Done: `scripts/gap/import_release.sh` from §4, with its throwaway-repo tests. §4 links to it | No |
 | F8 | The owner-document updates listed under Consequences | No |
 | F9 | Isolation of the production and CI namespaces (§2), as plan PR-3, before the fresh install, including the runner registrations and their configuration | Lane taskfile: yes. Manifests and proof: no |
@@ -923,10 +948,8 @@ The names the gap builds on are a **public API**, limited to this list:
 
 1. **Namespaces.** Answered in §2.
 2. **Extension points.** Decided in §9.
-3. **The gap release gate.** Which [release-gate](../release-verification.md)
-   checks must a gap release pass? It has no connected lanes.
-4. **The build mechanism** for the unprivileged in-namespace image build
-   (F6), and where its build and sign jobs run. They cannot run in the CI
-   namespace, because the signing key and the push credential never enter
-   it (§2).
+3. **The gap release gate.** Decided in #1207 (D5): the record states of §5
+   step 4, strict, with a visible waiver.
+4. **The build mechanism.** Decided in #1207 (D1, D3): no build step; layer
+   reuse and replacement in the bastion, signing outside it (§5).
 5. **F9 + F5 decisions D-1 to D-10.** Closed (status block).
