@@ -690,8 +690,8 @@ class GitLabTools:
     async def list_issue_notes(self, ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
         """One issue's notes, oldest first by default. System notes (label,
         state and description changes) are left out unless `include_system`:
-        asked of GitLab with `activity_filter` and filtered here as well, as
-        an older GitLab ignores that parameter."""
+        asked of GitLab with `activity_filter` and filtered here as well, for
+        a GitLab without that parameter (assumed to ignore it: a site check)."""
         project_id, _ = await self._project(ctx, args["project"])
         include_system = bool(args.get("include_system", False))
         params: dict[str, str | int] = {

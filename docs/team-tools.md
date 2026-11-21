@@ -250,9 +250,12 @@ never shows the headers that carry the credential.
 answer of any length and keeps only its last `keep_bytes` in memory
 (`UpstreamTail(tail, total, complete)`). It stops reading after
 `max_read_bytes` or `deadline_s`, whichever comes first, and returns what it
-read with `complete=False`. Statuses map as above. No answer by the deadline is
-`upstream_timeout`. A transport failure mid-body keeps its fixed code and is
-never returned as a partial result.
+read with `complete=False`. A body that stops arriving after the status (the
+deadline, or the per-read timeout) ends the same way. Statuses map as above.
+No answer by the deadline is `upstream_timeout`. Any other transport failure
+mid-body keeps its fixed code and is never returned as a partial result. Memory
+holds the tail plus one chunk. The call asks for `Accept-Encoding: identity`,
+so a chunk is its wire size and is never inflated from gzip.
 
 **Configuration.** `GATEWAY_CONFIG_FILE` names one JSON file (a mounted
 ConfigMap) with exactly these keys: `gateway` (must equal the module's name),
@@ -419,8 +422,9 @@ names it fails at start-up as an unknown key.
   - System notes (label, state and description changes) are left out unless
     `include_system` is true. The gateway asks GitLab with
     `activity_filter=only_comments` and also filters on each note's `system`
-    field, because an older GitLab ignores the parameter. A page can therefore
-    hold fewer notes than `per_page`.
+    field. The filter is a fallback for a GitLab without the parameter; that such a
+    GitLab ignores it, rather than refusing it, is assumed and is an ADR-0014 site
+    check. A page can therefore hold fewer notes than `per_page`.
   - Rows carry `id`, `author` (username), `body`, `created_at`, `updated_at`,
     `system` and `internal`. Internal notes are included, because the team token
     can read them.

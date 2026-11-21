@@ -1551,13 +1551,13 @@ def test_upstream_body_cap_and_timeout_are_fixed_codes():
                                                           headers={"Authorization": "Bearer " + CANARY}))
 
 
-def _stream_tail(transport: httpx2.AsyncBaseTransport, **options: object) -> gw.UpstreamTail:
+def _stream_tail(transport: httpx2.AsyncBaseTransport, timeout_s: float = 2.0, **options: object) -> gw.UpstreamTail:
     """`UpstreamClient.stream_tail` against `transport`, with test bounds."""
     kwargs: dict[str, object] = {"keep_bytes": 4096, "max_read_bytes": 64 * 1024 * 1024, "deadline_s": 30.0}
     kwargs.update(options)
 
     async def run() -> gw.UpstreamTail:
-        client = gw.UpstreamClient("https://gitlab.example.test/api/v4", timeout_s=2.0, max_bytes=1024,
+        client = gw.UpstreamClient("https://gitlab.example.test/api/v4", timeout_s=timeout_s, max_bytes=1024,
                                    transport=transport)
         try:
             return await client.stream_tail("GET", "/projects/7/jobs/1/trace", **kwargs)  # type: ignore[arg-type]
@@ -1580,13 +1580,24 @@ def test_stream_tail_keeps_the_last_bytes_in_bounded_memory():
             yield chunk
         yield last
 
-    transport = httpx2.MockTransport(lambda request: httpx2.Response(200, content=body()))
-    tracemalloc.start()
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(200, content=body())
+
+    tracing = tracemalloc.is_tracing()
+    if not tracing:
+        tracemalloc.start()
+    tracemalloc.reset_peak()
     try:
-        read = _stream_tail(transport)
+        read = _stream_tail(httpx2.MockTransport(handler))
         _, peak = tracemalloc.get_traced_memory()
     finally:
-        tracemalloc.stop()
+        if not tracing:
+            tracemalloc.stop()
+    # Identity encoding: a compressed chunk would be inflated whole in memory.
+    assert requests[0].headers["accept-encoding"] == "identity"
     assert read.complete is True
     assert read.total == 256 * 65536 + len(last)
     assert read.tail == (chunk + last)[-4096:]
@@ -1616,9 +1627,54 @@ def test_stream_tail_returns_what_it_has_at_the_deadline():
 
     started = time.monotonic()
     read = _stream_tail(httpx2.MockTransport(lambda request: httpx2.Response(200, content=body())),
-                        deadline_s=0.3)
-    assert time.monotonic() - started < 5
+                        deadline_s=1.0)
+    assert time.monotonic() - started < 6
     assert (read.complete, read.total, read.tail) == (False, 11, b"first line\n")
+
+
+def _quiet_after_first_line(request: httpx2.Request) -> httpx2.Response:
+    """A body that goes quiet after one line and then honours the request's
+    read timeout the way a real transport does."""
+
+    async def body():
+        yield b"first line\n"
+        await asyncio.sleep((request.extensions.get("timeout") or {}).get("read") or 30)
+        raise httpx2.ReadTimeout("timed out", request=request)
+
+    return httpx2.Response(200, content=body())
+
+
+def test_stream_tail_body_going_quiet_past_the_read_timeout_returns_what_was_read():
+    # The client's per-read timeout (0.2 s) is below the deadline (1 s): a
+    # body that goes quiet must still end as "what was read", not a timeout,
+    # and without waiting for the deadline.
+    started = time.monotonic()
+    read = _stream_tail(httpx2.MockTransport(_quiet_after_first_line), timeout_s=0.2, deadline_s=5.0)
+    assert time.monotonic() - started < 4
+    assert (read.complete, read.total, read.tail) == (False, 11, b"first line\n")
+
+
+def test_stream_tail_mid_body_failures_other_than_silence_keep_their_codes():
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        async def body():
+            yield b"first line\n"
+            raise httpx2.ReadTimeout("timed out", request=request)
+
+        return httpx2.Response(200, content=body())
+
+    read = _stream_tail(httpx2.MockTransport(handler))
+    assert (read.complete, read.tail) == (False, b"first line\n")  # silence: what was read
+
+    def broken(request: httpx2.Request) -> httpx2.Response:
+        async def body():
+            yield b"first line\n"
+            raise httpx2.RemoteProtocolError("peer closed", request=request)
+
+        return httpx2.Response(200, content=body())
+
+    with pytest.raises(gw.GatewayError) as caught:
+        _stream_tail(httpx2.MockTransport(broken))
+    assert caught.value.code == "upstream_unavailable"
 
 
 def test_stream_tail_maps_statuses_and_an_unanswered_request_to_fixed_codes():

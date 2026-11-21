@@ -828,8 +828,11 @@ class UpstreamClient:
         """Stream one backend answer, keeping only its last `keep_bytes` in
         memory (a log far larger than any cap). Reading stops after
         `max_read_bytes` or `deadline_s` seconds, whichever comes first,
-        and what was read is returned with `complete=False`. Statuses map as
-        in `request`; no answer by the deadline is `upstream_timeout`, and a
+        and what was read is returned with `complete=False`; so is a body that
+        stops arriving (the deadline, or a read timeout, after the status).
+        Memory holds the tail plus one chunk; the call asks for identity
+        encoding, so a chunk is its wire size. Statuses map as in `request`;
+        no answer by the deadline is `upstream_timeout`, and any other
         transport failure mid-body keeps its fixed code (never a partial)."""
         if keep_bytes <= 0 or max_read_bytes <= 0 or not deadline_s > 0:
             raise ValueError("keep_bytes, max_read_bytes and deadline_s must be positive")
@@ -840,13 +843,15 @@ class UpstreamClient:
         total = 0
         complete = reading = False
         deadline = asyncio.get_running_loop().time() + deadline_s
+        # Identity encoding keeps each chunk its wire size (a gzip chunk would
+        # be inflated whole before the ceiling could slice it).
         try:
             async with asyncio.timeout_at(deadline):
                 async with self._client.stream(
                     method,
                     url,
                     params=params,
-                    headers=headers,
+                    headers={**dict(headers or {}), "Accept-Encoding": "identity"},
                     follow_redirects=False,
                     timeout=self._timeout,
                 ) as response:
@@ -865,7 +870,9 @@ class UpstreamClient:
                             break  # the ceiling, with more still to come: stop reading
                     else:
                         complete = True
-        except TimeoutError:
+        except (TimeoutError, httpx2.ReadTimeout):
+            # A body that stops arriving ends the read; before any status it
+            # is a timeout, never an empty success.
             if not reading:
                 raise GatewayError("upstream_timeout") from None
         except httpx2.TimeoutException:

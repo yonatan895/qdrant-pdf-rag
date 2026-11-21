@@ -159,6 +159,10 @@
    D4(b)'s form in `bearer` mode.
 4. The site CA bundle, the GitLab egress rule, and the token's expiry and
    rotation procedure.
+5. The site GitLab accepts `activity_filter=only_comments` on issue notes, or
+   ignores it. If it refuses the parameter (a 400), drop it: the gateway
+   filters system notes itself as well. Also check that the job-log endpoint
+   streams a long log within the read ceilings.
 
 ## Consequences
 

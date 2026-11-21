@@ -651,9 +651,32 @@ def test_job_log_read_stops_at_the_time_ceiling_and_returns_what_it_has(tmp_path
         yield b"never read\n"
 
     started = time.monotonic()
-    text = _job_log(FakeGitLab(), tmp_path, httpx2.Response(200, content=stalls()), max_job_log_read_s=0.3)
+    text = _job_log(FakeGitLab(), tmp_path, httpx2.Response(200, content=stalls()), max_job_log_read_s=1.0)
     assert time.monotonic() - started < 10
     assert text == UNREAD.format("50 bytes") + b"".join(lines).decode() + STOPPED
+
+
+def test_job_log_that_goes_quiet_past_the_read_timeout_returns_what_was_read(tmp_path: Path):
+    # timeout_s (per read) 0.3 s is below the 1 s ceiling: a log that goes
+    # quiet is returned up to where it stopped, never refused as a timeout.
+    lines = _lines(2, 25)
+    fake = FakeGitLab()
+
+    def quiet(request: httpx2.Request) -> httpx2.Response:
+        if not request.url.raw_path.endswith(b"/jobs/50/trace"):
+            return fake.handler(request)
+
+        async def body():
+            yield b"".join(lines)
+            await asyncio.sleep((request.extensions.get("timeout") or {}).get("read") or 30)
+            raise httpx2.ReadTimeout("timed out", request=request)
+
+        return httpx2.Response(200, content=body())
+
+    doc = _config_doc(tmp_path, auth=False, timeout_s=0.3, max_job_log_read_s=1.0)
+    gateway = gitlab.build_gateway(_env(tmp_path, "bearer", doc), transport=httpx2.MockTransport(quiet))
+    body = _body(_run(gateway, "read_job_log", project="team/app", job_id=50), "read_job_log")
+    assert body["text"] == UNREAD.format("50 bytes") + b"".join(lines).decode() + STOPPED
 
 
 @pytest.mark.parametrize("tail_bytes", [2047, 2048, 2049, 8192, 1024 * 1024])
