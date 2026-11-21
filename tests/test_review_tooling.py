@@ -39,6 +39,7 @@ from unittest.mock import patch
 import yaml
 from scripts import ci_evidence
 from scripts.acceptance import (
+    ACTIVE_RUN_STATUSES,
     VERIFICATION_INPUTS,
     GitHub,
     candidate_identity,
@@ -2211,6 +2212,17 @@ class TestAcceptanceSnapshot(unittest.TestCase):
         self.assertNotIn('issue_comment', events)
         self.assertNotIn('acceptance-review-signal', events['workflow_run']['workflows'])
         self.assertFalse((root / '.github/workflows/acceptance-review-signal.yml').exists())
+        # #1299: in_progress is the same pending state `requested` already
+        # published (ACTIVE_RUN_STATUSES), so only creation and completion wake
+        # the publisher; the sweep for missed signals runs every 15-20 minutes.
+        self.assertEqual(events['workflow_run']['types'], ['requested', 'completed'])
+        self.assertTrue({'requested', 'queued', 'in_progress'} <= ACTIVE_RUN_STATUSES)
+        (schedule,) = events['schedule']
+        minute, *rest = schedule['cron'].split()
+        self.assertEqual(rest, ['*', '*', '*', '*'])
+        first, last, step = map(int, re.fullmatch(r'(\d+)-(\d+)/(\d+)', minute).groups())
+        self.assertTrue(15 <= step <= 20 and 60 % step == 0 and first > 0, schedule)
+        self.assertEqual(last, first + 60 - step)  # even gaps, none longer across the hour
 
     def test_gitlab_l1_note_appends_literal_body_without_claiming_marker_ownership(self):
 
@@ -3856,11 +3868,11 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
 
 
 class TestEvalRetrievalProducer(unittest.TestCase):
-    """The eval_retrieval lane has a native CI producer (ci.yml eval-retrieval
-    job running scripts/gate_l1.py). These tests pin the receipt binding and
-    the collection into lane statuses."""
+    """The eval_retrieval lane shares the single ci.yml gate-l1 producer (#1299)
+    so retrieval/rule PRs do not run scripts/gate_l1.py twice in parallel. These
+    tests pin the deduplicated workflow, receipt binding, and collection."""
 
-    def _eval_receipt(self, candidate, policy_sha256, producer_sha256, results):
+    def _gate_receipt(self, candidate, policy_sha256, producer_sha256, results):
 
         raw = json.dumps(results).encode()
         return {
@@ -3870,7 +3882,7 @@ class TestEvalRetrievalProducer(unittest.TestCase):
             "execution_sha": candidate["execution_sha"],
             "execution_parents": [candidate["base_sha"], candidate["head_sha"]],
             "event": "pull_request", "run_id": 123, "run_attempt": 2,
-            "job_key": "eval-retrieval", "job_name": "eval-retrieval", "lane": "eval_retrieval",
+            "job_key": "gate-l1", "job_name": "gate-l1", "lane": "gate_l1",
             "actor_id": 7, "triggering_actor": "synthetic",
             "workflow_ref": "synthetic/repository/.github/workflows/ci.yml@refs/pull/3/merge",
             "workflow_sha": candidate["execution_sha"],
@@ -3879,39 +3891,45 @@ class TestEvalRetrievalProducer(unittest.TestCase):
             "result_sha256": hashlib.sha256(raw).hexdigest(),
         }, raw
 
+    def test_ci_deduplicates_gate_l1_and_eval_retrieval_without_dropping_coverage(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        jobs = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())["jobs"]
+        self.assertIn("gate-l1", jobs)
+        self.assertNotIn("eval-retrieval", jobs)
+        condition = jobs["gate-l1"]["if"]
+        self.assertIn("'gate_l1'", condition)
+        self.assertIn("'eval_retrieval'", condition)
+
     def test_eval_retrieval_receipt_normalizes_to_success(self):
         args, _, _ = TestNativeEvidenceConsumer().fixture()
         producer = next(p for p in PRODUCERS if p.lane == "eval_retrieval")
-        self.assertEqual((producer.workflow, producer.job, producer.artifact, producer.kind),
-                         ("ci.yml", "eval-retrieval", "eval-retrieval", "execution"))
+        self.assertEqual((producer.workflow, producer.job, producer.artifact, producer.kind, producer.receipt_lane),
+                         ("ci.yml", "gate-l1", "gate-l1", "execution", "gate_l1"))
         self.assertTrue(producer.structured)
         args["producer"] = producer
-        args["job"]["name"] = "eval-retrieval"
-        args["artifact"]["name"] = "evidence-eval-retrieval-attempt-2"
+        args["job"]["name"] = "gate-l1"
+        args["artifact"]["name"] = "evidence-gate-l1-attempt-2"
         candidate = args["candidate"]
         report = {"n": 121, "scored": 108, "failures": 0, "recall@5": 1.0, "mrr": 0.995}
-        receipt, raw = self._eval_receipt(candidate, args["policy_digest"], args["producer_digest"], report)
+        receipt, raw = self._gate_receipt(candidate, args["policy_digest"], args["producer_digest"], report)
         args["archive"], args["artifact"]["digest"] = pack_archive(receipt, **{"results.json": raw})
         result = normalize_native(**args)
         self.assertEqual((result["lane"], result["status"]), ("eval_retrieval", "success"))
         self.assertEqual(result["results"]["recall@5"], 1.0)
-        # A receipt mislabeled to another lane must not satisfy this producer.
-        tampered = dict(receipt, lane="gate_l1")
-        args["archive"], args["artifact"]["digest"] = pack_archive(tampered, **{"results.json": raw})
-        with self.assertRaises(ValueError):
-            normalize_native(**args)
+        # A receipt mislabeled to any other lane must not satisfy this producer.
+        for bad_lane in ("hazards", "lint_and_types", "simulation", "eval_retrieval"):
+            with self.subTest(bad_lane=bad_lane):
+                tampered = dict(receipt, lane=bad_lane)
+                args["archive"], args["artifact"]["digest"] = pack_archive(tampered, **{"results.json": raw})
+                with self.assertRaises(ValueError):
+                    normalize_native(**args)
 
-    def test_collect_native_maps_eval_retrieval_job_to_lane_success(self):
+    def test_collect_native_maps_single_gate_l1_job_to_both_gate_l1_and_eval_retrieval(self):
         fixture_args, _, _ = TestNativeEvidenceConsumer().fixture()
         candidate, run, commit = fixture_args["candidate"], fixture_args["run"], fixture_args["execution_commit"]
         candidate["base_sha"], commit["parents"][0]["sha"] = None, None
-        jobs = [{"id": 456 + i, "run_id": 123, "run_attempt": 2, "head_sha": "a" * 40,
-                 "name": name, "status": "completed", "conclusion": "success"}
-                for i, name in enumerate(("gate-l1", "eval-retrieval"))]
-        lanes = {"gate-l1": "gate_l1", "eval-retrieval": "eval_retrieval"}
-        results = {"gate_l1": {"verdict": "pass"}, "eval_retrieval": {"n": 121, "failures": 0}}
-        archives = {}
-        artifacts = []
+        jobs = [{"id": 456, "run_id": 123, "run_attempt": 2, "head_sha": "a" * 40,
+                 "name": "gate-l1", "status": "completed", "conclusion": "success"}]
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             base = approved_repository(root)
@@ -3919,25 +3937,21 @@ class TestEvalRetrievalProducer(unittest.TestCase):
             commit["parents"][0]["sha"] = base
             policy_sha256 = hashlib.sha256(b"approved policy").hexdigest()
             producer_sha256 = hashlib.sha256(b"approved producer").hexdigest()
-            aid = 789
-            for job in jobs:
-                lane = lanes[job["name"]]
-                receipt, raw = self._eval_receipt(
-                    {**candidate, "number": 3}, policy_sha256, producer_sha256, results[lane])
-                receipt.update(job_key=job["name"], job_name=job["name"], lane=lane)
-                blob, digest = pack_archive(receipt, **{"results.json": raw})
-                archives[aid] = blob
-                artifacts.append({"id": aid, "expired": False,
-                                  "name": f"evidence-{job['name']}-attempt-2",
-                                  "size_in_bytes": len(blob), "digest": digest,
-                                  "workflow_run": {"id": 123, "repository_id": 42,
-                                                   "head_repository_id": 84, "head_sha": "a" * 40}})
-                aid += 1
+            receipt, raw = self._gate_receipt(
+                {**candidate, "number": 3}, policy_sha256, producer_sha256, {"n": 121, "failures": 0})
+            blob, digest = pack_archive(receipt, **{"results.json": raw})
+            archives = {789: blob}
+            artifacts = [{"id": 789, "expired": False, "name": "evidence-gate-l1-attempt-2",
+                          "size_in_bytes": len(blob), "digest": digest,
+                          "workflow_run": {"id": 123, "repository_id": 42,
+                                           "head_repository_id": 84, "head_sha": "a" * 40}}]
             pr = {"number": 3, "user": {"id": 99}, "state": "open", "mergeable": True,
                   "merge_commit_sha": "c" * 40,
                   "head": {"sha": "a" * 40, "repo": {"id": 84}},
                   "base": {"sha": base, "ref": "main",
                            "repo": {"id": 42, "full_name": "synthetic/repository", "default_branch": "main"}}}
+            raw_calls = []
+
             class API:
                 repository = "synthetic/repository"
                 prefix = "repos/synthetic/repository/"
@@ -3957,6 +3971,7 @@ class TestEvalRetrievalProducer(unittest.TestCase):
                         return commit
                     return run
                 def raw(self, endpoint):
+                    raw_calls.append(endpoint)
                     aid = int(endpoint.rstrip("/").rsplit("/", 2)[-2])
                     return archives[aid]
                 def blob(self, sha, path):
@@ -3964,12 +3979,16 @@ class TestEvalRetrievalProducer(unittest.TestCase):
                         return b"approved producer"
                     if path == "scripts/review_tooling.py":
                         return b"approved policy"
-                    if path in VERIFICATION_INPUTS or path.startswith("taskfiles/"):
-                        return (root / path).read_bytes()
                     return (root / path).read_bytes()
             result = collect_native(API(), pr, root)
             self.assertEqual(result["lane_statuses"].get("gate_l1"), "success")
             self.assertEqual(result["lane_statuses"].get("eval_retrieval"), "success")
+            self.assertEqual(len(raw_calls), 1)
+            # If gate-l1 fails, both gate_l1 and eval_retrieval fail together.
+            jobs[0]["conclusion"] = "failure"
+            failed = collect_native(API(), pr, root)
+            self.assertEqual(failed["lane_statuses"].get("gate_l1"), "failure")
+            self.assertEqual(failed["lane_statuses"].get("eval_retrieval"), "failure")
 
 
 class TestRerunAttemptEvidence(unittest.TestCase):
@@ -3981,8 +4000,8 @@ class TestRerunAttemptEvidence(unittest.TestCase):
     attempt that actually ran it.
     """
 
-    LANES: ClassVar[dict[str, str]] = {"gate-l1": "gate_l1", "eval-retrieval": "eval_retrieval"}
-    RESULTS: ClassVar[dict[str, dict]] = {"gate_l1": {"verdict": "pass"}, "eval_retrieval": {"n": 121, "failures": 0}}
+    LANES: ClassVar[dict[str, str]] = {"gate-l1": "gate_l1", "lint": "lint_and_types"}
+    RESULTS: ClassVar[dict[str, dict | None]] = {"gate_l1": {"verdict": "pass"}, "lint_and_types": None}
 
     def scenario(self, root):
         base = approved_repository(root)
@@ -4001,12 +4020,12 @@ class TestRerunAttemptEvidence(unittest.TestCase):
             return {"id": job_id, "run_id": 123, "run_attempt": attempt, "head_sha": "a" * 40, "name": name,
                     "status": "completed", "conclusion": conclusion,
                     "started_at": started, "completed_at": completed}
-        # Attempt 1: gate-l1 passed, eval-retrieval failed. Attempt 2 ("re-run
-        # failed jobs"): gate-l1 is a carried copy, eval-retrieval ran again.
+        # Attempt 1: gate-l1 passed, lint failed. Attempt 2 ("re-run
+        # failed jobs"): gate-l1 is a carried copy, lint ran again.
         jobs = {1: [job(501, 1, "gate-l1", "success", "2026-10-26T12:01:00Z", "2026-10-26T12:05:00Z"),
-                    job(502, 1, "eval-retrieval", "failure", "2026-10-26T12:01:00Z", "2026-10-26T12:06:00Z")],
+                    job(502, 1, "lint", "failure", "2026-10-26T12:01:00Z", "2026-10-26T12:06:00Z")],
                 2: [job(601, 2, "gate-l1", "success", "2026-10-26T12:01:00Z", "2026-10-26T12:05:00Z"),
-                    job(602, 2, "eval-retrieval", "success", "2026-10-26T13:00:10Z", "2026-10-26T13:04:00Z")]}
+                    job(602, 2, "lint", "success", "2026-10-26T13:00:10Z", "2026-10-26T13:04:00Z")]}
         commit = {"sha": "c" * 40, "parents": [{"sha": base}, {"sha": "a" * 40}],
                   "commit": {"tree": {"sha": "1" * 40}, "committer": {"date": "2026-10-26T12:00:00Z"}}}
         pr = {"number": 3, "user": {"id": 99}, "state": "open", "mergeable": True, "draft": True,
@@ -4028,13 +4047,17 @@ class TestRerunAttemptEvidence(unittest.TestCase):
             def evidence(self, name, attempt, **receipt_changes):
                 """Upload one job's receipt under the artifact name of `attempt`."""
                 lane = test.LANES[name]
-                receipt, raw = TestEvalRetrievalProducer()._eval_receipt(
+                structured = test.RESULTS[lane]
+                receipt, raw = TestEvalRetrievalProducer()._gate_receipt(
                     candidate, hashlib.sha256(b"approved policy").hexdigest(),
-                    hashlib.sha256(b"approved producer").hexdigest(), test.RESULTS[lane])
+                    hashlib.sha256(b"approved producer").hexdigest(), structured or {})
                 receipt.update(job_key=name, job_name=name, lane=lane, run_attempt=attempt,
                                triggering_actor=self.runs[attempt]["triggering_actor"]["login"])
+                if structured is None:
+                    receipt.pop("result_sha256", None)
                 receipt.update(receipt_changes)
-                blob, digest = pack_archive(receipt, **{"results.json": raw})
+                blob, digest = (pack_archive(receipt) if structured is None
+                                else pack_archive(receipt, **{"results.json": raw}))
                 artifact_id = 700 + len(self.artifacts)
                 self.archives[artifact_id] = blob
                 self.artifacts.append({"id": artifact_id, "expired": False,
@@ -4086,23 +4109,24 @@ class TestRerunAttemptEvidence(unittest.TestCase):
         return API(), pr
 
     def records(self, result):
-        return {record["job"]: record for record in result["native"] if record["job"] in self.LANES}
+        return {record["job"]: record for record in result["native"]
+                if record["job"] in self.LANES and record["lane"] == self.LANES[record["job"]]}
 
     def test_rerun_of_one_failed_job_keeps_earlier_successes(self):
         with tempfile.TemporaryDirectory() as directory:
             api, pr = self.scenario(pathlib.Path(directory))
             api.evidence("gate-l1", 1)
-            api.evidence("eval-retrieval", 2)
+            api.evidence("lint", 2)
             result = collect_native(api, pr, pathlib.Path(directory))
-            self.assertEqual((result["lane_statuses"].get("gate_l1"), result["lane_statuses"].get("eval_retrieval")),
+            self.assertEqual((result["lane_statuses"].get("gate_l1"), result["lane_statuses"].get("lint_and_types")),
                              ("success", "success"))
             records = self.records(result)
             # Each job is bound to the attempt that ran it: its job id, its
             # attempt and its own artifact, never the carried copy's.
             self.assertEqual((records["gate-l1"]["run_attempt"], records["gate-l1"]["job_id"],
                               records["gate-l1"]["artifact_id"]), (1, 501, 700))
-            self.assertEqual((records["eval-retrieval"]["run_attempt"], records["eval-retrieval"]["job_id"],
-                              records["eval-retrieval"]["artifact_id"]), (2, 602, 701))
+            self.assertEqual((records["lint"]["run_attempt"], records["lint"]["job_id"],
+                              records["lint"]["artifact_id"]), (2, 602, 701))
             self.assertEqual(result["runs"]["ci.yml"], {"run_id": 123, "run_attempt": 2, "status": "completed"})
             # The recheck still pins the run's latest attempt.
             recheck_current(api, {"candidate": result["candidate"], "runs": result["runs"]})
@@ -4117,9 +4141,9 @@ class TestRerunAttemptEvidence(unittest.TestCase):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
                 api, pr = self.scenario(pathlib.Path(directory))
                 api.evidence("gate-l1", 1)
-                api.evidence("eval-retrieval", 2)
+                api.evidence("lint", 2)
                 if case == "not rerun":
-                    # Only eval-retrieval was rerun; gate-l1 failed in attempt 1 and
+                    # Only lint was rerun; gate-l1 failed in attempt 1 and
                     # its carried copy still says so. A valid older receipt does not help.
                     for attempt in (1, 2):
                         api.jobs[attempt][0]["conclusion"] = "failure"
@@ -4129,20 +4153,20 @@ class TestRerunAttemptEvidence(unittest.TestCase):
                                           completed_at="2026-10-26T13:02:00Z")
                 result = collect_native(api, pr, pathlib.Path(directory))
                 self.assertEqual(result["lane_statuses"].get("gate_l1"), "failure")
-                self.assertEqual(result["lane_statuses"].get("eval_retrieval"), "success")
+                self.assertEqual(result["lane_statuses"].get("lint_and_types"), "success")
 
     def test_artifact_from_another_attempt_than_the_job_is_refused(self):
         cases = {
             # The rerun job's artifact is missing; an earlier attempt's is present.
-            "rerun job, older artifact": (("gate-l1", 1, {}), ("eval-retrieval", 1, {})),
+            "rerun job, older artifact": (("gate-l1", 1, {}), ("lint", 1, {})),
             # The carried job ran in attempt 1, but only an attempt-2 artifact exists.
-            "carried job, newer artifact": (("gate-l1", 2, {}), ("eval-retrieval", 2, {})),
+            "carried job, newer artifact": (("gate-l1", 2, {}), ("lint", 2, {})),
             # The artifact name matches the job's attempt, its receipt names another.
-            "renamed receipt": (("gate-l1", 1, {"run_attempt": 2}), ("eval-retrieval", 2, {"run_attempt": 1})),
+            "renamed receipt": (("gate-l1", 1, {"run_attempt": 2}), ("lint", 2, {"run_attempt": 1})),
         }
-        expected = {"rerun job, older artifact": {"gate-l1": "success", "eval-retrieval": "missing"},
-                    "carried job, newer artifact": {"gate-l1": "missing", "eval-retrieval": "success"},
-                    "renamed receipt": {"gate-l1": "unverified", "eval-retrieval": "unverified"}}
+        expected = {"rerun job, older artifact": {"gate-l1": "success", "lint": "missing"},
+                    "carried job, newer artifact": {"gate-l1": "missing", "lint": "success"},
+                    "renamed receipt": {"gate-l1": "unverified", "lint": "unverified"}}
         for case, uploads in cases.items():
             with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
                 api, pr = self.scenario(pathlib.Path(directory))
@@ -4175,7 +4199,7 @@ class TestRerunAttemptEvidence(unittest.TestCase):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
                 api, pr = self.scenario(pathlib.Path(directory))
                 api.evidence("gate-l1", 1)
-                api.evidence("eval-retrieval", 2)
+                api.evidence("lint", 2)
                 apply(api)
                 result = collect_native(api, pr, pathlib.Path(directory))
                 self.assertEqual(self.records(result)["gate-l1"]["status"], "unverified")
@@ -4187,7 +4211,7 @@ class TestRerunAttemptEvidence(unittest.TestCase):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
                 api, pr = self.scenario(pathlib.Path(directory))
                 api.evidence("gate-l1", 1, **changes)
-                api.evidence("eval-retrieval", 2)
+                api.evidence("lint", 2)
                 result = collect_native(api, pr, pathlib.Path(directory))
                 self.assertEqual(result["lane_statuses"].get("gate_l1"), "unverified")
 
@@ -4195,7 +4219,7 @@ class TestRerunAttemptEvidence(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             api, pr = self.scenario(pathlib.Path(directory))
             api.evidence("gate-l1", 1)
-            api.evidence("eval-retrieval", 2)
+            api.evidence("lint", 2)
             api.live = "d" * 40
             result = publish_acceptance(api, 3, pathlib.Path(directory))
             self.assertEqual(result["error"], "candidate_base_not_current")
@@ -4219,6 +4243,214 @@ class TestRerunAttemptEvidence(unittest.TestCase):
             api.pr = {**pr, "mergeable": False}
             result = publish_acceptance(api, 3, pathlib.Path(directory))
             self.assertEqual(result["error"], "acceptance_evidence_unavailable_or_changed")
+
+
+class TestGitHubKeepAliveClient(unittest.TestCase):
+    """GitHub client reuses one HTTP/1.1 keep-alive connection, strips credentials
+    on cross-origin artifact redirects, and memoizes only immutable 40-hex-SHA reads."""
+
+    def _start_server(self, handler_cls):
+        import http.server
+        import threading
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_keepalive_connection_reuse_memoization_and_freshness(self):
+        import http.server
+
+        sha = "a" * 40
+        state = {"connections": set(), "requests": [], "pr_head": "b" * 40,
+                 "tip": "c" * 40, "close_next": False}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, format, *args):
+                pass
+
+            def _send(self, code, body, *, content_type="application/json", close=False):
+                self.send_response(code)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                if close:
+                    self.send_header("Connection", "close")
+                    self.close_connection = True
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                state["connections"].add(self.client_address)
+                state["requests"].append(("GET", self.path, self.headers.get("Authorization")))
+                if state["close_next"]:
+                    state["close_next"] = False
+                    self.close_connection = True
+                    return  # drop socket mid-keepalive to prove single GET retry
+                if self.path == f"/repos/synthetic/repository/commits/{sha}":
+                    self._send(200, json.dumps({"sha": sha, "parents": [{"sha": "0" * 40}]}).encode())
+                elif self.path == f"/repos/synthetic/repository/contents/Taskfile.yml?ref={sha}":
+                    payload = {"type": "file", "encoding": "base64",
+                               "content": base64.b64encode(b"version: '3'\n").decode()}
+                    self._send(200, json.dumps(payload).encode())
+                elif self.path == "/repos/synthetic/repository/pulls/3":
+                    self._send(200, json.dumps({"number": 3, "head": {"sha": state["pr_head"]}}).encode())
+                elif self.path == "/repos/synthetic/repository/git/ref/heads/main":
+                    self._send(200, json.dumps({"ref": "refs/heads/main",
+                                                "object": {"type": "commit", "sha": state["tip"]}}).encode())
+                elif self.path == "/repos/synthetic/repository/commits/main":
+                    self._send(200, json.dumps({"sha": state["tip"]}).encode())
+                elif self.path == "/repos/synthetic/repository/error":
+                    self._send(500, b"sensitive upstream stack trace")
+                else:
+                    self._send(404, b"not found")
+
+            def do_POST(self):
+                state["connections"].add(self.client_address)
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length))
+                state["requests"].append(("POST", self.path, self.headers.get("Authorization")))
+                self._send(201, json.dumps({"id": 77, "name": body["name"]}).encode())
+
+            def do_PATCH(self):
+                state["connections"].add(self.client_address)
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length))
+                state["requests"].append(("PATCH", self.path, self.headers.get("Authorization")))
+                self._send(200, json.dumps({"id": 77, "status": body["status"]}).encode())
+
+        _, url = self._start_server(Handler)
+        with patch("scripts.acceptance.subprocess.run") as subproc, \
+             GitHub("synthetic/repository", base_url=url, token="synthetic-token") as api:
+            # 1. Immutable 40-hex-SHA commit is memoized and isolated from caller mutation.
+            c1 = api.get(api.prefix + f"commits/{sha}")
+            c1["parents"].append({"sha": "f" * 40})
+            c2 = api.get(api.prefix + f"commits/{sha}")
+            self.assertEqual(len(c2["parents"]), 1)
+            self.assertEqual(sum(1 for _, p, _ in state["requests"] if p.endswith(f"/commits/{sha}")), 1)
+            # 2. Immutable 40-hex-SHA blob is memoized.
+            self.assertEqual(api.blob(sha, "Taskfile.yml"), b"version: '3'\n")
+            self.assertEqual(api.blob(sha, "Taskfile.yml"), b"version: '3'\n")
+            self.assertEqual(sum(1 for _, p, _ in state["requests"] if "Taskfile.yml" in p), 1)
+            # 3. Mutable endpoints and non-40-hex commit refs are NEVER memoized.
+            self.assertEqual(api.get(api.prefix + "pulls/3")["head"]["sha"], "b" * 40)
+            state["pr_head"] = "d" * 40
+            self.assertEqual(api.get(api.prefix + "pulls/3")["head"]["sha"], "d" * 40)
+            self.assertEqual(api.get(api.prefix + "git/ref/heads/main")["object"]["sha"], "c" * 40)
+            state["tip"] = "e" * 40
+            self.assertEqual(api.get(api.prefix + "git/ref/heads/main")["object"]["sha"], "e" * 40)
+            self.assertEqual(api.get(api.prefix + "commits/main")["sha"], "e" * 40)
+            state["tip"] = "f" * 40
+            self.assertEqual(api.get(api.prefix + "commits/main")["sha"], "f" * 40)
+            # 4. Writes reuse the same keep-alive connection.
+            created = api.write(api.prefix + "check-runs", {"name": "current-candidate-acceptance"}, method="POST")
+            patched = api.write(api.prefix + "check-runs/77", {"status": "completed"}, method="PATCH")
+            self.assertEqual((created["id"], patched["status"]), (77, "completed"))
+            # All of the above ran over ONE persistent TCP connection with zero subprocesses.
+            self.assertEqual(len(state["connections"]), 1)
+            self.assertTrue(all(auth == "Bearer synthetic-token" for _, _, auth in state["requests"]))
+            subproc.assert_not_called()
+            # 5. Stale keep-alive disconnect on GET transparently reconnects once.
+            state["close_next"] = True
+            self.assertEqual(api.get(api.prefix + "pulls/3")["head"]["sha"], "d" * 40)
+            self.assertEqual(len(state["connections"]), 2)
+            # 6. Non-2xx status raises ValueError without echoing remote body.
+            with self.assertRaises(ValueError) as exc:
+                api.raw(api.prefix + "error")
+            self.assertNotIn("sensitive upstream", str(exc.exception))
+
+    def test_artifact_redirect_strips_authorization_cross_origin_and_bounds_size(self):
+        import http.server
+
+        blob_seen = []
+        payload = b"PK\x03\x04synthetic-zip-bytes"
+
+        class BlobHandler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, format, *args):
+                pass
+
+            def do_GET(self):
+                blob_seen.append((self.path, self.headers.get("Authorization")))
+                body = b"x" * 64 if self.path == "/too-big" else payload
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        _, blob_url = self._start_server(BlobHandler)
+
+        class ApiHandler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, format, *args):
+                pass
+
+            def do_GET(self):
+                if self.path == "/repos/synthetic/repository/actions/artifacts/7/zip":
+                    self.send_response(302)
+                    self.send_header("Location", blob_url + "/artifact.zip?sig=sas")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                elif self.path == "/repos/synthetic/repository/actions/artifacts/8/zip":
+                    self.send_response(302)
+                    self.send_header("Location", blob_url + "/too-big")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                else:
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+
+        _, api_url = self._start_server(ApiHandler)
+        with GitHub("synthetic/repository", base_url=api_url, token="secret-gh-token") as api:
+            self.assertEqual(api.raw(api.prefix + "actions/artifacts/7/zip"), payload)
+            # Artifact endpoint is NOT memoized: a second call hits the API + redirect again.
+            self.assertEqual(api.raw(api.prefix + "actions/artifacts/7/zip"), payload)
+            self.assertEqual(blob_seen, [("/artifact.zip?sig=sas", None), ("/artifact.zip?sig=sas", None)])
+            # Over-limit body is refused before unbounded buffering.
+            with patch("scripts.acceptance.LIMIT", 32), self.assertRaises(ValueError):
+                api.raw(api.prefix + "actions/artifacts/8/zip")
+        # Production HTTPS client must never follow a downgrade redirect to HTTP.
+        https_api = GitHub("synthetic/repository", token="secret-gh-token")
+        with self.assertRaises(ValueError):
+            https_api._follow_redirect("https://api.github.com/repos/synthetic/repository/actions/artifacts/7/zip",
+                                       "http://127.0.0.1:9999/downgraded.zip")
+
+    def test_token_falls_back_to_single_gh_auth_token_when_env_unset(self):
+        import http.server
+
+        seen_auth = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, format, *args):
+                pass
+
+            def do_GET(self):
+                seen_auth.append(self.headers.get("Authorization"))
+                body = json.dumps({"ok": True}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        _, api_url = self._start_server(Handler)
+        env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN")}
+        fake_auth = subprocess.CompletedProcess(["gh", "auth", "token"], 0, stdout="cli-token\n", stderr="")
+        with patch.dict(os.environ, env, clear=True), \
+             patch("scripts.acceptance.subprocess.run", return_value=fake_auth) as run, \
+             GitHub("synthetic/repository", base_url=api_url) as api:
+            self.assertEqual(api.get(api.prefix + "pulls/1"), {"ok": True})
+            self.assertEqual(api.get(api.prefix + "pulls/2"), {"ok": True})
+            run.assert_called_once_with(["gh", "auth", "token"], capture_output=True, text=True,
+                                        check=False, timeout=15)
+            self.assertEqual(seen_auth, ["Bearer cli-token", "Bearer cli-token"])
 
 
 if __name__ == "__main__":

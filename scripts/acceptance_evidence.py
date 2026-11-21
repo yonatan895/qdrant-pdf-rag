@@ -32,6 +32,7 @@ class NativeProducer:
     kind: str
     tests: bool = False
     structured: bool = False
+    receipt_lane: str | None = None
 
 
 # These are native job names, including each independently executed unit shard.
@@ -44,8 +45,8 @@ PRODUCERS = (
     NativeProducer('ci.yml', 'sim', 'sim', 'simulation', 'sim', 'execution', True),
     NativeProducer('agent-probes.yml', 'agent-probes', 'agent-probes', 'agent_probes', 'agent-probes', 'execution', True),
     NativeProducer('ci.yml', 'gate-l1', 'gate-l1', 'gate_l1', 'gate-l1', 'execution', structured=True),
-    NativeProducer('ci.yml', 'eval-retrieval', 'eval-retrieval', 'eval_retrieval', 'eval-retrieval',
-                   'execution', structured=True),
+    NativeProducer('ci.yml', 'gate-l1', 'gate-l1', 'eval_retrieval', 'gate-l1',
+                   'execution', structured=True, receipt_lane='gate_l1'),
     NativeProducer('ci.yml', 'hazards', 'hazards', 'hazards', 'hazards', 'execution', structured=True),
     NativeProducer('load.yml', 'load', 'load', 'load', 'load', 'execution', True),
     NativeProducer('ha.yml', 'ha', 'ha', 'ha', 'ha', 'execution', True),
@@ -236,7 +237,8 @@ def normalize_native(
         'repository_id': candidate['repository_id'], 'pull_request': candidate['number'],
         'head_sha': candidate['head_sha'], 'base_sha': candidate['base_sha'],
         'event': 'pull_request', 'run_id': run['id'], 'run_attempt': run['run_attempt'],
-        'job_key': producer.job_key, 'job_name': producer.job, 'lane': producer.lane,
+        'job_key': producer.job_key, 'job_name': producer.job,
+        'lane': producer.receipt_lane or producer.lane,
         'actor_id': run['actor']['id'], 'triggering_actor': run['triggering_actor']['login'],
         'workflow_ref': f"{candidate['repository']}/.github/workflows/{producer.workflow}@refs/pull/{candidate['number']}/merge",
         'policy_sha256': policy_digest, 'producer_sha256': producer_digest,
