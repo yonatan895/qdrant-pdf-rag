@@ -2229,7 +2229,7 @@ deterministic and trap queries stay on the manuals path.
   end to end (the server translates EBCDIC); `MCP_FTP_ENCODING` is the code
   page of the server's ASCII output (default `utf-8`; z/OS FTP usually sends
   ISO8859-1), not the dataset's EBCDIC page. The bridge strips control/bidi characters, and
-  redacts PEM private keys, RACF/TSO/JCL password and passphrase operands
+  redacts PEM private keys (also one cut open by the byte cap), RACF/TSO/JCL password and passphrase operands
   (`PASSWORD(...)`, `PHRASE('...')`, `PW`/`PASS`/`PWD`, the `NEW*`
   forms, `KEYMASKED`/`KEYENCRYPTED`/`SESSKEY`; any case, quoted or bare,
   also when the byte cap cuts them open), TSO `LOGON user/password`, `=`/`:`

@@ -86,6 +86,11 @@ _FORBIDDEN_NAME_CHARS = frozenset("'\"*?%/\\")
 _PEM_PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
 )
+# Open-ended keys (applied after complete blocks are gone): a BEGIN whose END
+# was cut off by the byte cap redacts to the end of the text; an END without
+# its BEGIN (text that starts inside a key) redacts from the start of the text.
+_PEM_OPEN_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*\Z")
+_PEM_OPEN_END_RE = re.compile(r"\A[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----")
 # Password and passphrase keywords as RACF, TSO and JCL spell them (any case):
 # the operands of ADDUSER/ALTUSER/PASSWORD/LOGON, their NEW* forms, and the
 # PassTicket/session key operands, whose values are secrets too.
@@ -568,7 +573,9 @@ def screen_zos_text(text: str) -> str:
     - Normalizes line endings (`\\r\\n`, `\\r`, Unicode line/paragraph seps -> `\\n`).
     - Strips C0/C1 control characters and Unicode format/bidi characters
       (category Cc/Cf), retaining only `\\n` and `\\t`.
-    - Redacts PEM private keys; RACF/TSO/JCL password and passphrase operands
+    - Redacts PEM private keys, including one cut open by the byte cap (BEGIN
+      without END redacts to the end, END without BEGIN from the start);
+      RACF/TSO/JCL password and passphrase operands
       (`PASSWORD(x)`, `PHRASE('a b')`, `PW(x)`, `PASS(x)`, `PWD(x)`, the
       `NEW*` forms, `KEYMASKED`/`KEYENCRYPTED`/`SESSKEY`; any case, quoted or
       bare, closed or cut open by the byte cap); TSO `LOGON user/pw[/newpw]`;
@@ -587,6 +594,8 @@ def screen_zos_text(text: str) -> str:
         if ch in ("\n", "\t") or unicodedata.category(ch) not in ("Cc", "Cf")
     )
     cleaned = _PEM_PRIVATE_KEY_RE.sub("[REDACTED]", cleaned)
+    cleaned = _PEM_OPEN_BEGIN_RE.sub("[REDACTED]", cleaned)
+    cleaned = _PEM_OPEN_END_RE.sub("[REDACTED]", cleaned)
     cleaned = _OPERAND_SECRET_RE.sub(r"\1\2[REDACTED]", cleaned)
     cleaned = _TSO_LOGON_RE.sub(r"\1/[REDACTED]", cleaned)
     cleaned = _KV_SECRET_RE.sub(r"\1\2[REDACTED]", cleaned)
