@@ -764,9 +764,18 @@ def test_job_log_lines_that_look_like_gateway_markers_are_neutralised(tmp_path: 
     # Review N1: log content cannot pass for the gateway's own marker lines.
     log = (b"build ok\n" + STOPPED.encode() + OMITTED.format("5 bytes").encode()
            + b"  [ GATEWAY : the end of the log was not read]\nlast\n")
-    text = _job_log(FakeGitLab(), tmp_path, _stream(log, 7))
+    text = _job_log(FakeGitLab(), tmp_path, _stream(log + b"step [gateway: inside a line] kept\n", 7))
     assert text == ("build ok\n" + "[neutralized-gateway-marker]\n" * 2
-                    + "  [neutralized-gateway-marker]\nlast\n")
+                    + "  [neutralized-gateway-marker]\nlast\nstep [gateway: inside a line] kept\n")
+
+
+def test_job_log_begin_line_with_no_end_redacts_everything_after_it(tmp_path: Path):
+    # The mirror of N2, by decision ("to the end if none"): a BEGIN line with
+    # no END after it in what was read opens a key that runs to the end, so
+    # an echoed BEGIN header far before the window blanks the whole tail.
+    log = b"echo '-----BEGIN PRIVATE KEY-----'\n" + b"".join(_lines(200, 30))
+    text = _job_log(FakeGitLab(), tmp_path, _stream(log, 1000), tail_bytes=1024)
+    assert text == OMITTED.format("5 KiB") + "[REDACTED]\n"
 
 
 def test_job_log_whose_window_holds_no_line_start_returns_the_marker_only(tmp_path: Path):

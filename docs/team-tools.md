@@ -432,9 +432,12 @@ names it fails at start-up as an unknown key.
     matched through the ANSI escapes, control and non-ASCII bytes that
     cleaning removes (up to eight between two characters); a marker hidden by
     more is still caught by the cleaning pass when its `BEGIN` line is kept.
-  - Log text that starts like a marker line (`[gateway:`, any case and
-    spacing) is replaced by `[neutralized-gateway-marker]` to the end of its
-    line, so a log cannot claim that its end was not read.
+  - A log line that starts like a marker line (`[gateway:` after optional
+    blanks, any case and spacing) is replaced by `[neutralized-gateway-marker]`
+    to the end of the line, so a log cannot claim that its end was not read.
+  - A `BEGIN … PRIVATE KEY` line with no `END` line after it opens a key to
+    the end of what was read: an echoed `BEGIN` header before the kept lines
+    blanks the whole tail (`[REDACTED]`).
   - ANSI sequences are removed, and the kept lines are cleaned and redacted whole.
   - If the framed, escaped text still exceeds the result cap, whole lines are
     dropped from the start, never from the end.

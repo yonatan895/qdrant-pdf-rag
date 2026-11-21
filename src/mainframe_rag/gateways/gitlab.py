@@ -79,10 +79,10 @@ _REF_PATTERN: Final = r"(?!.*\.\.)[A-Za-z0-9_][A-Za-z0-9_./+-]{0,254}"
 _FILE_PATTERN: Final = r"(?!/)(?!.*(?:^|/)\.{1,2}(?:/|$))[^\x00-\x1f\x7f\\]{1,1024}"
 _SEARCH_PATTERN: Final = r"[^\x00-\x1f\x7f]{1,200}"
 _ANSI_RE: Final = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]{0,256}(?:\x07|\x1b\\)")
-# Log text that reads like one of the gateway's marker lines (below) is
+# A log line that starts like one of the gateway's marker lines (below) is
 # replaced, so a log cannot tell the model its end was not read (review N1;
 # the z/OS bridge neutralises its observation delimiters the same way).
-_MARKER_LOOKALIKE_RE: Final = re.compile(r"(?i)[\[\uff3b]\s*gateway\s*:[^\n]*")
+_MARKER_LOOKALIKE_RE: Final = re.compile(r"(?im)^([ \t]*)[\[\uff3b][ \t]*gateway[ \t]*:.*$")
 NEUTRALIZED_MARKER: Final = "[neutralized-gateway-marker]"
 
 # Bearer mode (ADR-0014 D4): every Open WebUI user is the one caller
@@ -436,7 +436,7 @@ def job_log_text(
         data = data[: data.rfind(b"\n") + 1]
     data = _redact_keys(data, start, keys)
     text = clean_text(_ANSI_RE.sub("", data.decode("utf-8", errors="replace")))
-    text = _MARKER_LOOKALIKE_RE.sub(NEUTRALIZED_MARKER, text)
+    text = _MARKER_LOOKALIKE_RE.sub(lambda m: m.group(1) + NEUTRALIZED_MARKER, text)
     unread = "" if read.complete else JOB_LOG_UNREAD.format(_about(read.total))
     stopped = "" if read.complete else JOB_LOG_STOPPED
     kept = fit_text_tail(text, limits, prefix=unread, suffix=stopped)
