@@ -475,11 +475,11 @@
           {
             "notice": true,
             "path": "NOTICE.pstack-skills",
-            "sha256": "94722292fc6337b50705c02b19fb2774647ae8d0253df97cca83067100461333"
+            "sha256": "b6daa22fac8deaf831de4098855ae045996482c80fd96e32cf30708d587edef6"
           },
           {
             "path": ".agents/pstack-skills.sha256",
-            "sha256": "2044d53d4a58176dc5f83ab44c00d43f426e88571b683c23a4fb1dc9c93c9790"
+            "sha256": "64c69a361d56148f10853777432205789f8cd0c77b63ea5e23d216c630605621"
           }
         ]
       },
