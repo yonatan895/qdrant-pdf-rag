@@ -508,7 +508,11 @@ Compatibility and lifecycle decisions under #448:
   - `MALLOC_TRIM_THRESHOLD_=131072` returns free heap top memory to the OS
     once more than 128 KiB is free, instead of keeping it.
   - `MALLOC_MMAP_THRESHOLD_=131072` serves allocations of 128 KiB and more
-    (base64 image payloads) with `mmap`, released to the OS on free. Worker count and scratch size are
+    (base64 image payloads) with `mmap`, released to the OS on free.
+
+  The agent livenessProbe (`/livez`, period 20 s, 3 failures) has a 3 s
+  timeout: a CPU-throttled agent answered in up to about 1 s, the Kubernetes
+  1 s default. Worker count and scratch size are
   `INGEST_WORKERS` and `INGEST_WORK_SIZE`. CPU is whole/decimal cores or
   millicores (`500m`); memory and sizes need a Ki/Mi/Gi/Ti unit. Each value is
   validated before any change; a limit below its request (or below the default

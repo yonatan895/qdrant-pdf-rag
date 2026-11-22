@@ -46,7 +46,12 @@ def test_base_contract_with_independent_controls():
     assert new_svc["spec"]["selector"] == {"app": "rag-agent"}
     assert new_svc["spec"]["ports"] == [{"name": "http", "port": 8080, "targetPort": "http"}]
     assert agent["readinessProbe"]["httpGet"] == {"path": "/healthz", "port": "http"}
-    assert agent["livenessProbe"]["httpGet"] == {"path": "/livez", "port": "http"}
+    assert agent["livenessProbe"] == {  # #1348 (2026-11-22): timeout 3 s, nothing else moved
+        "httpGet": {"path": "/livez", "port": "http"},
+        "initialDelaySeconds": 5, "periodSeconds": 20, "timeoutSeconds": 3, "failureThreshold": 3}
+    assert agent["readinessProbe"] == {
+        "httpGet": {"path": "/healthz", "port": "http"}, "initialDelaySeconds": 5, "periodSeconds": 10}
+    assert "startupProbe" not in agent
     assert agent["resources"]["requests"] == {"cpu": "250m", "memory": "512Mi"}
     assert agent["resources"]["limits"] == {"cpu": "2", "memory": "2Gi"}
     new_env = env_map(new_dep)

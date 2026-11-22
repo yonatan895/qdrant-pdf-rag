@@ -182,6 +182,9 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 20
+            # 3 s (#1348, 2026-11-22): a CPU-throttled event loop answered /livez
+            # in up to about 1 s under load; the 1 s default risks needless restarts.
+            timeoutSeconds: 3
             failureThreshold: 3
           resources:
             {{- toYaml .Values.resources.agent | nindent 12 }}
