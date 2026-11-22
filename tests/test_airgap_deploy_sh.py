@@ -3006,8 +3006,8 @@ def test_sizing_keys_render_what_the_free_form_overlay_rendered(tmp_path):
 # --- #1348: agent container sizing keys --------------------------------------
 
 AGENT_SIZING = {
-    "AGENT_CPU_REQUEST": "250m", "AGENT_MEMORY_REQUEST": "768Mi",
-    "AGENT_CPU_LIMIT": "2", "AGENT_MEMORY_LIMIT": "1536Mi",
+    "AGENT_CPU_REQUEST": "500m", "AGENT_MEMORY_REQUEST": "1Gi",
+    "AGENT_CPU_LIMIT": "3", "AGENT_MEMORY_LIMIT": "3Gi",
 }
 OAUTH_PROXY_RESOURCES = {"requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"cpu": "200m", "memory": "128Mi"}}
 
@@ -3044,7 +3044,7 @@ def test_agent_sizing_keys_reach_only_the_agent_container(tree):
     assert r.returncode == 0, r.stderr
     sized_text = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
     assert rendered_container(sized_text, "agent")["resources"] == {
-        "requests": {"cpu": "250m", "memory": "768Mi"}, "limits": {"cpu": "2", "memory": "1536Mi"}}
+        "requests": {"cpu": "500m", "memory": "1Gi"}, "limits": {"cpu": "3", "memory": "3Gi"}}
     assert rendered_container(sized_text, "oauth-proxy")["resources"] == OAUTH_PROXY_RESOURCES
     # Every other rendered field is unchanged: restore the agent's resources and compare.
     sized_docs = _rendered_docs(tree)
@@ -3058,7 +3058,7 @@ def test_agent_sizing_keys_reach_only_the_agent_container(tree):
 
 @pytest.mark.parametrize("name,value", [
     ("AGENT_CPU_REQUEST", "lots"), ("AGENT_MEMORY_LIMIT", "500m"),
-    ("AGENT_CPU_LIMIT", "50m"), ("AGENT_MEMORY_REQUEST", "1Gi"),
+    ("AGENT_CPU_LIMIT", "200m"), ("AGENT_MEMORY_REQUEST", "3Gi"),
 ])
 def test_invalid_agent_sizing_is_refused_before_any_mutation(tree, name, value):
     r = _run(tree, (name, value))

@@ -615,7 +615,7 @@ def request_overrides(values: Mapping[str, str]) -> dict[str, int | float]:
 SIZING_DEFAULTS = {
     "QDRANT": {"requests": {"cpu": "4", "memory": "16Gi"}, "limits": {"cpu": "8", "memory": "32Gi"}},
     "INGEST": {"requests": {"cpu": "4", "memory": "8Gi"}, "limits": {"cpu": "16", "memory": "32Gi"}},
-    "AGENT": {"requests": {"cpu": "100m", "memory": "256Mi"}, "limits": {"cpu": "500m", "memory": "512Mi"}},
+    "AGENT": {"requests": {"cpu": "250m", "memory": "512Mi"}, "limits": {"cpu": "2", "memory": "2Gi"}},
 }
 SIZING_PREFIXES = ("QDRANT", "INGEST", "AGENT")
 QDRANT_VOLUME_KEYS = {"QDRANT_DATA_SIZE": "persistence.size", "QDRANT_SNAPSHOT_SIZE": "snapshotPersistence.size"}

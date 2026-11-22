@@ -2199,7 +2199,7 @@ def test_validate_trace_endpoint_classification(tree, endpoint, refused):
 @pytest.mark.parametrize("name,value", [
     ("QDRANT_DATA_SIZE", "lots"), ("QDRANT_CPU_LIMIT", "1"), ("INGEST_MEMORY_REQUEST", "64Gi"),
     ("INGEST_CPU_REQUEST", "0"), ("QDRANT_MEMORY_LIMIT", "500m"),
-    ("AGENT_MEMORY_LIMIT", "200Mi"), ("AGENT_CPU_REQUEST", "lots"),
+    ("AGENT_MEMORY_LIMIT", "400Mi"), ("AGENT_CPU_REQUEST", "lots"),
 ])
 @pytest.mark.parametrize("source", ["env", "file"])
 def test_validate_refuses_invalid_sizing_from_env_and_airgap_env(tree, name, value, source):

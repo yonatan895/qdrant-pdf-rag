@@ -132,8 +132,8 @@ def base_values() -> dict:
         "pullSecret": {"name": ""},
         "resources": {
             "agent": {
-                "requests": {"cpu": "100m", "memory": "256Mi"},
-                "limits": {"cpu": "500m", "memory": "512Mi"},
+                "requests": {"cpu": "250m", "memory": "512Mi"},
+                "limits": {"cpu": "2", "memory": "2Gi"},
             }
         },
     }

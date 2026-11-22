@@ -547,13 +547,13 @@ def test_config_check_refuses_agent_sizing_like_the_deploy_path():
 
     base = {"OPENWEBUI_ENABLED": "false", "EMBED_MODEL": "m", "EMBED_BASE_URL": "http://e/v1"}
     assert not [e for e in check_config(base)[0] if "AGENT_" in e]
-    lone_limit, _ = check_config({**base, "AGENT_MEMORY_LIMIT": "200Mi"})  # default request 256Mi
+    lone_limit, _ = check_config({**base, "AGENT_MEMORY_LIMIT": "400Mi"})  # default request 512Mi
     assert "AGENT_MEMORY_LIMIT must not be below AGENT_MEMORY_REQUEST" in lone_limit
     malformed, _ = check_config({**base, "AGENT_CPU_REQUEST": "lots"})
     assert any(e.startswith("AGENT_CPU_REQUEST must be a positive CPU quantity") for e in malformed)
-    assert not any("lots" in e or "200Mi" in e for e in lone_limit + malformed)
-    sized, _ = check_config({**base, "AGENT_CPU_REQUEST": "250m", "AGENT_MEMORY_REQUEST": "768Mi",
-                             "AGENT_CPU_LIMIT": "2", "AGENT_MEMORY_LIMIT": "1536Mi"})
+    assert not any("lots" in e or "400Mi" in e for e in lone_limit + malformed)
+    sized, _ = check_config({**base, "AGENT_CPU_REQUEST": "500m", "AGENT_MEMORY_REQUEST": "1Gi",
+                             "AGENT_CPU_LIMIT": "3", "AGENT_MEMORY_LIMIT": "3Gi"})
     assert not [e for e in sized if "AGENT_" in e]
 
 

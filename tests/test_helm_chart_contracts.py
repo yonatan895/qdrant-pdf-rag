@@ -47,8 +47,8 @@ def test_base_contract_with_independent_controls():
     assert new_svc["spec"]["ports"] == [{"name": "http", "port": 8080, "targetPort": "http"}]
     assert agent["readinessProbe"]["httpGet"] == {"path": "/healthz", "port": "http"}
     assert agent["livenessProbe"]["httpGet"] == {"path": "/livez", "port": "http"}
-    assert agent["resources"]["requests"] == {"cpu": "100m", "memory": "256Mi"}
-    assert agent["resources"]["limits"] == {"cpu": "500m", "memory": "512Mi"}
+    assert agent["resources"]["requests"] == {"cpu": "250m", "memory": "512Mi"}
+    assert agent["resources"]["limits"] == {"cpu": "2", "memory": "2Gi"}
     new_env = env_map(new_dep)
     expected_scalars = {
         "QDRANT_URL": "http://qdrant:6333",

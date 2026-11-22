@@ -420,13 +420,15 @@ pullSecret:
   name: ""
 
 resources:
+  # Agent defaults from the #1348 load measurement (image chats about 45 MiB
+  # each in flight; 512Mi was OOM-killed). Sites resize with AGENT_* keys.
   agent:
     requests:
-      cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: 500m
+      cpu: 250m
       memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
   feedback:
     requests:
       cpu: 50m

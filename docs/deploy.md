@@ -495,7 +495,10 @@ Compatibility and lifecycle decisions under #448:
   `INGEST_CPU_LIMIT`, `INGEST_MEMORY_LIMIT`. Agent container
   (`resources.agent`, #1348; the oauth-proxy sidecar keeps its own sizes):
   `AGENT_CPU_REQUEST`, `AGENT_MEMORY_REQUEST`, `AGENT_CPU_LIMIT`,
-  `AGENT_MEMORY_LIMIT`. Worker count and scratch size are
+  `AGENT_MEMORY_LIMIT`. The agent defaults (requests 250m/512Mi, limits
+  2 CPU/2Gi) come from the #1348 load measurement: concurrent image chats
+  hold about 45 MiB each, and 512Mi was OOM-killed at 16 of them. A site
+  whose quota cannot take the larger limits sets these keys. Worker count and scratch size are
   `INGEST_WORKERS` and `INGEST_WORK_SIZE`. CPU is whole/decimal cores or
   millicores (`500m`); memory and sizes need a Ki/Mi/Gi/Ti unit. Each value is
   validated before any change; a limit below its request (or below the default

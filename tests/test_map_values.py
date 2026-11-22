@@ -1617,8 +1617,8 @@ def test_sizing_defaults_mirror_the_chart_values():
 CHART_VALUES = yaml.safe_load((CHART / "values.yaml").read_text())
 CHART_AGENT_RESOURCES = CHART_VALUES["resources"]["agent"]
 AGENT_SIZING_ENV = {
-    "AGENT_CPU_REQUEST": "250m", "AGENT_MEMORY_REQUEST": "768Mi",
-    "AGENT_CPU_LIMIT": "2", "AGENT_MEMORY_LIMIT": "1536Mi",
+    "AGENT_CPU_REQUEST": "500m", "AGENT_MEMORY_REQUEST": "1Gi",
+    "AGENT_CPU_LIMIT": "3", "AGENT_MEMORY_LIMIT": "3Gi",
 }
 
 
@@ -1636,7 +1636,7 @@ def test_agent_sizing_defaults_partial_and_full(monkeypatch, mapper_env):
         monkeypatch.setenv(key, val)
     full = load_values(mapper_env()[1])
     assert full["resources"]["agent"] == {
-        "requests": {"cpu": "250m", "memory": "768Mi"}, "limits": {"cpu": "2", "memory": "1536Mi"}}
+        "requests": {"cpu": "500m", "memory": "1Gi"}, "limits": {"cpu": "3", "memory": "3Gi"}}
     # Only the agent block moves: ingest and every other value stay as rendered by default.
     assert {**full, "resources": {**full["resources"], "agent": default["resources"]["agent"]}} == default
 
@@ -1658,10 +1658,10 @@ def test_agent_sizing_keeps_feedback_and_ingest_resources(monkeypatch, mapper_en
     ("AGENT_CPU_LIMIT", "2,x=1"), ("AGENT_MEMORY_REQUEST", "256"), ("AGENT_MEMORY_REQUEST", "256MB"),
     ("AGENT_MEMORY_LIMIT", "500m"), ("AGENT_MEMORY_LIMIT", "1e3Mi"),
     # A lone side compared against the chart default of the other side.
-    ("AGENT_CPU_LIMIT", "50m"),          # default request is 100m
-    ("AGENT_MEMORY_LIMIT", "200Mi"),     # default request is 256Mi
-    ("AGENT_CPU_REQUEST", "750m"),       # default limit is 500m
-    ("AGENT_MEMORY_REQUEST", "1Gi"),     # default limit is 512Mi
+    ("AGENT_CPU_LIMIT", "200m"),         # default request is 250m
+    ("AGENT_MEMORY_LIMIT", "400Mi"),     # default request is 512Mi
+    ("AGENT_CPU_REQUEST", "2500m"),      # default limit is 2
+    ("AGENT_MEMORY_REQUEST", "3Gi"),     # default limit is 2Gi
 ])
 def test_invalid_agent_sizing_is_refused_with_a_fixed_message(monkeypatch, mapper_env, key, val):
     monkeypatch.setenv(key, val)
