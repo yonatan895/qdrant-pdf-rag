@@ -2,6 +2,10 @@
   "_about": "The upstream/gap extension surface (ADR-0009 section 9), derived by scripts/extension_surface.py. Do not edit by hand; refresh: .venv/bin/python scripts/extension_surface.py --write",
   "current": {
     "airgap_env_keys": [
+      "AGENT_CPU_LIMIT",
+      "AGENT_CPU_REQUEST",
+      "AGENT_MEMORY_LIMIT",
+      "AGENT_MEMORY_REQUEST",
       "AGENT_NETWORK_POLICY",
       "AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES",
       "AGENT_ROUTE",

@@ -260,6 +260,26 @@ OPERATOR_KEYS: tuple[OperatorKey, ...] = (
         "Site sizing override for ingest Job memory limit (must be >= request).",
         "#1070", _EX_MAP, helm_path="ingest.resources.limits.memory",
     ),
+    OperatorKey(
+        "AGENT_CPU_REQUEST", _SEC_CLUSTER, "str", "250m",
+        "Site sizing override for the agent container CPU request (not the oauth-proxy sidecar).",
+        "#1348", _EX_MAP, helm_path="resources.agent.requests.cpu",
+    ),
+    OperatorKey(
+        "AGENT_MEMORY_REQUEST", _SEC_CLUSTER, "str", "512Mi",
+        "Site sizing override for the agent container memory request.",
+        "#1348", _EX_MAP, helm_path="resources.agent.requests.memory",
+    ),
+    OperatorKey(
+        "AGENT_CPU_LIMIT", _SEC_CLUSTER, "str", "2",
+        "Site sizing override for the agent container CPU limit (must be >= request).",
+        "#1348", _EX_MAP, helm_path="resources.agent.limits.cpu",
+    ),
+    OperatorKey(
+        "AGENT_MEMORY_LIMIT", _SEC_CLUSTER, "str", "2Gi",
+        "Site sizing override for the agent container memory limit (must be >= request).",
+        "#1348", _EX_MAP, helm_path="resources.agent.limits.memory",
+    ),
 
     # --- Images ---
     OperatorKey(

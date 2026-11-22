@@ -160,8 +160,8 @@ local choice, not a product-default change; with `CHAT_FOLLOWUP_ANCHOR_ENABLED`
 unset it also turns the anchoring default (on since #1274) off. Keep the published `IMAGE_SHA`.
 
 Use the [real-corpus resource overrides](local-real-corpus.md#1-establish-the-candidate-data-and-resource-budget):
-1/1/1 Qdrant topology, one ingest worker, Kind-only fsGroup 3000, two agent
-replicas, Qdrant data/snapshots sized for current data plus a replacement, and
+1/1/1 Qdrant topology, one ingest worker, Kind-only fsGroup 3000, three agent
+replicas (the chart default), Qdrant data/snapshots sized for current data plus a replacement, and
 OpenObserve persistent storage. Mount `/mnt/rag-kind-checkpoint` read-only at
 `/qdrant/snapshots/checkpoint` for restore; never mount a host source over the
 writable Qdrant data directory. Provision the read-only corpus PV separately.

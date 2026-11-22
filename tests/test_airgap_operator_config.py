@@ -560,6 +560,22 @@ def test_config_check_refuses_body_budget_below_cap_with_chart_defaults():
         assert not any(value in joined for value in chosen.values())
 
 
+def test_config_check_refuses_agent_sizing_like_the_deploy_path():
+    """#1348: the preflight runs the same agent sizing check as map_values."""
+    from scripts.airgap.config_tool import check_config
+
+    base = {"OPENWEBUI_ENABLED": "false", "EMBED_MODEL": "m", "EMBED_BASE_URL": "http://e/v1"}
+    assert not [e for e in check_config(base)[0] if "AGENT_" in e]
+    lone_limit, _ = check_config({**base, "AGENT_MEMORY_LIMIT": "400Mi"})  # default request 512Mi
+    assert "AGENT_MEMORY_LIMIT must not be below AGENT_MEMORY_REQUEST" in lone_limit
+    malformed, _ = check_config({**base, "AGENT_CPU_REQUEST": "lots"})
+    assert any(e.startswith("AGENT_CPU_REQUEST must be a positive CPU quantity") for e in malformed)
+    assert not any("lots" in e or "400Mi" in e for e in lone_limit + malformed)
+    sized, _ = check_config({**base, "AGENT_CPU_REQUEST": "500m", "AGENT_MEMORY_REQUEST": "1Gi",
+                             "AGENT_CPU_LIMIT": "3", "AGENT_MEMORY_LIMIT": "3Gi"})
+    assert not [e for e in sized if "AGENT_" in e]
+
+
 def test_config_sh_help_and_argument_errors(tmp_path):
     make_bin_tree(tmp_path, ["common.sh", "config.sh"])
     env = {"PATH": system_path(tmp_path / "bin")}

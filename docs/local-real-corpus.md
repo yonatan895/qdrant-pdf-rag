@@ -58,7 +58,7 @@ resources:
 
 This fixed group is Kind-only; OpenShift keeps project-assigned identities.
 Use explicit local `QDRANT_SHARD_NUMBER=1`, `QDRANT_REPLICATION_FACTOR=1`,
-`QDRANT_WRITE_CONSISTENCY_FACTOR=1`, `AGENT_ROUTE=false`, two agent replicas,
+`QDRANT_WRITE_CONSISTENCY_FACTOR=1`, `AGENT_ROUTE=false`, three agent replicas (the chart default),
 real-model dimension 1024 and the verified immutable `EMBED_MODEL_REVISION`.
 The recorded claims are 20Gi each for Qdrant data/snapshots and 10Gi for OpenObserve.
 Include old generation, staging, safety snapshots and optimizer scratch in disk

@@ -34,6 +34,7 @@ try:
         MODEL_CONFIG_KEYS,
         SIZING_ENV_KEYS,
         JsonObject,
+        agent_resources,
         feedback_config,
         ingest_resources,
         network_policy,
@@ -54,6 +55,7 @@ except ModuleNotFoundError:
         MODEL_CONFIG_KEYS,
         SIZING_ENV_KEYS,
         JsonObject,
+        agent_resources,
         feedback_config,
         ingest_resources,
         network_policy,
@@ -382,12 +384,13 @@ def build_values(deploy_only: bool = False) -> dict:
     reasoning_model = env("LLM_MODEL_REASONING")
     reasoning_base = env("LLM_BASE_URL") if reasoning_model else ""
 
-    resources: dict = {
-        "agent": {
-            "requests": {"cpu": "100m", "memory": "256Mi"},
-            "limits": {"cpu": "500m", "memory": "512Mi"},
-        }
-    }
+    try:
+        # Site sizing keys AGENT_* (#1348): unset keeps the chart default; the
+        # oauth-proxy sidecar keeps its own fixed template resources.
+        agent_sizing = agent_resources({name: env(name) for name in SIZING_ENV_KEYS})
+    except ValueError as exc:
+        die(str(exc))
+    resources: dict = {"agent": agent_sizing}
     if feedback:
         # Protected defaults (D8: unmeasured, 10Gi included); not operator keys.
         resources["feedback"] = {
@@ -448,7 +451,7 @@ def build_values(deploy_only: bool = False) -> dict:
 
     return {
         **oo_values,
-        "replicaCount": 2,
+        "replicaCount": 3,  # rag-agent replicas (#1348, 2026-11-22); no operator key
         "images": {
             **optional_images,
             "agent": {

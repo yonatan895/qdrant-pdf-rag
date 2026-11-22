@@ -615,17 +615,18 @@ def request_overrides(values: Mapping[str, str]) -> dict[str, int | float]:
     return result
 
 
-# Site sizing (#1070 R2): a quota-bound site fits the release into its
-# namespace quota with these keys, not with free-form overlays (those stay
-# CI-only). Unset keeps the chart default, so the default render is unchanged.
-# SIZING_DEFAULTS mirrors charts/qdrant-openshift.values.yaml and
+# Site sizing (#1070 R2, agent #1348): a quota-bound site fits the release
+# into its namespace quota with these keys, not with free-form overlays (those
+# stay CI-only). Unset keeps the chart default, so the default render is
+# unchanged. SIZING_DEFAULTS mirrors charts/qdrant-openshift.values.yaml and
 # charts/mainframe-rag/values.yaml (a test pins both) so a lone limit or
 # request is compared against the value that will actually render.
 SIZING_DEFAULTS = {
     "QDRANT": {"requests": {"cpu": "4", "memory": "16Gi"}, "limits": {"cpu": "8", "memory": "32Gi"}},
     "INGEST": {"requests": {"cpu": "4", "memory": "8Gi"}, "limits": {"cpu": "16", "memory": "32Gi"}},
+    "AGENT": {"requests": {"cpu": "250m", "memory": "512Mi"}, "limits": {"cpu": "2", "memory": "2Gi"}},
 }
-SIZING_PREFIXES = ("QDRANT", "INGEST")
+SIZING_PREFIXES = ("QDRANT", "INGEST", "AGENT")
 QDRANT_VOLUME_KEYS = {"QDRANT_DATA_SIZE": "persistence.size", "QDRANT_SNAPSHOT_SIZE": "snapshotPersistence.size"}
 SIZING_ENV_KEYS = (
     *QDRANT_VOLUME_KEYS,
@@ -652,8 +653,8 @@ def _quantity(name: str, raw: str, cpu: bool) -> Fraction:
 
 
 def sizing_resources(values: Mapping[str, str], prefix: str) -> dict[str, dict[str, str]]:
-    """The explicitly selected requests/limits of one workload (`QDRANT` or
-    `INGEST`), validated against each other and the chart default of any side
+    """The explicitly selected requests/limits of one workload (`QDRANT`,
+    `INGEST` or `AGENT`), validated against each other and the chart default of any side
     left unset. Unset keys are omitted."""
     chosen: dict[str, dict[str, str]] = {"requests": {}, "limits": {}}
     quantities: dict[tuple[str, str], Fraction] = {}
@@ -684,12 +685,22 @@ def qdrant_sizing(values: Mapping[str, str]) -> list[str]:
     return result
 
 
-def ingest_resources(values: Mapping[str, str]) -> dict[str, dict[str, str]]:
-    """The chart's `ingest.resources` with the selected sizes applied over the defaults."""
-    merged = {section: dict(fields) for section, fields in SIZING_DEFAULTS["INGEST"].items()}
-    for section, fields in sizing_resources(values, "INGEST").items():
+def _chart_resources(values: Mapping[str, str], prefix: str) -> dict[str, dict[str, str]]:
+    merged = {section: dict(fields) for section, fields in SIZING_DEFAULTS[prefix].items()}
+    for section, fields in sizing_resources(values, prefix).items():
         merged[section].update(fields)
     return merged
+
+
+def ingest_resources(values: Mapping[str, str]) -> dict[str, dict[str, str]]:
+    """The chart's `ingest.resources` with the selected sizes applied over the defaults."""
+    return _chart_resources(values, "INGEST")
+
+
+def agent_resources(values: Mapping[str, str]) -> dict[str, dict[str, str]]:
+    """The chart's `resources.agent` (agent container only, never the oauth-proxy
+    sidecar) with the selected sizes applied over the defaults (#1348)."""
+    return _chart_resources(values, "AGENT")
 
 
 def validate_model_config(values: Mapping[str, str]) -> None:
@@ -729,6 +740,7 @@ def main(argv: list[str] | None = None) -> int:
         validate_model_config(os.environ)
         qdrant_sizing(os.environ)
         ingest_resources(os.environ)
+        agent_resources(os.environ)
     except ValueError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
