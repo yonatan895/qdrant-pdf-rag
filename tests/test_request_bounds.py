@@ -967,6 +967,7 @@ def test_declared_over_cap_body_is_refused_before_anything_reads_it(env, path):
             call = _Call(path, {"query": "IEA500I"}, framing="length", declared=MIB + 1).start()
             await call.done()
             assert (call.status, call.json()) == (413, TOO_LARGE_1MIB)
+            assert call.headers["connection"] == "close", "an unread body is never drained"
             assert call.receives == 0 and search.calls == 0
             assert app_mod.body_budget.in_use == 0
 
@@ -1010,6 +1011,7 @@ def test_body_waits_for_budget_without_reading_then_gets_the_overload_code(env):
             refused = await waiting.done()
             assert (refused.status, refused.json()) == (503, OVERLOADED)
             assert refused.headers["retry-after"] == "1"
+            assert refused.headers["connection"] == "close"
             assert refused.receives == 0 and search.calls == 0
             assert app_mod.body_budget.waiting == 0
 
@@ -1018,6 +1020,7 @@ def test_body_waits_for_budget_without_reading_then_gets_the_overload_code(env):
             holder.release()
             served = await queued.done()
             assert served.status == 200 and search.calls == 1
+            assert "connection" not in served.headers
             assert app_mod.body_budget.in_use == 0
 
     _run(main)
@@ -1043,10 +1046,11 @@ def test_chat_is_admitted_before_its_body_is_read_or_budgeted(env):
             refused = await _Call(*CHAT, framing="length").start().done()
             assert (refused.status, refused.json()) == (503, OVERLOADED)
             assert refused.receives == 0 and app_mod.body_budget.in_use == held
+            assert refused.headers["connection"] == "close", "an unread body is never drained"
             search.gate.set()
             assert (await holder.done()).status == 200
             assert (await queued.done()).status == 200
-            assert queued.receives == 1
+            assert queued.receives == 1 and "connection" not in queued.headers
             assert app_mod.body_budget.in_use == 0 and app_mod.admission.active == 0
 
     _run(main)
