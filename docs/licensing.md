@@ -24,7 +24,9 @@ the same day: the Hypothesis reference-docs archive re-pin (#1249, `abd9d185…`
 OpenTelemetry 1.45.2 security bump
 ([#1250 comment](https://github.com/yonatan895/qdrant-pdf-rag/pull/1250#issuecomment-6898865253)), bound to scope digest `6785f462…`. The 2026-11-22 vendored skills pin bumps (#1353) moved it again;
 the maintainer approved it the same day
-([#1353 comment](https://github.com/yonatan895/qdrant-pdf-rag/pull/1353#issuecomment-7081107677)), bound to scope digest `cb5e55d5…`. Any later dependency, pin or notice change voids it, and
+([#1353 comment](https://github.com/yonatan895/qdrant-pdf-rag/pull/1353#issuecomment-7081107677)), bound to scope digest `cb5e55d5…`. The 2026-11-22 Open WebUI v0.13.4 bump (#1359) moved it again;
+the maintainer approved it the same day
+([#1359 comment](https://github.com/yonatan895/qdrant-pdf-rag/pull/1359#issuecomment-7082490403)), bound to scope digest `afd1b32f…`. Any later dependency, pin or notice change voids it, and
 `check --release` then fails until a new approval is recorded.
 Source of authority: #376 and its triage comments (19 and 24 September, 1 October
 2026): close on a documented owner disposition, never on CI alone.
