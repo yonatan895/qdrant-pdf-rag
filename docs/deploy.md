@@ -147,7 +147,14 @@ restores the snapshot over whatever the file assigned; empty stays unset
   `REQUEST_QUEUE_WAIT_S`, then gets 503 overloaded). Same empty-keeps-default
   path through `model_config.request_overrides`; the budget must be at least the
   cap (an empty side counts as its chart default): preflight, the mapper, the
-  chart render and `Settings` each refuse a smaller budget.
+  chart render and `Settings` each refuse a smaller budget. Both chart keys
+  are required by the schema (a null override is refused, never a silent
+  `Settings` fallback), and every `REQUEST_*` integer key now accepts up to
+  10 digits (was 5) under its unchanged range check. A chunked body charges
+  the full cap and bytes stay charged until the response ends, so with
+  admission off the budget limits concurrent large uploads (about five at
+  the defaults). A stalled upload is bounded by `REQUEST_DEADLINE_S` (chart
+  270 s), after which it gets the fixed 504 and frees its bytes.
 - Model request arguments (#1193): `LLM_EXTRA_BODY` (one JSON object; single-quote
   it in the operator file) and `LLM_EFFORT_TRANSPORT` (`top_level`,
   `chat_template`, `none`) follow the same precedence/export path into

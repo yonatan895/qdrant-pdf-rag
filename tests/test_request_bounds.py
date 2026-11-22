@@ -2,7 +2,8 @@
 
 Hermetic: the real FastAPI app is driven over raw ASGI inside one event loop
 (so a stream can be held open and a client disconnect delivered), with fake
-retrieval and model legs. No network, no GPU, no Qdrant.
+retrieval and model legs. No network, no GPU, no Qdrant; the body-bound
+socket tests (#1352) serve the app with uvicorn on a loopback port 0.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import urllib.parse
 
 import pytest
@@ -967,7 +969,7 @@ def test_declared_over_cap_body_is_refused_before_anything_reads_it(env, path):
             call = _Call(path, {"query": "IEA500I"}, framing="length", declared=MIB + 1).start()
             await call.done()
             assert (call.status, call.json()) == (413, TOO_LARGE_1MIB)
-            assert call.headers["connection"] == "close", "an unread body is never drained"
+            assert "connection" not in call.headers, "the server discards the rest; a close would reset it"
             assert call.receives == 0 and search.calls == 0
             assert app_mod.body_budget.in_use == 0
 
@@ -997,7 +999,7 @@ def test_streamed_over_cap_body_is_the_fixed_413_not_a_parse_failure(env, path, 
             chunks = [b"x" * (MIB // 2)] * 3
             call = await _Call(path, body, framing="chunked", chunks=chunks).start().done()
             assert (call.status, call.json()) == (413, TOO_LARGE_1MIB)
-            assert call.headers["connection"] == "close"
+            assert "connection" not in call.headers
             assert search.calls == 0
             assert app_mod.body_budget.in_use == 0
             # One RED record for the refusal (the app's swallowed reaction and
@@ -1149,3 +1151,137 @@ def test_chat_disconnect_mid_upload_releases_slot_and_budget(env):
             assert after.status == 200
 
     _run(main)
+
+
+@contextlib.asynccontextmanager
+async def _uvicorn(monkeypatch, search):
+    """The app behind a real uvicorn socket (h11, as deployed), port 0."""
+    import uvicorn
+
+    async with _serving(monkeypatch, search):
+        config = uvicorn.Config(app_mod.app, host="127.0.0.1", port=0, lifespan="off", log_level="warning")
+        server = uvicorn.Server(config)
+        task = asyncio.create_task(server.serve())
+        while not server.started:
+            await asyncio.sleep(0.01)
+        try:
+            yield server.servers[0].sockets[0].getsockname()[1]
+        finally:
+            server.should_exit = True
+            await asyncio.wait_for(task, 10)
+
+
+async def _read_http_response(reader) -> tuple[int, dict[str, str], bytes]:
+    head = (await reader.readuntil(b"\r\n\r\n")).decode("latin-1").split("\r\n")
+    headers = dict(line.lower().split(": ", 1) for line in head[1:] if ": " in line)
+    body = await reader.readexactly(int(headers["content-length"]))
+    return int(head[0].split()[1]), headers, body
+
+
+@pytest.mark.parametrize("framing", ["length", "chunked"])
+@pytest.mark.parametrize("path,payload", [SEARCH, CHAT], ids=["search", "chat"])
+def test_over_cap_upload_on_a_real_socket_gets_the_413_and_is_never_buffered(env, path, payload, framing):
+    """#1356 review: a client still uploading an over-cap body (declared or
+    chunked) receives the fixed 413 envelope, not a connection reset. The
+    rest of the body is discarded by the server, never buffered (traced
+    allocations stay far below the upload), and the same keep-alive
+    connection then serves an ordinary request."""
+    import tracemalloc
+
+    _body_env(env)
+    total, piece = 16 * MIB, b"x" * (256 * 1024)
+    ordinary = json.dumps(payload).encode()
+
+    async def main():
+        search = InstantSearch()
+        async with _uvicorn(env, search) as port:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            framing_header = (b"Content-Length: %d" % total if framing == "length"
+                              else b"Transfer-Encoding: chunked")
+            writer.write(b"POST " + path.encode() + b" HTTP/1.1\r\nHost: t\r\n"
+                         b"Content-Type: application/json\r\n" + framing_header + b"\r\n\r\n")
+
+            async def upload():
+                for _ in range(total // len(piece)):
+                    writer.write(b"%x\r\n%s\r\n" % (len(piece), piece) if framing == "chunked" else piece)
+                    await writer.drain()
+                if framing == "chunked":
+                    writer.write(b"0\r\n\r\n")
+                    await writer.drain()
+
+            tracemalloc.start()
+            try:
+                tracemalloc.reset_peak()
+                sending = asyncio.create_task(upload())
+                status, headers, body = await asyncio.wait_for(_read_http_response(reader), 20)
+                await asyncio.wait_for(sending, 20)
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            assert (status, json.loads(body)) == (413, TOO_LARGE_1MIB)
+            assert "connection" not in headers
+            assert search.calls == 0
+            assert peak < total // 4, f"over-cap body buffered: traced peak {peak} bytes"
+            writer.write(b"POST " + path.encode() + b" HTTP/1.1\r\nHost: t\r\n"
+                         b"Content-Type: application/json\r\nContent-Length: %d\r\n\r\n" % len(ordinary)
+                         + ordinary)
+            await writer.drain()
+            status, _, _ = await asyncio.wait_for(_read_http_response(reader), 20)
+            assert status == 200 and search.calls == 1
+            writer.close()
+            await _until(lambda: app_mod.body_budget.in_use == 0, "budget returned")
+
+    _run(main)
+
+
+@pytest.mark.parametrize("call", [SEARCH, CHAT], ids=["search", "chat"])
+def test_stalled_upload_ends_at_the_deadline_and_releases_budget_and_slot(env, call):
+    """D-A (#1356 review): an upload that stops sending holds its budget
+    bytes (and on chat its admission slot) only until the request deadline,
+    then gets the fixed 504; the next ordinary request is served."""
+    _body_env(env, wait="5")
+    env.setenv("REQUEST_DEADLINE_S", "0.5")
+    env.setenv("REQUEST_MAX_CONCURRENT", "1")
+    env.setenv("REQUEST_QUEUE_MAX", "0")
+    red: list[str] = []
+    real_record = app_mod.record_request
+
+    def spy_record(endpoint, outcome, *args, **kwargs):
+        red.append(outcome)
+        return real_record(endpoint, outcome, *args, **kwargs)
+
+    env.setattr(app_mod, "record_request", spy_record)
+
+    async def main():
+        search = InstantSearch()
+        async with _serving(env, search):
+            stalled = _Call(*call, framing="chunked", chunks=[b'{"', None]).start()
+            await _until(lambda: stalled.receives == 1, "upload started")
+            assert app_mod.body_budget.in_use == MIB
+            refused = await stalled.done()
+            assert (refused.status, refused.json()) == (504, DEADLINE)
+            assert search.calls == 0 and red == ["deadline_exceeded"]
+            assert app_mod.body_budget.in_use == 0 and app_mod.admission.active == 0
+            ok = await _Call(*call, framing="length").start().done()
+            assert ok.status == 200 and search.calls == 1
+            assert app_mod.body_budget.in_use == 0 and app_mod.admission.active == 0
+
+    _run(main)
+
+
+def test_openapi_describes_the_chat_request_body():
+    """The chat handler parses its own body (issue #1352); the published
+    schema still names ChatRequest as the required JSON body of both routes."""
+    app_mod.app.openapi_schema = None
+    spec = app_mod.app.openapi()
+    for path in ("/v1/chat", "/v1/chat/completions"):
+        body = spec["paths"][path]["post"]["requestBody"]
+        assert body == {
+            "required": True,
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ChatRequest"}}},
+        }
+        assert "422" in spec["paths"][path]["post"]["responses"]
+    schemas = spec["components"]["schemas"]
+    assert schemas["ChatRequest"]["properties"]["messages"]
+    refs = re.findall(r'"\$ref": "#/components/schemas/([^"]+)"', json.dumps(spec))
+    assert set(refs) <= set(schemas), "every reference resolves"

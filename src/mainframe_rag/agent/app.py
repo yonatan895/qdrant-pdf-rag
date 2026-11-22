@@ -1363,6 +1363,11 @@ class ErrorEnvelope(BaseModel):
     message: str
 
 
+class RequestBodyDeadline(Exception):
+    """The request deadline expired while a non-chat body was still being
+    read (issue #1352, D-A). Raised from the counting receive; no text."""
+
+
 class RequestBodyTooLarge(Exception):
     """A body without a declared length streamed past REQUEST_MAX_BODY_BYTES
     (issue #1352). Raised from the counting receive; never carries text."""
@@ -1384,13 +1389,15 @@ class _BodyGate:
     when it has none, so the cap is reserved), the budget lease, taken at most
     once, and the bytes streamed so far."""
 
-    __slots__ = ("charge", "lease", "over", "received")
+    __slots__ = ("charge", "lease", "received", "refusal")
 
     def __init__(self, declared: int | None, cap: int) -> None:
         self.charge = cap if declared is None else declared
         self.lease: BodyLease | None = None
         self.received = 0
-        self.over = False
+        # (status, code, message, log reason) once the middleware refuses the
+        # body mid-read; the framework's reaction is then replaced by it.
+        self.refusal: tuple[int, str, str, str] | None = None
 
     async def take(self) -> None:
         """Reserve this body's bytes, waiting at most REQUEST_QUEUE_WAIT_S;
@@ -1427,26 +1434,39 @@ def _declared_body(headers) -> tuple[bool, int | None]:
 async def _refuse_body(scope, send, status: int, code: str, message: str, reason: str,
                        headers: dict[str, str] | None = None) -> None:
     """Send a fixed envelope from the middleware (the framework never saw the
-    request, or its reaction was discarded) with the one RED record. An
-    over-cap body is never drained: its 413 closes the connection (uvicorn
-    would otherwise read and discard the rest, however long). A budget 503
-    keeps the connection: uvicorn discards the unread body after the
-    response, so a client still uploading receives the envelope."""
+    request, or its reaction was discarded) with the one RED record. The
+    connection stays open: after the response uvicorn reads and discards
+    the rest of the body (h11 Data events once the response is done are
+    dropped, never buffered), so a client still uploading receives the
+    envelope. Closing instead would reset a socket with unread data, and
+    the client would see a reset rather than the envelope (#1356 review)."""
     request = Request(scope)
     request_id = getattr(request.state, "request_id", "unknown")
     log.warning(json_log(request_id, "request_body", outcome=code, reason=reason,
                          budget_in_use=body_budget.in_use, budget_waiting=body_budget.waiting))
-    _record_handler_error(request, code)
+    _record_handler_error(request, code, body_refusal=True)
     response = JSONResponse(
         status_code=status,
         content=ErrorEnvelope(code=code, message=message).model_dump(),
-        headers={**(headers or {}), "Connection": "close"} if status == 413 else headers,
+        headers=headers,
     )
     await response(scope, _no_receive, send)
 
 
 async def _no_receive():  # pragma: no cover - buffered responses never receive
     return {"type": "http.disconnect"}
+
+
+def _body_read_until(scope) -> float | None:
+    """When a non-chat body read must end (issue #1352, D-A): the request
+    deadline counted from arrival, so a stalled upload cannot hold its budget
+    bytes past it. The framework reads these bodies before the handler, whose
+    own deadline still starts at handler entry (#374). `/v1/chat*` reads its
+    body inside its handler deadline instead. None when no deadline is set."""
+    if scope["path"] in _ADMIT_FIRST_BODY_PATHS or settings.request_deadline_s <= 0:
+        return None
+    arrived = scope.get("state", {}).get("started", time.monotonic())
+    return arrived + settings.request_deadline_s
 
 
 class RequestBodyMiddleware:
@@ -1462,7 +1482,11 @@ class RequestBodyMiddleware:
       REQUEST_QUEUE_WAIT_S, then gets the fixed 503 `overloaded`.
     - `/v1/chat*` takes the budget in its handler after admission, so the
       admission queue keeps its immediate refusals; its receive still
-      counts and takes the budget if nothing did.
+      counts and takes the budget if nothing did. Its read runs inside the
+      handler's request deadline.
+    - Other routes' body reads end at the request deadline counted from
+      arrival (when one is set): a stalled upload gets the fixed 504
+      `deadline_exceeded` and returns its bytes.
     Requests without a body (probes, GETs) pass straight through. Pure ASGI:
     send is awaited directly, with no body queue (see RequestIdentityMiddleware).
     """
@@ -1494,28 +1518,36 @@ class RequestBodyMiddleware:
                                        "body_budget", {"Retry-After": "1"})
                     return
             started = False
+            read_until = _body_read_until(scope)
 
             async def counted_receive():
                 await gate.take()
-                message = await receive()
+                if read_until is None:
+                    message = await receive()
+                else:
+                    try:
+                        message = await asyncio.wait_for(receive(), max(read_until - time.monotonic(), 0.0))
+                    except TimeoutError:
+                        gate.refusal = (504, "deadline_exceeded", _DEADLINE_EXCEEDED, "body_deadline")
+                        raise RequestBodyDeadline from None
                 if message["type"] == "http.request":
                     gate.received += len(message.get("body", b""))
                     if gate.received > gate.charge:
-                        gate.over = True
+                        gate.refusal = too_large
                         raise RequestBodyTooLarge
                 return message
 
             async def guarded_send(message):
                 nonlocal started
-                if gate.over and not started:
+                if gate.refusal is not None and not started:
                     return  # the framework's reaction to the refusal is replaced below
                 if message["type"] == "http.response.start":
                     started = True
                 await send(message)
 
             await self.app(scope, counted_receive, guarded_send)
-            if gate.over and not started:
-                await _refuse_body(scope, send, *too_large)
+            if gate.refusal is not None and not started:
+                await _refuse_body(scope, send, *gate.refusal)
         finally:
             gate.release()
 
@@ -1542,7 +1574,39 @@ app.add_middleware(RequestBodyMiddleware)
 app.add_middleware(RequestIdentityMiddleware)
 
 
-def _record_handler_error(request: Request, code: str) -> None:
+_framework_openapi = app.openapi
+
+
+def _openapi_with_chat_body() -> dict:
+    """The framework schema plus the /v1/chat* request body: those handlers
+    read and validate `ChatRequest` themselves after admission (issue
+    #1352), so the framework no longer sees a body parameter. Published
+    exactly as a FastAPI body parameter would be: a required JSON
+    `ChatRequest` reference and the 422 validation response."""
+    if app.openapi_schema is not None:
+        return app.openapi_schema
+    spec = _framework_openapi()
+    schemas = spec.setdefault("components", {}).setdefault("schemas", {})
+    chat = ChatRequest.model_json_schema(ref_template="#/components/schemas/{model}")
+    schemas.update(chat.pop("$defs", {}))
+    schemas["ChatRequest"] = chat
+    for path in _ADMIT_FIRST_BODY_PATHS:
+        operation = spec["paths"][path]["post"]
+        operation["requestBody"] = {
+            "required": True,
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ChatRequest"}}},
+        }
+        operation["responses"].setdefault("422", {
+            "description": "Validation Error",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HTTPValidationError"}}},
+        })
+    return spec
+
+
+app.openapi = _openapi_with_chat_body  # type: ignore[method-assign]
+
+
+def _record_handler_error(request: Request, code: str, *, body_refusal: bool = False) -> None:
     """RED outcome for every error-handler response. One helper serves all
     six handlers so a new error shape cannot forget its series; non-product
     paths (scrapes, probes, unknown routes) map to no endpoint and are
@@ -1551,6 +1615,11 @@ def _record_handler_error(request: Request, code: str) -> None:
     the endpoint already recorded a richer series (kind/hits known) before
     raising — each request counts exactly once."""
     if getattr(request.state, "red_recorded", False):
+        return
+    # A body refused mid-read (#1352): the framework's reaction is replaced
+    # by the middleware's envelope, which is the one recorded.
+    gate = getattr(request.state, "body_gate", None)
+    if gate is not None and gate.refusal is not None and not body_refusal:
         return
     # getattr, not attribute access: the handler also serves synthetic
     # requests (tests) that carry no URL — telemetry degrades to skipping.

@@ -568,8 +568,8 @@ status (`/ui` failures render HTML banners instead, §1):
 | `invalid_request` / `request exceeds the <N>-character limit` | 422 | Request-size guard (issue #1192), the only length refusal on `/v1/answer`, `/v1/chat*` and `/ui/chat*`: the query or chat messages plus `splunk_context` (on `/v1/answer` at most `splunk_context_max_chars` of it), `product` and `version` exceed `chat_max_body_chars`. `<N>` is the configured limit; the message never carries input text. Refused before retrieval or any model call |
 | `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query guard (a `/v1/search` query over `query_max_chars`; on every path a query that is empty after `str.strip()` or contains NUL/C0 controls other than `\t\n\r`, issue #579; or, when `embed_max_input_chars` is set, a query whose dense text — prefix plus query — exceeds it, issue #374: refused before any model call, never truncated; an effective query that only grows past the bound after expansion/condensation is refused by the embedder with the same envelope), and a chat/console active `user` turn that is missing, blank or control-character; `product`/`version` longer than `query_max_chars`, any text field holding an unpaired surrogate (issues #1011, #1013: refused at the request model, before retrieval or any model call), and any body Starlette cannot parse, e.g. invalid UTF-8 (issue #1031: never the framework `detail` shape). The console's client-owned `messages` history that fails to parse (invalid JSON, deep nesting, over-long integers) degrades to an empty history (issue #1032) |
 | `overloaded` / `the service is at capacity; retry later` | 503 + `Retry-After: 1` | Request admission refused (issue #374): all `request_max_concurrent` slots busy and the bounded wait queue full or its wait expired; only when a limit is selected. Also the request-body budget refused (#1352): `request_body_budget_bytes` held by other bodies for the whole `request_queue_wait_s`, before any body byte is read. Raised before the serving gate and any retrieval/model work; on `/v1/chat*` before the body is read or validated, on other routes after framework validation. `/ui/chat` renders its fixed banner; `/ui/chat/stream` returns this envelope |
-| `invalid_request` / `request body exceeds the <REQUEST_MAX_BODY_BYTES>-byte limit` | 413 + `Connection: close` | Request body over `request_max_body_bytes` (#1352): by `Content-Length` before anything reads it, or by the streaming count once a chunked or understated body passes it. Every route with a body; the rest is never read (the connection closes) |
-| `deadline_exceeded` / `request deadline exceeded` | 504 | Total request deadline (`request_deadline_s`, issue #374) expired before the response began; on an already-open stream it is an `error` event (no `final`, `generation_incomplete`) instead. Only when a deadline is selected |
+| `invalid_request` / `request body exceeds the <REQUEST_MAX_BODY_BYTES>-byte limit` | 413 | Request body over `request_max_body_bytes` (#1352): by `Content-Length` before anything reads it, or by the streaming count once a chunked or understated body passes it. Every route with a body. The connection stays open: the server discards the rest of the body without buffering it, so a client still uploading receives the envelope (a close would reset the socket and lose it) |
+| `deadline_exceeded` / `request deadline exceeded` | 504 | Total request deadline (`request_deadline_s`, issue #374) expired before the response began (#1352: also a non-chat body still being read when the deadline, counted from arrival, expires; `/v1/chat*` reads its body inside the handler deadline); on an already-open stream it is an `error` event (no `final`, `generation_incomplete`) instead. Only when a deadline is selected |
 | `unknown_answer` / `this answer is not recorded, or not yet; it cannot be rated now` | 404 | Console rating (`/ui/feedback`, issue #780) for a `request_id` the feedback store does not hold: still queued, or dropped, failed or purged |
 | `feedback_disabled` / `feedback is not enabled on this deployment` | 404 | `/ui/feedback` while `FEEDBACK_ENABLED` is false |
 | `feedback_unavailable` / `feedback is temporarily unavailable` | 503 | `/ui/feedback`: the feedback service is unreachable, times out or answers an unexpected status (type logged only) |
@@ -1158,16 +1158,36 @@ immediate 503 (row in `docs/eval.md` section 10).
   stream closes). Other routes take the budget before the framework parses;
   `/v1/chat*` takes its admission slot first, then the budget, then reads the
   body and parses and validates it in a worker thread; the raw bytes and the
-  dict are locals of that parse, never cached on the request. So a slow
-  upload holds its slot until the deadline. Bodyless requests and probes
-  never touch the budget. A 413 closes the connection; an in-cap 503 keeps it
-  (uvicorn discards the unread body, so the client receives the envelope).
+  dict are locals of that parse, never cached on the request. Bodyless
+  requests and probes never touch the budget. Refusals (413, budget 503) keep
+  the connection open: uvicorn discards the unread rest of the body without
+  buffering it, so a client still uploading receives the envelope.
+  **Stalled uploads (maintainer decision 2026-11-22, #1356 D-A):** the body
+  read is bounded by the request deadline. `/v1/chat*` reads inside its
+  handler deadline; other routes' reads end at the deadline counted from
+  arrival (the handler's own deadline still starts at handler entry). Either
+  way a stalled upload gets the fixed `504 deadline_exceeded` and returns its
+  budget bytes and (chat) its admission slot. With no deadline selected (the
+  `Settings` default) a stalled upload holds them until the client
+  disconnects; the chart ships 270 s.
+  **Charging (maintainer decision 2026-11-22):** a chunked body charges the
+  full cap, and a body's bytes stay charged until its response ends (SSE: the
+  stream closes), not when the read finishes. With admission off or raised,
+  the budget therefore becomes the concurrency limit for large bodies: at
+  the defaults about five chunked uploads (128 / 24 MiB) at once per replica.
+  **Admission before validation (#1356 D-C, accepted):** a malformed or
+  invalid `/v1/chat*` request now takes an admission slot (and counts in
+  `rag.admission.inflight` / `rag.admission.wait`) before its 422, and with
+  a full queue it gets `503 overloaded` instead of the 422.
+  `rag.admission.rejected` keeps its `queue_full` | `queue_timeout` labels:
+  body-budget refusals count only in `rag.requests.total` (`overloaded`).
   **Measured residual (#1348 harness, 512M, 50% CPU, 64 clients):** anon memory
   stays near 350 MiB, but kernel receive buffers of open connections (charged
   to the pod's memory cgroup, up to `net.ipv4.tcp_rmem` max each, 6 MiB on the
   test host) reached about 315 MiB and the pod was OOM-killed; a listening
-  socket with `SO_RCVBUF` 128 KiB kept them under 20 MiB with no OOM. Bounding
-  socket buffers is a launch/deployment decision, not made here.
+  socket with `SO_RCVBUF` 128 KiB kept them under 20 MiB with no OOM. The
+  maintainer covers this with the agent's 2Gi memory limit (decision
+  2026-11-22).
 - **Deadline** (`request_deadline_s` > 0): one budget from handler entry
   (queue wait included; on `/v1/chat*` the body read, parse and validation are
   inside it, on other routes body decoding/framework validation precedes it) across condense/embed/search/rerank/tokenize (or completion-usage count)/model
@@ -1212,7 +1232,10 @@ immediate 503 (row in `docs/eval.md` section 10).
   `requestMaxConcurrent`, `requestQueueMax`, `requestQueueWaitSeconds` -> pod env.
   The body bounds (#1352) follow the same path: `REQUEST_MAX_BODY_BYTES`,
   `REQUEST_BODY_BUDGET_BYTES` -> `requestMaxBodyBytes`, `requestBodyBudgetBytes`
-  (both always rendered; the mapper, preflight and chart refuse budget < cap).
+  (both always rendered and required by the chart schema, so a null override is
+  refused; the mapper, preflight and chart refuse budget < cap). The operator
+  integer pattern for every `REQUEST_*` integer key accepts up to 10 digits
+  (it was 5); each key's own range check is unchanged.
   Empty keeps the chart state: deadline 270, admission names not rendered (no limit)
   until the D4 run approves values; `0` is an explicit selection. The other
   names (`EMBED_MAX_INPUT_CHARS`, `INGEST_MAX_*`) stay a local/CI experiment, not a
