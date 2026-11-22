@@ -1584,7 +1584,9 @@ class _MiniFTPSServer:
     """Minimal real-socket FTP/FTPS control server for TLS verification tests."""
 
     def __init__(self, *, certfile: Path | None = None, keyfile: Path | None = None, reject_auth: bool = False,
-                 replies: dict[str, bytes] | None = None, pass_replies: list[bytes] | None = None) -> None:
+                 replies: dict[str, bytes] | None = None, pass_replies: list[bytes] | None = None,
+                 banner: bytes = b"220 mini-ftps ready\r\n") -> None:
+        self._banner = banner
         self._certfile = certfile
         self._keyfile = keyfile
         self._reject_auth = reject_auth
@@ -1625,7 +1627,7 @@ class _MiniFTPSServer:
         conn: socket.socket = raw_conn
         conn.settimeout(2.0)
         try:
-            conn.sendall(b"220 mini-ftps ready\r\n")
+            conn.sendall(self._banner)
             buf = b""
             while True:
                 while b"\n" not in buf:
@@ -1639,7 +1641,9 @@ class _MiniFTPSServer:
                     continue
                 self.received_commands.append(line)
                 upper = line.upper()
-                if upper == "AUTH TLS":
+                if upper in self._replies:
+                    conn.sendall(self._replies[upper])
+                elif upper == "AUTH TLS":
                     if self._reject_auth or self._certfile is None or self._keyfile is None:
                         conn.sendall(b"500 AUTH TLS not supported\r\n")
                         continue
@@ -1658,8 +1662,6 @@ class _MiniFTPSServer:
                 elif upper == "QUIT":
                     conn.sendall(b"221 Bye\r\n")
                     return
-                elif upper in self._replies:
-                    conn.sendall(self._replies[upper])
                 else:
                     conn.sendall(b"200 Ok\r\n")
         except (OSError, ssl.SSLError):
@@ -2887,6 +2889,54 @@ def test_site_probe_undecodable_logon_reply_exits_3_with_one_logon(monkeypatch, 
     everything = written + captured.err
     for marker in (*PROBE_MARKERS, "MRKMEMQ", PROBE_JOB, "PARMLIB", "127.0.0.1", "Traceback"):
         assert marker not in everything, marker
+
+
+@pytest.mark.parametrize(("stage", "statuses"), [
+    ("banner", ["inconclusive"] * 3),
+    ("auth_tls", ["pass", "inconclusive", "inconclusive"]),
+    ("prot_p", ["pass", "inconclusive", "pass"]),
+])
+def test_site_probe_unexpected_error_at_each_setup_stage_exits_3(tmp_path: Path, stage: str, statuses: list[str]) -> None:
+    """Review B2 with the B1 contract: an undecodable reply at the banner,
+    AUTH TLS or PROT P is exit 3 with that stage `probe_error`, never a
+    fail, and never more than one logon (none before the logon stage)."""
+    certs = _generate_tls_fixtures(tmp_path)
+    bad = b"220 MRKBANNERQ \xa7\r\n"
+    server_kwargs: dict = {"certfile": certs["good_crt"], "keyfile": certs["good_key"]}
+    if stage == "banner":
+        server_kwargs["banner"] = bad
+    else:
+        server_kwargs["replies"] = {"AUTH TLS" if stage == "auth_tls" else "PROT P": bad}
+    with _MiniFTPSServer(**server_kwargs) as srv:
+        cfg = _probe_config(transport_mode="ftps", plain_ftp_accepted=False, host="localhost",
+                            port=srv.port, ca_file=str(certs["ca_crt"]))
+        targets = site_probe.validate_targets(cfg, dataset=PROBE_DATASET, job_id=None)
+        receipt = site_probe.run_zos_probe(cfg, targets)
+        sent, connections = list(srv.received_commands), srv.connections
+    checks = _assert_probe_error_receipt(receipt, "UnicodeDecodeError")
+    assert connections == 1
+    assert sum(c.startswith("PASS ") for c in sent) == (1 if stage == "prot_p" else 0)
+    assert [checks[c]["status"] for c in site_probe.CHECKS[:3]] == statuses
+    assert all(checks[c]["reason"] == "probe_error" for c in site_probe.CHECKS[3:])
+    assert not any(r["status"] == "fail" for r in receipt.records)
+    text = "\n".join(receipt.lines())
+    for marker in ("MRKBANNERQ", "MRKUSRQ", "MRKPWDQ9", "localhost"):
+        assert marker not in text, marker
+
+
+@pytest.mark.parametrize("ca", ["missing", "garbage"])
+def test_site_probe_unusable_ca_file_stays_a_control_connect_fail(tmp_path: Path, ca: str) -> None:
+    """A configuration fault before any socket is a classified error (exit 1),
+    not `probe_error`: the setup-stage exit 3 covers unexpected errors only."""
+    ca_file = tmp_path / "ca.pem"
+    if ca == "garbage":
+        ca_file.write_text("not a certificate\n", encoding="utf-8")
+    cfg = _probe_config(transport_mode="ftps", plain_ftp_accepted=False, ca_file=str(ca_file))
+    receipt = site_probe.run_zos_probe(cfg, site_probe.validate_targets(cfg))
+    checks = {str(r["check"]): r for r in receipt.records}
+    assert checks["zos.control_connect"]["status"] == "fail"
+    assert all(checks[c]["reason"] == "not_reached" for c in site_probe.CHECKS[1:])
+    assert receipt.exit_code() == 1 and "error_class" not in receipt.summary()
 
 
 @pytest.mark.parametrize("fault", ["stat", "dataset", "list", "spool"])
