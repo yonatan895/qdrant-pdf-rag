@@ -24,6 +24,7 @@ from tests.helpers_airgap import (
     install_rendering_helm,
     installed_workspace,
     make_bin_tree,
+    record_gap_promotion,
     release_anchor,
     release_identity,
     rendered_container,
@@ -967,4 +968,20 @@ def test_the_next_ingest_from_a_promoted_gap_workspace_needs_its_identity(ingest
     ok = _run_ingest(ingest_tree, *anchors, ("GAP_PROMOTE_IDENTITY", release_identity(tmp_path / "dist")))
     assert ok.returncode == 0, ok.stderr
     assert "==> Gap release promotion: release identity" in ok.stdout
+    assert (tmp_path / "dist" / "ingest-rendered.yaml").exists()
+    # #1344 B2: a declared ingest records no promotion (only a promotion deploy
+    # that rolls out does), so the next undeclared ingest is still refused.
+    assert not (tmp_path / "dist" / "gap-promotion.txt").exists()
+    assert "recorded" not in ok.stdout
+    (tmp_path / "dist" / "ingest-rendered.yaml").unlink()
+    kc_log.unlink(missing_ok=True)
+    still = _run_ingest(ingest_tree, *anchors)
+    assert still.returncode == 1
+    assert "this checkout is a gap release (origin: gap)" in still.stderr
+    assert not kc_log.exists()
+    # Once a promotion deploy has recorded it, the next ingest needs no export.
+    record_gap_promotion(tmp_path, release_identity(tmp_path / "dist"), "test-ns", "reg.internal:5000")
+    again = _run_ingest(ingest_tree, *anchors)
+    assert again.returncode == 0, again.stderr
+    assert "(recorded at promotion in dist/gap-promotion.txt)" in again.stdout
     assert (tmp_path / "dist" / "ingest-rendered.yaml").exists()

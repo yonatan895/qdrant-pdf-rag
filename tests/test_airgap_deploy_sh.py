@@ -15,6 +15,7 @@ import subprocess
 import pytest
 
 from tests.helpers_airgap import (
+    GAP_MANIFEST_LINES,
     REPO,
     FakeQdrant,
     assert_no_placeholders,
@@ -2029,15 +2030,19 @@ _LIVE_ENV = f"NAMESPACE='{LIVE_NS}'\nINTERNAL_REGISTRY='reg.live'\n"
 _GAP_REFUSED = "FAIL: gap release rehearsal refused (the STOP line above names the reason); nothing was changed"
 
 
-def _gap_release(tree, qdrant_digest=_FIXED_A, namespace=REH_NS):
-    """A verified gap bundle in the executing tree, its images loaded and running."""
+def _gap_release(tree, qdrant_digest=_FIXED_A, namespace=REH_NS, gap_tag=None):
+    """A verified gap bundle in the executing tree, its images loaded and running.
+    `gap_tag` packs another signed bundle of the same code (another identity)."""
     root = tree[0]
     copy_gap_tools(root)
     write_git_identity_stub(root, IMAGE_SHA)
     lines = [f"sha: {IMAGE_SHA}", f"chart_sha256: {sha256_bytes(_chart(tree).read_bytes())}",
              f"qdrant_digest: {qdrant_digest}"]
     lines += [f"{role}_config_digest: {_config_of(role)}" for role in ROLE_REFS]
-    write_signed_manifest(root / "dist", "\n".join(lines) + "\n", origin="gap", key=gap_release_key())
+    if gap_tag:
+        lines += ["origin: gap", GAP_MANIFEST_LINES.replace("gap-release-1", gap_tag).rstrip("\n")]
+    write_signed_manifest(root / "dist", "\n".join(lines) + "\n", origin=None if gap_tag else "gap",
+                          key=gap_release_key())
     _write_pods(tree, _load_all(tree), namespace=namespace)
 
 
@@ -2080,6 +2085,12 @@ def test_gap_rehearsal_deploys_only_into_its_own_namespace_and_reruns(tree):
         assert "upgrade" in log
         assert LIVE_NS not in log
         assert {log[i + 1] for i, arg in enumerate(log) if arg in ("-n", "--namespace")} == {REH_NS}
+    # A rehearsal never records a promotion (#1344): undeclared, it stays refused.
+    assert not (tree[0] / _MARKER).exists()
+    undeclared = _run(tree, *_BOTH_ANCHORS, *_RELEASE_PATH, ("NAMESPACE", ""), ("INTERNAL_REGISTRY", ""),
+                      ("FAKE_KUBE_CTX", REH_CTX))
+    assert undeclared.returncode == 1
+    assert "this checkout is a gap release (origin: gap)" in undeclared.stderr
 
 
 @pytest.mark.parametrize("declared", [
@@ -2231,6 +2242,293 @@ def test_gap_promotion_deploys_only_the_bundle_the_identity_names(tree):
     assert "current-context" not in _helm_log(tree), "a promotion runs no rehearsal resolution"
 
 
+# --- #1344: the promotion marker ----------------------------------------------
+#
+# A verified promotion run (GAP_PROMOTE_IDENTITY exported) records the promotion
+# in dist/gap-promotion.txt. A later stage from that workspace with nothing
+# declared runs as that promotion only while the marker is byte for byte what
+# the promotion would write here and now: the signed bundle's release identity,
+# the workspace's physical path and directory inode, and the stage's NAMESPACE
+# and INTERNAL_REGISTRY. A declaration always wins over the marker.
+
+_MARKER = "dist/gap-promotion.txt"
+
+
+def _marker_refused(field):
+    return f"the gap promotion marker (dist/gap-promotion.txt) does not hold here ({field} differs)"
+
+
+def _promote(tree, *extra_env):
+    identity = release_identity(tree[0] / "dist")
+    return _run(tree, *_BOTH_ANCHORS, *_RELEASE_PATH, ("GAP_PROMOTE_IDENTITY", identity), *extra_env)
+
+
+def _undeclared(tree, *extra_env):
+    return _run(tree, *_BOTH_ANCHORS, *_RELEASE_PATH, *extra_env)
+
+
+def _promoted(tree):
+    """Runbook step 8 from this workspace: the gap bundle deployed once with its
+    identity exported. Leaves no helm log or render behind."""
+    _gap_release(tree, namespace="ns")
+    ok = _promote(tree)
+    assert ok.returncode == 0, ok.stderr
+    assert "==> Gap release promotion recorded in dist/gap-promotion.txt" in ok.stdout
+    tree[1].unlink()
+    (tree[0] / "dist" / "agent-rendered.yaml").unlink()
+    return release_identity(tree[0] / "dist")
+
+
+def _copy_workspace(src, dest):
+    shutil.copytree(src, dest, symlinks=True)
+    return dest, dest / "helm-args.log"
+
+
+def test_the_next_deploy_from_a_promoted_gap_workspace_runs_without_the_export(tree):
+    identity = _promoted(tree)
+    marker = (tree[0] / _MARKER).read_bytes()
+    assert marker.decode().splitlines() == [
+        "gap_promotion: 1", f"release_identity: {identity}", f"workspace: {tree[0].resolve()}",
+        f"workspace_inode: {tree[0].stat().st_ino}", "namespace: ns", "internal_registry: reg.internal"]
+    for _ in range(2):
+        tree[1].unlink(missing_ok=True)
+        again = _undeclared(tree)
+        assert again.returncode == 0, again.stderr
+        assert (f"==> Gap release promotion: release identity {identity} (recorded at promotion in "
+                "dist/gap-promotion.txt)") in again.stdout
+        assert "upgrade" in _helm_log(tree).split()
+        assert "current-context" not in _helm_log(tree), "a promotion runs no rehearsal resolution"
+    assert (tree[0] / _MARKER).read_bytes() == marker, "a recorded promotion is read, never rewritten"
+
+
+_MARKER_CASES = {
+    # cp -a of the promoted workspace to another path (marker included).
+    "copied-workspace": "workspace",
+    # The workspace moved away (its inode stays allocated) and a copy put back
+    # at the same path. Best effort only: a workspace removed and restored at
+    # the same path may reuse the inode, so the guarantee there is that only
+    # the bundle and target recorded at that path pass.
+    "replaced-by-a-copy": "workspace_inode",
+    "edited-namespace": "namespace",
+    "edited-registry": "internal_registry",
+    "extra-line": "format",
+    "truncated": "format",
+    # Another signed bundle bootstrapped into the same dist/ (never promoted).
+    "another-bundle": "release_identity",
+    "symlink": "file",
+    # The same workspace and bundle, aimed at another target from the shell.
+    "namespace-override": "namespace",
+}
+
+
+@pytest.mark.parametrize("case", list(_MARKER_CASES))
+def test_a_promotion_marker_that_does_not_hold_is_refused_before_any_cluster_write(tree, case):
+    _promoted(tree)
+    field = _MARKER_CASES[case]
+    run_tree, extra = tree, ()
+    marker = tree[0] / _MARKER
+    text = marker.read_text()
+    if case == "copied-workspace":
+        run_tree = _copy_workspace(tree[0], tree[0].with_name(tree[0].name + "-copy"))
+    elif case == "replaced-by-a-copy":
+        moved = tree[0].with_name(tree[0].name + "-moved")
+        tree[0].rename(moved)
+        _copy_workspace(moved, tree[0])
+    elif case == "edited-namespace":
+        marker.write_text(text.replace("namespace: ns\n", "namespace: mfr-prod\n"))
+    elif case == "edited-registry":
+        marker.write_text(text.replace("internal_registry: reg.internal\n", "internal_registry: reg.live\n"))
+    elif case == "extra-line":
+        marker.write_text(text + "approved_by: operator\n")
+    elif case == "truncated":
+        marker.write_text(text.rsplit("internal_registry:", 1)[0])
+    elif case == "another-bundle":
+        _gap_release(tree, namespace="ns", gap_tag="gap-release-2")
+        assert f"release_identity: {release_identity(tree[0] / 'dist')}" not in text
+    elif case == "symlink":
+        elsewhere = tree[0] / "elsewhere.txt"
+        elsewhere.write_text(text)
+        marker.unlink()
+        marker.symlink_to(elsewhere)
+    elif case == "namespace-override":
+        extra = (("NAMESPACE", "mfr-other"),)
+    refused = _undeclared(run_tree, *extra)
+    _refused_before_any_cluster_write(run_tree, refused, _marker_refused(field))
+    assert refused.stderr.count("FAIL:") == 1
+    assert _helm_log(run_tree) == "", "no client call before the stage is known"
+    assert "Gap release promotion" not in refused.stdout
+    if case == "namespace-override":
+        # The next ordinary operation, at the recorded target, runs.
+        assert _undeclared(run_tree).returncode == 0
+        return
+    # The next ordinary operation: declaring the promotion again records it for
+    # this workspace, bundle and target, and the run after it needs no export.
+    again = _promote(run_tree)
+    assert again.returncode == 0, again.stderr
+    assert "==> Gap release promotion recorded in dist/gap-promotion.txt" in again.stdout
+    assert not (run_tree[0] / _MARKER).is_symlink()
+    run_tree[1].unlink()
+    after = _undeclared(run_tree)
+    assert after.returncode == 0, after.stderr
+    assert "(recorded at promotion in dist/gap-promotion.txt)" in after.stdout
+
+
+def test_a_promotion_marker_copied_into_a_rehearsal_workspace_never_skips_the_rehearsal_guard(tree):
+    """The release identity names the bundle, not the workspace: a rehearsal
+    workspace made by copying the promoted one (same signed bundle, same marker,
+    its airgap.env still naming the live namespace) is refused undeclared, and a
+    declared rehearsal there runs the rehearsal guard, never the marker."""
+    live = tree[0]
+    (live / "airgap.env").write_text("NAMESPACE='ns'\nINTERNAL_REGISTRY='reg.internal'\n")
+    _promoted(tree)
+    reh = _copy_workspace(live, live.with_name(live.name + "-rehearsal"))
+    on_file = (("NAMESPACE", ""), ("INTERNAL_REGISTRY", ""), ("FAKE_KUBE_CTX", REH_CTX))
+    refused = _undeclared(reh, *on_file)
+    _refused_before_any_cluster_write(reh, refused, _marker_refused("workspace"))
+    assert "-n ns" not in refused.stdout and _helm_log(reh) == ""
+    declared = (("GAP_REHEARSAL_INSTALLED_WORKSPACE", str(live)),)
+    guarded = _run_gap(reh, *declared)
+    _refused_before_any_cluster_write(reh, guarded, "the rehearsal deploy would target the installed release's namespace")
+    assert guarded.stderr.rstrip().endswith(_GAP_REFUSED)
+    # The next ordinary operation: the rehearsal, fixed in its own airgap.env.
+    (reh[0] / "airgap.env").write_text(_REH_ENV)
+    _write_pods(reh, _load_all(reh), namespace=REH_NS)
+    reh[1].unlink(missing_ok=True)
+    ok = _run_gap(reh, *declared)
+    assert ok.returncode == 0, ok.stderr
+    assert f"==> Gap release rehearsal: namespace={REH_NS}" in ok.stdout
+    assert "Gap release promotion" not in ok.stdout
+    assert {line for line in _helm_log(reh).split("\n") if line in ("ns", REH_NS)} == {REH_NS}
+
+
+def test_a_declaration_wins_over_a_valid_promotion_marker(tree):
+    """The marker is read only when nothing is declared: with a marker that
+    holds, a wrong promotion identity is still refused, and a declared
+    rehearsal still runs the rehearsal guard (which refuses the live
+    namespace here), never the recorded promotion."""
+    _promoted(tree)
+    marker = (tree[0] / _MARKER).read_bytes()
+    wrong = _run(tree, *_BOTH_ANCHORS, *_RELEASE_PATH, ("GAP_PROMOTE_IDENTITY", "0" * 64))
+    _refused_before_any_cluster_write(tree, wrong, "GAP_PROMOTE_IDENTITY is not this bundle's release identity")
+    # The same target from airgap.env, so the marker alone would hold.
+    (tree[0] / "airgap.env").write_text("NAMESPACE='ns'\nINTERNAL_REGISTRY='reg.internal'\n")
+    installed_workspace(tree[0], "NAMESPACE='ns'\nINTERNAL_REGISTRY='reg.live'\n", f"qdrant_digest: {_FIXED_A}\n")
+    rehearsal = _run_gap(tree)
+    _refused_before_any_cluster_write(tree, rehearsal,
+                                      "the rehearsal deploy would target the installed release's namespace")
+    assert "Gap release promotion" not in rehearsal.stdout
+    assert (tree[0] / _MARKER).read_bytes() == marker
+    # The next ordinary operation, undeclared, runs as the recorded promotion.
+    ok = _undeclared(tree, ("NAMESPACE", ""), ("INTERNAL_REGISTRY", ""))
+    assert ok.returncode == 0, ok.stderr
+    assert "(recorded at promotion in dist/gap-promotion.txt)" in ok.stdout
+
+
+def test_a_recorded_promotion_needs_the_bundle_signature_at_use(tree):
+    """The marker's identity is only as good as the signature check_manifest_chain
+    verifies in the same run: a broken signature is refused before the marker is
+    consulted and before any client call."""
+    _promoted(tree)
+    sig = tree[0] / "dist" / "SHA256SUMS.sig"
+    good = sig.read_bytes()
+    sig.write_bytes(bytes(b ^ 0xFF for b in good))
+    refused = _undeclared(tree)
+    _refused_before_any_cluster_write(tree, refused, "SHA256SUMS signature verification failed")
+    assert "Gap release promotion" not in refused.stdout
+    assert _helm_log(tree) == ""
+    sig.write_bytes(good)
+    ok = _undeclared(tree)
+    assert ok.returncode == 0, ok.stderr
+    assert "(recorded at promotion in dist/gap-promotion.txt)" in ok.stdout
+
+
+def test_a_declared_promotion_whose_deploy_fails_records_nothing(tree):
+    """#1344 B2 (coordinator decision): only a promotion deploy that completes its
+    rollout records the promotion. A declared deploy that fails after its helm
+    upgrade (the running pods do not report the verified digests) leaves no
+    marker, so the next undeclared deploy is refused; and it never refreshes
+    the marker an earlier, successful promotion left for another bundle."""
+    _gap_release(tree, namespace="ns")
+    digests = _load_all(tree)
+    _write_pods(tree, {role: "sha256:" + "9" * 64 for role in digests}, namespace="ns")
+    failed = _promote(tree)
+    assert failed.returncode != 0, failed.stdout
+    assert "upgrade" in _helm_log(tree).split(), "the failure came after the cluster write"
+    assert not (tree[0] / _MARKER).exists()
+    assert "recorded" not in failed.stdout
+    tree[1].unlink()
+    (tree[0] / "dist" / "agent-rendered.yaml").unlink(missing_ok=True)
+    refused = _undeclared(tree)
+    _refused_before_any_cluster_write(tree, refused, "this checkout is a gap release (origin: gap)")
+    # An earlier successful promotion of another bundle keeps its own marker.
+    _promoted(tree)
+    old = (tree[0] / _MARKER).read_bytes()
+    _gap_release(tree, namespace="ns", gap_tag="gap-release-2")
+    _write_pods(tree, {role: "sha256:" + "9" * 64 for role in digests}, namespace="ns")
+    failed_b = _promote(tree)
+    assert failed_b.returncode != 0
+    assert (tree[0] / _MARKER).read_bytes() == old, "a failed promotion never refreshes the marker"
+    tree[1].unlink()
+    (tree[0] / "dist" / "agent-rendered.yaml").unlink(missing_ok=True)
+    _refused_before_any_cluster_write(tree, _undeclared(tree), _marker_refused("release_identity"))
+    # The next ordinary operation: the promotion, rolled out, is recorded.
+    _write_pods(tree, _load_all(tree), namespace="ns")
+    tree[1].unlink(missing_ok=True)
+    ok = _promote(tree)
+    assert ok.returncode == 0, ok.stderr
+    assert "==> Gap release promotion recorded in dist/gap-promotion.txt" in ok.stdout
+    assert f"release_identity: {release_identity(tree[0] / 'dist')}" in (tree[0] / _MARKER).read_text()
+
+
+def test_a_directory_at_the_marker_path_is_never_reported_as_recorded(tree):
+    """#1361 delta review (c): mv onto a directory would move the marker into it.
+    The completed promotion deploy warns as for any write failure, records
+    nothing, and the next undeclared deploy is refused (file differs)."""
+    _gap_release(tree, namespace="ns")
+    blocker = tree[0] / _MARKER
+    blocker.mkdir(parents=True)
+    done = _promote(tree)
+    assert done.returncode == 0, done.stderr
+    assert "upgrade" in _helm_log(tree).split()
+    assert "recorded" not in done.stdout
+    assert ("WARNING: the promotion deploy completed, but dist/gap-promotion.txt could not be written; "
+            "later stages from this workspace still need GAP_PROMOTE_IDENTITY") in done.stderr
+    assert blocker.is_dir() and list(blocker.iterdir()) == []
+    assert [p.name for p in blocker.parent.iterdir() if ".tmp." in p.name] == []
+    tree[1].unlink()
+    (tree[0] / "dist" / "agent-rendered.yaml").unlink()
+    _refused_before_any_cluster_write(tree, _undeclared(tree), _marker_refused("file"))
+    # The next ordinary operation: with the directory gone, the promotion deploy records it.
+    blocker.rmdir()
+    ok = _promote(tree)
+    assert ok.returncode == 0, ok.stderr
+    assert "==> Gap release promotion recorded in dist/gap-promotion.txt" in ok.stdout
+    assert blocker.is_file()
+
+
+def test_a_dry_run_promotion_records_nothing_and_a_dry_run_reads_a_recorded_one(tree):
+    _gap_release(tree, namespace="ns")
+    dry = (("AIRGAP_DRYRUN", "1"),)
+    preview = _promote(tree, *dry)
+    assert preview.returncode == 0, preview.stderr
+    assert not (tree[0] / _MARKER).exists(), "a preview mutates nothing"
+    assert "recorded" not in preview.stdout
+    still = _undeclared(tree, *dry)
+    assert still.returncode == 1 and "this checkout is a gap release (origin: gap)" in still.stderr
+    identity = _promoted(tree)
+    ok = _undeclared(tree, *dry)
+    assert ok.returncode == 0, ok.stderr
+    assert (f"==> Gap release promotion: release identity {identity} (recorded at promotion in "
+            "dist/gap-promotion.txt)") in ok.stdout
+    assert "-n ns" in ok.stdout
+    # A declared dry-run of another bundle never refreshes the recorded marker.
+    old = (tree[0] / _MARKER).read_bytes()
+    _gap_release(tree, namespace="ns", gap_tag="gap-release-2")
+    preview_b = _promote(tree, *dry)
+    assert preview_b.returncode == 0, preview_b.stderr
+    assert (tree[0] / _MARKER).read_bytes() == old
+
+
 def test_gap_rehearsal_dry_run_refuses_the_live_namespace(tree):
     """The #1336 re-review's end-to-end run: a dry-run of a rehearsal workspace
     whose airgap.env names the live namespace printed `helm upgrade -n <live>`."""
@@ -2261,10 +2559,16 @@ def test_ordinary_deploys_never_consult_the_gap_stage(tree, path):
              ("GAP_REHEARSAL_KUBE_CONTEXT", LIVE_CTX), ("FAKE_KUBE_CTX", REH_CTX))
     if path == "upstream-release":
         _release(tree)
+    # A promotion marker (#1344) is never read, written or reported either.
+    (tree[0] / "dist").mkdir(exist_ok=True)
+    (tree[0] / _MARKER).write_text("stale\n")
+    if path == "upstream-release":
         result = _run(tree, *_RELEASE_PATH, *stage)
     else:
         result = _run(tree, ("AIRGAP_DRYRUN", "1"), *stage)
     assert result.returncode == 0, result.stderr
+    assert (tree[0] / _MARKER).read_text() == "stale\n"
+    assert "promotion marker" not in result.stdout + result.stderr
     assert not marker.exists()
     assert "current-context" not in _helm_log(tree)
     assert "Gap release" not in result.stdout + result.stderr

@@ -826,3 +826,22 @@ def installed_workspace(root: Path, env_text: str, manifest_text: str = "") -> P
 def release_identity(bundle_dir: Path) -> str:
     """The gap release identity the record states: the sha256 of the signed SHA256SUMS."""
     return sha256_bytes((bundle_dir / "SHA256SUMS").read_bytes())
+
+
+def record_gap_promotion(tree: Path, identity: str, namespace: str, registry: str) -> None:
+    """Record a promotion of `tree` as a successful promotion deploy records it
+    (#1344): the tree's own common.sh marker functions, its path and inode, the
+    given NAMESPACE and INTERNAL_REGISTRY. For suites whose fixture cannot run
+    deploy.sh; test_airgap_deploy_sh proves deploy.sh writes these bytes only
+    after its rollout succeeds."""
+    probe = tree / "scripts" / "airgap" / "record-promotion-probe.sh"
+    probe.write_text('. "$(dirname -- "$0")/common.sh"\n'
+                     '_record_gap_promotion "$(_gap_promotion_text "$1")"\n')
+    env = {"PATH": system_path(tree / "bin"), "NAMESPACE": namespace, "INTERNAL_REGISTRY": registry}
+    try:
+        r = subprocess.run(["sh", str(probe), identity], capture_output=True, text=True, env=env, cwd=tree,
+                           check=False)
+    finally:
+        probe.unlink()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (tree / "dist" / "gap-promotion.txt").is_file()

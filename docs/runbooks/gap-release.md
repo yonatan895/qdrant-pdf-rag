@@ -37,7 +37,8 @@ The record each release fills in is the
   `rehearse-check` (step 7) reads the rehearsal and installed workspaces'
   deploy settings the way `deploy.sh` does. The gap release stage variables
   of steps 7 and 8 (`GAP_REHEARSAL_*`, `GAP_PROMOTE_IDENTITY`) are read from
-  the process environment only, too.
+  the process environment only, too (`airgap:config check` reports them as
+  such when `airgap.env` sets one).
 
   ```sh
   export SNEAKERNET_TRUSTED_PUB=/work/anchors/upstream.pub
@@ -286,19 +287,55 @@ line; rerun the same command after fixing the cause.
    `GAP_PROMOTE_IDENTITY=<record's release identity> sh scripts/tools/run-task.sh airgap:pipeline`.
    A stage refuses an identity that is not the bundle's, and a promotion
    declared together with a rehearsal. Promotion runs no rehearsal guard:
-   that the bundle was rehearsed is still the record's to show (D9). Every
-   later `airgap:load`, `airgap:deploy`, `airgap:ingest` or
-   `airgap:retire-legacy` run from this live workspace is a run of the same
-   gap bundle and needs the same `GAP_PROMOTE_IDENTITY` export (record it with
-   the workspace). The identity names the bundle, not the workspace: the
-   rehearsal's checks come from the `GAP_REHEARSAL_*` declaration, never from
-   this one. Keep the previous release's
+   that the bundle was rehearsed is still the record's to show (D9). When
+   the declared `airgap:deploy` completes its rollout, it records the
+   promotion in this workspace's `dist/gap-promotion.txt` (#1344). A failed
+   promotion deploy, one abandoned before its rollout completed, a declared
+   load, ingest or retire-legacy on its own, and a dry-run record nothing and
+   never refresh an existing record. A promotion rolled back after its
+   rollout completed keeps its marker: retire that workspace with step 10
+   unless it will be used for rollback.
+   Every later `airgap:load`, `airgap:deploy`, `airgap:ingest` or
+   `airgap:retire-legacy` run from this live workspace then needs no export,
+   as long as the file still names this bundle's signed identity, this
+   workspace's path and directory inode, and the `NAMESPACE` and
+   `INTERNAL_REGISTRY` the stage resolves. A copy of the workspace at
+   another path, an edited file, another bundle bootstrapped into it, or
+   another target is refused (the message names the first field that
+   differs). The inode is a best-effort check only: a workspace removed and
+   restored at the same path may get the same inode back, so only the bundle
+   and target recorded at that path can pass there. To record it again, run
+   the promotion deploy with `GAP_PROMOTE_IDENTITY` exported; its completed
+   rollout rewrites the file. Never copy a promoted workspace to make a rehearsal
+   workspace, and never write the file by hand. The file is an **explicit
+   exception** to "no file declares a promotion" (maintainer decision on
+   #1361, #1344 amendment): it stands in for the export and is not an
+   attestation. Its basis is that the people who can write `/work` are
+   exactly the people with live-namespace rights, who can export the
+   identity anyway. Its residual is persistence: it covers every later
+   undeclared run by anyone in this workspace until it is removed (step 10).
+   If `/work` ever becomes writable by anyone without live-namespace rights
+   (backups or restores by another team, another pod mounting the volume),
+   the exception lapses and the design must be revisited before the next
+   gap release. The identity names the bundle, not the workspace:
+   the rehearsal's checks come from the `GAP_REHEARSAL_*` declaration, never
+   from this one, and a declared rehearsal never reads the file. Keep the
+   previous release's
    workspace and bundle, and the base bundle of each kept gap release,
    until the go-live checks pass.
 9. **Roll back** to the previous signed release, upstream or gap, from its
    own retained workspace and bundle, as ADR-0009 §5 step 7 says. Rolling
-   back to a gap release declares it promoted with its own identity
-   (`GAP_PROMOTE_IDENTITY`, step 8).
+   back to a gap release runs as the promotion its retained workspace
+   recorded (step 8), when its `dist/gap-promotion.txt` still holds there;
+   otherwise declare it with its own identity (`GAP_PROMOTE_IDENTITY`).
+10. **Retire a gap workspace** that is abandoned (its release was given up
+    or rolled back) or superseded, and will not be used for rollback: from
+    that workspace run `rm -f dist/gap-promotion.txt` and confirm
+    `ls dist/gap-promotion.txt` reports no such file. No later undeclared
+    stage from it can then run as its promotion; a stage from it needs
+    `GAP_PROMOTE_IDENTITY` again (step 9 if it is ever used for a rollback
+    after all). Keep the retained rollback workspace's file until that
+    workspace is retired too.
 
 Bootstrap refuses a bundle that declares `origin: gap` unless
 `SNEAKERNET_GAP_TRUSTED_PUB` is set (never trust on first use), and every
