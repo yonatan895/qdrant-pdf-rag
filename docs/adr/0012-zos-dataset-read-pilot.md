@@ -266,9 +266,11 @@
 
      It makes one session and at most one logon attempt per run, with no
      retry (maintainer decision on #1349 review B2, 2026-11-22, to protect
-     the site account from lockout). A failed logon ends the run: the
-     remaining checks are `inconclusive` `not_reached` and the receipt is
-     finished (exit 1; exit 3 when the logon hit an unexpected error). The
+     the site account from lockout). A failed logon ends the run and the
+     receipt is finished: exit 1 with the remaining checks `inconclusive`
+     `not_reached`, or exit 3 with them `inconclusive` `probe_error` when
+     the logon hit an unexpected error. A CR or LF in `MCP_FTP_USER` or
+     `MCP_FTP_PASSWORD` is refused with exit 2 before any connection. The
      bound is per run: the probe uses its own threshold-1 breaker, not the
      running bridge's (D9), so every rerun is one more logon; rerun only
      after the cause is fixed. It sends no write, delete or job

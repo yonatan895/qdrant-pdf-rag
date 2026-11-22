@@ -9,9 +9,12 @@ the spool window reader. It turns the D8 dry-run checklist into one command
 and a text-free receipt (`mainframe_rag.probe_receipt`).
 
 Read-only by construction: one session and **at most one logon attempt**
-per run, no retry (a fresh breaker with threshold 1; a failed logon ends the
-run with the remaining checks `inconclusive` `not_reached` and exit 1,
-nothing reconnects; review B2 decision on #1349). The bound is per run, not
+per run, no retry (one `bridge.connect` call with one `login`, nothing
+reconnects; a fresh threshold-1 breaker guards the 530 path too; review B2
+decision on #1349). A failed logon ends the run: exit 1 with the remaining
+checks `inconclusive` `not_reached`, or exit 3 with them `probe_error` on
+an unexpected error. The CLI refuses a CR or LF in the user or password
+with exit 2 before any connection. The bound is per run, not
 shared with the running bridge's breaker. After the bridge's own session setup the commands are SITE, STAT,
 TYPE, PASV, RETR, LIST, ABOR and QUIT only (no STOR, DELE or job action); `--dataset` must be an exact entry of
 `MCP_DATASET_ALLOWLIST`; JES checks run only for a job the operator names with

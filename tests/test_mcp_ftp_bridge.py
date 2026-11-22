@@ -2810,6 +2810,39 @@ def test_site_probe_cli_exits_3_with_the_receipt_file_on_an_unexpected_error(
         assert marker not in everything, marker
 
 
+@pytest.mark.parametrize(("name", "value"), [
+    ("MCP_FTP_USER", "MRKUSRQ\n"),
+    ("MCP_FTP_USER", "MRKUS\rRQ"),
+    ("MCP_FTP_PASSWORD", "MRKPWDQ9\n"),
+    ("MCP_FTP_PASSWORD", "MRKPW\rDQ9"),
+])
+def test_site_probe_cli_refuses_cr_or_lf_in_credentials_before_any_connection(
+    monkeypatch, capsys, tmp_path: Path, name: str, value: str
+) -> None:
+    """Review F1 on #1349 (7081200261): a CR or LF in the user or password
+    (a Secret with a trailing newline, say) is a configuration fault: exit 2
+    with a fixed message, before any socket, never a logon attempt."""
+    out_file = tmp_path / "receipt.jsonl"
+    with _MiniFTPSServer() as srv:
+        monkeypatch.setenv(name, value)
+        for other, good in (("MCP_FTP_USER", "MRKUSRQ"), ("MCP_FTP_PASSWORD", "MRKPWDQ9")):
+            if other != name:
+                monkeypatch.setenv(other, good)
+        for env_name, env_value in {
+            "MCP_FTP_HOST": "127.0.0.1", "MCP_FTP_PORT": str(srv.port), "MCP_FTP_TRANSPORT_MODE": "plain",
+            "MCP_FTP_PLAIN_ACCEPTED": "true", "MCP_DATASET_ALLOWLIST": PROBE_DATASET,
+        }.items():
+            monkeypatch.setenv(env_name, env_value)
+        monkeypatch.delenv("MCP_MOCK_DIR", raising=False)
+        rc = mcp_main.main(["--site-probe", "--dataset", PROBE_DATASET, "--receipt", str(out_file)])
+        sent, connections = list(srv.received_commands), srv.connections
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert connections == 0 and sent == []
+    assert captured.out == "" and not out_file.exists()
+    assert captured.err == "mcp bridge site probe: MCP_FTP_USER and MCP_FTP_PASSWORD must not contain CR or LF\n"
+
+
 def _site_probe_cli_against(monkeypatch, srv: _MiniFTPSServer, out_file: Path) -> int:
     for name, value in {
         "MCP_FTP_HOST": "127.0.0.1", "MCP_FTP_PORT": str(srv.port), "MCP_FTP_USER": "MRKUSRQ",

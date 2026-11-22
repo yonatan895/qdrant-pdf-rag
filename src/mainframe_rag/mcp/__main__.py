@@ -110,6 +110,14 @@ def _site_probe(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    if any(ch in value for value in (config.user, config.password) for ch in "\r\n"):
+        # ftplib would send USER and then fail (exit 3); refuse before any
+        # socket instead, and never echo the value (#1349 review F1).
+        print(
+            "mcp bridge site probe: MCP_FTP_USER and MCP_FTP_PASSWORD must not contain CR or LF",
+            file=sys.stderr,
+        )
+        return 2
     receipt = run_zos_probe(config, targets)
     try:
         write_receipt(receipt, sys.stdout, args.receipt)
