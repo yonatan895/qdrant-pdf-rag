@@ -499,7 +499,15 @@ Compatibility and lifecycle decisions under #448:
   `AGENT_MEMORY_LIMIT`. The agent defaults (requests 250m/512Mi, limits
   2 CPU/2Gi) come from the #1348 load measurement: concurrent image chats
   hold about 45 MiB each, and 512Mi was OOM-killed at 16 of them. A site
-  whose quota cannot take the larger limits sets these keys.
+  whose quota cannot take the larger limits sets these keys. Agent memory is
+  sized per replica (one pod: 512Mi request, 2Gi limit). The namespace needs
+  `replicaCount` x that, plus one surge pod during a rolling update: the agent
+  Deployment sets no `strategy`, so the Kubernetes default applies
+  (RollingUpdate, 25% max surge rounded up, 25% max unavailable rounded down),
+  which at 3 replicas adds one pod and removes none. At the defaults that is
+  3 x 2Gi = 6Gi of memory limits (8Gi during a rollout) and 3 x 512Mi = 1.5Gi
+  of requests (2Gi during a rollout). With the console Route on, each pod also
+  runs the oauth-proxy sidecar (64Mi request, 128Mi limit).
   Worker count and scratch size are
   `INGEST_WORKERS` and `INGEST_WORK_SIZE`. CPU is whole/decimal cores or
   millicores (`500m`); memory and sizes need a Ki/Mi/Gi/Ti unit. Each value is
