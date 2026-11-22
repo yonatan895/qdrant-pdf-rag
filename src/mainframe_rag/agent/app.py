@@ -1384,13 +1384,12 @@ class _BodyGate:
     when it has none, so the cap is reserved), the budget lease, taken at most
     once, and the bytes streamed so far."""
 
-    __slots__ = ("charge", "complete", "lease", "over", "received")
+    __slots__ = ("charge", "lease", "over", "received")
 
     def __init__(self, declared: int | None, cap: int) -> None:
         self.charge = cap if declared is None else declared
         self.lease: BodyLease | None = None
         self.received = 0
-        self.complete = False
         self.over = False
 
     async def take(self) -> None:
@@ -1425,21 +1424,14 @@ def _declared_body(headers) -> tuple[bool, int | None]:
     return bool(length), length
 
 
-def _closing(message: dict) -> dict:
-    """A response start that closes the connection: one sent before its
-    request body was read (an early refusal). Otherwise the server would
-    drain the unread body through the event loop while the socket's kernel
-    receive buffer (charged to the pod's memory cgroup, up to tcp_rmem max
-    per connection) stays full; closing frees it at once (issue #1352)."""
-    headers = [(k, v) for k, v in message.get("headers", []) if k.lower() != b"connection"]
-    return {**message, "headers": [*headers, (b"connection", b"close")]}
-
-
 async def _refuse_body(scope, send, status: int, code: str, message: str, reason: str,
                        headers: dict[str, str] | None = None) -> None:
     """Send a fixed envelope from the middleware (the framework never saw the
-    request, or its reaction was discarded) with the one RED record. The
-    body was not (fully) read, so the connection closes after it."""
+    request, or its reaction was discarded) with the one RED record. An
+    over-cap body is never drained: its 413 closes the connection (uvicorn
+    would otherwise read and discard the rest, however long). A budget 503
+    keeps the connection: uvicorn discards the unread body after the
+    response, so a client still uploading receives the envelope."""
     request = Request(scope)
     request_id = getattr(request.state, "request_id", "unknown")
     log.warning(json_log(request_id, "request_body", outcome=code, reason=reason,
@@ -1448,7 +1440,7 @@ async def _refuse_body(scope, send, status: int, code: str, message: str, reason
     response = JSONResponse(
         status_code=status,
         content=ErrorEnvelope(code=code, message=message).model_dump(),
-        headers={**(headers or {}), "Connection": "close"},
+        headers={**(headers or {}), "Connection": "close"} if status == 413 else headers,
     )
     await response(scope, _no_receive, send)
 
@@ -1511,7 +1503,6 @@ class RequestBodyMiddleware:
                     if gate.received > gate.charge:
                         gate.over = True
                         raise RequestBodyTooLarge
-                    gate.complete = not message.get("more_body", False)
                 return message
 
             async def guarded_send(message):
@@ -1520,8 +1511,6 @@ class RequestBodyMiddleware:
                     return  # the framework's reaction to the refusal is replaced below
                 if message["type"] == "http.response.start":
                     started = True
-                    if not gate.complete:
-                        message = _closing(message)
                 await send(message)
 
             await self.app(scope, counted_receive, guarded_send)

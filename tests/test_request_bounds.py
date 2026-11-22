@@ -987,6 +987,7 @@ def test_streamed_over_cap_body_is_the_fixed_413_not_a_parse_failure(env, path, 
             chunks = [b"x" * (MIB // 2)] * 3
             call = await _Call(path, body, framing="chunked", chunks=chunks).start().done()
             assert (call.status, call.json()) == (413, TOO_LARGE_1MIB)
+            assert call.headers["connection"] == "close"
             assert search.calls == 0
             assert app_mod.body_budget.in_use == 0
             ok = await _Call(path, body, framing="chunked").start().done()
@@ -1011,7 +1012,7 @@ def test_body_waits_for_budget_without_reading_then_gets_the_overload_code(env):
             refused = await waiting.done()
             assert (refused.status, refused.json()) == (503, OVERLOADED)
             assert refused.headers["retry-after"] == "1"
-            assert refused.headers["connection"] == "close"
+            assert "connection" not in refused.headers
             assert refused.receives == 0 and search.calls == 0
             assert app_mod.body_budget.waiting == 0
 
@@ -1046,7 +1047,9 @@ def test_chat_is_admitted_before_its_body_is_read_or_budgeted(env):
             refused = await _Call(*CHAT, framing="length").start().done()
             assert (refused.status, refused.json()) == (503, OVERLOADED)
             assert refused.receives == 0 and app_mod.body_budget.in_use == held
-            assert refused.headers["connection"] == "close", "an unread body is never drained"
+            # Kept open: the server discards the unread body after the response,
+            # so a client still uploading receives the envelope, not a reset.
+            assert "connection" not in refused.headers
             search.gate.set()
             assert (await holder.done()).status == 200
             assert (await queued.done()).status == 200
@@ -1054,6 +1057,28 @@ def test_chat_is_admitted_before_its_body_is_read_or_budgeted(env):
             assert app_mod.body_budget.in_use == 0 and app_mod.admission.active == 0
 
     _run(main)
+
+
+def test_chat_core_runs_without_the_raw_body_or_parsed_json_on_the_request(env):
+    """The bytes and the parsed dict are locals of the parse, never cached on
+    the Request, which lives as long as the response (issue #1352)."""
+    _body_env(env)
+    seen: list[tuple[bool, bool]] = []
+    real = app_mod._chat_response
+
+    async def spy(req, response, owner):
+        seen.append((hasattr(owner.request, "_body"), hasattr(owner.request, "_json")))
+        return await real(req, response, owner)
+
+    env.setattr(app_mod, "_chat_response", spy)
+
+    async def main():
+        async with _serving(env, InstantSearch()):
+            ok = await _Call(*CHAT, framing="length").start().done()
+            assert ok.status == 200
+
+    _run(main)
+    assert seen == [(False, False)]
 
 
 def test_admitted_chat_waits_for_body_budget_then_gets_the_overload_code(env):
