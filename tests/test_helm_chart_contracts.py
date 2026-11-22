@@ -1314,6 +1314,7 @@ OWUI_ENV_NAMES = {
     "ENABLE_PASSWORD_AUTH", "ENABLE_PERSISTENT_CONFIG", "ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS",
     "ENABLE_RETRIEVAL_QUERY_GENERATION", "ENABLE_SEARCH_QUERY_GENERATION", "ENABLE_SIGNUP",
     "ENABLE_TAGS_GENERATION", "ENABLE_TITLE_GENERATION", "ENABLE_TOOLS", "ENABLE_TOOL_PERMISSIONS_AUTO",
+    "ENABLE_TOOL_SEARCH",
     "ENABLE_TOOL_SERVERS", "ENABLE_VERSION_UPDATE_CHECK", "ENABLE_VIDEO_GENERATION", "ENABLE_WEB_SEARCH", "GLOBAL_LOG_LEVEL", "HF_HUB_OFFLINE", "HOME",
     "JWT_EXPIRES_IN", "OAUTH_ADMIN_ROLES", "OAUTH_ALLOWED_ROLES", "OAUTH_CLIENT_ID", "OAUTH_CLIENT_SECRET",
     "OAUTH_EMAIL_CLAIM", "OAUTH_GROUP_CLAIM", "OAUTH_MERGE_ACCOUNTS_BY_EMAIL", "OAUTH_ROLES_CLAIM",
@@ -1565,9 +1566,11 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         # scopes, CORS and the narrow admin-only API key. (v0.13.4 removed the
         # direct-connection and direct-integration settings, #1357.)
         "ENABLE_TOOLS": "false",
-        # #1357: v0.13.x features pinned off (auto tool permissions score at an
-        # external endpoint; inbox and comment rows sit outside the purge).
-        "ENABLE_TOOL_PERMISSIONS_AUTO": "false", "ENABLE_VIDEO_GENERATION": "false",
+        # #1357: v0.13.x features pinned off (auto tool permissions and tool search
+        # call an external endpoint by default; inbox and comment rows sit outside
+        # the purge).
+        "ENABLE_TOOL_PERMISSIONS_AUTO": "false", "ENABLE_TOOL_SEARCH": "false",
+        "ENABLE_VIDEO_GENERATION": "false",
         "ENABLE_NOTIFICATIONS": "false", "ENABLE_COMMENTS": "false",
         "BYPASS_MODEL_ACCESS_CONTROL": "false", "TASK_MODEL": "",
         # #1255: the docs Pipe's default answer depth, the model new chats and

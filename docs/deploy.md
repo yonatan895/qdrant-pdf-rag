@@ -2261,8 +2261,13 @@ v0.13.x routes the proxy refuses (#1357): the refresh-token session API
 first matching entry), Tether (`/api/v1/tether`, which has no admin switch), comments
 (`/api/v1/comments`), video generation (`/api/v1/videos`) and the notifications inbox
 (`/api/v1/notifications`). The chart also pins `ENABLE_COMMENTS`, `ENABLE_NOTIFICATIONS`,
-`ENABLE_VIDEO_GENERATION` and `ENABLE_TOOL_PERMISSIONS_AUTO` to `false`; comment and
-notification rows would sit outside the chat purge. A folder's system prompt reaches the docs
+`ENABLE_VIDEO_GENERATION`, `ENABLE_TOOL_PERMISSIONS_AUTO` and `ENABLE_TOOL_SEARCH` to `false`
+(the last two call an external endpoint by default); comment and notification rows would sit
+outside the chat purge. v0.13.4 also adds routes under prefixes the proxy already admits, each
+access-checked by the server (the #1357 re-audit lists them): a chat's view state, parameters,
+tag colour and search snippet for its owner or reader, resuming one's own temporary chat, and
+admin-only rotation or deletion of another user's API key. An admin can therefore mint a key in
+another admin's name; the key still works only on the installer's endpoints (below). A folder's system prompt reaches the docs
 Pipe as a system turn, and the Pipe drops it. Its knowledge entries resolve to nothing, because
 no file, knowledge collection or note can exist (ADR-0007 V1).
 

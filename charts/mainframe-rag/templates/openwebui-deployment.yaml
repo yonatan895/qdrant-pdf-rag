@@ -246,11 +246,13 @@ spec:
             - name: ENABLE_TOOLS
               value: "false"
             # v0.13.x features, pinned off (#1357). Auto tool permissions would score
-            # tool calls at an external endpoint (default api.openai.com); video
-            # generation is a model connection. The notifications inbox (default on)
-            # and comments store rows keyed by chat id that the retention purge does
-            # not know, and the proxy refuses their APIs.
+            # tool calls, and tool search would pick tools, at an external endpoint
+            # (default api.openai.com); video generation is a model connection. The
+            # notifications inbox (default on) and comments store rows keyed by chat
+            # id that the retention purge does not know, and the proxy refuses their APIs.
             - name: ENABLE_TOOL_PERMISSIONS_AUTO
+              value: "false"
+            - name: ENABLE_TOOL_SEARCH
               value: "false"
             - name: ENABLE_VIDEO_GENERATION
               value: "false"
