@@ -43,6 +43,7 @@ from __future__ import annotations
 import codecs
 import contextlib
 import ftplib
+import functools
 import re
 import socket
 import ssl
@@ -805,15 +806,23 @@ def _spool_budget(max_bytes: int) -> tuple[int, int, int]:
 
 # The text a key marker split by a receive chunk can have before the cut.
 PEM_CARRY_CHARS = 1024
-_ASCII_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+@functools.cache
+def _control_table() -> dict[int, None]:
+    """A str.translate table dropping what `_normalize_zos_text` drops: every
+    control and format character but tab and newline (built once, ~70 ms)."""
+    table: dict[int, None] = {
+        cp: None for cp in range(sys.maxunicode + 1) if unicodedata.category(chr(cp)) in ("Cc", "Cf")
+    }
+    del table[ord("\n")], table[ord("\t")]
+    return table
 
 
 def _marker_text(text: str) -> str:
-    """`_normalize_zos_text` as far as key markers are concerned (a split
-    CR LF may give two line ends), with a fast path for ASCII."""
-    if text.isascii():
-        return _ASCII_CONTROL_RE.sub("", text.replace("\r", "\n"))
-    return _normalize_zos_text(text)
+    """`_normalize_zos_text` as far as key markers are concerned (a CR LF
+    split by a chunk edge may give two line ends), at C speed."""
+    return text.replace("\r", "\n").translate(_control_table())
 
 
 class _OpenKey:

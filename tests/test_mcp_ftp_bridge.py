@@ -1394,6 +1394,40 @@ def test_spool_read_through_the_receive_never_leaks_a_secret(data: st.DataObject
     assume(props.assert_no_secret_survives(text, _whole_screened(payload, encoding), secret))
 
 
+@pytest.mark.parametrize(
+    ("encoding", "marker"),
+    [
+        ("latin-1", b"-----BEGIN RSA PRIVATE KEY-----"),
+        ("latin-1", b"-----BEG\x00IN RSA PRIVATE\x1b KEY-----"),  # control bytes screening drops
+        ("utf-8", b"-----BEGIN PRIV\xe2\x80\x8bATE KEY-----"),  # a zero-width space (Cf)
+    ],
+)
+def test_open_key_finds_a_marker_split_at_any_byte(encoding: str, marker: bytes) -> None:
+    """The key state the spool tail starts from: a BEGIN marker split by a
+    receive chunk edge at any byte is found, and the next END closes it."""
+    stream = b"first line\r\n" + marker + b"\r\nQXJZQXJZ\r\n"
+    for cut in range(len(stream) + 1):
+        keys = bridge._OpenKey(encoding)
+        keys.feed(stream[:cut])
+        keys.feed(stream[cut:])
+        assert keys.open, cut
+        keys.feed(b"-----END RSA PRIVATE KEY-----\r\nafter\r\n")
+        assert not keys.open, cut
+
+
+def test_spool_key_opened_in_the_head_without_end_blanks_the_tail() -> None:
+    """A key whose BEGIN line is in the head and which never ends: whole-file
+    screening redacts from BEGIN to the end, so no key line may show in the
+    head or the tail of an evicted read."""
+    body = b"".join(b"QXJZ%06dQXJZ\n" % n for n in range(9000))
+    payload = b"JOB LOG START\n-----BEGIN PRIVATE KEY-----\n" + body
+    out = _spool_out(_chunked(_spool_fake(payload), 4096), max_bytes=65536, encoding="latin-1")
+    text = _assert_framed_within(out, 65536)
+    assert out["structuredContent"]["window"] == "head_tail"
+    assert "JOB LOG START" in text
+    assert "QXJZ" not in text
+
+
 def test_spool_pem_cut_by_window_is_redacted() -> None:
     """A private key spanning the gap leaves BEGIN without END in the head and
     END without BEGIN in the tail; both halves are redacted."""
