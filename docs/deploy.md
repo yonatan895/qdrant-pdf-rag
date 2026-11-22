@@ -492,7 +492,10 @@ Compatibility and lifecycle decisions under #448:
   (`snapshotPersistence.size`), `QDRANT_CPU_REQUEST`, `QDRANT_MEMORY_REQUEST`,
   `QDRANT_CPU_LIMIT`, `QDRANT_MEMORY_LIMIT` (`resources.{requests,limits}`).
   Ingest Job (`ingest.resources`): `INGEST_CPU_REQUEST`, `INGEST_MEMORY_REQUEST`,
-  `INGEST_CPU_LIMIT`, `INGEST_MEMORY_LIMIT`. Worker count and scratch size are
+  `INGEST_CPU_LIMIT`, `INGEST_MEMORY_LIMIT`. Agent container
+  (`resources.agent`, #1348; the oauth-proxy sidecar keeps its own sizes):
+  `AGENT_CPU_REQUEST`, `AGENT_MEMORY_REQUEST`, `AGENT_CPU_LIMIT`,
+  `AGENT_MEMORY_LIMIT`. Worker count and scratch size are
   `INGEST_WORKERS` and `INGEST_WORK_SIZE`. CPU is whole/decimal cores or
   millicores (`500m`); memory and sizes need a Ki/Mi/Gi/Ti unit. Each value is
   validated before any change; a limit below its request (or below the default

@@ -111,7 +111,7 @@ MAXIMAL_INPUT = {
     "QDRANT_REPLICATION_FACTOR": "1", "QDRANT_WRITE_CONSISTENCY_FACTOR": "1",
     "QDRANT_DATA_SIZE": "1Gi", "QDRANT_SNAPSHOT_SIZE": "1Gi",
     **{f"{prefix}_{res}_{kind}": ("1" if res == "CPU" else "1Gi")
-       for prefix in ("QDRANT", "INGEST") for res in ("CPU", "MEMORY") for kind in ("REQUEST", "LIMIT")},
+       for prefix in ("QDRANT", "INGEST", "AGENT") for res in ("CPU", "MEMORY") for kind in ("REQUEST", "LIMIT")},
     **{f"IMAGE_DIGEST_{role}": _DIGEST
        for role in ("AGENT", "INGEST", "OAUTH_PROXY", "OPENWEBUI", "OPENWEBUI_PROXY")},
 }

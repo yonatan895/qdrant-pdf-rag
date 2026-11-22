@@ -475,8 +475,8 @@ def _check_cross_key_rules(effective: Mapping[str, str], errors: list[str]) -> N
     except ValueError as exc:
         _add_unique(errors, str(exc))
 
-    # Qdrant & ingest sizing (shapes and limit >= request)
-    for fn in (model_config.qdrant_sizing, model_config.ingest_resources):
+    # Qdrant, ingest & agent sizing (shapes and limit >= request)
+    for fn in (model_config.qdrant_sizing, model_config.ingest_resources, model_config.agent_resources):
         try:
             fn(effective)
         except ValueError as exc:

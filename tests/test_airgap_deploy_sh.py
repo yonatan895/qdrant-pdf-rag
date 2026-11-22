@@ -31,6 +31,7 @@ from tests.helpers_airgap import (
     release_anchor,
     release_identity,
     release_key,
+    rendered_container,
     rendered_env,
     run_sh,
     set_oauth_proxy_pin,
@@ -3000,6 +3001,72 @@ def test_sizing_keys_render_what_the_free_form_overlay_rendered(tmp_path):
         return docs
 
     assert non_secret(new) == non_secret(old), "every resource is identical, not only the sizing fields"
+
+
+# --- #1348: agent container sizing keys --------------------------------------
+
+AGENT_SIZING = {
+    "AGENT_CPU_REQUEST": "250m", "AGENT_MEMORY_REQUEST": "768Mi",
+    "AGENT_CPU_LIMIT": "2", "AGENT_MEMORY_LIMIT": "1536Mi",
+}
+OAUTH_PROXY_RESOURCES = {"requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"cpu": "200m", "memory": "128Mi"}}
+
+
+def _agent_route_dryrun(tree):
+    tmp_path, _ = tree
+    set_oauth_proxy_pin(tmp_path, "sha256:" + "b" * 64)
+    ca_file = tmp_path / "route-ca.crt"
+    ca_file.write_text("-----BEGIN CERTIFICATE-----\nDRYRUN\n-----END CERTIFICATE-----\n")
+    return (("AGENT_ROUTE", "true"), ("AIRGAP_DRYRUN", "1"), ("ROUTE_DESTINATION_CA_FILE", str(ca_file)))
+
+
+def _rendered_docs(tree) -> list:
+    import yaml
+
+    return [d for d in yaml.safe_load_all((tree[0] / "dist" / "agent-rendered.yaml").read_text()) if d]
+
+
+def test_agent_sizing_keys_reach_only_the_agent_container(tree):
+    """Unset keys render the chart default; set keys change the agent
+    container's resources and nothing else (the oauth-proxy sidecar included)."""
+    import yaml
+
+    route = _agent_route_dryrun(tree)
+    r = _run(tree, *route)
+    assert r.returncode == 0, r.stderr
+    default_text = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    chart = yaml.safe_load((REPO / "charts/mainframe-rag/values.yaml").read_text())["resources"]["agent"]
+    assert rendered_container(default_text, "agent")["resources"] == chart
+    assert rendered_container(default_text, "oauth-proxy")["resources"] == OAUTH_PROXY_RESOURCES
+    default_docs = _rendered_docs(tree)
+
+    r = _run(tree, *route, *AGENT_SIZING.items())
+    assert r.returncode == 0, r.stderr
+    sized_text = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert rendered_container(sized_text, "agent")["resources"] == {
+        "requests": {"cpu": "250m", "memory": "768Mi"}, "limits": {"cpu": "2", "memory": "1536Mi"}}
+    assert rendered_container(sized_text, "oauth-proxy")["resources"] == OAUTH_PROXY_RESOURCES
+    # Every other rendered field is unchanged: restore the agent's resources and compare.
+    sized_docs = _rendered_docs(tree)
+    for doc in sized_docs:
+        if doc.get("kind") == "Deployment":
+            for container in doc["spec"]["template"]["spec"]["containers"]:
+                if container["name"] == "agent":
+                    container["resources"] = chart
+    assert sized_docs == default_docs
+
+
+@pytest.mark.parametrize("name,value", [
+    ("AGENT_CPU_REQUEST", "lots"), ("AGENT_MEMORY_LIMIT", "500m"),
+    ("AGENT_CPU_LIMIT", "50m"), ("AGENT_MEMORY_REQUEST", "1Gi"),
+])
+def test_invalid_agent_sizing_is_refused_before_any_mutation(tree, name, value):
+    r = _run(tree, (name, value))
+    assert r.returncode != 0, r.stdout
+    assert name in r.stderr and value not in r.stderr
+    assert _mutations(tree) == []
+    assert "template" not in _helm_log(tree).split()
+    assert not (tree[0] / "dist" / "agent-rendered.yaml").exists()
 
 
 # --- #1070 R2: StatefulSet volume sizes are immutable ------------------------
