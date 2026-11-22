@@ -685,6 +685,32 @@ def test_export_carries_no_question_answer_citation_or_failure_text(site_eval, e
     assert data["metrics"]["by_failure"]["missing required substring"] == 2
 
 
+_TIMING_KEYS = ("elapsed_ms", "ttft_ms", "llm_ms", "client_first_token_ms", "decode_tps")
+
+
+def _without_timings(export: bytes) -> dict:
+    """An export minus its wall-clock values: the timestamp, every row's
+    timings and the timing distributions under `metrics`. Two runs of the
+    same stub agent can land either side of a millisecond boundary (#588)."""
+    data = json.loads(export)
+    data.pop("timestamp")
+    data["params"].pop("generated_at", None)
+
+    def strip(node: object) -> None:
+        if isinstance(node, dict):
+            for key in _TIMING_KEYS:
+                node.pop(key, None)
+            for value in node.values():
+                strip(value)
+        elif isinstance(node, list):
+            for value in node:
+                strip(value)
+
+    strip(data["rows"])
+    strip(data["metrics"])
+    return data
+
+
 @pytest.mark.parametrize("endpoint", ["answer", "chat"])
 def test_single_turn_export_does_not_follow_the_prior_turn_default(site_eval, monkeypatch, endpoint):
     """Issue #1274: the --prior-cap default follows the agent's
@@ -696,13 +722,7 @@ def test_single_turn_export_does_not_follow_the_prior_turn_default(site_eval, mo
     def run():
         _, _, export, calls = site_eval(_canary_agent(endpoint), _canary_entries(),
                                         ["--endpoint", endpoint, "--stream", "--coverage"])
-        data = json.loads(export)
-        for row in data["rows"]:
-            for key in ("elapsed_ms", "ttft_ms", "llm_ms", "client_first_token_ms", "decode_tps"):
-                row.pop(key)
-        data.pop("timestamp")
-        data["params"].pop("generated_at", None)
-        return data, [(c.method, str(c.url), c.content) for c in calls]
+        return _without_timings(export), [(c.method, str(c.url), c.content) for c in calls]
 
     field = Settings.model_fields["chat_max_prior_turn_chars"]
     assert field.default == 4000
@@ -1046,19 +1066,11 @@ def test_two_turn_export_carries_no_question_answer_or_follow_up_text(site_eval)
 
 def test_single_turn_run_is_unchanged_by_the_two_turn_mode(site_eval):
     """`--turns 1` is the default: same rows, same keys, no new params."""
-    def normal(export: bytes) -> dict:
-        data = json.loads(export)
-        data.pop("timestamp")
-        for row in data["rows"]:
-            for key in ("elapsed_ms", "client_first_token_ms"):
-                row.pop(key)
-        return data
-
     agent = _two_turn_agent({(_entry()["query"], 1): chat_stream("Rejected [1].")})
     _, report, plain, _ = site_eval(agent, [_entry()], ["--endpoint", "chat", "--stream"])
     _, _, explicit, calls = site_eval(agent, [_entry()],
                                       ["--endpoint", "chat", "--stream", "--turns", "1"])
-    assert normal(plain) == normal(explicit)
+    assert _without_timings(plain) == _without_timings(explicit)
     data = json.loads(plain)
     assert not {"turns", "arm"} & set(data["params"]) and "by_turn" not in data["metrics"]
     assert all(set(r) == EXPORT_ROW_KEYS for r in data["rows"])
