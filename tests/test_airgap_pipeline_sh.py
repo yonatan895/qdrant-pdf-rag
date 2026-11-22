@@ -664,7 +664,11 @@ def _gap_pipeline_tree(pipe_tree, airgap_env: str, *, dryrun: bool):
         # first push (the load suite's bundle and registry stub, its gap key).
         from tests.helpers_airgap import GAP_MANIFEST_LINES
         from tests.helpers_task_artifact import copy_task_tools
-        from tests.test_airgap_load_sh import STUB_SKOPEO, _edit_manifest_and_resign, _make_artifacts
+        from tests.test_airgap_load_sh import (
+            STUB_SKOPEO,
+            _edit_manifest_and_resign,
+            _make_artifacts,
+        )
 
         artdir = pipe_tree / "dist"
         _make_artifacts(artdir, sha=IMAGE_SHA)
@@ -733,7 +737,7 @@ def test_task_pipeline_operator_rehearsal_wins_over_a_promotion_exported_from_ai
     file's promotion identity reaches no stage."""
     from tests.helpers_airgap import installed_workspace
 
-    task, log, operator = _gap_pipeline_tree(
+    task, _log, operator = _gap_pipeline_tree(
         pipe_tree, "NAMESPACE='mfr-reh'\nINTERNAL_REGISTRY='reg.internal:5000'\n" + _FILE_DECLARATIONS["promotion"],
         dryrun=True)
     installed = installed_workspace(pipe_tree, _LIVE_WORKSPACE_ENV)
