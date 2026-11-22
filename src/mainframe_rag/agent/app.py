@@ -1520,9 +1520,14 @@ class RequestBodyMiddleware:
             started = False
             read_until = _body_read_until(scope)
 
+            body_done = False
+
             async def counted_receive():
+                nonlocal body_done
                 await gate.take()
-                if read_until is None:
+                if read_until is None or body_done:
+                    # After the last body message a receive only waits for
+                    # the disconnect (streaming responses): never bounded.
                     message = await receive()
                 else:
                     try:
@@ -1535,6 +1540,7 @@ class RequestBodyMiddleware:
                     if gate.received > gate.charge:
                         gate.refusal = too_large
                         raise RequestBodyTooLarge
+                    body_done = not message.get("more_body", False)
                 return message
 
             async def guarded_send(message):
