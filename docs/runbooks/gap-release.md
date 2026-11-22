@@ -35,7 +35,9 @@ The record each release fills in is the
 - Both anchors are plain files in `/work/anchors/` and are **exported in the
   process environment**: `release.sh` ignores `airgap.env`, except that
   `rehearse-check` (step 7) reads the rehearsal and installed workspaces'
-  deploy settings the way `deploy.sh` does.
+  deploy settings the way `deploy.sh` does. The gap release stage variables
+  of steps 7 and 8 (`GAP_REHEARSAL_*`, `GAP_PROMOTE_IDENTITY`) are read from
+  the process environment only, too.
 
   ```sh
   export SNEAKERNET_TRUSTED_PUB=/work/anchors/upstream.pub
@@ -214,25 +216,69 @@ line; rerun the same command after fixing the cause.
    current-context`. It refuses: a workspace it cannot resolve; the installed
    workspace itself; a rehearsal `NAMESPACE` that is unset (deploy would
    default it) or equal to the installed workspace's, ignoring case and
-   surrounding spaces; an unset `INTERNAL_REGISTRY`; no current context; a
+   surrounding spaces; an installed workspace whose `NAMESPACE` is unset (its
+   target is unknown); an unset `INTERNAL_REGISTRY`; no current context; a
    `KC` with arguments; a `HELM_KUBECONTEXT` other than that context; any
    typed value that differs from its resolved one; a changed third-party
    `*_digest` while the two registries are the same path ignoring case, port
    and a trailing `/` (load pushes third-party images under fixed tags); and
    a rehearsal namespace in which the deploy's `KC` lists any Deployment,
    StatefulSet, Job, Pod, PVC or Helm release Secret, or answers with
-   anything but a list of objects. It checks this moment only: a later
-   `NAMESPACE=…` override, login or context switch before the pipeline is
-   not covered. Afterwards uninstall both
+   anything but a list of objects. `HELM_KUBECONTEXT` and `KUBECONFIG` count
+   as the rehearsal workspace exports them, `airgap.env` included, and the
+   listing uses that `KUBECONFIG`.
+
+   Then run the pipeline from the rehearsal workspace with the stage declared
+   in the process environment (never in `airgap.env`: an assignment or
+   `export` there is ignored for these, a `readonly` one is refused). Keep the rehearsal settings in that workspace's own `airgap.env`:
+   inside a stage an exported value cannot be told from a file value, so the
+   stages resolve both workspaces from their own `airgap.env` (or the deploy
+   defaults) and refuse a stage whose `NAMESPACE`, `INTERNAL_REGISTRY` or
+   `KC` differs from that, for example one exported in the shell or chosen
+   with `AIRGAP_ENV`.
+
+   ```sh
+   export GAP_REHEARSAL_INSTALLED_WORKSPACE=<installed workspace>
+   export GAP_REHEARSAL_KUBE_CONTEXT=<the rehearsal cluster's context name>
+   sh scripts/tools/run-task.sh airgap:pipeline
+   ```
+
+   Every stage that writes (`airgap:load`, `airgap:deploy`, `airgap:ingest`,
+   `airgap:retire-legacy`) refuses a gap bundle (`origin: gap`) unless a
+   rehearsal or a promotion is declared, and for a rehearsal repeats the
+   resolution and refusals above in its own process, before any registry or
+   cluster write (#1338): the installed workspace itself, an unset or live
+   `NAMESPACE`, an installed workspace that does not record its `NAMESPACE`, an unset `INTERNAL_REGISTRY`, a `KC` with arguments, no
+   current context, a `HELM_KUBECONTEXT` other than that context, a changed
+   fixed-tag image on the installed registry path, a stage value that differs
+   from the workspace's resolution, and a context other than
+   `GAP_REHEARSAL_KUBE_CONTEXT`. A later `NAMESPACE=…` override, login or
+   context switch is therefore refused too. The stages do not repeat the
+   emptiness check: a repeat deploy or ingest into the same rehearsal is
+   allowed, so `rehearse-check` stays the step that proves the namespace
+   started empty. Afterwards uninstall both
    releases, delete the namespace's PVCs and Jobs and confirm it is empty.
 8. **Promote** only when every required row of the record is `PASS` or
    `INHERITED` and the approver signed off: bootstrap the same signed
    members (the sha256 of `SHA256SUMS` equals the record's identity) into a
-   fresh workspace and deploy as usual. Keep the previous release's
+   fresh workspace and deploy as usual, declaring the promotion in the
+   process environment with that identity:
+   `GAP_PROMOTE_IDENTITY=<record's release identity> sh scripts/tools/run-task.sh airgap:pipeline`.
+   A stage refuses an identity that is not the bundle's, and a promotion
+   declared together with a rehearsal. Promotion runs no rehearsal guard:
+   that the bundle was rehearsed is still the record's to show (D9). Every
+   later `airgap:load`, `airgap:deploy`, `airgap:ingest` or
+   `airgap:retire-legacy` run from this live workspace is a run of the same
+   gap bundle and needs the same `GAP_PROMOTE_IDENTITY` export (record it with
+   the workspace). The identity names the bundle, not the workspace: the
+   rehearsal's checks come from the `GAP_REHEARSAL_*` declaration, never from
+   this one. Keep the previous release's
    workspace and bundle, and the base bundle of each kept gap release,
    until the go-live checks pass.
 9. **Roll back** to the previous signed release, upstream or gap, from its
-   own retained workspace and bundle, as ADR-0009 §5 step 7 says.
+   own retained workspace and bundle, as ADR-0009 §5 step 7 says. Rolling
+   back to a gap release declares it promoted with its own identity
+   (`GAP_PROMOTE_IDENTITY`, step 8).
 
 Bootstrap refuses a bundle that declares `origin: gap` unless
 `SNEAKERNET_GAP_TRUSTED_PUB` is set (never trust on first use), and every

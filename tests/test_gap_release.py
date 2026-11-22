@@ -987,12 +987,13 @@ def test_release_sh_verify_runs_from_a_verified_installed_release_only(tmp_path:
 # every namespace it is asked about.
 
 _FAKE_KUBECTL = """#!/bin/sh
+ctx=${KUBECONFIG:-$FAKE_KUBE_CTX}
 if [ "$1" = config ] && [ "$2" = current-context ]; then
-    [ -s "$FAKE_KUBE_CTX" ] || exit 1
-    cat "$FAKE_KUBE_CTX"
+    [ -s "$ctx" ] || exit 1
+    cat "$ctx"
     exit 0
 fi
-printf '%s %s\n' "$2" "$4" >> "$FAKE_KUBE_LOG"
+printf '%s %s %s\n' "$2" "$4" "$(cat "$ctx")" >> "$FAKE_KUBE_LOG"
 if [ -n "${FAKE_KUBE_RAW:-}" ]; then
     cat "$FAKE_KUBE_RAW"
     exit 0
@@ -1081,6 +1082,12 @@ class RehearsalSites:
             return []
         return [line.split(" ", 1)[0] for line in self.log.read_text(encoding="utf-8").splitlines()]
 
+    def listing_contexts(self) -> set[str]:
+        """The kube context each emptiness listing ran against."""
+        if not self.log.exists():
+            return set()
+        return {line.split(" ", 2)[2] for line in self.log.read_text(encoding="utf-8").splitlines()}
+
 
 @pytest.fixture
 def sites(tmp_path: Path) -> RehearsalSites:
@@ -1153,6 +1160,30 @@ def test_rehearse_check_refuses_an_unresolvable_context_or_registry(sites: Rehea
     _refused(sites.run(), "INTERNAL_REGISTRY is not set for the rehearsal workspace")
     sites.write_env(sites.rehearsal, NAMESPACE=REH_NS, INTERNAL_REGISTRY=REH_REG, KC="kubectl --context x")
     _refused(sites.run(), "KC must name one command")
+
+
+def test_rehearse_check_honours_helm_kubecontext_exported_from_airgap_env(sites: RehearsalSites):
+    """#1336 re-review V5g: helm reads HELM_KUBECONTEXT from what airgap.env
+    exports, so the check must too, not only the process environment."""
+    with (sites.rehearsal / "airgap.env").open("a", encoding="utf-8") as env_file:
+        env_file.write("export HELM_KUBECONTEXT='live-ctx'\n")
+    _refused(sites.run(), "HELM_KUBECONTEXT")
+    assert sites.queried() == []
+
+
+def test_rehearse_check_lists_with_the_kubeconfig_exported_from_airgap_env(sites: RehearsalSites):
+    """#1336 re-review V5h: KUBECONFIG exported from the rehearsal airgap.env
+    selects the deploy's cluster; the emptiness listing runs on that cluster,
+    never on the one the operator's shell happens to use."""
+    live = sites.root / "live.kubeconfig"
+    live.write_text("live-ctx\n", encoding="utf-8")
+    with (sites.rehearsal / "airgap.env").open("a", encoding="utf-8") as env_file:
+        env_file.write(f"export KUBECONFIG='{live}'\n")
+    _refused(sites.run(), "--kube-context does not match")
+    proc = sites.run(kube_context="live-ctx")
+    assert proc.returncode == 0, proc.stderr
+    assert "context=live-ctx" in proc.stdout
+    assert sites.listing_contexts() == {"live-ctx"}
 
 
 @pytest.mark.parametrize(

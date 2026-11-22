@@ -1565,15 +1565,25 @@ def cmd_verify(
 # deploy.sh: process environment over the env file, then resolve_aliases, then
 # deploy.sh's KC=${KC:-$(kc)}. NAMESPACE is captured before resolve_aliases too,
 # so an unset value is refused instead of becoming deploy's mainframe-rag
-# default. Fields are NUL-separated: values round-trip byte for byte.
+# default. HELM_KUBECONTEXT and KUBECONFIG are read as exported after airgap.env
+# (#1338): what the deploy's helm and kubectl inherit, including an
+# `export` line in the workspace's airgap.env. The packed MANIFEST is
+# common.sh's find_manifest. Fields are NUL-separated: values round-trip byte
+# for byte.
 _RESOLVE_DEPLOY_TARGET_SH = r"""
 . "$1"
 _mfr_raw_namespace=${NAMESPACE:-}
 resolve_aliases
 KC=${KC:-$(kc)}
 _mfr_context=$($KC config current-context 2>/dev/null) || _mfr_context=""
+_mfr_helm_context=$(printenv HELM_KUBECONTEXT) || _mfr_helm_context=""
+_mfr_kubeconfig_set=1
+_mfr_kubeconfig=$(printenv KUBECONFIG) || { _mfr_kubeconfig=""; _mfr_kubeconfig_set=0; }
+_mfr_manifest=$(find_manifest)
 printf 'raw_namespace=%s\0namespace=%s\0registry=%s\0qdrant_release=%s\0kc=%s\0context=%s\0' \
     "$_mfr_raw_namespace" "$NAMESPACE" "$INTERNAL_REGISTRY" "$QDRANT_RELEASE" "$KC" "$_mfr_context"
+printf 'helm_kubecontext=%s\0kubeconfig=%s\0kubeconfig_set=%s\0manifest=%s\0' \
+    "$_mfr_helm_context" "$_mfr_kubeconfig" "$_mfr_kubeconfig_set" "$_mfr_manifest"
 """
 # deploy.sh installs the application chart under this literal release name.
 APP_RELEASE = "mainframe-rag"
@@ -1595,6 +1605,21 @@ class DeployTarget:
     qdrant_release: str
     kc: str
     context: str
+    # As exported to the deploy's helm and kubectl; kubeconfig None = not exported.
+    helm_kubecontext: str
+    kubeconfig: str | None
+    # The workspace's packed MANIFEST (find_manifest), relative to it; "" = none.
+    manifest: str
+
+    def client_env(self, base: Mapping[str, str]) -> dict[str, str]:
+        """`base` with the KUBECONFIG and HELM_KUBECONTEXT this workspace's deploy exports."""
+        env = dict(base)
+        for key, value in (("KUBECONFIG", self.kubeconfig), ("HELM_KUBECONTEXT", self.helm_kubecontext or None)):
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
+        return env
 
 
 def resolve_deploy_target(workspace: Path, role: str, env: Mapping[str, str]) -> DeployTarget:
@@ -1620,7 +1645,8 @@ def resolve_deploy_target(workspace: Path, role: str, env: Mapping[str, str]) ->
                 fields[key] = value
     except UnicodeDecodeError:
         fields = {}
-    names = ("raw_namespace", "namespace", "registry", "qdrant_release", "kc", "context")
+    names = ("raw_namespace", "namespace", "registry", "qdrant_release", "kc", "context",
+             "helm_kubecontext", "kubeconfig", "kubeconfig_set", "manifest")
     if proc.returncode != 0 or set(fields) != set(names):
         raise ReleaseStop(f"rehearsal refused: cannot resolve the deploy target of the {role} "
                           "workspace (FAIL line above, if any)")
@@ -1632,6 +1658,9 @@ def resolve_deploy_target(workspace: Path, role: str, env: Mapping[str, str]) ->
         qdrant_release=fields["qdrant_release"],
         kc=fields["kc"],
         context=fields["context"],
+        helm_kubecontext=fields["helm_kubecontext"],
+        kubeconfig=fields["kubeconfig"] if fields["kubeconfig_set"] == "1" else None,
+        manifest=fields["manifest"],
     )
 
 
@@ -1656,6 +1685,69 @@ def _object_names(data: object, kind: str) -> list[str]:
     return names
 
 
+def _read_manifest_map(path: Path, role: str) -> dict[str, str]:
+    try:
+        return parse_manifest(path.read_text(encoding="utf-8"))[0]
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ReleaseStop(f"rehearsal refused: the {role} MANIFEST is unreadable") from exc
+
+
+def judge_rehearsal_target(
+    reh: DeployTarget, live: DeployTarget, *, candidate_manifest: Path, installed_manifest: Path
+) -> list[str]:
+    """Rev 2 §3h / D6 refusals on two resolved deploy targets, shared by
+    `rehearse-check` and the deploy path's `rehearse-guard` (#1338). Returns
+    the changed fixed-tag image keys; raises ReleaseStop on any refusal."""
+    if not reh.raw_namespace.strip():
+        raise ReleaseStop("rehearsal refused: NAMESPACE is not set for the rehearsal workspace "
+                          "(deploy would fall back to its default); set it in its airgap.env")
+    if not live.raw_namespace.strip():
+        raise ReleaseStop("rehearsal refused: NAMESPACE is not set for the installed workspace, so its "
+                          "target is unknown; record it in the installed workspace's airgap.env")
+    if reh.namespace.strip().lower() == live.namespace.strip().lower():
+        raise ReleaseStop(
+            "rehearsal refused: the rehearsal deploy would target the installed release's "
+            "namespace; set the rehearsal namespace in the rehearsal workspace's airgap.env "
+            "and do not override NAMESPACE in the environment (Rev 2 D6)"
+        )
+    if not reh.registry.strip():
+        raise ReleaseStop("rehearsal refused: INTERNAL_REGISTRY is not set for the rehearsal workspace")
+    if not reh.kc or any(ch.isspace() for ch in reh.kc):
+        raise ReleaseStop("rehearsal refused: KC must name one command (no arguments)")
+    if not reh.context.strip():
+        raise ReleaseStop("rehearsal refused: no current kube context for the rehearsal "
+                          "workspace's KC; log in first")
+    if reh.helm_kubecontext and reh.helm_kubecontext != reh.context:
+        raise ReleaseStop("rehearsal refused: HELM_KUBECONTEXT names another context than "
+                          "kubectl's; helm and kubectl would deploy to different clusters")
+
+    cand_map = _read_manifest_map(candidate_manifest, "candidate")
+    inst_map = _read_manifest_map(installed_manifest, "installed")
+    changed_fixed_tags = [
+        key for key in FIXED_TAG_IMAGE_KEYS
+        if cand_map.get(key) and cand_map.get(key) != inst_map.get(key)
+    ]
+    if changed_fixed_tags and _registry_identity(reh.registry) == _registry_identity(live.registry):
+        raise ReleaseStop(
+            "rehearsal refused: candidate changes a fixed-tag third-party image while sharing "
+            "INTERNAL_REGISTRY with the installed release — use a separate rehearsal registry path"
+        )
+    return changed_fixed_tags
+
+
+def _resolve_both(
+    rehearsal_workspace: Path, installed_workspace: Path, env: Mapping[str, str]
+) -> tuple[DeployTarget, DeployTarget]:
+    try:
+        same = rehearsal_workspace.resolve() == installed_workspace.resolve()
+    except OSError as exc:
+        raise ReleaseStop("rehearsal refused: a workspace path cannot be resolved") from exc
+    if same:
+        raise ReleaseStop("rehearsal refused: the rehearsal workspace is the installed workspace")
+    return (resolve_deploy_target(rehearsal_workspace, "rehearsal", env),
+            resolve_deploy_target(installed_workspace, "installed", env))
+
+
 def cmd_rehearse_check(
     *,
     rehearsal_workspace: Path,
@@ -1674,43 +1766,16 @@ def cmd_rehearse_check(
 
     Both workspaces are resolved by their own scripts/airgap/common.sh under this
     process environment (see _RESOLVE_DEPLOY_TARGET_SH); the operator's typed
-    values only have to agree with that. Refused: an unresolvable workspace; an
-    unset NAMESPACE or INTERNAL_REGISTRY; no current kube context; a KC that is not
-    one command; a HELM_KUBECONTEXT other than the context; any typed value that
-    differs from its effective value; the installed workspace itself; the installed
-    release's namespace; a changed fixed-tag third-party image on the installed
-    registry path; a namespace that is not empty, as the deploy's own KC lists it.
+    values only have to agree with that. Refused: an unresolvable workspace; the
+    installed workspace itself; everything judge_rehearsal_target refuses; any
+    typed value that differs from its effective value; a namespace that is not
+    empty, as the deploy's own KC lists it with the KUBECONFIG the rehearsal
+    workspace's deploy would use.
     """
     run_env = dict(os.environ if env is None else env)
-    try:
-        same = rehearsal_workspace.resolve() == installed_workspace.resolve()
-    except OSError as exc:
-        raise ReleaseStop("rehearsal refused: a workspace path cannot be resolved") from exc
-    if same:
-        raise ReleaseStop("rehearsal refused: the rehearsal workspace is the installed workspace")
-    reh = resolve_deploy_target(rehearsal_workspace, "rehearsal", run_env)
-    live = resolve_deploy_target(installed_workspace, "installed", run_env)
-
-    if not reh.raw_namespace.strip():
-        raise ReleaseStop("rehearsal refused: NAMESPACE is not set for the rehearsal workspace "
-                          "(deploy would fall back to its default); set it in its airgap.env")
-    if reh.namespace.strip().lower() == live.namespace.strip().lower():
-        raise ReleaseStop(
-            "rehearsal refused: the rehearsal deploy would target the installed release's "
-            "namespace; set the rehearsal namespace in the rehearsal workspace's airgap.env "
-            "and do not override NAMESPACE in the environment (Rev 2 D6)"
-        )
-    if not reh.registry.strip():
-        raise ReleaseStop("rehearsal refused: INTERNAL_REGISTRY is not set for the rehearsal workspace")
-    if not reh.context.strip():
-        raise ReleaseStop("rehearsal refused: no current kube context for the rehearsal "
-                          "workspace's KC; log in first")
-    if not reh.kc or any(ch.isspace() for ch in reh.kc):
-        raise ReleaseStop("rehearsal refused: KC must name one command (no arguments)")
-    helm_context = run_env.get("HELM_KUBECONTEXT", "")
-    if helm_context and helm_context != reh.context:
-        raise ReleaseStop("rehearsal refused: HELM_KUBECONTEXT names another context than "
-                          "kubectl's; helm and kubectl would deploy to different clusters")
+    reh, live = _resolve_both(rehearsal_workspace, installed_workspace, run_env)
+    changed_fixed_tags = judge_rehearsal_target(
+        reh, live, candidate_manifest=candidate_manifest, installed_manifest=installed_manifest)
     for flag, typed, effective in (
         ("--rehearsal-namespace", rehearsal_namespace, reh.namespace),
         ("--prod-namespace", prod_namespace, live.namespace),
@@ -1721,18 +1786,6 @@ def cmd_rehearse_check(
         if typed != effective:
             raise ReleaseStop(f"rehearsal refused: {flag} does not match what the deploy "
                               "resolves from its workspace and this environment")
-
-    cand_map, _ = parse_manifest(candidate_manifest.read_text(encoding="utf-8"))
-    inst_map, _ = parse_manifest(installed_manifest.read_text(encoding="utf-8"))
-    changed_fixed_tags = [
-        key for key in FIXED_TAG_IMAGE_KEYS
-        if cand_map.get(key) and cand_map.get(key) != inst_map.get(key)
-    ]
-    if changed_fixed_tags and _registry_identity(reh.registry) == _registry_identity(live.registry):
-        raise ReleaseStop(
-            "rehearsal refused: candidate changes a fixed-tag third-party image while sharing "
-            "INTERNAL_REGISTRY with the installed release — use a separate rehearsal registry path"
-        )
 
     existing: list[str] = []
     if namespace_objects_json is not None:
@@ -1747,8 +1800,8 @@ def cmd_rehearse_check(
             if kind == "secrets":
                 args.extend(["-l", "owner=helm"])
             try:
-                proc = subprocess.run(args, cwd=reh.workspace, env=run_env, capture_output=True,
-                                      text=True, check=False, timeout=30)
+                proc = subprocess.run(args, cwd=reh.workspace, env=reh.client_env(run_env),
+                                      capture_output=True, text=True, check=False, timeout=30)
             except (OSError, subprocess.SubprocessError) as exc:
                 raise ReleaseStop(f"rehearsal refused: cannot run KC to inspect {kind}") from exc
             if proc.returncode != 0:
@@ -1775,6 +1828,66 @@ def cmd_rehearse_check(
         "qdrant_release": reh.qdrant_release,
         "changed_fixed_tags": changed_fixed_tags,
     }
+
+
+def workspace_only_env(env: Mapping[str, str], operator_keys: str) -> dict[str, str]:
+    """`env` without any operator key (#1338).
+
+    Inside a stage no operator key in the environment can be told apart from
+    an `airgap.env` value: common.sh exports what it resolved
+    (export_operator_env), and the Task bridge and pipeline.sh export every key
+    before a stage sources the file, so a file assignment reaches the stage's
+    children as if the operator had typed it. The guard therefore resolves both
+    workspaces from their own `airgap.env` (or deploy default) only, and
+    requires the stage's own values to equal the rehearsal workspace's: an
+    operator override can only cause a refusal, never redirect a rehearsal or
+    hide the installed target."""
+    drop = set(operator_keys.split())
+    return {key: value for key, value in env.items() if key not in drop}
+
+
+def cmd_rehearse_guard(
+    *,
+    repo_root: Path,
+    installed_workspace: Path,
+    kube_context: str,
+    candidate_manifest: Path,
+    namespace: str,
+    registry: str,
+    kc: str,
+    env: Mapping[str, str],
+) -> dict[str, object]:
+    """The deploy path's rehearsal guard (#1338): common.sh runs it in every
+    stage that writes to the cluster or the registry when the verified bundle is
+    `origin: gap` and the operator declared a rehearsal.
+
+    The executing workspace is the rehearsal workspace. Both targets are
+    resolved and judged exactly as `rehearse-check` does, from each workspace's
+    own settings (workspace_only_env); the stage's own resolved NAMESPACE,
+    INTERNAL_REGISTRY and KC must equal the rehearsal workspace's resolution,
+    and the declared kube context must be the one its KC uses. No
+    emptiness check: a repeat deploy or ingest into the same rehearsal is a
+    rehearsal row, and leftovers before the first one are rehearse-check's."""
+    reh, live = _resolve_both(repo_root, installed_workspace, env)
+    if not live.manifest:
+        raise ReleaseStop("rehearsal refused: the installed workspace has no packed MANIFEST")
+    judge_rehearsal_target(reh, live, candidate_manifest=candidate_manifest,
+                           installed_manifest=live.workspace / live.manifest)
+    for name, own, resolved in (
+        ("NAMESPACE", namespace, reh.namespace),
+        ("INTERNAL_REGISTRY", registry, reh.registry),
+        ("KC", kc, reh.kc),
+    ):
+        if own != resolved:
+            raise ReleaseStop(f"rehearsal refused: this stage's {name} differs from the rehearsal "
+                              "workspace's airgap.env (or its default); set it there, not in the environment")
+    if kube_context != reh.context:
+        raise ReleaseStop("rehearsal refused: GAP_REHEARSAL_KUBE_CONTEXT does not name the context "
+                          "the rehearsal workspace's KC uses (check KUBECONFIG, in airgap.env too, "
+                          "and the login)")
+    print(f"==> Gap release rehearsal: namespace={reh.namespace} registry={reh.registry} "
+          f"context={reh.context} (installed release namespace={live.namespace})")
+    return {"namespace": reh.namespace, "registry": reh.registry, "context": reh.context}
 
 
 # Workspace templates the operator renders by hand (F6): `render-role` runs
@@ -1842,6 +1955,7 @@ def _env_path(name: str) -> Path | None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Gap release pipeline Increment 1: classify, pack, assemble, verify, rehearse-check."
+        " rehearse-guard is the deploy path's own rehearsal guard (scripts/airgap/common.sh)."
     )
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1893,6 +2007,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_reh.add_argument("--candidate-manifest", type=Path, required=True)
     p_reh.add_argument("--installed-manifest", type=Path, required=True)
     p_reh.add_argument("--namespace-objects-json", type=Path, default=None)
+
+    p_rg = sub.add_parser("rehearse-guard", help="the deploy path's rehearsal guard (run by scripts/airgap/common.sh)")
+    p_rg.add_argument("--installed-workspace", type=Path, required=True)
+    p_rg.add_argument("--kube-context", required=True)
+    p_rg.add_argument("--candidate-manifest", type=Path, required=True)
+    p_rg.add_argument("--namespace", required=True)
+    p_rg.add_argument("--registry", required=True)
+    p_rg.add_argument("--kc", required=True)
+    p_rg.add_argument("--operator-keys", required=True)
 
     p_rr = sub.add_parser("render-role", help="render an F6 workspace template, refusing allow-all egress")
     p_rr.add_argument("--template", required=True, choices=RENDER_ROLE_TEMPLATES)
@@ -1963,6 +2086,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 candidate_manifest=args.candidate_manifest,
                 installed_manifest=args.installed_manifest,
                 namespace_objects_json=args.namespace_objects_json,
+            )
+            return 0
+        if args.command == "rehearse-guard":
+            cmd_rehearse_guard(
+                repo_root=args.repo_root,
+                installed_workspace=args.installed_workspace,
+                kube_context=args.kube_context,
+                candidate_manifest=args.candidate_manifest,
+                namespace=args.namespace,
+                registry=args.registry,
+                kc=args.kc,
+                env=workspace_only_env(os.environ, args.operator_keys),
             )
             return 0
         if args.command == "render-role":

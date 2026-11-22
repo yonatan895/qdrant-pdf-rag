@@ -22,11 +22,14 @@ from tests.helpers_airgap import (
     b64,
     connected_checkout,
     copy_chart,
+    copy_gap_tools,
     gap_release_anchor,
     gap_release_key,
     install_rendering_helm,
+    installed_workspace,
     make_bin_tree,
     release_anchor,
+    release_identity,
     release_key,
     rendered_env,
     run_sh,
@@ -72,6 +75,13 @@ def test_packaging_pr_gate_checks_vendored_qdrant_chart():
 STUB_BIN = """#!/bin/sh
 printf '%s\\n' "$@" >> "$HELM_LOG"
 case "$*" in
+  'config current-context')
+    # The kube context the deploy's KC would use (#1338): KUBECONFIG's, else the
+    # login's. Records the KUBECONFIG it saw.
+    printf 'KUBECONFIG=%s\\n' "${{KUBECONFIG:-}}" >> "${{FAKE_KUBECONFIG_LOG:-/dev/null}}"
+    if [ -n "${{KUBECONFIG:-}}" ]; then cat "$KUBECONFIG"
+    elif [ -n "${{FAKE_KUBE_CTX:-}}" ]; then printf '%s\\n' "$FAKE_KUBE_CTX"
+    else exit 1; fi ;;
   *'get statefulset/qdrant '*)
     [ "${{STS_FAIL:-}}" != 1 ] || {{ echo 'dial tcp 10.0.0.1:6443: i/o timeout' >&2; exit 1; }}
     [ -z "${{FAKE_QDRANT_URL:-}}" ] || echo statefulset.apps/qdrant ;;
@@ -578,7 +588,7 @@ def _load_all(tree) -> dict[str, str]:
     return {role: _put_registry(tree, role, _image_manifest(role)) for role in ROLE_REFS}
 
 
-def _write_pods(tree, digests: dict[str, str], **override) -> None:
+def _write_pods(tree, digests: dict[str, str], namespace: str = "ns", **override) -> None:
     items = []
     for role, repo in ROLE_REPOS.items():
         kind = "StatefulSet" if role == "qdrant" else "Deployment"
@@ -587,7 +597,7 @@ def _write_pods(tree, digests: dict[str, str], **override) -> None:
         uid = f"{role}-workload"
         spec = {"containers": [{"name": role, "image": f"{repo}:tag"}]}
         items.append({
-            "kind": kind, "metadata": {"name": name, "namespace": "ns", "uid": uid,
+            "kind": kind, "metadata": {"name": name, "namespace": namespace, "uid": uid,
                 "annotations": {"deployment.kubernetes.io/revision": "2"}},
             "spec": {"replicas": replicas, "selector": {"matchLabels": {"app": name}},
                      "template": {"spec": spec}}, "status": {"updateRevision": "qdrant-current"},
@@ -596,7 +606,7 @@ def _write_pods(tree, digests: dict[str, str], **override) -> None:
         if kind == "Deployment":
             owner_kind, uid = "ReplicaSet", f"{role}-rs"
             items.append({"kind": "ReplicaSet", "metadata": {
-                "name": uid, "namespace": "ns", "uid": uid,
+                "name": uid, "namespace": namespace, "uid": uid,
                 "annotations": {"deployment.kubernetes.io/revision": "2"},
                 "ownerReferences": [{"kind": kind, "uid": f"{role}-workload", "controller": True}],
             }})
@@ -605,7 +615,7 @@ def _write_pods(tree, digests: dict[str, str], **override) -> None:
         digest = override.get(role, digests[role])
         for n in range(replicas):
             items.append({
-                "kind": "Pod", "metadata": {"name": f"{role}-{n}", "namespace": "ns",
+                "kind": "Pod", "metadata": {"name": f"{role}-{n}", "namespace": namespace,
                     "labels": {"app": name, "controller-revision-hash": "qdrant-current"},
                     "ownerReferences": [{"kind": owner_kind, "uid": uid, "controller": True}]},
                 "spec": spec,
@@ -1979,7 +1989,9 @@ def test_release_deploy_refuses_a_bundle_its_origin_anchor_did_not_sign(tree, or
     assert needle in refused.stderr
     assert _mutations(tree) == []
     _release(tree, origin=origin or "upstream", key=gap_release_key() if origin == "gap" else release_key())
-    again = _run(tree, *_BOTH_ANCHORS, *_RELEASE_PATH)
+    # A gap bundle deploys only in a declared stage (#1338): here its promotion.
+    promote = (("GAP_PROMOTE_IDENTITY", release_identity(tree[0] / "dist")),) if origin == "gap" else ()
+    again = _run(tree, *_BOTH_ANCHORS, *_RELEASE_PATH, *promote)
     assert again.returncode == 0, again.stderr
     assert "upgrade" in _helm_log(tree)
 
@@ -1989,7 +2001,8 @@ def test_release_deploy_of_a_gap_release_uses_the_gap_anchor_only(tree):
     with both anchors configured, and is refused when the gap anchor is unset
     even though the upstream anchor is (the upstream key cannot stand in)."""
     _release(tree, origin="gap", key=gap_release_key())
-    ok = _run(tree, *_BOTH_ANCHORS, *_RELEASE_PATH)
+    # Promoted (#1338): a gap bundle deploys only in a declared stage.
+    ok = _run(tree, *_BOTH_ANCHORS, *_RELEASE_PATH, ("GAP_PROMOTE_IDENTITY", release_identity(tree[0] / "dist")))
     assert ok.returncode == 0, ok.stderr
     assert "upgrade" in _helm_log(tree)
     tree[1].unlink()
@@ -1998,6 +2011,262 @@ def test_release_deploy_of_a_gap_release_uses_the_gap_anchor_only(tree):
     assert refused.returncode == 1
     assert "no release trust anchor is configured for the bundle's origin (gap)" in refused.stderr
     assert _mutations(tree) == []
+
+
+# --- #1338: the gap release stage, enforced inside deploy.sh ------------------
+#
+# A gap bundle (origin: gap) deploys only in a declared stage: a rehearsal, whose
+# target rehearse-check's own resolution and refusals judge in the deploy process
+# before any cluster call, or a promotion naming the bundle's release identity.
+# The executing tree is the rehearsal workspace; tree/installed is the live one.
+
+REH_NS, LIVE_NS = "mfr-reh", "mfr-prod"
+REH_CTX, LIVE_CTX = "rehearsal-ctx", "live-ctx"
+_FIXED_A, _FIXED_C = "sha256:" + "a" * 64, "sha256:" + "c" * 64
+_REH_ENV = f"NAMESPACE='{REH_NS}'\nINTERNAL_REGISTRY='reg.internal'\n"
+_LIVE_ENV = f"NAMESPACE='{LIVE_NS}'\nINTERNAL_REGISTRY='reg.live'\n"
+_GAP_REFUSED = "FAIL: gap release rehearsal refused (the STOP line above names the reason); nothing was changed"
+
+
+def _gap_release(tree, qdrant_digest=_FIXED_A, namespace=REH_NS):
+    """A verified gap bundle in the executing tree, its images loaded and running."""
+    root = tree[0]
+    copy_gap_tools(root)
+    write_git_identity_stub(root, IMAGE_SHA)
+    lines = [f"sha: {IMAGE_SHA}", f"chart_sha256: {sha256_bytes(_chart(tree).read_bytes())}",
+             f"qdrant_digest: {qdrant_digest}"]
+    lines += [f"{role}_config_digest: {_config_of(role)}" for role in ROLE_REFS]
+    write_signed_manifest(root / "dist", "\n".join(lines) + "\n", origin="gap", key=gap_release_key())
+    _write_pods(tree, _load_all(tree), namespace=namespace)
+
+
+def _rehearsal(tree, rehearsal_env=_REH_ENV, live_env=_LIVE_ENV, qdrant_digest=_FIXED_A):
+    _gap_release(tree, qdrant_digest)
+    (tree[0] / "airgap.env").write_text(rehearsal_env)
+    return installed_workspace(tree[0], live_env, f"qdrant_digest: {_FIXED_A}\n")
+
+
+def _run_gap(tree, *extra_env):
+    """deploy.sh on the release path, the target from the workspace's airgap.env
+    (the fixture's process-env NAMESPACE/INTERNAL_REGISTRY are cleared), declared
+    a rehearsal of the installed workspace on the rehearsal cluster's login."""
+    return _run(tree, *_BOTH_ANCHORS, *_RELEASE_PATH, ("NAMESPACE", ""), ("INTERNAL_REGISTRY", ""),
+                ("GAP_REHEARSAL_INSTALLED_WORKSPACE", str(tree[0] / "installed")),
+                ("GAP_REHEARSAL_KUBE_CONTEXT", REH_CTX), ("FAKE_KUBE_CTX", REH_CTX),
+                ("FAKE_KUBECONFIG_LOG", str(tree[0] / "kubeconfig.log")), *extra_env)
+
+
+def _refused_before_any_cluster_write(tree, result, needle):
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert needle in result.stderr, result.stderr
+    assert "Traceback" not in result.stderr
+    assert _mutations_before_refusal(tree) == []
+    assert "upgrade" not in _helm_log(tree).split()
+    assert not (tree[0] / "dist" / "agent-rendered.yaml").exists()
+
+
+def test_gap_rehearsal_deploys_only_into_its_own_namespace_and_reruns(tree):
+    """The control: the guard passes, every namespaced helm call names the
+    rehearsal namespace, and a repeat deploy into the same rehearsal passes too
+    (repeat deploy is a rehearsal row; emptiness is rehearse-check's)."""
+    _rehearsal(tree)
+    for _ in range(2):
+        tree[1].unlink(missing_ok=True)
+        ok = _run_gap(tree)
+        assert ok.returncode == 0, ok.stderr
+        assert f"==> Gap release rehearsal: namespace={REH_NS} registry=reg.internal context={REH_CTX}" in ok.stdout
+        log = _helm_log(tree).split("\n")
+        assert "upgrade" in log
+        assert LIVE_NS not in log
+        assert {log[i + 1] for i, arg in enumerate(log) if arg in ("-n", "--namespace")} == {REH_NS}
+
+
+@pytest.mark.parametrize("declared", [
+    None,
+    # Stage declarations are process-environment only: an operator file that a
+    # rehearsal workspace may have copied never declares one, assigned or
+    # exported (#1340 review B1; the pipeline path is in test_airgap_pipeline_sh).
+    "",
+    "export ",
+], ids=["undeclared", "declared-in-airgap-env", "exported-from-airgap-env"])
+def test_a_gap_release_without_a_declared_stage_is_refused_before_any_cluster_call(tree, declared):
+    _rehearsal(tree)
+    if declared is not None:
+        identity = release_identity(tree[0] / "dist")
+        (tree[0] / "airgap.env").write_text(
+            _REH_ENV + f"{declared}GAP_PROMOTE_IDENTITY='{identity}'\n"
+            f"{declared}GAP_REHEARSAL_INSTALLED_WORKSPACE='{tree[0] / 'installed'}'\n"
+            f"{declared}GAP_REHEARSAL_KUBE_CONTEXT='{REH_CTX}'\n")
+    result = _run(tree, *_BOTH_ANCHORS, *_RELEASE_PATH, ("NAMESPACE", ""), ("INTERNAL_REGISTRY", ""),
+                  ("FAKE_KUBE_CTX", REH_CTX))
+    _refused_before_any_cluster_write(tree, result, "this checkout is a gap release (origin: gap)")
+    assert result.stderr.count("FAIL:") == 1
+    assert _helm_log(tree) == "", "no client call before the stage is known"
+    assert _run_gap(tree).returncode == 0
+
+
+def test_a_readonly_stage_declaration_in_airgap_env_is_refused_before_any_cluster_call(tree):
+    """A readonly line cannot be ignored (its value would stay in every child's
+    environment), so it is refused with a fixed message naming the key only."""
+    _rehearsal(tree)
+    identity = release_identity(tree[0] / "dist")
+    (tree[0] / "airgap.env").write_text(_REH_ENV + f"readonly GAP_PROMOTE_IDENTITY='{identity}'\n")
+    result = _run(tree, *_BOTH_ANCHORS, *_RELEASE_PATH, ("NAMESPACE", ""), ("INTERNAL_REGISTRY", ""),
+                  ("FAKE_KUBE_CTX", REH_CTX))
+    _refused_before_any_cluster_write(tree, result, "GAP_PROMOTE_IDENTITY is read-only after loading the operator env file")
+    assert identity not in result.stdout + result.stderr
+    assert _helm_log(tree) == ""
+    (tree[0] / "airgap.env").write_text(_REH_ENV)
+    assert _run_gap(tree).returncode == 0
+
+
+@pytest.mark.parametrize("origin", [None, "GAP"], ids=["missing", "malformed"])
+def test_a_dry_run_refuses_the_manifest_origin_the_real_run_refuses(tree, origin):
+    """#1340 review N2: a dry-run with a MANIFEST whose origin: line is missing
+    or malformed took the ordinary preview path (helm upgrade -n <ns> printed);
+    it now stops with the real run's own refusal, before any client call."""
+    _release(tree, origin=origin)
+    real = _run(tree, *_RELEASE_PATH)
+    dry = _run(tree, ("AIRGAP_DRYRUN", "1"))
+    assert real.returncode == 1 and dry.returncode == 1, dry.stdout + dry.stderr
+    fails = [[line for line in r.stderr.splitlines() if line.startswith("FAIL:")] for r in (real, dry)]
+    assert len(fails[0]) == 1 and fails[0] == fails[1], fails
+    assert "release origin" in fails[0][0]
+    assert "helm upgrade" not in dry.stdout and "-n ns" not in dry.stdout
+    assert _mutations(tree) == []
+    if origin is None:
+        # Under the connected opt-out both read a missing origin as upstream.
+        opt_out = (("AIRGAP_UNVERIFIED_CHECKOUT", "1"), ("CI_REHEARSAL", "1"))
+        dry_opt = _run(tree, ("AIRGAP_DRYRUN", "1"), *opt_out)
+        assert dry_opt.returncode == 0, dry_opt.stderr
+        assert "packed MANIFEST declares no release origin — read as upstream" in dry_opt.stderr
+    # The same bundle with its origin line restored previews as before.
+    _release(tree)
+    ok = _run(tree, ("AIRGAP_DRYRUN", "1"))
+    assert ok.returncode == 0, ok.stderr
+
+
+def _live_kubeconfig(tree):
+    path = tree[0] / "live.kubeconfig"
+    path.write_text(LIVE_CTX + "\n")
+    return path
+
+
+# Each row: (rehearsal airgap.env, installed airgap.env, extra process env, the
+# STOP reason). The #1336 reproductions, through the real deploy entry point.
+_LIVE_TARGETS = {
+    "live-namespace-in-airgap-env": (f"NAMESPACE='{LIVE_NS}'\nINTERNAL_REGISTRY='reg.internal'\n", _LIVE_ENV, (),
+                                     "the rehearsal deploy would target the installed release's namespace"),
+    # Inside a stage an exported value cannot be told from an airgap.env one, so
+    # the stage's own target must equal its workspace's airgap.env resolution.
+    "live-namespace-in-process-env": (_REH_ENV, _LIVE_ENV, (("NAMESPACE", LIVE_NS),),
+                                      "this stage's NAMESPACE differs from the rehearsal workspace's airgap.env"),
+    "registry-in-process-env": (_REH_ENV, _LIVE_ENV, (("INTERNAL_REGISTRY", "reg.live"),),
+                                "this stage's INTERNAL_REGISTRY differs from the rehearsal workspace's airgap.env"),
+    "installed-namespace-unset": (_REH_ENV, "INTERNAL_REGISTRY='reg.live'\n", (),
+                                  "NAMESPACE is not set for the installed workspace"),
+    "unset-namespace": ("INTERNAL_REGISTRY='reg.internal'\n", _LIVE_ENV, (),
+                        "NAMESPACE is not set for the rehearsal workspace"),
+    "both-unset-default": ("INTERNAL_REGISTRY='reg.internal'\n", "INTERNAL_REGISTRY='reg.live'\n", (),
+                           "NAMESPACE is not set for the rehearsal workspace"),
+    "kc-with-arguments": (_REH_ENV + f"KC='kubectl --context={LIVE_CTX}'\n", _LIVE_ENV, (),
+                          "KC must name one command"),
+    "helm-kubecontext-from-airgap-env": (_REH_ENV + f"export HELM_KUBECONTEXT='{LIVE_CTX}'\n", _LIVE_ENV, (),
+                                         "HELM_KUBECONTEXT names another context"),
+    "helm-kubecontext-in-process-env": (_REH_ENV, _LIVE_ENV, (("HELM_KUBECONTEXT", LIVE_CTX),),
+                                        "HELM_KUBECONTEXT names another context"),
+    "kubeconfig-from-airgap-env": (_REH_ENV + "export KUBECONFIG='{kubeconfig}'\n", _LIVE_ENV, (),
+                                   "GAP_REHEARSAL_KUBE_CONTEXT does not name the context"),
+    "installed-is-this-workspace": (_REH_ENV, _LIVE_ENV, (("GAP_REHEARSAL_INSTALLED_WORKSPACE", "{root}"),),
+                                    "the rehearsal workspace is the installed workspace"),
+    "installed-is-not-a-workspace": (_REH_ENV, _LIVE_ENV, (("GAP_REHEARSAL_INSTALLED_WORKSPACE", "{root}/dist"),),
+                                     "the installed workspace is not a release workspace"),
+    "no-login": (_REH_ENV, _LIVE_ENV, (("FAKE_KUBE_CTX", ""),), "no current kube context"),
+}
+
+
+@pytest.mark.parametrize("case", list(_LIVE_TARGETS))
+def test_gap_rehearsal_refuses_a_live_or_unset_target_before_any_cluster_write(tree, case):
+    rehearsal_env, live_env, extra, needle = _LIVE_TARGETS[case]
+    kubeconfig = _live_kubeconfig(tree)
+    fill = {"kubeconfig": str(kubeconfig), "root": str(tree[0])}
+    _rehearsal(tree, rehearsal_env.format(**fill), live_env)
+    refused = _run_gap(tree, *((k, v.format(**fill)) for k, v in extra))
+    _refused_before_any_cluster_write(tree, refused, needle)
+    assert refused.stderr.rstrip().endswith(_GAP_REFUSED)
+    assert refused.stderr.count("STOP:") == 1 and refused.stderr.count("FAIL:") == 1
+    if case == "kubeconfig-from-airgap-env":
+        # The guard asked the context with the KUBECONFIG airgap.env exports,
+        # the one the deploy's kubectl and helm would use.
+        assert f"KUBECONFIG={kubeconfig}" in (tree[0] / "kubeconfig.log").read_text().splitlines()
+    # The next ordinary rehearsal run, with the target fixed, deploys.
+    (tree[0] / "airgap.env").write_text(_REH_ENV)
+    (tree[0] / "installed" / "airgap.env").write_text(_LIVE_ENV)
+    assert _run_gap(tree).returncode == 0
+
+
+@pytest.mark.parametrize("rehearsal_registry", ["reg.live", "REG.live", "reg.live:443", "reg.live/"])
+def test_gap_rehearsal_refuses_a_changed_fixed_tag_on_the_live_registry(tree, rehearsal_registry):
+    """load pushes third-party images under fixed tags: a changed one on the
+    installed release's registry path changes what a restarted live pod pulls."""
+    _rehearsal(tree, f"NAMESPACE='{REH_NS}'\nINTERNAL_REGISTRY='{rehearsal_registry}'\n", qdrant_digest=_FIXED_C)
+    _refused_before_any_cluster_write(tree, _run_gap(tree), "fixed-tag third-party image")
+    assert "skopeo" not in _helm_log(tree), "refused before any registry read"
+
+
+def test_gap_promotion_deploys_only_the_bundle_the_identity_names(tree):
+    _gap_release(tree, namespace="ns")
+    identity = release_identity(tree[0] / "dist")
+    base = (*_BOTH_ANCHORS, *_RELEASE_PATH)
+    wrong = _run(tree, *base, ("GAP_PROMOTE_IDENTITY", "0" * 64))
+    _refused_before_any_cluster_write(tree, wrong, "GAP_PROMOTE_IDENTITY is not this bundle's release identity")
+    both = _run(tree, *base, ("GAP_PROMOTE_IDENTITY", identity),
+                ("GAP_REHEARSAL_INSTALLED_WORKSPACE", str(tree[0])), ("GAP_REHEARSAL_KUBE_CONTEXT", REH_CTX))
+    _refused_before_any_cluster_write(tree, both, "declares both a rehearsal and a promotion")
+    ok = _run(tree, *base, ("GAP_PROMOTE_IDENTITY", identity))
+    assert ok.returncode == 0, ok.stderr
+    assert f"==> Gap release promotion: release identity {identity}" in ok.stdout
+    assert "upgrade" in _helm_log(tree).split()
+    assert "current-context" not in _helm_log(tree), "a promotion runs no rehearsal resolution"
+
+
+def test_gap_rehearsal_dry_run_refuses_the_live_namespace(tree):
+    """The #1336 re-review's end-to-end run: a dry-run of a rehearsal workspace
+    whose airgap.env names the live namespace printed `helm upgrade -n <live>`."""
+    _rehearsal(tree, f"NAMESPACE='{LIVE_NS}'\nINTERNAL_REGISTRY='reg.internal'\n")
+    dry = (("AIRGAP_DRYRUN", "1"),)
+    refused = _run_gap(tree, *dry)
+    assert refused.returncode == 1
+    assert "the rehearsal deploy would target the installed release's namespace" in refused.stderr
+    assert f"-n {LIVE_NS}" not in refused.stdout and "helm upgrade" not in refused.stdout
+    undeclared = _run(tree, *dry, ("NAMESPACE", ""), ("INTERNAL_REGISTRY", ""))
+    assert undeclared.returncode == 1
+    assert "this checkout is a gap release (origin: gap)" in undeclared.stderr
+    (tree[0] / "airgap.env").write_text(_REH_ENV)
+    ok = _run_gap(tree, *dry)
+    assert ok.returncode == 0, ok.stderr
+    assert f"-n {REH_NS}" in ok.stdout and f"-n {LIVE_NS}" not in ok.stdout
+
+
+@pytest.mark.parametrize("path", ["upstream-release", "dry-run-no-manifest"])
+def test_ordinary_deploys_never_consult_the_gap_stage(tree, path):
+    """Upstream and unpacked deploys are unchanged: stage declarations are ignored,
+    no kube context is read and no release tool runs, whatever is exported."""
+    marker = tree[0] / "release-tool-ran"
+    (tree[0] / "scripts" / "gap").mkdir(parents=True)
+    (tree[0] / "scripts" / "gap" / "release.py").write_text(
+        f"open({str(marker)!r}, 'w').close()\nraise SystemExit(1)\n")
+    stage = (("GAP_PROMOTE_IDENTITY", "0" * 64), ("GAP_REHEARSAL_INSTALLED_WORKSPACE", str(tree[0])),
+             ("GAP_REHEARSAL_KUBE_CONTEXT", LIVE_CTX), ("FAKE_KUBE_CTX", REH_CTX))
+    if path == "upstream-release":
+        _release(tree)
+        result = _run(tree, *_RELEASE_PATH, *stage)
+    else:
+        result = _run(tree, ("AIRGAP_DRYRUN", "1"), *stage)
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
+    assert "current-context" not in _helm_log(tree)
+    assert "Gap release" not in result.stdout + result.stderr
 
 
 def test_manifest_without_config_digests_refuses_before_any_mutation(tree):

@@ -122,6 +122,9 @@ packed_sha=$(awk '/^sha: /{print $2}' "$ARTDIR/MANIFEST.txt")
 # The executing checkout itself must resolve to the packed SHA (issue #414):
 # loading B images with A scripts checked out must fail before any push.
 MANIFEST="$ARTDIR/MANIFEST.txt" check_checkout_sha
+# A gap bundle loads only as a declared rehearsal or promotion (#1338): a
+# rehearsal never pushes a changed fixed tag onto the installed registry path.
+check_gap_release_stage "$ARTDIR/MANIFEST.txt"
 
 # Task is a signed host artifact, never an image to push. Require its members
 # even if a malformed, signed checksum list omitted them.
