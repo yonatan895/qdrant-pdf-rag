@@ -23,9 +23,12 @@ import httpx2
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
+from hypothesis import assume, given
+from hypothesis import strategies as st
 from jwt.algorithms import RSAAlgorithm
 
 from mainframe_rag.gateways import common, gitlab
+from tests import helpers_redaction_props as props
 
 TEAM_TOKEN = "glpat-TEAMTOKEN0123456789abcdef"
 BEARER = "b" * 40
@@ -1136,6 +1139,134 @@ def test_every_paged_list_names_the_next_start(tmp_path: Path, tool: str, args: 
     fake.routes[path] = last
     assert _hint(_run(gateway, tool, project="team/app", **args), tool) is None
 
+
+
+# --- #1347: no secret survives a truncation cut (shared property helper) ------------------
+# Whole-text screening (ANSI strip, then clean_text) is the oracle
+# (tests/helpers_redaction_props.py); each example places the window start,
+# the read ceiling or the clip at a drawn byte of a secret.
+
+_PROP_CEILING = 6000
+
+
+def _whole_cleaned(log: bytes) -> str:
+    return common.clean_text(gitlab._ANSI_RE.sub("", log.decode("utf-8", errors="replace")))
+
+
+@st.composite
+def _job_log_case(draw: st.DrawFn, secrets) -> tuple[bytes, props.Secret, int, int, bool]:
+    """(log, secret, tail_bytes, chunk, stopped): a complete log whose kept
+    window starts at a drawn byte of the secret, or one longer than the
+    read ceiling whose window start or stop lands on it."""
+    eol = draw(st.sampled_from(props.LINE_ENDS))
+    secret = draw(secrets(eol))
+    tail = draw(st.sampled_from([1024, 1500, 2048]))
+    chunk = draw(st.sampled_from([7, 64, 512, 4096]))
+    shape = {"width": draw(st.sampled_from([12, 30, 81, 3000])), "multibyte": draw(st.booleans())}
+    off = draw(props.cut_offsets(secret))
+    mode = draw(st.sampled_from(["window", "ceiling_window", "ceiling_stop"]))
+    if mode == "window":  # complete read: the kept window starts tail + 1 bytes from the end
+        before = props.filler(draw(st.integers(3, 4000)), eol=eol, **shape)
+        full = before + secret.raw + eol + props.filler(tail + 3000, eol=eol, **shape)
+        return full[: len(before) + off + tail + 1], secret, tail, chunk, False
+    start = _PROP_CEILING - (tail + 1 if mode == "ceiling_window" else 0) - off
+    before = props.filler(start, eol=eol, **shape)
+    log = before + secret.raw + eol + props.filler(_PROP_CEILING, eol=eol, **shape)
+    return log, secret, tail, chunk, True
+
+
+def _check_job_log_property(tmp_path: Path, secrets) -> None:
+    fake = FakeGitLab()
+    for directory in ("stopped", "complete"):
+        (tmp_path / directory).mkdir()
+    gateways = {
+        stopped: _bearer_gateway(
+            tmp_path / ("stopped" if stopped else "complete"),
+            fake,
+            max_job_log_read_bytes=_PROP_CEILING if stopped else 1_000_000,
+        )
+        for stopped in (False, True)
+    }
+
+    @props.property_settings(max_examples=120)
+    @given(_job_log_case(secrets))
+    def check(case: tuple[bytes, props.Secret, int, int, bool]) -> None:
+        log, secret, tail, chunk, stopped = case
+        fake.routes["/api/v4/projects/7/jobs/50/trace"] = _stream(log, chunk)
+        result = _run(gateways[stopped], "read_job_log", project="team/app", job_id=50, tail_bytes=tail)
+        text = _body(result, "read_job_log")["text"]
+        assert isinstance(text, str) and ("[gateway:" in text)  # the cut happened and is marked
+        assume(props.assert_no_secret_survives(text, _whole_cleaned(log), secret))
+
+    check()
+
+
+def test_job_log_window_or_stop_never_leaks_a_private_key(tmp_path: Path):
+    """#1333 B1 as a property: keys with any label, colour escapes around the
+    markers, no END line, the window start or the read ceiling anywhere in
+    or around the key, any chunking."""
+    _check_job_log_property(tmp_path, lambda eol: props.pem_secrets(eol, ansi=True))
+
+
+def test_job_log_window_or_stop_never_leaks_a_one_line_secret(tmp_path: Path):
+    """Key/value, auth-header and URL-credential secrets on one line. Families
+    whose value sits on a later line than its key are left out: clean_text's
+    key/value separator spans a line end, and the window can start on the
+    value line (finding recorded on #1347; not fixed here)."""
+    _check_job_log_property(tmp_path, lambda eol: props.kv_secrets(props.SAME_LINE, eol, props.SHORT_LEADS))
+
+
+# --- #1347: field clip and result cut ----------------------------------------------------
+
+
+def test_long_field_clip_never_leaks_a_secret(tmp_path: Path):
+    """The 32768-character field clip lands on a drawn character of a secret
+    in an issue description."""
+    fake = FakeGitLab()
+    gateway = _long_gateway(tmp_path, fake)
+    limit = gateway.limits.max_field_chars
+
+    @props.property_settings(max_examples=40)
+    @given(st.data())
+    def check(data: st.DataObject) -> None:
+        eol = data.draw(st.sampled_from(props.LINE_ENDS))
+        # A key with no END redacts the rest of the field, which then fits: no clip.
+        secret = data.draw(st.one_of(props.pem_secrets(eol, open_end=False), props.kv_secrets(list(props.FAMILIES), eol)))
+        off = data.draw(props.cut_offsets(secret))
+        raw = props.filler(limit - off, eol=eol) + secret.raw + eol + props.filler(4000, eol=eol)
+        description = raw.decode("utf-8", errors="replace")
+        fake.routes["/api/v4/projects/7/issues/5"] = httpx2.Response(
+            200, json={"iid": 5, "title": "T", "description": description, "user_notes_count": 0})
+        body = _body(_run(gateway, "get_issue", project="team/app", iid=5), "get_issue")
+        assert body["truncated"] is True
+        kept = body["rows"][0]["description"]  # type: ignore[index]
+        assume(props.assert_no_secret_survives(kept, common.clean_text(description), secret))
+
+    check()
+
+
+def test_result_size_cut_never_leaks_a_secret(tmp_path: Path):
+    """A file read larger than max_result_bytes is cut near a drawn byte of a
+    secret (escaping moves the exact cut by a few bytes)."""
+    fake = FakeGitLab()
+    gateway = _bearer_gateway(tmp_path, fake, max_file_bytes=16384)
+    route = "/api/v4/projects/7/repository/files/src%2Fmain.py/raw"
+
+    @props.property_settings(max_examples=60)
+    @given(st.data())
+    def check(data: st.DataObject) -> None:
+        eol = data.draw(st.sampled_from(props.LINE_ENDS))
+        secret = data.draw(
+            st.one_of(props.pem_secrets(eol, max_lines=4, open_end=False), props.kv_secrets(props.SAME_LINE, eol)))
+        off = data.draw(props.cut_offsets(secret))
+        before = props.filler(max(3, data.draw(st.integers(1800, 2040)) - off), eol=eol)
+        raw = before + secret.raw + eol + props.filler(3000, eol=eol)
+        fake.routes[route] = httpx2.Response(200, content=raw)
+        body = _body(_run(gateway, "read_file", project="team/app", file_path="src/main.py"), "read_file")
+        assert body["truncated"] is True
+        assume(props.assert_no_secret_survives(body["text"], _whole_cleaned(raw), secret))  # type: ignore[arg-type]
+
+    check()
 
 
 # --- long text fields (maintainer, 2026-11-21, item f: 32768 characters) ------------------
