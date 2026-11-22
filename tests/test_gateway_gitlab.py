@@ -1220,6 +1220,33 @@ def test_job_log_window_or_stop_never_leaks_a_key_value_secret(tmp_path: Path):
     _check_job_log_property(tmp_path, lambda eol: props.kv_secrets(families, eol, props.SHORT_LEADS))
 
 
+@pytest.mark.parametrize(
+    "key",
+    [b"Authorization:\n  ", b"db_password\n= ", b"api_key:\n\n  ", b"HDR Bearer\n"],
+)
+def test_job_log_window_on_the_value_line_of_an_earlier_key(tmp_path: Path, key: bytes) -> None:
+    """The window starts at the value line, or a few bytes either side, of a
+    key whose name or separator is on an earlier line: the header name, the
+    name with its separator on the next line, a blank line in between, an
+    auth scheme. Cleaning the whole log redacts the value; so must the tail."""
+    fake = FakeGitLab()
+    gw = _bearer_gateway(tmp_path, fake, max_job_log_read_bytes=1_000_000)
+    value = b"QXJZQXJZqxjzQXJZ"
+    pair = key + value + b"\n"
+    for off in range(-4, 4):
+        # The window (tail_bytes + 1 = 1025 bytes) starts \`off\` bytes after the value's first byte.
+        size = 1025 + off - (len(pair) - pair.index(value))
+        suffix = b"".join(b"log %06d %s\n" % (n, b"." * 18) for n in range(size // 30 + 1))[: size - 5]
+        suffix = suffix[: suffix.rfind(b"\n") + 1]
+        suffix += b"z" * (size - 5 - len(suffix)) + b"LAST\n"
+        log = b"".join(_lines(100, 30)) + pair + suffix
+        assert value.decode() not in common.clean_text(log.decode())
+        fake.routes["/api/v4/projects/7/jobs/50/trace"] = _stream(log, 64)
+        text = _body(_run(gw, "read_job_log", project="team/app", job_id=50, tail_bytes=1024), "read_job_log")["text"]
+        assert "LAST" in text, off
+        assert "QXJZqxjz" not in text, off
+
+
 # --- #1347: field clip and result cut ----------------------------------------------------
 
 
