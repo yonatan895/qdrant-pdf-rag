@@ -941,6 +941,21 @@ cannot schedule on one node — proven).
   hostname spread. Inter-node gossip is plaintext on the CNI
   (`enable_tls: false`) — mounting no cert avoids startup crashloops.
   No public Route, ever.
+- Qdrant RAM estimate. The per-component formulas are kept here because the vendored
+  `qdrant-sizing` skill dropped them at pin `e80a4d52` (#1353). Let `n` be points × replication
+  factor on a node.
+  - Resident in RAM:
+    - the quantized dense copy, `n × DENSE_DIM × 1 B` for INT8;
+    - HNSW links, about `n × m × 2 × 4 B × 1.2` (`m` = 16);
+    - the ID tracker, about `n × 52 B`;
+    - payload indexes, roughly twice the bytes of the indexed fields.
+  - On disk, read through the page cache:
+    - the float32 originals, `n × DENSE_DIM × 4 B`, which rescoring reads;
+    - sparse vectors plus their inverted index, about 1.5× the stored non-zeros;
+    - payload, about 1.5× its raw size.
+  - Add about 50% for point metadata and the optimizer's temporary segments, and leave page cache
+    for the rescore reads. These are estimates; the real figures come from
+    `GET /collections/{name}/memory`.
 - The agent stays 2 tiny replicas (production patch changes only replica
   count, env, and pull secrets — FastAPI needs no GPU). The ingest Job is
   one-shot with a 24h deadline: caller corpus PVC read-only plus an

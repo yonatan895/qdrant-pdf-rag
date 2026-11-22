@@ -1,8 +1,8 @@
 # Vendored Qdrant skills — pin record
 
 - **Source:** https://github.com/qdrant/skills (Apache-2.0)
-- **Pinned upstream SHA:** `bcca2c2da1c00992038e83038e01791d468f943d`
-  (upstream commit 2026-08-27; vendored 2026-08-28 — the last release tag
+- **Pinned upstream SHA:** `e80a4d52201fb68ba3163f608f41e228d65fdff3`
+  (upstream commit 2026-11-20; vendored 2026-11-22 — the last release tag
   `v0.1.0` (2026-03-30) predates significant skill updates, so the SHA is the
   pin; keep SHA-only pins until upstream tags again)
 - **License:** Apache-2.0, kept verbatim in `LICENSE.qdrant-skills`;
