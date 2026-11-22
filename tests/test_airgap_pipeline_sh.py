@@ -753,24 +753,34 @@ def test_task_pipeline_operator_rehearsal_wins_over_a_promotion_exported_from_ai
 
 
 def test_task_pipeline_runs_a_recorded_promotion_without_the_export(pipe_tree):
-    """#1344: a promotion declared once through `run-task.sh airgap:pipeline`
-    is recorded by its first writing stage (load). The next pipeline from that
-    workspace, with nothing declared, runs its writing stages as that promotion
-    (the bundle reaches the registry), and the same run with the workspace's
-    NAMESPACE changed is refused before any write."""
-    from tests.helpers_airgap import release_identity
+    """#1344 through `run-task.sh airgap:pipeline`. B2: a declared promotion
+    pipeline whose deploy fails (here after load pushed the images) records
+    nothing, so the next undeclared pipeline is refused at stage 2 before any
+    push. With the promotion recorded (as a promotion deploy that rolls out
+    records it), the next undeclared pipeline runs its writing stages as that
+    promotion, and the same run with the workspace's NAMESPACE changed is
+    refused before any write."""
+    from tests.helpers_airgap import record_gap_promotion, release_identity
 
     task, log, operator = _gap_pipeline_tree(pipe_tree, _LIVE_WORKSPACE_ENV, dryrun=False)
     identity = release_identity(pipe_tree / "dist")
-    first = _run_task(pipe_tree, task, "airgap:pipeline", extra_env={**operator, "GAP_PROMOTE_IDENTITY": identity})
-    assert "==> Gap release promotion recorded in dist/gap-promotion.txt" in first.stdout, first.stdout + first.stderr
-    assert (pipe_tree / "dist" / "gap-promotion.txt").is_file()
 
     def copies():
         calls = log.read_text().splitlines() if log.exists() else []
         return [c for c in calls if c.split()[:1] == ["copy"] or c.split()[:2] == ["skopeo", "copy"]]
 
+    first = _run_task(pipe_tree, task, "airgap:pipeline", extra_env={**operator, "GAP_PROMOTE_IDENTITY": identity})
+    assert first.returncode != 0, "the fixture's deploy stage fails after the guard"
+    assert copies(), first.stdout + first.stderr
+    assert "recorded" not in first.stdout
+    assert not (pipe_tree / "dist" / "gap-promotion.txt").exists()
     log.unlink(missing_ok=True)
+    refused = _run_task(pipe_tree, task, "airgap:pipeline", extra_env=operator)
+    assert refused.returncode != 0
+    assert "this checkout is a gap release (origin: gap)" in refused.stderr
+    assert copies() == []
+
+    record_gap_promotion(pipe_tree, identity, "mfr-prod", "reg.live")
     second = _run_task(pipe_tree, task, "airgap:pipeline", extra_env=operator)
     assert "this checkout is a gap release (origin: gap)" not in second.stderr, second.stdout + second.stderr
     recorded = (f"==> Gap release promotion: release identity {identity} (recorded at promotion in "

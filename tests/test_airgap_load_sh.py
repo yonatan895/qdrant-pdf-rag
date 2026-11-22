@@ -26,6 +26,7 @@ from tests.helpers_airgap import (
     installed_workspace,
     make_bin_tree,
     plant_stdlib_shadows,
+    record_gap_promotion,
     release_anchor,
     release_identity,
     release_key,
@@ -611,9 +612,18 @@ def test_load_accepts_a_gap_release_only_with_the_gap_anchor(load_tree):
     ok = _run_load(load_tree, *_BOTH, ("GAP_PROMOTE_IDENTITY", release_identity(dist)))
     assert ok.returncode == 0, ok.stderr
     assert _copies(skopeo_log)
-    # #1344: the promotion is recorded, so the next load of it needs no export.
-    assert "==> Gap release promotion recorded in dist/gap-promotion.txt" in ok.stdout
+    # #1344 B2: a declared load only stages images; it records no promotion
+    # (only a promotion deploy that rolls out does), so the next undeclared
+    # load is refused before any push.
+    assert not (tmp_path / "dist" / "gap-promotion.txt").exists()
+    assert "recorded" not in ok.stdout
     skopeo_log.unlink()
+    refused = _run_load(load_tree, *_BOTH)
+    assert refused.returncode == 1
+    assert "this checkout is a gap release (origin: gap)" in refused.stderr
+    assert not _copies(skopeo_log)
+    # Once a promotion deploy has recorded it, the next load needs no export.
+    record_gap_promotion(tmp_path, release_identity(dist), "mainframe-rag", "reg.internal:5000")
     again = _run_load(load_tree, *_BOTH)
     assert again.returncode == 0, again.stderr
     assert "(recorded at promotion in dist/gap-promotion.txt)" in again.stdout

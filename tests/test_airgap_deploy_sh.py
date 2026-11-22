@@ -2438,6 +2438,44 @@ def test_a_recorded_promotion_needs_the_bundle_signature_at_use(tree):
     assert "(recorded at promotion in dist/gap-promotion.txt)" in ok.stdout
 
 
+def test_a_declared_promotion_whose_deploy_fails_records_nothing(tree):
+    """#1344 B2 (coordinator decision): only a promotion deploy that completes its
+    rollout records the promotion. A declared deploy that fails after its helm
+    upgrade (the running pods do not report the verified digests) leaves no
+    marker, so the next undeclared deploy is refused; and it never refreshes
+    the marker an earlier, successful promotion left for another bundle."""
+    _gap_release(tree, namespace="ns")
+    digests = _load_all(tree)
+    _write_pods(tree, {role: "sha256:" + "9" * 64 for role in digests}, namespace="ns")
+    failed = _promote(tree)
+    assert failed.returncode != 0, failed.stdout
+    assert "upgrade" in _helm_log(tree).split(), "the failure came after the cluster write"
+    assert not (tree[0] / _MARKER).exists()
+    assert "recorded" not in failed.stdout
+    tree[1].unlink()
+    (tree[0] / "dist" / "agent-rendered.yaml").unlink(missing_ok=True)
+    refused = _undeclared(tree)
+    _refused_before_any_cluster_write(tree, refused, "this checkout is a gap release (origin: gap)")
+    # An earlier successful promotion of another bundle keeps its own marker.
+    _promoted(tree)
+    old = (tree[0] / _MARKER).read_bytes()
+    _gap_release(tree, namespace="ns", gap_tag="gap-release-2")
+    _write_pods(tree, {role: "sha256:" + "9" * 64 for role in digests}, namespace="ns")
+    failed_b = _promote(tree)
+    assert failed_b.returncode != 0
+    assert (tree[0] / _MARKER).read_bytes() == old, "a failed promotion never refreshes the marker"
+    tree[1].unlink()
+    (tree[0] / "dist" / "agent-rendered.yaml").unlink(missing_ok=True)
+    _refused_before_any_cluster_write(tree, _undeclared(tree), _marker_refused("release_identity"))
+    # The next ordinary operation: the promotion, rolled out, is recorded.
+    _write_pods(tree, _load_all(tree), namespace="ns")
+    tree[1].unlink(missing_ok=True)
+    ok = _promote(tree)
+    assert ok.returncode == 0, ok.stderr
+    assert "==> Gap release promotion recorded in dist/gap-promotion.txt" in ok.stdout
+    assert f"release_identity: {release_identity(tree[0] / 'dist')}" in (tree[0] / _MARKER).read_text()
+
+
 def test_a_dry_run_promotion_records_nothing_and_a_dry_run_reads_a_recorded_one(tree):
     _gap_release(tree, namespace="ns")
     dry = (("AIRGAP_DRYRUN", "1"),)
@@ -2453,6 +2491,12 @@ def test_a_dry_run_promotion_records_nothing_and_a_dry_run_reads_a_recorded_one(
     assert (f"==> Gap release promotion: release identity {identity} (recorded at promotion in "
             "dist/gap-promotion.txt)") in ok.stdout
     assert "-n ns" in ok.stdout
+    # A declared dry-run of another bundle never refreshes the recorded marker.
+    old = (tree[0] / _MARKER).read_bytes()
+    _gap_release(tree, namespace="ns", gap_tag="gap-release-2")
+    preview_b = _promote(tree, *dry)
+    assert preview_b.returncode == 0, preview_b.stderr
+    assert (tree[0] / _MARKER).read_bytes() == old
 
 
 def test_gap_rehearsal_dry_run_refuses_the_live_namespace(tree):
