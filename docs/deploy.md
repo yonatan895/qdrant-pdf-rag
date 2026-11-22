@@ -773,9 +773,19 @@ checksums **after**.
   `GAP_REHEARSAL_KUBE_CONTEXT`), whose target `release.py rehearse-guard`
   resolves and judges with `rehearse-check`'s refusals before any registry
   or cluster write, or a promoted release (`GAP_PROMOTE_IDENTITY`, the sha256
-  of the bundle's signed `SHA256SUMS`). The promoted declaration is needed
-  for every later stage run from that live workspace too. Upstream and
-  unpacked runs are unchanged
+  of the bundle's signed `SHA256SUMS`). A declared promotion outside dry-run
+  is recorded in the workspace's untracked `dist/gap-promotion.txt` (#1344).
+  With nothing declared, a later stage from that workspace runs as that
+  promotion only while the file is byte for byte what the promotion would
+  write there now: the identity of the bundle whose signature the guard
+  above has just verified, the workspace's physical path and directory
+  inode, and the stage's `NAMESPACE` and `INTERNAL_REGISTRY`. A copied or
+  moved workspace, an edited file, another bundle or another target is
+  refused with the first field that differs, and a declaration always wins
+  over the file. The file is not an attestation: it grants nothing that
+  exporting `GAP_PROMOTE_IDENTITY` does not. `airgap:config check` reports
+  any of the three variables set in `airgap.env` as honoured from the
+  process environment only. Upstream and unpacked runs are unchanged
   ([gap release runbook](runbooks/gap-release.md) steps 7 to 9).
 - `bootstrap.sh` cannot source `common.sh` (no clone exists yet), so it
   carries an inline twin of the trust check (bundle signature, then the

@@ -790,7 +790,8 @@ check_checkout_sha() {
 # one check_manifest_chain authenticated; in dry-run (nothing authenticated,
 # nothing mutated) a present MANIFEST's own origin line is read with the same
 # rules (a missing or malformed one is refused, as in the real run), which can
-# only add a refusal. A gap bundle runs only in a stage the process environment declares:
+# only add a refusal. A gap bundle runs only in a stage the process environment
+# declares, or as a promotion recorded in this workspace (marker below):
 #   - GAP_PROMOTE_IDENTITY: promotion (runbook step 8) of exactly the bundle
 #     whose signed SHA256SUMS has this sha256, the record's release identity;
 #   - GAP_REHEARSAL_INSTALLED_WORKSPACE and GAP_REHEARSAL_KUBE_CONTEXT: a
@@ -801,6 +802,74 @@ check_checkout_sha() {
 #     workspace's resolution (no environment override).
 # Neither, both, or an identity naming another bundle is refused. Fixed
 # messages; the STOP line before a rehearsal refusal names the reason.
+#
+# The promotion marker (#1344): a promotion declared outside dry-run is
+# recorded in _GAP_PROMOTION_MARKER, so the later stages and a rollback run from
+# that workspace need no export. With nothing declared, a present marker counts
+# as that promotion only when its bytes equal what the promotion would write
+# here and now (_gap_promotion_text): this bundle's release identity (its
+# SHA256SUMS, whose signature check_manifest_chain verified against the
+# configured anchor before this function runs; in dry-run nothing is verified
+# and nothing is written), this workspace's physical path and directory inode
+# (a copy, or a copy put back at the same path, has another inode), and this
+# stage's NAMESPACE and INTERNAL_REGISTRY. Anything else is refused, naming the
+# first field that differs, never a value. A declaration always wins: the
+# marker is not read when one is made, so it never turns a declared rehearsal
+# into a promotion. It is not an attestation: whoever can write the workspace
+# can write the right bytes, which grants nothing GAP_PROMOTE_IDENTITY does not.
+_GAP_PROMOTION_MARKER=dist/gap-promotion.txt  # relative to $REPO_ROOT
+
+# $1 = release identity. Prints the marker this promotion writes here, without
+# its final newline (the caller adds exactly one).
+_gap_promotion_text() {
+    _gpt_ws=$(cd -P -- "$REPO_ROOT" && pwd -P) || return 1
+    _gpt_ino=$(ls -di -- "$_gpt_ws" | awk 'NR == 1 { print $1 }') || return 1
+    case "$_gpt_ino" in ""|*[!0-9]*) return 1 ;; esac
+    printf 'gap_promotion: 1\nrelease_identity: %s\nworkspace: %s\nworkspace_inode: %s\nnamespace: %s\ninternal_registry: %s' \
+        "$1" "$_gpt_ws" "$_gpt_ino" "${NAMESPACE:-}" "${INTERNAL_REGISTRY:-}"
+    unset _gpt_ws _gpt_ino
+}
+
+# $1 = release identity of a declared, verified promotion. Atomic and
+# idempotent (temporary file, then rename over the marker in the same
+# directory, which also replaces a symlink rather than writing through it).
+_record_gap_promotion() {
+    _rgp_text=$(_gap_promotion_text "$1") ||
+        die "cannot record the gap promotion: this workspace's physical path or directory inode cannot be read; nothing was changed"
+    _rgp_path="$REPO_ROOT/$_GAP_PROMOTION_MARKER"
+    _rgp_tmp="$_rgp_path.tmp.$$"
+    { mkdir -p "$(dirname -- "$_rgp_path")" &&
+        printf '%s\n' "$_rgp_text" > "$_rgp_tmp" &&
+        mv -f "$_rgp_tmp" "$_rgp_path"; } 2>/dev/null || {
+        rm -f "$_rgp_tmp"
+        die "cannot write the gap promotion marker ($_GAP_PROMOTION_MARKER); nothing was changed"
+    }
+    echo "==> Gap release promotion recorded in $_GAP_PROMOTION_MARKER: later stages from this workspace run without GAP_PROMOTE_IDENTITY while its bundle, path and target stay the same"
+    unset _rgp_text _rgp_path _rgp_tmp
+}
+
+# $1 = this bundle's release identity. Returns when the marker holds; refuses
+# otherwise with the first field that differs (file, format or a field name).
+_check_gap_promotion_marker() {
+    _cgm_path="$REPO_ROOT/$_GAP_PROMOTION_MARKER"
+    _cgm_field=file
+    if [ -f "$_cgm_path" ] && [ ! -L "$_cgm_path" ]; then
+        _cgm_want=$(_gap_promotion_text "$1") ||
+            die "cannot check the gap promotion marker: this workspace's physical path or directory inode cannot be read; nothing was changed"
+        if printf '%s\n' "$_cgm_want" | cmp -s - "$_cgm_path"; then
+            unset _cgm_path _cgm_field _cgm_want
+            return 0
+        fi
+        # The first line that differs names its field; a marker whose lines
+        # all match but that is longer or shorter is "format".
+        _cgm_field=$(printf '%s\n' "$_cgm_want" | awk '
+            NR == FNR { want[FNR] = $0; key[FNR] = substr($0, 1, index($0, ":") - 1); n = FNR; next }
+            bad == "" && FNR <= n && $0 != want[FNR] { bad = key[FNR] }
+            END { print (bad == "" ? "format" : bad) }' - "$_cgm_path")
+    fi
+    die "the gap promotion marker ($_GAP_PROMOTION_MARKER) does not hold here ($_cgm_field differs) — it holds only for the workspace, signed bundle and target it was recorded for, so a copied or moved workspace, an edited marker, another bundle or another NAMESPACE or INTERNAL_REGISTRY is refused; declare the stage in the process environment (GAP_PROMOTE_IDENTITY to promote this bundle again, the two GAP_REHEARSAL_* variables to rehearse it); nothing was changed"
+}
+
 check_gap_release_stage() {
     if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
         # A present MANIFEST's origin line is read with the real run's rules
@@ -823,13 +892,23 @@ check_gap_release_stage() {
         return 0
     fi
     _grs_rehearsal="$_GAP_REHEARSAL_INSTALLED_WORKSPACE_PROCESS_ENV$_GAP_REHEARSAL_KUBE_CONTEXT_PROCESS_ENV"
+    _grs_identity=$(sha256sum "$(dirname -- "$1")/SHA256SUMS" 2>/dev/null | awk '{print $1}') || _grs_identity=""
     if [ -n "$_GAP_PROMOTE_IDENTITY_PROCESS_ENV" ]; then
         [ -z "$_grs_rehearsal" ] ||
             die "the process environment declares both a rehearsal and a promotion of this gap release — export only GAP_PROMOTE_IDENTITY to promote, or only the two GAP_REHEARSAL_* variables to rehearse; nothing was changed"
-        _grs_identity=$(sha256sum "$(dirname -- "$1")/SHA256SUMS" 2>/dev/null | awk '{print $1}') || _grs_identity=""
         { [ -n "$_grs_identity" ] && [ "$_grs_identity" = "$_GAP_PROMOTE_IDENTITY_PROCESS_ENV" ]; } ||
             die "GAP_PROMOTE_IDENTITY is not this bundle's release identity (the sha256 of its signed SHA256SUMS, as the gap release record states) — promote only the rehearsed bundle; nothing was changed"
         echo "==> Gap release promotion: release identity $_grs_identity (the record must show its rehearsal passed)"
+        [ "${AIRGAP_DRYRUN:-0}" = "1" ] || _record_gap_promotion "$_grs_identity"
+        unset _grs_origin _grs_rehearsal _grs_identity
+        return 0
+    fi
+    # Nothing declared and a promotion recorded in this workspace (#1344).
+    if [ -z "$_grs_rehearsal" ] && { [ -e "$REPO_ROOT/$_GAP_PROMOTION_MARKER" ] || [ -L "$REPO_ROOT/$_GAP_PROMOTION_MARKER" ]; }; then
+        [ -n "$_grs_identity" ] ||
+            die "this gap release's SHA256SUMS cannot be read, so the gap promotion marker cannot be checked; nothing was changed"
+        _check_gap_promotion_marker "$_grs_identity"
+        echo "==> Gap release promotion: release identity $_grs_identity (recorded at promotion in $_GAP_PROMOTION_MARKER)"
         unset _grs_origin _grs_rehearsal _grs_identity
         return 0
     fi
@@ -841,7 +920,7 @@ check_gap_release_stage() {
         --candidate-manifest "$1" --namespace "${NAMESPACE:-}" --registry "${INTERNAL_REGISTRY:-}" \
         --kc "${KC:-$(kc)}" --operator-keys "$_OPERATOR_ENV_KEYS $_RETIRED_ENV_KEYS" ||
         die "gap release rehearsal refused (the STOP line above names the reason); nothing was changed"
-    unset _grs_origin _grs_rehearsal
+    unset _grs_origin _grs_rehearsal _grs_identity
 }
 
 # Pack-host twin of the checkout guard (#1030): fixed messages, no file names.

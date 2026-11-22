@@ -49,10 +49,14 @@ FORBIDDEN_ENV_FILE_KEYS: tuple[str, ...] = (
     "CONTEXT_LLM_API_KEY",
 )
 
-# Honored from caller process environment only, never from airgap.env (#1014, #1118 F1).
+# Honored from caller process environment only, never from airgap.env (#1014, #1118 F1;
+# the gap release stage declarations: #1338, #1344).
 PROCESS_ENV_ONLY_KEYS: tuple[str, ...] = (
     "CI_REHEARSAL",
     "AIRGAP_UNVERIFIED_CHECKOUT",
+    "GAP_PROMOTE_IDENTITY",
+    "GAP_REHEARSAL_INSTALLED_WORKSPACE",
+    "GAP_REHEARSAL_KUBE_CONTEXT",
 )
 
 
