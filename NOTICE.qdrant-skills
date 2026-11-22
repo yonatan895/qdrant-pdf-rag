@@ -1,6 +1,6 @@
 NOTICE for .agents/skills/ — vendored from https://github.com/qdrant/skills
-at commit bcca2c2da1c00992038e83038e01791d468f943d
-(upstream commit 2026-08-27, vendored 2026-08-28), Apache-2.0.
+at commit e80a4d52201fb68ba3163f608f41e228d65fdff3
+(upstream commit 2026-11-20, vendored 2026-11-22), Apache-2.0.
 
 Only the allowlisted skill directories listed in
 .agents/qdrant-skills-provenance.md are vendored (a curated subset, not the
