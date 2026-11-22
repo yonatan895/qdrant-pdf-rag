@@ -135,7 +135,8 @@ restores the snapshot over whatever the file assigned; empty stays unset
   mapper share it; diagnostics name the key, not the value). Empty means no
   override: the deadline stays 270 and admission ships ON at 4/4/30 (#843);
   `0` is an explicit selection (queue wait must stay above 0 while concurrency
-  is above 0; the chart schema refuses it). Limits are per agent replica.
+  is above 0; the chart schema refuses it). Limits are per agent replica, so the
+  default 3 replicas admit up to 12 concurrent upstream requests (plus 12 queued).
   Sizing rule: `REQUEST_MAX_CONCURRENT` = 2 x the engine's concurrent sequence
   slots; the site sets it from its own engine numbers.
 - Model request arguments (#1193): `LLM_EXTRA_BODY` (one JSON object; single-quote
@@ -499,6 +500,19 @@ Compatibility and lifecycle decisions under #448:
   2 CPU/2Gi) come from the #1348 load measurement: concurrent image chats
   hold about 45 MiB each, and 512Mi was OOM-killed at 16 of them. A site
   whose quota cannot take the larger limits sets these keys.
+  Worker count and scratch size are
+  `INGEST_WORKERS` and `INGEST_WORK_SIZE`. CPU is whole/decimal cores or
+  millicores (`500m`); memory and sizes need a Ki/Mi/Gi/Ti unit. Each value is
+  validated before any change; a limit below its request (or below the default
+  request when only the limit is set) is refused, and diagnostics never echo the
+  value. The specific size keys win over `QDRANT_STORAGE_SIZE`. A StatefulSet's
+  volume claim templates are immutable: before any change `deploy.sh` reads the
+  existing Qdrant StatefulSet (read-only) and refuses when the rendered
+  data/snapshot sizes differ from it, so keep the creation-time sizes in the
+  file and grow a volume with `oc patch pvc` (`check_qdrant_volumes.py`).
+  `QDRANT_EXTRA_VALUES` and `INGEST_EXTRA_PATCH` set outside `CI_REHEARSAL=1`
+  refuse with a message naming these keys. These keys follow the
+  [precedence rule](#2-environment-precedence) and the Task bridge like every operator key.
 - **Agent runtime defaults (#1348, maintainer decisions 2026-11-22).** The
   chart runs 3 agent replicas (`replicaCount`; no operator key) and sets
   three glibc allocator variables on the agent container (measured: peaks
@@ -512,19 +526,7 @@ Compatibility and lifecycle decisions under #448:
 
   The agent livenessProbe (`/livez`, period 20 s, 3 failures) has a 3 s
   timeout: a CPU-throttled agent answered in up to about 1 s, the Kubernetes
-  1 s default. Worker count and scratch size are
-  `INGEST_WORKERS` and `INGEST_WORK_SIZE`. CPU is whole/decimal cores or
-  millicores (`500m`); memory and sizes need a Ki/Mi/Gi/Ti unit. Each value is
-  validated before any change; a limit below its request (or below the default
-  request when only the limit is set) is refused, and diagnostics never echo the
-  value. The specific size keys win over `QDRANT_STORAGE_SIZE`. A StatefulSet's
-  volume claim templates are immutable: before any change `deploy.sh` reads the
-  existing Qdrant StatefulSet (read-only) and refuses when the rendered
-  data/snapshot sizes differ from it, so keep the creation-time sizes in the
-  file and grow a volume with `oc patch pvc` (`check_qdrant_volumes.py`).
-  `QDRANT_EXTRA_VALUES` and `INGEST_EXTRA_PATCH` set outside `CI_REHEARSAL=1`
-  refuse with a message naming these keys. These keys follow the
-  [precedence rule](#2-environment-precedence) and the Task bridge like every operator key.
+  1 s default.
 - `deploy.sh` validates every operator string that becomes a Helm value before
   rendering (`STORAGE_CLASS`/`SNAPSHOT_STORAGE_CLASS`: DNS-1123 name,
   `QDRANT_RELEASE`: DNS-1123 label, `QDRANT_TAG`: image tag,
