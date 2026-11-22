@@ -431,8 +431,8 @@ def _owui_pinned(tmp_path, images_txt: str | None):
 
 def test_the_lane_image_is_the_images_txt_row_and_fails_closed_while_pending(tmp_path):
     digest = "sha256:" + "ab" * 32
-    row = f"ghcr.io/example/qdrant-pdf-rag-openwebui:v0.12.3-slim    {digest}\n"
-    ok = _owui_pinned(tmp_path, "# c\nghcr.io/open-webui/open-webui:v0.12.3-slim  sha256:" + "cd" * 32 + "\n" + row)
+    row = f"ghcr.io/example/qdrant-pdf-rag-openwebui:v0.13.4-slim    {digest}\n"
+    ok = _owui_pinned(tmp_path, "# c\nghcr.io/open-webui/open-webui:v0.13.4-slim  sha256:" + "cd" * 32 + "\n" + row)
     assert ok.returncode == 0 and ok.stdout.strip() == f"ghcr.io/example/qdrant-pdf-rag-openwebui@{digest}"
     pending = _owui_pinned(tmp_path, row.replace(digest, "sha256:PENDING"))
     assert pending.returncode != 0 and pending.stdout == "" and "OWUI_BUILD=1" in pending.stderr

@@ -421,7 +421,7 @@ def build_values(deploy_only: bool = False) -> dict:
         # the verified registry digest when deploy checked it (#272).
         optional_images["openwebui"] = {
             "repository": f"{internal_registry}/qdrant-pdf-rag-openwebui",
-            "tag": "v0.12.3-slim",
+            "tag": "v0.13.4-slim",
             "pullPolicy": "IfNotPresent",
             **image_digest("OPENWEBUI"),
         }

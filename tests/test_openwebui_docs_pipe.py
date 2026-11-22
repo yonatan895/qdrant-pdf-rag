@@ -431,6 +431,48 @@ def test_an_unusable_last_turn_never_reaches_the_agent(messages: list[dict[str, 
     assert events == []
 
 
+def _hidden_tool_pair(name: str, text: str) -> list[dict[str, Any]]:
+    """What Open WebUI v0.13.4 appends with native function calling (utils/
+    middleware.py hidden_tool_result, converted by utils/misc.py
+    convert_output_to_messages): memory recall, the skills list or the attached
+    knowledge list as an assistant tool call plus its tool result, after the
+    user's message and replayed in later turns."""
+    call = f"fc_{name}"
+    return [{"role": "assistant", "content": None,
+             "tool_calls": [{"id": call, "type": "function",
+                             "function": {"name": name, "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": call, "content": text}]
+
+
+def test_hidden_tool_results_after_the_question_never_hide_it():
+    """#1357: since v0.13.1 a Pipe can see a tool message last (native function
+    calling puts the skills list, memories or attached knowledge after the
+    user's message). The question is the last user turn after those hidden
+    tool turns, and they never reach the agent, here or in the history."""
+    fake = FakeAgent()
+    run_pipe(fake, messages=[
+        {"role": "user", "content": "an earlier question"},
+        *_hidden_tool_pair("recall_memories", "an earlier recall"),
+        {"role": "assistant", "content": "an earlier answer"},
+        {"role": "user", "content": QUESTION},
+        *_hidden_tool_pair("list_available_skills", "<available_skills>\n</available_skills>"),
+    ])
+    (body,) = fake.bodies()
+    assert body == {"messages": [{"role": "user", "content": "an earlier question"},
+                                 {"role": "assistant", "content": "an earlier answer"},
+                                 {"role": "user", "content": QUESTION}], "stream": True}
+
+
+def test_only_hidden_tool_turns_after_an_assistant_turn_are_still_unusable():
+    """Skipping hidden tool turns never promotes an older question: an
+    assistant turn before them stays the last turn, so nothing is sent."""
+    fake = FakeAgent()
+    content, events = run_pipe(fake, messages=[
+        *_EARLIER, *_hidden_tool_pair("list_available_skills", "skills")])
+    assert fake.requests == []
+    assert content == _UNUSABLE and events == []
+
+
 def test_text_parts_of_a_multimodal_last_turn_are_the_question():
     """Text parts are joined by newlines; Open WebUI's `<attached_files>`
     part (saved chats, add_file_context) is file metadata, never question text.
@@ -1259,7 +1301,7 @@ def test_open_webui_pin_and_install_header():
     source = Path(docs_pipe.__file__).read_text(encoding="utf-8")
     header = source.split('"""', 2)[1]
     fields = dict(re.findall(r"^(\w+):\s*(.+)$", header, flags=re.MULTILINE))
-    assert docs_pipe.OPEN_WEBUI_VERSION == "0.12.3"
+    assert docs_pipe.OPEN_WEBUI_VERSION == "0.13.4"
     assert fields["required_open_webui_version"] == docs_pipe.OPEN_WEBUI_VERSION
     assert fields["title"] == "Rosetta"
     assert "requirements" not in fields

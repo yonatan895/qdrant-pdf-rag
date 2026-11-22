@@ -1871,7 +1871,7 @@ OWUI_REF = f"{OWUI_SOURCE}@{OWUI_PIN}"
 PROXY_REF = ("docker.io/nginxinc/nginx-unprivileged@sha256:"
              "f5116ed4606f3eb015dd4a8e28cb9b351476dc0ad4bc6e9f93b19cec130cdf03")
 # Independent expectation of the chart's images.openwebui (repository, tag).
-OWUI_CHART_BLOCK = "  openwebui:\n    repository: qdrant-pdf-rag-openwebui\n    tag: v0.12.3-slim\n"
+OWUI_CHART_BLOCK = "  openwebui:\n    repository: qdrant-pdf-rag-openwebui\n    tag: v0.13.4-slim\n"
 
 
 def _openwebui_tree(tree, pin=OWUI_PIN):
@@ -1958,7 +1958,7 @@ def test_validate_openwebui_pending_pin_refused_only_when_enabled(tree):
 
 @pytest.mark.parametrize("edit,needle", [
     (lambda t: (t / "images.txt").write_text((t / "images.txt").read_text().replace(
-        "qdrant-pdf-rag-openwebui:v0.12.3-slim", "qdrant-pdf-rag-openwebui:v0.99.0-slim")),
+        "qdrant-pdf-rag-openwebui:v0.13.4-slim", "qdrant-pdf-rag-openwebui:v0.99.0-slim")),
      "to match the chart's images.openwebui repository/tag"),
     (lambda t: _manifest(t), "packed without the Open WebUI image"),
     (lambda t: _manifest(t, f"openwebui: {OWUI_SOURCE}@sha256:" + "c" * 64),

@@ -1304,28 +1304,29 @@ OWUI_ENV_NAMES = {
     "DEFAULT_MODEL_METADATA", "DEFAULT_MODELS", "DO_NOT_TRACK", "ENABLE_ADMIN_CHAT_ACCESS", "ENABLE_ADMIN_EXPORT", "ENABLE_API_KEYS",
     "ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS", "ENABLE_AUTOCOMPLETE_GENERATION", "ENABLE_CHANNELS",
     "ENABLE_CODE_EXECUTION", "ENABLE_CODE_INTERPRETER", "ENABLE_COMMUNITY_SHARING",
-    "ENABLE_DIRECT_CONNECTIONS", "ENABLE_DIRECT_INTEGRATIONS", "ENABLE_EVALUATION_ARENA_MODELS",
+    "ENABLE_COMMENTS", "ENABLE_EVALUATION_ARENA_MODELS",
     "ENABLE_FOLDERS", "ENABLE_FOLLOW_UP_GENERATION", "ENABLE_IMAGE_GENERATION",
     "ENABLE_INITIAL_ADMIN_SIGNUP", "ENABLE_LOGIN_FORM", "ENABLE_MEMORIES", "ENABLE_MESSAGE_RATING",
-    "ENABLE_NOTES", "ENABLE_OAUTH_GROUP_CREATION", "ENABLE_OAUTH_GROUP_MANAGEMENT",
+    "ENABLE_NOTES", "ENABLE_NOTIFICATIONS", "ENABLE_OAUTH_GROUP_CREATION", "ENABLE_OAUTH_GROUP_MANAGEMENT",
     "ENABLE_OAUTH_ID_TOKEN_COOKIE", "ENABLE_OAUTH_PERSISTENT_CONFIG", "ENABLE_OAUTH_ROLE_MANAGEMENT",
     "ENABLE_OAUTH_SIGNUP",
     "ENABLE_OAUTH_TOKEN_EXCHANGE", "ENABLE_OLLAMA_API", "ENABLE_OPENAI_API", "ENABLE_OTEL",
     "ENABLE_PASSWORD_AUTH", "ENABLE_PERSISTENT_CONFIG", "ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS",
     "ENABLE_RETRIEVAL_QUERY_GENERATION", "ENABLE_SEARCH_QUERY_GENERATION", "ENABLE_SIGNUP",
-    "ENABLE_TAGS_GENERATION", "ENABLE_TITLE_GENERATION", "ENABLE_TOOLS", "ENABLE_TOOL_SERVERS",
-    "ENABLE_VERSION_UPDATE_CHECK", "ENABLE_WEB_SEARCH", "GLOBAL_LOG_LEVEL", "HF_HUB_OFFLINE", "HOME",
+    "ENABLE_TAGS_GENERATION", "ENABLE_TITLE_GENERATION", "ENABLE_TOOLS", "ENABLE_TOOL_PERMISSIONS_AUTO",
+    "ENABLE_TOOL_SERVERS", "ENABLE_VERSION_UPDATE_CHECK", "ENABLE_VIDEO_GENERATION", "ENABLE_WEB_SEARCH", "GLOBAL_LOG_LEVEL", "HF_HUB_OFFLINE", "HOME",
     "JWT_EXPIRES_IN", "OAUTH_ADMIN_ROLES", "OAUTH_ALLOWED_ROLES", "OAUTH_CLIENT_ID", "OAUTH_CLIENT_SECRET",
     "OAUTH_EMAIL_CLAIM", "OAUTH_GROUP_CLAIM", "OAUTH_MERGE_ACCOUNTS_BY_EMAIL", "OAUTH_ROLES_CLAIM",
     "OAUTH_SCOPES", "OAUTH_USERNAME_CLAIM", "OFFLINE_MODE", "OLLAMA_BASE_URL", "OPENID_PROVIDER_URL",
     "OPENID_REDIRECT_URI", "RAG_EMBEDDING_MODEL_AUTO_UPDATE", "RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE",
     "RAG_RERANKING_MODEL_AUTO_UPDATE", "RAG_RERANKING_MODEL_TRUST_REMOTE_CODE", "SCARF_NO_ANALYTICS",
+    "SESSION_EXPIRES_IN",
     "TASK_MODEL", "USER_PERMISSIONS_CHAT_CALL", "USER_PERMISSIONS_CHAT_FILE_UPLOAD",
     "USER_PERMISSIONS_CHAT_ALLOW_OPEN_SHARING", "USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING",
     "USER_PERMISSIONS_CHAT_SHARE", "USER_PERMISSIONS_CHAT_STT", "USER_PERMISSIONS_CHAT_TEMPORARY",
     "USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED", "USER_PERMISSIONS_CHAT_TTS",
     "USER_PERMISSIONS_FEATURES_API_KEYS",
-    "USER_PERMISSIONS_FEATURES_CODE_INTERPRETER", "USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS",
+    "USER_PERMISSIONS_FEATURES_CODE_INTERPRETER",
     "USER_PERMISSIONS_FEATURES_FOLDERS", "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION",
     "USER_PERMISSIONS_FEATURES_MEMORIES", "USER_PERMISSIONS_FEATURES_NOTES",
     "USER_PERMISSIONS_FEATURES_WEB_SEARCH", "USER_PERMISSIONS_FOLDERS_ALLOW_SHARING",
@@ -1497,7 +1498,7 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
     assert "anyuid" not in json.dumps(dep)
     assert [c["name"] for c in pod["containers"]] == ["openwebui", "proxy", "chat-purge"]
     container, proxy, purge = pod["containers"]
-    assert container["image"] == "qdrant-pdf-rag-openwebui:v0.12.3-slim"
+    assert container["image"] == "qdrant-pdf-rag-openwebui:v0.13.4-slim"
     assert container["securityContext"].get("privileged") is not True
     # One worker, plain HTTP on loopback ONLY: the allow-list proxy sidecar is
     # the single listener the Service and Route reach (nothing bypasses it).
@@ -1539,7 +1540,7 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         # #1073 trial R2: without an explicit loopback base URL v0.12.3 probes
         # host.docker.internal:11434/12434 on first start.
         "OLLAMA_BASE_URL": "http://127.0.0.1:9",
-        "ENABLE_DIRECT_CONNECTIONS": "false", "ENABLE_COMMUNITY_SHARING": "false",
+        "ENABLE_COMMUNITY_SHARING": "false",
         "ENABLE_VERSION_UPDATE_CHECK": "false", "BYPASS_EMBEDDING_AND_RETRIEVAL": "true",
         "ENABLE_WEB_SEARCH": "false", "ENABLE_MEMORIES": "false",
         "USER_PERMISSIONS_CHAT_FILE_UPLOAD": "false", "ENABLE_CODE_EXECUTION": "false",
@@ -1549,6 +1550,9 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         "ENABLE_PASSWORD_AUTH": "false", "ENABLE_INITIAL_ADMIN_SIGNUP": "false",
         "ENABLE_OAUTH_TOKEN_EXCHANGE": "false", "ENABLE_OAUTH_GROUP_MANAGEMENT": "true",
         "ENABLE_OAUTH_ROLE_MANAGEMENT": "true", "JWT_EXPIRES_IN": "8h",
+        # #1357: v0.13.x refresh-token sessions keep the browser session's 8 h idle
+        # limit (the proxy also refuses their API).
+        "SESSION_EXPIRES_IN": "8h",
         "DATA_DIR": "/app/backend/data", "AUDIT_LOG_LEVEL": "METADATA",
         "OPENID_PROVIDER_URL": OWUI_ON["openwebui"]["oidc"]["providerUrl"],
         "OPENID_REDIRECT_URI": "https://docs.apps.example.internal/oauth/oidc/callback",
@@ -1557,14 +1561,18 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         # Open WebUI v0.12.3's own defaults, pinned explicitly (config.py).
         "OAUTH_EMAIL_CLAIM": "email", "OAUTH_USERNAME_CLAIM": "name",
         "OAUTH_ALLOWED_ROLES": "staff", "OAUTH_ADMIN_ROLES": "docs-admins,docs-owners",
-        # B1 (trial/review): tools, direct integrations, per-feature permissions,
-        # task model, audio, scopes, CORS and the narrow admin-only API key.
-        "ENABLE_TOOLS": "false", "ENABLE_DIRECT_INTEGRATIONS": "false",
+        # B1 (trial/review): tools, per-feature permissions, task model, audio,
+        # scopes, CORS and the narrow admin-only API key. (v0.13.4 removed the
+        # direct-connection and direct-integration settings, #1357.)
+        "ENABLE_TOOLS": "false",
+        # #1357: v0.13.x features pinned off (auto tool permissions score at an
+        # external endpoint; inbox and comment rows sit outside the purge).
+        "ENABLE_TOOL_PERMISSIONS_AUTO": "false", "ENABLE_VIDEO_GENERATION": "false",
+        "ENABLE_NOTIFICATIONS": "false", "ENABLE_COMMENTS": "false",
         "BYPASS_MODEL_ACCESS_CONTROL": "false", "TASK_MODEL": "",
         # #1255: the docs Pipe's default answer depth, the model new chats and
         # chats whose stored model id is gone fall back to.
         "DEFAULT_MODELS": "mainframe_rag_docs.standard",
-        "USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS": "false",
         "USER_PERMISSIONS_FEATURES_NOTES": "false",
         "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION": "false",
         "USER_PERMISSIONS_CHAT_STT": "false", "USER_PERMISSIONS_CHAT_TTS": "false",
@@ -1597,6 +1605,9 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
     # N4: every toggle the pod sets is pinned above or below; a new env name is a
     # deliberate edit of this table, never an accident.
     assert set(env) == OWUI_ENV_NAMES
+    # #1357: v0.13.4 reads none of these; setting them would suggest a control that is gone.
+    assert not {"ENABLE_DIRECT_CONNECTIONS", "ENABLE_DIRECT_INTEGRATIONS",
+                "USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS"} & set(env)
     # Exactly the two operator Secret references; nothing else is a credential.
     refs = {k: v["valueFrom"]["secretKeyRef"] for k, v in env.items() if "valueFrom" in v}
     assert refs == {
@@ -1945,7 +1956,7 @@ def test_openwebui_ratings_require_the_feedback_store():
             "are stored only by the agent's feedback store (ADR-0005)") in r.stderr
 
 
-# Open WebUI v0.12.3 folder ids are str(uuid.uuid4()) (models/folders.py).
+# Open WebUI v0.13.4 folder ids are str(uuid.uuid4()) (models/folders.py).
 FOLDER_ID = "0b9d6f3e-6c1a-4f43-9a51-2d3c8e7f1a00"
 ALLOWED_PATHS = [
     "/", "/c/3f2a", "/auth", "/admin/users", "/_app/immutable/chunks/a.js", "/static/loader.js",
@@ -1965,6 +1976,10 @@ ALLOWED_PATHS = [
     f"/api/v1/folders/{FOLDER_ID}/update", f"/api/v1/folders/{FOLDER_ID}/update/parent",
     f"/api/v1/folders/{FOLDER_ID}/update/expanded", f"/api/v1/folders/{FOLDER_ID}/read",
     f"/api/v1/folders/{FOLDER_ID}/shared/chats",
+    # v0.13.x folder page (#1357): its filters (the folder's chat tags and chat
+    # authors) and a chat's status on the folder board, behind the folder read check.
+    f"/api/v1/folders/{FOLDER_ID}/tags", f"/api/v1/folders/{FOLDER_ID}/users",
+    f"/api/v1/folders/{FOLDER_ID}/chats/{FOLDER_ID}/status",
 ]
 DENIED_PATHS = [
     "/api/v1/files/", "/api/v1/files", "/api/v1/files/abc/content", "/api/v1/retrieval/process/text",
@@ -1987,6 +2002,15 @@ DENIED_PATHS = [
     "/api/v1/folders/shared/chats", f"/api/v1/folders/{FOLDER_ID}/update/x",
     f"/api/v1/folders/{FOLDER_ID}/shared", f"/api/v1/folders/{FOLDER_ID}/chats",
     "/api/v1/foldersX", "/api/v1/folders/ABC", "/api/v1/folders/a/b",
+    # v0.13.x (#1357): the refresh-token session API under the allowed auths
+    # prefix, Tether (no admin switch), comments, videos, the notifications
+    # inbox and a folder's automations stay refused.
+    "/api/v1/auths/sessions", "/api/v1/auths/sessions/", "/api/v1/auths/sessions/refresh",
+    "/api/v1/auths/sessions/requests", "/api/v1/auths/sessions/exchange",
+    "/api/v1/auths/sessions/3f2a/authorize", "/api/v1/tether/connect", "/api/v1/tether/",
+    "/api/v1/comments/", "/api/v1/videos/generations", "/api/v1/notifications/inbox/count",
+    f"/api/v1/folders/{FOLDER_ID}/automations", f"/api/v1/folders/{FOLDER_ID}/chats/x/status",
+    f"/api/v1/folders/{FOLDER_ID}/chats/{FOLDER_ID}/status/x",
 ]
 
 
@@ -1998,13 +2022,15 @@ def _allow_regexes():
     import re
     conf = _proxy_conf()
     block = re.search(r"map \$uri \$owui_allowed \{(.*?)\n    \}", conf, re.DOTALL).group(1)
-    entries = re.findall(r"^\s*~(\S+)\s+1;\s*$", block, re.MULTILINE)
+    # nginx tries a map's regexes in order and the first match decides (#1357:
+    # a "0" entry carves a denied path out of a broader allowed prefix).
+    entries = re.findall(r"^\s*~(\S+)\s+([01]);\s*$", block, re.MULTILINE)
     # Anything the Route list does not admit falls to the installer map, whose
     # own default is deny (#1255): deny stays the default for every client.
     assert re.search(r"^\s*default\s+\$owui_installer_allowed;\s*$", block, re.MULTILINE), \
         "unlisted paths must fall to the loopback installer map"
     assert entries, "no allow-list entries"
-    return [re.compile(e) for e in entries]
+    return [(re.compile(e), value == "1") for e, value in entries]
 
 
 def _installer_regexes():
@@ -2022,8 +2048,10 @@ def _installer_regexes():
 
 def _proxy_admits(remote, uri):
     """nginx's decision: the Route allow-list, else the loopback installer map."""
-    return (any(r.search(uri) for r in _allow_regexes())
-            or any(r.search(f"{remote} {uri}") for r in _installer_regexes()))
+    decided = next((allowed for r, allowed in _allow_regexes() if r.search(uri)), None)
+    if decided is not None:
+        return decided
+    return any(r.search(f"{remote} {uri}") for r in _installer_regexes())
 
 
 ROUTE_PEER = "10.128.2.17"  # the OpenShift router; never a loopback source
@@ -2031,10 +2059,12 @@ PROMPT_ID = "0b6f9a52-3c1d-4e8f-9a7b-2d4c6e8f0a1b"
 INSTALLER_PROMPT_PATHS = [
     "/api/v1/prompts/list", "/api/v1/prompts/create", f"/api/v1/prompts/id/{PROMPT_ID}/update",
     f"/api/v1/prompts/id/{PROMPT_ID}/toggle", f"/api/v1/prompts/id/{PROMPT_ID}/delete",
+    # #1357: v0.12.4 and later change a prompt's sharing only through this route.
+    f"/api/v1/prompts/id/{PROMPT_ID}/access/update",
 ]
 NEVER_PROMPT_PATHS = [
     "/api/v1/prompts/tags", f"/api/v1/prompts/id/{PROMPT_ID}", f"/api/v1/prompts/id/{PROMPT_ID}/history",
-    f"/api/v1/prompts/id/{PROMPT_ID}/access/update", f"/api/v1/prompts/id/{PROMPT_ID}/update/meta",
+    f"/api/v1/prompts/id/{PROMPT_ID}/access/updatex", f"/api/v1/prompts/id/{PROMPT_ID}/update/meta",
     f"/api/v1/prompts/id/{PROMPT_ID}/update/version", "/api/v1/prompts/id/x/update",
     "/api/v1/prompts/create/x", "/api/v1/prompts/listx", "/api/v1/prompts//create",
 ]
@@ -2164,8 +2194,10 @@ CHAT_IMAGES_LOCATION = (
 )
 # sha256 of proxy.nginx.conf before #1287. The images-off render must equal it
 # byte for byte (the default render's only #1287 change is one Open WebUI
-# variable). An allow-list change after #1287 updates this pin deliberately.
-PRE_1287_PROXY_SHA256 = "842fe2600b125677a52af1232dbbbe499aeb7bf5a2a4fd7dcd798149a872ff36"
+# variable). An allow-list change after #1287 updates this pin deliberately:
+# #1357 (v0.13.4 re-audit: session API refused, folder page paths, prompt
+# access route from loopback).
+PRE_1287_PROXY_SHA256 = "9c0cf47f364fc80ee310317945848b9ac6a09ae213e10be26471f4e8f9104926"
 
 
 def _proxy_conf_rendered(*, ratings, images):

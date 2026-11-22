@@ -58,7 +58,7 @@ CMD=${1:-}
 if [ "$CMD" = operator ]; then OWUI_PORT=${OWUI_PORT:-443}; else OWUI_PORT=${OWUI_PORT:-8443}; fi
 DEX_PORT=${DEX_PORT:-5556}
 POD_CIDR=10.244.0.0/16
-OWUI_IMAGE=${OWUI_IMAGE:-ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.12.3-slim}
+OWUI_IMAGE=${OWUI_IMAGE:-ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.13.4-slim}
 DEX_IMAGE=trial.local/dex:v2.46.0-distroless
 NGINX_IMAGE=trial.local/nginx-unprivileged:1.30.6-alpine
 OWUI_URL="https://$OWUI_HOST"

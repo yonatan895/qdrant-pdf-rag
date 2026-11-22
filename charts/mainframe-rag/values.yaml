@@ -72,7 +72,7 @@ images:
   # until the #1073 qualification records it) and enforced at pack/load.
   openwebui:
     repository: qdrant-pdf-rag-openwebui
-    tag: v0.12.3-slim
+    tag: v0.13.4-slim
     pullPolicy: IfNotPresent
   # Allow-list proxy sidecar of the Open WebUI pod (ADR-0007 E1, maintainer
   # decision 2026-10-24): nginx-unprivileged, pinned by digest in images.txt and

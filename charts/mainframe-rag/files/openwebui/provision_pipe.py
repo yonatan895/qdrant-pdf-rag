@@ -14,7 +14,7 @@ key arrives on stdin, never in argv, the environment or the pod spec.
      Function can read the user's tokens).
   3b. The Function is created when that listing does not contain it, or updated
      when its stored content differs, and then read back: its stored content must
-     hash to EXPECTED_SHA256. Open WebUI v0.12.3 answers HTTP 401, not 404, for
+     hash to EXPECTED_SHA256. Open WebUI v0.13.4 answers HTTP 401, not 404, for
      an absent Function (routers/functions.py get_function_by_id) and also 401 for
      an unknown or non-admin key (utils/auth.py), so presence is decided by the
      listing, never by a 401 on the Function itself.
@@ -50,7 +50,7 @@ ACTION_ID = "mainframe_rag_rating"
 ACTION_NAME = "Rosetta rating"
 ACTION_DESCRIPTION = "Rate a Rosetta answer; stored by the agent's feedback store only"
 # sha256 of charts/mainframe-rag/files/openwebui/rating_action.py (a test pins it).
-ACTION_SHA256 = "c32b82c2ae7d6527fb02ed12fe4dd039c96726a44f258b364112470e800af8ce"
+ACTION_SHA256 = "4bd14ee2593a28283bc3badca1565ff0d41e0fcd9d6d562ff3594eb6275f186b"
 MOUNT = Path("/opt/mainframe-rag/openwebui")
 CERT = Path("/etc/tls/private/tls.crt")
 HOST = "127.0.0.1"
@@ -166,7 +166,7 @@ def _listing(client: Client) -> dict[str, str]:
 
 def _function(client: Client, fid: str) -> dict:
     """Read a Function the listing showed or the write just stored: any non-200
-    here (v0.12.3 answers an absent Function with 401) is a failure."""
+    here (v0.13.4 answers an absent Function with 401) is a failure."""
     status, document = client.call("GET", f"/api/v1/functions/id/{fid}")
     if status != 200 or not isinstance(document, dict):
         raise ProvisionError(f"cannot read Function {fid} (HTTP {status})")

@@ -189,6 +189,11 @@ ALLOWED = [
     # Chat folders (#1255), by a uuid4 folder id; the query string is not part of $uri.
     f"/folders/{FOLDER_ID}", "/api/v1/folders/", f"/api/v1/folders/{FOLDER_ID}?delete_contents=true",
     f"/api/v1/folders/{FOLDER_ID}/update/parent", f"/api/v1/folders/{FOLDER_ID}/shared/chats?page=1",
+    # v0.13.x folder page (#1357): filters and a chat's status on the folder board.
+    f"/api/v1/folders/{FOLDER_ID}/tags", f"/api/v1/folders/{FOLDER_ID}/users",
+    f"/api/v1/folders/{FOLDER_ID}/chats/{FOLDER_ID}/status",
+    # A sibling of the refused session API under auths is still the auths prefix.
+    "/api/v1/auths/signout",
 ]
 
 BLOCKED_FILES = [
@@ -215,6 +220,15 @@ BLOCKED_OTHER = [
     "/api/v1/prompts/create", "/api/v1/prompts/list", "/api/v1/prompts/%63reate",
     "/api/v1/prompts/id/0b6f9a52-3c1d-4e8f-9a7b-2d4c6e8f0a1b/update",
     "/api/v1/prompts/id/0b6f9a52-3c1d-4e8f-9a7b-2d4c6e8f0a1b/delete",
+    "/api/v1/prompts/id/0b6f9a52-3c1d-4e8f-9a7b-2d4c6e8f0a1b/access/update",
+    # v0.13.x (#1357): the refresh-token session API (carved out of the allowed
+    # auths prefix, encoded and merged-slash spellings too), Tether, comments,
+    # videos, the notifications inbox and a folder's automations.
+    "/api/v1/auths/sessions", "/api/v1/auths/sessions/refresh", "/api/v1/auths/%73essions",
+    "/api/v1/auths//sessions/exchange", "/api/v1/auths/x/../sessions/requests",
+    "/api/v1/auths/sessions/3f2a/authorize", "/api/v1/tether/connect", "/api/v1/comments/",
+    "/api/v1/videos/generations", "/api/v1/notifications/inbox/count",
+    f"/api/v1/folders/{FOLDER_ID}/automations",
     # Folder sharing stays off (#1255): the grant route and the shared-with-me list.
     f"/api/v1/folders/{FOLDER_ID}/access/update", f"/api/v1/folders/{FOLDER_ID}/%61ccess/update",
     f"/api/v1/folders/{FOLDER_ID}/update/../access/update", "/api/v1/folders/shared",

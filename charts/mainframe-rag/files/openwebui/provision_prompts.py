@@ -25,14 +25,16 @@ The admin API key arrives on stdin, never in argv, the environment or the pod sp
      meta carries "mainframe_rag_managed": true. A repository command held by an
      unmanaged prompt is refused before any write: the installer never adopts,
      changes or deletes a prompt it does not manage.
-  5. Managed prompts are created, updated (name, content, grants: public read
-     only), re-activated, or deleted when the repository no longer lists them.
-     An unchanged prompt is not written (an update adds a history row
+  5. Managed prompts are created (with grants: public read only), updated
+     (name and content through the update route; grants, when they drifted,
+     only through the access route, the one place v0.12.4 and later change
+     sharing), re-activated, or deleted when the repository no longer lists
+     them. An unchanged prompt is not written (a text update adds a history row
      upstream). The result is listed again and must equal the repository set.
 
 Output and errors are fixed texts plus Open WebUI's HTTP status and counts;
 response bodies, the key and the template text are never printed. Endpoints
-are those of the pinned release v0.12.3 (routers/prompts.py). Stdlib only.
+are those of the pinned release v0.13.4 (routers/prompts.py). Stdlib only.
 """
 from __future__ import annotations
 
@@ -53,8 +55,10 @@ TIMEOUT_S = 30
 MANAGED = "mainframe_rag_managed"
 PUBLIC_READ = {"principal_type": "user", "principal_id": "*", "permission": "read"}
 COMMAND = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
-# Built-in `/` commands of the chat input (v0.12.3 MessageInput.svelte).
-BUILT_IN = frozenset({"compact", "fork", "status", "model", "compare", "settings", "temporary"})
+# Built-in `/` commands of the chat input (v0.13.4 MessageInput.svelte).
+# v0.13.x adds /side (also matched by "btw") and /comments.
+BUILT_IN = frozenset({"compact", "fork", "status", "model", "compare", "settings", "temporary",
+                      "side", "btw", "comments"})
 PROMPT_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 MAX_PROMPTS = 50
 MAX_COMMAND = 32
@@ -285,11 +289,16 @@ def provision(client: Client, raw: bytes, expected: str) -> list[str]:
         if status != 200:
             raise ProvisionError(f"cannot create a shared prompt (HTTP {status})")
     for pid, item, want in updates:
-        if (item.get("name"), item.get("content"), _grants(item), _managed(item)) != \
-                (want["name"], want["content"], WANT_GRANTS, True):
+        if (item.get("name"), item.get("content"), _managed(item)) != (want["name"], want["content"], True):
             status, _ = client.call("POST", f"/api/v1/prompts/id/{pid}/update", _form(want))
             if status != 200:
                 raise ProvisionError(f"cannot update a shared prompt (HTTP {status})")
+        if _grants(item) != WANT_GRANTS:
+            # The update route ignores grants since v0.12.4: sharing changes only here.
+            status, _ = client.call("POST", f"/api/v1/prompts/id/{pid}/access/update",
+                                    {"access_grants": [dict(PUBLIC_READ)]})
+            if status != 200:
+                raise ProvisionError(f"cannot restore a shared prompt's read access (HTTP {status})")
     for pid in removals:
         status, document = client.call("DELETE", f"/api/v1/prompts/id/{pid}/delete")
         if status != 200 or document is not True:

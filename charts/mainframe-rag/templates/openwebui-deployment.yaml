@@ -214,8 +214,6 @@ spec:
               value: "false"
             - name: USER_PERMISSIONS_FEATURES_CODE_INTERPRETER
               value: "false"
-            - name: USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS
-              value: "false"
             - name: USER_PERMISSIONS_FEATURES_NOTES
               value: "false"
             - name: USER_PERMISSIONS_FEATURES_IMAGE_GENERATION
@@ -238,13 +236,27 @@ spec:
             # trial R2). Loopback, discard port: the probe fails locally.
             - name: OLLAMA_BASE_URL
               value: "http://127.0.0.1:9"
-            - name: ENABLE_DIRECT_CONNECTIONS
-              value: "false"
+            # v0.13.4 removed ENABLE_DIRECT_CONNECTIONS, ENABLE_DIRECT_INTEGRATIONS and
+            # USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS (#1357): nothing reads them.
+            # Their successor, Tether (a user's own machine adds its models and
+            # tool servers), has no switch: the proxy refuses /api/v1/tether and the
+            # session API it needs (/api/v1/auths/sessions, ADR-0007 E1).
             - name: ENABLE_TOOL_SERVERS
               value: "false"
             - name: ENABLE_TOOLS
               value: "false"
-            - name: ENABLE_DIRECT_INTEGRATIONS
+            # v0.13.x features, pinned off (#1357). Auto tool permissions would score
+            # tool calls at an external endpoint (default api.openai.com); video
+            # generation is a model connection. The notifications inbox (default on)
+            # and comments store rows keyed by chat id that the retention purge does
+            # not know, and the proxy refuses their APIs.
+            - name: ENABLE_TOOL_PERMISSIONS_AUTO
+              value: "false"
+            - name: ENABLE_VIDEO_GENERATION
+              value: "false"
+            - name: ENABLE_NOTIFICATIONS
+              value: "false"
+            - name: ENABLE_COMMENTS
               value: "false"
             - name: BYPASS_MODEL_ACCESS_CONTROL
               value: "false"
@@ -357,6 +369,11 @@ spec:
             - name: ENABLE_OAUTH_ID_TOKEN_COOKIE
               value: "false"
             - name: JWT_EXPIRES_IN
+              value: 8h
+            # v0.13.x refresh-token sessions (/api/v1/auths/sessions, default idle
+            # lifetime 90 days): the proxy refuses that API; this keeps any such
+            # session to the browser session's 8 hours idle as a second layer (#1357).
+            - name: SESSION_EXPIRES_IN
               value: 8h
             - name: OPENID_PROVIDER_URL
               value: {{ $o.oidc.providerUrl | quote }}

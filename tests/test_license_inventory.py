@@ -19,9 +19,10 @@ from scripts import license_inventory as li
 from tests.helpers_airgap import REPO, copy_chart, copy_license_inputs
 from tests.helpers_task_artifact import copy_task_tools
 
-# Open WebUI v0.12.3-slim upstream index qualified by the #1073 Kind trial.
-BASE_DIGEST = "5adfb0355bbe4a5860c0ba9482cc0b40f573de3749a21a64cf4789391a14fffc"
-OPENWEBUI_DIGEST = "8417d47dd04505cac429c8b50c0d9452f635ae23a6c17351299b703b8eb04e04"
+# Open WebUI v0.13.4-slim upstream index (#1357 import); the derived image
+# digest stays sha256:PENDING until the factory pushes the v0.13.4 build.
+BASE_DIGEST = "0c4439e78c24c85e3e7a41936771d3b02f0df38daf28a086cd83ca74804f7676"
+OPENWEBUI_DIGEST = "PENDING"
 
 
 def real_inventory():
@@ -138,8 +139,8 @@ def test_open_webui_licence_records_the_maintainer_decision_and_its_conditions()
     inventory = real_inventory()
     by_id = {e["id"]: e for e in inventory["components"]}
     binds = {
-        "image:openwebui": "ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.12.3-slim",
-        "image:openwebui-base": "ghcr.io/open-webui/open-webui:v0.12.3-slim",
+        "image:openwebui": "ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.13.4-slim",
+        "image:openwebui-base": "ghcr.io/open-webui/open-webui:v0.13.4-slim",
     }
     for cid, ref in binds.items():
         entry = by_id[cid]

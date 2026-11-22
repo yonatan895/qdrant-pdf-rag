@@ -258,7 +258,7 @@ def test_open_webui_pin_and_install_header():
     source = Path(rating_action.__file__).read_text(encoding="utf-8")
     header = source.split('"""', 2)[1]
     fields = dict(re.findall(r"^(\w+):\s*(.+)$", header, flags=re.MULTILINE))
-    assert rating_action.OPEN_WEBUI_VERSION == "0.12.3" == fields["required_open_webui_version"]
+    assert rating_action.OPEN_WEBUI_VERSION == "0.13.4" == fields["required_open_webui_version"]
     assert "requirements" not in fields
     imports = set(re.findall(r"^(?:from|import) (\w+)", source, flags=re.MULTILINE))
     assert imports <= {"__future__", "collections", "contextlib", "json", "re", "typing", "httpx",

@@ -53,7 +53,7 @@ USER_KEY = "sk-synthetic-user-key"
 
 
 class FakeOpenWebUI:
-    """Functions API of the pinned release (v0.12.3), as the installer uses it.
+    """Functions API of the pinned release (v0.13.4), as the installer uses it.
 
     Status codes follow the release source (backend/open_webui): an unknown key
     is 401 (utils/auth.py get_current_user_by_api_key), a valid non-admin key is
@@ -167,9 +167,9 @@ def _writes(state):
     return [(m, p) for m, p, _ in state.requests if m == "POST"]
 
 
-@pytest.mark.parametrize("absent_status", [401, 404], ids=["v0.12.3-401", "404"])
+@pytest.mark.parametrize("absent_status", [401, 404], ids=["v0.13.4-401", "404"])
 def test_installer_first_install_creates_when_the_function_is_absent(owui, absent_status):
-    """v0.12.3 answers an absent Function with 401 (routers/functions.py
+    """v0.13.4 answers an absent Function with 401 (routers/functions.py
     get_function_by_id); a fresh install must create it, never read that 401 as
     a refused key (#1107 lane finding)."""
     state, client, _ = owui

@@ -1230,7 +1230,7 @@ def test_openwebui_selection_round_trips_with_the_decided_defaults(monkeypatch, 
         "idpEgress": {"cidrs": ["10.20.0.0/24", "10.21.0.8/32"], "port": 443},
     }
     assert values["images"]["openwebui"] == {
-        "repository": "reg.internal/qdrant-pdf-rag-openwebui", "tag": "v0.12.3-slim",
+        "repository": "reg.internal/qdrant-pdf-rag-openwebui", "tag": "v0.13.4-slim",
         "pullPolicy": "IfNotPresent"}
     # The namespace service CA is the destination CA while the console Route is off.
     assert values["route"] == {"enabled": False, "timeoutSeconds": 300, "destinationCA": OWUI_CA}
@@ -1427,7 +1427,7 @@ def test_openwebui_mapper_to_helm_round_trip(monkeypatch, mapper_env, tmp_path):
     docs = {(d["kind"], d["metadata"]["name"]): d for d in yaml.safe_load_all(rendered.stdout) if d}
     dep = docs["Deployment", "rag-openwebui"]
     containers = {c["name"]: c for c in dep["spec"]["template"]["spec"]["containers"]}
-    assert containers["openwebui"]["image"] == "reg.internal/qdrant-pdf-rag-openwebui:v0.12.3-slim"
+    assert containers["openwebui"]["image"] == "reg.internal/qdrant-pdf-rag-openwebui:v0.13.4-slim"
     assert containers["chat-purge"]["args"][:2] == ["--days", "14"]
     env = {e["name"]: e for e in containers["openwebui"]["env"]}
     assert env["OAUTH_CLIENT_ID"]["value"] == "docs-frontend"
