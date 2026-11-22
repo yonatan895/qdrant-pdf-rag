@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 
 type SelectMode = Literal["selected", "bypass", "fallback"]
 type SelectReason = Literal[
-    "identifier", "trap", "few_candidates", "model_error", "invalid_output",
+    "identifier", "trap", "few_candidates", "model_error", "invalid_output", "research_mode",
 ]
 
 # Characters of each candidate shown to the model. The prefix bounds the

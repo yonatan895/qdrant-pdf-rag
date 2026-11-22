@@ -70,8 +70,8 @@
      the dry run.
    - **Opt-in `job_status` and `jes_spool_read` (decided 2026-11-21, Option
      4A):** `job_status` uses `SITE FILETYPE=JES` + `LIST` and `jes_spool_read`
-     uses `SITE FILETYPE=JES` + `RETR <JOBID>.<spool_id>` (capped, with
-     explicit `TYPE A`). Both require an exact target (`JOBnnnnn`, or exact
+     uses `SITE FILETYPE=JES` + `RETR <JOBID>.<spool_id>` (with explicit
+     `TYPE A`, windowed to the byte cap as D6 states). Both require an exact target (`JOBnnnnn`, or exact
      `job_name`/`owner` where supported) checked against a bridge-side
      jobname/owner prefix allowlist verified via `LIST` before any `RETR` (no
      arbitrary wildcards such as `PAY*`). `jes_spool_read` is DD-scoped to
@@ -182,6 +182,31 @@
      FTP output is a single-byte ASCII page, usually ISO8859-1 per the server's
      `SBDATACONN`; bytes above 0x7F such as `¬` are invalid UTF-8 and would decode
      to U+FFFD; a site with UTF-8 output sets `MCP_FTP_ENCODING=utf-8`).
+   - Trailing blanks stripped (decided 2026-11-21): every text read sends
+     `SITE NOTRAILINGBLANKS` and `SITE SBSENDEOL=CRLF` before `TYPE A`. An
+     unconfirmed reply (202, a 200 carrying an unrecognized-parameter line, or
+     a 5xx) is a capacity loss, not a security control: the read proceeds and
+     the reply code alone is logged and set on the span.
+   - Job logs windowed at both ends (decided 2026-11-21): `jes_spool_read`
+     returns a spool file whole when its screened text fits the cap less 1 KiB
+     for the frame; a longer one keeps its first quarter and last three
+     quarters (module constants, no setting) around a gap marker, with the
+     window facts repeated in the bridge-authored header and in
+     `structuredContent`. The framed result fits `MCP_FTP_MAX_BYTES`, so the
+     agent's head-only live cap keeps the tail and the END delimiter as long as
+     `ZOWE_MCP_MAX_BYTES` is at least `MCP_FTP_MAX_BYTES` (both 256 KiB by
+     default; nothing enforces the pairing across the two processes). A
+     contiguous read is screened once as a whole and both parts are cut from
+     it. With a gap, each part is screened on its own, and the tail from its
+     first line start (after the retained ring's partial first line) that no
+     redaction match can span, so its keys and values pair as whole-file
+     screening pairs them and no value whose key fell in the gap survives.
+     Whole lines are trimmed last.
+     `MCP_FTP_SPOOL_STREAM_MAX_BYTES`
+     (16 MiB) and `MCP_FTP_SPOOL_STREAM_MAX_S` (8 s, below the agent's default
+     15 s call timeout) stop a longer stream, which returns the head with a
+     stop marker; a `LIST` BYTE-COUNT above the byte ceiling reads the head
+     only. `dataset_read` and `job_status` stay head-only.
    - Screened before it reaches the prompt: control and bidi characters
      stripped, password-shaped strings redacted.
    - Framed as an untrusted, delimited observation block, cited distinctly from
@@ -234,6 +259,18 @@
      until z/OS `JESINTERFACELEVEL=2`, scoped `JESSPOOL` READ profiles (never
      `JESSPOOL *`) and `JESJOBS`/`FTCHKCMD` submission blocks are verified and
      recorded.
+   - (d) **Dry-run checklist (unverified until the test LPAR records them):**
+     - `SITE NOTRAILINGBLANKS` and `SITE SBSENDEOL=CRLF` are the server's
+       spellings, and the reply wording for an accepted and an ignored operand
+       (the bridge treats 200 without "unrecognized" as confirmed);
+     - whether the strip applies under `FILETYPE=JES`; it covers
+       fixed-format records only, and sequence numbers in columns 73 to 80
+       defeat it;
+     - the unit of the JES `LIST` BYTE-COUNT column (the bridge reads it as
+       bytes for the stream-ceiling hint);
+     - that a long `JESMSGLG`/`JESYSMSG` read returns its first and last
+       lines within `MCP_FTP_SPOOL_STREAM_MAX_S`, recorded with ids, window
+       and byte counts only.
 9. **D9, logon-failure breaker.** A logon failure (FTP 530) gets its own code
    (named by #1294) and stops further logons until an operator resets it or a
    cool-down passes, so repeated failures cannot revoke the ID.

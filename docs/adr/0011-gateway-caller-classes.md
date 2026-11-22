@@ -14,7 +14,9 @@
   decision record ("Required follow-up"). Amended by
   [ADR-0012](0012-zos-dataset-read-pilot.md) (proposed): named exception E3
   for a read-only z/OS pilot (`dataset_read` default; opt-in `job_status` and
-  DD-scoped `jes_spool_read`).
+  DD-scoped `jes_spool_read`). Amended by
+  [ADR-0014](0014-gitlab-team-token-gateway.md) (proposed): named exception E4
+  (one read-only GitLab team token) and the bearer caller credential B1.
 - **Context:**
   - ADR-0010 defines the gateways for one caller, a signed-in user in a
     Team-model chat. The improvement agents of the gap (herdr-core plus

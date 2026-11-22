@@ -12,6 +12,7 @@ import pytest
 from scripts.eval_retrieval import main
 
 from mainframe_rag.config import Settings
+from mainframe_rag.eval.datasets import GoldenEntry
 from mainframe_rag.eval.retrieval import _set, update_baseline
 from tests.helpers_eval_local import free_port
 from tests.helpers_eval_local import retrieval_report as _report
@@ -870,3 +871,145 @@ def test_ndcg_at_k_ideal_gives_every_expected_doc_its_max_gain():
     assert late is not None and 0.0 <= late < 1.0
     partial = ndcg_at_k([hit("DOC-1"), hit("DOC-2", "Other", "9")], entry, k=8)
     assert partial == pytest.approx(0.7420981285)
+
+
+# --- generated gold rows: text-free, private, outside-git reports (#1317, maintainer decision 2026-11-21) ---
+
+_SECRET_Q = "Which lever opens the outlet valve?"
+_SECRET_ERR_Q = "Second secret question about the reactor"
+
+
+def _generated_golden(tmp_path: Path, source: str = "generated") -> Path:
+    golden = tmp_path / "generated.jsonl"
+    rows = [
+        {"id": "GEN-0001", "query": _SECRET_Q, "expected_doc_ids": ["DOC-A"],
+         "expected_heading": "Part A > Secret Heading", "query_class": "diagnostic", "source": source,
+         "status": "adjudicated", "reviewers": ["alice"], "reviewed_by": "alice",
+         "reviewed_at": "2026-11-21", "gold_chunk_ids": ["chunk-src"], "section_chunk_count": 1},
+        {"id": "GEN-0002", "query": _SECRET_ERR_Q, "expected_doc_ids": ["DOC-B"], "source": source,
+         "status": "spot_checked", "reviewers": ["bob"]},
+    ]
+    golden.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return golden
+
+
+def _text_report() -> dict:
+    return _report() | {"rows": [
+        {"query": _SECRET_Q, "id": "GEN-0001", "query_class": "diagnostic", "expected_behavior": "answer",
+         "hit_doc_ids": ["DOC-A"], "recall@1": 1.0, "recall@3": 1.0, "recall@5": 1.0, "recall@8": 1.0,
+         "mrr": 1.0, "kind": "nl"},
+        {"query": _SECRET_ERR_Q, "id": "GEN-0002", "error": "upstream said: " + _SECRET_ERR_Q, "kind": "error"},
+    ]}
+
+
+def _hermetic_generated(monkeypatch, tmp_path: Path, source: str = "generated") -> Path:
+    import scripts.eval_retrieval as ev
+
+    _hermetic_main(monkeypatch, tmp_path)
+    monkeypatch.setattr(ev, "evaluate", lambda golden_entries, s: _text_report())
+    return _generated_golden(tmp_path, source)
+
+
+@pytest.mark.parametrize("source", ["generated", "Generated", " GENERATED "])
+def test_generated_rows_report_is_text_free_private_and_hand_written_is_unchanged(
+    monkeypatch, tmp_path, capfd, source
+):
+    golden = _hermetic_generated(monkeypatch, tmp_path, source)
+    out_dir = tmp_path / "private"
+    out_dir.mkdir()
+    out, summary = out_dir / "report.json", out_dir / "summary.md"
+    rc = main(["--golden", str(golden), "--no-check", "--out", str(out), "--summary", str(summary)])
+    streams = capfd.readouterr()
+    assert rc == 0
+    for name in (out, summary):
+        text = name.read_text(encoding="utf-8")
+        assert _SECRET_Q not in text and _SECRET_ERR_Q not in text and "Secret Heading" not in text
+        assert "GEN-0001" in text and "GEN-0002" in text
+        assert oct(name.stat().st_mode & 0o777) == "0o600"
+    assert _SECRET_Q not in streams.out + streams.err and _SECRET_ERR_Q not in streams.out + streams.err
+    assert "upstream said" not in out.read_text(encoding="utf-8") + streams.out + streams.err
+    rows = json.loads(out.read_text(encoding="utf-8"))["rows"]
+    assert [r["id"] for r in rows] == ["GEN-0001", "GEN-0002"] and rows[0]["recall@1"] == 1.0
+
+
+def test_generated_rows_stdout_report_is_text_free(monkeypatch, tmp_path, capfd):
+    golden = _hermetic_generated(monkeypatch, tmp_path)
+    main(["--golden", str(golden), "--no-check"])
+    streams = capfd.readouterr()
+    assert "GEN-0001" in streams.out and _SECRET_Q not in streams.out + streams.err
+    assert _SECRET_ERR_Q not in streams.out + streams.err
+
+
+def test_generated_rows_refuse_report_paths_inside_a_git_checkout(monkeypatch, tmp_path, capfd):
+    import scripts.eval_retrieval as ev
+
+    golden = _hermetic_generated(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(ev, "evaluate", lambda *a: calls.append(a) or _text_report())
+    inside = Path(__file__).resolve().parents[1] / "bundles" / "tmp-1317-report.json"
+    ok_dir = tmp_path / "private"
+    ok_dir.mkdir()
+    for flag in ("--out", "--summary"):
+        extra = ["--summary", str(ok_dir / "s.md")] if flag == "--out" else ["--out", str(ok_dir / "o.json")]
+        assert main(["--golden", str(golden), "--no-check", flag, str(inside), *extra]) == 2
+        err = capfd.readouterr().err
+        assert "outside any git work tree" in err and _SECRET_Q not in err
+        assert not inside.exists() and not calls
+    assert not (ok_dir / "s.md").exists() and not (ok_dir / "o.json").exists()
+
+
+def test_hand_written_report_bytes_are_unchanged(monkeypatch, tmp_path, capfd):
+    import scripts.eval_retrieval as ev
+
+    golden = _hermetic_main(monkeypatch, tmp_path)  # a hand-written golden row, no source
+    report = _text_report()
+    expected_summary_input = json.loads(json.dumps(report))
+    monkeypatch.setattr(ev, "evaluate", lambda golden_entries, s: report)
+    out, summary = tmp_path / "plain.json", tmp_path / "plain.md"
+    main(["--golden", str(golden), "--no-check", "--out", str(out), "--summary", str(summary)])
+    streams = capfd.readouterr()
+    expected_summary_input["gate"] = {"status": "not_requested", "problems": []}
+    from mainframe_rag.eval.retrieval import summary_markdown
+
+    assert out.read_text(encoding="utf-8") == json.dumps(expected_summary_input, indent=2, ensure_ascii=False) + "\n"
+    expected_md = summary_markdown(expected_summary_input) + "\n\nGate: not_requested (ungated diagnostics are not acceptance).\n"
+    assert summary.read_text(encoding="utf-8") == expected_md
+    assert _SECRET_Q in out.read_text(encoding="utf-8") and _SECRET_Q in streams.err
+
+
+def test_text_free_report_helper_keeps_ids_scores_counts_only():
+    from mainframe_rag.eval.retrieval import text_free_report
+
+    report = _text_report()
+    stripped = text_free_report(report)
+    assert report["rows"][0]["query"] == _SECRET_Q  # input is not mutated
+    assert [r["query"] for r in stripped["rows"]] == ["GEN-0001", "GEN-0002"]
+    assert stripped["rows"][1]["error"] == "query_error"
+    assert stripped["rows"][0]["recall@1"] == 1.0 and stripped["n"] == report["n"]
+    assert _SECRET_Q not in json.dumps(stripped)
+    no_id = text_free_report({"rows": [{"query": _SECRET_Q, "kind": "nl"}]})
+    assert no_id["rows"][0]["query"] == "row-1"
+
+
+def test_generated_source_match_is_case_and_space_insensitive():
+    from mainframe_rag.eval import datasets as ds
+
+    for source in ("generated", "Generated", "GENERATED", " generated "):
+        assert ds.has_generated_entries([GoldenEntry(query="q", expected_doc_ids=["A"], source=source)])
+        assert ds.is_unreviewed_generated_record(json.dumps({"query": "q", "source": source}))
+    assert not ds.has_generated_entries([GoldenEntry(query="q", expected_doc_ids=["A"], source="hand")])
+    assert not ds.has_generated_entries([GoldenEntry(query="q", expected_doc_ids=["A"])])
+
+
+def test_gate_l1_and_harness_refuse_generated_report_paths_inside_git(tmp_path, capsys):
+    import scripts.gate_l1 as gl
+    import scripts.harness as hn
+
+    golden = _generated_golden(tmp_path)
+    inside = Path(__file__).resolve().parents[1] / "bundles" / "tmp-1317-report.json"
+    rc, md = gl.run_gate(golden_path=golden, baseline_path=tmp_path / "b.json", out_path=inside)
+    assert rc == 2 and "outside any git work tree" in md and _SECRET_Q not in md
+    assert hn.main(["--golden", str(golden), "--baseline", str(tmp_path / "b.json"), "--out", str(inside)]) == 2
+    err = capsys.readouterr().err
+    assert "outside any git work tree" in err and _SECRET_Q not in err
+    assert not inside.exists()

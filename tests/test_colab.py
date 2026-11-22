@@ -3683,6 +3683,7 @@ def test_ambient_agent_settings_never_reach_the_workload(lab, monkeypatch):
     monkeypatch.setenv("ANSWER_HIT_LIMIT", "16")
     monkeypatch.setenv("RETRIEVE_MAX_CHUNKS_PER_DOC", "5")
     monkeypatch.setenv("ANSWER_CODING_MODE_ENABLED", "false")
+    monkeypatch.setenv("ANSWER_SPL_MODE_ENABLED", "true")
     monkeypatch.setenv("CHAT_IMAGES_ENABLED", "true")
     monkeypatch.setenv("LLM_IMAGE_TOKEN_RESERVE", "8192")
     # Documented caller-only inputs survive the clear.
@@ -3693,7 +3694,8 @@ def test_ambient_agent_settings_never_reach_the_workload(lab, monkeypatch):
     for env in (observed, _sandbox_env(state)):
         for name in ("LLM_RESERVED_OUTPUT_TOKENS", "LLM_STREAM", "PROMPT_MAX_CONTEXT_CHARS",
                      "COMPARATIVE_SPLIT_ENABLED", "ANSWER_HIT_LIMIT",
-                     "RETRIEVE_MAX_CHUNKS_PER_DOC", "ANSWER_CODING_MODE_ENABLED", "CHAT_IMAGES_ENABLED",
+                     "RETRIEVE_MAX_CHUNKS_PER_DOC", "ANSWER_CODING_MODE_ENABLED",
+                     "ANSWER_SPL_MODE_ENABLED", "CHAT_IMAGES_ENABLED",
                      "LLM_IMAGE_TOKEN_RESERVE"):
             assert name not in env
         # The lane's own values are applied after the clear.

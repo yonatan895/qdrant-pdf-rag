@@ -1713,11 +1713,11 @@ def test_parse_answer_script_lang():
     assert res_abstain.script_lang == "jcl"
 
 
-@pytest.mark.parametrize("tag", ["c", "C", "metalc", "asm", "hlasm", "assembler", "clist"])
+@pytest.mark.parametrize("tag", ["c", "C", "metalc", "asm", "hlasm", "assembler", "clist", "spl", "SPL"])
 def test_parse_answer_keeps_mainframe_coding_fences_as_scripts(tag):
-    """Issue #1276: C, Metal C, assembler and CLIST fences are code, not
-    prose: kept as the script with their tag, out of the body, so a citation
-    lookalike or [n] inside the code is never read as provenance."""
+    """Issue #1276 & #1293: C, Metal C, assembler, CLIST and Splunk SPL fences
+    are code, not prose: kept as the script with their tag, out of the body,
+    so a citation lookalike or [n] inside the code is never read as provenance."""
     cite1 = "SA22-0000-00 Synthetic Reference, Chapter 1 > System parameters, p. 1-3"
     code = "buf[1] = 0;  /* VERIFY: SA22-9999-99 Made Up, p. 1 */"
     res = parse_answer(
@@ -1729,6 +1729,22 @@ def test_parse_answer_keeps_mainframe_coding_fences_as_scripts(tag):
     assert res.answer == "The macro maps as documented."
     assert res.citations == [cite1] and res.citations_inferred is False
     assert res.cites_rejected_unmapped == 0
+
+
+def test_parse_answer_spl_fence_subsearch_and_index_never_infer_citations():
+    """Issue #1293: a ```spl fence with `[1]` or subsearch brackets stays in
+    `script` with `script_lang='spl'` and never triggers citation inference."""
+    cite1 = "SA22-0000-00 Synthetic Reference, Chapter 1 > System parameters, p. 1-3"
+    spl = (
+        "index=zos_smf sourcetype=smf30 earliest=-24h latest=now\n"
+        "| eval first=mvindex(vals, 1), tag=\"[1]\"\n"
+        "| stats count by SMF30JBN"
+    )
+    res = parse_answer(f"Run this search.\n\n```spl\n{spl}\n```", make_evidence({cite1}))
+    assert res.script == spl
+    assert res.script_lang == "spl"
+    assert "index=zos_smf" not in res.answer
+    assert res.citations == [] and res.inferred_indices == []
 
 
 def test_parse_answer_coding_fence_without_citations_infers_nothing_from_code():
@@ -1956,6 +1972,119 @@ def test_coding_classifier_leaves_classify_query_complexity_unchanged():
 
     assert classify_query_complexity("Write a REXX exec that lists the members of a PDS") == "simple"
     assert classify_query_complexity("Write a REXX exec that replies to IEA500I") == "simple"
+
+
+SPL_REQUESTS = [
+    "Write a Splunk search for SMF type 30 CPU usage",
+    "Write an SPL query over index=zos_smf to find job abends",
+    "Generate a Splunk query to count IEA500I messages per LPAR",
+    "Build an SPL search for sourcetype=zos_syslog errors in the last 24 hours",
+    "Optimise this Splunk search:\nindex=zos_smf sourcetype=smf30\n| stats sum(smf30cpt) by smf30jbn",
+    "Optimize my SPL query so it runs faster",
+    "Convert this Splunk search to a dashboard panel with a time picker",
+    "Turn this SPL into a dashboard panel with a base search",
+    "Turn this Splunk search into a dashboard panel",
+    "Check my Splunk search for errors",
+    "Explain this SPL query:\nindex=zos_syslog\n| rex field=_raw \"(?<msgid>[A-Z]{3}\\d{3,4}[A-Z])\"\n| stats count by msgid",
+    "Fix this Splunk search, it returns no rows:\nsourcetype=zos:smf30\n| timechart span=5m sum(cpu)",
+    "Fix this SPL search for IEA500I:\nindex=zos_syslog IEA500I\n| stats count by host",
+    "What does this Splunk query do?\n| tstats count where index=zos_smf by host",
+    "Why is this slow?\n| stats count by jobname",
+    "Review my SPL:\n```spl\nindex=zos_smf | stats count by host\n```",
+    "I need a Splunk alert for S0C4 abends",
+    "Show me an example SPL search for SYSLOG messages",
+    "Write a Splunk SPL search to find JCL errors in JES2 SYSLOG",
+    # Pasted Splunk result tables (_time + another column + data row)
+    "What happened here?\n_time\thost\tmsgid\tcount\n2026-11-18 02:14:00\tSYS1\tIEA500I\t42",
+    "Explain these results:\n_time,host,SMF30JBN,SMF30CPT\n2026-11-18T02:14:00Z,SYS1,JOB1,12.4",
+    "| _time | host | count |\n|---|---|---|\n| 2026-11-18 02:14:00 | SYS1 | 42 |",
+    "_time                   host    sourcetype      count\n2026-11-18 02:14:00     SYS1    zos:syslog      42",
+    # Pasted forwarder-shaped events (JSON and key=value)
+    'What caused this?\n{"_time": "2026-11-18T02:14:00Z", "host": "SYS1", "sourcetype": "zos:smf30", "SMF30JBN": "JOB1"}',
+    "Explain this event:\n2026-11-18 02:14:00 host=SYS1 sourcetype=ironstream:smf30 jobname=JOB1 smf30scc=0C4",
+    "2026-11-18T02:14:00Z host=SYS1 smf_record_type=30 jobname=JOB1 smf30cpt=12.4",
+    "sourcetype=cdp:smf30 host=SYS1 smf30jbn=JOB1 smf30scc=0C4",
+]
+NON_SPL_REQUESTS = [
+    "What does IEA500I mean?",
+    "IEA500I",
+    "What is the JCL DISP parameter?",
+    "Write a REXX exec that lists the members of a PDS",
+    "Fix this JCL:\n//STEP1 EXEC PGM=IEFBR14\n//DD1 DD DSN=A.B,DISP=(NEW,CATLG)",
+    "How do I diagnose and recover when DFSMShsm journal fills up?",
+    "What fields are in SMF type 30 record?",
+    "Explain SMF30CPT and SMF30JBN in SMF type 30",
+    # Splunk / SPL mentioned without an SPL authoring/repair/result intent
+    "What is Splunk?",
+    "What is the _time field in Splunk?",
+    "What does the Splunk stats command do?",
+    "Explain what the Splunk stats command does",
+    "Where is the Splunk forwarder documented?",
+    "Does Ironstream support SMF type 30?",
+    "Which sourcetype does IBM Z CDP use for SYSLOG?",
+    "What is the difference between stats and eventstats in SPL?",
+    "I need a Splunk reference manual",
+    "What is the correct SPL syntax for timechart?",
+    "Which is the correct Splunk sourcetype for SMF type 30?",
+    "Where can I read the Splunk Search Reference?",
+    "How do I check SPL syntax in the manual?",
+    "What is my Splunk license tier?",
+    # Near-misses: SPLIT, numeric index=0, non-_time table, shell pipes, message-ID lookup
+    "What is the SPLIT parameter in DFSORT?",
+    "Write a C loop with index=0 to scan an array",
+    "Fix this REXX with index=1",
+    "Explain this markdown table:\n| Column | Value |\n|---|---|\n| Foo | Bar |",
+    "Explain this shell pipeline:\ncat foo.txt\n| grep error\n| wc -l",
+    "How do I fix IEFC452I JOB NOT RUN - JCL ERROR?",
+    "How do I fix IEA500I in Splunk?",
+    "Does sourcetype=zos_syslog set host=SYS1?",
+    "The _time, host, and sourcetype fields are useful.\nCan you explain them?",
+    "_time, host, and sourcetype are fields.\nWhat do they mean?",
+]
+
+
+@pytest.mark.parametrize("query", SPL_REQUESTS)
+def test_spl_request_classifier_fires_on_spl_intents_and_pasted_results(query):
+    """Issue #1293: SPL intent + marker, pasted SPL with ask, or pasted Splunk
+    results (`_time` table or forwarder-shaped event) triggers SPL mode."""
+    from mainframe_rag.agent.answer import is_spl_request
+
+    assert is_spl_request(query) is True
+
+
+@pytest.mark.parametrize("query", NON_SPL_REQUESTS)
+def test_spl_request_classifier_leaves_lookups_and_near_misses_alone(query):
+    """Docs lookups, coding requests, Splunk-mentioning docs questions without
+    SPL intent, shell pipes, and near-misses do not trigger SPL mode."""
+    from mainframe_rag.agent.answer import is_spl_request
+
+    assert is_spl_request(query) is False
+
+
+@pytest.mark.parametrize("message", [
+    "review " + " \t" * 60000 + "spl",
+    "write a " + "x " * 60000,
+    "| " + " \t" * 60000 + "stats",
+    "_time" + ",col" * 20000 + "\n1,2",
+    ("index=" + "a" * 50 + " ") * 2000,
+    "sourcetype=" + "x" * 120000,
+])
+def test_spl_classifier_is_linear_on_a_maximal_message(message):
+    """The SPL classifier reads up to the 131072-char body cap in linear time."""
+    from mainframe_rag.agent.answer import is_spl_request
+
+    started = time.perf_counter()
+    is_spl_request(message)
+    assert time.perf_counter() - started < 1.0
+
+
+def test_spl_classifier_leaves_classify_query_complexity_unchanged():
+    """The complexity classifier stays setting-free: with SPL mode off an SPL
+    request keeps its existing complexity."""
+    from mainframe_rag.agent.answer import classify_query_complexity
+
+    assert classify_query_complexity("Write a Splunk search for SMF type 30 CPU usage") == "simple"
+    assert classify_query_complexity("Write an SPL search for IEA500I") == "simple"
 
 
 def test_answer_dispatches_reasoning_effort_by_complexity(client, monkeypatch):

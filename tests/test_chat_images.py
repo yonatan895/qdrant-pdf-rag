@@ -624,6 +624,18 @@ def test_screen_text_counts_as_pasted_code_for_coding_mode(gateway_client):
     assert "Coding Protocol" in gateway.answers()[0]["messages"][0]["content"]
 
 
+def test_screen_text_counts_as_pasted_splunk_results_for_spl_mode(gateway_client):
+    read = (
+        "SCREEN TEXT:\n_time\thost\tmsgid\tcount\n2026-11-18 02:14:00\tSYS1\tIEA500I\t42\n"
+        "IDENTIFIERS:\nIEA500I\nDESCRIPTION: Splunk search results table."
+    )
+    gateway = _Gateway(read, _ANSWER)
+    client = gateway_client(gateway, {**_ON, "ANSWER_SPL_MODE_ENABLED": "true"})
+    client.post("/v1/chat", json={"messages": [
+        {"role": "user", "content": _parts("explain what happened", _url(_png()))}]})
+    assert "SPL Protocol" in gateway.answers()[0]["messages"][0]["content"]
+
+
 def test_text_turns_are_unchanged_with_images_on(gateway_client):
     """No new keys and no new prompt bytes for a text-only request (the
     byte-for-byte comparison against origin/main is in the PR evidence)."""

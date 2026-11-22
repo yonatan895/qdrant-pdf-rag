@@ -52,6 +52,9 @@ class _MockDataConn:
         self._pos += len(chunk)
         return chunk
 
+    def settimeout(self, value: float | None) -> None:
+        return None  # in-memory: never blocks
+
 
 class MockFTPSession:
     """Fake FTP server rooted at a fixture directory."""
@@ -132,6 +135,9 @@ class MockFTPSession:
     def abort(self) -> str:
         self.aborted = True
         return "226 aborted"
+
+    def close(self) -> None:
+        return None
 
     # ---------------------------------------------------------- fixture IO
     def _datasets(self) -> Path:
