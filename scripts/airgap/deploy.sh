@@ -429,5 +429,8 @@ fi
 if [ "$AGENT_ROUTE" = "true" ]; then
     echo "Route rag-agent -> svc port oauth, reencrypt, timeout 300s"
 fi
+# #1344: a declared gap promotion whose rollout completed is recorded, so later
+# stages from this workspace need no export (no-op otherwise and in dry-run).
+record_gap_promotion
 
 next_step "corpus ready? sh scripts/tools/run-task.sh airgap:ingest CORPUS_PVC=<pvc>   |   smoke: sh scripts/tools/run-task.sh airgap:smoke"

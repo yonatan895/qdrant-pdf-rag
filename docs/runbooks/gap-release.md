@@ -267,18 +267,23 @@ line; rerun the same command after fixing the cause.
    `GAP_PROMOTE_IDENTITY=<record's release identity> sh scripts/tools/run-task.sh airgap:pipeline`.
    A stage refuses an identity that is not the bundle's, and a promotion
    declared together with a rehearsal. Promotion runs no rehearsal guard:
-   that the bundle was rehearsed is still the record's to show (D9). The
-   first stage that runs with the declaration (not in dry-run) records the
-   promotion in this workspace's `dist/gap-promotion.txt` (#1344). Every
-   later `airgap:load`, `airgap:deploy`, `airgap:ingest` or
+   that the bundle was rehearsed is still the record's to show (D9). When
+   the declared `airgap:deploy` completes its rollout, it records the
+   promotion in this workspace's `dist/gap-promotion.txt` (#1344). A failed
+   or abandoned promotion, a declared load, ingest or retire-legacy on its
+   own, and a dry-run record nothing and never refresh an existing record.
+   Every later `airgap:load`, `airgap:deploy`, `airgap:ingest` or
    `airgap:retire-legacy` run from this live workspace then needs no export,
    as long as the file still names this bundle's signed identity, this
    workspace's path and directory inode, and the `NAMESPACE` and
-   `INTERNAL_REGISTRY` the stage resolves. A copy of the workspace, an edited
-   file, another bundle bootstrapped into it, or another target is refused
-   (the message names the first field that differs); export
-   `GAP_PROMOTE_IDENTITY` again to re-declare the promotion there, which
-   rewrites the file. Never copy a promoted workspace to make a rehearsal
+   `INTERNAL_REGISTRY` the stage resolves. A copy of the workspace at
+   another path, an edited file, another bundle bootstrapped into it, or
+   another target is refused (the message names the first field that
+   differs). The inode is a best-effort check only: a workspace removed and
+   restored at the same path may get the same inode back, so only the bundle
+   and target recorded at that path can pass there. To record it again, run
+   the promotion deploy with `GAP_PROMOTE_IDENTITY` exported; its completed
+   rollout rewrites the file. Never copy a promoted workspace to make a rehearsal
    workspace, and never write the file by hand: it is not an attestation, it
    only spares the export. The identity names the bundle, not the workspace:
    the rehearsal's checks come from the `GAP_REHEARSAL_*` declaration, never

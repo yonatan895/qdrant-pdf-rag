@@ -2303,7 +2303,10 @@ def test_the_next_deploy_from_a_promoted_gap_workspace_runs_without_the_export(t
 _MARKER_CASES = {
     # cp -a of the promoted workspace to another path (marker included).
     "copied-workspace": "workspace",
-    # The workspace moved away and a copy put back at the same path.
+    # The workspace moved away (its inode stays allocated) and a copy put back
+    # at the same path. Best effort only: a workspace removed and restored at
+    # the same path may reuse the inode, so the guarantee there is that only
+    # the bundle and target recorded at that path pass.
     "replaced-by-a-copy": "workspace_inode",
     "edited-namespace": "namespace",
     "edited-registry": "internal_registry",
