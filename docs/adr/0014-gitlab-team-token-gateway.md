@@ -153,9 +153,31 @@
 
 ## Open site checks (before go-live)
 
+Items 1 and 5 and the GitLab version are answered by the read-only site
+probe (#1343), run in the gateway pod with the gateway's configuration:
+
+```sh
+python -m mainframe_rag.gateways.gitlab --site-probe \
+  --job <allowlisted project>:<job id with a long log> \
+  --issue <allowlisted project>:<iid with label or state changes> [--receipt <writable path>]
+```
+
+Its receipt holds one JSON line per check with counts, version integers and
+fixed reason codes (never paths, ids, text or the token). Exit 0: no check
+failed; 1: a check failed; 2: refused to start (configuration or target); 3:
+stopped on an unexpected error, with the receipt still whole (the rest
+`inconclusive` `probe_error`, the summary naming only the exception class). `gitlab.version` passes on 17.x (another major is
+`inconclusive`: a human decides); `gitlab.token_scopes` passes when the
+start-up check passes and the token holds `read_api` alone (D1);
+`gitlab.job_trace_stream` when the named log streams to its end within
+`max_job_log_read_bytes`/`max_job_log_read_s`; `gitlab.issue_notes_filter`
+when the filter removes the system notes the unfiltered first page holds
+(`filter_ignored` and `no_system_notes` are `inconclusive`; `filter_refused`
+fails).
+
 1. A group access token with Reporter and `read_api` can be created for the
    team's group, and `personal_access_tokens/self` answers for it (the
-   gateway refuses to start otherwise).
+   gateway refuses to start otherwise; `gitlab.token_scopes`).
 2. The E4 premise holds for the allowlists, recorded at the site, and is
    re-checked when the allowlists or the team change.
 3. Whether people outside the team sign in to Open WebUI, which selects
@@ -163,9 +185,10 @@
 4. The site CA bundle, the GitLab egress rule, and the token's expiry and
    rotation procedure.
 5. The site GitLab accepts `activity_filter=only_comments` on issue notes, or
-   ignores it. If it refuses the parameter (a 400), drop it: the gateway
-   filters system notes itself as well. Also check that the job-log endpoint
-   streams a long log within the read ceilings.
+   ignores it (`gitlab.issue_notes_filter`). If it refuses the parameter
+   (`filter_refused`), drop it: the gateway filters system notes itself as
+   well. The job-log endpoint streams a long log within the read ceilings
+   (`gitlab.job_trace_stream`).
 
 ## Consequences
 

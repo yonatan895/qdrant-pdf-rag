@@ -1242,3 +1242,171 @@ def test_page_bounds_come_from_configuration(tmp_path: Path):
     assert _run(gateway, "list_issues", project="team/app", start=14)["isError"] is False
     assert {k: v for k, v in fake.requests[-1].url.params.items() if k in ("per_page", "page")} == {
         "per_page": "5", "page": "3"}
+
+
+
+# --- the read-only site probe (#1343) ---------------------------------------------------------
+
+PROBE_MARKERS = ("MRKVERQ", "MRKREVQ", "MRKLOGQ", "MRKNOTEQ", "MRKSYSNOTEQ", TEAM_TOKEN, "team/app",
+                 "gitlab.example.test", UPSTREAM_CANARY)
+
+
+def _probe_notes(*, honour_filter: bool = True, system: bool = True) -> object:
+    notes = [_note(1, "MRKNOTEQ first"), _note(2, "MRKSYSNOTEQ changed", system=system), _note(3, "MRKNOTEQ x")]
+    return _paged_notes(notes, honour_filter=honour_filter)
+
+
+def _probe_fake(**routes: object) -> FakeGitLab:
+    fake = FakeGitLab()
+    fake.routes["/api/v4/version"] = httpx2.Response(200, json={"version": "17.5.1-MRKVERQ", "revision": "MRKREVQ"})
+    fake.routes["/api/v4/projects/7/jobs/41/trace"] = _stream(b"MRKLOGQ line\n" * 2000, 4096)
+    fake.routes["/api/v4/projects/7/issues/5/notes"] = _probe_notes()
+    fake.routes.update({f"/api/v4/{k}": v for k, v in routes.items()})
+    return fake
+
+
+def _gitlab_probe(tmp_path: Path, fake: FakeGitLab, *, job: str | None = "team/app:41",
+                  issue: str | None = "team/app:5", **backend: object) -> dict[str, dict[str, object]]:
+    from mainframe_rag.gateways import gitlab_probe
+
+    gateway = _bearer_gateway(tmp_path, fake, **{"max_job_log_read_bytes": 1_000_000, **backend})
+    allows = gateway.client.backend.allows
+    receipt = asyncio.run(gitlab_probe.run_gitlab_probe(
+        gateway,
+        job=gitlab_probe.parse_target(job, allows, "job") if job else None,
+        issue=gitlab_probe.parse_target(issue, allows, "issue") if issue else None,
+    ))
+    assert [r["check"] for r in receipt.records] == list(gitlab_probe.CHECKS)
+    assert fake.violations == []
+    return {str(r["check"]): r for r in receipt.records}
+
+
+def test_site_probe_passes_and_writes_a_text_free_receipt(tmp_path: Path, monkeypatch, capsys):
+    fake = _probe_fake()
+    env = _env(tmp_path, "bearer", _config_doc(tmp_path, auth=False, max_job_log_read_bytes=1_000_000))
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    real_build = gitlab.build_gateway
+    monkeypatch.setattr(gitlab, "build_gateway", lambda: real_build(env, transport=fake.transport()))
+    out = tmp_path / "gitlab-receipt.jsonl"
+    rc = gitlab.main(["--site-probe", "--job", "team/app:41", "--issue", "team/app:5", "--receipt", str(out)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    written = out.read_text(encoding="utf-8")
+    assert written == captured.out and out.stat().st_mode & 0o777 == 0o600
+    records = {r["check"]: r for r in map(json.loads, written.splitlines())}
+    assert all(records[c]["status"] == "pass" for c in (
+        "gitlab.version", "gitlab.token_scopes", "gitlab.job_trace_stream", "gitlab.issue_notes_filter"))
+    assert (records["gitlab.version"]["major"], records["gitlab.version"]["minor"]) == (17, 5)
+    assert records["gitlab.token_scopes"]["read_api"] is True
+    assert records["gitlab.token_scopes"]["read_repository"] is False
+    trace = records["gitlab.job_trace_stream"]
+    assert trace["read_bytes"] == len(b"MRKLOGQ line\n") * 2000 and trace["complete"] is True
+    assert isinstance(trace["chunks"], int) and trace["chunks"] > 1
+    notes = records["gitlab.issue_notes_filter"]
+    assert notes["honoured"] is True
+    assert (notes["system_notes_unfiltered"], notes["system_notes_filtered"]) == (1, 0)
+    assert records["gitlab.summary"]["status"] == "pass"
+    for marker in PROBE_MARKERS:
+        assert marker.lower() not in (written + captured.err).lower(), marker
+    assert fake.violations == []
+    assert all(r.headers.get("PRIVATE-TOKEN") == TEAM_TOKEN for r in fake.requests)
+
+
+def _refuse_filter(request: httpx2.Request) -> httpx2.Response:
+    if request.url.params.get("activity_filter"):
+        return httpx2.Response(400, json={"message": UPSTREAM_CANARY})
+    return _probe_notes()(request)  # type: ignore[operator]
+
+
+@pytest.mark.parametrize(("setup", "check", "reason"), [
+    ({"scopes": ["read_api", "read_repository"]}, "gitlab.token_scopes", "wider_than_read_api"),
+    ({"scopes": ["api"]}, "gitlab.token_scopes", "token_scope_too_wide"),
+    ({"self_status": 404}, "gitlab.token_scopes", "scope_unverifiable"),
+    ({"routes": {"version": httpx2.Response(403, text=UPSTREAM_CANARY)}}, "gitlab.version", "upstream_refused"),
+    ({"backend": {"max_job_log_read_bytes": 4096}}, "gitlab.job_trace_stream", "stopped_at_ceiling"),
+    ({"routes": {"projects/7/jobs/41/trace": httpx2.Response(500, text=UPSTREAM_CANARY)}},
+     "gitlab.job_trace_stream", "upstream_unavailable"),
+    ({"routes": {"projects/7/issues/5/notes": _refuse_filter}}, "gitlab.issue_notes_filter", "filter_refused"),
+])
+def test_site_probe_fail_paths(tmp_path: Path, setup: dict[str, object], check: str, reason: str):
+    fake = _probe_fake(**setup.get("routes", {}))  # type: ignore[arg-type]
+    if "scopes" in setup:
+        fake.self_doc = {"id": 1, "scopes": setup["scopes"], "active": True, "revoked": False}
+    fake.self_status = int(setup.get("self_status", 200))  # type: ignore[call-overload]
+    checks = _gitlab_probe(tmp_path, fake, **setup.get("backend", {}))  # type: ignore[arg-type]
+    assert checks[check]["status"] == "fail" and checks[check]["reason"] == reason
+    assert UPSTREAM_CANARY not in json.dumps(checks)
+
+
+def _flaky_filter(request: httpx2.Request) -> httpx2.Response:
+    """The filtered request fails with a 503: not evidence the filter is refused."""
+    if request.url.params.get("activity_filter"):
+        return httpx2.Response(503, text=UPSTREAM_CANARY)
+    return _probe_notes()(request)  # type: ignore[operator]
+
+
+@pytest.mark.parametrize(("setup", "check", "reason"), [
+    ({"job": None, "issue": None}, "gitlab.job_trace_stream", "no_job_named"),
+    ({"job": None, "issue": None}, "gitlab.issue_notes_filter", "no_issue_named"),
+    ({"routes": {"version": httpx2.Response(200, json={"version": "16.11.2-ee"})}}, "gitlab.version",
+     "other_major"),
+    ({"routes": {"version": httpx2.Response(200, json={"version": "MRKVERQ"})}}, "gitlab.version", "unparsed"),
+    ({"routes": {"projects/7/issues/5/notes": _probe_notes(honour_filter=False)}}, "gitlab.issue_notes_filter",
+     "filter_ignored"),
+    ({"routes": {"projects/7/issues/5/notes": _probe_notes(system=False)}}, "gitlab.issue_notes_filter",
+     "no_system_notes"),
+    ({"routes": {"projects/7/issues/5/notes": _flaky_filter}}, "gitlab.issue_notes_filter",
+     "upstream_unavailable"),
+    ({"job": "team/app:99"}, "gitlab.job_trace_stream", "job_not_found"),
+    ({"issue": "team/moved:5"}, "gitlab.issue_notes_filter", "project_project_not_allowed"),
+])
+def test_site_probe_inconclusive_paths(tmp_path: Path, setup: dict[str, object], check: str, reason: str):
+    fake = _probe_fake(**setup.get("routes", {}))  # type: ignore[arg-type]
+    kwargs = {k: setup[k] for k in ("job", "issue") if k in setup}
+    checks = _gitlab_probe(tmp_path, fake, **kwargs)  # type: ignore[arg-type]
+    assert checks[check]["status"] == "inconclusive" and checks[check]["reason"] == reason
+
+
+def test_site_probe_refuses_targets_outside_the_allowlists_before_any_call(tmp_path: Path, monkeypatch, capsys):
+    fake = _probe_fake()
+    env = _env(tmp_path, "bearer", _config_doc(tmp_path, auth=False))
+    real_build = gitlab.build_gateway
+    monkeypatch.setattr(gitlab, "build_gateway", lambda: real_build(env, transport=fake.transport()))
+    for argv in (["--job", "other/secret:41"], ["--issue", "team/app:x"], ["--job", "team/app:0"],
+                 ["--issue", "teamx/app:5"]):
+        assert gitlab.main(["--site-probe", *argv]) == 2
+    assert gitlab.main(["--serve-now"]) == 2
+    assert fake.requests == []
+    assert "other/secret" not in capsys.readouterr().err
+
+
+def _crash_trace(request: httpx2.Request) -> httpx2.Response:
+    raise RuntimeError(UPSTREAM_CANARY)
+
+
+def test_site_probe_unexpected_exception_keeps_a_whole_receipt_and_exits_3(tmp_path: Path, monkeypatch, capsys):
+    """Review B1: an exception other than GatewayError ends the run with the
+    finished checks kept, the rest probe_error, the class name only, exit 3."""
+    fake = _probe_fake(**{"projects/7/jobs/41/trace": _crash_trace})
+    env = _env(tmp_path, "bearer", _config_doc(tmp_path, auth=False, max_job_log_read_bytes=1_000_000))
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    real_build = gitlab.build_gateway
+    monkeypatch.setattr(gitlab, "build_gateway", lambda: real_build(env, transport=fake.transport()))
+    out = tmp_path / "gitlab-receipt.jsonl"
+    rc = gitlab.main(["--site-probe", "--job", "team/app:41", "--issue", "team/app:5", "--receipt", str(out)])
+    captured = capsys.readouterr()
+    assert rc == 3
+    written = out.read_text(encoding="utf-8")
+    assert written == captured.out and out.stat().st_mode & 0o777 == 0o600
+    records = [json.loads(line) for line in written.splitlines()]
+    assert [(r["check"], r["status"]) for r in records] == [
+        ("gitlab.version", "pass"), ("gitlab.token_scopes", "pass"),
+        ("gitlab.job_trace_stream", "inconclusive"), ("gitlab.issue_notes_filter", "inconclusive"),
+        ("gitlab.summary", "error")]
+    assert records[2]["reason"] == records[3]["reason"] == "probe_error"
+    assert records[-1]["error_class"] == "RuntimeError" and records[-1]["probe_error"] is True
+    for marker in PROBE_MARKERS:
+        assert marker.lower() not in (written + captured.err).lower(), marker
+    assert fake.violations == []

@@ -68,6 +68,26 @@ passphrase or a credential that can sign (D3).
   ```
 
   It must print an RSA-3072 key and its fingerprint (`PUBKEY v<n> <sha256>`).
+  Then, from where signing will run (the workstation, or the `sign-vault`
+  pod), run the read-only transit probe (#1343):
+
+  ```sh
+  VAULT_ADDR=https://vault.site.example VAULT_TOKEN=... \
+    python3 -I sign_vault.py vault-probe --key-name <key> --receipt vault-probe.jsonl
+  ```
+
+  It reads the key, signs a fixed probe message (never a `SHA256SUMS`) with
+  PKCS#1 v1.5 and SHA-256 and verifies it with the bootstrap's `openssl`
+  command. Its receipt is one JSON line per check (`pass`, `fail` or
+  `inconclusive`, HTTP status codes, booleans, the key version and the
+  public key fingerprint; never the address, key name or token); exit 1 when
+  a check failed, 2 on a configuration error, 3 when it stopped on an
+  unexpected error (the receipt still whole, the rest `inconclusive`
+  `probe_error`, the summary naming only the exception class). `vault.key_type` needs a non-exportable `rsa-3072` key;
+  `vault.public_key_export`'s `fingerprint_sha256` must equal the
+  `vault-pubkey` fingerprint. A key holder whose policy allows only
+  `sign` gets `vault.key_read` `forbidden` and an `inconclusive`
+  signature check: run it with the token that read the public key.
   Add the Vault address to the isolation proof's site values (`VAULT_CIDRS`,
   `VAULT_PORT`): the proof then requires every workspace role, the bastion
   included, to be blocked from it. Leave the `VAULT_CIDRS` line out only when

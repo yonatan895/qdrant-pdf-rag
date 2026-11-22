@@ -565,6 +565,7 @@ def connect(
     factory: type[ftplib.FTP] = ftplib.FTP,
     *,
     breaker: LogonBreaker | None = None,
+    progress: list[str] | None = None,
 ) -> Any:
     """Open one FTP/FTPS session for a single tool call.
 
@@ -575,23 +576,32 @@ def connect(
       downgrade fallback, and protects the data channel with `PROT P`.
     - In `plain` mode, requires `plain_ftp_accepted=True`.
     - Sets explicit passive mode (`ftp.set_pasv(True)`) on every session.
+    - `progress`, when given, gets each completed setup stage appended
+      (`SESSION_STAGES`), so the site probe can tell which one failed.
     """
+    stages: list[str] = [] if progress is None else progress
     if breaker is None:
-        return _open_session(config, factory)
+        return _open_session(config, factory, stages)
     with breaker.logon_slot(wait_s=config.timeout_s):
-        return _open_session(config, factory)
+        return _open_session(config, factory, stages)
 
 
-def _open_session(config: FTPConfig, factory: type[ftplib.FTP]) -> Any:
+# Session setup stages in order (`tls` and `protected` in ftps mode only).
+SESSION_STAGES: tuple[str, ...] = ("connected", "tls", "logon", "protected", "passive")
+
+
+def _open_session(config: FTPConfig, factory: type[ftplib.FTP], progress: list[str]) -> Any:
     if config.transport_mode == "ftps":
         ctx = build_verified_tls_context(config.ca_file)
         ftp: Any = ftplib.FTP_TLS(context=ctx)
         try:
             ftp.connect(config.host, config.port, timeout=config.timeout_s)
+            progress.append("connected")
             try:
                 ftp.auth()
             except (ssl.SSLError, ftplib.error_perm, ftplib.error_temp, OSError) as exc:
                 raise _TlsVerificationError("FTPS verification failed") from exc
+            progress.append("tls")
         except Exception:
             with contextlib.suppress(Exception):
                 ftp.close()
@@ -602,6 +612,7 @@ def _open_session(config: FTPConfig, factory: type[ftplib.FTP]) -> Any:
         ftp = factory()
         try:
             ftp.connect(config.host, config.port, timeout=config.timeout_s)
+            progress.append("connected")
         except Exception:
             with contextlib.suppress(Exception):
                 ftp.close()
@@ -619,11 +630,14 @@ def _open_session(config: FTPConfig, factory: type[ftplib.FTP]) -> Any:
         if _is_530_error(exc):
             raise _LogonFailed("FTP logon failed") from exc
         raise
+    progress.append("logon")
 
     try:
         if config.transport_mode == "ftps" and isinstance(ftp, ftplib.FTP_TLS):
             ftp.prot_p()
+            progress.append("protected")
         ftp.set_pasv(True)
+        progress.append("passive")
     except Exception:
         with contextlib.suppress(Exception):
             ftp.close()
@@ -709,19 +723,30 @@ def _pin_text_format(ftp: Any) -> tuple[str, ...]:
     """
     unconfirmed: list[str] = []
     for operand in TEXT_FORMAT_SITES:
-        try:
-            reply = ftp.sendcmd(f"SITE {operand}")
-        except ftplib.error_perm as exc:
-            reply = str(exc)
-        if reply.startswith("200") and "unrecogni" not in reply.lower():
+        code, confirmed = site_reply(ftp, operand)
+        if confirmed:
             continue
         name = operand.split("=", 1)[0]
         unconfirmed.append(name)
-        code = reply[:3] if reply[:3].isdigit() else "???"
         print(f"mcp bridge: SITE {name} unconfirmed reply_code={code}", file=sys.stderr, flush=True)
     if unconfirmed:
         trace.get_current_span().set_attribute("mcp.ftp.site_unconfirmed", ",".join(unconfirmed))
     return tuple(unconfirmed)
+
+
+def site_reply(ftp: Any, operand: str) -> tuple[str, bool]:
+    """Send `SITE <operand>`; return (reply code, confirmed) without the text.
+
+    Confirmed is the `_pin_text_format` rule: a reply starting `200` with no
+    "unrecognized" line. A 5xx (`error_perm`) is an unconfirmed reply; a 4xx
+    (`error_temp`) or socket error propagates. The code is `???` when the
+    reply does not start with three digits."""
+    try:
+        reply = ftp.sendcmd(f"SITE {operand}")
+    except ftplib.error_perm as exc:
+        reply = str(exc)
+    code = reply[:3] if reply[:3].isdigit() else "???"
+    return code, reply.startswith("200") and "unrecogni" not in reply.lower()
 
 
 def _receive_ascii(

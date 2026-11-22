@@ -16,10 +16,12 @@ Proves:
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import http.server
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -27,6 +29,8 @@ from pathlib import Path
 
 import pytest
 from scripts.gap import sign_vault
+
+from mainframe_rag import probe_receipt
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -333,3 +337,225 @@ def test_fallback_encrypted_key_sign_round_trip_and_refusals(tmp_path: Path):
     )
     assert info["release_identity"] == identity
     sign_vault.verify_signature_openssl(pub, sums, out_sig)
+
+
+# --- vault-probe (#1343) ---------------------------------------------------------------
+
+_PROBE_TOKEN = "s.MRKTOKENQ-never-logged"
+_PROBE_KEY = "mrkkeyq-gap"
+_ERROR_BODY = b'{"errors":["MRKERRBODYQ permission denied for mrkkeyq-gap"]}'
+
+
+@contextlib.contextmanager
+def _vault_stub(priv: Path, pub: Path, *, key_type: str = "rsa-3072", exportable: bool = False,
+                read_status: int = 200, sign_status: int = 200, pss: bool = False,
+                sign_reply: bytes | None = None):
+    calls: list[tuple[str, str]] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+        def _reply(self, status: int, body: bytes) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:
+            calls.append(("GET", self.path))
+            ok = self.headers.get("X-Vault-Token") == _PROBE_TOKEN
+            if read_status != 200 or not ok or self.path != f"/v1/transit/keys/{_PROBE_KEY}":
+                self._reply(read_status if read_status != 200 else 403, _ERROR_BODY)
+                return
+            self._reply(200, json.dumps({"data": {
+                "name": _PROBE_KEY, "type": key_type, "exportable": exportable,
+                "supports_signing": True, "latest_version": 3,
+                "keys": {"3": {"public_key": pub.read_text(encoding="utf-8"), "name": "MRKNAMEQ"}},
+            }}).encode())
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            req = json.loads(self.rfile.read(length).decode("utf-8"))
+            calls.append(("POST", self.path))
+            if sign_reply is not None:
+                self._reply(200, sign_reply)
+                return
+            ok = self.headers.get("X-Vault-Token") == _PROBE_TOKEN
+            if sign_status != 200 or not ok or self.path != f"/v1/transit/sign/{_PROBE_KEY}":
+                self._reply(sign_status if sign_status != 200 else 403, _ERROR_BODY)
+                return
+            assert (req["hash_algorithm"], req["signature_algorithm"], req["prehashed"]) == (
+                "sha2-256", "pkcs1v15", True)
+            digest = base64.b64decode(req["input"])
+            assert digest == hashlib.sha256(sign_vault.PROBE_MESSAGE).digest()
+            raw = (_sign_prehashed_pss if pss else _sign_prehashed_pkcs1v15)(priv, digest)
+            self._reply(200, json.dumps(
+                {"data": {"signature": sign_vault.raw_sig_to_vault(raw, version=3)}}).encode())
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", calls
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _vault_probe(addr: str) -> dict[str, dict[str, object]]:
+    receipt = sign_vault.probe_vault(vault_addr=addr, vault_token=_PROBE_TOKEN,
+                                     transit_mount="transit", key_name=_PROBE_KEY)
+    assert [r["check"] for r in receipt.records] == list(sign_vault.VAULT_PROBE_CHECKS)
+    return {str(r["check"]): r for r in receipt.records}
+
+
+def test_vault_probe_passes_and_its_receipt_is_text_free(
+    tmp_path: Path, rsa3072_pair: tuple[Path, Path], monkeypatch, capsys
+):
+    priv, pub = rsa3072_pair
+    with _vault_stub(priv, pub) as (addr, calls):
+        monkeypatch.setenv("VAULT_TOKEN", _PROBE_TOKEN)
+        out = tmp_path / "vault-receipt.jsonl"
+        rc = sign_vault.main(["vault-probe", "--vault-addr", addr, "--key-name", _PROBE_KEY,
+                              "--receipt", str(out)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert calls == [("GET", f"/v1/transit/keys/{_PROBE_KEY}"), ("POST", f"/v1/transit/sign/{_PROBE_KEY}")]
+    written = out.read_text(encoding="utf-8")
+    assert written == captured.out and out.stat().st_mode & 0o777 == 0o600
+    records = {r["check"]: r for r in map(json.loads, written.splitlines())}
+    assert all(records[c]["status"] == "pass" for c in sign_vault.VAULT_PROBE_CHECKS)
+    assert records["vault.key_type"]["key_type"] == "rsa-3072"
+    assert records["vault.key_type"]["exportable"] is False
+    assert records["vault.sign_pkcs1v15_sha256"]["verified"] is True
+    assert records["vault.sign_pkcs1v15_sha256"]["signature_bytes"] == 384
+    assert records["vault.sign_pkcs1v15_sha256"]["key_version"] == 3
+    expected_fp = sign_vault.pubkey_fingerprint_sha256(pub)
+    assert records["vault.public_key_export"]["fingerprint_sha256"] == expected_fp
+    assert records["vault.summary"]["status"] == "pass"
+    everything = (written + captured.err).lower()
+    for marker in ("mrktokenq", "mrkkeyq", "mrknameq", "127.0.0.1", "begin public key"):
+        assert marker not in everything, marker
+
+
+@pytest.mark.parametrize(
+    ("stub", "check", "status", "reason"),
+    [
+        ({"key_type": "rsa-2048"}, "vault.key_type", "fail", "not_rsa_3072"),
+        ({"exportable": True}, "vault.key_type", "fail", "exportable"),
+        ({"pss": True}, "vault.sign_pkcs1v15_sha256", "fail", "verify_failed"),
+        ({"sign_status": 403}, "vault.sign_pkcs1v15_sha256", "fail", "forbidden"),
+        ({"read_status": 404}, "vault.key_read", "fail", "not_found"),
+        ({"read_status": 403}, "vault.sign_pkcs1v15_sha256", "inconclusive", "no_public_key"),
+    ],
+)
+def test_vault_probe_fail_and_inconclusive_paths(
+    rsa3072_pair: tuple[Path, Path], rsa2048_pair: tuple[Path, Path],
+    stub: dict[str, object], check: str, status: str, reason: str,
+):
+    priv, pub = rsa2048_pair if stub.get("key_type") == "rsa-2048" else rsa3072_pair
+    with _vault_stub(priv, pub, **stub) as (addr, _):
+        checks = _vault_probe(addr)
+    assert checks[check]["status"] == status and checks[check]["reason"] == reason
+    if stub.get("key_type") == "rsa-2048":
+        assert checks["vault.public_key_export"]["status"] == "fail"
+    if "read_status" in stub:
+        assert checks["vault.key_type"]["reason"] == "not_reached"
+    assert "MRKERRBODYQ" not in json.dumps(checks)
+
+
+def test_vault_probe_unreachable_and_bad_config(capsys):
+    checks = _vault_probe("http://127.0.0.1:9")  # discard port: connection refused
+    assert checks["vault.key_read"]["reason"] == "unreachable"
+    assert checks["vault.sign_pkcs1v15_sha256"]["reason"] == "unreachable"
+    assert sign_vault.main(["vault-probe", "--vault-addr", "http://vault.example:8200",
+                            "--key-name", _PROBE_KEY]) == 2
+    assert sign_vault.main(["vault-probe", "--vault-addr", "https://127.0.0.1:9",
+                            "--key-name", "bad/name"]) == 2
+    assert "MRKTOKENQ" not in capsys.readouterr().err
+
+
+def test_vault_probe_receipt_rules_equal_the_package_copy():
+    """sign_vault.py runs as a single stdlib file, so it carries a copy of the
+    receipt rules; the two must accept, refuse and print the same records."""
+    assert sign_vault._PROBE_SAFE_VALUE_RE.pattern == probe_receipt.SAFE_VALUE_RE.pattern
+    assert sign_vault._PROBE_CHECK_ID_RE.pattern == probe_receipt.CHECK_ID_RE.pattern
+    assert sign_vault._PROBE_FIELD_RE.pattern == probe_receipt.FIELD_RE.pattern
+    assert sign_vault.PROBE_STATUSES == probe_receipt.STATUSES
+    assert sign_vault.PROBE_SCHEMA_VERSION == probe_receipt.SCHEMA_VERSION
+    ours, theirs = sign_vault.ProbeReceipt("vault"), probe_receipt.Receipt("vault")
+    for receipt in (ours, theirs):
+        receipt.add("vault.a", "pass", http_status=200, verified=True, fingerprint_sha256="ab" * 32)
+        receipt.add("vault.b", "inconclusive", reason="no_public_key", key_version=None)
+        receipt.add("vault.c", "fail", reason="forbidden")
+    assert ours.lines() == theirs.lines()
+    assert ours.exit_code() == theirs.exit_code() == 1
+    with pytest.raises(sign_vault.SignError):
+        ours.add("vault.d", "pass", note="two words")
+    for receipt in (ours, theirs):
+        receipt.abort(KeyError("MRKTOKENQ"), ("vault.c", "vault.e"))
+    assert ours.lines() == theirs.lines()
+    assert ours.exit_code() == theirs.exit_code() == probe_receipt.EXIT_PROBE_ERROR == 3
+    assert ours.summary()["error_class"] == "KeyError" and "MRKTOKENQ" not in "".join(ours.lines())
+    assert sign_vault.PROBE_ERROR == probe_receipt.PROBE_ERROR
+
+
+def test_vault_probe_odd_replies_are_receipt_records_not_crashes(rsa3072_pair: tuple[Path, Path]):
+    """Review B1: a non-object `data` in the sign reply and a malformed HTTP
+    status line are outcomes, not exceptions."""
+    priv, pub = rsa3072_pair
+    with _vault_stub(priv, pub, sign_reply=b'{"data": "MRKDATAQ"}') as (addr, _):
+        checks = _vault_probe(addr)
+    sign = checks["vault.sign_pkcs1v15_sha256"]
+    assert (sign["status"], sign["reason"]) == ("fail", "no_signature")
+    assert "MRKDATAQ" not in json.dumps(checks)
+
+    with socket.socket() as srv:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+
+        def garbage() -> None:
+            for _ in range(2):
+                conn, _addr = srv.accept()
+                with conn:
+                    conn.recv(65536)
+                    conn.sendall(b"MRKSTATUSQ not http\r\n\r\n")
+
+        thread = threading.Thread(target=garbage, daemon=True)
+        thread.start()
+        checks = _vault_probe(f"http://127.0.0.1:{srv.getsockname()[1]}")
+        thread.join(timeout=5)
+    assert checks["vault.key_read"]["reason"] == "unreachable"
+    assert checks["vault.sign_pkcs1v15_sha256"]["reason"] == "unreachable"
+    assert "MRKSTATUSQ" not in json.dumps(checks)
+
+
+def test_vault_probe_unexpected_exception_keeps_a_whole_receipt_and_exits_3(
+    tmp_path: Path, rsa3072_pair: tuple[Path, Path], monkeypatch, capsys
+):
+    priv, pub = rsa3072_pair
+
+    def broken(pem: bytes, **_: object) -> bytes:
+        raise RuntimeError("MRKERRBODYQ")
+
+    monkeypatch.setattr(sign_vault, "normalize_public_key_pem", broken)
+    monkeypatch.setenv("VAULT_TOKEN", _PROBE_TOKEN)
+    out = tmp_path / "vault-receipt.jsonl"
+    with _vault_stub(priv, pub) as (addr, calls):
+        rc = sign_vault.main(["vault-probe", "--vault-addr", addr, "--key-name", _PROBE_KEY,
+                              "--receipt", str(out)])
+    captured = capsys.readouterr()
+    assert rc == 3
+    assert calls == [("GET", f"/v1/transit/keys/{_PROBE_KEY}")]  # nothing after the error
+    written = out.read_text(encoding="utf-8")
+    assert written == captured.out and out.stat().st_mode & 0o777 == 0o600
+    records = [json.loads(line) for line in written.splitlines()]
+    assert [(r["check"], r["status"], r.get("reason")) for r in records] == [
+        ("vault.key_read", "pass", None), ("vault.key_type", "pass", None),
+        ("vault.public_key_export", "inconclusive", "probe_error"),
+        ("vault.sign_pkcs1v15_sha256", "inconclusive", "probe_error"),
+        ("vault.summary", "error", None)]
+    assert records[-1]["error_class"] == "RuntimeError"
+    for marker in ("MRKERRBODYQ", "mrktokenq", "mrkkeyq", "Traceback"):
+        assert marker.lower() not in (written + captured.err).lower(), marker

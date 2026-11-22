@@ -251,29 +251,75 @@
      `EgressIP` scoped to `app: rag-mcp-ftp`, registers its Rosetta terminal
      alias, binds the dedicated READ-only RACF ID to that alias, and opens the
      firewall to the LPAR IP on TCP 21 and `FTP.DATA` `PASSIVEPORTRANGE`;
-   - (c) **Phased validation:** first the logon-free transport probe, then a
-     `dry_run` plan without FTP calls (recording the FTP server's `SBDATACONN`
-     code page, to confirm or override `MCP_FTP_ENCODING`), then one live `dataset_read` of an
-     allowlisted member on a test LPAR (recorded with ids, outcome and bytes
-     only). Opting in `job_status,jes_spool_read` in `MCP_ENABLED_TOOLS` waits
-     until z/OS `JESINTERFACELEVEL=2`, scoped `JESSPOOL` READ profiles (never
-     `JESSPOOL *`) and `JESJOBS`/`FTCHKCMD` submission blocks are verified and
-     recorded.
-   - (d) **Dry-run checklist (unverified until the test LPAR records them):**
-     - `SITE NOTRAILINGBLANKS` and `SITE SBSENDEOL=CRLF` are the server's
-       spellings, and the reply wording for an accepted and an ignored operand
-       (the bridge treats 200 without "unrecognized" as confirmed);
-     - whether the strip applies under `FILETYPE=JES`; it covers
+   - (c) **Phased validation:** first the logon-free transport probe
+     (`--probe`), then the read-only site probe (#1343) in the bridge pod,
+     then a `dry_run` plan without FTP calls, then one live `dataset_read` of
+     an allowlisted member on a test LPAR through the agent (recorded with ids,
+     outcome and bytes only). The site probe records the FTP server's
+     `SBDATACONN` code page (`zos.stat_sbdataconn`), to confirm or override
+     `MCP_FTP_ENCODING`:
+
+     ```sh
+     python -m mainframe_rag.mcp --site-probe --dataset <allowlisted member> \
+       [--job-id <JOBnnnnn of an allowlisted team job>] [--receipt <writable path>]
+     ```
+
+     It makes one session and at most one logon attempt per run, with no
+     retry (maintainer decision on #1349 review B2, 2026-11-22, to protect
+     the site account from lockout). A failed logon ends the run and the
+     receipt is finished: exit 1 with the remaining checks `inconclusive`
+     `not_reached`, or exit 3 with them `inconclusive` `probe_error` when
+     the logon hit an unexpected error. A CR or LF in `MCP_FTP_USER` or
+     `MCP_FTP_PASSWORD` is refused with exit 2 before any connection. The
+     bound is per run: the probe uses its own threshold-1 breaker, not the
+     running bridge's (D9), so every rerun is one more logon; rerun only
+     after the cause is fixed. It sends no write, delete or job
+     command (after logon: SITE, STAT, TYPE, PASV, RETR, LIST, ABOR, QUIT),
+     and reads only the named allowlisted dataset and,
+     with `--job-id`, that job's `LIST` and `JESMSGLG` after the bridge's
+     prefix check. Its receipt is one JSON line per check (`pass`, `fail` or
+     `inconclusive` with reply codes, counts and fixed reason codes, never
+     text, names or hosts) plus a summary. Exit 0: no check failed; 1: a
+     check failed; 2: refused to start (configuration or target); 3: stopped
+     on an unexpected error, with the receipt still whole (finished checks
+     kept, the rest `inconclusive` `probe_error`, the summary naming only
+     the exception class). Record the receipt with the dry run. Opting in
+     `job_status,jes_spool_read` in `MCP_ENABLED_TOOLS` waits until
+     `zos.jes_interface_level2` and `zos.jes_spool_mapping` pass, and scoped
+     `JESSPOOL` READ profiles (never `JESSPOOL *`) and `JESJOBS`/`FTCHKCMD`
+     submission blocks are verified and recorded (a site check).
+   - (d) **Dry-run checklist.** The probe's checks answer:
+     - `zos.tls` (verified `AUTH TLS` with `MCP_FTP_CA_FILE`, `PROT P`;
+       `inconclusive` in owner-accepted plain mode), `zos.logon`,
+       `zos.passive_data` (the first data connection, through
+       `PASSIVEPORTRANGE`);
+     - `zos.site_notrailingblanks` and `zos.site_sbsendeol`: the reply code and
+       whether the bridge's rule (200 without "unrecognized") confirms the pin;
+       `zos.jes_site_*` the same after `SITE FILETYPE=JES`. The strip covers
        fixed-format records only, and sequence numbers in columns 73 to 80
        defeat it;
-     - the unit of the JES `LIST` BYTE-COUNT column (the bridge reads it as
-       bytes for the stream-ceiling hint);
-     - that a long `JESMSGLG`/`JESYSMSG` read returns its first and last
-       lines within `MCP_FTP_SPOOL_STREAM_MAX_S`, recorded with ids, window
-       and byte counts only.
+     - `zos.stat_sbdataconn`: the network code page `STAT` reports for
+       `SBDATACONN` against `MCP_FTP_ENCODING` (`inconclusive` when `STAT`
+       does not report it in the assumed `SBDATACONN (file,network)` form);
+     - `zos.dataset_read_ascii`: the read's bytes are translated text (no
+       U+FFFD under `MCP_FTP_ENCODING`, no control bytes, at least 90%
+       printable ASCII);
+     - `zos.jes_interface_level2`: the `LIST` header; `zos.jes_spool_mapping`:
+       the listed `JESMSGLG` id returns a job log banner, not another DD's
+       records (APAR PI98636).
+
+     Still a site check, judged from the receipt or by hand: the unit of the
+     JES `LIST` BYTE-COUNT column (`zos.jes_spool_mapping` records
+     `listed_byte_count` beside `received_bytes`; the bridge reads it as
+     bytes for the stream-ceiling hint), and that a long
+     `JESMSGLG`/`JESYSMSG` read returns its first and last lines within
+     `MCP_FTP_SPOOL_STREAM_MAX_S` (`elapsed_ms`, `stream_complete`), recorded
+     with ids, window and byte counts only.
 9. **D9, logon-failure breaker.** A logon failure (FTP 530) gets its own code
    (named by #1294) and stops further logons until an operator resets it or a
-   cool-down passes, so repeated failures cannot revoke the ID.
+   cool-down passes, so repeated failures cannot revoke the ID. The breaker
+   is per process: the D8(c) site probe holds its own and is bounded to one
+   logon per run instead.
 
 ## Shared credentials (replaces ADR-0011's z/OS row for the pilot)
 

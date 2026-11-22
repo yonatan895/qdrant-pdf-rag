@@ -321,7 +321,9 @@ Start-up reads the configuration and secrets, then checks the team token, then
 serves. It exits 2 on a configuration error (the message names the rule, never a
 value) and 3 when the token check refuses, logging
 `{"action": "gitlab_gateway_start", "decision": <code>}`. The token and the
-bearer secret are never logged.
+bearer secret are never logged. `--site-probe` runs the read-only ADR-0014
+site checks instead of serving and prints a text-free receipt
+(`gitlab_probe.py`; [ADR-0014](adr/0014-gitlab-team-token-gateway.md#open-site-checks-before-go-live)).
 
 **Caller mode.** `GITLAB_AUTH_MODE` is `oidc` (default; also when unset) or
 `bearer`; anything else is a start-up error. `oidc` uses
