@@ -30,6 +30,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Protocol
@@ -38,6 +39,7 @@ from urllib.parse import quote
 import httpx2
 
 from mainframe_rag.gateways.common import (
+    KEY_CARRY_CHARS,
     REDACTED,
     GatewayConfig,
     GatewayConfigError,
@@ -53,6 +55,7 @@ from mainframe_rag.gateways.common import (
     configure_gateway_logging,
     create_gateway_app,
     fit_text_tail,
+    key_runs_on,
     load_config,
 )
 from mainframe_rag.mcp.tool_auth import ASGIApp, JwksCache, Principal
@@ -118,6 +121,9 @@ JOB_LOG_OMITTED: Final = "[gateway: about {} of earlier log omitted]\n"
 JOB_LOG_UNREAD: Final = (
     "[gateway: the end of the log was not read; reading stopped after about {}]\n"
 )
+# Read bytes kept before the job-log window, only to tell whether its first
+# lines may be the value of a key that precedes them (`_carry_free_start`).
+JOB_LOG_LOOKBEHIND_BYTES: Final = 4096
 JOB_LOG_STOPPED: Final = "[gateway: reading stopped here; the end of the log was not read]\n"
 
 
@@ -406,6 +412,36 @@ def _redact_keys(data: bytes, start: int, keys: Sequence[tuple[int, int | None]]
     return bytes(out + data[pos:])
 
 
+def _plain(data: bytes) -> str:
+    """Decoded log bytes as clean_text sees them, before redaction."""
+    text = _ANSI_RE.sub("", data.decode("utf-8", errors="replace"))
+    return "".join(c for c in text if c in "\n\t" or unicodedata.category(c) not in ("Cc", "Cf", "Cs", "Co", "Cn"))
+
+
+def _carry_free_start(before: bytes, data: bytes, *, more_before: bool) -> int:
+    """The offset of the first line start in `data` that no clean_text match
+    can run across from the text before it (`len(data)` if none). `before`
+    is the read text just before `data` (the lookbehind); `more_before`
+    says the stream went on further back. A line start is unsafe while the
+    last non-blank text before it may carry a key into the line
+    (`key_runs_on`), or while only blank text is known before it and more
+    came earlier. From a safe start, cleaning the rest on its own pairs keys
+    and values as cleaning the whole log does."""
+    context = _plain(before).rstrip()[-KEY_CARRY_CHARS:]
+    pos = 0
+    while pos < len(data):
+        newline = data.find(b"\n", pos)
+        line = _plain(data[pos : len(data) if newline < 0 else newline]).rstrip()
+        if not (key_runs_on(context, line) if context else more_before):
+            return pos
+        if newline < 0:
+            return len(data)
+        if line:
+            context = (context + "\n" + line)[-KEY_CARRY_CHARS:]
+        pos = newline + 1
+    return pos
+
+
 def job_log_text(
     read: UpstreamTail,
     tail_bytes: int,
@@ -420,20 +456,26 @@ def job_log_text(
     `keys` are the private-key spans of the whole stream (`PrivateKeySpans`):
     every kept byte inside one is redacted, so a key whose BEGIN line lies
     before the kept lines, or whose END line was never read, leaves no line
-    of its body. Log lines that read like a marker line are neutralised. The
+    of its body. A kept line that may be the value of a key just before the
+    kept lines (`_carry_free_start`, over the read lookbehind) is dropped
+    too. Log lines that read like a marker line are neutralised. The
     kept lines are cleaned whole, then lines are dropped from the start until
     the framed text fits `max_result_bytes`. A marker line says roughly how
     much came before; when the end was not read, a line before and after the
     text says so."""
     data = read.tail
+    before = b""  # read bytes before the kept ones: context only, never returned
     if read.total > tail_bytes:
-        data = data[-(tail_bytes + 1) :]
+        before, data = data[: -(tail_bytes + 1)], data[-(tail_bytes + 1) :]
         newline = data.find(b"\n")
-        data = data[newline + 1 :] if newline >= 0 else b""
+        before, data = (before + data[: newline + 1], data[newline + 1 :]) if newline >= 0 else (before + data, b"")
     start = read.total - len(data)  # the stream offset of the first kept byte
-    skipped = start
     if not read.complete:
         data = data[: data.rfind(b"\n") + 1]
+    if start:
+        lead = _carry_free_start(before, data, more_before=start > len(before))
+        data, start = data[lead:], start + lead
+    skipped = start
     data = _redact_keys(data, start, keys)
     text = clean_text(_ANSI_RE.sub("", data.decode("utf-8", errors="replace")))
     text = _MARKER_LOOKALIKE_RE.sub(lambda m: m.group(1) + NEUTRALIZED_MARKER, text)
@@ -898,7 +940,7 @@ class GitLabTools:
         read = await self.client.get_tail(
             ctx.principal,
             f"/projects/{project_id}/jobs/{args['job_id']}/trace",
-            keep_bytes=tail_bytes + 1,
+            keep_bytes=tail_bytes + 1 + JOB_LOG_LOOKBEHIND_BYTES,
             max_read_bytes=self.backend.max_job_log_read_bytes,
             deadline_s=remaining,
             observe=keys.feed,

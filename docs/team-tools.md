@@ -422,6 +422,12 @@ names it fails at start-up as an unknown key.
   - It is cut at a line boundary. A partial first line is dropped, and so is a
     partial last line when reading stopped early, so a cut never leaves a
     fragment of a secret that redaction would miss.
+  - Up to 4 KiB read before the window (`JOB_LOG_LOOKBEHIND_BYTES`) is held
+    as context and never returned. While the text before a kept line ends in
+    a secret name and separator, an `Authorization` header name or an auth
+    scheme word (`Bearer`, `Basic`, `Splunk`), or in a secret name whose
+    separator opens that line, the line may be the value of a key outside the
+    window and is dropped as well; blank lines in between do not end this.
   - Private keys are found in the whole stream, the dropped bytes included: a
     key runs from a `BEGIN … PRIVATE KEY` line to the next `END … PRIVATE KEY`
     line, or to the end of what was read. Every kept byte inside a key becomes

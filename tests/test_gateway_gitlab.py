@@ -1212,12 +1212,12 @@ def test_job_log_window_or_stop_never_leaks_a_private_key(tmp_path: Path):
     _check_job_log_property(tmp_path, lambda eol: props.pem_secrets(eol, ansi=True))
 
 
-def test_job_log_window_or_stop_never_leaks_a_one_line_secret(tmp_path: Path):
-    """Key/value, auth-header and URL-credential secrets on one line. Families
-    whose value sits on a later line than its key are left out: clean_text's
-    key/value separator spans a line end, and the window can start on the
-    value line (finding recorded on #1347; not fixed here)."""
-    _check_job_log_property(tmp_path, lambda eol: props.kv_secrets(props.SAME_LINE, eol, props.SHORT_LEADS))
+def test_job_log_window_or_stop_never_leaks_a_key_value_secret(tmp_path: Path):
+    """Key/value, auth-header and URL-credential secrets, the value on the
+    key's line or on a later one (clean_text's separator spans a line end),
+    so the window can start on the value line with the key just before it."""
+    families = [name for name in props.FAMILIES if not name.startswith(("zos_", "tso_", "space_"))]
+    _check_job_log_property(tmp_path, lambda eol: props.kv_secrets(families, eol, props.SHORT_LEADS))
 
 
 # --- #1347: field clip and result cut ----------------------------------------------------
