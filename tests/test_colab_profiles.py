@@ -274,7 +274,8 @@ def test_reasoning_inputs_produce_the_argv_and_are_recorded_for_the_manifest():
     ("COLAB_G4_BF16", {"max_model_len": "65536"}),
     ("COLAB_G4_BF16", {"max_model_len": True}),
     ("COLAB_G4_BF16", {"max_num_seqs": 0}),
-    ("COLAB_G4_BF16", {"max_num_seqs": 17}),
+    ("COLAB_G4_BF16", {"max_num_seqs": 65}),
+    ("COLAB_G4_BF16", {"max_num_seqs": 64.0}),
     ("COLAB_G4_BF16", {"reasoning_parser": "qwen3 --enable-auto-tool-choice"}),
     ("COLAB_G4_BF16", {"reasoning_parser": ""}),
     ("COLAB_G4_BF16", {"reasoning_parser": None}),
@@ -285,6 +286,21 @@ def test_reasoning_inputs_produce_the_argv_and_are_recorded_for_the_manifest():
 def test_reasoning_inputs_fail_closed(name, inputs):
     with pytest.raises(ValueError):
         build_profile(name, reasoning=inputs)
+
+
+def test_reasoning_sequence_ceiling_is_64_and_renders_into_the_argv():
+    """#1358/#300: the gist stand-in (a small chat model on the reasoning slot)
+    is measured up to 64 concurrent sequences; the bound is the only limit
+    here, fit stays vLLM's admission."""
+    from mainframe_rag.serve.colab_profiles import REASONING_SEQUENCE_BOUNDS
+
+    assert REASONING_SEQUENCE_BOUNDS == (1, 64)
+    profile = build_profile("COLAB_G4_BF16", reasoning={
+        "model_id": "Example-Org/Other.Model-9B", "revision": REVISION,
+        "max_num_seqs": 64, "reasoning_parser": "none"})
+    assert _flag(profile["servers"][0]["argv"], "--max-num-seqs") == "64"
+    assert profile["reasoning_inputs"]["max_num_seqs"] == 64
+    assert build_profile("COLAB_G4_BF16", reasoning=profile["reasoning_inputs"]) == profile
 
 
 def test_reasoning_window_ceiling_is_the_budget_ceiling_within_the_settings_ceiling():

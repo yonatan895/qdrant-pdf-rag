@@ -266,7 +266,7 @@ gateway configuration to their digests at `c5259460`).
 | `--reasoning-model` | `Qwen/Qwen3.8-27B` | A Hugging Face `owner/name` id |
 | `--reasoning-revision` | the reference pin | 40-hex commit. Required with any other model: the reference pin is never reused |
 | `--reasoning-max-model-len` | `32768` | 4096–131072 (the ceiling of `serve.budget`, within `LLM_MAX_MODEL_LEN`'s 262144) |
-| `--reasoning-max-num-seqs` | `2` (`1` on the A100 profile) | 1–16 |
+| `--reasoning-max-num-seqs` | `2` (`1` on the A100 profile) | 1–64 (above 16 for a small chat model's many short sequences, e.g. contextual gists, #1358/#300; fit stays vLLM's admission) |
 | `--reasoning-parser` | `qwen3` | A vLLM parser name, or `none` to serve without `--reasoning-parser` |
 | `--agent-env NAME=VALUE` (repeatable) | none | Any agent setting: effort defaults (`LLM_REASONING_EFFORT_SIMPLE`, `LLM_REASONING_EFFORT_COMPLEX`, `LLM_REASONING_EFFORTS`), reserves, an agent window below the served one, a request-body extra. At most 32; lane-owned names are refused (gateway legs and routing, any `*_URL` or `*_ENDPOINT`, `QDRANT_*`, `EMBED_*`, `RERANK_*`, credentials, `ALLOW_HASH_MODE`, interpreter paths, and the test-only `COLAB_TEST_*` time-scale prefix, #1299). Names that are agent settings are validated against the settings model at `prepare` |
 | `--gateway-shape` | `local` | `site`: no `/tokenize` pass-through and no argument allow-list (below) |

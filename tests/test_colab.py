@@ -3825,6 +3825,7 @@ def g4_prepare_base(tmp_path_factory, _cpu_proof_cache):
     ("--agent-env", "LLM_RESERVED_OUTPUT_TOKENS=many"),
     ("--reasoning-max-model-len", "262144"),
     ("--reasoning-max-num-seqs", "0"),
+    ("--reasoning-max-num-seqs", "65"),
     ("--reasoning-model", "Example-Org/Other-Model"),             # no revision of its own
     ("--reasoning-parser", "qwen3 --trust-remote-code"),
     ("--gateway-shape", "platform"),

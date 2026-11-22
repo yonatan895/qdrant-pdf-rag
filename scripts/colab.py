@@ -2131,7 +2131,7 @@ def parser() -> argparse.ArgumentParser:
     prep.add_argument("--reasoning-model", help="Hugging Face repository id of the reasoning model")
     prep.add_argument("--reasoning-revision", help="its 40-hex revision (required for a non-reference model)")
     prep.add_argument("--reasoning-max-model-len", type=int, help="served reasoning window (4096-131072)")
-    prep.add_argument("--reasoning-max-num-seqs", type=int, help="served reasoning concurrency (1-16)")
+    prep.add_argument("--reasoning-max-num-seqs", type=int, help="served reasoning concurrency (1-64)")
     prep.add_argument("--reasoning-parser", help="vLLM reasoning parser name, or 'none' to serve without one")
     prep.add_argument("--agent-env", action="append", metavar="NAME=VALUE",
                       help="extra agent setting frozen into the run (repeatable; lane-owned names refused)")
