@@ -173,10 +173,10 @@ tasks:
     summary: |
       Builds images/openwebui/Containerfile (the pinned upstream slim release
       plus one ownership layer) as OPENWEBUI_IMAGE (default
-      mainframe-rag/openwebui:v0.12.3-slim). Connected host only; the air gap
+      mainframe-rag/openwebui:v0.13.4-slim). Connected host only; the air gap
       never builds. The pushed manifest digest is then recorded in images.txt.
     vars:
-      OPENWEBUI_IMAGE: '{{if hasKey . "OPENWEBUI_IMAGE"}}{{.OPENWEBUI_IMAGE}}{{else}}mainframe-rag/openwebui:v0.12.3-slim{{end}}'
+      OPENWEBUI_IMAGE: '{{if hasKey . "OPENWEBUI_IMAGE"}}{{.OPENWEBUI_IMAGE}}{{else}}mainframe-rag/openwebui:v0.13.4-slim{{end}}'
     env:
       TASK_OPENWEBUI_IMAGE: '{{.OPENWEBUI_IMAGE}}'
     cmds:

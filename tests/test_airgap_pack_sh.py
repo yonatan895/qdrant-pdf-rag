@@ -669,15 +669,15 @@ def test_openwebui_base_and_derived_pin_needles_are_disjoint(pack_tree):
     tmp_path, _log, _head, _key = pack_tree
     images = tmp_path / "images.txt"
     text = images.read_text()
-    base = "ghcr.io/open-webui/open-webui:v0.12.3-slim"
-    derived = "ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.12.3-slim"
-    assert re.search(rf"^{re.escape(base)}\s+sha256:5adfb035[0-9a-f]{{56}}$", text, re.MULTILINE)
+    base = "ghcr.io/open-webui/open-webui:v0.13.4-slim"
+    derived = "ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.13.4-slim"
+    assert re.search(rf"^{re.escape(base)}\s+sha256:0c4439e7[0-9a-f]{{56}}$", text, re.MULTILINE)
     assert re.search(rf"^{re.escape(derived)}\s+sha256:PENDING$", text, re.MULTILINE)
     text = re.sub(rf"^({re.escape(base)})\s+\S+$", r"\1 sha256:" + "1" * 64, text, flags=re.MULTILINE)
     images.write_text(text)
     probe = tmp_path / "scripts" / "airgap" / "pin-probe.sh"
     probe.write_text('. "$(dirname -- "$0")/common.sh"\n'
-                     "pin_from_images_txt open-webui:v0.12.3-slim\n"
+                     "pin_from_images_txt open-webui:v0.13.4-slim\n"
                      "pin_from_images_txt qdrant-pdf-rag-openwebui\n"
                      "if pin_recorded qdrant-pdf-rag-openwebui; then echo derived-recorded; else echo derived-pending; fi\n"
                      "pin_from_images_txt qdrant\n")

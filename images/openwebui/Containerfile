@@ -1,5 +1,5 @@
 # Open WebUI product image (issues #1073, #1074; ADR-0007 R1, ADR-0008): the
-# unmodified upstream Open WebUI v0.12.3 SLIM release, derived only to run as
+# unmodified upstream Open WebUI v0.13.4 SLIM release, derived only to run as
 # an arbitrary non-root UID in group 0 (OpenShift restricted-v2, no anyuid).
 #
 # Derived, not rebuilt: no source checkout, no Node/SvelteKit build, no pip
@@ -13,17 +13,17 @@
 # test pins this FROM digest to the ghcr.io/open-webui line of images.txt.
 # Build on the connected host only, never in the air gap; no build contexts:
 #   docker build -f images/openwebui/Containerfile \
-#     -t ghcr.io/<owner>/qdrant-pdf-rag-openwebui:v0.12.3-slim images/openwebui
+#     -t ghcr.io/<owner>/qdrant-pdf-rag-openwebui:v0.13.4-slim images/openwebui
 # The pushed manifest digest is then recorded in images.txt (the pin).
 #
-# Base: ghcr.io/open-webui/open-webui:v0.12.3-slim, image index digest below
-# (amd64 manifest sha256:912c133d2dcecb8d74662f9be64b1f00f303a0d8c0836cbb30fd156f65652f5f;
-# org.opencontainers.image.revision 91ea4e3421d1d8069f13d4a463fcb5986d94ea60 =
-# upstream tag v0.12.3; created 2026-10-16). Tag plus digest is not a valid
+# Base: ghcr.io/open-webui/open-webui:v0.13.4-slim, image index digest below
+# (amd64 manifest sha256:4da3e2b46ebb1dd63f025ec1cf20a0d834094d75bd2a390762810adc76dbc641;
+# org.opencontainers.image.revision 0666e59d26a4d056e0bacee41742486badd71cf8 =
+# upstream tag v0.13.4; created 2026-11-17; #1357 import). Tag plus digest is not a valid
 # reference here, so the digest is the contract (as in Containerfile.agent).
 # The slim variant matters: it builds no vector client at import time and
 # ships no embedding, reranker or Whisper models (no second vector store).
-FROM ghcr.io/open-webui/open-webui@sha256:5adfb0355bbe4a5860c0ba9482cc0b40f573de3749a21a64cf4789391a14fffc
+FROM ghcr.io/open-webui/open-webui@sha256:0c4439e78c24c85e3e7a41936771d3b02f0df38daf28a086cd83ca74804f7676
 
 USER 0:0
 # Writable paths at run time, each covered here and by a mount in the trial:

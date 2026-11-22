@@ -53,7 +53,7 @@ USER_KEY = "sk-synthetic-user-key"
 
 
 class FakeOpenWebUI:
-    """Functions API of the pinned release (v0.12.3), as the installer uses it.
+    """Functions API of the pinned release (v0.13.4), as the installer uses it.
 
     Status codes follow the release source (backend/open_webui): an unknown key
     is 401 (utils/auth.py get_current_user_by_api_key), a valid non-admin key is
@@ -167,9 +167,9 @@ def _writes(state):
     return [(m, p) for m, p, _ in state.requests if m == "POST"]
 
 
-@pytest.mark.parametrize("absent_status", [401, 404], ids=["v0.12.3-401", "404"])
+@pytest.mark.parametrize("absent_status", [401, 404], ids=["v0.13.4-401", "404"])
 def test_installer_first_install_creates_when_the_function_is_absent(owui, absent_status):
-    """v0.12.3 answers an absent Function with 401 (routers/functions.py
+    """v0.13.4 answers an absent Function with 401 (routers/functions.py
     get_function_by_id); a fresh install must create it, never read that 401 as
     a refused key (#1107 lane finding)."""
     state, client, _ = owui
@@ -321,7 +321,7 @@ def test_installer_pins_the_repository_rating_action_by_hash():
 
 
 def test_repository_functions_survive_open_webuis_import_rewrite():
-    """Open WebUI v0.12.3 rewrites `from utils|apps|main|config` anywhere in a
+    """Open WebUI v0.13.4 rewrites `from utils|apps|main|config` anywhere in a
     Function's text before storing it (utils/plugin.py replace_imports): the
     stored hash would never match, so neither file may contain them."""
     for name in ("docs_pipe.py", "rating_action.py"):
@@ -619,10 +619,10 @@ def test_purge_deletes_expired_chats_snapshots_links_and_files_and_reclaims_the_
                                               "files": 0, "orphans": 0, "folders": 0}
 
 
-# Open WebUI v0.12.3 keeps a share link's snapshot in its own table (migration
+# Open WebUI v0.13.4 keeps a share link's snapshot in its own table (migration
 # c1d2e3f4a5b6 moved the legacy "shared-<chat id>" chat rows there) and who may
 # open it in access_grant rows keyed by the ORIGINAL chat id (models/
-# shared_chats.py, models/access_grants.py at tag v0.12.3).
+# shared_chats.py, models/access_grants.py at tag v0.13.4).
 SHARED_CHAT_DDL = ("CREATE TABLE shared_chat (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL "
                    "REFERENCES chat(id) ON DELETE CASCADE, user_id TEXT NOT NULL, title TEXT, "
                    "chat JSON, created_at BIGINT, updated_at BIGINT)")
@@ -723,7 +723,7 @@ def test_purge_removes_v0123_share_snapshots_of_purged_chats_and_aged_snapshots(
 
 
 def test_purge_counts_a_share_snapshot_of_unknown_age_as_expired(tmp_path):
-    """shared_chat timestamps are nullable in v0.12.3: a snapshot whose age is
+    """shared_chat timestamps are nullable in v0.13.4: a snapshot whose age is
     unknown must not outlive the window by escaping the comparison."""
     data, db, conn = _db(tmp_path)
     conn.execute(SHARED_CHAT_DDL)
@@ -1013,11 +1013,11 @@ def test_purge_orphan_unlink_failure_is_a_failed_run_retried_next_time(tmp_path,
     assert purge.run_once(db, data, 30, status, NOW + 1) is True and not stale.exists()
 
 
-# Open WebUI v0.12.3's folder table as its migrations leave it in SQLite
+# Open WebUI v0.13.4's folder table as its migrations leave it in SQLite
 # (c69f45358db4 creates it with the composite key, 4ace53fd72c8 turns the
 # timestamps into NOT NULL epoch-second BIGINTs, d31026856c01 adds data). A chat
 # is filed by chat.folder_id; an automation row may name a folder too
-# (models/folders.py, chats.py, automations.py at tag v0.12.3).
+# (models/folders.py, chats.py, automations.py at tag v0.13.4).
 FOLDER_DDL = ("CREATE TABLE folder (id TEXT NOT NULL, parent_id TEXT, user_id TEXT NOT NULL, "
               "name TEXT NOT NULL, items JSON, meta JSON, is_expanded BOOLEAN NOT NULL, "
               "created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, data JSON, "
@@ -1180,7 +1180,7 @@ def test_purge_scrubs_the_text_of_a_deleted_folder_when_nothing_else_is_deleted(
 
 
 def test_purge_never_deletes_a_folder_of_unknown_age(tmp_path):
-    """The v0.12.3 model declares folder.updated_at nullable (only the
+    """The v0.13.4 model declares folder.updated_at nullable (only the
     migration makes it NOT NULL). Maintainer decision 2026-11-16 (F-b): a
     folder of unknown age is never purged, used or not, as the chat and file
     purges keep rows of unknown age. Its aged parent therefore keeps a child

@@ -47,7 +47,7 @@ USERS = {
 }
 EMAIL_DOMAIN = "trial.test"
 DOCS_FUNCTION = "mainframe_rag_docs"  # provision_pipe.py PIPE_ID
-# The docs Pipe's answer-depth entries (#1255, docs_pipe.py DEPTHS) as Open WebUI v0.12.3
+# The docs Pipe's answer-depth entries (#1255, docs_pipe.py DEPTHS) as Open WebUI v0.13.4
 # models: `<Function id>.<entry id>`, with the entry's display name. The first is the default.
 DOCS_MODELS = (
     (f"{DOCS_FUNCTION}.standard", "Rosetta"),
@@ -226,7 +226,7 @@ class Session:
         """POST and read the reply as it arrives, timing it in seconds from the request:
         the headers, the first and last content delta of an SSE reply, the end, and the
         longest silence the connection saw (no byte between two reads). Open WebUI
-        v0.12.3 answers a saved chat without a socket session with one JSON reply at the
+        v0.13.4 answers a saved chat without a socket session with one JSON reply at the
         end (the connection is silent for the whole answer), a request without a chat
         with SSE, and a browser request (session_id) at once with the task ids. Of an SSE
         reply only counts are kept: content characters, cited lines under the Pipe's

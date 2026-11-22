@@ -115,7 +115,7 @@ proxy images come from the bundle through `airgap:load`. It follows the
   - the browser's path (a socket session): Open WebUI answers at once and saves the message from
     a background task;
   - the API path for a saved chat: one request stays silent until the answer is complete
-    (v0.12.3 replies with JSON at the end);
+    (v0.13.4 replies with JSON at the end);
   - the OpenAI-compatible stream: no saved chat, SSE.
 
   Each must finish with its citation (source chips; on the stream, a line under the Pipe's
@@ -128,7 +128,7 @@ proxy images come from the bundle through `airgap:load`. It follows the
   |---|---|---|
   | Router (Route) | 300 s idle (HAProxy `timeout`; the stand-in nginx reads it from the stored Route) | `templates/openwebui-route.yaml:18`, `values.yaml` `route.timeoutSeconds` |
   | Allow-list proxy | 600 s read and send idle | `files/openwebui/proxy.nginx.conf:85-86` |
-  | Open WebUI v0.12.3 | none on a Function's stream; `AIOHTTP_CLIENT_TIMEOUT` serves the disabled OpenAI/Ollama connections; the socket pings every 25 s | image `open_webui/env.py:519-529,614-618` |
+  | Open WebUI v0.13.4 | none on a Function's stream; `AIOHTTP_CLIENT_TIMEOUT` serves the disabled OpenAI/Ollama connections; the socket pings every 25 s | image `open_webui/env.py:509-513,598-602` |
   | docs Pipe to agent | 300 s per read (`TIMEOUT_S`), 10 s connect | `files/openwebui/docs_pipe.py:472,535` |
   | Agent request | 270 s total (`REQUEST_DEADLINE_S`): the binding limit; past it the stream ends with a fixed error frame | `values.yaml:19`, `agent/app.py:494,514` |
   | Agent to gateway | 300 s per read (`answer_timeout_s`) | `config.py:236`, `agent/answer.py:1812` |
@@ -149,7 +149,7 @@ product defect or a lane defect; do not weaken a rule in `checks.py` to pass.
 
 The same workflow's `image-openwebui` job (dispatch and nightly only) builds
 that Containerfile and pushes `ghcr.io/<owner>/qdrant-pdf-rag-openwebui` with the commit-SHA tag,
-sets the `v0.12.3-slim` tag only if it does not exist yet (never moves it), and
+sets the `v0.13.4-slim` tag only if it does not exist yet (never moves it), and
 writes the manifest digest, the tag outcome and a rebuild-reproducibility probe to the job summary; the `images.txt` pin is a separate PR. Every other e2e job that runs
 the operator flow sets `OPENWEBUI_ENABLED=false` (the front end is default-on
 and fails closed without site inputs); only the `openwebui` and `openwebui-operator` lanes deploy it.

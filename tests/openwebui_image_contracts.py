@@ -14,7 +14,7 @@ Without Docker or the image it skips (never pulled here, about 1 GB).
 - The shipped ca-trust init script (charts/mainframe-rag/files/openwebui/
   ca_trust.py) as the pod runs it: a corrupt bundle stops the init step; a good
   one makes httpx and aiohttp TLS to the IdP work.
-- The v0.12.3 role mapping (utils/oauth.py get_user_role) that the AD FS
+- The v0.13.4 role mapping (utils/oauth.py get_user_role) that the AD FS
   procedure in docs/deploy.md relies on for revocation.
 """
 from __future__ import annotations
@@ -177,7 +177,7 @@ asyncio.run(main())
 
 
 def test_pinned_role_mapping_needs_a_roles_claim_on_every_sign_in(tmp_path):
-    """docs/deploy.md (AD FS) relies on this v0.12.3 behaviour of
+    """docs/deploy.md (AD FS) relies on this v0.13.4 behaviour of
     utils/oauth.py get_user_role, which the sign-in callback runs for an
     existing user on every sign-in (review #1083 B2):
     - no roles claim: an existing user KEEPS the stored role (an admin stays

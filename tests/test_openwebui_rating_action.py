@@ -2,7 +2,7 @@
 only by the agent's feedback store (ADR-0005), never in Open WebUI's database.
 
 The Action runs inside Open WebUI, so these tests drive it through the
-interface Open WebUI v0.12.3 calls (`utils/actions.py chat_action`: `body` as
+interface Open WebUI v0.13.4 calls (`utils/actions.py chat_action`: `body` as
 the browser builds it in `Chat.svelte chatActionHandler`, plus the declared
 reserved arguments), with no Open WebUI installed. Expected user-visible texts
 are spelled out here, not read back from the Action's tables.
@@ -59,7 +59,7 @@ class FakeAgent:
 
 def _body(content: Any = REFERENCED, *, message_id: str = "m2", last_id: str = "m2",
           role: str = "assistant") -> dict[str, Any]:
-    """The browser's action body (Chat.svelte chatActionHandler, v0.12.3)."""
+    """The browser's action body (Chat.svelte chatActionHandler, v0.13.4)."""
     return {
         "model": "mainframe_rag_docs",
         "messages": [
@@ -258,7 +258,7 @@ def test_open_webui_pin_and_install_header():
     source = Path(rating_action.__file__).read_text(encoding="utf-8")
     header = source.split('"""', 2)[1]
     fields = dict(re.findall(r"^(\w+):\s*(.+)$", header, flags=re.MULTILINE))
-    assert rating_action.OPEN_WEBUI_VERSION == "0.12.3" == fields["required_open_webui_version"]
+    assert rating_action.OPEN_WEBUI_VERSION == "0.13.4" == fields["required_open_webui_version"]
     assert "requirements" not in fields
     imports = set(re.findall(r"^(?:from|import) (\w+)", source, flags=re.MULTILINE))
     assert imports <= {"__future__", "collections", "contextlib", "json", "re", "typing", "httpx",

@@ -10,7 +10,7 @@ over the agent (#1072) is the only Function; its answer-depth entries
 
 The environment is the ADR-0007 condition set (V1 vector store, V2 answer
 path, R2 offline, R3 identity, S2-S4 storage, audit and sharing). Variable
-names follow Open WebUI v0.12.3; they are pending #1073 qualification and are
+names follow Open WebUI v0.13.4; they are pending #1073 qualification and are
 re-qualified on every pin import (P1). ENABLE_PERSISTENT_CONFIG=false keeps
 this environment authoritative over admin-UI edits.
 
@@ -67,7 +67,7 @@ spec:
       imagePullSecrets: []
       {{- end }}
       {{- if $idpCA }}
-      # Optional IdP CA (openwebui.oidc.caBundle). Open WebUI v0.12.3 signs in
+      # Optional IdP CA (openwebui.oidc.caBundle). Open WebUI v0.13.4 signs in
       # through authlib's httpx client (trust_env: SSL_CERT_FILE, else certifi)
       # and refreshes through aiohttp (OpenSSL default file, also SSL_CERT_FILE);
       # requests reads REQUESTS_CA_BUNDLE. Pointing them at the IdP CA alone would
@@ -201,7 +201,7 @@ spec:
               value: "false"
             - name: USER_PERMISSIONS_WORKSPACE_TOOLS_ACCESS
               value: "false"
-            # Shared prompts are repository-owned (#1255): v0.12.3 lets a user
+            # Shared prompts are repository-owned (#1255): v0.13.4 lets a user
             # create a prompt with either permission (stored XSS through prompts
             # was CVE-2025-64495). Users still use the shared `/` commands.
             - name: USER_PERMISSIONS_WORKSPACE_PROMPTS_ACCESS
@@ -213,8 +213,6 @@ spec:
             - name: USER_PERMISSIONS_FEATURES_WEB_SEARCH
               value: "false"
             - name: USER_PERMISSIONS_FEATURES_CODE_INTERPRETER
-              value: "false"
-            - name: USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS
               value: "false"
             - name: USER_PERMISSIONS_FEATURES_NOTES
               value: "false"
@@ -233,18 +231,34 @@ spec:
               value: "false"
             - name: ENABLE_OLLAMA_API
               value: "false"
-            # v0.12.3 probes host.docker.internal:11434/12434 on first start even
+            # v0.13.4 probes host.docker.internal:11434/12434 on first start even
             # with ENABLE_OLLAMA_API=false unless the base URL is explicit (#1073
             # trial R2). Loopback, discard port: the probe fails locally.
             - name: OLLAMA_BASE_URL
               value: "http://127.0.0.1:9"
-            - name: ENABLE_DIRECT_CONNECTIONS
-              value: "false"
+            # v0.13.4 removed ENABLE_DIRECT_CONNECTIONS, ENABLE_DIRECT_INTEGRATIONS and
+            # USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS (#1357): nothing reads them.
+            # Their successor, Tether (a user's own machine adds its models and
+            # tool servers), has no switch: the proxy refuses /api/v1/tether and the
+            # session API it needs (/api/v1/auths/sessions, ADR-0007 E1).
             - name: ENABLE_TOOL_SERVERS
               value: "false"
             - name: ENABLE_TOOLS
               value: "false"
-            - name: ENABLE_DIRECT_INTEGRATIONS
+            # v0.13.x features, pinned off (#1357). Auto tool permissions would score
+            # tool calls, and tool search would pick tools, at an external endpoint
+            # (default api.openai.com); video generation is a model connection. The
+            # notifications inbox (default on) and comments store rows keyed by chat
+            # id that the retention purge does not know, and the proxy refuses their APIs.
+            - name: ENABLE_TOOL_PERMISSIONS_AUTO
+              value: "false"
+            - name: ENABLE_TOOL_SEARCH
+              value: "false"
+            - name: ENABLE_VIDEO_GENERATION
+              value: "false"
+            - name: ENABLE_NOTIFICATIONS
+              value: "false"
+            - name: ENABLE_COMMENTS
               value: "false"
             - name: BYPASS_MODEL_ACCESS_CONTROL
               value: "false"
@@ -350,13 +364,18 @@ spec:
               value: "false"
             - name: ENABLE_OAUTH_PERSISTENT_CONFIG
               value: "false"
-            # No raw ID token in a browser cookie (#1070, maintainer decision). v0.12.3
+            # No raw ID token in a browser cookie (#1070, maintainer decision). v0.13.4
             # never reads it back (sign-out takes id_token_hint from the server-side
             # OAuth session); on the callback it counts against the proxy's 4 KiB
             # response-header buffer, so a large group claim made sign-in fail with 502.
             - name: ENABLE_OAUTH_ID_TOKEN_COOKIE
               value: "false"
             - name: JWT_EXPIRES_IN
+              value: 8h
+            # v0.13.x refresh-token sessions (/api/v1/auths/sessions, default idle
+            # lifetime 90 days): the proxy refuses that API; this keeps any such
+            # session to the browser session's 8 hours idle as a second layer (#1357).
+            - name: SESSION_EXPIRES_IN
               value: 8h
             - name: OPENID_PROVIDER_URL
               value: {{ $o.oidc.providerUrl | quote }}
@@ -365,7 +384,7 @@ spec:
             - name: OAUTH_CLIENT_ID
               value: {{ $o.oidc.clientId | quote }}
             # Scopes and identity claims are site inputs (values.yaml; AD FS in
-            # docs/deploy.md). v0.12.3 reads email, name, groups and roles from the
+            # docs/deploy.md). v0.13.4 reads email, name, groups and roles from the
             # ID token and calls userinfo when the e-mail or username claim is
             # missing there (userinfo wins on a conflict).
             - name: OAUTH_SCOPES

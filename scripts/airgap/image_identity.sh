@@ -75,7 +75,7 @@ image_role_ref() {
         openobserve) echo "$INTERNAL_REGISTRY/openobserve/openobserve:v1.1.2" ;;
         otelcol) echo "$INTERNAL_REGISTRY/otel/opentelemetry-collector-contrib:0.160.0" ;;
         oauth_proxy) echo "$INTERNAL_REGISTRY/openshift4/ose-oauth-proxy:v4.14" ;;
-        openwebui) echo "$INTERNAL_REGISTRY/qdrant-pdf-rag-openwebui:v0.12.3-slim" ;;
+        openwebui) echo "$INTERNAL_REGISTRY/qdrant-pdf-rag-openwebui:v0.13.4-slim" ;;
         openwebui_proxy) echo "$INTERNAL_REGISTRY/nginxinc/nginx-unprivileged:1.30.6-alpine" ;;
         *) die "unknown image role: $1" ;;
     esac

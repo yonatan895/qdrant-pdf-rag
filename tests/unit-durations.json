@@ -3372,7 +3372,7 @@
 "tests/test_openwebui_frontend_scripts.py::test_installer_errors_are_fixed_text_without_response_bodies[500]": 599,
 "tests/test_openwebui_frontend_scripts.py::test_installer_fails_closed_when_the_listing_cannot_show_the_function": 598,
 "tests/test_openwebui_frontend_scripts.py::test_installer_first_install_creates_when_the_function_is_absent[404]": 573,
-"tests/test_openwebui_frontend_scripts.py::test_installer_first_install_creates_when_the_function_is_absent[v0.12.3-401]": 598,
+"tests/test_openwebui_frontend_scripts.py::test_installer_first_install_creates_when_the_function_is_absent[v0.13.4-401]": 598,
 "tests/test_openwebui_frontend_scripts.py::test_installer_installs_the_rating_action_active_and_global": 1048,
 "tests/test_openwebui_frontend_scripts.py::test_installer_main_installs_the_action_only_when_it_is_mounted": 669,
 "tests/test_openwebui_frontend_scripts.py::test_installer_main_reads_the_key_from_stdin_only": 609,

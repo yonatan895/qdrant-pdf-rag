@@ -85,7 +85,7 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
         echo "[dryrun] skopeo copy oci-archive:$ARTDIR/$OAUTH_TAR docker://$INTERNAL_REGISTRY/openshift4/ose-oauth-proxy:v4.14"
     fi
     if [ -n "$OPENWEBUI_TAR" ]; then
-        echo "[dryrun] skopeo copy oci-archive:$ARTDIR/$OPENWEBUI_TAR docker://$INTERNAL_REGISTRY/qdrant-pdf-rag-openwebui:v0.12.3-slim"
+        echo "[dryrun] skopeo copy oci-archive:$ARTDIR/$OPENWEBUI_TAR docker://$INTERNAL_REGISTRY/qdrant-pdf-rag-openwebui:v0.13.4-slim"
     fi
     if [ -n "$OPENWEBUI_PROXY_TAR" ]; then
         echo "[dryrun] skopeo copy oci-archive:$ARTDIR/$OPENWEBUI_PROXY_TAR docker://$INTERNAL_REGISTRY/nginxinc/nginx-unprivileged:1.30.6-alpine"
@@ -286,7 +286,7 @@ if [ -n "$OAUTH_TAR" ]; then
 fi
 if [ -n "$OPENWEBUI_TAR" ]; then
     # ADR-0007 docs front end: the tag the chart's images.openwebui renders.
-    load "$OPENWEBUI_TAR" "$INTERNAL_REGISTRY/qdrant-pdf-rag-openwebui:v0.12.3-slim" openwebui_digest
+    load "$OPENWEBUI_TAR" "$INTERNAL_REGISTRY/qdrant-pdf-rag-openwebui:v0.13.4-slim" openwebui_digest
 fi
 if [ -n "$OPENWEBUI_PROXY_TAR" ]; then
     # ADR-0007 E1: the tag the chart's images.openwebuiProxy renders.

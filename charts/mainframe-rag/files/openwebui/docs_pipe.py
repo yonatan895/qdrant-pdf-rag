@@ -2,7 +2,7 @@
 title: Rosetta
 author: mainframe-rag
 version: 0.1.0
-required_open_webui_version: 0.12.3
+required_open_webui_version: 0.13.4
 license: Apache-2.0
 description: The documentation corpus through the agent's /v1/chat, with its validated citations, abstention and verification state.
 """
@@ -26,7 +26,7 @@ from typing import Any, NamedTuple
 import httpx
 from pydantic import BaseModel, Field
 
-OPEN_WEBUI_VERSION = "0.12.3"
+OPEN_WEBUI_VERSION = "0.13.4"
 CHAT_PATH = "/v1/chat"
 ERROR_BODY_MAX_BYTES = 65536
 
@@ -91,7 +91,7 @@ HOUSE_NOTE = "house guidance"
 TASK_REPLY = "Docs question"
 
 # Answer depths (#1255): the manifold entries Open WebUI shows as models,
-# `<Function id>.<id>` (v0.12.3 functions.py get_function_models). The id is
+# `<Function id>.<id>` (v0.13.4 functions.py get_function_models). The id is
 # stored in chats and model grants, so it never changes; the name is what
 # users see. Each entry sends its id as the agent's symbolic `reasoning_depth`
 # (#1289), never a literal effort: the agent resolves it from its own
@@ -190,7 +190,7 @@ IMAGE_READ_FAILED = "An image could not be read, so the search did not use it"
 EARLIER_IMAGE = "An earlier image was not re-sent"
 IMAGE_READS_SUMMARY = "What Rosetta read from your image"
 IMAGE_CARRIED = "[Image {index}, as read by the model]: {text}"
-# The block opens as Open WebUI v0.12.3's details tokenizer requires
+# The block opens as Open WebUI v0.13.4's details tokenizer requires
 # (src/lib/utils/marked/extension.ts: `<details>` then a newline, then
 # `<summary>...</summary>` and a newline). Each transcript sits in a backtick
 # fence longer than any backtick run in it, with `&`, `<` and `>` escaped: that
@@ -342,11 +342,23 @@ def _split_reads(text: str) -> tuple[str, list[tuple[int, str]]]:
     return stripped[:start], reads
 
 
+def _hidden_tool_turn(message: dict[str, Any]) -> bool:
+    """A tool result, or an assistant turn that only calls a tool. With native
+    function calling (v0.13.1 and later) Open WebUI adds such a pair for memory
+    recall, the skills list or the attached knowledge after the user's message
+    and replays it later, so a tool turn can be last (#1357). Neither is ever
+    sent; skipping them keeps the user's message the question."""
+    role = message.get("role")
+    return role == "tool" or (role == "assistant" and bool(message.get("tool_calls"))
+                              and not _text(message.get("content")))
+
+
 def _build(messages: object, user_valves: object, *, images_on: bool, max_images: int,
            max_image_bytes: int) -> tuple[dict[str, Any] | str, bool]:
     """(the agent request body, or the fixed text to show instead of a
     call; whether an earlier image was dropped without its transcript)."""
-    items = [m for m in messages if isinstance(m, dict)] if isinstance(messages, list) else []
+    items = [m for m in messages if isinstance(m, dict) and not _hidden_tool_turn(m)] \
+        if isinstance(messages, list) else []
     if not items or items[-1].get("role") != "user":
         return NO_TEXT_TURN, False
     last = items[-1].get("content")
