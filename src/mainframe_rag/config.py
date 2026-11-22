@@ -285,6 +285,13 @@ class Settings(BaseSettings):
     # (Metal) C takes the complex path and the coding prompt extension. False
     # restores the pre-#1276 complexity and prompt bytes for every request.
     answer_coding_mode_enabled: bool = True
+    # SPL mode (issue #1293, default off pending maintainer sign-off on prompt
+    # wording and default-on flip): a request to write, fix, optimise or
+    # explain Splunk SPL over z/OS data, or pasted Splunk results, takes the
+    # complex path and the SPL prompt extension (taking precedence over coding
+    # mode when both match). False restores the pre-#1293 complexity and prompt
+    # bytes for every request (the `spl` fence tag in SCRIPT_LANGS is not gated).
+    answer_spl_mode_enabled: bool = False
 
     # Dense query instruction prefix for asymmetric embedders (e.g. Qwen3-Embedding).
     # Applied to query vector embeddings; chunks during ingest remain raw text.
@@ -363,6 +370,21 @@ class Settings(BaseSettings):
     answer_expand_enabled: bool = False
     answer_expand_budget: int = Field(default=16, ge=0, le=32)
     answer_expand_per_hit: int = Field(default=4, ge=1, le=8)
+    # Research mode (ADR-0013 / issue #1325; default off): bounded
+    # model-directed follow-up search loop on opted-in /v1/chat* turns.
+    # Off: every request without the field is byte-identical, and a request
+    # carrying the field fails closed with 422 research_mode_disabled.
+    # Hard ceilings in code: at most 2 follow-up rounds and 3 total searches
+    # (first retrieval included). Enabling requires request_deadline_s > 0
+    # and research_stage_budget_s + one search overrun < request_deadline_s.
+    research_mode_enabled: bool = False
+    research_max_rounds: int = Field(default=2, ge=1, le=2)
+    research_max_searches: int = Field(default=3, ge=1, le=3)
+    research_stage_budget_s: float = Field(default=30.0, gt=0.0, le=120.0, allow_inf_nan=False)
+    research_max_packed_excerpts: int = Field(default=24, ge=1, le=64)
+    research_plan_max_excerpts: int = Field(default=16, ge=1, le=32)
+    research_plan_excerpt_chars: int = Field(default=2000, ge=100, le=4000)
+    research_plan_max_tokens: int = Field(default=8192, ge=32, le=16384)
 
     # Reasoning effort control: directs the reasoning model to think more thoroughly
     # on complex operational, diagnostic, and comparative inquiries while conserving
@@ -651,6 +673,30 @@ class Settings(BaseSettings):
             self.feedback_url and self.feedback_api_key and self.feedback_api_key.strip()
         ):
             raise ValueError("FEEDBACK_ENABLED requires FEEDBACK_URL and FEEDBACK_API_KEY")
+        return self
+
+    def research_search_overrun_s(self) -> float:
+        """Worst-case per-leg timeout overrun of one in-flight follow-up search
+        (ADR-0013 D4): dense embed + Qdrant + optional rerank."""
+        overrun = float(self.embed_timeout_s) + float(self.qdrant_timeout_s)
+        if self.rerank_enabled:
+            overrun += float(self.rerank_timeout_s)
+        return overrun
+
+    @model_validator(mode="after")
+    def _research_mode_bounds(self) -> Settings:
+        """ADR-0013 D4 / #1325: refuse enabling research mode at startup when
+        REQUEST_DEADLINE_S is unset or cannot cover the stage budget plus one
+        in-flight search's per-leg timeouts."""
+        if not self.research_mode_enabled:
+            return self
+        if self.request_deadline_s <= 0:
+            raise ValueError("RESEARCH_MODE_ENABLED requires REQUEST_DEADLINE_S > 0")
+        if self.research_stage_budget_s + self.research_search_overrun_s() >= self.request_deadline_s:
+            raise ValueError(
+                "RESEARCH_STAGE_BUDGET_S plus one search overrun must be strictly below "
+                "REQUEST_DEADLINE_S"
+            )
         return self
 
     @model_validator(mode="after")

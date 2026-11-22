@@ -402,3 +402,242 @@ def test_retrieval_defaults_resolve_each_normalized_invocation(monkeypatch):
                 Path("evals/golden.jsonl"), Path(f"evals/baseline{suffix}.json"))
             assert default_retrieval_paths(normalized, "paraphrase") == (
                 Path("evals/paraphrase.jsonl"), Path(f"evals/baseline-paraphrase{suffix}.json"))
+
+
+# ------------------------------------------- passage-level gold (#1317 PR 2)
+def _chunk_hit(
+    chunk_id: str,
+    doc_id: str = "SC23-6883-70",
+    heading: str = "Chapter 4 > Mounting",
+    page_label: str = "4-12",
+    score: float = 0.9,
+) -> SearchHit:
+    return SearchHit(
+        chunk_id=chunk_id,
+        score=score,
+        cite=f"{doc_id} Reference, {heading}, p. {page_label}",
+        heading=heading,
+        text="excerpt text",
+        doc_id=doc_id,
+        title="Reference",
+        page_label=page_label,
+        chunk_type="narrative",
+        message_ids=(),
+    )
+
+
+def _adjudicated_entry(**overrides) -> GoldenEntry:
+    base = {
+        "id": "GEN-0001",
+        "query": "Which lever opens the outlet valve?",
+        "expected_doc_ids": ["DOC-A"],
+        "expected_heading": "Part A > Valves",
+        "expected_page": "4",
+        "query_class": "diagnostic",
+        "source": "generated",
+        "status": "adjudicated",
+        "reviewers": ["alice"],
+        "reviewed_by": "alice",
+        "reviewed_at": "2026-11-21",
+        "gold_chunk_ids": ["chunk-src", "chunk-sib1", "chunk-sib2"],
+        "gold_chunk_ids_truncated": False,
+        "section_chunk_count": 3,
+        "lexical_overlap": 0.45,
+    }
+    base.update(overrides)
+    return GoldenEntry(**base)
+
+
+def test_golden_entry_passage_gold_validation_and_backward_compatibility():
+    # Existing doc-only entries still work unchanged.
+    plain = GoldenEntry(query="plain question", expected_doc_ids=["DOC-A"])
+    assert plain.gold_chunk_ids == []
+    assert plain.gold_chunk_ids_truncated is False
+    assert plain.section_chunk_count is None
+    assert plain.lexical_overlap is None
+
+    # Adjudicated and spot-checked generated entries parse cleanly.
+    adj = _adjudicated_entry()
+    assert adj.gold_chunk_ids == ["chunk-src", "chunk-sib1", "chunk-sib2"]
+    spot = _adjudicated_entry(status="spot_checked", reviewed_by=None, reviewed_at=None)
+    assert spot.status == "spot_checked"
+
+    # Abstain entries cannot carry gold_chunk_ids.
+    with pytest.raises(ValidationError, match="gold_chunk_ids"):
+        GoldenEntry(query="trap", expected_behavior="abstain", gold_chunk_ids=["c1"])
+    # Duplicate or blank chunk ids are rejected.
+    with pytest.raises(ValidationError):
+        _adjudicated_entry(gold_chunk_ids=["c1", "c1"])
+    with pytest.raises(ValidationError):
+        _adjudicated_entry(gold_chunk_ids=["c1", "  "])
+    # section_chunk_count cannot be smaller than gold_chunk_ids.
+    with pytest.raises(ValidationError):
+        _adjudicated_entry(gold_chunk_ids=["c1", "c2"], section_chunk_count=1)
+    # lexical_overlap must be finite in [0, 1].
+    with pytest.raises(ValidationError):
+        _adjudicated_entry(lexical_overlap=1.5)
+    with pytest.raises(ValidationError):
+        _adjudicated_entry(lexical_overlap=float("nan"))
+    # reviewed_at must be an ISO calendar date when supplied.
+    with pytest.raises(ValidationError):
+        _adjudicated_entry(reviewed_at="not-a-date")
+
+
+def test_readers_refuse_escaped_candidate_rejected_spot_check_and_unreviewed_generated(tmp_path):
+    from mainframe_rag.eval import datasets as ds
+
+    escaped = tmp_path / "escaped.jsonl"
+    escaped.write_text(
+        '{"query": "secret question", "expected_doc_ids": ["A"], "status": "\\u0063andidate"}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ds.CandidateDatasetError) as exc:
+        ds.load_golden(escaped)
+    assert str(exc.value) == ds.CANDIDATE_REFUSAL
+
+    rejected = tmp_path / "rejected.jsonl"
+    rejected.write_text(
+        '{"query": "secret question", "expected_doc_ids": ["A"], "status": "rejected"}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ds.CandidateDatasetError) as exc:
+        ds.load_golden(rejected)
+    assert str(exc.value) == ds.REJECTED_REFUSAL
+    assert "secret question" not in str(exc.value)
+
+    review = tmp_path / "review.jsonl"
+    review.write_text(
+        json.dumps({"record": "spot_check_header", "kind": "gold-spot-check-review", "version": 1}) + "\n"
+        + json.dumps({"record": "spot_check_item", "id": "GEN-1", "query": "secret question"}) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ds.CandidateDatasetError) as exc:
+        ds.load_golden(review)
+    assert str(exc.value) == ds.SPOT_CHECK_REFUSAL
+    assert "secret question" not in str(exc.value)
+
+    # Generated rows stripped of status, reviewers, or adjudication metadata are refused before parsing.
+    for bad_fields in (
+        {"status": None},
+        {"status": "draft"},
+        {"reviewers": []},
+        {"reviewed_by": None},
+        {"reviewed_at": "2026-99-99"},
+    ):
+        row = {**_adjudicated_entry().model_dump(), **bad_fields, "query": "secret question"}
+        bad_path = tmp_path / f"bad-{next(iter(bad_fields))}.jsonl"
+        bad_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        with pytest.raises(ds.CandidateDatasetError) as exc:
+            ds.load_golden(bad_path)
+        assert str(exc.value) == ds.UNREVIEWED_GENERATED_REFUSAL
+        assert "secret question" not in str(exc.value)
+
+    # Valid adjudicated and spot_checked generated files load cleanly.
+    valid = tmp_path / "valid.jsonl"
+    valid.write_text(
+        json.dumps(_adjudicated_entry().model_dump()) + "\n"
+        + json.dumps(_adjudicated_entry(
+            id="GEN-0002", status="spot_checked", reviewed_by=None, reviewed_at=None,
+        ).model_dump()) + "\n",
+        encoding="utf-8",
+    )
+    loaded = ds.load_golden(valid)
+    assert [e.status for e in loaded] == ["adjudicated", "spot_checked"]
+
+
+def test_score_entry_scores_chunk_section_and_doc_levels_and_keeps_plain_rows_unchanged():
+    # Plain entry without gold_chunk_ids emits no passage keys.
+    plain = GoldenEntry(query="q", expected_doc_ids=["DOC-A"], query_class="diagnostic")
+    plain_row = score_entry([_chunk_hit("c-other", doc_id="DOC-A")], plain)
+    assert "chunk_recall@1" not in plain_row and "section_recall@1" not in plain_row
+
+    # Passage-gold entry: sibling at rank 1, source chunk at rank 4.
+    entry = _adjudicated_entry()
+    hits = [
+        _chunk_hit("chunk-sib1", doc_id="DOC-A", heading="Part A > Valves", score=0.9),
+        _chunk_hit("chunk-wrong-1", doc_id="DOC-B", heading="Other", score=0.8),
+        _chunk_hit("chunk-wrong-2", doc_id="DOC-C", heading="Other", score=0.7),
+        _chunk_hit("chunk-src", doc_id="DOC-A", heading="Part A > Valves", score=0.6),
+    ]
+    row = score_entry(hits, entry)
+    # Doc/heading relevance still hits at rank 1.
+    assert row["recall@1"] == 1.0 and row["mrr"] == 1.0
+    # Section-chunk relevance hits at rank 1 via chunk-sib1.
+    assert row["section_recall@1"] == 1.0
+    assert row["section_recall@5"] == 1.0
+    assert row["section_mrr"] == 1.0
+    assert row["section_rank"] == 1
+    # Exact source chunk hits at rank 4.
+    assert row["chunk_recall@1"] == 0.0
+    assert row["chunk_recall@3"] == 0.0
+    assert row["chunk_recall@5"] == 1.0
+    assert row["chunk_recall@8"] == 1.0
+    assert row["chunk_mrr"] == 0.25
+    assert row["chunk_rank"] == 4
+    assert row["overlap_band"] == "medium"
+    assert row["gold_chunk_ids_truncated"] is False
+    assert row["unoutlined_section"] is False
+
+
+def test_summarize_passage_reports_three_levels_overlap_bands_truncation_and_unoutlined():
+    from mainframe_rag.eval.retrieval import summary_markdown
+
+    e_low = _adjudicated_entry(
+        id="GEN-1", query_class="diagnostic", lexical_overlap=0.15,
+        gold_chunk_ids=["c1", "c1-sib"], gold_chunk_ids_truncated=True, section_chunk_count=80,
+    )
+    e_high = _adjudicated_entry(
+        id="GEN-2", query_class="syntax", expected_heading=None, lexical_overlap=0.85,
+        gold_chunk_ids=["c2", "c2-sib"], gold_chunk_ids_truncated=False, section_chunk_count=2,
+    )
+    r1 = {**score_entry([_chunk_hit("c1-sib", doc_id="DOC-A", heading="Part A > Valves")], e_low), "kind": "nl"}
+    r2 = {**score_entry([_chunk_hit("c2", doc_id="DOC-A", heading="")], e_high), "kind": "nl"}
+    report = summarize([r1, r2], failures=0, elapsed_s=0.1, embed_mode="hash", collection="c")
+
+    passage = report["passage"]
+    assert passage["checked"] == 2
+    assert passage["truncated"] == 1
+    assert passage["unoutlined"] == 1
+    assert passage["chunk"]["recall@1"] == 0.5 and passage["chunk"]["mrr"] == 0.5
+    assert passage["section"]["recall@1"] == 1.0 and passage["section"]["mrr"] == 1.0
+    assert passage["doc"]["recall@1"] == 1.0 and passage["doc"]["mrr"] == 1.0
+    assert passage["by_overlap_band"]["low"]["n"] == 1
+    assert passage["by_overlap_band"]["low"]["chunk"]["recall@1"] == 0.0
+    assert passage["by_overlap_band"]["high"]["n"] == 1
+    assert passage["by_overlap_band"]["high"]["chunk"]["recall@1"] == 1.0
+    assert passage["by_class"]["diagnostic"]["truncated"] == 1
+    assert passage["by_class"]["syntax"]["unoutlined"] == 1
+
+    md = summary_markdown(report)
+    assert "Passage-level" in md and "truncated=1" in md and "unoutlined=1" in md
+    assert "low" in md and "high" in md
+
+
+def test_baseline_recording_refuses_generated_rows_even_after_adjudication(tmp_path, monkeypatch, capsys):
+    import scripts.eval_retrieval as er
+    import scripts.gate_l1 as gl
+    import scripts.harness as hn
+
+    from mainframe_rag import config as cfg
+    from mainframe_rag.config import Settings
+    from mainframe_rag.eval import datasets as ds
+
+    golden = tmp_path / "adjudicated.jsonl"
+    golden.write_text(json.dumps(_adjudicated_entry().model_dump()) + "\n", encoding="utf-8")
+    baseline = tmp_path / "baseline.json"
+    monkeypatch.delenv("VENUE", raising=False)
+    settings = Settings(embed_mode="hash", qdrant_collection="synthetic", _env_file=None)
+    monkeypatch.setattr(er, "load_settings", lambda: settings)
+    monkeypatch.setattr(cfg, "load_settings", lambda: settings)
+
+    assert er.main(["--golden", str(golden), "--update-baseline", str(baseline)]) == 2
+    assert ds.GENERATED_BASELINE_REFUSAL in capsys.readouterr().err
+    assert not baseline.exists()
+
+    rc, md = gl.run_gate(golden_path=golden, baseline_path=baseline, update_baseline_flag=True)
+    assert rc == 2 and ds.GENERATED_BASELINE_REFUSAL in md
+    assert not baseline.exists()
+
+    assert hn.main(["--golden", str(golden), "--baseline", str(baseline), "--update-baseline"]) == 2
+    assert ds.GENERATED_BASELINE_REFUSAL in capsys.readouterr().err
+    assert not baseline.exists()

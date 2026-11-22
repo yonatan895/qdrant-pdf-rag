@@ -1992,6 +1992,26 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
         with self.assertRaises(ValueError):
             artifact_members(raw + b"tampered", digest)
 
+    def test_large_decompressed_evidence_is_read_up_to_the_member_limit(self):
+        # Unit evidence grows with the suite (every collected id per shard):
+        # ~18.7 MiB per shard at ~10.6k tests (#1339) must still be read, and
+        # the decompressed total stays bounded by MEMBER_LIMIT.
+        from scripts.acceptance_evidence import LIMIT, MEMBER_LIMIT, object_json
+        for size, accepted in ((20 * 1024 * 1024, True), (MEMBER_LIMIT + 1, False)):
+            with self.subTest(size=size):
+                body = b'{"pad": "' + b"a" * (size - 11) + b'"}'
+                buffer = io.BytesIO()
+                with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+                    archive.writestr("evidence.json", body)
+                raw = buffer.getvalue()
+                self.assertLessEqual(len(raw), LIMIT)
+                digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+                if accepted:
+                    self.assertEqual(len(object_json(artifact_members(raw, digest)["evidence.json"])["pad"]), size - 11)
+                else:
+                    with self.assertRaises(ValueError):
+                        artifact_members(raw, digest)
+
 
 class TestAcceptanceSnapshot(unittest.TestCase):
 

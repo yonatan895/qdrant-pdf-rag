@@ -584,6 +584,14 @@ def test_coding_mode_operator_mapping(monkeypatch, mapper_env, raw, want):
 
 
 @pytest.mark.parametrize("raw,want", [("", None), ("false", False), ("1", True), ("true", True)])
+def test_spl_mode_operator_mapping(monkeypatch, mapper_env, raw, want):
+    """Issue #1293: unset writes no key (the pod keeps the off default); an
+    explicit boolean is carried to models.reasoning.splModeEnabled."""
+    monkeypatch.setenv("ANSWER_SPL_MODE_ENABLED", raw)
+    assert mapped(mapper_env)["models"]["reasoning"].get("splModeEnabled") is want
+
+
+@pytest.mark.parametrize("raw,want", [("", None), ("false", False), ("1", True), ("true", True)])
 def test_chat_images_operator_mapping(monkeypatch, mapper_env, raw, want):
     """Issue #1287: unset writes no key (the pod keeps the off default and the
     Open WebUI render keeps images off); the one-line `true` is carried as an

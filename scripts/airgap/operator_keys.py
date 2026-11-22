@@ -528,6 +528,12 @@ OPERATOR_KEYS: tuple[OperatorKey, ...] = (
         chart_env=("ANSWER_CODING_MODE_ENABLED",),
     ),
     OperatorKey(
+        "ANSWER_SPL_MODE_ENABLED", _SEC_CHAT, "bool", False,
+        "Route Splunk SPL requests and pasted Splunk results over z/OS data to the complex SPL prompt.",
+        "#1293", _EX_CHART, helm_path="models.reasoning.splModeEnabled",
+        chart_env=("ANSWER_SPL_MODE_ENABLED",),
+    ),
+    OperatorKey(
         "CHAT_IMAGES_ENABLED", _SEC_CHAT, "bool", False,
         "Enable pasted images in Open WebUI temporary chats (requires --probe-image pass).",
         "#1287", _EX_CHART, helm_path="models.reasoning.chatImagesEnabled",

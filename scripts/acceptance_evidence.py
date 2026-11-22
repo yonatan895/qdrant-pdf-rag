@@ -20,6 +20,11 @@ from scripts.ci_evidence import junit_bytes
 from scripts.unit_evidence import validate as validate_unit_coverage
 
 LIMIT = 16 * 1024 * 1024
+# Decompressed evidence members and the JSON parsed from them. Unit evidence
+# lists every collected test id per shard, so it grows with the suite: it
+# passed 16 MiB (about 18.7 MiB per shard) once the suite reached ~10.6k
+# tests (train #1339). Downloads and compressed archives stay under LIMIT.
+MEMBER_LIMIT = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -96,7 +101,7 @@ def object_json(raw: bytes) -> dict[str, Any]:
                 raise ValueError('duplicate JSON key')
             result[key] = value
         return result
-    require(len(raw) <= LIMIT)
+    require(len(raw) <= MEMBER_LIMIT)
     value = json.loads(raw, object_pairs_hook=unique)
     require(isinstance(value, dict))
     return value
@@ -118,7 +123,7 @@ def artifact_members(raw: bytes, digest: str) -> dict[str, bytes]:
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         entries = archive.infolist()
         require(1 <= len(entries) <= 3)
-        require(sum(item.file_size for item in entries) <= LIMIT)
+        require(sum(item.file_size for item in entries) <= MEMBER_LIMIT)
         result = {}
         for item in entries:
             require(item.filename in {'evidence.json', 'tests.xml', 'results.json'})

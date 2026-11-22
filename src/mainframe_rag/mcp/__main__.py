@@ -81,6 +81,8 @@ def _config_from_env() -> FTPConfig:
         jes_jobname_prefixes=parse_jes_prefixes(os.environ.get("MCP_JES_JOBNAME_PREFIXES", "")),
         jes_owner_prefixes=parse_jes_prefixes(os.environ.get("MCP_JES_OWNER_PREFIXES", "")),
         logon_breaker_cooldown_s=_float("MCP_FTP_LOGON_COOLDOWN_S", 900.0),
+        spool_stream_max_bytes=_int("MCP_FTP_SPOOL_STREAM_MAX_BYTES", 16 * 1024 * 1024),
+        spool_stream_max_s=_float("MCP_FTP_SPOOL_STREAM_MAX_S", 8.0),
     )
 
 

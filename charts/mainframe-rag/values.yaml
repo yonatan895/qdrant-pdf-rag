@@ -115,6 +115,11 @@ models:
     # restores the pre-#1276 prompts and complexity for every request (the
     # c/hlasm/asm/metalc/clist fence handling is not part of the setting).
     # codingModeEnabled: true
+    # SPL mode (#1293); absent keeps the Settings default (off). true routes
+    # Splunk SPL requests and pasted Splunk results to the complex path and
+    # SPL prompt (taking precedence over coding mode when both match; the
+    # `spl` fence handling is not part of the setting).
+    # splModeEnabled: false
     # Pasted images in Open WebUI temporary chats (#1287); absent keeps the
     # Settings default (off). Turn on only after `probe_gateway.py
     # --probe-image` passes; true also sets the Open WebUI image caps, the

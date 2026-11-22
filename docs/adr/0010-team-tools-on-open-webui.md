@@ -15,7 +15,10 @@
   [ADR-0005](0005-answer-feedback-data-boundary.md), as listed under
   "Amendments" below. Accepting it enables nothing: until the registration PR
   (T4) merges, the chart keeps tool servers, tools and model connections off,
-  and that PR stays default-off.
+  and that PR stays default-off. Amended by
+  [ADR-0014](0014-gitlab-team-token-gateway.md) (proposed): the GitLab gateway
+  reads with one read-only team token instead of TD4's per-user tokens (named
+  exception E4) and may run in a bearer-secret caller mode (B1).
 - **Context:**
   - ADR-0007 deferred team tools (Splunk, GitLab, mail) to their own ADR,
     "likely on a separate instance", and fixed the rule "this instance holds

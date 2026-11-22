@@ -734,3 +734,135 @@ def test_coding_prompt_text_reads_as_no_refusal():
     assert tail.startswith("Please answer from the retrieved manual excerpts above")
     for text in (SYSTEM_PROMPT_CODING_EXTENSION, STABLE_CACHE_INSTRUCTIONS_CODING, tail):
         assert not is_refusal(text)
+
+
+# ---------------------------------------------------- SPL mode (issue #1293)
+
+_SPL_QUERY = "Write a Splunk SPL search for SMF type 30 CPU usage"
+
+
+def _spl_prompt(query, *, chat, order, spl_on, complexity=None, spl=False, coding=False):
+    from mainframe_rag.agent.answer import build_chat_messages
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage
+
+    settings = Settings(_env_file=None, **_MECHANICS_BUDGET, answer_spl_mode_enabled=spl_on)
+    hits = [_hit("SA22-0000-00 Ref, Chapter 2 > IEA500I, p. 1-6", "Body.")]
+    extra = {}
+    if spl:
+        extra["spl"] = True
+    if coding:
+        extra["coding"] = True
+    if chat:
+        history = [ChatMessage(role="user", content="Prior?"),
+                   ChatMessage(role="assistant", content="Prior answer."),
+                   ChatMessage(role="user", content=query)]
+        prepared = build_chat_messages(history, hits, complexity=complexity, settings=settings,
+                                       order=order, **extra)
+    else:
+        prepared = build_messages(query, hits, complexity=complexity, settings=settings,
+                                  order=order, **extra)
+    return [(m.role, m.content) for m in prepared.messages]
+
+
+@pytest.mark.parametrize("chat", [False, True])
+@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
+@pytest.mark.parametrize("query", [
+    "What does IEA500I mean?",
+    "How do I diagnose and recover when DFSMShsm journal fills up?",
+    "What is the _time field in Splunk?",
+    _SPL_QUERY,  # an SPL request whose builder call is not told it is one
+])
+def test_prompt_bytes_do_not_depend_on_the_spl_setting_unless_the_turn_is_spl(
+    chat, order, query
+):
+    """The builder never decides SPL mode itself: without `spl=True` every
+    prompt (answer and chat, simple and complex, both orders) is byte-identical
+    with the setting on or off and keeps the strict tail."""
+    on = _spl_prompt(query, chat=chat, order=order, spl_on=True)
+    off = _spl_prompt(query, chat=chat, order=order, spl_on=False)
+    assert on == off
+    assert _STRICT_TAIL in on[-1][1]
+    assert "SPL Protocol" not in on[0][1]
+
+
+@pytest.mark.parametrize("chat", [False, True])
+@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
+@pytest.mark.parametrize("coding", [False, True])
+def test_spl_turn_prompt_carries_the_extension_no_strict_wording_and_precedes_coding(
+    chat, order, coding
+):
+    """An SPL turn: system = base + complex + SPL extension (also when simple
+    or coding=True is passed); the strict tail and 'only the excerpts' block
+    are replaced, and SPL takes precedence over coding when both are set."""
+    from mainframe_rag.agent.answer import (
+        STABLE_CACHE_INSTRUCTIONS,
+        STABLE_CACHE_INSTRUCTIONS_CODING,
+        STABLE_CACHE_INSTRUCTIONS_SPL,
+        SYSTEM_PROMPT,
+        SYSTEM_PROMPT_COMPLEX_EXTENSION,
+        SYSTEM_PROMPT_SPL_EXTENSION,
+    )
+
+    messages = _spl_prompt(_SPL_QUERY, chat=chat, order=order, spl_on=True,
+                           complexity="simple", spl=True, coding=coding)
+    system, user = messages[0][1], messages[-1][1]
+    assert system == SYSTEM_PROMPT + SYSTEM_PROMPT_COMPLEX_EXTENSION + SYSTEM_PROMPT_SPL_EXTENSION
+    assert "Coding Protocol" not in system
+    whole = "\n".join(content for _role, content in messages)
+    assert "strictly" not in whole
+    assert STABLE_CACHE_INSTRUCTIONS not in whole
+    assert STABLE_CACHE_INSTRUCTIONS_CODING not in whole
+    assert user.rstrip().endswith(
+        "Citations:\nSA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17")
+    assert "following the SPL Protocol" in user
+    if order == "stable_cache":
+        assert user.startswith(STABLE_CACHE_INSTRUCTIONS_SPL)
+    else:
+        assert "Instructions:" not in user
+
+
+def test_spl_extension_states_the_required_rules():
+    """Issue #1293 prompt contract: grounded syntax/data dictionary, VERIFY
+    placeholders, fenced spl, index/sourcetype/earliest/latest, pipe stages,
+    dashboard panel tokens/base searches, interpretation checklist items, and
+    precedence over base rules."""
+    from mainframe_rag.agent.answer import SYSTEM_PROMPT_SPL_EXTENSION as ext
+
+    for needle in (
+        "takes precedence",
+        "`VERIFY: <name>`",
+        "fenced `spl` code block",
+        "`index`",
+        "`sourcetype`",
+        "`earliest`",
+        "`latest`",
+        "each pipe stage",
+        "time-picker tokens",
+        "base/post-process searches",
+        "Interpretation checklist:",
+        "time range covered",
+        "missing data is not zero",
+        "counts versus rates",
+        "time zone",
+        "which system",
+        "General guidance (not from the manuals):",
+        "never decline an SPL request",
+    ):
+        assert needle in ext, needle
+
+
+def test_spl_prompt_text_reads_as_no_refusal():
+    """No SPL instruction (system, tail, instructions) carries a refusal
+    marker, so the prompt's own wording never seeds a refusal phrase."""
+    from mainframe_rag.agent.answer import (
+        STABLE_CACHE_INSTRUCTIONS_SPL,
+        SYSTEM_PROMPT_SPL_EXTENSION,
+        is_refusal,
+    )
+
+    tail = _spl_prompt(_SPL_QUERY, chat=False, order="retrieval", spl_on=True,
+                       spl=True)[-1][1].split("\n\n")[-1]
+    assert tail.startswith("Please answer from the retrieved manual excerpts above")
+    for text in (SYSTEM_PROMPT_SPL_EXTENSION, STABLE_CACHE_INSTRUCTIONS_SPL, tail):
+        assert not is_refusal(text)

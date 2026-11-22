@@ -48,6 +48,7 @@ from pydantic import (
     Field,
     PrivateAttr,
     SerializeAsAny,
+    StrictBool,
     field_validator,
     model_validator,
 )
@@ -1255,6 +1256,11 @@ class ChatRequest(BoundedRequestText):
     # LLM_REASONING_EFFORTS by Settings.reasoning_depth_effort. Exclusive with
     # reasoning_effort: both at once is the fixed invalid_request 422.
     reasoning_depth: ReasoningDepth | None = None
+    # Research mode opt-in (ADR-0013 D5 / #1325; /v1/chat* only, separate from
+    # reasoning_depth / reasoning_effort). An explicit null is absent; any
+    # boolean while RESEARCH_MODE_ENABLED is off fails closed with 422
+    # research_mode_disabled before retrieval or any model call.
+    research_mode: StrictBool | None = None
     # The latest user message's validated images (#1287), split out of its
     # content parts before the text model validates; empty with
     # CHAT_IMAGES_ENABLED off, where a content list stays today's 422.
@@ -1900,6 +1906,16 @@ def require_offered_effort(effort: ReasoningEffort | None) -> None:
         )
 
 
+def require_research_mode(requested: bool | None) -> None:
+    """Refuse a /v1/chat* request carrying `research_mode` while
+    RESEARCH_MODE_ENABLED is off (ADR-0013 D5 / #1325) before retrieval or
+    any model call — never a silent ordinary answer."""
+    if requested is not None and not settings.research_mode_enabled:
+        raise AppError(
+            422, "research_mode_disabled", "research mode is not enabled on this deployment"
+        )
+
+
 def _embed_input_refusal(owner: _RequestSpan, endpoint: str, exc: Exception) -> AppError | None:
     """The embedder refused an over-bound input before calling the model
     (issue #374): a request-body fault, not an upstream one — the same fixed
@@ -2459,6 +2475,7 @@ async def prepare_chat_core(
     temperature: float | None = None,
     reasoning_effort: ReasoningEffort | None = None,
     images: tuple[TurnImage, ...] = (),
+    research_mode: bool = False,
 ) -> tuple[AnswerCoreInput, AnswerCoreDeps, str]:
     """One chat turn up to the answer core, shared by /v1/chat* and both
     console routes so the same fault maps to the same code, outcome and log
@@ -2505,6 +2522,7 @@ async def prepare_chat_core(
         temperature=temperature,
         is_chat=True,
         reasoning_effort=reasoning_effort,
+        research_mode=research_mode,
     )
     # An image turn searches the typed text plus what was read from each
     # image (#1287 §3.4): the plan reads that text as the active message, so
@@ -2580,6 +2598,7 @@ async def _chat_response(req, response, owner):
     effort = (req.reasoning_effort if req.reasoning_depth is None
               else settings.reasoning_depth_effort(req.reasoning_depth))
     require_offered_effort(effort)
+    require_research_mode(req.research_mode)
     core_input, deps, llm_model = await prepare_chat_core(
         owner,
         req.messages,
@@ -2589,6 +2608,7 @@ async def _chat_response(req, response, owner):
         temperature=req.temperature,
         reasoning_effort=effort,
         images=req.images,
+        research_mode=bool(req.research_mode),
     )
     hits, kind, timings = core_input.hits, core_input.query_kind, core_input.timings
     is_stream = req.stream

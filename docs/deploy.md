@@ -93,7 +93,7 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - Operator booleans `UI_ENABLED`, `CONTEXTUAL_EMBED_ENABLED`,
   `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `INGEST_AUTHORIZE_FROM_CATALOG`,
   `CHAT_CONDENSE_ENABLED`, `CHAT_FOLLOWUP_ANCHOR_ENABLED`, `LLM_STREAM`
-  `FEEDBACK_ENABLED`, `OPENWEBUI_ENABLED`, `ANSWER_CODING_MODE_ENABLED` (unset keeps the pod's **true** default), `CHAT_IMAGES_ENABLED` and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
+  `FEEDBACK_ENABLED`, `OPENWEBUI_ENABLED`, `ANSWER_CODING_MODE_ENABLED` (unset keeps the pod's **true** default), `ANSWER_SPL_MODE_ENABLED` (unset keeps the pod's **false** default), `CHAT_IMAGES_ENABLED` and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
   accept only `true/1/yes` or `false/0/no` (any case; unset keeps the
   default). `INGEST_ALIAS_PUBLISH` may only be unset or true: in-place ingest
   was retired (#360) and an explicit false fails closed.
@@ -2577,7 +2577,11 @@ unset keeps the pod's on default, and `ANSWER_CODING_MODE_ENABLED=false` in
 `airgap.env` is the one-line per-site revert of the coding prompts and the
 coding route to the complex path (the `coding-off` arm). It does not revert the
 #1276 code-fence tags (`c`, `metalc`, `asm`, `hlasm`, `assembler`, `clist` kept
-as `script`), which apply to every answer. `CHAT_IMAGES_ENABLED` (#1287) maps to
+as `script`), which apply to every answer. `ANSWER_SPL_MODE_ENABLED` (#1293)
+maps to `models.reasoning.splModeEnabled` and renders only when set; unset
+keeps the pod's off default, and `ANSWER_SPL_MODE_ENABLED=true` in `airgap.env`
+enables SPL mode (taking precedence over coding mode when both match; the `spl`
+code-fence tag applies to every answer regardless of the setting). `CHAT_IMAGES_ENABLED` (#1287) maps to
 `models.reasoning.chatImagesEnabled` and renders only when set; unset keeps the pod's off
 default and the Open WebUI render's images off ([pasted images](#owui-chat-images)). Enable condensation deliberately when qualifying pronoun-only
 console follow-ups; require a grounded answer after the extra reasoning call.
