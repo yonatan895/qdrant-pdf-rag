@@ -2303,7 +2303,9 @@ deterministic and trap queries stay on the manuals path.
   `MCP_FTP_TRANSPORT_MODE` pins either verified FTPS (`ftps`, default: CA bundle
   `MCP_FTP_CA_FILE`, `CERT_REQUIRED`, hostname check, `PROT P`, zero downgrade
   fallback) or owner-accepted plain FTP (`plain` + `MCP_FTP_PLAIN_ACCEPTED=true`);
-  `--probe` runs a logon-free `AUTH TLS` connectivity probe without credentials.
+  `--probe` runs a logon-free `AUTH TLS` connectivity probe without credentials;
+  `--site-probe` runs the read-only ADR-0012 D8 site probe with one logon and
+  prints a text-free JSON-lines receipt (`mcp/site_probe.py`, ADR-0012 D8(c)).
   Every session sets explicit passive mode (`ftp.set_pasv(True)`). HTTP mode
   offloads blocking FTP I/O via `asyncio.to_thread`, enforces bearer caller auth
   (`MCP_BRIDGE_AUTH_TOKEN`, except `GET /healthz`), and bounds logons with an

@@ -10,8 +10,8 @@ and a text-free receipt (`mainframe_rag.probe_receipt`).
 
 Read-only by construction: one session and **one logon attempt** per run
 (a fresh breaker with threshold 1; a failed logon ends the run, nothing
-reconnects); verbs are SITE, STAT, TYPE, PASV, RETR, LIST, ABOR and QUIT only
-(no STOR, DELE or job action); `--dataset` must be an exact entry of
+reconnects); after the bridge's own session setup the commands are SITE, STAT,
+TYPE, PASV, RETR, LIST, ABOR and QUIT only (no STOR, DELE or job action); `--dataset` must be an exact entry of
 `MCP_DATASET_ALLOWLIST`; JES checks run only for a job the operator names with
 `--job-id`, and read only that job's `LIST` and its `JESMSGLG`, after the
 bridge's jobname/owner prefix check. Without a named target those checks are
