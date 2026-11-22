@@ -408,6 +408,18 @@ OPERATOR_KEYS: tuple[OperatorKey, ...] = (
         "#843", _EX_CHART, helm_path="requestQueueWaitSeconds", chart_env=("REQUEST_QUEUE_WAIT_S",),
         min_value=0.0, max_value=300.0,
     ),
+    OperatorKey(
+        "REQUEST_MAX_BODY_BYTES", _SEC_INFERENCE, "int", 25165824,
+        "Largest request body in bytes per agent replica; larger is refused with 413 before parsing (1 MiB..256 MiB).",
+        "#1352", _EX_CHART, helm_path="requestMaxBodyBytes", chart_env=("REQUEST_MAX_BODY_BYTES",),
+        min_value=1048576, max_value=268435456,
+    ),
+    OperatorKey(
+        "REQUEST_BODY_BUDGET_BYTES", _SEC_INFERENCE, "int", 134217728,
+        "Sum of request bodies in flight per agent replica; excess waits, then 503 (1 MiB..4 GiB; >= REQUEST_MAX_BODY_BYTES).",
+        "#1352", _EX_CHART, helm_path="requestBodyBudgetBytes", chart_env=("REQUEST_BODY_BUDGET_BYTES",),
+        min_value=1048576, max_value=4294967296,
+    ),
 
     # --- Optional cross-encoder reranker ---
     OperatorKey(

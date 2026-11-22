@@ -541,6 +541,25 @@ def test_config_check_catches_remaining_cross_key_and_plaintext_rules(tmp_path):
     assert any("CI_APPROVED_REGISTRY" in w for w in warnings)
 
 
+def test_config_check_refuses_body_budget_below_cap_with_chart_defaults():
+    """#1352: budget >= cap; an empty side counts as its chart default (24 MiB / 128 MiB)."""
+    from scripts.airgap.config_tool import check_config
+
+    rule = "REQUEST_BODY_BUDGET_BYTES must be at least REQUEST_MAX_BODY_BYTES"
+    for chosen, refused in (
+        ({}, False),
+        ({"REQUEST_MAX_BODY_BYTES": "134217728"}, False),
+        ({"REQUEST_MAX_BODY_BYTES": "134217729"}, True),
+        ({"REQUEST_BODY_BUDGET_BYTES": "25165823"}, True),
+        ({"REQUEST_MAX_BODY_BYTES": "268435456", "REQUEST_BODY_BUDGET_BYTES": "4294967296"}, False),
+        ({"REQUEST_MAX_BODY_BYTES": "33554432", "REQUEST_BODY_BUDGET_BYTES": "33554431"}, True),
+    ):
+        errors, _ = check_config({"OPENWEBUI_ENABLED": "false", **chosen})
+        joined = "\n".join(errors)
+        assert (rule in joined) is refused, chosen
+        assert not any(value in joined for value in chosen.values())
+
+
 def test_config_sh_help_and_argument_errors(tmp_path):
     make_bin_tree(tmp_path, ["common.sh", "config.sh"])
     env = {"PATH": system_path(tmp_path / "bin")}

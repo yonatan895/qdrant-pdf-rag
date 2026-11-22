@@ -97,6 +97,15 @@ spec:
               value: {{ index $.Values $field | toString | quote }}
             {{- end }}
             {{- end }}
+            {{- /* #1352: byte bounds render through int64 (a values-file integer is a float64 and
+                 toString would print 2.5165824e+07); the schema requires both, so they always render. */}}
+            {{- if lt (int64 .Values.requestBodyBudgetBytes) (int64 .Values.requestMaxBodyBytes) }}
+            {{- fail "requestBodyBudgetBytes must be at least requestMaxBodyBytes (REQUEST_BODY_BUDGET_BYTES >= REQUEST_MAX_BODY_BYTES)" }}
+            {{- end }}
+            - name: REQUEST_MAX_BODY_BYTES
+              value: {{ int64 .Values.requestMaxBodyBytes | toString | quote }}
+            - name: REQUEST_BODY_BUDGET_BYTES
+              value: {{ int64 .Values.requestBodyBudgetBytes | toString | quote }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ include "mainframe-rag.otelEndpoint" . | quote }}
             {{- if include "mainframe-rag.openobserveEnabled" . }}

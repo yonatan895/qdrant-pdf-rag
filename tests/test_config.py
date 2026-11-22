@@ -192,6 +192,19 @@ def test_chat_bounds_are_enforced():
         Settings(_env_file=None, chat_max_prior_turn_chars=6000)
 
 
+def test_request_body_bounds_are_enforced():
+    """The budget must hold one capped body, or no body could ever be admitted (#1352)."""
+    mib = 1024 * 1024
+    with pytest.raises(ValidationError, match="REQUEST_BODY_BUDGET_BYTES must be at least"):
+        Settings(_env_file=None, request_max_body_bytes=32 * mib, request_body_budget_bytes=16 * mib)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, request_max_body_bytes=mib - 1)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, request_max_body_bytes=256 * mib + 1, request_body_budget_bytes=1024 * mib)
+    equal = Settings(_env_file=None, request_max_body_bytes=8 * mib, request_body_budget_bytes=8 * mib)
+    assert (equal.request_max_body_bytes, equal.request_body_budget_bytes) == (8 * mib, 8 * mib)
+
+
 @pytest.mark.parametrize("field,low,high", [
     ("answer_hit_limit", 1, 32), ("retrieve_max_chunks_per_doc", 1, 10),
     ("answer_expand_budget", 0, 32), ("answer_expand_per_hit", 1, 8),
