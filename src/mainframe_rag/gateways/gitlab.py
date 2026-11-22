@@ -1150,7 +1150,8 @@ def _site_probe(argv: Sequence[str]) -> int:
     """`--site-probe` (#1343): the read-only ADR-0014 site checks with the
     gateway's configuration and client; a text-free receipt on stdout (and
     `--receipt FILE`, 0600). Exit 1 when a check failed, 2 on a configuration
-    or target error (fixed messages, never a target or the token)."""
+    or target error (fixed messages, never a target or the token), 3 when the
+    probe stopped on an unexpected error (the receipt is still whole)."""
     import argparse
     from pathlib import Path
 

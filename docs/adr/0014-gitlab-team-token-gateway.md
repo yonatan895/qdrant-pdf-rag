@@ -163,8 +163,10 @@ python -m mainframe_rag.gateways.gitlab --site-probe \
 ```
 
 Its receipt holds one JSON line per check with counts, version integers and
-fixed reason codes (never paths, ids, text or the token); the exit code is 1
-when a check failed. `gitlab.version` passes on 17.x (another major is
+fixed reason codes (never paths, ids, text or the token). Exit 0: no check
+failed; 1: a check failed; 2: refused to start (configuration or target); 3:
+stopped on an unexpected error, with the receipt still whole (the rest
+`inconclusive` `probe_error`, the summary naming only the exception class). `gitlab.version` passes on 17.x (another major is
 `inconclusive`: a human decides); `gitlab.token_scopes` passes when the
 start-up check passes and the token holds `read_api` alone (D1);
 `gitlab.job_trace_stream` when the named log streams to its end within

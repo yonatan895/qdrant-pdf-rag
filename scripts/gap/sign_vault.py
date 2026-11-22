@@ -28,6 +28,7 @@ import argparse
 import base64
 import binascii
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -373,6 +374,8 @@ _PROBE_CHECK_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,15}\.[a-z][a-z0-9_]{0,47}$")
 _PROBE_FIELD_RE = re.compile(r"^[a-z][a-z0-9_]{0,47}$")
 _PROBE_SAFE_VALUE_RE = re.compile(r"^[A-Za-z0-9_.+=-]{0,64}$")
 _PROBE_RESERVED = frozenset({"probe", "check", "status"})
+PROBE_ERROR = "probe_error"
+PROBE_EXIT_ERROR = 3
 # Signed by the probe: a fixed message that is not a SHA256SUMS file, so its
 # signature can never stand in for a release's.
 PROBE_MESSAGE = b"mainframe-rag vault-probe v1: test digest, not a release\n"
@@ -392,6 +395,7 @@ class ProbeReceipt:
             raise SignError("invalid probe name")
         self.probe = probe
         self.records: list[dict[str, object]] = []
+        self.error_class: str | None = None
 
     def add(self, check: str, status: str, **fields: object) -> None:
         if not _PROBE_CHECK_ID_RE.fullmatch(check) or not check.startswith(self.probe + "."):
@@ -410,20 +414,43 @@ class ProbeReceipt:
             record[name] = value
         self.records.append(record)
 
+    def status_of(self, check: str) -> str | None:
+        for record in self.records:
+            if record["check"] == check:
+                return str(record["status"])
+        return None
+
+    def abort(self, exc: BaseException, checks: Sequence[str] = ()) -> None:
+        """Stopped on an unexpected exception: keep the finished records, add
+        the unrecorded ``checks`` as inconclusive probe_error, and keep only
+        the exception's class name."""
+        if self.error_class is None:
+            name = type(exc).__name__
+            self.error_class = name if name and _PROBE_SAFE_VALUE_RE.fullmatch(name) else "unnamed"
+        for check in checks:
+            if self.status_of(check) is None:
+                self.add(check, "inconclusive", reason=PROBE_ERROR)
+
     def summary(self) -> dict[str, object]:
         counts = {status: 0 for status in PROBE_STATUSES}
         for record in self.records:
             counts[str(record["status"])] += 1
         overall = "fail" if counts["fail"] else "inconclusive" if counts["inconclusive"] else "pass"
-        return {
+        summary: dict[str, object] = {
             "probe": self.probe,
             "check": self.probe + ".summary",
-            "status": overall,
+            "status": "error" if self.error_class else overall,
             "schema": PROBE_SCHEMA_VERSION,
             **counts,
         }
+        if self.error_class:
+            summary[PROBE_ERROR] = True
+            summary["error_class"] = self.error_class
+        return summary
 
     def exit_code(self) -> int:
+        if self.error_class:
+            return PROBE_EXIT_ERROR
         return 1 if any(record["status"] == "fail" for record in self.records) else 0
 
     def lines(self) -> list[str]:
@@ -460,7 +487,7 @@ def _vault_call(
             raw = resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, None
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError, ValueError):
         return None, None
     try:
         body = json.loads(raw.decode("utf-8"))
@@ -487,7 +514,8 @@ def probe_vault(
     """The read-only transit checks (#1343): key read, key type, public key
     export and a probe signature verified with ``openssl dgst -sha256 -verify``
     (the bootstrap command). Raises SignError only for configuration errors;
-    every Vault outcome is a receipt record."""
+    every Vault outcome is a receipt record, and an unexpected exception is
+    recorded as probe_error (class name only, exit code 3), never raised."""
     if not vault_token:
         raise SignError("STOP: Vault token is empty")
     mount, key = _validate_vault_path(transit_mount, key_name)
@@ -496,6 +524,36 @@ def probe_vault(
     receipt = ProbeReceipt("vault")
     results: dict[str, tuple[str, dict[str, object]]] = {}
 
+    error: BaseException | None = None
+    try:
+        _vault_probe_checks(
+            results, base=base, key=key, vault_token=vault_token, ctx=ctx, timeout_s=timeout_s
+        )
+    except Exception as exc:  # noqa: BLE001 - recorded by class name only
+        error = exc
+    unset = PROBE_ERROR if error is not None else "not_reached"
+    for name in VAULT_PROBE_CHECKS:
+        state, fields = results.get(name, ("inconclusive", {"reason": unset}))
+        try:
+            receipt.add(name, state, **fields)
+        except SignError as exc:  # a probe bug: the record is withheld
+            error = error or exc
+            receipt.add(name, "inconclusive", reason=PROBE_ERROR)
+    if error is not None:
+        receipt.abort(error)
+    return receipt
+
+
+def _vault_probe_checks(
+    results: dict[str, tuple[str, dict[str, object]]],
+    *,
+    base: str,
+    key: str,
+    vault_token: str,
+    ctx: ssl.SSLContext | None,
+    timeout_s: float,
+) -> None:
+    """The checks of ``probe_vault``, recorded in ``results`` as they finish."""
     read_req = urllib.request.Request(
         base + "/keys/" + key, method="GET", headers={"X-Vault-Token": vault_token}
     )
@@ -559,7 +617,8 @@ def probe_vault(
         )
         status, body = _vault_call(sign_req, ctx, timeout_s)
         check = "vault.sign_pkcs1v15_sha256"
-        signature = (body.get("data") or {}).get("signature") if isinstance(body, dict) else None
+        sign_data = body.get("data") if isinstance(body, dict) else None
+        signature = sign_data.get("signature") if isinstance(sign_data, dict) else None
         if status != 200 or not isinstance(signature, str):
             reason = _http_reason(status) if status != 200 else "no_signature"
             results[check] = ("fail", {"reason": reason, "http_status": status})
@@ -592,10 +651,6 @@ def probe_vault(
                             "fail", {"reason": "verify_failed", "verified": False, **facts}
                         )
 
-    for name in VAULT_PROBE_CHECKS:
-        state, fields = results.get(name, ("inconclusive", {"reason": "not_reached"}))
-        receipt.add(name, state, **fields)
-    return receipt
 
 
 def main(argv: Sequence[str] | None = None) -> int:

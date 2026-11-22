@@ -1583,10 +1583,12 @@ def _generate_tls_fixtures(tmp_path: Path) -> dict[str, Path]:
 class _MiniFTPSServer:
     """Minimal real-socket FTP/FTPS control server for TLS verification tests."""
 
-    def __init__(self, *, certfile: Path | None = None, keyfile: Path | None = None, reject_auth: bool = False) -> None:
+    def __init__(self, *, certfile: Path | None = None, keyfile: Path | None = None, reject_auth: bool = False,
+                 replies: dict[str, bytes] | None = None) -> None:
         self._certfile = certfile
         self._keyfile = keyfile
         self._reject_auth = reject_auth
+        self._replies = replies or {}  # upper-cased command -> raw reply bytes
         self.received_commands: list[str] = []
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1653,6 +1655,8 @@ class _MiniFTPSServer:
                 elif upper == "QUIT":
                     conn.sendall(b"221 Bye\r\n")
                     return
+                elif upper in self._replies:
+                    conn.sendall(self._replies[upper])
                 else:
                     conn.sendall(b"200 Ok\r\n")
         except (OSError, ssl.SSLError):
@@ -2735,3 +2739,131 @@ def test_probe_receipt_refuses_text_and_counts_statuses() -> None:
     assert receipt.exit_code() == 0
     receipt.add("zos.c", "fail")
     assert receipt.exit_code() == 1 and receipt.summary()["status"] == "fail"
+
+
+# A STAT reply carrying one byte that is not UTF-8 (0xa7, a section sign in
+# ISO8859-1): the real ftplib decodes replies as strict UTF-8 and raises.
+_NON_UTF8_STAT = b"211-SBDATACONN (IBM-1047,ISO8859-1) MRKSTATQ \xa7\r\n211 end\r\n"
+
+
+def _assert_probe_error_receipt(receipt: Receipt, error_class: str) -> dict[str, dict]:
+    records = {str(r["check"]): r for r in receipt.records}
+    assert list(records) == list(site_probe.CHECKS)
+    summary = receipt.summary()
+    assert summary["status"] == "error" and summary["probe_error"] is True
+    assert summary["error_class"] == error_class
+    assert receipt.exit_code() == 3
+    return records
+
+
+def test_site_probe_non_utf8_stat_reply_on_real_ftplib_keeps_a_whole_receipt() -> None:
+    """Review B1: the decode error escaped, losing every finished check."""
+    with _MiniFTPSServer(replies={"STAT": _NON_UTF8_STAT}) as srv:
+        cfg = _probe_config(transport_mode="plain", plain_ftp_accepted=True, host="127.0.0.1",
+                            port=srv.port)
+        targets = site_probe.validate_targets(cfg, dataset=PROBE_DATASET, job_id=None)
+        receipt = site_probe.run_zos_probe(cfg, targets, factory=ftplib.FTP)
+        sent = list(srv.received_commands)
+    checks = _assert_probe_error_receipt(receipt, "UnicodeDecodeError")
+    assert sum(c.startswith("PASS ") for c in sent) == 1
+    assert [checks[c]["status"] for c in site_probe.CHECKS[:5]] == [
+        "pass", "inconclusive", "pass", "pass", "pass"]  # tls: plain mode
+    assert all(checks[c] == {"probe": "zos", "check": c, "status": "inconclusive", "reason": "probe_error"}
+               for c in site_probe.CHECKS[5:])
+    text = "\n".join(receipt.lines())
+    for marker in ("MRKSTATQ", "MRKDSQ", "MRKUSRQ", "MRKPWDQ9", "127.0.0.1", "0xa7", "byte"):
+        assert marker not in text, marker
+
+
+def test_site_probe_cli_exits_3_with_the_receipt_file_on_an_unexpected_error(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    with _MiniFTPSServer(replies={"STAT": _NON_UTF8_STAT}) as srv:
+        for name, value in {
+            "MCP_FTP_HOST": "127.0.0.1", "MCP_FTP_PORT": str(srv.port), "MCP_FTP_USER": "MRKUSRQ",
+            "MCP_FTP_PASSWORD": "MRKPWDQ9", "MCP_FTP_TRANSPORT_MODE": "plain",
+            "MCP_FTP_PLAIN_ACCEPTED": "true", "MCP_DATASET_ALLOWLIST": PROBE_DATASET,
+            "MCP_JES_JOBNAME_PREFIXES": "MRKJOB", "MCP_JES_OWNER_PREFIXES": "MRKOWN",
+        }.items():
+            monkeypatch.setenv(name, value)
+        monkeypatch.delenv("MCP_MOCK_DIR", raising=False)
+        out_file = tmp_path / "receipt.jsonl"
+        rc = mcp_main.main(["--site-probe", "--dataset", PROBE_DATASET, "--job-id", PROBE_JOB,
+                            "--receipt", str(out_file)])
+        sent = list(srv.received_commands)
+    captured = capsys.readouterr()
+    assert rc == 3
+    assert sum(c.startswith("PASS ") for c in sent) == 1
+    written = out_file.read_text(encoding="utf-8")
+    assert written == captured.out and out_file.stat().st_mode & 0o777 == 0o600
+    records = [json.loads(line) for line in written.splitlines()]
+    assert [r["check"] for r in records] == [*site_probe.CHECKS, "zos.summary"]
+    assert records[2]["status"] == "pass"  # the logon stays recorded
+    assert records[-1]["error_class"] == "UnicodeDecodeError"
+    everything = written + captured.err
+    for marker in (*PROBE_MARKERS, "MRKMEMQ", PROBE_JOB, "PARMLIB", "Traceback"):
+        assert marker not in everything, marker
+
+
+@pytest.mark.parametrize("fault", ["stat", "dataset", "list", "spool"])
+@pytest.mark.parametrize("exc", [ValueError("MRKSTATQ boom"), UnicodeDecodeError("utf-8", b"\xa7", 0, 1, "MRKDATAQ"),
+                                 RuntimeError("MRKSPOOLQ")])
+def test_site_probe_unexpected_exception_at_each_step_finishes_the_receipt(fault: str, exc: Exception) -> None:
+    """Every step after logon: the faulted check is never a pass, the checks
+    before it keep their outcome, one logon, read-only verbs, exit 3."""
+
+    class FaultFTP(ProbeFTP):
+        def transfercmd(self, cmd: str, rest=None) -> _FakeDataConn:
+            if cmd == faulted_command.get(fault):
+                self.commands.append(cmd)
+                raise exc
+            return super().transfercmd(cmd, rest)
+
+    faulted_command = {"dataset": f"RETR '{PROBE_DATASET.split('(')[0]}'(MRKMEMQ)",
+                       "list": f"LIST {PROBE_JOB}", "spool": f"RETR {PROBE_JOB}.2"}
+
+    fake = FaultFTP(stat=exc if fault == "stat" else STAT_OK)
+    receipt, checks = _probe(fake)
+    _assert_read_only(fake)
+    _assert_probe_error_receipt(receipt, type(exc).__name__)
+    faulted = {"stat": "zos.stat_sbdataconn", "dataset": "zos.dataset_read_ascii",
+               "list": "zos.jes_interface_level2", "spool": "zos.jes_spool_mapping"}[fault]
+    assert checks[faulted]["status"] == "inconclusive" and checks[faulted]["reason"] == "probe_error"
+    assert checks["zos.logon"]["status"] == "pass"
+    if fault != "stat":
+        assert checks["zos.stat_sbdataconn"]["status"] == "pass"
+
+
+def test_site_probe_transient_reply_on_the_dataset_pin_is_inconclusive() -> None:
+    """Review N1: a 421 on the SITE pin before the RETR is not a failed read."""
+
+    class ClosingFTP(ProbeFTP):
+        pins = 0
+
+        def sendcmd(self, cmd: str) -> str:
+            if cmd == "SITE NOTRAILINGBLANKS":
+                self.pins += 1
+                if self.pins == 2:
+                    self.commands.append(cmd)
+                    raise ftplib.error_temp("421 MRKSITEQ closing")
+            return super().sendcmd(cmd)
+
+    receipt, checks = _probe(ClosingFTP(), job=None)
+    read = checks["zos.dataset_read_ascii"]
+    assert (read["status"], read["reason"], read["reply_code"]) == ("inconclusive", "transient", "421")
+    assert checks["zos.passive_data"]["status"] == "inconclusive"
+    assert receipt.exit_code() == 0
+
+
+def test_probe_receipt_abort_keeps_finished_records_and_names_only_the_class() -> None:
+    receipt = Receipt("zos")
+    receipt.add("zos.a", "fail", reason="refused")
+    receipt.abort(KeyError("MRKUSRQ secret text"), ("zos.a", "zos.b"))
+    receipt.abort(ValueError("second"))  # the first error stands
+    assert [r["status"] for r in receipt.records] == ["fail", "inconclusive"]
+    assert receipt.records[1]["reason"] == "probe_error"
+    assert receipt.summary() == {"probe": "zos", "check": "zos.summary", "status": "error", "schema": 1,
+                                 "pass": 0, "fail": 1, "inconclusive": 1, "probe_error": True,
+                                 "error_class": "KeyError"}
+    assert receipt.exit_code() == 3
+    assert "MRKUSRQ" not in "\n".join(receipt.lines())

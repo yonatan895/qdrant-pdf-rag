@@ -6,7 +6,8 @@ MCP_FTP_PASSWORD must arrive via a mounted secret or the environment.
 without credentials to verify whether the target supports verified FTPS.
 `--site-probe` runs the read-only D8 site probe (one logon; `site_probe.py`)
 and prints a text-free JSON-lines receipt (also to `--receipt FILE`, mode
-0600); it exits 1 when a check failed, 2 on a configuration or target error.
+0600); it exits 1 when a check failed, 2 on a configuration or target error,
+3 when it stopped on an unexpected error (the receipt is still whole).
 `--mock DIR` (or `MCP_MOCK_DIR`) serves a deterministic fixture tree instead
 of the wire: test-only, never in prod manifests (hygiene-gated).
 """

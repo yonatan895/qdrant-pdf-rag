@@ -271,8 +271,11 @@
      with `--job-id`, that job's `LIST` and `JESMSGLG` after the bridge's
      prefix check. Its receipt is one JSON line per check (`pass`, `fail` or
      `inconclusive` with reply codes, counts and fixed reason codes, never
-     text, names or hosts) plus a summary; the exit code is 1 when a check
-     failed. Record the receipt with the dry run. Opting in
+     text, names or hosts) plus a summary. Exit 0: no check failed; 1: a
+     check failed; 2: refused to start (configuration or target); 3: stopped
+     on an unexpected error, with the receipt still whole (finished checks
+     kept, the rest `inconclusive` `probe_error`, the summary naming only
+     the exception class). Record the receipt with the dry run. Opting in
      `job_status,jes_spool_read` in `MCP_ENABLED_TOOLS` waits until
      `zos.jes_interface_level2` and `zos.jes_spool_mapping` pass, and scoped
      `JESSPOOL` READ profiles (never `JESSPOOL *`) and `JESJOBS`/`FTCHKCMD`

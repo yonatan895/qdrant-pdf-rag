@@ -81,7 +81,9 @@ passphrase or a credential that can sign (D3).
   command. Its receipt is one JSON line per check (`pass`, `fail` or
   `inconclusive`, HTTP status codes, booleans, the key version and the
   public key fingerprint; never the address, key name or token); exit 1 when
-  a check failed. `vault.key_type` needs a non-exportable `rsa-3072` key;
+  a check failed, 2 on a configuration error, 3 when it stopped on an
+  unexpected error (the receipt still whole, the rest `inconclusive`
+  `probe_error`, the summary naming only the exception class). `vault.key_type` needs a non-exportable `rsa-3072` key;
   `vault.public_key_export`'s `fingerprint_sha256` must equal the
   `vault-pubkey` fingerprint. A key holder whose policy allows only
   `sign` gets `vault.key_read` `forbidden` and an `inconclusive`

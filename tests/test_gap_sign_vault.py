@@ -21,6 +21,7 @@ import hashlib
 import http.server
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -347,7 +348,8 @@ _ERROR_BODY = b'{"errors":["MRKERRBODYQ permission denied for mrkkeyq-gap"]}'
 
 @contextlib.contextmanager
 def _vault_stub(priv: Path, pub: Path, *, key_type: str = "rsa-3072", exportable: bool = False,
-                read_status: int = 200, sign_status: int = 200, pss: bool = False):
+                read_status: int = 200, sign_status: int = 200, pss: bool = False,
+                sign_reply: bytes | None = None):
     calls: list[tuple[str, str]] = []
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -376,6 +378,9 @@ def _vault_stub(priv: Path, pub: Path, *, key_type: str = "rsa-3072", exportable
             length = int(self.headers.get("Content-Length", "0"))
             req = json.loads(self.rfile.read(length).decode("utf-8"))
             calls.append(("POST", self.path))
+            if sign_reply is not None:
+                self._reply(200, sign_reply)
+                return
             ok = self.headers.get("X-Vault-Token") == _PROBE_TOKEN
             if sign_status != 200 or not ok or self.path != f"/v1/transit/sign/{_PROBE_KEY}":
                 self._reply(sign_status if sign_status != 200 else 403, _ERROR_BODY)
@@ -488,3 +493,69 @@ def test_vault_probe_receipt_rules_equal_the_package_copy():
     assert ours.exit_code() == theirs.exit_code() == 1
     with pytest.raises(sign_vault.SignError):
         ours.add("vault.d", "pass", note="two words")
+    for receipt in (ours, theirs):
+        receipt.abort(KeyError("MRKTOKENQ"), ("vault.c", "vault.e"))
+    assert ours.lines() == theirs.lines()
+    assert ours.exit_code() == theirs.exit_code() == probe_receipt.EXIT_PROBE_ERROR == 3
+    assert ours.summary()["error_class"] == "KeyError" and "MRKTOKENQ" not in "".join(ours.lines())
+    assert sign_vault.PROBE_ERROR == probe_receipt.PROBE_ERROR
+
+
+def test_vault_probe_odd_replies_are_receipt_records_not_crashes(rsa3072_pair: tuple[Path, Path]):
+    """Review B1: a non-object `data` in the sign reply and a malformed HTTP
+    status line are outcomes, not exceptions."""
+    priv, pub = rsa3072_pair
+    with _vault_stub(priv, pub, sign_reply=b'{"data": "MRKDATAQ"}') as (addr, _):
+        checks = _vault_probe(addr)
+    sign = checks["vault.sign_pkcs1v15_sha256"]
+    assert (sign["status"], sign["reason"]) == ("fail", "no_signature")
+    assert "MRKDATAQ" not in json.dumps(checks)
+
+    with socket.socket() as srv:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+
+        def garbage() -> None:
+            for _ in range(2):
+                conn, _addr = srv.accept()
+                with conn:
+                    conn.recv(65536)
+                    conn.sendall(b"MRKSTATUSQ not http\r\n\r\n")
+
+        thread = threading.Thread(target=garbage, daemon=True)
+        thread.start()
+        checks = _vault_probe(f"http://127.0.0.1:{srv.getsockname()[1]}")
+        thread.join(timeout=5)
+    assert checks["vault.key_read"]["reason"] == "unreachable"
+    assert checks["vault.sign_pkcs1v15_sha256"]["reason"] == "unreachable"
+    assert "MRKSTATUSQ" not in json.dumps(checks)
+
+
+def test_vault_probe_unexpected_exception_keeps_a_whole_receipt_and_exits_3(
+    tmp_path: Path, rsa3072_pair: tuple[Path, Path], monkeypatch, capsys
+):
+    priv, pub = rsa3072_pair
+
+    def broken(pem: bytes, **_: object) -> bytes:
+        raise RuntimeError("MRKERRBODYQ")
+
+    monkeypatch.setattr(sign_vault, "normalize_public_key_pem", broken)
+    monkeypatch.setenv("VAULT_TOKEN", _PROBE_TOKEN)
+    out = tmp_path / "vault-receipt.jsonl"
+    with _vault_stub(priv, pub) as (addr, calls):
+        rc = sign_vault.main(["vault-probe", "--vault-addr", addr, "--key-name", _PROBE_KEY,
+                              "--receipt", str(out)])
+    captured = capsys.readouterr()
+    assert rc == 3
+    assert calls == [("GET", f"/v1/transit/keys/{_PROBE_KEY}")]  # nothing after the error
+    written = out.read_text(encoding="utf-8")
+    assert written == captured.out and out.stat().st_mode & 0o777 == 0o600
+    records = [json.loads(line) for line in written.splitlines()]
+    assert [(r["check"], r["status"], r.get("reason")) for r in records] == [
+        ("vault.key_read", "pass", None), ("vault.key_type", "pass", None),
+        ("vault.public_key_export", "inconclusive", "probe_error"),
+        ("vault.sign_pkcs1v15_sha256", "inconclusive", "probe_error"),
+        ("vault.summary", "error", None)]
+    assert records[-1]["error_class"] == "RuntimeError"
+    for marker in ("MRKERRBODYQ", "mrktokenq", "mrkkeyq", "Traceback"):
+        assert marker.lower() not in (written + captured.err).lower(), marker

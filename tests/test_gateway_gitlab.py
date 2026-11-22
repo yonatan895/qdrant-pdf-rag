@@ -1379,3 +1379,34 @@ def test_site_probe_refuses_targets_outside_the_allowlists_before_any_call(tmp_p
     assert gitlab.main(["--serve-now"]) == 2
     assert fake.requests == []
     assert "other/secret" not in capsys.readouterr().err
+
+
+def _crash_trace(request: httpx2.Request) -> httpx2.Response:
+    raise RuntimeError(UPSTREAM_CANARY)
+
+
+def test_site_probe_unexpected_exception_keeps_a_whole_receipt_and_exits_3(tmp_path: Path, monkeypatch, capsys):
+    """Review B1: an exception other than GatewayError ends the run with the
+    finished checks kept, the rest probe_error, the class name only, exit 3."""
+    fake = _probe_fake(**{"projects/7/jobs/41/trace": _crash_trace})
+    env = _env(tmp_path, "bearer", _config_doc(tmp_path, auth=False, max_job_log_read_bytes=1_000_000))
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    real_build = gitlab.build_gateway
+    monkeypatch.setattr(gitlab, "build_gateway", lambda: real_build(env, transport=fake.transport()))
+    out = tmp_path / "gitlab-receipt.jsonl"
+    rc = gitlab.main(["--site-probe", "--job", "team/app:41", "--issue", "team/app:5", "--receipt", str(out)])
+    captured = capsys.readouterr()
+    assert rc == 3
+    written = out.read_text(encoding="utf-8")
+    assert written == captured.out and out.stat().st_mode & 0o777 == 0o600
+    records = [json.loads(line) for line in written.splitlines()]
+    assert [(r["check"], r["status"]) for r in records] == [
+        ("gitlab.version", "pass"), ("gitlab.token_scopes", "pass"),
+        ("gitlab.job_trace_stream", "inconclusive"), ("gitlab.issue_notes_filter", "inconclusive"),
+        ("gitlab.summary", "error")]
+    assert records[2]["reason"] == records[3]["reason"] == "probe_error"
+    assert records[-1]["error_class"] == "RuntimeError" and records[-1]["probe_error"] is True
+    for marker in PROBE_MARKERS:
+        assert marker.lower() not in (written + captured.err).lower(), marker
+    assert fake.violations == []

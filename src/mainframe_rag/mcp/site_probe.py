@@ -20,6 +20,11 @@ bridge's jobname/owner prefix check. Without a named target those checks are
 The matchers for server wording (`SBDATACONN_RE` over the STAT reply and the
 `JESMSGLG` record shapes) are assumptions the dry run exists to test: an
 unrecognised shape is `inconclusive`, never `fail`.
+
+An unexpected exception (a reply `ftplib` cannot decode, say) ends the run
+with the receipt still whole: finished checks keep their outcome, the rest
+are `inconclusive probe_error`, the summary names the exception class only,
+and the exit code is 3 (`mainframe_rag.probe_receipt`).
 """
 
 from __future__ import annotations
@@ -35,7 +40,7 @@ from typing import Any
 
 from mainframe_rag.mcp import bridge
 from mainframe_rag.mcp.bridge import FTPConfig, LogonBreaker
-from mainframe_rag.probe_receipt import Receipt
+from mainframe_rag.probe_receipt import PROBE_ERROR, Receipt, ReceiptError
 
 PROBE = "zos"
 
@@ -184,6 +189,7 @@ class _ZosRun:
     clock: Callable[[], float]
     results: dict[str, tuple[str, dict[str, Any]]] = field(default_factory=dict)
     default_reason: str = "not_reached"
+    error: BaseException | None = None
 
     def put(self, check: str, status: str, **fields: Any) -> None:
         """Record a check once; the first outcome stands, except that a pass
@@ -195,11 +201,16 @@ class _ZosRun:
 
     def receipt(self) -> Receipt:
         receipt = Receipt(PROBE)
+        unset = PROBE_ERROR if self.error is not None else self.default_reason
         for check in CHECKS:
-            status, fields = self.results.get(
-                check, ("inconclusive", {"reason": self.default_reason})
-            )
-            receipt.add(check, status, **fields)
+            status, fields = self.results.get(check, ("inconclusive", {"reason": unset}))
+            try:
+                receipt.add(check, status, **fields)
+            except ReceiptError as exc:  # a probe bug: the record is withheld
+                self.error = self.error or exc
+                receipt.add(check, "inconclusive", reason=PROBE_ERROR)
+        if self.error is not None:
+            receipt.abort(self.error)
         return receipt
 
     # --- session setup ----------------------------------------------------------
@@ -329,6 +340,11 @@ class _ZosRun:
             self._transfer_failed(exc)
             self.put(check, "inconclusive", reason="session_lost")
             raise _SessionLost("session_lost") from None
+        except ftplib.error_temp as exc:
+            # A 4xx (on the SITE pin or the RETR) is transient by definition.
+            self._transfer_failed(exc)
+            self.put(check, "inconclusive", reason="transient", reply_code=_reply_code(exc))
+            return
         except ftplib.Error as exc:
             self._transfer_failed(exc)
             code = _reply_code(exc)
@@ -494,21 +510,26 @@ def run_zos_probe(
     clock: Callable[[], float] = time.monotonic,
 ) -> Receipt:
     """One session, one logon attempt, the D8 checks in a fixed order (control
-    commands first, the dataset read, then JES with the spool read last)."""
+    commands first, the dataset read, then JES with the spool read last).
+    Always returns the whole receipt: an unexpected exception after the start
+    is recorded as `probe_error` (class name only), never raised."""
     run = _ZosRun(config, targets, clock)
-    active = breaker or LogonBreaker(threshold=1, cooldown_s=config.logon_breaker_cooldown_s)
-    progress: list[str] = []
     try:
-        ftp = bridge.connect(config, factory, breaker=active, progress=progress)
-    except Exception as exc:  # noqa: BLE001 — recorded as a reason code only
-        run.record_setup(progress, exc, active, None)
-        return run.receipt()
-    run.record_setup(progress, None, active, ftp)
-    try:
-        run.after_logon(ftp)
-    finally:
-        with contextlib.suppress(Exception):
-            ftp.quit()
-        with contextlib.suppress(Exception):
-            ftp.close()
+        active = breaker or LogonBreaker(threshold=1, cooldown_s=config.logon_breaker_cooldown_s)
+        progress: list[str] = []
+        try:
+            ftp = bridge.connect(config, factory, breaker=active, progress=progress)
+        except Exception as exc:  # noqa: BLE001 — recorded as a reason code only
+            run.record_setup(progress, exc, active, None)
+            return run.receipt()
+        run.record_setup(progress, None, active, ftp)
+        try:
+            run.after_logon(ftp)
+        finally:
+            with contextlib.suppress(Exception):
+                ftp.quit()
+            with contextlib.suppress(Exception):
+                ftp.close()
+    except Exception as exc:  # noqa: BLE001 — recorded by class name only
+        run.error = exc
     return run.receipt()

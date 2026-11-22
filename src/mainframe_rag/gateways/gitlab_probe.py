@@ -18,11 +18,15 @@ records the ADR-0014 site checks in a text-free receipt
 
 Job and issue checks run only for targets the operator names, inside the
 allowlists; otherwise they are `inconclusive`. Nothing from a response but
-counts, booleans, version integers and fixed codes reaches the receipt.
+counts, booleans, version integers and fixed codes reaches the receipt. An
+unexpected exception ends the run with the receipt still whole (the
+unfinished checks `inconclusive probe_error`, the exception's class name in
+the summary, exit code 3).
 """
 
 from __future__ import annotations
 
+import contextlib
 import re
 import time
 from collections.abc import Callable
@@ -250,13 +254,19 @@ async def run_gitlab_probe(
     clock: Callable[[], float] = time.monotonic,
 ) -> Receipt:
     """The four checks in `CHECKS` order on the gateway's own client (closed
-    after)."""
-    probe = _Probe(gateway, clock)
+    after). Always returns the whole receipt: an unexpected exception is
+    recorded as `probe_error` (class name only), never raised."""
+    receipt = Receipt(PROBE)
     try:
+        probe = _Probe(gateway, clock)
+        receipt = probe.receipt
         await probe.version()
         await probe.token_scopes()
         await probe.job_trace(job)
         await probe.notes_filter(issue)
+    except Exception as exc:  # noqa: BLE001 — recorded by class name only
+        receipt.abort(exc, CHECKS)
     finally:
-        await gateway.client.aclose()
-    return probe.receipt
+        with contextlib.suppress(Exception):
+            await gateway.client.aclose()
+    return receipt
