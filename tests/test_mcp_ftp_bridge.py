@@ -1584,12 +1584,14 @@ class _MiniFTPSServer:
     """Minimal real-socket FTP/FTPS control server for TLS verification tests."""
 
     def __init__(self, *, certfile: Path | None = None, keyfile: Path | None = None, reject_auth: bool = False,
-                 replies: dict[str, bytes] | None = None) -> None:
+                 replies: dict[str, bytes] | None = None, pass_replies: list[bytes] | None = None) -> None:
         self._certfile = certfile
         self._keyfile = keyfile
         self._reject_auth = reject_auth
         self._replies = replies or {}  # upper-cased command -> raw reply bytes
+        self._pass_replies = list(pass_replies or [])  # consumed in order, then 230
         self.received_commands: list[str] = []
+        self.connections = 0
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("127.0.0.1", 0))
@@ -1616,6 +1618,7 @@ class _MiniFTPSServer:
                 continue
             except OSError:
                 break
+            self.connections += 1
             self._handle(conn)
 
     def _handle(self, raw_conn: socket.socket) -> None:
@@ -1647,7 +1650,7 @@ class _MiniFTPSServer:
                 elif upper.startswith("USER "):
                     conn.sendall(b"331 Password required\r\n")
                 elif upper.startswith("PASS "):
-                    conn.sendall(b"230 Logged in\r\n")
+                    conn.sendall(self._pass_replies.pop(0) if self._pass_replies else b"230 Logged in\r\n")
                 elif upper == "PBSZ 0":
                     conn.sendall(b"200 PBSZ 0 ok\r\n")
                 elif upper == "PROT P":
@@ -2802,6 +2805,87 @@ def test_site_probe_cli_exits_3_with_the_receipt_file_on_an_unexpected_error(
     assert records[-1]["error_class"] == "UnicodeDecodeError"
     everything = written + captured.err
     for marker in (*PROBE_MARKERS, "MRKMEMQ", PROBE_JOB, "PARMLIB", "Traceback"):
+        assert marker not in everything, marker
+
+
+def _site_probe_cli_against(monkeypatch, srv: _MiniFTPSServer, out_file: Path) -> int:
+    for name, value in {
+        "MCP_FTP_HOST": "127.0.0.1", "MCP_FTP_PORT": str(srv.port), "MCP_FTP_USER": "MRKUSRQ",
+        "MCP_FTP_PASSWORD": "MRKPWDQ9", "MCP_FTP_TRANSPORT_MODE": "plain",
+        "MCP_FTP_PLAIN_ACCEPTED": "true", "MCP_DATASET_ALLOWLIST": PROBE_DATASET,
+        "MCP_JES_JOBNAME_PREFIXES": "MRKJOB", "MCP_JES_OWNER_PREFIXES": "MRKOWN",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("MCP_MOCK_DIR", raising=False)
+    return mcp_main.main(["--site-probe", "--dataset", PROBE_DATASET, "--job-id", PROBE_JOB,
+                          "--receipt", str(out_file)])
+
+
+@pytest.mark.parametrize(("pass_reply", "reason"), [
+    (b"530 PASS command failed MRK530Q\r\n", "logon_failed"),
+    (b"421 MRK530Q service not available\r\n", "upstream_error"),
+])
+def test_site_probe_failed_logon_ends_the_run_with_no_retry(
+    monkeypatch, capsys, tmp_path: Path, pass_reply: bytes, reason: str
+) -> None:
+    """Review B2, maintainer decision (comment 7080731707): at most one logon
+    per run, no retry. The server would accept a second logon; the probe must
+    not try one. The failed logon ends the run with the receipt finished."""
+    out_file = tmp_path / "receipt.jsonl"
+    with _MiniFTPSServer(pass_replies=[pass_reply]) as srv:
+        rc = _site_probe_cli_against(monkeypatch, srv, out_file)
+        sent, connections = list(srv.received_commands), srv.connections
+    captured = capsys.readouterr()
+    assert connections == 1
+    assert sum(c.startswith("USER ") for c in sent) == 1
+    assert sum(c.startswith("PASS ") for c in sent) == 1
+    assert not any(c.startswith(("SITE", "STAT", "RETR", "LIST", "PASV", "TYPE")) for c in sent)
+    assert rc == 1
+    written = out_file.read_text(encoding="utf-8")
+    assert written == captured.out and out_file.stat().st_mode & 0o777 == 0o600
+    records = [json.loads(line) for line in written.splitlines()]
+    assert [r["check"] for r in records] == [*site_probe.CHECKS, "zos.summary"]
+    checks = {r["check"]: r for r in records}
+    assert checks["zos.control_connect"]["status"] == "pass"
+    assert checks["zos.tls"] == {"probe": "zos", "check": "zos.tls", "status": "inconclusive",
+                                 "reason": "plain_mode", "plain_accepted": True}
+    assert checks["zos.logon"] == {"probe": "zos", "check": "zos.logon", "status": "fail", "reason": reason,
+                                   "logon_attempts": 1, "breaker_open": reason == "logon_failed"}
+    assert all(checks[c] == {"probe": "zos", "check": c, "status": "inconclusive", "reason": "not_reached"}
+               for c in site_probe.CHECKS[3:])
+    assert checks["zos.summary"]["status"] == "fail"
+    assert "error_class" not in checks["zos.summary"]
+    everything = written + captured.err
+    for marker in (*PROBE_MARKERS, "MRKMEMQ", PROBE_JOB, "PARMLIB", "127.0.0.1", "Traceback"):
+        assert marker not in everything, marker
+
+
+def test_site_probe_undecodable_logon_reply_exits_3_with_one_logon(monkeypatch, capsys, tmp_path: Path) -> None:
+    """Review B2 with the B1 contract: an unexpected error during the one
+    logon is exit 3 (not a logon fail), still with no second attempt."""
+    out_file = tmp_path / "receipt.jsonl"
+    with _MiniFTPSServer(pass_replies=[b"530 MRK530Q \xa7\r\n"]) as srv:
+        rc = _site_probe_cli_against(monkeypatch, srv, out_file)
+        sent, connections = list(srv.received_commands), srv.connections
+    captured = capsys.readouterr()
+    assert connections == 1
+    assert sum(c.startswith("USER ") for c in sent) == 1
+    assert sum(c.startswith("PASS ") for c in sent) == 1
+    assert rc == 3
+    written = out_file.read_text(encoding="utf-8")
+    assert written == captured.out and out_file.stat().st_mode & 0o777 == 0o600
+    records = [json.loads(line) for line in written.splitlines()]
+    assert [r["check"] for r in records] == [*site_probe.CHECKS, "zos.summary"]
+    checks = {r["check"]: r for r in records}
+    assert checks["zos.control_connect"]["status"] == "pass"
+    assert checks["zos.logon"] == {"probe": "zos", "check": "zos.logon", "status": "inconclusive",
+                                   "reason": "probe_error", "logon_attempts": 1}
+    assert all(checks[c] == {"probe": "zos", "check": c, "status": "inconclusive", "reason": "probe_error"}
+               for c in site_probe.CHECKS[3:])
+    assert checks["zos.summary"]["status"] == "error"
+    assert checks["zos.summary"]["error_class"] == "UnicodeDecodeError"
+    everything = written + captured.err
+    for marker in (*PROBE_MARKERS, "MRKMEMQ", PROBE_JOB, "PARMLIB", "127.0.0.1", "Traceback"):
         assert marker not in everything, marker
 
 

@@ -264,8 +264,14 @@
        [--job-id <JOBnnnnn of an allowlisted team job>] [--receipt <writable path>]
      ```
 
-     It makes one session and one logon attempt (a failed logon ends the run;
-     do not rerun until the password is fixed), sends no write, delete or job
+     It makes one session and at most one logon attempt per run, with no
+     retry (maintainer decision on #1349 review B2, 2026-11-22, to protect
+     the site account from lockout). A failed logon ends the run: the
+     remaining checks are `inconclusive` `not_reached` and the receipt is
+     finished (exit 1; exit 3 when the logon hit an unexpected error). The
+     bound is per run: the probe uses its own threshold-1 breaker, not the
+     running bridge's (D9), so every rerun is one more logon; rerun only
+     after the cause is fixed. It sends no write, delete or job
      command (after logon: SITE, STAT, TYPE, PASV, RETR, LIST, ABOR, QUIT),
      and reads only the named allowlisted dataset and,
      with `--job-id`, that job's `LIST` and `JESMSGLG` after the bridge's
@@ -309,7 +315,9 @@
      with ids, window and byte counts only.
 9. **D9, logon-failure breaker.** A logon failure (FTP 530) gets its own code
    (named by #1294) and stops further logons until an operator resets it or a
-   cool-down passes, so repeated failures cannot revoke the ID.
+   cool-down passes, so repeated failures cannot revoke the ID. The breaker
+   is per process: the D8(c) site probe holds its own and is bounded to one
+   logon per run instead.
 
 ## Shared credentials (replaces ADR-0011's z/OS row for the pilot)
 

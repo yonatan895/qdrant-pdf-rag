@@ -8,9 +8,11 @@ logon breaker, `FTPSession`, the SITE pin rule, the JES `LIST` parsers and
 the spool window reader. It turns the D8 dry-run checklist into one command
 and a text-free receipt (`mainframe_rag.probe_receipt`).
 
-Read-only by construction: one session and **one logon attempt** per run
-(a fresh breaker with threshold 1; a failed logon ends the run, nothing
-reconnects); after the bridge's own session setup the commands are SITE, STAT,
+Read-only by construction: one session and **at most one logon attempt**
+per run, no retry (a fresh breaker with threshold 1; a failed logon ends the
+run with the remaining checks `inconclusive` `not_reached` and exit 1,
+nothing reconnects; review B2 decision on #1349). The bound is per run, not
+shared with the running bridge's breaker. After the bridge's own session setup the commands are SITE, STAT,
 TYPE, PASV, RETR, LIST, ABOR and QUIT only (no STOR, DELE or job action); `--dataset` must be an exact entry of
 `MCP_DATASET_ALLOWLIST`; JES checks run only for a job the operator names with
 `--job-id`, and read only that job's `LIST` and its `JESMSGLG`, after the
@@ -129,6 +131,17 @@ def validate_targets(
     return ProbeTargets(dataset=dsn, member=mem, job_id=jid)
 
 
+# Setup failures the bridge classifies (network, FTP replies, TLS, logon,
+# breaker); anything else during setup is unexpected and ends the run with
+# exit 3, like one after logon.
+_SETUP_ERRORS: tuple[type[BaseException], ...] = (
+    *ftplib.all_errors,
+    bridge._LogonFailed,
+    bridge._LogonBreakerOpen,
+    bridge._TlsVerificationError,
+)
+
+
 def _reply_code(exc: BaseException) -> str:
     text = str(exc)
     return text[:3] if text[:3].isdigit() else "???"
@@ -223,7 +236,13 @@ class _ZosRun:
             self.default_reason = "breaker_open"
             self.put("zos.control_connect", "inconclusive", reason="breaker_open")
             return
+        unexpected = exc is not None and not isinstance(exc, _SETUP_ERRORS)
+        if unexpected:
+            # The stage it hit stays unset (`probe_error`); never a fail.
+            self.error = exc
         if "connected" not in progress:
+            if unexpected:
+                return
             self.put("zos.control_connect", "fail", reason=_error_code(exc) if exc else None)
             return
         self.put("zos.control_connect", "pass")
@@ -231,18 +250,22 @@ class _ZosRun:
         if not ftps:
             self.put("zos.tls", "inconclusive", reason="plain_mode", plain_accepted=True)
         elif "tls" not in progress:
-            self.put("zos.tls", "fail", reason="tls_error", **tls_facts)
+            if not unexpected:
+                self.put("zos.tls", "fail", reason="tls_error", **tls_facts)
         else:
             tls_facts["tls_version"] = _tls_version(ftp)
             if "protected" in progress:
                 self.put("zos.tls", "pass", prot_p=True, **tls_facts)
             elif "logon" in progress:
-                self.put("zos.tls", "fail", reason="prot_p_refused", prot_p=False, **tls_facts)
+                if not unexpected:
+                    self.put("zos.tls", "fail", reason="prot_p_refused", prot_p=False, **tls_facts)
             else:
                 self.put("zos.tls", "pass", prot_p=None, **tls_facts)
         logon_tried = "tls" in progress or not ftps
         if "logon" in progress:
             self.put("zos.logon", "pass", logon_attempts=1)
+        elif logon_tried and unexpected:
+            self.put("zos.logon", "inconclusive", reason=PROBE_ERROR, logon_attempts=1)
         elif logon_tried and exc is not None:
             failed = isinstance(exc, bridge._LogonFailed)
             self.put(
