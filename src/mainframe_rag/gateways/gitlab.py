@@ -473,7 +473,13 @@ def job_log_text(
     if not read.complete:
         data = data[: data.rfind(b"\n") + 1]
     if start:
-        lead = _carry_free_start(before, data, more_before=start > len(before))
+        more_before = start > len(before)
+        if more_before:
+            # The lookbehind may start inside a key (its bound is raw bytes,
+            # and cleaning removes some), so its partial first line is no
+            # context: from an empty context the first kept line is dropped.
+            before = before[before.find(b"\n") + 1 :] if b"\n" in before else b""
+        lead = _carry_free_start(before, data, more_before=more_before)
         data, start = data[lead:], start + lead
     skipped = start
     data = _redact_keys(data, start, keys)

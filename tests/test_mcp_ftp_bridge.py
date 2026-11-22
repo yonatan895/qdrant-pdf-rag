@@ -1394,6 +1394,15 @@ def test_spool_read_through_the_receive_never_leaks_a_secret(data: st.DataObject
     assume(props.assert_no_secret_survives(text, _whole_screened(payload, encoding), secret))
 
 
+def test_whole_text_screen_covers_these_secret_shapes() -> None:
+    """Pins which shared families the z/OS screen redacts (L LF, W CRLF,
+    R CR), so a property cannot go silently vacuous: a family not covered
+    here is discarded by the spool and dataset properties. Pattern limits
+    (lower-case or prefixed key names, URL credentials) are not leaks."""
+    covered = props.screen_coverage(lambda raw: bridge.screen_zos_text(raw.decode("latin-1")))
+    assert covered == {name: "LWR" for name in props.FAMILIES} | {"kv_spaced": "", "url_credentials": ""}
+
+
 @pytest.mark.parametrize(
     ("encoding", "marker"),
     [

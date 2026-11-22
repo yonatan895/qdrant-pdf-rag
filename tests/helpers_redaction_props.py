@@ -15,7 +15,7 @@ existing fakes (FakeFTP for the z/OS bridge, FakeGitLab for the GitLab gateway).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from hypothesis import settings
@@ -73,6 +73,20 @@ PEM_LABELS = (b"", b"RSA ", b"EC ", b"OPENSSH ", b"ENCRYPTED ")
 LEADS = (b"", E_ACUTE + EURO + b" ", b"X" * 120 + b" ", b"X" * 5000 + b" ")
 SHORT_LEADS = LEADS[:3]
 LINE_ENDS = (b"\n", b"\r\n", b"\r")
+
+
+def screen_coverage(screen: Callable[[bytes], str]) -> dict[str, str]:
+    """For each key/value family, the line ends (`L` LF, `W` CRLF, `R` CR)
+    under which `screen` (a surface's whole-text screen) redacts the value.
+    A family no surface covers is vacuous in that surface's properties."""
+    value = "QXJZqxjzQXJZ"
+    out: dict[str, str] = {}
+    for name, family in FAMILIES.items():
+        raw = family.template.replace(b"{v}", value.encode())
+        out[name] = "".join(
+            tag for tag, eol in zip("LWR", LINE_ENDS, strict=True) if value not in screen(raw.replace(b"\n", eol))
+        )
+    return out
 
 
 @dataclass(frozen=True)

@@ -1247,6 +1247,74 @@ def test_job_log_window_on_the_value_line_of_an_earlier_key(tmp_path: Path, key:
         assert "QXJZqxjz" not in text, off
 
 
+def test_whole_text_screen_covers_these_secret_shapes() -> None:
+    """Pins which shared families the GitLab screen redacts (L LF, W CRLF,
+    R CR), so a property cannot go silently vacuous: a family not covered
+    here is discarded by the job-log properties. z/OS-only shapes are
+    pattern limits, not leaks."""
+    covered = props.screen_coverage(lambda raw: _whole_cleaned(raw))
+    assert covered == {
+        "kv_same_line": "LWR",
+        "kv_spaced": "LWR",
+        "kv_colon": "LWR",
+        "kv_export": "LWR",
+        "kv_next_line": "LWR",
+        "kv_chain": "R",
+        "kv_chain_spaced": "",
+        "zos_operand": "",
+        "zos_operand_next_line": "",
+        "zos_phrase": "",
+        "zos_phrase_next_line": "",
+        "tso_logon": "",
+        "tso_logon_next_line": "",
+        "space_form_next_line": "",
+        "bearer": "LWR",
+        "bearer_next_line": "LWR",
+        "url_credentials": "LWR",
+    }
+
+
+@pytest.mark.parametrize(
+    ("key", "pad"),
+    [
+        *(
+            (key, pad)
+            for key in (b"password=", b"Authorization:", b"API_TOKEN: ", b"HDR Bearer")
+            for pad in (b"\r", b"\x1b[0K", b"\xe2\x80\x8b")  # CR, ANSI, zero-width space
+        ),
+        (b"HDR Bearer", b"\n"),  # blank lines: only an auth scheme's \s+ spans them
+    ],
+)
+def test_job_log_lookbehind_starting_on_a_key(tmp_path: Path, key: bytes, pad: bytes) -> None:
+    """The window starts on a value line and the lookbehind (read bytes
+    before it, JOB_LOG_LOOKBEHIND_BYTES, counted raw) starts at, inside or
+    just around the key, which a run of bytes cleaning removes (CR, ANSI,
+    zero-width) or blank lines keep ~4 KiB from its value. Where cleaning
+    the whole log redacts the value, the tail must not show it."""
+    fake = FakeGitLab()
+    gw = _bearer_gateway(tmp_path, fake, max_job_log_read_bytes=1_000_000)
+    value = b"QXJZQXJZqxjzQXJZ"
+    value_line = b"  " + value + b"\n"
+    size = 1024 - len(value_line)
+    suffix = b"".join(b"log %06d %s\n" % (n, b"." * 18) for n in range(size // 30 + 1))[: size - 5]
+    suffix = suffix[: suffix.rfind(b"\n") + 1]
+    suffix += b"z" * (size - 5 - len(suffix)) + b"LAST\n"
+    in_scope = 0
+    for units in range((4096 - len(key)) // len(pad) - 2, (4096 + 4) // len(pad) + 2):
+        # The window (tail_bytes + 1 bytes) starts at the key line's last
+        # newline; the lookbehind starts len(key) + units * len(pad) - 4096
+        # bytes after the key's first byte.
+        log = b"".join(_lines(200, 30)) + key + pad * units + b"\n" + value_line + suffix
+        if value.decode() in _whole_cleaned(log):
+            continue
+        in_scope += 1
+        fake.routes["/api/v4/projects/7/jobs/50/trace"] = _stream(log, 512)
+        text = _body(_run(gw, "read_job_log", project="team/app", job_id=50, tail_bytes=1024), "read_job_log")["text"]
+        assert "LAST" in text, units
+        assert "QXJZqxjz" not in text, units
+    assert in_scope
+
+
 # --- #1347: field clip and result cut ----------------------------------------------------
 
 
