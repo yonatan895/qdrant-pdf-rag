@@ -2,7 +2,7 @@
 title: Rosetta rating
 author: mainframe-rag
 version: 0.1.0
-required_open_webui_version: 0.12.3
+required_open_webui_version: 0.13.4
 license: Apache-2.0
 description: Rate a Rosetta answer. The rating goes to the agent's feedback store, never to Open WebUI.
 """
@@ -33,7 +33,7 @@ from typing import Any, ClassVar
 import httpx
 from pydantic import BaseModel, Field
 
-OPEN_WEBUI_VERSION = "0.12.3"
+OPEN_WEBUI_VERSION = "0.13.4"
 FEEDBACK_PATH = "/v1/feedback"
 ERROR_BODY_MAX_BYTES = 65536
 

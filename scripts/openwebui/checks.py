@@ -200,7 +200,7 @@ def check_answer(chat: dict, name: str = "answer-citations") -> Verdict:
 
 def check_legacy_chat(listed: list[str], default_models: str | None, turn: dict) -> Verdict:
     """#1255 upgrade: a chat stored before the docs Pipe became a manifold names the bare
-    Function id, which is no longer a model. On opening it v0.12.3 drops an unlisted id and
+    Function id, which is no longer a model. On opening it v0.13.4 drops an unlisted id and
     selects the configured default (Chat.svelte loadChat, resolveDefaultModelIds), so the
     next turn answers only if the bare id is gone, the default is the listed default entry,
     and a turn on that stored chat, sent with the default, completes with sources. The

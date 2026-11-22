@@ -767,7 +767,7 @@ class TaskContractsTests(unittest.TestCase):
     def test_openwebui_image_builds_only_its_own_context_with_the_selected_tag(self):
         self.make_tool_recorder("docker")
         self.make_venv_fake()
-        for args, tag in (((), "mainframe-rag/openwebui:v0.12.3-slim"),
+        for args, tag in (((), "mainframe-rag/openwebui:v0.13.4-slim"),
                           (("OPENWEBUI_IMAGE=ghcr.io/o/qdrant-pdf-rag-openwebui:x y",),
                            "ghcr.io/o/qdrant-pdf-rag-openwebui:x y")):
             with self.subTest(args=args):

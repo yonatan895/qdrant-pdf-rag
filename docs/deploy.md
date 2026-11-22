@@ -1410,7 +1410,7 @@ and CI tooling have different owners and pull credentials.
 | OpenObserve OSS (ADR-0006) | `openobserve/openobserve:v1.1.2` | as the agent; the chart references it by digest only (`images.openobserve.digest`) | `load.sh` | cluster pods when tracing is on with an empty `tracing.endpoint` |
 | otelcol-contrib (ADR-0006) | `otel/opentelemetry-collector-contrib:0.160.0` | as the agent | `load.sh` | cluster pod (`Deployment/otelcol`, container `otelcol`) beside OpenObserve |
 | OAuth sidecar (optional) | `openshift4/ose-oauth-proxy:v4.14` | as the agent; absent while `images.txt` says `sha256:PENDING` | `load.sh` | cluster pods |
-| Open WebUI front end (default on, ADR-0007/ADR-0008, #1074) | `qdrant-pdf-rag-openwebui:v0.12.3-slim` | as the agent; absent while `images.txt` says `sha256:PENDING` (the factory records the pushed manifest digest of the image built from `images/openwebui/Containerfile`, the recipe the `scripts/openwebui/` dev environment and acceptance lane also build); the upstream `open-webui/open-webui:v0.12.3-slim` line is factory build provenance, never pushed | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `openwebui`) when `openwebui.enabled` |
+| Open WebUI front end (default on, ADR-0007/ADR-0008, #1074) | `qdrant-pdf-rag-openwebui:v0.13.4-slim` | as the agent; absent while `images.txt` says `sha256:PENDING` (the factory records the pushed manifest digest of the image built from `images/openwebui/Containerfile`, the recipe the `scripts/openwebui/` dev environment and acceptance lane also build); the upstream `open-webui/open-webui:v0.13.4-slim` line is factory build provenance, never pushed | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `openwebui`) when `openwebui.enabled` |
 | Open WebUI allow-list proxy (ADR-0007 E1, **Verifier-owned** where the workflow builds or mirrors images) | `nginxinc/nginx-unprivileged:1.30.6-alpine` | pinned by digest in `images.txt`; bundled as `openwebui-proxy-image.tar` exactly when the Open WebUI member is | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `proxy`) when `openwebui.enabled` |
 | CI job image | `qdrant-pdf-rag-devkit@<kit pin digest>`: the dev workspace image (next row) | the default `CI_PYTHON_IMAGE` names the digest in `scripts/tools/devkit-pin.txt` (a unit test keeps them equal); leave the project variable unset | `scripts/devkit/install.sh`, as the next row | GitLab runner: every job. The former `ci/python:3.14` role is retired (GH#1118 F5) |
 | Dev workspace image (ADR-0009 §8, #1118) | `qdrant-pdf-rag-devkit:<kit key>` | manifest digest in `scripts/tools/devkit-pin.txt`, recorded with its key in one pin PR after the factory pushes the image for that key (a kit-input change merges with the pin untouched; kit packing and the release gate refuse a stale pin; `sha256:PENDING` is refused); built from `images/Containerfile.devkit` by `.github/workflows/devkit.yml`; carried by the separate dev kit, never a release-bundle member or an `images.txt` line | the first push from Windows ([`docs/runbooks/devkit-windows.md`](runbooks/devkit-windows.md)), then `scripts/devkit/install.sh` in the bastion | bastion, dev pod and runner jobs, from the templates and runner configurations in `deploy/workspace/` (contract: `deploy/workspace/contract.json`); the coding agents on the gap orchestration VM under rootless Podman ([agents VM](agents-vm.md), #1172) |
@@ -1910,7 +1910,8 @@ is recorded in `images.txt`; the 2026-10-24 Kind trials are interim and partial
 in the trial records), and every pin import re-runs the ADR-0007 conditions
 (ADR-0008 item 2). The environment variable
 names, uvicorn TLS arguments, Functions API used by the Pipe installer and chat table layout
-used by the purge are those of the pinned v0.12.3 build.
+used by the purge are those of the pinned v0.13.4 build (#1357 re-read them; the tables the purge
+reads did not change from v0.12.3).
 
 **Enabling it at a site (default).** A site that does nothing gets Open WebUI, so the deploy
 refuses until the site supplies every required input. Both layers refuse before any cluster change:
@@ -1973,7 +1974,7 @@ bundle cannot yield a Ready pod whose sign-ins fail. Token exchange stays disabl
   Client authentication by client secret.
 - The **ID token** must carry the e-mail claim (`OPENWEBUI_OIDC_EMAIL_CLAIM`, default `email`),
   the group claim (`OPENWEBUI_OIDC_GROUP_CLAIM`, default `groups`) and the roles claim
-  (`OPENWEBUI_OIDC_ROLES_CLAIM`, default `roles`). Open WebUI v0.12.3 reads them from the ID
+  (`OPENWEBUI_OIDC_ROLES_CLAIM`, default `roles`). Open WebUI v0.13.4 reads them from the ID
   token. It calls userinfo only when the e-mail or username claim (`OPENWEBUI_OIDC_USERNAME_CLAIM`,
   default `name`) is missing there, and userinfo wins on a conflict. AD FS userinfo returns only
   `sub`, so AD FS issues these claims through issuance rules (below).
@@ -1984,7 +1985,7 @@ bundle cannot yield a Ready pod whose sign-ins fail. Token exchange stays disabl
   named owners who are Open WebUI admins. Admins can still read chats through the database or a
   Function (ADR-0007 S3), so keep that group small.
 - The roles claim must be in **every** ID token. The IdP issues the baseline value `signed-in`
-  to every user it authenticates, plus the group roles. Open WebUI v0.12.3 recomputes the role
+  to every user it authenticates, plus the group roles. Open WebUI v0.13.4 recomputes the role
   at every sign-in only when the claim is present: if the claim is missing, an existing user
   keeps the stored role, so a removed admin stays admin. Neither role list may contain
   `signed-in` or `*`; validate and the chart refuse both. An IdP that cannot issue a constant
@@ -1998,7 +1999,7 @@ bundle cannot yield a Ready pod whose sign-ins fail. Token exchange stays disabl
 **Register Open WebUI with AD FS.** AD FS 2016 or later. Placeholders: `<adfs-host>` is the
 federation service host and `<host>` is `OPENWEBUI_HOST`. Statements marked *(confirm on the test
 client)* are AD FS behaviour that could not be checked from a source here. The Open WebUI
-statements come from the v0.12.3 source in the pinned image.
+statements come from the v0.13.4 source in the pinned image.
 1. **Client.** Create an application group with a server application, which is a confidential
    client authenticated by a generated shared secret. Add a Web API whose identifier is the
    client id, so it can carry the scopes and rules below *(confirm on the test client)*. A
@@ -2029,7 +2030,7 @@ statements come from the v0.12.3 source in the pinned image.
      (for example `docs-user`) or in `OPENWEBUI_OIDC_ADMIN_ROLES` (for example `docs-admin`).
      Several values arrive as a list. A single string is split on `,`. *(Confirm on the test
      client that the custom rule's type is emitted as `roles` in the ID token.)*
-   - **What happens at each sign-in.** Open WebUI v0.12.3 recomputes the role from the claim at
+   - **What happens at each sign-in.** Open WebUI v0.13.4 recomputes the role from the claim at
      every sign-in (`utils/oauth.py` `get_user_role`, called from the callback for an existing
      user). The cases are pinned by a test in the pinned image:
      - An admin role is present: the user becomes `admin`.
@@ -2041,7 +2042,14 @@ statements come from the v0.12.3 source in the pinned image.
      - No claim at all: an existing user keeps the stored role, and a new user is `pending`.
        The baseline rule exists to prevent this case.
    - **Revocation window.** The IdP change takes effect at the next sign-in. A session that is
-     already open stays valid until it expires (`JWT_EXPIRES_IN`, 8 hours). A refused sign-in
+     already open stays valid until it expires (`JWT_EXPIRES_IN`, 8 hours). v0.13.x also has
+     renewable refresh-token sessions (`/api/v1/auths/sessions`, 90 days by default) that the IdP
+     never re-checks; the proxy refuses that API and the chart pins `SESSION_EXPIRES_IN=8h`
+     (#1357), so the 8-hour bound holds. An admin can end every session of an account at once
+     (Admin > Users, edit the user, "Sign out all devices": `POST /api/v1/users/{id}/sessions/revoke`;
+     the user's API keys stay active); v0.13.4 stores that revocation in the database
+     (`auth.session_stamp`, checked on every session token), so it works without Redis
+     *(source reading at v0.13.4, not yet exercised live)*. A refused sign-in
      does not change the stored role. That user's API keys therefore keep their old role until
      the next successful sign-in, or with no time limit for someone who never signs in again.
      To remove an admin at once, also demote or delete the account in the Open WebUI admin UI.
@@ -2061,7 +2069,7 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
   `OPENWEBUI_OIDC_ADMIN_ROLES='DOMAIN\docs-admins'`. The file is sourced by `sh`, which removes an
   unquoted backslash, so validate and deploy refuse a role line whose backslash is outside single
   quotes (fixed message, value not shown). Names are comma-separated with no spaces. Open WebUI
-  v0.12.3 compares them exactly and case-sensitively with the claim values (`utils/oauth.py`
+  v0.13.4 compares them exactly and case-sensitively with the claim values (`utils/oauth.py`
   `get_user_role`; the configured names are trimmed, the claim values are not), so copy the case
   the token carries.
 - **Why domain-qualified.** Group membership spans the forest and its trusts. A bare name such as
@@ -2076,7 +2084,7 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
   guarantee above still holds without a
   baseline. The chart's refusal of `*` and `signed-in` stays. A group literally named `*` cannot
   be configured, and a claim value `*` matches nothing (only a configured `*` is a wildcard).
-- **Token size.** Every group of the user is in the ID token. By default Open WebUI v0.12.3
+- **Token size.** Every group of the user is in the ID token. By default Open WebUI v0.13.4
   also sets the raw ID token as the `oauth_id_token` browser cookie on the sign-in callback
   (`utils/oauth.py` `handle_callback`). The pod's allow-list proxy reads that response header into
   nginx's default `proxy_buffer_size` of one 4 KiB page, so a large token failed the sign-in with
@@ -2092,15 +2100,17 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
   before the redirect. Do not shrink the group claim: in this form the shorter queries either
   give bare names (fail open, above) or drop the primary group, and so lose the claim that
   revocation relies on.
-- **Sign-out.** Open WebUI v0.12.3 (`routers/auths.py` `signout`) deletes its session cookies and,
+- **Sign-out.** Open WebUI v0.13.4 (`routers/auths.py` `signout`) deletes its session cookies and,
   for an OIDC session, sends the browser to the IdP's `end_session_endpoint` from discovery with
   `id_token_hint` taken from the server-side OAuth session (not from a cookie). Whether AD FS then
   ends its own SSO session is AD FS behaviour *(confirm on the test client)*. The chart has no
-  Redis, and v0.12.3 revokes session tokens only through Redis (`utils/auth.py`
-  `invalidate_token`). Sign-out therefore removes the browser's Rosetta session, but a copied
-  session token stays valid until it expires (8 hours).
+  Redis, and v0.13.4 revokes a single session token only through Redis (`utils/auth.py`
+  `invalidate_token`); its database revocation covers only refresh-token sessions, which the
+  browser sign-in does not create and the proxy refuses. Sign-out therefore removes the browser's
+  Rosetta session, but a copied session token stays valid until it expires (8 hours) unless an
+  admin revokes the account's sessions (Revocation window, above).
 - **Logs.** A refused sign-in makes Open WebUI log a warning that lists the user's roles claim
-  values, that is, all their group names (v0.12.3 `get_user_role`). This is identity metadata in
+  values, that is, all their group names (v0.13.4 `get_user_role`). This is identity metadata in
   the pod log, not chat content.
 - **Check.** Run the [claims check](#adfs-claims-check) in role-list mode before deploying. In
   step 6, the refusal of the account in no docs group shows that the group claim arrives.
@@ -2147,7 +2157,7 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
    refusal; re-run deploy after a minute. The installer then runs inside the pod with the key on stdin. It refuses a mounted Pipe whose sha256 differs from the
    repository file, sends the key only to the pod's own serving certificate, proves it is an
    admin key on the admin-only Function listing (a refused key, including a non-admin one,
-   fails there and nothing is written), creates the Function when the listing lacks it (v0.12.3
+   fails there and nothing is written), creates the Function when the listing lacks it (v0.13.4
    answers an absent Function with 401, so a 401 on the Function itself never decides) or
    updates it, reads it back by hash and activates it. Until the key exists, deploy prints
    `docs Pipe NOT installed` and the front end offers no model.
@@ -2163,7 +2173,7 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
 
 <a id="owui-answer-depth"></a>
 **Answer depth (#1255).** The docs Pipe is an Open WebUI manifold: one Function whose entries
-v0.12.3 lists as the models `mainframe_rag_docs.standard` "Rosetta", `mainframe_rag_docs.quick`
+v0.13.4 lists as the models `mainframe_rag_docs.standard` "Rosetta", `mainframe_rag_docs.quick`
 "Rosetta – quick" and `mainframe_rag_docs.thorough` "Rosetta – thorough" (maintainer decision
 2026-11-16). Each sends the agent its symbolic depth (#1289), and the agent resolves it from its
 own `LLM_REASONING_EFFORTS` ([Pipe contract](agent.md#openwebui-docs-pipe)): quick is the lowest
@@ -2180,7 +2190,7 @@ chats. Upgrading from the single model:
   whatever `LLM_REASONING_EFFORTS` offers, a site without `xhigh` included: since #1289 every
   entry answers at an offered effort.
 - A chat started before the upgrade still names `mainframe_rag_docs`. Once the user is granted
-  the entries (previous item), v0.12.3 drops on opening it a model id it does not list and
+  the entries (previous item), v0.13.4 drops on opening it a model id it does not list and
   selects `DEFAULT_MODELS` (`Chat.svelte` `loadChat`; source reading, not yet observed live), so
   the next message, or a regenerated answer, goes through the default entry. With no model
   granted the old id stays selected and the chat cannot send. "Continue response" on an
@@ -2222,10 +2232,10 @@ default **30 days** (maintainer decision 2026-10-24). An explicit null fails the
 **Share links and temporary chats (ADR-0007 S2, #1255).** Chart values under `openwebui.chats`,
 all off by default; there is no `airgap.env` key for them yet.
 - These values set the default user permissions. An admin can still change a group's permissions
-  in the Open WebUI admin UI, and v0.12.3 combines them most-permissive over the defaults.
+  in the Open WebUI admin UI, and v0.13.4 combines them most-permissive over the defaults.
 - `share` (`USER_PERMISSIONS_CHAT_SHARE`): users may share a chat as a link `/s/<token>`. The link
   is a snapshot copy of the chat, opens only after sign-in, and only for its owner and the users or
-  groups the owner grants in the share dialog. In v0.12.3's "continue" mode, the owner instead lets
+  groups the owner grants in the share dialog. In v0.13.4's "continue" mode, the owner instead lets
   grantees read and write the live chat. `shareWithAllUsers`
   (`USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING`) also lets the owner open it to every signed-in
   user. The no-auth "anyone" grant (`USER_PERMISSIONS_CHAT_ALLOW_OPEN_SHARING`) is pinned off in
@@ -2233,11 +2243,15 @@ all off by default; there is no `airgap.env` key for them yet.
   Community sharing stays off. A snapshot is purged with its chat, or on its own once it is older
   than the window.
 - Temporary chats (`USER_PERMISSIONS_CHAT_TEMPORARY`, pinned on) are never saved: the server
-  writes no chat row for a `temporary:` chat id. `temporaryEnforced`
+  writes no chat row for a `temporary:` chat id. Since v0.13.x an answer in a temporary chat also
+  needs the browser's live socket registration, which the pod holds in memory (the chart has no
+  Redis). A pod restart (deploy, rollout, eviction) therefore loses every open temporary chat: the
+  conversation cannot continue and its text is gone; the user starts a new one (#1357; source
+  reading at v0.13.4). `temporaryEnforced`
   (`USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED`) stops non-admins from starting a saved chat: the
   server refuses to create or import one. Admins are exempt, and a chat saved earlier can still be
   continued and stays until the purge. To enforce for one group only, leave this off and set the group's permission in the
-  Open WebUI admin UI; v0.12.3 combines group permissions most-permissive, so any one group that
+  Open WebUI admin UI; v0.13.4 combines group permissions most-permissive, so any one group that
   enforces it enforces it for its members.
 
 <a id="owui-chat-images"></a>
@@ -2303,11 +2317,15 @@ off with the rollback flag below until a qualified import is deployed.
 Deployment, Service, Route, NetworkPolicy and ConfigMap. The claim `rag-openwebui-data` is kept
 (`helm.sh/resource-policy: keep`), and nothing purges it while the front end is off. The agent
 and the console are unchanged. Open WebUI chats cannot move into the console. A database that a
-newer pin has migrated rolls back only through its pre-upgrade snapshot. To retire the front end
+newer pin has migrated rolls back only through its pre-upgrade snapshot. Open WebUI runs its
+database migrations at start (`ENABLE_DB_MIGRATIONS`, default on): the first v0.13.4 start
+adds tables (comments, notifications, refresh-token sessions, chat view state) and columns, and
+the older image cannot open the result. Snapshot `rag-openwebui-data` before the first start of
+a new pin (#1357). To retire the front end
 for good, delete the claim explicitly (`oc delete pvc rag-openwebui-data`); no deploy path does
 that.
 
-**Allow-list proxy (ADR-0007 E1).** Open WebUI v0.12.3 disables some features in its UI
+**Allow-list proxy (ADR-0007 E1).** Open WebUI disables some features in its UI
 only: `/api/v1/files` stores uploads with uploads off (Kind trial V1), the
 `/api/v1/retrieval/process/*` routes check no feature flag, and knowledge and audio rest on
 permissions that admins bypass. The server also decodes percent-encoding before routing, so a
@@ -2321,12 +2339,27 @@ image as `openwebui-proxy-image.tar`) as its only listener. Open WebUI listens o
 everything outside the allow-list. Access logs are off.
 
 Chat folders (`ENABLE_FOLDERS=true`, #1255) pass: the folder page `/folders/<id>`, and the folder
-API by id (hex and hyphens; v0.12.3 ids are uuid4) for list and create, read, delete, rename and
-settings, move, expand, mark read, and the owner's chat list (`/{id}/shared/chats`, which the
-folder page uses). Folder sharing stays off. The proxy refuses
-the grant route `/api/v1/folders/{id}/access/update`, which v0.12.3 does not gate on
-`USER_PERMISSIONS_FOLDERS_ALLOW_SHARING`, and the shared-folder list `/api/v1/folders/shared`
-(the sidebar treats that refusal as an empty list). A folder's system prompt reaches the docs
+API by id (hex and hyphens; v0.13.4 ids are uuid4) for list and create, read, delete, rename and
+settings, move, expand, mark read, the owner's chat list (`/{id}/shared/chats`, which the
+folder page uses) and, since v0.13.x (#1357), the folder page's filters (`/{id}/tags`,
+`/{id}/users`) and a chat's status on the folder board (`/{id}/chats/{chat id}/status`), all
+behind the folder's own read check. Folder sharing stays off. The proxy refuses
+the grant route `/api/v1/folders/{id}/access/update` (gated on the sharing permission since
+v0.13.x, refused here regardless), the shared-folder list `/api/v1/folders/shared`
+(the sidebar treats that refusal as an empty list) and a folder's automations.
+
+v0.13.x routes the proxy refuses (#1357): the refresh-token session API
+`/api/v1/auths/sessions*` (an explicit deny ahead of the allowed `auths` prefix; nginx takes the
+first matching entry), Tether (`/api/v1/tether`, which has no admin switch), comments
+(`/api/v1/comments`), video generation (`/api/v1/videos`) and the notifications inbox
+(`/api/v1/notifications`). The chart also pins `ENABLE_COMMENTS`, `ENABLE_NOTIFICATIONS`,
+`ENABLE_VIDEO_GENERATION`, `ENABLE_TOOL_PERMISSIONS_AUTO` and `ENABLE_TOOL_SEARCH` to `false`
+(the last two call an external endpoint by default); comment and notification rows would sit
+outside the chat purge. v0.13.4 also adds routes under prefixes the proxy already admits, each
+access-checked by the server (the #1357 re-audit lists them): a chat's view state, parameters,
+tag colour and search snippet for its owner or reader, resuming one's own temporary chat, and
+admin-only rotation or deletion of another user's API key. An admin can therefore mint a key in
+another admin's name; the key still works only on the installer's endpoints (below). A folder's system prompt reaches the docs
 Pipe as a system turn, and the Pipe drops it. Its knowledge entries resolve to nothing, because
 no file, knowledge collection or note can exist (ADR-0007 V1).
 
@@ -2340,6 +2373,9 @@ for p in /api/v1/files/ /api/v1/files /API/v1/files/ //api/v1/files/ /api/v1/./f
          /api/v1/retrieval/process/text /api/v1/knowledge/ /api/v1/audio/transcriptions \
          /openai/chat/completions /ollama/api/chat /api/v1/utils/code/execute \
          /api/v1/prompts/create /api/v1/prompts/list \
+         /api/v1/prompts/id/00000000-0000-4000-8000-000000000000/access/update \
+         /api/v1/auths/sessions /api/v1/auths/sessions/refresh /api/v1/tether/connect \
+         /api/v1/comments/ /api/v1/notifications/inbox/count \
          /api/v1/folders/shared \
          /api/v1/folders/00000000-0000-4000-8000-000000000000/access/update; do
   printf '%s ' "$p"; curl -sk -o /dev/null -w '%{http_code}\n' -X POST -b "$C" "https://$H$p"
@@ -2375,7 +2411,8 @@ ConfigMap mount can trail the release by a minute: wait, then re-run) and an inv
 the key on the admin-only Function listing, and then converges: it creates, updates and removes
 the prompts it manages (marked in their metadata) and never writes any other prompt. A
 repository command held by a prompt it does not manage fails the deploy before any write. Every
-signed-in user gets read access only. Users cannot create or import prompts
+signed-in user gets read access only; since v0.12.4 the update route ignores sharing, so the
+installer restores that read grant through `/api/v1/prompts/id/{id}/access/update` (#1357). Users cannot create or import prompts
 (`USER_PERMISSIONS_WORKSPACE_PROMPTS_ACCESS` and `_IMPORT` are pinned to `false`; stored XSS
 through prompts was CVE-2025-64495). The proxy admits the installer's prompt calls only from the
 pod's loopback (ADR-0007 E1), so the Route reaches no prompt write and the admin workspace
@@ -2739,7 +2776,7 @@ python3 -I scripts/openwebui/adfs_claims_check.py --paste \
 ```
 
 It reports whether the claim is a list or a string (split on `,`), which configured roles
-matched, and the predicted Open WebUI v0.12.3 outcome: `admin`, `user` or refused (a redirect
+matched, and the predicted Open WebUI v0.13.4 outcome: `admin`, `user` or refused (a redirect
 to `/auth?error=...` with no session cookie). Run it
 with a docs-group account (expect exit 0), then with `--expect-refused` and an account in
 neither docs group: it passes only if the claim is present and the prediction is a refusal.

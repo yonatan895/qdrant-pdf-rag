@@ -882,7 +882,7 @@ def test_load_dryrun_is_hermetic_and_not_release_verified(load_tree):
     assert not (root / "skopeo-state").exists()
 
 
-OPENWEBUI_REF = f"{REGISTRY}/qdrant-pdf-rag-openwebui:v0.12.3-slim"
+OPENWEBUI_REF = f"{REGISTRY}/qdrant-pdf-rag-openwebui:v0.13.4-slim"
 OPENWEBUI_PROXY_REF = f"{REGISTRY}/nginxinc/nginx-unprivileged:1.30.6-alpine"
 OAUTH_REF = f"{REGISTRY}/openshift4/ose-oauth-proxy:v4.14"
 

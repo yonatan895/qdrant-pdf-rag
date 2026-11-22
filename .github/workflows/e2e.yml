@@ -231,7 +231,7 @@ jobs:
         run: |
           OWNER_LC="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr 'A-Z' 'a-z')"
           IMAGE="ghcr.io/${OWNER_LC}/qdrant-pdf-rag-openwebui"
-          VERSION_TAG=v0.12.3-slim
+          VERSION_TAG=v0.13.4-slim
           echo "$GITHUB_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           # Rebuilds of the same Containerfile aim at the same digest: the timestamp is the commit time
           # of the Containerfile and BuildKit rewrites layer timestamps to it.

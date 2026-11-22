@@ -3,8 +3,8 @@
 charts/mainframe-rag/files/openwebui/provision_prompts.py converges the
 workspace Prompts (the chat `/` commands) to the repository file prompts.json,
 run inside the pod by deploy.sh with the admin key on stdin. The fake below is
-the Prompts API of the pinned release (v0.12.3, backend/open_webui/routers/
-prompts.py and models/prompts.py at tag v0.12.3) as the installer uses it.
+the Prompts API of the pinned release (v0.13.4, backend/open_webui/routers/
+prompts.py and models/prompts.py at tag v0.13.4) as the installer uses it.
 Every template text here is synthetic; the shipped set is never asserted on.
 """
 from __future__ import annotations
@@ -59,7 +59,7 @@ def _cert(tmp_path, name):
 
 
 class FakePrompts:
-    """Prompts API of v0.12.3 as the installer uses it.
+    """Prompts API of v0.13.4 as the installer uses it.
 
     - GET /api/v1/functions/list is admin-only: 401 for any other key.
     - GET /api/v1/prompts/list?page=N: verified users; the admin (with the
@@ -68,8 +68,10 @@ class FakePrompts:
     - POST /create: admin only here (the chart pins the user create/import
       permissions off); 400 when the command is taken; id is a server UUID.
     - POST /id/{id}/update: keeps the stored meta when the form's is empty and
-      replaces the grants when they are sent; every write with grants adds a
-      history row upstream (counted here).
+      ignores any grants in the form (since v0.12.4 sharing changes only through
+      the access route); a text change adds a history row upstream (counted here).
+    - POST /id/{id}/access/update {"access_grants": [...]}: replaces the grants
+      (an admin may grant public read) and answers the prompt.
     - POST /id/{id}/toggle flips is_active; DELETE /id/{id}/delete answers true.
     """
 
@@ -164,9 +166,12 @@ def _server(state, key_file, cert_file):
                                   meta=body.get("meta") or prompt["meta"])
                     if body.get("tags") is not None:
                         prompt["tags"] = body["tags"]
-                    if body.get("access_grants") is not None:
-                        prompt["access_grants"] = state._grants(pid, body["access_grants"])
                     state.history_rows += 1
+                    return self._reply(200, prompt)
+                if method == "POST" and action == "access/update":
+                    if set(body) != {"access_grants"} or not isinstance(body["access_grants"], list):
+                        return self._reply(422, {"detail": "invalid form"})
+                    prompt["access_grants"] = state._grants(pid, body["access_grants"])
                     return self._reply(200, prompt)
                 if method == "POST" and action == "toggle":
                     prompt["is_active"] = not prompt["is_active"]
@@ -266,6 +271,23 @@ def test_drift_is_converged_back_to_the_repository_text_grants_and_state(owui):
     assert _writes(state) == []
 
 
+def test_grant_drift_alone_is_restored_through_the_access_route_without_a_text_write(owui):
+    """#1357: v0.13.4 changes sharing only through /id/{id}/access/update; the
+    text update route ignores grants, so a grants-only drift needs that route
+    and must not add a history row."""
+    state, client, _ = owui
+    prompts.provision(client, SET_A, SET_A_SHA)
+    beta = state.by_command()["beta-two"]
+    beta["access_grants"] = [state._grant(beta["id"], ("group", "g-1", "write"))]
+    rows = state.history_rows
+    state.requests.clear()
+    lines = prompts.provision(client, SET_A, SET_A_SHA)
+    assert "(0 created, 1 updated, 0 removed, 1 unchanged)" in lines[0]
+    assert _stored(state) == EXPECTED_A
+    assert _writes(state) == [("POST", f"/api/v1/prompts/id/{beta['id']}/access/update")]
+    assert state.history_rows == rows
+
+
 def test_a_prompt_dropped_from_the_repository_is_removed_and_others_are_never_touched(owui):
     state, client, _ = owui
     prompts.provision(client, SET_A, SET_A_SHA)
@@ -315,6 +337,10 @@ def test_every_listing_page_is_read_before_deciding(owui):
     (_doc(("Bad Command", "N", "C")), "command"),
     (_doc(("/alpha", "N", "C")), "command"),
     (_doc(("compare", "N", "C")), "built-in"),
+    # v0.13.4 SlashCommands.svelte adds /side (typed as side or btw) and /comments.
+    (_doc(("side", "N", "C")), "built-in"),
+    (_doc(("btw", "N", "C")), "built-in"),
+    (_doc(("comments", "N", "C")), "built-in"),
     (_doc(("alpha", "N", "C"), ("alpha", "M", "D")), "duplicate"),
     (_doc(("alpha", "", "C")), "name"),
     (_doc(("alpha", "N", "")), "content"),
