@@ -920,7 +920,7 @@ cannot schedule on one node — proven).
   hostname spread. Inter-node gossip is plaintext on the CNI
   (`enable_tls: false`) — mounting no cert avoids startup crashloops.
   No public Route, ever.
-- The agent stays 2 tiny replicas (production patch changes only replica
+- The agent runs 3 replicas (#1348; production patch changes only replica
   count, env, and pull secrets — FastAPI needs no GPU). The ingest Job is
   one-shot with a 24h deadline: caller corpus PVC read-only plus an
   auto-created `ingest-work` RWO scratch PVC (sized by `INGEST_WORK_SIZE`,
@@ -1707,7 +1707,7 @@ protection remains the platform's responsibility.
 
 Preserve separate CI/prod Qdrant values and sizing. CI synthetic hash jobs never become
 prod ingest; production has no EMBED_MODE key, RWO block data/work storage,
-read-only caller corpus and two agent replicas. Qdrant chart IDs are explicitly
+read-only caller corpus and three agent replicas. Qdrant chart IDs are explicitly
 null; OpenObserve uses project-assigned IDs and `Recreate` for its single local-mode writer.
 Agent and ingest image roots (source and baked BM25 snapshot included) are
 read-only; only `/tmp` and ingest's existing `/work` mount accept writes.

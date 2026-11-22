@@ -142,7 +142,7 @@ def test_full_mapping_table(mapper_env):
     assert v["storage"] == {"className": "standard"}
     assert v["ingest"]["enabled"] is False  # no CORPUS_PVC
     assert v["pullSecret"] == {"name": ""}
-    assert v["replicaCount"] == 2
+    assert v["replicaCount"] == 3 == yaml.safe_load((CHART / "values.yaml").read_text())["replicaCount"]
 
 
 def test_removed_legacy_env_names_are_refused_not_ignored(monkeypatch, mapper_env):

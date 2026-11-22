@@ -451,7 +451,7 @@ def build_values(deploy_only: bool = False) -> dict:
 
     return {
         **oo_values,
-        "replicaCount": 2,
+        "replicaCount": 3,  # rag-agent replicas (#1348, 2026-11-22); no operator key
         "images": {
             **optional_images,
             "agent": {

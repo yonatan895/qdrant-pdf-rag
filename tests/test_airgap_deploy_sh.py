@@ -3039,6 +3039,9 @@ def test_agent_sizing_keys_reach_only_the_agent_container(tree):
     assert rendered_container(default_text, "agent")["resources"] == chart
     assert rendered_container(default_text, "oauth-proxy")["resources"] == OAUTH_PROXY_RESOURCES
     default_docs = _rendered_docs(tree)
+    agent_deployment = next(d for d in default_docs if d.get("kind") == "Deployment"
+                            and d["metadata"]["name"] == "rag-agent")
+    assert agent_deployment["spec"]["replicas"] == 3  # #1348 (2026-11-22)
 
     r = _run(tree, *route, *AGENT_SIZING.items())
     assert r.returncode == 0, r.stderr

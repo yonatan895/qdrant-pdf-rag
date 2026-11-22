@@ -36,7 +36,7 @@ def test_base_contract_with_independent_controls():
     new = run_new_template({})
     new_dep = new["Deployment", "rag-agent"]
     new_svc = new["Service", "rag-agent"]
-    assert new_dep["spec"]["replicas"] == 2
+    assert new_dep["spec"]["replicas"] == 3  # #1348 (2026-11-22)
     assert new_dep["metadata"]["namespace"] == "ns"
     assert new_svc["metadata"]["namespace"] == "ns"
     agent = container_map(new_dep)["agent"]

@@ -49,7 +49,7 @@ def set_path(values: dict, path: str, value) -> dict:
 def base_values() -> dict:
     """Independent synthetic operator mapping (not computed from the chart)."""
     return {
-        "replicaCount": 2,
+        "replicaCount": 3,
         "images": {
             "agent": {
                 "repository": f"{BASE_ENV['INTERNAL_REGISTRY']}/qdrant-pdf-rag-agent",
