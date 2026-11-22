@@ -30,6 +30,8 @@ def prepare_simulator(root: Path, log: Path) -> dict[str, str]:
         'log, tag, argv = sys.argv[1], sys.argv[2], sys.argv[3:]\n'
         'with open(log, "a", encoding="utf-8") as fh:\n'
         '    fh.write(json.dumps({"tag": tag, "argv": argv, "cwd": os.getcwd()}) + "\\n")\n'
+        'if argv[:2] == ["container", "inspect"]:\n'
+        '    argv = argv[1:]\n'
         'if argv[:2] == ["image", "inspect"]:\n'
         '    print(json.dumps([{"Id": "sha256:" + "b" * 64, "RepoDigests": ["example.com/qdrant/qdrant@sha256:" + "a" * 64]}]))\n'
         'if argv[:2] == ["inspect", "--format"] and "Mounts" in argv[2]:\n'
@@ -37,7 +39,14 @@ def prepare_simulator(root: Path, log: Path) -> dict[str, str]:
         'elif argv[:2] == ["inspect", "--format"]:\n'
         '    print(os.environ.get("DOCKER_RUNNING_IMAGE", "sha256:" + "b" * 64) + " true")\n'
         'PYEOF\n'
-        'if [ "$1" = "inspect" ]; then exit "${DOCKER_INSPECT_EXIT:-1}"; fi\n'
+        '# DOCKER_INSPECT_EXIT=0: the container exists. DOCKER_VOLUME_EXISTS=1: only a volume of\n'
+        '# that name exists, which an untyped inspect finds (its --format has no .Image: exit 1).\n'
+        'if [ "$1" = "container" ] && [ "$2" = "inspect" ]; then exit "${DOCKER_INSPECT_EXIT:-1}"; fi\n'
+        'if [ "$1" = "inspect" ]; then\n'
+        '    [ "${DOCKER_INSPECT_EXIT:-1}" = 0 ] && exit 0\n'
+        '    [ "${DOCKER_VOLUME_EXISTS:-0}" = 1 ] && [ "$2" != "--format" ] && exit 0\n'
+        '    exit 1\n'
+        'fi\n'
         'exit 0\n',
         encoding="utf-8")
     path.chmod(0o755)

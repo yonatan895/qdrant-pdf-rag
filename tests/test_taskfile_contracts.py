@@ -1156,7 +1156,7 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("local:qdrant:up", "SIM_CONTAINER=custom", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         docker = [c["argv"] for c in self.tool_calls("docker") if c["argv"][:2] != ["image", "inspect"]]
-        self.assertEqual(docker[0], ["inspect", "custom"])
+        self.assertEqual(docker[0], ["container", "inspect", "custom"])
         self.assertIn("--name", docker[1])
         self.assertIn("custom", docker[1])
         self.reset_log()
@@ -1174,7 +1174,7 @@ class TaskContractsTests(unittest.TestCase):
                              extra_env=dict(env, SIM_CONTAINER="ambient-sim", SIM_PORT="6333"))
         self.assertEqual(proc.returncode, 0, proc.stdout)
         docker = [c["argv"] for c in self.tool_calls("docker") if c["argv"][:2] != ["image", "inspect"]]
-        self.assertEqual(docker[0], ["inspect", "requested-sim"])
+        self.assertEqual(docker[0], ["container", "inspect", "requested-sim"])
         self.assertIn("requested-sim", docker[1])
         self.assertIn("127.0.0.1:6334:6333", docker[1])
         self.reset_log()

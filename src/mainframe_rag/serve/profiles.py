@@ -32,8 +32,10 @@ QWEN3_EMBED_06B = ModelSpec(
     kv_bytes_per_token=0.0,
     context_need=4096,
     max_num_seqs=1,
-    # Host RSS: 2.0 GB measured steady (issue #580) + startup peak + 15%.
-    host_mem_mb=2600,
+    # Host memory: 3221 MiB unreclaimable (cgroup anon + shmem + kernel) on
+    # vLLM v0.28.0 after load and one 4096-token request (2026-11-22), + 15%.
+    # The old 2600 (issue #580, 2.0 GB steady) was OOM-killed while loading.
+    host_mem_mb=3700,
 )
 
 # gemma-4-E4B-it-qat-mobile-ct: 4B-class QAT weights (~2.7 GiB resident upper

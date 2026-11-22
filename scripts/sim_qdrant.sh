@@ -32,14 +32,14 @@ esac
 case "${1:?usage: sim_qdrant.sh up|down}" in
   up)
     IMAGE_ID=$("$PY" "$REPO_ROOT/scripts/qdrant_pin.py" --prepared)
-    if docker inspect "$SIM_CONTAINER" >/dev/null 2>&1; then
-      OBSERVED=$(docker inspect --format '{{.Image}} {{.State.Running}}' "$SIM_CONTAINER")
+    if docker container inspect "$SIM_CONTAINER" >/dev/null 2>&1; then
+      OBSERVED=$(docker container inspect --format '{{.Image}} {{.State.Running}}' "$SIM_CONTAINER")
       [ "$OBSERVED" = "$IMAGE_ID true" ] || {
         echo "sim_qdrant: existing container is stopped or uses unapproved image bytes" >&2
         exit 1
       }
       if [ -n "$SIM_QDRANT_VOLUME" ]; then
-        MOUNTED=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/qdrant/storage"}}{{.Name}}{{end}}{{end}}' "$SIM_CONTAINER")
+        MOUNTED=$(docker container inspect --format '{{range .Mounts}}{{if eq .Destination "/qdrant/storage"}}{{.Name}}{{end}}{{end}}' "$SIM_CONTAINER")
         [ "$MOUNTED" = "$SIM_QDRANT_VOLUME" ] || {
           echo "sim_qdrant: running container does not persist to SIM_QDRANT_VOLUME; stop it first" >&2
           exit 1
