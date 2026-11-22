@@ -10,7 +10,7 @@ over the agent (#1072) is the only Function; its answer-depth entries
 
 The environment is the ADR-0007 condition set (V1 vector store, V2 answer
 path, R2 offline, R3 identity, S2-S4 storage, audit and sharing). Variable
-names follow Open WebUI v0.12.3; they are pending #1073 qualification and are
+names follow Open WebUI v0.13.4; they are pending #1073 qualification and are
 re-qualified on every pin import (P1). ENABLE_PERSISTENT_CONFIG=false keeps
 this environment authoritative over admin-UI edits.
 

@@ -1954,8 +1954,9 @@ statements come from the v0.13.4 source in the pinned image.
      renewable refresh-token sessions (`/api/v1/auths/sessions`, 90 days by default) that the IdP
      never re-checks; the proxy refuses that API and the chart pins `SESSION_EXPIRES_IN=8h`
      (#1357), so the 8-hour bound holds. An admin can end every session of an account at once
-     (Admin > Users, revoke sessions: `POST /api/v1/users/{id}/sessions/revoke`); v0.13.4 stores
-     that revocation in the database (`auth.session_stamp`), so it works without Redis
+     (Admin > Users, edit the user, "Sign out all devices": `POST /api/v1/users/{id}/sessions/revoke`;
+     the user's API keys stay active); v0.13.4 stores that revocation in the database
+     (`auth.session_stamp`, checked on every session token), so it works without Redis
      *(source reading at v0.13.4, not yet exercised live)*. A refused sign-in
      does not change the stored role. That user's API keys therefore keep their old role until
      the next successful sign-in, or with no time limit for someone who never signs in again.
