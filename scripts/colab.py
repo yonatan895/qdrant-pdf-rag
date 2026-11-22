@@ -74,6 +74,21 @@ SOURCE_REQUIRED = ("scripts/colab.py", "scripts/colab_preflight.py", "scripts/co
                    "scripts/run_local_stack.sh", "scripts/run_local_gateway.sh", "scripts/probe_gateway.py",
                    "taskfiles/local.yml", "Taskfile.yml", "pyproject.toml", "requirements.lock.txt")
 TRANSPORT_TOOLS = ("colab", "ssh", "ssh_keygen", "docker")
+# The pinned google-colab-cli release whose argv and stdout this controller
+# parses (#1358). It is also part of the CPU transport receipt identity.
+COLAB_CLI_VERSION = "0.8.0"
+# The controller's own bound on `colab new`; past it the CLI is killed while the
+# allocation outcome may be unknown, so automatic release then refuses.
+NEW_COMMAND_SECONDS = 180
+# CLI 0.8.0 retries POST /tun/m/assign on 502/503/504 and read timeouts, and
+# re-reads GET assign before each retry so an uncertain POST is not repeated.
+# Its defaults (3 retries, 10/20/40 s backoff) outlive NEW_COMMAND_SECONDS when
+# Colab answers 503 after about 31 s, as it did for G4 on 2026-11-22. Two
+# retries at 10/20 s end that pattern in about 130 s. The per-request read
+# timeout lets one slow allocation outlive AuthorizedSession's default and
+# stays below NEW_COMMAND_SECONDS. Only `new` receives these values.
+COLAB_NEW_ENVIRONMENT = {"COLAB_CLI_REQUEST_TIMEOUT": "150", "COLAB_CLI_ASSIGN_RETRIES": "2",
+                         "COLAB_CLI_RETRY_BACKOFF": "10"}
 NETWORK_RELEASE_SECONDS = 5
 FINAL_USAGE_SECONDS = 5
 # Transient account/control-plane failures (#746). A running budget poll may go
@@ -620,7 +635,7 @@ def cpu_transport_profile(profile: dict) -> dict:
 
 def transport_identity(config: dict, bridge: str) -> dict:
     return {"verified": True, "bridge": bridge, "gateway_image": config["gateway_image"],
-            "cli_version": "0.7.4", "network_name": config["gateway_network"],
+            "cli_version": COLAB_CLI_VERSION, "network_name": config["gateway_network"],
             "gateway_name": config["gateway_name"],
             "reasoning_url": f"http://{bridge}:{config['reasoning_port']}/v1",
             "embedding_url": f"http://{bridge}:{config['embedding_port']}/v1",
@@ -1241,6 +1256,8 @@ class Run:
         # Only these pinned CLI stdout contracts establish identity/account
         # state. Progress from upload/download/new/exec is diagnostic output.
         kwargs.setdefault("require_complete_stdout", command in ("version", "sessions", "usage"))
+        if command == "new":
+            kwargs.setdefault("env", {**os.environ, **COLAB_NEW_ENVIRONMENT})
         return self.command(self.colab_argv(command, *args), **kwargs)
 
     def sessions(self, *, cleanup: bool = False) -> dict[str, str]:
@@ -1583,7 +1600,7 @@ class Run:
         key = self.state / "id_ed25519_colab_rag"
         self.command([self.tools["ssh_keygen"], "-q", "-t", "ed25519", "-N", "", "-f", str(key), "-C", self.manifest["session"]])
         key.chmod(0o600)
-        # In 0.7.4 named proxy mode auto-creates missing names. Unnamed mode
+        # In 0.8.0 named proxy mode auto-creates missing names. Unnamed mode
         # only resolves the sole live record in this run's private store;
         # empty/pruned/ambiguous stores refuse without allocating anything.
         proxy = shlex.join(self.colab_argv("ssh", "--proxy-mode", "--identity", str(key)))
@@ -1959,8 +1976,8 @@ class Run:
                     raise LabError("production requires the native workload without wrappers or overrides")
                 seconds = min(self.config["production_scan"]["deadline_seconds"], self.work_expiry - time.time())
                 verify_production_sources(self.production_admission(), deadline=time.monotonic() + seconds)
-            if not re.search(r"\b0\.7\.4\b", self.colab("version").stdout):
-                raise LabError("google-colab-cli 0.7.4 is required")
+            if not re.search(rf"\b{re.escape(COLAB_CLI_VERSION)}\b", self.colab("version").stdout):
+                raise LabError(f"google-colab-cli {COLAB_CLI_VERSION} is required")
             bridge = self.config.get("docker_gateway")
             if bridge is None:
                 bridge = self.command([self.tools["docker"], "network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"]).stdout.strip()
@@ -1991,7 +2008,7 @@ class Run:
             argv = ["-s", self.manifest["session"]]
             if self.profile["accelerator"]:
                 argv += ["--gpu", self.profile["accelerator"]]
-            self.colab("new", *argv, seconds=180)
+            self.colab("new", *argv, seconds=NEW_COMMAND_SECONDS)
             if not self.owned():
                 raise LabError("new runtime was not found in active assignments")
             self.budget()

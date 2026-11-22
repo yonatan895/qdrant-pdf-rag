@@ -46,7 +46,7 @@ def _scaled_colab_timing(monkeypatch):
     multi-second wall sleeps."""
     monkeypatch.setenv(controller.TEST_TIME_SCALE_ENV, str(TEST_TIME_SCALE))
 
-# Output and auto-allocation semantics follow google-colab-cli v0.7.4
+# Output and auto-allocation semantics follow google-colab-cli v0.8.0
 # commands/session.py, commands/usage.py and commands/ssh.py. The fake SSH
 # really binds the four requested local sockets; Docker's host-gateway fake
 # probes those sockets rather than declaring them reachable by fiat.
@@ -104,7 +104,7 @@ if name=='colab':
     failures=root/'fail-calls.json'
     if failures.exists() and index in json.loads(failures.read_text()).get(cmd,[]):
         print("NameResolutionError: Failed to resolve 'colab.research.google.com'",file=sys.stderr); sys.exit(1)
-    if cmd=='version': print('0.7.4')
+    if cmd=='version': print('Version: '+os.environ.get('FAKE_COLAB_VERSION','0.8.0'))
     elif cmd=='usage':
         reads=root/'usage-reads'
         count=int(reads.read_text()) if reads.exists() else 0
@@ -131,6 +131,9 @@ if name=='colab':
             print(f'[{shown}] {e} | Hardware: G4 | Shape: HIGH_RAM | Variant: GPU')
     elif cmd=='new':
         assert session not in state
+        with (root/'new-env.jsonl').open('a') as f:
+            f.write(json.dumps([os.environ.get(k) for k in ('COLAB_CLI_REQUEST_TIMEOUT','COLAB_CLI_ASSIGN_RETRIES',
+                                                            'COLAB_CLI_RETRY_BACKOFF')])+'\n')
         for previous in remote.iterdir(): previous.unlink()
         state[session]='endpoint-owned'; sessions.write_text(json.dumps(state))
         local[session]='endpoint-owned'; store.write_text(json.dumps(local))
@@ -146,7 +149,7 @@ if name=='colab':
     elif cmd=='ssh':
         assert '--proxy-mode' in rest
         if session and session not in local:
-            # Actual0.7.4 named proxy selection allocates if local name vanished.
+            # Actual 0.8.0 named proxy selection allocates if local name vanished.
             state[session]='endpoint-replacement'; sessions.write_text(json.dumps(state))
             local[session]='endpoint-replacement'; store.write_text(json.dumps(local))
             event('proxy-allocation',[session])
@@ -969,7 +972,7 @@ case "$cmd" in
     printf '%s\n' "$$" >> "$root/fake-pids"
     printf '["colab", ["--auth", "oauth2", "version"]]\n["cli-store", ["%s"]]\n' "$store" >> "$root/events.jsonl"
     inc "$root/calls-version"
-    printf '0.7.4\n'
+    printf 'Version: %s\n' "${FAKE_COLAB_VERSION:-0.8.0}"
     exit 0
     ;;
   usage)
@@ -1058,6 +1061,8 @@ case "$cmd" in
     else
       fallback "$@"
     fi
+    printf '["%s", "%s", "%s"]\n' "${COLAB_CLI_REQUEST_TIMEOUT:-}" "${COLAB_CLI_ASSIGN_RETRIES:-}" \
+      "${COLAB_CLI_RETRY_BACKOFF:-}" >> "$root/new-env.jsonl"
     [ -d "$root/remote" ] || mkdir -p "$root/remote"
     for f in "$root/remote"/*; do
       [ -e "$f" ] && rm -f -- "$f" || true
@@ -2174,8 +2179,8 @@ def test_late_scheduled_drain_keeps_complete_identity_output_then_next_command_w
         patch.setattr(controller.ProcessCapture, "drain", late_drain)
         started = time.monotonic()
         # An identity-shaped command: truncated stdout would itself be refused.
-        result = run.command([sys.executable, "-c", "print('0.7.4')"], seconds=3)
-    assert result.stdout == "0.7.4\n"
+        result = run.command([sys.executable, "-c", "print('Version: 0.8.0')"], seconds=3)
+    assert result.stdout == "Version: 0.8.0\n"
     assert time.monotonic() - started < controller.PIPE_DRAIN_GRACE_SECONDS + 2 * controller.PIPE_DRAIN_SCHEDULING_SECONDS
     assert run.command([sys.executable, "-c", "print('ordinary')"], seconds=3).stdout == "ordinary\n"
 
@@ -2333,7 +2338,7 @@ def test_successful_cpu_receipt_is_created_only_after_exact_release_absence(lab)
     assert receipt["cpu_profile"]["accelerator"] is None and receipt["cpu_profile"]["servers"] == []
     assert receipt["candidate"] == manifest["prepared_identity"]["candidate"]
     assert receipt["transport"]["gateway_image"] == IMAGE
-    assert receipt["transport"]["cli_version"] == "0.7.4"
+    assert receipt["transport"]["cli_version"] == "0.8.0"
     assert receipt["transport"]["network_name"] == "local-litellm-gateway-net"
     assert receipt["transport"]["gateway_name"] == "local-litellm-gateway"
     assert receipt["transport"]["reasoning_url"] == f"http://127.0.0.2:{manifest['config']['reasoning_port']}/v1"
@@ -2356,6 +2361,49 @@ def test_successful_cpu_receipt_is_created_only_after_exact_release_absence(lab)
     assert any(argv[2] == "sessions" for argv in calls[stopped + 1:])
     assert "--gpu" not in next(argv for argv in calls if argv[2] == "new")
     assert json.loads((root / "sessions.json").read_text()) == {}
+
+
+def test_previous_pinned_cli_is_refused_before_allocation(lab, monkeypatch):
+    root, state, _ = lab
+    monkeypatch.setenv("FAKE_COLAB_VERSION", "0.7.4")
+    assert _run_fake(state) != 0
+    assert not any(kind == "colab" and argv[2] == "new" for kind, argv in _events(root))
+    assert _manifest(state)["allocation_attempted"] is False
+
+
+def test_new_bounds_cli_assignment_retries_inside_the_controller_timeout(lab, monkeypatch):
+    """CLI 0.8.0 retries a 503 assign; the whole loop must end before the
+    controller kills `new` with the allocation outcome unknown (#1358)."""
+    root, state, _ = lab
+    # Ambient values cannot widen the bounded loop.
+    monkeypatch.setenv("COLAB_CLI_REQUEST_TIMEOUT", "900")
+    monkeypatch.setenv("COLAB_CLI_ASSIGN_RETRIES", "9")
+    monkeypatch.setenv("COLAB_CLI_RETRY_BACKOFF", "60")
+    assert _run_fake(state) == 0
+    received = [json.loads(line) for line in (root / "new-env.jsonl").read_text().splitlines()]
+    assert received == [["150", "2", "10"]]
+    assert controller.NEW_COMMAND_SECONDS == 180
+    # 2026-11-22 G4 pattern: each POST answered 503 after about 31 s, each GET
+    # took under 1 s. CLI 0.8.0: GET assign, then per attempt POST, and before
+    # each retry a backoff of 10 * 2**attempt seconds and a reconciling GET.
+    retries, backoff, post, get = 2, 10, 31, 1
+    observed_pattern = get + (retries + 1) * post + sum(backoff * 2 ** n + get for n in range(retries))
+    assert observed_pattern < controller.NEW_COMMAND_SECONDS - 30
+    assert 120 < float(received[0][0]) < controller.NEW_COMMAND_SECONDS
+
+
+def test_only_new_receives_the_assignment_retry_environment(lab, monkeypatch):
+    _, state, _ = lab
+    run = controller.Run(state)
+    seen = {}
+    monkeypatch.setattr(run, "command", lambda argv, **kwargs: seen.setdefault(argv[5], kwargs))
+    for command in ("version", "sessions", "usage", "stop", "upload", "download", "exec", "new"):
+        run.colab(command, "-s", "rag-" + "0" * 16)
+    assert all("env" not in seen[command] for command in seen if command != "new")
+    environment = seen["new"]["env"]
+    assert {key: environment[key] for key in controller.COLAB_NEW_ENVIRONMENT} == {
+        "COLAB_CLI_REQUEST_TIMEOUT": "150", "COLAB_CLI_ASSIGN_RETRIES": "2", "COLAB_CLI_RETRY_BACKOFF": "10"}
+    assert environment["PATH"] == os.environ["PATH"]
 
 
 def test_explicit_private_docker_gateway_is_frozen_and_checked_before_allocation(lab, monkeypatch):
@@ -2499,7 +2547,8 @@ def test_gpu_rejects_incompatible_or_unsuccessful_cpu_receipt_before_allocation(
         receipt["candidate"]["source_sha256"] = "0" * 64
     elif changed in ("cli", "network"):
         field = {"cli": "cli_version", "network": "network_name"}[changed]
-        receipt["transport"][field] = "different identity"
+        # A receipt proved with the previous pinned CLI cannot admit a GPU run.
+        receipt["transport"][field] = "0.7.4" if changed == "cli" else "different identity"
     elif changed == "absence":
         del receipt["release_evidence"]
     elif changed == "session":
