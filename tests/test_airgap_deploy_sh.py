@@ -2479,6 +2479,32 @@ def test_a_declared_promotion_whose_deploy_fails_records_nothing(tree):
     assert f"release_identity: {release_identity(tree[0] / 'dist')}" in (tree[0] / _MARKER).read_text()
 
 
+def test_a_directory_at_the_marker_path_is_never_reported_as_recorded(tree):
+    """#1361 delta review (c): mv onto a directory would move the marker into it.
+    The completed promotion deploy warns as for any write failure, records
+    nothing, and the next undeclared deploy is refused (file differs)."""
+    _gap_release(tree, namespace="ns")
+    blocker = tree[0] / _MARKER
+    blocker.mkdir(parents=True)
+    done = _promote(tree)
+    assert done.returncode == 0, done.stderr
+    assert "upgrade" in _helm_log(tree).split()
+    assert "recorded" not in done.stdout
+    assert ("WARNING: the promotion deploy completed, but dist/gap-promotion.txt could not be written; "
+            "later stages from this workspace still need GAP_PROMOTE_IDENTITY") in done.stderr
+    assert blocker.is_dir() and list(blocker.iterdir()) == []
+    assert [p.name for p in blocker.parent.iterdir() if ".tmp." in p.name] == []
+    tree[1].unlink()
+    (tree[0] / "dist" / "agent-rendered.yaml").unlink()
+    _refused_before_any_cluster_write(tree, _undeclared(tree), _marker_refused("file"))
+    # The next ordinary operation: with the directory gone, the promotion deploy records it.
+    blocker.rmdir()
+    ok = _promote(tree)
+    assert ok.returncode == 0, ok.stderr
+    assert "==> Gap release promotion recorded in dist/gap-promotion.txt" in ok.stdout
+    assert blocker.is_file()
+
+
 def test_a_dry_run_promotion_records_nothing_and_a_dry_run_reads_a_recorded_one(tree):
     _gap_release(tree, namespace="ns")
     dry = (("AIRGAP_DRYRUN", "1"),)
