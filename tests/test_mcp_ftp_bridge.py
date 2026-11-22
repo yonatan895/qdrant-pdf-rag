@@ -2819,6 +2819,12 @@ def test_site_probe_unexpected_exception_at_each_step_finishes_the_receipt(fault
                 raise exc
             return super().transfercmd(cmd, rest)
 
+        def retrlines(self, cmd: str, callback) -> str:
+            if cmd == faulted_command.get(fault):
+                self.commands.append(cmd)
+                raise exc
+            return super().retrlines(cmd, callback)
+
     faulted_command = {"dataset": f"RETR '{PROBE_DATASET.split('(')[0]}'(MRKMEMQ)",
                        "list": f"LIST {PROBE_JOB}", "spool": f"RETR {PROBE_JOB}.2"}
 
