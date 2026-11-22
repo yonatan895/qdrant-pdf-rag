@@ -442,11 +442,11 @@
           {
             "notice": true,
             "path": "NOTICE.mattpocock-skills",
-            "sha256": "610d0432b77867c8c749a02a74b291cc0c36837272cf224f0da644341468350d"
+            "sha256": "7e9a41c23fd0260747cca293e431f0f163f55a39dd89cf430c1e748492f28090"
           },
           {
             "path": ".agents/mattpocock-skills.sha256",
-            "sha256": "89f6783a25ea159ef1c14b9acb4cb6f682c010ce466ddcdac2191328ffba1049"
+            "sha256": "4baa3e768aa77c73f12b2c65f031147038ddae92018dd9e2117c28a31b0d4918"
           }
         ]
       },
