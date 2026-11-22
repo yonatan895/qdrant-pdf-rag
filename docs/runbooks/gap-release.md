@@ -229,8 +229,8 @@ line; rerun the same command after fixing the cause.
    listing uses that `KUBECONFIG`.
 
    Then run the pipeline from the rehearsal workspace with the stage declared
-   in the process environment (never in `airgap.env`, which is ignored for
-   these). Keep the rehearsal settings in that workspace's own `airgap.env`:
+   in the process environment (never in `airgap.env`: an assignment or
+   `export` there is ignored for these, a `readonly` one is refused). Keep the rehearsal settings in that workspace's own `airgap.env`:
    inside a stage an exported value cannot be told from a file value, so the
    stages resolve both workspaces from their own `airgap.env` (or the deploy
    defaults) and refuse a stage whose `NAMESPACE`, `INTERNAL_REGISTRY` or

@@ -765,8 +765,10 @@ checksums **after**.
   ([gap release runbook](runbooks/gap-release.md)).
 - *Gap release stage (#1338).* After the guard above, load, deploy, ingest
   and retire_legacy run a bundle whose authenticated origin is `gap` (in
-  dry-run: whose MANIFEST says so) only in a stage the process environment
-  declares (`check_gap_release_stage`; `airgap.env` values are ignored):
+  dry-run: whose MANIFEST says so, read with the same origin rules) only in a
+  stage the process environment declares (`check_gap_release_stage`;
+  `airgap.env` values, exported too, are ignored on every entry point,
+  `pipeline.sh` included; a `readonly` one is refused):
   a rehearsal (`GAP_REHEARSAL_INSTALLED_WORKSPACE` and
   `GAP_REHEARSAL_KUBE_CONTEXT`), whose target `release.py rehearse-guard`
   resolves and judges with `rehearse-check`'s refusals before any registry
