@@ -71,14 +71,20 @@ REASONING_ENV_KEYS = (*REASONING_INTEGER_FIELDS, *REASONING_EFFORT_FIELDS, "LLM_
                       SPL_MODE_KEY, CHAT_IMAGES_KEY)
 
 # Request admission and total deadline (#374 handoff, #843 D1). Empty keeps the
-# chart default (deadline 270; admission 4/4/30, #843); zero is an explicit selection. Limits match config.Settings and the
+# chart default (deadline 270; admission 4/4/30, #843; body cap/budget 24/128 MiB, #1352); zero is an explicit selection. Limits match config.Settings and the
 # chart schema. The route timeout is the mapper's fixed 300 s.
 ROUTE_TIMEOUT_SECONDS = 300
 REQUEST_INTEGER_FIELDS = {
     "REQUEST_DEADLINE_S": ("requestDeadlineSeconds", 0, 3600),
     "REQUEST_MAX_CONCURRENT": ("requestMaxConcurrent", 0, 1000),
     "REQUEST_QUEUE_MAX": ("requestQueueMax", 0, 1000),
+    # Request-body bounds (#1352), bytes per agent replica; budget >= cap.
+    "REQUEST_MAX_BODY_BYTES": ("requestMaxBodyBytes", 1048576, 268435456),
+    "REQUEST_BODY_BUDGET_BYTES": ("requestBodyBudgetBytes", 1048576, 4294967296),
 }
+# Chart defaults (charts/mainframe-rag/values.yaml, a test pins them) that the
+# budget >= cap rule compares an empty side against.
+REQUEST_BODY_DEFAULTS = {"requestMaxBodyBytes": 25165824, "requestBodyBudgetBytes": 134217728}
 REQUEST_WAIT_KEY = "REQUEST_QUEUE_WAIT_S"  # chart requestQueueWaitSeconds, 0..300, decimal
 REQUEST_ENV_KEYS = (*REQUEST_INTEGER_FIELDS, REQUEST_WAIT_KEY)
 
@@ -592,12 +598,15 @@ def request_overrides(values: Mapping[str, str]) -> dict[str, int | float]:
         raw = values.get(name, "")
         if raw == "":
             continue
-        if not re.fullmatch(r"[0-9]{1,5}", raw) or not minimum <= int(raw) <= maximum:
+        if not re.fullmatch(r"[0-9]{1,10}", raw) or not minimum <= int(raw) <= maximum:
             raise ValueError(f"{name} must be an integer from {minimum} to {maximum}")
         result[field] = int(raw)
     deadline = result.get("requestDeadlineSeconds", 0)
     if deadline >= ROUTE_TIMEOUT_SECONDS:
         raise ValueError(f"REQUEST_DEADLINE_S must be 0 or below the {ROUTE_TIMEOUT_SECONDS} s route timeout")
+    body = {**REQUEST_BODY_DEFAULTS, **{k: v for k, v in result.items() if k in REQUEST_BODY_DEFAULTS}}
+    if body["requestBodyBudgetBytes"] < body["requestMaxBodyBytes"]:
+        raise ValueError("REQUEST_BODY_BUDGET_BYTES must be at least REQUEST_MAX_BODY_BYTES")
     raw = values.get(REQUEST_WAIT_KEY, "")
     if raw != "":
         if not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3})?", raw) or float(raw) > 300:
@@ -606,17 +615,18 @@ def request_overrides(values: Mapping[str, str]) -> dict[str, int | float]:
     return result
 
 
-# Site sizing (#1070 R2): a quota-bound site fits the release into its
-# namespace quota with these keys, not with free-form overlays (those stay
-# CI-only). Unset keeps the chart default, so the default render is unchanged.
-# SIZING_DEFAULTS mirrors charts/qdrant-openshift.values.yaml and
+# Site sizing (#1070 R2, agent #1348): a quota-bound site fits the release
+# into its namespace quota with these keys, not with free-form overlays (those
+# stay CI-only). Unset keeps the chart default, so the default render is
+# unchanged. SIZING_DEFAULTS mirrors charts/qdrant-openshift.values.yaml and
 # charts/mainframe-rag/values.yaml (a test pins both) so a lone limit or
 # request is compared against the value that will actually render.
 SIZING_DEFAULTS = {
     "QDRANT": {"requests": {"cpu": "4", "memory": "16Gi"}, "limits": {"cpu": "8", "memory": "32Gi"}},
     "INGEST": {"requests": {"cpu": "4", "memory": "8Gi"}, "limits": {"cpu": "16", "memory": "32Gi"}},
+    "AGENT": {"requests": {"cpu": "250m", "memory": "512Mi"}, "limits": {"cpu": "2", "memory": "2Gi"}},
 }
-SIZING_PREFIXES = ("QDRANT", "INGEST")
+SIZING_PREFIXES = ("QDRANT", "INGEST", "AGENT")
 QDRANT_VOLUME_KEYS = {"QDRANT_DATA_SIZE": "persistence.size", "QDRANT_SNAPSHOT_SIZE": "snapshotPersistence.size"}
 SIZING_ENV_KEYS = (
     *QDRANT_VOLUME_KEYS,
@@ -643,8 +653,8 @@ def _quantity(name: str, raw: str, cpu: bool) -> Fraction:
 
 
 def sizing_resources(values: Mapping[str, str], prefix: str) -> dict[str, dict[str, str]]:
-    """The explicitly selected requests/limits of one workload (`QDRANT` or
-    `INGEST`), validated against each other and the chart default of any side
+    """The explicitly selected requests/limits of one workload (`QDRANT`,
+    `INGEST` or `AGENT`), validated against each other and the chart default of any side
     left unset. Unset keys are omitted."""
     chosen: dict[str, dict[str, str]] = {"requests": {}, "limits": {}}
     quantities: dict[tuple[str, str], Fraction] = {}
@@ -675,12 +685,22 @@ def qdrant_sizing(values: Mapping[str, str]) -> list[str]:
     return result
 
 
-def ingest_resources(values: Mapping[str, str]) -> dict[str, dict[str, str]]:
-    """The chart's `ingest.resources` with the selected sizes applied over the defaults."""
-    merged = {section: dict(fields) for section, fields in SIZING_DEFAULTS["INGEST"].items()}
-    for section, fields in sizing_resources(values, "INGEST").items():
+def _chart_resources(values: Mapping[str, str], prefix: str) -> dict[str, dict[str, str]]:
+    merged = {section: dict(fields) for section, fields in SIZING_DEFAULTS[prefix].items()}
+    for section, fields in sizing_resources(values, prefix).items():
         merged[section].update(fields)
     return merged
+
+
+def ingest_resources(values: Mapping[str, str]) -> dict[str, dict[str, str]]:
+    """The chart's `ingest.resources` with the selected sizes applied over the defaults."""
+    return _chart_resources(values, "INGEST")
+
+
+def agent_resources(values: Mapping[str, str]) -> dict[str, dict[str, str]]:
+    """The chart's `resources.agent` (agent container only, never the oauth-proxy
+    sidecar) with the selected sizes applied over the defaults (#1348)."""
+    return _chart_resources(values, "AGENT")
 
 
 def validate_model_config(values: Mapping[str, str]) -> None:
@@ -720,6 +740,7 @@ def main(argv: list[str] | None = None) -> int:
         validate_model_config(os.environ)
         qdrant_sizing(os.environ)
         ingest_resources(os.environ)
+        agent_resources(os.environ)
     except ValueError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1

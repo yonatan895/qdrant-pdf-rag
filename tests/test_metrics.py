@@ -276,7 +276,7 @@ async def test_stream_close_records_once(outcome_client, monkeypatch, endpoint, 
     from fastapi import Request, Response
 
     from mainframe_rag.webui import routes
-    from tests.test_stream_truncation import _scope
+    from tests.test_stream_truncation import _chat_request, _scope
 
     monkeypatch.setattr(app_mod, "llm", _OutcomeLLM("error" if close_after == "error" else "accepted"))
     reader = _hermetic_instruments(monkeypatch)
@@ -286,7 +286,7 @@ async def test_stream_close_records_once(outcome_client, monkeypatch, endpoint, 
     if endpoint == "answer":
         response = await app_mod.v1_answer(request, app_mod.AnswerRequest(query="IEA500I"), Response(), stream=True)
     elif endpoint == "chat":
-        response = await app_mod.chat_completions(app_mod.ChatRequest(messages=messages, stream=True), request, Response())
+        response = await app_mod.chat_completions(_chat_request({"messages": messages, "stream": True}, request), Response())
     else:
         response = await routes.ui_chat_stream(request, routes.UiChatRequest(messages=messages))
     body = response.body_iterator

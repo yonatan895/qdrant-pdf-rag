@@ -73,9 +73,10 @@ async def _direct_turn(route, request, stream=False):
             request, app_mod.AnswerRequest(query="IEA500I"), Response(), stream=stream
         )
     if route == "chat":
+        from tests.test_stream_truncation import _chat_request
+
         return await app_mod.chat_completions(
-            app_mod.ChatRequest(messages=[{"role": "user", "content": "IEA500I"}], stream=stream),
-            request,
+            _chat_request({"messages": [{"role": "user", "content": "IEA500I"}], "stream": stream}, request),
             Response(),
         )
     if stream:

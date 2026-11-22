@@ -29,10 +29,10 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.answer import PromptBudgetExceeded, TruncatedStreamError
-from mainframe_rag.agent.app import AnswerRequest, ChatRequest
+from mainframe_rag.agent.app import AnswerRequest
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.ports import ChatResult, TokenUsage
-from tests.test_stream_truncation import _client, _scope, _search_stub
+from tests.test_stream_truncation import _chat_request, _client, _scope, _search_stub
 
 GOLDEN_PATH = Path(__file__).parent / "data" / "answer_chat_orchestration.json"
 _CITE = "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
@@ -288,8 +288,7 @@ async def test_close_outcome_is_pinned(start, endpoint, scenario, frames):
         )
     else:
         response = await app_mod.chat_completions(
-            ChatRequest(messages=[{"role": "user", "content": "IEA500I command"}], stream=True),
-            Request(_scope("/v1/chat")),
+            _chat_request({"messages": [{"role": "user", "content": "IEA500I command"}], "stream": True}),
             Response(),
         )
     body = response.body_iterator

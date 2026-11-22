@@ -260,6 +260,26 @@ OPERATOR_KEYS: tuple[OperatorKey, ...] = (
         "Site sizing override for ingest Job memory limit (must be >= request).",
         "#1070", _EX_MAP, helm_path="ingest.resources.limits.memory",
     ),
+    OperatorKey(
+        "AGENT_CPU_REQUEST", _SEC_CLUSTER, "str", "250m",
+        "Site sizing override for the agent container CPU request (not the oauth-proxy sidecar).",
+        "#1348", _EX_MAP, helm_path="resources.agent.requests.cpu",
+    ),
+    OperatorKey(
+        "AGENT_MEMORY_REQUEST", _SEC_CLUSTER, "str", "512Mi",
+        "Site sizing override for the agent container memory request.",
+        "#1348", _EX_MAP, helm_path="resources.agent.requests.memory",
+    ),
+    OperatorKey(
+        "AGENT_CPU_LIMIT", _SEC_CLUSTER, "str", "2",
+        "Site sizing override for the agent container CPU limit (must be >= request).",
+        "#1348", _EX_MAP, helm_path="resources.agent.limits.cpu",
+    ),
+    OperatorKey(
+        "AGENT_MEMORY_LIMIT", _SEC_CLUSTER, "str", "2Gi",
+        "Site sizing override for the agent container memory limit (must be >= request).",
+        "#1348", _EX_MAP, helm_path="resources.agent.limits.memory",
+    ),
 
     # --- Images ---
     OperatorKey(
@@ -407,6 +427,18 @@ OPERATOR_KEYS: tuple[OperatorKey, ...] = (
         "Max seconds a queued request may wait before 503 (0..300; > 0 while concurrency > 0).",
         "#843", _EX_CHART, helm_path="requestQueueWaitSeconds", chart_env=("REQUEST_QUEUE_WAIT_S",),
         min_value=0.0, max_value=300.0,
+    ),
+    OperatorKey(
+        "REQUEST_MAX_BODY_BYTES", _SEC_INFERENCE, "int", 25165824,
+        "Largest request body in bytes per agent replica; larger is refused with 413 before parsing (1 MiB..256 MiB).",
+        "#1352", _EX_CHART, helm_path="requestMaxBodyBytes", chart_env=("REQUEST_MAX_BODY_BYTES",),
+        min_value=1048576, max_value=268435456,
+    ),
+    OperatorKey(
+        "REQUEST_BODY_BUDGET_BYTES", _SEC_INFERENCE, "int", 134217728,
+        "Sum of request bodies in flight per agent replica; excess waits, then 503 (1 MiB..4 GiB; >= REQUEST_MAX_BODY_BYTES).",
+        "#1352", _EX_CHART, helm_path="requestBodyBudgetBytes", chart_env=("REQUEST_BODY_BUDGET_BYTES",),
+        min_value=1048576, max_value=4294967296,
     ),
 
     # --- Optional cross-encoder reranker ---

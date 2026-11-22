@@ -97,6 +97,15 @@ spec:
               value: {{ index $.Values $field | toString | quote }}
             {{- end }}
             {{- end }}
+            {{- /* #1352: byte bounds render through int64 (a values-file integer is a float64 and
+                 toString would print 2.5165824e+07); the schema requires both, so they always render. */}}
+            {{- if lt (int64 .Values.requestBodyBudgetBytes) (int64 .Values.requestMaxBodyBytes) }}
+            {{- fail "requestBodyBudgetBytes must be at least requestMaxBodyBytes (REQUEST_BODY_BUDGET_BYTES >= REQUEST_MAX_BODY_BYTES)" }}
+            {{- end }}
+            - name: REQUEST_MAX_BODY_BYTES
+              value: {{ int64 .Values.requestMaxBodyBytes | toString | quote }}
+            - name: REQUEST_BODY_BUDGET_BYTES
+              value: {{ int64 .Values.requestBodyBudgetBytes | toString | quote }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ include "mainframe-rag.otelEndpoint" . | quote }}
             {{- if include "mainframe-rag.openobserveEnabled" . }}
@@ -162,6 +171,14 @@ spec:
             - name: SSL_CERT_FILE
               value: /etc/gateway-ca/ca-bundle.crt
             {{- end }}
+            # glibc allocator tuning (#1348, 2026-11-22; docs/deploy.md): measured
+            # peak memory -25% and idle back near startup after image-chat bursts.
+            - name: MALLOC_ARENA_MAX
+              value: "2"
+            - name: MALLOC_TRIM_THRESHOLD_
+              value: "131072"
+            - name: MALLOC_MMAP_THRESHOLD_
+              value: "131072"
           readinessProbe:
             httpGet:
               path: /healthz
@@ -174,6 +191,9 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 20
+            # 3 s (#1348, 2026-11-22): a CPU-throttled event loop answered /livez
+            # in up to about 1 s under load; the 1 s default risks needless restarts.
+            timeoutSeconds: 3
             failureThreshold: 3
           resources:
             {{- toYaml .Values.resources.agent | nindent 12 }}

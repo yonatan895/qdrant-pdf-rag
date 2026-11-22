@@ -102,7 +102,8 @@ MAXIMAL_INPUT = {
     "LLM_EXTRA_BODY": '{"chat_template_kwargs": {"enable_thinking": true}}', "LLM_EFFORT_TRANSPORT": "chat_template",
     "LLM_TOKEN_COUNT_SOURCE": "auto",
     "REQUEST_DEADLINE_S": "200", "REQUEST_MAX_CONCURRENT": "4", "REQUEST_QUEUE_MAX": "4",
-    "REQUEST_QUEUE_WAIT_S": "30", "RERANK_ENABLED": "true", "RERANK_BASE_URL": "http://rerank.example.invalid/v1",
+    "REQUEST_QUEUE_WAIT_S": "30", "REQUEST_MAX_BODY_BYTES": "25165824", "REQUEST_BODY_BUDGET_BYTES": "134217728",
+    "RERANK_ENABLED": "true", "RERANK_BASE_URL": "http://rerank.example.invalid/v1",
     "GATEWAY_API_KEY_SECRET": "gw", "GATEWAY_API_KEY_SECRET_KEY": "key", "GATEWAY_CA_CONFIGMAP": "ca",
     "CORPUS_PVC": "corpus", "INGEST_WORKERS": "2", "INGEST_WORK_SIZE": "10Gi", "INGEST_REINGEST": "true",
     "INGEST_RETIRE_DOCS": "doc", "INGEST_AUTHORIZE_FROM_CATALOG": "true", "CONTEXTUAL_EMBED_ENABLED": "true",
@@ -111,7 +112,7 @@ MAXIMAL_INPUT = {
     "QDRANT_REPLICATION_FACTOR": "1", "QDRANT_WRITE_CONSISTENCY_FACTOR": "1",
     "QDRANT_DATA_SIZE": "1Gi", "QDRANT_SNAPSHOT_SIZE": "1Gi",
     **{f"{prefix}_{res}_{kind}": ("1" if res == "CPU" else "1Gi")
-       for prefix in ("QDRANT", "INGEST") for res in ("CPU", "MEMORY") for kind in ("REQUEST", "LIMIT")},
+       for prefix in ("QDRANT", "INGEST", "AGENT") for res in ("CPU", "MEMORY") for kind in ("REQUEST", "LIMIT")},
     **{f"IMAGE_DIGEST_{role}": _DIGEST
        for role in ("AGENT", "INGEST", "OAUTH_PROXY", "OPENWEBUI", "OPENWEBUI_PROXY")},
 }

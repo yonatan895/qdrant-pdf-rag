@@ -33,7 +33,7 @@ from mainframe_rag.agent.answer import (
     _chat_result_from_response,
     is_model_timeout,
 )
-from mainframe_rag.agent.app import AnswerRequest, ChatRequest
+from mainframe_rag.agent.app import AnswerRequest
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage
 from tests.fakes import HttpxStreamFake, NonPropagatingGateway, SlowOpenAIUpstream, settings_kw
@@ -740,6 +740,24 @@ def _scope(path: str) -> dict:
     }
 
 
+def _chat_request(payload: dict, request: Request | None = None) -> Request:
+    """A direct /v1/chat call: the handler reads and validates its own JSON
+    body after admission (issue #1352), so the request carries the body.
+    `request` supplies the scope (path, headers, state) when given."""
+    base = request.scope if request is not None else _scope("/v1/chat")
+    body = json.dumps(payload).encode()
+    scope = {**base, "headers": [*base["headers"], (b"content-type", b"application/json")]}
+    pending = [{"type": "http.request", "body": body, "more_body": False}]
+
+    async def receive():
+        if pending:
+            return pending.pop()
+        await asyncio.Event().wait()  # never disconnects on its own
+        return {"type": "http.disconnect"}
+
+    return Request(scope, receive)
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("route", ["answer", "chat"])
 async def test_stream_disconnect_records_generation_incomplete(
@@ -767,10 +785,9 @@ async def test_stream_disconnect_records_generation_incomplete(
             first_marker = "event: token"
         else:
             response = await app_mod.chat_completions(
-                app_mod.ChatRequest(
-                    messages=[{"role": "user", "content": "IEA500I command"}], stream=True
+                _chat_request(
+                    {"messages": [{"role": "user", "content": "IEA500I command"}], "stream": True}
                 ),
-                Request(_scope("/v1/chat")),
                 Response(),
             )
             first_marker = '"delta"'
@@ -831,10 +848,9 @@ async def test_chat_stream_disconnect_records_generation_incomplete(
     )
     with caplog.at_level(logging.WARNING, logger="agent"):
         response = await app_mod.chat_completions(
-            ChatRequest(
-                messages=[{"role": "user", "content": "IEA500I command"}], stream=True
+            _chat_request(
+                {"messages": [{"role": "user", "content": "IEA500I command"}], "stream": True}
             ),
-            Request(_scope("/v1/chat")),
             Response(),
         )
         body = response.body_iterator

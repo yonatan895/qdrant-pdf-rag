@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
+import email.message
+import json
 import logging
 import math
 import os
@@ -49,15 +52,19 @@ from pydantic import (
     PrivateAttr,
     SerializeAsAny,
     StrictBool,
+    ValidationError,
     field_validator,
     model_validator,
 )
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import ClientDisconnect
 
 from mainframe_rag.agent.admission import (
     AdmissionController,
     AdmissionRejected,
     AdmissionTicket,
+    BodyBudget,
+    BodyLease,
 )
 from mainframe_rag.agent.answer import (
     HttpxLLMClient,
@@ -204,6 +211,9 @@ serving_gate: ServingGate | None = None
 # import-time instance is unlimited (pre-#374 behaviour) so anything that
 # runs without a lifespan is unchanged. Tests inject a controller directly.
 admission: AdmissionController = AdmissionController()
+# Request-body budget (issue #1352): rebuilt from Settings in lifespan like
+# admission; the import-time instance is unlimited.
+body_budget: BodyBudget = BodyBudget()
 # Exact-evidence entitlement authority (issue #405). SharedCorpusAccess is the
 # explicit shared-corpus mode of today's deployment; per-source entitlement
 # (#373) replaces this object. Tests inject restrictive/unavailable doubles.
@@ -521,12 +531,15 @@ class RequestDeadlineExceeded(Exception):
 
 async def _admit(owner: _RequestSpan) -> None:
     """Admission + deadline start for one product request (issue #374):
-    the first await of every product handler, before any validation, serving
-    gate or model work. Takes a slot (queueing within the bounded queue and
-    never beyond the remaining deadline) or refuses with the stable 503
-    `overloaded` + Retry-After. The slot is released exactly once by
-    `owner.end()` — when the handler returns for buffered responses, when
-    the response closes for SSE. With no limit selected this admits immediately."""
+    the first await of every product handler, before the serving gate and
+    any model work. On `/v1/chat*` it also precedes the body read and all
+    validation (issue #1352); on the other product routes FastAPI has
+    already read and validated the (small) body by then. Takes a slot
+    (queueing within the bounded queue and never beyond the remaining
+    deadline) or refuses with the stable 503 `overloaded` + Retry-After. The
+    slot is released exactly once by `owner.end()` — when the handler
+    returns for buffered responses, when the response closes for SSE. With
+    no limit selected this admits immediately."""
     request_id = owner.request.state.request_id
     owner.deadline_s = settings.request_deadline_s or None
     try:
@@ -891,7 +904,7 @@ async def _close_client(client: object) -> None:
 async def lifespan(_app: FastAPI):
     global settings, http, http_sync, qdrant, embedder, llm, tokenizer, reranker, zowe_mcp
     global rerank_health
-    global serving_gate, admission, feedback
+    global serving_gate, admission, body_budget, feedback
     settings = load_settings()
     configure_logging(settings.log_level)
     # Startup fail-fast (issue #20 PR D): the agent refuses to listen on a
@@ -1001,6 +1014,7 @@ async def lifespan(_app: FastAPI):
             settings.request_queue_max,
             settings.request_queue_wait_s,
         )
+        body_budget = BodyBudget(settings.request_body_budget_bytes)
         # Serving-generation gate (issues #391 F3/F4): one instance per process,
         # created from Settings unless a test injected its own (never overwritten
         # then). The cache is invalidated at every startup so a validation from a
@@ -1350,6 +1364,201 @@ class ErrorEnvelope(BaseModel):
     message: str
 
 
+class RequestBodyDeadline(Exception):
+    """The request deadline expired while a non-chat body was still being
+    read (issue #1352, D-A). Raised from the counting receive; no text."""
+
+
+class RequestBodyTooLarge(Exception):
+    """A body without a declared length streamed past REQUEST_MAX_BODY_BYTES
+    (issue #1352). Raised from the counting receive; never carries text."""
+
+
+def _too_large_body_message(limit: int) -> str:
+    return f"request body exceeds the {limit}-byte limit"
+
+
+# Routes whose handler takes the body budget itself, after admission, then
+# reads and parses the body (issue #1352). Every other body-bearing request
+# takes it in RequestBodyMiddleware before the framework reads the body.
+_ADMIT_FIRST_BODY_PATHS = frozenset({"/v1/chat", "/v1/chat/completions"})
+_BODYLESS_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+class _BodyGate:
+    """One request's body accounting (issue #1352): its declared length (None
+    when it has none, so the cap is reserved), the budget lease, taken at most
+    once, and the bytes streamed so far."""
+
+    __slots__ = ("charge", "lease", "received", "refusal")
+
+    def __init__(self, declared: int | None, cap: int) -> None:
+        self.charge = cap if declared is None else declared
+        self.lease: BodyLease | None = None
+        self.received = 0
+        # (status, code, message, log reason) once the middleware refuses the
+        # body mid-read; the framework's reaction is then replaced by it.
+        self.refusal: tuple[int, str, str, str] | None = None
+
+    async def take(self) -> None:
+        """Reserve this body's bytes, waiting at most REQUEST_QUEUE_WAIT_S;
+        raises AdmissionRejected(body_budget). Reads the module globals per
+        request: the lifespan and tests replace them."""
+        if self.lease is None:
+            self.lease = await body_budget.acquire(self.charge, settings.request_queue_wait_s)
+
+    def release(self) -> None:
+        lease, self.lease = self.lease, None
+        if lease is not None:
+            lease.release()
+
+
+def _declared_body(headers) -> tuple[bool, int | None]:
+    """(has a body, declared length). HTTP/1.1 framing: a request carries a
+    body only with Content-Length > 0 or Transfer-Encoding. An unparsable
+    length counts as undeclared (the server has already refused it)."""
+    length: int | None = None
+    chunked = False
+    for name, value in headers:
+        if name == b"content-length":
+            try:
+                length = int(value)
+            except ValueError:
+                chunked = True
+        elif name == b"transfer-encoding":
+            chunked = True
+    if chunked:
+        return True, None
+    return bool(length), length
+
+
+async def _refuse_body(scope, send, status: int, code: str, message: str, reason: str,
+                       headers: dict[str, str] | None = None) -> None:
+    """Send a fixed envelope from the middleware (the framework never saw the
+    request, or its reaction was discarded) with the one RED record. The
+    connection stays open: after the response uvicorn reads and discards
+    the rest of the body (h11 Data events once the response is done are
+    dropped, never buffered), so a client still uploading receives the
+    envelope. Closing instead would reset a socket with unread data, and
+    the client would see a reset rather than the envelope (#1356 review)."""
+    request = Request(scope)
+    request_id = getattr(request.state, "request_id", "unknown")
+    log.warning(json_log(request_id, "request_body", outcome=code, reason=reason,
+                         budget_in_use=body_budget.in_use, budget_waiting=body_budget.waiting))
+    _record_handler_error(request, code, body_refusal=True)
+    response = JSONResponse(
+        status_code=status,
+        content=ErrorEnvelope(code=code, message=message).model_dump(),
+        headers=headers,
+    )
+    await response(scope, _no_receive, send)
+
+
+async def _no_receive():  # pragma: no cover - buffered responses never receive
+    return {"type": "http.disconnect"}
+
+
+def _body_read_until(scope) -> float | None:
+    """When a non-chat body read must end (issue #1352, D-A): the request
+    deadline counted from arrival, so a stalled upload cannot hold its budget
+    bytes past it. The framework reads these bodies before the handler, whose
+    own deadline still starts at handler entry (#374). `/v1/chat*` reads its
+    body inside its handler deadline instead. None when no deadline is set."""
+    if scope["path"] in _ADMIT_FIRST_BODY_PATHS or settings.request_deadline_s <= 0:
+        return None
+    arrived = scope.get("state", {}).get("started", time.monotonic())
+    return arrived + settings.request_deadline_s
+
+
+class RequestBodyMiddleware:
+    """Bound request-body memory before any parse (issue #1352).
+
+    - A declared length above REQUEST_MAX_BODY_BYTES is refused before the
+      app runs; a body without one is counted as it streams and refused once
+      it passes the cap (fixed 413 `invalid_request`, never a parse).
+    - Every body takes its bytes from the per-replica budget before its first
+      read and holds them until the response ends (SSE: the stream closes).
+      A request that cannot get them waits without reading (uvicorn stops
+      reading the socket at its 64 KiB buffer) for at most
+      REQUEST_QUEUE_WAIT_S, then gets the fixed 503 `overloaded`.
+    - `/v1/chat*` takes the budget in its handler after admission, so the
+      admission queue keeps its immediate refusals; its receive still
+      counts and takes the budget if nothing did. Its read runs inside the
+      handler's request deadline.
+    - Other routes' body reads end at the request deadline counted from
+      arrival (when one is set): a stalled upload gets the fixed 504
+      `deadline_exceeded` and returns its bytes.
+    Requests without a body (probes, GETs) pass straight through. Pure ASGI:
+    send is awaited directly, with no body queue (see RequestIdentityMiddleware).
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] in _BODYLESS_METHODS:
+            await self.app(scope, receive, send)
+            return
+        has_body, declared = _declared_body(scope["headers"])
+        if not has_body:
+            await self.app(scope, receive, send)
+            return
+        cap = settings.request_max_body_bytes
+        too_large = (413, "invalid_request", _too_large_body_message(cap), "too_large")
+        if declared is not None and declared > cap:
+            await _refuse_body(scope, send, *too_large)
+            return
+        gate = _BodyGate(declared, cap)
+        scope.setdefault("state", {})["body_gate"] = gate
+        try:
+            if scope["path"] not in _ADMIT_FIRST_BODY_PATHS:
+                try:
+                    await gate.take()
+                except AdmissionRejected:
+                    await _refuse_body(scope, send, 503, "overloaded", _OVERLOADED,
+                                       "body_budget", {"Retry-After": "1"})
+                    return
+            started = False
+            read_until = _body_read_until(scope)
+
+            body_done = False
+
+            async def counted_receive():
+                nonlocal body_done
+                await gate.take()
+                if read_until is None or body_done:
+                    # After the last body message a receive only waits for
+                    # the disconnect (streaming responses): never bounded.
+                    message = await receive()
+                else:
+                    try:
+                        message = await asyncio.wait_for(receive(), max(read_until - time.monotonic(), 0.0))
+                    except TimeoutError:
+                        gate.refusal = (504, "deadline_exceeded", _DEADLINE_EXCEEDED, "body_deadline")
+                        raise RequestBodyDeadline from None
+                if message["type"] == "http.request":
+                    gate.received += len(message.get("body", b""))
+                    if gate.received > gate.charge:
+                        gate.refusal = too_large
+                        raise RequestBodyTooLarge
+                    body_done = not message.get("more_body", False)
+                return message
+
+            async def guarded_send(message):
+                nonlocal started
+                if gate.refusal is not None and not started:
+                    return  # the framework's reaction to the refusal is replaced below
+                if message["type"] == "http.response.start":
+                    started = True
+                await send(message)
+
+            await self.app(scope, counted_receive, guarded_send)
+            if gate.refusal is not None and not started:
+                await _refuse_body(scope, send, *gate.refusal)
+        finally:
+            gate.release()
+
+
 class RequestIdentityMiddleware:
     """Attach correlation state without interposing a response-body queue.
     The stream lifetime owner must await the actual ASGI send for its deadline
@@ -1366,10 +1575,45 @@ class RequestIdentityMiddleware:
         await self.app(scope, receive, send)
 
 
+# Order: identity is outermost (added last), so the body middleware's refusals
+# carry the request id and arrival time.
+app.add_middleware(RequestBodyMiddleware)
 app.add_middleware(RequestIdentityMiddleware)
 
 
-def _record_handler_error(request: Request, code: str) -> None:
+_framework_openapi = app.openapi
+
+
+def _openapi_with_chat_body() -> dict:
+    """The framework schema plus the /v1/chat* request body: those handlers
+    read and validate `ChatRequest` themselves after admission (issue
+    #1352), so the framework no longer sees a body parameter. The body, its
+    schemas and the 422 response come from FastAPI's own generator (a probe
+    app with `ChatRequest` as a body parameter), so the published document
+    is exactly what a body parameter produces."""
+    if app.openapi_schema is not None:
+        return app.openapi_schema
+    spec = _framework_openapi()
+    probe = FastAPI()
+
+    @probe.post("/chat")
+    async def _probe_chat(req: ChatRequest) -> None:  # pragma: no cover - schema only
+        return None
+
+    probe_spec = probe.openapi()
+    probe_operation = probe_spec["paths"]["/chat"]["post"]
+    spec.setdefault("components", {}).setdefault("schemas", {}).update(probe_spec["components"]["schemas"])
+    for path in _ADMIT_FIRST_BODY_PATHS:
+        operation = spec["paths"][path]["post"]
+        operation["requestBody"] = copy.deepcopy(probe_operation["requestBody"])
+        operation["responses"].setdefault("422", copy.deepcopy(probe_operation["responses"]["422"]))
+    return spec
+
+
+app.openapi = _openapi_with_chat_body  # type: ignore[method-assign]
+
+
+def _record_handler_error(request: Request, code: str, *, body_refusal: bool = False) -> None:
     """RED outcome for every error-handler response. One helper serves all
     six handlers so a new error shape cannot forget its series; non-product
     paths (scrapes, probes, unknown routes) map to no endpoint and are
@@ -1378,6 +1622,11 @@ def _record_handler_error(request: Request, code: str) -> None:
     the endpoint already recorded a richer series (kind/hits known) before
     raising — each request counts exactly once."""
     if getattr(request.state, "red_recorded", False):
+        return
+    # A body refused mid-read (#1352): the framework's reaction is replaced
+    # by the middleware's envelope, which is the one recorded.
+    gate = getattr(request.state, "body_gate", None)
+    if gate is not None and gate.refusal is not None and not body_refusal:
         return
     # getattr, not attribute access: the handler also serves synthetic
     # requests (tests) that carry no URL — telemetry degrades to skipping.
@@ -1454,21 +1703,25 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
     )
 
 
-@app.exception_handler(RequestValidationError)
-async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-    # The request-size guard states its limit (issue #1192): the configured
-    # number only, read off the typed refusal, never any input text. A
-    # refused pasted image (#1287) has its own stable code and fixed
-    # per-reason text, which states only the configured limit.
-    code, message = "invalid_request", "request body failed validation"
-    for error in exc.errors():
+def _validation_refusal(errors) -> tuple[str, str]:
+    """(code, message) of a body-validation failure. The request-size guard
+    states its limit (issue #1192): the configured number only, read off the
+    typed refusal, never any input text. A refused pasted image (#1287) has
+    its own stable code and fixed per-reason text, which states only the
+    configured limit. Shared by the framework's handler and /v1/chat*, which
+    validates its own body after admission (#1352)."""
+    for error in errors:
         cause = (error.get("ctx") or {}).get("error")
         if isinstance(cause, RequestTooLarge):
-            message = too_large_message(cause.limit)
-            break
+            return "invalid_request", too_large_message(cause.limit)
         if isinstance(cause, UnsupportedImage):
-            code, message = UNSUPPORTED_IMAGE_CODE, cause.message
-            break
+            return UNSUPPORTED_IMAGE_CODE, cause.message
+    return "invalid_request", "request body failed validation"
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    code, message = _validation_refusal(exc.errors())
     _record_handler_error(request, code)
     return JSONResponse(
         status_code=422,
@@ -2374,7 +2627,7 @@ async def rate_answer(req: UiFeedbackRequest) -> JSONResponse:
 
 @app.post("/v1/chat", response_model=None)
 @app.post("/v1/chat/completions", response_model=None)
-async def chat_completions(req: ChatRequest, request: Request, response: Response):
+async def chat_completions(request: Request, response: Response):
     """Multi-turn chat completions: native POST /v1/chat and its
     OpenAI-compatible alias POST /v1/chat/completions.
 
@@ -2383,7 +2636,14 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
     CHAT_CONDENSE_ENABLED is on; retrieval, prompt assembly, reasoning
     generation, and turn-local citation validation all run through the shared
     answer core.
+
     """
+    # The body (a ChatRequest, up to three pasted images) is read only after
+    # admission and the body budget, then parsed and validated off the event
+    # loop; the raw bytes and the parsed JSON are dropped once the validated
+    # request exists (issue #1352). Refusals keep the framework's envelopes.
+    # (A comment, not docstring text: the docstring is the published
+    # /openapi.json description, unchanged by #1352.)
     request_id = getattr(request.state, "request_id", uuid.uuid4().hex[:12])
     started = getattr(request.state, "started", time.monotonic())
 
@@ -2394,11 +2654,84 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
         "v1.chat",
         context=parent_context(request.headers),
         kind=SpanKind.SERVER,
-        attributes={"http.request_id": request_id, "rag.stream": req.stream},
+        attributes={"http.request_id": request_id},
     )
     with _request_span(request, root_span, "chat", started) as owner:
         await _admit(owner)
-        return await _within_deadline(owner, _chat_response(req, response, owner))
+        return await _within_deadline(owner, _chat_from_body(request, response, owner))
+
+
+async def _chat_from_body(request: Request, response: Response, owner: _RequestSpan):
+    req = await _read_chat_request(request, owner)
+    owner.span.set_attribute("rag.stream", req.stream)
+    return await _chat_response(req, response, owner)
+
+
+async def _read_chat_request(request: Request, owner: _RequestSpan) -> ChatRequest:
+    """Body budget, read and validation of one admitted chat (issue #1352),
+    inside its slot and deadline. The bytes are collected locally, never
+    cached on the Request (which lives as long as the response), and parsed
+    in a worker thread."""
+    gate = getattr(request.state, "body_gate", None)
+    if gate is not None:
+        try:
+            await gate.take()
+        except AdmissionRejected as exc:
+            log.warning(
+                json_log(
+                    getattr(request.state, "request_id", "unknown"),
+                    owner.endpoint,
+                    outcome="overloaded",
+                    reason=exc.reason,
+                    budget_in_use=body_budget.in_use,
+                    budget_waiting=body_budget.waiting,
+                )
+            )
+            raise AppError(
+                503, "overloaded", _OVERLOADED, headers={"Retry-After": "1"}
+            ) from exc
+    body = bytearray()
+    try:
+        async for chunk in request.stream():
+            body += chunk
+    except RequestBodyTooLarge as exc:
+        raise AppError(
+            413, "invalid_request", _too_large_body_message(settings.request_max_body_bytes)
+        ) from exc
+    except ClientDisconnect:
+        owner.abort()
+        raise AppError(422, "invalid_request", "request body failed validation") from None
+    return await asyncio.to_thread(_parse_chat_body, body, request.headers.get("content-type"))
+
+
+def _is_json_content_type(value: str | None) -> bool:
+    """FastAPI's strict JSON body rule: application/json or application/*+json."""
+    if not value:
+        return False
+    message = email.message.Message()
+    message["content-type"] = value
+    if message.get_content_maintype() != "application":
+        return False
+    subtype = message.get_content_subtype()
+    return subtype == "json" or subtype.endswith("+json")
+
+
+def _parse_chat_body(body: bytearray, content_type: str | None) -> ChatRequest:
+    """The framework's JSON-body handling for `ChatRequest`, with the same
+    refusals: an empty, non-JSON or undecodable body is the fixed
+    `invalid_request` 422, and a validation failure maps through
+    `_validation_refusal` exactly as the exception handler does."""
+    if not body or not _is_json_content_type(content_type):
+        raise AppError(422, "invalid_request", "request body failed validation")
+    try:
+        data = json.loads(body)
+    except ValueError:  # JSONDecodeError, UnicodeDecodeError
+        raise AppError(422, "invalid_request", "request body failed validation") from None
+    try:
+        return ChatRequest.model_validate(data)
+    except ValidationError as exc:
+        code, message = _validation_refusal(exc.errors())
+        raise AppError(422, code, message) from None
 
 
 def _with_image_fields(fields: dict, images: TurnImages | None) -> dict:
