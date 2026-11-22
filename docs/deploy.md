@@ -2140,10 +2140,10 @@ default **30 days** (maintainer decision 2026-10-24). An explicit null fails the
 **Share links and temporary chats (ADR-0007 S2, #1255).** Chart values under `openwebui.chats`,
 all off by default; there is no `airgap.env` key for them yet.
 - These values set the default user permissions. An admin can still change a group's permissions
-  in the Open WebUI admin UI, and v0.12.3 combines them most-permissive over the defaults.
+  in the Open WebUI admin UI, and v0.13.4 combines them most-permissive over the defaults.
 - `share` (`USER_PERMISSIONS_CHAT_SHARE`): users may share a chat as a link `/s/<token>`. The link
   is a snapshot copy of the chat, opens only after sign-in, and only for its owner and the users or
-  groups the owner grants in the share dialog. In v0.12.3's "continue" mode, the owner instead lets
+  groups the owner grants in the share dialog. In v0.13.4's "continue" mode, the owner instead lets
   grantees read and write the live chat. `shareWithAllUsers`
   (`USER_PERMISSIONS_CHAT_ALLOW_PUBLIC_SHARING`) also lets the owner open it to every signed-in
   user. The no-auth "anyone" grant (`USER_PERMISSIONS_CHAT_ALLOW_OPEN_SHARING`) is pinned off in
@@ -2151,11 +2151,15 @@ all off by default; there is no `airgap.env` key for them yet.
   Community sharing stays off. A snapshot is purged with its chat, or on its own once it is older
   than the window.
 - Temporary chats (`USER_PERMISSIONS_CHAT_TEMPORARY`, pinned on) are never saved: the server
-  writes no chat row for a `temporary:` chat id. `temporaryEnforced`
+  writes no chat row for a `temporary:` chat id. Since v0.13.x an answer in a temporary chat also
+  needs the browser's live socket registration, which the pod holds in memory (the chart has no
+  Redis). A pod restart (deploy, rollout, eviction) therefore loses every open temporary chat: the
+  conversation cannot continue and its text is gone; the user starts a new one (#1357; source
+  reading at v0.13.4). `temporaryEnforced`
   (`USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED`) stops non-admins from starting a saved chat: the
   server refuses to create or import one. Admins are exempt, and a chat saved earlier can still be
   continued and stays until the purge. To enforce for one group only, leave this off and set the group's permission in the
-  Open WebUI admin UI; v0.12.3 combines group permissions most-permissive, so any one group that
+  Open WebUI admin UI; v0.13.4 combines group permissions most-permissive, so any one group that
   enforces it enforces it for its members.
 
 <a id="owui-chat-images"></a>
@@ -2675,7 +2679,7 @@ python3 -I scripts/openwebui/adfs_claims_check.py --paste \
 ```
 
 It reports whether the claim is a list or a string (split on `,`), which configured roles
-matched, and the predicted Open WebUI v0.12.3 outcome: `admin`, `user` or refused (a redirect
+matched, and the predicted Open WebUI v0.13.4 outcome: `admin`, `user` or refused (a redirect
 to `/auth?error=...` with no session cookie). Run it
 with a docs-group account (expect exit 0), then with `--expect-refused` and an account in
 neither docs group: it passes only if the claim is present and the prediction is a refusal.

@@ -127,7 +127,7 @@ def _messages(*turns: tuple[str, Any]) -> list[dict[str, Any]]:
 
 
 async def owui_stream(result: Any, events: list[dict[str, Any]]) -> str:
-    """Model of how Open WebUI v0.12.3 turns a streaming Pipe's yields into the
+    """Model of how Open WebUI v0.13.4 turns a streaming Pipe's yields into the
     message (upstream `functions.py` stream wrapper plus `utils/middleware.py`):
     a dict becomes a `data: <json>` frame, a string that starts with `data:` is
     forwarded as a raw SSE frame, any other string is wrapped as a content
@@ -266,7 +266,7 @@ _FOLDER_TURNS = [{"role": "user", "content": "first question"},
         {"type": "text", "text": f"{FOLDER_PROMPT}\nsecond part"}]}, id="list-content"),
 ])
 def test_a_folder_system_prompt_never_reaches_the_agent(system: dict[str, Any]):
-    """Open WebUI v0.12.3 applies a chat folder's `data.system_prompt` in
+    """Open WebUI v0.13.4 applies a chat folder's `data.system_prompt` in
     utils/middleware.py process_chat_payload through apply_system_prompt_to_body,
     whose add_or_update_system_message (utils/misc.py) only ever inserts or
     updates the role:system turn at messages[0]. The Pipe drops system turns,
@@ -398,7 +398,7 @@ def test_admin_valve_sets_the_cap():
 
 
 _UNUSABLE = "Ask a question in plain text; attachments and images are not supported."
-# Open WebUI v0.12.3 add_file_context's text part (utils/middleware.py), spelled out.
+# Open WebUI v0.13.4 add_file_context's text part (utils/middleware.py), spelled out.
 ATTACHED = ('<attached_files>\n<file type="image" id="f1" url="/api/v1/files/f1" '
             'content_type="image/png" name="screen.png"/>\n</attached_files>\n\n')
 _IMAGE = {"type": "image_url", "image_url": {"url": "x"}}
@@ -599,7 +599,7 @@ def test_task_calls_never_reach_the_agent(marker: dict[str, Any]):
 # --- Answer depth (#1255) ----------------------------------------------------
 
 # The Function id the installer uses (provision_pipe.py PIPE_ID): Open WebUI
-# v0.12.3 names a manifold entry `<function id>.<entry id>` (functions.py
+# v0.13.4 names a manifold entry `<function id>.<entry id>` (functions.py
 # get_function_models) and passes that id as `body["model"]`.
 FUNCTION_ID = "mainframe_rag_docs"
 
@@ -607,7 +607,7 @@ FUNCTION_ID = "mainframe_rag_docs"
 def test_pipe_lists_the_answer_depths_with_the_default_first():
     """The manifold entries Open WebUI shows as models: the default depth
     first (the first-available fallback for a chat whose model id is gone).
-    The class has no `name` attribute, which v0.12.3 would prefix to every
+    The class has no `name` attribute, which v0.13.4 would prefix to every
     entry name."""
     pipe = docs_pipe.Pipe()
     assert pipe.pipes() == [
@@ -623,7 +623,7 @@ def test_pipe_lists_the_answer_depths_with_the_default_first():
     pytest.param(f"{FUNCTION_ID}.thorough", "thorough", id="thorough"),
     pytest.param(f"{FUNCTION_ID}.standard", "standard", id="standard"),
     # Defensive: an id without a known depth gets the agent's configured
-    # default, never a refusal (v0.12.3 itself refuses an unlisted id).
+    # default, never a refusal (v0.13.4 itself refuses an unlisted id).
     pytest.param(FUNCTION_ID, None, id="pre-1255-model-id"),
     pytest.param(f"{FUNCTION_ID}.retired", None, id="unknown-entry"),
     pytest.param(f"other.{FUNCTION_ID}.quick", None, id="foreign-prefix"),
@@ -1637,7 +1637,7 @@ def test_round_trip_each_depth_reaches_the_model_at_its_effort(real_agent, monke
     effort the real agent resolves from its own LLM_REASONING_EFFORTS and sends
     to the model (quick the lowest, thorough the highest); the default entry
     keeps the configured default. The bare Function id is a defensive case
-    only: v0.12.3 refuses an unlisted model id before any Pipe call (main.py),
+    only: v0.13.4 refuses an unlisted model id before any Pipe call (main.py),
     and a pre-upgrade chat reaches the Pipe through the frontend's
     DEFAULT_MODELS fallback instead."""
     from mainframe_rag.agent import app as app_mod
@@ -1709,7 +1709,7 @@ def _image(url: object, **extra: Any) -> dict[str, Any]:
 
 
 def _image_turn(*parts: dict[str, Any], text: str | None = QUESTION) -> dict[str, Any]:
-    """A temporary chat's user turn as Open WebUI v0.12.3 sends it (Chat.svelte):
+    """A temporary chat's user turn as Open WebUI v0.13.4 sends it (Chat.svelte):
     a text part (empty for an image-only turn), then one part per image."""
     return {"role": "user", "content": [{"type": "text", "text": text or ""}, *parts]}
 
@@ -1909,7 +1909,7 @@ HOSTILE_READS = [
 
 
 def _owui_history(content: str) -> str:
-    """How Open WebUI v0.12.3 resends a temporary chat's answer
+    """How Open WebUI v0.13.4 resends a temporary chat's answer
     (src/lib/utils/index.ts processDetails): reasoning and code_interpreter
     details removed (here even inside code, which is stricter), tool_calls
     details replaced by their result, and the whole content trimmed."""

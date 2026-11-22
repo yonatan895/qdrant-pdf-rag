@@ -350,7 +350,7 @@ openwebui:
     # an older session's token (Kind trial). The IdP must permit every scope.
     # AD FS: openid profile email allatclaims (docs/deploy.md).
     scopes: openid email profile groups offline_access
-    # Claim with the user's e-mail (OAUTH_EMAIL_CLAIM): Open WebUI v0.12.3 refuses a
+    # Claim with the user's e-mail (OAUTH_EMAIL_CLAIM): Open WebUI v0.13.4 refuses a
     # sign-in without it. AD FS usually: upn. Top-level claim names only.
     emailClaim: email
     # Claim with the display name (OAUTH_USERNAME_CLAIM); missing, the e-mail is used.

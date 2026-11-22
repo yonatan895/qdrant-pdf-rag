@@ -7,7 +7,7 @@ as the SQLite database (the ADR-0005/#804 purge pattern):
 
 Each run deletes, in one transaction, every chat whose last update is older
 than N days, the share-link snapshots of those chats and every snapshot whose
-own last update is older than N days (v0.12.3 `shared_chat` rows; a surviving
+own last update is older than N days (v0.13.4 `shared_chat` rows; a surviving
 chat is left unshared: `share_id` cleared and its `shared_chat` access grants
 removed, its own last update untouched; legacy `shared-<chat id>` chat rows
 likewise), the rows of every other table that reference a deleted chat by
@@ -39,7 +39,7 @@ next to the database and logs one fixed line of counts. On start the counters
 are loaded from that file, so a restart does not reset them (a counter that is
 not a non-negative integer starts again from 0); the next successful run sets
 consecutive_failures back to 0. Chat content, titles
-and identifiers are never logged. The table layout is Open WebUI v0.12.3's,
+and identifiers are never logged. The table layout is Open WebUI v0.13.4's,
 pending #1073 qualification and re-qualified on every pin import (P1).
 Stdlib only: the image's own interpreter runs it.
 """
@@ -173,7 +173,7 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
         if "chat" not in tables or not {"id", "user_id", "updated_at"} <= _columns(conn, "chat"):
             raise PurgeError("schema")
         _check_epoch(conn, "chat")
-        # v0.12.3 keeps share-link snapshots in shared_chat (one per shared chat,
+        # v0.13.4 keeps share-link snapshots in shared_chat (one per shared chat,
         # keyed by the share token) and who may open them in access_grant rows
         # keyed by the ORIGINAL chat id. A shared_chat table without the columns
         # the purge reads is an unexpected schema.
@@ -187,7 +187,7 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
         has_files = "file" in tables and {"id", "path", "updated_at"} <= _columns(conn, "file")
         if has_files:
             _check_epoch(conn, "file")
-        # v0.12.3 files a chat under a folder by chat.folder_id. A folder table
+        # v0.13.4 files a chat under a folder by chat.folder_id. A folder table
         # without the columns the purge reads, or with no chat.folder_id to tell
         # which folders are in use, is an unexpected schema.
         has_folders = "folder" in tables

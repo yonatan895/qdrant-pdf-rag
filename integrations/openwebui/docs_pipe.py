@@ -91,7 +91,7 @@ HOUSE_NOTE = "house guidance"
 TASK_REPLY = "Docs question"
 
 # Answer depths (#1255): the manifold entries Open WebUI shows as models,
-# `<Function id>.<id>` (v0.12.3 functions.py get_function_models). The id is
+# `<Function id>.<id>` (v0.13.4 functions.py get_function_models). The id is
 # stored in chats and model grants, so it never changes; the name is what
 # users see. Each entry sends its id as the agent's symbolic `reasoning_depth`
 # (#1289), never a literal effort: the agent resolves it from its own
@@ -190,7 +190,7 @@ IMAGE_READ_FAILED = "An image could not be read, so the search did not use it"
 EARLIER_IMAGE = "An earlier image was not re-sent"
 IMAGE_READS_SUMMARY = "What Rosetta read from your image"
 IMAGE_CARRIED = "[Image {index}, as read by the model]: {text}"
-# The block opens as Open WebUI v0.12.3's details tokenizer requires
+# The block opens as Open WebUI v0.13.4's details tokenizer requires
 # (src/lib/utils/marked/extension.ts: `<details>` then a newline, then
 # `<summary>...</summary>` and a newline). Each transcript sits in a backtick
 # fence longer than any backtick run in it, with `&`, `<` and `>` escaped: that

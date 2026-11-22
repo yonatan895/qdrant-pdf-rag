@@ -1537,7 +1537,7 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
     for key, value in {
         "OFFLINE_MODE": "true", "ENABLE_PERSISTENT_CONFIG": "false", "UVICORN_WORKERS": "1",
         "ENABLE_OPENAI_API": "false", "ENABLE_OLLAMA_API": "false",
-        # #1073 trial R2: without an explicit loopback base URL v0.12.3 probes
+        # #1073 trial R2: without an explicit loopback base URL v0.13.4 probes
         # host.docker.internal:11434/12434 on first start.
         "OLLAMA_BASE_URL": "http://127.0.0.1:9",
         "ENABLE_COMMUNITY_SHARING": "false",
@@ -1558,7 +1558,7 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         "OPENID_REDIRECT_URI": "https://docs.apps.example.internal/oauth/oidc/callback",
         "WEBUI_URL": "https://docs.apps.example.internal", "OAUTH_CLIENT_ID": "docs-frontend",
         "OAUTH_GROUP_CLAIM": "groups", "OAUTH_ROLES_CLAIM": "roles",
-        # Open WebUI v0.12.3's own defaults, pinned explicitly (config.py).
+        # Open WebUI v0.13.4's own defaults, pinned explicitly (config.py).
         "OAUTH_EMAIL_CLAIM": "email", "OAUTH_USERNAME_CLAIM": "name",
         "OAUTH_ALLOWED_ROLES": "staff", "OAUTH_ADMIN_ROLES": "docs-admins,docs-owners",
         # B1 (trial/review): tools, per-feature permissions, task model, audio,
@@ -1577,7 +1577,7 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION": "false",
         "USER_PERMISSIONS_CHAT_STT": "false", "USER_PERMISSIONS_CHAT_TTS": "false",
         "USER_PERMISSIONS_CHAT_CALL": "false",
-        # ADR-0007 S2: sharing is off. v0.12.3 defaults it to True, and its
+        # ADR-0007 S2: sharing is off. v0.13.4 defaults it to True, and its
         # snapshots sit outside the 30-day purge.
         "USER_PERMISSIONS_CHAT_SHARE": "false",
         # Chat folders on, folder sharing off (#1255); a folder's knowledge
@@ -1594,7 +1594,7 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         # The installers' APIs only: the docs Pipe and the shared prompts (#1255).
         "API_KEYS_ALLOWED_ENDPOINTS": "/api/v1/functions,/api/v1/prompts",
         # Shared prompts are repository-owned (#1255): users cannot create or
-        # import one (v0.12.3 create accepts either permission; CVE-2025-64495).
+        # import one (v0.13.4 create accepts either permission; CVE-2025-64495).
         "USER_PERMISSIONS_WORKSPACE_PROMPTS_ACCESS": "false",
         "USER_PERMISSIONS_WORKSPACE_PROMPTS_IMPORT": "false",
     }.items():
@@ -1651,7 +1651,7 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
 IDP_CA_PEM = ("-----BEGIN CERTIFICATE-----\nSURQLUNBLTE=\n-----END CERTIFICATE-----\n"
               "-----BEGIN CERTIFICATE-----\nSURQLUNBLTI=\n-----END CERTIFICATE-----\n")
 CA_TRUST_FILE = "/etc/mainframe-rag/ca-trust/ca-bundle.crt"
-# Open WebUI v0.12.3 (pinned image): the sign-in calls (discovery, token, JWKS,
+# Open WebUI v0.13.4 (pinned image): the sign-in calls (discovery, token, JWKS,
 # userinfo) use authlib's httpx client with trust_env on, which reads
 # SSL_CERT_FILE and otherwise certifi (httpx/_config.py create_ssl_context);
 # aiohttp (token refresh, utils/oauth.py) uses ssl.create_default_context(),
@@ -1997,7 +1997,7 @@ DENIED_PATHS = [
     "/api/chat/actions/mainframe_rag_rating", "/api/chat/actions/mainframe_rag_rating.sideways",
     "/api/chat/actions/mainframe_rag_rating.up/x", "/api/chat/actions/mainframe_rag_ratingXup",
     # Folder sharing stays off (#1255, ADR-0007 S2): the grant route (its only
-    # writer in v0.12.3), the shared-folder list, and any other folder route.
+    # writer in v0.13.4), the shared-folder list, and any other folder route.
     f"/api/v1/folders/{FOLDER_ID}/access/update", "/api/v1/folders/shared",
     "/api/v1/folders/shared/chats", f"/api/v1/folders/{FOLDER_ID}/update/x",
     f"/api/v1/folders/{FOLDER_ID}/shared", f"/api/v1/folders/{FOLDER_ID}/chats",
@@ -2286,7 +2286,7 @@ def test_openwebui_chat_images_on_sets_the_caps_banner_and_pipe_switch(owui_char
     assert int(plain["RAG_FILE_MAX_COUNT"]) == fields["chat_image_max_count"].default
     assert (int(plain["FILE_IMAGE_COMPRESSION_WIDTH"]) * int(plain["FILE_IMAGE_COMPRESSION_HEIGHT"])
             == fields["chat_image_max_pixels"].default)
-    # v0.12.3 BannerModel: a missing or mistyped field drops every banner.
+    # v0.13.4 BannerModel: a missing or mistyped field drops every banner.
     banners = json.loads(plain["WEBUI_BANNERS"])
     assert len(banners) == 1
     banner = banners[0]
@@ -2354,7 +2354,7 @@ def test_openwebui_refuses_to_enable_without_the_repository_docs_pipe(tmp_path):
 
 
 def test_openwebui_default_model_is_the_pipes_default_answer_depth(owui_chart):
-    """#1255: DEFAULT_MODELS names the docs Pipe's first entry as Open WebUI v0.12.3
+    """#1255: DEFAULT_MODELS names the docs Pipe's first entry as Open WebUI v0.13.4
     ids it (`<Function id>.<entry id>`), so a renamed or reordered entry cannot leave
     the default pointing at a model that does not exist."""
     from integrations.openwebui import docs_pipe
@@ -2783,7 +2783,7 @@ def test_openwebui_refuses_role_lists_that_would_admit_every_signed_in_user(owui
 
 
 def test_openwebui_keeps_the_raw_id_token_out_of_browser_cookies(owui_chart):
-    """#1070 (maintainer decision): v0.12.3 sets the raw ID token as the
+    """#1070 (maintainer decision): v0.13.4 sets the raw ID token as the
     oauth_id_token cookie unless ENABLE_OAUTH_ID_TOKEN_COOKIE is false, and never
     reads it back (sign-out uses the server-side OAuth session). On the sign-in
     callback it counts against the allow-list proxy's 4 KiB response-header

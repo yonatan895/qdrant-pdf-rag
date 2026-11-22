@@ -97,7 +97,7 @@ def test_pod_security_restricted_shape():
 
 
 def test_harness_model_ids_are_the_pipe_entries():
-    """#1255: the docs Pipe is a manifold, so Open WebUI v0.12.3 shows one model per
+    """#1255: the docs Pipe is a manifold, so Open WebUI v0.13.4 shows one model per
     entry, `<Function id>.<entry id>` (functions.py get_function_models), and the
     single-model id `mainframe_rag_docs` is gone. The harness grants, chats and
     checks exactly those ids; the default entry is the one chats use."""
@@ -115,7 +115,7 @@ def test_harness_model_ids_are_the_pipe_entries():
 
 
 def test_access_grants_every_entry_under_its_own_name(monkeypatch, capsys):
-    """The grant call creates the model row, and v0.12.3 shows a row's name over the
+    """The grant call creates the model row, and v0.13.4 shows a row's name over the
     entry's (utils/models.py get_all_models): one shared name would show every
     depth as the same model."""
     calls = []
@@ -147,7 +147,7 @@ def test_access_grants_every_entry_under_its_own_name(monkeypatch, capsys):
 
 def _legacy(**over):
     """A chat stored before #1255 (chat.models = the bare Function id when it was
-    created), continued after the upgrade with the model the v0.12.3 frontend
+    created), continued after the upgrade with the model the v0.13.4 frontend
     resolves for it. Live (#1273 proof, 2026-11-17): Open WebUI rewrites the
     stored model list to the turn's model on that turn, so the record read
     after the turn names the default entry."""

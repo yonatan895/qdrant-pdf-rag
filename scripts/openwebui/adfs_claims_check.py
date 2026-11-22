@@ -8,7 +8,7 @@ Open WebUI and reports which claims the ID token carries.
 Two modes. Baseline mode (default) expects the IdP to issue a constant baseline
 value plus role values. Role-list mode (``--allowed-roles``/``--admin-roles``) is
 for an IdP that can only issue LDAP attributes: the roles claim is the group
-claim itself, and the check predicts the Open WebUI v0.12.3 outcome (admin, user
+claim itself, and the check predicts the Open WebUI v0.13.4 outcome (admin, user
 or refused) from the configured role lists. A refusal is a 403 inside Open WebUI; the
 browser gets a redirect to /auth?error=... and no session cookie.
 
@@ -61,7 +61,7 @@ MAX_BODY = 1_000_000
 # ID token size (#1070). The chart sets ENABLE_OAUTH_ID_TOKEN_COOKIE=false, so the
 # sign-in callback no longer carries the token as a cookie; before that, the pod's
 # allow-list proxy (nginx default proxy_buffer_size, one 4 KiB page) answered 502
-# once the callback headers passed 4096 bytes. Open WebUI v0.12.3 keeps the token
+# once the callback headers passed 4096 bytes. Open WebUI v0.13.4 keeps the token
 # in its database (models/oauth_sessions.py), with no size limit found. The step
 # that still carries the whole token is sign-out: routers/auths.py signout sends
 # the browser to the IdP's end_session_endpoint with it as id_token_hint in the
@@ -101,7 +101,7 @@ GATEWAY_ALGS = ("RS256",)
 GATEWAY_MAX_TOKEN_CHARS = 32 * 1024
 # Header alg values printed as-is; anything else prints as "other".
 KNOWN_ALGS = GATEWAY_ALGS + ("ES256", "RS384", "RS512", "PS256", "PS384", "ES384", "HS256", "none")
-# Open WebUI v0.12.3 refreshes the access token 5 minutes before it expires.
+# Open WebUI v0.13.4 refreshes the access token 5 minutes before it expires.
 MIN_LIFETIME_S = 600
 # The gateway's clock leeway (tool_auth.GatewayAuthConfig.leeway_s default). Its
 # verifier (PyJWT) refuses int(nbf) or int(iat) > now + leeway and int(exp) <= now - leeway.
@@ -225,7 +225,7 @@ def validate_claims(
 def role_values(value: Any) -> tuple[str, int, list[str]]:
     """Return (JSON type name, value count, values) for a roles claim.
 
-    Open WebUI v0.12.3 reads the roles claim as a JSON list, or as a single string
+    Open WebUI v0.13.4 reads the roles claim as a JSON list, or as a single string
     that it splits on ',' only (docs/deploy.md, "Register Open WebUI with AD FS").
     Anything else yields no roles; ';' is NOT a separator for roles.
     """
@@ -242,7 +242,7 @@ def role_values(value: Any) -> tuple[str, int, list[str]]:
 
 
 def openwebui_roles(value: Any) -> list[Any]:
-    """The roles Open WebUI v0.12.3 reads from the claim (utils/oauth.py get_user_role).
+    """The roles Open WebUI v0.13.4 reads from the claim (utils/oauth.py get_user_role).
 
     A list is taken as-is, a string is split on ',' when it holds one, an int
     becomes its decimal string, anything else gives no roles. Values are not
@@ -273,7 +273,7 @@ def parse_role_list(raw: str | None) -> list[str]:
 
 
 def predict_outcome(roles: list[Any], allowed: list[str], admin: list[str]) -> str:
-    """Open WebUI v0.12.3 role decision at sign-in: admin, user, refused or unchanged."""
+    """Open WebUI v0.13.4 role decision at sign-in: admin, user, refused or unchanged."""
     if not roles:
         return "unchanged"
     if any(r in roles for r in admin):
@@ -388,7 +388,7 @@ def analyse_role_lists(
                 lines.append(f"hint: configured role '{role}' is not in the claim; {hint}")
                 near = True
     outcome = predict_outcome(roles, allowed, admin)
-    lines.append("predicted Open WebUI v0.12.3 outcome: " + OUTCOME_TEXT[outcome])
+    lines.append("predicted Open WebUI v0.13.4 outcome: " + OUTCOME_TEXT[outcome])
     if form_mismatch:
         failures.append("the configured role form does not match the claim's value form")
     if outcome == "unchanged":

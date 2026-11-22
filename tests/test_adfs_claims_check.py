@@ -825,7 +825,7 @@ def test_paste_flag_combinations(capsys):
 # An IdP rule form that offers only LDAP-attribute rules cannot issue a constant
 # baseline value. The roles claim is then the group claim itself (tokenGroups,
 # which always carries the primary group), the role lists are group names, and
-# the check predicts the Open WebUI v0.12.3 decision (utils/oauth.py get_user_role).
+# the check predicts the Open WebUI v0.13.4 decision (utils/oauth.py get_user_role).
 
 DOCS_USERS = "docs-users"
 DOCS_ADMINS = "docs-admins"
@@ -929,7 +929,7 @@ def test_role_list_mode_reports_matches_and_outcome_without_other_values(
     assert f"roles claim 'groups': present, type=list, form=list, count={len(groups)}" in out
     assert f"configured allowed roles matched: {matched_allowed}" in out
     assert f"configured admin roles matched: {matched_admin}" in out
-    assert f"predicted Open WebUI v0.12.3 outcome: {outcome}\n" in out
+    assert f"predicted Open WebUI v0.13.4 outcome: {outcome}\n" in out
     assert f"ID token size: {len(token)} bytes" in out
     assert "baseline role" not in out and "RESULT: ok" in out
     for canary in (PRIMARY, OTHER, UPN, DISPLAY, token, "CANARY-SIGNATURE", "eyJ"):
@@ -986,7 +986,7 @@ def test_role_list_mode_string_claim_forms(tmp_path, capsys, value, form, count,
     rc, _ = _decode(tmp_path, {"groups": value, "upn": UPN, "name": "n"})
     out = capsys.readouterr().out
     assert f"type=string, form={form}, count={count}" in out
-    assert f"predicted Open WebUI v0.12.3 outcome: {outcome}" in out
+    assert f"predicted Open WebUI v0.13.4 outcome: {outcome}" in out
     assert rc == (0 if outcome == "user" else 8)
     assert PRIMARY not in out
 
@@ -1078,7 +1078,7 @@ def test_paste_role_list_mode_against_the_fake_adfs(adfs):
     assert rc == 0, out
     assert "roles claim 'groups': present, type=list, form=list, count=3" in out
     assert f"configured admin roles matched: {DOCS_ADMINS}" in out
-    assert "predicted Open WebUI v0.12.3 outcome: admin" in out and "ID token size: " in out
+    assert "predicted Open WebUI v0.13.4 outcome: admin" in out and "ID token size: " in out
     assert PRIMARY not in out and OTHER not in out
     assert_paste_no_leak(out, pasted)
 
@@ -1117,7 +1117,7 @@ def test_domain_qualified_roles_match_exactly_without_the_bare_name_warning(tmp_
     assert "configured role form: domain-qualified" in out
     assert "claim value form: domain-qualified" in out
     assert f"configured admin roles matched: {Q_ADMINS}" in out
-    assert "predicted Open WebUI v0.12.3 outcome: admin" in out
+    assert "predicted Open WebUI v0.13.4 outcome: admin" in out
     assert "WARN: a bare configured role" not in out and "MISMATCH" not in out
     assert Q_PRIMARY not in out and "CANARYDOM" not in out
 
@@ -1149,7 +1149,7 @@ def test_bare_configured_roles_warn_and_name_the_multi_domain_count_only(tmp_pat
     rc = _decode_q(tmp_path, groups, *ROLE_ARGS)
     out = capsys.readouterr().out
     # bare docs-users matches, but the account holds docs-admins only domain-qualified
-    assert rc == 8 and "predicted Open WebUI v0.12.3 outcome: user" in out
+    assert rc == 8 and "predicted Open WebUI v0.13.4 outcome: user" in out
     assert "claim value form: mixed" in out
     assert "WARN: a bare configured role also matches a same-named group" in out
     assert (
@@ -1215,7 +1215,7 @@ def test_rule_named_claims_pass_when_configured(tmp_path, capsys):
     assert chk.main(argv) == 0
     out = capsys.readouterr().out
     assert "roles claim name 'role-groups': present" in out
-    assert "predicted Open WebUI v0.12.3 outcome: user" in out
+    assert "predicted Open WebUI v0.13.4 outcome: user" in out
 
 
 def test_uri_claim_names_and_no_match_are_reported(tmp_path, capsys):
