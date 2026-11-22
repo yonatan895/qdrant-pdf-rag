@@ -413,7 +413,7 @@
           {
             "notice": true,
             "path": "NOTICE.qdrant-skills",
-            "sha256": "9a9bbdfeadd8038436514dd6e7428a1b062523c5198bfc3ac8595e3a324ba9d8"
+            "sha256": "d653c2a8d55a806445ae02fbda0594252d98577547c738a1de293b7efd04c08c"
           }
         ]
       },
@@ -442,11 +442,11 @@
           {
             "notice": true,
             "path": "NOTICE.mattpocock-skills",
-            "sha256": "610d0432b77867c8c749a02a74b291cc0c36837272cf224f0da644341468350d"
+            "sha256": "7e9a41c23fd0260747cca293e431f0f163f55a39dd89cf430c1e748492f28090"
           },
           {
             "path": ".agents/mattpocock-skills.sha256",
-            "sha256": "89f6783a25ea159ef1c14b9acb4cb6f682c010ce466ddcdac2191328ffba1049"
+            "sha256": "4baa3e768aa77c73f12b2c65f031147038ddae92018dd9e2117c28a31b0d4918"
           }
         ]
       },
@@ -475,11 +475,11 @@
           {
             "notice": true,
             "path": "NOTICE.pstack-skills",
-            "sha256": "94722292fc6337b50705c02b19fb2774647ae8d0253df97cca83067100461333"
+            "sha256": "b6daa22fac8deaf831de4098855ae045996482c80fd96e32cf30708d587edef6"
           },
           {
             "path": ".agents/pstack-skills.sha256",
-            "sha256": "2044d53d4a58176dc5f83ab44c00d43f426e88571b683c23a4fb1dc9c93c9790"
+            "sha256": "64c69a361d56148f10853777432205789f8cd0c77b63ea5e23d216c630605621"
           }
         ]
       },
@@ -4692,8 +4692,8 @@
     }
   ],
   "release_approval": {
-    "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/pull/1250#issuecomment-6898865253",
-    "approved_digest": "6785f462ff05b80049bca9c951f4ac61361f99352418a281be3996839e08c409"
+    "approval_ref": "https://github.com/yonatan895/qdrant-pdf-rag/pull/1353#issuecomment-7081107677",
+    "approved_digest": "cb5e55d53653dc4300b3b42e7b7ded33cc5b45c373c046e565dd6fcb0c114f71"
   },
   "schema_version": 1
 }

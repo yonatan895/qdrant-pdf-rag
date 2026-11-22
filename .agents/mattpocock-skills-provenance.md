@@ -1,8 +1,8 @@
 # Matt Pocock engineering skills — pin record
 
 - Source: https://github.com/mattpocock/skills (MIT).
-- Pinned upstream SHA: `49dd158d1076134a641b33efb035946536778336`
-  (upstream and installed 2026-10-09).
+- Pinned upstream SHA: `abeeaf95660ba9e8b7c753eb38f441ca707a8823`
+  (upstream commit 2026-11-19; installed 2026-11-22).
 - License: verbatim upstream `LICENSE` in `LICENSE.mattpocock-skills`;
   attribution and pin in `NOTICE.mattpocock-skills`.
 - Authority: the maintainer's 2026-10-09 request to add the three highest-ranked

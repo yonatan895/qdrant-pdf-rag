@@ -1,6 +1,7 @@
 import ast
 import os
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -99,3 +100,56 @@ def test_github_never_tracks_the_gap_site_layer(tmp_path):
     (tmp_path / ".gitlab").mkdir()
     assert _site_layer_paths_on_github(tmp_path, {"GITHUB_ACTIONS": "true"}) == ["gap", ".gitlab"]
     assert _site_layer_paths_on_github(tmp_path, {}) == []
+
+
+def _exe_mode_violations(root: Path) -> list[str]:
+    """Ruff EXE001/EXE002 from the git index: a '#!' file must be 100755 and a
+    100755 file must start with '#!'. Scope is the CI ruff scope (python files
+    under src/ and tests/ plus CI_LINT_SCRIPTS). The mode comes from the index,
+    not the working tree, because ruff skips its EXE checks on WSL/Windows."""
+    from scripts.local_verify import CI_LINT_SCRIPTS
+
+    out = subprocess.run(
+        ["git", "ls-files", "-s", "-z"], cwd=root, check=True, capture_output=True
+    ).stdout.decode()
+    bad = []
+    for entry in filter(None, out.split("\0")):
+        meta, path = entry.split("\t", 1)
+        mode = meta.split()[0]
+        if mode not in {"100644", "100755"} or not path.endswith(".py"):
+            continue
+        if not (path.startswith(("src/", "tests/")) or path in CI_LINT_SCRIPTS):
+            continue
+        if not (root / path).is_file():
+            continue
+        shebang = (root / path).read_bytes().startswith(b"#!")
+        if shebang and mode != "100755":
+            bad.append(f"{path}: shebang but mode {mode} (EXE001)")
+        elif mode == "100755" and not shebang:
+            bad.append(f"{path}: mode 100755 without shebang (EXE002)")
+    return bad
+
+
+def test_ci_lint_scope_shebang_and_exec_bit_agree_in_the_git_index():
+    assert _exe_mode_violations(ROOT) == []
+
+
+def test_exe_mode_check_flags_both_directions_in_a_fixture_repo(tmp_path):
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+
+    git("init", "-q")
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "scripts" / "review_tooling.py").write_text("#!/usr/bin/env python3\nx = 1\n")
+    (tmp_path / "tests" / "test_plain.py").write_text("x = 1\n")
+    (tmp_path / "tests" / "test_ok.py").write_text("#!/usr/bin/env python3\n")
+    (tmp_path / "scripts" / "outside_scope.py").write_text("#!/usr/bin/env python3\n")
+    git("add", ".")
+    # Index modes are set explicitly: the working tree's exec bits are irrelevant.
+    git("update-index", "--chmod=-x", "scripts/review_tooling.py")
+    git("update-index", "--chmod=+x", "tests/test_plain.py", "tests/test_ok.py")
+    assert _exe_mode_violations(tmp_path) == [
+        "scripts/review_tooling.py: shebang but mode 100644 (EXE001)",
+        "tests/test_plain.py: mode 100755 without shebang (EXE002)",
+    ]
