@@ -823,7 +823,10 @@ check_checkout_sha() {
 # can pass. Anything else is refused, naming the first field that differs,
 # never a value. A declaration always wins: the marker is not read when one is
 # made, so it never turns a declared rehearsal into a promotion. It is not an
-# attestation: whoever can write the workspace can write the right bytes.
+# attestation: whoever can write the workspace can write the right bytes. That
+# is an explicit, documented exception (docs/deploy.md §4, maintainer decision
+# on #1361): /work writers are the live-namespace rights holders; it lapses if
+# /work write access ever widens.
 _GAP_PROMOTION_MARKER=dist/gap-promotion.txt  # relative to $REPO_ROOT
 
 # $1 = release identity. Prints the marker this promotion writes here, without

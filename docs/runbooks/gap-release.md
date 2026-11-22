@@ -284,8 +284,17 @@ line; rerun the same command after fixing the cause.
    and target recorded at that path can pass there. To record it again, run
    the promotion deploy with `GAP_PROMOTE_IDENTITY` exported; its completed
    rollout rewrites the file. Never copy a promoted workspace to make a rehearsal
-   workspace, and never write the file by hand: it is not an attestation, it
-   only spares the export. The identity names the bundle, not the workspace:
+   workspace, and never write the file by hand. The file is an **explicit
+   exception** to "no file declares a promotion" (maintainer decision on
+   #1361, #1344 amendment): it stands in for the export and is not an
+   attestation. Its basis is that the people who can write `/work` are
+   exactly the people with live-namespace rights, who can export the
+   identity anyway. Its residual is persistence: it covers every later
+   undeclared run by anyone in this workspace until it is removed (step 10).
+   If `/work` ever becomes writable by anyone without live-namespace rights
+   (backups or restores by another team, another pod mounting the volume),
+   the exception lapses and the design must be revisited before the next
+   gap release. The identity names the bundle, not the workspace:
    the rehearsal's checks come from the `GAP_REHEARSAL_*` declaration, never
    from this one, and a declared rehearsal never reads the file. Keep the
    previous release's
@@ -296,6 +305,14 @@ line; rerun the same command after fixing the cause.
    back to a gap release runs as the promotion its retained workspace
    recorded (step 8), when its `dist/gap-promotion.txt` still holds there;
    otherwise declare it with its own identity (`GAP_PROMOTE_IDENTITY`).
+10. **Retire a gap workspace** that is abandoned (its release was given up
+    or rolled back) or superseded, and will not be used for rollback: from
+    that workspace run `rm -f dist/gap-promotion.txt` and confirm
+    `ls dist/gap-promotion.txt` reports no such file. No later undeclared
+    stage from it can then run as its promotion; a stage from it needs
+    `GAP_PROMOTE_IDENTITY` again (step 9 if it is ever used for a rollback
+    after all). Keep the retained rollback workspace's file until that
+    workspace is retired too.
 
 Bootstrap refuses a bundle that declares `origin: gap` unless
 `SNEAKERNET_GAP_TRUSTED_PUB` is set (never trust on first use), and every

@@ -786,11 +786,24 @@ checksums **after**.
   field that differs, and a declaration always wins over the file. The
   inode is only a best-effort check (a filesystem may reuse it when a
   workspace is removed and restored at the same path): what holds is that
-  only the bundle and target recorded at that path can pass. The file is not an attestation: it grants nothing that
-  exporting `GAP_PROMOTE_IDENTITY` does not. `airgap:config check` reports
+  only the bundle and target recorded at that path can pass.
+  *Explicit exception (maintainer decision on #1361 B1; #1344 amendment).*
+  The file stands in for the export, and nothing in it is secret: a file
+  written by hand with the right bytes declares a promotion too, so it is not
+  an attestation. Basis: write access to the bastion `/work` volume is held
+  by exactly the people with live-namespace rights, who can export
+  `GAP_PROMOTE_IDENTITY` anyway. Residual: persistence. The file covers every
+  later undeclared run by anyone in that workspace, not only the run of the
+  person who typed an export, until it is removed (runbook step 10 removes it
+  from an abandoned or superseded workspace). Voiding condition: if `/work`
+  ever becomes writable by anyone without live-namespace rights (for example
+  backups or restores by another team, or another pod mounting the volume),
+  the exception lapses and this design must be revisited. A workspace copied
+  to another path, a rehearsal workspace, another bundle or another target
+  still cannot declare a promotion. `airgap:config check` reports
   any of the three variables set in `airgap.env` as honoured from the
   process environment only. Upstream and unpacked runs are unchanged
-  ([gap release runbook](runbooks/gap-release.md) steps 7 to 9).
+  ([gap release runbook](runbooks/gap-release.md) steps 7 to 10).
 - `bootstrap.sh` cannot source `common.sh` (no clone exists yet), so it
   carries an inline twin of the trust check (bundle signature, then the
   anchors, then `SHA256SUMS`, then the `gap_*` MANIFEST fields: all four
