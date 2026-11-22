@@ -4,6 +4,9 @@ Config is environment-only; in particular there is NO password flag —
 MCP_FTP_PASSWORD must arrive via a mounted secret or the environment.
 `--probe` runs a one-time logon-free connectivity probe (ADR-0012 D5 point 5)
 without credentials to verify whether the target supports verified FTPS.
+`--site-probe` runs the read-only D8 site probe (one logon; `site_probe.py`)
+and prints a text-free JSON-lines receipt (also to `--receipt FILE`, mode
+0600); it exits 1 when a check failed, 2 on a configuration or target error.
 `--mock DIR` (or `MCP_MOCK_DIR`) serves a deterministic fixture tree instead
 of the wire: test-only, never in prod manifests (hygiene-gated).
 """
@@ -14,6 +17,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Literal, cast
 
 from mainframe_rag import tracing as tracing_mod
@@ -28,6 +32,8 @@ from mainframe_rag.mcp.bridge import (
 )
 from mainframe_rag.mcp.http import serve_http
 from mainframe_rag.mcp.server import create_app, sample_ratio_from_env, serve_stdio
+from mainframe_rag.mcp.site_probe import run_zos_probe, validate_targets
+from mainframe_rag.probe_receipt import write_receipt
 
 
 def _env_bool(name: str) -> bool:
@@ -86,6 +92,32 @@ def _config_from_env() -> FTPConfig:
     )
 
 
+def _site_probe(args: argparse.Namespace) -> int:
+    """The D8 site probe on the live wire (never mock mode); fixed messages."""
+    if args.mock or args.probe or os.environ.get("MCP_MOCK_DIR", "").strip():
+        print("mcp bridge site probe: runs on the live wire only, alone", file=sys.stderr)
+        return 2
+    try:
+        config = _config_from_env()
+        targets = validate_targets(config, dataset=args.dataset, job_id=args.job_id)
+    except ValueError as exc:
+        print(f"mcp bridge site probe: invalid configuration ({exc})", file=sys.stderr)
+        return 2
+    if not config.host or not config.user or not config.password:
+        print(
+            "mcp bridge site probe: MCP_FTP_HOST, MCP_FTP_USER, and MCP_FTP_PASSWORD must all be set",
+            file=sys.stderr,
+        )
+        return 2
+    receipt = run_zos_probe(config, targets)
+    try:
+        write_receipt(receipt, sys.stdout, args.receipt)
+    except OSError:
+        print("mcp bridge site probe: the receipt file could not be written", file=sys.stderr)
+        return 2
+    return receipt.exit_code()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--transport", choices=("stdio", "http"), default="stdio")
@@ -99,7 +131,27 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run a one-time logon-free FTPS/FTP connectivity probe and exit",
     )
+    parser.add_argument(
+        "--site-probe",
+        action="store_true",
+        help="run the read-only ADR-0012 D8 site probe (one logon) and print its receipt",
+    )
+    parser.add_argument(
+        "--dataset", default=None, help="site probe: an exact MCP_DATASET_ALLOWLIST entry to read"
+    )
+    parser.add_argument(
+        "--job-id", default=None, help="site probe: an allowlisted job whose JESMSGLG to read"
+    )
+    parser.add_argument(
+        "--receipt", type=Path, default=None, help="site probe: also write the receipt here (0600)"
+    )
     args = parser.parse_args(argv)
+
+    if args.site_probe:
+        return _site_probe(args)
+    if args.dataset or args.job_id or args.receipt:
+        print("mcp bridge: --dataset, --job-id and --receipt need --site-probe", file=sys.stderr)
+        return 2
 
     if args.probe:
         host = os.environ.get("MCP_FTP_HOST", "").strip()

@@ -26,8 +26,10 @@ import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
-from mainframe_rag.mcp import bridge, server
+from mainframe_rag.mcp import __main__ as mcp_main
+from mainframe_rag.mcp import bridge, server, site_probe
 from mainframe_rag.mcp.bridge import FTPConfig, LogonBreaker
+from mainframe_rag.probe_receipt import Receipt, ReceiptError
 
 
 class FakeFTP:
@@ -2335,3 +2337,368 @@ def test_all_pilot_tools_issue_only_read_ftp_verbs_and_no_nlst() -> None:
     }
     # The strip pins ride text reads only: job_status (sessions[1]) sends none.
     assert not set(_TEXT_PINS) & set(sessions[1].commands)
+
+
+# ------------------------------------------- #1343: read-only D8 site probe
+
+# Unique markers seeded in every piece of fake content and configuration: none
+# may reach the receipt, stdout, stderr or the receipt file.
+PROBE_MARKERS = (
+    "MRKHOSTQ", "MRKUSRQ", "MRKPWDQ9", "MRKDSQ", "MRKBANNERQ", "MRKSITEQ", "MRKSTATQ",
+    "MRKDATAQ", "MRKSPOOLQ", "MRKJOBQ", "MRKOWNQ", "MRK530Q", "MRKSYSQ",
+)
+PROBE_DATASET = "MRKDSQ.PARMLIB(MRKMEMQ)"
+PROBE_JOB = "JOB04711"
+PROBE_LIST = [
+    "JOBNAME  JOBID    OWNER    STATUS CLASS",
+    f"MRKJOBQ  {PROBE_JOB} MRKOWNQ  OUTPUT A        RC=0000",
+    "--------",
+    "         ID  STEPNAME PROCSTEP C DDNAME   BYTE-COUNT",
+    "         001 JES2              A JESJCL          100",
+    "         002 JES2              A JESMSGLG        120",
+    "         003 JES2              A JESYSMSG         80",
+    "3 spool files",
+]
+JOB_LOG = (
+    b"1                    J E S 2  J O B  L O G  --  S Y S T E M  MRKSYSQ  --\r\n"
+    b"0\r\n12.00.01 JOB04711 ---- MONDAY MRKSPOOLQ password=MRKPWDQ9\r\n"
+)
+STAT_OK = (
+    "211-Server FTP talking to host MRKHOSTQ MRKSTATQ\n"
+    "211-SBDATACONN (IBM-1047,ISO8859-1) MRKSTATQ\n"
+    "211 *** end of status ***"
+)
+
+
+class ProbeFTP(FakeFTP):
+    """FakeFTP with a STAT reply, SITE replies that may change after
+    `SITE FILETYPE=JES`, a scripted login and a login counter."""
+
+    def __init__(
+        self,
+        *,
+        stat: str | Exception = STAT_OK,
+        site: dict[str, str | Exception] | None = None,
+        jes_site: dict[str, str | Exception] | None = None,
+        login_error: Exception | None = None,
+        data_error: Exception | None = None,
+    ) -> None:
+        super().__init__()
+        self.stat = stat
+        self.site = {"NOTRAILINGBLANKS": "200 SITE command was accepted MRKSITEQ", **(site or {})}
+        self.jes_site = jes_site or {}
+        self.login_exc = login_error
+        self.data_error = data_error
+        self.logins = 0
+        self.jes_mode = False
+        self.files[f"'{PROBE_DATASET.split('(')[0]}'(MRKMEMQ)"] = (
+            b"  MRKDATAQ SYSNAME=MRKSYSQ\r\nLFAREA=(1G,64M)\r\n"
+        )
+        self.jes_list_by_job[PROBE_JOB] = list(PROBE_LIST)
+        self.files[f"{PROBE_JOB}.2"] = JOB_LOG
+        self.files[f"{PROBE_JOB}.1"] = b"        1 //MRKJOBQ  JOB (ACCT),'MRKSPOOLQ'\r\n"
+
+    def connect(self, host: str, port: int = 21, timeout: float = 15.0) -> str:
+        super().connect(host, port, timeout)
+        return "220-MRKBANNERQ welcome"
+
+    def login(self, user: str, passwd: str, acct: str = "", secure: bool = True) -> str:
+        self.logins += 1
+        self.commands.append("LOGIN")
+        if self.login_exc is not None:
+            raise self.login_exc
+        return super().login(user, passwd, acct, secure)
+
+    def sendcmd(self, cmd: str) -> str:
+        if cmd == "STAT":
+            self.commands.append(cmd)
+            if isinstance(self.stat, Exception):
+                raise self.stat
+            return self.stat
+        if cmd == "SITE FILETYPE=JES":
+            self.jes_mode = True
+        operand = cmd[5:] if cmd.startswith("SITE ") else None
+        table = self.jes_site if self.jes_mode and operand in self.jes_site else self.site
+        if operand is not None and operand in table:
+            self.commands.append(cmd)
+            reply = table[operand]
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+        return super().sendcmd(cmd)
+
+    def transfercmd(self, cmd: str, rest=None) -> _FakeDataConn:
+        if self.data_error is not None:
+            self.commands.append(cmd)
+            raise self.data_error
+        return super().transfercmd(cmd, rest)
+
+
+def _probe_config(**overrides) -> FTPConfig:
+    base: dict = {
+        "host": "mrkhostq.example",
+        "user": "MRKUSRQ",
+        "password": "MRKPWDQ9",
+        "dataset_allowlist": (PROBE_DATASET, "SYS1.PARMLIB"),
+        "enabled_tools": ("dataset_read",),
+        "jes_jobname_prefixes": ("MRKJOB",),
+        "jes_owner_prefixes": ("MRKOWN",),
+    }
+    base.update(overrides)
+    return _config(**base)
+
+
+def _probe(fake: ProbeFTP, *, dataset: str | None = PROBE_DATASET, job: str | None = PROBE_JOB,
+           breaker: LogonBreaker | None = None, **overrides) -> tuple[Receipt, dict[str, dict]]:
+    cfg = _probe_config(**overrides)
+    targets = site_probe.validate_targets(cfg, dataset=dataset, job_id=job)
+    receipt = site_probe.run_zos_probe(cfg, targets, factory=lambda: fake, breaker=breaker)
+    return receipt, {str(r["check"]): r for r in receipt.records}
+
+
+_PROBE_VERBS = ("CONNECT", "LOGIN", "SITE ", "STAT", "TYPE A", "RETR ", "LIST ", "QUIT")
+
+
+def _assert_read_only(fake: ProbeFTP) -> None:
+    assert all(cmd.startswith(_PROBE_VERBS) for cmd in fake.commands), fake.commands
+    assert fake.logins <= 1
+    for cmd in fake.commands:
+        if cmd.startswith("RETR "):
+            assert cmd in (f"RETR '{PROBE_DATASET.split('(')[0]}'(MRKMEMQ)", f"RETR {PROBE_JOB}.2")
+        if cmd.startswith("LIST"):
+            assert cmd == f"LIST {PROBE_JOB}"
+
+
+def test_site_probe_passes_every_check_with_one_logon_and_read_only_verbs() -> None:
+    fake = ProbeFTP(jes_site={"NOTRAILINGBLANKS": "200 SITE accepted MRKSITEQ"})
+    receipt, checks = _probe(fake)
+
+    assert [r["check"] for r in receipt.records] == list(site_probe.CHECKS)
+    statuses = {k: v["status"] for k, v in checks.items()}
+    assert statuses.pop("zos.tls") == "inconclusive"  # plain mode: an owner-accepted transport
+    assert checks["zos.tls"]["reason"] == "plain_mode"
+    assert set(statuses.values()) == {"pass"}, statuses
+    assert checks["zos.logon"]["logon_attempts"] == 1
+    assert checks["zos.site_notrailingblanks"]["reply_code"] == "200"
+    assert checks["zos.stat_sbdataconn"]["server_codec"] == "iso8859-1"
+    assert checks["zos.stat_sbdataconn"]["matches_configured"] is True
+    data = checks["zos.dataset_read_ascii"]
+    assert data["bytes"] > 0 and data["replacement_chars"] == 0 and data["crlf_record_ends"]
+    assert checks["zos.passive_data"]["via"] == "dataset_read"
+    spool = checks["zos.jes_spool_mapping"]
+    assert spool["jesmsglg_spool_id"] == 2 and spool["header_shape"] == "job_log"
+    assert spool["received_bytes"] == len(JOB_LOG) and spool["listed_byte_count"] == 120
+    assert spool["byte_count_equal"] is False
+    assert receipt.exit_code() == 0
+    assert receipt.summary()["status"] == "inconclusive"
+    _assert_read_only(fake)
+    assert fake.logins == 1
+    # JES checks run after the dataset read, the spool read last, then QUIT.
+    order = [c for c in fake.commands if c.startswith(("RETR", "LIST", "SITE FILETYPE"))]
+    assert order[0].startswith("RETR '") and order[-1] == f"RETR {PROBE_JOB}.2"
+    assert fake.commands[-1] == "QUIT"
+
+
+@pytest.mark.parametrize(
+    ("fake_kwargs", "overrides", "check", "reason"),
+    [
+        ({"site": {"NOTRAILINGBLANKS": ftplib.error_perm("501 MRKSITEQ bad operand")}}, {},
+         "zos.site_notrailingblanks", None),
+        ({"site": {"SBSENDEOL=CRLF": "200-MRKSITEQ unrecognized parameter\n200 SITE ok"}}, {},
+         "zos.site_sbsendeol", None),
+        ({"jes_site": {"NOTRAILINGBLANKS": "202 MRKSITEQ not implemented"}}, {},
+         "zos.jes_site_notrailingblanks", None),
+        ({"stat": "211-SBDATACONN (IBM-1047,UTF-8) MRKSTATQ\n211 end"}, {},
+         "zos.stat_sbdataconn", None),
+        ({}, {"encoding": "utf-8"}, "zos.dataset_read_ascii", "replacement_chars"),
+        ({}, {}, "zos.dataset_read_ascii", "not_ascii_text"),
+        ({}, {}, "zos.jes_interface_level2", "no_level2_header"),
+        ({}, {}, "zos.jes_spool_mapping", "other_dd_shape"),
+        ({}, {}, "zos.jes_interface_level2", "jes_refused"),
+        ({"data_error": ftplib.error_temp("425 MRKSITEQ cannot open data connection")}, {},
+         "zos.passive_data", "data_connection_refused"),
+        ({"data_error": TimeoutError("MRKHOSTQ")}, {}, "zos.passive_data",
+         "data_connection_failed"),
+    ],
+)
+def test_site_probe_fail_paths(fake_kwargs: dict, overrides: dict, check: str, reason: str | None) -> None:
+    fake = ProbeFTP(**fake_kwargs)
+    dsn_key = f"'{PROBE_DATASET.split('(')[0]}'(MRKMEMQ)"
+    if reason == "replacement_chars":
+        fake.files[dsn_key] = b"MRKDATAQ caf\xe9\r\n"  # latin-1 bytes decoded as UTF-8
+    elif reason == "not_ascii_text":
+        fake.files[dsn_key] = "MRKDATAQ UNTRANSLATED RECORD\n".encode("cp037")[:-1] + b"\r\n"
+    elif reason == "no_level2_header":
+        fake.jes_list_by_job[PROBE_JOB] = PROBE_LIST[1:]
+    elif reason == "other_dd_shape":
+        fake.files[f"{PROBE_JOB}.2"] = fake.files[f"{PROBE_JOB}.1"]  # the PI98636 shift
+    elif reason == "jes_refused":
+        fake.site["FILETYPE=JES"] = ftplib.error_perm("550 MRKSITEQ JES interface unavailable")
+    receipt, checks = _probe(fake, **overrides)
+
+    assert checks[check]["status"] == "fail", checks[check]
+    if reason is not None:
+        assert checks[check]["reason"] == reason
+    assert receipt.exit_code() == 1 and receipt.summary()["status"] == "fail"
+    _assert_read_only(fake)
+    if reason in ("no_level2_header", "jes_refused"):
+        assert f"RETR {PROBE_JOB}.2" not in fake.commands
+    if reason == "data_connection_failed":
+        later = [checks[c] for c in site_probe.CHECKS[8:]]
+        assert all(c["status"] == "inconclusive" and c["reason"] == "session_lost" for c in later)
+
+
+def test_site_probe_inconclusive_paths_never_fail_on_unknown_shapes() -> None:
+    # No targets named: no data connection, no JES command at all.
+    fake = ProbeFTP(stat="211 status MRKSTATQ")
+    receipt, checks = _probe(fake, dataset=None, job=None)
+    for check, reason in (
+        ("zos.dataset_read_ascii", "no_dataset_named"),
+        ("zos.passive_data", "no_transfer"),
+        ("zos.stat_sbdataconn", "not_reported"),
+        *((c, "no_job_named") for c in site_probe.CHECKS[8:]),
+    ):
+        assert checks[check]["status"] == "inconclusive" and checks[check]["reason"] == reason
+    assert receipt.exit_code() == 0
+    assert not any(c.startswith(("RETR", "LIST", "SITE FILETYPE")) for c in fake.commands)
+
+    # Unrecognised spool shape, unknown code page, empty dataset, unlisted job.
+    fake = ProbeFTP(stat="211-SBDATACONN (IBM-1047,MRKSTATQ) x\n211 end")
+    fake.files[f"{PROBE_JOB}.2"] = b"MRKSPOOLQ SOMETHING ELSE\r\n"
+    fake.files[f"'{PROBE_DATASET.split('(')[0]}'(MRKMEMQ)"] = b""
+    receipt, checks = _probe(fake)
+    assert checks["zos.stat_sbdataconn"]["reason"] == "unknown_code_page"
+    assert checks["zos.dataset_read_ascii"]["reason"] == "empty"
+    assert checks["zos.jes_spool_mapping"]["status"] == "inconclusive"
+    assert checks["zos.jes_spool_mapping"]["reason"] == "unrecognized_shape"
+    assert receipt.exit_code() == 0
+
+    # A named job outside the prefix allowlist: LIST only, never RETR.
+    fake = ProbeFTP()
+    receipt, checks = _probe(fake, jes_jobname_prefixes=("PAY",))
+    assert checks["zos.jes_spool_mapping"]["reason"] == "job_not_allowlisted"
+    assert f"RETR {PROBE_JOB}.2" not in fake.commands
+    # An unknown job: an empty listing.
+    fake = ProbeFTP()
+    fake.jes_list_by_job.pop(PROBE_JOB)
+    fake.jes_lines = []
+    _, checks = _probe(fake)
+    assert checks["zos.jes_interface_level2"]["reason"] == "empty_listing"
+    assert f"RETR {PROBE_JOB}.2" not in fake.commands
+
+
+def test_site_probe_truncated_dataset_read_stops_before_jes() -> None:
+    fake = ProbeFTP()
+    fake.files[f"'{PROBE_DATASET.split('(')[0]}'(MRKMEMQ)"] = b"MRKDATAQ LINE\r\n" * 4096
+    _, checks = _probe(fake, max_bytes=1024, spool_stream_max_bytes=1024)
+    assert checks["zos.dataset_read_ascii"]["truncated"] is True
+    assert all(checks[c]["reason"] == "after_abort" for c in site_probe.CHECKS[8:])
+    assert not any(c.startswith(("LIST", "SITE FILETYPE")) for c in fake.commands)
+
+
+def test_site_probe_failing_password_makes_one_logon_and_respects_the_breaker() -> None:
+    fake = ProbeFTP(login_error=ftplib.error_perm("530 MRK530Q PASSWORD NOT AUTHORIZED"))
+    breaker = LogonBreaker(threshold=1, cooldown_s=900.0)
+    receipt, checks = _probe(fake, breaker=breaker)
+    assert fake.logins == 1
+    assert fake.commands == ["CONNECT mrkhostq.example:21", "LOGIN"]
+    assert checks["zos.logon"]["status"] == "fail"
+    assert checks["zos.logon"]["reason"] == "logon_failed"
+    assert checks["zos.logon"]["breaker_open"] is True
+    assert all(checks[c]["reason"] == "not_reached" for c in site_probe.CHECKS[3:])
+    assert receipt.exit_code() == 1
+
+    # A second run on the tripped breaker opens no connection at all.
+    again = ProbeFTP()
+    receipt, checks = _probe(again, breaker=breaker)
+    assert again.commands == [] and again.logins == 0
+    assert checks["zos.control_connect"]["reason"] == "breaker_open"
+    assert all(r["status"] == "inconclusive" for r in receipt.records)
+
+
+def test_site_probe_tls_check_on_a_real_loopback_ftps_server(tmp_path: Path) -> None:
+    certs = _generate_tls_fixtures(tmp_path)
+    cfg = {"transport_mode": "ftps", "plain_ftp_accepted": False, "host": "localhost",
+           "ca_file": str(certs["ca_crt"])}
+    with _MiniFTPSServer(certfile=certs["good_crt"], keyfile=certs["good_key"]) as srv:
+        receipt, checks = _probe(ProbeFTP(), dataset=None, job=None, port=srv.port, **cfg)
+        assert checks["zos.tls"]["status"] == "pass" and checks["zos.tls"]["prot_p"] is True
+        assert str(checks["zos.tls"]["tls_version"]).startswith("TLSv1.")
+        assert checks["zos.logon"]["status"] == "pass"
+        assert sum(c.startswith("PASS ") for c in srv.received_commands) == 1
+    with _MiniFTPSServer(certfile=certs["ss_crt"], keyfile=certs["ss_key"]) as srv:
+        receipt, checks = _probe(ProbeFTP(), dataset=None, job=None, port=srv.port, **cfg)
+        assert checks["zos.tls"]["status"] == "fail" and checks["zos.tls"]["reason"] == "tls_error"
+        assert checks["zos.logon"]["reason"] == "not_reached"
+        assert not any(c.startswith(("USER", "PASS")) for c in srv.received_commands)
+        assert receipt.exit_code() == 1
+
+
+def test_site_probe_cli_receipt_is_text_free_and_0600(monkeypatch, capsys, tmp_path: Path) -> None:
+    fake = ProbeFTP(stat="211-SBDATACONN (IBM-1047,UTF-8) MRKSTATQ\n211 end")
+    fake.files[f"{PROBE_JOB}.2"] = fake.files[f"{PROBE_JOB}.1"]
+    for name, value in {
+        "MCP_FTP_HOST": "mrkhostq.example", "MCP_FTP_USER": "MRKUSRQ",
+        "MCP_FTP_PASSWORD": "MRKPWDQ9", "MCP_FTP_TRANSPORT_MODE": "plain",
+        "MCP_FTP_PLAIN_ACCEPTED": "true", "MCP_DATASET_ALLOWLIST": PROBE_DATASET,
+        "MCP_JES_JOBNAME_PREFIXES": "MRKJOB", "MCP_JES_OWNER_PREFIXES": "MRKOWN",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("MCP_MOCK_DIR", raising=False)
+    monkeypatch.setattr(
+        mcp_main, "run_zos_probe",
+        lambda cfg, targets: site_probe.run_zos_probe(cfg, targets, factory=lambda: fake),
+    )
+    out_file = tmp_path / "receipt.jsonl"
+    rc = mcp_main.main(["--site-probe", "--dataset", PROBE_DATASET.lower(), "--job-id",
+                        PROBE_JOB, "--receipt", str(out_file)])
+    captured = capsys.readouterr()
+    assert rc == 1  # the code page and spool mapping fail
+    written = out_file.read_text(encoding="utf-8")
+    assert written == captured.out
+    assert out_file.stat().st_mode & 0o777 == 0o600
+    records = [json.loads(line) for line in written.splitlines()]
+    assert [r["check"] for r in records] == [*site_probe.CHECKS, "zos.summary"]
+    everything = (written + captured.err).upper()
+    for marker in (*PROBE_MARKERS, "MRKMEMQ", PROBE_JOB, "PARMLIB", "MRKHOSTQ.EXAMPLE"):
+        assert marker.upper() not in everything, marker
+    assert fake.logins == 1
+
+
+def test_site_probe_cli_refuses_bad_targets_before_any_connection(monkeypatch, capsys) -> None:
+    for name, value in {
+        "MCP_FTP_HOST": "mrkhostq.example", "MCP_FTP_USER": "MRKUSRQ",
+        "MCP_FTP_PASSWORD": "MRKPWDQ9", "MCP_FTP_TRANSPORT_MODE": "plain",
+        "MCP_FTP_PLAIN_ACCEPTED": "true", "MCP_DATASET_ALLOWLIST": PROBE_DATASET,
+    }.items():
+        monkeypatch.setenv(name, value)
+    calls: list[object] = []
+    monkeypatch.setattr(mcp_main, "run_zos_probe", lambda *a: calls.append(a))
+    assert mcp_main.main(["--site-probe", "--dataset", "MRKDSQ.OTHER"]) == 2
+    assert mcp_main.main(["--site-probe", "--job-id", PROBE_JOB]) == 2  # no JES prefixes
+    assert mcp_main.main(["--site-probe", "--job-id", "PAY*"]) == 2
+    assert mcp_main.main(["--dataset", PROBE_DATASET]) == 2  # needs --site-probe
+    assert mcp_main.main(["--site-probe", "--mock", "/nonexistent"]) == 2
+    assert calls == []
+    err = capsys.readouterr().err
+    assert "MRKDSQ" not in err and "PAY*" not in err
+
+
+def test_probe_receipt_refuses_text_and_counts_statuses() -> None:
+    receipt = Receipt("zos")
+    receipt.add("zos.a", "pass", reply_code="200", ok=True, n=3, none=None)
+    receipt.add("zos.b", "inconclusive", reason="no_job_named")
+    for bad in ("two words", "a/b", "user@host", "x" * 49, "line\n", "k:v"):
+        with pytest.raises(ReceiptError):
+            receipt.add("zos.c", "pass", value=bad)
+    with pytest.raises(ReceiptError):
+        receipt.add("zos.c", "maybe")
+    with pytest.raises(ReceiptError):
+        receipt.add("gitlab.c", "pass")
+    with pytest.raises(ReceiptError):
+        receipt.add("zos.c", "pass", value=1.5)
+    assert receipt.summary() == {"probe": "zos", "check": "zos.summary", "status": "inconclusive",
+                                 "schema": 1, "pass": 1, "fail": 0, "inconclusive": 1}
+    assert receipt.exit_code() == 0
+    receipt.add("zos.c", "fail")
+    assert receipt.exit_code() == 1 and receipt.summary()["status"] == "fail"
