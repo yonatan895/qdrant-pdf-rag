@@ -611,6 +611,13 @@ def test_load_accepts_a_gap_release_only_with_the_gap_anchor(load_tree):
     ok = _run_load(load_tree, *_BOTH, ("GAP_PROMOTE_IDENTITY", release_identity(dist)))
     assert ok.returncode == 0, ok.stderr
     assert _copies(skopeo_log)
+    # #1344: the promotion is recorded, so the next load of it needs no export.
+    assert "==> Gap release promotion recorded in dist/gap-promotion.txt" in ok.stdout
+    skopeo_log.unlink()
+    again = _run_load(load_tree, *_BOTH)
+    assert again.returncode == 0, again.stderr
+    assert "(recorded at promotion in dist/gap-promotion.txt)" in again.stdout
+    assert _copies(skopeo_log)
 
 
 def test_load_signed_missing_task_member_refuses_before_push(load_tree):

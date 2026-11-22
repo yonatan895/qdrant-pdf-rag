@@ -750,3 +750,36 @@ def test_task_pipeline_operator_rehearsal_wins_over_a_promotion_exported_from_ai
     assert r.stdout.count(guarded) == 2, r.stdout  # deploy and ingest
     assert "declares both" not in r.stderr and "Gap release promotion" not in r.stdout
     assert "-n mfr-prod" not in r.stdout
+
+
+def test_task_pipeline_runs_a_recorded_promotion_without_the_export(pipe_tree):
+    """#1344: a promotion declared once through `run-task.sh airgap:pipeline`
+    is recorded by its first writing stage (load). The next pipeline from that
+    workspace, with nothing declared, runs its writing stages as that promotion
+    (the bundle reaches the registry), and the same run with the workspace's
+    NAMESPACE changed is refused before any write."""
+    from tests.helpers_airgap import release_identity
+
+    task, log, operator = _gap_pipeline_tree(pipe_tree, _LIVE_WORKSPACE_ENV, dryrun=False)
+    identity = release_identity(pipe_tree / "dist")
+    first = _run_task(pipe_tree, task, "airgap:pipeline", extra_env={**operator, "GAP_PROMOTE_IDENTITY": identity})
+    assert "==> Gap release promotion recorded in dist/gap-promotion.txt" in first.stdout, first.stdout + first.stderr
+    assert (pipe_tree / "dist" / "gap-promotion.txt").is_file()
+
+    def copies():
+        calls = log.read_text().splitlines() if log.exists() else []
+        return [c for c in calls if c.split()[:1] == ["copy"] or c.split()[:2] == ["skopeo", "copy"]]
+
+    log.unlink(missing_ok=True)
+    second = _run_task(pipe_tree, task, "airgap:pipeline", extra_env=operator)
+    assert "this checkout is a gap release (origin: gap)" not in second.stderr, second.stdout + second.stderr
+    assert (f"==> Gap release promotion: release identity {identity} (recorded at promotion in "
+            "dist/gap-promotion.txt)") in second.stdout, second.stdout + second.stderr
+    assert copies(), "the recorded promotion loads without the export"
+    # Counterexample: the workspace now names another target; refused at stage 2.
+    log.unlink(missing_ok=True)
+    (pipe_tree / "airgap.env").write_text("NAMESPACE='mfr-other'\nINTERNAL_REGISTRY='reg.live'\n")
+    moved = _run_task(pipe_tree, task, "airgap:pipeline", extra_env=operator)
+    assert moved.returncode != 0
+    assert "the gap promotion marker (dist/gap-promotion.txt) does not hold here (namespace differs)" in moved.stderr
+    assert copies() == []

@@ -8,7 +8,8 @@ Covers:
   `tests/fixtures/extension-surface.json`.
 - `airgap.env`-file-only (non-exported) propagation of every `OPERATOR_ENV_KEYS`
   entry into `map_values.py` and `model_config.py` via `common.sh`, while keeping
-  `CI_REHEARSAL` and `AIRGAP_UNVERIFIED_CHECKOUT` process-env-only.
+  `CI_REHEARSAL`, `AIRGAP_UNVERIFIED_CHECKOUT` and the gap release stage
+  declarations (`GAP_*`, #1344) process-env-only.
 - `airgap:config show` and `airgap:config check` (`scripts/airgap/config_tool.py`
   and `scripts/airgap/config.sh`), plus non-fatal warning integration in
   `scripts/airgap/validate.sh`.
@@ -23,6 +24,8 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 from tests.helpers_airgap import (
     REPO,
@@ -356,6 +359,24 @@ def test_config_check_catches_type_bound_mutual_exclusion_and_deprecated_issues(
     assert "STORAGE_CLASS" in combined
     assert "CI_REHEARSAL" in combined
     assert "invalid-transport" not in combined
+
+
+@pytest.mark.parametrize("key", ["GAP_PROMOTE_IDENTITY", "GAP_REHEARSAL_INSTALLED_WORKSPACE",
+                                 "GAP_REHEARSAL_KUBE_CONTEXT"])
+def test_config_check_names_the_gap_stage_declarations_process_environment_only(tmp_path, key):
+    """#1344 (maintainer decision 5 on #1340): the gap release stage is declared
+    in the process environment only (common.sh ignores an airgap.env value), so
+    config check names such a line for what it is instead of an unknown key."""
+    make_bin_tree(tmp_path, ["common.sh", "config.sh"])
+    env_file = tmp_path / "gap.env"
+    env_file.write_text(f"OPENWEBUI_ENABLED=false\n{key}='declared-in-file'\n", encoding="utf-8")
+    env = {"PATH": system_path(tmp_path / "bin"), "AIRGAP_ENV": str(env_file)}
+    r = _run_config_sh(tmp_path, env, "check")
+    combined = r.stdout + r.stderr
+    assert r.returncode != 0, combined
+    assert f"{key} is honored from the process environment only and must not be set in airgap.env" in combined
+    assert "unknown key" not in combined
+    assert "declared-in-file" not in combined
 
 
 def test_config_check_reports_deprecated_and_retired_keys(tmp_path):

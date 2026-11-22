@@ -728,3 +728,28 @@ def test_a_gap_release_without_a_declared_stage_is_refused_before_any_cluster_or
     assert "this checkout is a gap release (origin: gap)" in result.stderr
     assert _log(tree) == "", "kubectl/oc was invoked before the guard"
     assert qdrant.ops == [], "Qdrant was contacted before the guard"
+
+
+def test_a_recorded_gap_promotion_runs_the_next_retire_legacy_without_the_export(tree, qdrant):
+    """#1344: a promotion declared once (here by the copy stage, in a real git
+    checkout) is recorded in the untracked dist/gap-promotion.txt; the checkout
+    guard still passes and the next stage runs without GAP_PROMOTE_IDENTITY."""
+    from tests.helpers_airgap import (
+        gap_release_anchor,
+        gap_release_key,
+        release_identity,
+        write_signed_manifest,
+    )
+
+    _legacy_site(qdrant)
+    head = _git_release(tree)
+    write_signed_manifest(tree / "dist", f"sha: {head}\n", origin="gap", key=gap_release_key())
+    anchors = {"SNEAKERNET_TRUSTED_PUB": _anchor(), "SNEAKERNET_GAP_TRUSTED_PUB": str(gap_release_anchor()),
+               **_RELEASE}
+    promoted = _copy(tree, qdrant, GAP_PROMOTE_IDENTITY=release_identity(tree / "dist"), **anchors)
+    assert promoted.returncode == 0, promoted.stderr
+    assert "==> Gap release promotion recorded in dist/gap-promotion.txt" in promoted.stdout
+    nxt = _retire(tree, qdrant, **anchors)
+    assert nxt.returncode == 0, nxt.stderr
+    assert "(recorded at promotion in dist/gap-promotion.txt)" in nxt.stdout
+    _assert_retired(qdrant)

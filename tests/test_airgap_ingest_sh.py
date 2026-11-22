@@ -967,4 +967,11 @@ def test_the_next_ingest_from_a_promoted_gap_workspace_needs_its_identity(ingest
     ok = _run_ingest(ingest_tree, *anchors, ("GAP_PROMOTE_IDENTITY", release_identity(tmp_path / "dist")))
     assert ok.returncode == 0, ok.stderr
     assert "==> Gap release promotion: release identity" in ok.stdout
+    assert "==> Gap release promotion recorded in dist/gap-promotion.txt" in ok.stdout
+    assert (tmp_path / "dist" / "ingest-rendered.yaml").exists()
+    # #1344: that declared promotion is recorded; the next ingest needs no export.
+    (tmp_path / "dist" / "ingest-rendered.yaml").unlink()
+    again = _run_ingest(ingest_tree, *anchors)
+    assert again.returncode == 0, again.stderr
+    assert "(recorded at promotion in dist/gap-promotion.txt)" in again.stdout
     assert (tmp_path / "dist" / "ingest-rendered.yaml").exists()
