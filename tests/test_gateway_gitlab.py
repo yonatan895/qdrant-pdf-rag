@@ -23,9 +23,12 @@ import httpx2
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
+from hypothesis import assume, given
+from hypothesis import strategies as st
 from jwt.algorithms import RSAAlgorithm
 
 from mainframe_rag.gateways import common, gitlab
+from tests import helpers_redaction_props as props
 
 TEAM_TOKEN = "glpat-TEAMTOKEN0123456789abcdef"
 BEARER = "b" * 40
@@ -1138,6 +1141,233 @@ def test_every_paged_list_names_the_next_start(tmp_path: Path, tool: str, args: 
 
 
 
+# --- #1347: no secret survives a truncation cut (shared property helper) ------------------
+# Whole-text screening (ANSI strip, then clean_text) is the oracle
+# (tests/helpers_redaction_props.py); each example places the window start,
+# the read ceiling or the clip at a drawn byte of a secret.
+
+_PROP_CEILING = 6000
+
+
+def _whole_cleaned(log: bytes) -> str:
+    return common.clean_text(gitlab._ANSI_RE.sub("", log.decode("utf-8", errors="replace")))
+
+
+@st.composite
+def _job_log_case(draw: st.DrawFn, secrets) -> tuple[bytes, props.Secret, int, int, bool]:
+    """(log, secret, tail_bytes, chunk, stopped): a complete log whose kept
+    window starts at a drawn byte of the secret, or one longer than the
+    read ceiling whose window start or stop lands on it."""
+    eol = draw(st.sampled_from(props.LINE_ENDS))
+    secret = draw(secrets(eol))
+    # Under the test gateway's 2048-byte result cap, so the fit keeps the window's first lines.
+    tail = draw(st.sampled_from([1024, 1200, 1500]))
+    # A long log (over the key scan's 32 KiB batch) comes in larger chunks to stay fast.
+    big = draw(st.booleans())
+    chunk = draw(st.sampled_from([512, 4096] if big else [7, 64, 512, 4096]))
+    shape = {"width": draw(st.sampled_from([12, 30, 81, 3000])), "multibyte": draw(st.booleans())}
+    off = draw(props.cut_offsets(secret))
+    mode = draw(st.sampled_from(["window", "ceiling_window", "ceiling_stop"]))
+    if mode == "window":  # complete read: the kept window starts tail + 1 bytes from the end
+        before = props.filler(draw(st.integers(40_000, 70_000) if big else st.integers(3, 4000)), eol=eol, **shape)
+        full = before + secret.raw + eol + props.filler(tail + 3000, eol=eol, **shape)
+        return full[: len(before) + off + tail + 1], secret, tail, chunk, False
+    start = _PROP_CEILING - (tail + 1 if mode == "ceiling_window" else 0) - off
+    before = props.filler(start, eol=eol, **shape)
+    log = before + secret.raw + eol + props.filler(_PROP_CEILING, eol=eol, **shape)
+    return log, secret, tail, chunk, True
+
+
+def _check_job_log_property(tmp_path: Path, secrets) -> None:
+    fake = FakeGitLab()
+    for directory in ("stopped", "complete"):
+        (tmp_path / directory).mkdir()
+    gateways = {
+        stopped: _bearer_gateway(
+            tmp_path / ("stopped" if stopped else "complete"),
+            fake,
+            max_job_log_read_bytes=_PROP_CEILING if stopped else 1_000_000,
+        )
+        for stopped in (False, True)
+    }
+
+    @props.property_settings(max_examples=120)
+    @given(_job_log_case(secrets))
+    def check(case: tuple[bytes, props.Secret, int, int, bool]) -> None:
+        log, secret, tail, chunk, stopped = case
+        fake.routes["/api/v4/projects/7/jobs/50/trace"] = _stream(log, chunk)
+        result = _run(gateways[stopped], "read_job_log", project="team/app", job_id=50, tail_bytes=tail)
+        text = _body(result, "read_job_log")["text"]
+        assert isinstance(text, str) and ("[gateway:" in text)  # the cut happened and is marked
+        assume(props.assert_no_secret_survives(text, _whole_cleaned(log), secret))
+
+    check()
+
+
+def test_job_log_window_or_stop_never_leaks_a_private_key(tmp_path: Path):
+    """#1333 B1 as a property: keys with any label, colour escapes around the
+    markers, no END line, the window start or the read ceiling anywhere in
+    or around the key, chunks from 7 bytes up, logs short and over the key
+    scan's 32 KiB batch."""
+    _check_job_log_property(tmp_path, lambda eol: props.pem_secrets(eol, ansi=True))
+
+
+def test_job_log_window_or_stop_never_leaks_a_key_value_secret(tmp_path: Path):
+    """Key/value, auth-header and URL-credential secrets, the value on the
+    key's line or on a later one (clean_text's separator spans a line end),
+    so the window can start on the value line with the key just before it."""
+    families = [name for name in props.FAMILIES if not name.startswith(("zos_", "tso_", "space_"))]
+    _check_job_log_property(tmp_path, lambda eol: props.kv_secrets(families, eol, props.SHORT_LEADS))
+
+
+@pytest.mark.parametrize(
+    "key",
+    [b"Authorization:\n  ", b"db_password\n= ", b"api_key:\n\n  ", b"HDR Bearer\n"],
+)
+def test_job_log_window_on_the_value_line_of_an_earlier_key(tmp_path: Path, key: bytes) -> None:
+    """The window starts at the value line, or a few bytes either side, of a
+    key whose name or separator is on an earlier line: the header name, the
+    name with its separator on the next line, a blank line in between, an
+    auth scheme. Cleaning the whole log redacts the value; so must the tail."""
+    fake = FakeGitLab()
+    gw = _bearer_gateway(tmp_path, fake, max_job_log_read_bytes=1_000_000)
+    value = b"QXJZQXJZqxjzQXJZ"
+    pair = key + value + b"\n"
+    for off in range(-4, 4):
+        # The window (tail_bytes + 1 = 1025 bytes) starts \`off\` bytes after the value's first byte.
+        size = 1025 + off - (len(pair) - pair.index(value))
+        suffix = b"".join(b"log %06d %s\n" % (n, b"." * 18) for n in range(size // 30 + 1))[: size - 5]
+        suffix = suffix[: suffix.rfind(b"\n") + 1]
+        suffix += b"z" * (size - 5 - len(suffix)) + b"LAST\n"
+        log = b"".join(_lines(100, 30)) + pair + suffix
+        assert value.decode() not in common.clean_text(log.decode())
+        fake.routes["/api/v4/projects/7/jobs/50/trace"] = _stream(log, 64)
+        text = _body(_run(gw, "read_job_log", project="team/app", job_id=50, tail_bytes=1024), "read_job_log")["text"]
+        assert "LAST" in text, off
+        assert "QXJZqxjz" not in text, off
+
+
+def test_whole_text_screen_covers_these_secret_shapes() -> None:
+    """Pins which shared families the GitLab screen redacts (L LF, W CRLF,
+    R CR), so a property cannot go silently vacuous: a family not covered
+    here is discarded by the job-log properties. z/OS-only shapes are
+    pattern limits, not leaks."""
+    covered = props.screen_coverage(lambda raw: _whole_cleaned(raw))
+    assert covered == {
+        "kv_same_line": "LWR",
+        "kv_spaced": "LWR",
+        "kv_colon": "LWR",
+        "kv_export": "LWR",
+        "kv_next_line": "LWR",
+        "kv_chain": "R",
+        "kv_chain_spaced": "",
+        "zos_operand": "",
+        "zos_operand_next_line": "",
+        "zos_phrase": "",
+        "zos_phrase_next_line": "",
+        "tso_logon": "",
+        "tso_logon_next_line": "",
+        "space_form_next_line": "",
+        "bearer": "LWR",
+        "bearer_next_line": "LWR",
+        "url_credentials": "LWR",
+    }
+
+
+@pytest.mark.parametrize(
+    ("key", "pad"),
+    [
+        *(
+            (key, pad)
+            for key in (b"password=", b"Authorization:", b"API_TOKEN: ", b"HDR Bearer")
+            for pad in (b"\r", b"\x1b[0K", b"\xe2\x80\x8b")  # CR, ANSI, zero-width space
+        ),
+        (b"HDR Bearer", b"\n"),  # blank lines: only an auth scheme's \s+ spans them
+    ],
+)
+def test_job_log_lookbehind_starting_on_a_key(tmp_path: Path, key: bytes, pad: bytes) -> None:
+    """The window starts on a value line and the lookbehind (read bytes
+    before it, JOB_LOG_LOOKBEHIND_BYTES, counted raw) starts at, inside or
+    just around the key, which a run of bytes cleaning removes (CR, ANSI,
+    zero-width) or blank lines keep ~4 KiB from its value. Where cleaning
+    the whole log redacts the value, the tail must not show it."""
+    fake = FakeGitLab()
+    gw = _bearer_gateway(tmp_path, fake, max_job_log_read_bytes=1_000_000)
+    value = b"QXJZQXJZqxjzQXJZ"
+    value_line = b"  " + value + b"\n"
+    size = 1024 - len(value_line)
+    suffix = b"".join(b"log %06d %s\n" % (n, b"." * 18) for n in range(size // 30 + 1))[: size - 5]
+    suffix = suffix[: suffix.rfind(b"\n") + 1]
+    suffix += b"z" * (size - 5 - len(suffix)) + b"LAST\n"
+    in_scope = 0
+    for units in range((4096 - len(key)) // len(pad) - 2, (4096 + 4) // len(pad) + 2):
+        # The window (tail_bytes + 1 bytes) starts at the key line's last
+        # newline; the lookbehind starts len(key) + units * len(pad) - 4096
+        # bytes after the key's first byte.
+        log = b"".join(_lines(200, 30)) + key + pad * units + b"\n" + value_line + suffix
+        if value.decode() in _whole_cleaned(log):
+            continue
+        in_scope += 1
+        fake.routes["/api/v4/projects/7/jobs/50/trace"] = _stream(log, 512)
+        text = _body(_run(gw, "read_job_log", project="team/app", job_id=50, tail_bytes=1024), "read_job_log")["text"]
+        assert "LAST" in text, units
+        assert "QXJZqxjz" not in text, units
+    assert in_scope
+
+
+# --- #1347: field clip and result cut ----------------------------------------------------
+
+
+def test_long_field_clip_never_leaks_a_secret(tmp_path: Path):
+    """The 32768-character field clip lands on a drawn character of a secret
+    in an issue description."""
+    fake = FakeGitLab()
+    gateway = _long_gateway(tmp_path, fake)
+    limit = gateway.limits.max_field_chars
+
+    @props.property_settings(max_examples=40)
+    @given(st.data())
+    def check(data: st.DataObject) -> None:
+        eol = data.draw(st.sampled_from(props.LINE_ENDS))
+        # A key with no END redacts the rest of the field, which then fits: no clip.
+        secret = data.draw(st.one_of(props.pem_secrets(eol, open_end=False), props.kv_secrets(list(props.FAMILIES), eol)))
+        off = data.draw(props.cut_offsets(secret))
+        raw = props.filler(limit - off, eol=eol) + secret.raw + eol + props.filler(4000, eol=eol)
+        description = raw.decode("utf-8", errors="replace")
+        fake.routes["/api/v4/projects/7/issues/5"] = httpx2.Response(
+            200, json={"iid": 5, "title": "T", "description": description, "user_notes_count": 0})
+        body = _body(_run(gateway, "get_issue", project="team/app", iid=5), "get_issue")
+        assert body["truncated"] is True
+        kept = body["rows"][0]["description"]  # type: ignore[index]
+        assume(props.assert_no_secret_survives(kept, common.clean_text(description), secret))
+
+    check()
+
+
+def test_result_size_cut_never_leaks_a_secret(tmp_path: Path):
+    """A file read larger than max_result_bytes is cut near a drawn byte of a
+    secret (escaping moves the exact cut by a few bytes)."""
+    fake = FakeGitLab()
+    gateway = _bearer_gateway(tmp_path, fake, max_file_bytes=16384)
+    route = "/api/v4/projects/7/repository/files/src%2Fmain.py/raw"
+
+    @props.property_settings(max_examples=60)
+    @given(st.data())
+    def check(data: st.DataObject) -> None:
+        eol = data.draw(st.sampled_from(props.LINE_ENDS))
+        secret = data.draw(
+            st.one_of(props.pem_secrets(eol, max_lines=4, open_end=False), props.kv_secrets(props.SAME_LINE, eol)))
+        off = data.draw(props.cut_offsets(secret))
+        before = props.filler(max(3, data.draw(st.integers(1800, 2040)) - off), eol=eol)
+        raw = before + secret.raw + eol + props.filler(3000, eol=eol)
+        fake.routes[route] = httpx2.Response(200, content=raw)
+        body = _body(_run(gateway, "read_file", project="team/app", file_path="src/main.py"), "read_file")
+        assert body["truncated"] is True
+        assume(props.assert_no_secret_survives(body["text"], _whole_cleaned(raw), secret))  # type: ignore[arg-type]
+
+    check()
+
+
 # --- long text fields (maintainer, 2026-11-21, item f: 32768 characters) ------------------
 
 def _long_gateway(tmp_path: Path, fake: FakeGitLab, **limits: int) -> gitlab.Gateway:
@@ -1242,3 +1472,171 @@ def test_page_bounds_come_from_configuration(tmp_path: Path):
     assert _run(gateway, "list_issues", project="team/app", start=14)["isError"] is False
     assert {k: v for k, v in fake.requests[-1].url.params.items() if k in ("per_page", "page")} == {
         "per_page": "5", "page": "3"}
+
+
+
+# --- the read-only site probe (#1343) ---------------------------------------------------------
+
+PROBE_MARKERS = ("MRKVERQ", "MRKREVQ", "MRKLOGQ", "MRKNOTEQ", "MRKSYSNOTEQ", TEAM_TOKEN, "team/app",
+                 "gitlab.example.test", UPSTREAM_CANARY)
+
+
+def _probe_notes(*, honour_filter: bool = True, system: bool = True) -> object:
+    notes = [_note(1, "MRKNOTEQ first"), _note(2, "MRKSYSNOTEQ changed", system=system), _note(3, "MRKNOTEQ x")]
+    return _paged_notes(notes, honour_filter=honour_filter)
+
+
+def _probe_fake(**routes: object) -> FakeGitLab:
+    fake = FakeGitLab()
+    fake.routes["/api/v4/version"] = httpx2.Response(200, json={"version": "17.5.1-MRKVERQ", "revision": "MRKREVQ"})
+    fake.routes["/api/v4/projects/7/jobs/41/trace"] = _stream(b"MRKLOGQ line\n" * 2000, 4096)
+    fake.routes["/api/v4/projects/7/issues/5/notes"] = _probe_notes()
+    fake.routes.update({f"/api/v4/{k}": v for k, v in routes.items()})
+    return fake
+
+
+def _gitlab_probe(tmp_path: Path, fake: FakeGitLab, *, job: str | None = "team/app:41",
+                  issue: str | None = "team/app:5", **backend: object) -> dict[str, dict[str, object]]:
+    from mainframe_rag.gateways import gitlab_probe
+
+    gateway = _bearer_gateway(tmp_path, fake, **{"max_job_log_read_bytes": 1_000_000, **backend})
+    allows = gateway.client.backend.allows
+    receipt = asyncio.run(gitlab_probe.run_gitlab_probe(
+        gateway,
+        job=gitlab_probe.parse_target(job, allows, "job") if job else None,
+        issue=gitlab_probe.parse_target(issue, allows, "issue") if issue else None,
+    ))
+    assert [r["check"] for r in receipt.records] == list(gitlab_probe.CHECKS)
+    assert fake.violations == []
+    return {str(r["check"]): r for r in receipt.records}
+
+
+def test_site_probe_passes_and_writes_a_text_free_receipt(tmp_path: Path, monkeypatch, capsys):
+    fake = _probe_fake()
+    env = _env(tmp_path, "bearer", _config_doc(tmp_path, auth=False, max_job_log_read_bytes=1_000_000))
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    real_build = gitlab.build_gateway
+    monkeypatch.setattr(gitlab, "build_gateway", lambda: real_build(env, transport=fake.transport()))
+    out = tmp_path / "gitlab-receipt.jsonl"
+    rc = gitlab.main(["--site-probe", "--job", "team/app:41", "--issue", "team/app:5", "--receipt", str(out)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    written = out.read_text(encoding="utf-8")
+    assert written == captured.out and out.stat().st_mode & 0o777 == 0o600
+    records = {r["check"]: r for r in map(json.loads, written.splitlines())}
+    assert all(records[c]["status"] == "pass" for c in (
+        "gitlab.version", "gitlab.token_scopes", "gitlab.job_trace_stream", "gitlab.issue_notes_filter"))
+    assert (records["gitlab.version"]["major"], records["gitlab.version"]["minor"]) == (17, 5)
+    assert records["gitlab.token_scopes"]["read_api"] is True
+    assert records["gitlab.token_scopes"]["read_repository"] is False
+    trace = records["gitlab.job_trace_stream"]
+    assert trace["read_bytes"] == len(b"MRKLOGQ line\n") * 2000 and trace["complete"] is True
+    assert isinstance(trace["chunks"], int) and trace["chunks"] > 1
+    notes = records["gitlab.issue_notes_filter"]
+    assert notes["honoured"] is True
+    assert (notes["system_notes_unfiltered"], notes["system_notes_filtered"]) == (1, 0)
+    assert records["gitlab.summary"]["status"] == "pass"
+    for marker in PROBE_MARKERS:
+        assert marker.lower() not in (written + captured.err).lower(), marker
+    assert fake.violations == []
+    assert all(r.headers.get("PRIVATE-TOKEN") == TEAM_TOKEN for r in fake.requests)
+
+
+def _refuse_filter(request: httpx2.Request) -> httpx2.Response:
+    if request.url.params.get("activity_filter"):
+        return httpx2.Response(400, json={"message": UPSTREAM_CANARY})
+    return _probe_notes()(request)  # type: ignore[operator]
+
+
+@pytest.mark.parametrize(("setup", "check", "reason"), [
+    ({"scopes": ["read_api", "read_repository"]}, "gitlab.token_scopes", "wider_than_read_api"),
+    ({"scopes": ["api"]}, "gitlab.token_scopes", "token_scope_too_wide"),
+    ({"self_status": 404}, "gitlab.token_scopes", "scope_unverifiable"),
+    ({"routes": {"version": httpx2.Response(403, text=UPSTREAM_CANARY)}}, "gitlab.version", "upstream_refused"),
+    ({"backend": {"max_job_log_read_bytes": 4096}}, "gitlab.job_trace_stream", "stopped_at_ceiling"),
+    ({"routes": {"projects/7/jobs/41/trace": httpx2.Response(500, text=UPSTREAM_CANARY)}},
+     "gitlab.job_trace_stream", "upstream_unavailable"),
+    ({"routes": {"projects/7/issues/5/notes": _refuse_filter}}, "gitlab.issue_notes_filter", "filter_refused"),
+])
+def test_site_probe_fail_paths(tmp_path: Path, setup: dict[str, object], check: str, reason: str):
+    fake = _probe_fake(**setup.get("routes", {}))  # type: ignore[arg-type]
+    if "scopes" in setup:
+        fake.self_doc = {"id": 1, "scopes": setup["scopes"], "active": True, "revoked": False}
+    fake.self_status = int(setup.get("self_status", 200))  # type: ignore[call-overload]
+    checks = _gitlab_probe(tmp_path, fake, **setup.get("backend", {}))  # type: ignore[arg-type]
+    assert checks[check]["status"] == "fail" and checks[check]["reason"] == reason
+    assert UPSTREAM_CANARY not in json.dumps(checks)
+
+
+def _flaky_filter(request: httpx2.Request) -> httpx2.Response:
+    """The filtered request fails with a 503: not evidence the filter is refused."""
+    if request.url.params.get("activity_filter"):
+        return httpx2.Response(503, text=UPSTREAM_CANARY)
+    return _probe_notes()(request)  # type: ignore[operator]
+
+
+@pytest.mark.parametrize(("setup", "check", "reason"), [
+    ({"job": None, "issue": None}, "gitlab.job_trace_stream", "no_job_named"),
+    ({"job": None, "issue": None}, "gitlab.issue_notes_filter", "no_issue_named"),
+    ({"routes": {"version": httpx2.Response(200, json={"version": "16.11.2-ee"})}}, "gitlab.version",
+     "other_major"),
+    ({"routes": {"version": httpx2.Response(200, json={"version": "MRKVERQ"})}}, "gitlab.version", "unparsed"),
+    ({"routes": {"projects/7/issues/5/notes": _probe_notes(honour_filter=False)}}, "gitlab.issue_notes_filter",
+     "filter_ignored"),
+    ({"routes": {"projects/7/issues/5/notes": _probe_notes(system=False)}}, "gitlab.issue_notes_filter",
+     "no_system_notes"),
+    ({"routes": {"projects/7/issues/5/notes": _flaky_filter}}, "gitlab.issue_notes_filter",
+     "upstream_unavailable"),
+    ({"job": "team/app:99"}, "gitlab.job_trace_stream", "job_not_found"),
+    ({"issue": "team/moved:5"}, "gitlab.issue_notes_filter", "project_project_not_allowed"),
+])
+def test_site_probe_inconclusive_paths(tmp_path: Path, setup: dict[str, object], check: str, reason: str):
+    fake = _probe_fake(**setup.get("routes", {}))  # type: ignore[arg-type]
+    kwargs = {k: setup[k] for k in ("job", "issue") if k in setup}
+    checks = _gitlab_probe(tmp_path, fake, **kwargs)  # type: ignore[arg-type]
+    assert checks[check]["status"] == "inconclusive" and checks[check]["reason"] == reason
+
+
+def test_site_probe_refuses_targets_outside_the_allowlists_before_any_call(tmp_path: Path, monkeypatch, capsys):
+    fake = _probe_fake()
+    env = _env(tmp_path, "bearer", _config_doc(tmp_path, auth=False))
+    real_build = gitlab.build_gateway
+    monkeypatch.setattr(gitlab, "build_gateway", lambda: real_build(env, transport=fake.transport()))
+    for argv in (["--job", "other/secret:41"], ["--issue", "team/app:x"], ["--job", "team/app:0"],
+                 ["--issue", "teamx/app:5"]):
+        assert gitlab.main(["--site-probe", *argv]) == 2
+    assert gitlab.main(["--serve-now"]) == 2
+    assert fake.requests == []
+    assert "other/secret" not in capsys.readouterr().err
+
+
+def _crash_trace(request: httpx2.Request) -> httpx2.Response:
+    raise RuntimeError(UPSTREAM_CANARY)
+
+
+def test_site_probe_unexpected_exception_keeps_a_whole_receipt_and_exits_3(tmp_path: Path, monkeypatch, capsys):
+    """Review B1: an exception other than GatewayError ends the run with the
+    finished checks kept, the rest probe_error, the class name only, exit 3."""
+    fake = _probe_fake(**{"projects/7/jobs/41/trace": _crash_trace})
+    env = _env(tmp_path, "bearer", _config_doc(tmp_path, auth=False, max_job_log_read_bytes=1_000_000))
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    real_build = gitlab.build_gateway
+    monkeypatch.setattr(gitlab, "build_gateway", lambda: real_build(env, transport=fake.transport()))
+    out = tmp_path / "gitlab-receipt.jsonl"
+    rc = gitlab.main(["--site-probe", "--job", "team/app:41", "--issue", "team/app:5", "--receipt", str(out)])
+    captured = capsys.readouterr()
+    assert rc == 3
+    written = out.read_text(encoding="utf-8")
+    assert written == captured.out and out.stat().st_mode & 0o777 == 0o600
+    records = [json.loads(line) for line in written.splitlines()]
+    assert [(r["check"], r["status"]) for r in records] == [
+        ("gitlab.version", "pass"), ("gitlab.token_scopes", "pass"),
+        ("gitlab.job_trace_stream", "inconclusive"), ("gitlab.issue_notes_filter", "inconclusive"),
+        ("gitlab.summary", "error")]
+    assert records[2]["reason"] == records[3]["reason"] == "probe_error"
+    assert records[-1]["error_class"] == "RuntimeError" and records[-1]["probe_error"] is True
+    for marker in PROBE_MARKERS:
+        assert marker.lower() not in (written + captured.err).lower(), marker
+    assert fake.violations == []

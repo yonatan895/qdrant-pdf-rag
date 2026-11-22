@@ -14,6 +14,12 @@ Signing NEVER runs in the bastion. These helpers run either:
      with a passphrase-encrypted RSA-3072 PEM private key piped in for one
      signing, never writing an unencrypted key to disk.
 
+``vault-probe`` (#1343) checks, from where signing runs, that the transit key
+exists, is a non-exportable ``rsa-3072`` key, signs a fixed probe message
+(never a SHA256SUMS) with PKCS#1 v1.5 + SHA-256 that verifies under its
+exported public key, and prints a text-free JSON-lines receipt (the rules of
+``mainframe_rag.probe_receipt``, copied here because this file runs alone).
+
 Standard library only (runs under ``python3 -I``).
 """
 from __future__ import annotations
@@ -22,12 +28,14 @@ import argparse
 import base64
 import binascii
 import hashlib
+import http.client
 import json
 import os
 import re
 import ssl
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from collections.abc import Sequence
@@ -357,6 +365,294 @@ def sign_with_encrypted_key(
     }
 
 
+# --- vault-probe (#1343) -------------------------------------------------------------
+# A copy of mainframe_rag.probe_receipt's rules (this file runs as one stdlib
+# script under python3 -I); tests/test_gap_sign_vault.py pins the two equal.
+PROBE_SCHEMA_VERSION = 1
+PROBE_STATUSES = ("pass", "fail", "inconclusive")
+_PROBE_CHECK_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,15}\.[a-z][a-z0-9_]{0,47}$")
+_PROBE_FIELD_RE = re.compile(r"^[a-z][a-z0-9_]{0,47}$")
+_PROBE_SAFE_VALUE_RE = re.compile(r"^[A-Za-z0-9_.+=-]{0,64}$")
+_PROBE_RESERVED = frozenset({"probe", "check", "status"})
+PROBE_ERROR = "probe_error"
+PROBE_EXIT_ERROR = 3
+# Signed by the probe: a fixed message that is not a SHA256SUMS file, so its
+# signature can never stand in for a release's.
+PROBE_MESSAGE = b"mainframe-rag vault-probe v1: test digest, not a release\n"
+VAULT_PROBE_CHECKS = (
+    "vault.key_read",
+    "vault.key_type",
+    "vault.public_key_export",
+    "vault.sign_pkcs1v15_sha256",
+)
+
+
+class ProbeReceipt:
+    """Text-free probe records (see mainframe_rag.probe_receipt.Receipt)."""
+
+    def __init__(self, probe: str) -> None:
+        if not _PROBE_FIELD_RE.fullmatch(probe):
+            raise SignError("invalid probe name")
+        self.probe = probe
+        self.records: list[dict[str, object]] = []
+        self.error_class: str | None = None
+
+    def add(self, check: str, status: str, **fields: object) -> None:
+        if not _PROBE_CHECK_ID_RE.fullmatch(check) or not check.startswith(self.probe + "."):
+            raise SignError("invalid check id")
+        if status not in PROBE_STATUSES:
+            raise SignError("invalid status")
+        record: dict[str, object] = {"probe": self.probe, "check": check, "status": status}
+        for name, value in fields.items():
+            if not _PROBE_FIELD_RE.fullmatch(name) or name in _PROBE_RESERVED:
+                raise SignError("invalid receipt field name")
+            safe = value is None or isinstance(value, (bool, int)) or (
+                isinstance(value, str) and _PROBE_SAFE_VALUE_RE.fullmatch(value) is not None
+            )
+            if not safe:
+                raise SignError(f"receipt field {name} is not a boolean, integer or safe token")
+            record[name] = value
+        self.records.append(record)
+
+    def status_of(self, check: str) -> str | None:
+        for record in self.records:
+            if record["check"] == check:
+                return str(record["status"])
+        return None
+
+    def abort(self, exc: BaseException, checks: Sequence[str] = ()) -> None:
+        """Stopped on an unexpected exception: keep the finished records, add
+        the unrecorded ``checks`` as inconclusive probe_error, and keep only
+        the exception's class name."""
+        if self.error_class is None:
+            name = type(exc).__name__
+            self.error_class = name if name and _PROBE_SAFE_VALUE_RE.fullmatch(name) else "unnamed"
+        for check in checks:
+            if self.status_of(check) is None:
+                self.add(check, "inconclusive", reason=PROBE_ERROR)
+
+    def summary(self) -> dict[str, object]:
+        counts = {status: 0 for status in PROBE_STATUSES}
+        for record in self.records:
+            counts[str(record["status"])] += 1
+        overall = "fail" if counts["fail"] else "inconclusive" if counts["inconclusive"] else "pass"
+        summary: dict[str, object] = {
+            "probe": self.probe,
+            "check": self.probe + ".summary",
+            "status": "error" if self.error_class else overall,
+            "schema": PROBE_SCHEMA_VERSION,
+            **counts,
+        }
+        if self.error_class:
+            summary[PROBE_ERROR] = True
+            summary["error_class"] = self.error_class
+        return summary
+
+    def exit_code(self) -> int:
+        if self.error_class:
+            return PROBE_EXIT_ERROR
+        return 1 if any(record["status"] == "fail" for record in self.records) else 0
+
+    def lines(self) -> list[str]:
+        return [json.dumps(r, separators=(",", ":")) for r in [*self.records, self.summary()]]
+
+
+def write_probe_receipt(receipt: ProbeReceipt, path: Path | None = None) -> None:
+    """Print the receipt; with ``path``, also write it there as a 0600 file."""
+    text = "".join(line + "\n" for line in receipt.lines())
+    sys.stdout.write(text)
+    sys.stdout.flush()
+    if path is None:
+        return
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    except OSError:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+def _vault_call(
+    req: urllib.request.Request, ctx: ssl.SSLContext | None, timeout_s: float
+) -> tuple[int | None, dict | None]:
+    """(HTTP status, JSON body) of one Vault call; never the error body. A
+    transport failure is (None, None); a 2xx that is not a JSON object is
+    (status, None)."""
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout_s) as resp:
+            status = int(resp.status)
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, None
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError, ValueError):
+        return None, None
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return status, None
+    return status, body if isinstance(body, dict) else None
+
+
+def _http_reason(status: int | None) -> str:
+    if status is None:
+        return "unreachable"
+    return {403: "forbidden", 404: "not_found"}.get(status, "http_error")
+
+
+def probe_vault(
+    *,
+    vault_addr: str,
+    vault_token: str,
+    transit_mount: str,
+    key_name: str,
+    ca_file: Path | None = None,
+    timeout_s: float = 30.0,
+) -> ProbeReceipt:
+    """The read-only transit checks (#1343): key read, key type, public key
+    export and a probe signature verified with ``openssl dgst -sha256 -verify``
+    (the bootstrap command). Raises SignError only for configuration errors;
+    every Vault outcome is a receipt record, and an unexpected exception is
+    recorded as probe_error (class name only, exit code 3), never raised."""
+    if not vault_token:
+        raise SignError("STOP: Vault token is empty")
+    mount, key = _validate_vault_path(transit_mount, key_name)
+    ctx = _vault_ssl_context(vault_addr, ca_file)
+    base = vault_addr.rstrip("/") + "/v1/" + mount
+    receipt = ProbeReceipt("vault")
+    results: dict[str, tuple[str, dict[str, object]]] = {}
+
+    error: BaseException | None = None
+    try:
+        _vault_probe_checks(
+            results, base=base, key=key, vault_token=vault_token, ctx=ctx, timeout_s=timeout_s
+        )
+    except Exception as exc:  # noqa: BLE001 - recorded by class name only
+        error = exc
+    unset = PROBE_ERROR if error is not None else "not_reached"
+    for name in VAULT_PROBE_CHECKS:
+        state, fields = results.get(name, ("inconclusive", {"reason": unset}))
+        try:
+            receipt.add(name, state, **fields)
+        except SignError as exc:  # a probe bug: the record is withheld
+            error = error or exc
+            receipt.add(name, "inconclusive", reason=PROBE_ERROR)
+    if error is not None:
+        receipt.abort(error)
+    return receipt
+
+
+def _vault_probe_checks(
+    results: dict[str, tuple[str, dict[str, object]]],
+    *,
+    base: str,
+    key: str,
+    vault_token: str,
+    ctx: ssl.SSLContext | None,
+    timeout_s: float,
+) -> None:
+    """The checks of ``probe_vault``, recorded in ``results`` as they finish."""
+    read_req = urllib.request.Request(
+        base + "/keys/" + key, method="GET", headers={"X-Vault-Token": vault_token}
+    )
+    status, body = _vault_call(read_req, ctx, timeout_s)
+    data = body.get("data") if isinstance(body, dict) else None
+    public_pem: str | None = None
+    with tempfile.TemporaryDirectory(prefix="vault-probe-") as tmp:
+        work = Path(tmp)
+        if status == 200 and isinstance(data, dict):
+            results["vault.key_read"] = ("pass", {"http_status": status})
+            key_type = data.get("type")
+            exportable = data.get("exportable")
+            latest = data.get("latest_version")
+            type_facts: dict[str, object] = {
+                "key_type": key_type if key_type in ("rsa-2048", "rsa-3072", "rsa-4096") else "other",
+                "exportable": exportable if isinstance(exportable, bool) else None,
+                "supports_signing": data.get("supports_signing") is True,
+                "latest_version": latest if isinstance(latest, int) and not isinstance(latest, bool) else None,
+            }
+            if key_type != "rsa-3072":
+                results["vault.key_type"] = ("fail", {"reason": "not_rsa_3072", **type_facts})
+            elif exportable is not False:
+                results["vault.key_type"] = ("fail", {"reason": "exportable", **type_facts})
+            else:
+                results["vault.key_type"] = ("pass", type_facts)
+            keys_map = data.get("keys")
+            entry = keys_map.get(str(latest)) if isinstance(keys_map, dict) else None
+            candidate = entry.get("public_key") if isinstance(entry, dict) else None
+            if isinstance(candidate, str) and candidate.strip():
+                try:
+                    normalized = normalize_public_key_pem(candidate.encode("utf-8"))
+                    pub_path = work / "probe.pub"
+                    pub_path.write_bytes(normalized)
+                    fingerprint = pubkey_fingerprint_sha256(pub_path)
+                    public_pem = str(pub_path)
+                    results["vault.public_key_export"] = (
+                        "pass", {"rsa_3072": True, "fingerprint_sha256": fingerprint}
+                    )
+                except (SignError, OSError, subprocess.SubprocessError):
+                    results["vault.public_key_export"] = (
+                        "fail", {"reason": "not_rsa_3072_public_key", "rsa_3072": False}
+                    )
+            else:
+                results["vault.public_key_export"] = ("fail", {"reason": "no_public_key"})
+        elif status == 200:
+            results["vault.key_read"] = ("fail", {"reason": "unexpected_body", "http_status": status})
+        else:
+            results["vault.key_read"] = ("fail", {"reason": _http_reason(status), "http_status": status})
+
+        payload = json.dumps({
+            "input": sha256_digest_b64(PROBE_MESSAGE),
+            "hash_algorithm": "sha2-256",
+            "signature_algorithm": "pkcs1v15",
+            "prehashed": True,
+        }).encode("utf-8")
+        sign_req = urllib.request.Request(
+            base + "/sign/" + key,
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/json", "X-Vault-Token": vault_token},
+        )
+        status, body = _vault_call(sign_req, ctx, timeout_s)
+        check = "vault.sign_pkcs1v15_sha256"
+        sign_data = body.get("data") if isinstance(body, dict) else None
+        signature = sign_data.get("signature") if isinstance(sign_data, dict) else None
+        if status != 200 or not isinstance(signature, str):
+            reason = _http_reason(status) if status != 200 else "no_signature"
+            results[check] = ("fail", {"reason": reason, "http_status": status})
+        else:
+            match = _VAULT_SIG_RE.fullmatch(signature.strip())
+            try:
+                raw = vault_sig_to_raw(signature)
+            except SignError:
+                raw = None
+            if raw is None or match is None:
+                results[check] = ("fail", {"reason": "malformed_signature", "http_status": status})
+            else:
+                facts: dict[str, object] = {
+                    "http_status": status,
+                    "key_version": int(match.group(1)),
+                    "signature_bytes": len(raw),
+                }
+                if public_pem is None:
+                    results[check] = ("inconclusive", {"reason": "no_public_key", **facts})
+                else:
+                    msg = work / "probe.msg"
+                    sig = work / "probe.sig"
+                    msg.write_bytes(PROBE_MESSAGE)
+                    sig.write_bytes(raw)
+                    try:
+                        verify_signature_openssl(Path(public_pem), msg, sig)
+                        results[check] = ("pass", {"verified": True, **facts})
+                    except (SignError, subprocess.SubprocessError):
+                        results[check] = (
+                            "fail", {"reason": "verify_failed", "verified": False, **facts}
+                        )
+
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Gap release signing helpers (run outside the bastion, Rev 2 D3).")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -394,12 +690,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                          help="release identity pack printed; the signer reads it before signing (D4)")
     p_ksign.add_argument("--verify-pub", type=Path, default=None)
 
+    p_probe = sub.add_parser("vault-probe", help="read-only transit key checks with a text-free receipt (#1343)")
+    p_probe.add_argument("--vault-addr", default=os.environ.get("VAULT_ADDR", ""))
+    p_probe.add_argument("--transit-mount", default=os.environ.get("VAULT_TRANSIT_MOUNT", "transit"))
+    p_probe.add_argument("--key-name", required=True)
+    p_probe.add_argument("--ca-file", type=Path, default=None)
+    p_probe.add_argument("--receipt", type=Path, default=None, help="also write the receipt here (mode 0600)")
+
     p_ver = sub.add_parser("verify", help="verify raw SHA256SUMS.sig using bootstrap.sh's openssl command")
     p_ver.add_argument("--pub", type=Path, required=True)
     p_ver.add_argument("--sums", type=Path, required=True)
     p_ver.add_argument("--sig", type=Path, required=True)
 
     args = parser.parse_args(argv)
+    if args.command == "vault-probe":
+        try:
+            receipt = probe_vault(
+                vault_addr=args.vault_addr,
+                vault_token=os.environ.get("VAULT_TOKEN", ""),
+                transit_mount=args.transit_mount,
+                key_name=args.key_name,
+                ca_file=args.ca_file,
+            )
+        except SignError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        try:
+            write_probe_receipt(receipt, args.receipt)
+        except OSError:
+            print("STOP: the receipt file could not be written", file=sys.stderr)
+            return 2
+        return receipt.exit_code()
     try:
         if args.command == "vault-sign":
             token = os.environ.get("VAULT_TOKEN", "")

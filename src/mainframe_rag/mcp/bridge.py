@@ -43,6 +43,7 @@ from __future__ import annotations
 import codecs
 import contextlib
 import ftplib
+import functools
 import re
 import socket
 import ssl
@@ -129,6 +130,9 @@ _PEM_PRIVATE_KEY_RE = re.compile(
 # its BEGIN (text that starts inside a key) redacts from the start of the text.
 _PEM_OPEN_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*\Z")
 _PEM_OPEN_END_RE = re.compile(r"\A[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----")
+# One BEGIN or END line of those patterns, for tracking a key across a read.
+_PEM_MARKER_RE = re.compile(r"-----(BEGIN|END) [A-Z0-9 ]*PRIVATE KEY-----")
+_PEM_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
 # Password and passphrase keywords as RACF, TSO and JCL spell them (any case):
 # the operands of ADDUSER/ALTUSER/PASSWORD/LOGON, their NEW* forms, and the
 # PassTicket/session key operands, whose values are secrets too.
@@ -565,6 +569,7 @@ def connect(
     factory: type[ftplib.FTP] = ftplib.FTP,
     *,
     breaker: LogonBreaker | None = None,
+    progress: list[str] | None = None,
 ) -> Any:
     """Open one FTP/FTPS session for a single tool call.
 
@@ -575,23 +580,32 @@ def connect(
       downgrade fallback, and protects the data channel with `PROT P`.
     - In `plain` mode, requires `plain_ftp_accepted=True`.
     - Sets explicit passive mode (`ftp.set_pasv(True)`) on every session.
+    - `progress`, when given, gets each completed setup stage appended
+      (`SESSION_STAGES`), so the site probe can tell which one failed.
     """
+    stages: list[str] = [] if progress is None else progress
     if breaker is None:
-        return _open_session(config, factory)
+        return _open_session(config, factory, stages)
     with breaker.logon_slot(wait_s=config.timeout_s):
-        return _open_session(config, factory)
+        return _open_session(config, factory, stages)
 
 
-def _open_session(config: FTPConfig, factory: type[ftplib.FTP]) -> Any:
+# Session setup stages in order (`tls` and `protected` in ftps mode only).
+SESSION_STAGES: tuple[str, ...] = ("connected", "tls", "logon", "protected", "passive")
+
+
+def _open_session(config: FTPConfig, factory: type[ftplib.FTP], progress: list[str]) -> Any:
     if config.transport_mode == "ftps":
         ctx = build_verified_tls_context(config.ca_file)
         ftp: Any = ftplib.FTP_TLS(context=ctx)
         try:
             ftp.connect(config.host, config.port, timeout=config.timeout_s)
+            progress.append("connected")
             try:
                 ftp.auth()
             except (ssl.SSLError, ftplib.error_perm, ftplib.error_temp, OSError) as exc:
                 raise _TlsVerificationError("FTPS verification failed") from exc
+            progress.append("tls")
         except Exception:
             with contextlib.suppress(Exception):
                 ftp.close()
@@ -602,6 +616,7 @@ def _open_session(config: FTPConfig, factory: type[ftplib.FTP]) -> Any:
         ftp = factory()
         try:
             ftp.connect(config.host, config.port, timeout=config.timeout_s)
+            progress.append("connected")
         except Exception:
             with contextlib.suppress(Exception):
                 ftp.close()
@@ -619,11 +634,14 @@ def _open_session(config: FTPConfig, factory: type[ftplib.FTP]) -> Any:
         if _is_530_error(exc):
             raise _LogonFailed("FTP logon failed") from exc
         raise
+    progress.append("logon")
 
     try:
         if config.transport_mode == "ftps" and isinstance(ftp, ftplib.FTP_TLS):
             ftp.prot_p()
+            progress.append("protected")
         ftp.set_pasv(True)
+        progress.append("passive")
     except Exception:
         with contextlib.suppress(Exception):
             ftp.close()
@@ -709,19 +727,30 @@ def _pin_text_format(ftp: Any) -> tuple[str, ...]:
     """
     unconfirmed: list[str] = []
     for operand in TEXT_FORMAT_SITES:
-        try:
-            reply = ftp.sendcmd(f"SITE {operand}")
-        except ftplib.error_perm as exc:
-            reply = str(exc)
-        if reply.startswith("200") and "unrecogni" not in reply.lower():
+        code, confirmed = site_reply(ftp, operand)
+        if confirmed:
             continue
         name = operand.split("=", 1)[0]
         unconfirmed.append(name)
-        code = reply[:3] if reply[:3].isdigit() else "???"
         print(f"mcp bridge: SITE {name} unconfirmed reply_code={code}", file=sys.stderr, flush=True)
     if unconfirmed:
         trace.get_current_span().set_attribute("mcp.ftp.site_unconfirmed", ",".join(unconfirmed))
     return tuple(unconfirmed)
+
+
+def site_reply(ftp: Any, operand: str) -> tuple[str, bool]:
+    """Send `SITE <operand>`; return (reply code, confirmed) without the text.
+
+    Confirmed is the `_pin_text_format` rule: a reply starting `200` with no
+    "unrecognized" line. A 5xx (`error_perm`) is an unconfirmed reply; a 4xx
+    (`error_temp`) or socket error propagates. The code is `???` when the
+    reply does not start with three digits."""
+    try:
+        reply = ftp.sendcmd(f"SITE {operand}")
+    except ftplib.error_perm as exc:
+        reply = str(exc)
+    code = reply[:3] if reply[:3].isdigit() else "???"
+    return code, reply.startswith("200") and "unrecogni" not in reply.lower()
 
 
 def _receive_ascii(
@@ -800,11 +829,66 @@ def _spool_budget(max_bytes: int) -> tuple[int, int, int]:
     return body, head, body - head
 
 
+# The text a key marker split by a receive chunk can have before the cut.
+PEM_CARRY_CHARS = 1024
+
+
+@functools.cache
+def _control_table() -> dict[int, None]:
+    """A str.translate table dropping what `_normalize_zos_text` drops: every
+    control and format character but tab and newline (built once, ~70 ms)."""
+    table: dict[int, None] = {
+        cp: None for cp in range(sys.maxunicode + 1) if unicodedata.category(chr(cp)) in ("Cc", "Cf")
+    }
+    del table[ord("\n")], table[ord("\t")]
+    return table
+
+
+def _marker_text(text: str) -> str:
+    """`_normalize_zos_text` as far as key markers are concerned (a CR LF
+    split by a chunk edge may give two line ends), at C speed."""
+    return text.replace("\r", "\n").translate(_control_table())
+
+
+class _OpenKey:
+    """Whether a private key is open after the spool bytes fed so far, in
+    stream order: the last BEGIN or END line of a private key seen is a
+    BEGIN. That is the whole-file rule (a key runs from a BEGIN line to the
+    next END line, or to the end of the text; an END with no open key is not
+    a key). Bytes are decoded and normalized as screening does; a marker
+    split by a chunk edge is found through a carry of the unfinished line
+    (up to PEM_CARRY_CHARS). Memory is bounded; time is linear."""
+
+    def __init__(self, encoding: str) -> None:
+        self._decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
+        self._carry = ""
+        self.open = False
+
+    def feed(self, raw: bytes) -> None:
+        self.feed_text(self._decoder.decode(raw))
+
+    def feed_text(self, text: str) -> None:
+        """Feed text already decoded by `decode_rest` or `feed`."""
+        text = self._carry + _marker_text(text)
+        consumed = 0
+        for match in _PEM_MARKER_RE.finditer(text):
+            self.open = match.group(1) == "BEGIN"
+            consumed = match.end()
+        self._carry = text[max(consumed, text.rfind("\n") + 1, len(text) - PEM_CARRY_CHARS) :]
+
+    def decode_rest(self, raw: bytes) -> str:
+        """Decode the bytes after those fed, the decoder state carried over
+        (a character split by the last fed chunk is whole)."""
+        return self._decoder.decode(raw, final=True)
+
+
 @dataclass
 class _SpoolCapture:
     """Receive state for the spool window: the first `head_cap` bytes, a
     deque of the last chunks holding at least `tail_keep` bytes, and a byte
-    count. `head_only` stops once the head is full."""
+    count. `head_only` stops once the head is full. `keys`, when set, is fed
+    every byte that is not in the ring (the head and each evicted chunk), so
+    the tail knows whether it starts inside a private key."""
 
     head_cap: int
     tail_keep: int
@@ -816,6 +900,7 @@ class _SpoolCapture:
     total: int = 0
     evicted: bool = False
     complete: bool = False
+    keys: _OpenKey | None = None
 
     def accept(self, chunk: bytes) -> bool:
         if self.total + len(chunk) > self.ceiling:
@@ -824,6 +909,8 @@ class _SpoolCapture:
         room = self.head_cap - len(self.head)
         if room > 0:
             self.head.extend(chunk[:room])
+            if self.keys is not None:
+                self.keys.feed(chunk[:room])
             chunk = chunk[room:]
         if self.head_only:
             return len(self.head) < self.head_cap
@@ -831,8 +918,11 @@ class _SpoolCapture:
             self.tail.append(chunk)
             self.tail_len += len(chunk)
             while self.tail_len - len(self.tail[0]) >= self.tail_keep:
-                self.tail_len -= len(self.tail.popleft())
+                evicted = self.tail.popleft()
+                self.tail_len -= len(evicted)
                 self.evicted = True
+                if self.keys is not None:
+                    self.keys.feed(evicted)
         return True
 
 
@@ -910,7 +1000,8 @@ def _tail_start(text: str) -> int:
     Every non-PEM value is single-line, so a match spans a line start only
     through its key's separator. From such a start, screening the rest on its
     own pairs keys and values exactly as whole-file screening does; a PEM
-    block it starts inside is redacted from the start by the open-END rule.
+    block it starts inside is redacted from the start by the open-END rule,
+    or by `_screen_tail` when its END line is missing too.
     Dropping the first line also drops a CR/LF or character split by the
     receive. The size of the ring's lookbehind does not matter for safety.
     """
@@ -931,12 +1022,28 @@ def _tail_start(text: str) -> int:
     return len(text)
 
 
-def _screen_tail(raw: bytes, encoding: str) -> str:
+def _screen_tail(raw: bytes, encoding: str, keys: _OpenKey | None = None) -> str:
     """Decode an evicted tail ring and screen it from `_tail_start` on, then
-    neutralize window-marker lookalikes."""
-    decoded = codecs.getincrementaldecoder(encoding)(errors="replace").decode(raw, final=True)
+    neutralize window-marker lookalikes.
+
+    With `keys` (fed every byte before the ring), a private key still open
+    at the tail start (its BEGIN line in the head, the gap or the ring's
+    lead) is redacted from the tail start to its END line, or to the end of
+    the tail when it has none, as whole-file screening redacts it."""
+    if keys is None:
+        decoded = codecs.getincrementaldecoder(encoding)(errors="replace").decode(raw, final=True)
+    else:
+        decoded = keys.decode_rest(raw)
     text = _normalize_zos_text(decoded)
-    screened = _redact_zos_text(text[_tail_start(text) :])
+    start = _tail_start(text)
+    rest = text[start:]
+    lead = ""
+    if keys is not None:
+        keys.feed_text(text[:start])
+        if keys.open:
+            end = _PEM_END_RE.search(rest)
+            lead, rest = "[REDACTED]", rest[end.end() :] if end else ""
+    screened = lead + _redact_zos_text(rest)
     return _WINDOW_MARKER_RE.sub("[neutralized-window-marker]", screened)
 
 
@@ -996,7 +1103,7 @@ def _spool_window(
             "stream_complete": False,
         }
         return body, fields, f"window=head-only read_bytes={capture.total}"
-    tail = _keep_last_lines(_screen_tail(tail_raw, encoding), tail_budget)
+    tail = _keep_last_lines(_screen_tail(tail_raw, encoding, capture.keys), tail_budget)
     return _head_tail_window(head, tail, capture.total)
 
 
@@ -1089,6 +1196,7 @@ class FTPSession:
             tail_keep=tail_budget + TAIL_LOOKBEHIND_BYTES,
             ceiling=cfg.spool_stream_max_bytes,
             head_only=size_hint is not None and size_hint > cfg.spool_stream_max_bytes,
+            keys=_OpenKey(cfg.encoding),
         )
         _pin_text_format(self.ftp)
         outcome = _receive_ascii(

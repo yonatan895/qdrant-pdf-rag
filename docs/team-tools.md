@@ -321,7 +321,9 @@ Start-up reads the configuration and secrets, then checks the team token, then
 serves. It exits 2 on a configuration error (the message names the rule, never a
 value) and 3 when the token check refuses, logging
 `{"action": "gitlab_gateway_start", "decision": <code>}`. The token and the
-bearer secret are never logged.
+bearer secret are never logged. `--site-probe` runs the read-only ADR-0014
+site checks instead of serving and prints a text-free receipt
+(`gitlab_probe.py`; [ADR-0014](adr/0014-gitlab-team-token-gateway.md#open-site-checks-before-go-live)).
 
 **Caller mode.** `GITLAB_AUTH_MODE` is `oidc` (default; also when unset) or
 `bearer`; anything else is a start-up error. `oidc` uses
@@ -422,6 +424,17 @@ names it fails at start-up as an unknown key.
   - It is cut at a line boundary. A partial first line is dropped, and so is a
     partial last line when reading stopped early, so a cut never leaves a
     fragment of a secret that redaction would miss.
+  - Up to 4 KiB of raw log bytes read before the window
+    (`JOB_LOG_LOOKBEHIND_BYTES`, counted before cleaning removes escapes,
+    CRs or zero-width characters) is held as context and never returned. When
+    more log came before it, its partial first line is not used, since a key
+    could start there. While the text before a kept line ends in a secret name
+    and separator, an `Authorization` header name or an auth scheme word
+    (`Bearer`, `Basic`, `Splunk`), or in a secret name whose separator
+    opens that line, the line may be the value of a key outside the window and
+    is dropped as well; blank lines in between do not end this. With no
+    usable context (a line longer than the lookbehind), the first non-blank
+    kept line is dropped.
   - Private keys are found in the whole stream, the dropped bytes included: a
     key runs from a `BEGIN … PRIVATE KEY` line to the next `END … PRIVATE KEY`
     line, or to the end of what was read. Every kept byte inside a key becomes
