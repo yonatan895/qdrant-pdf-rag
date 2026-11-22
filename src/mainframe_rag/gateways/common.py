@@ -442,6 +442,31 @@ def clean_text(text: str) -> str:
     return kept
 
 
+# Where a clean_text match can run on across a line end: through the
+# whitespace after a secret name and its separator, an authorization header
+# name and its separator, or an auth scheme word; or from a secret name or
+# authorization header name whose separator opens the next line. Every other
+# pattern stops at a line end (private keys are tracked by PrivateKeySpans).
+_KEY_SEP_END_RE: Final = re.compile(
+    rf"(?i)(?:{_SECRET_NAME}[\w.-]{{0,40}}['\"]?\s*[:=]|\bauthorization\s*[:=]|\b(?:bearer|basic|splunk))\s*\Z"
+)
+_KEY_NAME_END_RE: Final = re.compile(rf"(?i)(?:{_SECRET_NAME}[\w.-]{{0,40}}['\"]?|\bauthorization)\s*\Z")
+KEY_CARRY_CHARS: Final = 256
+
+
+def key_runs_on(before: str, line: str) -> bool:
+    """Whether a clean_text match could start in `before` and run on into
+    `line`, the next line: `before` ends in a secret name and separator, an
+    authorization header name and separator, or an auth scheme word; or it
+    ends in a name and `line` is blank or opens with a separator. Only the
+    last KEY_CARRY_CHARS characters of `before` are read."""
+    tail = before[-KEY_CARRY_CHARS:]
+    if _KEY_SEP_END_RE.search(tail):
+        return True
+    opening = line.lstrip()
+    return (not opening or opening[0] in ":=") and _KEY_NAME_END_RE.search(tail) is not None
+
+
 
 # --- private keys across a streamed read ------------------------------------------------
 

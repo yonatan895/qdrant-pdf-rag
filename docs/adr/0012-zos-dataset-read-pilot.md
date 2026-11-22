@@ -207,6 +207,11 @@
      15 s call timeout) stop a longer stream, which returns the head with a
      stop marker; a `LIST` BYTE-COUNT above the byte ceiling reads the head
      only. `dataset_read` and `job_status` stay head-only.
+   - *(2026-11-22 amendment, Refs #1347.)* Open private key at a job-log gap:
+     a private key still open at the tail start (its `BEGIN` line in the
+     head, the gap or the ring's lead; tracked over every received byte) is
+     redacted from the tail start to its `END` line, or to the end of the
+     tail when it has none, as whole-file screening redacts it.
    - Screened before it reaches the prompt: control and bidi characters
      stripped, password-shaped strings redacted.
    - Framed as an untrusted, delimited observation block, cited distinctly from

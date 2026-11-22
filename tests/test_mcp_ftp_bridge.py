@@ -25,11 +25,14 @@ from typing import Self
 import httpx2
 import pytest
 from fastapi.testclient import TestClient
+from hypothesis import assume, given
+from hypothesis import strategies as st
 
 from mainframe_rag.mcp import __main__ as mcp_main
 from mainframe_rag.mcp import bridge, server, site_probe
 from mainframe_rag.mcp.bridge import FTPConfig, LogonBreaker
 from mainframe_rag.probe_receipt import Receipt, ReceiptError
+from tests import helpers_redaction_props as props
 
 
 class FakeFTP:
@@ -1233,6 +1236,207 @@ def test_spool_window_split_anywhere_in_a_key_value_pair_never_leaks(family: str
         if _GAP in text:
             tail = _after_gap_marker(text).removesuffix(bridge.OBS_END_MARKER)
             _assert_line_suffix(tail, _screened_oracle(payload))
+
+
+# --- #1347: no secret survives a truncation cut (shared property helper) ------------------
+# Whole-text screening is the oracle (tests/helpers_redaction_props.py). Each
+# example draws a secret shape and the offset into it where the cut lands,
+# then builds the bytes so the real tool path cuts exactly there.
+
+
+def _whole_screened(payload: bytes, encoding: str) -> str:
+    return bridge.screen_zos_text(payload.decode(encoding, errors="replace"))
+
+
+def _chunked(fake: FakeFTP, chunk: int) -> FakeFTP:
+    """The fake data connection delivering at most chunk bytes per recv, so
+    chunk edges (and the tail ring's eviction steps) fall on drawn bytes."""
+    opened = fake.transfercmd
+
+    def transfercmd(cmd: str, rest=None) -> _FakeDataConn:
+        conn = opened(cmd, rest)
+        whole = conn.recv
+        conn.recv = lambda n: whole(min(n, chunk))  # type: ignore[method-assign]
+        return conn
+
+    fake.transfercmd = transfercmd  # type: ignore[method-assign]
+    return fake
+
+
+@st.composite
+def _zos_secret(
+    draw: st.DrawFn, leads: tuple[bytes, ...] = props.LEADS, *, open_end: bool = True
+) -> tuple[bytes, props.Secret]:
+    eol = draw(st.sampled_from(props.LINE_ENDS))
+    if draw(st.integers(0, 3)) == 0:
+        return eol, draw(props.pem_secrets(eol, open_end=open_end))
+    return eol, draw(props.kv_secrets(list(props.FAMILIES), eol, leads))
+
+
+@props.property_settings(max_examples=150)
+@given(st.data())
+def test_dataset_read_head_cut_never_leaks_a_secret(data: st.DataObject) -> None:
+    """The byte cap cuts the head of a dataset read at a drawn byte of a key,
+    separator or value (or a PEM key); screening runs on the cut text."""
+    eol, secret = data.draw(_zos_secret())
+    encoding = data.draw(st.sampled_from(["latin-1", "utf-8"]))
+    shape = {"width": data.draw(st.sampled_from([8, 40, 133])), "multibyte": data.draw(st.booleans())}
+    off = data.draw(props.cut_offsets(secret))
+    before = props.filler(data.draw(st.integers(4, 3000)), eol=eol, **shape)
+    payload = before + secret.raw + eol + props.filler(400, eol=eol, **shape) + b"LAST LINE" + eol
+    cap = len(before) + off
+    fake = FakeFTP()
+    fake.files["'A.B'"] = payload
+    out = bridge.dataset_read(_session(fake, max_bytes=cap, encoding=encoding), "A.B")
+    text = out["content"][0]["text"]
+    assert bridge.TRUNCATION_SUFFIX in text  # the cut happened
+    assume(props.assert_no_secret_survives(text, _whole_screened(payload, encoding), secret))
+
+
+@props.property_settings(max_examples=100)
+@given(st.data())
+def test_spool_window_head_cut_never_leaks_a_secret(data: st.DataObject) -> None:
+    """jes_spool_read with the secret straddling the head budget H: a
+    contiguous read just over B (whole-file screened, then cut at H and at
+    the tail start right after it), an evicted read (the head cut back to a
+    line end and screened alone), and a read stopped at the byte ceiling
+    (head only)."""
+    cap = _SMALL_CAP
+    b, h, _ = bridge._spool_budget(cap)
+    eol, secret = data.draw(_zos_secret(leads=props.SHORT_LEADS))
+    encoding = data.draw(st.sampled_from(["latin-1", "utf-8"]))
+    shape = {"width": data.draw(st.sampled_from([8, 40, 133])), "multibyte": data.draw(st.booleans())}
+    off = data.draw(props.cut_offsets(secret).filter(lambda o: o <= h))
+    mode = data.draw(st.sampled_from(["contiguous", "evicted", "head_only"]))
+    # Contiguous: a few bytes over B, so the line trim alone cannot drop the tail's first lines.
+    total = {"contiguous": b + data.draw(st.integers(1, 8)), "evicted": 30_000, "head_only": 30_000}[mode]
+    before = props.filler(h - off, eol=eol, **shape)
+    last = b"LAST LINE" + eol
+    rest = max(0, total - len(before) - len(secret.raw) - len(eol) - len(last))
+    payload = before + secret.raw + eol + props.filler(rest, eol=eol, **shape) + last
+    if mode == "contiguous":  # pad back what screening removed, so the screened text stays just over B
+        rest += max(0, total - len(_whole_screened(payload, encoding).encode()))
+        payload = before + secret.raw + eol + props.filler(rest, eol=eol, **shape) + last
+    overrides = {"spool_stream_max_bytes": cap} if mode == "head_only" else {}
+    out = _spool_out(_spool_fake(payload), max_bytes=cap, encoding=encoding, **overrides)
+    text = _assert_framed_within(out, cap)
+    # A contiguous read whose screened text shrank under B (CRs, a redacted key) comes back whole.
+    expected = {"contiguous": {"head_tail", "full"}, "evicted": {"head_tail"}, "head_only": {"head_only"}}
+    assert out["structuredContent"]["window"] in expected[mode]
+    assume(props.assert_no_secret_survives(text, _whole_screened(payload, encoding), secret))
+
+
+@props.property_settings(max_examples=150)
+@given(st.data())
+def test_spool_window_tail_start_never_leaks_a_secret(data: st.DataObject) -> None:
+    """An evicted spool read whose tail ring starts at a drawn byte of a
+    secret (the ring is built directly, so the start is exact rather than
+    receive-chunk granular). What follows the secret fits T, so the line trim
+    alone cannot remove it; the head and the evicted part are filler. A key
+    with no END line whose BEGIN line falls before the tail start is redacted
+    to the end, as whole-file screening redacts it."""
+    cap = _SMALL_CAP
+    _, h, t = bridge._spool_budget(cap)
+    eol, secret = data.draw(_zos_secret())
+    encoding = data.draw(st.sampled_from(["latin-1", "utf-8"]))
+    shape = {"width": data.draw(st.sampled_from([8, 40, 133, 6000])), "multibyte": data.draw(st.booleans())}
+    off = data.draw(props.cut_offsets(secret))
+    before = props.filler(data.draw(st.integers(3, 6000)), eol=eol, **shape)
+    after = props.filler(data.draw(st.integers(0, t // 2)), eol=eol, **shape)
+    full = before + secret.raw + eol + after + b"LAST LINE" + eol
+    ring = full[len(before) + off :]
+    edge = data.draw(st.integers(0, len(ring)))  # a receive chunk edge (CR/LF or a character split)
+    head = props.filler(h, eol=eol)
+    keys = bridge._OpenKey(encoding)  # what accept() feeds: the head, then each evicted chunk
+    keys.feed(head)
+    keys.feed(full[: len(before) + off])
+    capture = bridge._SpoolCapture(
+        head_cap=h,
+        tail_keep=t + bridge.TAIL_LOOKBEHIND_BYTES,
+        ceiling=1 << 30,
+        head=bytearray(head),
+        tail=deque(part for part in (ring[:edge], ring[edge:]) if part),
+        tail_len=len(ring),
+        total=h + len(before) + off + len(ring),
+        evicted=True,
+        complete=True,
+        keys=keys,
+    )
+    body, fields, _ = bridge._spool_window(capture, encoding, cap)
+    assert fields["window"] == "head_tail"
+    assume(props.assert_no_secret_survives(body, _whole_screened(full, encoding), secret))
+
+
+@props.property_settings(max_examples=40, deadline_ms=10000)
+@given(st.data())
+def test_spool_read_through_the_receive_never_leaks_a_secret(data: st.DataObject) -> None:
+    """jes_spool_read end to end: chunked receive, real eviction, short CRLF
+    records after the secret (CR stripping shrinks the screened tail under T,
+    so the value is not trimmed away), and the ring start placed at a drawn
+    byte of the secret. A probe read of the same length finds the ring start;
+    it depends on lengths only."""
+    cap = 65536
+    eol, secret = data.draw(_zos_secret(leads=props.SHORT_LEADS))
+    encoding = data.draw(st.sampled_from(["latin-1", "utf-8"]))
+    chunk = data.draw(st.sampled_from([997, 2048, 4096]))
+    off = data.draw(props.cut_offsets(secret))
+    total = data.draw(st.integers(80_000, 120_000))
+    probe = bridge.FTPSession(_chunked(_spool_fake(b"x" * total), chunk), _jes_config(max_bytes=cap))
+    capture = probe.read_spool("RETR JOB00123.2")
+    ring_start = total - sum(len(part) for part in capture.tail)
+    before = props.filler(ring_start - off, eol=eol)
+    last = b"LAST LINE" + eol
+    after_size = total - len(before) - len(secret.raw) - len(eol) - len(last)
+    after = (b"rrrr\r\n" * (after_size // 6 + 1))[:after_size]  # 6-byte CRLF records
+    payload = before + secret.raw + eol + after + last
+    assert len(payload) == total
+    out = _spool_out(_chunked(_spool_fake(payload), chunk), max_bytes=cap, encoding=encoding)
+    text = _assert_framed_within(out, cap)
+    assert out["structuredContent"]["window"] == "head_tail"
+    assume(props.assert_no_secret_survives(text, _whole_screened(payload, encoding), secret))
+
+
+def test_whole_text_screen_covers_these_secret_shapes() -> None:
+    """Pins which shared families the z/OS screen redacts (L LF, W CRLF,
+    R CR), so a property cannot go silently vacuous: a family not covered
+    here is discarded by the spool and dataset properties. Pattern limits
+    (lower-case or prefixed key names, URL credentials) are not leaks."""
+    covered = props.screen_coverage(lambda raw: bridge.screen_zos_text(raw.decode("latin-1")))
+    assert covered == {name: "LWR" for name in props.FAMILIES} | {"kv_spaced": "", "url_credentials": ""}
+
+
+@pytest.mark.parametrize(
+    ("encoding", "marker"),
+    [
+        ("latin-1", b"-----BEGIN RSA PRIVATE KEY-----"),
+        ("latin-1", b"-----BEG\x00IN RSA PRIVATE\x1b KEY-----"),  # control bytes screening drops
+        ("utf-8", b"-----BEGIN PRIV\xe2\x80\x8bATE KEY-----"),  # a zero-width space (Cf)
+    ],
+)
+def test_open_key_finds_a_marker_split_at_any_byte(encoding: str, marker: bytes) -> None:
+    """The key state the spool tail starts from: a BEGIN marker split by a
+    receive chunk edge at any byte is found, and the next END closes it."""
+    stream = b"first line\r\n" + marker + b"\r\nQXJZQXJZ\r\n"
+    for cut in range(len(stream) + 1):
+        keys = bridge._OpenKey(encoding)
+        keys.feed(stream[:cut])
+        keys.feed(stream[cut:])
+        assert keys.open, cut
+        keys.feed(b"-----END RSA PRIVATE KEY-----\r\nafter\r\n")
+        assert not keys.open, cut
+
+
+def test_spool_key_opened_in_the_head_without_end_blanks_the_tail() -> None:
+    """A key whose BEGIN line is in the head and which never ends: whole-file
+    screening redacts from BEGIN to the end, so no key line may show in the
+    head or the tail of an evicted read."""
+    body = b"".join(b"QXJZ%06dQXJZ\n" % n for n in range(9000))
+    payload = b"JOB LOG START\n-----BEGIN PRIVATE KEY-----\n" + body
+    out = _spool_out(_chunked(_spool_fake(payload), 4096), max_bytes=65536, encoding="latin-1")
+    text = _assert_framed_within(out, 65536)
+    assert out["structuredContent"]["window"] == "head_tail"
+    assert "JOB LOG START" in text
+    assert "QXJZ" not in text
 
 
 def test_spool_pem_cut_by_window_is_redacted() -> None:
