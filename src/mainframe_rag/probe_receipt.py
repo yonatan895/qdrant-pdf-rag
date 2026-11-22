@@ -31,7 +31,7 @@ SCHEMA_VERSION = 1
 STATUSES: tuple[str, ...] = ("pass", "fail", "inconclusive")
 CHECK_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,15}\.[a-z][a-z0-9_]{0,47}$")
 FIELD_RE = re.compile(r"^[a-z][a-z0-9_]{0,47}$")
-SAFE_VALUE_RE = re.compile(r"^[A-Za-z0-9_.+=-]{0,48}$")
+SAFE_VALUE_RE = re.compile(r"^[A-Za-z0-9_.+=-]{0,64}$")
 RESERVED_FIELDS = frozenset({"probe", "check", "status"})
 
 FieldValue = bool | int | str | None

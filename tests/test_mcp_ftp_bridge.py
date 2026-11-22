@@ -2688,7 +2688,7 @@ def test_probe_receipt_refuses_text_and_counts_statuses() -> None:
     receipt = Receipt("zos")
     receipt.add("zos.a", "pass", reply_code="200", ok=True, n=3, none=None)
     receipt.add("zos.b", "inconclusive", reason="no_job_named")
-    for bad in ("two words", "a/b", "user@host", "x" * 49, "line\n", "k:v"):
+    for bad in ("two words", "a/b", "user@host", "x" * 65, "line\n", "k:v"):
         with pytest.raises(ReceiptError):
             receipt.add("zos.c", "pass", value=bad)
     with pytest.raises(ReceiptError):
