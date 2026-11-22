@@ -71,14 +71,20 @@ REASONING_ENV_KEYS = (*REASONING_INTEGER_FIELDS, *REASONING_EFFORT_FIELDS, "LLM_
                       SPL_MODE_KEY, CHAT_IMAGES_KEY)
 
 # Request admission and total deadline (#374 handoff, #843 D1). Empty keeps the
-# chart default (deadline 270; admission 4/4/30, #843); zero is an explicit selection. Limits match config.Settings and the
+# chart default (deadline 270; admission 4/4/30, #843; body cap/budget 24/128 MiB, #1352); zero is an explicit selection. Limits match config.Settings and the
 # chart schema. The route timeout is the mapper's fixed 300 s.
 ROUTE_TIMEOUT_SECONDS = 300
 REQUEST_INTEGER_FIELDS = {
     "REQUEST_DEADLINE_S": ("requestDeadlineSeconds", 0, 3600),
     "REQUEST_MAX_CONCURRENT": ("requestMaxConcurrent", 0, 1000),
     "REQUEST_QUEUE_MAX": ("requestQueueMax", 0, 1000),
+    # Request-body bounds (#1352), bytes per agent replica; budget >= cap.
+    "REQUEST_MAX_BODY_BYTES": ("requestMaxBodyBytes", 1048576, 268435456),
+    "REQUEST_BODY_BUDGET_BYTES": ("requestBodyBudgetBytes", 1048576, 4294967296),
 }
+# Chart defaults (charts/mainframe-rag/values.yaml, a test pins them) that the
+# budget >= cap rule compares an empty side against.
+REQUEST_BODY_DEFAULTS = {"requestMaxBodyBytes": 25165824, "requestBodyBudgetBytes": 134217728}
 REQUEST_WAIT_KEY = "REQUEST_QUEUE_WAIT_S"  # chart requestQueueWaitSeconds, 0..300, decimal
 REQUEST_ENV_KEYS = (*REQUEST_INTEGER_FIELDS, REQUEST_WAIT_KEY)
 
@@ -592,12 +598,15 @@ def request_overrides(values: Mapping[str, str]) -> dict[str, int | float]:
         raw = values.get(name, "")
         if raw == "":
             continue
-        if not re.fullmatch(r"[0-9]{1,5}", raw) or not minimum <= int(raw) <= maximum:
+        if not re.fullmatch(r"[0-9]{1,10}", raw) or not minimum <= int(raw) <= maximum:
             raise ValueError(f"{name} must be an integer from {minimum} to {maximum}")
         result[field] = int(raw)
     deadline = result.get("requestDeadlineSeconds", 0)
     if deadline >= ROUTE_TIMEOUT_SECONDS:
         raise ValueError(f"REQUEST_DEADLINE_S must be 0 or below the {ROUTE_TIMEOUT_SECONDS} s route timeout")
+    body = {**REQUEST_BODY_DEFAULTS, **{k: v for k, v in result.items() if k in REQUEST_BODY_DEFAULTS}}
+    if body["requestBodyBudgetBytes"] < body["requestMaxBodyBytes"]:
+        raise ValueError("REQUEST_BODY_BUDGET_BYTES must be at least REQUEST_MAX_BODY_BYTES")
     raw = values.get(REQUEST_WAIT_KEY, "")
     if raw != "":
         if not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3})?", raw) or float(raw) > 300:

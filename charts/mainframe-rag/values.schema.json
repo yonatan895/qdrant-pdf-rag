@@ -11,7 +11,7 @@
     "required": ["requestQueueWaitSeconds"],
     "properties": { "requestQueueWaitSeconds": { "exclusiveMinimum": 0 } }
   },
-  "required": ["replicaCount", "images", "qdrantRelease", "models", "gateway", "tracing", "metrics", "ui", "route", "storage", "ingest", "pullSecret", "resources"],
+  "required": ["requestMaxBodyBytes", "requestBodyBudgetBytes", "replicaCount", "images", "qdrantRelease", "models", "gateway", "tracing", "metrics", "ui", "route", "storage", "ingest", "pullSecret", "resources"],
   "definitions": {
     "nonPlaceholderString": {
       "type": "string",
@@ -55,6 +55,8 @@
     "requestMaxConcurrent": { "type": "integer", "minimum": 0, "maximum": 1000 },
     "requestQueueMax": { "type": "integer", "minimum": 0, "maximum": 1000 },
     "requestQueueWaitSeconds": { "type": "number", "minimum": 0, "maximum": 300 },
+    "requestMaxBodyBytes": { "type": "integer", "minimum": 1048576, "maximum": 268435456 },
+    "requestBodyBudgetBytes": { "type": "integer", "minimum": 1048576, "maximum": 4294967296 },
     "replicaCount": {
       "type": "integer",
       "minimum": 1,

@@ -1,0 +1,267 @@
+{
+ "_comment": "/openapi.json for the /v1/chat* request body as published before #1352 (origin/main c243d1c2); tests/test_request_bounds.py pins it.",
+ "operations": {
+  "/v1/chat": {
+   "422": {
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/HTTPValidationError"
+      }
+     }
+    },
+    "description": "Validation Error"
+   },
+   "description": "Multi-turn chat completions: native POST /v1/chat and its\nOpenAI-compatible alias POST /v1/chat/completions.\n\nSupports non-streaming JSON and streaming SSE (OpenAI `data: {...}` chunks\nterminated by `data: [DONE]`). Follow-up turns condense only when\nCHAT_CONDENSE_ENABLED is on; retrieval, prompt assembly, reasoning\ngeneration, and turn-local citation validation all run through the shared\nanswer core.",
+   "requestBody": {
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/ChatRequest"
+      }
+     }
+    },
+    "required": true
+   }
+  },
+  "/v1/chat/completions": {
+   "422": {
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/HTTPValidationError"
+      }
+     }
+    },
+    "description": "Validation Error"
+   },
+   "description": "Multi-turn chat completions: native POST /v1/chat and its\nOpenAI-compatible alias POST /v1/chat/completions.\n\nSupports non-streaming JSON and streaming SSE (OpenAI `data: {...}` chunks\nterminated by `data: [DONE]`). Follow-up turns condense only when\nCHAT_CONDENSE_ENABLED is on; retrieval, prompt assembly, reasoning\ngeneration, and turn-local citation validation all run through the shared\nanswer core.",
+   "requestBody": {
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/ChatRequest"
+      }
+     }
+    },
+    "required": true
+   }
+  }
+ },
+ "schemas": {
+  "ChatMessage": {
+   "additionalProperties": false,
+   "properties": {
+    "content": {
+     "minLength": 1,
+     "title": "Content",
+     "type": "string"
+    },
+    "role": {
+     "enum": [
+      "system",
+      "user",
+      "assistant"
+     ],
+     "title": "Role",
+     "type": "string"
+    }
+   },
+   "required": [
+    "role",
+    "content"
+   ],
+   "title": "ChatMessage",
+   "type": "object"
+  },
+  "ChatRequest": {
+   "additionalProperties": false,
+   "properties": {
+    "max_tokens": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "OpenAI-compat parameter; token limits are managed server-side by the reasoning profile.",
+     "title": "Max Tokens"
+    },
+    "messages": {
+     "items": {
+      "$ref": "#/components/schemas/ChatMessage"
+     },
+     "minItems": 1,
+     "title": "Messages",
+     "type": "array"
+    },
+    "model": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Model"
+    },
+    "product": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Product"
+    },
+    "reasoning_depth": {
+     "anyOf": [
+      {
+       "enum": [
+        "quick",
+        "standard",
+        "thorough"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Reasoning Depth"
+    },
+    "reasoning_effort": {
+     "anyOf": [
+      {
+       "enum": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Reasoning Effort"
+    },
+    "research_mode": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Research Mode"
+    },
+    "splunk_context": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Splunk Context"
+    },
+    "stream": {
+     "default": false,
+     "title": "Stream",
+     "type": "boolean"
+    },
+    "temperature": {
+     "anyOf": [
+      {
+       "maximum": 2.0,
+       "minimum": 0.0,
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Temperature"
+    },
+    "version": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Version"
+    }
+   },
+   "required": [
+    "messages"
+   ],
+   "title": "ChatRequest",
+   "type": "object"
+  },
+  "HTTPValidationError": {
+   "properties": {
+    "detail": {
+     "items": {
+      "$ref": "#/components/schemas/ValidationError"
+     },
+     "title": "Detail",
+     "type": "array"
+    }
+   },
+   "title": "HTTPValidationError",
+   "type": "object"
+  },
+  "ValidationError": {
+   "properties": {
+    "ctx": {
+     "title": "Context",
+     "type": "object"
+    },
+    "input": {
+     "title": "Input"
+    },
+    "loc": {
+     "items": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "integer"
+       }
+      ]
+     },
+     "title": "Location",
+     "type": "array"
+    },
+    "msg": {
+     "title": "Message",
+     "type": "string"
+    },
+    "type": {
+     "title": "Error Type",
+     "type": "string"
+    }
+   },
+   "required": [
+    "loc",
+    "msg",
+    "type"
+   ],
+   "title": "ValidationError",
+   "type": "object"
+  }
+ }
+}

@@ -51,6 +51,7 @@ MAPPER_KEYS = [
     "LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT", "LLM_TOKEN_COUNT_SOURCE", "CHAT_MAX_PRIOR_TURN_CHARS", "CHAT_MAX_TURNS",
     "CHAT_FOLLOWUP_ANCHOR_ENABLED", "ANSWER_HIT_LIMIT", "RETRIEVE_MAX_CHUNKS_PER_DOC", "ANSWER_CODING_MODE_ENABLED", "CHAT_IMAGES_ENABLED",
     "LLM_IMAGE_TOKEN_RESERVE", "REQUEST_DEADLINE_S", "REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S",
+    "REQUEST_MAX_BODY_BYTES", "REQUEST_BODY_BUDGET_BYTES",
     "RERANK_ENABLED", "RERANK_BASE_URL", "RERANK_MODEL", "RERANK_ENDPOINT_ORDER",
     "GATEWAY_API_KEY_SECRET", "GATEWAY_API_KEY_SECRET_KEY", "GATEWAY_CA_CONFIGMAP", "PULL_SECRET",
     "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_ENDPOINT_RESOLVED", "OTEL_TRACING_ENABLED",
@@ -1537,6 +1538,10 @@ def test_request_bound_explicit_zero_is_retained(monkeypatch, mapper_env):
     ("REQUEST_DEADLINE_S", "300"), ("REQUEST_DEADLINE_S", "900"), ("REQUEST_DEADLINE_S", "private-value"),
     ("REQUEST_MAX_CONCURRENT", "1001"), ("REQUEST_MAX_CONCURRENT", "two"),
     ("REQUEST_QUEUE_MAX", "-3"), ("REQUEST_QUEUE_WAIT_S", "301"), ("REQUEST_QUEUE_WAIT_S", "1e2"),
+    ("REQUEST_MAX_BODY_BYTES", "1048575"), ("REQUEST_MAX_BODY_BYTES", "268435457"),
+    ("REQUEST_MAX_BODY_BYTES", "2.5e7"), ("REQUEST_MAX_BODY_BYTES", "private-value"),
+    ("REQUEST_BODY_BUDGET_BYTES", "4294967297"), ("REQUEST_BODY_BUDGET_BYTES", "-1"),
+    ("REQUEST_BODY_BUDGET_BYTES", "12345678901"),
 ])
 def test_request_bound_invalid_values_fail_without_echo(monkeypatch, mapper_env, name, raw):
     monkeypatch.setenv(name, raw)
@@ -1544,6 +1549,67 @@ def test_request_bound_invalid_values_fail_without_echo(monkeypatch, mapper_env,
     assert result.returncode != 0
     assert name in result.stderr
     assert "private-value" not in result.stderr
+    if name.endswith("_BYTES"):
+        assert raw not in result.stderr
+
+
+def test_request_body_bounds_unset_keep_chart_defaults(monkeypatch, mapper_env):
+    """#1352: no operator value means no override; the chart's 24 MiB cap and 128 MiB
+    budget reach the pod as exact integers and Settings reads them back."""
+    from mainframe_rag.config import Settings
+
+    result, output = mapper_env()
+    assert result.returncode == 0, result.stderr
+    assert not {"requestMaxBodyBytes", "requestBodyBudgetBytes"} & load_values(output).keys()
+    actual = _agent_env(output)
+    names = ("REQUEST_MAX_BODY_BYTES", "REQUEST_BODY_BUDGET_BYTES")
+    assert [actual[n] for n in names] == ["25165824", "134217728"]
+    for n in names:
+        monkeypatch.setenv(n, actual[n])
+    settings = Settings(_env_file=None)
+    assert (settings.request_max_body_bytes, settings.request_body_budget_bytes) == (25165824, 134217728)
+
+
+def test_request_body_bounds_operator_values_reach_the_pod_and_settings(monkeypatch, mapper_env):
+    from mainframe_rag.config import Settings
+
+    chosen = {"REQUEST_MAX_BODY_BYTES": "268435456", "REQUEST_BODY_BUDGET_BYTES": "4294967296"}
+    for name, value in chosen.items():
+        monkeypatch.setenv(name, value)
+    result, output = mapper_env()
+    assert result.returncode == 0, result.stderr
+    assert load_values(output)["requestBodyBudgetBytes"] == 4294967296
+    actual = _agent_env(output)
+    assert {name: actual[name] for name in chosen} == chosen
+    for name in chosen:
+        monkeypatch.setenv(name, actual[name])
+    settings = Settings(_env_file=None)
+    assert (settings.request_max_body_bytes, settings.request_body_budget_bytes) == (268435456, 4294967296)
+
+
+@pytest.mark.parametrize("chosen", [
+    {"REQUEST_MAX_BODY_BYTES": "33554432", "REQUEST_BODY_BUDGET_BYTES": "33554431"},
+    # An empty side counts as its chart default: a cap above the 128 MiB budget alone is refused.
+    {"REQUEST_MAX_BODY_BYTES": "268435456"},
+    {"REQUEST_BODY_BUDGET_BYTES": "16777216"},
+])
+def test_request_body_budget_below_cap_is_refused_without_echo(monkeypatch, mapper_env, chosen):
+    for name, value in chosen.items():
+        monkeypatch.setenv(name, value)
+    result, _ = mapper_env()
+    assert result.returncode != 0
+    assert "REQUEST_BODY_BUDGET_BYTES must be at least REQUEST_MAX_BODY_BYTES" in result.stderr
+    assert not any(value in result.stderr for value in chosen.values())
+
+
+def test_request_body_defaults_mirror_the_chart():
+    from scripts.airgap import model_config
+
+    chart = yaml.safe_load((CHART / "values.yaml").read_text())
+    assert model_config.REQUEST_BODY_DEFAULTS == {
+        "requestMaxBodyBytes": chart["requestMaxBodyBytes"],
+        "requestBodyBudgetBytes": chart["requestBodyBudgetBytes"],
+    } == {"requestMaxBodyBytes": 25165824, "requestBodyBudgetBytes": 134217728}
 
 
 def test_preflight_rejects_invalid_request_bound():

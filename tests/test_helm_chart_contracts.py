@@ -79,6 +79,8 @@ def test_base_contract_with_independent_controls():
         "REQUEST_MAX_CONCURRENT": "4",
         "REQUEST_QUEUE_MAX": "4",
         "REQUEST_QUEUE_WAIT_S": "30",
+        "REQUEST_MAX_BODY_BYTES": "25165824",  # chart default, #1352
+        "REQUEST_BODY_BUDGET_BYTES": "134217728",
         # glibc allocator (#1348, 2026-11-22)
         "MALLOC_ARENA_MAX": "2",
         "MALLOC_TRIM_THRESHOLD_": "131072",
@@ -754,6 +756,9 @@ def test_token_count_source_reaches_the_pod_as_settings_accept_it():
     ("requestDeadlineSeconds", "300"), ("requestDeadlineSeconds", 1.5),
     ("requestMaxConcurrent", -1), ("requestMaxConcurrent", 1001), ("requestMaxConcurrent", "2"),
     ("requestQueueMax", 1.5), ("requestQueueWaitSeconds", 301), ("requestQueueWaitSeconds", -1),
+    ("requestMaxBodyBytes", 1048575), ("requestMaxBodyBytes", 268435457), ("requestMaxBodyBytes", "25165824"),
+    ("requestMaxBodyBytes", 25165824.5), ("requestBodyBudgetBytes", 1048575), ("requestBodyBudgetBytes", 4294967297),
+    ("requestBodyBudgetBytes", "134217728"),
 ], ids=lambda v: v if isinstance(v, str) else str(v))
 def test_direct_chart_refuses_invalid_values(path, bad):
     result = _helm_template_with_values(set_path(base_values(), path, bad))
@@ -2483,6 +2488,68 @@ def test_direct_chart_requires_queue_wait_when_override_omits_it_while_admission
     values["requestMaxConcurrent"] = 0
     off = _helm_template_with_values(values)
     assert off.returncode == 0, off.stderr
+
+
+def test_chart_body_bounds_render_exact_integers_and_reach_settings(monkeypatch):
+    """#1352: the cap and budget render as plain integers (a values-file integer is a
+    float64 in Helm; scientific notation would not parse as a Settings int), by
+    default and at the upper bounds, and Settings reads them back exactly."""
+    from mainframe_rag.config import Settings
+
+    names = ("REQUEST_MAX_BODY_BYTES", "REQUEST_BODY_BUDGET_BYTES")
+    for extra, expected in (({}, ("25165824", "134217728")),
+                            ({"requestMaxBodyBytes": 268435456, "requestBodyBudgetBytes": 4294967296},
+                             ("268435456", "4294967296")),
+                            ({"requestMaxBodyBytes": 1048576, "requestBodyBudgetBytes": 1048576},
+                             ("1048576", "1048576"))):
+        pod = env_map(run_new_template(extra)["Deployment", "rag-agent"])
+        assert tuple(pod[n]["value"] for n in names) == expected
+        for n in names:
+            monkeypatch.setenv(n, pod[n]["value"])
+        settings = Settings(_env_file=None)
+        assert (settings.request_max_body_bytes, settings.request_body_budget_bytes) == tuple(map(int, expected))
+
+
+def test_body_bounds_are_the_settings_bounds():
+    """#1352: the chart schema accepts exactly the Settings range for both byte bounds."""
+    from mainframe_rag.config import Settings
+
+    schema = json.loads((CHART / "values.schema.json").read_text())["properties"]
+    for field, setting, lo, hi in (("requestMaxBodyBytes", "request_max_body_bytes", 1048576, 268435456),
+                                   ("requestBodyBudgetBytes", "request_body_budget_bytes", 1048576, 4294967296)):
+        bounds = {type(m).__name__: m for m in Settings.model_fields[setting].metadata}
+        assert (schema[field]["minimum"], schema[field]["maximum"]) == (lo, hi) == (bounds["Ge"].ge, bounds["Le"].le)
+
+
+def test_direct_chart_refuses_body_budget_below_cap_without_echo():
+    """#1352: budget >= cap. The schema cannot compare two values, so the render fails
+    with a fixed message naming the keys, never the values."""
+    values = base_values()
+    values["requestMaxBodyBytes"] = 268435456
+    values["requestBodyBudgetBytes"] = 268435455
+    result = _helm_template_with_values(values)
+    assert result.returncode != 0
+    assert "requestBodyBudgetBytes must be at least requestMaxBodyBytes" in result.stderr
+    assert "268435455" not in result.stderr and "268435456" not in result.stderr
+    # Raising the cap above the shipped budget alone is refused too.
+    values.pop("requestBodyBudgetBytes")
+    alone = _helm_template_with_values(values)
+    assert alone.returncode != 0
+    assert "requestBodyBudgetBytes must be at least requestMaxBodyBytes" in alone.stderr
+    values["requestBodyBudgetBytes"] = 268435456
+    equal = _helm_template_with_values(values)
+    assert equal.returncode == 0, equal.stderr
+
+
+@pytest.mark.parametrize("field", ["requestMaxBodyBytes", "requestBodyBudgetBytes"])
+def test_direct_chart_requires_body_bounds_when_override_nulls_them(field):
+    """#1352, like #588: a null override drops the key; without the schema requirement the
+    pod would fall back to a Settings default the budget >= cap check never saw."""
+    values = base_values()
+    values[field] = None
+    result = _helm_template_with_values(values)
+    assert result.returncode != 0
+    assert field in result.stderr
 
 
 # OpenObserve is the only trace backend (issue #956, ADR-0006). Tags in

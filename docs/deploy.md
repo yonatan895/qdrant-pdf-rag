@@ -139,6 +139,26 @@ restores the snapshot over whatever the file assigned; empty stays unset
   default 3 replicas admit up to 12 concurrent upstream requests (plus 12 queued).
   Sizing rule: `REQUEST_MAX_CONCURRENT` = 2 x the engine's concurrent sequence
   slots; the site sets it from its own engine numbers.
+  Request-body bounds (#1352, maintainer decision 2026-11-22), per agent replica:
+  `REQUEST_MAX_BODY_BYTES` (chart `requestMaxBodyBytes`, default 25165824 =
+  24 MiB, 1048576..268435456) is the largest body the agent accepts (larger is a
+  fixed 413 before parsing); `REQUEST_BODY_BUDGET_BYTES` (chart
+  `requestBodyBudgetBytes`, default 134217728 = 128 MiB, 1048576..4294967296) is
+  the sum of bodies in flight (a request waits unread for at most
+  `REQUEST_QUEUE_WAIT_S`, then gets 503 overloaded). Same empty-keeps-default
+  path through `model_config.request_overrides`; the budget must be at least the
+  cap (an empty side counts as its chart default): preflight, the mapper, the
+  chart render and `Settings` each refuse a smaller budget. Both chart keys
+  are required by the schema (a null override is refused, never a silent
+  `Settings` fallback), and every `REQUEST_*` integer key now accepts up to
+  10 digits (was 5) under its unchanged range check. A chunked body charges
+  the full cap and bytes stay charged until the response ends, so with
+  admission off the budget limits concurrent large uploads (about five at
+  the defaults). A stalled upload is bounded by `REQUEST_DEADLINE_S` (chart
+  270 s), after which it gets the fixed 504 and frees its bytes. **Warning:**
+  `REQUEST_DEADLINE_S=0` leaves stalled uploads unbounded: each holds its body
+  bytes (and on `/v1/chat*` its admission slot) until the client disconnects,
+  so a few stalled clients can refuse every other body with 503.
 - Model request arguments (#1193): `LLM_EXTRA_BODY` (one JSON object; single-quote
   it in the operator file) and `LLM_EFFORT_TRANSPORT` (`top_level`,
   `chat_template`, `none`) follow the same precedence/export path into

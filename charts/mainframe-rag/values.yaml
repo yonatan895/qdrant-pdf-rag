@@ -30,6 +30,14 @@ requestMaxConcurrent: 4      # 0..1000
 requestQueueMax: 4           # 0..1000
 requestQueueWaitSeconds: 30  # 0..300
 
+# Request-body memory bounds (#1352, agent REQUEST_MAX_BODY_BYTES /
+# REQUEST_BODY_BUDGET_BYTES; maintainer decision 2026-11-22), per agent replica.
+# The cap is the largest body the agent accepts (larger: 413 before parsing);
+# the budget is the sum of bodies in flight (a request waits unread up to
+# requestQueueWaitSeconds, then 503). budget >= cap; the render refuses otherwise.
+requestMaxBodyBytes: 25165824      # 1048576..268435456 (24 MiB)
+requestBodyBudgetBytes: 134217728  # 1048576..4294967296 (128 MiB)
+
 # Packed image identity. The tag is the full git SHA (deploy.sh fail-closes
 # on empty/HEAD; the same rule is enforced by values.schema.json). The
 # repository is the full registry path set by the generator, e.g.
