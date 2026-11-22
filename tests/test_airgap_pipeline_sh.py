@@ -629,3 +629,119 @@ def test_task_pipeline_carries_the_gap_rehearsal_declaration_to_every_writing_st
         assert r.returncode != 0
         assert "the rehearsal deploy would target the installed release's namespace" in r.stderr
         assert "STAGE 4/5" not in r.stdout and "-n mfr-prod" not in r.stdout
+
+
+# --- #1340 review B1: an airgap.env export never declares a gap release stage -
+
+
+def _gap_pipeline_tree(pipe_tree, airgap_env: str, *, dryrun: bool):
+    """A signed gap bundle in a Task-driven workspace whose every cluster and
+    registry client records its arguments in tool.log; returns (task, log,
+    operator environment)."""
+    from tests.helpers_airgap import (
+        copy_gap_tools,
+        gap_release_anchor,
+        gap_release_key,
+        release_anchor,
+        release_identity,
+        write_git_identity_stub,
+        write_signed_manifest,
+    )
+
+    task = _task_tree(pipe_tree)
+    copy_gap_tools(pipe_tree)
+    write_git_identity_stub(pipe_tree, IMAGE_SHA)
+    log = pipe_tree / "tool.log"
+    recording = ('#!/bin/sh\nprintf \'%s %s\\n\' "${0##*/}" "$*" >> "$TOOL_LOG"\n'
+                 '[ "$*" = \'config current-context\' ] && echo rehearsal-ctx\nexit 0\n')
+    for name in ("kubectl", "oc"):
+        write_stub(pipe_tree / "bin" / name, recording)
+    if dryrun:
+        write_stub(pipe_tree / "bin" / "skopeo", recording)
+        write_signed_manifest(pipe_tree / "dist", f"sha: {IMAGE_SHA}\n", origin="gap", key=gap_release_key())
+    else:
+        # A complete signed gap bundle, so a run past the guard reaches the
+        # first push (the load suite's bundle and registry stub, its gap key).
+        from tests.helpers_airgap import GAP_MANIFEST_LINES
+        from tests.helpers_task_artifact import copy_task_tools
+        from tests.test_airgap_load_sh import STUB_SKOPEO, _edit_manifest_and_resign, _make_artifacts
+
+        artdir = pipe_tree / "dist"
+        _make_artifacts(artdir, sha=IMAGE_SHA)
+        shutil.copy(gap_release_key(), artdir / "signing.key")
+        (artdir / "sneakernet-signing.pub").unlink()
+        _edit_manifest_and_resign(artdir, lambda text: text.replace("origin: upstream\n",
+                                                                    "origin: gap\n" + GAP_MANIFEST_LINES))
+        copy_task_tools(pipe_tree)
+        write_stub(pipe_tree / "bin" / "skopeo", STUB_SKOPEO)
+    identity = release_identity(pipe_tree / "dist")
+    (pipe_tree / "airgap.env").write_text(airgap_env.format(identity=identity, root=pipe_tree))
+    operator = {"IMAGE_SHA": IMAGE_SHA, "STORAGE_CLASS": "standard", "EMBED_MODEL": "embed-v1",
+                "DENSE_DIM": "768", "EMBED_MODEL_REVISION": "rev-1", "EMBED_BASE_URL": "http://vllm:8000/v1",
+                "OPENWEBUI_ENABLED": "false", "CORPUS_PVC": "corpus-pvc", "TOOL_LOG": str(log),
+                "HELM_LOG": str(log), "SKOPEO_LOG": str(log), "SKOPEO_STATE": str(pipe_tree / "skopeo-state"),
+                "AIRGAP_DRYRUN": "1" if dryrun else "0",
+                "SNEAKERNET_TRUSTED_PUB": str(release_anchor()),
+                "SNEAKERNET_GAP_TRUSTED_PUB": str(gap_release_anchor())}
+    return task, log, operator
+
+
+_LIVE_WORKSPACE_ENV = "NAMESPACE='mfr-prod'\nINTERNAL_REGISTRY='reg.live'\n"
+_FILE_DECLARATIONS = {
+    # An airgap.env copied from the promoted (live) workspace, whose runbook
+    # step 8 shell line was pasted into the file as an export.
+    "promotion": "export GAP_PROMOTE_IDENTITY='{identity}'\n",
+    # A file-declared rehearsal against a decoy "installed" workspace that does
+    # not name the live namespace, so the rehearsal guard alone would pass.
+    "rehearsal": ("export GAP_REHEARSAL_INSTALLED_WORKSPACE='{root}/installed'\n"
+                  "export GAP_REHEARSAL_KUBE_CONTEXT='rehearsal-ctx'\n"),
+}
+
+
+@pytest.mark.parametrize("dryrun", [True, False], ids=["dry-run", "live"])
+@pytest.mark.parametrize("declared", list(_FILE_DECLARATIONS))
+def test_task_pipeline_ignores_a_gap_stage_exported_from_airgap_env(pipe_tree, declared, dryrun):
+    """#1340 review B1: pipeline.sh sources airgap.env, so an `export GAP_*=`
+    line there reached every stage's process environment and declared the stage
+    through `run-task.sh airgap:pipeline`. Stage declarations come from the
+    operator's process environment only: the file's export is ignored, the
+    undeclared gap bundle is refused at the first writing stage, and no client
+    makes a write call (no push, no namespace, no apply, no upgrade)."""
+    from tests.helpers_airgap import installed_workspace
+
+    task, log, operator = _gap_pipeline_tree(pipe_tree, _LIVE_WORKSPACE_ENV + _FILE_DECLARATIONS[declared],
+                                             dryrun=dryrun)
+    installed_workspace(pipe_tree, "NAMESPACE='mfr-old'\nINTERNAL_REGISTRY='reg.old'\n")
+    r = _run_task(pipe_tree, task, "airgap:pipeline", extra_env=operator)
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert "this checkout is a gap release (origin: gap): it runs only as a declared" in r.stderr, r.stderr
+    assert "Gap release promotion" not in r.stdout and "Gap release rehearsal" not in r.stdout
+    # Dry-run load previews before its guard; deploy (stage 3) then refuses.
+    assert "-n mfr-prod" not in r.stdout and "STAGE 4/5" not in r.stdout
+    assert "PIPELINE DRY-RUN COMPLETE" not in r.stdout
+    calls = log.read_text().splitlines() if log.exists() else []
+    # The registry stub logs "copy ..."; the cluster stubs log "<client> <args>";
+    # the helm stub one argument per line.
+    writes = [c for c in calls if c.split()[:1] == ["copy"] or c.split()[:2] == ["skopeo", "copy"] or
+              set(c.split()) & {"upgrade", "install", "apply", "create", "delete", "new-project", "patch"}]
+    assert writes == [], writes
+
+
+def test_task_pipeline_operator_rehearsal_wins_over_a_promotion_exported_from_airgap_env(pipe_tree):
+    """The file's export is ignored, not merged: the operator's declared
+    rehearsal runs as a rehearsal (not refused as 'both declared'), and the
+    file's promotion identity reaches no stage."""
+    from tests.helpers_airgap import installed_workspace
+
+    task, log, operator = _gap_pipeline_tree(
+        pipe_tree, "NAMESPACE='mfr-reh'\nINTERNAL_REGISTRY='reg.internal:5000'\n" + _FILE_DECLARATIONS["promotion"],
+        dryrun=True)
+    installed = installed_workspace(pipe_tree, _LIVE_WORKSPACE_ENV)
+    operator.update({"GAP_REHEARSAL_INSTALLED_WORKSPACE": str(installed),
+                     "GAP_REHEARSAL_KUBE_CONTEXT": "rehearsal-ctx"})
+    r = _run_task(pipe_tree, task, "airgap:pipeline", extra_env=operator)
+    assert r.returncode == 0, r.stdout + r.stderr
+    guarded = "==> Gap release rehearsal: namespace=mfr-reh registry=reg.internal:5000 context=rehearsal-ctx"
+    assert r.stdout.count(guarded) == 2, r.stdout  # deploy and ingest
+    assert "declares both" not in r.stderr and "Gap release promotion" not in r.stdout
+    assert "-n mfr-prod" not in r.stdout

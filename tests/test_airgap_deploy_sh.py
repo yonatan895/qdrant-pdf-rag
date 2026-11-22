@@ -2055,25 +2055,68 @@ def test_gap_rehearsal_deploys_only_into_its_own_namespace_and_reruns(tree):
 
 
 @pytest.mark.parametrize("declared", [
-    (),
+    None,
     # Stage declarations are process-environment only: an operator file that a
-    # rehearsal workspace may have copied never declares one.
-    "airgap.env",
-], ids=["undeclared", "declared-in-airgap-env"])
+    # rehearsal workspace may have copied never declares one, assigned or
+    # exported (#1340 review B1; the pipeline path is in test_airgap_pipeline_sh).
+    "",
+    "export ",
+], ids=["undeclared", "declared-in-airgap-env", "exported-from-airgap-env"])
 def test_a_gap_release_without_a_declared_stage_is_refused_before_any_cluster_call(tree, declared):
     _rehearsal(tree)
-    if declared:
+    if declared is not None:
         identity = release_identity(tree[0] / "dist")
         (tree[0] / "airgap.env").write_text(
-            _REH_ENV + f"GAP_PROMOTE_IDENTITY='{identity}'\n"
-            f"GAP_REHEARSAL_INSTALLED_WORKSPACE='{tree[0] / 'installed'}'\n"
-            f"GAP_REHEARSAL_KUBE_CONTEXT='{REH_CTX}'\n")
+            _REH_ENV + f"{declared}GAP_PROMOTE_IDENTITY='{identity}'\n"
+            f"{declared}GAP_REHEARSAL_INSTALLED_WORKSPACE='{tree[0] / 'installed'}'\n"
+            f"{declared}GAP_REHEARSAL_KUBE_CONTEXT='{REH_CTX}'\n")
     result = _run(tree, *_BOTH_ANCHORS, *_RELEASE_PATH, ("NAMESPACE", ""), ("INTERNAL_REGISTRY", ""),
                   ("FAKE_KUBE_CTX", REH_CTX))
     _refused_before_any_cluster_write(tree, result, "this checkout is a gap release (origin: gap)")
     assert result.stderr.count("FAIL:") == 1
     assert _helm_log(tree) == "", "no client call before the stage is known"
     assert _run_gap(tree).returncode == 0
+
+
+def test_a_readonly_stage_declaration_in_airgap_env_is_refused_before_any_cluster_call(tree):
+    """A readonly line cannot be ignored (its value would stay in every child's
+    environment), so it is refused with a fixed message naming the key only."""
+    _rehearsal(tree)
+    identity = release_identity(tree[0] / "dist")
+    (tree[0] / "airgap.env").write_text(_REH_ENV + f"readonly GAP_PROMOTE_IDENTITY='{identity}'\n")
+    result = _run(tree, *_BOTH_ANCHORS, *_RELEASE_PATH, ("NAMESPACE", ""), ("INTERNAL_REGISTRY", ""),
+                  ("FAKE_KUBE_CTX", REH_CTX))
+    _refused_before_any_cluster_write(tree, result, "GAP_PROMOTE_IDENTITY is read-only after loading the operator env file")
+    assert identity not in result.stdout + result.stderr
+    assert _helm_log(tree) == ""
+    (tree[0] / "airgap.env").write_text(_REH_ENV)
+    assert _run_gap(tree).returncode == 0
+
+
+@pytest.mark.parametrize("origin", [None, "GAP"], ids=["missing", "malformed"])
+def test_a_dry_run_refuses_the_manifest_origin_the_real_run_refuses(tree, origin):
+    """#1340 review N2: a dry-run with a MANIFEST whose origin: line is missing
+    or malformed took the ordinary preview path (helm upgrade -n <ns> printed);
+    it now stops with the real run's own refusal, before any client call."""
+    _release(tree, origin=origin)
+    real = _run(tree, *_RELEASE_PATH)
+    dry = _run(tree, ("AIRGAP_DRYRUN", "1"))
+    assert real.returncode == 1 and dry.returncode == 1, dry.stdout + dry.stderr
+    fails = [[line for line in r.stderr.splitlines() if line.startswith("FAIL:")] for r in (real, dry)]
+    assert len(fails[0]) == 1 and fails[0] == fails[1], fails
+    assert "release origin" in fails[0][0]
+    assert "helm upgrade" not in dry.stdout and "-n ns" not in dry.stdout
+    assert _mutations(tree) == []
+    if origin is None:
+        # Under the connected opt-out both read a missing origin as upstream.
+        opt_out = (("AIRGAP_UNVERIFIED_CHECKOUT", "1"), ("CI_REHEARSAL", "1"))
+        dry_opt = _run(tree, ("AIRGAP_DRYRUN", "1"), *opt_out)
+        assert dry_opt.returncode == 0, dry_opt.stderr
+        assert "packed MANIFEST declares no release origin — read as upstream" in dry_opt.stderr
+    # The same bundle with its origin line restored previews as before.
+    _release(tree)
+    ok = _run(tree, ("AIRGAP_DRYRUN", "1"))
+    assert ok.returncode == 0, ok.stderr
 
 
 def _live_kubeconfig(tree):
