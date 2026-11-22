@@ -129,6 +129,9 @@ _PEM_PRIVATE_KEY_RE = re.compile(
 # its BEGIN (text that starts inside a key) redacts from the start of the text.
 _PEM_OPEN_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*\Z")
 _PEM_OPEN_END_RE = re.compile(r"\A[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----")
+# One BEGIN or END line of those patterns, for tracking a key across a read.
+_PEM_MARKER_RE = re.compile(r"-----(BEGIN|END) [A-Z0-9 ]*PRIVATE KEY-----")
+_PEM_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
 # Password and passphrase keywords as RACF, TSO and JCL spell them (any case):
 # the operands of ADDUSER/ALTUSER/PASSWORD/LOGON, their NEW* forms, and the
 # PassTicket/session key operands, whose values are secrets too.
@@ -800,11 +803,58 @@ def _spool_budget(max_bytes: int) -> tuple[int, int, int]:
     return body, head, body - head
 
 
+# The text a key marker split by a receive chunk can have before the cut.
+PEM_CARRY_CHARS = 1024
+_ASCII_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _marker_text(text: str) -> str:
+    """`_normalize_zos_text` as far as key markers are concerned (a split
+    CR LF may give two line ends), with a fast path for ASCII."""
+    if text.isascii():
+        return _ASCII_CONTROL_RE.sub("", text.replace("\r", "\n"))
+    return _normalize_zos_text(text)
+
+
+class _OpenKey:
+    """Whether a private key is open after the spool bytes fed so far, in
+    stream order: the last BEGIN or END line of a private key seen is a
+    BEGIN. That is the whole-file rule (a key runs from a BEGIN line to the
+    next END line, or to the end of the text; an END with no open key is not
+    a key). Bytes are decoded and normalized as screening does; a marker
+    split by a chunk edge is found through a carry of the unfinished line
+    (up to PEM_CARRY_CHARS). Memory is bounded; time is linear."""
+
+    def __init__(self, encoding: str) -> None:
+        self._decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
+        self._carry = ""
+        self.open = False
+
+    def feed(self, raw: bytes) -> None:
+        self.feed_text(self._decoder.decode(raw))
+
+    def feed_text(self, text: str) -> None:
+        """Feed text already decoded by `decode_rest` or `feed`."""
+        text = self._carry + _marker_text(text)
+        consumed = 0
+        for match in _PEM_MARKER_RE.finditer(text):
+            self.open = match.group(1) == "BEGIN"
+            consumed = match.end()
+        self._carry = text[max(consumed, text.rfind("\n") + 1, len(text) - PEM_CARRY_CHARS) :]
+
+    def decode_rest(self, raw: bytes) -> str:
+        """Decode the bytes after those fed, the decoder state carried over
+        (a character split by the last fed chunk is whole)."""
+        return self._decoder.decode(raw, final=True)
+
+
 @dataclass
 class _SpoolCapture:
     """Receive state for the spool window: the first `head_cap` bytes, a
     deque of the last chunks holding at least `tail_keep` bytes, and a byte
-    count. `head_only` stops once the head is full."""
+    count. `head_only` stops once the head is full. `keys`, when set, is fed
+    every byte that is not in the ring (the head and each evicted chunk), so
+    the tail knows whether it starts inside a private key."""
 
     head_cap: int
     tail_keep: int
@@ -816,6 +866,7 @@ class _SpoolCapture:
     total: int = 0
     evicted: bool = False
     complete: bool = False
+    keys: _OpenKey | None = None
 
     def accept(self, chunk: bytes) -> bool:
         if self.total + len(chunk) > self.ceiling:
@@ -824,6 +875,8 @@ class _SpoolCapture:
         room = self.head_cap - len(self.head)
         if room > 0:
             self.head.extend(chunk[:room])
+            if self.keys is not None:
+                self.keys.feed(chunk[:room])
             chunk = chunk[room:]
         if self.head_only:
             return len(self.head) < self.head_cap
@@ -831,8 +884,11 @@ class _SpoolCapture:
             self.tail.append(chunk)
             self.tail_len += len(chunk)
             while self.tail_len - len(self.tail[0]) >= self.tail_keep:
-                self.tail_len -= len(self.tail.popleft())
+                evicted = self.tail.popleft()
+                self.tail_len -= len(evicted)
                 self.evicted = True
+                if self.keys is not None:
+                    self.keys.feed(evicted)
         return True
 
 
@@ -910,7 +966,8 @@ def _tail_start(text: str) -> int:
     Every non-PEM value is single-line, so a match spans a line start only
     through its key's separator. From such a start, screening the rest on its
     own pairs keys and values exactly as whole-file screening does; a PEM
-    block it starts inside is redacted from the start by the open-END rule.
+    block it starts inside is redacted from the start by the open-END rule,
+    or by `_screen_tail` when its END line is missing too.
     Dropping the first line also drops a CR/LF or character split by the
     receive. The size of the ring's lookbehind does not matter for safety.
     """
@@ -931,12 +988,28 @@ def _tail_start(text: str) -> int:
     return len(text)
 
 
-def _screen_tail(raw: bytes, encoding: str) -> str:
+def _screen_tail(raw: bytes, encoding: str, keys: _OpenKey | None = None) -> str:
     """Decode an evicted tail ring and screen it from `_tail_start` on, then
-    neutralize window-marker lookalikes."""
-    decoded = codecs.getincrementaldecoder(encoding)(errors="replace").decode(raw, final=True)
+    neutralize window-marker lookalikes.
+
+    With `keys` (fed every byte before the ring), a private key still open
+    at the tail start (its BEGIN line in the head, the gap or the ring's
+    lead) is redacted from the tail start to its END line, or to the end of
+    the tail when it has none, as whole-file screening redacts it."""
+    if keys is None:
+        decoded = codecs.getincrementaldecoder(encoding)(errors="replace").decode(raw, final=True)
+    else:
+        decoded = keys.decode_rest(raw)
     text = _normalize_zos_text(decoded)
-    screened = _redact_zos_text(text[_tail_start(text) :])
+    start = _tail_start(text)
+    rest = text[start:]
+    lead = ""
+    if keys is not None:
+        keys.feed_text(text[:start])
+        if keys.open:
+            end = _PEM_END_RE.search(rest)
+            lead, rest = "[REDACTED]", rest[end.end() :] if end else ""
+    screened = lead + _redact_zos_text(rest)
     return _WINDOW_MARKER_RE.sub("[neutralized-window-marker]", screened)
 
 
@@ -996,7 +1069,7 @@ def _spool_window(
             "stream_complete": False,
         }
         return body, fields, f"window=head-only read_bytes={capture.total}"
-    tail = _keep_last_lines(_screen_tail(tail_raw, encoding), tail_budget)
+    tail = _keep_last_lines(_screen_tail(tail_raw, encoding, capture.keys), tail_budget)
     return _head_tail_window(head, tail, capture.total)
 
 
@@ -1089,6 +1162,7 @@ class FTPSession:
             tail_keep=tail_budget + TAIL_LOOKBEHIND_BYTES,
             ceiling=cfg.spool_stream_max_bytes,
             head_only=size_hint is not None and size_hint > cfg.spool_stream_max_bytes,
+            keys=_OpenKey(cfg.encoding),
         )
         _pin_text_format(self.ftp)
         outcome = _receive_ascii(

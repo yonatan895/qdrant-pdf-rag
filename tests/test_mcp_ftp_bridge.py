@@ -1330,15 +1330,12 @@ def test_spool_window_tail_start_never_leaks_a_secret(data: st.DataObject) -> No
     """An evicted spool read whose tail ring starts at a drawn byte of a
     secret (the ring is built directly, so the start is exact rather than
     receive-chunk granular). What follows the secret fits T, so the line trim
-    alone cannot remove it; the head and the evicted part are filler.
-
-    Every key here has its END line: a tail that starts after a BEGIN line
-    whose key never ends shows the key body, which whole-file screening
-    redacts to the end of the text (finding recorded on #1347; not fixed
-    here)."""
+    alone cannot remove it; the head and the evicted part are filler. A key
+    with no END line whose BEGIN line falls before the tail start is redacted
+    to the end, as whole-file screening redacts it."""
     cap = _SMALL_CAP
     _, h, t = bridge._spool_budget(cap)
-    eol, secret = data.draw(_zos_secret(open_end=False))
+    eol, secret = data.draw(_zos_secret())
     encoding = data.draw(st.sampled_from(["latin-1", "utf-8"]))
     shape = {"width": data.draw(st.sampled_from([8, 40, 133, 6000])), "multibyte": data.draw(st.booleans())}
     off = data.draw(props.cut_offsets(secret))
@@ -1347,16 +1344,21 @@ def test_spool_window_tail_start_never_leaks_a_secret(data: st.DataObject) -> No
     full = before + secret.raw + eol + after + b"LAST LINE" + eol
     ring = full[len(before) + off :]
     edge = data.draw(st.integers(0, len(ring)))  # a receive chunk edge (CR/LF or a character split)
+    head = props.filler(h, eol=eol)
+    keys = bridge._OpenKey(encoding)  # what accept() feeds: the head, then each evicted chunk
+    keys.feed(head)
+    keys.feed(full[: len(before) + off])
     capture = bridge._SpoolCapture(
         head_cap=h,
         tail_keep=t + bridge.TAIL_LOOKBEHIND_BYTES,
         ceiling=1 << 30,
-        head=bytearray(props.filler(h, eol=eol)),
+        head=bytearray(head),
         tail=deque(part for part in (ring[:edge], ring[edge:]) if part),
         tail_len=len(ring),
-        total=h + 50000 + len(ring),
+        total=h + len(before) + off + len(ring),
         evicted=True,
         complete=True,
+        keys=keys,
     )
     body, fields, _ = bridge._spool_window(capture, encoding, cap)
     assert fields["window"] == "head_tail"
@@ -1372,7 +1374,7 @@ def test_spool_read_through_the_receive_never_leaks_a_secret(data: st.DataObject
     byte of the secret. A probe read of the same length finds the ring start;
     it depends on lengths only."""
     cap = 65536
-    eol, secret = data.draw(_zos_secret(leads=props.SHORT_LEADS, open_end=False))  # see above
+    eol, secret = data.draw(_zos_secret(leads=props.SHORT_LEADS))
     encoding = data.draw(st.sampled_from(["latin-1", "utf-8"]))
     chunk = data.draw(st.sampled_from([997, 2048, 4096]))
     off = data.draw(props.cut_offsets(secret))

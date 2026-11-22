@@ -201,6 +201,10 @@
      first line start (after the retained ring's partial first line) that no
      redaction match can span, so its keys and values pair as whole-file
      screening pairs them and no value whose key fell in the gap survives.
+     A private key still open at the tail start (its `BEGIN` line in the
+     head, the gap or the ring's lead; tracked over every received byte) is
+     redacted from the tail start to its `END` line, or to the end of the
+     tail when it has none, as whole-file screening redacts it.
      Whole lines are trimmed last.
      `MCP_FTP_SPOOL_STREAM_MAX_BYTES`
      (16 MiB) and `MCP_FTP_SPOOL_STREAM_MAX_S` (8 s, below the agent's default
