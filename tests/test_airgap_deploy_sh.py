@@ -2397,6 +2397,47 @@ def test_a_promotion_marker_copied_into_a_rehearsal_workspace_never_skips_the_re
     assert {line for line in _helm_log(reh).split("\n") if line in ("ns", REH_NS)} == {REH_NS}
 
 
+def test_a_declaration_wins_over_a_valid_promotion_marker(tree):
+    """The marker is read only when nothing is declared: with a marker that
+    holds, a wrong promotion identity is still refused, and a declared
+    rehearsal still runs the rehearsal guard (which refuses the live
+    namespace here), never the recorded promotion."""
+    _promoted(tree)
+    marker = (tree[0] / _MARKER).read_bytes()
+    wrong = _run(tree, *_BOTH_ANCHORS, *_RELEASE_PATH, ("GAP_PROMOTE_IDENTITY", "0" * 64))
+    _refused_before_any_cluster_write(tree, wrong, "GAP_PROMOTE_IDENTITY is not this bundle's release identity")
+    # The same target from airgap.env, so the marker alone would hold.
+    (tree[0] / "airgap.env").write_text("NAMESPACE='ns'\nINTERNAL_REGISTRY='reg.internal'\n")
+    installed_workspace(tree[0], "NAMESPACE='ns'\nINTERNAL_REGISTRY='reg.live'\n", f"qdrant_digest: {_FIXED_A}\n")
+    rehearsal = _run_gap(tree)
+    _refused_before_any_cluster_write(tree, rehearsal,
+                                      "the rehearsal deploy would target the installed release's namespace")
+    assert "Gap release promotion" not in rehearsal.stdout
+    assert (tree[0] / _MARKER).read_bytes() == marker
+    # The next ordinary operation, undeclared, runs as the recorded promotion.
+    ok = _undeclared(tree, ("NAMESPACE", ""), ("INTERNAL_REGISTRY", ""))
+    assert ok.returncode == 0, ok.stderr
+    assert "(recorded at promotion in dist/gap-promotion.txt)" in ok.stdout
+
+
+def test_a_recorded_promotion_needs_the_bundle_signature_at_use(tree):
+    """The marker's identity is only as good as the signature check_manifest_chain
+    verifies in the same run: a broken signature is refused before the marker is
+    consulted and before any client call."""
+    _promoted(tree)
+    sig = tree[0] / "dist" / "SHA256SUMS.sig"
+    good = sig.read_bytes()
+    sig.write_bytes(bytes(b ^ 0xFF for b in good))
+    refused = _undeclared(tree)
+    _refused_before_any_cluster_write(tree, refused, "SHA256SUMS signature verification failed")
+    assert "Gap release promotion" not in refused.stdout
+    assert _helm_log(tree) == ""
+    sig.write_bytes(good)
+    ok = _undeclared(tree)
+    assert ok.returncode == 0, ok.stderr
+    assert "(recorded at promotion in dist/gap-promotion.txt)" in ok.stdout
+
+
 def test_a_dry_run_promotion_records_nothing_and_a_dry_run_reads_a_recorded_one(tree):
     _gap_release(tree, namespace="ns")
     dry = (("AIRGAP_DRYRUN", "1"),)

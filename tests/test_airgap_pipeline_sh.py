@@ -773,8 +773,10 @@ def test_task_pipeline_runs_a_recorded_promotion_without_the_export(pipe_tree):
     log.unlink(missing_ok=True)
     second = _run_task(pipe_tree, task, "airgap:pipeline", extra_env=operator)
     assert "this checkout is a gap release (origin: gap)" not in second.stderr, second.stdout + second.stderr
-    assert (f"==> Gap release promotion: release identity {identity} (recorded at promotion in "
-            "dist/gap-promotion.txt)") in second.stdout, second.stdout + second.stderr
+    recorded = (f"==> Gap release promotion: release identity {identity} (recorded at promotion in "
+                "dist/gap-promotion.txt)")
+    # Read by every writing stage the run reaches: load (stage 2) and deploy (stage 3).
+    assert second.stdout.count(recorded) == 2, second.stdout + second.stderr
     assert copies(), "the recorded promotion loads without the export"
     # Counterexample: the workspace now names another target; refused at stage 2.
     log.unlink(missing_ok=True)
