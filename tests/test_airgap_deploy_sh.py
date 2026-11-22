@@ -3042,6 +3042,10 @@ def test_agent_sizing_keys_reach_only_the_agent_container(tree):
     agent_deployment = next(d for d in default_docs if d.get("kind") == "Deployment"
                             and d["metadata"]["name"] == "rag-agent")
     assert agent_deployment["spec"]["replicas"] == 3  # #1348 (2026-11-22)
+    assert {k: rendered_env(default_text, "agent")[k] for k in
+            ("MALLOC_ARENA_MAX", "MALLOC_TRIM_THRESHOLD_", "MALLOC_MMAP_THRESHOLD_")} == {
+        "MALLOC_ARENA_MAX": "2", "MALLOC_TRIM_THRESHOLD_": "131072", "MALLOC_MMAP_THRESHOLD_": "131072"}
+    assert "MALLOC_ARENA_MAX" not in str(rendered_container(default_text, "oauth-proxy"))
 
     r = _run(tree, *route, *AGENT_SIZING.items())
     assert r.returncode == 0, r.stderr

@@ -74,6 +74,10 @@ def test_base_contract_with_independent_controls():
         "REQUEST_MAX_CONCURRENT": "4",
         "REQUEST_QUEUE_MAX": "4",
         "REQUEST_QUEUE_WAIT_S": "30",
+        # glibc allocator (#1348, 2026-11-22)
+        "MALLOC_ARENA_MAX": "2",
+        "MALLOC_TRIM_THRESHOLD_": "131072",
+        "MALLOC_MMAP_THRESHOLD_": "131072",
     }
     assert {key: env["value"] for key, env in new_env.items() if "value" in env} == expected_scalars
     assert set(new_env) == set(expected_scalars) | {"QDRANT_API_KEY", "OTEL_EXPORTER_OTLP_HEADERS"}

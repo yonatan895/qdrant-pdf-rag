@@ -498,7 +498,17 @@ Compatibility and lifecycle decisions under #448:
   `AGENT_MEMORY_LIMIT`. The agent defaults (requests 250m/512Mi, limits
   2 CPU/2Gi) come from the #1348 load measurement: concurrent image chats
   hold about 45 MiB each, and 512Mi was OOM-killed at 16 of them. A site
-  whose quota cannot take the larger limits sets these keys. Worker count and scratch size are
+  whose quota cannot take the larger limits sets these keys.
+- **Agent runtime defaults (#1348, maintainer decisions 2026-11-22).** The
+  chart runs 3 agent replicas (`replicaCount`; no operator key) and sets
+  three glibc allocator variables on the agent container (measured: peaks
+  about 25% lower, idle memory back near startup after bursts):
+  - `MALLOC_ARENA_MAX=2` caps the per-thread malloc arenas at two, so idle
+    arenas do not each hold freed memory.
+  - `MALLOC_TRIM_THRESHOLD_=131072` returns free heap top memory to the OS
+    once more than 128 KiB is free, instead of keeping it.
+  - `MALLOC_MMAP_THRESHOLD_=131072` serves allocations of 128 KiB and more
+    (base64 image payloads) with `mmap`, released to the OS on free. Worker count and scratch size are
   `INGEST_WORKERS` and `INGEST_WORK_SIZE`. CPU is whole/decimal cores or
   millicores (`500m`); memory and sizes need a Ki/Mi/Gi/Ti unit. Each value is
   validated before any change; a limit below its request (or below the default

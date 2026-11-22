@@ -162,6 +162,14 @@ spec:
             - name: SSL_CERT_FILE
               value: /etc/gateway-ca/ca-bundle.crt
             {{- end }}
+            # glibc allocator tuning (#1348, 2026-11-22; docs/deploy.md): measured
+            # peak memory -25% and idle back near startup after image-chat bursts.
+            - name: MALLOC_ARENA_MAX
+              value: "2"
+            - name: MALLOC_TRIM_THRESHOLD_
+              value: "131072"
+            - name: MALLOC_MMAP_THRESHOLD_
+              value: "131072"
           readinessProbe:
             httpGet:
               path: /healthz
