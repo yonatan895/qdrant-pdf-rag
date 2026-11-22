@@ -217,6 +217,18 @@ def test_blocked_paths_need_the_allow_list_403_or_the_sidecars_own_nul_refusal()
     assert not checks.check_blocked({}, 200).ok
 
 
+def test_dev_smoke_judges_blocked_paths_with_the_acceptance_rules():
+    """The dev smoke (`dev.sh ready`) once failed on every run: it accepted only the proxy's 403,
+    while nginx answers a NUL byte in the path with its own 400 page before the allow-list."""
+    nginx_400 = b"<html><center>nginx</center></html>"
+    answers = [("/api/v1/files/", 403, b"denied\n"), ("/api/v1/files%00", 400, nginx_400)]
+    blocked, ok = client.smoke_blocked(answers, 200)
+    assert blocked == {"/api/v1/files/": "proxy-403", "/api/v1/files%00": "sidecar-nul-400"} and ok
+    assert not client.smoke_blocked(answers, 502)[1]
+    assert not client.smoke_blocked([*answers, ("/x", 400, nginx_400)], 200)[1]
+    assert not client.smoke_blocked([*answers, ("/y", 403, b'{"detail":"Forbidden"}')], 200)[1]
+
+
 def test_client_blocked_list_covers_the_proxy_acceptance_list():
     assert {"/api/v1/files/", "/api/v1/files%00", "/api/v1/%2566iles/", "/openai/chat/completions"} <= set(client.BLOCKED)
     assert len(set(client.BLOCKED)) == len(client.BLOCKED)

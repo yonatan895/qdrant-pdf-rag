@@ -474,6 +474,19 @@ def cmd_access(state: str) -> None:
         sys.exit(1)
 
 
+def smoke_blocked(results, allowed_control: int) -> tuple[dict[str, str], bool]:
+    """Judge the blocked paths with the acceptance lane's own rules (checks.py owns them, unit-tested):
+    each answer is the proxy's 403 `denied` or nginx's own 400 page for a NUL byte in the path, and
+    the allowed control path still answers 200. The dev smoke asks through the router stand-in, so
+    that 400 shows only that an nginx hop refused the request; the acceptance lane asks the pod's
+    own listener and proves the sidecar did."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import checks
+
+    blocked = {path: checks.classify_blocked(status, body, path) for path, status, body in results}
+    return blocked, checks.check_blocked(blocked, allowed_control).ok
+
+
 def cmd_smoke(state: str) -> None:
     s = Session(state)
     report: dict[str, Any] = {"users": [], "ok": True}
@@ -499,14 +512,10 @@ def cmd_smoke(state: str) -> None:
     else:
         report["chat"] = "skipped: write one docs question to STATE/smoke-question.txt (mode 600)"
         report["ok"] = False
-    blocked = {}
-    for path in BLOCKED:
-        status, body = s.raw("docs-user", "POST", path)
-        blocked[path] = "proxy-403" if status == 403 and body == b"denied\n" else f"HTTP {status}"
-    report["blocked"] = blocked
-    report["blocked_all_proxy_403"] = all(v == "proxy-403" for v in blocked.values())
     report["allowed_control"] = s.api("docs-user", "GET", "/api/models")[0]
-    report["ok"] &= report["blocked_all_proxy_403"] and report["allowed_control"] == 200
+    report["blocked"], report["blocked_ok"] = smoke_blocked(
+        ((path, *s.raw("docs-user", "POST", path)) for path in BLOCKED), report["allowed_control"])
+    report["ok"] &= report["blocked_ok"]
     out(report)
     if not report["ok"]:
         sys.exit(1)
