@@ -36,7 +36,7 @@ def test_base_contract_with_independent_controls():
     new = run_new_template({})
     new_dep = new["Deployment", "rag-agent"]
     new_svc = new["Service", "rag-agent"]
-    assert new_dep["spec"]["replicas"] == 2
+    assert new_dep["spec"]["replicas"] == 3  # #1348 (2026-11-22)
     assert new_dep["metadata"]["namespace"] == "ns"
     assert new_svc["metadata"]["namespace"] == "ns"
     agent = container_map(new_dep)["agent"]
@@ -46,9 +46,14 @@ def test_base_contract_with_independent_controls():
     assert new_svc["spec"]["selector"] == {"app": "rag-agent"}
     assert new_svc["spec"]["ports"] == [{"name": "http", "port": 8080, "targetPort": "http"}]
     assert agent["readinessProbe"]["httpGet"] == {"path": "/healthz", "port": "http"}
-    assert agent["livenessProbe"]["httpGet"] == {"path": "/livez", "port": "http"}
-    assert agent["resources"]["requests"] == {"cpu": "100m", "memory": "256Mi"}
-    assert agent["resources"]["limits"] == {"cpu": "500m", "memory": "512Mi"}
+    assert agent["livenessProbe"] == {  # #1348 (2026-11-22): timeout 3 s, nothing else moved
+        "httpGet": {"path": "/livez", "port": "http"},
+        "initialDelaySeconds": 5, "periodSeconds": 20, "timeoutSeconds": 3, "failureThreshold": 3}
+    assert agent["readinessProbe"] == {
+        "httpGet": {"path": "/healthz", "port": "http"}, "initialDelaySeconds": 5, "periodSeconds": 10}
+    assert "startupProbe" not in agent
+    assert agent["resources"]["requests"] == {"cpu": "250m", "memory": "512Mi"}
+    assert agent["resources"]["limits"] == {"cpu": "2", "memory": "2Gi"}
     new_env = env_map(new_dep)
     expected_scalars = {
         "QDRANT_URL": "http://qdrant:6333",
@@ -74,6 +79,10 @@ def test_base_contract_with_independent_controls():
         "REQUEST_MAX_CONCURRENT": "4",
         "REQUEST_QUEUE_MAX": "4",
         "REQUEST_QUEUE_WAIT_S": "30",
+        # glibc allocator (#1348, 2026-11-22)
+        "MALLOC_ARENA_MAX": "2",
+        "MALLOC_TRIM_THRESHOLD_": "131072",
+        "MALLOC_MMAP_THRESHOLD_": "131072",
     }
     assert {key: env["value"] for key, env in new_env.items() if "value" in env} == expected_scalars
     assert set(new_env) == set(expected_scalars) | {"QDRANT_API_KEY", "OTEL_EXPORTER_OTLP_HEADERS"}

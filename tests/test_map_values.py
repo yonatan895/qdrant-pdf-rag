@@ -61,6 +61,7 @@ MAPPER_KEYS = [
     "IMAGE_DIGEST_AGENT", "IMAGE_DIGEST_INGEST", "IMAGE_DIGEST_OPENOBSERVE", "IMAGE_DIGEST_OTELCOL", "IMAGE_DIGEST_OAUTH_PROXY",
     "STORAGE_CLASS", "CORPUS_PVC", "INGEST_WORKERS", "INGEST_WORK_SIZE",
     "INGEST_CPU_REQUEST", "INGEST_MEMORY_REQUEST", "INGEST_CPU_LIMIT", "INGEST_MEMORY_LIMIT",
+    "AGENT_CPU_REQUEST", "AGENT_MEMORY_REQUEST", "AGENT_CPU_LIMIT", "AGENT_MEMORY_LIMIT",
     "QDRANT_DATA_SIZE", "QDRANT_SNAPSHOT_SIZE", "QDRANT_CPU_REQUEST", "QDRANT_MEMORY_REQUEST",
     "QDRANT_CPU_LIMIT", "QDRANT_MEMORY_LIMIT",
     "INGEST_ALIAS_PUBLISH", "INGEST_REINGEST", "INGEST_RETIRE_DOCS",
@@ -141,7 +142,7 @@ def test_full_mapping_table(mapper_env):
     assert v["storage"] == {"className": "standard"}
     assert v["ingest"]["enabled"] is False  # no CORPUS_PVC
     assert v["pullSecret"] == {"name": ""}
-    assert v["replicaCount"] == 2
+    assert v["replicaCount"] == 3 == yaml.safe_load((CHART / "values.yaml").read_text())["replicaCount"]
 
 
 def test_removed_legacy_env_names_are_refused_not_ignored(monkeypatch, mapper_env):
@@ -1608,6 +1609,74 @@ def test_sizing_defaults_mirror_the_chart_values():
     qdrant = yaml.safe_load((REPO / "charts" / "qdrant-openshift.values.yaml").read_text())
     assert SIZING_DEFAULTS["QDRANT"] == qdrant["resources"]
     assert SIZING_DEFAULTS["INGEST"] == CHART_INGEST_RESOURCES
+    assert SIZING_DEFAULTS["AGENT"] == CHART_AGENT_RESOURCES
+
+
+# --- #1348: agent container sizing keys ---------------------------------------
+
+CHART_VALUES = yaml.safe_load((CHART / "values.yaml").read_text())
+CHART_AGENT_RESOURCES = CHART_VALUES["resources"]["agent"]
+AGENT_SIZING_ENV = {
+    "AGENT_CPU_REQUEST": "500m", "AGENT_MEMORY_REQUEST": "1Gi",
+    "AGENT_CPU_LIMIT": "3", "AGENT_MEMORY_LIMIT": "3Gi",
+}
+
+
+def test_agent_sizing_defaults_partial_and_full(monkeypatch, mapper_env):
+    """Unset agent keys keep the chart default; a partial override keeps the
+    rest; the full set reaches resources.agent and nothing else changes."""
+    default = load_values(mapper_env()[1])
+    assert default["resources"]["agent"] == CHART_AGENT_RESOURCES
+    monkeypatch.setenv("AGENT_MEMORY_LIMIT", "1Gi")
+    partial = load_values(mapper_env()[1])
+    expected = {k: dict(v) for k, v in CHART_AGENT_RESOURCES.items()}
+    expected["limits"]["memory"] = "1Gi"
+    assert partial["resources"]["agent"] == expected
+    for key, val in AGENT_SIZING_ENV.items():
+        monkeypatch.setenv(key, val)
+    full = load_values(mapper_env()[1])
+    assert full["resources"]["agent"] == {
+        "requests": {"cpu": "500m", "memory": "1Gi"}, "limits": {"cpu": "3", "memory": "3Gi"}}
+    # Only the agent block moves: ingest and every other value stay as rendered by default.
+    assert {**full, "resources": {**full["resources"], "agent": default["resources"]["agent"]}} == default
+
+
+def test_agent_sizing_keeps_feedback_and_ingest_resources(monkeypatch, mapper_env):
+    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
+    monkeypatch.setenv("FEEDBACK_ENABLED", "true")
+    monkeypatch.setenv("FEEDBACK_SECRET", "fb")
+    default = load_values(mapper_env()[1])
+    for key, val in AGENT_SIZING_ENV.items():
+        monkeypatch.setenv(key, val)
+    sized = load_values(mapper_env()[1])
+    assert sized["resources"]["feedback"] == default["resources"]["feedback"]
+    assert sized["ingest"]["resources"] == default["ingest"]["resources"] == CHART_INGEST_RESOURCES
+
+
+@pytest.mark.parametrize("key,val", [
+    ("AGENT_CPU_REQUEST", "lots"), ("AGENT_CPU_REQUEST", "0"), ("AGENT_CPU_REQUEST", "1Gi"),
+    ("AGENT_CPU_LIMIT", "2,x=1"), ("AGENT_MEMORY_REQUEST", "256"), ("AGENT_MEMORY_REQUEST", "256MB"),
+    ("AGENT_MEMORY_LIMIT", "500m"), ("AGENT_MEMORY_LIMIT", "1e3Mi"),
+    # A lone side compared against the chart default of the other side.
+    ("AGENT_CPU_LIMIT", "200m"),         # default request is 250m
+    ("AGENT_MEMORY_LIMIT", "400Mi"),     # default request is 512Mi
+    ("AGENT_CPU_REQUEST", "2500m"),      # default limit is 2
+    ("AGENT_MEMORY_REQUEST", "3Gi"),     # default limit is 2Gi
+])
+def test_invalid_agent_sizing_is_refused_with_a_fixed_message(monkeypatch, mapper_env, key, val):
+    monkeypatch.setenv(key, val)
+    r, out = mapper_env()
+    assert r.returncode != 0 and not out.exists()
+    assert key in r.stderr
+    assert val not in r.stderr, "the refusal never echoes the supplied value"
+
+
+def test_agent_limit_below_an_explicit_request_is_refused(monkeypatch, mapper_env):
+    monkeypatch.setenv("AGENT_MEMORY_REQUEST", "2Gi")
+    monkeypatch.setenv("AGENT_MEMORY_LIMIT", "1536Mi")
+    r, out = mapper_env()
+    assert r.returncode != 0 and not out.exists()
+    assert "AGENT_MEMORY_LIMIT must not be below AGENT_MEMORY_REQUEST" in r.stderr
 
 
 # --- Retired airgap.env keys (#1070) ---
