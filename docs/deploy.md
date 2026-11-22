@@ -154,7 +154,10 @@ restores the snapshot over whatever the file assigned; empty stays unset
   the full cap and bytes stay charged until the response ends, so with
   admission off the budget limits concurrent large uploads (about five at
   the defaults). A stalled upload is bounded by `REQUEST_DEADLINE_S` (chart
-  270 s), after which it gets the fixed 504 and frees its bytes.
+  270 s), after which it gets the fixed 504 and frees its bytes. **Warning:**
+  `REQUEST_DEADLINE_S=0` leaves stalled uploads unbounded: each holds its body
+  bytes (and on `/v1/chat*` its admission slot) until the client disconnects,
+  so a few stalled clients can refuse every other body with 503.
 - Model request arguments (#1193): `LLM_EXTRA_BODY` (one JSON object; single-quote
   it in the operator file) and `LLM_EFFORT_TRANSPORT` (`top_level`,
   `chat_template`, `none`) follow the same precedence/export path into

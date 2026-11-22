@@ -1167,9 +1167,11 @@ immediate 503 (row in `docs/eval.md` section 10).
   handler deadline; other routes' reads end at the deadline counted from
   arrival (the handler's own deadline still starts at handler entry). Either
   way a stalled upload gets the fixed `504 deadline_exceeded` and returns its
-  budget bytes and (chat) its admission slot. With no deadline selected (the
-  `Settings` default) a stalled upload holds them until the client
-  disconnects; the chart ships 270 s.
+  budget bytes and (chat) its admission slot. **Warning:** with no deadline
+  selected (`request_deadline_s` 0, the `Settings` default) stalled uploads
+  are unbounded: each holds its bytes and (chat) its slot until the client
+  disconnects, so a few stalled clients can refuse every other body with
+  `503 overloaded`. The chart ships 270 s.
   **Charging (maintainer decision 2026-11-22):** a chunked body charges the
   full cap, and a body's bytes stay charged until its response ends (SSE: the
   stream closes), not when the read finishes. With admission off or raised,

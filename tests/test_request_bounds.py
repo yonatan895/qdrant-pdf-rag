@@ -13,6 +13,7 @@ import contextlib
 import json
 import re
 import urllib.parse
+from pathlib import Path
 
 import pytest
 
@@ -1269,19 +1270,18 @@ def test_stalled_upload_ends_at_the_deadline_and_releases_budget_and_slot(env, c
     _run(main)
 
 
-def test_openapi_describes_the_chat_request_body():
-    """The chat handler parses its own body (issue #1352); the published
-    schema still names ChatRequest as the required JSON body of both routes."""
+def test_openapi_describes_the_chat_request_body_as_before():
+    """The chat handler parses its own body (issue #1352); /openapi.json still
+    publishes exactly the pre-#1352 request body, schemas, 422 response and
+    description for both chat routes (pinned from origin/main)."""
+    pinned = json.loads((Path(__file__).parent / "fixtures" / "openapi-chat-body.json").read_text())
     app_mod.app.openapi_schema = None
     spec = app_mod.app.openapi()
-    for path in ("/v1/chat", "/v1/chat/completions"):
-        body = spec["paths"][path]["post"]["requestBody"]
-        assert body == {
-            "required": True,
-            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ChatRequest"}}},
-        }
-        assert "422" in spec["paths"][path]["post"]["responses"]
-    schemas = spec["components"]["schemas"]
-    assert schemas["ChatRequest"]["properties"]["messages"]
+    for path, expected in pinned["operations"].items():
+        operation = spec["paths"][path]["post"]
+        assert {"requestBody": operation["requestBody"], "422": operation["responses"]["422"],
+                "description": operation["description"]} == expected
+    for name, schema in pinned["schemas"].items():
+        assert spec["components"]["schemas"][name] == schema, name
     refs = re.findall(r'"\$ref": "#/components/schemas/([^"]+)"', json.dumps(spec))
-    assert set(refs) <= set(schemas), "every reference resolves"
+    assert set(refs) <= set(spec["components"]["schemas"]), "every reference resolves"

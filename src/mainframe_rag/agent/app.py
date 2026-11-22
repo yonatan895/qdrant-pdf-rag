@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import email.message
 import json
 import logging
@@ -1586,26 +1587,26 @@ _framework_openapi = app.openapi
 def _openapi_with_chat_body() -> dict:
     """The framework schema plus the /v1/chat* request body: those handlers
     read and validate `ChatRequest` themselves after admission (issue
-    #1352), so the framework no longer sees a body parameter. Published
-    exactly as a FastAPI body parameter would be: a required JSON
-    `ChatRequest` reference and the 422 validation response."""
+    #1352), so the framework no longer sees a body parameter. The body, its
+    schemas and the 422 response come from FastAPI's own generator (a probe
+    app with `ChatRequest` as a body parameter), so the published document
+    is exactly what a body parameter produces."""
     if app.openapi_schema is not None:
         return app.openapi_schema
     spec = _framework_openapi()
-    schemas = spec.setdefault("components", {}).setdefault("schemas", {})
-    chat = ChatRequest.model_json_schema(ref_template="#/components/schemas/{model}")
-    schemas.update(chat.pop("$defs", {}))
-    schemas["ChatRequest"] = chat
+    probe = FastAPI()
+
+    @probe.post("/chat")
+    async def _probe_chat(req: ChatRequest) -> None:  # pragma: no cover - schema only
+        return None
+
+    probe_spec = probe.openapi()
+    probe_operation = probe_spec["paths"]["/chat"]["post"]
+    spec.setdefault("components", {}).setdefault("schemas", {}).update(probe_spec["components"]["schemas"])
     for path in _ADMIT_FIRST_BODY_PATHS:
         operation = spec["paths"][path]["post"]
-        operation["requestBody"] = {
-            "required": True,
-            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ChatRequest"}}},
-        }
-        operation["responses"].setdefault("422", {
-            "description": "Validation Error",
-            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HTTPValidationError"}}},
-        })
+        operation["requestBody"] = copy.deepcopy(probe_operation["requestBody"])
+        operation["responses"].setdefault("422", copy.deepcopy(probe_operation["responses"]["422"]))
     return spec
 
 
@@ -2636,11 +2637,13 @@ async def chat_completions(request: Request, response: Response):
     generation, and turn-local citation validation all run through the shared
     answer core.
 
-    The body (a `ChatRequest`, up to three pasted images) is read only after
-    admission and the body budget, then parsed and validated off the event
-    loop; the raw bytes and the parsed JSON are dropped once the validated
-    request exists (issue #1352). Refusals keep the framework's envelopes.
     """
+    # The body (a ChatRequest, up to three pasted images) is read only after
+    # admission and the body budget, then parsed and validated off the event
+    # loop; the raw bytes and the parsed JSON are dropped once the validated
+    # request exists (issue #1352). Refusals keep the framework's envelopes.
+    # (A comment, not docstring text: the docstring is the published
+    # /openapi.json description, unchanged by #1352.)
     request_id = getattr(request.state, "request_id", uuid.uuid4().hex[:12])
     started = getattr(request.state, "started", time.monotonic())
 
