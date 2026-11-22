@@ -980,6 +980,16 @@ def test_streamed_over_cap_body_is_the_fixed_413_not_a_parse_failure(env, path, 
     it is refused with the 413 envelope (never the framework's 400/422), the
     budget is returned and the next ordinary request is served."""
     _body_env(env, budget=2 * MIB)
+    red: list[tuple[str, str]] = []
+    real_record = app_mod.record_request
+
+    def spy_record(endpoint, outcome, *args, **kwargs):
+        red.append((endpoint, outcome))
+        return real_record(endpoint, outcome, *args, **kwargs)
+
+    env.setattr(app_mod, "record_request", spy_record)
+    rejected: list[tuple] = []
+    env.setattr(app_mod, "record_admission_rejected", lambda *a: rejected.append(a))
 
     async def main():
         search = InstantSearch()
@@ -990,6 +1000,10 @@ def test_streamed_over_cap_body_is_the_fixed_413_not_a_parse_failure(env, path, 
             assert call.headers["connection"] == "close"
             assert search.calls == 0
             assert app_mod.body_budget.in_use == 0
+            # One RED record for the refusal (the app's swallowed reaction and
+            # the middleware's envelope never both count); no admission label.
+            assert [outcome for _, outcome in red] == ["invalid_request"]
+            assert rejected == []
             ok = await _Call(path, body, framing="chunked").start().done()
             assert ok.status == 200 and search.calls == 1
             assert app_mod.body_budget.in_use == 0

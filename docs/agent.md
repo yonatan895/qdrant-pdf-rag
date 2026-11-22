@@ -1101,8 +1101,11 @@ async pool on `FEEDBACK_TIMEOUT_S` (issue #780; closed after a bounded drain).
 ## 6a. Request admission, total deadline and embed-input bound (issue #374)
 
 **Status:** implemented with hermetic tests (`tests/test_request_bounds.py`,
-`tests/test_hash_embed.py`, `tests/test_run_ingest.py`); **every `Settings` limit
-defaults off** (0), so local and CI behaviour is unchanged. Only the 270 s
+`tests/test_hash_embed.py`, `tests/test_run_ingest.py`); **every #374 `Settings`
+limit defaults off** (0), so local and CI behaviour is unchanged by them. The
+request-body cap and budget (#1352) are the exception: they default on (24 MiB /
+128 MiB, maintainer decision 2026-11-22) in `Settings` and the chart alike, and
+change no response for a body within them. Only the 270 s
 deadline is approved for the supported deployment (below, #843 D6); no admission
 limit is approved or measured, and choosing one needs the site procedure at the
 end of this section. **Decision owners:** `agent/admission.py`
@@ -2022,7 +2025,7 @@ tokenizer share; a later named profile can carry its own instance.
 | Condensation | Optional reasoning call; failure returns the raw latest query, not a fabricated condensed result |
 | Candidate selection (#1309) | Optional reasoning call, one attempt; failure, timeout, an empty reply or one naming no supplied candidate packs the pinned hits and then the retrieval order, cut to `answer_hit_limit`, never a fabricated selection ([candidate selection](#candidate-selection)) |
 | Research planning (#1325) | Optional reasoning call per round (`research_max_rounds <= 2`, `research_max_searches <= 3`), lowest offered effort, one attempt, no retry, bounded by `research_stage_budget_s` and `request_deadline_s`; transport error, timeout, stage-budget expiry, malformed reply or screened-out query ends the loop and answers with held evidence, never a fabricated query; failed follow-up search remains `502 upstream_error` ([research mode](#research-mode)) |
-| Admission / total deadline (issue #374) | Opt-in (`request_*`, default off): refusal is `503 overloaded` before any work; expiry cancels async legs and is `504 deadline_exceeded` / a terminal SSE `error` event; sync worker-thread legs are bounded by their own timeouts, not interrupted (§6a). No retry or fallback is added |
+| Admission / total deadline (issue #374) | Opt-in (`request_*`, default off; the #1352 body cap and budget default on): refusal is `503 overloaded` before any work (an over-cap body is the fixed 413); expiry cancels async legs and is `504 deadline_exceeded` / a terminal SSE `error` event; sync worker-thread legs are bounded by their own timeouts, not interrupted (§6a). No retry or fallback is added |
 | Tracing export | Separately bounded fail-open export; outages drop/log and must not fail request/shutdown |
 
 This policy describes current operations, not permission to add retries. A new
