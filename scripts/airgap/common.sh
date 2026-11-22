@@ -841,12 +841,15 @@ _gap_promotion_text() {
 }
 
 # $1 = the marker text. Atomic and idempotent (temporary file, then rename
-# over the marker in the same directory, which also replaces a symlink rather
-# than writing through it). Returns non-zero when it cannot write.
+# over the marker in the same directory, which also replaces a symlink to a
+# file rather than writing through it). Returns non-zero when it cannot write,
+# including when a directory (or a link to one) sits at the marker path: mv
+# would move the file into it and the marker would still not exist.
 _record_gap_promotion() {
     _rgp_path="$REPO_ROOT/$_GAP_PROMOTION_MARKER"
     _rgp_tmp="$_rgp_path.tmp.$$"
     _rgp_rc=0
+    [ ! -d "$_rgp_path" ] || { unset _rgp_path _rgp_tmp _rgp_rc; return 1; }
     { mkdir -p "$(dirname -- "$_rgp_path")" &&
         printf '%s\n' "$1" > "$_rgp_tmp" &&
         mv -f "$_rgp_tmp" "$_rgp_path"; } 2>/dev/null || { _rgp_rc=1; rm -f "$_rgp_tmp"; }

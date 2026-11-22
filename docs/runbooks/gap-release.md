@@ -270,8 +270,11 @@ line; rerun the same command after fixing the cause.
    that the bundle was rehearsed is still the record's to show (D9). When
    the declared `airgap:deploy` completes its rollout, it records the
    promotion in this workspace's `dist/gap-promotion.txt` (#1344). A failed
-   or abandoned promotion, a declared load, ingest or retire-legacy on its
-   own, and a dry-run record nothing and never refresh an existing record.
+   promotion deploy, one abandoned before its rollout completed, a declared
+   load, ingest or retire-legacy on its own, and a dry-run record nothing and
+   never refresh an existing record. A promotion rolled back after its
+   rollout completed keeps its marker: retire that workspace with step 10
+   unless it will be used for rollback.
    Every later `airgap:load`, `airgap:deploy`, `airgap:ingest` or
    `airgap:retire-legacy` run from this live workspace then needs no export,
    as long as the file still names this bundle's signed identity, this
