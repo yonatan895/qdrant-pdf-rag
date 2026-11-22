@@ -1146,12 +1146,52 @@ async def _checked_scopes(gateway: Gateway) -> list[str]:
         await gateway.client.aclose()
 
 
+def _site_probe(argv: Sequence[str]) -> int:
+    """`--site-probe` (#1343): the read-only ADR-0014 site checks with the
+    gateway's configuration and client; a text-free receipt on stdout (and
+    `--receipt FILE`, 0600). Exit 1 when a check failed, 2 on a configuration
+    or target error (fixed messages, never a target or the token)."""
+    import argparse
+    from pathlib import Path
+
+    from mainframe_rag.gateways import gitlab_probe
+    from mainframe_rag.probe_receipt import write_receipt
+
+    parser = argparse.ArgumentParser(prog="python -m mainframe_rag.gateways.gitlab")
+    parser.add_argument("--site-probe", action="store_true", required=True)
+    parser.add_argument("--job", default=None, help="PROJECT_PATH:JOB_ID whose log to stream")
+    parser.add_argument("--issue", default=None, help="PROJECT_PATH:IID whose notes to read")
+    parser.add_argument("--receipt", type=Path, default=None, help="also write the receipt (0600)")
+    args = parser.parse_args(list(argv))
+    try:
+        gateway = build_gateway()
+        allows = gateway.client.backend.allows
+        job = gitlab_probe.parse_target(args.job, allows, "job") if args.job else None
+        issue = gitlab_probe.parse_target(args.issue, allows, "issue") if args.issue else None
+    except (GatewayConfigError, ValueError) as exc:
+        print(f"gitlab site probe: invalid configuration or target ({exc})", file=sys.stderr)
+        return 2
+    receipt = asyncio.run(gitlab_probe.run_gitlab_probe(gateway, job=job, issue=issue))
+    try:
+        write_receipt(receipt, sys.stdout, args.receipt)
+    except OSError:
+        print("gitlab site probe: the receipt file could not be written", file=sys.stderr)
+        return 2
+    return receipt.exit_code()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Start-up: configuration, then the token scope check, then serve. Any
-    failure exits non-zero with a fixed reason; the token is never logged."""
+    failure exits non-zero with a fixed reason; the token is never logged.
+    `--site-probe` runs the read-only site probe instead of serving."""
     from mainframe_rag.gateways.common import serve
 
-    del argv
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args:
+        if "--site-probe" in args:
+            return _site_probe(args)
+        print("gitlab gateway: the only option is --site-probe", file=sys.stderr)
+        return 2
     configure_gateway_logging()
     try:
         scopes = asyncio.run(_checked_scopes(build_gateway()))
