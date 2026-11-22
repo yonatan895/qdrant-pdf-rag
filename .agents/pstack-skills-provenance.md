@@ -1,8 +1,8 @@
 # pstack skills — pin record
 
 - Source: https://github.com/cursor/plugins/tree/main/pstack (MIT).
-- Pinned upstream SHA: `f713f14203cd6420cec13cd7c55c32d598dbab68`
-  (upstream 2026-10-16, installed 2026-10-16; plugin version 0.15.25).
+- Pinned upstream SHA: `7a583913eb1b8d1a0ee76753d1a2cf072e7b54f9`
+  (upstream 2026-11-22, installed 2026-11-22; plugin version 0.15.46).
 - License: verbatim upstream `pstack/LICENSE` in `LICENSE.pstack-skills`;
   attribution and pin in `NOTICE.pstack-skills`.
 - Authority: the maintainer's 2026-10-16 request to review `pstack/skills` and
