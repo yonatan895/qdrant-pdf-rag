@@ -1160,13 +1160,16 @@ def _job_log_case(draw: st.DrawFn, secrets) -> tuple[bytes, props.Secret, int, i
     read ceiling whose window start or stop lands on it."""
     eol = draw(st.sampled_from(props.LINE_ENDS))
     secret = draw(secrets(eol))
-    tail = draw(st.sampled_from([1024, 1500, 2048]))
-    chunk = draw(st.sampled_from([7, 64, 512, 4096]))
+    # Under the test gateway's 2048-byte result cap, so the fit keeps the window's first lines.
+    tail = draw(st.sampled_from([1024, 1200, 1500]))
+    # A long log (over the key scan's 32 KiB batch) comes in larger chunks to stay fast.
+    big = draw(st.booleans())
+    chunk = draw(st.sampled_from([512, 4096] if big else [7, 64, 512, 4096]))
     shape = {"width": draw(st.sampled_from([12, 30, 81, 3000])), "multibyte": draw(st.booleans())}
     off = draw(props.cut_offsets(secret))
     mode = draw(st.sampled_from(["window", "ceiling_window", "ceiling_stop"]))
     if mode == "window":  # complete read: the kept window starts tail + 1 bytes from the end
-        before = props.filler(draw(st.integers(3, 4000)), eol=eol, **shape)
+        before = props.filler(draw(st.integers(40_000, 70_000) if big else st.integers(3, 4000)), eol=eol, **shape)
         full = before + secret.raw + eol + props.filler(tail + 3000, eol=eol, **shape)
         return full[: len(before) + off + tail + 1], secret, tail, chunk, False
     start = _PROP_CEILING - (tail + 1 if mode == "ceiling_window" else 0) - off
@@ -1204,7 +1207,8 @@ def _check_job_log_property(tmp_path: Path, secrets) -> None:
 def test_job_log_window_or_stop_never_leaks_a_private_key(tmp_path: Path):
     """#1333 B1 as a property: keys with any label, colour escapes around the
     markers, no END line, the window start or the read ceiling anywhere in
-    or around the key, any chunking."""
+    or around the key, chunks from 7 bytes up, logs short and over the key
+    scan's 32 KiB batch."""
     _check_job_log_property(tmp_path, lambda eol: props.pem_secrets(eol, ansi=True))
 
 

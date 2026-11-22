@@ -1291,6 +1291,39 @@ def test_dataset_read_head_cut_never_leaks_a_secret(data: st.DataObject) -> None
     assume(props.assert_no_secret_survives(text, _whole_screened(payload, encoding), secret))
 
 
+@props.property_settings(max_examples=100)
+@given(st.data())
+def test_spool_window_head_cut_never_leaks_a_secret(data: st.DataObject) -> None:
+    """jes_spool_read with the secret straddling the head budget H: a
+    contiguous read just over B (whole-file screened, then cut at H and at
+    the tail start right after it), an evicted read (the head cut back to a
+    line end and screened alone), and a read stopped at the byte ceiling
+    (head only)."""
+    cap = _SMALL_CAP
+    b, h, _ = bridge._spool_budget(cap)
+    eol, secret = data.draw(_zos_secret(leads=props.SHORT_LEADS))
+    encoding = data.draw(st.sampled_from(["latin-1", "utf-8"]))
+    shape = {"width": data.draw(st.sampled_from([8, 40, 133])), "multibyte": data.draw(st.booleans())}
+    off = data.draw(props.cut_offsets(secret).filter(lambda o: o <= h))
+    mode = data.draw(st.sampled_from(["contiguous", "evicted", "head_only"]))
+    # Contiguous: a few bytes over B, so the line trim alone cannot drop the tail's first lines.
+    total = {"contiguous": b + data.draw(st.integers(1, 8)), "evicted": 30_000, "head_only": 30_000}[mode]
+    before = props.filler(h - off, eol=eol, **shape)
+    last = b"LAST LINE" + eol
+    rest = max(0, total - len(before) - len(secret.raw) - len(eol) - len(last))
+    payload = before + secret.raw + eol + props.filler(rest, eol=eol, **shape) + last
+    if mode == "contiguous":  # pad back what screening removed, so the screened text stays just over B
+        rest += max(0, total - len(_whole_screened(payload, encoding).encode()))
+        payload = before + secret.raw + eol + props.filler(rest, eol=eol, **shape) + last
+    overrides = {"spool_stream_max_bytes": cap} if mode == "head_only" else {}
+    out = _spool_out(_spool_fake(payload), max_bytes=cap, encoding=encoding, **overrides)
+    text = _assert_framed_within(out, cap)
+    # A contiguous read whose screened text shrank under B (CRs, a redacted key) comes back whole.
+    expected = {"contiguous": {"head_tail", "full"}, "evicted": {"head_tail"}, "head_only": {"head_only"}}
+    assert out["structuredContent"]["window"] in expected[mode]
+    assume(props.assert_no_secret_survives(text, _whole_screened(payload, encoding), secret))
+
+
 @props.property_settings(max_examples=150)
 @given(st.data())
 def test_spool_window_tail_start_never_leaks_a_secret(data: st.DataObject) -> None:
