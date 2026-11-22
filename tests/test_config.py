@@ -383,6 +383,8 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "request_queue_max": 0,
     "request_queue_wait_s": 5.0,
     "request_deadline_s": 0.0,
+    "request_max_body_bytes": 25165824,  # #1352, 24 MiB (maintainer decision 2026-11-22)
+    "request_body_budget_bytes": 134217728,  # #1352, 128 MiB
     "embed_max_input_chars": 0,
     "ingest_max_pdf_bytes": 0,
     "ingest_max_doc_pages": 0,

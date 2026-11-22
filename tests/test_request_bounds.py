@@ -16,7 +16,7 @@ import pytest
 
 from mainframe_rag.agent import admission as admission_mod
 from mainframe_rag.agent import app as app_mod
-from mainframe_rag.agent.admission import AdmissionController, AdmissionRejected
+from mainframe_rag.agent.admission import AdmissionController, AdmissionRejected, BodyBudget
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.ingest.bounds import EmbedInputTooLarge
 from tests.helpers_agent_local import set_agent_env
@@ -43,7 +43,18 @@ class _Call:
         query: str = "",
         method: str = "POST",
         form: bool = False,
+        framing: str | None = None,
+        chunks: list[bytes | None] | None = None,
+        declared: int | None = None,
     ) -> None:
+        # framing (issue #1352): None sends no length header (the pre-#1352
+        # shape of these tests), "length" a Content-Length (`declared` or the
+        # payload size), "chunked" Transfer-Encoding with `chunks` as the
+        # request messages (a trailing None: the upload stalls until
+        # disconnect). `receives` counts body reads by the app.
+        self.framing = framing
+        self.declared = declared
+        self.receives = 0
         self.method = method
         self.path = path
         self.query = query.encode()
@@ -51,18 +62,19 @@ class _Call:
         self.payload = (
             urllib.parse.urlencode(body).encode() if form else json.dumps(body).encode()
         )
+        self._chunks: list[bytes | None] = list(chunks) if chunks is not None else [self.payload]
         self.status: int | None = None
         self.headers: dict[str, str] = {}
         self.body = b""
         self.first_chunk = asyncio.Event()
-        self._sent_request = False
         self._disconnect = asyncio.Event()
         self.task: asyncio.Task | None = None
 
     async def _receive(self):
-        if not self._sent_request:
-            self._sent_request = True
-            return {"type": "http.request", "body": self.payload, "more_body": False}
+        if self._chunks and self._chunks[0] is not None:
+            self.receives += 1
+            chunk = self._chunks.pop(0)
+            return {"type": "http.request", "body": chunk, "more_body": bool(self._chunks)}
         await self._disconnect.wait()
         return {"type": "http.disconnect"}
 
@@ -86,12 +98,20 @@ class _Call:
             "raw_path": self.path.encode(),
             "query_string": self.query,
             "root_path": "",
-            "headers": [(b"content-type", self.content_type)],
+            "headers": [(b"content-type", self.content_type), *self._framing_headers()],
             "client": ("127.0.0.1", 1),
             "server": ("test", 80),
         }
         self.task = asyncio.ensure_future(app_mod.app(scope, self._receive, self._send))
         return self
+
+    def _framing_headers(self) -> list[tuple[bytes, bytes]]:
+        if self.framing == "length":
+            size = len(self.payload) if self.declared is None else self.declared
+            return [(b"content-length", str(size).encode())]
+        if self.framing == "chunked":
+            return [(b"transfer-encoding", b"chunked")]
+        return []
 
     def disconnect(self) -> None:
         self._disconnect.set()
@@ -856,5 +876,233 @@ def test_deadline_and_admission_include_the_closing_asgi_body_send(env, endpoint
             await call.done()
             await next_call.done()
             assert next_call.status == 200 and app_mod.admission.active == 0
+
+    _run(main)
+
+
+# ------------------------------------------------- request-body budget (#1352)
+
+MIB = 1 << 20
+TOO_LARGE_1MIB = {"code": "invalid_request", "message": f"request body exceeds the {MIB}-byte limit"}
+CHAT = ("/v1/chat", {"messages": [{"role": "user", "content": "IEA500I"}]})
+
+
+def test_body_budget_is_fifo_and_never_exceeds_capacity():
+    async def main():
+        budget = BodyBudget(100)
+        a = await budget.acquire(60, 1)
+        assert budget.in_use == 60
+        big = asyncio.ensure_future(budget.acquire(70, 5))
+        await _until(lambda: budget.waiting == 1, "big waits")
+        small = asyncio.ensure_future(budget.acquire(10, 5))
+        await _until(lambda: budget.waiting == 2, "small queued behind big")
+        await asyncio.sleep(0.01)
+        assert not small.done(), "a late small body never overtakes a queued large one"
+        a.release()
+        a.release()  # idempotent
+        b = await asyncio.wait_for(big, 1)
+        s = await asyncio.wait_for(small, 1)
+        assert budget.in_use == 80 and budget.waiting == 0
+        assert b.waited_s > 0
+        b.release()
+        s.release()
+        assert budget.in_use == 0
+
+    _run(main)
+
+
+def test_body_budget_timeout_refuses_and_a_leaving_head_lets_followers_in():
+    async def main():
+        budget = BodyBudget(100)
+        holder = await budget.acquire(50, 1)
+        with pytest.raises(AdmissionRejected) as refused:
+            await budget.acquire(60, 0)  # no wait allowed
+        assert refused.value.reason == admission_mod.REASON_BODY_BUDGET
+        head = asyncio.ensure_future(budget.acquire(60, 0.05))
+        await _until(lambda: budget.waiting == 1, "head waits")
+        follower = asyncio.ensure_future(budget.acquire(40, 5))
+        await _until(lambda: budget.waiting == 2, "follower queued")
+        with pytest.raises(AdmissionRejected):
+            await head  # times out ...
+        f = await asyncio.wait_for(follower, 1)  # ... and the follower fits now
+        assert budget.in_use == 90 and budget.waiting == 0
+        f.release()
+        holder.release()
+        assert budget.in_use == 0
+
+    _run(main)
+
+
+def test_body_budget_cancelled_waiter_that_was_just_granted_returns_the_bytes():
+    async def main():
+        budget = BodyBudget(100)
+        holder = await budget.acquire(100, 1)
+        waiter = asyncio.ensure_future(budget.acquire(100, 5))
+        await _until(lambda: budget.waiting == 1, "waiter queued")
+        holder.release()  # hands the bytes to the waiter's future ...
+        waiter.cancel()  # ... which is cancelled before it resumes
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert budget.in_use == 0 and budget.waiting == 0
+        (await budget.acquire(100, 0)).release()
+        assert BodyBudget().capacity == 0  # import-time instance: unlimited
+        assert (await BodyBudget().acquire(10**12, 0)).nbytes == 0
+
+    _run(main)
+
+
+def _body_env(env, *, budget=MIB, wait="0.2"):
+    env.setenv("REQUEST_MAX_BODY_BYTES", str(MIB))
+    env.setenv("REQUEST_BODY_BUDGET_BYTES", str(budget))
+    env.setenv("REQUEST_QUEUE_WAIT_S", wait)
+
+
+@pytest.mark.parametrize("path", ["/v1/search", "/v1/answer", "/v1/chat", "/ui/chat"])
+def test_declared_over_cap_body_is_refused_before_anything_reads_it(env, path):
+    _body_env(env)
+
+    async def main():
+        search = InstantSearch()
+        async with _serving(env, search):
+            call = _Call(path, {"query": "IEA500I"}, framing="length", declared=MIB + 1).start()
+            await call.done()
+            assert (call.status, call.json()) == (413, TOO_LARGE_1MIB)
+            assert call.receives == 0 and search.calls == 0
+            assert app_mod.body_budget.in_use == 0
+
+    _run(main)
+
+
+@pytest.mark.parametrize(("path", "body"), [SEARCH, CHAT])
+def test_streamed_over_cap_body_is_the_fixed_413_not_a_parse_failure(env, path, body):
+    """A body without a declared length is counted as it streams: past the cap
+    it is refused with the 413 envelope (never the framework's 400/422), the
+    budget is returned and the next ordinary request is served."""
+    _body_env(env, budget=2 * MIB)
+
+    async def main():
+        search = InstantSearch()
+        async with _serving(env, search):
+            chunks = [b"x" * (MIB // 2)] * 3
+            call = await _Call(path, body, framing="chunked", chunks=chunks).start().done()
+            assert (call.status, call.json()) == (413, TOO_LARGE_1MIB)
+            assert search.calls == 0
+            assert app_mod.body_budget.in_use == 0
+            ok = await _Call(path, body, framing="chunked").start().done()
+            assert ok.status == 200 and search.calls == 1
+            assert app_mod.body_budget.in_use == 0
+
+    _run(main)
+
+
+def test_body_waits_for_budget_without_reading_then_gets_the_overload_code(env):
+    _body_env(env)
+
+    async def main():
+        search = InstantSearch()
+        async with _serving(env, search):
+            holder = await app_mod.body_budget.acquire(MIB, 1)
+            waiting = _Call(*SEARCH, framing="length").start()
+            await _until(lambda: app_mod.body_budget.waiting == 1, "request waits for budget")
+            assert waiting.receives == 0, "a waiting request reads nothing"
+            probe = await _Call("/livez", {}, method="GET").start().done()
+            assert (probe.status, probe.json()) == (200, {"status": "alive"})
+            refused = await waiting.done()
+            assert (refused.status, refused.json()) == (503, OVERLOADED)
+            assert refused.headers["retry-after"] == "1"
+            assert refused.receives == 0 and search.calls == 0
+            assert app_mod.body_budget.waiting == 0
+
+            queued = _Call(*SEARCH, framing="length").start()
+            await _until(lambda: app_mod.body_budget.waiting == 1, "next request waits")
+            holder.release()
+            served = await queued.done()
+            assert served.status == 200 and search.calls == 1
+            assert app_mod.body_budget.in_use == 0
+
+    _run(main)
+
+
+def test_chat_is_admitted_before_its_body_is_read_or_budgeted(env):
+    """Admission first on /v1/chat*: a refused or queued chat has read no byte
+    and holds no budget, so the admission queue keeps its immediate refusal."""
+    env.setenv("REQUEST_MAX_CONCURRENT", "1")
+    env.setenv("REQUEST_QUEUE_MAX", "1")
+    _body_env(env, wait="5")
+
+    async def main():
+        search = BlockingSearch()
+        async with _serving(env, search):
+            holder = _Call(*SEARCH, framing="length").start()
+            await _until(lambda: search.calls == 1, "search holds the slot")
+            held = app_mod.body_budget.in_use
+            assert held == len(holder.payload)
+            queued = _Call(*CHAT, framing="length").start()
+            await _until(lambda: app_mod.admission.queued == 1, "chat queued for admission")
+            assert queued.receives == 0 and app_mod.body_budget.in_use == held
+            refused = await _Call(*CHAT, framing="length").start().done()
+            assert (refused.status, refused.json()) == (503, OVERLOADED)
+            assert refused.receives == 0 and app_mod.body_budget.in_use == held
+            search.gate.set()
+            assert (await holder.done()).status == 200
+            assert (await queued.done()).status == 200
+            assert queued.receives == 1
+            assert app_mod.body_budget.in_use == 0 and app_mod.admission.active == 0
+
+    _run(main)
+
+
+def test_admitted_chat_waits_for_body_budget_then_gets_the_overload_code(env):
+    _body_env(env)
+
+    async def main():
+        async with _serving(env, InstantSearch()):
+            holder = await app_mod.body_budget.acquire(MIB, 1)
+            refused = await _Call(*CHAT, framing="length").start().done()
+            assert (refused.status, refused.json()) == (503, OVERLOADED)
+            assert refused.headers["retry-after"] == "1" and refused.receives == 0
+            holder.release()
+            ok = await _Call(*CHAT, framing="length").start().done()
+            assert ok.status == 200 and app_mod.body_budget.in_use == 0
+
+    _run(main)
+
+
+def test_chat_stream_holds_its_body_bytes_until_disconnect_then_releases_them(env):
+    _body_env(env, wait="5")
+
+    async def main():
+        llm = ParkedStreamLLM()
+        async with _serving(env, InstantSearch(), llm):
+            body = {"messages": [{"role": "user", "content": "IEA500I"}], "stream": True}
+            stream = _Call("/v1/chat", body, framing="length").start()
+            await asyncio.wait_for(stream.first_chunk.wait(), 5)
+            assert stream.status == 200
+            assert app_mod.body_budget.in_use == len(stream.payload)
+            stream.disconnect()
+            await stream.done()
+            await asyncio.wait_for(llm.closed.wait(), 5)
+            assert app_mod.body_budget.in_use == 0
+            after = await _Call(*CHAT, framing="length").start().done()
+            assert after.status == 200 and app_mod.body_budget.in_use == 0
+
+    _run(main)
+
+
+def test_chat_disconnect_mid_upload_releases_slot_and_budget(env):
+    env.setenv("REQUEST_MAX_CONCURRENT", "1")
+    _body_env(env, wait="5")
+
+    async def main():
+        search = InstantSearch()
+        async with _serving(env, search):
+            call = _Call(*CHAT, framing="chunked", chunks=[b'{"messages": ', None]).start()
+            await _until(lambda: call.receives == 1, "first chunk read")
+            call.disconnect()
+            await call.done()
+            assert search.calls == 0
+            assert app_mod.admission.active == 0 and app_mod.body_budget.in_use == 0
+            after = await _Call(*CHAT, framing="length").start().done()
+            assert after.status == 200
 
     _run(main)

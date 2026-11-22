@@ -549,6 +549,17 @@ class Settings(BaseSettings):
     request_queue_max: int = Field(default=0, ge=0, le=1000)
     request_queue_wait_s: float = Field(default=5.0, ge=0.0, le=300.0)
     request_deadline_s: float = Field(default=0.0, ge=0.0, le=3600.0)
+    # Request-body memory bounds (issue #1352, maintainer decision 2026-11-22:
+    # 24 MiB cap, 128 MiB budget). request_max_body_bytes refuses a larger
+    # body before any parse: a Content-Length above it, or a body without one
+    # whose streamed bytes pass it (fixed 413 envelope). request_body_budget_bytes
+    # is the per-replica sum of request bodies being read or served; a request
+    # that cannot get its share waits WITHOUT reading its body (uvicorn stops
+    # reading the socket) for at most request_queue_wait_s, then gets the
+    # fixed 503 overloaded. Probes and other body-less requests never wait.
+    # The budget must hold at least one capped body.
+    request_max_body_bytes: int = Field(default=25165824, ge=1048576, le=268435456)
+    request_body_budget_bytes: int = Field(default=134217728, ge=1048576, le=4294967296)
     # Embed-input size bound (issue #374), in characters of the exact text
     # sent to the dense embedding endpoint (query path: prefix + effective
     # query; ingest: header + heading path + context + chunk body). 0 = no
@@ -665,6 +676,12 @@ class Settings(BaseSettings):
             if "chat_followup_anchor_enabled" in self.model_fields_set:
                 raise ValueError(CHAT_FOLLOWUP_MODES_CONFLICT)
             object.__setattr__(self, "chat_followup_anchor_enabled", False)
+        return self
+
+    @model_validator(mode="after")
+    def _body_budget_holds_one_body(self) -> Settings:
+        if self.request_body_budget_bytes < self.request_max_body_bytes:
+            raise ValueError("REQUEST_BODY_BUDGET_BYTES must be at least REQUEST_MAX_BODY_BYTES")
         return self
 
     @model_validator(mode="after")

@@ -27,6 +27,7 @@ from collections import deque
 
 REASON_QUEUE_FULL = "queue_full"
 REASON_QUEUE_TIMEOUT = "queue_timeout"
+REASON_BODY_BUDGET = "body_budget"
 
 
 class AdmissionRejected(Exception):
@@ -116,3 +117,98 @@ class AdmissionController:
                 fut.set_result(None)
                 return
         self._active -= 1
+
+
+class BodyLease:
+    """Bytes of the body budget held by one request (issue #1352)."""
+
+    __slots__ = ("_budget", "_held", "nbytes", "waited_s")
+
+    def __init__(self, budget: BodyBudget, nbytes: int, waited_s: float) -> None:
+        self._budget = budget
+        self._held = nbytes > 0
+        self.nbytes = nbytes
+        self.waited_s = waited_s
+
+    def release(self) -> None:
+        if self._held:
+            self._held = False
+            self._budget._release(self.nbytes)
+
+
+class BodyBudget:
+    """Per-replica in-flight request-body bytes (issue #1352).
+
+    A request reserves the bytes its body may occupy before the first body
+    read and holds them until its response ends. One that does not fit waits
+    FIFO (never overtaken by a smaller late arrival, so a large body cannot
+    starve) for at most `wait_s`, then is refused with `AdmissionRejected`
+    (`body_budget`). The waiter reads nothing meanwhile: the server stops
+    reading its socket. Invariants (tests/test_request_bounds.py): bytes in use
+    never exceed `capacity`; release is idempotent; a waiter that leaves,
+    by timeout or cancellation, while bytes are handed to it gives them back,
+    and one leaving the head of the queue lets the waiters behind it in.
+    `capacity == 0` is unlimited (the import-time instance; lifespan builds
+    the configured one).
+    """
+
+    def __init__(self, capacity: int = 0) -> None:
+        self.capacity = max(0, capacity)
+        self._in_use = 0
+        self._waiters: deque[tuple[int, asyncio.Future[None]]] = deque()
+
+    @property
+    def in_use(self) -> int:
+        return self._in_use
+
+    @property
+    def waiting(self) -> int:
+        return len(self._waiters)
+
+    async def acquire(self, nbytes: int, wait_s: float) -> BodyLease:
+        if self.capacity == 0:
+            return BodyLease(self, 0, 0.0)
+        nbytes = min(max(0, nbytes), self.capacity)
+        if not self._waiters and self._in_use + nbytes <= self.capacity:
+            self._in_use += nbytes
+            return BodyLease(self, nbytes, 0.0)
+        if wait_s <= 0:
+            raise AdmissionRejected(REASON_BODY_BUDGET)
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[None] = loop.create_future()
+        entry = (nbytes, fut)
+        self._waiters.append(entry)
+        started = loop.time()
+        try:
+            async with asyncio.timeout(wait_s):
+                await fut
+        except BaseException as exc:
+            if fut.done() and not fut.cancelled():
+                # Granted just as this waiter left: give the bytes back.
+                self._release(nbytes)
+            else:
+                fut.cancel()
+                with contextlib.suppress(ValueError):
+                    self._waiters.remove(entry)
+                self._grant()
+            if isinstance(exc, TimeoutError):
+                raise AdmissionRejected(REASON_BODY_BUDGET) from exc
+            raise
+        return BodyLease(self, nbytes, loop.time() - started)
+
+    def _release(self, nbytes: int) -> None:
+        self._in_use -= nbytes
+        self._grant()
+
+    def _grant(self) -> None:
+        # Strict FIFO: hand bytes to the head waiters while they fit.
+        while self._waiters:
+            nbytes, fut = self._waiters[0]
+            if fut.done():
+                self._waiters.popleft()
+                continue
+            if self._in_use + nbytes > self.capacity:
+                return
+            self._waiters.popleft()
+            self._in_use += nbytes
+            fut.set_result(None)

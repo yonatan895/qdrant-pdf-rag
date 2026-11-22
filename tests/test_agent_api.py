@@ -3486,19 +3486,30 @@ def test_lone_surrogate_in_chat_is_fixed_422(client, field):
 
 
 def test_invalid_utf8_and_malformed_bodies_use_the_fixed_envelope(client):
-    """Issue #1031: no framework `detail` shape for any unparseable body."""
+    """Issue #1031: no framework `detail` shape for any unparseable body.
+    Issue #1352: /v1/chat* parses its own body after admission and keeps the
+    framework's refusals (strict JSON content type, empty, null, non-object)."""
     hdr = {"content-type": "application/json"}
     cases = [
         (b'{"query":"\xff"}', hdr),
         (b'{"query":"IEA50', hdr),
         (b'{"query":"x"} junk', hdr),
         (b'{"query":"IEA500I"}', {"content-type": "text/plain"}),
+        (b"", hdr),
+        (b"null", hdr),
+        (b"[]", hdr),
     ]
-    for path in ("/v1/search", "/v1/answer", "/v1/chat"):
-        for raw, headers in cases:
+    valid = {"/v1/search": b'{"query":"IEA500I"}', "/v1/answer": b'{"query":"IEA500I"}',
+             "/v1/chat": b'{"messages":[{"role":"user","content":"IEA500I"}]}'}
+    for path in ("/v1/search", "/v1/answer", "/v1/chat", "/v1/chat/completions"):
+        ok = valid.get(path, valid["/v1/chat"])
+        for raw, headers in [*cases, (ok, {}), (ok, {"content-type": "text/plain"}),
+                             (ok.replace(b"IEA500I", b"\xff"), hdr)]:
             resp = client.post(path, content=raw, headers=headers)
-            assert resp.status_code == 422, (path, raw)
-            assert resp.json() == _FIXED_422, (path, raw)
+            assert resp.status_code == 422, (path, raw, headers)
+            assert resp.json() == _FIXED_422, (path, raw, headers)
+        served = client.post(path, content=ok, headers={"content-type": "application/vnd.x+json"})
+        assert served.status_code == 200, path
 
 
 @pytest.mark.parametrize("temperature, status", [
