@@ -151,7 +151,7 @@ for _k in GAP_PROMOTE_IDENTITY GAP_REHEARSAL_INSTALLED_WORKSPACE GAP_REHEARSAL_K
         die "$_k is read-only after loading the operator env file — the gap release stage is declared in the process environment only; delete that line from airgap.env"
     eval "_v=\${_${_k}_PROCESS_ENV}"
     if [ -n "$_v" ]; then
-        eval "export ${_k}=\$_v"
+        eval "${_k}=\$_v; export ${_k}"
     else
         unset "$_k"
     fi

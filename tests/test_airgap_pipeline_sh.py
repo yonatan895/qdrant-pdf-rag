@@ -740,7 +740,8 @@ def test_task_pipeline_operator_rehearsal_wins_over_a_promotion_exported_from_ai
     task, _log, operator = _gap_pipeline_tree(
         pipe_tree, "NAMESPACE='mfr-reh'\nINTERNAL_REGISTRY='reg.internal:5000'\n" + _FILE_DECLARATIONS["promotion"],
         dryrun=True)
-    installed = installed_workspace(pipe_tree, _LIVE_WORKSPACE_ENV)
+    # A space in the declared path survives the restore and the re-export.
+    installed = installed_workspace(pipe_tree / "live workspace", _LIVE_WORKSPACE_ENV)
     operator.update({"GAP_REHEARSAL_INSTALLED_WORKSPACE": str(installed),
                      "GAP_REHEARSAL_KUBE_CONTEXT": "rehearsal-ctx"})
     r = _run_task(pipe_tree, task, "airgap:pipeline", extra_env=operator)
