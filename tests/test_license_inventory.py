@@ -19,10 +19,10 @@ from scripts import license_inventory as li
 from tests.helpers_airgap import REPO, copy_chart, copy_license_inputs
 from tests.helpers_task_artifact import copy_task_tools
 
-# Open WebUI v0.13.4-slim upstream index (#1357 import); the derived image
-# digest stays sha256:PENDING until the factory pushes the v0.13.4 build.
+# Open WebUI v0.13.4-slim upstream index (#1357 import) and the derived image the
+# e2e image-openwebui job pushed from it (run 45034752116, manifest digest).
 BASE_DIGEST = "0c4439e78c24c85e3e7a41936771d3b02f0df38daf28a086cd83ca74804f7676"
-OPENWEBUI_DIGEST = "PENDING"
+OPENWEBUI_DIGEST = "43a12b28e82d975dd042a3bac07b3f7b8e25107a65e4258286430a3ef2ff13e2"
 
 
 def real_inventory():

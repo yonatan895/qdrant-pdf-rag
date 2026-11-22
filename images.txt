@@ -39,7 +39,7 @@ registry.redhat.io/openshift4/ose-oauth-proxy:v4.14                     sha256:b
 # records it); like the UBI line it is provenance, never a bundle member. The
 # two needles are disjoint: open-webui:v0.13.4-slim vs qdrant-pdf-rag-openwebui.
 ghcr.io/open-webui/open-webui:v0.13.4-slim                             sha256:0c4439e78c24c85e3e7a41936771d3b02f0df38daf28a086cd83ca74804f7676
-ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.13.4-slim               sha256:PENDING
+ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.13.4-slim               sha256:43a12b28e82d975dd042a3bac07b3f7b8e25107a65e4258286430a3ef2ff13e2
 # ADR-0007 E1 (maintainer decision 2026-10-24): the allow-list proxy sidecar of
 # the Open WebUI pod (nginx, BSD-2-Clause; the unprivileged image is Apache-2.0
 # packaging). Config: charts/mainframe-rag/files/openwebui/proxy.nginx.conf.
