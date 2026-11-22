@@ -30,7 +30,13 @@ These envelopes are estimates until actual co-residency is measured.
 
 Prepare the repository's pinned Task runner and development environment using
 [the existing setup](task-runner.md). Provision the official
-`google-colab-cli` 0.7.4 and required SSH/Docker/kubectl tools explicitly.
+`google-colab-cli` 0.8.0 (`uv tool install --force google-colab-cli==0.8.0`;
+the PyPI wheel sha256 is `5e623d0b34e6efa84ea81571d0cec60099e06aebe7ea345ec62f53e810da2ec1`)
+and required SSH/Docker/kubectl tools explicitly. The controller refuses any
+other CLI version, and a CPU receipt proved with another version cannot admit
+a GPU run. CLI 0.8.0 reads its OAuth token from the OS keyring first and falls
+back to `~/.config/colab-cli/token.json`; it deletes that file only after a
+successful keyring write.
 The maintainer completes OAuth in their own terminal before a live run; the
 controller uses explicit `--auth oauth2` and does not log in automatically.
 Inspect the intended account and its available CU balance privately. Do not
@@ -187,7 +193,7 @@ the successful CPU receipt binds this effective address for GPU admission.
 Fresh known-hosts state and a private SSH key belong to this run.
 Every CLI operation uses the run's private `colab-sessions.json` store, including
 runtime execution, SSH and the printed recovery command. SSH uses unnamed proxy
-mode: CLI 0.7.4 resolves the sole live record in that isolated store and refuses
+mode: CLI 0.8.0 resolves the sole live record in that isolated store and refuses
 an empty, pruned or ambiguous store. Its named proxy mode can create a missing
 session and is therefore unsuitable here. A fresh run refuses a pre-existing
 private store; global CLI sessions are neither imported nor adopted.
@@ -677,6 +683,16 @@ Release also requires absence of the bound endpoint under every listed name,
 including the CLI's `?` label for server assignments missing local state. An
 allocation with no bound endpoint remains `cleanup_required`, even after an
 empty listing: a timed-out allocation is not proof that no runtime was created.
+`colab new` has a 180 s controller bound. CLI 0.8.0 retries an assignment POST
+that returns 502/503/504 or times out, and re-reads its assignment before each
+retry so an uncertain POST is not repeated. The controller passes only `new`
+`COLAB_CLI_REQUEST_TIMEOUT=150`, `COLAB_CLI_ASSIGN_RETRIES=2` and
+`COLAB_CLI_RETRY_BACKOFF=10`, which override ambient values. Repeated 503s
+after about 31 s, the 2026-11-22 G4 pattern, then end in about 130 s. A single
+request that waits the full 150 s and is then retried can still reach the
+180 s bound and becomes such an unknown allocation. Runtime `exec --timeout`
+is an idle limit in 0.8.0, not a whole-run deadline; the controller's own work
+deadline and session stop end the runtime execution.
 Inspect unresolved assignments in the Colab UI; never invent a name or adopt an
 unattributed endpoint to stop it automatically.
 Preserve the final account usage observation, stop result and absence proof.
