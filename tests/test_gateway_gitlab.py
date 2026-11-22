@@ -1339,6 +1339,13 @@ def test_site_probe_fail_paths(tmp_path: Path, setup: dict[str, object], check: 
     assert UPSTREAM_CANARY not in json.dumps(checks)
 
 
+def _flaky_filter(request: httpx2.Request) -> httpx2.Response:
+    """The filtered request fails with a 503: not evidence the filter is refused."""
+    if request.url.params.get("activity_filter"):
+        return httpx2.Response(503, text=UPSTREAM_CANARY)
+    return _probe_notes()(request)  # type: ignore[operator]
+
+
 @pytest.mark.parametrize(("setup", "check", "reason"), [
     ({"job": None, "issue": None}, "gitlab.job_trace_stream", "no_job_named"),
     ({"job": None, "issue": None}, "gitlab.issue_notes_filter", "no_issue_named"),
@@ -1349,6 +1356,8 @@ def test_site_probe_fail_paths(tmp_path: Path, setup: dict[str, object], check: 
      "filter_ignored"),
     ({"routes": {"projects/7/issues/5/notes": _probe_notes(system=False)}}, "gitlab.issue_notes_filter",
      "no_system_notes"),
+    ({"routes": {"projects/7/issues/5/notes": _flaky_filter}}, "gitlab.issue_notes_filter",
+     "upstream_unavailable"),
     ({"job": "team/app:99"}, "gitlab.job_trace_stream", "job_not_found"),
     ({"issue": "team/moved:5"}, "gitlab.issue_notes_filter", "project_project_not_allowed"),
 ])

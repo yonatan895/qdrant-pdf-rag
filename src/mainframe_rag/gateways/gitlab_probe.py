@@ -217,8 +217,12 @@ class _Probe:
         try:
             filtered = await self._notes(project_id, target.number, filtered=True)
         except GatewayError as exc:
-            # The control request worked, so the parameter itself was refused.
-            self.receipt.add(check, "fail", reason="filter_refused", upstream=exc.code)
+            if exc.code == "upstream_error":
+                # The control request worked and this one got a 4xx other
+                # than 401/403/404: the parameter itself was refused.
+                self.receipt.add(check, "fail", reason="filter_refused")
+            else:
+                self.receipt.add(check, "inconclusive", reason=exc.code)
             return
 
         def system(rows: list[Any]) -> int:

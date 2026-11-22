@@ -186,8 +186,11 @@ class _ZosRun:
     default_reason: str = "not_reached"
 
     def put(self, check: str, status: str, **fields: Any) -> None:
-        """Record a check once; the first outcome of a check stands."""
-        if check not in self.results:
+        """Record a check once; the first outcome stands, except that a pass
+        replaces an inconclusive one (a later transfer proves the passive
+        data connection a refused one could not)."""
+        earlier = self.results.get(check)
+        if earlier is None or (earlier[0] == "inconclusive" and status == "pass"):
             self.results[check] = (status, fields)
 
     def receipt(self) -> Receipt:

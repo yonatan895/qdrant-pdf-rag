@@ -2382,6 +2382,7 @@ class ProbeFTP(FakeFTP):
         jes_site: dict[str, str | Exception] | None = None,
         login_error: Exception | None = None,
         data_error: Exception | None = None,
+        connect_error: Exception | None = None,
     ) -> None:
         super().__init__()
         self.stat = stat
@@ -2389,6 +2390,7 @@ class ProbeFTP(FakeFTP):
         self.jes_site = jes_site or {}
         self.login_exc = login_error
         self.data_error = data_error
+        self.connect_error = connect_error
         self.logins = 0
         self.jes_mode = False
         self.files[f"'{PROBE_DATASET.split('(')[0]}'(MRKMEMQ)"] = (
@@ -2400,6 +2402,8 @@ class ProbeFTP(FakeFTP):
 
     def connect(self, host: str, port: int = 21, timeout: float = 15.0) -> str:
         super().connect(host, port, timeout)
+        if self.connect_error is not None:
+            raise self.connect_error
         return "220-MRKBANNERQ welcome"
 
     def login(self, user: str, passwd: str, acct: str = "", secure: bool = True) -> str:
@@ -2453,6 +2457,10 @@ def _probe(fake: ProbeFTP, *, dataset: str | None = PROBE_DATASET, job: str | No
     cfg = _probe_config(**overrides)
     targets = site_probe.validate_targets(cfg, dataset=dataset, job_id=job)
     receipt = site_probe.run_zos_probe(cfg, targets, factory=lambda: fake, breaker=breaker)
+    # Every path: nothing seeded in the fake or the configuration is recorded.
+    text = "\n".join(receipt.lines()).upper()
+    for marker in (*PROBE_MARKERS, "MRKMEMQ", PROBE_JOB, "PARMLIB", "EXAMPLE"):
+        assert marker.upper() not in text, marker
     return receipt, {str(r["check"]): r for r in receipt.records}
 
 
@@ -2508,6 +2516,11 @@ def test_site_probe_passes_every_check_with_one_logon_and_read_only_verbs() -> N
          "zos.site_sbsendeol", None),
         ({"jes_site": {"NOTRAILINGBLANKS": "202 MRKSITEQ not implemented"}}, {},
          "zos.jes_site_notrailingblanks", None),
+        ({"jes_site": {"SBSENDEOL=CRLF": ftplib.error_perm("501 MRKSITEQ invalid under JES")}}, {},
+         "zos.jes_site_sbsendeol", None),
+        ({"connect_error": TimeoutError("MRKHOSTQ")}, {}, "zos.control_connect", "timeout"),
+        ({"connect_error": ConnectionRefusedError("MRKHOSTQ")}, {}, "zos.control_connect",
+         "upstream_error"),
         ({"stat": "211-SBDATACONN (IBM-1047,UTF-8) MRKSTATQ\n211 end"}, {},
          "zos.stat_sbdataconn", None),
         ({}, {"encoding": "utf-8"}, "zos.dataset_read_ascii", "replacement_chars"),
@@ -2541,6 +2554,9 @@ def test_site_probe_fail_paths(fake_kwargs: dict, overrides: dict, check: str, r
         assert checks[check]["reason"] == reason
     assert receipt.exit_code() == 1 and receipt.summary()["status"] == "fail"
     _assert_read_only(fake)
+    if check == "zos.control_connect":
+        assert fake.logins == 0
+        assert all(checks[c]["reason"] == "not_reached" for c in site_probe.CHECKS[1:])
     if reason in ("no_level2_header", "jes_refused"):
         assert f"RETR {PROBE_JOB}.2" not in fake.commands
     if reason == "data_connection_failed":
@@ -2572,6 +2588,23 @@ def test_site_probe_inconclusive_paths_never_fail_on_unknown_shapes() -> None:
     assert checks["zos.jes_spool_mapping"]["status"] == "inconclusive"
     assert checks["zos.jes_spool_mapping"]["reason"] == "unrecognized_shape"
     assert receipt.exit_code() == 0
+
+    # A transient (4xx) SITE reply is not a fact about the pin.
+    fake = ProbeFTP(site={"NOTRAILINGBLANKS": ftplib.error_temp("421 MRKSITEQ busy")})
+    _, checks = _probe(fake)
+    assert checks["zos.site_notrailingblanks"]["status"] == "inconclusive"
+    assert checks["zos.site_notrailingblanks"]["reason"] == "transient"
+    assert checks["zos.site_notrailingblanks"]["reply_code"] == "421"
+
+    # A refused dataset RETR proves no data connection; the JES LIST then does.
+    fake = ProbeFTP()
+    fake.files.pop(f"'{PROBE_DATASET.split('(')[0]}'(MRKMEMQ)")
+    _, checks = _probe(fake)
+    assert checks["zos.dataset_read_ascii"]["reason"] == "not_found"
+    assert checks["zos.passive_data"]["status"] == "pass"
+    assert checks["zos.passive_data"]["via"] == "jes_list"
+    _, checks = _probe(ProbeFTP(data_error=ftplib.error_perm("550 MRKSITEQ")), job=None)
+    assert checks["zos.passive_data"]["reason"] == "no_data_transferred"
 
     # A named job outside the prefix allowlist: LIST only, never RETR.
     fake = ProbeFTP()

@@ -253,7 +253,11 @@
      firewall to the LPAR IP on TCP 21 and `FTP.DATA` `PASSIVEPORTRANGE`;
    - (c) **Phased validation:** first the logon-free transport probe
      (`--probe`), then the read-only site probe (#1343) in the bridge pod,
-     which replaces the `dry_run` plan and the single live `dataset_read`:
+     then a `dry_run` plan without FTP calls, then one live `dataset_read` of
+     an allowlisted member on a test LPAR through the agent (recorded with ids,
+     outcome and bytes only). The site probe records the FTP server's
+     `SBDATACONN` code page (`zos.stat_sbdataconn`), to confirm or override
+     `MCP_FTP_ENCODING`:
 
      ```sh
      python -m mainframe_rag.mcp --site-probe --dataset <allowlisted member> \
