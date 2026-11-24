@@ -248,6 +248,11 @@ def start(monkeypatch, synthetic_pdf, servable_representation_gate):
             # explicit old source reproduces them byte for byte; the check
             # itself is pinned in tests/test_tokenizer.py.
             monkeypatch.setenv("LLM_TOKEN_COUNT_SOURCE", "tokenize")
+            # They also predate #1368's selection and expansion defaults (on);
+            # both stages have their own pinned outcomes in test_answer_core.py,
+            # test_answer_expand.py and test_telemetry_privacy.py.
+            monkeypatch.setenv("ANSWER_SELECT_ENABLED", "false")
+            monkeypatch.setenv("ANSWER_EXPAND_ENABLED", "false")
             timeline = stack.enter_context(_timeline(monkeypatch))
             llm = _scenario(monkeypatch, scenario)
             client = stack.enter_context(

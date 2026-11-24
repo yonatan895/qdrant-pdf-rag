@@ -552,6 +552,18 @@ OPERATOR_KEYS: tuple[OperatorKey, ...] = (
         chart_env=("RETRIEVE_MAX_CHUNKS_PER_DOC",), min_value=1, max_value=10,
     ),
     OperatorKey(
+        "ANSWER_SELECT_ENABLED", _SEC_CHAT, "bool", True,
+        "Candidate selection: one lowest-effort reasoning call picks the packed hits from a wider retrieval.",
+        "#1368", _EX_CHART, helm_path="models.reasoning.answerSelectEnabled",
+        chart_env=("ANSWER_SELECT_ENABLED",),
+    ),
+    OperatorKey(
+        "ANSWER_EXPAND_ENABLED", _SEC_CHAT, "bool", True,
+        "Neighbour expansion: append reading-order neighbours of packed hits (within two pages).",
+        "#1368", _EX_CHART, helm_path="models.reasoning.answerExpandEnabled",
+        chart_env=("ANSWER_EXPAND_ENABLED",),
+    ),
+    OperatorKey(
         "CHAT_FOLLOWUP_ANCHOR_ENABLED", _SEC_CHAT, "bool", True,
         "Anchor identifier-free follow-ups with previous user message (mutually exclusive with CHAT_CONDENSE_ENABLED).",
         "#1268", _EX_CHART, helm_path="models.reasoning.followupAnchorEnabled",
@@ -580,6 +592,24 @@ OPERATOR_KEYS: tuple[OperatorKey, ...] = (
         "Prompt tokens reserved per pasted chat image (256..65536).",
         "#1287", _EX_CHART, helm_path="models.reasoning.imageTokenReserve",
         chart_env=("LLM_IMAGE_TOKEN_RESERVE",), min_value=256, max_value=65536,
+    ),
+    OperatorKey(
+        "CHAT_IMAGE_MAX_BYTES", _SEC_CHAT, "int", 5242880,
+        "Decoded bytes per pasted image at the agent (1024..20971520; browser and Pipe caps stay 5 MiB).",
+        "#1368", _EX_CHART, helm_path="models.reasoning.chatImageMaxBytes",
+        chart_env=("CHAT_IMAGE_MAX_BYTES",), min_value=1024, max_value=20971520,
+    ),
+    OperatorKey(
+        "CHAT_IMAGE_MAX_COUNT", _SEC_CHAT, "int", 3,
+        "Pasted images per message at the agent (1..8; browser and Pipe caps stay 3).",
+        "#1368", _EX_CHART, helm_path="models.reasoning.chatImageMaxCount",
+        chart_env=("CHAT_IMAGE_MAX_COUNT",), min_value=1, max_value=8,
+    ),
+    OperatorKey(
+        "CHAT_IMAGE_MAX_PIXELS", _SEC_CHAT, "int", 4194304,
+        "Pixels per pasted image at the agent (4096..33554432; the browser downscales to 2048 px).",
+        "#1368", _EX_CHART, helm_path="models.reasoning.chatImageMaxPixels",
+        chart_env=("CHAT_IMAGE_MAX_PIXELS",), min_value=4096, max_value=33554432,
     ),
 
     # --- Optional metrics ---

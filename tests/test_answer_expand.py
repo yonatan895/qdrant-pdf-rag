@@ -633,7 +633,7 @@ def _follow_up(query: str) -> AnswerCoreInput:
 async def test_expansion_off_never_reads_stored_chunks_and_changes_nothing(
     select, query, source, monkeypatch
 ):
-    """ANSWER_EXPAND_ENABLED off (the default): the stage's code is never
+    """ANSWER_EXPAND_ENABLED off (on by default since #1368): the stage's code is never
     entered and no stored chunk is read, on a first turn and an anchored
     follow-up, with candidate selection on or off. The hits, timings, prompt
     and span attributes equal those of a turn with no reader at all."""

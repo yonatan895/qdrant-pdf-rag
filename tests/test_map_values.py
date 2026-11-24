@@ -50,7 +50,9 @@ MAPPER_KEYS = [
     "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS", "LLM_STREAM",
     "LLM_EXTRA_BODY", "LLM_EFFORT_TRANSPORT", "LLM_TOKEN_COUNT_SOURCE", "CHAT_MAX_PRIOR_TURN_CHARS", "CHAT_MAX_TURNS",
     "CHAT_FOLLOWUP_ANCHOR_ENABLED", "ANSWER_HIT_LIMIT", "RETRIEVE_MAX_CHUNKS_PER_DOC", "ANSWER_CODING_MODE_ENABLED", "CHAT_IMAGES_ENABLED",
-    "LLM_IMAGE_TOKEN_RESERVE", "REQUEST_DEADLINE_S", "REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S",
+    "LLM_IMAGE_TOKEN_RESERVE", "ANSWER_SELECT_ENABLED", "ANSWER_EXPAND_ENABLED", "CHAT_IMAGE_MAX_BYTES",
+    "CHAT_IMAGE_MAX_COUNT", "CHAT_IMAGE_MAX_PIXELS",
+    "REQUEST_DEADLINE_S", "REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S",
     "REQUEST_MAX_BODY_BYTES", "REQUEST_BODY_BUDGET_BYTES",
     "RERANK_ENABLED", "RERANK_BASE_URL", "RERANK_MODEL", "RERANK_ENDPOINT_ORDER",
     "GATEWAY_API_KEY_SECRET", "GATEWAY_API_KEY_SECRET_KEY", "GATEWAY_CA_CONFIGMAP", "PULL_SECRET",
@@ -602,6 +604,17 @@ def test_chat_images_operator_mapping(monkeypatch, mapper_env, raw, want):
     assert mapped(mapper_env)["models"]["reasoning"].get("chatImagesEnabled") is want
 
 
+@pytest.mark.parametrize("name,field", [("ANSWER_SELECT_ENABLED", "answerSelectEnabled"),
+                                        ("ANSWER_EXPAND_ENABLED", "answerExpandEnabled")])
+@pytest.mark.parametrize("raw,want", [("", None), ("false", False), ("0", False), ("true", True)])
+def test_answer_select_and_expand_operator_mapping(monkeypatch, mapper_env, name, field, raw, want):
+    """Issue #1368: unset writes no key (the pod keeps the on default); an
+    explicit boolean, the one-line `false` of an ablation arm included, is
+    carried to its models.reasoning value."""
+    monkeypatch.setenv(name, raw)
+    assert mapped(mapper_env)["models"]["reasoning"].get(field) is want
+
+
 @pytest.mark.parametrize("anchor,condense", [("true", "true"), ("1", "yes")])
 def test_condense_and_anchor_together_fail_without_artifact(monkeypatch, mapper_env, anchor, condense):
     """Issue #1268: the follow-up modes are exclusive; the mapper refuses the
@@ -655,13 +668,16 @@ def test_chat_history_limits_reach_rendered_agent(monkeypatch, mapper_env):
 
 def test_answer_depth_reaches_rendered_agent(monkeypatch, mapper_env):
     """Issue #1191: the retrieval depth inputs cross the mapper into the pod
-    exactly; the limits the mapper enforces are the Settings limits."""
+    exactly; the limits the mapper enforces are the Settings limits. #1368:
+    so do the selection and expansion switches and the agent's image limits."""
     from scripts.airgap import model_config
 
     from mainframe_rag.config import Settings
 
     selected = {"ANSWER_HIT_LIMIT": "16", "RETRIEVE_MAX_CHUNKS_PER_DOC": "5",
-                "LLM_IMAGE_TOKEN_RESERVE": "8192"}
+                "LLM_IMAGE_TOKEN_RESERVE": "8192", "ANSWER_SELECT_ENABLED": "false",
+                "ANSWER_EXPAND_ENABLED": "false", "CHAT_IMAGE_MAX_BYTES": "2097152",
+                "CHAT_IMAGE_MAX_COUNT": "2", "CHAT_IMAGE_MAX_PIXELS": "1048576"}
     for name, value in selected.items():
         monkeypatch.setenv(name, value)
     result, output = mapper_env()
@@ -669,6 +685,9 @@ def test_answer_depth_reaches_rendered_agent(monkeypatch, mapper_env):
     reasoning = load_values(output)["models"]["reasoning"]
     assert (reasoning["answerHitLimit"], reasoning["retrieveMaxChunksPerDoc"],
             reasoning["imageTokenReserve"]) == (16, 5, 8192)
+    assert (reasoning["answerSelectEnabled"], reasoning["answerExpandEnabled"],
+            reasoning["chatImageMaxBytes"], reasoning["chatImageMaxCount"],
+            reasoning["chatImageMaxPixels"]) == (False, False, 2097152, 2, 1048576)
     rendered = subprocess.run(
         [str(REPO / ".tools/bin/helm"), "template", "app", str(CHART), "-f", str(output),
          "--namespace", "ns", "--show-only", "templates/agent-deployment.yaml"],
@@ -680,7 +699,10 @@ def test_answer_depth_reaches_rendered_agent(monkeypatch, mapper_env):
     assert {name: actual.get(name) for name in selected} == selected
     for name, setting in (("ANSWER_HIT_LIMIT", "answer_hit_limit"),
                           ("RETRIEVE_MAX_CHUNKS_PER_DOC", "retrieve_max_chunks_per_doc"),
-                          ("LLM_IMAGE_TOKEN_RESERVE", "llm_image_token_reserve")):
+                          ("LLM_IMAGE_TOKEN_RESERVE", "llm_image_token_reserve"),
+                          ("CHAT_IMAGE_MAX_BYTES", "chat_image_max_bytes"),
+                          ("CHAT_IMAGE_MAX_COUNT", "chat_image_max_count"),
+                          ("CHAT_IMAGE_MAX_PIXELS", "chat_image_max_pixels")):
         bounds = {type(m).__name__: m for m in Settings.model_fields[setting].metadata}
         _field, low, high = model_config.REASONING_INTEGER_FIELDS[name]
         assert (low, high) == (bounds["Ge"].ge, bounds["Le"].le)
@@ -741,6 +763,11 @@ def test_selected_model_budgets_reach_rendered_agent(monkeypatch, mapper_env, st
     ("CHAT_FOLLOWUP_ANCHOR_ENABLED", "unsupported-private-value"),
     ("ANSWER_CODING_MODE_ENABLED", "unsupported-private-value"),
     ("CHAT_IMAGES_ENABLED", "unsupported-private-value"),
+    ("ANSWER_SELECT_ENABLED", "unsupported-private-value"),
+    ("ANSWER_EXPAND_ENABLED", "unsupported-private-value"),
+    ("CHAT_IMAGE_MAX_BYTES", "1023"), ("CHAT_IMAGE_MAX_BYTES", "20971521"),
+    ("CHAT_IMAGE_MAX_BYTES", "5MiB"), ("CHAT_IMAGE_MAX_COUNT", "0"), ("CHAT_IMAGE_MAX_COUNT", "9"),
+    ("CHAT_IMAGE_MAX_PIXELS", "4095"), ("CHAT_IMAGE_MAX_PIXELS", "33554433"),
 ])
 def test_model_budget_invalid_selection_fails_without_artifact(monkeypatch, mapper_env, name, bad):
     monkeypatch.setenv(name, bad)
@@ -941,7 +968,9 @@ def test_empty_model_budget_inputs_preserve_application_defaults(monkeypatch, ma
                  "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS",
                  "LLM_STREAM", "LLM_TOKEN_COUNT_SOURCE", "CHAT_MAX_PRIOR_TURN_CHARS", "CHAT_MAX_TURNS",
                  "CHAT_FOLLOWUP_ANCHOR_ENABLED", "ANSWER_HIT_LIMIT", "RETRIEVE_MAX_CHUNKS_PER_DOC", "ANSWER_CODING_MODE_ENABLED",
-                 "CHAT_IMAGES_ENABLED", "LLM_IMAGE_TOKEN_RESERVE"):
+                 "CHAT_IMAGES_ENABLED", "LLM_IMAGE_TOKEN_RESERVE", "ANSWER_SELECT_ENABLED",
+                 "ANSWER_EXPAND_ENABLED", "CHAT_IMAGE_MAX_BYTES", "CHAT_IMAGE_MAX_COUNT",
+                 "CHAT_IMAGE_MAX_PIXELS"):
         monkeypatch.setenv(name, "")
     result, output = mapper_env()
     assert result.returncode == 0, result.stderr

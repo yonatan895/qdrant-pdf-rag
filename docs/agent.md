@@ -1283,15 +1283,15 @@ readers:
 | `chat_max_body_chars` | 131072 (422, message states the limit) | request-size guard for `/v1/answer`, `/v1/chat` and `/ui` (abuse protection; shared `chat_body_chars` helper); the Pipe valve `MAX_BODY_CHARS` must match |
 | `chat_max_turns` / `chat_max_prior_turn_chars` | 10 / 4000 (#1274, was 1000) | chat history packing caps; operator inputs `CHAT_MAX_TURNS` / `CHAT_MAX_PRIOR_TURN_CHARS` (#1268; unset renders no variable) |
 | `answer_hit_limit` | 16 (#1274, was 8; 1..32) | hits one answer retrieval returns: `/v1/answer`, `/v1/chat*`, the console and the fused cut of an anchored follow-up's two legs (`AgentResources.retrieve`, `_fuse_by_rank`); `/v1/search` and MCP search keep the caller's `limit` (default 8, max 40). Operator input `ANSWER_HIT_LIMIT` (#1191; unset renders no variable). The pool (40 per leg, or `rerank_candidates` with rerank on) and the per-page/per-doc caps may return fewer. Every hit is offered to packing: under the default window and reserves, the estimator fits 16 excerpts at the 4000-character cap (above the 3500-character ingest section cap), and a denser server count trims or drops from the tail; 32 need about a 65,536-token window. The supplied-evidence text total scales as `max(48000, 6000 x answer_hit_limit)`, so excerpts at the 4000-character cap keep their text ([supplied evidence](#supplied-evidence-projection-issue-635)) |
-| `answer_select_enabled` / `answer_select_candidates` | `false` / 40 (2..40) | [candidate selection](#candidate-selection) (#1309): one lowest-effort reasoning call picks which of one retrieval's `answer_select_candidates` hits are the answer's `answer_hit_limit` hits; on an anchored follow-up whose antecedent names an identifier, the antecedent leg's head (at most `answer_hit_limit // 2` hits) is pinned and the model picks the rest. Off is byte-identical. Settings/environment only (`ANSWER_SELECT_ENABLED`, `ANSWER_SELECT_CANDIDATES`): no operator key, chart value or registry entry until a measured A/B |
-| `answer_expand_enabled` / `answer_expand_budget` / `answer_expand_per_hit` | `false` / 16 (0..32) / 4 (1..8) | [neighbour expansion](#neighbour-expansion) (#1314): after retrieval and selection, a hit's reading-order neighbours within two pages are appended as separate hits, at most `answer_expand_per_hit` per hit and `answer_expand_budget` per turn (0 adds none). Off is byte-identical. Settings/environment only (`ANSWER_EXPAND_ENABLED`, `ANSWER_EXPAND_BUDGET`, `ANSWER_EXPAND_PER_HIT`): no operator key, chart value or registry entry (maintainer decision 2026-11-20) |
+| `answer_select_enabled` / `answer_select_candidates` | `true` / 40 (2..40) | [candidate selection](#candidate-selection) (#1309): one lowest-effort reasoning call picks which of one retrieval's `answer_select_candidates` hits are the answer's `answer_hit_limit` hits; on an anchored follow-up whose antecedent names an identifier, the antecedent leg's head (at most `answer_hit_limit // 2` hits) is pinned and the model picks the rest. Off is byte-identical to before #1309. On by default since #1368 (maintainer decision 2026-11-22, confirmed 2026-11-24). Operator key `ANSWER_SELECT_ENABLED` (chart `models.reasoning.answerSelectEnabled`; unset renders no variable); `ANSWER_SELECT_CANDIDATES` stays Settings/environment only |
+| `answer_expand_enabled` / `answer_expand_budget` / `answer_expand_per_hit` | `true` / 16 (0..32) / 4 (1..8) | [neighbour expansion](#neighbour-expansion) (#1314): after retrieval and selection, a hit's reading-order neighbours within two pages are appended as separate hits, at most `answer_expand_per_hit` per hit and `answer_expand_budget` per turn (0 adds none). Off is byte-identical to before #1314. On by default since #1368 (maintainer decision 2026-11-22, confirmed 2026-11-24, superseding the 2026-11-20 no-key decision). Operator key `ANSWER_EXPAND_ENABLED` (chart `models.reasoning.answerExpandEnabled`; unset renders no variable); `ANSWER_EXPAND_BUDGET` and `ANSWER_EXPAND_PER_HIT` stay Settings/environment only |
 | `research_mode_enabled` / `research_max_rounds` / `research_max_searches` / `research_stage_budget_s` / `research_max_packed_excerpts` / `research_plan_max_excerpts` / `research_plan_excerpt_chars` / `research_plan_max_tokens` | `false` / 2 (1..2) / 3 (1..3) / 30.0 (0..120) / 24 (1..64) / 16 (1..32) / 2000 (100..4000) / 8192 (32..16384) | [research mode](#research-mode) (ADR-0013, #1325): bounded model-directed follow-up search stage on opted-in `/v1/chat*` turns. Default off (byte-identical when off or not requested). Hard ceilings in code: `research_max_rounds <= 2`, `research_max_searches <= 3` (first retrieval included). Enabling refuses startup unless `request_deadline_s > 0` and `research_stage_budget_s + embed_timeout_s + qdrant_timeout_s (+ rerank_timeout_s if rerank_enabled) < request_deadline_s`. Settings/environment only in Issue 1 (no chart value, operator key or Pipe entry yet) |
 | `retrieve_max_chunks_per_page` / `retrieve_max_chunks_per_doc` | 1 / 5 (#1274, was 3; 1..10 each) | diversity caps in `diversify_hits`, for every retrieval (`/v1/search` and MCP included); a capped hit is backfilled only when the pool runs short. Operator input `RETRIEVE_MAX_CHUNKS_PER_DOC` (#1191; unset renders no variable) |
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
 | `answer_coding_mode_enabled` | `true` (#1276) | coding mode: coding requests take the complex path and the coding prompt extension ([prompt assembly](#4-prompt-assembly-and-budgets)); operator input `ANSWER_CODING_MODE_ENABLED`, unset renders no variable |
 | `answer_spl_mode_enabled` | `false` (#1293) | SPL mode: Splunk SPL requests and pasted Splunk results take the complex path and the SPL prompt extension, taking precedence over coding mode when both match ([prompt assembly](#4-prompt-assembly-and-budgets)); operator input `ANSWER_SPL_MODE_ENABLED`, unset renders no variable; the `spl` tag in `SCRIPT_LANGS` is not gated |
 | `chat_images_enabled` | `false` (#1287) | pasted images on `/v1/chat*` ([chat images](#chat-images)); operator input `CHAT_IMAGES_ENABLED`, unset renders no variable. Off: a content-part list is the fixed 422 `invalid_request`, and requests for messages without attachments are byte-identical (the Pipe drops Open WebUI's `<attached_files>` text, which appears only when a file is attached; uploads are off) |
-| `chat_image_max_bytes` / `chat_image_max_count` / `chat_image_max_pixels` | 5242880 / 3 / 4194304 | per-image decoded bytes, images per request (latest user message only) and pixels per image (decision 7; the chart's Open WebUI caps and the Pipe valves `MAX_IMAGE_BYTES`/`MAX_IMAGES` match) |
+| `chat_image_max_bytes` / `chat_image_max_count` / `chat_image_max_pixels` | 5242880 / 3 / 4194304 | per-image decoded bytes, images per request (latest user message only) and pixels per image (decision 7; the chart's Open WebUI caps and the Pipe valves `MAX_IMAGE_BYTES`/`MAX_IMAGES` match the defaults). Operator keys since #1368: `CHAT_IMAGE_MAX_BYTES`, `CHAT_IMAGE_MAX_COUNT`, `CHAT_IMAGE_MAX_PIXELS` (chart `models.reasoning.chatImageMaxBytes`/`chatImageMaxCount`/`chatImageMaxPixels`; unset renders no variable). They set the agent hop only: the browser caps, the Pipe valves and the proxy body cap keep the defaults, so a lower value refuses a larger image with the fixed `unsupported_image` text and a higher one has no effect past the browser |
 | `chat_image_types` | `png,jpeg,webp` | accepted types from `png,jpeg,webp,gif`; GIF is parsed but off by default (decision 7) |
 | `chat_image_read_max_tokens` / `chat_image_read_max_chars` / `chat_image_read_timeout_s` | 4096 / 4000 / 60 | the transcription call: completion cap, characters kept of the reply, and its timeout (also at most half of what the request deadline has left). Its effort is not a setting: it is the `quick` depth's, the lowest `LLM_REASONING_EFFORTS` offers (maintainer decision 2026-11-17), so turning images on never conflicts with the effort list |
 | `llm_image_token_reserve` | 6144 (256..65536) | tokens priced per image in the answer prompt (counts are text-only). The default is an estimate (2048x2048 px at 28x28 px per token is about 5,350); set the `image_tokens` the site's `probe_gateway.py --probe-image` measured. Operator input `LLM_IMAGE_TOKEN_RESERVE` (chart `models.reasoning.imageTokenReserve`, maintainer decision 2026-11-17), unset renders no variable |
@@ -1777,16 +1777,18 @@ and capability restrictions.
 <a id="candidate-selection"></a>
 ## Candidate selection (issue #1309)
 
-**Status: implemented, default off** (`answer_select_enabled`; no operator key,
-chart value or registry entry yet, so it is a Settings/environment switch for
-the stand-in lane only). **Decision owners:** `answer_core.retrieve_for_answer`
+**Status: implemented, default on since #1368** (`answer_select_enabled`;
+operator key `ANSWER_SELECT_ENABLED`, chart value
+`models.reasoning.answerSelectEnabled`; maintainer decision 2026-11-22,
+confirmed 2026-11-24). **Decision owners:** `answer_core.retrieve_for_answer`
 (when the stage runs) and `agent/answer_select.py` (prompt, parsing, order).
 [ADR-0013](adr/0013-research-mode.md) (accepted, implemented default off in #1325) adds a
 bounded follow-up search stage ([research mode](#research-mode)), exclusive per request with this one in its first release (its D1; selection bypasses with reason `research_mode`).
 
-Off, every request is byte-identical: the same retrieval call, hits, timings
-and prompt, and no span attribute. On, `/v1/answer`, `/v1/chat*` and the
-console (never `/v1/search` or MCP search) do this after the search plan:
+Off (`ANSWER_SELECT_ENABLED=false`), every request is byte-identical to before
+#1309: the same retrieval call, hits, timings and prompt, and no span
+attribute. On, `/v1/answer`, `/v1/chat*` and the console (never
+`/v1/search` or MCP search) do this after the search plan:
 
 | Step | Rule |
 |---|---|
@@ -1816,12 +1818,15 @@ elapsed time, not `llm_ms`. Stage order is fixed: retrieve, select, then
 <a id="neighbour-expansion"></a>
 ## Neighbour expansion (issue #1314)
 
-**Status: implemented, default off** (`answer_expand_enabled`; Settings/environment
-only, for the stand-in lane). **Decision owners:** `answer_core.retrieve_for_answer`
+**Status: implemented, default on since #1368** (`answer_expand_enabled`;
+operator key `ANSWER_EXPAND_ENABLED`, chart value
+`models.reasoning.answerExpandEnabled`; maintainer decision 2026-11-22,
+confirmed 2026-11-24). **Decision owners:** `answer_core.retrieve_for_answer`
 (when the stage runs) and `agent/answer_expand.py` (lookup, order rules, budget).
 
-Off, every request is byte-identical: no stored-point read, the same hits,
-timings, prompt and response keys, and no span attribute. On, `/v1/answer`,
+Off (`ANSWER_EXPAND_ENABLED=false`), every request is byte-identical to
+before #1314: no stored-point read, the same hits, timings, prompt and
+response keys, and no span attribute. On, `/v1/answer`,
 `/v1/chat*` and the console (never `/v1/search`, MCP search or
 `retrieve/query.py` ranking) run it last: retrieve, select (when on), expand.
 It applies to the final list whatever selection did (pinned hits stay first).
@@ -2156,7 +2161,11 @@ The Helm operator input `CHAT_CONDENSE_ENABLED` maps to
 `followupAnchorEnabled` and render only when set (#1268), so an unset value
 keeps the application default (anchoring on, 4000 characters, since #1274);
 `ANSWER_HIT_LIMIT` and `RETRIEVE_MAX_CHUNKS_PER_DOC` map to `answerHitLimit` and
-`retrieveMaxChunksPerDoc` the same way (#1191). Explicit local
+`retrieveMaxChunksPerDoc` the same way (#1191), and `ANSWER_SELECT_ENABLED`,
+`ANSWER_EXPAND_ENABLED`, `CHAT_IMAGE_MAX_BYTES`, `CHAT_IMAGE_MAX_COUNT` and
+`CHAT_IMAGE_MAX_PIXELS` map to `answerSelectEnabled`, `answerExpandEnabled`,
+`chatImageMaxBytes`, `chatImageMaxCount` and `chatImageMaxPixels` (#1368;
+unset keeps selection and expansion on). Explicit local
 follow-up acceptance is described in [the real-corpus runbook](local-real-corpus.md).
 
 

@@ -75,7 +75,16 @@ spec:
               value: {{ index $.Values.models.reasoning $field | toString | quote }}
             {{- end }}
             {{- end }}
-            {{- $chatEnv := dict "chatMaxTurns" "CHAT_MAX_TURNS" "chatMaxPriorTurnChars" "CHAT_MAX_PRIOR_TURN_CHARS" "followupAnchorEnabled" "CHAT_FOLLOWUP_ANCHOR_ENABLED" "answerHitLimit" "ANSWER_HIT_LIMIT" "retrieveMaxChunksPerDoc" "RETRIEVE_MAX_CHUNKS_PER_DOC" }}
+            {{- /* Image limits (#1368) reach 7-8 digits: int64 first, or toString
+                   renders the YAML number in exponent form (2.097152e+06). */}}
+            {{- $imageEnv := dict "chatImageMaxBytes" "CHAT_IMAGE_MAX_BYTES" "chatImageMaxCount" "CHAT_IMAGE_MAX_COUNT" "chatImageMaxPixels" "CHAT_IMAGE_MAX_PIXELS" }}
+            {{- range $field, $name := $imageEnv }}
+            {{- if hasKey $.Values.models.reasoning $field }}
+            - name: {{ $name }}
+              value: {{ index $.Values.models.reasoning $field | int64 | toString | quote }}
+            {{- end }}
+            {{- end }}
+            {{- $chatEnv := dict "chatMaxTurns" "CHAT_MAX_TURNS" "chatMaxPriorTurnChars" "CHAT_MAX_PRIOR_TURN_CHARS" "followupAnchorEnabled" "CHAT_FOLLOWUP_ANCHOR_ENABLED" "answerHitLimit" "ANSWER_HIT_LIMIT" "retrieveMaxChunksPerDoc" "RETRIEVE_MAX_CHUNKS_PER_DOC" "answerSelectEnabled" "ANSWER_SELECT_ENABLED" "answerExpandEnabled" "ANSWER_EXPAND_ENABLED" }}
             {{- range $field, $name := $chatEnv }}
             {{- if hasKey $.Values.models.reasoning $field }}
             - name: {{ $name }}

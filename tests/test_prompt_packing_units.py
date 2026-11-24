@@ -1011,11 +1011,13 @@ def test_the_projection_total_follows_the_bound_hit_limit(hit_limit, kept_whole)
     """The bound comes from the request's Settings: with 8,000-character
     excerpts, 48,000 keeps six whole at a hit limit of 8 and 96,000 keeps
     twelve at 16; past the total every entry stays, its text empty and
-    flagged."""
+    flagged. Neighbour expansion off (on by default since #1368): with it
+    on, the total follows the hits offered instead (the next test)."""
     from mainframe_rag.agent.answer import SUPPLIED_EXCERPT_MAX_CHARS
     from mainframe_rag.config import Settings
 
-    settings = Settings(**settings_kw(answer_hit_limit=hit_limit, llm_max_model_len=131072))
+    settings = Settings(**settings_kw(answer_hit_limit=hit_limit, llm_max_model_len=131072,
+                                      answer_expand_enabled=False))
     hits = _depth_hits(16, 5, SUPPLIED_EXCERPT_MAX_CHARS)
     prepared = build_messages("What does the operator do?", hits, tokenizer=FallbackTokenizer(),
                               settings=settings, max_chunk_chars=SUPPLIED_EXCERPT_MAX_CHARS)

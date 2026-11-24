@@ -526,6 +526,13 @@ def test_chart_preserves_positive_operator_dimension_and_worker_range():
     ("chatImagesEnabled", True, "CHAT_IMAGES_ENABLED"),
     ("chatImagesEnabled", False, "CHAT_IMAGES_ENABLED"),
     ("imageTokenReserve", 8192, "LLM_IMAGE_TOKEN_RESERVE"),
+    ("answerSelectEnabled", False, "ANSWER_SELECT_ENABLED"),  # #1368
+    ("answerSelectEnabled", True, "ANSWER_SELECT_ENABLED"),
+    ("answerExpandEnabled", False, "ANSWER_EXPAND_ENABLED"),
+    ("answerExpandEnabled", True, "ANSWER_EXPAND_ENABLED"),
+    ("chatImageMaxBytes", 2097152, "CHAT_IMAGE_MAX_BYTES"),
+    ("chatImageMaxCount", 2, "CHAT_IMAGE_MAX_COUNT"),
+    ("chatImageMaxPixels", 1048576, "CHAT_IMAGE_MAX_PIXELS"),
 ])
 def test_direct_chart_optional_budget_limits_reach_pod(field, value, environment):
     rendered = run_new_template({"models": {"reasoning": {field: value}}})
@@ -579,6 +586,26 @@ def test_chat_images_on_reaches_the_pod_settings_and_unset_renders_nothing(monke
     assert Settings(_env_file=None).chat_images_enabled is True
 
 
+@pytest.mark.parametrize("field,environment,setting", [
+    ("answerSelectEnabled", "ANSWER_SELECT_ENABLED", "answer_select_enabled"),
+    ("answerExpandEnabled", "ANSWER_EXPAND_ENABLED", "answer_expand_enabled"),
+])
+def test_selection_and_expansion_off_reach_the_pod_settings_and_unset_renders_nothing(
+    monkeypatch, field, environment, setting
+):
+    """Issue #1368: both stages are on by default and unset renders no
+    variable (the pod keeps the on default); the one-line switch-off of an
+    ablation arm crosses the chart into Settings as false."""
+    from mainframe_rag.config import Settings
+
+    default = env_map(run_new_template({})["Deployment", "rag-agent"])
+    assert environment not in default
+    assert getattr(Settings(_env_file=None), setting) is True
+    pod = env_map(run_new_template({"models": {"reasoning": {field: False}}})["Deployment", "rag-agent"])
+    monkeypatch.setenv(environment, pod[environment]["value"])
+    assert getattr(Settings(_env_file=None), setting) is False
+
+
 def test_chat_history_limits_are_optional_pod_inputs_bounded_like_settings():
     """Issue #1268: the chat history caps are operator inputs. Unset renders
     neither variable (the default pod keeps the Settings defaults); the schema
@@ -588,7 +615,8 @@ def test_chat_history_limits_are_optional_pod_inputs_bounded_like_settings():
 
     default = env_map(run_new_template({})["Deployment", "rag-agent"])
     assert not {"CHAT_MAX_PRIOR_TURN_CHARS", "CHAT_MAX_TURNS", "CHAT_FOLLOWUP_ANCHOR_ENABLED",
-                "ANSWER_HIT_LIMIT", "RETRIEVE_MAX_CHUNKS_PER_DOC", "LLM_IMAGE_TOKEN_RESERVE"} & set(default)
+                "ANSWER_HIT_LIMIT", "RETRIEVE_MAX_CHUNKS_PER_DOC", "LLM_IMAGE_TOKEN_RESERVE",
+                "CHAT_IMAGE_MAX_BYTES", "CHAT_IMAGE_MAX_COUNT", "CHAT_IMAGE_MAX_PIXELS"} & set(default)
     schema = json.loads((CHART / "values.schema.json").read_text())
     reasoning = schema["properties"]["models"]["properties"]["reasoning"]["properties"]
     # The retrieval depth inputs (#1191) follow the same rule.
@@ -596,7 +624,10 @@ def test_chat_history_limits_are_optional_pod_inputs_bounded_like_settings():
                            ("chatMaxTurns", "chat_max_turns"),
                            ("answerHitLimit", "answer_hit_limit"),
                            ("retrieveMaxChunksPerDoc", "retrieve_max_chunks_per_doc"),
-                           ("imageTokenReserve", "llm_image_token_reserve")):
+                           ("imageTokenReserve", "llm_image_token_reserve"),
+                           ("chatImageMaxBytes", "chat_image_max_bytes"),  # #1368
+                           ("chatImageMaxCount", "chat_image_max_count"),
+                           ("chatImageMaxPixels", "chat_image_max_pixels")):
         bounds = {type(m).__name__: m for m in Settings.model_fields[setting].metadata}
         assert (reasoning[field]["minimum"], reasoning[field]["maximum"]) == (bounds["Ge"].ge, bounds["Le"].le)
 
@@ -749,6 +780,10 @@ def test_token_count_source_reaches_the_pod_as_settings_accept_it():
     ("models.reasoning.retrieveMaxChunksPerDoc", 0), ("models.reasoning.retrieveMaxChunksPerDoc", 11),
     ("models.reasoning.imageTokenReserve", 255), ("models.reasoning.imageTokenReserve", 65537),
     ("models.reasoning.imageTokenReserve", "6144"),
+    ("models.reasoning.answerSelectEnabled", "false"), ("models.reasoning.answerExpandEnabled", "true"),
+    ("models.reasoning.chatImageMaxBytes", 1023), ("models.reasoning.chatImageMaxBytes", 20971521),
+    ("models.reasoning.chatImageMaxCount", 0), ("models.reasoning.chatImageMaxCount", 9),
+    ("models.reasoning.chatImageMaxPixels", 4095), ("models.reasoning.chatImageMaxPixels", "4194304"),
     ("models.reasoning.followupAnchorEnabled", "true"),
     ("models.reasoning.tokenCountSource", "usage"), ("models.reasoning.tokenCountSource", ""),
     ("models.reasoning.tokenCountSource", "Tokenize"),

@@ -823,6 +823,63 @@ def test_slow_model_stand_in_paces_only_the_marked_question_and_keeps_the_reply_
             server.server_close()
 
 
+def _post(url, messages, stream):
+    import http.client
+    import time
+    host, port = url.removeprefix("http://").split(":")
+    body = json.dumps({"model": "mock-reasoning", "stream": stream, "messages": messages})
+    t0 = time.monotonic()
+    conn = http.client.HTTPConnection(host, int(port), timeout=10)
+    conn.request("POST", "/v1/chat/completions", body=body, headers={"Content-Type": "application/json"})
+    data = conn.getresponse().read()
+    return time.monotonic() - t0, data
+
+
+def _content(data, stream):
+    if not stream:
+        return json.loads(data)["choices"][0]["message"]["content"]
+    frames = [json.loads(line[6:]) for line in data.decode().splitlines()
+              if line.startswith("data: {")]
+    return "".join(frame["choices"][0]["delta"].get("content", "") for frame in frames)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_slow_model_stand_in_answers_the_selection_call_at_once_in_retrieval_order(stream):
+    """#1368: candidate selection is on by default, so a non-identifier answer
+    first sends the agent's selection prompt (built here by answer_select
+    itself). The stand-in answers it at once, even when the question carries
+    the paced marker, with the first candidates in the order listed: the
+    packed hits are the retrieval order (what a fallback packs), so no lane
+    answer moves. The answer call that follows is still paced."""
+    from mainframe_rag.agent.answer_select import (
+        build_select_messages,
+        order_selection,
+        parse_selection,
+    )
+    from tests.helpers_agent_local import agent_hit
+
+    candidates = [agent_hit(f"Step {n} text.", chunk_id=f"c{n}", page_label=str(n)) for n in range(1, 7)]
+    question = "What does the operator do next? ZQTESTMARK1"
+    messages = [{"role": m.role, "content": m.content}
+                for m in build_select_messages(question, None, candidates, 4)]
+    paced, paced_url = _mock("select", {"MOCK_PACED_MARKER": "ZQTESTMARK1", "MOCK_PACED_TTFT_MS": "1500",
+                                        "MOCK_PACED_STREAM_MS": "0"})
+    try:
+        elapsed, data = _post(paced_url, messages, stream)
+        reply = _content(data, stream)
+        assert elapsed < 1.0, elapsed
+        assert reply == "[1, 2, 3, 4]"
+        picked = parse_selection(reply, len(candidates))
+        assert order_selection(candidates, picked, 4) == candidates[:4]
+        answer = [{"role": "system", "content": "x"},
+                  {"role": "user", "content": f"{question}\n[1] SA22-0000-00 outline, p. 3\nIEA500I means a test."}]
+        slow, _ = _post(paced_url, answer, stream)
+        assert slow >= 1.5, slow
+    finally:
+        paced.shutdown()
+        paced.server_close()
+
+
 @pytest.mark.parametrize("env", [{"MOCK_PACED_MARKER": "short"}, {"MOCK_PACED_MARKER": "has space 12"},
                                  {"MOCK_PACED_TTFT_MS": "-1"}, {"MOCK_PACED_STREAM_MS": "inf"}])
 def test_slow_model_stand_in_refuses_a_bad_setting(env):

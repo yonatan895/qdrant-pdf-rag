@@ -783,14 +783,16 @@ anchoring (`CHAT_FOLLOWUP_ANCHOR_ENABLED`), a 4000-character prior-turn cut
 (`LLM_TOKEN_COUNT_SOURCE`), the 262144-token window default
 (`LLM_MAX_MODEL_LEN`), a retrieval depth of 16 hits and 5 chunks per manual
 (`ANSWER_HIT_LIMIT`, `RETRIEVE_MAX_CHUNKS_PER_DOC`, #1191) and coding mode
-(`ANSWER_CODING_MODE_ENABLED`, #1276). No pre-merge evidence exists for them
+(`ANSWER_CODING_MODE_ENABLED`, #1276); since #1368 also candidate selection
+(`ANSWER_SELECT_ENABLED`, #1309) and neighbour expansion
+(`ANSWER_EXPAND_ENABLED`, #1314). No pre-merge evidence exists for them
 on the site model; this visit is the deciding measurement. The release's
 defaults are the baseline. The visit runs in this order: step 0 (settings
 and probes), the A sessions on the old build (f117160c, `--hit-limit 8`),
 the upgrade, the B sessions on the new defaults, then the
 [ablation arms](#site-ablation-arms), each switching one feature off in
 `airgap.env` (anchor off, history 1000, count tokenize, depth 8/3, coding
-off), and last an effort arm only if step 0 showed the effort is honoured.
+off, selection off, expansion off), and last an effort arm only if step 0 showed the effort is honoured.
 A feature that hurts stays off in `airgap.env`, with no new release;
 flipping its code default back is a later decision.
 
@@ -1065,6 +1067,8 @@ run D-coding-off chat --all --repeats 2
 | `count-tokenize` | `LLM_TOKEN_COUNT_SOURCE=tokenize` | B2 (same flags, same build) |
 | `depth-8-3` | `ANSWER_HIT_LIMIT=8` and `RETRIEVE_MAX_CHUNKS_PER_DOC=3`, run with `--hit-limit 8` | B2 |
 | `coding-off` | `ANSWER_CODING_MODE_ENABLED=false` | B1/B2 ([coding mode](#site-coding-arm)) |
+| `select-off` (#1368) | `ANSWER_SELECT_ENABLED=false` | a `select-on` run with the same flags ([candidate selection](#select-arm)) |
+| `expand-control` (#1368) | `ANSWER_EXPAND_ENABLED=false` and `ANSWER_HIT_LIMIT=N+B` | an `expand-on` run with the same flags ([neighbour expansion](#expand-arm)) |
 | `effort` (only if step 0 shows the effort is honoured) | the transport `--probe-args` named | B2 |
 
 - `--prior-cap` must equal the deployed cut: omit it on every arm but
@@ -1117,15 +1121,19 @@ recount each repeat from the export rows (`repeat`, `follow_up_kind`,
 default change after the comparison is a separate maintainer decision.
 
 <a id="select-arm"></a>
-**Candidate-selection arm (`select-on`, issue #1309; stand-in lane only).**
-[Candidate selection](agent.md#candidate-selection) has no operator key, so
-this arm cannot run at a site: it is set in the agent's environment on the
-stand-in lane, and its result is relative to that lane's model.
+**Candidate-selection arm (`select-on` vs `select-off`, issue #1309).**
+[Candidate selection](agent.md#candidate-selection) is on by default since
+#1368, with the operator key `ANSWER_SELECT_ENABLED`, so the arm runs at a
+site: the release default is `select-on`, and `select-off` is one
+`airgap.env` line. `ANSWER_SELECT_CANDIDATES` has no operator key: at a
+site it is the default 40; on the stand-in lane it is set in the agent's
+environment, and that lane's result is relative to its model. Neighbour
+expansion stays at its deployed value in both arms.
 
 | Arm | Agent environment | Compare with |
 |---|---|---|
-| `select-on` | `ANSWER_SELECT_ENABLED=true`, `ANSWER_SELECT_CANDIDATES=40`, `ANSWER_HIT_LIMIT=N` | `select-off` |
-| `select-off` (control) | `ANSWER_HIT_LIMIT=N` only | n/a |
+| `select-on` (release default) | `ANSWER_HIT_LIMIT=N` (`ANSWER_SELECT_CANDIDATES=40`, the default) | `select-off` |
+| `select-off` (control) | `ANSWER_SELECT_ENABLED=false`, `ANSWER_HIT_LIMIT=N` | n/a |
 
 - Run both with `--stream` (the buffered `/v1/answer` body carries no hits,
   so `final_hits` is null there).
@@ -1134,7 +1142,8 @@ stand-in lane, and its result is relative to that lane's model.
   selection label, and the selection prompt is not budgeted (about 1,000
   characters per candidate): on a window too small for it every row is a
   `fallback` and the arm measures nothing. Lower `ANSWER_SELECT_CANDIDATES`
-  until the list fits.
+  until the list fits (stand-in lane only: it has no operator key, so a site
+  whose window is too small reports the arm as unmeasured).
 - Both arms pack the same number of excerpts (`N`, run with `--hit-limit N`),
   so the difference is which candidates are packed, not how many. Raising
   `ANSWER_HIT_LIMIT` instead is a different arm ([depth](#site-depth-arm)).
@@ -1157,14 +1166,17 @@ stand-in lane, and its result is relative to that lane's model.
   interpreting follow-up rows.
 
 <a id="expand-arm"></a>
-**Neighbour-expansion arm (`expand-on`, issue #1314; stand-in lane only).**
-[Neighbour expansion](agent.md#neighbour-expansion) has no operator key, so
-this arm cannot run at a site.
+**Neighbour-expansion arm (`expand-on` vs `expand-control`, issue #1314).**
+[Neighbour expansion](agent.md#neighbour-expansion) is on by default since
+#1368, with the operator key `ANSWER_EXPAND_ENABLED`, so the arm runs at a
+site: the release default is `expand-on`. `ANSWER_EXPAND_BUDGET` and
+`ANSWER_EXPAND_PER_HIT` have no operator key: at a site `B` is the
+default 16. Candidate selection stays at its deployed value in both arms.
 
 | Arm | Agent environment | Compare with |
 |---|---|---|
-| `expand-on` | `ANSWER_EXPAND_ENABLED=true`, `ANSWER_HIT_LIMIT=N`, `ANSWER_EXPAND_BUDGET=B` (`ANSWER_EXPAND_PER_HIT` at its default 4) | `expand-control` |
-| `expand-control` | `ANSWER_HIT_LIMIT=N+B` only (at most 32) | n/a |
+| `expand-on` (release default) | `ANSWER_HIT_LIMIT=N`, `ANSWER_EXPAND_BUDGET=B` (default 16; `ANSWER_EXPAND_PER_HIT` at its default 4) | `expand-control` |
+| `expand-control` | `ANSWER_EXPAND_ENABLED=false`, `ANSWER_HIT_LIMIT=N+B` (at most 32) | n/a |
 
 - The control packs the same number of chunks by plain retrieval depth, so
   the difference is which chunks fill the extra slots, not how many. With
@@ -1181,7 +1193,9 @@ this arm cannot run at a site.
   `hits`, and `--image-arm`) keeps the sibling `/v1/search` join exactly
   as before #1314. Harness L2/L4 call the buffered `/v1/answer`, so they
   keep that join on `expand-on` too, where a cited cross-page neighbour is
-  unmapped and fails the row: do not run L2/L4 on this arm.
+  unmapped and fails the row: do not run L2/L4 on this arm. Since #1368
+  every default deployment is this arm; how the release gate runs L2/L4
+  against it is a pending maintainer decision (#1368).
 - Run `expand-on` with `--stream` and `--hit-limit N` (the sibling pool depth) and
   the control with `--stream` and `--hit-limit N+B`.
 - Before reading results, confirm from the stand-in's traces that rows carry

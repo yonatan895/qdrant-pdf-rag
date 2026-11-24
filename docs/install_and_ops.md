@@ -1700,6 +1700,8 @@ sh scripts/tools/run-task.sh airgap:smoke
   | Hits per answer retrieval | 16 (was 8) | `ANSWER_HIT_LIMIT=8` |
   | Chunks kept per manual (every retrieval, `/v1/search` included) | 5 (was 3) | `RETRIEVE_MAX_CHUNKS_PER_DOC=3` |
   | Coding mode (#1276): a request to write, fix, review, convert or explain JCL, REXX, HLASM or (Metal) C takes the complex path and the coding prompt | on | `ANSWER_CODING_MODE_ENABLED=false` (restores the prompts and complexity; the new `c`/`hlasm`/`asm`/`metalc`/`assembler`/`clist` fence handling stays) |
+  | Candidate selection (#1309, on since #1368): one extra lowest-effort reasoning call per non-identifier answer picks the packed hits from a 40-hit retrieval | on | `ANSWER_SELECT_ENABLED=false` ([deploy.md](deploy.md#default-changes-1368)) |
+  | Neighbour expansion (#1314, on since #1368): reading-order neighbours of the packed hits (within two pages, at most 16) join the prompt | on | `ANSWER_EXPAND_ENABLED=false` |
   | Pasted images in Open WebUI (#1287): Rosetta is declared not image-capable, so a pasted image is refused up front instead of dropped silently (one new Open WebUI variable, `DEFAULT_MODEL_METADATA`) | off | none (the silent drop was the defect); turn images on with `CHAT_IMAGES_ENABLED=true` only after `probe_gateway.py --probe-image` passes ([deploy.md](deploy.md#owui-chat-images)) |
 
   - **Window:** the 262144 default assumes the reasoning model serves at
