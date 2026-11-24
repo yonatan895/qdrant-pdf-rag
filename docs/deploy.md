@@ -2301,7 +2301,8 @@ Nothing is uploaded or stored, and E1 adds no route. A paste in a saved chat sti
   unset renders no variable). The browser caps, the docs Pipe valves
   (`MAX_IMAGE_BYTES`, `MAX_IMAGES`) and the proxy body cap stay at the
   defaults: a lower agent value refuses a larger image with the fixed
-  `unsupported_image` text, and a higher one has no effect past the browser.
+  `unsupported_image` text, and a higher one has no effect on Open WebUI
+  chats (a direct `/v1/chat*` API caller does get it).
 
   The proxy adds an exact `location = /api/chat/completions` with `client_max_body_size 55m`,
   only while images are on. Every other path keeps 1m. The browser resends every earlier image
@@ -2710,7 +2711,8 @@ the new default; the last column restores the behaviour before #1368.
   a 40-hit retrieval (`answer_select_candidates`, about 1,000 characters per
   candidate in that prompt). Confirm the reasoning key's rate limit and
   quota first. A failed, timed-out or unusable selection packs the retrieval
-  order instead and never fails the turn
+  order instead and never fails the turn by itself; the call counts against
+  the request deadline, which still ends the whole turn on a slow model
   ([candidate selection](agent.md#candidate-selection)).
 - **Expansion cost.** No model call: one Qdrant read of the hit ids and up to
   one scroll per distinct page among the hits, with the serving key. At most

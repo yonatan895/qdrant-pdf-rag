@@ -1,5 +1,5 @@
 # mypy: disallow_untyped_defs=True, disallow_untyped_calls=True, disallow_any_generics=True, warn_return_any=True, no_implicit_reexport=True, strict_equality=True, warn_unused_ignores=True
-"""Candidate selection for the answer path (issue #1309, default off).
+"""Candidate selection for the answer path (issue #1309; on by default since #1368).
 
 One low-effort call to the reasoning model picks which of one retrieval's
 candidates are packed for the answer. The model sees a numbered list (cite,

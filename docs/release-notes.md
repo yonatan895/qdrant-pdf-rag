@@ -176,9 +176,10 @@ Nothing is removed from the extension surface.
 
 Candidate selection (#1309) and neighbour expansion (#1314) are on by default
 (maintainer decision 2026-11-22, confirmed 2026-11-24). Every answer, chat and
-console turn whose question names no identifier makes one extra lowest-effort
-reasoning call over a 40-hit retrieval, and the packed hits' neighbours within
-two pages join the prompt. Five new optional `airgap.env` keys
+console turn whose question names no identifier and is not a trap makes one
+extra lowest-effort reasoning call over a 40-hit retrieval (none when there
+are no more candidates than packed hits), and the packed hits' neighbours
+within two pages join the prompt. Five new optional `airgap.env` keys
 ([default changes](deploy.md#default-changes-1368)):
 
 1. `ANSWER_SELECT_ENABLED` and `ANSWER_EXPAND_ENABLED` (unset: on). Set one
@@ -186,7 +187,8 @@ two pages join the prompt. Five new optional `airgap.env` keys
    ablation arm each).
 2. `CHAT_IMAGE_MAX_BYTES` (5242880), `CHAT_IMAGE_MAX_COUNT` (3) and
    `CHAT_IMAGE_MAX_PIXELS` (4194304): the agent's pasted-image limits, values
-   unchanged. Only a lower value takes effect; the browser and Pipe caps stay.
+   unchanged. The browser and Pipe caps stay, so in Open WebUI only a lower
+   value takes effect.
 
 Confirm the reasoning key's rate limit and quota before the upgrade.
 `CHAT_IMAGES_ENABLED`, `FEEDBACK_ENABLED` and rerank stay off. Nothing is

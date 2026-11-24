@@ -144,7 +144,7 @@ models:
     # imageTokenReserve: 6144
     # Pasted-image limits at the agent (#1368); absent keeps the Settings
     # defaults (shown). The Open WebUI caps and the docs Pipe valves stay at
-    # the defaults, so only a lower value takes effect.
+    # the defaults, so in Open WebUI only a lower value takes effect.
     # chatImageMaxBytes: 5242880   # 1024..20971520
     # chatImageMaxCount: 3         # 1..8
     # chatImageMaxPixels: 4194304  # 4096..33554432
