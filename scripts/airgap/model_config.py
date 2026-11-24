@@ -25,6 +25,11 @@ REASONING_INTEGER_FIELDS = {
     "RETRIEVE_MAX_CHUNKS_PER_DOC": ("retrieveMaxChunksPerDoc", 1, 10),
     # Tokens priced per pasted image (#1287): config.Settings bounds.
     "LLM_IMAGE_TOKEN_RESERVE": ("imageTokenReserve", 256, 65536),
+    # Pasted-image limits at the agent (#1287 decision 7; operator keys since
+    # #1368): config.Settings bounds. Only the agent hop reads them.
+    "CHAT_IMAGE_MAX_BYTES": ("chatImageMaxBytes", 1024, 20971520),
+    "CHAT_IMAGE_MAX_COUNT": ("chatImageMaxCount", 1, 8),
+    "CHAT_IMAGE_MAX_PIXELS": ("chatImageMaxPixels", 4096, 33554432),
 }
 REASONING_EFFORT_FIELDS = {
     "LLM_REASONING_EFFORT_SIMPLE": "reasoningEffortSimple",
@@ -66,9 +71,13 @@ CODING_MODE_KEY = "ANSWER_CODING_MODE_ENABLED"
 SPL_MODE_KEY = "ANSWER_SPL_MODE_ENABLED"
 # Pasted chat images (#1287): optional boolean, default off in Settings; empty keeps it.
 CHAT_IMAGES_KEY = "CHAT_IMAGES_ENABLED"
+# Candidate selection (#1309) and neighbour expansion (#1314): optional
+# booleans, default on in Settings since #1368; empty keeps it.
+SELECT_KEY = "ANSWER_SELECT_ENABLED"
+EXPAND_KEY = "ANSWER_EXPAND_ENABLED"
 REASONING_ENV_KEYS = (*REASONING_INTEGER_FIELDS, *REASONING_EFFORT_FIELDS, "LLM_REASONING_EFFORTS", "LLM_STREAM",
                       *MODEL_ARGUMENT_ENV_KEYS, TOKEN_COUNT_SOURCE_KEY, FOLLOWUP_ANCHOR_KEY, CODING_MODE_KEY,
-                      SPL_MODE_KEY, CHAT_IMAGES_KEY)
+                      SPL_MODE_KEY, CHAT_IMAGES_KEY, SELECT_KEY, EXPAND_KEY)
 
 # Request admission and total deadline (#374 handoff, #843 D1). Empty keeps the
 # chart default (deadline 270; admission 4/4/30, #843; body cap/budget 24/128 MiB, #1352); zero is an explicit selection. Limits match config.Settings and the
@@ -103,6 +112,7 @@ OPERATOR_BOOL_KEYS = (
     "INGEST_REINGEST", "INGEST_AUTHORIZE_FROM_CATALOG", "CHAT_CONDENSE_ENABLED", "LLM_STREAM", "AGENT_NETWORK_POLICY",
     "FEEDBACK_ENABLED", "OPENWEBUI_ENABLED", "CHAT_FOLLOWUP_ANCHOR_ENABLED", "ANSWER_CODING_MODE_ENABLED",
     "ANSWER_SPL_MODE_ENABLED", "OPENWEBUI_RATINGS_ENABLED", "CHAT_IMAGES_ENABLED",
+    "ANSWER_SELECT_ENABLED", "ANSWER_EXPAND_ENABLED",
 )
 
 # Agent ingress NetworkPolicy (issue #373): default ON; the allow-list names
@@ -578,6 +588,10 @@ def reasoning_overrides(values: Mapping[str, str]) -> dict[str, object]:
         result["splModeEnabled"] = parse_strict_bool(SPL_MODE_KEY, values[SPL_MODE_KEY], False)
     if values.get(CHAT_IMAGES_KEY, "") != "":
         result["chatImagesEnabled"] = parse_strict_bool(CHAT_IMAGES_KEY, values[CHAT_IMAGES_KEY], False)
+    if values.get(SELECT_KEY, "") != "":
+        result["answerSelectEnabled"] = parse_strict_bool(SELECT_KEY, values[SELECT_KEY], True)
+    if values.get(EXPAND_KEY, "") != "":
+        result["answerExpandEnabled"] = parse_strict_bool(EXPAND_KEY, values[EXPAND_KEY], True)
     source = values.get(TOKEN_COUNT_SOURCE_KEY, "")
     if source != "":
         if source not in TOKEN_COUNT_SOURCES:

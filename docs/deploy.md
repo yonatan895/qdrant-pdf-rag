@@ -93,7 +93,7 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - Operator booleans `UI_ENABLED`, `CONTEXTUAL_EMBED_ENABLED`,
   `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `INGEST_AUTHORIZE_FROM_CATALOG`,
   `CHAT_CONDENSE_ENABLED`, `CHAT_FOLLOWUP_ANCHOR_ENABLED`, `LLM_STREAM`
-  `FEEDBACK_ENABLED`, `OPENWEBUI_ENABLED`, `ANSWER_CODING_MODE_ENABLED` (unset keeps the pod's **true** default), `ANSWER_SPL_MODE_ENABLED` (unset keeps the pod's **false** default), `CHAT_IMAGES_ENABLED` and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
+  `FEEDBACK_ENABLED`, `OPENWEBUI_ENABLED`, `ANSWER_CODING_MODE_ENABLED` (unset keeps the pod's **true** default), `ANSWER_SELECT_ENABLED` and `ANSWER_EXPAND_ENABLED` (unset keeps the pod's **true** default, #1368), `ANSWER_SPL_MODE_ENABLED` (unset keeps the pod's **false** default), `CHAT_IMAGES_ENABLED` and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
   accept only `true/1/yes` or `false/0/no` (any case; unset keeps the
   default). `INGEST_ALIAS_PUBLISH` may only be unset or true: in-place ingest
   was retired (#360) and an explicit false fails closed.
@@ -179,8 +179,10 @@ restores the snapshot over whatever the file assigned; empty stays unset
   (`LLM_REASONING_EFFORT_SIMPLE` / `COMPLEX`), `LLM_STREAM` and the chat history
   caps (`CHAT_MAX_TURNS` 1..50, `CHAT_MAX_PRIOR_TURN_CHARS` 200..5000, #1268)
   and the retrieval depth (`ANSWER_HIT_LIMIT` 1..32, `RETRIEVE_MAX_CHUNKS_PER_DOC`
-  1..10, #1191) follow that same precedence/export path into `models.reasoning`
-  and the rendered agent pod.
+  1..10, #1191), and the agent's pasted-image limits (`CHAT_IMAGE_MAX_BYTES`
+  1024..20971520, `CHAT_IMAGE_MAX_COUNT` 1..8, `CHAT_IMAGE_MAX_PIXELS`
+  4096..33554432, #1368) follow that same precedence/export path into
+  `models.reasoning` and the rendered agent pod.
   `model_config.reasoning_overrides` enforces the existing Settings integer bounds,
   the `low/medium/high/xhigh` effort domain, `LLM_REASONING_EFFORTS` membership
   of both efforts (explicit or default, #748) and strict streaming booleans; chart
@@ -2294,6 +2296,14 @@ Nothing is uploaded or stored, and E1 adds no route. A paste in a saved chat sti
   | Browser (`RAG_FILE_MAX_SIZE`, `RAG_FILE_MAX_COUNT`, `FILE_IMAGE_COMPRESSION_*`), checked before the paste | 5 MB (MiB) | 3 | downscaled to 2048 px, aspect kept |
   | Agent (`CHAT_IMAGE_MAX_BYTES`, `_COUNT`, `_PIXELS`), latest user message only | 5242880 bytes | 3 | 4194304 |
 
+  The agent row is the only one an operator sets (`airgap.env` keys since
+  #1368, chart `models.reasoning.chatImageMaxBytes`/`chatImageMaxCount`/`chatImageMaxPixels`;
+  unset renders no variable). The browser caps, the docs Pipe valves
+  (`MAX_IMAGE_BYTES`, `MAX_IMAGES`) and the proxy body cap stay at the
+  defaults: a lower agent value refuses a larger image with the fixed
+  `unsupported_image` text, and a higher one has no effect on Open WebUI
+  chats (a direct `/v1/chat*` API caller does get it).
+
   The proxy adds an exact `location = /api/chat/completions` with `client_max_body_size 55m`,
   only while images are on. Every other path keeps 1m. The browser resends every earlier image
   of a temporary chat each turn, so 55m holds the 1 MiB text cap plus 8 images base64-encoded
@@ -2681,6 +2691,41 @@ behaviour before #1274.
   (mapper and chart). Ratings have not yet run on a live Open WebUI
   ([status](agent.md#openwebui-ratings)).
 
+<a id="default-changes-1368"></a>
+### Default changes (#1368)
+
+Maintainer decision of 2026-11-22, confirmed 2026-11-24: every new
+answer-quality feature ships on. Candidate selection (#1309) and neighbour
+expansion (#1314) become on by default and get an operator key each, so the
+site runs one ablation arm per feature ([eval.md](eval.md#select-arm)) and
+switches off one that hurts in `airgap.env`, with no new release. Unset keeps
+the new default; the last column restores the behaviour before #1368.
+
+| Setting (chart `models.reasoning.*`) | Before | Now | Old behaviour |
+|---|---|---|---|
+| `ANSWER_SELECT_ENABLED` (`answerSelectEnabled`) | off (no key) | on | `ANSWER_SELECT_ENABLED=false` |
+| `ANSWER_EXPAND_ENABLED` (`answerExpandEnabled`) | off (no key) | on | `ANSWER_EXPAND_ENABLED=false` |
+
+- **Selection cost.** One extra lowest-effort reasoning call per answer, chat
+  or console turn whose question names no identifier and is not a trap, over
+  a 40-hit retrieval (`answer_select_candidates`, about 1,000 characters per
+  candidate in that prompt). Confirm the reasoning key's rate limit and
+  quota first. A failed, timed-out or unusable selection packs the retrieval
+  order instead and never fails the turn by itself; the call counts against
+  the request deadline, which still ends the whole turn on a slow model
+  ([candidate selection](agent.md#candidate-selection)).
+- **Expansion cost.** No model call: one Qdrant read of the hit ids and up to
+  one scroll per distinct page among the hits, with the serving key. At most
+  16 neighbours join a turn's prompt (`answer_expand_budget`), so prompts
+  grow ([neighbour expansion](agent.md#neighbour-expansion)).
+- **Image limits.** `CHAT_IMAGE_MAX_BYTES` (5242880), `CHAT_IMAGE_MAX_COUNT`
+  (3) and `CHAT_IMAGE_MAX_PIXELS` (4194304) become operator keys
+  (`chatImageMaxBytes`, `chatImageMaxCount`, `chatImageMaxPixels`) with
+  their values unchanged. They set the agent hop only
+  ([caps chain](#owui-chat-images)).
+- **Unchanged.** `CHAT_IMAGES_ENABLED` and `FEEDBACK_ENABLED` stay off;
+  rerank stays off.
+
 ### Local follow-up and tokenizer acceptance
 
 `CHAT_CONDENSE_ENABLED` is an explicit boolean operator input mapped to Helm
@@ -2710,7 +2755,10 @@ as `script`), which apply to every answer. `ANSWER_SPL_MODE_ENABLED` (#1293)
 maps to `models.reasoning.splModeEnabled` and renders only when set; unset
 keeps the pod's off default, and `ANSWER_SPL_MODE_ENABLED=true` in `airgap.env`
 enables SPL mode (taking precedence over coding mode when both match; the `spl`
-code-fence tag applies to every answer regardless of the setting). `CHAT_IMAGES_ENABLED` (#1287) maps to
+code-fence tag applies to every answer regardless of the setting). `ANSWER_SELECT_ENABLED` and
+`ANSWER_EXPAND_ENABLED` (#1368) map to `models.reasoning.answerSelectEnabled` and
+`answerExpandEnabled` and render only when set; unset keeps the pod's on default
+([default changes](#default-changes-1368)). `CHAT_IMAGES_ENABLED` (#1287) maps to
 `models.reasoning.chatImagesEnabled` and renders only when set; unset keeps the pod's off
 default and the Open WebUI render's images off ([pasted images](#owui-chat-images)). Enable condensation deliberately when qualifying pronoun-only
 console follow-ups; require a grounded answer after the extra reasoning call.

@@ -340,9 +340,9 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "answer_hit_limit": 16,  # #1274, was 8 (#1191: the former RETRIEVAL_HIT_LIMIT constant)
     "llm_reasoning_effort_simple": "medium",  # #917, was xhigh (#777)
     "llm_reasoning_effort_complex": "medium",
-    "answer_select_enabled": False,  # #1309: off until a measured A/B
+    "answer_select_enabled": True,  # #1309; on since #1368 (maintainer 2026-11-22/24)
     "answer_select_candidates": 40,
-    "answer_expand_enabled": False,  # #1314: off, no operator key
+    "answer_expand_enabled": True,  # #1314; on since #1368 (maintainer 2026-11-22/24)
     "answer_expand_budget": 16,
     "answer_expand_per_hit": 4,
     "research_mode_enabled": False,  # #1325 / ADR-0013: default off

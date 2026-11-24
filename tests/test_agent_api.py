@@ -149,7 +149,9 @@ def test_answer_hit_limit_sets_every_answer_retrieval_and_never_search(
     """Issue #1191: ANSWER_HIT_LIMIT (default 16 since #1274; 8, the former fixed constant, before)
     is the hit count of every answer retrieval (/v1/answer, both chat routes,
     the console and each leg of an anchored follow-up). /v1/search keeps its
-    caller's limit and its own default of 8."""
+    caller's limit and its own default of 8. Candidate selection (on by
+    default since #1368) widens these retrievals, so it is set off here; its
+    own limits are pinned by test_candidate_selection_widens_answer_retrievals_only."""
     limits: list[tuple[str, int]] = []
 
     def search(_qdrant, _embedder, _collection, query, *, limit, **_kwargs):
@@ -159,7 +161,8 @@ def test_answer_hit_limit_sets_every_answer_retrieval_and_never_search(
     opener, follow_up = "What does IEA500I mean?", "What should the operator do next?"
     with agent_client(
         monkeypatch, llm=FakeLLM(), search=search,
-        env={**env, "UI_ENABLED": "true", "CHAT_FOLLOWUP_ANCHOR_ENABLED": "true"},
+        env={**env, "UI_ENABLED": "true", "CHAT_FOLLOWUP_ANCHOR_ENABLED": "true",
+             "ANSWER_SELECT_ENABLED": "false"},
     ) as c:
         for path, payload in (
             ("/v1/search", {"query": "s1"}),
@@ -269,7 +272,7 @@ class _NoStoredReads:
 def test_neighbour_expansion_off_keeps_every_answer_hit_as_retrieved(
     monkeypatch, servable_representation_gate, path, payload, final, select
 ):
-    """Issue #1314: with ANSWER_EXPAND_ENABLED off (the default) no stored
+    """Issue #1314: with ANSWER_EXPAND_ENABLED off (on by default since #1368) no stored
     point is read and every response hit is the retrieved hit, key for key
     (no parent-id key), on /v1/answer and /v1/chat, first turn and anchored
     follow-up, with candidate selection on or off."""
@@ -282,7 +285,7 @@ def test_neighbour_expansion_off_keeps_every_answer_hit_as_retrieved(
         return [retrieved], "nl", {"embed_ms": 1, "qdrant_ms": 2}
 
     with agent_client(monkeypatch, llm=FakeLLM(), search=search,
-                      env={"ANSWER_SELECT_ENABLED": select}) as c:
+                      env={"ANSWER_SELECT_ENABLED": select, "ANSWER_EXPAND_ENABLED": "false"}) as c:
         monkeypatch.setattr(app_mod, "qdrant", _NoStoredReads())
         resp = c.post(path, json=payload)
     assert resp.status_code == 200

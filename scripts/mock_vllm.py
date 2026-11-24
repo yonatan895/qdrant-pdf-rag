@@ -31,7 +31,8 @@ and infallible so eval/sim determinism never depends on load noise.
 Slow-model stand-in for the Open WebUI operator lane (#1118; default off):
     MOCK_PACED_MARKER     a word (8-64 letters/digits); only a chat request whose
                           last user message contains it is paced, so every other
-                          request in the same lane stays instant and byte-identical
+                          request in the same lane stays instant and byte-identical;
+                          the agent's candidate-selection call is never paced
     MOCK_PACED_TTFT_MS    a streamed reply sends its headers at once (as vLLM
                           does), then is silent this long before the first chunk
                           (a reasoning model thinking); non-stream sleeps it too
@@ -217,6 +218,40 @@ def _chat_content(messages: list) -> str:
     )
 
 
+# Candidate selection (#1309; on by default since #1368): the agent's
+# selection call is told apart by the first sentence of its system prompt
+# (answer_select.SELECT_SYSTEM_PROMPT; a test pins the two). The stand-in
+# chooses the first `limit` candidates in the order listed, so the packed hits
+# are the retrieval order (what a fallback packs) and the stage runs end to end
+# without moving any answer. A selection call is never paced: the slow-model
+# stand-in paces the answer call only.
+_SELECT_PROMPT_PREFIX = "You choose which manual excerpts will be used to answer a question."
+_SELECT_LIMIT_RE = re.compile(r"at most (\d+)\.")
+_CANDIDATE_RE = re.compile(r"(?:excerpts:\n|\n\n)\[(\d+)\] ")
+
+
+def _select_limit(messages: list) -> int | None:
+    """The selection call's 'at most' bound, or None for any other chat."""
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "system":
+            text = str(msg.get("content") or "")
+            if text.startswith(_SELECT_PROMPT_PREFIX):
+                found = _SELECT_LIMIT_RE.search(text)
+                return int(found.group(1)) if found else 0
+    return None
+
+
+def _select_content(messages: list, limit: int) -> str:
+    """The identity choice as the JSON array the stage parses: candidates 1..n."""
+    user = ""
+    for msg in reversed(messages):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            user = str(msg.get("content") or "")
+            break
+    count = len(_CANDIDATE_RE.findall(user))
+    return json.dumps(list(range(1, min(limit, count) + 1)))
+
+
 def _paced(messages: list) -> bool:
     """The slow-model stand-in applies: a marker is configured and the last user message carries it."""
     if not PACED_MARKER:
@@ -318,7 +353,9 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(messages, list) or not all(isinstance(m, dict) for m in messages):
             self._send(400, {"error": {"message": "'messages' must be a list of objects"}})
             return
-        content = _chat_content(messages)
+        select_limit = _select_limit(messages)
+        content = (_chat_content(messages) if select_limit is None
+                   else _select_content(messages, select_limit))
         prompt_tokens = sum(len(str(m.get("content", "")).split()) for m in messages)
         completion_tokens = len(content.split())
         finish_reason = req.get("mock_finish_reason", "stop")
@@ -329,7 +366,7 @@ class Handler(BaseHTTPRequestHandler):
             "reasoning_tokens": 10,
             "total_tokens": prompt_tokens + completion_tokens + 10,
         }
-        paced = _paced(messages)
+        paced = select_limit is None and _paced(messages)
         if req.get("stream"):
             ttft_ms = 0.0 if paced else _pace(TTFT_MS)  # first-byte latency, before any chunk
             self.send_response(200)

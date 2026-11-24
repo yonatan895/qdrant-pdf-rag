@@ -355,19 +355,23 @@ class Settings(BaseSettings):
     # excerpt cap; the retrieval pool (40 per leg, or `rerank_candidates`) and
     # the per-page/per-doc caps may return fewer. 16 since #1274 (was 8).
     answer_hit_limit: int = Field(default=16, ge=1, le=32)
-    # Candidate selection (issue #1309; off until a measured A/B, maintainer
-    # decision): one lowest-effort reasoning call picks which of one wider
-    # retrieval's candidates are the answer's hits. Off: every request is
-    # byte-identical. The candidate count is that retrieval's limit (at most
-    # /v1/search's 40); at or under answer_hit_limit there is nothing to pick.
-    answer_select_enabled: bool = False
+    # Candidate selection (issue #1309; on by default since #1368, maintainer
+    # decision 2026-11-22, confirmed 2026-11-24; operator key
+    # ANSWER_SELECT_ENABLED): one lowest-effort reasoning call picks which of
+    # one wider retrieval's candidates are the answer's hits. Off: every
+    # request is byte-identical to before #1309. The candidate count is that
+    # retrieval's limit (at most /v1/search's 40); at or under
+    # answer_hit_limit there is nothing to pick.
+    answer_select_enabled: bool = True
     answer_select_candidates: int = Field(default=40, ge=2, le=40)
-    # Neighbour expansion (issue #1314; off, no operator key, maintainer
-    # decision 2026-11-20): after retrieval and selection, a hit's
+    # Neighbour expansion (issue #1314; on by default since #1368, maintainer
+    # decision 2026-11-22, confirmed 2026-11-24; operator key
+    # ANSWER_EXPAND_ENABLED): after retrieval and selection, a hit's
     # reading-order neighbours within two pages are appended as separate
-    # hits. Off: every request is byte-identical. The budget is the most
-    # chunks one turn adds (0 adds none); the cap is the most one hit adds.
-    answer_expand_enabled: bool = False
+    # hits. Off: every request is byte-identical to before #1314. The budget
+    # is the most chunks one turn adds (0 adds none); the cap is the most one
+    # hit adds.
+    answer_expand_enabled: bool = True
     answer_expand_budget: int = Field(default=16, ge=0, le=32)
     answer_expand_per_hit: int = Field(default=4, ge=1, le=8)
     # Research mode (ADR-0013 / issue #1325; default off): bounded

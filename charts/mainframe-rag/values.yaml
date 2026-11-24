@@ -120,6 +120,10 @@ models:
     # limit) and chunks kept per manual (1..10; applies to /v1/search too).
     # answerHitLimit: 16          # 8 before #1274
     # retrieveMaxChunksPerDoc: 5  # 3 before #1274
+    # Candidate selection (#1309) and neighbour expansion (#1314); absent
+    # keeps the Settings defaults (on since #1368). false switches one off.
+    # answerSelectEnabled: true
+    # answerExpandEnabled: true
     # Coding mode (#1276); absent keeps the Settings default (on). false
     # restores the pre-#1276 prompts and complexity for every request (the
     # c/hlasm/asm/metalc/clist fence handling is not part of the setting).
@@ -138,6 +142,12 @@ models:
     # the Settings default (shown, an estimate). Set the image_tokens the
     # site's `probe_gateway.py --probe-image` measured, rounded up.
     # imageTokenReserve: 6144
+    # Pasted-image limits at the agent (#1368); absent keeps the Settings
+    # defaults (shown). The Open WebUI caps and the docs Pipe valves stay at
+    # the defaults, so in Open WebUI only a lower value takes effect.
+    # chatImageMaxBytes: 5242880   # 1024..20971520
+    # chatImageMaxCount: 3         # 1..8
+    # chatImageMaxPixels: 4194304  # 4096..33554432
     # Empty model disables /v1/answer; when set, baseUrl is required.
     baseUrl: ""
     model: ""

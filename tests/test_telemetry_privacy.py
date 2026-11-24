@@ -317,7 +317,7 @@ _ANSWER_ROOT = ["http.request_id", "rag.citations", "rag.evidence", "rag.has_scr
 def test_neighbour_expansion_off_leaves_the_request_as_it_was(
     client, monkeypatch, path, payload, root_name, root_keys, timing, select
 ):
-    """Issue #1314: with ANSWER_EXPAND_ENABLED off (the default) the stage's
+    """Issue #1314: with ANSWER_EXPAND_ENABLED off (on by default since #1368) the stage's
     code is never entered and no stored point is read, on /v1/answer and
     /v1/chat, first turn and anchored follow-up, with candidate selection on
     or off: one excerpt in the prompt, the root span's attribute names as
@@ -334,6 +334,7 @@ def test_neighbour_expansion_off_leaves_the_request_as_it_was(
     monkeypatch.setattr(app_mod, "qdrant", _FailingStore())
     monkeypatch.setattr(app_mod, "llm", llm)
     monkeypatch.setattr(app_mod.settings, "answer_select_enabled", select)
+    monkeypatch.setattr(app_mod.settings, "answer_expand_enabled", False)
     resp = c.post(path, json=payload)
     assert resp.status_code == 200
     assert len(llm.prompts) == 1 and llm.prompts[0].count("IEA500I synthetic text") == 1

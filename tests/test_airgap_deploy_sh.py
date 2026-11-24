@@ -359,16 +359,23 @@ def test_refused_model_request_arguments_stop_the_deploy_before_helm(tree):
     assert not (root / "dist/agent-rendered.yaml").exists()
 
 
-# Chat follow-up (#1268), retrieval depth (#1191) and image token reserve (#1287)
-# operator inputs: selected vs a conflicting alternate.
+# Chat follow-up (#1268), retrieval depth (#1191), image token reserve (#1287),
+# selection/expansion switches and agent image limits (#1368) operator inputs:
+# selected vs a conflicting alternate.
 _CHAT_FOLLOWUP_SELECTED = {"CHAT_MAX_PRIOR_TURN_CHARS": "4000", "CHAT_MAX_TURNS": "12",
                            "CHAT_FOLLOWUP_ANCHOR_ENABLED": "true",
                            "ANSWER_HIT_LIMIT": "16", "RETRIEVE_MAX_CHUNKS_PER_DOC": "5",
-                           "LLM_IMAGE_TOKEN_RESERVE": "8192"}
+                           "LLM_IMAGE_TOKEN_RESERVE": "8192",
+                           "ANSWER_SELECT_ENABLED": "false", "ANSWER_EXPAND_ENABLED": "false",
+                           "CHAT_IMAGE_MAX_BYTES": "2097152", "CHAT_IMAGE_MAX_COUNT": "2",
+                           "CHAT_IMAGE_MAX_PIXELS": "1048576"}
 _CHAT_FOLLOWUP_ALTERNATE = {"CHAT_MAX_PRIOR_TURN_CHARS": "200", "CHAT_MAX_TURNS": "1",
                             "CHAT_FOLLOWUP_ANCHOR_ENABLED": "false",
                             "ANSWER_HIT_LIMIT": "1", "RETRIEVE_MAX_CHUNKS_PER_DOC": "1",
-                            "LLM_IMAGE_TOKEN_RESERVE": "256"}
+                            "LLM_IMAGE_TOKEN_RESERVE": "256",
+                            "ANSWER_SELECT_ENABLED": "true", "ANSWER_EXPAND_ENABLED": "true",
+                            "CHAT_IMAGE_MAX_BYTES": "1024", "CHAT_IMAGE_MAX_COUNT": "8",
+                            "CHAT_IMAGE_MAX_PIXELS": "4096"}
 
 
 @pytest.mark.parametrize("source", ["file", "environment"])
@@ -392,6 +399,16 @@ def test_chat_followup_inputs_operator_precedence_reaches_rendered_pod(tree, sou
     assert result.returncode == 0, result.stderr
     pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
     assert {name: pod.get(name) for name in _CHAT_FOLLOWUP_SELECTED} == _CHAT_FOLLOWUP_SELECTED
+    # #1368: the pod's Settings read the switch-off lines and the lowered limits.
+    from mainframe_rag.config import Settings
+
+    settings = Settings(_env_file=None, answer_select_enabled=pod["ANSWER_SELECT_ENABLED"],
+                        answer_expand_enabled=pod["ANSWER_EXPAND_ENABLED"],
+                        chat_image_max_bytes=pod["CHAT_IMAGE_MAX_BYTES"],
+                        chat_image_max_count=pod["CHAT_IMAGE_MAX_COUNT"],
+                        chat_image_max_pixels=pod["CHAT_IMAGE_MAX_PIXELS"])
+    assert (settings.answer_select_enabled, settings.answer_expand_enabled, settings.chat_image_max_bytes,
+            settings.chat_image_max_count, settings.chat_image_max_pixels) == (False, False, 2097152, 2, 1048576)
 
 
 def test_unset_chat_followup_inputs_add_no_pod_variable(tree):

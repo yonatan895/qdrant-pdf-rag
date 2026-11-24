@@ -81,9 +81,12 @@ class CoreFakeLLM:
 
 
 def _deps(settings: Settings, llm, retrieve) -> AnswerCoreDeps:
-    async def retrieve_adapter(query, *, product, version, settings):
+    async def retrieve_adapter(query, *, product, version, settings, limit=None):
+        # The answer port's shape: candidate selection (on by default since
+        # #1368) asks a wider limit; without one the fake keeps its fixed 8.
         result = retrieve(None, None, settings.qdrant_collection, query,
-                          product=product, version=version, settings=settings, limit=8)
+                          product=product, version=version, settings=settings,
+                          limit=8 if limit is None else limit)
         if inspect.isawaitable(result):
             result = await result
         return RetrievalResult(*result)
@@ -477,7 +480,9 @@ async def test_anchored_follow_up_fuses_both_legs_by_rank_to_one_retrieval_count
     anchored = [_anchor_hit("A1", "DOC-A"), _anchor_hit("S", "DOC-S"), _anchor_hit("A2", "DOC-A")]
     search = _LegSearch({_FOLLOW_UP: literal, _OPENER: anchored}, kinds={_OPENER: "identifier"})
     llm = CoreFakeLLM()
-    deps = _deps(_settings(chat_followup_anchor_enabled=True), llm, search)
+    # Selection off (on by default since #1368): with it on, this identifier
+    # antecedent's leg is pinned first (test_selection_pins_*).
+    deps = _deps(_settings(chat_followup_anchor_enabled=True, answer_select_enabled=False), llm, search)
     source = AnswerCoreInput(query=_FOLLOW_UP, messages=_follow_up_messages(), is_chat=True)
     plan = await plan_search(source, deps)
     assert (plan.mode, plan.query, plan.anchor) == ("anchored", _FOLLOW_UP, _OPENER)
@@ -554,7 +559,10 @@ async def test_anchored_excerpt_is_supplied_evidence_an_answer_can_cite(order, e
     anchored = [_anchor_hit("A1", "DOC-A")]
     cite = anchored[0].cite
     llm = CoreFakeLLM(content=f"Reissue the command.\n\nCitations:\n- {cite}\n")
-    deps = _deps(_settings(chat_followup_anchor_enabled=True, prompt_order=order), llm,
+    # Selection off (on by default since #1368), which would pin the
+    # identifier antecedent's leg first and so reorder the manifest.
+    deps = _deps(_settings(chat_followup_anchor_enabled=True, prompt_order=order,
+                           answer_select_enabled=False), llm,
                  _LegSearch({_FOLLOW_UP: literal, _OPENER: anchored}))
     if estimated:
         deps = replace(deps, tokenizer=FallbackTokenizer())
@@ -2845,12 +2853,12 @@ def _ids(hits) -> list[str]:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("overrides,query", [
-    ({}, _SELECT_Q),
+    ({"answer_select_enabled": False}, _SELECT_Q),
     ({"answer_select_enabled": True, "answer_select_candidates": 6}, "IEA500I rejected"),
     ({"answer_select_enabled": True, "answer_select_candidates": 6}, _TRAP_Q),
 ])
 async def test_selection_off_or_bypassed_keeps_the_turn_byte_identical(overrides, query):
-    """Issue #1309: with ANSWER_SELECT_ENABLED off (the default), and on a
+    """Issue #1309: with ANSWER_SELECT_ENABLED off (on by default since #1368), and on a
     turn the stage bypasses before retrieval, the retrieval call, the hits,
     the timings and the prompt are those of a turn the stage never sees (a
     route's precomputed hits): no wider limit, no extra model call."""
@@ -2882,7 +2890,7 @@ async def test_selection_off_or_bypassed_keeps_the_turn_byte_identical(overrides
     assert out.hits == reference.hits == pool[:3]
     assert out.timings == reference.timings == {"embed_ms": 1, "qdrant_ms": 2}
     assert out.supplied == reference.supplied
-    if not overrides:
+    if overrides["answer_select_enabled"] is False:
         assert _select_attributes(root) == {}
 
 
