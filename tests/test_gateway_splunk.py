@@ -1262,6 +1262,10 @@ def test_verified_macros_let_the_gateway_start(tmp_path: Path):
     ((_macro_row("app_errors(2)", 'sourcetype=x $h$', "lvl,h"),), "macro_param_unquoted", "app_errors"),
     ((_macro_row("app_errors(2)", '$h$=foo level="$lvl$"', "lvl,h"),), "macro_param_unquoted", "app_errors"),
     ((_macro_row("app_errors(2)", 'level="$lvl$" ""$h$""', "lvl,h"),), "macro_param_unquoted", "app_errors"),
+    ((_macro_row("app_errors(2)", 'eval a=1 \\" | delete " x \\" y "', "lvl,h"),), "macro_backslash", "app_errors"),
+    ((_macro_row("app_errors(2)", 'level="$lvl$" `app_base("p,q")`', "lvl,h"), _macro_row("app_base(2)", 'a="$x$" b="$y$"', "x,y"),
+      _macro_row("app_base(1)", 'a="$x$"', "x")),
+     "macro_argument_form", "app_errors"),
 ])
 def test_a_macro_whose_expansion_breaks_a_template_rule_refuses_start_up(
     tmp_path: Path, rows: tuple[dict[str, Any], ...], reason: str, macro: str
@@ -1295,6 +1299,47 @@ def test_a_macro_after_the_template_pipe_is_checked_in_place(tmp_path: Path, def
     assert (caught.value.reason, caught.value.macro) == (reason, "app_tail")
     fake.macro_rows = [_macro_row("app_base", "stats count"), _macro_row("app_tail(1)", 'eval y="$n$"', "n")]
     assert _check(_macro_gateway(tmp_path, fake, templates=templates, macros=["app_base", "app_tail"])).macros == "verified"
+
+
+def test_an_integer_parameter_cannot_choose_the_index_of_a_macro(tmp_path: Path):
+    """An index name built from a parameter (`index=app$n$`) is refused even
+    for an integer, whose stand-in no allowlist holds. Kills: standing an
+    integer as 1 (`app1` would be allowlisted)."""
+    templates = [{"name": "pick", "description": "d", "index_from_macro": True,
+                  "search": '`app_idx({n})` error', "params": {"n": {"type": "integer", "minimum": 1, "maximum": 9}}}]
+    fake = _macro_fake(_macro_row("app_idx(1)", "index=app$n$", "n"))
+    gateway = _macro_gateway(tmp_path, fake, templates=templates, macros=["app_idx"], allowed_indexes=["app1", "app_test"])
+    with pytest.raises(splunk.BackendCheckError) as caught:
+        _check(gateway)
+    assert (caught.value.reason, caught.value.macro) == ("macro_index_not_allowed", "app_idx")
+
+
+@pytest.mark.parametrize("row", [
+    {"name": "app_base", "definition": 'sourcetype="x"'},                          # no eval flag at all
+    {"name": "app_base", "content": {"definition": 'sourcetype="x"', "iseval": "0"}},  # flag at another path
+])
+def test_a_macro_whose_eval_flag_is_unknown_is_unreadable(tmp_path: Path, row: dict[str, Any]):
+    """An eval macro read as plain text would pass every check. Kills: a
+    missing eval flag read as false."""
+    first = GOOD_ROWS[0]
+    source: dict[str, Any] = {}
+    if "content" in row:
+        first = {"name": first["name"], "args": first["args"],
+                 "content": {"definition": first["definition"], "iseval": "0"}}
+        source = {"definition_path": ["content", "definition"]}
+    fake = _macro_fake(first, row)
+    with pytest.raises(splunk.BackendCheckError) as caught:
+        _check(_macro_gateway(tmp_path, fake, macro_source=source))
+    # With the flag at another path, every row's flag is unknown: the first is blamed.
+    blamed = "app_errors" if source else "app_base"
+    assert (caught.value.reason, caught.value.macro) == ("macros_unverifiable", blamed)
+
+
+def test_a_template_may_not_use_a_backslash_outside_a_string():
+    templates = [{"name": "t", "description": "d", "indexes": ["app_test"], "search": 'x=1 \\" | delete "'}]
+    with pytest.raises(common.GatewayConfigError) as caught:
+        _backend(_config_doc(Path("."), templates=templates))
+    assert str(caught.value).endswith("may not use a backslash outside a string")
 
 
 def test_a_macro_defined_twice_differently_is_unreadable(tmp_path: Path):
@@ -1351,6 +1396,8 @@ INDEX_TEMPLATE = [{"name": "app_from_macro", "description": "d", "index_from_mac
     ("sourcetype=x", False),
     ('sourcetype=x note="index=app_test"', False),     # text inside a string restricts nothing
     ('("index=app_test")', False),
+    ("INDEX=app_test sourcetype=x", False),            # only `index` itself counts as the proof
+    ("(INDEX=app_test OR index=app_other)", False),
 ])
 def test_an_index_from_macro_template_needs_proven_allowlisted_indexes(tmp_path: Path, definition: str, ok: bool):
     """Kills: trusting the flag without the check; counting an index term

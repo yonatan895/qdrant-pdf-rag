@@ -183,10 +183,15 @@ documentation.
      every index it names is in `allowed_indexes`, so wildcards and indexes
      that come from a parameter are refused;
    - a parameter's value must sit inside double quotes, so a caller's value
-     cannot become an operator, a field name, an index term or a command;
+     cannot become an operator, a field name, an index term or a command
+     (an integer may stand bare but may not build an index name);
+   - a backslash outside a string, and a nested call whose arguments hold a
+     quoted comma, are refused: Splunk reads both differently from the
+     check, which fails closed where the readings could differ;
    - a macro called in the search terms may not contain a pipe;
-   - an eval-based macro, an arity mismatch, or one name defined twice with
-     different definitions counts as unreadable.
+   - an eval-based macro, one whose eval flag is not found, an arity
+     mismatch, or one name defined twice with different definitions counts
+     as unreadable.
 
    A failure refuses start-up (exit 3) with a fixed reason naming the macro,
    never its text. When the definitions cannot be read, the gateway refuses
@@ -201,7 +206,7 @@ documentation.
    bounds and the row cap. The macro check must prove that the expanded
    terms restrict the search to allowlisted indexes: no top-level `OR`, and a
    top-level index term or a group of index terms joined by `OR`, not
-   preceded by `NOT` and not inside a string. Otherwise the template needs
+   preceded by `NOT`, not inside a string and spelled `index` in lower case. Otherwise the template needs
    the unverified flag. The site probe reports, per allowlisted macro,
    whether its definitions were readable, the verdict code and the nesting
    depth, and never the definition. Definitions are checked only at pod

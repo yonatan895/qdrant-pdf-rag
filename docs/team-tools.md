@@ -585,7 +585,7 @@ with a fixed reason:
 | `extra_argument_missing` | a key of `extra_arguments` is not a property |
 | `required_argument_unset` | the schema requires an argument the gateway does not send |
 | `upstream_refused`, `upstream_unavailable`, `upstream_timeout`, `upstream_too_large`, `upstream_error`, `upstream_protocol` | as the client maps them |
-| `macro_refused_command`, `macro_subsearch`, `macro_time_modifier`, `macro_index_not_allowed`, `macro_param_unquoted`, `macro_pipe_in_terms`, `macro_backtick`, `macro_unbalanced_quote`, `macro_unbalanced_parentheses`, `macro_nested_not_allowed`, `macro_cycle`, `macro_too_deep`, `index_not_bounded` | the macro check refused the named macro (below) |
+| `macro_refused_command`, `macro_subsearch`, `macro_time_modifier`, `macro_index_not_allowed`, `macro_param_unquoted`, `macro_pipe_in_terms`, `macro_backtick`, `macro_backslash`, `macro_argument_form`, `macro_unbalanced_quote`, `macro_unbalanced_parentheses`, `macro_nested_not_allowed`, `macro_cycle`, `macro_too_deep`, `index_not_bounded` | the macro check refused the named macro (below) |
 | `macros_unverifiable` | the definitions could not be read and `allow_unverified_macros` is false |
 
 **Configuration `backend` section.** Unknown keys are refused. An example
@@ -646,8 +646,8 @@ failure is a start-up error naming the template's position:
 - `{name}` placeholders name declared parameters, every parameter is used,
   and an `identifier` or `enum` placeholder sits inside a double-quoted
   string (an `integer` may stand alone);
-- double quotes balance (a backslash escapes inside a string), and so do
-  parentheses outside strings;
+- double quotes balance (a backslash escapes inside a string; outside one it
+  is refused), and so do parentheses outside strings;
 - backticks only as calls of an allowlisted macro outside strings:
   `` `name` `` or `` `name(a,b)` ``, each argument a `{param}` placeholder (not of
   type `index`), a token `[A-Za-z0-9_.:*-]{1,64}` or a double-quoted literal
@@ -681,26 +681,33 @@ each call. It refuses start-up, naming the macro and never its text:
   nesting at most 5 deep (`macro_too_deep`), and no cycle (`macro_cycle`);
 - definitions are looked up as `name` or `name(<count>)`, with `$arg$`
   substituted. A missing, eval-based (`iseval`), wrong-arity or
-  twice-differently-defined macro is unreadable;
+  twice-differently-defined macro is unreadable, and so is one whose eval
+  flag is not found at `iseval_path` (an eval macro read as text would pass);
+- a nested call's arguments must be plain text or one double-quoted literal
+  with no comma, so splitting on commas matches Splunk (`macro_argument_form`);
+- no backslash outside a string (`macro_backslash`): Splunk reads `\"` and
+  `\|` there as literals, which the check would read differently;
 - each expansion, and each template's whole expanded search (one more call
   expanded at a time, so a macro after the template's pipe is covered),
   must pass the template rules: no refused command, subsearch, unbalanced
   quote or parenthesis, time modifier, or backtick other than a macro call;
 - an `index` term may use only `=`, `::` or `IN` and name only entries of
-  `allowed_indexes` (no wildcard, none from a parameter);
+  `allowed_indexes` (no wildcard, none built from a parameter, an integer
+  included);
 - every parameter value must land inside double quotes
   (`macro_param_unquoted`);
 - a macro in the search terms may not contain a pipe outside a string;
 - for `index_from_macro`, the expanded terms must have no top-level `OR`
   and a top-level index term (or a group of index terms joined by `OR`),
-  not after `NOT` and not inside a string (`index_not_bounded`).
+  not after `NOT`, not inside a string and spelled `index` in lower case
+  (`index_not_bounded`).
 
 Unreadable definitions (the tool not listed, its schema lacking the
 configured arguments or requiring others, an error, no rows found, a
 missing or eval-based macro) refuse start-up as `macros_unverifiable`
 unless `allow_unverified_macros` is true. Definitions are checked only at
 pod start: a macro changed in Splunk afterwards runs unchecked until the next
-start.
+start. The knowledge-object tool is called once, without paging.
 
 `macro_source` keys (unknown keys refused): `tool_name`
 (`splunk_get_knowledge_objects`), `type_argument` (`type`) and `type_value`

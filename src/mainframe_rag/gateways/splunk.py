@@ -14,7 +14,8 @@ default) with one encrypted MCP token (ADR-0010 TD7, E1). It never writes:
 - template parameters are rejected, never escaped: each type admits a small
   character set with no quote, backslash, pipe, bracket, backtick, equals
   sign, space or control character, and string values sit only inside the
-  double quotes the template wrote;
+  double quotes the template wrote, or are passed bare as an allowlisted
+  macro's argument, whose definition must quote them (ADR-0015 D9);
 - templates are checked when the configuration loads (placeholders, index
   references, time modifiers, subsearches, comments, macros outside
   `allowed_macros` and commands that write or read outside the composed index
@@ -400,6 +401,8 @@ def lint_search(
         scrubbed[start:end] = " " * (end - start)
     rest = "".join(scrubbed)
     unquoted = "".join(" " if quoted else char for char, quoted in zip(rest, mask, strict=True))
+    if "\\" in unquoted:
+        raise GatewayConfigError(f"{where} may not use a backslash outside a string")
     if "[" in unquoted or "]" in unquoted:
         raise GatewayConfigError(f"{where} may not use a subsearch")
     depth = 0
@@ -1223,8 +1226,11 @@ MAX_MACRO_DEPTH: Final = 5
 # checked: an identifier no index allowlist holds, so an index that comes
 # from a parameter is refused, and one that must stay inside double quotes
 # (a caller's value placed bare could be an operator, a field name, an index
-# term or a command). Integer parameters stand as 1.
+# term or a command). Integer parameters stand as `_INT_MARKER`: a value that
+# may sit bare (`head $n$`) but, being in no allowlist, refuses an index
+# name built from a parameter (`index=app$n$`).
 _PARAM_MARKER: Final = "mfrparamvalue"
+_INT_MARKER: Final = "4242mfrint"
 _TIME_TERM_RE: Final = re.compile(
     r"(?i)(?<![A-Za-z0-9_.])(?:earliest|latest|_index_earliest|_index_latest"
     r"|starttime|endtime|starttimeu|endtimeu|timeformat|searchtimespan[a-z]*"
@@ -1237,6 +1243,9 @@ _INDEX_LIST_RE: Final = re.compile(r"\(([^()]*)\)")
 _OR_RE: Final = re.compile(r"(?<![A-Za-z0-9_])OR(?![A-Za-z0-9_])")
 _NOT_BEFORE_RE: Final = re.compile(r"(?<![A-Za-z0-9_])NOT\s*$")
 _TRUE_WORDS: Final = frozenset({"1", "true", "t", "yes", "y"})
+# A nested call's argument: text with no quote, or one double-quoted literal
+# with no comma, backslash or quote inside (so splitting on commas is exact).
+_NESTED_ARG_RE: Final = re.compile(r'[^"\\,]*|"[^"\\,]*"')
 
 
 class MacroCheckError(Exception):
@@ -1286,6 +1295,13 @@ def macro_definitions(source: MacroSource, result: Mapping[str, Any]) -> dict[st
         else:
             args = ()
         iseval = _at(row, source.iseval_path)
+        if iseval is None:
+            # Whether Splunk evaluates the definition is unknown: an eval
+            # macro read as plain text would pass every check, so the macro
+            # stays unreadable (fail closed; the probe shows it).
+            conflicting.add(name)
+            out.pop(name, None)
+            continue
         entry = MacroDefinition(definition, args, iseval is True or iseval == 1 or str(iseval).lower() in _TRUE_WORDS)
         if out.setdefault(name, entry) != entry:
             # The same name from two apps with different definitions: which
@@ -1338,6 +1354,10 @@ def lint_expansion(text: str, allowed_indexes: Sequence[str], macro: str | None)
     parameter)."""
     mask = _mask_or_fail(text, macro)
     unquoted = "".join(" " if quoted else char for char, quoted in zip(text, mask, strict=True))
+    if "\\" in unquoted:
+        # Splunk reads \" and \| outside a string as literals; the check's
+        # reading of strings and pipes would differ from Splunk's.
+        raise MacroCheckError("macro_backslash", macro)
     if "[" in unquoted or "]" in unquoted:
         raise MacroCheckError("macro_subsearch", macro)
     depth = 0
@@ -1407,6 +1427,8 @@ def expand_macros(
         if name not in backend.allowed_macros:
             raise MacroCheckError("macro_nested_not_allowed", owner)
         args = tuple(raw.split(",")) if raw is not None else ()
+        if not all(_NESTED_ARG_RE.fullmatch(arg.strip()) for arg in args):
+            raise MacroCheckError("macro_argument_form", owner)  # a quoted comma splits differently
         stanza = name if not args else f"{name}({len(args)})"
         if stanza in stack:
             raise MacroCheckError("macro_cycle", name)
@@ -1431,7 +1453,9 @@ def expand_macros(
 
 def _marked(template: Template, text: str) -> str:
     kinds = {p.name: p.kind for p in template.params}
-    return _PLACEHOLDER_RE.sub(lambda m: "1" if kinds.get(m.group(1)) == "integer" else _PARAM_MARKER, text)
+    return _PLACEHOLDER_RE.sub(
+        lambda m: _INT_MARKER if kinds.get(m.group(1)) == "integer" else _PARAM_MARKER, text
+    )
 
 
 _INDEX_GROUP_RE: Final = re.compile(
@@ -1476,8 +1500,8 @@ def index_bounded(terms: str, allowed_indexes: Sequence[str]) -> bool:
         )
 
     for match in _INDEX_TERM_RE.finditer(stripped):
-        if mask[match.start()]:
-            continue  # text inside a string restricts nothing
+        if mask[match.start()] or not stripped.startswith("index", match.start()):
+            continue  # text inside a string restricts nothing; only `index` itself counts
         names = _index_names(stripped[match.start() :], None)
         if match.group(1).lower() != "in":
             names = names[:1]
@@ -1488,7 +1512,7 @@ def index_bounded(terms: str, allowed_indexes: Sequence[str]) -> bool:
         keywords = [start + 1 + m.start() for m in _INDEX_TERM_RE.finditer(inner)]
         if (
             _INDEX_GROUP_RE.fullmatch(inner)
-            and not any(mask[at] for at in keywords)
+            and not any(mask[at] or not stripped.startswith("index", at) for at in keywords)
             and positive(start, _index_names(inner, None))
         ):
             return True
