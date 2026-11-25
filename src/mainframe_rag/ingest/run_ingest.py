@@ -66,6 +66,7 @@ from mainframe_rag.ingest.completion import (
     carry_marker,
     completion_collection_name,
     completion_point_id,
+    delete_carried_completions,
     delete_completion,
     delete_revision_completions,
     delete_superseded_completions,
@@ -2650,6 +2651,13 @@ def _build_and_cut_over(
         raise RuntimeError("candidate build state changed during preparation; refusing mutation")
     verified_state: dict[str, Any] = {}
     if not sealed:
+        if forced:
+            # A forced build re-embeds what an earlier unforced attempt of
+            # it carried (issue #1372): drop those markers before planning,
+            # so no later attempt, forced or not, can skip over them.
+            dropped = delete_carried_completions(client, staging_settings)
+            if dropped:
+                log.info(json.dumps({"action": "carry_revoked", "staging": staging, "markers": dropped}))
         carry_from = _carry_ancestor(client, staging_settings, live=live, mode=mode, forced=forced)
         log.info(
             json.dumps(

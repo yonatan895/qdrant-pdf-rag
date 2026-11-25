@@ -896,12 +896,15 @@ thread pool.
   set; no node-local snapshot, so distributed generations copy
   shard-complete, issue #360); a
   marker certifies its own `target_collection`, and an inherited marker
-  never certifies a skip. **Carry (issue #1372; approved contract change,
-  default on, no setting):** an unchanged walked document is carried into
+  never certifies a skip. **Carry (issue #1372; a change to the fail-closed
+  contract pending the maintainer's approval on its PR; default on, no
+  setting):** an unchanged walked document is carried into
   the cloned staging instead of re-parsed and re-embedded when every
   condition holds. Run level, decided once under the publish lock: no
   attempt of this sidecar-bound build ran `--reingest` (the sidecar's sticky
-  `forced` flag; a sidecar without it reads as forced); a live generation
+  `forced` flag; a sidecar without it reads as forced; a forced attempt
+  first removes the markers an earlier attempt carried, logging
+  `action: carry_revoked`); a live generation
   exists and the staging is cloned, reused or repaired; the staging's data
   collection still equals live's sealed content, vectors included
   (`publish.clone_matches_live_seal`, one full scan with vectors; a live
@@ -930,7 +933,13 @@ thread pool.
   dimensions 32/1024/4096); that is proven for the pin and CPU it ran on, so
   a different server or host that re-normalises differently disables carry
   (every document re-embeds) rather than inheriting unequal vectors.
-  `--reingest` remains the full rebuild. The manifest is
+  `--reingest` remains the full rebuild. Rollback note: the previous
+  release reads a carried marker as an ordinary marker (it ignores
+  `carried_from`), so a forced checkpoint resume run by that release over a
+  staging this release carried into would keep the carried documents; their
+  points still verify against the marker, but their vectors are the
+  inherited ones. Finish or abandon such a build with this release before
+  rolling back. The manifest is
   re-keyed onto the staging id verbatim (`rekey_manifest` — the fixed
   point id embeds the collection name, so a byte copy is unreadable; the
   contract AND its pending/committed state are carried, never recomputed,

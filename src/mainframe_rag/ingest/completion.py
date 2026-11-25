@@ -668,6 +668,34 @@ def carry_marker(
     return marker
 
 
+def delete_carried_completions(client: QdrantPoints, settings: Settings) -> int:
+    """Remove every carried marker bound to this staging (issue #1372) and
+    return how many. A build that any attempt ran forced must re-embed what
+    an earlier unforced attempt carried: once removed, those documents have
+    no staging-bound marker, so neither the ordinary skip nor a checkpoint
+    resume can keep their inherited points. Staging controls only."""
+    name = completion_collection_name(settings)
+    if not client.collection_exists(name):
+        return 0
+    points = scroll_all_points(
+        client,
+        name,
+        scroll_filter=None,
+        with_payload=["doc_id", "target_collection", "carried_from"],
+        page_size=settings.ingest_scan_page_size,
+    )
+    ids: list[int | str | uuid.UUID] = [
+        p.id
+        for p in points
+        if (p.payload or {}).get("doc_id")
+        and (p.payload or {}).get("target_collection") == settings.qdrant_collection
+        and (p.payload or {}).get("carried_from")
+    ]
+    if ids:
+        client.delete(name, points_selector=models.PointIdsList(points=ids), wait=True)
+    return len(ids)
+
+
 def delete_superseded_completions(
     client: QdrantPoints, settings: Settings, doc_id: str, source_rev: str, keep_id: str
 ) -> None:

@@ -4972,3 +4972,110 @@ def test_publish_state_refuses_a_non_boolean_forced_flag(tmp_path, value):
     path.write_text(json.dumps(state))
     with pytest.raises(RuntimeError, match="forced flag"):
         read_publish_state(progress, ALIAS)
+
+
+
+def test_a_forced_attempt_revokes_earlier_carries_for_every_later_attempt(tmp_path, monkeypatch):
+    """Review F1: an unforced attempt carries and fails, a --reingest attempt
+    of the same build is interrupted before any document, and a plain retry
+    follows. The forced attempt removed the carried markers, so the plain
+    retry re-embeds every document instead of skipping over carried ones."""
+    from mainframe_rag.ingest import run_ingest
+
+    fake, corpus, progress = _published_pair(tmp_path, monkeypatch)
+    gen1 = fake.aliases[ALIAS]
+    _build_doc_with_id(corpus, "doc_c", DOC_C)
+    original_upsert = run_ingest._upsert_one
+
+    def failing_upsert(doc, *args, **kwargs):
+        if doc.doc_id == DOC_C:
+            raise RuntimeError("synthetic connection interruption")
+        return original_upsert(doc, *args, **kwargs)
+
+    monkeypatch.setattr(run_ingest, "_upsert_one", failing_upsert)
+    assert _run_main(monkeypatch, corpus, progress) == 1
+    monkeypatch.setattr(run_ingest, "_upsert_one", original_upsert)
+    original_execute = run_ingest._execute
+
+    def crash(*args, **kwargs):
+        raise RuntimeError("synthetic crash before any document")
+
+    monkeypatch.setattr(run_ingest, "_execute", crash)
+    with pytest.raises(RuntimeError, match="synthetic crash"):
+        _run_main(monkeypatch, corpus, progress, "--reingest")
+    monkeypatch.setattr(run_ingest, "_execute", original_execute)
+    parsed = _capture_parses(monkeypatch)
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    gen2 = fake.aliases[ALIAS]
+    assert gen2 != gen1 and sorted(parsed) == ["doc_a", "doc_b", "doc_c"]
+    assert all(m.get("carried_from") is None
+               for d in (DOC_A, DOC_B, DOC_C) for m in _doc_markers(fake, gen2, d))
+
+
+def test_carry_refuses_when_the_contract_moves_after_planning(tmp_path, monkeypatch):
+    """The plan was made against a committed current contract; if the build
+    opens to anything but `already_current`, the run stops before any carried
+    marker is written."""
+    from mainframe_rag.ingest import run_ingest
+
+    fake, corpus, progress = _published_pair(tmp_path, monkeypatch)
+    gen1 = fake.aliases[ALIAS]
+    original_begin = run_ingest.begin_manifest
+    monkeypatch.setattr(run_ingest, "begin_manifest",
+                        lambda *a, **k: (original_begin(*a, **k)[0], "committed"))
+    _build_doc_with_id(corpus, "doc_c", DOC_C)
+    with pytest.raises(RuntimeError, match="contract changed between carry planning"):
+        _run_main(monkeypatch, corpus, progress)
+    assert fake.aliases[ALIAS] == gen1
+    stagings = [n for n in _gen_collections(fake) if n != gen1]
+    assert stagings and all(
+        m.get("carried_from") is None for s in stagings for d in (DOC_A, DOC_B) for m in _doc_markers(fake, s, d)
+    )
+
+
+@pytest.mark.parametrize("case", ["unsealed_live", "unreadable_seal"])
+def test_carry_needs_a_readable_live_content_seal(tmp_path, monkeypatch, case):
+    """A live build without a content seal, or a seal scan that fails,
+    disables carry for the build (every document re-embeds); it never fails
+    the publication."""
+    from mainframe_rag.ingest import publish, run_ingest
+
+    fake, corpus, progress = _published_pair(tmp_path, monkeypatch)
+    gen1 = fake.aliases[ALIAS]
+    if case == "unsealed_live":
+        # A schema-1 receipt: bound, never sealed (still served, #827).
+        receipt = next(p for p in fake.collections[gen1 + "__completions"]
+                       if (p.payload or {}).get("record_type") == "publication-metadata")
+        receipt.payload["build_schema"] = 1
+        for key in ("content_seal", "source_catalog"):
+            receipt.payload.pop(key, None)
+        assert publish.clone_matches_live_seal(fake, gen1, gen1) is False
+    else:
+        def broken(*args, **kwargs):
+            raise ValueError("incomplete content seal projection")
+
+        monkeypatch.setattr(run_ingest, "clone_matches_live_seal", broken)
+    parsed = _capture_parses(monkeypatch)
+    _build_doc_with_id(corpus, "doc_c", DOC_C)
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    assert sorted(parsed) == ["doc_a", "doc_b", "doc_c"]
+
+
+def test_retirement_only_build_carries_the_retained_documents(tmp_path, monkeypatch):
+    """Maintainer-confirmed decision 3: an explicit retirement with no other
+    corpus change carries the remaining documents instead of re-embedding
+    them; the retired document is gone from the new generation."""
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    a_path, _ = _two_doc_corpus(corpus)
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    gen1 = fake.aliases[ALIAS]
+    old_b = _doc_points(fake, gen1, DOC_B)
+    a_path.unlink()
+    parsed = _capture_parses(monkeypatch)
+    assert _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_A) == 0
+    gen2 = fake.aliases[ALIAS]
+    assert gen2 != gen1 and parsed == []
+    assert _live_doc_ids(fake) == {DOC_B}
+    assert _doc_points(fake, gen2, DOC_B) == old_b
+    _assert_carried(fake, gen2, DOC_B, gen1)
+    assert _doc_markers(fake, gen2, DOC_A) == []

@@ -419,7 +419,8 @@ def test_alias_publish_rekeys_manifest_across_clone(qdrant_url, corpus, tmp_path
     second = _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, local, progress)
     # The progress file is append-only: the second run's records are the tail.
     second_records = second[len(first) :]
-    # Issue #1372 (approved contract change): the three unchanged documents
+    # Issue #1372 (contract change, pending the maintainer's approval on its
+    # PR): the three unchanged documents
     # are carried from live into the cloned staging, with no parse and no
     # inventory record, so only the new document upserts. Before the F5 fix
     # this run aborted instead — the un-rekeyed manifest read as legacy
@@ -487,16 +488,10 @@ def test_alias_publish_carries_unchanged_documents_on_real_server(
     progress = tmp_path / "inv.jsonl"
 
     # A second endpoint: same API and model name, different (negated) vectors.
-    old_dim = os.environ.get("MOCK_DIM")
-    os.environ["MOCK_DIM"] = str(MOCK_DIM)
-    try:
+    with monkeypatch.context() as patch:
+        patch.setenv("MOCK_DIM", str(MOCK_DIM))
         other = importlib.util.module_from_spec(MOCK_SPEC)
         MOCK_SPEC.loader.exec_module(other)
-    finally:
-        if old_dim is None:
-            os.environ.pop("MOCK_DIM", None)
-        else:
-            os.environ["MOCK_DIM"] = old_dim
     original_embed = other._embed
     other_calls: list[str] = []
 
@@ -619,7 +614,7 @@ def test_points_api_clone_reads_vectors_back_bit_identical(qdrant_url, dim):
 
     from mainframe_rag.config import Settings
     from mainframe_rag.ingest.qdrant_io import clone_collection, collection_vector_configs
-    from mainframe_rag.ingest.seal import _collection_digest
+    from mainframe_rag.ingest.seal import data_seal
 
     rng = random.Random(1372 + dim)
     names = [f"sim-bitstab-{dim}-{tag}-{uuid.uuid4().hex[:8]}" for tag in ("a", "b", "c")]
@@ -668,8 +663,9 @@ def test_points_api_clone_reads_vectors_back_bit_identical(qdrant_url, dim):
         assert len(first) == count
         differing = sum(1 for pid, vec in first.items() if second[pid] != vec or third[pid] != vec)
         assert differing == 0, f"{differing} of {count} points changed bits across the clone"
-        binding = ["b" * 32, "alias", names[0], "g" * 16, "c" * 12]
-        digests = {_collection_digest(client, n, binding, "data", None)["sha256"] for n in names}
+        # The carry guard's own computation: each copy under the source's binding.
+        digests = {data_seal(client, n, build_id="b" * 32, alias="alias", physical=names[0],
+                             gen_fp="g" * 16, corpus_fp="c" * 12)["sha256"] for n in names}
         assert len(digests) == 1
     finally:
         for name in names:
