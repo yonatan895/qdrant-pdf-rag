@@ -211,11 +211,13 @@ To turn it on, follow the [site procedure](deploy.md#splunk-gateway-deploy):
 1. The Splunk owner creates the token user, its role (the team's indexes,
    search only, `mcp_tool_execute`) and an encrypted MCP token.
 2. Create the gateway Secret, add Open WebUI's LiteLLM key
-   `openwebui-llm-api-key` to the `GATEWAY_API_KEY_SECRET` Secret, and write
+   `openwebui-llm-api-key` to the `GATEWAY_API_KEY_SECRET` Secret (always, also with a
+   shared `GATEWAY_API_KEY_SECRET_KEY`: validate and deploy refuse without it), and write
    the gateway configuration and the Splunk CA file at the site. Set the
    Splunk and LiteLLM egress CIDRs (and the IdP's in oidc mode).
 3. Create the team group in Open WebUI and set `TEAM_TOOLS_GROUP_ID` to its id.
-4. Set `SPLUNK_GATEWAY_ENABLED=true`, run `airgap:deploy` and the site probe.
+4. Set `SPLUNK_GATEWAY_ENABLED=true` (and `SPLUNK_GATEWAY_AUTH_MODE=bearer` for the
+   pilot; the default stays `oidc`), run `airgap:deploy` and the site probe.
 5. An admin turns the connection model into the Team model in the admin UI.
 
 Nothing is removed from the extension surface.

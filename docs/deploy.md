@@ -2486,8 +2486,10 @@ without them.
     prefix `team`: the one model id `team.<LLM_MODEL_REASONING>`. A connection model
     without a database row is visible to admins only (step 9). Its key is Open WebUI's
     own per-leg key, data key `openwebui-llm-api-key` in the Secret
-    `GATEWAY_API_KEY_SECRET` (TD3). When the shared key `GATEWAY_API_KEY_SECRET_KEY`
-    is set, that key wins, and Open WebUI then uses the shared key. When LiteLLM's
+    `GATEWAY_API_KEY_SECRET` (TD3), always: the shared key `GATEWAY_API_KEY_SECRET_KEY`
+    is never used for the Team model, even when it is set (maintainer decision,
+    2026-11-25), and `teamTools.model.apiKeySecretKey` naming the shared key or
+    another model leg's key is refused at render. When LiteLLM's
     certificate comes from the site CA (`GATEWAY_CA_CONFIGMAP`), Open WebUI trusts that
     complete bundle (`SSL_CERT_FILE`, as the agent does). `OPENWEBUI_IDP_CA_FILE` is
     then refused when the chart renders (in `airgap:deploy`, before any cluster change;
@@ -2527,8 +2529,9 @@ message that names keys and never values:
   oidc mode, or whose `token_exchange.client_secret_env` is not
   `SPLUNK_GATEWAY_TOKEN_EXCHANGE_SECRET`. Before any mutation `deploy.sh` also
   requires the Secret keys `splunk-mcp-token` (and `bearer-secret` in bearer mode,
-  matching `[A-Za-z0-9_-]{32,}`, never printed) and `openwebui-llm-api-key` (or the
-  `GATEWAY_API_KEY_SECRET_KEY` key) in `GATEWAY_API_KEY_SECRET`.
+  matching `[A-Za-z0-9_-]{32,}`, never printed). `airgap:validate` and `airgap:deploy`
+  require `openwebui-llm-api-key` in `GATEWAY_API_KEY_SECRET` whatever
+  `GATEWAY_API_KEY_SECRET_KEY` says, and refuse with `E_TEAM_MODEL_KEY` without it.
 - Chart layer (direct `helm template/upgrade`): the same checks on the
   `teamTools.*` values, `openwebui.enabled`, `models.reasoning.baseUrl`,
   `models.reasoning.model` and `gateway.apiKeySecretName`, except the timeout rule;
@@ -2536,7 +2539,9 @@ message that names keys and never values:
   missing-inputs message also names the off switch. The gateway checks the rest of
   its configuration at start (exit 2, step 7).
 
-**Caller mode (`SPLUNK_GATEWAY_AUTH_MODE`, default `oidc`).**
+**Caller mode (`SPLUNK_GATEWAY_AUTH_MODE`, default `oidc`).** The default stays `oidc`
+(maintainer decision, 2026-11-25); the pilot sets `SPLUNK_GATEWAY_AUTH_MODE=bearer`
+explicitly in `airgap.env` (step 7).
 - `bearer` (named exception B2, the pilot posture): Open WebUI presents one shared
   secret ([bearer mode](team-tools.md#service-bearer)). The gateway sees one caller,
   `service:openwebui`: its limits cover the whole instance, and per-person
@@ -2587,8 +2592,9 @@ procedure closes #1077's "site procedure for the service-account role" item.
    JSON string). To rotate the bearer secret, update it and restart both
    `deploy/rag-splunk-gateway` and `deploy/rag-openwebui`. The platform issues Open
    WebUI's own LiteLLM per-leg key (ADR-0010 go-live input 2); add it as
-   `openwebui-llm-api-key` to the Secret named by `GATEWAY_API_KEY_SECRET`. No value
-   goes into `airgap.env`.
+   `openwebui-llm-api-key` to the Secret named by `GATEWAY_API_KEY_SECRET`, also when
+   `GATEWAY_API_KEY_SECRET_KEY` names a shared key: the Team model never uses that one.
+   No value goes into `airgap.env`.
 5. **Gateway configuration.** Start from
    [deploy/gateways/splunk-gateway.example.json](../deploy/gateways/splunk-gateway.example.json)
    and set every section ([backend keys](team-tools.md#splunk-gateway)):
@@ -2617,7 +2623,7 @@ procedure closes #1077's "site procedure for the service-account role" item.
    sign-in. Copy its id into `TEAM_TOOLS_GROUP_ID`: v0.13.4 matches grants by group
    id, never by name. Empty leaves the tool server admin-only.
 7. **Enable.** Set `SPLUNK_GATEWAY_ENABLED=true` and `SPLUNK_GATEWAY_AUTH_MODE=bearer`
-   (B2) or `oidc`, then run `sh scripts/tools/run-task.sh airgap:validate` and
+   (B2, the pilot; unset means `oidc`) or `oidc`, then run `sh scripts/tools/run-task.sh airgap:validate` and
    `sh scripts/tools/run-task.sh airgap:deploy`. The gateway serves only after its
    start-up backend check passes. Exit 2 (configuration) or 3 (backend refused) makes
    the pod restart (`CrashLoopBackOff`), and it never becomes Ready. Read the reason
@@ -2681,11 +2687,38 @@ procedure closes #1077's "site procedure for the service-account role" item.
    - access: the team group only.
 
    Do not build a separate custom model on top of it: that would need a read grant
-   on the base model, which lets team users chat with the bare model id. Verify as a
-   team user: the Team model and the Splunk tool are listed, and a tool call answers
-   (whether the chat preselects the tool is a site check; otherwise enable it in the
-   chat's tool menu). Verify as a non-team user: no Team model, and no
-   `server:mcp:splunk` in `/api/v1/tools/`.
+   on the base model, which lets team users chat with the bare model id.
+
+   Native function calling is the model's default, not a lock (accepted by the
+   maintainer, 2026-11-25): in v0.13.4 a request's `params.function_calling` wins over
+   the model's, and a user can pick Chat Controls > Advanced Params > Function Calling
+   in the chat. With `legacy` Open WebUI selects tools by prompt instead: one more
+   completion to the Team model for each message (the task model falls back to the
+   chat model, `TASK_MODEL_EXTERNAL` being empty), which carries the tool
+   descriptions and the conversation, and a tool call parsed from text. What Splunk
+   runs stays bounded by the gateway (templates only, checked parameters, caps), and
+   the extra call goes to the same model through the same key; the cost is that
+   call and TD8's "no task calls" holding only for chats that keep the default. The
+   allow-list proxy cannot see request bodies, so nothing refuses it.
+
+   **Verify who sees the tool** (ADR-0010 T4). Use two accounts that are not
+   admins (an admin sees every model and tool server): one in the team group, one
+   outside it. Signed in as each, open `https://<OPENWEBUI_HOST>/api/models` and
+   `https://<OPENWEBUI_HOST>/api/v1/tools/` in the same browser (the session cookie
+   authenticates; the proxy admits both paths), and the chat's model menu:
+   - team user: `team.<LLM_MODEL_REASONING>` is listed, its `info.meta.toolIds` is
+     `["server:mcp:splunk"]`, and `/api/v1/tools/` lists `server:mcp:splunk`. In a
+     chat with the Team model, one template question gives a tool call with rows
+     (whether the chat preselects the tool is a site check; otherwise enable it in
+     the chat's tool menu);
+   - non-team user: neither the Team model nor `server:mcp:splunk` is listed;
+   - both: every Docs model entry has no `toolIds`, and a Docs chat's tool menu is
+     empty.
+
+   Any other result means a grant is wrong: fix the group id (step 6) or the
+   model's access, and check again. The Kind `openwebui` lane runs the same checks
+   with this step done through the admin API (`scripts/openwebui/acceptance.sh
+   team-tools`).
    ADR-0014 D4 guard (b) in bearer mode: either every value of
    `OPENWEBUI_OIDC_ALLOWED_ROLES` and `OPENWEBUI_OIDC_ADMIN_ROLES` is a team role, or
    the Team model and the tool-server entry are granted to the team group only

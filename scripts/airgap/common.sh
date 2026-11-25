@@ -1323,8 +1323,14 @@ require_splunk_gateway_secrets() {
     else
         require_secret_keys "${SPLUNK_GATEWAY_SECRET:-}" splunk-mcp-token
     fi
-    # Open WebUI's own LiteLLM key for the team model (teamTools.model.apiKeySecretKey).
-    require_secret_keys "${GATEWAY_API_KEY_SECRET:-}" "${GATEWAY_API_KEY_SECRET_KEY:-openwebui-llm-api-key}"
+    # Open WebUI's own LiteLLM key for the team model (teamTools.model.apiKeySecretKey),
+    # always, never the shared GATEWAY_API_KEY_SECRET_KEY (ADR-0010 TD3; #1374 decision).
+    if [ "${AIRGAP_DRYRUN:-0}" != "1" ] && [ -n "${GATEWAY_API_KEY_SECRET:-}" ]; then
+        _own_key=$($KC -n "$NAMESPACE" get secret "$GATEWAY_API_KEY_SECRET" \
+            -o "go-template={{if index .data \"openwebui-llm-api-key\"}}present{{end}}") || die "required Secret cannot be read"
+        [ "$_own_key" = present ] || die "E_TEAM_MODEL_KEY: SPLUNK_GATEWAY_ENABLED=true needs Open WebUI's own LiteLLM key, data key openwebui-llm-api-key in Secret $GATEWAY_API_KEY_SECRET (ADR-0010 TD3); the shared GATEWAY_API_KEY_SECRET_KEY is never used for the Team model. Add it, or keep SPLUNK_GATEWAY_ENABLED=false (docs/deploy.md#splunk-gateway-deploy, step 4)"
+        unset _own_key
+    fi
     [ "${SPLUNK_GATEWAY_AUTH_MODE:-oidc}" = "bearer" ] || return 0
     [ "${AIRGAP_DRYRUN:-0}" != "1" ] || return 0
     [ -n "${SPLUNK_GATEWAY_SECRET:-}" ] || return 0

@@ -321,7 +321,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.gateway.apiKeySecretName }}
-                  key: {{ .Values.gateway.apiKeySecretKey | default .Values.teamTools.model.apiKeySecretKey | quote }}
+                  key: {{ .Values.teamTools.model.apiKeySecretKey | quote }}
             - name: OPENAI_API_CONFIGS
               value: {{ dict "0" (dict "enable" true "model_ids" (list .Values.models.reasoning.model) "prefix_id" "team") | toJson | quote }}
             {{- range $g := $teamGateways }}

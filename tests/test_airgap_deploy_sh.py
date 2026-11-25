@@ -13,6 +13,7 @@ import shutil
 import subprocess
 
 import pytest
+import yaml
 
 from tests.helpers_airgap import (
     GAP_MANIFEST_LINES,
@@ -3679,12 +3680,32 @@ def test_splunk_gateway_oidc_config_without_auth_refuses_before_mutation(tree):
     assert "upgrade" not in _helm_log(tree)
 
 
-@pytest.mark.parametrize("key", ["splunk-mcp-token", "bearer-secret", "openwebui-llm-api-key"])
+@pytest.mark.parametrize("key", ["splunk-mcp-token", "bearer-secret"])
 def test_missing_splunk_gateway_secret_key_blocks_before_mutation(tree, key):
     r = _splunk_deploy(tree, ("MISSING_KEY", key))
     assert r.returncode != 0
     assert f"required Secret key is missing or empty: {key}" in r.stderr
     assert "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize("shared", ["", "api-key"])
+def test_the_team_model_needs_open_webuis_own_key_even_with_a_shared_key(tree, shared):
+    """ADR-0010 TD3, maintainer decision on #1374: with or without a shared
+    GATEWAY_API_KEY_SECRET_KEY (present in the Secret), a missing
+    openwebui-llm-api-key refuses before mutation; present, the render reads it."""
+    extra = {"GATEWAY_API_KEY_SECRET_KEY": shared} if shared else {}
+    r = _splunk_deploy(tree, ("MISSING_KEY", "openwebui-llm-api-key"), **extra)
+    assert r.returncode != 0
+    assert ("E_TEAM_MODEL_KEY: SPLUNK_GATEWAY_ENABLED=true needs Open WebUI's own LiteLLM key, data key "
+            "openwebui-llm-api-key in Secret gw-keys (ADR-0010 TD3)") in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+    r = _splunk_deploy(tree, **extra)
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    owui = next(d for d in yaml.safe_load_all(rendered)
+                if d and d["kind"] == "Deployment" and d["metadata"]["name"] == "rag-openwebui")
+    env = {e["name"]: e for e in owui["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["OPENAI_API_KEYS"]["valueFrom"]["secretKeyRef"] == {"name": "gw-keys", "key": "openwebui-llm-api-key"}
 
 
 @pytest.mark.parametrize("raw", [

@@ -394,7 +394,7 @@ openwebui:
 # LiteLLM, limited to models.reasoning.model (TD3; id "team.<model>", visible
 # to admins only until an admin grants the Team model, docs/deploy.md), its
 # own per-leg key from gateway.apiKeySecretName (data key model.apiKeySecretKey,
-# or gateway.apiKeySecretKey when that shared key is set) and the gateway as
+# always, even when the shared gateway.apiKeySecretKey is set) and the gateway as
 # an MCP tool server (TOOL_SERVER_CONNECTIONS). Task calls stay off (TD8).
 teamTools:
   # Open WebUI group id (the UUID shown in the admin UI, not the name: v0.13.4

@@ -2307,7 +2307,7 @@ def _b64(raw: bytes) -> str:
     ({"SG_SECRET": "forbidden"}, "may not read Secret 'splunk-gw'"),
     ({"MISSING_KEY": "splunk-mcp-token"}, "required Secret key is missing or empty: splunk-mcp-token"),
     ({"MISSING_KEY": "bearer-secret"}, "required Secret key is missing or empty: bearer-secret"),
-    ({"MISSING_KEY": "openwebui-llm-api-key"}, "required Secret key is missing or empty: openwebui-llm-api-key"),
+    ({"MISSING_KEY": "openwebui-llm-api-key"}, "E_TEAM_MODEL_KEY"),
     ({"BEARER_B64": _b64(b"short-secret-7731")}, "E_SPLUNK_GATEWAY_BEARER_SECRET"),
     ({"BEARER_B64": _b64(SPLUNK_GOOD_BEARER.encode() + b"\n")}, "E_SPLUNK_GATEWAY_BEARER_SECRET"),
     ({"BEARER_B64": _b64(SPLUNK_GOOD_BEARER.encode() + b'"}')}, "E_SPLUNK_GATEWAY_BEARER_SECRET"),
@@ -2320,14 +2320,23 @@ def test_validate_live_splunk_gateway_secret_problems_fail(tree, env, message):
     assert SPLUNK_GOOD_BEARER not in out and "short-secret-7731" not in out
 
 
-def test_validate_live_shared_gateway_key_replaces_the_openwebui_key_name(tree):
-    """GATEWAY_API_KEY_SECRET_KEY (one shared key) is the key Open WebUI's team
-    model connection reads, like every other model leg."""
+TEAM_MODEL_KEY_REFUSAL = (
+    "E_TEAM_MODEL_KEY: SPLUNK_GATEWAY_ENABLED=true needs Open WebUI's own LiteLLM key, data key "
+    "openwebui-llm-api-key in Secret gw-keys (ADR-0010 TD3); the shared GATEWAY_API_KEY_SECRET_KEY is never "
+    "used for the Team model. Add it, or keep SPLUNK_GATEWAY_ENABLED=false")
+
+
+def test_validate_live_needs_open_webuis_own_key_even_with_a_shared_key(tree):
+    """ADR-0010 TD3, maintainer decision on #1374: a shared GATEWAY_API_KEY_SECRET_KEY
+    present in the Secret does not stand in for openwebui-llm-api-key."""
     r = _splunk_validate(tree, AIRGAP_DRYRUN="0", GATEWAY_API_KEY_SECRET_KEY="shared-key",
                          MISSING_KEY="openwebui-llm-api-key")
+    assert r.returncode != 0
+    assert TEAM_MODEL_KEY_REFUSAL in r.stderr
+    r = _splunk_validate(tree, AIRGAP_DRYRUN="0", MISSING_KEY="openwebui-llm-api-key")
+    assert r.returncode != 0 and TEAM_MODEL_KEY_REFUSAL in r.stderr
+    r = _splunk_validate(tree, AIRGAP_DRYRUN="0", GATEWAY_API_KEY_SECRET_KEY="shared-key")
     assert r.returncode == 0, r.stderr
-    r = _splunk_validate(tree, AIRGAP_DRYRUN="0", GATEWAY_API_KEY_SECRET_KEY="shared-key", MISSING_KEY="shared-key")
-    assert r.returncode != 0 and "required Secret key is missing or empty: shared-key" in r.stderr
 
 
 def test_validate_live_splunk_gateway_off_reads_no_gateway_secret(tree):

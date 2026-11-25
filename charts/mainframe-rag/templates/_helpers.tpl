@@ -284,6 +284,11 @@ NetworkPolicy) range over, so a later gateway (GitLab, #1078) adds one spec.
 {{- if $shape -}}
 {{- fail (printf "Team-tool settings must not be empty or null: %s (a null port would open the egress rule to every TCP port)." (join ", " $shape)) -}}
 {{- end -}}
+{{- /* ADR-0010 TD3: the Team model reads Open WebUI's own per-leg key, never the
+shared key or another leg's (maintainer decision on #1374, 2026-11-25). */ -}}
+{{- if has ($model.apiKeySecretKey | default "") (compact (list .Values.gateway.apiKeySecretKey "llm-api-key" "embed-api-key" "rerank-api-key" "context-llm-api-key")) -}}
+{{- fail "teamTools.model.apiKeySecretKey must name Open WebUI's own LiteLLM key (ADR-0010 TD3), not the shared gateway.apiKeySecretKey or another model leg's key" -}}
+{{- end -}}
 {{- if and .Values.gateway.caConfigMapName (.Values.openwebui.oidc | default dict).caBundle -}}
 {{- fail "teamTools.splunk.enabled=true with gateway.caConfigMapName: Open WebUI then trusts that complete bundle to reach LiteLLM, so put the IdP CA into it and leave openwebui.oidc.caBundle unset (OPENWEBUI_IDP_CA_FILE)" -}}
 {{- end -}}

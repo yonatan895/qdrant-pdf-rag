@@ -3123,10 +3123,29 @@ def test_open_webui_registers_the_gateway_for_the_team_model_bearer(owui_chart):
     assert not purge & {"MFR_SPLUNK_GATEWAY_KEY", "OPENAI_API_KEYS", "TOOL_SERVER_CONNECTIONS"}
 
 
-def test_open_webui_model_key_follows_the_shared_gateway_key(owui_chart):
+def test_the_team_model_reads_open_webuis_own_key_even_with_a_shared_key(owui_chart):
+    """ADR-0010 TD3, maintainer decision on #1374: the shared key never reaches Open WebUI."""
     docs = _splunk(owui_chart, gateway={"apiKeySecretName": "gw-keys", "apiKeySecretKey": "api-key"})
     env = env_map(docs["Deployment", "rag-openwebui"], "openwebui")
-    assert env["OPENAI_API_KEYS"]["valueFrom"] == {"secretKeyRef": {"name": "gw-keys", "key": "api-key"}}
+    assert env["OPENAI_API_KEYS"]["valueFrom"] == {"secretKeyRef": {"name": "gw-keys", "key": "openwebui-llm-api-key"}}
+    agent = env_map(docs["Deployment", "rag-agent"], "agent")
+    assert agent["LLM_API_KEY"]["valueFrom"]["secretKeyRef"] == {"name": "gw-keys", "key": "api-key"}
+
+
+@pytest.mark.parametrize(("shared", "own"), [
+    ("api-key", "api-key"),
+    ("", "llm-api-key"),
+    ("", "embed-api-key"),
+    ("", "rerank-api-key"),
+    ("", "context-llm-api-key"),
+])
+def test_the_team_model_key_cannot_name_the_shared_or_another_legs_key(owui_chart, shared, own):
+    values = _splunk_values(gateway={"apiKeySecretName": "gw-keys", "apiKeySecretKey": shared})
+    values["teamTools"]["model"]["apiKeySecretKey"] = own
+    r = _splunk_render(owui_chart, values)
+    assert r.returncode != 0
+    assert ("teamTools.model.apiKeySecretKey must name Open WebUI's own LiteLLM key (ADR-0010 TD3), not the shared "
+            "gateway.apiKeySecretKey or another model leg's key") in r.stderr
 
 
 def test_oidc_mode_forwards_the_user_token_and_reaches_the_idp(owui_chart):
