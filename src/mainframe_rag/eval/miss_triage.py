@@ -17,17 +17,23 @@ Read-only. Three steps, run where the inputs live:
 
 Selected rows: answer rows the taxonomy (scripts/answer_taxonomy.py) judged
 failing with primary class retrieval_miss or a "=not_retrieved" gold gap,
-repeat 1 only. Buckets, first match wins:
+repeat 1 only. Row-level buckets come first:
 
   D  corpus/label: the row's coverage is "none", or no stored chunk is gold
   E  identifier: the captured query_kind is "identifier"
   unknown_no_final_hits: the row has no final_hits (buffered transport or a
      malformed hit list); fix the input and rerun
-  C  answer stage: a gold chunk is in the served final_hits
-  B  ordering: a gold chunk is in a dense or sparse leg of the pool but not
-     in final_hits (beyond_prefetch: its best rank is past the served prefetch)
-  A  recall: no gold chunk in any leg of the pool
   unknown_no_pool: no pool record for the row's query (or a capture error)
+
+Otherwise each missing target (a not_retrieved gold gap; the whole row when
+there is none) is bucketed on its own gold chunks (a doc:X target on doc X
+only), and the row takes the most upstream target bucket:
+
+  A  recall: no target gold chunk in any leg of the pool
+  B  ordering: in a dense or sparse leg of the pool but not in final_hits
+     (beyond_prefetch: its best rank is past the served prefetch)
+  C  answer stage: a target gold chunk is in the served final_hits
+  D  only when no missing target has a stored gold chunk
 
 Gold is the row's gold_chunk_ids when set; otherwise every stored chunk of
 expected_doc_ids that is_relevant_hit accepts (heading substring), on
@@ -65,6 +71,11 @@ CHUNK_TYPES = (*get_args(ChunkType), "-")
 # answer_taxonomy.py's primary class for a retrieval miss (pinned by a test).
 RETRIEVAL_MISS = "retrieval_miss"
 GOLD_IDS_KEPT = 20  # gold candidates a triage row lists for the reader
+NOT_RETRIEVED = "not_retrieved"  # packing_diagnostic's target outcome (pinned by a test)
+ROW_TARGET = "row"  # the whole row's gold, for a miss with no not_retrieved gap
+# Target buckets, most upstream first; a row takes the first one any of its
+# missing targets has. "D" here is a target with no stored gold chunk.
+TARGET_ORDER = ("A", "B", "C", "D")
 SCROLL_PAGE = 256
 # Payload fields the tool reads: the embedded text's parts plus locators.
 PAYLOAD_KEYS = ["product", "version", "doc_id", "title", "heading_path", "context", "text",
@@ -97,19 +108,30 @@ def read_jsonl(path: Path | str) -> list[dict[str, Any]]:
         return [json.loads(line) for line in fh if line.strip()]
 
 
-def select_rows(taxonomy: dict[str, Any]) -> list[str]:
+def missing_targets(gold_gaps: Iterable[Any]) -> list[str]:
+    """The diagnostic targets a row's gold_gaps report as never retrieved
+    (`kind:key`, e.g. `doc:SC27-1234-05`), sorted. answer_taxonomy writes a
+    gap as `kind:key=outcome`; retrieved_dropped gaps are packing, not misses."""
+    return sorted({str(g).rsplit("=", 1)[0] for g in gold_gaps
+                   if str(g).endswith("=" + NOT_RETRIEVED)})
+
+
+def select_rows(taxonomy: dict[str, Any]) -> dict[str, list[str]]:
     """Failing answer rows the taxonomy calls a retrieval miss, or with a gold
-    target never retrieved (a partial miss), sorted."""
+    target never retrieved (a partial miss): row id -> missing targets. A row
+    with no not_retrieved gap (the served zero-hits path) gets the whole-row
+    target ROW_TARGET."""
     rows = taxonomy.get("rows")
     if not isinstance(rows, list):
         raise TriageError("taxonomy report has no rows list")
-    picked = {
-        str(r["id"]) for r in rows
-        if r.get("verdict") == "fail" and r.get("expected_behavior") == "answer"
-        and (r.get("primary") == RETRIEVAL_MISS
-             or any(str(g).endswith("=not_retrieved") for g in r.get("gold_gaps") or []))
-    }
-    return sorted(picked)
+    picked: dict[str, list[str]] = {}
+    for r in rows:
+        if r.get("verdict") != "fail" or r.get("expected_behavior") != "answer":
+            continue
+        targets = missing_targets(r.get("gold_gaps") or [])
+        if r.get("primary") == RETRIEVAL_MISS or targets:
+            picked[str(r["id"])] = targets or [ROW_TARGET]
+    return dict(sorted(picked.items()))
 
 
 def repeat_one_rows(reports: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -172,17 +194,25 @@ def doc_points(client: QdrantReader, collection: str, doc_ids: Sequence[str]) ->
 
 def gold_set(client: QdrantReader, collection: str,
              record: dict[str, Any]) -> tuple[dict[str, str], str]:
-    """(gold chunk id -> chunk_type, basis) for one golden record."""
+    """(gold chunk id -> its doc id, basis) for one golden record."""
+    from pydantic import ValidationError
+
     from mainframe_rag.eval.datasets import GoldenEntry
     from mainframe_rag.eval.retrieval import is_relevant_hit
     from mainframe_rag.retrieve.query import hit_from_payload
 
-    entry = GoldenEntry.model_validate(record)
+    try:
+        entry = GoldenEntry.model_validate(record)
+    except ValidationError:
+        # Fixed text: a validation message would echo the row's question.
+        row_id = record.get("id")
+        shown = row_id if isinstance(row_id, str) and _ROW_ID_RE.fullmatch(row_id) else "?"
+        raise TriageError(f"golden row {shown} is not a valid golden entry") from None
     if entry.gold_chunk_ids:
         points = client.retrieve(collection, ids=list(entry.gold_chunk_ids),
-                                 with_payload=["chunk_type"], with_vectors=False)
-        return ({str(p.id): str((p.payload or {}).get("chunk_type") or "narrative")
-                 for p in points}, "chunk_ids")
+                                 with_payload=["doc_id"], with_vectors=False)
+        return ({str(p.id): str((p.payload or {}).get("doc_id") or "") for p in points},
+                "chunk_ids")
     page = entry.expected_page or ""
     must = [str(s).lower() for s in record.get("gold_must_contain") or []]
     basis = "+".join(["doc"] + [name for name, on in (
@@ -197,41 +227,84 @@ def gold_set(client: QdrantReader, collection: str,
             continue
         if must and not any(m in hit.text.lower() for m in must):
             continue
-        gold[hit.chunk_id] = hit.chunk_type
+        gold[hit.chunk_id] = hit.doc_id
     return gold, basis
 
 
 # ---------------------------------------------------------------- buckets
-def classify_row(row_id: str, row: dict[str, Any], record: dict[str, Any],
-                 gold: dict[str, str], basis: str, served_prefetch: int) -> dict[str, Any]:
-    """One selected row's bucket (pure). First match wins: D, E, C, B, A."""
+def leg_ranks(record: dict[str, Any], chunk_ids: Iterable[str]) -> dict[str, int]:
+    """Best 1-based rank of any of these chunks per side, across every leg."""
+    wanted = set(chunk_ids)
     ranks: dict[str, int] = {}
     for leg in record["legs"]:
         for side in ("dense", "sparse"):
             for rank, cid in enumerate(leg[side], 1):
-                if cid in gold and rank < ranks.get(side, rank + 1):
+                if cid in wanted and rank < ranks.get(side, rank + 1):
                     ranks[side] = rank
+    return ranks
+
+
+def target_gold(target: str, gold: dict[str, str]) -> set[str]:
+    """The gold chunks one missing target stands for: a `doc:X` target is the
+    row's gold chunks in doc X; any other target (the whole row, a heading or
+    an identifier entry) is the row's whole gold set."""
+    if target.startswith("doc:"):
+        doc = target.removeprefix("doc:")
+        return {cid for cid, d in gold.items() if d == doc}
+    return set(gold)
+
+
+def classify_row(row_id: str, row: dict[str, Any], record: dict[str, Any],
+                 gold: dict[str, str], basis: str, served_prefetch: int,
+                 targets: Sequence[str] = (ROW_TARGET,)) -> dict[str, Any]:
+    """One selected row's bucket (pure). Row level first: D (coverage none or
+    no stored gold), E (identifier query), unknown_no_final_hits. Otherwise
+    each missing target is bucketed on its own gold (C in final_hits, B in a
+    pool leg, A in neither, D nothing stored) and the row takes the most
+    upstream target bucket: A before B before C before D."""
     final = row.get("final_hits")
     out: dict[str, Any] = {
         "id": row_id, "query_kind": record.get("query_kind"),
         "pool_depth": record["_meta"]["depth"], "served_prefetch": served_prefetch,
         "gold_basis": basis, "gold_n": len(gold), "coverage": row.get("coverage"),
-        "dense_rank": ranks.get("dense"), "sparse_rank": ranks.get("sparse"),
+        "missing_n": len(targets),
     }
     if row.get("coverage") == "none" or not gold:
-        bucket = "D"
-    elif record.get("query_kind") == "identifier":
-        bucket = "E"
-    elif not isinstance(final, list):
-        bucket = "unknown_no_final_hits"
-    elif any(isinstance(h, dict) and h.get("chunk_id") in gold for h in final):
-        bucket = "C"
-    elif ranks:
-        bucket = "B"
-        out["beyond_prefetch"] = min(ranks.values()) > served_prefetch
-    else:
-        bucket = "A"
-        out["gold_ids"] = sorted(gold)[:GOLD_IDS_KEPT]
+        out["bucket"] = "D"
+        return out
+    if record.get("query_kind") == "identifier":
+        out["bucket"] = "E"
+        return out
+    if not isinstance(final, list):
+        out["bucket"] = "unknown_no_final_hits"
+        return out
+    served = {h.get("chunk_id") for h in final if isinstance(h, dict)}
+    per: list[dict[str, Any]] = []
+    for target in targets:
+        chunks = target_gold(target, gold)
+        ranks = leg_ranks(record, chunks)
+        bucket = ("D" if not chunks else "C" if chunks & served else "B" if ranks else "A")
+        per.append({"target": target, "bucket": bucket, "gold_n": len(chunks),
+                    "dense_rank": ranks.get("dense"), "sparse_rank": ranks.get("sparse"),
+                    "_chunks": chunks})
+    bucket = min((p["bucket"] for p in per), key=TARGET_ORDER.index)
+    deciding = [p for p in per if p["bucket"] == bucket]
+    for side in ("dense_rank", "sparse_rank"):
+        found = [p[side] for p in deciding if p[side] is not None]
+        out[side] = min(found) if found else None
+    if bucket == "B":
+        # Past the served prefetch when some missing target's best rank is.
+        out["beyond_prefetch"] = any(
+            min(r for r in (p["dense_rank"], p["sparse_rank"]) if r is not None) > served_prefetch
+            for p in deciding)
+    if bucket == "A":
+        out["gold_ids"] = sorted(set().union(*(p["_chunks"] for p in deciding)))[:GOLD_IDS_KEPT]
+    # A partial row: an expected doc that is not a missing target was served
+    # (comparative rows, and rows whose expected docs are alternatives).
+    missing_docs = {t.removeprefix("doc:") for t in targets if t.startswith("doc:")}
+    out["partial"] = bool(missing_docs) and any(
+        cid in served for cid, d in gold.items() if d not in missing_docs)
+    out["targets"] = [{k: v for k, v in p.items() if k != "_chunks"} for p in per]
     out["bucket"] = bucket
     return out
 
@@ -240,7 +313,8 @@ def triage(client: QdrantReader, collection: str, served_prefetch: int,
            golden: Sequence[dict[str, Any]], reports: Sequence[dict[str, Any]],
            taxonomy: dict[str, Any], pools: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Every selected row exactly once, in id order."""
-    selected = select_rows(taxonomy)
+    targets = select_rows(taxonomy)
+    selected = list(targets)
     rows = repeat_one_rows(reports)
     entries = {str(e.get("id")): e for e in golden}
     missing = [i for i in selected if i not in rows]
@@ -259,7 +333,8 @@ def triage(client: QdrantReader, collection: str, served_prefetch: int,
             out.append({"id": row_id, "bucket": "unknown_no_pool"})
             continue
         gold, basis = gold_set(client, collection, entries[row_id])
-        out.append(classify_row(row_id, rows[row_id], record, gold, basis, served_prefetch))
+        out.append(classify_row(row_id, rows[row_id], record, gold, basis, served_prefetch,
+                                targets[row_id]))
     return out
 
 
@@ -326,14 +401,24 @@ def build_export(rows: Sequence[dict[str, Any]], reading: dict[str, tuple[str, s
     from closed sets, integers. A reader's wrong_gold moves an A row to D."""
     ids: dict[str, list[str]] = {b: [] for b in BUCKETS}
     beyond: list[str] = []
+    partial: list[str] = []
+    missing_n: dict[str, int] = {}
     prefetch: set[int] = set()
     depths: list[int] = []
+    seen: set[str] = set()
     for n, row in enumerate(rows, 1):
         row_id, bucket = row.get("id"), row.get("bucket")
         if not isinstance(row_id, str) or not _ROW_ID_RE.fullmatch(row_id):
             raise TriageError(f"triage row {n}: row id has an unexpected shape")
         if bucket not in ids:
             raise TriageError(f"triage row {n}: unknown bucket")
+        if row_id in seen:
+            raise TriageError(f"triage row {n}: row {row_id} appears twice (one classify run per export)")
+        seen.add(row_id)
+        if type(row.get("missing_n")) is int and row["missing_n"] > 0:
+            missing_n[row_id] = row["missing_n"]
+        if row.get("partial") is True:
+            partial.append(row_id)
         if bucket == "A" and reading.get(row_id, ("",))[0] == "wrong_gold":
             bucket = "D"
         ids[bucket].append(row_id)
@@ -365,6 +450,8 @@ def build_export(rows: Sequence[dict[str, Any]], reading: dict[str, tuple[str, s
         "counts": {b: len(v) for b, v in ids.items()},
         "row_ids": {b: sorted(v) for b, v in ids.items()},
         "b_beyond_prefetch": sorted(beyond),
+        "missing_targets_n": dict(sorted(missing_n.items())),
+        "partial_rows": sorted(partial),
         "a_rows": [{"id": i, "context_starved": reading[i][0], "chunk_type": reading[i][1]}
                    for i in a_rows],
         "context_starved": sum(reading[i][0] == "yes" for i in kept_a),

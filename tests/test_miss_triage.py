@@ -12,6 +12,7 @@ from qdrant_client import QdrantClient, models
 from scripts.answer_taxonomy import RETRIEVAL_MISS as TAXONOMY_RETRIEVAL_MISS
 from scripts.answer_taxonomy import _gold_gaps
 from scripts.capture_pool import legs_to_record
+from scripts.packing_diagnostic import NOT_RETRIEVED as DIAGNOSTIC_NOT_RETRIEVED
 
 from mainframe_rag.eval import miss_triage as mt
 from tests.helpers_eval_local import eval_settings
@@ -47,6 +48,9 @@ STORED = [
     ("m-hit", "DOCM", "Intro", "1", "narrative", "has the needle word"),
     ("m-miss", "DOCM", "Intro", "1", "narrative", "nothing here"),
     ("cn-gold", CANARIES["doc"], CANARIES["heading"], "9", "table", CANARIES["text"]),
+    ("p-gold", "DOCP", "Intro", "1", "narrative", "pi"),
+    ("q-gold", "DOCQ", "Intro", "1", "narrative", "qu"),
+    ("r-gold", "DOCR", "Intro", "1", "narrative", "rho"),
 ]
 
 
@@ -164,6 +168,7 @@ def run_triage(client=None, results=RESULTS, reports=None, pools=POOLS, prefetch
 
 def test_taxonomy_vocabulary_is_answer_taxonomys():
     assert mt.RETRIEVAL_MISS == TAXONOMY_RETRIEVAL_MISS
+    assert mt.NOT_RETRIEVED == DIAGNOSTIC_NOT_RETRIEVED
 
 
 def test_each_selected_row_gets_its_bucket():
@@ -318,6 +323,8 @@ def test_cli_end_to_end_export_is_text_free(monkeypatch, tmp_path, capsys):
                     "D": ["SYN-11", "SYN-5", "SYN-6"], "E": ["SYN-7"],
                     "unknown_no_final_hits": ["SYN-8"], "unknown_no_pool": ["SYN-9"]},
         "b_beyond_prefetch": ["SYN-3"],
+        "missing_targets_n": {i: 1 for i in sorted(EXPECTED_BUCKETS) if i != "SYN-9"},
+        "partial_rows": [],
         "a_rows": [{"id": "SYN-1", "context_starved": "yes", "chunk_type": "table"},
                    {"id": "SYN-11", "context_starved": "wrong_gold", "chunk_type": "-"},
                    {"id": "SYN-12", "context_starved": "no", "chunk_type": "narrative"}],
@@ -350,6 +357,7 @@ def test_show_prints_the_embedded_text_to_the_console_only(monkeypatch, capsys):
 
 def test_real_client_entry_keeps_the_venue_rule_and_constructs_the_client(monkeypatch, capsys):
     # limits= is pinned src-wide by test_timeouts (#1131); this runs the real entry once.
+    # Construction may probe the server version (a read, failing offline); nothing is written.
     from mainframe_rag import config
 
     monkeypatch.delenv("VENUE", raising=False)
@@ -358,7 +366,7 @@ def test_real_client_entry_keeps_the_venue_rule_and_constructs_the_client(monkey
     out = capsys.readouterr()
     assert out.out == "" and out.err.startswith("REFUSED: collection")
     monkeypatch.setattr(config, "load_settings", lambda: eval_settings(qdrant_collection=COLL))
-    client, settings = mt._client_and_settings()  # constructs only; no request is sent
+    client, settings = mt._client_and_settings()
     assert isinstance(client, QdrantClient) and settings.qdrant_collection == COLL
 
 
@@ -397,3 +405,104 @@ def test_export_never_copies_unlisted_row_fields():
     text = json.dumps(mt.build_export(rows, {"SYN-1": ("unidentifiable", "message")}))
     for canary in (cid("a-gold"), CANARIES["query"], CANARIES["heading"], CANARIES["text"]):
         assert canary not in text
+
+
+
+# ---------------------------------------------------------------- partial misses (B1)
+def comparative(gaps, final, pool_dense, *, docs=("DOCP", "DOCQ")):
+    """One comparative row: the taxonomy reports gaps; DOCP is served."""
+    entry = golden("CMP-1", "q cmp", list(docs), query_class="comparative")
+    taxonomy = {"rows": [tax_row("CMP-1", gaps=gaps)]}
+    report = {"results": [result("CMP-1", final=final)]}
+    return mt.triage(corpus(), COLL, 40, [entry], [report], taxonomy,
+                     [pool("q cmp", pool_dense)])[0]
+
+
+def test_a_missing_doc_absent_from_the_pool_is_a_even_when_another_doc_was_served():
+    row = comparative(["doc:DOCQ=not_retrieved"], ("p-gold",), [sp("p-gold", "DOCP")] + fillers("c1", 5))
+    assert row["bucket"] == "A" and row["partial"] is True and row["missing_n"] == 1
+    assert row["gold_ids"] == [cid("q-gold")]  # the missing doc's chunks, not the served doc's
+    assert row["targets"] == [{"target": "doc:DOCQ", "bucket": "A", "gold_n": 1,
+                               "dense_rank": None, "sparse_rank": None}]
+
+
+def test_a_missing_doc_at_pool_rank_30_is_b_with_its_own_rank():
+    dense = [sp("p-gold", "DOCP")] + fillers("c2", 28) + [sp("q-gold", "DOCQ")]
+    row = comparative(["doc:DOCQ=not_retrieved"], ("p-gold",), dense)
+    assert (row["bucket"], row["dense_rank"], row["beyond_prefetch"]) == ("B", 30, False)
+
+
+def test_the_most_upstream_missing_target_decides_and_unstored_targets_are_d():
+    dense = [sp("p-gold", "DOCP")] + fillers("c3", 28) + [sp("q-gold", "DOCQ")]
+    gaps = ["doc:DOCQ=not_retrieved", "doc:DOCR=not_retrieved", "doc:DOCP=retrieved_dropped"]
+    row = comparative(gaps, ("p-gold",), dense, docs=("DOCP", "DOCQ", "DOCR"))
+    assert row["bucket"] == "A" and row["missing_n"] == 2
+    assert [(t["target"], t["bucket"]) for t in row["targets"]] == [("doc:DOCQ", "B"), ("doc:DOCR", "A")]
+    gaps = ["doc:DOCQ=not_retrieved", "doc:DOC-NOT-STORED=not_retrieved"]
+    row = comparative(gaps, ("p-gold",), dense, docs=("DOCP", "DOCQ", "DOC-NOT-STORED"))
+    assert row["bucket"] == "B"
+    assert [t["bucket"] for t in row["targets"]] == ["D", "B"]
+
+
+def test_a_missing_doc_that_reached_final_hits_is_still_c():
+    row = comparative(["doc:DOCQ=not_retrieved"], ("p-gold", "q-gold"), [sp("p-gold", "DOCP")])
+    assert row["bucket"] == "C" and row["partial"] is True
+
+
+# ---------------------------------------------------------------- boundaries (review R-N1)
+def test_scroll_reads_every_page(monkeypatch):
+    client = QdrantClient(":memory:")
+    client.create_collection(COLL, vectors_config=models.VectorParams(size=2, distance=models.Distance.COSINE))
+    client.upsert(COLL, [models.PointStruct(id=cid(f"pg-{i}"), vector=[1.0, 0.0], payload={"doc_id": "DOCPG"})
+                         for i in range(5)])
+    monkeypatch.setattr(mt, "SCROLL_PAGE", 2)
+    assert {str(p.id) for p in mt.doc_points(client, COLL, ["DOCPG"])} == {cid(f"pg-{i}") for i in range(5)}
+
+
+def test_expected_page_narrows_the_gold():
+    gold, basis = mt.gold_set(corpus(), COLL, golden("SYN-90", "q", ["DOCA"], expected_page="6"))
+    assert (gold, basis) == ({cid("a-other"): "DOCA"}, "doc+page")
+
+
+def test_ranks_are_the_minimum_across_legs():
+    legs = [{"effective_text": "x", "filter_fallback": False, "dense": [*fillers("l1", 1), sp("b-gold")],
+             "sparse": []},
+            {"effective_text": "y", "filter_fallback": False, "dense": [*fillers("l2", 4), sp("b-gold")],
+             "sparse": []}]
+    record = legs_to_record("q", "nl", legs, {}, {"collection": COLL, "depth": 50})
+    assert mt.leg_ranks(record, [cid("b-gold")]) == {"dense": 2}
+
+
+@pytest.mark.parametrize(("rank", "beyond"), [(40, False), (41, True)])
+def test_beyond_prefetch_is_strictly_past_the_served_prefetch(rank, beyond):
+    record = pool("q", fillers("bp", rank - 1) + [sp("b-gold", "DOCB")])
+    row = mt.classify_row("SYN-2", result("SYN-2"), record, {cid("b-gold"): "DOCB"}, "doc", 40)
+    assert (row["bucket"], row["dense_rank"], row["beyond_prefetch"]) == ("B", rank, beyond)
+
+
+def test_identifier_rows_are_e_even_with_gold_in_final_hits():
+    record = pool("q", [sp("e-gold", "DOCE")], kind="identifier")
+    row = mt.classify_row("SYN-7", result("SYN-7", final=("e-gold",)), record,
+                          {cid("e-gold"): "DOCE"}, "doc", 40)
+    assert row["bucket"] == "E"
+
+
+def test_duplicate_pool_records_keep_the_first():
+    first, second = pool("q dup", [sp("b-gold")]), pool("q dup", [])
+    assert mt.pool_index([first, second], COLL, 40)["q dup"] is first
+
+
+def test_export_refuses_rows_that_disagree_on_prefetch_or_repeat_an_id():
+    rows = _rows()
+    rows[1]["served_prefetch"] = 50
+    with pytest.raises(mt.TriageError, match="disagree on the served prefetch"):
+        mt.build_export(rows, {"SYN-1": ("yes", "table")})
+    with pytest.raises(mt.TriageError, match="row SYN-2 appears twice"):
+        mt.build_export([*_rows(), _rows()[1]], {"SYN-1": ("yes", "table")})
+
+
+def test_an_invalid_golden_row_refuses_without_echoing_it():
+    bad = {"id": "SYN-99", "query": CANARIES["query"], "expected_doc_ids": []}  # answer row, no docs
+    with pytest.raises(mt.TriageError) as exc:
+        mt.gold_set(corpus(), COLL, bad)
+    assert str(exc.value) == "golden row SYN-99 is not a valid golden entry"

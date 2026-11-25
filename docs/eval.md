@@ -1408,16 +1408,34 @@ steps:
   --depth 50` and the golden set the run used. It selects the failing answer
   rows whose primary class is `retrieval_miss` or that carry a
   `...=not_retrieved` gold gap, from repeat 1 only. It then puts each row in
-  one bucket (the first match wins):
+  one bucket. Row-level buckets come first:
   - D (corpus or label): the row's coverage is `none`, or no stored chunk is gold.
   - E (identifier): the captured `query_kind` is `identifier`.
-  - C (answer stage): a gold chunk is in the row's served `final_hits`.
-  - B (ordering): a gold chunk is in a dense or sparse leg of the pool but not
-    in `final_hits`. `beyond_prefetch` marks a best rank past the served
-    prefetch (`rerank_candidates` with rerank on, 40 without).
-  - A (recall): no gold chunk is in any leg of the pool.
   - `unknown_no_final_hits`: the row has no `final_hits`.
   - `unknown_no_pool`: the row has no pool record, or a capture error.
+
+  Otherwise the row is bucketed on its missing targets: each `...=not_retrieved`
+  gold gap the taxonomy reports (`doc:X`, `heading:heading`, `entry-*:ID`),
+  or the whole row when it has none (the served zero-hits path). A `doc:X`
+  target is judged on the row's gold chunks in doc X only; any other target on
+  the row's whole gold set. Each target gets its own bucket:
+  - A (recall): none of its gold chunks is in any leg of the pool.
+  - B (ordering): one is in a dense or sparse leg of the pool but not in
+    `final_hits`. `beyond_prefetch` marks a best rank past the served
+    prefetch (`rerank_candidates` with rerank on, 40 without).
+  - C (answer stage): one is in the row's served `final_hits`.
+  - D: the target has no stored gold chunk.
+
+  The row takes the most upstream target bucket: A before B before C before
+  D. A comparative row with one doc served and another missing is therefore
+  bucketed on the missing doc. `partial` marks rows where an expected doc that
+  is not a missing target was served.
+
+  The golden set has no field that marks expected docs as alternatives (any
+  one is enough). The packing diagnostic makes one target per expected doc,
+  and only this prose names DIA-17 and DIA-23 as alternatives. The tool
+  therefore buckets a missing alternative like any missing doc. Such rows show
+  up in `partial_rows`; read them before counting them as misses.
 
   The packing diagnostic retrieves 8, fewer than the served path, so its
   label is re-checked here against `final_hits`. Gold is the row's
@@ -1430,7 +1448,7 @@ steps:
   It refuses with exit 2 and a fixed message in these cases:
   - no selected row carries `final_hits` (a report from before #1191, or one
     run without `--stream`);
-  - a row appears twice in repeat 1;
+  - a row appears twice in repeat 1, or a golden row is not a valid entry;
   - a selected row is missing from the reports or the golden set;
   - a pool record has no `_meta.depth`, is shallower than the served
     prefetch, or comes from another collection.
@@ -1447,14 +1465,15 @@ steps:
 - `export --triage --reading --out` writes the only file that may leave. It
   is built from an allowlist:
   - bucket counts and row ids per bucket (ids in the golden id shape);
-  - `b_beyond_prefetch`;
+  - `b_beyond_prefetch`, `partial_rows` and `missing_targets_n` (missing targets per row);
   - per A row, the closed-set verdict and chunk type;
   - the `context_starved`, `unidentifiable` and `misses_excl_d` counts;
   - the served prefetch and the minimum pool depth.
 
   It never copies a question, chunk text, heading, doc id, chunk id, rank or
-  reason. A `wrong_gold` reading moves its row from A to D. A reading
-  error names the line number, never the line.
+  reason. A `wrong_gold` reading moves its row from A to D. A row id twice in
+  the triage rows, or rows that disagree on the served prefetch, refuse. A
+  reading error names the line number, never the line.
 
 The tool applies no decision rule. Any threshold on the counts belongs to
 the run's pre-registration, outside this tool.
