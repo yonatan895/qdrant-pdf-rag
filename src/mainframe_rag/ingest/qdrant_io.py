@@ -8,6 +8,7 @@ Collection mainframe_manuals (architecture.md section 4.3):
 
 from __future__ import annotations
 
+import json
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 from uuid import UUID
@@ -325,6 +326,80 @@ def _records_to_points(
     return points
 
 
+# Request sizing for bulk point copies (issue #1379). Upper bounds on the
+# JSON bytes qdrant-client's REST transport sends for one point: the longest
+# shortest-repr of a finite float64 is 24 characters
+# ("-2.2250738585072014e-308") plus its separator, and a sparse index is a u32
+# (at most 10 digits) plus its separator. The fixed allowances cover the
+# point's id, key names and braces, and the request envelope.
+_FLOAT_JSON_BOUND = 25
+_INDEX_JSON_BOUND = 11
+_POINT_JSON_OVERHEAD = 256
+_REQUEST_JSON_OVERHEAD = 1024
+
+
+class PointTooLargeError(RuntimeError):
+    """One point's estimated request size exceeds the copy request budget."""
+
+
+def _vector_json_bound(vector: Any) -> int:
+    if isinstance(vector, models.SparseVector):
+        return 32 + len(vector.indices) * _INDEX_JSON_BOUND + len(vector.values) * _FLOAT_JSON_BOUND
+    if isinstance(vector, dict):
+        return 2 + sum(
+            len(json.dumps(str(name))) + 2 + _vector_json_bound(value)
+            for name, value in vector.items()
+        )
+    if isinstance(vector, list):
+        if vector and isinstance(vector[0], (list, dict)):
+            return 2 + sum(_vector_json_bound(value) + 1 for value in vector)
+        return 2 + len(vector) * _FLOAT_JSON_BOUND
+    return _FLOAT_JSON_BOUND
+
+
+def estimate_point_bytes(point: models.PointStruct) -> int:
+    """Upper bound on one point's JSON size in an upsert request (issue
+    #1379): the named vectors from their dimensions and sparse entry counts
+    (worst-case number formatting, not the observed values), plus the
+    payload serialized with ASCII escapes, which is never shorter than the
+    transport's UTF-8 body."""
+    payload = len(json.dumps(point.payload, default=str)) if point.payload else 4
+    return _POINT_JSON_OVERHEAD + _vector_json_bound(point.vector) + payload
+
+
+def byte_bounded_batches(
+    points: list[models.PointStruct], budget: int
+) -> list[list[models.PointStruct]]:
+    """Split points, in order, into upsert batches whose estimated request
+    size stays within budget bytes (issue #1379). A point that cannot fit a
+    request on its own raises before any batch is returned: a copy never
+    skips a point."""
+    batches: list[list[models.PointStruct]] = []
+    batch: list[models.PointStruct] = []
+    size = _REQUEST_JSON_OVERHEAD
+    for point in points:
+        need = estimate_point_bytes(point)
+        if _REQUEST_JSON_OVERHEAD + need > budget:
+            raise PointTooLargeError(
+                f"point {point.id} needs an estimated {need} request bytes, over the "
+                f"{budget}-byte copy request budget (ingest_copy_request_bytes) — "
+                "refusing to copy without it."
+            )
+        if batch and size + need > budget:
+            batches.append(batch)
+            batch, size = [], _REQUEST_JSON_OVERHEAD
+        batch.append(point)
+        size += need
+    if batch:
+        batches.append(batch)
+    return batches
+
+
+def _upsert_each(client: QdrantPoints, dst: str, batches: list[list[models.PointStruct]]) -> None:
+    for batch in batches:
+        client.upsert(dst, points=batch, wait=True)
+
+
 def clone_collection(
     client: QdrantPoints, settings: Settings, src: str, dst: str
 ) -> None:
@@ -337,7 +412,11 @@ def clone_collection(
     as for any existing target), this run's distribution policy and src's
     payload indexes, before any point is loaded. Fail closed unless dst then
     holds exactly src's point ids: a partial copy must never become a
-    publish base. src is only read."""
+    publish base. src is only read.
+
+    Reads page by `ingest_scan_page_size`; each page is written in upsert
+    requests sized by bytes (`ingest_copy_request_bytes`, issue #1379), since
+    a page of 4096-dimension points can exceed the server's request limit."""
     if client.collection_exists(dst):
         raise RuntimeError(f"copy target {dst!r} already exists — refusing to copy into it.")
     info = client.get_collection(src)
@@ -371,6 +450,7 @@ def clone_collection(
         settings.qdrant_replication_factor,
         settings.qdrant_write_consistency_factor,
     ) == (1, 1, 1)
+    budget = settings.ingest_copy_request_bytes
     if single_shard_unreplicated:
         pending_async = False
         last_point: models.PointStruct | None = None
@@ -383,11 +463,12 @@ def clone_collection(
                 offset=offset,
             )
             if page:
-                points = _records_to_points(page, want)
-                is_last = offset is None
-                client.upsert(dst, points=points, wait=is_last)
-                pending_async = not is_last
-                last_point = points[-1]
+                batches = byte_bounded_batches(_records_to_points(page, want), budget)
+                for index, batch in enumerate(batches):
+                    is_last = offset is None and index == len(batches) - 1
+                    client.upsert(dst, points=batch, wait=is_last)
+                    pending_async = not is_last
+                    last_point = batch[-1]
             if offset is None or not page:
                 break
         if pending_async and last_point is not None:
@@ -407,8 +488,8 @@ def clone_collection(
                     pending.result()
                     pending = None
                 if page:
-                    points = _records_to_points(page, want)
-                    pending = pool.submit(client.upsert, dst, points=points, wait=True)
+                    batches = byte_bounded_batches(_records_to_points(page, want), budget)
+                    pending = pool.submit(_upsert_each, client, dst, batches)
                 if offset is None or not page:
                     break
             if pending is not None:

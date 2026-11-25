@@ -421,6 +421,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "batch_size": 128,
     "ingest_upsert_streams": 4,
     "ingest_scan_page_size": 1000,
+    "ingest_copy_request_bytes": 25165824,  # #1379, 24 MiB under the 32 MiB server limit
     "ingest_bulk_load": False,
     "ingest_alias_publish": True,
     "bm25_model": "Qdrant/bm25",
