@@ -2578,6 +2578,9 @@ procedure closes #1077's "site procedure for the service-account role" item.
    `SPLUNK_EGRESS_CIDRS` and `SPLUNK_EGRESS_PORT`. LiteLLM's CIDRs and port go into
    `TEAM_MODEL_EGRESS_CIDRS` and `TEAM_MODEL_EGRESS_PORT`. In oidc mode, the IdP's
    go into `SPLUNK_GATEWAY_IDP_EGRESS_CIDRS` and `SPLUNK_GATEWAY_IDP_EGRESS_PORT`.
+   NetworkPolicy matches the address and port after Service translation: when LiteLLM
+   (or Splunk) is an in-cluster Service, list its pods' CIDRs and target port, not the
+   ClusterIP and Service port.
 4. **Secrets.** Create the Secret named by `SPLUNK_GATEWAY_SECRET` with
    `splunk-mcp-token` (step 1) and, in bearer mode, `bearer-secret` from
    `openssl rand -hex 32` (it must match `[A-Za-z0-9_-]{32,}`; it is placed inside a
@@ -2621,7 +2624,11 @@ procedure closes #1077's "site procedure for the service-account role" item.
    in the one log line `{"action": "splunk_gateway_start", "decision": ...}`
    (`oc logs deploy/rag-splunk-gateway`): exit 2 logs `config_error` with a detail
    that names keys and template positions, exit 3 a reason from the
-   [start-up check](team-tools.md#splunk-gateway) table.
+   [start-up check](team-tools.md#splunk-gateway) table. `airgap:deploy` waits for the
+   gateway last, after the docs Pipe and shared prompts are installed: a gateway that
+   is not Ready within 330 s fails the deploy with a fixed message, the docs front end
+   already deployed, and a later `airgap:deploy` after the fix (or with
+   `SPLUNK_GATEWAY_ENABLED=false`) completes it.
 8. **Site probe.** In a running pod:
 
    ```sh

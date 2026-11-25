@@ -115,8 +115,6 @@ verify_registry_images $DEPLOY_IMAGES
 # own StatefulSet is bound to the verified agent digest after rollout.
 RUNNING_IMAGES=$DEPLOY_IMAGES
 [ "$FEEDBACK_ENABLED" != "true" ] || RUNNING_IMAGES="$RUNNING_IMAGES feedback"
-# So does the Splunk gateway (#1077), bound to its own Deployment.
-[ "$SPLUNK_GATEWAY_ENABLED" != "true" ] || RUNNING_IMAGES="$RUNNING_IMAGES splunk_gateway"
 
 KC=${KC:-$(kc)}
 check_gateway_ca
@@ -423,7 +421,6 @@ else
     if [ "$OPENWEBUI_ENABLED" = "true" ]; then
         wait_rollout "deploy/rag-openwebui" 660
     fi
-    [ "$SPLUNK_GATEWAY_ENABLED" != "true" ] || wait_rollout "deploy/rag-splunk-gateway" 330
     # Tags can move after the registry read-back: the running pods must report
     # the verified digests (fail closed; legacy cleanup below is skipped).
     # shellcheck disable=SC2086
@@ -438,6 +435,20 @@ fi
 [ "$OPENWEBUI_ENABLED" != "true" ] || provision_openwebui_pipe
 # #1255: the shared prompt templates (chat `/` commands), repository-owned.
 [ "$OPENWEBUI_ENABLED" != "true" ] || provision_openwebui_prompts
+# #1077: the Splunk gateway is waited for last, after the docs platform is
+# complete: it serves only once its start-up backend check passes (its startup
+# probe allows 300 s), and on a first enable it may restart until the site
+# configuration is right (docs/deploy.md site procedure). A gateway that does
+# not become Ready fails the deploy here, with the docs front end deployed.
+# It runs the agent image: its pod must report the verified agent digest.
+if [ "$SPLUNK_GATEWAY_ENABLED" = "true" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
+    if ! $KC -n "$NAMESPACE" rollout status deploy/rag-splunk-gateway --timeout=330s; then
+        echo "==> Diagnostic: Splunk gateway start-up (the splunk_gateway_start line names the reason)" >&2
+        $KC -n "$NAMESPACE" logs deploy/rag-splunk-gateway --tail=20 2>/dev/null || true
+        die "Splunk gateway rag-splunk-gateway is not Ready within 330s; the rest of the release, the docs front end included, is deployed. Fix the gateway configuration (docs/deploy.md#splunk-gateway-deploy, steps 7-8) and re-run airgap:deploy, or set SPLUNK_GATEWAY_ENABLED=false"
+    fi
+    verify_running_images splunk_gateway
+fi
 if [ "$AGENT_ROUTE" = "true" ]; then
     echo "Route rag-agent -> svc port oauth, reencrypt, timeout 300s"
 fi

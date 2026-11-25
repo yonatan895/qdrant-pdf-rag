@@ -98,7 +98,8 @@ case "$*" in
   *'get secret -l owner=helm,name='*)
     [ -z "${{HELM_RELEASE_SECRET:-}}" ] || echo "secret/sh.helm.release.v1.$HELM_RELEASE_SECRET.v1" ;;
   *'rollout status '*)
-    [ "${{ROLLOUT_FAIL:-}}" != 1 ] || exit 1 ;;
+    [ "${{ROLLOUT_FAIL:-}}" != 1 ] || exit 1
+    case "$*" in *"${{ROLLOUT_FAIL_TARGET:-@none@}}"*) exit 1 ;; esac ;;
   'api-resources -o name')
     [ "${{DISCOVERY_FAIL:-}}" != 1 ] || exit 1
     printf '%s\\n' routes.route.openshift.io servicemonitors.monitoring.coreos.com ;;
@@ -3643,6 +3644,21 @@ def test_splunk_gateway_bearer_deploy_checks_secrets_renders_and_waits(tree):
     assert 'get secret gw-keys -o go-template={{if index .data "openwebui-llm-api-key"}}' in flat
     assert flat.index("jsonpath={.data['bearer-secret']}") < flat.index("upgrade")
     assert log.index("deploy/rag-splunk-gateway") > log.index("upgrade")
+    _assert_bearer_never_shown(tree, r)
+
+
+def test_a_gateway_that_is_not_ready_fails_after_the_docs_platform_is_complete(tree):
+    """A first enable may crash-loop until the site config is right: the docs
+    Pipe and prompts are installed first, then the gateway wait fails the
+    deploy with a fixed message that names the off switch."""
+    r = _splunk_deploy(tree, ("ROLLOUT_FAIL_TARGET", "deploy/rag-splunk-gateway"))
+    assert r.returncode != 0
+    assert "Splunk gateway rag-splunk-gateway is not Ready within 330s" in r.stderr
+    assert "SPLUNK_GATEWAY_ENABLED=false" in r.stderr
+    log = _helm_log(tree)
+    gateway_wait = log.index("deploy/rag-splunk-gateway\n--timeout=330s")
+    assert log.index("/opt/mainframe-rag/openwebui/provision_pipe.py") < gateway_wait
+    assert log.index("/opt/mainframe-rag/openwebui/provision_prompts.py") < gateway_wait
     _assert_bearer_never_shown(tree, r)
 
 
