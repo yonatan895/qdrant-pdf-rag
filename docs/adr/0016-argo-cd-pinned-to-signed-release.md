@@ -323,26 +323,30 @@ source read for this record.
      4. **Prepare** (new task): every pre-apply check of O6, the renders, the
         Qdrant render check, then the two Application manifests into
         `dist/`.
-     5. The operator copies the two manifests out of the bastion's `dist/`
-        and commits them to `gap/config/<cluster>/<namespace>/` through the
-        fork's reviewed merge request (a change that leaves them equal needs
-        none). The bastion pushes nothing; any copy route will do, because
-        step 6 derives the manifests again.
-     6. On the bastion, regenerate both manifests from the verified bundle
-        and the `airgap.env` at the merged fork commit, require the committed
+     5. The operator commits the two manifests to
+        `gap/config/<cluster>/<namespace>/` through the fork's reviewed merge
+        request (a change that leaves them equal needs none). The bastion
+        pushes nothing. How the files reach the merge request follows what
+        ADR-0009 §2 allows to leave the bastion; the route is a pilot
+        procedure. Integrity does not depend on it, because step 6 derives
+        the manifests again.
+     6. On the bastion, run the prepare task again: regenerate both
+        manifests from the verified bundle and the `airgap.env` at the merged
+        fork commit, require the committed
         manifests at that commit to equal them byte for byte and to pin the
         MANIFEST sha, then apply the two Applications with the operator's
         session. Step 4's output is a proposal; this check decides.
      7. Sync by hand in D2's order.
      8. **Verify** (new task): each Application reports the MANIFEST sha as its
         `targetRevision` and its synced revision, and its live spec equals the
-        prepared manifest; it lists who may edit Applications in the
+        manifest applied in step 6; it lists who may edit Applications in the
         namespace; then every post-apply step of O6 and the smoke.
      9. Record the MANIFEST sha, the Application manifests' SHA-256 and the
         fork commit that holds them in `gap/records/`.
    - **What stops an unverified commit:** the pin is a content hash that only
      the prepare step writes, from a verified bundle; the bastion applies only
-     a committed manifest that equals the prepare output; sync is manual; the
+     a committed manifest that equals the manifests regenerated at the merged
+     commit; sync is manual; the
      verify step refuses any other revision or spec. Namespace RBAC limits
      who may edit Applications in a deployment namespace to the operators who
      run this flow. Whether the cluster's built-in namespace roles already
@@ -448,8 +452,9 @@ source read for this record.
     - **Then the existing dev namespace** migrates in a window, with its own
       approved issue: snapshot; switch Qdrant to the O3 form, keeping the
       Secret; delete the Helm release records (never `helm uninstall`);
-      prepare, commit, apply, sync. The expected changes are the tracking label and
-      one rolling restart of Qdrant. Any other difference stops the migration.
+      record the Qdrant objects' field managers (D5); prepare, commit,
+      apply, sync. The expected changes are the tracking label and one
+      rolling restart of Qdrant. Any other difference stops the migration.
     - **Production** is a fresh install on new namespaces (ADR-0009 §2) by the
       same flow, after both dev namespaces have run one release cycle, and
       only after open site input 10 is answered and recorded (maintainer
@@ -475,8 +480,8 @@ source read for this record.
        refusals. The stored-layout and volume-size checks stop reading Helm
        release records to recognise a fresh install. The prepare step refuses
        an Application name equal to `$QDRANT_RELEASE` or `mainframe-rag`,
-       and committed manifests that differ from its output or pin another
-       sha; the verify step compares against the verified bundle's MANIFEST
+       and, when run again at the merged commit (D6 step 6), committed
+       manifests that differ from its output or pin another sha; the verify step compares against the verified bundle's MANIFEST
        sha and lists who may edit Applications in the namespace.
        A test bounds the size of each rendered object: Argo CD's client-side
        apply stores a last-applied copy that Helm does not, and the Open
@@ -508,7 +513,7 @@ source read for this record.
 
 | Guarantee | State that establishes it | Who can change that state | Valid for | What forbids the counterexample |
 |---|---|---|---|---|
-| G1. Argo CD applies only a signed release's tree | `targetRevision` is the verified MANIFEST sha | Users with Application edit rights in the namespace (limited by namespace RBAC, input 11); fork committers to `gap/config/` (the committed manifest); the fork cannot change what a sha names | Until the Application is edited | The bastion applies only a committed manifest equal to the prepare output; the verify step compares against the verified bundle's sha and refuses another revision or spec. Not prevented before the sync (D6); accepted for the dev pilot only, production waits for input 10 |
+| G1. Argo CD applies only a signed release's tree | `targetRevision` is the verified MANIFEST sha | Users with Application edit rights in the namespace (limited by namespace RBAC, input 11); fork committers to `gap/config/` (the committed manifest); the fork cannot change what a sha names | Until the Application is edited | The bastion applies only a committed manifest equal to the manifests regenerated at the merged commit (D6 step 6); the verify step compares against the verified bundle's sha and refuses another revision or spec. Not prevented before the sync (D6); accepted for the dev pilot only, production waits for input 10 |
 | G2. Argo CD never deletes data | Prune off, no finalizer, tracking value unequal to any release name | Namespace admins; the platform (instance settings) | Until prune is chosen for a sync | Exit criterion 8; the Kind lane; kept-PVC annotations before any prune |
 | G3. Qdrant keys never change on a sync | The render holds no Secret (O3) | A release, through the chart or values | Standing | The no-Secret render test; `check_qdrant_render.py` |
 | G4. No Secret value is in git or in an Application | Secrets are operator-created and referenced by name | Operators | Standing | The no-Secret render test; the prepare step reads names only; the project denies the kind (requested) |
