@@ -86,6 +86,9 @@ ERRORS: Final[dict[str, str]] = {
     # GitLab gateway (#1078)
     "project_not_allowed": "the project is not available through this gateway",
     "binary_content": "the file is not text",
+    # Splunk gateway (#1077)
+    "upstream_protocol": "the backend did not answer in the expected protocol",
+    "search_refused": "the backend refused or could not finish the search; try a narrower time range",
 }
 
 
@@ -987,6 +990,62 @@ class UpstreamClient:
                         raise GatewayError("upstream_too_large")
                 content_type = response.headers.get("content-type", "")
                 kept = {k.lower(): v for k, v in response.headers.items()}
+        except httpx2.TimeoutException:
+            raise GatewayError("upstream_timeout") from None
+        except httpx2.HTTPError:
+            raise GatewayError("upstream_unavailable") from None
+        return UpstreamResponse(status, bytes(body), content_type, kept)
+
+    async def request_until(
+        self,
+        method: str,
+        path: str,
+        *,
+        deadline_s: float,
+        until: Callable[[str, bytes], bool],
+        json_body: object | None = None,
+        headers: Mapping[str, str] | None = None,
+        max_bytes: int | None = None,
+    ) -> UpstreamResponse:
+        """One backend call whose body is read only as far as the caller
+        needs: `until(content_type, chunk)` sees every chunk in order, and
+        reading stops after the first chunk for which it returns True (an
+        event stream the server keeps open after the event the caller
+        wanted). Otherwise the body is read to its end. The body returned
+        holds the bytes read. The byte cap and status mapping are those of
+        `request`; the whole call, body included, must finish within
+        `deadline_s`, else `upstream_timeout` (never a partial body). The
+        call asks for identity encoding, so a chunk is its wire size."""
+        cap = self._max_bytes if max_bytes is None else max_bytes
+        if cap <= 0 or not deadline_s > 0:
+            raise ValueError("max_bytes and deadline_s must be positive")
+        if method not in self._methods:
+            raise RuntimeError("this gateway does not allow that method")  # programming error
+        url = self._url(path)
+        body = bytearray()
+        deadline = asyncio.get_running_loop().time() + deadline_s
+        try:
+            async with asyncio.timeout_at(deadline):
+                async with self._client.stream(
+                    method,
+                    url,
+                    json=json_body,
+                    headers={**dict(headers or {}), "Accept-Encoding": "identity"},
+                    follow_redirects=False,
+                    timeout=self._timeout,
+                ) as response:
+                    status = response.status_code
+                    _raise_for_status(status)
+                    content_type = response.headers.get("content-type", "")
+                    kept = {k.lower(): v for k, v in response.headers.items()}
+                    async for chunk in response.aiter_bytes():
+                        body += chunk
+                        if len(body) > cap:
+                            raise GatewayError("upstream_too_large")
+                        if until(content_type, chunk):
+                            break  # the caller has what it needs: stop reading
+        except TimeoutError:
+            raise GatewayError("upstream_timeout") from None
         except httpx2.TimeoutException:
             raise GatewayError("upstream_timeout") from None
         except httpx2.HTTPError:

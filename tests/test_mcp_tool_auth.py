@@ -1689,6 +1689,101 @@ def test_stream_tail_maps_statuses_and_an_unanswered_request_to_fixed_codes():
     assert caught.value.code == "upstream_timeout"
 
 
+def _request_until(transport: httpx2.AsyncBaseTransport, until, **options: object) -> gw.UpstreamResponse:
+    """`UpstreamClient.request_until` (POST allowed) against `transport`, bounded so a
+    mutant that reads a never-ending body fails instead of hanging the run."""
+    kwargs: dict[str, object] = {"deadline_s": 5.0, "json_body": {"m": 1}}
+    kwargs.update(options)
+
+    async def run() -> gw.UpstreamResponse:
+        client = gw.UpstreamClient("https://splunk.example.test:8089", timeout_s=2.0, max_bytes=1024,
+                                   allowed_methods=frozenset({"POST"}), transport=transport)
+        try:
+            return await asyncio.wait_for(
+                client.request_until("POST", "/services/mcp", until=until, **kwargs), 15)  # type: ignore[arg-type]
+        finally:
+            await client.aclose()
+
+    return asyncio.run(run())
+
+
+def test_request_until_stops_reading_once_the_caller_has_its_answer():
+    """Kills: reading an event stream to its end (this one never ends)."""
+    seen: list[tuple[str, bytes]] = []
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+
+        async def body():
+            yield b"data: one\n\n"
+            yield b"data: answer\n\n"
+            await asyncio.Event().wait()
+
+        return httpx2.Response(200, content=body(), headers={"content-type": "text/event-stream", "X-Id": "s1"})
+
+    def until(content_type: str, chunk: bytes) -> bool:
+        seen.append((content_type, chunk))
+        return b"answer" in chunk
+
+    started = time.monotonic()
+    response = _request_until(httpx2.MockTransport(handler), until)
+    assert time.monotonic() - started < 10
+    assert response.body == b"data: one\n\ndata: answer\n\n" and response.headers["x-id"] == "s1"
+    assert [c for _, c in seen] == [b"data: one\n\n", b"data: answer\n\n"]
+    assert {t for t, _ in seen} == {"text/event-stream"}
+    assert json.loads(requests[0].content) == {"m": 1} and requests[0].headers["accept-encoding"] == "identity"
+
+
+def test_request_until_reads_to_the_end_otherwise_and_keeps_caps_and_codes():
+    """Kills: returning a partial body at the deadline; dropping the byte
+    cap; a changed status mapping; a method outside the allowed set."""
+    def never(content_type: str, chunk: bytes) -> bool:
+        return False
+
+    chunks = [b'{"a":', b' 1}']
+
+    async def body():
+        for chunk in chunks:
+            yield chunk
+
+    whole = _request_until(httpx2.MockTransport(lambda r: httpx2.Response(200, content=body())), never)
+    assert whole.body == b'{"a": 1}' and whole.json() == {"a": 1}
+    with pytest.raises(gw.GatewayError) as caught:
+        _request_until(httpx2.MockTransport(_Backend(body=b"x" * 1025).handler), never)
+    assert caught.value.code == "upstream_too_large"
+
+    async def stalls():
+        yield b'{"partial":'
+        await asyncio.sleep(3600)
+
+    started = time.monotonic()
+    with pytest.raises(gw.GatewayError) as caught:
+        _request_until(httpx2.MockTransport(lambda r: httpx2.Response(200, content=stalls())), never,
+                       deadline_s=0.5)
+    assert caught.value.code == "upstream_timeout" and time.monotonic() - started < 10
+    for status, code in ((404, "not_found"), (401, "upstream_refused"), (302, "upstream_unavailable"),
+                         (400, "upstream_error")):
+        backend = _Backend(status, body=f"stack {CANARY}".encode())
+        with pytest.raises(gw.GatewayError) as caught:
+            _request_until(httpx2.MockTransport(backend.handler), never)
+        assert caught.value.code == code and CANARY not in caught.value.message
+    with pytest.raises(gw.GatewayError) as caught:
+        _request_until(_HangingTransport(), never, deadline_s=0.2)
+    assert caught.value.code == "upstream_timeout"
+
+    async def get_only() -> None:
+        client = gw.UpstreamClient("https://splunk.example.test", timeout_s=1, max_bytes=1,
+                                   transport=httpx2.MockTransport(_Backend().handler))
+        try:
+            await client.request_until("POST", "/x", until=never, deadline_s=1)
+        finally:
+            await client.aclose()
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(get_only())
+
+
 def test_limit_defaults_fill_only_the_keys_the_document_leaves_out():
     doc = _config_doc(limits={"rate_per_minute": 7})
     defaults = {"max_concurrent_per_user": 4, "rate_per_minute": 120}
