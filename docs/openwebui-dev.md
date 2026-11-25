@@ -80,6 +80,34 @@ Every rule in `checks.py` has a counterexample in
 | blocked paths | the allow-list paths answer the proxy's 403 `denied`; an allowed path still answers 200 |
 | console alongside | `/ui` and `/healthz` of the agent answer before and after the Open WebUI restart |
 
+<a id="team-tools-lane"></a>
+**Team tools** (#1077, ADR-0010 T4, same lane, after the checks above:
+`acceptance.sh team-tools`, `acceptance.py team-tools`). The fake Splunk MCP Server the gateway's
+unit tests use (`tests/fake_splunk_mcp.py`) runs in a pod on the lane's agent image, served over
+HTTPS with the run's CA (`scripts/ci/fake_splunk_mcp_server.py`, `kind-splunk.yaml`; synthetic
+templates, indexes and rows). Open WebUI is re-rendered from the chart with `teamTools` on in
+bearer mode: the shipped example configuration pointed at the fake, the team group's id read from
+Open WebUI, the IdP CA inside the complete bundle (`gateway.caConfigMapName`, no
+`openwebui.oidc.caBundle`), and a shared `gateway.apiKeySecretKey` (`api-key`, not a LiteLLM key)
+beside Open WebUI's own `openwebui-llm-api-key`. The lane's default-deny egress policy excludes the
+gateway pod as it excludes Open WebUI. Step 9's admin step is done through the admin API here.
+
+| Check | Executed as |
+|---|---|
+| gateway start | the gateway's `splunk_gateway_start` line says `ok`, `bearer`, two templates, and the pod is Ready |
+| sign-in again | both users sign in after the re-render (the IdP CA only inside the complete bundle) |
+| admin-only, then the row | the connection model `team.mock-reasoning` is listed for the admin, not the team user; the override row stores the tool, `function_calling: native`, no base model and one read grant for the team group |
+| T4 models and tools | the team user lists the Docs models and the Team model with `server:mcp:splunk`; the docs user lists the Docs models only; no Docs model has a tool; `/api/v1/tools/` lists the tool server for the team user only |
+| MCP handshake | `/api/v1/tools/id/server:mcp:splunk/specs` from inside the pod (Open WebUI's own `connect_mcp_server`): the two templates for the team user, 404 for the docs user |
+| tool call | Open WebUI's `MCPClient` in its container, url and expanded key from its own `TOOL_SERVER_CONNECTIONS`: rows, framed as untrusted, redacted |
+| Team model chat | the team user's completion answers (so the own key reached LiteLLM); the docs user's is refused |
+| network | a pod outside Open WebUI cannot reach the gateway (pod IP and Service) but reaches LiteLLM (control); Open WebUI reaches the gateway and LiteLLM, not Splunk; the gateway reaches Splunk, not LiteLLM or the agent |
+| log canary | no MCP token, bearer secret or own key value in the gateway, fake Splunk or Open WebUI logs |
+
+Not automated (site checks, [deploy.md step 9](deploy.md#splunk-gateway-deploy)): the admin UI
+path of the admin step, a tool call the model itself makes in a chat (the stand-in model emits
+no tool calls), whether the chat preselects the tool, and oidc mode.
+
 <a id="operator-lane"></a>
 **Operator-deploy lane** (`openwebui-operator`, #1118 B3, same job and triggers). The lane above
 adds the chart's Open WebUI objects itself (`helm template --show-only` plus `kubectl apply`).

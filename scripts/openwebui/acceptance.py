@@ -2,7 +2,8 @@
 
     python3 -I acceptance.py STATE_DIR [PHASE]   (via acceptance.sh run, or acceptance.sh operator ...)
 
-PHASE is `checks` (default: the full check list) or, in the operator-deploy lane (#1118 B3),
+PHASE is `checks` (default: the full check list), `team-tools` (after acceptance.sh team-tools,
+#1077: the Splunk gateway and ADR-0010 T4) or, in the operator-deploy lane (#1118 B3),
 `first-pass` (before the admin API key), `record`, `rollback-off` and `rollback-on` (K1), and
 `paced`: one question on the three Open WebUI paths at once against the slow-model stand-in
 (scripts/mock_vllm.py MOCK_PACED_*; CI stand-in models only).
@@ -45,6 +46,27 @@ EDIT_KEY = "JWT_EXPIRES_IN"
 EDIT_VALUE = "4w"
 PROBE = os.path.join(HERE, "..", "ci", "egress_probe.py")
 INSPECT = os.path.join(HERE, "inspect_data.py")
+# Team tools (#1077): acceptance.sh team-tools renders these (deploy/gateways/splunk-gateway.example.json).
+TOOL_CALL = os.path.join(HERE, "team_tool_call.py")
+TEAM_GROUP = "internal-team"
+TEAM_REASONING_MODEL = "mock-reasoning"
+TEAM_TEMPLATES = ["errors_by_host", "job_runs"]
+# ADR-0010 T4: registration comes from the environment, so these stay behind the proxy's 403.
+TEAM_PROXY_CLOSED = ("/api/v1/configs/tool_servers", "/api/v1/configs/tool_servers/verify", "/openai/config/update",
+                     "/api/v1/tasks/config/update", "/api/v1/tools/id/server:mcp:splunk/specs",
+                     "/api/v1/tools/id/server:mcp:splunk/mcp/app/rpc", "/api/v1/tools/create")
+SPECS_CODE = (
+    "import json, sys, urllib.error, urllib.request\n"
+    "token = sys.stdin.read().strip()\n"
+    "req = urllib.request.Request('http://127.0.0.1:8080/api/v1/tools/id/server:mcp:splunk/specs',\n"
+    "                             headers={'Authorization': 'Bearer ' + token})\n"
+    "try:\n"
+    "    with urllib.request.urlopen(req, timeout=60) as r:\n"
+    "        status, body = r.status, json.load(r)\n"
+    "except urllib.error.HTTPError as e:\n"
+    "    status, body = e.code, None\n"
+    "specs = body.get('specs') if isinstance(body, dict) else None\n"
+    "print(json.dumps({'status': status, 'names': sorted(s.get('name') for s in specs or [])}))\n")
 
 
 # ------------------------------------------------------------------ cluster access
@@ -401,6 +423,124 @@ class Acceptance:
                            chat_models=[client.DOCS_FUNCTION])
         return checks.check_legacy_chat(listed, default, turn)
 
+    # -------------------------------------------------------------- team tools (#1077, ADR-0010 T4)
+    def team_tools(self) -> bool:
+        """After acceptance.sh team-tools re-rendered Open WebUI with the Splunk gateway (bearer mode)
+        against the fake Splunk. The admin step of docs/deploy.md step 9 is done through the admin API
+        here; at a site it is the admin UI (a site check)."""
+        team_model = checks.TEAM_MODEL_PREFIX + TEAM_REASONING_MODEL
+        gateway_ready = kc("rollout", "status", "deploy/rag-splunk-gateway", "--timeout=60s").returncode == 0
+        self.add(checks.check_gateway_start(logs_of("deploy/rag-splunk-gateway"), gateway_ready, len(TEAM_TEMPLATES)))
+        logins = {user: self.s.login(user) for user in ("team-user", "docs-user", client.ADMIN)}
+        self.add(checks.check_relogin(logins))
+        self.add(checks.check_team_model_admin_only(self.models("team-user"), self.models(client.ADMIN), team_model))
+        group_id = self.s.group_ids().get(TEAM_GROUP, "")
+        self.add(self.team_model_row(team_model, group_id))
+        self.add(checks.check_t4_models(self.models("team-user"), self.models("docs-user"), team_model,
+                                        sorted(m for m, _name in client.DOCS_MODELS)))
+        team_status, team_tools = self.s.api("team-user", "GET", "/api/v1/tools/")
+        docs_status, docs_tools = self.s.api("docs-user", "GET", "/api/v1/tools/")
+        self.add(checks.check_t4_tools(team_status, team_tools if isinstance(team_tools, list) else [],
+                                       docs_status, docs_tools if isinstance(docs_tools, list) else []))
+        self.add(checks.check_mcp_handshake(self.specs("team-user"), self.specs("docs-user"), TEAM_TEMPLATES))
+        self.add(checks.check_tool_call(self.tool_call(), TEAM_TEMPLATES))
+        team_chat = self.s.stream_completion("team-user", team_model, "Say hello.")
+        docs_chat = self.s.stream_completion("docs-user", team_model, "Say hello.")
+        self.add(checks.check_team_chat(team_chat, int(docs_chat.get("completion_status") or 0)))
+        self.add(self.t4_closed(team_model))
+        self.add(checks.check_team_network(self.team_probes()))
+        self.add(self.team_log_scan())
+        return checks.overall(self.verdicts)
+
+    def t4_closed(self, team_model: str) -> checks.Verdict:
+        proxy = {}
+        for path in TEAM_PROXY_CLOSED:
+            status, body = self.s.raw(client.ADMIN, "POST", path)
+            proxy[path] = "proxy-403" if status == 403 and body == b"denied\n" else f"HTTP {status}"
+        status, functions = self.s.api(client.ADMIN, "GET", "/api/v1/functions/")
+        ids = sorted(f.get("id") for f in functions) if status == 200 and isinstance(functions, list) else []
+        create, _ = self.s.api("team-user", "POST", "/api/v1/models/create", {
+            "id": "team-user-model", "base_model_id": team_model, "name": "user model",
+            "meta": {"toolIds": [checks.TEAM_TOOL_ID]}, "params": {}})
+        return checks.check_t4_closed(proxy, ids, create)
+
+    def models(self, user: str) -> list[dict]:
+        status, body = self.s.api(user, "GET", "/api/models")
+        return list((body or {}).get("data") or []) if status == 200 and isinstance(body, dict) else []
+
+    def team_model_row(self, team_model: str, group_id: str) -> checks.Verdict:
+        """docs/deploy.md step 9: edit the connection model itself (an override row, no base model)."""
+        status, _created = self.s.api(client.ADMIN, "POST", "/api/v1/models/create", {
+            "id": team_model, "base_model_id": None, "name": "Team \N{EN DASH} Splunk",
+            "meta": {"description": "Team model with the Splunk tool (Kind acceptance)",
+                     "toolIds": [checks.TEAM_TOOL_ID]},
+            "params": {"function_calling": "native"},
+            "access_grants": [{"principal_type": "group", "principal_id": group_id, "permission": "read"}]})
+        if status != 200:
+            return checks.Verdict("team-model-row", False, {"create_status": status})
+        status, row = self.s.api(client.ADMIN, "GET", f"/api/v1/models/model?id={team_model}")
+        return checks.check_team_model_row(status, row if isinstance(row, dict) else None, group_id)
+
+    def specs(self, user: str) -> dict:
+        """GET .../server:mcp:splunk/specs on the container port from inside the pod (the allow-list proxy
+        admits only /api/v1/tools/), as the user (the token on stdin, never argv)."""
+        with open(os.path.join(self.state, "sessions", f"{user}.token"), "rb") as fh:
+            token = fh.read()
+        proc = owui_exec("openwebui", ["python3", "-c", SPECS_CODE], stdin=token)
+        try:
+            return json.loads(proc.stdout.decode().strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            return {"status": None, "rc": proc.returncode}
+
+    def tool_call(self) -> dict:
+        proc = owui_exec("openwebui", ["python3", "-", "errors_by_host"], stdin=read_bytes(TOOL_CALL))
+        for line in proc.stdout.decode("utf-8", "replace").splitlines():
+            if line.startswith("TEAM_TOOL_CALL "):
+                try:
+                    return json.loads(line.removeprefix("TEAM_TOOL_CALL "))
+                except ValueError:
+                    break
+        return {"error": f"no result line (rc {proc.returncode})"}
+
+    def team_probes(self) -> dict[str, int]:
+        """egress_probe.py from the intruder, Open WebUI and the gateway pods; one target per probe."""
+        probe = read_bytes(PROBE)
+        gateway_ip = kc_out("get", "pod", "-l", "app=rag-splunk-gateway",
+                            "-o", "jsonpath={.items[0].status.podIP}").strip()
+        splunk = "fake-splunk.owui-splunk.svc:8089"
+
+        def run(target: list[str], mode: str, dest: str) -> int:
+            return kc("exec", "-i", *target, "--", "python3", "-", mode, dest, stdin=probe).returncode
+
+        intruder = ["pod/team-tools-intruder"]
+        owui = [pod_info()["name"], "-c", "openwebui"]
+        gateway = ["deploy/rag-splunk-gateway", "-c", "gateway"]
+        return {
+            "intruder->gateway-pod-ip:blocked": run(intruder, "blocked", f"{gateway_ip}:8080") if gateway_ip else 1,
+            "intruder->gateway-service:blocked": run(intruder, "blocked", "rag-splunk-gateway:8080"),
+            # Control: the lane's default-deny egress lets the intruder reach this namespace's pods,
+            # the gateway's among them, so only the gateway's own ingress policy refuses it.
+            "intruder->litellm:reachable (control)": run(intruder, "reachable", "test-gateway:4000"),
+            "openwebui->gateway:reachable": run(owui, "reachable", "rag-splunk-gateway:8080"),
+            "openwebui->litellm:reachable": run(owui, "reachable", "test-gateway:4000"),
+            "openwebui->fake-splunk:blocked": run(owui, "blocked", splunk),
+            "gateway->fake-splunk:reachable": run(gateway, "reachable", splunk),
+            "gateway->litellm:blocked": run(gateway, "blocked", "test-gateway:4000"),
+            "gateway->agent:blocked": run(gateway, "blocked", "rag-agent:8080"),
+        }
+
+    def team_log_scan(self) -> checks.Verdict:
+        """No team-tools secret value in the gateway, fake Splunk or Open WebUI logs."""
+        team = os.path.join(self.state, "team")
+        canaries = {name: read_text(os.path.join(team, name)).strip()
+                    for name in ("splunk-mcp-token", "bearer-secret", "openwebui-llm-api-key")}
+        logs = {"gateway": logs_of("deploy/rag-splunk-gateway"),
+                "fake-splunk": logs_of("deploy/fake-splunk", ns="owui-splunk"),
+                "openwebui-pod": logs_of(pod_info()["name"])}
+        verdict = checks.scan_logs(logs, canaries)
+        verdict.name = "team-log-canary"
+        return verdict
+
     # -------------------------------------------------------------- operator lane (#1118 B3)
     def repo_sha(self) -> str:
         return read_text(os.path.join(self.state, "render", "pipe.sha256")).strip()
@@ -486,7 +626,8 @@ class Acceptance:
 def main(argv: list[str]) -> int:
     run = Acceptance(argv[0])
     phases = {"checks": run.run, "first-pass": run.first_pass, "record": run.record,
-              "rollback-off": run.rollback_off, "rollback-on": run.rollback_on, "paced": run.paced}
+              "rollback-off": run.rollback_off, "rollback-on": run.rollback_on, "paced": run.paced,
+              "team-tools": run.team_tools}
     phase = argv[1] if len(argv) > 1 else "checks"
     if phase not in phases:
         print(f"unknown phase {phase!r}; one of {', '.join(phases)}", file=sys.stderr)

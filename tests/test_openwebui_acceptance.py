@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1001,3 +1002,233 @@ def test_stopping_the_forwards_ends_kubectl_itself_so_the_next_phase_can_bind(tm
 def test_a_forward_that_exits_is_reported_at_once(tmp_path):
     proc = _forward_shell(tmp_path, "exit 1\n", "forward ns a 1 2; sleep 0.5; forwards_alive; echo unreachable")
     assert proc.returncode != 0 and "a port-forward exited" in proc.stderr and "unreachable" not in proc.stdout
+
+
+
+# ------------------------------------------------------------------ team tools (#1077, ADR-0010 T4)
+TEAM_MODEL = "team.mock-reasoning"
+TEAM_TEMPLATES = ["errors_by_host", "job_runs"]
+TEAM_GROUP_ID = "0b6f2c1e-1d2a-4c3b-9e8f-1234567890ab"
+DOCS = sorted(m for m, _name in client.DOCS_MODELS)
+
+
+def _start_line(**over):
+    line = {"action": "splunk_gateway_start", "decision": "ok", "mode": "bearer", "protocol": "2025-06-18",
+            "session_issued": True, "templates": 2, "macros": None}
+    return json.dumps({**line, **over})
+
+
+def test_the_gateway_start_verdict_needs_its_own_ok_line_in_bearer_mode_and_readiness():
+    log = "\n".join(["not json", _start_line(decision="backend_refused"), _start_line()])
+    assert checks.check_gateway_start(log, True, 2).ok  # the last start line decides (a restart that recovered)
+    assert not checks.check_gateway_start(log, False, 2).ok
+    assert not checks.check_gateway_start(_start_line(), True, 3).ok
+    assert not checks.check_gateway_start(_start_line(mode="oidc"), True, 2).ok
+    assert not checks.check_gateway_start(_start_line() + "\n" + _start_line(decision="config_error"), True, 2).ok
+    assert not checks.check_gateway_start("", True, 2).ok
+
+
+def test_both_users_must_sign_in_again_after_the_team_render():
+    assert checks.check_relogin({"team-user": {"signed_in": True}, "docs-user": {"signed_in": True}}).ok
+    assert not checks.check_relogin({"team-user": {"signed_in": True}, "docs-user": {"signed_in": False}}).ok
+    assert not checks.check_relogin({}).ok
+
+
+def _model(mid, tools=None):
+    return {"id": mid, "info": {"meta": {"toolIds": tools}} if tools is not None else {}}
+
+
+def test_the_connection_model_is_listed_for_admins_only_before_the_grant():
+    admin = [_model(m) for m in DOCS] + [_model(TEAM_MODEL)]
+    assert checks.check_team_model_admin_only([_model(m) for m in DOCS], admin, TEAM_MODEL).ok
+    assert not checks.check_team_model_admin_only(admin, admin, TEAM_MODEL).ok  # a user saw the bare model
+    assert not checks.check_team_model_admin_only([], [_model(m) for m in DOCS], TEAM_MODEL).ok  # no connection
+
+
+def _row(**over):
+    row = {"id": TEAM_MODEL, "base_model_id": None, "meta": {"toolIds": ["server:mcp:splunk"]},
+           "params": {"function_calling": "native"},
+           "access_grants": [{"principal_type": "group", "principal_id": TEAM_GROUP_ID, "permission": "read"}]}
+    return {**row, **over}
+
+
+def test_the_team_model_row_is_an_override_with_the_tool_native_calls_and_the_group_only():
+    assert checks.check_team_model_row(200, _row(), TEAM_GROUP_ID).ok
+    assert not checks.check_team_model_row(403, _row(), TEAM_GROUP_ID).ok
+    assert not checks.check_team_model_row(200, _row(base_model_id="mock-reasoning"), TEAM_GROUP_ID).ok
+    assert not checks.check_team_model_row(200, _row(params={"function_calling": "legacy"}), TEAM_GROUP_ID).ok
+    assert not checks.check_team_model_row(200, _row(meta={}), TEAM_GROUP_ID).ok
+    wider = _row(access_grants=[*_row()["access_grants"],
+                                {"principal_type": "user", "principal_id": "*", "permission": "read"}])
+    assert not checks.check_team_model_row(200, wider, TEAM_GROUP_ID).ok
+    assert not checks.check_team_model_row(200, None, TEAM_GROUP_ID).ok
+
+
+def test_t4_the_team_model_and_its_tool_reach_the_team_user_only_and_docs_models_stay_tool_free():
+    team = [_model(m) for m in DOCS] + [_model(TEAM_MODEL, ["server:mcp:splunk"])]
+    docs = [_model(m) for m in DOCS]
+    assert checks.check_t4_models(team, docs, TEAM_MODEL, DOCS).ok
+    assert not checks.check_t4_models(team, team, TEAM_MODEL, DOCS).ok  # the docs user sees the Team model
+    assert not checks.check_t4_models(docs, docs, TEAM_MODEL, DOCS).ok  # the team user does not
+    no_tool = [_model(m) for m in DOCS] + [_model(TEAM_MODEL, [])]
+    assert not checks.check_t4_models(no_tool, docs, TEAM_MODEL, DOCS).ok
+    docs_tool = [_model(DOCS[0], ["server:mcp:splunk"])] + [_model(m) for m in DOCS[1:]]
+    assert not checks.check_t4_models(team, docs_tool, TEAM_MODEL, DOCS).ok  # a Docs model with a tool
+
+
+def test_t4_the_tool_server_is_listed_for_the_team_group_only():
+    tool = [{"id": "server:mcp:splunk"}]
+    assert checks.check_t4_tools(200, tool, 200, []).ok
+    assert not checks.check_t4_tools(200, tool, 200, tool).ok
+    assert not checks.check_t4_tools(200, [], 200, []).ok
+    assert not checks.check_t4_tools(200, tool, 403, []).ok  # a refused listing proves nothing
+
+
+def test_open_webuis_handshake_lists_the_templates_for_the_team_user_and_refuses_the_docs_user():
+    team = {"status": 200, "names": TEAM_TEMPLATES}
+    assert checks.check_mcp_handshake(team, {"status": 404, "names": []}, TEAM_TEMPLATES).ok
+    assert not checks.check_mcp_handshake(team, {"status": 200, "names": TEAM_TEMPLATES}, TEAM_TEMPLATES).ok
+    assert not checks.check_mcp_handshake({"status": 502, "names": []}, {"status": 404}, TEAM_TEMPLATES).ok
+    assert not checks.check_mcp_handshake({"status": 200, "names": ["splunk_run_query"]}, {"status": 404},
+                                          TEAM_TEMPLATES).ok
+
+
+def test_the_tool_call_needs_the_expanded_key_framed_redacted_rows():
+    good = {"auth_type": "bearer", "key_expanded": True, "tools": TEAM_TEMPLATES, "rows": 2, "framed": True,
+            "redacted": True, "raw_secret_seen": False}
+    assert checks.check_tool_call(good, TEAM_TEMPLATES).ok
+    for change in ({"key_expanded": False}, {"rows": 0}, {"rows": None}, {"framed": False}, {"redacted": False},
+                   {"raw_secret_seen": True}, {"tools": ["errors_by_host"]}):
+        assert not checks.check_tool_call({**good, **change}, TEAM_TEMPLATES).ok, change
+    assert not checks.check_tool_call({"error": "ExceptionGroup"}, TEAM_TEMPLATES).ok
+
+
+def test_the_team_model_answers_the_team_user_and_refuses_the_docs_user():
+    team = {"completion_status": 200, "content_chars": 12, "done_frame": True}
+    assert checks.check_team_chat(team, 403).ok
+    assert checks.check_team_chat(team, 404).ok
+    assert not checks.check_team_chat(team, 200).ok
+    assert not checks.check_team_chat({**team, "completion_status": 401}, 403).ok  # a key LiteLLM refused
+    assert not checks.check_team_chat({**team, "content_chars": 0}, 403).ok
+
+
+def test_t4_surfaces_stay_closed_with_team_tools_on():
+    closed = {"/api/v1/configs/tool_servers": "proxy-403", "/api/v1/tasks/config/update": "proxy-403"}
+    assert checks.check_t4_closed(closed, [checks.DOCS_FUNCTION], 401).ok
+    assert not checks.check_t4_closed({**closed, "/openai/config/update": "HTTP 200"}, [checks.DOCS_FUNCTION], 401).ok
+    assert not checks.check_t4_closed(closed, [checks.DOCS_FUNCTION, "community_tool"], 401).ok
+    assert not checks.check_t4_closed(closed, [checks.DOCS_FUNCTION], 200).ok  # a user created a model
+    assert not checks.check_t4_closed({}, [checks.DOCS_FUNCTION], 401).ok
+
+
+def test_every_team_network_probe_must_meet_its_expectation():
+    assert checks.check_team_network({"intruder->gateway-pod-ip:blocked": 0, "openwebui->gateway:reachable": 0}).ok
+    assert not checks.check_team_network({"intruder->gateway-pod-ip:blocked": 1}).ok
+    assert not checks.check_team_network({}).ok
+
+
+def _team_step(steps, name):
+    return next(i for i, s in enumerate(steps) if s.get("name", "").startswith(name))
+
+
+def test_the_openwebui_lane_runs_team_tools_after_the_acceptance_behind_the_gate_and_keeps_evidence():
+    job = _kind_job()
+    steps = job["steps"]
+    acceptance = _team_step(steps, "Open WebUI acceptance (ADR-0007")
+    team = _team_step(steps, "Team tools acceptance")
+    assert team == acceptance + 1
+    step = steps[team]
+    assert step["if"] == "matrix.lane == 'openwebui'" and step["shell"] == GATED
+    assert step["run"].strip().endswith("sh rehearsal-infra/scripts/openwebui/acceptance.sh team-tools")
+    evidence = steps[_team_step(steps, "Open WebUI acceptance evidence")]["run"]
+    for item in ("logs/team-tools.json", "splunk-gateway.log", "fake-splunk.log", "team-openwebui.yaml"):
+        assert item in evidence
+    # Only the chart's policies govern the gateway's egress, as for Open WebUI (a namespace-wide allow
+    # would be unioned into them and the gateway's blocked probes would prove nothing).
+    boundary = steps[_team_step(steps, "Close the network boundary")]["run"]
+    assert "values: [rag-openwebui, rag-splunk-gateway]" in boundary
+
+
+def test_the_kind_splunk_stand_ins_render_every_placeholder_and_are_restricted():
+    text = (DIR / "kind-splunk.yaml").read_text()
+    script = (DIR / "acceptance.sh").read_text()
+    team = script[script.index("team_tools() {"):]
+    team = team[:team.index("\n}\n")]
+    used = {p for line in text.splitlines() if not line.lstrip().startswith("#") for p in re.findall(r"@[A-Z_]+@", line)}
+    assert sorted(used) == sorted(set(re.findall(r's#(@[A-Z_]+@)#', team)))
+    for name, value in {"@APP_NS@": "rag-kind-x", "@NODE_IP@": "172.18.0.2", "@AGENT_IMAGE@": "r/agent:1",
+                        "@FAKE_UID@": "1000712345", "@INTRUDER_UID@": "1000712346"}.items():
+        text = text.replace(name, value)
+    docs = [d for d in yaml.safe_load_all(text) if d]
+    pods = {d["metadata"]["name"]: (d["spec"]["template"] if d["kind"] == "Deployment" else d)
+            for d in docs if d["kind"] in ("Deployment", "Pod")}
+    assert sorted(pods) == ["fake-splunk", "team-tools-intruder"]
+    for name, pod in pods.items():
+        verdict = checks.check_pod_security(pod)
+        assert verdict.ok, (name, verdict.detail)
+    probe = next(d for d in docs if d["kind"] == "NetworkPolicy")
+    assert probe["spec"]["podSelector"] == {"matchLabels": {"app": "rag-splunk-gateway"}}
+    assert probe["spec"]["ingress"] == [{"from": [{"ipBlock": {"cidr": "172.18.0.2/32"}}],
+                                         "ports": [{"protocol": "TCP", "port": 8080}]}]
+    intruder = pods["team-tools-intruder"]["metadata"]["labels"]
+    assert intruder["app"] not in ("rag-openwebui", "rag-splunk-gateway")
+
+
+def test_the_lane_fake_splunk_served_over_https_passes_the_gateways_start_up_check(tmp_path):
+    """The pod's server (scripts/ci/fake_splunk_mcp_server.py) is the shared unit-test fake behind real
+    HTTPS; the real gateway's start-up check and one template call go through it."""
+    import asyncio
+    import socket
+
+    from mainframe_rag.gateways import splunk
+
+    pki = tmp_path / "pki"
+    pki.mkdir()
+    ext = pki / "ext"
+    ext.write_text("subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\n"
+                   "keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n")
+    for cmd in (
+        ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-days", "1",
+         "-subj", "/CN=lane test CA", "-keyout", str(pki / "ca.key"), "-out", str(pki / "ca.crt"),
+         "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign"],
+        ["openssl", "req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+         "-subj", "/CN=localhost", "-keyout", str(pki / "tls.key"), "-out", str(pki / "tls.csr")],
+        ["openssl", "x509", "-req", "-in", str(pki / "tls.csr"), "-CA", str(pki / "ca.crt"), "-CAkey",
+         str(pki / "ca.key"), "-CAcreateserial", "-days", "1", "-extfile", str(ext), "-out", str(pki / "tls.crt")],
+    ):
+        subprocess.run(cmd, check=True, capture_output=True)
+    token = "lane-token-" + "7" * 30
+    (pki / "token").write_text(token)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    server = subprocess.Popen(
+        [sys.executable, str(ROOT / "scripts" / "ci" / "fake_splunk_mcp_server.py"), "--port", str(port),
+         "--cert", str(pki / "tls.crt"), "--key", str(pki / "tls.key"), "--module-dir", str(ROOT / "tests")],
+        env={**os.environ, "FAKE_SPLUNK_TOKEN_FILE": str(pki / "token")},
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        for _ in range(100):
+            with socket.socket() as s:
+                if s.connect_ex(("127.0.0.1", port)) == 0:
+                    break
+            time.sleep(0.1)
+        config = json.loads((ROOT / "deploy" / "gateways" / "splunk-gateway.example.json").read_text())
+        config.pop("auth")
+        config["backend"].update(base_url=f"https://localhost:{port}", ca_file=str(pki / "ca.crt"))
+        path = tmp_path / "gateway.json"
+        path.write_text(json.dumps(config))
+        env = {"GATEWAY_CONFIG_FILE": str(path), "SPLUNK_AUTH_MODE": "bearer", "SPLUNK_MCP_TOKEN": token,
+               "SPLUNK_GATEWAY_BEARER_SECRET": "b" * 40}
+        with pytest.MonkeyPatch.context() as mp:
+            for key, value in env.items():
+                mp.setenv(key, value)
+            report = asyncio.run(splunk._checked(splunk.build_gateway()))
+        assert report.protocol == "2025-06-18" and report.session_issued is True
+    finally:
+        server.terminate()
+        out, _ = server.communicate(timeout=10)
+    lines = [json.loads(line) for line in out.decode().splitlines() if line.startswith("{")]
+    assert [line["rpc"] for line in lines][:3] == ["initialize", "notifications/initialized", "tools/list"]
+    assert all(line["status"] in (200, 202) for line in lines)
+    assert token not in out.decode()

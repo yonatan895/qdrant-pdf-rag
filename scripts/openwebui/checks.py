@@ -415,5 +415,136 @@ def check_rollback_on(before: dict, after: dict, repo_sha256: str, next_chat_ok:
               docs_only=after["models"] == DOCS_MODELS, next_chat_answered=next_chat_ok)
 
 
+# ------------------------------------------------------------------ team tools (#1077, ADR-0010 T4)
+TEAM_TOOL_ID = "server:mcp:splunk"  # the chart's TOOL_SERVER_CONNECTIONS entry (info.id splunk)
+TEAM_MODEL_PREFIX = "team."  # OPENAI_API_CONFIGS prefix_id
+
+
+def check_gateway_start(log_text: str, ready: bool, templates: int) -> Verdict:
+    """The gateway's own start-up line: its backend check passed against the fake Splunk, in bearer mode,
+    and the pod is Ready (it serves only after the check)."""
+    starts = []
+    for line in log_text.splitlines():
+        try:
+            doc = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(doc, dict) and doc.get("action") == "splunk_gateway_start":
+            starts.append(doc)
+    last = starts[-1] if starts else {}
+    ok = (ready and last.get("decision") == "ok" and last.get("mode") == "bearer"
+          and last.get("templates") == templates)
+    return _v("team-gateway-start", ok, ready=ready, starts=len(starts), decision=last.get("decision"),
+              mode=last.get("mode"), protocol=last.get("protocol"), templates=last.get("templates"))
+
+
+def check_relogin(logins: dict[str, dict]) -> Verdict:
+    """Both users sign in again after the team-tools re-render: the IdP CA now reaches Open WebUI only
+    inside the complete bundle (SSL_CERT_FILE, no ca-trust init container; decision 5 on #1374)."""
+    signed = {user: bool(result.get("signed_in")) for user, result in sorted(logins.items())}
+    return _v("team-relogin", bool(signed) and all(signed.values()), signed_in=signed)
+
+
+def _ids(models: list[dict]) -> list[str]:
+    return sorted(str(m.get("id")) for m in models)
+
+
+def _tool_ids(model: dict) -> list:
+    return list((((model.get("info") or {}).get("meta") or {}).get("toolIds")) or [])
+
+
+def check_team_model_admin_only(team_user_models: list[dict], admin_models: list[dict], team_model: str) -> Verdict:
+    """Before the admin step, the connection model exists (Open WebUI listed it from LiteLLM with its own
+    key, through the CA bundle and the egress policy) and only admins see it."""
+    ok = team_model in _ids(admin_models) and team_model not in _ids(team_user_models)
+    return _v("team-model-admin-only-before-grant", ok, admin_sees=team_model in _ids(admin_models),
+              team_user_sees=team_model in _ids(team_user_models))
+
+
+def check_team_model_row(status: int, row: dict | None, group_id: str) -> Verdict:
+    """The admin step (docs/deploy.md step 9) as stored: an override row of the connection model itself
+    (no base model), the Splunk tool, native function calling, read for the team group only."""
+    row = row or {}
+    grants = sorted((g.get("principal_type"), g.get("principal_id"), g.get("permission"))
+                    for g in row.get("access_grants") or [])
+    ok = (status == 200 and row.get("base_model_id") is None
+          and _tool_ids({"info": row}) == [TEAM_TOOL_ID]
+          and (row.get("params") or {}).get("function_calling") == "native"
+          and grants == [("group", group_id, "read")])
+    return _v("team-model-row", ok, status=status, base_model=row.get("base_model_id"), tools=_tool_ids({"info": row}),
+              function_calling=(row.get("params") or {}).get("function_calling"), grants=len(grants))
+
+
+def check_t4_models(team_user_models: list[dict], docs_user_models: list[dict], team_model: str,
+                    docs_models: list[str]) -> Verdict:
+    """ADR-0010 T4 in /api/models: the team user sees the Docs models and the Team model with the Splunk
+    tool; the docs user sees the Docs models only; no Docs model carries a tool."""
+    team_ids, docs_ids = _ids(team_user_models), _ids(docs_user_models)
+    team_entry = next((m for m in team_user_models if m.get("id") == team_model), {})
+    docs_with_tools = sorted({str(m.get("id")) for m in team_user_models + docs_user_models
+                              if m.get("id") in docs_models and _tool_ids(m)})
+    ok = (team_ids == sorted([*docs_models, team_model]) and docs_ids == sorted(docs_models)
+          and _tool_ids(team_entry) == [TEAM_TOOL_ID] and not docs_with_tools)
+    return _v("t4-models", ok, team_user_models=team_ids, docs_user_models=docs_ids,
+              team_model_tools=_tool_ids(team_entry), docs_models_with_tools=docs_with_tools)
+
+
+def check_t4_tools(team_status: int, team_tools: list[dict], docs_status: int, docs_tools: list[dict]) -> Verdict:
+    """ADR-0010 T4 in /api/v1/tools/ (through the allow-list proxy): the tool server is listed for the team
+    group's member only."""
+    team_ids, docs_ids = _ids(team_tools), _ids(docs_tools)
+    ok = team_status == 200 and docs_status == 200 and TEAM_TOOL_ID in team_ids and TEAM_TOOL_ID not in docs_ids
+    return _v("t4-tools", ok, team_status=team_status, docs_status=docs_status, team_user_tools=team_ids,
+              docs_user_tools=docs_ids)
+
+
+def check_mcp_handshake(team: dict, docs: dict, templates: list[str]) -> Verdict:
+    """Open WebUI's own MCP handshake (GET /api/v1/tools/id/server:mcp:splunk/specs, connect_mcp_server:
+    the access check, the expanded bearer key, the SDK's discover-then-initialize) as each user: the team
+    user gets the gateway's template tools, the docs user is refused (404, access denied)."""
+    ok = team.get("status") == 200 and team.get("names") == sorted(templates) and docs.get("status") == 404
+    return _v("team-mcp-handshake", ok, team_status=team.get("status"), team_tools=team.get("names"),
+              docs_status=docs.get("status"))
+
+
+def check_tool_call(result: dict, templates: list[str]) -> Verdict:
+    """A template tool called with Open WebUI's MCP client from inside its pod (url and key from its own
+    TOOL_SERVER_CONNECTIONS): rows come back framed as untrusted, redacted, through both policies."""
+    ok = (result.get("key_expanded") is True and result.get("tools") == sorted(templates)
+          and isinstance(result.get("rows"), int) and result["rows"] > 0 and result.get("framed") is True
+          and result.get("redacted") is True and result.get("raw_secret_seen") is False)
+    return _v("team-tool-call", ok, **{k: result.get(k) for k in
+                                         ("auth_type", "key_expanded", "tools", "rows", "framed", "redacted",
+                                          "raw_secret_seen", "error")})
+
+
+def check_team_chat(team: dict, docs_status: int) -> Verdict:
+    """The Team model answers the team user through LiteLLM with Open WebUI's own key (the shared api-key
+    beside it is no LiteLLM key), and the docs user cannot use it."""
+    ok = (team.get("completion_status") == 200 and team.get("content_chars", 0) > 0 and bool(team.get("done_frame"))
+          and docs_status in (401, 403, 404))
+    return _v("team-model-chat", ok, team_status=team.get("completion_status"),
+              team_content_chars=team.get("content_chars"), team_done=team.get("done_frame"), docs_status=docs_status)
+
+
+def check_t4_closed(proxy: dict[str, str], function_ids: list[str], user_model_create: int) -> Verdict:
+    """ADR-0010 T4, unchanged surfaces with team tools on: the proxy still answers its own 403 for the
+    tool-server, connection and task APIs and the tool routes beyond the listing; the docs Pipe is the
+    only Function; a user cannot create a model."""
+    open_paths = sorted(path for path, result in proxy.items() if result != "proxy-403")
+    ok = (bool(proxy) and not open_paths and function_ids == [DOCS_FUNCTION]
+          and user_model_create in (401, 403))
+    return _v("t4-closed-surfaces", ok, paths=len(proxy), not_refused=open_paths, functions=function_ids,
+              user_model_create=user_model_create)
+
+
+def check_team_network(probes: dict[str, int]) -> Verdict:
+    """Real sockets (scripts/ci/egress_probe.py exit codes, 0 = expectation met) from three pods: a pod outside
+    Open WebUI cannot reach the gateway but reaches LiteLLM in the same namespace (control); Open WebUI
+    reaches the gateway and LiteLLM, not Splunk; the gateway reaches Splunk, not LiteLLM or the agent."""
+    failed = sorted(name for name, rc in probes.items() if rc != 0)
+    return _v("team-network", bool(probes) and not failed, probes=len(probes), failed=failed)
+
+
 def overall(verdicts: list[Verdict]) -> bool:
     return bool(verdicts) and all(v.ok for v in verdicts)

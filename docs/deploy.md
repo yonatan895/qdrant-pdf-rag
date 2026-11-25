@@ -2717,8 +2717,7 @@ procedure closes #1077's "site procedure for the service-account role" item.
 
    Any other result means a grant is wrong: fix the group id (step 6) or the
    model's access, and check again. The Kind `openwebui` lane runs the same checks
-   with this step done through the admin API (`scripts/openwebui/acceptance.sh
-   team-tools`).
+   with this step done through the admin API ([team tools](openwebui-dev.md#team-tools-lane)).
    ADR-0014 D4 guard (b) in bearer mode: either every value of
    `OPENWEBUI_OIDC_ALLOWED_ROLES` and `OPENWEBUI_OIDC_ADMIN_ROLES` is a team role, or
    the Team model and the tool-server entry are granted to the team group only
