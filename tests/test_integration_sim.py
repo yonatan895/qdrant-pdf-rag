@@ -419,9 +419,8 @@ def test_alias_publish_rekeys_manifest_across_clone(qdrant_url, corpus, tmp_path
     second = _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, local, progress)
     # The progress file is append-only: the second run's records are the tail.
     second_records = second[len(first) :]
-    # Issue #1372 (contract change, pending the maintainer's approval on its
-    # PR): the three unchanged documents
-    # are carried from live into the cloned staging, with no parse and no
+    # Issue #1372 contract change: the three unchanged documents are
+    # carried from live into the cloned staging, with no parse and no
     # inventory record, so only the new document upserts. Before the F5 fix
     # this run aborted instead — the un-rekeyed manifest read as legacy
     # during the inner preflight.

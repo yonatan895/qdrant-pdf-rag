@@ -1985,8 +1985,8 @@ def _carry_contract_gate(
     """Run-level carry clause 4 (issue #1372): the staging's stored contract,
     read before `begin_manifest`, must be exactly this run's contract and
     committed. Record-only drift, a pending or absent contract, or any
-    forced run carries nothing (strict on the manifest, maintainer-confirmed
-    decision 2). Returns the ancestor to carry from, or None."""
+    forced run carries nothing (strict on the manifest, #1372 maintainer
+    decision 2026-11-25). Returns the ancestor to carry from, or None."""
     if staging is None or staging.carry_from is None or force_reingest:
         return None
     stored = read_manifest_record(client, completion_collection_name(settings))
@@ -2019,7 +2019,7 @@ def _carry_ancestor(
     and only when the staging data still equals live's sealed content (the
     clone's points, payloads and vectors, under live's own build binding).
     The ancestor is live pinned by the sidecar's `previous`. Retirement-only
-    builds may carry (maintainer-confirmed decision 3); excluding them would
+    builds may carry (#1372 maintainer decision 2026-11-25); excluding them would
     be one more condition here. A resumed staging whose data an earlier
     attempt already changed fails the guard: its carries were written before
     that attempt's execution and skip as ordinary staging-bound markers."""

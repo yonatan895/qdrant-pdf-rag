@@ -896,9 +896,8 @@ thread pool.
   set; no node-local snapshot, so distributed generations copy
   shard-complete, issue #360); a
   marker certifies its own `target_collection`, and an inherited marker
-  never certifies a skip. **Carry (issue #1372; a change to the fail-closed
-  contract pending the maintainer's approval on its PR; default on, no
-  setting):** an unchanged walked document is carried into
+  never certifies a skip. **Carry (issue #1372; default on, no setting;
+  maintainer decision 2026-11-25):** an unchanged walked document is carried into
   the cloned staging instead of re-parsed and re-embedded when every
   condition holds. Run level, decided once under the publish lock: no
   attempt of this sidecar-bound build ran `--reingest` (the sidecar's sticky

@@ -4806,7 +4806,7 @@ def test_carry_refuses_when_the_inventory_binding_differs(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize("resume", [False, True])
 def test_record_only_drift_re_embeds_instead_of_carrying(tmp_path, monkeypatch, resume):
-    """Maintainer-confirmed decision 2 (strict manifest digest): a query
+    """#1372 maintainer decision 2026-11-25 (strict manifest digest): a query
     prefix change carries nothing. On a resume after the build opened, the
     staging contract already reads current; the ancestor markers' own digest
     still refuses."""
@@ -4976,7 +4976,7 @@ def test_publish_state_refuses_a_non_boolean_forced_flag(tmp_path, value):
 
 
 def test_a_forced_attempt_revokes_earlier_carries_for_every_later_attempt(tmp_path, monkeypatch):
-    """Review F1: an unforced attempt carries and fails, a --reingest attempt
+    """Issue #1372: an unforced attempt carries and fails, a --reingest attempt
     of the same build is interrupted before any document, and a plain retry
     follows. The forced attempt removed the carried markers, so the plain
     retry re-embeds every document instead of skipping over carried ones."""
@@ -5062,7 +5062,7 @@ def test_carry_needs_a_readable_live_content_seal(tmp_path, monkeypatch, case):
 
 
 def test_retirement_only_build_carries_the_retained_documents(tmp_path, monkeypatch):
-    """Maintainer-confirmed decision 3: an explicit retirement with no other
+    """#1372 maintainer decision 2026-11-25: an explicit retirement with no other
     corpus change carries the remaining documents instead of re-embedding
     them; the retired document is gone from the new generation."""
     fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
