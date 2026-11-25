@@ -593,7 +593,10 @@ Compatibility and lifecycle decisions under #448:
   probe: the old key must 401 while the corpus (PVC-backed points) is
   untouched. Do not render with `helm template --dry-run` and apply the
   result: without cluster access the chart's Secret lookup misses and
-  every render mints fresh random keys.
+  every render mints fresh random keys. Under Argo CD
+  ([ADR-0016](adr/0016-argo-cd-pinned-to-signed-release.md) D4, proposed; in a namespace under Argo CD only)
+  the chart renders no key Secret: a bastion task creates and rotates it,
+  followed by an explicit restart.
 The published-bundle Kind lifecycle lane uses the same chart and values
 mapper for A/A/B/failed rollout/recovery A/B/redeploy A. It checks admitted
 fault injection, serving smoke and PVC identities. Independent rendered behavior
@@ -1812,7 +1815,9 @@ Keep placeholders in git, render fails closed on leftover tokens, quote scalar
 environment values, and wire PULL_SECRET to Qdrant **and** agent/ingest. Deploy
 and ingest arguments reject unknown flags before operations. Snapshot administration
 runs in a temporary maintenance Job using the ingest image and write-key Secret;
-serving remains read-only. Jobs are deleted before re-apply because they are
+serving remains read-only. The Argo CD pilot restore
+([ADR-0016](adr/0016-argo-cd-pinned-to-signed-release.md) D10, proposed) uploads from the
+bastion through a port-forward instead, with this Job as the fallback. Jobs are deleted before re-apply because they are
 immutable. TLS bundles retain every required trust root and mount only into the
 application containers; missing ConfigMap/key fails closed. Gateway secrets use
 per-leg Secret references, never plaintext keys in airgap.env.
