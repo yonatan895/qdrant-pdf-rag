@@ -525,8 +525,9 @@ template count. The token and the bearer secret are never logged.
 `bearer` uses [bearer mode](#service-bearer) with
 `SPLUNK_GATEWAY_BEARER_SECRET` and the caller `openwebui`. Bearer mode is
 ADR-0015's proposed exception B2 and is not approved yet. In bearer mode the
-limits are instance-wide, with defaults of 3 calls in flight and 60 a minute,
-and the TD5 hash is the same for every search. A key set in the file's
+limits are instance-wide, with defaults of 3 calls in flight (Splunk's default
+`srchJobsQuota`) and 60 a minute, and the TD5 hash is the same for every
+search. A key set in the file's
 `limits` keeps its value. In both modes `tool_timeout_s` defaults to 60.
 
 **Token (E1).** `SPLUNK_MCP_TOKEN` holds the encrypted token the Splunk MCP
@@ -567,7 +568,7 @@ with a fixed reason:
 
 | Reason | When |
 |---|---|
-| `protocol_unsupported` | the server answered a version outside 2025-06-18 and 2025-03-26 |
+| `protocol_unsupported` | the server answered a version outside 2025-06-18 and 2025-03-26, or a JSON-RPC error that refuses the requested version (code -32602 or -32022, or `data.supported`) |
 | `tool_missing` | `tool_name` is not listed |
 | `tool_schema_unreadable` | its `inputSchema` has no `properties` object, or `required` is not a list |
 | `query_argument_missing` | `query_argument` is not a property |
@@ -630,7 +631,8 @@ failure is a start-up error naming the template's position:
 - `{name}` placeholders name declared parameters, every parameter is used,
   and an `identifier` or `enum` placeholder sits inside a double-quoted
   string (an `integer` may stand alone);
-- double quotes balance (a backslash escapes inside a string);
+- double quotes balance (a backslash escapes inside a string), and so do
+  parentheses outside strings;
 - no backtick (macros and comments), no `[` or `]` outside a string
   (subsearches search outside the index clause);
 - no `index`, `earliest`, `latest`, `_index_earliest`, `_index_latest`,
@@ -645,7 +647,8 @@ failure is a start-up error naming the template's position:
   `mcatalog`, `metadata`, `metasearch`, `dbinspect`, `datamodel`, `from`,
   `pivot`, `eventcount`, `mpreview`, `msearch`, `multisearch`, `union`,
   `append`, `appendcols`, `join`, `set`, `makeresults`, `gentimes`,
-  `typeahead`, `walklex`.
+  `typeahead`, `walklex`, `summaryindex`, `dbxquery`, `dbxoutput`, `ldapsearch`,
+  `fit`, `outputtelemetry`.
 
 The check is a lint over operator-written text; the token user's role is the
 boundary (ADR-0015 D3).
@@ -663,10 +666,14 @@ template's parameters plus:
 **The search a call runs** is composed by the gateway, in this order:
 
 ```text
-search index="<i>" earliest=<earliest> latest=<latest> <template search with values> | head <rows> ```mfr sub_hash=<16 hex> req=<request id>```
+search index="<i>" earliest=<earliest> latest=<latest> (<template terms>) <template pipeline> | head <rows> ```mfr sub_hash=<16 hex> req=<request id>```
 ```
 
-`search ` is left out when `search_prefix` is false; several fixed indexes
+The template's terms are its text before the first pipe outside a string,
+with values in place; they are parenthesised (left out when empty) because
+Splunk evaluates `OR` before the implicit `AND`, so an `OR` in a template
+cannot bind to the index clause or the time bounds. The pipeline is the
+rest. `search ` is left out when `search_prefix` is false; several fixed indexes
 become `(index="a" OR index="b")`; the comment (TD5, Splunk's inline comment
 syntax) is left out when `attribution_comment` is false. `sub_hash` is the
 runtime's hash of the caller's `sub` (`service:openwebui` in bearer mode);
@@ -692,7 +699,7 @@ an unexpected error) and then one line
 |---|---|---|
 | `splunk.initialize` | a supported version was negotiated | `protocol`, `session_issued`, `answer_kind` (`json` or `sse`) |
 | `splunk.startup_check` | the start-up check passes | `tool_count`, `tool_present`, `property_count`, `reason` |
-| `splunk.result_shape` | `\| makeresults count=1` returns rows where the configuration looks | `is_error`, `structured`, `content_items`, `rows_found`, `row_count` |
+| `splunk.result_shape` | `\| makeresults count=1` returns rows where the configuration looks | `is_error`, `structured`, `content_items`, `rows_found`, `row_count`, `answer_kind` of the call |
 | `splunk.comment` | the same search with the TD5 comment is accepted (fails only when the comment is enabled and refused; `inconclusive` when the control failed or the comment is disabled) | `enabled`, `accepted` |
 | `splunk.search_prefix` | the configured `search_prefix` works: `search <q>` and `<q>` are run over the first allowed index (`earliest=-24h`, `\| head 1 \| stats count`); a form refused, or a count that differs between them, shows which one Splunk reads as intended (`no_events` is `inconclusive`) | `configured`, `with_prefix_ok`, `without_prefix_ok`, `count_with`, `count_without` |
 | `splunk.composed_search` | a search composed as a tool call composes one (the first allowed index, `-15m`, one row, the comment as configured) runs and its rows are found | as `splunk.result_shape` |

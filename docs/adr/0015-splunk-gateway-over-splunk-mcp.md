@@ -77,8 +77,10 @@ documentation.
 2. **D2, templates only.** The model never writes SPL (#1077 and ADR-0010
    unchanged). Each site template becomes one tool with typed parameters.
    The gateway composes the search:
-   `search index="…" earliest=… latest=… <template> | head <rows>`, then the
-   TD5 comment (D6).
+   `search index="…" earliest=… latest=… (<template terms>) <template pipeline> | head <rows>`,
+   then the TD5 comment (D6). The template's search terms are
+   parenthesised because Splunk evaluates `OR` before the implicit `AND`: an
+   `OR` in a template cannot bind to the gateway's own terms.
    The index clause comes from the template's fixed indexes or one
    parameter whose values are the configured `allowed_indexes`. The time
    bounds and the row cap are written into the SPL itself, so they do not
@@ -94,13 +96,15 @@ documentation.
    `-24h`, `-7d@d`, `@d`). A string value goes into SPL only inside the
    double quotes the template wrote. When the configuration loads, each
    template is checked: every placeholder is declared and every parameter
-   used; the text is printable ASCII with balanced quotes; it names no index
+   used; the text is printable ASCII with balanced quotes and parentheses; it names no index
    or time bound; it has no subsearch, macro or comment; and it uses none of
    a list of commands that write, run other searches or read outside the
    composed index clause. This check is a lint over trusted, operator-written
    text. The token user's Splunk role remains the boundary.
 4. **D4, a start-up check that fails closed.** Before serving, the gateway
-   initializes a session, requires a supported protocol version, lists the
+   initializes a session, requires a supported protocol version (a version
+   in the answer outside the allowlist, or a JSON-RPC error that refuses the
+   requested version, is `protocol_unsupported`), lists the
    tools, and requires the run-query tool with the query argument and every
    configured constant argument in its input schema, and no required
    argument it does not send. Otherwise it exits 3 with a fixed reason. A
@@ -129,9 +133,10 @@ documentation.
    bearer mode the caller is `service:openwebui`: the rate and concurrency
    limits cover the whole instance, and the TD5 hash is the same for every
    search, so per-person attribution is only Open WebUI's chat history. The
-   bearer-mode defaults are 3 searches in flight (the concurrent-search
-   quota of Splunk's stock `user` role, which the token user may hold) and
-   60 a minute, unless the configuration sets them. `oidc` mode keeps the
+   bearer-mode defaults are 3 searches in flight (Splunk's default per-role
+   concurrent-search quota, `srchJobsQuota`; the token user's role at the
+   site may set another) and 60 a minute, unless the configuration sets
+   them. They are part of the B2 proposal. `oidc` mode keeps the
    runtime's per-user defaults. The tool timeout defaults to 60 seconds for
    this gateway, and the backend timeout must be below it.
 8. **D8, results are untrusted data.** `isError` results, including Splunk's
@@ -156,7 +161,7 @@ documentation.
 | G3. Every search is bounded in time and rows | Time bounds and `\| head` written by the gateway; template text cannot name time bounds | Gateway code | Standing | Tests: the exact SPL the fake received; window and row caps; snapped starts |
 | G4. A parameter cannot change the search's structure | Typed rejection (D3); values only inside the template's quotes | Gateway code | Standing | Tests: injection attempts per type (quotes, pipe, backticks, brackets, comment markers, control characters, Unicode lookalikes, NUL); a property test over arbitrary text |
 | G5. No secret or content in logs | The decision log (ids, codes, counts, timings); fixed error codes | Gateway code | Standing | Tests: the token, upstream text, event content and parameter values never appear in captured logs or replies |
-| G6. Protocol drift fails closed | The version allowlist; the start-up tool check | Gateway code; the platform (a Splunk MCP upgrade) | Every start | Tests: unsupported versions (including 2025-11-25 and 2026-07-28), a missing tool or argument, and endless pagination refuse start-up |
+| G6. Protocol drift fails closed | The version allowlist; the start-up tool check | Gateway code; the platform (a Splunk MCP upgrade) | Every start | Tests: unsupported versions answered (including 2025-11-25 and 2026-07-28) or refused with a version error, a missing tool or argument, and endless pagination refuse start-up |
 
 ## Amendments and unchanged clauses
 
@@ -214,8 +219,10 @@ defaults: keep it at the site.
   comment plus the gateway's decision log, or only Open WebUI's chat history
   in bearer mode.
 - A Splunk MCP upgrade that drops 2025-06-18 and 2025-03-26 (for example a
-  stateless 2026-07-28 server) stops the gateway at start-up with
-  `protocol_unsupported` until the client is extended. That is deliberate:
+  stateless 2026-07-28 server) stops the gateway at start-up until the
+  client is extended: `protocol_unsupported` when the server answers
+  initialize with another version or a version error, `upstream_protocol`
+  or a status code when it refuses initialize some other way. That is deliberate:
   the client does not guess at a protocol it does not implement.
 - The template lint refuses subsearches, macros and some commands a site
   query might use. Templates are rewritten without them, or a later decision

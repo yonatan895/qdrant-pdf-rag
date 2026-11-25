@@ -84,9 +84,10 @@ SPLUNK_MAX_EVENTS: Final = 1000
 # answers with its own fixed code first.
 LIMIT_DEFAULTS: Final = {"tool_timeout_s": 60.0}
 # Bearer mode: every Open WebUI user is the one caller `service:openwebui`, so
-# the per-caller limits are instance-wide. Three searches in flight (the
-# concurrent-search quota of Splunk's stock `user` role, which the token user may
-# hold) and 60 a minute, unless the configuration sets them (ADR-0015 D7).
+# the per-caller limits are instance-wide. Three searches in flight (Splunk's
+# default per-role concurrent-search quota, `srchJobsQuota` in authorize.conf;
+# the token user's role at the site may differ) and 60 a minute, unless the
+# configuration sets them (ADR-0015 D7, proposed).
 BEARER_LIMIT_DEFAULTS: Final = {"max_concurrent_per_user": 3, "rate_per_minute": 60}
 
 _IDENTIFIER_RE: Final = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
@@ -133,6 +134,8 @@ REFUSED_COMMANDS: Final = frozenset(
         "tstats", "mstats", "mcatalog", "metadata", "metasearch", "dbinspect", "datamodel",
         "from", "pivot", "eventcount", "mpreview", "msearch", "multisearch", "union", "append",
         "appendcols", "join", "set", "makeresults", "gentimes", "typeahead", "walklex",
+        # aliases and add-on commands with the same effect
+        "summaryindex", "dbxquery", "dbxoutput", "ldapsearch", "fit", "outputtelemetry",
     }
 )  # fmt: skip
 
@@ -282,6 +285,16 @@ def _quoted_mask(text: str, where: str) -> list[bool]:
     return mask
 
 
+def split_terms(text: str) -> tuple[str, str]:
+    """A template's search terms (before its first pipe outside a string)
+    and the rest, which starts with that pipe or is empty."""
+    mask = _quoted_mask(text, "a template search")
+    for at, (char, quoted) in enumerate(zip(text, mask, strict=True)):
+        if char == "|" and not quoted:
+            return text[:at], text[at:]
+    return text, ""
+
+
 def lint_search(text: str, params: Mapping[str, Param], where: str) -> set[str]:
     """Check one template's SPL (ADR-0015 D3); returns the parameter names it
     uses. Messages name the template's position and parameter names, never
@@ -294,6 +307,13 @@ def lint_search(text: str, params: Mapping[str, Param], where: str) -> set[str]:
     unquoted = "".join(" " if quoted else char for char, quoted in zip(text, mask, strict=True))
     if "[" in unquoted or "]" in unquoted:
         raise GatewayConfigError(f"{where} may not use a subsearch")
+    depth = 0
+    for char in unquoted:
+        depth += {"(": 1, ")": -1}.get(char, 0)
+        if depth < 0:
+            break
+    if depth != 0:
+        raise GatewayConfigError(f"{where} has unbalanced parentheses")
     if _TIME_OR_INDEX_RE.search(text.replace('"', " ")):
         raise GatewayConfigError(f"{where} may not name an index or a time bound")
     for command in _COMMAND_RE.findall(unquoted):
@@ -597,8 +617,8 @@ def compose_spl(
     backend: SplunkBackend, template: Template, args: Mapping[str, Any], ctx: ToolContext
 ) -> tuple[str, int]:
     """The search one call runs, and its row cap: the index clause and time
-    bounds, the template with each value in place, `| head <rows>`, and the TD5
-    comment. Every value is checked again here (the runtime checked the
+    bounds, the template's search terms in parentheses and the rest of its
+    pipeline with each value in place, `| head <rows>`, and the TD5 comment. Every value is checked again here (the runtime checked the
     schema first): a value outside its type is refused, never escaped."""
     values: dict[str, str] = {}
     for param in template.params:
@@ -623,13 +643,20 @@ def compose_spl(
     rows = args.get("rows", template.default_rows or backend.max_rows)
     if isinstance(rows, bool) or not isinstance(rows, int) or not 0 < rows <= backend.max_rows:
         raise GatewayError("invalid_arguments")
-    body = _PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], template.search).strip()
+    terms, pipeline = (
+        _PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], part).strip()
+        for part in split_terms(template.search)
+    )
     clause = " OR ".join(f'index="{index}"' for index in indexes)
     if len(indexes) > 1:
         clause = f"({clause})"
     spl = f"{'search ' if backend.search_prefix else ''}{clause} earliest={earliest} latest={latest}"
-    if body:
-        spl += f" {body}"
+    if terms:
+        # Parenthesised, so a template's OR cannot bind to the gateway's terms
+        # (Splunk evaluates OR before the implicit AND).
+        spl += f" ({terms})"
+    if pipeline:
+        spl += f" {pipeline}"
     spl += f" | head {rows}"
     if backend.attribution_comment:
         spl += " " + attribution_comment(ctx.sub_hash, ctx.request_id)
@@ -752,6 +779,20 @@ class McpSession:
     answer_kind: str
 
 
+# JSON-RPC errors a server answers initialize with when it does not speak the
+# requested version: invalid params (2025-06-18's example, which also lists
+# the supported versions in data) and UnsupportedProtocolVersion (-32022 in
+# 2026-07-28).
+_VERSION_ERROR_CODES: Final = frozenset({-32602, -32022})
+
+
+def _refuses_version(error: object) -> bool:
+    if not isinstance(error, dict):
+        return False
+    data = error.get("data")
+    return error.get("code") in _VERSION_ERROR_CODES or (isinstance(data, dict) and "supported" in data)
+
+
 def _info(value: object) -> str | None:
     return clean_text(value)[:128] if isinstance(value, str) else None
 
@@ -784,6 +825,7 @@ class SplunkMcpClient:
         self._lock = asyncio.Lock()
         self._next_id = 0
         self.answer_kinds: set[str] = set()
+        self.last_answer_kind: str | None = None
 
     def __repr__(self) -> str:  # never the token
         return f"SplunkMcpClient(base={self.backend.base_url!r})"
@@ -824,6 +866,7 @@ class SplunkMcpClient:
         if reader.message is None:
             raise GatewayError("upstream_protocol")
         self.answer_kinds.add(kind)
+        self.last_answer_kind = kind
         return reader.message, response, kind
 
     async def _initialize(self, deadline: float) -> McpSession:
@@ -834,6 +877,8 @@ class SplunkMcpClient:
             if exc.code == "not_found":
                 raise GatewayError("upstream_protocol") from None
             raise
+        if _refuses_version(reply.get("error")):
+            raise UnsupportedProtocol()
         result = reply.get("result")
         if not isinstance(result, dict):
             raise GatewayError("upstream_protocol")

@@ -11,7 +11,8 @@ items the Splunk documentation leaves open. It prints two things:
   - `splunk.startup_check`: the gateway's start-up verdict (the run-query tool
     and its arguments);
   - `splunk.result_shape`: whether `| makeresults count=1` returns rows where
-    `result_source` and `result_path` look;
+    `result_source` and `result_path` look, and whether the tool answered as
+    JSON or an event stream;
   - `splunk.comment`: the same search with the TD5 comment, against that control;
   - `splunk.search_prefix`: one count over the first allowed index with and
     without a leading `search` keyword, so the site learns whether the tool adds
@@ -215,7 +216,7 @@ class _Probe:
             self.receipt.add(check, "fail", reason=code)
             return False
         self.detail["makeresults_shape"] = _result_shape(result)
-        facts = self._rows_facts(result)
+        facts = {**self._rows_facts(result), "answer_kind": self.client.last_answer_kind}
         if facts["is_error"]:
             self.receipt.add(check, "fail", reason="search_refused", **facts)
             return False

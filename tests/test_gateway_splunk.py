@@ -125,6 +125,12 @@ class FakeSplunkMcp:
         self.crlf = False
         self.status_override: int | None = None
         self.body_override: bytes | None = None
+        self.init_delay = 0.0
+        self.init_error: dict[str, Any] | None = None
+        self.expire_once = False
+        self.call_status: int | None = None
+        self.fail_notification = False
+        self.call_delay = 0.0
 
     def transport(self) -> httpx2.MockTransport:
         return httpx2.MockTransport(self.handler)
@@ -144,12 +150,18 @@ class FakeSplunkMcp:
             return httpx2.Response(406)
         message = json.loads(request.content)
         self.messages.append(message)
+        if self.call_delay and message.get("method") == "tools/call":
+            await asyncio.sleep(self.call_delay)  # every concurrent call is in flight on the old session
         if self.status_override is not None:
             return httpx2.Response(self.status_override, text=CANARY)
         method = message.get("method")
         if method == "initialize":
             if "mcp-session-id" in request.headers:
                 self.violations.append("session-on-initialize")
+            if self.init_delay:
+                await asyncio.sleep(self.init_delay)
+            if self.init_error is not None:
+                return self._answer(message["id"], None, error=self.init_error)
             self.initializes += 1
             self.calls_in_session = 0
             headers = {}
@@ -168,7 +180,12 @@ class FakeSplunkMcp:
             if sid != self.current:
                 return httpx2.Response(404, text=CANARY)
         if method == "notifications/initialized":
-            return httpx2.Response(202)
+            return httpx2.Response(500 if self.fail_notification else 202)
+        if method == "tools/call" and self.expire_once:
+            self.expire_once, self.current = False, "expired"
+            return httpx2.Response(404, text=CANARY)
+        if method == "tools/call" and self.call_status is not None:
+            return httpx2.Response(self.call_status, text=CANARY)
         if self.expire_after_calls is not None and self.calls_in_session >= self.expire_after_calls:
             self.current = "expired"
             return httpx2.Response(404, text=CANARY)
@@ -183,7 +200,7 @@ class FakeSplunkMcp:
                 return httpx2.Response(200, content=self.body_override,
                                        headers={"content-type": "application/json"})
             return self._answer(message["id"], self.result(arguments.get("query", "")))
-        return self._answer(message["id"], None, error=True)
+        return self._answer(message["id"], None, error={"code": -32601, "message": CANARY})
 
     def _tools_page(self, params: dict[str, Any]) -> dict[str, Any]:
         if self.endless_pages:
@@ -196,10 +213,10 @@ class FakeSplunkMcp:
         return page
 
     def _answer(self, msg_id: int, result: object, headers: dict[str, str] | None = None,
-                *, error: bool = False) -> httpx2.Response:
+                *, error: dict[str, Any] | None = None) -> httpx2.Response:
         reply: dict[str, Any] = {"jsonrpc": "2.0", "id": msg_id}
-        if error:
-            reply["error"] = {"code": -32601, "message": CANARY}
+        if error is not None:
+            reply["error"] = error
         else:
             reply["result"] = result
         if not self.sse:
@@ -390,6 +407,10 @@ def test_the_shipped_example_configuration_loads_and_names_only_synthetic_target
     ('host="h" | append CANARYIDX', "uses a refused command"),
     ('host="h" | map search=CANARYIDX', "uses a refused command"),
     ('host="CANARYIDX', "has an unbalanced double quote"),
+    ('host="h" ) OR (sourcetype=CANARYIDX', "has unbalanced parentheses"),
+    ('(host="h" OR sourcetype=CANARYIDX', "has unbalanced parentheses"),
+    ('host="h" | summaryindex CANARYIDX', "uses a refused command"),
+    ('host="h" | fit CANARYIDX into model', "uses a refused command"),
     ('host="h" level="éCANARYIDX"', "must be printable ASCII"),
     ('host="h"\nlevel="CANARYIDX"', "must be printable ASCII"),
 ])
@@ -507,13 +528,13 @@ def test_a_call_sends_exactly_the_composed_search_with_caps_and_attribution(tmp_
     gateway = _gateway(tmp_path, fake)
     body = _body(_run(gateway, "errors_by_host", host="web-01", earliest="-4h", rows=50), "errors_by_host")
     assert body["row_count"] == 2 and body["truncated"] is False
-    assert re.fullmatch(_spl('sourcetype="app:log" host="web-01" level="ERROR" | stats count by host',
+    assert re.fullmatch(_spl('(sourcetype="app:log" host="web-01" level="ERROR") | stats count by host',
                              rows=50, earliest="-4h"), fake.queries[0]), fake.queries[0]
     _run(gateway, "recent_events", idx="app_other", latest="-1h", earliest="-1d@h")
     assert re.fullmatch(_spl("| where linecount > 0 | fields _time host", rows=20, index='index="app_other"',
                              earliest="-1d@h", latest="-1h"), fake.queries[1]), fake.queries[1]
     _run(gateway, "errors_by_host", host="h", level="WARN")
-    assert re.fullmatch(_spl('sourcetype="app:log" host="h" level="WARN" | stats count by host', rows=100),
+    assert re.fullmatch(_spl('(sourcetype="app:log" host="h" level="WARN") | stats count by host', rows=100),
                         fake.queries[2]), fake.queries[2]
     assert fake.violations == [] and fake.arguments[0] == {"query": fake.queries[0]}
 
@@ -525,7 +546,7 @@ def test_the_comment_and_the_search_keyword_follow_the_configuration(tmp_path: P
     gateway = _gateway(tmp_path, fake, attribution_comment=False, search_prefix=False,
                        extra_arguments={"workload_pool": "pool_test"})
     _run(gateway, "errors_by_host", host="web-01")
-    assert re.fullmatch(_spl('sourcetype="app:log" host="web-01" level="ERROR" | stats count by host',
+    assert re.fullmatch(_spl('(sourcetype="app:log" host="web-01" level="ERROR") | stats count by host',
                              rows=100, prefix="", comment=False), fake.queries[0]), fake.queries[0]
     assert "```" not in fake.queries[0]
     assert fake.arguments[0] == {"query": fake.queries[0], "workload_pool": "pool_test"}
@@ -991,6 +1012,107 @@ def test_main_names_configuration_keys_never_template_values(
     assert "CANARYIDX" not in caplog.text and TOKEN not in caplog.text
 
 
+
+def test_a_template_or_cannot_bind_to_the_gateway_terms(tmp_path: Path):
+    """Splunk evaluates OR before the implicit AND: the template's search
+    terms are parenthesised, so 'OR' in them cannot widen the index clause or
+    the time bounds. Kills: composing the terms bare."""
+    templates = [{"name": "either_host", "description": "d", "indexes": ["app_test"],
+                  "search": 'host="{a}" OR host="{b}" | stats count by host',
+                  "params": {"a": {"type": "identifier"}, "b": {"type": "identifier"}}}]
+    fake = FakeSplunkMcp()
+    gateway = _gateway(tmp_path, fake, templates=templates)
+    _run(gateway, "either_host", a="web-01", b="web-02")
+    assert re.fullmatch(_spl('(host="web-01" OR host="web-02") | stats count by host', rows=100),
+                        fake.queries[0]), fake.queries[0]
+
+
+def _gather(client: splunk.SplunkMcpClient, count: int, *, warm: bool = False,
+            before: Any = None) -> list[object]:
+    """`count` concurrent run-query calls on one client (optionally after one
+    call that sets the session up, then `before()`), bounded in time."""
+
+    async def run() -> list[object]:
+        loop = asyncio.get_running_loop()
+        try:
+            if warm:
+                await client.run_query("| makeresults", loop.time() + 10)
+            if before is not None:
+                before()
+            calls = (client.run_query("| makeresults", loop.time() + 10) for _ in range(count))
+            return await asyncio.wait_for(asyncio.gather(*calls, return_exceptions=True), 20)
+        finally:
+            await client.aclose()
+
+    return asyncio.run(run())
+
+
+def test_concurrent_first_calls_share_one_initialize(tmp_path: Path):
+    """Kills: no lock around the first initialize (each call would start its own session)."""
+    fake = FakeSplunkMcp()
+    fake.init_delay = 0.2
+    results = _gather(_gateway(tmp_path, fake).client, 3)
+    assert all(isinstance(r, dict) for r in results), results
+    assert fake.initializes == 1 and len(fake.queries) == 3
+
+
+def test_concurrent_calls_on_an_expired_session_renew_it_once(tmp_path: Path):
+    """Kills: renewing whatever session is current (each waiting call would
+    replace the session the first one just renewed)."""
+    fake = FakeSplunkMcp()
+
+    def expire() -> None:
+        fake.expire_once, fake.init_delay, fake.call_delay = True, 0.2, 0.1
+
+    results = _gather(_gateway(tmp_path, fake).client, 3, warm=True, before=expire)
+    assert all(isinstance(r, dict) for r in results), results
+    assert fake.initializes == 2
+    retried = [m for m in fake.messages if m.get("method") == "tools/call"][4:]
+    assert len(retried) == 3  # all three were refused on the old session, then retried
+
+
+def test_a_404_on_a_call_without_a_session_is_not_retried(tmp_path: Path):
+    """Kills: renewing a session the server never issued."""
+    fake = FakeSplunkMcp(session=False)
+    fake.call_status = 404
+    gateway = _gateway(tmp_path, fake)
+    assert _error(_run(gateway, "errors_by_host", host="h"))["code"] == "upstream_protocol"
+    assert fake.initializes == 1 and sum(m.get("method") == "tools/call" for m in fake.messages) == 1
+
+
+def test_a_failed_handshake_leaves_no_session_and_the_next_call_starts_afresh(tmp_path: Path):
+    """Kills: publishing the session before the initialized notification was
+    accepted (the next call would use a session the server never finished)."""
+    fake = FakeSplunkMcp()
+    fake.fail_notification = True
+    gateway = _gateway(tmp_path, fake)
+    assert _error(_run(gateway, "errors_by_host", host="h"))["code"] == "upstream_unavailable"
+    assert fake.queries == []
+    fake.fail_notification = False
+    assert _run(gateway, "errors_by_host", host="h")["isError"] is False
+    assert fake.initializes == 2 and len(fake.queries) == 1
+
+
+@pytest.mark.parametrize(("error", "reason"), [
+    ({"code": -32602, "message": CANARY, "data": {"supported": ["2026-07-28"], "requested": "2025-06-18"}},
+     "protocol_unsupported"),
+    ({"code": -32022, "message": CANARY}, "protocol_unsupported"),
+    ({"code": -32603, "message": CANARY}, "upstream_protocol"),
+])
+def test_an_initialize_error_answer_is_classified_without_its_text(tmp_path: Path, error: dict[str, Any],
+                                                                     reason: str):
+    """A server that does not speak the requested version answers initialize
+    with a JSON-RPC error (2025-06-18's example; -32022 in 2026-07-28).
+    Kills: reporting a version refusal as a generic protocol failure."""
+    fake = FakeSplunkMcp()
+    fake.init_error = error
+    with pytest.raises(splunk.BackendCheckError) as caught:
+        _check(_gateway(tmp_path, fake))
+    assert caught.value.reason == reason and CANARY not in str(caught.value)
+    reply = _run(_gateway(tmp_path, fake), "errors_by_host", host="h")
+    assert _error(reply)["code"] == "upstream_protocol" and CANARY not in json.dumps(reply)
+
+
 # --- the site probe ----------------------------------------------------------------------------------
 
 
@@ -1035,6 +1157,7 @@ def test_site_probe_passes_and_prints_schemas_and_shapes_but_no_values(tmp_path:
     init = checks["splunk.initialize"]
     assert (init["protocol"], init["session_issued"], init["answer_kind"]) == ("2025-06-18", True, "sse")
     assert checks["splunk.result_shape"]["rows_found"] is True
+    assert checks["splunk.result_shape"]["answer_kind"] == "sse"
     assert checks["splunk.comment"]["accepted"] is True
     info = detail["site_private_detail"]
     assert info["server_info"] == {"name": "Fake Splunk MCP", "version": "1.0.5"}
