@@ -14,11 +14,12 @@
      configuration in the fork's site layer, `gap/config/<cluster>/<namespace>/`
      (ADR-0009 §3, Q2), so each namespace's settings stay versioned. The
      bastion applies them.
-  2. **The weaker gate is accepted for the dev pilot (D6, G1),** with three
-     measures: namespace RBAC limits who may edit Applications; the post-sync
-     verify step checks that `targetRevision` equals the recorded signed sha;
-     and whether the platform project can enforce commit-signature
-     verification stays an open site question (input 10). Production
+  2. **The weaker gate is accepted for the dev pilot (D6, G1),** with two
+     measures and one open question: namespace RBAC limits who may edit
+     Applications; the post-sync verify step checks that `targetRevision`
+     equals the recorded signed sha; and whether the platform project can
+     enforce commit-signature verification stays an open site question
+     (input 10). Production
      adoption needs that question answered (D10).
   3. **The vendored Qdrant chart** is also kept as an unpacked directory
      beside the archive, in its own prerequisite pull request, with a check
@@ -35,8 +36,8 @@
   7. **The own-instance fallback (D1)** is recorded, not approved.
 
   Accepting this record deploys nothing and changes no default:
-  `airgap:deploy` stays the only deploy path until the pilot's exit criteria
-  (D10) are recorded. It **amends** [ADR-0009](0009-gap-fork.md) and two
+  `airgap:deploy` stays the only deploy path outside the pilot namespace
+  until the pilot's exit criteria (D10) are recorded. It **amends** [ADR-0009](0009-gap-fork.md) and two
   passages of [`docs/deploy.md`](../deploy.md), as "Amendments" lists. Site
   names stay off GitHub: this record writes `<cluster>` and `<namespace>`.
 - **Context:**
@@ -249,7 +250,9 @@ source read for this record.
      `skipTests: true`.
 5. **D5, ignore rules live in each Application.** Each Application sets
    `ignoreDifferences` and `RespectIgnoreDifferences=true`, and keeps
-   client-side apply (`deploy.sh` already passes `--server-side=false`).
+   client-side apply (`deploy.sh` already passes `--server-side=false` for the
+     application release; the Qdrant release passes no apply flag, so the
+     migration in D10 checks the Qdrant objects' field managers).
    - The rule list is fixed by the pilot's observed diff, not guessed. Each
      entry names the object, the path and who mutates it. A diff nobody can
      attribute blocks the exit criteria.
@@ -287,9 +290,10 @@ source read for this record.
      fork's ordinary reviewed merge request for the site layer (ADR-0009 §3
      and §6). They hold Secret names but no Secret value (D7), image
      references by digest, and the namespace's non-secret settings; they hold
-     no rendered chart object. The maintainer's decision reads them as
-     non-secret site configuration under ADR-0009 Q2, not as the generated
-     deployment artifacts AGENTS.md keeps out of git; rendered chart output,
+     no rendered chart object. This record reads them as
+     non-secret site configuration under ADR-0009 Q2 (decision 1; confirmed
+     by merging), not as the generated deployment artifacts AGENTS.md keeps
+     out of git; rendered chart output,
      bundles and images stay out.
    - **Argo CD never reads `gap/config/`.** It reads the charts and values
      files at the MANIFEST sha. The bastion keeps read-only access to GitLab:
@@ -298,7 +302,7 @@ source read for this record.
      pushes nothing (S5).
    - **The committed manifest never vouches for itself.** Before applying,
      the bastion regenerates both manifests from the verified bundle and the
-     recorded site configuration, and refuses unless the committed files
+     site configuration at the same fork commit, and refuses unless the committed files
      equal its output byte for byte and each `targetRevision` equals the
      verified bundle's MANIFEST sha. The verify step compares the live
      Application to the MANIFEST sha recorded from the verified bundle, never
@@ -319,12 +323,16 @@ source read for this record.
      4. **Prepare** (new task): every pre-apply check of O6, the renders, the
         Qdrant render check, then the two Application manifests into
         `dist/`.
-     5. Commit the manifests to `gap/config/<cluster>/<namespace>/` through
-        the fork's reviewed merge request (a change that leaves them equal
-        needs none).
-     6. On the bastion, check the committed manifests at the merged fork
-        commit against step 4's output and the MANIFEST sha, then apply the
-        two Applications with the operator's session.
+     5. The operator copies the two manifests out of the bastion's `dist/`
+        and commits them to `gap/config/<cluster>/<namespace>/` through the
+        fork's reviewed merge request (a change that leaves them equal needs
+        none). The bastion pushes nothing; any copy route will do, because
+        step 6 derives the manifests again.
+     6. On the bastion, regenerate both manifests from the verified bundle
+        and the `airgap.env` at the merged fork commit, require the committed
+        manifests at that commit to equal them byte for byte and to pin the
+        MANIFEST sha, then apply the two Applications with the operator's
+        session. Step 4's output is a proposal; this check decides.
      7. Sync by hand in D2's order.
      8. **Verify** (new task): each Application reports the MANIFEST sha as its
         `targetRevision` and its synced revision, and its live spec equals the
@@ -476,9 +484,11 @@ source read for this record.
     5. Kept-PVC annotations (D3) in `charts/mainframe-rag`.
     6. The bastion in a tools namespace (D9): the workspace templates, the
        contract and the isolation proof.
-    7. A snapshot seed and restore task with the D10 checks (publication
+    7. A snapshot seed and restore task with the D10 checks (publication/retirement
        lifecycle row as well).
-    8. Owner documents: `docs/deploy.md` and `docs/install_and_ops.md`.
+    8. Owner documents: `docs/deploy.md` and `docs/install_and_ops.md`
+       (prose-only row; may ride with the item whose behaviour it
+       documents).
     - **Hermetic tier:** render and generator tests in `qa:check`;
       `airgap:dryrun` prints both Applications with zero placeholders.
     - **Kind lane:** a disposable Argo CD in Kind syncing the charts from a
@@ -507,13 +517,17 @@ source read for this record.
 
 ## Amendments
 
-These apply only in a namespace deployed under Argo CD: the pilot namespace
-first, any other only after the pilot's exit criteria (D10) are recorded.
+Scope of each row: the Decision, §1 and §5 rows apply per namespace, in a
+namespace deployed under Argo CD (the pilot namespace first, any other only
+after the pilot's exit criteria in D10 are recorded); the §2 and §8 rows
+apply per cluster once its bastion is in a tools namespace (D9); the §3 and
+§9 rows change the site layout when D11 item 3 lands, for `deploy.sh`
+namespaces too; the `docs/deploy.md` rows apply under Argo CD only.
 Elsewhere the amended text stands.
 
 | Record | Was | Now |
 |---|---|---|
-| ADR-0009 §1, "production deploys only signed releases" | The executing guard covers the apply | Unchanged for every script. For the apply itself, the MANIFEST-sha pin, the committed-manifest check and the verify step (D6, G1) |
+| ADR-0009 Decision and §1, "production deploys only signed releases" | The executing guard covers the apply | Unchanged for every script. For the apply itself, the MANIFEST-sha pin, the committed-manifest check and the verify step (D6, G1) |
 | ADR-0009 §2, bastion row and "only the bastion holds production authority" | The bastion is in the production namespace; no other identity writes workloads | One bastion per cluster in a tools namespace (D9). The platform's controller, as the client SA, also writes workload objects; it is platform-owned |
 | ADR-0009 §2 and §8, D-10 | `/work` is in the production namespace | In the tools namespace |
 | ADR-0009 §3, `gap/config/` | One site `airgap.env` | One directory per cluster and namespace, holding its `airgap.env` and its two Application manifests (non-secret site configuration, Q2; maintainer decision 1) |
@@ -570,7 +584,8 @@ decision 1); rendered chart output stays out of git.
 - Each namespace's settings, including its Application manifests, are
   versioned and reviewed in the fork's site layer. Every release adds one
   site-layer merge request per namespace before the apply.
-- A deploy becomes prepare, commit, sync, verify where there was one step.
+- A deploy becomes prepare, commit, apply, sync, verify where there was one
+  step.
   The checks are the same; their order around the apply is now a procedure.
 - The trust gate depends on a step after the sync (G1). Until the platform
   enforces signature verification, a skipped verify step is the residual
