@@ -37,8 +37,8 @@
 
   Accepting this record deploys nothing and changes no default:
   `airgap:deploy` stays the only deploy path outside the pilot namespace
-  until the pilot's exit criteria (D10) are recorded. It **amends** [ADR-0009](0009-gap-fork.md) and two
-  passages of [`docs/deploy.md`](../deploy.md), as "Amendments" lists. Site
+  until the pilot's exit criteria (D10) are recorded. It **amends**
+  [ADR-0009](0009-gap-fork.md) and two passages of [`docs/deploy.md`](../deploy.md), as "Amendments" lists. Site
   names stay off GitHub: this record writes `<cluster>` and `<namespace>`.
 - **Context:**
   - Deployment today is `scripts/airgap/deploy.sh`: two Helm releases per
@@ -250,9 +250,10 @@ source read for this record.
      `skipTests: true`.
 5. **D5, ignore rules live in each Application.** Each Application sets
    `ignoreDifferences` and `RespectIgnoreDifferences=true`, and keeps
-   client-side apply (`deploy.sh` already passes `--server-side=false` for the
-     application release; the Qdrant release passes no apply flag, so the
-     migration in D10 checks the Qdrant objects' field managers).
+   client-side apply (`deploy.sh` already passes `--server-side=false` for
+   the application release; the Qdrant release passes no apply flag, so the
+   migration in D10 records the Qdrant objects' field managers, and any
+   difference they explain stops it like any other).
    - The rule list is fixed by the pilot's observed diff, not guessed. Each
      entry names the object, the path and who mutates it. A diff nobody can
      attribute blocks the exit criteria.
@@ -326,8 +327,8 @@ source read for this record.
      5. The operator commits the two manifests to
         `gap/config/<cluster>/<namespace>/` through the fork's reviewed merge
         request (a change that leaves them equal needs none). The bastion
-        pushes nothing. How the files reach the merge request follows what
-        ADR-0009 §2 allows to leave the bastion; the route is a pilot
+        pushes nothing. ADR-0009 §2 names no route for files to leave the
+        bastion, so the route is open site input 12, settled as a pilot
         procedure. Integrity does not depend on it, because step 6 derives
         the manifests again.
      6. On the bastion, run the prepare task again: regenerate both
@@ -481,8 +482,9 @@ source read for this record.
        release records to recognise a fresh install. The prepare step refuses
        an Application name equal to `$QDRANT_RELEASE` or `mainframe-rag`,
        and, when run again at the merged commit (D6 step 6), committed
-       manifests that differ from its output or pin another sha; the verify step compares against the verified bundle's MANIFEST
-       sha and lists who may edit Applications in the namespace.
+       manifests that differ from its output or pin another sha; the
+       verify step compares against the verified bundle's MANIFEST sha and
+       lists who may edit Applications in the namespace.
        A test bounds the size of each rendered object: Argo CD's client-side
        apply stores a last-applied copy that Helm does not, and the Open
        WebUI Pipe ConfigMap is the large one.
@@ -626,3 +628,7 @@ decision 1); rendered chart output stays out of git.
 11. Whether the cluster's built-in namespace roles grant rights on
     Applications, which decides whether our own namespace RBAC can limit who
     edits them (D6).
+12. The route by which the operator carries the prepared manifests from the
+    bastion to the fork's merge request (D6 step 5), for example a copy
+    through the operator's session. ADR-0009 §2 names none; if the route
+    needs a new egress or credential, it is an ADR-0009 §2 amendment.
