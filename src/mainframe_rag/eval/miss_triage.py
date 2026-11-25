@@ -50,9 +50,12 @@ import re
 import sys
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import Any, Protocol, get_args
+from typing import TYPE_CHECKING, Any, get_args
 
 from mainframe_rag.ingest.classify import ChunkType
+
+if TYPE_CHECKING:  # the export step stays importable without qdrant_client
+    from mainframe_rag.ports import QdrantReader
 
 EXPORT_SCHEMA = "miss_triage_export/1"
 BUCKETS = ("A", "B", "C", "D", "E", "unknown_no_final_hits", "unknown_no_pool")
@@ -79,14 +82,6 @@ POOL_COLLECTION = "a pool record was captured from another collection than the s
 
 class TriageError(RuntimeError):
     """A refused input. The message is fixed text plus row ids at most."""
-
-
-class PointReader(Protocol):
-    """The only Qdrant calls the tool makes (both read-only)."""
-
-    def scroll(self, collection_name: str, **kwargs: Any) -> tuple[list[Any], Any]: ...
-
-    def retrieve(self, collection_name: str, ids: Sequence[Any], **kwargs: Any) -> list[Any]: ...
 
 
 # ---------------------------------------------------------------- inputs
@@ -159,7 +154,7 @@ def pool_index(records: Iterable[dict[str, Any]], collection: str,
 
 
 # ---------------------------------------------------------------- gold
-def doc_points(client: PointReader, collection: str, doc_ids: Sequence[str]) -> Iterator[Any]:
+def doc_points(client: QdrantReader, collection: str, doc_ids: Sequence[str]) -> Iterator[Any]:
     """Every stored point of these doc ids (doc_id is a keyword-indexed field)."""
     from qdrant_client import models
 
@@ -175,7 +170,7 @@ def doc_points(client: PointReader, collection: str, doc_ids: Sequence[str]) -> 
             return
 
 
-def gold_set(client: PointReader, collection: str,
+def gold_set(client: QdrantReader, collection: str,
              record: dict[str, Any]) -> tuple[dict[str, str], str]:
     """(gold chunk id -> chunk_type, basis) for one golden record."""
     from mainframe_rag.eval.datasets import GoldenEntry
@@ -241,7 +236,7 @@ def classify_row(row_id: str, row: dict[str, Any], record: dict[str, Any],
     return out
 
 
-def triage(client: PointReader, collection: str, served_prefetch: int,
+def triage(client: QdrantReader, collection: str, served_prefetch: int,
            golden: Sequence[dict[str, Any]], reports: Sequence[dict[str, Any]],
            taxonomy: dict[str, Any], pools: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Every selected row exactly once, in id order."""
@@ -277,7 +272,7 @@ def served_prefetch_depth(settings: Any) -> int:
 
 
 # ---------------------------------------------------------------- reader
-def show_blocks(client: PointReader, collection: str, args: Sequence[str]) -> Iterator[str]:
+def show_blocks(client: QdrantReader, collection: str, args: Sequence[str]) -> Iterator[str]:
     """Stored chunks as the reader judges them: the embedded string
     (build_embed_text over the stored payload, unclipped). A plain argument
     is a chunk id; DOC_ID@PAGE_LABEL is every chunk on that printed page."""

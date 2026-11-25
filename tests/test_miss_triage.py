@@ -348,6 +348,20 @@ def test_show_prints_the_embedded_text_to_the_console_only(monkeypatch, capsys):
     assert "=== DOCA@404: no stored chunk" in out
 
 
+def test_real_client_entry_keeps_the_venue_rule_and_constructs_the_client(monkeypatch, capsys):
+    # limits= is pinned src-wide by test_timeouts (#1131); this runs the real entry once.
+    from mainframe_rag import config
+
+    monkeypatch.delenv("VENUE", raising=False)
+    monkeypatch.setattr(config, "load_settings", lambda: eval_settings(qdrant_collection="real_manuals"))
+    assert mt.main(["show", cid("a-gold")]) == 2
+    out = capsys.readouterr()
+    assert out.out == "" and out.err.startswith("REFUSED: collection")
+    monkeypatch.setattr(config, "load_settings", lambda: eval_settings(qdrant_collection=COLL))
+    client, settings = mt._client_and_settings()  # constructs only; no request is sent
+    assert isinstance(client, QdrantClient) and settings.qdrant_collection == COLL
+
+
 def _rows():
     return [{"id": i, "bucket": b, "served_prefetch": 40, "pool_depth": 50} for i, b in
             (("SYN-1", "A"), ("SYN-2", "B"))]
