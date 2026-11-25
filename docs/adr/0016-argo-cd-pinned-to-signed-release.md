@@ -2,7 +2,7 @@
 
 - **Status:** proposed. The maintainer accepts this record by merging it.
   Issue [#1197](https://github.com/yonatan895/qdrant-pdf-rag/issues/1197);
-  tracker #1191; prerequisites tracked in their own issue (D11). The
+  tracker #1191; prerequisite pull requests tracked in #1381 (D11). The
   coordinator's recommendation (central controller, one set of Applications
   per namespace, manual sync, prune off, pilot on a new namespace) was
   accepted in principle on 2026-11-25. Maintainer decisions 2026-11-25 (in
