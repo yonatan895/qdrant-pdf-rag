@@ -1,0 +1,225 @@
+# ADR-0015: Splunk gateway over the site's Splunk MCP Server, templates only
+
+- **Status:** proposed. The maintainer set the direction on 2026-11-25 (in
+  session): the site runs Splunk's own MCP Server app, it accepts raw SPL,
+  and its token user reads exactly the indexes every team member can read.
+  The maintainer accepts this record by merging it. Tracker #1075; build
+  issue #1077; identity #1088. This record **amends**
+  [ADR-0010](0010-team-tools-on-open-webui.md) (TD5's form, TD7's credential
+  and go-live input 3) and [ADR-0011](0011-gateway-caller-classes.md) (the
+  E1 row of the shared-credentials table, which also gains B2), as
+  "Amendments and unchanged clauses" lists. It also supersedes the "Splunk
+  REST only, no Splunk-side install" requirement and the escaping wording in
+  #1077's issue body. Accepting it deploys nothing: the gateway ships
+  default-off, and its chart and Open WebUI registration are a later pull
+  request, as for GitLab ([ADR-0014](0014-gitlab-team-token-gateway.md) D5).
+- **Context:**
+  - #1077 planned a gateway that calls Splunk REST (`/services/search/jobs`)
+    with a read-only service token and no Splunk-side install.
+  - The site's platform team installed Splunk's MCP Server app (Splunkbase
+    7931, version 1.0.5 at the site) on the Splunk management port at
+    `/services/mcp`. Clients authenticate with
+    `Authorization: Bearer <encrypted token>`. Splunk's documentation for
+    the 1.x line says encrypted tokens are for MCP only and cannot call the
+    Splunk REST API. The credential the site can issue therefore reaches
+    Splunk only through the MCP Server: a REST backend is impossible with it.
+  - The MCP Server's search tool is `splunk_run_query` (an older listing
+    called it `run_splunk_query`). Splunk documents that it fails, rather
+    than truncates, a search that runs past one minute or returns more than
+    1000 events, and that it may refuse commands it considers unsafe. Running
+    a tool needs the capability `mcp_tool_execute` on the token user's role.
+    Other tools (`splunk_get_*`, `saia_*`) exist; this gateway never calls
+    them.
+  - The documentation does not publish the run-query tool's arguments other
+    than the query, its result shape, or whether the server uses sessions or
+    event streams. These are site facts (D5).
+  - ADR-0010 TD7 already allows one Splunk service token on the
+    equal-entitlement premise (named exception E1 in ADR-0011). The
+    maintainer confirmed the premise for the MCP token user on 2026-11-25.
+
+## What the protocol and the vendor documents establish
+
+Checked on 2026-11-25 against the MCP specification and Splunk's MCP Server
+documentation.
+
+| Item | Status | Source |
+|---|---|---|
+| Streamable HTTP: every message is a POST with `Accept: application/json, text/event-stream`; a request is answered with one JSON object or an event stream, and the client must support both; a notification is answered 202 | Confirmed | MCP 2025-06-18, transports |
+| In an event stream the server may send requests and notifications before the response, and should close the stream after it | Confirmed | MCP 2025-06-18, transports |
+| `initialize` negotiates the version; a client that does not support the server's answer should disconnect; `notifications/initialized` follows | Confirmed | MCP 2025-06-18, lifecycle |
+| `MCP-Protocol-Version` on every request after initialize; a server answers 400 to an invalid or unsupported value | Confirmed | MCP 2025-06-18, transports |
+| `Mcp-Session-Id`: optional, visible ASCII, echoed on every later request; 404 on a request carrying it means the session ended and the client must initialize again | Confirmed | MCP 2025-06-18, transports |
+| `tools/list` pages with `nextCursor`; a `tools/call` result has `content`, optional `structuredContent` and `isError` | Confirmed | MCP 2025-06-18, tools |
+| 2025-11-25 lets a server close an event stream before its response and expects the client to resume with GET and `Last-Event-ID` | Confirmed; not implemented | MCP 2025-11-25 changelog (SEP-1699) |
+| The current revision, 2026-07-28, is stateless: no `initialize`, no `Mcp-Session-Id`, a `server/discover` method and `Mcp-Method`/`Mcp-Name` request headers | Confirmed; not implemented | MCP 2026-07-28 changelog |
+| The site's server negotiates 2025-06-18 | Maintainer report | Site |
+| Encrypted tokens are MCP-only; `mcp_tool_execute` runs tools; Splunk recommends per-user tokens | Confirmed | Splunk MCP Server 1.x documentation |
+| `splunk_run_query` fails past one minute or 1000 events and may refuse unsafe commands | Confirmed | Splunk MCP Server 1.0 tools page |
+| The run-query tool's arguments besides the query (1.3 and later add a workload pool) | Unconfirmed | Site probe |
+| The result shape (`structuredContent` or JSON text, and the key holding rows) | Unconfirmed | Site probe |
+| Whether the server issues a session or answers with event streams (a community reading of a later 2.x release says neither) | Unconfirmed | Site probe |
+| Whether the tool adds its own leading `search` keyword, and whether its guardrail accepts an SPL comment | Unconfirmed | Site probe |
+
+## Decision
+
+1. **D1, the backend is the Splunk MCP Server's run-query tool.** The gateway
+   is a small MCP client of the site's server (`SplunkMcpClient` over the
+   shared `UpstreamClient`): POST only, no redirects, no proxy environment,
+   the configured https origin and path, a byte cap and the site CA. It sends
+   `initialize`, `notifications/initialized`, `tools/list` and
+   `tools/call` for the one configured tool, nothing else. It speaks MCP
+   2025-06-18 and accepts a server that answers 2025-06-18 or 2025-03-26.
+   Any other answer is refused (D4). It reads JSON or event-stream answers,
+   stops reading an event stream at the response to its own request (so a
+   stream the server keeps open cannot hold a call), echoes a session id
+   when one is issued, and renews an expired session once per call. One
+   session serves the process.
+2. **D2, templates only.** The model never writes SPL (#1077 and ADR-0010
+   unchanged). Each site template becomes one tool with typed parameters.
+   The gateway composes the search:
+   `search index="…" earliest=… latest=… <template> | head <rows>`, then the
+   TD5 comment (D6).
+   The index clause comes from the template's fixed indexes or one
+   parameter whose values are the configured `allowed_indexes`. The time
+   bounds and the row cap are written into the SPL itself, so they do not
+   depend on any unconfirmed tool argument. Rows are at most the configured
+   cap, which is at most 1000 and at most the runtime's `max_rows`. The
+   window is at most the template's and the global maximum; a snapped start
+   counts its whole snap unit.
+3. **D3, parameters are rejected, never escaped, and templates are linted.**
+   Each type admits a small character set with no quote, backslash, pipe,
+   bracket, backtick, equals sign, space or control character: identifiers
+   (`[A-Za-z0-9_.:-]{1,64}`), enums, integers in a range, and index names
+   from the allowlist. Time values follow a small grammar (`now`, `-15m`,
+   `-24h`, `-7d@d`, `@d`). A string value goes into SPL only inside the
+   double quotes the template wrote. When the configuration loads, each
+   template is checked: every placeholder is declared and every parameter
+   used; the text is printable ASCII with balanced quotes; it names no index
+   or time bound; it has no subsearch, macro or comment; and it uses none of
+   a list of commands that write, run other searches or read outside the
+   composed index clause. This check is a lint over trusted, operator-written
+   text. The token user's Splunk role remains the boundary.
+4. **D4, a start-up check that fails closed.** Before serving, the gateway
+   initializes a session, requires a supported protocol version, lists the
+   tools, and requires the run-query tool with the query argument and every
+   configured constant argument in its input schema, and no required
+   argument it does not send. Otherwise it exits 3 with a fixed reason. A
+   server that cannot answer is a refusal too. The check runs at every pod
+   start.
+5. **D5, a site probe answers the unconfirmed items.**
+   `python -m mainframe_rag.gateways.splunk --site-probe` runs in the gateway
+   pod with the gateway's configuration. It prints a text-free receipt (the
+   shared probe receipt rules) and one site-private block of schemas and
+   key/type shapes. The probe never prints the token, a row, a value, an
+   index name or a query.
+6. **D6, TD5 attribution as an SPL comment, with an off switch.** Each
+   search ends with an SPL inline comment (Splunk's triple-backtick syntax)
+   holding `mfr sub_hash=<16 hex> req=<request id>`. Whether the run-query guardrail accepts a comment
+   is a site check. If it refuses one, `attribution_comment: false` drops
+   the comment; attribution then exists only in the gateway's decision log
+   (request id to `sub`), and Splunk's own records show only the token
+   user.
+7. **D7, caller authentication by switch: `SPLUNK_AUTH_MODE=oidc|bearer`.**
+   `oidc` (default) is ADR-0010's caller verification, with
+   `require_single_audience=True` fixed by the entry point. `bearer` is
+   proposed as named exception **B2**, the Splunk twin of ADR-0014 B1: one
+   shared secret (`SPLUNK_GATEWAY_BEARER_SECRET`) held only by Open WebUI,
+   with the same deployment guards as ADR-0014 D4 (a) and (b). It needs the
+   maintainer's acceptance; until then a site runs `oidc` or not at all. In
+   bearer mode the caller is `service:openwebui`: the rate and concurrency
+   limits cover the whole instance, and the TD5 hash is the same for every
+   search, so per-person attribution is only Open WebUI's chat history. The
+   bearer-mode defaults are 3 searches in flight (the concurrent-search
+   quota of Splunk's stock `user` role, which the token user may hold) and
+   60 a minute, unless the configuration sets them. `oidc` mode keeps the
+   runtime's per-user defaults. The tool timeout defaults to 60 seconds for
+   this gateway, and the backend timeout must be below it.
+8. **D8, results are untrusted data.** `isError` results, including Splunk's
+   one-minute and 1000-event failures, become the fixed code
+   `search_refused`; a result whose rows cannot be found is
+   `upstream_protocol`. Rows go through the shared runtime: redacted, capped
+   and framed as untrusted. Logs carry ids, codes, counts and timings only.
+
+## Shared credentials (amends ADR-0011's table)
+
+| Credential | Class | What it reaches, and the premise |
+|---|---|---|
+| E1. Splunk encrypted MCP token (ADR-0010 TD7, this record D1) | Named exception | MCP calls as one Splunk user whose role holds `mcp_tool_execute` and the team's index role, read-only. The token cannot call Splunk REST. Premise: every team-group member can search the same indexes with their own account (confirmed by the maintainer, 2026-11-25). Splunk recommends per-user tokens; the exception holds only while the premise does. If it fails, per-user tokens are required, and that needs a new decision first |
+| B2. Splunk gateway bearer secret (D7) | Service-to-service caller credential, proposed, pilot only | Calls the gateway's template tools as `service:openwebui`. Held only by Open WebUI. Safe only with ADR-0014 D4's guards (a) and (b) applied to this gateway |
+
+## Guarantees and what establishes them
+
+| Guarantee | State that establishes it | Who can change that state | Valid for | What forbids the counterexample |
+|---|---|---|---|---|
+| G1. The gateway never writes to Splunk | One run-query tool; templates only; the lint's refused commands (D3); the token user's read-only role; Splunk's guardrail | Gateway code, through a release; the operator (templates); the Splunk owner (role) | Standing; the template lint runs at every start | `tests/test_gateway_splunk.py`: the fake records every request and the exact SPL; write commands in a template refuse start-up. A role without write capabilities is a site input |
+| G2. Searches read only allowlisted indexes | The composed index clause; index parameters limited to `allowed_indexes`; the lint (no index terms, subsearches or data-source commands) | The operator, through a deployed release; the Splunk owner (role) | Until the configuration or the role changes | Tests: index values outside the allowlist refused before any call; each lint rule; the exact composed SPL. The lint is not a proof: the role is the boundary |
+| G3. Every search is bounded in time and rows | Time bounds and `\| head` written by the gateway; template text cannot name time bounds | Gateway code | Standing | Tests: the exact SPL the fake received; window and row caps; snapped starts |
+| G4. A parameter cannot change the search's structure | Typed rejection (D3); values only inside the template's quotes | Gateway code | Standing | Tests: injection attempts per type (quotes, pipe, backticks, brackets, comment markers, control characters, Unicode lookalikes, NUL); a property test over arbitrary text |
+| G5. No secret or content in logs | The decision log (ids, codes, counts, timings); fixed error codes | Gateway code | Standing | Tests: the token, upstream text, event content and parameter values never appear in captured logs or replies |
+| G6. Protocol drift fails closed | The version allowlist; the start-up tool check | Gateway code; the platform (a Splunk MCP upgrade) | Every start | Tests: unsupported versions (including 2025-11-25 and 2026-07-28), a missing tool or argument, and endless pagination refuse start-up |
+
+## Amendments and unchanged clauses
+
+| Record | Was | Now |
+|---|---|---|
+| ADR-0010 TD7 | One read-only Splunk service token | One encrypted Splunk MCP token (E1), MCP-only, for a user with `mcp_tool_execute` and the team's index role. Premise unchanged |
+| ADR-0010 TD5 | The hash and request id in an SPL comment | Unchanged by default. The site may turn the comment off when the guardrail refuses it (D6); in bearer mode (B2) the hash names the instance |
+| ADR-0010 go-live input 3 | Search-head URL and CA, a read-only role and service token, egress, templates | The MCP Server's management-port URL and CA, the token user (`mcp_tool_execute` plus the team's index role, no write capabilities), the encrypted token as a Secret, egress to the management port, templates and `allowed_indexes`, and the site-probe receipt |
+| ADR-0010 amendments table and ADR-0014's V2 row (`auth_type`) | A static bearer key for the GitLab gateway in bearer mode (B1) | Also for the Splunk gateway in bearer mode (B2), once accepted |
+| ADR-0011 shared credentials | E1 a read-only Splunk service token | E1 as above; adds B2 |
+| ADR-0011 D1 and G1 | Every user-class call carries one verified user | Unchanged in `oidc` mode. In `bearer` mode, B2 is the stated exception, as B1 is for GitLab |
+| #1077 issue body | Splunk REST only, no Splunk-side install; values "validated and escaped"; a fake Splunk REST server | The Splunk MCP Server app the platform installed (REST is impossible with an MCP-only token); values validated and rejected, never escaped; a fake Splunk MCP Server |
+| ADR-0010 TD1 to TD4, TD6, TD8; ADR-0011 D2 to D4, G2 to G6; ADR-0014 | | Unchanged |
+
+## Open site checks (before go-live)
+
+The site probe answers items 1 to 3, run in the gateway pod with the
+gateway's configuration:
+
+```sh
+python -m mainframe_rag.gateways.splunk --site-probe [--receipt <writable path>]
+```
+
+Receipt checks: `splunk.initialize` (negotiated version, session issued,
+JSON or event stream), `splunk.startup_check` (D4's verdict),
+`splunk.result_shape` (`| makeresults count=1` returns rows where
+`result_source` and `result_path` look), `splunk.comment` (the same search
+with the TD5 comment, against that control), `splunk.search_prefix` (one
+count over the first allowed index with and without a leading `search`;
+counts only), and `splunk.composed_search` (a search composed as a tool call
+composes one). Exit codes are the shared probe codes. The site-private block
+holds the server's name and version, the tool names, the run-query tool's
+input and output schema, and the makeresults result's key and type shape.
+The schema is the server's own text and may carry site names in enums or
+defaults: keep it at the site.
+
+1. The run-query tool's input schema, and the constant arguments the site
+   needs (`extra_arguments`, for example a workload pool).
+2. The result shape, which sets `result_source` and `result_path`.
+3. Whether the guardrail accepts the comment (D6) and whether the tool adds
+   its own `search` keyword (`search_prefix`).
+4. The token user and role (`mcp_tool_execute`, the team's index role, no
+   write capabilities), the token's expiry and rotation, the CA bundle and
+   the egress rule to the management port.
+5. The E1 premise, recorded at the site and re-checked when the team or the
+   indexes change.
+6. The templates and `allowed_indexes`, written at the site. None ship in
+   the repository.
+
+## Consequences
+
+- Team members get templated Splunk answers through the platform's own MCP
+  Server, with no REST credential and no search-job lifecycle in the gateway.
+- Splunk's audit shows the token user. Per-person attribution is the TD5
+  comment plus the gateway's decision log, or only Open WebUI's chat history
+  in bearer mode.
+- A Splunk MCP upgrade that drops 2025-06-18 and 2025-03-26 (for example a
+  stateless 2026-07-28 server) stops the gateway at start-up with
+  `protocol_unsupported` until the client is extended. That is deliberate:
+  the client does not guess at a protocol it does not implement.
+- The template lint refuses subsearches, macros and some commands a site
+  query might use. Templates are rewritten without them, or a later decision
+  widens the lint.
+- Verification: the prose row for this record; the HTTP/lifecycle row for the
+  gateway ([live-stack](../live-stack.md#verification-minimums)). Real
+  Splunk MCP compatibility is the site probe.
