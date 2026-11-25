@@ -382,7 +382,7 @@ def build_export(rows: Sequence[dict[str, Any]], reading: dict[str, tuple[str, s
 def _client_and_settings() -> tuple[Any, Any]:
     from qdrant_client import QdrantClient
 
-    from mainframe_rag.config import load_settings
+    from mainframe_rag.config import load_settings, qdrant_pool_limits
     from mainframe_rag.eval.datasets import require_rc_for_collection
 
     settings = load_settings()
@@ -390,7 +390,8 @@ def _client_and_settings() -> tuple[Any, Any]:
     # agent pod the configured key is the read-only serving key.
     require_rc_for_collection(settings.qdrant_collection)
     client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key,
-                          timeout=settings.qdrant_timeout_s)
+                          timeout=settings.qdrant_timeout_s,
+                          limits=qdrant_pool_limits(settings.qdrant_url))
     return client, settings
 
 
