@@ -1062,6 +1062,13 @@ def test_the_team_model_row_is_an_override_with_the_tool_native_calls_and_the_gr
                                 {"principal_type": "user", "principal_id": "*", "permission": "read"}])
     assert not checks.check_team_model_row(200, wider, TEAM_GROUP_ID).ok
     assert not checks.check_team_model_row(200, None, TEAM_GROUP_ID).ok
+    assert not checks.check_team_model_row(200, _row(access_grants=[]), TEAM_GROUP_ID).ok
+    other = _row(access_grants=[{"principal_type": "group", "principal_id": "other", "permission": "read"}])
+    assert not checks.check_team_model_row(200, other, TEAM_GROUP_ID).ok
+    write = _row(access_grants=[{"principal_type": "group", "principal_id": TEAM_GROUP_ID, "permission": "write"}])
+    assert not checks.check_team_model_row(200, write, TEAM_GROUP_ID).ok
+    empty = _row(access_grants=[{"principal_type": "group", "principal_id": "", "permission": "read"}])
+    assert not checks.check_team_model_row(200, empty, "").ok  # a failed group lookup
 
 
 def test_t4_the_team_model_and_its_tool_reach_the_team_user_only_and_docs_models_stay_tool_free():
@@ -1082,6 +1089,7 @@ def test_t4_the_tool_server_is_listed_for_the_team_group_only():
     assert not checks.check_t4_tools(200, tool, 200, tool).ok
     assert not checks.check_t4_tools(200, [], 200, []).ok
     assert not checks.check_t4_tools(200, tool, 403, []).ok  # a refused listing proves nothing
+    assert not checks.check_t4_tools(500, tool, 200, []).ok
 
 
 def test_open_webuis_handshake_lists_the_templates_for_the_team_user_and_refuses_the_docs_user():
@@ -1110,6 +1118,7 @@ def test_the_team_model_answers_the_team_user_and_refuses_the_docs_user():
     assert not checks.check_team_chat(team, 200).ok
     assert not checks.check_team_chat({**team, "completion_status": 401}, 403).ok  # a key LiteLLM refused
     assert not checks.check_team_chat({**team, "content_chars": 0}, 403).ok
+    assert not checks.check_team_chat({**team, "done_frame": False}, 403).ok
 
 
 def test_t4_surfaces_stay_closed_with_team_tools_on():
@@ -1143,8 +1152,9 @@ def test_the_openwebui_lane_runs_team_tools_after_the_acceptance_behind_the_gate
     assert step["if"] == "matrix.lane == 'openwebui'" and step["shell"] == GATED
     assert step["run"].strip().endswith("sh rehearsal-infra/scripts/openwebui/acceptance.sh team-tools")
     evidence = steps[_team_step(steps, "Open WebUI acceptance evidence")]["run"]
-    for item in ("logs/team-tools.json", "splunk-gateway.log", "fake-splunk.log", "team-openwebui.yaml"):
+    for item in ("logs/team-tools.json", "splunk-gateway.log", "fake-splunk.log"):
         assert item in evidence
+    assert "render-team" not in evidence  # the re-render carries the run's CA certificate
     # Only the chart's policies govern the gateway's egress, as for Open WebUI (a namespace-wide allow
     # would be unioned into them and the gateway's blocked probes would prove nothing).
     boundary = steps[_team_step(steps, "Close the network boundary")]["run"]
@@ -1178,7 +1188,7 @@ def test_the_kind_splunk_stand_ins_render_every_placeholder_and_are_restricted()
 
 def test_the_lane_fake_splunk_served_over_https_passes_the_gateways_start_up_check(tmp_path):
     """The pod's server (scripts/ci/fake_splunk_mcp_server.py) is the shared unit-test fake behind real
-    HTTPS; the real gateway's start-up check and one template call go through it."""
+    HTTPS; the real gateway's start-up check (initialize, initialized, tools/list) passes through it."""
     import asyncio
     import socket
 
@@ -1234,3 +1244,45 @@ def test_the_lane_fake_splunk_served_over_https_passes_the_gateways_start_up_che
     assert [line["rpc"] for line in lines][:3] == ["initialize", "notifications/initialized", "tools/list"]
     assert all(line["status"] in (200, 202) for line in lines)
     assert token not in out.decode()
+
+
+def test_team_tools_reaches_its_phase_with_its_own_paths_intact(tmp_path):
+    """Drive the real team_tools with real render_chart, team_values and check_team_render (helm) and the
+    cluster calls stubbed, up to the acceptance phase. Regression: sh has no local variables, and
+    render_chart's template loop once overwrote team_tools' directory variable, so check_team_render read
+    the wrong files and the lane's team-tools step ended before any check ran."""
+    stub = tmp_path / "kubectl"
+    stub.write_text('#!/bin/sh\n[ "$1" = kustomize ] && cat "$2/chart.yaml"\nexit 0\n')
+    stub.chmod(0o755)
+    pyh = tmp_path / "pyh"
+    pyh.write_text("echo 0b6f2c1e-1d2a-4c3b-9e8f-1234567890ab\n")
+    own_key = "c2stMDEyMzQ1Njc4OWFiY2RlZjAxMjM="  # base64 of a synthetic sk-... value
+    script = f"""set -eu
+HERE={DIR}; REPO={ROOT}; STATE={tmp_path}/state; APP_NS=rag-kind-x; POD_CIDR=10.244.0.0/16
+OWUI_HOST=owui.localhost DEX_HOST=dex.localhost OWUI_PORT=8443 DEX_PORT=5556
+OWUI_URL=https://owui.localhost:8443 DEX_ISSUER=https://dex.localhost:5556/dex
+OWUI_IMAGE=example.invalid/owui:v1 NGINX_IMAGE=example.invalid/nginx:v1 HELM=helm PY={sys.executable} KUBECTL={stub}
+PYH="sh {pyh}"
+say() {{ echo "==> $*"; }}; die() {{ echo "ERROR: $*" >&2; exit 1; }}
+. "$HERE/lib.sh"
+eval "$(sed -n '/^team_[a-z_]*() {{/,/^}}$/p; /^check_team_render() {{/,/^}}$/p' "$HERE/acceptance.sh")"
+TEAM_GROUP=internal-team
+prepare_state() {{ mkdir -p "$STATE/logs" "$STATE/render"; }}
+k() {{
+    case "$*" in
+        *'containers[0].image'*) echo kind-registry:5000/qdrant-pdf-rag-agent:0123456789abcdef0123456789abcdef01234567 ;;
+        *'get secret test-gateway-keys'*) printf %s {own_key} ;;
+        *'get configmap test-gateway-ca'*) cat "$STATE/pki/ca.crt" ;;
+    esac
+    return 0
+}}
+kind_net() {{ echo "172.18.0.1 172.18.0.2"; }}
+start_forwards() {{ :; }}; wait_health() {{ :; }}; phase() {{ echo "PHASE $1"; }}
+prepare_state; pki; team_tools
+"""
+    proc = subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False, cwd=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert "team render: 10 objects" in proc.stdout
+    assert proc.stdout.rstrip().endswith("PHASE team-tools")
+    rendered = (tmp_path / "state" / "render" / "splunk.yaml").read_text()
+    assert "@" not in "".join(line for line in rendered.splitlines() if not line.lstrip().startswith("#"))

@@ -178,11 +178,11 @@ team_inputs() {  # team_inputs DIR: the Secret values (files, mode 600, never ar
       # Stands in for a shared GATEWAY_API_KEY_SECRET_KEY: no LiteLLM key at all, so a Team model that
       # read it could not answer (maintainer decision 3 on #1374).
       printf 'sk-lane-shared-key-not-a-litellm-key' > "$1/api-key"
-      k -n "$APP_NS" get configmap test-gateway-ca -o 'jsonpath={.data.ca-bundle\.crt}' > "$1/ca-bundle.crt"
-      printf '\n' >> "$1/ca-bundle.crt"
-      cat "$STATE/pki/ca.crt" >> "$1/ca-bundle.crt" )
+      k -n "$APP_NS" get configmap test-gateway-ca -o 'jsonpath={.data.ca-bundle\.crt}' > "$1/ca-bundle.crt" )
     [ -s "$1/openwebui-llm-api-key" ] || die "Secret test-gateway-keys has no llm-api-key"
     grep -q 'BEGIN CERTIFICATE' "$1/ca-bundle.crt" || die "ConfigMap test-gateway-ca has no ca-bundle.crt"
+    printf '\n' >> "$1/ca-bundle.crt"
+    cat "$STATE/pki/ca.crt" >> "$1/ca-bundle.crt"
 }
 
 team_values() {  # team_values DIR AGENT_IMAGE GROUP_ID: the teamTools values (JSON is YAML) on top of values.yaml
@@ -252,39 +252,39 @@ PY
 
 team_tools() {
     prepare_state
-    t="$STATE/team"
-    mkdir -p "$t"; chmod 700 "$t"
+    team_dir="$STATE/team"
+    mkdir -p "$team_dir"; chmod 700 "$team_dir"
     k -n "$APP_NS" get deploy rag-openwebui >/dev/null || die "no deploy/rag-openwebui: run 'deploy' and 'run' first"
     AGENT_IMAGE=$(k -n "$APP_NS" get deploy rag-agent -o 'jsonpath={.spec.template.spec.containers[0].image}')
     [ -n "$AGENT_IMAGE" ] || die "cannot read the image of deploy/rag-agent"
-    team_pki "$t"
-    team_inputs "$t"
+    team_pki "$team_dir"
+    team_inputs "$team_dir"
     set -- $(kind_net)
     sed -e "s#@APP_NS@#$APP_NS#g" -e "s#@NODE_IP@#$2#g" -e "s#@AGENT_IMAGE@#$AGENT_IMAGE#g" \
         -e "s#@FAKE_UID@#$(uid_for fake-splunk)#g" -e "s#@INTRUDER_UID@#$(uid_for intruder)#g" \
         "$HERE/kind-splunk.yaml" > "$STATE/render/splunk.yaml"
     k apply -f "$STATE/render/splunk.yaml" > "$STATE/logs/apply-splunk.log"
-    k -n owui-splunk create secret tls fake-splunk-tls --cert="$t/fake-splunk.crt" --key="$t/fake-splunk.key" \
+    k -n owui-splunk create secret tls fake-splunk-tls --cert="$team_dir/fake-splunk.crt" --key="$team_dir/fake-splunk.key" \
         --dry-run=client -o yaml | k apply -f - >/dev/null
-    k -n owui-splunk create secret generic fake-splunk-token --from-file="$t/splunk-mcp-token" \
+    k -n owui-splunk create secret generic fake-splunk-token --from-file="$team_dir/splunk-mcp-token" \
         --dry-run=client -o yaml | k apply -f - >/dev/null
     k -n owui-splunk create configmap fake-splunk-code --from-file="$REPO/tests/fake_splunk_mcp.py" \
         --from-file="$REPO/scripts/ci/fake_splunk_mcp_server.py" --dry-run=client -o yaml | k apply -f - >/dev/null
     # Site procedure step 4: the gateway Secret, and Open WebUI's own LiteLLM key beside a shared one.
-    k -n "$APP_NS" create secret generic rag-splunk-gateway --from-file="$t/splunk-mcp-token" \
-        --from-file="$t/bearer-secret" --dry-run=client -o yaml | k apply -f - >/dev/null
-    k -n "$APP_NS" create secret generic rag-owui-team-llm --from-file="$t/openwebui-llm-api-key" \
-        --from-file="$t/api-key" --dry-run=client -o yaml | k apply -f - >/dev/null
-    k -n "$APP_NS" create configmap rag-owui-team-ca --from-file="$t/ca-bundle.crt" \
+    k -n "$APP_NS" create secret generic rag-splunk-gateway --from-file="$team_dir/splunk-mcp-token" \
+        --from-file="$team_dir/bearer-secret" --dry-run=client -o yaml | k apply -f - >/dev/null
+    k -n "$APP_NS" create secret generic rag-owui-team-llm --from-file="$team_dir/openwebui-llm-api-key" \
+        --from-file="$team_dir/api-key" --dry-run=client -o yaml | k apply -f - >/dev/null
+    k -n "$APP_NS" create configmap rag-owui-team-ca --from-file="$team_dir/ca-bundle.crt" \
         --dry-run=client -o yaml | k apply -f - >/dev/null
     k -n owui-splunk rollout status deploy/fake-splunk --timeout=300s
     k -n "$APP_NS" wait --for=condition=Ready pod/team-tools-intruder --timeout=300s >/dev/null
     start_forwards
     # Site procedure step 6: the team group's id (v0.13.4 matches tool-server grants by id only).
     gid=$($PYH group-id "$STATE" "$TEAM_GROUP") || die "cannot read the id of group $TEAM_GROUP"
-    team_values "$t" "$AGENT_IMAGE" "$gid" > "$t/values.json"
-    TEAM_VALUES="$t/values.json" render_chart "$STATE/render-team"
-    check_team_render "$STATE/render-team" "$t" "$AGENT_IMAGE"
+    team_values "$team_dir" "$AGENT_IMAGE" "$gid" > "$team_dir/values.json"
+    TEAM_VALUES="$team_dir/values.json" render_chart "$STATE/render-team"
+    check_team_render "$STATE/render-team" "$team_dir" "$AGENT_IMAGE"
     # Site procedure step 7 (enable), as the chart renders it.
     k apply -f "$STATE/render-team/openwebui.yaml" > "$STATE/logs/apply-team.log"
     k -n "$APP_NS" rollout status deploy/rag-openwebui --timeout=900s

@@ -102,7 +102,7 @@ gateway pod as it excludes Open WebUI. Step 9's admin step is done through the a
 | tool call | Open WebUI's `MCPClient` in its container, url and expanded key from its own `TOOL_SERVER_CONNECTIONS`: rows, framed as untrusted, redacted |
 | Team model chat | the team user's completion answers (the own key, the CA bundle and the model egress rule reach LiteLLM; with `model_ids` set, the listing above never asks LiteLLM); the docs user's is refused (v0.13.4: 400 "Model not found") |
 | closed surfaces | the proxy's own 403 for the tool-server, connection and task APIs and the tool routes beyond the listing; only the repository's Functions; a user cannot create a model |
-| network | a pod outside Open WebUI cannot reach the gateway (pod IP and Service) but reaches LiteLLM (control); Open WebUI reaches the gateway and LiteLLM, not Splunk; the gateway reaches Splunk, not LiteLLM, the agent, the API server or a public address |
+| network | a pod outside Open WebUI cannot reach the gateway (pod IP and Service) but reaches LiteLLM (control); Open WebUI reaches the gateway and LiteLLM, not Splunk; the gateway reaches Splunk, not LiteLLM, the agent or the API server (a public address is the runner gate's) |
 | log canary | no MCP token, bearer secret or own key value in the gateway, fake Splunk or Open WebUI logs |
 
 Not automated (site checks, [deploy.md step 9](deploy.md#splunk-gateway-deploy)): the admin UI

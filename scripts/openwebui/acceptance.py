@@ -527,8 +527,8 @@ class Acceptance:
             "gateway->fake-splunk:reachable": run(gateway, "reachable", splunk),
             "gateway->litellm:blocked": run(gateway, "blocked", "test-gateway:4000"),
             "gateway->agent:blocked": run(gateway, "blocked", "rag-agent:8080"),
-            # The lane's default-deny egress no longer selects the gateway: its own policy must hold.
-            "gateway->public:blocked": run(gateway, "blocked", "1.1.1.1:443"),
+            # The lane's default-deny egress no longer selects the gateway: its own policy must hold
+            # in the cluster (a public address is also refused by the runner's gate, so it proves nothing).
             "gateway->kubernetes-api:blocked": run(gateway, "blocked", "kubernetes.default.svc:443"),
         }
 
@@ -537,10 +537,18 @@ class Acceptance:
         team = os.path.join(self.state, "team")
         canaries = {name: read_text(os.path.join(team, name)).strip()
                     for name in ("splunk-mcp-token", "bearer-secret", "openwebui-llm-api-key")}
-        logs = {"gateway": logs_of("deploy/rag-splunk-gateway"),
-                "fake-splunk": logs_of("deploy/fake-splunk", ns="owui-splunk"),
-                "openwebui-pod": logs_of(pod_info()["name"])}
+        logs, unread = {}, []
+        for label, target, ns in (("gateway", "deploy/rag-splunk-gateway", NS),
+                                  ("fake-splunk", "deploy/fake-splunk", "owui-splunk"),
+                                  ("openwebui-pod", pod_info()["name"], NS)):
+            proc = kc("logs", target, "--all-containers", "--tail=-1", ns=ns)
+            if proc.returncode != 0:
+                unread.append(label)  # an error message is not a scanned log
+            logs[label] = proc.stdout.decode("utf-8", "replace")
         verdict = checks.scan_logs(logs, canaries)
+        if unread:
+            verdict.ok = False
+            verdict.detail["unreadable"] = unread
         verdict.name = "team-log-canary"
         return verdict
 

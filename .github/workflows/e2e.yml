@@ -1542,12 +1542,11 @@ jobs:
           done
           /usr/local/bin/kubectl -n "$NS" get pods,pvc,svc,networkpolicy -o wide > diagnostics/openwebui/workloads.txt 2>&1 || true
           /usr/local/bin/kubectl -n "$NS" describe deploy/rag-openwebui > diagnostics/openwebui/describe-rag-openwebui.txt 2>&1 || true
-          # Team-tools phase (#1077): its verdicts, the re-render (no secret values: check_team_render) and
-          # the gateway's and fake Splunk's logs (decision lines and status codes only).
+          # Team-tools phase (#1077): its verdicts and the gateway's and fake Splunk's logs (decision lines
+          # and status codes only). Not the re-render: it carries the run's CA certificate.
           for f in logs/team-tools.json logs/apply-splunk.log logs/apply-team.log; do
             test ! -f "$OWUI_STATE/$f" || cp "$OWUI_STATE/$f" "diagnostics/openwebui/$(basename "$f")"
           done
-          test ! -f "$OWUI_STATE/render-team/openwebui.yaml" || cp "$OWUI_STATE/render-team/openwebui.yaml" diagnostics/openwebui/team-openwebui.yaml
           /usr/local/bin/kubectl -n "$NS" logs deploy/rag-splunk-gateway --all-containers --tail=200 > diagnostics/openwebui/splunk-gateway.log 2>&1 || true
           /usr/local/bin/kubectl -n owui-splunk logs deploy/fake-splunk --tail=200 > diagnostics/openwebui/fake-splunk.log 2>&1 || true
           /usr/local/bin/kubectl -n owui-splunk get pods,svc -o wide > diagnostics/openwebui/owui-splunk.txt 2>&1 || true

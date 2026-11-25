@@ -469,7 +469,7 @@ def check_team_model_row(status: int, row: dict | None, group_id: str) -> Verdic
     row = row or {}
     grants = sorted((g.get("principal_type"), g.get("principal_id"), g.get("permission"))
                     for g in row.get("access_grants") or [])
-    ok = (status == 200 and row.get("base_model_id") is None
+    ok = (bool(group_id) and status == 200 and row.get("base_model_id") is None
           and _tool_ids({"info": row}) == [TEAM_TOOL_ID]
           and (row.get("params") or {}).get("function_calling") == "native"
           and grants == [("group", group_id, "read")])

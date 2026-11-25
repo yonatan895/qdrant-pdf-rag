@@ -2692,7 +2692,8 @@ procedure closes #1077's "site procedure for the service-account role" item.
    Native function calling is the model's default, not a lock (accepted by the
    maintainer, 2026-11-25): in v0.13.4 a request's `params.function_calling` wins over
    the model's (`main.py`), and the chat's own advanced parameters can send it (the
-   exact menu is a site check; the web UI is not in the image the source was read from). With `legacy` Open WebUI selects tools by prompt instead: one more
+   exact menu is a site check). With `legacy` Open WebUI selects tools by prompt
+   instead: one more
    completion to the Team model for each message (the task model falls back to the
    chat model, `TASK_MODEL_EXTERNAL` being empty), which carries the tool
    descriptions and the conversation, and a tool call parsed from text. What Splunk
@@ -2712,8 +2713,10 @@ procedure closes #1077's "site procedure for the service-account role" item.
      (whether the chat preselects the tool is a site check; otherwise enable it in
      the chat's tool menu);
    - non-team user: neither the Team model nor `server:mcp:splunk` is listed;
-   - both: every Docs model entry has no `toolIds`, and a Docs chat's tool menu is
-     empty.
+   - both: every Docs model entry has no `toolIds`; for the non-team user a Docs
+     chat's tool menu is empty. A team user can still pick the Splunk tool in a Docs
+     chat's tool menu (v0.13.4 lists tools by grant, not by model, and does not refuse
+     a tool for the Pipe): what that chat does is a site check.
 
    Any other result means a grant is wrong: fix the group id (step 6) or the
    model's access, and check again. The Kind `openwebui` lane runs the same checks
