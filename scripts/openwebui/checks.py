@@ -416,6 +416,7 @@ def check_rollback_on(before: dict, after: dict, repo_sha256: str, next_chat_ok:
 
 
 # ------------------------------------------------------------------ team tools (#1077, ADR-0010 T4)
+RATING_ACTION = "mainframe_rag_rating"  # provision_pipe.py ACTION_ID (with ratings on)
 TEAM_TOOL_ID = "server:mcp:splunk"  # the chart's TOOL_SERVER_CONNECTIONS entry (info.id splunk)
 TEAM_MODEL_PREFIX = "team."  # OPENAI_API_CONFIGS prefix_id
 
@@ -454,8 +455,9 @@ def _tool_ids(model: dict) -> list:
 
 
 def check_team_model_admin_only(team_user_models: list[dict], admin_models: list[dict], team_model: str) -> Verdict:
-    """Before the admin step, the connection model exists (Open WebUI listed it from LiteLLM with its own
-    key, through the CA bundle and the egress policy) and only admins see it."""
+    """Before the admin step, the connection model exists and only admins see it. With model_ids set,
+    v0.13.4 lists the connection's models without asking LiteLLM, so this proves the registration, not
+    the key or the path (check_team_chat does)."""
     ok = team_model in _ids(admin_models) and team_model not in _ids(team_user_models)
     return _v("team-model-admin-only-before-grant", ok, admin_sees=team_model in _ids(admin_models),
               team_user_sees=team_model in _ids(team_user_models))
@@ -520,20 +522,22 @@ def check_tool_call(result: dict, templates: list[str]) -> Verdict:
 
 def check_team_chat(team: dict, docs_status: int) -> Verdict:
     """The Team model answers the team user through LiteLLM with Open WebUI's own key (the shared api-key
-    beside it is no LiteLLM key), and the docs user cannot use it."""
+    beside it is no LiteLLM key), through the CA bundle and the model egress rule; the docs user cannot use
+    it (v0.13.4 answers a failed model-access check with 400 "Model not found")."""
     ok = (team.get("completion_status") == 200 and team.get("content_chars", 0) > 0 and bool(team.get("done_frame"))
-          and docs_status in (401, 403, 404))
+          and docs_status in (400, 401, 403, 404))
     return _v("team-model-chat", ok, team_status=team.get("completion_status"),
               team_content_chars=team.get("content_chars"), team_done=team.get("done_frame"), docs_status=docs_status)
 
 
 def check_t4_closed(proxy: dict[str, str], function_ids: list[str], user_model_create: int) -> Verdict:
     """ADR-0010 T4, unchanged surfaces with team tools on: the proxy still answers its own 403 for the
-    tool-server, connection and task APIs and the tool routes beyond the listing; the docs Pipe is the
-    only Function; a user cannot create a model."""
+    tool-server, connection and task APIs and the tool routes beyond the listing; the only Functions are
+    the repository's (the docs Pipe, and the rating Action when ratings are on); a user cannot create a
+    model."""
     open_paths = sorted(path for path, result in proxy.items() if result != "proxy-403")
-    ok = (bool(proxy) and not open_paths and function_ids == [DOCS_FUNCTION]
-          and user_model_create in (401, 403))
+    ok = (bool(proxy) and not open_paths and DOCS_FUNCTION in function_ids
+          and set(function_ids) <= {DOCS_FUNCTION, RATING_ACTION} and user_model_create in (401, 403))
     return _v("t4-closed-surfaces", ok, paths=len(proxy), not_refused=open_paths, functions=function_ids,
               user_model_create=user_model_create)
 

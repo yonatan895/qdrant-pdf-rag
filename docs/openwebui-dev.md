@@ -100,8 +100,9 @@ gateway pod as it excludes Open WebUI. Step 9's admin step is done through the a
 | T4 models and tools | the team user lists the Docs models and the Team model with `server:mcp:splunk`; the docs user lists the Docs models only; no Docs model has a tool; `/api/v1/tools/` lists the tool server for the team user only |
 | MCP handshake | `/api/v1/tools/id/server:mcp:splunk/specs` from inside the pod (Open WebUI's own `connect_mcp_server`): the two templates for the team user, 404 for the docs user |
 | tool call | Open WebUI's `MCPClient` in its container, url and expanded key from its own `TOOL_SERVER_CONNECTIONS`: rows, framed as untrusted, redacted |
-| Team model chat | the team user's completion answers (so the own key reached LiteLLM); the docs user's is refused |
-| network | a pod outside Open WebUI cannot reach the gateway (pod IP and Service) but reaches LiteLLM (control); Open WebUI reaches the gateway and LiteLLM, not Splunk; the gateway reaches Splunk, not LiteLLM or the agent |
+| Team model chat | the team user's completion answers (the own key, the CA bundle and the model egress rule reach LiteLLM; with `model_ids` set, the listing above never asks LiteLLM); the docs user's is refused (v0.13.4: 400 "Model not found") |
+| closed surfaces | the proxy's own 403 for the tool-server, connection and task APIs and the tool routes beyond the listing; only the repository's Functions; a user cannot create a model |
+| network | a pod outside Open WebUI cannot reach the gateway (pod IP and Service) but reaches LiteLLM (control); Open WebUI reaches the gateway and LiteLLM, not Splunk; the gateway reaches Splunk, not LiteLLM, the agent, the API server or a public address |
 | log canary | no MCP token, bearer secret or own key value in the gateway, fake Splunk or Open WebUI logs |
 
 Not automated (site checks, [deploy.md step 9](deploy.md#splunk-gateway-deploy)): the admin UI

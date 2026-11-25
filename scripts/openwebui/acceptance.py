@@ -527,6 +527,9 @@ class Acceptance:
             "gateway->fake-splunk:reachable": run(gateway, "reachable", splunk),
             "gateway->litellm:blocked": run(gateway, "blocked", "test-gateway:4000"),
             "gateway->agent:blocked": run(gateway, "blocked", "rag-agent:8080"),
+            # The lane's default-deny egress no longer selects the gateway: its own policy must hold.
+            "gateway->public:blocked": run(gateway, "blocked", "1.1.1.1:443"),
+            "gateway->kubernetes-api:blocked": run(gateway, "blocked", "kubernetes.default.svc:443"),
         }
 
     def team_log_scan(self) -> checks.Verdict:

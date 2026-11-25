@@ -2274,6 +2274,8 @@ def test_validate_reports_the_splunk_gateway_selection(tree):
     ({"SPLUNK_GATEWAY_ENABLED": "maybe"}, "SPLUNK_GATEWAY_ENABLED must be true/false"),
     ({"SPLUNK_GATEWAY_AUTH_MODE": "mtls"}, "SPLUNK_GATEWAY_AUTH_MODE must be oidc or bearer"),
     ({"SPLUNK_GATEWAY_SECRET": ""}, "required inputs are missing: SPLUNK_GATEWAY_SECRET."),
+    # The Team model's own key lives in this Secret (ADR-0010 TD3): no Secret, no enable.
+    ({"GATEWAY_API_KEY_SECRET": ""}, "required inputs are missing: GATEWAY_API_KEY_SECRET."),
     ({"SPLUNK_GATEWAY_AUTH_MODE": "oidc"}, "required inputs are missing: SPLUNK_GATEWAY_IDP_EGRESS_CIDRS."),
     ({"SPLUNK_GATEWAY_CA_FILE": "/nonexistent/site-ca.pem"}, "SPLUNK_GATEWAY_CA_FILE is unreadable"),
     ({"TEAM_TOOLS_GROUP_ID": "splunk-team"}, "TEAM_TOOLS_GROUP_ID must be an Open WebUI group id"),

@@ -1105,8 +1105,8 @@ def test_the_tool_call_needs_the_expanded_key_framed_redacted_rows():
 
 def test_the_team_model_answers_the_team_user_and_refuses_the_docs_user():
     team = {"completion_status": 200, "content_chars": 12, "done_frame": True}
+    assert checks.check_team_chat(team, 400).ok  # v0.13.4: a failed model-access check is 400 "Model not found"
     assert checks.check_team_chat(team, 403).ok
-    assert checks.check_team_chat(team, 404).ok
     assert not checks.check_team_chat(team, 200).ok
     assert not checks.check_team_chat({**team, "completion_status": 401}, 403).ok  # a key LiteLLM refused
     assert not checks.check_team_chat({**team, "content_chars": 0}, 403).ok
@@ -1115,6 +1115,8 @@ def test_the_team_model_answers_the_team_user_and_refuses_the_docs_user():
 def test_t4_surfaces_stay_closed_with_team_tools_on():
     closed = {"/api/v1/configs/tool_servers": "proxy-403", "/api/v1/tasks/config/update": "proxy-403"}
     assert checks.check_t4_closed(closed, [checks.DOCS_FUNCTION], 401).ok
+    assert checks.check_t4_closed(closed, [checks.DOCS_FUNCTION, checks.RATING_ACTION], 401).ok
+    assert not checks.check_t4_closed(closed, [checks.RATING_ACTION], 401).ok
     assert not checks.check_t4_closed({**closed, "/openai/config/update": "HTTP 200"}, [checks.DOCS_FUNCTION], 401).ok
     assert not checks.check_t4_closed(closed, [checks.DOCS_FUNCTION, "community_tool"], 401).ok
     assert not checks.check_t4_closed(closed, [checks.DOCS_FUNCTION], 200).ok  # a user created a model

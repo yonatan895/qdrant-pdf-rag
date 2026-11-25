@@ -2691,8 +2691,8 @@ procedure closes #1077's "site procedure for the service-account role" item.
 
    Native function calling is the model's default, not a lock (accepted by the
    maintainer, 2026-11-25): in v0.13.4 a request's `params.function_calling` wins over
-   the model's, and a user can pick Chat Controls > Advanced Params > Function Calling
-   in the chat. With `legacy` Open WebUI selects tools by prompt instead: one more
+   the model's (`main.py`), and the chat's own advanced parameters can send it (the
+   exact menu is a site check; the web UI is not in the image the source was read from). With `legacy` Open WebUI selects tools by prompt instead: one more
    completion to the Team model for each message (the task model falls back to the
    chat model, `TASK_MODEL_EXTERNAL` being empty), which carries the tool
    descriptions and the conversation, and a tool call parsed from text. What Splunk

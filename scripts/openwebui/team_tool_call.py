@@ -26,6 +26,20 @@ def rows_in(text):
     return None
 
 
+def describe(exc, depth=0):
+    """The exception's class and where it was raised, then its causes and group members (never str(exc))."""
+    tb = exc.__traceback__
+    while tb is not None and tb.tb_next is not None:
+        tb = tb.tb_next
+    where = f"{os.path.basename(tb.tb_frame.f_code.co_filename)}:{tb.tb_lineno}" if tb is not None else "?"
+    parts = [f"{type(exc).__name__}@{where}"]
+    if depth < 4:
+        for inner in list(getattr(exc, "exceptions", ()))[:3] + [exc.__cause__ or exc.__context__]:
+            if inner is not None:
+                parts.append("<" + describe(inner, depth + 1) + ">")
+    return " ".join(parts)
+
+
 async def main():
     out = {}
     try:
@@ -45,8 +59,8 @@ async def main():
         text = "\n".join(str(item.get("text", "")) for item in items if isinstance(item, dict))
         out.update(rows=rows_in(text), framed=FRAME in text, redacted="[REDACTED]" in text,
                    raw_secret_seen="hunter2" in text)
-    except Exception as exc:  # noqa: BLE001 - the class only, never the text
-        out["error"] = type(exc).__name__
+    except Exception as exc:  # noqa: BLE001 - classes and places only, never the text
+        out["error"] = describe(exc)
     print("TEAM_TOOL_CALL " + json.dumps(out, sort_keys=True), flush=True)
 
 
