@@ -1,0 +1,86 @@
+{
+  "gateway": "splunk",
+  "auth": {
+    "issuer": "https://idp.example.test/adfs",
+    "audience": "urn:team-tools:splunk",
+    "jwks_url": "https://idp.example.test/adfs/discovery/keys",
+    "allowed_groups": [
+      "team-example"
+    ]
+  },
+  "limits": {
+    "rate_per_minute": 30,
+    "max_concurrent_per_user": 1,
+    "tool_timeout_s": 60
+  },
+  "backend": {
+    "base_url": "https://splunk.example.test:8089",
+    "ca_file": "/etc/pki/site-ca/ca-bundle.pem",
+    "timeout_s": 50,
+    "mcp_path": "/services/mcp",
+    "tool_name": "splunk_run_query",
+    "query_argument": "query",
+    "result_source": "auto",
+    "result_path": [
+      "results"
+    ],
+    "search_prefix": true,
+    "attribution_comment": true,
+    "max_rows": 100,
+    "max_window_s": 604800,
+    "allowed_indexes": [
+      "app_test",
+      "batch_test"
+    ],
+    "templates": [
+      {
+        "name": "errors_by_host",
+        "description": "Error and warning counts per host in the application test index.",
+        "indexes": [
+          "app_test"
+        ],
+        "search": "sourcetype=\"app:log\" host=\"{host}\" level=\"{level}\" | stats count by host, level",
+        "params": {
+          "host": {
+            "type": "identifier",
+            "description": "Host name, for example web-01"
+          },
+          "level": {
+            "type": "enum",
+            "values": [
+              "ERROR",
+              "WARN"
+            ],
+            "default": "ERROR"
+          }
+        },
+        "max_window_s": 86400,
+        "default_earliest": "-1h"
+      },
+      {
+        "name": "job_runs",
+        "description": "Recent runs of one batch job, newest first.",
+        "index_param": "index",
+        "search": "job=\"{job}\" | where duration_s > {min_duration_s} | sort - _time | table _time job status duration_s",
+        "params": {
+          "index": {
+            "type": "index",
+            "description": "Which index to search"
+          },
+          "job": {
+            "type": "identifier",
+            "description": "Batch job name"
+          },
+          "min_duration_s": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 0
+          }
+        },
+        "default_earliest": "-24h",
+        "default_rows": 50
+      }
+    ]
+  }
+}
