@@ -2096,26 +2096,12 @@ def test_team_tools_sizing_defaults_mirror_the_chart_values():
 
 
 
-def test_team_tools_refuse_the_idp_ca_beside_the_site_ca_bundle(monkeypatch, mapper_env, tmp_path):
-    """With GATEWAY_CA_CONFIGMAP, Open WebUI trusts that complete bundle to reach
-    LiteLLM; a second trust file for the IdP is refused (one SSL_CERT_FILE)."""
-    idp, _key = _real_ca(tmp_path, "idp-ca")
-    idp_file = tmp_path / "idp-ca.pem"
-    idp_file.write_text(idp, encoding="utf-8")
-    _splunk_env(monkeypatch, tmp_path, GATEWAY_CA_CONFIGMAP="site-ca", OPENWEBUI_IDP_CA_FILE=str(idp_file))
-    r, out = mapper_env()
-    assert r.returncode != 0 and not out.exists()
-    assert "put the IdP CA into it and leave OPENWEBUI_IDP_CA_FILE unset" in r.stderr
-    monkeypatch.delenv("OPENWEBUI_IDP_CA_FILE")
-    r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
-
-
 def test_team_tools_timeout_defaults_are_the_gateways_own():
     """The mapper's timeout rule uses the gateway's defaults; a changed default
     in the gateway must fail here, not drift."""
-    from mainframe_rag.gateways import splunk
     from scripts.airgap import model_config
 
-    assert model_config.SPLUNK_BACKEND_TIMEOUT_DEFAULT == splunk.SplunkBackend.__dataclass_fields__["timeout_s"].default
-    assert model_config.SPLUNK_TOOL_TIMEOUT_DEFAULT == splunk.LIMIT_DEFAULTS["tool_timeout_s"]
+    from mainframe_rag.gateways import splunk
+
+    assert splunk.SplunkBackend.__dataclass_fields__["timeout_s"].default == model_config.SPLUNK_BACKEND_TIMEOUT_DEFAULT
+    assert splunk.LIMIT_DEFAULTS["tool_timeout_s"] == model_config.SPLUNK_TOOL_TIMEOUT_DEFAULT

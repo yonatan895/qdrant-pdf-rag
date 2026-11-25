@@ -2489,8 +2489,9 @@ without them.
     `GATEWAY_API_KEY_SECRET` (TD3). When the shared key `GATEWAY_API_KEY_SECRET_KEY`
     is set, that key wins, and Open WebUI then uses the shared key. When LiteLLM's
     certificate comes from the site CA (`GATEWAY_CA_CONFIGMAP`), Open WebUI trusts that
-    complete bundle (`SSL_CERT_FILE`, as the agent does); `OPENWEBUI_IDP_CA_FILE` is
-    then refused, and the IdP CA goes into the same bundle.
+    complete bundle (`SSL_CERT_FILE`, as the agent does). `OPENWEBUI_IDP_CA_FILE` is
+    then refused when the chart renders (in `airgap:deploy`, before any cluster change;
+    `airgap:validate` does not render the chart), and the IdP CA goes into the same bundle.
   - `ENABLE_TOOL_SERVERS=true` and `TOOL_SERVER_CONNECTIONS` with one MCP entry,
     `http://rag-splunk-gateway:8080/mcp`, id `splunk` (tool id `server:mcp:splunk`).
     In bearer mode it sends the bearer secret, which the chart fills in from the
