@@ -637,7 +637,8 @@ failure is a start-up error naming the template's position:
   (subsearches search outside the index clause);
 - no `index`, `earliest`, `latest`, `_index_earliest`, `_index_latest`,
   `starttime`, `endtime`, `starttimeu`, `endtimeu`, `timeformat`,
-  `searchtimespan*`, `savedsearch` or `eventtype` followed by `=`, `!=`,
+  `searchtimespan*`, `daysago`, `hoursago`, `minutesago`, `monthsago` (also with
+  `start` or `end` in front), `savedsearch` or `eventtype` followed by `=`, `!=`,
   `<`, `>`, `::` or `IN`, in any case, quoted or not;
 - no command after a pipe from this list: `collect`, `mcollect`,
   `meventcollect`, `tscollect`, `outputlookup`, `outputcsv`, `outputtext`,

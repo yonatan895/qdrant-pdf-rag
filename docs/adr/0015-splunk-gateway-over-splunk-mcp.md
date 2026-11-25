@@ -114,8 +114,9 @@ documentation.
    `python -m mainframe_rag.gateways.splunk --site-probe` runs in the gateway
    pod with the gateway's configuration. It prints a text-free receipt (the
    shared probe receipt rules) and one site-private block of schemas and
-   key/type shapes. The probe never prints the token, a row, a value, an
-   index name or a query.
+   key/type shapes. The probe never prints the token, a row, a field value,
+   an index name or a query; its only numbers from site data are 0-or-1
+   event counts.
 6. **D6, TD5 attribution as an SPL comment, with an off switch.** Each
    search ends with an SPL inline comment (Splunk's triple-backtick syntax)
    holding `mfr sub_hash=<16 hex> req=<request id>`. Whether the run-query guardrail accepts a comment

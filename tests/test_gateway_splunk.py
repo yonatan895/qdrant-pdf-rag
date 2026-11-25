@@ -398,6 +398,10 @@ def test_the_shipped_example_configuration_loads_and_names_only_synthetic_target
     ('host="h" earliest=-30d', "may not name an index or a time bound"),
     ('host="h" Latest=+1d', "may not name an index or a time bound"),
     ('host="h" _index_earliest=-1y', "may not name an index or a time bound"),
+    ('host="h" searchtimespanmonths=30', "may not name an index or a time bound"),
+    ('host="h" daysago=400', "may not name an index or a time bound"),
+    ('host="h" startmonthsago=CANARYIDX', "may not name an index or a time bound"),
+    ('host="h" EndHoursAgo = 1', "may not name an index or a time bound"),
     ('host="h" [search sourcetype=CANARYIDX | fields host]', "may not use a subsearch"),
     ('host="h" `CANARYIDX_macro`', "may not use backticks"),
     ('host="h" ```CANARYIDX```', "may not use backticks"),
@@ -663,6 +667,21 @@ def test_any_accepted_value_stays_inside_its_quotes(value: str):
     assert spl == reference.replace('host="h"', f'host="{value}"')
     for char in '"|[]`\\= \n':
         assert spl.count(char) == reference.count(char)
+
+
+
+def test_advertised_patterns_are_anchored_like_the_gateway_check(tmp_path: Path):
+    """JSON Schema's pattern is a search, the gateway's a full match: the
+    advertised patterns are anchored so a client-side check agrees."""
+    gateway = _gateway(tmp_path, FakeSplunkMcp())
+    tools = _post(gateway.app, [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}],
+                  {"Authorization": f"Bearer {BEARER}"})[0].json()["result"]["tools"]
+    props = tools[0]["inputSchema"]["properties"]
+    for name, bad in (("host", 'x"y'), ("earliest", "xnow"), ("latest", "now|delete")):
+        pattern = props[name]["pattern"]
+        assert pattern.startswith("^") and pattern.endswith("$")
+        assert re.search(pattern, bad) is None
+    assert re.search(props["earliest"]["pattern"], "-7d@d")
 
 
 # --- the MCP client: 2025-06-18 Streamable HTTP ------------------------------------------------------
@@ -936,6 +955,8 @@ def _check(gateway: splunk.Gateway) -> splunk.BackendReport:
     ([{"name": "splunk_run_query", "inputSchema": {"type": "object", "properties": {"q": {}}}}], {},
      "query_argument_missing"),
     ([{"name": "splunk_run_query", "inputSchema": "none"}], {}, "tool_schema_unreadable"),
+    ([{"name": "splunk_run_query", "inputSchema": {"type": "object", "properties": {"query": {}},
+                                                   "required": [["query"]]}}], {}, "tool_schema_unreadable"),
     ([RUN_QUERY_TOOL], {"extra_arguments": {"row_limit": 10}}, "extra_argument_missing"),
     ([{"name": "splunk_run_query", "inputSchema": {"type": "object", "properties": {"query": {}, "earliest_time": {}},
                                                    "required": ["query", "earliest_time"]}}], {},

@@ -119,8 +119,9 @@ RESULT_SOURCES: Final = ("auto", "structured", "text_json", "text")
 # is the boundary.
 _TIME_OR_INDEX_RE: Final = re.compile(
     r"(?i)(?<![A-Za-z0-9_.])(?:index|earliest|latest|_index_earliest|_index_latest"
-    r"|starttime|endtime|starttimeu|endtimeu|timeformat|searchtimespandays"
-    r"|searchtimespanhours|searchtimespanminutes|savedsearch|eventtype)\s*(?:!=|=|<|>|::|in\b)"
+    r"|starttime|endtime|starttimeu|endtimeu|timeformat|searchtimespan[a-z]*"
+    r"|(?:start|end)?(?:days|hours|minutes|months)ago|savedsearch|eventtype)"
+    r"\s*(?:!=|=|<|>|::|in\b)"
 )
 _COMMAND_RE: Final = re.compile(r"\|\s*([A-Za-z_][A-Za-z0-9_]*)")
 REFUSED_COMMANDS: Final = frozenset(
@@ -230,7 +231,8 @@ class Param:
         if self.kind == "integer":
             prop = {"type": "integer", "minimum": self.minimum, "maximum": self.maximum}
         elif self.kind == "identifier":
-            prop = {"type": "string", "pattern": _IDENTIFIER_RE.pattern, "maxLength": 64}
+            # Anchored: JSON Schema's pattern is a search; the gateway full-matches.
+            prop = {"type": "string", "pattern": f"^{_IDENTIFIER_RE.pattern}$", "maxLength": 64}
         else:
             prop = {"type": "string", "enum": list(self.values)}
         description = self.description
@@ -1002,7 +1004,7 @@ def tool_check(backend: SplunkBackend, tools: Sequence[Mapping[str, Any]]) -> st
     if set(backend.extra_arguments) - set(props):
         return "extra_argument_missing"
     required = schema.get("required", []) if isinstance(schema, dict) else []
-    if not isinstance(required, list):
+    if not isinstance(required, list) or not all(isinstance(r, str) for r in required):
         return "tool_schema_unreadable"
     if set(required) - {backend.query_argument} - set(backend.extra_arguments):
         return "required_argument_unset"
@@ -1122,7 +1124,7 @@ def shape(value: object, depth: int = 0) -> object:
 
 
 def _time_schema(description: str) -> dict[str, Any]:
-    return {"type": "string", "pattern": _TIME_PATTERN, "maxLength": 16, "description": description}
+    return {"type": "string", "pattern": f"^(?:{_TIME_PATTERN})$", "maxLength": 16, "description": description}
 
 
 def template_schema(backend: SplunkBackend, template: Template) -> dict[str, Any]:
