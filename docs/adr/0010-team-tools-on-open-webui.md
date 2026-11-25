@@ -30,8 +30,12 @@
   pending. Open WebUI v0.13.4 cannot create a model from the environment,
   so creating the Team model and setting `function_calling: native` is an
   admin step. Tool-server and model grants name the team group by its Open
-  WebUI group id. T4's acceptance checks (below) are not run yet: no Kind
-  lane exercises the registration. The decisions below are unchanged.
+  WebUI group id. The Kind `openwebui` lane's team-tools step runs T4's
+  acceptance checks as far as Kind can, in bearer mode against a fake Splunk
+  (first green: e2e run 45617269274, 2026-11-25;
+  [team tools](../openwebui-dev.md#team-tools-lane)); the multi-turn TD8 trace
+  with a model-driven tool call, TD6 and oidc mode are not run. The decisions
+  below are unchanged.
 - **Context:**
   - ADR-0007 deferred team tools (Splunk, GitLab, mail) to their own ADR,
     "likely on a separate instance", and fixed the rule "this instance holds
