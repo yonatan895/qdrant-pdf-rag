@@ -310,7 +310,9 @@ def _worst_point(i: int, dim: int, nnz: int = 64) -> models.PointStruct:
                 indices=[4294967295 - k for k in range(nnz)], values=[_WORST_FLOATS[1]] * nnz
             ),
         },
-        payload={"doc_id": f"D{i}", "text": _MIXED_TEXT * 20, "page_start": i},
+        # Floats in 1e-05..1e-04 serialize as 0.00001 (longer than Python's
+        # json module writes them): the payload is sized by the client's encoder.
+        payload={"doc_id": f"D{i}", "text": _MIXED_TEXT * 20, "page_start": i, "f": [1e-05] * 2000},
     )
 
 
@@ -380,11 +382,12 @@ def test_a_point_over_the_copy_budget_fails_closed_before_any_batch():
 class _CopyClient:
     """Scroll by offset over src; records every dst upsert (size, wait)."""
 
-    def __init__(self, points, dim):
+    def __init__(self, points, dim, trailing_empty_page=False):
         self.points = points
         self.dim = dim
+        self.trailing_empty_page = trailing_empty_page
         self.dst: dict[str, models.PointStruct] = {}
-        self.upserts: list[tuple[int, bool]] = []
+        self.upserts: list[tuple[int, int, bool]] = []
         self.created = False
 
     def collection_exists(self, name):
@@ -401,37 +404,40 @@ class _CopyClient:
         stored = self.points if name == "src" else list(self.dst.values())
         start = int(offset or 0)
         page = stored[start:start + limit]
+        if name == "src" and self.trailing_empty_page and page and start + limit == len(stored):
+            return page, str(start + limit)  # a non-None offset at an exact page boundary
         return page, (str(start + limit) if start + limit < len(stored) else None)
 
     def upsert(self, _name, *, points, wait=True):
-        self.upserts.append((len(points), wait))
+        self.upserts.append((len(points), _request_bytes(points), wait))
         self.dst.update({p.id: p for p in points})
 
 
+@pytest.mark.parametrize(("count", "trailing_empty_page"), [(250, False), (200, True)])
 @pytest.mark.parametrize("policy", [(1, 1, 1), (6, 3, 2)])
-def test_clone_sizes_each_request_by_bytes_and_keeps_the_barrier(policy):
+def test_clone_sizes_each_request_by_bytes_and_keeps_the_barrier(policy, count, trailing_empty_page):
     """Pages are read at ingest_scan_page_size and written in byte-bounded
-    requests; 1/1/1 pipelines all but the final request (#1298), any other
-    policy waits on every request; the id-set check still covers the copy."""
-    from mainframe_rag.ingest.qdrant_io import clone_collection, estimate_point_bytes
+    requests; 1/1/1 pipelines all but the final barrier (#1298, including a
+    single-point barrier after an empty trailing page), any other policy
+    waits on every request; the id-set check still covers the copy."""
+    from mainframe_rag.ingest.qdrant_io import clone_collection
 
     dim = 4096
     points = [
         models.PointStruct(id=f"00000000-0000-4000-8000-{i:012d}", vector={"dense": [0.0] * dim},
                            payload={"doc_id": "D"})
-        for i in range(250)
+        for i in range(count)
     ]
-    client = _CopyClient(points, dim)
+    client = _CopyClient(points, dim, trailing_empty_page)
     settings = _settings(dim=dim, ingest_scan_page_size=100, ingest_copy_request_bytes=1024 * 1024,
                          qdrant_shard_number=policy[0], qdrant_replication_factor=policy[1],
                          qdrant_write_consistency_factor=policy[2])
     clone_collection(client, settings, "src", "dst")
 
     assert set(client.dst) == {p.id for p in points}
-    per_point = estimate_point_bytes(points[0])
-    assert all(n * per_point <= 1024 * 1024 for n, _ in client.upserts)
-    assert len(client.upserts) > 3  # more requests than the three scan pages
-    waits = [w for _, w in client.upserts]
+    assert all(size <= 1024 * 1024 for _, size, _ in client.upserts)
+    assert len(client.upserts) > 3  # more requests than the scan pages
+    waits = [w for _, _, w in client.upserts]
     if policy == (1, 1, 1):
         assert waits[-1] is True and not any(waits[:-1])
     else:

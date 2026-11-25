@@ -361,9 +361,14 @@ def estimate_point_bytes(point: models.PointStruct) -> int:
     """Upper bound on one point's JSON size in an upsert request (issue
     #1379): the named vectors from their dimensions and sparse entry counts
     (worst-case number formatting, not the observed values), plus the
-    payload serialized with ASCII escapes, which is never shorter than the
-    transport's UTF-8 body."""
-    payload = len(json.dumps(point.payload, default=str)) if point.payload else 4
+    payload's UTF-8 bytes from the same pydantic serializer and options the
+    REST transport uses (Python's json module formats some floats shorter,
+    e.g. 1e-05 against 0.00001)."""
+    payload = (
+        len(point.model_dump_json(include={"payload"}, by_alias=True, exclude_none=True).encode("utf-8"))
+        if point.payload
+        else 4
+    )
     return _POINT_JSON_OVERHEAD + _vector_json_bound(point.vector) + payload
 
 
