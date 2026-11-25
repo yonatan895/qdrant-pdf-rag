@@ -10,6 +10,9 @@ items the Splunk documentation leaves open. It prints two things:
     was issued and whether initialize was answered as JSON or an event stream;
   - `splunk.startup_check`: the gateway's start-up verdict (the run-query tool
     and its arguments);
+  - `splunk.macros`: the start-up macro check (ADR-0015 D9): counts in the
+    receipt; per allowlisted macro, readable or not, the verdict code and the
+    nesting depth on the site-private line, never a definition;
   - `splunk.result_shape`: whether `| makeresults count=1` returns rows where
     `result_source` and `result_path` look, and whether the tool answered as
     JSON or an event stream;
@@ -41,12 +44,16 @@ from typing import Any
 
 from mainframe_rag.gateways.common import GatewayError, ToolContext, clean_text, sub_hash
 from mainframe_rag.gateways.splunk import (
+    BackendCheckError,
     Gateway,
     Template,
     UnsupportedProtocol,
+    assess_macros,
     attribution_comment,
     compose_spl,
+    enforce_macros,
     find_rows,
+    read_macro_definitions,
     shape,
     tool_check,
 )
@@ -57,6 +64,7 @@ PROBE = "splunk"
 CHECKS: tuple[str, ...] = (
     "splunk.initialize",
     "splunk.startup_check",
+    "splunk.macros",
     "splunk.result_shape",
     "splunk.comment",
     "splunk.search_prefix",
@@ -118,6 +126,7 @@ class _Probe:
         self.backend = gateway.backend
         self.receipt = Receipt(PROBE)
         self.detail: dict[str, object] = {}
+        self.tools: list[dict[str, Any]] = []
         self.ctx = ToolContext(
             gateway=PROBE,
             principal=_PRINCIPAL,
@@ -168,6 +177,7 @@ class _Probe:
         except GatewayError as exc:
             self.receipt.add(check, "fail", reason=exc.code)
             return False
+        self.tools = tools
         self.detail["tools"] = [clean_text(str(t.get("name")))[:128] for t in tools]
         tool = next((t for t in tools if t.get("name") == self.backend.tool_name), None)
         if tool is not None:
@@ -187,6 +197,42 @@ class _Probe:
             return True
         self.receipt.add(check, "fail", reason=reason, **facts)
         return False
+
+    async def macros(self) -> None:
+        """Per allowlisted macro, on the site-private line: whether its
+        definitions were readable, the check's verdict code and the deepest
+        nesting; never a definition. The receipt holds counts."""
+        check = "splunk.macros"
+        backend = self.backend
+        source = backend.macro_source
+        tool = next((t for t in self.tools if t.get("name") == source.tool_name), None)
+        if tool is not None:
+            self.detail["macro_tool_input_schema"] = _clean(tool.get("inputSchema"))
+        if not any(t.macros for t in backend.templates):
+            self.receipt.add(check, "pass", templates_with_macros=0, allowlisted=len(backend.allowed_macros))
+            return
+        defs = await read_macro_definitions(self.client, self.tools, self._deadline())
+        assessment = assess_macros(backend, defs)
+        self.detail["macros"] = {
+            name: {"readable": v.readable, "verdict": v.verdict, "depth": v.depth}
+            for name, v in assessment.verdicts.items()
+        }
+        facts: dict[str, object] = {
+            "allowlisted": len(backend.allowed_macros),
+            "definitions_read": defs is not None,
+            "checked_ok": sum(v.verdict == "ok" for v in assessment.verdicts.values()),
+            "failed": len(assessment.failures),
+            "allow_unverified": backend.allow_unverified_macros,
+        }
+        try:
+            status = enforce_macros(backend, assessment)
+        except BackendCheckError as exc:
+            self.receipt.add(check, "fail", reason=exc.reason, **facts)
+            return
+        if status == "verified":
+            self.receipt.add(check, "pass", **facts)
+        else:
+            self.receipt.add(check, "inconclusive", reason="unverified", **facts)
 
     def _rows_facts(self, result: dict[str, Any]) -> dict[str, object]:
         rows = find_rows(self.backend, result)
@@ -325,6 +371,7 @@ async def run_splunk_probe(gateway: Gateway) -> tuple[Receipt, dict[str, object]
         if not await probe.initialize() or not await probe.startup_check():
             probe._skip(CHECKS, "not_reached")
         else:
+            await probe.macros()
             control_ok = await probe.result_shape()
             await probe.comment(control_ok)
             await probe.search_prefix()

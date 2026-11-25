@@ -131,6 +131,9 @@ class FakeSplunkMcp:
         self.call_status: int | None = None
         self.fail_notification = False
         self.call_delay = 0.0
+        self.macro_rows: list[dict[str, Any]] = []
+        self.ko_arguments: list[dict[str, Any]] = []
+        self.ko_error = False
 
     def transport(self) -> httpx2.MockTransport:
         return httpx2.MockTransport(self.handler)
@@ -192,6 +195,11 @@ class FakeSplunkMcp:
         self.calls_in_session += 1
         if method == "tools/list":
             return self._answer(message["id"], self._tools_page(message.get("params") or {}))
+        if method == "tools/call" and message["params"]["name"] == "splunk_get_knowledge_objects":
+            self.ko_arguments.append(message["params"]["arguments"])
+            result: dict[str, Any] = {"structuredContent": {"results": self.macro_rows}, "content": [],
+                                      "isError": self.ko_error}
+            return self._answer(message["id"], result)
         if method == "tools/call":
             arguments = message["params"]["arguments"]
             self.arguments.append(arguments)
@@ -403,8 +411,9 @@ def test_the_shipped_example_configuration_loads_and_names_only_synthetic_target
     ('host="h" startmonthsago=CANARYIDX', "may not name an index or a time bound"),
     ('host="h" EndHoursAgo = 1', "may not name an index or a time bound"),
     ('host="h" [search sourcetype=CANARYIDX | fields host]', "may not use a subsearch"),
-    ('host="h" `CANARYIDX_macro`', "may not use backticks"),
-    ('host="h" ```CANARYIDX```', "may not use backticks"),
+    ('host="h" ```CANARYIDX```', "may use backticks only for allowlisted macro calls"),
+    ('host="h" `CANARYIDX', "has an unbalanced backtick"),
+    ('host="`CANARYIDX`"', "may not use a backtick inside a string"),
     ('host="h" | collect CANARYIDX', "uses a refused command"),
     ('host="h" |outputlookup CANARYIDX', "uses a refused command"),
     ('host="h" | REST /services/CANARYIDX', "uses a refused command"),
@@ -445,7 +454,12 @@ def test_template_lint_refuses_text_that_could_override_the_gateway_caps(search:
     ({"search": "", "indexes": None, "index_param": "i", "params": {"i": {"type": "index", "values": ["CANARYIDX"]}}},
      "backend.templates[0].params.i.values must be distinct entries of allowed_indexes"),
     ({"search": "", "indexes": None},
-     "backend.templates[0] needs exactly one of indexes or index_param"),
+     "backend.templates[0] needs exactly one of indexes, index_param or index_from_macro"),
+    ({"search": "", "index_from_macro": True},
+     "backend.templates[0] needs exactly one of indexes, index_param or index_from_macro"),
+    ({"search": "| stats count", "indexes": None, "index_from_macro": True},
+     "backend.templates[0].index_from_macro needs a macro call in the search terms"),
+    ({"search": 'h="x" `unlisted_macro`'}, "backend.templates[0].search uses macro unlisted_macro outside allowed_macros"),
     ({"search": "", "max_window_s": 8 * 86400},
      "backend.templates[0].max_window_s must be in (0, backend.max_window_s]"),
     ({"search": "", "max_window_s": 3600, "default_earliest": "-1h@h"},
@@ -1134,6 +1148,291 @@ def test_an_initialize_error_answer_is_classified_without_its_text(tmp_path: Pat
     assert _error(reply)["code"] == "upstream_protocol" and CANARY not in json.dumps(reply)
 
 
+
+# --- macros (ADR-0015 D9) --------------------------------------------------------------------------
+
+MACRO_TOOL = {
+    "name": "splunk_get_knowledge_objects",
+    "inputSchema": {"type": "object", "properties": {"type": {"type": "string"}}, "required": ["type"]},
+}
+DEF_CANARY = "DEFINITION-CANARY-7731"
+
+
+def _macro_row(name: str, definition: str, args: str = "", iseval: str = "0") -> dict[str, Any]:
+    return {"name": name, "definition": definition, "args": args, "iseval": iseval}
+
+
+MACRO_TEMPLATES: list[dict[str, Any]] = [
+    {"name": "errors_via_macro", "description": "Errors through a site macro.", "indexes": ["app_test"],
+     "search": 'host="{host}" `app_errors({level},{host})` | stats count by host',
+     "params": {"host": {"type": "identifier"}, "level": {"type": "enum", "values": ["ERROR", "WARN"]}}},
+]
+
+
+def _macro_fake(*rows: dict[str, Any]) -> FakeSplunkMcp:
+    fake = FakeSplunkMcp(tools=[*OTHER_TOOLS, RUN_QUERY_TOOL, MACRO_TOOL])
+    fake.macro_rows = list(rows)
+    return fake
+
+
+def _macro_gateway(tmp_path: Path, fake: FakeSplunkMcp, templates: list[dict[str, Any]] | None = None,
+                   macros: list[str] | None = None, **backend: object) -> splunk.Gateway:
+    return _gateway(tmp_path, fake, templates=templates or copy.deepcopy(MACRO_TEMPLATES),
+                    allowed_macros=macros if macros is not None else ["app_errors", "app_base", "app_level"],
+                    **backend)
+
+
+GOOD_ROWS = (
+    _macro_row("app_errors(2)", 'level="$lvl$" `app_base` src="$h$"', "lvl,h"),
+    _macro_row("app_base", f'sourcetype="app:log" tag="{DEF_CANARY}"'),
+)
+
+
+@pytest.mark.parametrize(("search", "message"), [
+    ('h="x" `app_errors(a b)`', "passes macro app_errors an argument outside the allowed forms"),
+    ('h="x" `app_errors(a|b)`', "passes macro app_errors an argument outside the allowed forms"),
+    ('h="x" `app_errors({idx})`', "uses index parameter idx outside index_param"),
+    ('h="x" `app_errors({nope})`', "names an undeclared parameter"),
+    ('h="x" `app_errors()`', "passes macro app_errors an argument outside the allowed forms"),
+    ('h="x" `app_errors("{host}")`', "passes macro app_errors an argument outside the allowed forms"),
+])
+def test_macro_calls_in_templates_take_only_allowed_argument_forms(search: str, message: str):
+    """Kills: admitting spaces or pipes in macro arguments, index parameters
+    or undeclared placeholders as arguments, an empty argument."""
+    templates = [{"name": "t", "description": "d", "indexes": ["app_test"], "search": search,
+                  "params": {"idx": {"type": "index"}, "host": {"type": "identifier"}}}]
+    doc = _config_doc(Path("."), templates=templates, allowed_macros=["app_errors"])
+    with pytest.raises(common.GatewayConfigError) as caught:
+        _backend(doc)
+    assert str(caught.value).endswith(message), str(caught.value)
+
+
+def test_an_allowlisted_macro_call_with_parameters_is_composed_in_place(tmp_path: Path):
+    fake = _macro_fake(*GOOD_ROWS)
+    gateway = _macro_gateway(tmp_path, fake)
+    _run(gateway, "errors_via_macro", host="web-01", level="WARN")
+    body = '(host="web-01" `app_errors(WARN,web-01)`) | stats count by host'
+    assert re.fullmatch(_spl(body, rows=100), fake.queries[0]), fake.queries[0]
+
+
+def test_operator_words_stay_valid_values_when_the_definition_quotes_them(tmp_path: Path):
+    """A definition must quote every parameter (macro_param_unquoted), so a
+    caller's value is a string there, as elsewhere."""
+    fake = _macro_fake(*GOOD_ROWS)
+    gateway = _macro_gateway(tmp_path, fake)
+    assert _run(gateway, "errors_via_macro", host="OR", level="ERROR")["isError"] is False
+    assert fake.queries[0].count('"OR"') == 1
+
+
+def test_verified_macros_let_the_gateway_start(tmp_path: Path):
+    fake = _macro_fake(*GOOD_ROWS)
+    report = _check(_macro_gateway(tmp_path, fake))
+    assert report.macros == "verified"
+    assert fake.ko_arguments == [{"type": "macros"}]
+
+
+@pytest.mark.parametrize(("rows", "reason", "macro"), [
+    ((_macro_row("app_errors(2)", f'level="$lvl$" | collect index={DEF_CANARY}', "lvl,h"),),
+     "macro_refused_command", "app_errors"),
+    ((_macro_row("app_errors(2)", f'level="$lvl$" [search {DEF_CANARY}]', "lvl,h"),),
+     "macro_subsearch", "app_errors"),
+    ((_macro_row("app_errors(2)", f'index={DEF_CANARY} level="$lvl$"', "lvl,h"),),
+     "macro_index_not_allowed", "app_errors"),
+    ((_macro_row("app_errors(2)", 'index=app_* level="$lvl$"', "lvl,h"),),
+     "macro_index_not_allowed", "app_errors"),
+    ((_macro_row("app_errors(2)", 'index=$h$ level="$lvl$"', "lvl,h"),),
+     "macro_index_not_allowed", "app_errors"),
+    ((_macro_row("app_errors(2)", 'index!=app_test level="$lvl$"', "lvl,h"),),
+     "macro_index_not_allowed", "app_errors"),
+    ((_macro_row("app_errors(2)", 'earliest=-30d level="$lvl$"', "lvl,h"),),
+     "macro_time_modifier", "app_errors"),
+    ((_macro_row("app_errors(2)", 'level="$lvl$" `app_base`', "lvl,h"),
+      _macro_row("app_base", f"| delete {DEF_CANARY}")),
+     "macro_refused_command", "app_base"),
+    ((_macro_row("app_errors(2)", 'level="$lvl$" `other_macro`', "lvl,h"),
+      _macro_row("other_macro", "x=1")),
+     "macro_nested_not_allowed", "app_errors"),
+    ((_macro_row("app_errors(2)", 'level="$lvl$" `app_base`', "lvl,h"),
+      _macro_row("app_base", "`app_level`"), _macro_row("app_level", "`app_base`")),
+     "macro_cycle", "app_base"),
+    ((_macro_row("app_errors(2)", 'level="$lvl$" ```note```', "lvl,h"),),
+     "macro_backtick", "app_errors"),
+    ((_macro_row("app_errors(2)", 'level="$lvl$" | stats count', "lvl,h"),),
+     "macro_pipe_in_terms", "app_errors"),
+    ((_macro_row("app_errors(2)", 'sourcetype=x $h$', "lvl,h"),), "macro_param_unquoted", "app_errors"),
+    ((_macro_row("app_errors(2)", '$h$=foo level="$lvl$"', "lvl,h"),), "macro_param_unquoted", "app_errors"),
+    ((_macro_row("app_errors(2)", 'level="$lvl$" ""$h$""', "lvl,h"),), "macro_param_unquoted", "app_errors"),
+])
+def test_a_macro_whose_expansion_breaks_a_template_rule_refuses_start_up(
+    tmp_path: Path, rows: tuple[dict[str, Any], ...], reason: str, macro: str
+):
+    """Kills: skipping any expansion rule (refused command, subsearch,
+    foreign, wildcard, parameter-supplied or negated index, time modifier,
+    a nested refused command, an unlisted nested macro, a cycle, a comment,
+    a pipe inside the terms). The error names the macro, never its text."""
+    fake = _macro_fake(*rows)
+    with pytest.raises(splunk.BackendCheckError) as caught:
+        _check(_macro_gateway(tmp_path, fake))
+    assert (caught.value.reason, caught.value.macro) == (reason, macro)
+    assert DEF_CANARY not in str(caught.value) and DEF_CANARY not in repr(caught.value)
+
+
+@pytest.mark.parametrize(("definition", "reason"), [
+    ("delete", "macro_refused_command"),
+    (f"outputlookup {DEF_CANARY}", "macro_refused_command"),
+    ("$n$", "macro_param_unquoted"),
+    ("stats count | collect", "macro_refused_command"),
+])
+def test_a_macro_after_the_template_pipe_is_checked_in_place(tmp_path: Path, definition: str, reason: str):
+    """A command-position macro carries no pipe of its own: only the whole
+    expanded search shows the command. Kills: checking each expansion alone."""
+    templates = [{"name": "tail", "description": "d", "indexes": ["app_test"],
+                  "search": 'x="{n}" | `app_base` | `app_tail({n})`',
+                  "params": {"n": {"type": "identifier"}}}]
+    fake = _macro_fake(_macro_row("app_base", "stats count"), _macro_row("app_tail(1)", definition, "n"))
+    with pytest.raises(splunk.BackendCheckError) as caught:
+        _check(_macro_gateway(tmp_path, fake, templates=templates, macros=["app_base", "app_tail"]))
+    assert (caught.value.reason, caught.value.macro) == (reason, "app_tail")
+    fake.macro_rows = [_macro_row("app_base", "stats count"), _macro_row("app_tail(1)", 'eval y="$n$"', "n")]
+    assert _check(_macro_gateway(tmp_path, fake, templates=templates, macros=["app_base", "app_tail"])).macros == "verified"
+
+
+def test_a_macro_defined_twice_differently_is_unreadable(tmp_path: Path):
+    fake = _macro_fake(*GOOD_ROWS, _macro_row("app_base", 'sourcetype="other"'))
+    with pytest.raises(splunk.BackendCheckError) as caught:
+        _check(_macro_gateway(tmp_path, fake))
+    assert (caught.value.reason, caught.value.macro) == ("macros_unverifiable", "app_base")
+    fake.macro_rows = [*GOOD_ROWS, GOOD_ROWS[1]]  # an identical duplicate is harmless
+    assert _check(_macro_gateway(tmp_path, fake)).macros == "verified"
+
+
+def test_nesting_deeper_than_the_bound_is_refused(tmp_path: Path):
+    names = [f"m{i}" for i in range(7)]
+    rows = [_macro_row(n, f"`{names[i + 1]}`") for i, n in enumerate(names[:-1])] + [_macro_row(names[-1], "x=1")]
+    templates = [{"name": "deep", "description": "d", "indexes": ["app_test"], "search": "`m0` y=1"}]
+    fake = _macro_fake(*rows)
+    with pytest.raises(splunk.BackendCheckError) as caught:
+        _check(_macro_gateway(tmp_path, fake, templates=templates, macros=names))
+    assert caught.value.reason == "macro_too_deep"
+
+
+@pytest.mark.parametrize("fault", ["tool_absent", "refused", "missing", "iseval", "arity"])
+def test_unreadable_definitions_refuse_unless_the_operator_allows_unverified(tmp_path: Path, fault: str):
+    """Kills: starting with unchecked macros by default; ignoring the
+    explicit flag; treating an eval macro or a wrong arity as checked."""
+    rows = list(GOOD_ROWS)
+    if fault == "missing":
+        rows = rows[1:]
+    if fault == "iseval":
+        rows[0] = {**rows[0], "iseval": "1"}
+    if fault == "arity":
+        rows[0] = {**rows[0], "args": "lvl"}
+    fake = _macro_fake(*rows)
+    if fault == "tool_absent":
+        fake.tools = [*OTHER_TOOLS, RUN_QUERY_TOOL]
+    fake.ko_error = fault == "refused"
+    with pytest.raises(splunk.BackendCheckError) as caught:
+        _check(_macro_gateway(tmp_path, fake))
+    assert caught.value.reason == "macros_unverifiable"
+    assert _check(_macro_gateway(tmp_path, fake, allow_unverified_macros=True)).macros == "unverified"
+
+
+INDEX_TEMPLATE = [{"name": "app_from_macro", "description": "d", "index_from_macro": True,
+                   "search": '`app_idx` host="{host}" | stats count', "params": {"host": {"type": "identifier"}}}]
+
+
+@pytest.mark.parametrize(("definition", "ok"), [
+    ('index="app_test" sourcetype="app:log"', True),
+    ("index IN (app_test, app_other) sourcetype=x", True),
+    ('(index=app_test OR index=app_other) tag="a OR b"', True),
+    ("index=app_test OR sourcetype=x", False),        # OR binds first: other data joins
+    ("NOT index=app_test sourcetype=x", False),        # no positive index term
+    ("(index=app_test OR sourcetype=x)", False),       # the index term is not top-level
+    ("sourcetype=x", False),
+    ('sourcetype=x note="index=app_test"', False),     # text inside a string restricts nothing
+    ('("index=app_test")', False),
+])
+def test_an_index_from_macro_template_needs_proven_allowlisted_indexes(tmp_path: Path, definition: str, ok: bool):
+    """Kills: trusting the flag without the check; counting an index term
+    that an OR, a NOT or a group makes optional."""
+    fake = _macro_fake(_macro_row("app_idx", definition))
+    gateway = _macro_gateway(tmp_path, fake, templates=copy.deepcopy(INDEX_TEMPLATE), macros=["app_idx"])
+    if ok:
+        assert _check(gateway).macros == "verified"
+    else:
+        with pytest.raises(splunk.BackendCheckError) as caught:
+            _check(gateway)
+        assert (caught.value.reason, caught.value.macro) == ("index_not_bounded", "app_idx")
+
+
+def test_an_index_from_macro_search_has_no_gateway_index_clause_but_keeps_the_caps(tmp_path: Path):
+    fake = _macro_fake(_macro_row("app_idx", 'index="app_test"'))
+    gateway = _macro_gateway(tmp_path, fake, templates=copy.deepcopy(INDEX_TEMPLATE), macros=["app_idx"])
+    _run(gateway, "app_from_macro", host="web-01", earliest="-2h", rows=10)
+    pattern = re.escape('search earliest=-2h latest=now (`app_idx` host="web-01") | stats count | head 10 ```mfr ')
+    assert re.match(pattern, fake.queries[0]), fake.queries[0]
+    fake.macro_rows = []
+    with pytest.raises(splunk.BackendCheckError):
+        _check(_macro_gateway(tmp_path, fake, templates=copy.deepcopy(INDEX_TEMPLATE), macros=["app_idx"]))
+    unverified = _macro_gateway(tmp_path, fake, templates=copy.deepcopy(INDEX_TEMPLATE), macros=["app_idx"],
+                                allow_unverified_macros=True)
+    assert _check(unverified).macros == "unverified"
+
+
+def test_main_names_the_refused_macro_never_its_definition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    fake = _macro_fake(_macro_row("app_errors(2)", f"| outputlookup {DEF_CANARY}", "lvl,h"), GOOD_ROWS[1])
+    doc = _config_doc(tmp_path, templates=copy.deepcopy(MACRO_TEMPLATES),
+                      allowed_macros=["app_errors", "app_base"])
+    env = _env(tmp_path, "bearer", doc)
+    monkeypatch.setattr(splunk, "build_gateway", lambda: _REAL_BUILD(env, transport=fake.transport()))
+    monkeypatch.setattr(common, "serve", lambda app: None)
+    monkeypatch.setattr("mainframe_rag.logs.configure_logging", lambda level: None)
+    with caplog.at_level(logging.INFO, logger="gateway.splunk"):
+        assert splunk.main([]) == 3
+    assert '"decision": "macro_refused_command"' in caplog.text and '"macro": "app_errors"' in caplog.text
+    assert DEF_CANARY not in caplog.text and TOKEN not in caplog.text
+
+
+# --- gateway-wide caps (ADR-0015 D10) -----------------------------------------------------------------
+
+
+def test_the_shared_token_quota_is_a_gateway_wide_cap_across_callers(tmp_path: Path):
+    """Every search runs as the one token user, so Splunk's per-user search
+    quota covers all callers. Kills: a per-caller cap only."""
+    fake = FakeSplunkMcp()
+    fake.call_delay = 0.3
+    doc = _config_doc(tmp_path, auth=True, limits={"max_concurrent_total": 1})
+    gateway = splunk.build_gateway(_env(tmp_path, "oidc", doc), transport=fake.transport())
+    assert (gateway.limits.max_concurrent_total, gateway.limits.rate_per_minute_total) == (1, 60)
+
+    async def run() -> list[httpx2.Response]:
+        transport = httpx2.ASGITransport(app=gateway.app)  # type: ignore[arg-type]
+        async with httpx2.AsyncClient(transport=transport, base_url="http://gw") as client:
+            posts = [client.post("/mcp", headers={"Authorization": f"Bearer {_user_token(sub=sub)}"},
+                                 content=json.dumps(_call("errors_by_host", host="h")).encode())
+                     for sub in ("user-a", "user-b")]
+            return await asyncio.wait_for(asyncio.gather(*posts), 20)
+
+    codes = sorted(json.loads(r.json()["result"]["content"][0]["text"]).get("code", "ok")
+                   if r.json()["result"]["isError"] else "ok" for r in asyncio.run(run()))
+    assert codes == ["busy", "ok"]
+
+
+def test_splunk_gateway_wide_defaults_and_the_total_rate(tmp_path: Path):
+    for mode in ("oidc", "bearer"):
+        doc = _config_doc(tmp_path, auth=mode == "oidc")
+        doc["limits"] = {}
+        limits = splunk.build_gateway(_env(tmp_path, mode, doc), transport=FakeSplunkMcp().transport()).limits
+        assert (limits.max_concurrent_total, limits.rate_per_minute_total) == (3, 60)
+    doc = _config_doc(tmp_path, limits={"rate_per_minute_total": 2})
+    gateway = splunk.build_gateway(_env(tmp_path, "bearer", doc), transport=FakeSplunkMcp().transport())
+    results = _run_many(gateway, [_call("errors_by_host", n, host="h") for n in range(3)])
+    assert [r["isError"] for r in results] == [False, False, True]
+    assert _error(results[2])["code"] == "rate_limited"
+
+
 # --- the site probe ----------------------------------------------------------------------------------
 
 
@@ -1246,3 +1545,24 @@ def test_site_probe_stops_early_on_an_unsupported_protocol(tmp_path: Path, monke
         "fail", "protocol_unsupported")
     assert all(checks[c]["reason"] == "not_reached" for c in splunk_probe.CHECKS[1:])
     assert detail["site_private_detail"] == {}
+
+
+def test_site_probe_reports_each_macro_without_its_definition(tmp_path: Path, monkeypatch):
+    fake = _macro_fake(*GOOD_ROWS)
+    fake.result = _planted_result
+    rc, records, detail, printed = _probe(tmp_path, monkeypatch, fake, templates=copy.deepcopy(MACRO_TEMPLATES),
+                                          allowed_macros=["app_errors", "app_base", "app_level"])
+    check = {r["check"]: r for r in records}["splunk.macros"]
+    assert check["status"] == "pass" and (check["checked_ok"], check["failed"]) == (2, 0)
+    info = detail["site_private_detail"]
+    assert info["macros"] == {"app_errors": {"readable": True, "verdict": "ok", "depth": 2},
+                              "app_base": {"readable": True, "verdict": "ok", "depth": 1},
+                              "app_level": {"readable": True, "verdict": "unused", "depth": 0}}
+    assert info["macro_tool_input_schema"] == MACRO_TOOL["inputSchema"]
+    assert DEF_CANARY not in printed and 'level="' not in printed
+    fake.macro_rows = []
+    rc, records, detail, printed = _probe(tmp_path, monkeypatch, fake, templates=copy.deepcopy(MACRO_TEMPLATES),
+                                          allowed_macros=["app_errors", "app_base", "app_level"])
+    check = {r["check"]: r for r in records}["splunk.macros"]
+    assert rc == 1 and (check["status"], check["reason"]) == ("fail", "macros_unverifiable")
+    assert detail["site_private_detail"]["macros"]["app_errors"]["readable"] is False

@@ -1368,6 +1368,34 @@ def test_rate_limit_is_per_user_sliding_and_refusals_do_not_count():
     assert set(limiter._calls) == {"u3"}  # idle users are forgotten
 
 
+def test_gateway_wide_caps_cover_every_caller_and_are_off_by_default():
+    """Kills: a total cap counted per caller; a refused call counted against
+    the total rate; a total cap applied when unset (GitLab's behaviour)."""
+    assert (gw.Limits().max_concurrent_total, gw.Limits().rate_per_minute_total) == (None, None)
+    now = [1000.0]
+    limiter = gw.UserLimiter(gw.Limits(max_concurrent_per_user=5, max_concurrent_total=2, rate_per_minute=100,
+                                       rate_per_minute_total=3), clock=lambda: now[0])
+    with limiter.slot("u1"), limiter.slot("u2"):
+        with pytest.raises(gw.GatewayError) as caught, limiter.slot("u3"):
+            pass
+        assert caught.value.code == "busy"
+    with limiter.slot("u3"):
+        pass
+    for _ in range(2):  # refused calls are not counted against the total rate
+        with pytest.raises(gw.GatewayError) as caught, limiter.slot("u4"):
+            pass
+        assert caught.value.code == "rate_limited"
+    now[0] += 60
+    with limiter.slot("u4"):
+        pass
+    unlimited = gw.UserLimiter(gw.Limits(max_concurrent_per_user=1), clock=lambda: now[0])
+    with unlimited.slot("a"), unlimited.slot("b"), unlimited.slot("c"):
+        pass
+    for bad in (0, -1, True, 1.5):
+        with pytest.raises(gw.GatewayConfigError, match="limits.max_concurrent_total must be a positive integer"):
+            gw.Limits(max_concurrent_total=bad)  # type: ignore[arg-type]
+
+
 def test_decision_log_is_one_line_with_ids_counts_and_no_content(caplog: pytest.LogCaptureFixture):
     rows = [{"msg": f"event {CANARY}"}]
     handler = _Handler(gw.ToolOutput(rows=rows))

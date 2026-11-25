@@ -17,9 +17,10 @@
   DD-scoped `jes_spool_read`). Amended by
   [ADR-0014](0014-gitlab-team-token-gateway.md) (proposed): named exception E4
   (one read-only GitLab team token) and the bearer caller credential B1.
-  Amended by [ADR-0015](0015-splunk-gateway-over-splunk-mcp.md) (proposed):
-  E1 becomes an MCP-only Splunk token, and the proposed Splunk bearer
-  credential B2.
+  Amended by [ADR-0015](0015-splunk-gateway-over-splunk-mcp.md) (approved by
+  the maintainer 2026-11-25 in session; accepted by merging): E1 becomes an
+  MCP-only Splunk token, and the Splunk bearer credential B2 is approved as
+  a named exception (one caller service; NetworkPolicy; shared attribution).
 - **Context:**
   - ADR-0010 defines the gateways for one caller, a signed-in user in a
     Team-model chat. The improvement agents of the gap (herdr-core plus

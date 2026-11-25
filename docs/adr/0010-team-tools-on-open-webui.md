@@ -19,10 +19,11 @@
   [ADR-0014](0014-gitlab-team-token-gateway.md) (proposed): the GitLab gateway
   reads with one read-only team token instead of TD4's per-user tokens (named
   exception E4) and may run in a bearer-secret caller mode (B1). Amended by
-  [ADR-0015](0015-splunk-gateway-over-splunk-mcp.md) (proposed): the Splunk
-  gateway searches through the site's Splunk MCP Server with an MCP-only
-  token (TD7's credential and go-live input 3), with an off switch for TD5's
-  comment and a proposed bearer mode (B2).
+  [ADR-0015](0015-splunk-gateway-over-splunk-mcp.md) (approved by the
+  maintainer 2026-11-25 in session; accepted by merging): the Splunk gateway
+  searches through the site's Splunk MCP Server with an MCP-only token (TD7's
+  credential and go-live input 3), with an off switch for TD5's comment and
+  a bearer mode (B2, approved as a named exception).
 - **Context:**
   - ADR-0007 deferred team tools (Splunk, GitLab, mail) to their own ADR,
     "likely on a separate instance", and fixed the rule "this instance holds

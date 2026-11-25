@@ -16,16 +16,18 @@ default) with one encrypted MCP token (ADR-0010 TD7, E1). It never writes:
   sign, space or control character, and string values sit only inside the
   double quotes the template wrote;
 - templates are checked when the configuration loads (placeholders, index
-  references, time modifiers, subsearches, macros, comments and commands that
-  write or read outside the composed index clause are refused);
+  references, time modifiers, subsearches, comments, macros outside
+  `allowed_macros` and commands that write or read outside the composed index
+  clause are refused);
 - at start-up `check_backend` initializes a session, checks the negotiated
   protocol version and that the run-query tool takes the configured
-  arguments, and refuses to serve otherwise.
+  arguments, reads and checks the definitions of the macros templates call
+  (ADR-0015 D9), and refuses to serve otherwise.
 
 Callers authenticate in one of two modes (`SPLUNK_AUTH_MODE`): `oidc` (the
 default, ADR-0010's caller verification with a single-audience token, fixed
-here) or `bearer` (proposed in ADR-0015 as a named exception, pending the
-maintainer's acceptance). Contract: docs/team-tools.md#splunk-gateway.
+here) or `bearer` (ADR-0015's named exception B2, approved by the maintainer
+on 2026-11-25). Contract: docs/team-tools.md#splunk-gateway.
 """
 
 from __future__ import annotations
@@ -81,13 +83,16 @@ SPLUNK_MAX_EVENTS: Final = 1000
 
 # Splunk's run-query tool fails a search that runs past one minute: the tool
 # deadline sits just above the backend timeout (below 60 s), so the gateway
-# answers with its own fixed code first.
-LIMIT_DEFAULTS: Final = {"tool_timeout_s": 60.0}
+# answers with its own fixed code first. Every search runs as the one token
+# user, so Splunk's per-user concurrent-search quota (`srchJobsQuota`, 3 by
+# default) covers all callers together: the gateway-wide caps default to 3
+# in flight and 60 a minute in both modes (ADR-0015 D10; per pod).
+LIMIT_DEFAULTS: Final = {"tool_timeout_s": 60.0, "max_concurrent_total": 3, "rate_per_minute_total": 60}
 # Bearer mode: every Open WebUI user is the one caller `service:openwebui`, so
 # the per-caller limits are instance-wide. Three searches in flight (Splunk's
 # default per-role concurrent-search quota, `srchJobsQuota` in authorize.conf;
 # the token user's role at the site may differ) and 60 a minute, unless the
-# configuration sets them (ADR-0015 D7, proposed).
+# configuration sets them (ADR-0015 D7, B2 approved 2026-11-25).
 BEARER_LIMIT_DEFAULTS: Final = {"max_concurrent_per_user": 3, "rate_per_minute": 60}
 
 _IDENTIFIER_RE: Final = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
@@ -114,8 +119,8 @@ RESULT_SOURCES: Final = ("auto", "structured", "text_json", "text")
 # the time bounds, so a template may not name them (any case or spacing, with
 # =, !=, <, >, :: or IN; quotes are ignored for this check, so a quoted name
 # is caught too). Brackets (subsearches, which search outside the composed
-# index clause), backticks (macros and comments) and these commands are
-# refused. This is a lint over operator-authored text; the token user's role
+# index clause), backticks other than allowlisted macro calls (D9) and these
+# commands are refused. This is a lint over operator-authored text; the token user's role
 # is the boundary.
 _TIME_OR_INDEX_RE: Final = re.compile(
     r"(?i)(?<![A-Za-z0-9_.])(?:index|earliest|latest|_index_earliest|_index_latest"
@@ -142,11 +147,14 @@ REFUSED_COMMANDS: Final = frozenset(
 
 
 class BackendCheckError(Exception):
-    """The start-up check refused the backend. `reason` is a fixed code."""
+    """The start-up check refused the backend. `reason` is a fixed code;
+    `macro` names the allowlisted macro a macro check refused (never its
+    definition)."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, macro: str | None = None) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.macro = macro
 
 
 class UnsupportedProtocol(GatewayError):
@@ -257,6 +265,8 @@ class Template:
     max_window_s: int = 86400
     default_earliest: str = "-1h"
     default_rows: int | None = None
+    macros: tuple[MacroCall, ...] = ()
+    index_from_macro: bool = False
 
     def param(self, name: str) -> Param:
         for param in self.params:
@@ -297,16 +307,99 @@ def split_terms(text: str) -> tuple[str, str]:
     return text, ""
 
 
-def lint_search(text: str, params: Mapping[str, Param], where: str) -> set[str]:
-    """Check one template's SPL (ADR-0015 D3); returns the parameter names it
-    uses. Messages name the template's position and parameter names, never
+_MACRO_CALL_RE: Final = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_.:-]{0,79})(?:\(([^()`]*)\))?")
+_MACRO_NAME_RE: Final = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:-]{0,79}")
+# A macro argument in a template: a parameter placeholder, a literal token,
+# or a double-quoted literal with no quote, backslash, comma, pipe, backtick
+# or brace (a placeholder is passed bare, never inside a quoted argument).
+_MACRO_ARG_RE: Final = re.compile(r'\{[a-z][a-z0-9_]{0,31}\}|[A-Za-z0-9_.:*-]{1,64}|"[^"\\,|`{}]{0,128}"')
+
+
+@dataclass(frozen=True)
+class MacroCall:
+    """One allowlisted macro call in a template: its name, its raw argument
+    texts (placeholders kept) and whether it sits in the search terms (before
+    the first pipe outside a string)."""
+
+    name: str
+    args: tuple[str, ...] = ()
+    in_terms: bool = True
+
+    @property
+    def stanza(self) -> str:
+        """The macro's definition name: Splunk names a macro with arguments
+        `name(<count>)`."""
+        return self.name if not self.args else f"{self.name}({len(self.args)})"
+
+
+def backtick_spans(text: str, mask: Sequence[bool], where: str) -> list[tuple[int, int]]:
+    """The (start, end) of each backtick span outside strings. A backtick
+    inside a string or one left open is refused."""
+    spans: list[tuple[int, int]] = []
+    at = 0
+    while (start := text.find("`", at)) >= 0:
+        if mask[start]:
+            raise GatewayConfigError(f"{where} may not use a backtick inside a string")
+        end = text.find("`", start + 1)
+        if end < 0:
+            raise GatewayConfigError(f"{where} has an unbalanced backtick")
+        spans.append((start, end + 1))
+        at = end + 1
+    return spans
+
+
+def parse_macro_call(content: str, allowed_macros: Sequence[str], where: str) -> tuple[str, tuple[str, ...]]:
+    """The name and raw arguments of one backtick span's content; refused
+    unless it is a call of an allowlisted macro (a comment shape is not)."""
+    match = _MACRO_CALL_RE.fullmatch(content)
+    if match is None:
+        raise GatewayConfigError(f"{where} may use backticks only for allowlisted macro calls")
+    name, raw = match.group(1), match.group(2)
+    if name not in allowed_macros:
+        raise GatewayConfigError(f"{where} uses macro {name} outside allowed_macros")
+    if raw is None:
+        return name, ()
+    args = tuple(raw.split(","))
+    if not all(_MACRO_ARG_RE.fullmatch(arg) for arg in args):
+        raise GatewayConfigError(f"{where} passes macro {name} an argument outside the allowed forms")
+    return name, args
+
+
+def _first_unquoted_pipe(text: str, mask: Sequence[bool]) -> int:
+    for at, (char, quoted) in enumerate(zip(text, mask, strict=True)):
+        if char == "|" and not quoted:
+            return at
+    return len(text)
+
+
+def lint_search(
+    text: str, params: Mapping[str, Param], where: str, allowed_macros: Sequence[str] = ()
+) -> tuple[set[str], tuple[MacroCall, ...]]:
+    """Check one template's SPL (ADR-0015 D3, D9). Returns the parameter
+    names it uses and its macro calls.
+    Messages name the template's position, parameter and macro names, never
     the SPL."""
     if not isinstance(text, str) or len(text) > 4096 or not _TEMPLATE_CHARS_RE.fullmatch(text):
         raise GatewayConfigError(f"{where} must be printable ASCII of at most 4096 characters")
-    if "`" in text:
-        raise GatewayConfigError(f"{where} may not use backticks (macros or comments)")
     mask = _quoted_mask(text, where)
-    unquoted = "".join(" " if quoted else char for char, quoted in zip(text, mask, strict=True))
+    pipe = _first_unquoted_pipe(text, mask)
+    used: set[str] = set()
+    calls: list[MacroCall] = []
+    scrubbed = list(text)
+    for start, end in backtick_spans(text, mask, where):
+        name, args = parse_macro_call(text[start + 1 : end - 1], allowed_macros, where)
+        for arg in args:
+            if arg.startswith("{"):
+                param = params.get(arg[1:-1])
+                if param is None:
+                    raise GatewayConfigError(f"{where} names an undeclared parameter")
+                if param.kind == "index":
+                    raise GatewayConfigError(f"{where} uses index parameter {param.name} outside index_param")
+                used.add(param.name)
+        calls.append(MacroCall(name, args, in_terms=start < pipe))
+        scrubbed[start:end] = " " * (end - start)
+    rest = "".join(scrubbed)
+    unquoted = "".join(" " if quoted else char for char, quoted in zip(rest, mask, strict=True))
     if "[" in unquoted or "]" in unquoted:
         raise GatewayConfigError(f"{where} may not use a subsearch")
     depth = 0
@@ -316,13 +409,12 @@ def lint_search(text: str, params: Mapping[str, Param], where: str) -> set[str]:
             break
     if depth != 0:
         raise GatewayConfigError(f"{where} has unbalanced parentheses")
-    if _TIME_OR_INDEX_RE.search(text.replace('"', " ")):
+    if _TIME_OR_INDEX_RE.search(rest.replace('"', " ")):
         raise GatewayConfigError(f"{where} may not name an index or a time bound")
     for command in _COMMAND_RE.findall(unquoted):
         if command.lower() in REFUSED_COMMANDS:
             raise GatewayConfigError(f"{where} uses a refused command")
-    used: set[str] = set()
-    for match in _PLACEHOLDER_RE.finditer(text):
+    for match in _PLACEHOLDER_RE.finditer(rest):
         name = match.group(1)
         param = params.get(name)
         if param is None:
@@ -332,7 +424,7 @@ def lint_search(text: str, params: Mapping[str, Param], where: str) -> set[str]:
         if param.kind != "integer" and not mask[match.start()]:
             raise GatewayConfigError(f"{where} must put parameter {name} inside double quotes")
         used.add(name)
-    return used
+    return used, tuple(calls)
 
 
 def _param_from_doc(name: str, doc: object, allowed_indexes: Sequence[str], where: str) -> Param:
@@ -407,12 +499,19 @@ _TEMPLATE_KEYS: Final = frozenset(
         "max_window_s",
         "default_earliest",
         "default_rows",
+        "index_from_macro",
     }
 )
 
 
 def template_from_doc(
-    doc: object, position: int, *, allowed_indexes: Sequence[str], max_window_s: int, max_rows: int
+    doc: object,
+    position: int,
+    *,
+    allowed_indexes: Sequence[str],
+    max_window_s: int,
+    max_rows: int,
+    allowed_macros: Sequence[str] = (),
 ) -> Template:
     where = f"backend.templates[{position}]"
     if not isinstance(doc, dict):
@@ -432,11 +531,19 @@ def template_from_doc(
         n: _param_from_doc(n, spec, allowed_indexes, f"{where}.params")
         for n, spec in raw_params.items()
     }
-    used = lint_search(doc.get("search"), params, f"{where}.search")  # type: ignore[arg-type]
+    used, calls = lint_search(
+        doc.get("search"), params, f"{where}.search", allowed_macros  # type: ignore[arg-type]
+    )
     indexes, index_param = doc.get("indexes"), doc.get("index_param")
-    if (indexes is None) == (index_param is None):
-        raise GatewayConfigError(f"{where} needs exactly one of indexes or index_param")
-    if indexes is not None:
+    from_macro = doc.get("index_from_macro", False)
+    if not isinstance(from_macro, bool):
+        raise GatewayConfigError(f"{where}.index_from_macro must be true or false")
+    if (indexes is not None) + (index_param is not None) + from_macro != 1:
+        raise GatewayConfigError(f"{where} needs exactly one of indexes, index_param or index_from_macro")
+    if from_macro:
+        if not any(call.in_terms for call in calls):
+            raise GatewayConfigError(f"{where}.index_from_macro needs a macro call in the search terms")
+    elif indexes is not None:
         if (
             not isinstance(indexes, list)
             or not indexes
@@ -475,10 +582,87 @@ def template_from_doc(
         max_window_s=window,
         default_earliest=earliest,
         default_rows=rows,
+        macros=calls,
+        index_from_macro=from_macro,
     )
 
 
 # --- configuration ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MacroSource:
+    """Where the start-up macro check reads macro definitions (ADR-0015 D9):
+    a knowledge-object tool called once with `type_argument` = `type_value`
+    and the constant `extra_arguments`; its rows are found like run-query
+    rows, and each row's name, definition, argument list and eval flag at
+    the given key paths. Argument names and the row shape are unconfirmed,
+    so every part is configurable (the site probe shows the tool's schema)."""
+
+    tool_name: str = "splunk_get_knowledge_objects"
+    type_argument: str = "type"
+    type_value: str = "macros"
+    extra_arguments: Mapping[str, str | int | bool] = field(default_factory=dict)
+    result_source: str = "auto"
+    result_path: tuple[str, ...] = ("results",)
+    name_path: tuple[str, ...] = ("name",)
+    definition_path: tuple[str, ...] = ("definition",)
+    args_path: tuple[str, ...] = ("args",)
+    iseval_path: tuple[str, ...] = ("iseval",)
+
+
+_MACRO_SOURCE_KEYS: Final = frozenset(f.name for f in dataclasses.fields(MacroSource))
+
+
+def _key_path(value: object, where: str, *, empty: bool) -> tuple[str, ...]:
+    if (
+        not isinstance(value, list)
+        or len(value) > 4
+        or (not value and not empty)
+        or not all(isinstance(k, str) and 0 < len(k) <= 64 for k in value)
+    ):
+        raise GatewayConfigError(f"{where} must be a list of at most 4 keys")
+    return tuple(value)
+
+
+def _constants(value: object, where: str, reserved: str) -> dict[str, str | int | bool]:
+    if not isinstance(value, dict) or len(value) > 16:
+        raise GatewayConfigError(f"{where} must be an object of at most 16 keys")
+    for key, item in value.items():
+        if not _ARGUMENT_RE.fullmatch(key) or key == reserved:
+            raise GatewayConfigError(f"{where} has an invalid argument name")
+        if not (
+            isinstance(item, (bool, int))
+            or (isinstance(item, str) and len(item) <= 256 and _TEMPLATE_CHARS_RE.fullmatch(item))
+        ):
+            raise GatewayConfigError(f"{where}.{key} must be a constant")
+    return dict(value)
+
+
+def macro_source_from_doc(doc: object) -> MacroSource:
+    where = "backend.macro_source"
+    if not isinstance(doc, dict):
+        raise GatewayConfigError(f"{where} must be an object")
+    unknown = sorted(set(doc) - _MACRO_SOURCE_KEYS)
+    if unknown:
+        raise GatewayConfigError(f"{where} has unknown keys: {', '.join(unknown)}")
+    out = dict(doc)
+    tool_name = out.get("tool_name", "splunk_get_knowledge_objects")
+    if not isinstance(tool_name, str) or not _TOOL_NAME_RE.fullmatch(tool_name):
+        raise GatewayConfigError(f"{where}.tool_name must be a tool name")
+    type_argument = out.get("type_argument", "type")
+    if not isinstance(type_argument, str) or not _ARGUMENT_RE.fullmatch(type_argument):
+        raise GatewayConfigError(f"{where}.type_argument must be an argument name")
+    type_value = out.get("type_value", "macros")
+    if not isinstance(type_value, str) or not _IDENTIFIER_RE.fullmatch(type_value):
+        raise GatewayConfigError(f"{where}.type_value must be an identifier")
+    if out.get("result_source", "auto") not in RESULT_SOURCES[:3]:
+        raise GatewayConfigError(f"{where}.result_source must be one of auto, structured, text_json")
+    out["extra_arguments"] = _constants(out.get("extra_arguments", {}), f"{where}.extra_arguments", type_argument)
+    for key in ("result_path", "name_path", "definition_path", "args_path", "iseval_path"):
+        if key in out:
+            out[key] = _key_path(out[key], f"{where}.{key}", empty=key == "result_path")
+    return MacroSource(**out)
 
 
 @dataclass(frozen=True)
@@ -501,6 +685,9 @@ class SplunkBackend:
     attribution_comment: bool = True
     max_rows: int = 100
     max_window_s: int = 7 * 86400
+    allowed_macros: tuple[str, ...] = ()
+    allow_unverified_macros: bool = False
+    macro_source: MacroSource = field(default_factory=lambda: MacroSource())
 
 
 _BACKEND_KEYS: Final = frozenset(f.name for f in dataclasses.fields(SplunkBackend))
@@ -576,6 +763,19 @@ def backend_from_config(config: GatewayConfig) -> SplunkBackend:
         ):
             raise GatewayConfigError(f"backend.extra_arguments.{key} must be a constant")
     doc["extra_arguments"] = dict(extra)
+    macros = doc.get("allowed_macros", [])
+    if (
+        not isinstance(macros, list)
+        or len(macros) > 128
+        or not all(isinstance(m, str) and _MACRO_NAME_RE.fullmatch(m) for m in macros)
+        or len(set(macros)) != len(macros)
+    ):
+        raise GatewayConfigError("backend.allowed_macros must be a list of distinct macro names")
+    doc["allowed_macros"] = tuple(macros)
+    if not isinstance(doc.get("allow_unverified_macros", False), bool):
+        raise GatewayConfigError("backend.allow_unverified_macros must be true or false")
+    if "macro_source" in doc:
+        doc["macro_source"] = macro_source_from_doc(doc["macro_source"])
     path = doc.get("result_path", ["results"])
     if (
         not isinstance(path, list)
@@ -596,6 +796,7 @@ def backend_from_config(config: GatewayConfig) -> SplunkBackend:
             allowed_indexes=doc["allowed_indexes"],
             max_window_s=max_window,
             max_rows=max_rows,
+            allowed_macros=doc["allowed_macros"],
         )
         for i, t in enumerate(templates)
     )
@@ -632,7 +833,7 @@ def compose_spl(
         indexes: tuple[str, ...] = (values[template.index_param],)
     else:
         indexes = template.indexes
-    if not indexes or not set(indexes) <= set(backend.allowed_indexes):
+    if not set(indexes) <= set(backend.allowed_indexes) or not (indexes or template.index_from_macro):
         raise GatewayError("invalid_arguments")
     earliest = args.get("earliest", template.default_earliest)
     latest = args.get("latest", "now")
@@ -649,10 +850,13 @@ def compose_spl(
         _PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], part).strip()
         for part in split_terms(template.search)
     )
+    # An index-defining macro (index_from_macro) supplies the index clause:
+    # the start-up macro check proved its indexes are allowed (ADR-0015 D9).
     clause = " OR ".join(f'index="{index}"' for index in indexes)
     if len(indexes) > 1:
         clause = f"({clause})"
-    spl = f"{'search ' if backend.search_prefix else ''}{clause} earliest={earliest} latest={latest}"
+    head = f"{clause} " if clause else ""
+    spl = f"{'search ' if backend.search_prefix else ''}{head}earliest={earliest} latest={latest}"
     if terms:
         # Parenthesised, so a template's OR cannot bind to the gateway's terms
         # (Splunk evaluates OR before the implicit AND).
@@ -977,13 +1181,14 @@ class SplunkMcpClient:
                 raise GatewayError("upstream_protocol")
         raise GatewayError("upstream_protocol")
 
+    async def call_tool(self, name: str, arguments: Mapping[str, Any], deadline: float) -> dict[str, Any]:
+        return await self.request("tools/call", {"name": name, "arguments": dict(arguments)}, deadline)
+
     async def run_query(self, query: str, deadline: float) -> dict[str, Any]:
         """The run-query tool's result for `query`, with the configured constant
         arguments."""
         arguments: dict[str, Any] = {**self.backend.extra_arguments, self.backend.query_argument: query}
-        return await self.request(
-            "tools/call", {"name": self.backend.tool_name, "arguments": arguments}, deadline
-        )
+        return await self.call_tool(self.backend.tool_name, arguments, deadline)
 
     async def aclose(self) -> None:
         await self.upstream.aclose()
@@ -1011,11 +1216,409 @@ def tool_check(backend: SplunkBackend, tools: Sequence[Mapping[str, Any]]) -> st
     return None
 
 
+# --- macros (ADR-0015 D9) ----------------------------------------------------------------
+
+MAX_MACRO_DEPTH: Final = 5
+# What a non-integer parameter placeholder stands for while a definition is
+# checked: an identifier no index allowlist holds, so an index that comes
+# from a parameter is refused, and one that must stay inside double quotes
+# (a caller's value placed bare could be an operator, a field name, an index
+# term or a command). Integer parameters stand as 1.
+_PARAM_MARKER: Final = "mfrparamvalue"
+_TIME_TERM_RE: Final = re.compile(
+    r"(?i)(?<![A-Za-z0-9_.])(?:earliest|latest|_index_earliest|_index_latest"
+    r"|starttime|endtime|starttimeu|endtimeu|timeformat|searchtimespan[a-z]*"
+    r"|(?:start|end)?(?:days|hours|minutes|months)ago|savedsearch|eventtype)"
+    r"\s*(?:!=|=|<|>|::|in\b)"
+)
+_INDEX_TERM_RE: Final = re.compile(r"(?i)(?<![A-Za-z0-9_.])index\s*(!=|=|<|>|::|in\b)\s*")
+_INDEX_VALUE_RE: Final = re.compile(r"[^\s()]+")
+_INDEX_LIST_RE: Final = re.compile(r"\(([^()]*)\)")
+_OR_RE: Final = re.compile(r"(?<![A-Za-z0-9_])OR(?![A-Za-z0-9_])")
+_NOT_BEFORE_RE: Final = re.compile(r"(?<![A-Za-z0-9_])NOT\s*$")
+_TRUE_WORDS: Final = frozenset({"1", "true", "t", "yes", "y"})
+
+
+class MacroCheckError(Exception):
+    """A macro definition failed a check. `macro` is the allowlisted macro
+    to blame; the definition text never enters the error."""
+
+    def __init__(self, reason: str, macro: str | None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.macro = macro
+
+
+@dataclass(frozen=True)
+class MacroDefinition:
+    definition: str
+    args: tuple[str, ...] = ()
+    iseval: bool = False
+
+
+def _at(value: object, path: Sequence[str]) -> object:
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def macro_definitions(source: MacroSource, result: Mapping[str, Any]) -> dict[str, MacroDefinition] | None:
+    """The definitions in a knowledge-object result, by stanza name; None
+    when the rows cannot be found."""
+    if result.get("isError") not in (None, False):
+        return None
+    rows = find_rows_at(result, source.result_source, source.result_path)
+    if rows is None:
+        return None
+    out: dict[str, MacroDefinition] = {}
+    conflicting: set[str] = set()
+    for row in rows:
+        name, definition = _at(row, source.name_path), _at(row, source.definition_path)
+        if not isinstance(name, str) or not isinstance(definition, str) or name in conflicting:
+            continue
+        raw_args = _at(row, source.args_path)
+        if isinstance(raw_args, str):
+            args = tuple(a.strip() for a in raw_args.split(",") if a.strip())
+        elif isinstance(raw_args, list):
+            args = tuple(str(a).strip() for a in raw_args)
+        else:
+            args = ()
+        iseval = _at(row, source.iseval_path)
+        entry = MacroDefinition(definition, args, iseval is True or iseval == 1 or str(iseval).lower() in _TRUE_WORDS)
+        if out.setdefault(name, entry) != entry:
+            # The same name from two apps with different definitions: which
+            # one a search uses depends on app context, so neither is checked.
+            del out[name]
+            conflicting.add(name)
+    return out
+
+
+async def read_macro_definitions(
+    client: SplunkMcpClient, tools: Sequence[Mapping[str, Any]], deadline: float
+) -> dict[str, MacroDefinition] | None:
+    """Every macro definition the knowledge-object tool lists, or None when
+    they cannot be read: the tool is not listed, its schema lacks the
+    configured arguments or requires others, the call fails or is refused,
+    or no rows are found."""
+    source = client.backend.macro_source
+    tool = next((t for t in tools if t.get("name") == source.tool_name), None)
+    schema = tool.get("inputSchema") if tool is not None else None
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    required = schema.get("required", []) if isinstance(schema, dict) else None
+    sent = {source.type_argument, *source.extra_arguments}
+    if (
+        not isinstance(props, dict)
+        or not sent <= set(props)
+        or not isinstance(required, list)
+        or not all(isinstance(r, str) for r in required)
+        or set(required) - sent
+    ):
+        return None
+    arguments = {**source.extra_arguments, source.type_argument: source.type_value}
+    try:
+        result = await client.call_tool(source.tool_name, arguments, deadline)
+    except GatewayError:
+        return None
+    return macro_definitions(source, result)
+
+
+def _mask_or_fail(text: str, macro: str | None) -> list[bool]:
+    try:
+        return _quoted_mask(text, "macro")
+    except GatewayConfigError:
+        raise MacroCheckError("macro_unbalanced_quote", macro) from None
+
+
+def lint_expansion(text: str, allowed_indexes: Sequence[str], macro: str | None) -> None:
+    """The template rules on a macro's expansion: no subsearch, unbalanced
+    parentheses, refused command or time modifier; index terms only with =,
+    :: or IN and only allowlisted names (no wildcard, none from a
+    parameter)."""
+    mask = _mask_or_fail(text, macro)
+    unquoted = "".join(" " if quoted else char for char, quoted in zip(text, mask, strict=True))
+    if "[" in unquoted or "]" in unquoted:
+        raise MacroCheckError("macro_subsearch", macro)
+    depth = 0
+    for char in unquoted:
+        depth += {"(": 1, ")": -1}.get(char, 0)
+        if depth < 0:
+            break
+    if depth != 0:
+        raise MacroCheckError("macro_unbalanced_parentheses", macro)
+    for command in _COMMAND_RE.findall(unquoted):
+        if command.lower() in REFUSED_COMMANDS:
+            raise MacroCheckError("macro_refused_command", macro)
+    stripped = text.replace('"', " ")
+    if _TIME_TERM_RE.search(stripped):
+        raise MacroCheckError("macro_time_modifier", macro)
+    for name in _index_names(stripped, macro):
+        if name not in allowed_indexes:
+            raise MacroCheckError("macro_index_not_allowed", macro)
+    for match in re.finditer(_PARAM_MARKER, text):
+        if not mask[match.start()]:
+            raise MacroCheckError("macro_param_unquoted", macro)
+
+
+def _index_names(stripped: str, macro: str | None) -> list[str]:
+    names: list[str] = []
+    for match in _INDEX_TERM_RE.finditer(stripped):
+        op, rest = match.group(1).lower(), stripped[match.end() :]
+        if op in ("=", "::"):
+            value = _INDEX_VALUE_RE.match(rest)
+            names.append(value.group(0) if value else "")
+        elif op == "in":
+            listed = _INDEX_LIST_RE.match(rest)
+            if listed is None:
+                raise MacroCheckError("macro_index_not_allowed", macro)
+            names.extend(n for n in re.split(r"[\s,]+", listed.group(1)) if n)
+        else:
+            raise MacroCheckError("macro_index_not_allowed", macro)  # !=, <, > widen the search
+    return names
+
+
+def expand_macros(
+    text: str,
+    defs: Mapping[str, MacroDefinition],
+    backend: SplunkBackend,
+    *,
+    owner: str | None = None,
+    depth: int = 0,
+    stack: tuple[str, ...] = (),
+    seen: dict[str, int] | None = None,
+) -> tuple[str, int]:
+    """`text` with every macro call replaced by its checked expansion, and
+    the deepest nesting reached. Each definition's arguments are substituted
+    (`$name$`), nested calls expanded first (bounded depth, cycle-safe, each
+    nested macro allowlisted), and the expansion linted; the innermost
+    failing macro is blamed."""
+    mask = _mask_or_fail(text, owner)
+    try:
+        spans = backtick_spans(text, mask, "macro")
+    except GatewayConfigError:
+        raise MacroCheckError("macro_backtick", owner) from None
+    deepest = depth
+    for start, end in reversed(spans):
+        match = _MACRO_CALL_RE.fullmatch(text[start + 1 : end - 1])
+        if match is None:
+            raise MacroCheckError("macro_backtick", owner)  # a comment or other backtick text
+        name, raw = match.group(1), match.group(2)
+        if name not in backend.allowed_macros:
+            raise MacroCheckError("macro_nested_not_allowed", owner)
+        args = tuple(raw.split(",")) if raw is not None else ()
+        stanza = name if not args else f"{name}({len(args)})"
+        if stanza in stack:
+            raise MacroCheckError("macro_cycle", name)
+        if depth + 1 > MAX_MACRO_DEPTH:
+            raise MacroCheckError("macro_too_deep", name)
+        definition = defs.get(stanza)
+        if definition is None or definition.iseval or len(definition.args) != len(args):
+            raise MacroCheckError("macro_unreadable", name)
+        body = definition.definition
+        for arg_name, value in zip(definition.args, args, strict=True):
+            body = body.replace(f"${arg_name}$", value.strip())
+        expanded, reached = expand_macros(
+            body, defs, backend, owner=name, depth=depth + 1, stack=(*stack, stanza), seen=seen
+        )
+        lint_expansion(expanded, backend.allowed_indexes, name)
+        if seen is not None:
+            seen[name] = max(seen.get(name, 0), reached - depth)
+        text = text[:start] + expanded + text[end:]
+        deepest = max(deepest, reached)
+    return text, deepest
+
+
+def _marked(template: Template, text: str) -> str:
+    kinds = {p.name: p.kind for p in template.params}
+    return _PLACEHOLDER_RE.sub(lambda m: "1" if kinds.get(m.group(1)) == "integer" else _PARAM_MARKER, text)
+
+
+_INDEX_GROUP_RE: Final = re.compile(
+    r"(?i)\s*index\s*(?:=|::)\s*[^\s()]+(?:\s+OR\s+index\s*(?:=|::)\s*[^\s()]+)*\s*"
+)
+
+
+def index_bounded(terms: str, allowed_indexes: Sequence[str]) -> bool:
+    """Whether expanded search terms restrict the search to allowlisted
+    indexes on their own: no unquoted OR at the top level (Splunk's OR binds
+    before AND, so it could add other data), and at least one top-level
+    positive index restriction (not preceded by NOT): an index term with =,
+    :: or IN, or a group holding only index terms joined by OR. Every index
+    named anywhere was already checked against the allowlist."""
+    mask = _quoted_mask(terms, "terms")
+    stripped = terms.replace('"', " ")
+    depths: list[int] = []
+    depth = 0
+    groups: list[tuple[int, int]] = []
+    opened = 0
+    for at, (char, quoted) in enumerate(zip(terms, mask, strict=True)):
+        if not quoted and char == "(":
+            if depth == 0:
+                opened = at
+            depth += 1
+        depths.append(depth)
+        if not quoted and char == ")":
+            depth -= 1
+            if depth == 0:
+                groups.append((opened, at))
+    top_unquoted = "".join(
+        c if d == 0 and not q else " " for c, d, q in zip(terms, depths, mask, strict=True)
+    )
+    if _OR_RE.search(top_unquoted):
+        return False
+
+    def positive(start: int, names: Sequence[str]) -> bool:
+        return (
+            not _NOT_BEFORE_RE.search(top_unquoted[:start])
+            and bool(names)
+            and all(n in allowed_indexes for n in names)
+        )
+
+    for match in _INDEX_TERM_RE.finditer(stripped):
+        if mask[match.start()]:
+            continue  # text inside a string restricts nothing
+        names = _index_names(stripped[match.start() :], None)
+        if match.group(1).lower() != "in":
+            names = names[:1]
+        if depths[match.start()] == 0 and positive(match.start(), names):
+            return True
+    for start, end in groups:
+        inner = stripped[start + 1 : end]
+        keywords = [start + 1 + m.start() for m in _INDEX_TERM_RE.finditer(inner)]
+        if (
+            _INDEX_GROUP_RE.fullmatch(inner)
+            and not any(mask[at] for at in keywords)
+            and positive(start, _index_names(inner, None))
+        ):
+            return True
+    return False
+
+
+@dataclass
+class MacroVerdict:
+    """The site probe's view of one allowlisted macro: whether every
+    definition a template needs was readable, the check's verdict code
+    (`ok`, `unused` or a failure reason) and the deepest nesting."""
+
+    readable: bool = True
+    verdict: str = "unused"
+    depth: int = 0
+
+
+@dataclass(frozen=True)
+class MacroAssessment:
+    readable: bool
+    verdicts: Mapping[str, MacroVerdict]
+    failures: tuple[tuple[str, str | None], ...]
+
+
+def assess_macros(backend: SplunkBackend, defs: Mapping[str, MacroDefinition] | None) -> MacroAssessment:
+    """Check every template macro call (and, for an index_from_macro
+    template, that its expanded terms bound the indexes). Never raises."""
+    verdicts = {name: MacroVerdict() for name in backend.allowed_macros}
+    failures: list[tuple[str, str | None]] = []
+    if defs is None:
+        for template in backend.templates:
+            for call in template.macros:
+                verdicts[call.name] = MacroVerdict(readable=False, verdict="macro_unreadable")
+        return MacroAssessment(False, verdicts, ())
+    readable = True
+    for template in backend.templates:
+        ok = True
+        for call in template.macros:
+            text = _marked(template, f"`{call.name}{'(' + ','.join(call.args) + ')' if call.args else ''}`")
+            verdict = verdicts[call.name]
+            seen: dict[str, int] = {}
+            try:
+                expanded, reached = expand_macros(text, defs, backend, seen=seen)
+                if call.in_terms and "|" in "".join(
+                    " " if q else c for c, q in zip(expanded, _quoted_mask(expanded, "macro"), strict=True)
+                ):
+                    raise MacroCheckError("macro_pipe_in_terms", call.name)
+            except MacroCheckError as exc:
+                ok = False
+                blamed = verdicts.get(exc.macro or call.name, verdict)
+                if exc.reason == "macro_unreadable":
+                    readable = False
+                    blamed.readable = False
+                else:
+                    failures.append((exc.reason, exc.macro or call.name))
+                if blamed.verdict in ("unused", "ok"):
+                    blamed.verdict = exc.reason
+                if verdict is not blamed and verdict.verdict in ("unused", "ok"):
+                    verdict.verdict = exc.reason
+                continue
+            for name, reach in seen.items():
+                nested = verdicts[name]
+                nested.depth = max(nested.depth, reach)
+                if nested.verdict == "unused":
+                    nested.verdict = "ok"
+            del reached
+        if not ok:
+            continue
+        failure = whole_template_failure(template, defs, backend)
+        if failure is None and template.index_from_macro:
+            first = next(c.name for c in template.macros if c.in_terms)
+            terms, _ = split_terms(template.search)
+            try:
+                expanded, _ = expand_macros(_marked(template, terms), defs, backend)
+                bounded = index_bounded(expanded, backend.allowed_indexes)
+            except (MacroCheckError, GatewayConfigError):
+                bounded = False
+            if not bounded:
+                failure = ("index_not_bounded", first)
+        if failure is not None:
+            failures.append(failure)
+            if verdicts[failure[1]].verdict == "ok":
+                verdicts[failure[1]].verdict = failure[0]
+    return MacroAssessment(readable, verdicts, tuple(failures))
+
+
+def whole_template_failure(
+    template: Template, defs: Mapping[str, MacroDefinition], backend: SplunkBackend
+) -> tuple[str, str] | None:
+    """The expansion rules over the template's whole search, expanding one
+    more call at a time, so a macro used after the template's own pipe (a
+    definition such as `delete` with no pipe of its own) or text split
+    across the template and a macro is checked too. Blames the call whose
+    expansion first breaks a rule."""
+    marked = _marked(template, template.search)
+    spans = backtick_spans(marked, _quoted_mask(marked, "template"), "template")
+    for upto, call in enumerate(template.macros, start=1):
+        text = list(marked)
+        for start, end in spans[upto:]:
+            text[start:end] = " " * (end - start)
+        try:
+            expanded, _ = expand_macros("".join(text), defs, backend)
+            lint_expansion(expanded, backend.allowed_indexes, call.name)
+        except MacroCheckError as exc:
+            return exc.reason, call.name
+    return None
+
+
+def enforce_macros(backend: SplunkBackend, assessment: MacroAssessment) -> str:
+    """The start-up decision: any failed check refuses (naming the macro);
+    unreadable definitions refuse unless `allow_unverified_macros`, which
+    leaves the token user's role as the only bound on what a macro reads or
+    runs. Returns `verified` or `unverified`."""
+    if assessment.failures:
+        reason, macro = assessment.failures[0]
+        raise BackendCheckError(reason, macro)
+    if assessment.readable:
+        return "verified"
+    if backend.allow_unverified_macros:
+        return "unverified"
+    unreadable = next((n for n, v in assessment.verdicts.items() if not v.readable), None)
+    raise BackendCheckError("macros_unverifiable", unreadable)
+
+
 @dataclass(frozen=True)
 class BackendReport:
     protocol: str
     session_issued: bool
     tools: int
+    macros: str | None = None  # "verified", "unverified", or None when no template uses one
 
 
 async def check_backend(client: SplunkMcpClient) -> BackendReport:
@@ -1033,7 +1636,11 @@ async def check_backend(client: SplunkMcpClient) -> BackendReport:
     reason = tool_check(client.backend, tools)
     if reason is not None:
         raise BackendCheckError(reason)
-    return BackendReport(session.protocol, session.session_id is not None, len(tools))
+    macros: str | None = None
+    if any(t.macros for t in client.backend.templates):
+        defs = await read_macro_definitions(client, tools, deadline)
+        macros = enforce_macros(client.backend, assess_macros(client.backend, defs))
+    return BackendReport(session.protocol, session.session_id is not None, len(tools), macros)
 
 
 # --- results ----------------------------------------------------------------------------------
@@ -1063,17 +1670,21 @@ def _follow(value: object, path: Sequence[str]) -> list[Any] | None:
 def find_rows(backend: SplunkBackend, result: Mapping[str, Any]) -> list[Any] | None:
     """The result rows at `result_path` in `structuredContent` or in JSON
     text content, as `result_source` allows; None when neither holds them."""
+    return find_rows_at(result, backend.result_source, backend.result_path)
+
+
+def find_rows_at(result: Mapping[str, Any], source: str, path: Sequence[str]) -> list[Any] | None:
     candidates: list[object] = []
-    if backend.result_source in ("auto", "structured") and "structuredContent" in result:
+    if source in ("auto", "structured") and "structuredContent" in result:
         candidates.append(result["structuredContent"])
-    if backend.result_source in ("auto", "text_json"):
+    if source in ("auto", "text_json"):
         for text in _text_items(result):
             try:
                 candidates.append(json.loads(text))
             except ValueError, RecursionError:
                 continue
     for candidate in candidates:
-        rows = _follow(candidate, backend.result_path)
+        rows = _follow(candidate, path)
         if rows is not None:
             return rows
     return None
@@ -1299,7 +1910,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
     except BackendCheckError as exc:
-        log.error(json.dumps({"action": "splunk_gateway_start", "decision": exc.reason}))
+        line = {"action": "splunk_gateway_start", "decision": exc.reason}
+        if exc.macro is not None:
+            line["macro"] = exc.macro  # the allowlisted name, never its definition
+        log.error(json.dumps(line))
         return 3
     log.info(
         json.dumps(
@@ -1310,6 +1924,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "protocol": report.protocol,
                 "session_issued": report.session_issued,
                 "templates": len(gateway.backend.templates),
+                "macros": report.macros,
             }
         )
     )

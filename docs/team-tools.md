@@ -207,9 +207,12 @@ scoped queries remain the primary control.
 `max_request_bytes` (64 KiB, else HTTP 413; a client that disconnects mid-body
 gets no reply); `max_result_bytes` (64 KiB; the GitLab gateway defaults it to
 128 KiB); `max_rows` (200); `max_field_chars` (4096; the GitLab gateway defaults it to 32768,
-so a description or note body of 20k characters arrives whole); `max_string_arg_chars` (1024). The
-limiter lives in memory, which suits the one replica per gateway; idle users are
-forgotten.
+so a description or note body of 20k characters arrives whole); `max_string_arg_chars` (1024);
+`max_concurrent_total` and `rate_per_minute_total` (unset), optional caps over
+all callers together, for a gateway whose backend credential is shared (the
+Splunk gateway sets them; over a cap is `busy` or `rate_limited`). The
+limiter lives in memory, which suits the one replica per gateway: every cap is
+per pod. Idle users are forgotten.
 
 **Errors.** Protocol errors are JSON-RPC errors with fixed text that never echoes
 the request: `-32700 invalid JSON`, `-32600 request must be an object`,
@@ -504,10 +507,10 @@ it, read-only would be only a client-side filter.
 ```text
 Contract / scope: the read-only Splunk gateway process, templates only, over the site's Splunk MCP Server
 Status: implemented with evidence (process, client, tools and site probe; default-off; no chart, NetworkPolicy or Open WebUI registration yet; site checks pending)
-Source of authority: ADR-0010 (TD2, TD3, TD5, TD6, TD7), ADR-0015 (proposed; bearer mode B2 pending the maintainer's acceptance)
+Source of authority: ADR-0010 (TD2, TD3, TD5, TD6, TD7), ADR-0015 (approved by the maintainer 2026-11-25 in session, accepted by merging; bearer mode B2 approved as a named exception)
 Decision owner: src/mainframe_rag/gateways/splunk.py (build_gateway, check_backend, SplunkMcpClient, compose_spl, backend_from_config)
 Inputs and identities: GATEWAY_CONFIG_FILE (backend section below); SPLUNK_MCP_TOKEN; SPLUNK_AUTH_MODE; SPLUNK_GATEWAY_BEARER_SECRET (bearer mode)
-Producers -> persisted state -> consumers: Open WebUI tool call -> gateway (one in-memory MCP session) -> Splunk MCP Server run-query tool -> framed rows to the model
+Producers -> persisted state -> consumers: Open WebUI tool call -> gateway (one in-memory MCP session) -> Splunk MCP Server run-query tool -> framed rows to the model; at start-up, the knowledge-object tool's macro definitions -> the macro check (held in memory only for the check)
 Evidence: tests/test_gateway_splunk.py (fake Splunk MCP Server following MCP 2025-06-18; records each request and the exact SPL; any non-POST is a recorded violation)
 ```
 
@@ -515,19 +518,26 @@ Evidence: tests/test_gateway_splunk.py (fake Splunk MCP Server following MCP 202
 Start-up reads the configuration and secrets, checks the backend, then serves.
 It exits 2 on a configuration error (the message names keys and template
 positions, never a value or SPL) and 3 when the backend check refuses, logging
-`{"action": "splunk_gateway_start", "decision": <code>}`. On success it logs
-the mode, the negotiated protocol, whether a session was issued and the
-template count. The token and the bearer secret are never logged.
+`{"action": "splunk_gateway_start", "decision": <code>}`, with `"macro"`
+naming the allowlisted macro when the macro check refused one (never its
+definition). On success it logs the mode, the negotiated protocol, whether a
+session was issued, the template count and `"macros"` (`verified`,
+`unverified`, or null when no template calls one). The token and the bearer secret are never logged.
 `--site-probe` runs the read-only site checks instead of serving (below).
 
 **Caller mode.** `SPLUNK_AUTH_MODE` is `oidc` (default; also when unset) or
 `bearer`, as for GitLab: `oidc` fixes `require_single_audience` on (TD6);
 `bearer` uses [bearer mode](#service-bearer) with
 `SPLUNK_GATEWAY_BEARER_SECRET` and the caller `openwebui`. Bearer mode is
-ADR-0015's proposed exception B2 and is not approved yet. In bearer mode the
-limits are instance-wide, with defaults of 3 calls in flight (Splunk's default
-`srchJobsQuota`) and 60 a minute, and the TD5 hash is the same for every
-search. A key set in the file's
+ADR-0015's named exception B2, approved by the maintainer on 2026-11-25. Its
+premise: one caller service holds the secret, a NetworkPolicy admits only
+that service, and attribution is shared. In bearer mode the per-caller
+limits are instance-wide, with defaults of 3 calls in flight and 60 a
+minute, and the TD5 hash is the same for every search. In both modes the
+gateway-wide caps default to `max_concurrent_total` 3 (Splunk's default
+`srchJobsQuota`, which covers every caller because they share one token
+user) and `rate_per_minute_total` 60 (ADR-0015 D10). They are per pod: run
+one replica, or divide them by the replica count. A key set in the file's
 `limits` keeps its value. In both modes `tool_timeout_s` defaults to 60.
 
 **Token (E1).** `SPLUNK_MCP_TOKEN` holds the encrypted token the Splunk MCP
@@ -575,6 +585,8 @@ with a fixed reason:
 | `extra_argument_missing` | a key of `extra_arguments` is not a property |
 | `required_argument_unset` | the schema requires an argument the gateway does not send |
 | `upstream_refused`, `upstream_unavailable`, `upstream_timeout`, `upstream_too_large`, `upstream_error`, `upstream_protocol` | as the client maps them |
+| `macro_refused_command`, `macro_subsearch`, `macro_time_modifier`, `macro_index_not_allowed`, `macro_param_unquoted`, `macro_pipe_in_terms`, `macro_backtick`, `macro_unbalanced_quote`, `macro_unbalanced_parentheses`, `macro_nested_not_allowed`, `macro_cycle`, `macro_too_deep`, `index_not_bounded` | the macro check refused the named macro (below) |
+| `macros_unverifiable` | the definitions could not be read and `allow_unverified_macros` is false |
 
 **Configuration `backend` section.** Unknown keys are refused. An example
 with synthetic names is
@@ -598,6 +610,9 @@ the site writes its own indexes and templates.
 | `max_rows` | 100 | at most 1000 (Splunk's event cap) and at most `limits.max_rows` |
 | `max_window_s` | 604800 | the widest time range any template may allow |
 | `allowed_indexes` | required | non-empty list of index names (`[A-Za-z0-9_][A-Za-z0-9_-]{0,79}`) |
+| `allowed_macros` | `[]` | at most 128 distinct macro names (`[A-Za-z0-9_][A-Za-z0-9_.:-]{0,79}`) templates and macros may call |
+| `allow_unverified_macros` | false | start even when the macro definitions cannot be read; the token user's role is then the only bound on what a macro reads or runs |
+| `macro_source` | below | where the macro check reads definitions |
 | `templates` | required | 1 to 64 templates (below) |
 
 **Templates.** Each template is an object:
@@ -607,7 +622,7 @@ the site writes its own indexes and templates.
 | `name` | the tool name: a lower-case identifier, unique |
 | `description` | 1 to 1024 characters; the tool description starts with it |
 | `search` | the SPL after the index clause and time bounds; printable ASCII, at most 4096 characters, may be empty |
-| `indexes` or `index_param` | exactly one: a list of entries of `allowed_indexes`, or the name of a parameter of type `index` |
+| `indexes`, `index_param` or `index_from_macro` | exactly one: a list of entries of `allowed_indexes`, the name of a parameter of type `index`, or `true` when an allowlisted macro in the search terms defines the index (the macro check must prove it) |
 | `params` | an object of typed parameters (below) |
 | `max_window_s` | at most `backend.max_window_s` (its default) |
 | `default_earliest` | a relative time within the window; default `-1h` |
@@ -633,8 +648,12 @@ failure is a start-up error naming the template's position:
   string (an `integer` may stand alone);
 - double quotes balance (a backslash escapes inside a string), and so do
   parentheses outside strings;
-- no backtick (macros and comments), no `[` or `]` outside a string
-  (subsearches search outside the index clause);
+- backticks only as calls of an allowlisted macro outside strings:
+  `` `name` `` or `` `name(a,b)` ``, each argument a `{param}` placeholder (not of
+  type `index`), a token `[A-Za-z0-9_.:*-]{1,64}` or a double-quoted literal
+  of up to 128 characters with no quote, backslash, comma, pipe, backtick or
+  brace; any other backtick span, a comment included, is refused; no `[` or
+  `]` outside a string (subsearches search outside the index clause);
 - no `index`, `earliest`, `latest`, `_index_earliest`, `_index_latest`,
   `starttime`, `endtime`, `starttimeu`, `endtimeu`, `timeformat`,
   `searchtimespan*`, `daysago`, `hoursago`, `minutesago`, `monthsago` (also with
@@ -654,6 +673,44 @@ failure is a start-up error naming the template's position:
 The check is a lint over operator-written text; the token user's role is the
 boundary (ADR-0015 D3).
 
+**Macros (ADR-0015 D9).** When a template calls a macro, the start-up check
+reads every definition once through the knowledge-object tool and checks
+each call. It refuses start-up, naming the macro and never its text:
+
+- every nested call must be allowlisted (`macro_nested_not_allowed`), the
+  nesting at most 5 deep (`macro_too_deep`), and no cycle (`macro_cycle`);
+- definitions are looked up as `name` or `name(<count>)`, with `$arg$`
+  substituted. A missing, eval-based (`iseval`), wrong-arity or
+  twice-differently-defined macro is unreadable;
+- each expansion, and each template's whole expanded search (one more call
+  expanded at a time, so a macro after the template's pipe is covered),
+  must pass the template rules: no refused command, subsearch, unbalanced
+  quote or parenthesis, time modifier, or backtick other than a macro call;
+- an `index` term may use only `=`, `::` or `IN` and name only entries of
+  `allowed_indexes` (no wildcard, none from a parameter);
+- every parameter value must land inside double quotes
+  (`macro_param_unquoted`);
+- a macro in the search terms may not contain a pipe outside a string;
+- for `index_from_macro`, the expanded terms must have no top-level `OR`
+  and a top-level index term (or a group of index terms joined by `OR`),
+  not after `NOT` and not inside a string (`index_not_bounded`).
+
+Unreadable definitions (the tool not listed, its schema lacking the
+configured arguments or requiring others, an error, no rows found, a
+missing or eval-based macro) refuse start-up as `macros_unverifiable`
+unless `allow_unverified_macros` is true. Definitions are checked only at
+pod start: a macro changed in Splunk afterwards runs unchecked until the next
+start.
+
+`macro_source` keys (unknown keys refused): `tool_name`
+(`splunk_get_knowledge_objects`), `type_argument` (`type`) and `type_value`
+(`macros`), `extra_arguments` (constants, as for the run-query tool),
+`result_source` (`auto`, `structured` or `text_json`), `result_path`
+(`["results"]`), and the key paths in a row: `name_path` (`["name"]`),
+`definition_path` (`["definition"]`), `args_path` (`["args"]`, a
+comma-separated string or a list) and `iseval_path` (`["iseval"]`). The site
+probe shows the tool's input schema.
+
 **Tools.** One tool per template, named by it. Its arguments are the
 template's parameters plus:
 
@@ -671,11 +728,13 @@ search index="<i>" earliest=<earliest> latest=<latest> (<template terms>) <templ
 ```
 
 The template's terms are its text before the first pipe outside a string,
-with values in place; they are parenthesised (left out when empty) because
+with values in place and macro calls as written (Splunk expands them);
+they are parenthesised (left out when empty) because
 Splunk evaluates `OR` before the implicit `AND`, so an `OR` in a template
 cannot bind to the index clause or the time bounds. The pipeline is the
 rest. `search ` is left out when `search_prefix` is false; several fixed indexes
-become `(index="a" OR index="b")`; the comment (TD5, Splunk's inline comment
+become `(index="a" OR index="b")`; an `index_from_macro` template has no
+index clause (`search earliest=… latest=… (<terms>) …`); the comment (TD5, Splunk's inline comment
 syntax) is left out when `attribution_comment` is false. `sub_hash` is the
 runtime's hash of the caller's `sub` (`service:openwebui` in bearer mode);
 `req` is the decision log's `request_id`. The SPL goes to `tool_name` as
@@ -700,6 +759,7 @@ an unexpected error) and then one line
 |---|---|---|
 | `splunk.initialize` | a supported version was negotiated | `protocol`, `session_issued`, `answer_kind` (`json` or `sse`) |
 | `splunk.startup_check` | the start-up check passes | `tool_count`, `tool_present`, `property_count`, `reason` |
+| `splunk.macros` | the start-up macro check passes (`inconclusive` `unverified` when the definitions cannot be read and `allow_unverified_macros` is set) | `allowlisted`, `definitions_read`, `checked_ok`, `failed`, `allow_unverified`, `reason` |
 | `splunk.result_shape` | `\| makeresults count=1` returns rows where the configuration looks | `is_error`, `structured`, `content_items`, `rows_found`, `row_count`, `answer_kind` of the call |
 | `splunk.comment` | the same search with the TD5 comment is accepted (fails only when the comment is enabled and refused; `inconclusive` when the control failed or the comment is disabled) | `enabled`, `accepted` |
 | `splunk.search_prefix` | the configured `search_prefix` works: `search <q>` and `<q>` are run over the first allowed index (`earliest=-24h`, `\| head 1 \| stats count`); a form refused, or a count that differs between them, shows which one Splunk reads as intended (`no_events` is `inconclusive`) | `configured`, `with_prefix_ok`, `without_prefix_ok`, `count_with`, `count_without` |
@@ -708,7 +768,10 @@ an unexpected error) and then one line
 When initialize or the start-up check fails, the later checks are
 `inconclusive` `not_reached`. The detail line holds the server's name and
 version, the listed tool names, the run-query tool's input and output schema
-(strings cleaned and redacted), and the key and JSON-type shape of the
-makeresults result. It holds no row, value, index name, query or token, but
+(strings cleaned and redacted), the knowledge-object tool's input schema
+(`macro_tool_input_schema`), per allowlisted macro `{"readable", "verdict",
+"depth"}` (`verdict` is `ok`, `unused` or a reason above), and the key and
+JSON-type shape of the makeresults result. It holds no row, value, index
+name, query, macro definition or token, but
 the schema is the server's own text and may carry site names in enums or
 defaults: keep it at the site.
