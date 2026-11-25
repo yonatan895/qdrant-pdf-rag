@@ -86,6 +86,9 @@ ERRORS: Final[dict[str, str]] = {
     # GitLab gateway (#1078)
     "project_not_allowed": "the project is not available through this gateway",
     "binary_content": "the file is not text",
+    # Splunk gateway (#1077)
+    "upstream_protocol": "the backend did not answer in the expected protocol",
+    "search_refused": "the backend refused or could not finish the search; try a narrower time range",
 }
 
 
@@ -107,6 +110,9 @@ class GatewayConfigError(Exception):
 # --- configuration --------------------------------------------------------------
 
 
+_OPTIONAL_LIMITS: Final = frozenset({"max_concurrent_total", "rate_per_minute_total"})
+
+
 @dataclass(frozen=True)
 class Limits:
     """Per-gateway caps. Every field is a positive bound."""
@@ -119,10 +125,21 @@ class Limits:
     max_rows: int = 200
     max_field_chars: int = 4096
     max_string_arg_chars: int = 1024
+    # Gateway-wide caps over every caller together (per process, so per pod).
+    # None (the default) means no such cap; a gateway whose backend
+    # credential is shared sets them (the Splunk gateway, ADR-0015 D10).
+    max_concurrent_total: int | None = None
+    rate_per_minute_total: int | None = None
 
     def __post_init__(self) -> None:
         for f in fields(self):
             value = getattr(self, f.name)
+            if f.name in _OPTIONAL_LIMITS:
+                if value is not None and (
+                    isinstance(value, bool) or not isinstance(value, int) or value <= 0
+                ):
+                    raise GatewayConfigError(f"limits.{f.name} must be a positive integer")
+                continue
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise GatewayConfigError(f"limits.{f.name} must be a number")
             if f.type == "int" and not isinstance(value, int):
@@ -767,30 +784,46 @@ def fit_text_tail(text: str, limits: Limits, *, prefix: str = "", suffix: str = 
 
 class UserLimiter:
     """Per-`sub` concurrency cap and sliding one-minute rate limit, in memory
-    (one replica per gateway). A refused call does not count against the
-    rate. Idle users are forgotten, so memory follows active users only."""
+    (one replica per gateway), plus the optional gateway-wide caps over all
+    callers together (`max_concurrent_total`, `rate_per_minute_total`). A
+    refused call counts against no rate. Idle users are forgotten, so memory
+    follows active users only."""
 
     def __init__(self, limits: Limits, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._limits = limits
         self._clock = clock
         self._calls: dict[str, deque[float]] = {}
         self._active: dict[str, int] = {}
+        self._total_calls: deque[float] = deque()
+        self._total_active = 0
 
     @contextmanager
     def slot(self, sub: str) -> Iterator[None]:
         now = self._clock()
-        if self._active.get(sub, 0) >= self._limits.max_concurrent_per_user:
+        limits = self._limits
+        if self._active.get(sub, 0) >= limits.max_concurrent_per_user:
+            raise GatewayError("busy")
+        if limits.max_concurrent_total is not None and self._total_active >= limits.max_concurrent_total:
             raise GatewayError("busy")
         window = self._calls.setdefault(sub, deque())
         while window and now - window[0] >= 60.0:
             window.popleft()
-        if len(window) >= self._limits.rate_per_minute:
+        if len(window) >= limits.rate_per_minute:
+            raise GatewayError("rate_limited")
+        total = self._total_calls
+        while total and now - total[0] >= 60.0:
+            total.popleft()
+        if limits.rate_per_minute_total is not None and len(total) >= limits.rate_per_minute_total:
             raise GatewayError("rate_limited")
         window.append(now)
+        if limits.rate_per_minute_total is not None:
+            total.append(now)
         self._active[sub] = self._active.get(sub, 0) + 1
+        self._total_active += 1
         try:
             yield
         finally:
+            self._total_active -= 1
             self._active[sub] -= 1
             if not self._active[sub]:
                 del self._active[sub]
@@ -987,6 +1020,62 @@ class UpstreamClient:
                         raise GatewayError("upstream_too_large")
                 content_type = response.headers.get("content-type", "")
                 kept = {k.lower(): v for k, v in response.headers.items()}
+        except httpx2.TimeoutException:
+            raise GatewayError("upstream_timeout") from None
+        except httpx2.HTTPError:
+            raise GatewayError("upstream_unavailable") from None
+        return UpstreamResponse(status, bytes(body), content_type, kept)
+
+    async def request_until(
+        self,
+        method: str,
+        path: str,
+        *,
+        deadline_s: float,
+        until: Callable[[str, bytes], bool],
+        json_body: object | None = None,
+        headers: Mapping[str, str] | None = None,
+        max_bytes: int | None = None,
+    ) -> UpstreamResponse:
+        """One backend call whose body is read only as far as the caller
+        needs: `until(content_type, chunk)` sees every chunk in order, and
+        reading stops after the first chunk for which it returns True (an
+        event stream the server keeps open after the event the caller
+        wanted). Otherwise the body is read to its end. The body returned
+        holds the bytes read. The byte cap and status mapping are those of
+        `request`; the whole call, body included, must finish within
+        `deadline_s`, else `upstream_timeout` (never a partial body). The
+        call asks for identity encoding, so a chunk is its wire size."""
+        cap = self._max_bytes if max_bytes is None else max_bytes
+        if cap <= 0 or not deadline_s > 0:
+            raise ValueError("max_bytes and deadline_s must be positive")
+        if method not in self._methods:
+            raise RuntimeError("this gateway does not allow that method")  # programming error
+        url = self._url(path)
+        body = bytearray()
+        deadline = asyncio.get_running_loop().time() + deadline_s
+        try:
+            async with asyncio.timeout_at(deadline):
+                async with self._client.stream(
+                    method,
+                    url,
+                    json=json_body,
+                    headers={**dict(headers or {}), "Accept-Encoding": "identity"},
+                    follow_redirects=False,
+                    timeout=self._timeout,
+                ) as response:
+                    status = response.status_code
+                    _raise_for_status(status)
+                    content_type = response.headers.get("content-type", "")
+                    kept = {k.lower(): v for k, v in response.headers.items()}
+                    async for chunk in response.aiter_bytes():
+                        body += chunk
+                        if len(body) > cap:
+                            raise GatewayError("upstream_too_large")
+                        if until(content_type, chunk):
+                            break  # the caller has what it needs: stop reading
+        except TimeoutError:
+            raise GatewayError("upstream_timeout") from None
         except httpx2.TimeoutException:
             raise GatewayError("upstream_timeout") from None
         except httpx2.HTTPError:
