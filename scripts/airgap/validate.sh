@@ -263,7 +263,7 @@ if [ "$SPLUNK_GATEWAY_ENABLED" = "true" ]; then
             case "$PROBE" in
                 ok) require_splunk_gateway_secrets
                     echo "    Splunk gateway Secret '$SPLUNK_GATEWAY_SECRET' has the keys ${SPLUNK_GATEWAY_AUTH_MODE:-oidc} mode reads" ;;
-                notfound) die "Secret '$SPLUNK_GATEWAY_SECRET' not found in namespace '$NAMESPACE' — create it before SPLUNK_GATEWAY_ENABLED=true (docs/team-tools.md)" ;;
+                notfound) die "Secret '$SPLUNK_GATEWAY_SECRET' not found in namespace '$NAMESPACE' — create it before SPLUNK_GATEWAY_ENABLED=true (docs/deploy.md#splunk-gateway-deploy)" ;;
                 forbidden) die "this identity may not read Secret '$SPLUNK_GATEWAY_SECRET' in namespace '$NAMESPACE' (Forbidden); grant namespace-scoped get on secrets, not cluster-admin" ;;
                 *) die "cannot read Secret '$SPLUNK_GATEWAY_SECRET' in namespace '$NAMESPACE' (unexpected client error)" ;;
             esac

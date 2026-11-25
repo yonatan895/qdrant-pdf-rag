@@ -228,6 +228,8 @@ spec:
               value: "false"
             # Answers only through the agent (V2): no model connections, no
             # user tools, the Pipe Function is the only extension.
+            {{- /* Team tools (below) add one connection and their tool servers,
+            for Team models only; a template comment keeps the default render unchanged. */}}
             - name: ENABLE_OPENAI_API
               value: {{ ternary "true" "false" (not (empty $teamGateways)) | quote }}
             - name: ENABLE_OLLAMA_API
@@ -338,6 +340,15 @@ spec:
             # TD8: the task model for external connections stays empty too.
             - name: TASK_MODEL_EXTERNAL
               value: ""
+            {{- if .Values.gateway.caConfigMapName }}
+            # LiteLLM behind the site CA: the complete gateway trust bundle (as the
+            # agent's SSL_CERT_FILE). The render refuses it together with the IdP CA
+            # bundle, which then belongs inside this one.
+            - name: SSL_CERT_FILE
+              value: /etc/gateway-ca/ca-bundle.crt
+            - name: REQUESTS_CA_BUNDLE
+              value: /etc/gateway-ca/ca-bundle.crt
+            {{- end }}
             {{- end }}
             # Task calls off: the docs model is never a task model (V2).
             - name: TASK_MODEL
@@ -514,6 +525,11 @@ spec:
               mountPath: /etc/mainframe-rag/ca-trust
               readOnly: true
             {{- end }}
+            {{- if and $teamGateways .Values.gateway.caConfigMapName }}
+            - name: gateway-ca
+              mountPath: /etc/gateway-ca
+              readOnly: true
+            {{- end }}
         # Allow-list proxy (ADR-0007 E1): the only listener of the pod.
         - name: proxy
           image: {{ include "mainframe-rag.image" (dict "name" "openwebuiProxy" "image" .Values.images.openwebuiProxy) }}
@@ -618,5 +634,13 @@ spec:
             name: rag-openwebui-idp-ca
         - name: ca-trust
           emptyDir: {}
+        {{- end }}
+        {{- if and $teamGateways .Values.gateway.caConfigMapName }}
+        - name: gateway-ca
+          configMap:
+            name: {{ .Values.gateway.caConfigMapName }}
+            items:
+              - key: ca-bundle.crt
+                path: ca-bundle.crt
         {{- end }}
 {{- end }}

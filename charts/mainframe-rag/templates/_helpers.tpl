@@ -284,6 +284,9 @@ NetworkPolicy) range over, so a later gateway (GitLab, #1078) adds one spec.
 {{- if $shape -}}
 {{- fail (printf "Team-tool settings must not be empty or null: %s (a null port would open the egress rule to every TCP port)." (join ", " $shape)) -}}
 {{- end -}}
+{{- if and .Values.gateway.caConfigMapName (.Values.openwebui.oidc | default dict).caBundle -}}
+{{- fail "teamTools.splunk.enabled=true with gateway.caConfigMapName: Open WebUI then trusts that complete bundle to reach LiteLLM, so put the IdP CA into it and leave openwebui.oidc.caBundle unset (OPENWEBUI_IDP_CA_FILE)" -}}
+{{- end -}}
 {{- if not (regexMatch "^\\s*(-----BEGIN CERTIFICATE-----\\r?\\n[A-Za-z0-9+/=\\r\\n]+-----END CERTIFICATE-----\\s*)+$" (toString $s.caBundle)) -}}
 {{- fail "teamTools.splunk.caBundle must hold only PEM certificates (-----BEGIN CERTIFICATE----- blocks, no key or other text); the value is not shown" -}}
 {{- end -}}

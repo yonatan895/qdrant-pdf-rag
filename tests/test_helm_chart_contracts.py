@@ -3201,6 +3201,49 @@ def test_splunk_gateway_refuses_missing_inputs_naming_the_key(owui_chart, key, m
         assert leaked not in r.stderr
 
 
+@pytest.mark.parametrize("path,key", [
+    ("teamTools.splunk.splunkEgress.port", "teamTools.splunk.splunkEgress.port"),
+    ("teamTools.model.egress.port", "teamTools.model.egress.port"),
+    ("teamTools.model.apiKeySecretKey", "teamTools.model.apiKeySecretKey"),
+])
+def test_splunk_gateway_refuses_null_ports_and_key_names(owui_chart, path, key):
+    """A null port would open the egress rule to every TCP port."""
+    r = _splunk_render(owui_chart, set_path(_splunk_values(), path, None))
+    assert r.returncode != 0
+    assert "Team-tool settings must not be empty or null" in r.stderr and key in r.stderr
+
+
+def test_splunk_gateway_dns_egress_reaches_cluster_dns_only(owui_chart):
+    gw = _splunk(owui_chart)["NetworkPolicy", "rag-splunk-gateway"]
+    for ns in ("openshift-dns", "kube-system"):
+        assert _owui_egress_allows(gw, ns, {}, "10.0.0.10", "UDP", 53)
+    assert not _owui_egress_allows(gw, "ns", {}, "10.0.0.10", "UDP", 53)
+    assert not _owui_egress_allows(gw, "other", {}, "10.0.0.10", "UDP", 53)
+    assert not _owui_egress_allows(gw, "openshift-dns", {}, "10.0.0.10", "TCP", 8089)
+
+
+def test_open_webui_trusts_the_site_ca_bundle_to_reach_litellm(owui_chart):
+    values = _splunk_values()
+    values["gateway"]["caConfigMapName"] = "site-ca"
+    docs = run_new_template(values, chart=owui_chart)
+    dep = docs["Deployment", "rag-openwebui"]
+    env = env_map(dep, "openwebui")
+    assert env["SSL_CERT_FILE"]["value"] == env["REQUESTS_CA_BUNDLE"]["value"] == "/etc/gateway-ca/ca-bundle.crt"
+    mounts = {m["name"]: m for m in container_map(dep)["openwebui"]["volumeMounts"]}
+    assert mounts["gateway-ca"] == {"name": "gateway-ca", "mountPath": "/etc/gateway-ca", "readOnly": True}
+    vols = {v["name"]: v for v in dep["spec"]["template"]["spec"]["volumes"]}
+    assert vols["gateway-ca"]["configMap"] == {"name": "site-ca", "items": [{"key": "ca-bundle.crt", "path": "ca-bundle.crt"}]}
+    # Off: the docs front end never mounts the gateway CA (unchanged).
+    off = _splunk_values(splunk={"enabled": False})
+    off["gateway"]["caConfigMapName"] = "site-ca"
+    owui = run_new_template(off, chart=owui_chart)["Deployment", "rag-openwebui"]
+    assert "SSL_CERT_FILE" not in env_map(owui, "openwebui")
+    # With the IdP CA too, the render refuses (one trust file per container).
+    values["openwebui"]["oidc"] = {**values["openwebui"]["oidc"], "caBundle": FAKE_CA}
+    r = _splunk_render(owui_chart, values)
+    assert r.returncode != 0 and "put the IdP CA into it and leave openwebui.oidc.caBundle unset" in r.stderr
+
+
 def test_splunk_gateway_oidc_needs_the_idp_egress(owui_chart):
     values = _splunk_values("oidc")
     values["teamTools"]["splunk"]["idpEgress"]["cidrs"] = []

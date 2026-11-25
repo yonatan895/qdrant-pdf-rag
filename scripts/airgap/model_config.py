@@ -560,6 +560,10 @@ def team_tools_config(values: Mapping[str, str]) -> dict[str, object] | None:
     if missing:
         raise ValueError(f"SPLUNK_GATEWAY_ENABLED=true ({mode} mode) but required inputs are missing: "
                          f"{', '.join(missing)}. Set them, or keep SPLUNK_GATEWAY_ENABLED=false")
+    if values.get("GATEWAY_CA_CONFIGMAP", "") and values.get("OPENWEBUI_IDP_CA_FILE", ""):
+        raise ValueError("SPLUNK_GATEWAY_ENABLED=true with GATEWAY_CA_CONFIGMAP: Open WebUI then trusts that "
+                         "complete bundle to reach LiteLLM, so put the IdP CA into it and leave "
+                         "OPENWEBUI_IDP_CA_FILE unset")
     config = _site_text("SPLUNK_GATEWAY_CONFIG_FILE", config_file)
     _splunk_gateway_config(config, mode)
     ca_bundle = _site_text("SPLUNK_GATEWAY_CA_FILE", ca_file)

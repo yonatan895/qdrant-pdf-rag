@@ -423,7 +423,7 @@ else
     if [ "$OPENWEBUI_ENABLED" = "true" ]; then
         wait_rollout "deploy/rag-openwebui" 660
     fi
-    [ "$SPLUNK_GATEWAY_ENABLED" != "true" ] || wait_rollout "deploy/rag-splunk-gateway" 120
+    [ "$SPLUNK_GATEWAY_ENABLED" != "true" ] || wait_rollout "deploy/rag-splunk-gateway" 330
     # Tags can move after the registry read-back: the running pods must report
     # the verified digests (fail closed; legacy cleanup below is skipped).
     # shellcheck disable=SC2086

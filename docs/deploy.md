@@ -573,7 +573,8 @@ Compatibility and lifecycle decisions under #448:
   `QDRANT_STORAGE_SIZE`: positive quantity with a Ki/Mi/Gi/Ti unit, `INTERNAL_REGISTRY`:
   `host[:port][/path]`) and passes them with `--set-string`, so a comma or `=`
   can never become a second chart value (#1017).
-- Rollout waits remain Qdrant 600s, agent 300s and, with the bundled backend, OpenObserve and otelcol 120s each, with bounded
+- Rollout waits remain Qdrant 600s, agent 300s and, with the bundled backend, OpenObserve and otelcol 120s each
+  (the Splunk gateway, when enabled, 330s: its startup probe allows 300s for the start-up backend check), with bounded
   diagnostics on failure. Explicit ingest keeps its existing wait/diagnostics.
 
 - The Qdrant service URL is derived as plaintext
@@ -2486,7 +2487,10 @@ without them.
     without a database row is visible to admins only (step 9). Its key is Open WebUI's
     own per-leg key, data key `openwebui-llm-api-key` in the Secret
     `GATEWAY_API_KEY_SECRET` (TD3). When the shared key `GATEWAY_API_KEY_SECRET_KEY`
-    is set, that key wins, and Open WebUI then uses the shared key.
+    is set, that key wins, and Open WebUI then uses the shared key. When LiteLLM's
+    certificate comes from the site CA (`GATEWAY_CA_CONFIGMAP`), Open WebUI trusts that
+    complete bundle (`SSL_CERT_FILE`, as the agent does); `OPENWEBUI_IDP_CA_FILE` is
+    then refused, and the IdP CA goes into the same bundle.
   - `ENABLE_TOOL_SERVERS=true` and `TOOL_SERVER_CONNECTIONS` with one MCP entry,
     `http://rag-splunk-gateway:8080/mcp`, id `splunk` (tool id `server:mcp:splunk`).
     In bearer mode it sends the bearer secret, which the chart fills in from the
