@@ -25,6 +25,7 @@ emptyDirs (static, /root, /tmp), as qualified by the #1073 Kind trial.
 {{- if include "mainframe-rag.openwebuiEnabled" . }}
 {{- $o := .Values.openwebui }}
 {{- $idpCA := $o.oidc.caBundle }}
+{{- $teamGateways := include "mainframe-rag.teamGateways" . | fromJsonArray }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -228,7 +229,7 @@ spec:
             # Answers only through the agent (V2): no model connections, no
             # user tools, the Pipe Function is the only extension.
             - name: ENABLE_OPENAI_API
-              value: "false"
+              value: {{ ternary "true" "false" (not (empty $teamGateways)) | quote }}
             - name: ENABLE_OLLAMA_API
               value: "false"
             # v0.13.4 probes host.docker.internal:11434/12434 on first start even
@@ -242,7 +243,7 @@ spec:
             # tool servers), has no switch: the proxy refuses /api/v1/tether and the
             # session API it needs (/api/v1/auths/sessions, ADR-0007 E1).
             - name: ENABLE_TOOL_SERVERS
-              value: "false"
+              value: {{ ternary "true" "false" (not (empty $teamGateways)) | quote }}
             - name: ENABLE_TOOLS
               value: "false"
             # v0.13.x features, pinned off (#1357). Auto tool permissions would score
@@ -306,6 +307,38 @@ spec:
             # entry): new chats and chats whose stored model id is gone use it.
             - name: DEFAULT_MODELS
               value: "mainframe_rag_docs.standard"
+            {{- if $teamGateways }}
+            # Team tools (ADR-0010 TD1/TD3, #1075): one OpenAI-compatible connection to
+            # LiteLLM, limited to the designated reasoning model (id "team.<model>",
+            # admin-only until an admin grants the Team model), with Open WebUI's own
+            # per-leg key; and the enabled gateways as MCP tool servers (ENABLE_TOOLS,
+            # workspace Python tools, stays off). The Docs models stay tool-free.
+            - name: OPENAI_API_BASE_URLS
+              value: {{ .Values.models.reasoning.baseUrl | quote }}
+            - name: OPENAI_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.apiKeySecretName }}
+                  key: {{ .Values.gateway.apiKeySecretKey | default .Values.teamTools.model.apiKeySecretKey | quote }}
+            - name: OPENAI_API_CONFIGS
+              value: {{ dict "0" (dict "enable" true "model_ids" (list .Values.models.reasoning.model) "prefix_id" "team") | toJson | quote }}
+            {{- range $g := $teamGateways }}
+            {{- if eq $g.authMode "bearer" }}
+            # The gateway's bearer secret (ADR-0015 B2): referenced below as $(...)
+            # inside TOOL_SERVER_CONNECTIONS, which v0.13.4 reads only inline.
+            - name: {{ printf "MFR_%s_GATEWAY_KEY" (upper $g.name) }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $g.secretName }}
+                  key: bearer-secret
+            {{- end }}
+            {{- end }}
+            - name: TOOL_SERVER_CONNECTIONS
+              value: {{ include "mainframe-rag.teamToolServerConnections" . | quote }}
+            # TD8: the task model for external connections stays empty too.
+            - name: TASK_MODEL_EXTERNAL
+              value: ""
+            {{- end }}
             # Task calls off: the docs model is never a task model (V2).
             - name: TASK_MODEL
               value: ""

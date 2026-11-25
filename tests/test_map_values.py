@@ -39,8 +39,16 @@ OPENWEBUI_KEYS = [
     "OPENWEBUI_IDP_CA_FILE", "OPENWEBUI_OIDC_SCOPES", "OPENWEBUI_OIDC_EMAIL_CLAIM",
     "OPENWEBUI_OIDC_USERNAME_CLAIM", "OPENWEBUI_RATINGS_ENABLED",
 ]
+TEAM_TOOLS_KEYS = [
+    "TEAM_TOOLS_GROUP_ID", "TEAM_MODEL_EGRESS_CIDRS", "TEAM_MODEL_EGRESS_PORT", "SPLUNK_GATEWAY_ENABLED",
+    "SPLUNK_GATEWAY_AUTH_MODE", "SPLUNK_GATEWAY_SECRET", "SPLUNK_GATEWAY_CONFIG_FILE", "SPLUNK_GATEWAY_CA_FILE",
+    "SPLUNK_EGRESS_CIDRS", "SPLUNK_EGRESS_PORT", "SPLUNK_GATEWAY_IDP_EGRESS_CIDRS", "SPLUNK_GATEWAY_IDP_EGRESS_PORT",
+    "SPLUNK_GATEWAY_CPU_REQUEST", "SPLUNK_GATEWAY_MEMORY_REQUEST", "SPLUNK_GATEWAY_CPU_LIMIT",
+    "SPLUNK_GATEWAY_MEMORY_LIMIT", "GATEWAY_BASE_URL",
+]
 MAPPER_KEYS = [
     *OPENWEBUI_KEYS,
+    *TEAM_TOOLS_KEYS,
     "INTERNAL_REGISTRY", "REGISTRY_INTERNAL", "NAMESPACE", "OPENSHIFT_NAMESPACE",
     "QDRANT_RELEASE", "IMAGE_SHA", "EMBED_BASE_URL", "VLLM_BASE_URL",
     "EMBED_MODEL", "DENSE_DIM", "EMBED_MODEL_REVISION",
@@ -1835,3 +1843,253 @@ def test_vllm_base_url_migration_names_the_v1_suffix():
         "then remove it"
     ) in str(caught.value)
     assert "http://vllm:8000" not in str(caught.value)
+
+
+
+# --------------------------------------- Team tools: Splunk gateway (#1077)
+
+SPLUNK_CA_MOUNT = "/etc/mainframe-rag/splunk-gateway/ca-bundle.crt"
+TEAM_GROUP = "0f8fad5b-d9cb-469f-a165-70867728950e"
+# A marker only the site files carry: no refusal may echo file content.
+PRIVATE_MARKER = "private-site-text-7731"
+
+
+def _gateway_doc(**top) -> dict:
+    doc = {"gateway": "splunk",
+           "backend": {"base_url": "https://splunk.example.test:8089", "ca_file": SPLUNK_CA_MOUNT,
+                       "allowed_indexes": ["main"], "templates": [], "tool_name": PRIVATE_MARKER}}
+    doc.update(top)
+    return doc
+
+
+def _splunk_env(monkeypatch, tmp_path, *, config: dict | bytes | None = None, ca: str | bytes | None = None,
+                **env) -> tuple[Path, Path]:
+    """Open WebUI on plus an enabled bearer-mode gateway; env overrides (None unsets)."""
+    _owui_env(monkeypatch, tmp_path)
+    config_file, ca_file = tmp_path / "splunk-gateway.json", tmp_path / "splunk-ca.pem"
+    raw = config if isinstance(config, bytes) else json.dumps(_gateway_doc() if config is None else config).encode()
+    config_file.write_bytes(raw)
+    if ca is None:
+        ca = _real_ca(tmp_path, "splunk-ca")[0]
+    ca_file.write_bytes(ca if isinstance(ca, bytes) else ca.encode())
+    selected = {
+        "SPLUNK_GATEWAY_ENABLED": "true", "SPLUNK_GATEWAY_AUTH_MODE": "bearer",
+        "SPLUNK_GATEWAY_SECRET": "splunk-gw", "SPLUNK_GATEWAY_CONFIG_FILE": str(config_file),
+        "SPLUNK_GATEWAY_CA_FILE": str(ca_file), "SPLUNK_EGRESS_CIDRS": "192.0.2.10/32",
+        "TEAM_MODEL_EGRESS_CIDRS": "198.51.100.0/24", "LLM_MODEL_REASONING": "reasoner",
+        "LLM_BASE_URL": "https://llm.example.test/v1", "GATEWAY_API_KEY_SECRET": "gw-keys", **env,
+    }
+    for key, value in selected.items():
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    return config_file, ca_file
+
+
+def test_team_tools_off_emits_nothing_and_writes_byte_identical_values(monkeypatch, mapper_env, tmp_path):
+    """Default off: no teamTools block. An explicit false with every other team
+    key set (files that do not even exist) writes the same bytes as unset."""
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    unset = out.read_bytes()
+    assert b"teamTools" not in unset
+    for key, value in {
+        "SPLUNK_GATEWAY_ENABLED": "false", "SPLUNK_GATEWAY_AUTH_MODE": "bearer", "SPLUNK_GATEWAY_SECRET": "splunk-gw",
+        "SPLUNK_GATEWAY_CONFIG_FILE": str(tmp_path / "absent.json"), "SPLUNK_GATEWAY_CA_FILE": str(tmp_path / "absent.pem"),
+        "SPLUNK_EGRESS_CIDRS": "192.0.2.10/32", "SPLUNK_EGRESS_PORT": "8089", "TEAM_MODEL_EGRESS_CIDRS": "198.51.100.0/24",
+        "TEAM_MODEL_EGRESS_PORT": "443", "SPLUNK_GATEWAY_IDP_EGRESS_CIDRS": "203.0.113.0/28", "TEAM_TOOLS_GROUP_ID": TEAM_GROUP,
+        "SPLUNK_GATEWAY_CPU_REQUEST": "100m", "SPLUNK_GATEWAY_MEMORY_LIMIT": "1Gi",
+    }.items():
+        monkeypatch.setenv(key, value)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert out.read_bytes() == unset
+
+
+def test_team_tools_bearer_selection_emits_the_exact_block(monkeypatch, mapper_env, tmp_path):
+    config_file, ca_file = _splunk_env(monkeypatch, tmp_path, TEAM_TOOLS_GROUP_ID=TEAM_GROUP)
+    values = mapped(mapper_env)
+    assert values["teamTools"] == {
+        "groupId": TEAM_GROUP,
+        "model": {"egress": {"cidrs": ["198.51.100.0/24"], "port": 443}},
+        "splunk": {
+            "enabled": True, "authMode": "bearer", "secretName": "splunk-gw",
+            "config": config_file.read_text(), "caBundle": ca_file.read_text(),
+            "splunkEgress": {"cidrs": ["192.0.2.10/32"], "port": 8089},
+            "idpEgress": {"cidrs": [], "port": 443},
+            "resources": {"requests": {"cpu": "50m", "memory": "128Mi"}, "limits": {"cpu": "500m", "memory": "512Mi"}},
+        },
+    }
+    # The team model connection reuses the reasoning leg and the gateway key Secret.
+    assert values["models"]["reasoning"]["baseUrl"] == "https://llm.example.test/v1"
+    assert values["models"]["reasoning"]["model"] == "reasoner"
+    assert values["gateway"]["apiKeySecretName"] == "gw-keys"
+
+
+def test_team_tools_oidc_selection_carries_the_idp_egress_ports_and_sizing(monkeypatch, mapper_env, tmp_path):
+    doc = _gateway_doc(auth={"allowed_groups": ["splunk-users"]},
+                       token_exchange={"client_secret_env": "SPLUNK_GATEWAY_TOKEN_EXCHANGE_SECRET"},
+                       limits={"tool_timeout_s": 45}, backend={**_gateway_doc()["backend"], "timeout_s": 40})
+    _splunk_env(monkeypatch, tmp_path, config=doc, SPLUNK_GATEWAY_AUTH_MODE="oidc",
+                SPLUNK_GATEWAY_IDP_EGRESS_CIDRS="203.0.113.0/28, 203.0.113.64/28", SPLUNK_GATEWAY_IDP_EGRESS_PORT="8443",
+                SPLUNK_EGRESS_PORT="18089", TEAM_MODEL_EGRESS_PORT="4443", SPLUNK_GATEWAY_CPU_LIMIT="1",
+                SPLUNK_GATEWAY_MEMORY_REQUEST="256Mi")
+    splunk = mapped(mapper_env)["teamTools"]["splunk"]
+    assert splunk["authMode"] == "oidc" and splunk["idpEgress"] == {
+        "cidrs": ["203.0.113.0/28", "203.0.113.64/28"], "port": 8443}
+    assert splunk["splunkEgress"]["port"] == 18089
+    assert splunk["resources"] == {"requests": {"cpu": "50m", "memory": "256Mi"},
+                                   "limits": {"cpu": "1", "memory": "512Mi"}}
+    # An empty auth mode is the default (oidc), like the chart.
+    monkeypatch.setenv("SPLUNK_GATEWAY_AUTH_MODE", "")
+    assert mapped(mapper_env)["teamTools"]["splunk"]["authMode"] == "oidc"
+
+
+_BACKEND = _gateway_doc()["backend"]
+_MISSING = "SPLUNK_GATEWAY_ENABLED=true (bearer mode) but required inputs are missing: {}. " \
+           "Set them, or keep SPLUNK_GATEWAY_ENABLED=false"
+_TIMEOUT = ("SPLUNK_GATEWAY_CONFIG_FILE backend.timeout_s must be above 0, below 60 and below "
+            "limits.tool_timeout_s (defaults 50 and 60)")
+_CONFIG_SHAPE = "SPLUNK_GATEWAY_CONFIG_FILE must hold one JSON object with unique, nonempty keys"
+_CA_SHAPE = ("SPLUNK_GATEWAY_CA_FILE must hold only PEM certificates that load "
+             "(-----BEGIN CERTIFICATE----- blocks, no key or other text)")
+
+
+@pytest.mark.parametrize(("env", "config", "ca", "message"), [
+    ({"OPENWEBUI_ENABLED": "false"}, None, None,
+     "SPLUNK_GATEWAY_ENABLED=true requires OPENWEBUI_ENABLED=true: team tools are reached only through Open WebUI"),
+    ({"SPLUNK_GATEWAY_SECRET": None}, None, None, _MISSING.format("SPLUNK_GATEWAY_SECRET")),
+    ({"SPLUNK_GATEWAY_CONFIG_FILE": None, "SPLUNK_GATEWAY_CA_FILE": None}, None, None,
+     _MISSING.format("SPLUNK_GATEWAY_CONFIG_FILE, SPLUNK_GATEWAY_CA_FILE")),
+    ({"SPLUNK_EGRESS_CIDRS": None, "TEAM_MODEL_EGRESS_CIDRS": None}, None, None,
+     _MISSING.format("SPLUNK_EGRESS_CIDRS, TEAM_MODEL_EGRESS_CIDRS")),
+    ({"LLM_MODEL_REASONING": None, "LLM_BASE_URL": None, "GATEWAY_API_KEY_SECRET": None}, None, None,
+     _MISSING.format("LLM_MODEL_REASONING, LLM_BASE_URL (or GATEWAY_BASE_URL), GATEWAY_API_KEY_SECRET")),
+    ({"SPLUNK_GATEWAY_AUTH_MODE": "oidc"}, _gateway_doc(auth={"allowed_groups": ["g"]}), None,
+     ("SPLUNK_GATEWAY_ENABLED=true (oidc mode) but required inputs are missing: SPLUNK_GATEWAY_IDP_EGRESS_CIDRS. "
+      "Set them, or keep SPLUNK_GATEWAY_ENABLED=false")),
+    ({"SPLUNK_GATEWAY_AUTH_MODE": "Bearer"}, None, None, "SPLUNK_GATEWAY_AUTH_MODE must be oidc or bearer"),
+    ({"SPLUNK_GATEWAY_AUTH_MODE": "mtls"}, None, None, "SPLUNK_GATEWAY_AUTH_MODE must be oidc or bearer"),
+    ({"TEAM_TOOLS_GROUP_ID": "team-splunk-users"}, None, None,
+     "TEAM_TOOLS_GROUP_ID must be an Open WebUI group id (a lowercase UUID)"),
+    ({"TEAM_TOOLS_GROUP_ID": TEAM_GROUP.upper()}, None, None,
+     "TEAM_TOOLS_GROUP_ID must be an Open WebUI group id (a lowercase UUID)"),
+    ({"SPLUNK_GATEWAY_SECRET": "Splunk_GW"}, None, None, "SPLUNK_GATEWAY_SECRET must be a DNS-subdomain Secret name"),
+    ({"SPLUNK_EGRESS_CIDRS": "192.0.2.300/32"}, None, None, "SPLUNK_EGRESS_CIDRS must be comma-separated IPv4 CIDRs"),
+    ({"TEAM_MODEL_EGRESS_CIDRS": "198.51.100.0/24,198.51.100.0/24"}, None, None,
+     "TEAM_MODEL_EGRESS_CIDRS must not repeat a CIDR"),
+    ({"SPLUNK_GATEWAY_IDP_EGRESS_CIDRS": "idp.example.test"}, None, None,
+     "SPLUNK_GATEWAY_IDP_EGRESS_CIDRS must be comma-separated IPv4 CIDRs"),
+    ({"SPLUNK_EGRESS_PORT": "70000"}, None, None, "SPLUNK_EGRESS_PORT must be a TCP port from 1 to 65535"),
+    ({"TEAM_MODEL_EGRESS_PORT": "https"}, None, None, "TEAM_MODEL_EGRESS_PORT must be a TCP port from 1 to 65535"),
+    ({"SPLUNK_GATEWAY_CPU_REQUEST": "600m"}, None, None,
+     "SPLUNK_GATEWAY_CPU_LIMIT must not be below SPLUNK_GATEWAY_CPU_REQUEST"),
+    ({"SPLUNK_GATEWAY_MEMORY_LIMIT": "lots"}, None, None,
+     "SPLUNK_GATEWAY_MEMORY_LIMIT must be a positive quantity with a unit (Ki, Mi, Gi or Ti)"),
+    # Shapes are checked while the gateway is off too: a typo fails today.
+    ({"SPLUNK_GATEWAY_ENABLED": "false", "TEAM_TOOLS_GROUP_ID": "team-splunk-users"}, None, None,
+     "TEAM_TOOLS_GROUP_ID must be an Open WebUI group id (a lowercase UUID)"),
+    ({"SPLUNK_GATEWAY_ENABLED": "maybe"}, None, None, "SPLUNK_GATEWAY_ENABLED must be true/false"),
+    ({"SPLUNK_GATEWAY_CONFIG_FILE": "/nonexistent/private-site-text-7731.json"}, None, None,
+     "SPLUNK_GATEWAY_CONFIG_FILE is unreadable (a UTF-8 text file is required)"),
+    ({}, b"\xff\xfe" + PRIVATE_MARKER.encode(), None,
+     "SPLUNK_GATEWAY_CONFIG_FILE is unreadable (a UTF-8 text file is required)"),
+    ({}, b"  \n", None, "SPLUNK_GATEWAY_CONFIG_FILE is blank"),
+    ({}, PRIVATE_MARKER.encode(), None, _CONFIG_SHAPE),
+    ({}, json.dumps([_gateway_doc()]).encode(), None, _CONFIG_SHAPE),
+    ({}, ('{"gateway": "splunk", "gateway": "' + PRIVATE_MARKER + '"}').encode(), None, _CONFIG_SHAPE),
+    ({}, _gateway_doc(gateway="gitlab"), None, 'SPLUNK_GATEWAY_CONFIG_FILE must set "gateway" to "splunk"'),
+    ({}, _gateway_doc(backend={**_BACKEND, "ca_file": "/etc/" + PRIVATE_MARKER}), None,
+     ("SPLUNK_GATEWAY_CONFIG_FILE backend.ca_file must be /etc/mainframe-rag/splunk-gateway/ca-bundle.crt "
+      "(where the chart mounts SPLUNK_GATEWAY_CA_FILE)")),
+    ({}, {k: v for k, v in _gateway_doc().items() if k != "backend"}, None,
+     "SPLUNK_GATEWAY_CONFIG_FILE backend.ca_file must be"),
+    ({}, _gateway_doc(backend={**_BACKEND, "timeout_s": 60}), None, _TIMEOUT),
+    ({}, _gateway_doc(backend={**_BACKEND, "timeout_s": 0}), None, _TIMEOUT),
+    ({}, _gateway_doc(backend={**_BACKEND, "timeout_s": "50"}), None, _TIMEOUT),
+    ({}, _gateway_doc(backend={**_BACKEND, "timeout_s": True}), None, _TIMEOUT),
+    # The default 50 s backend timeout must stay below a lowered tool deadline.
+    ({}, _gateway_doc(limits={"tool_timeout_s": 50}), None, _TIMEOUT),
+    ({}, _gateway_doc(limits={"tool_timeout_s": -1}), None,
+     "SPLUNK_GATEWAY_CONFIG_FILE limits.tool_timeout_s must be a positive number"),
+    ({}, _gateway_doc(limits=[PRIVATE_MARKER]), None, "SPLUNK_GATEWAY_CONFIG_FILE limits must be an object"),
+    ({"SPLUNK_GATEWAY_AUTH_MODE": "oidc", "SPLUNK_GATEWAY_IDP_EGRESS_CIDRS": "203.0.113.0/28"}, None, None,
+     'SPLUNK_GATEWAY_CONFIG_FILE must have an "auth" object in oidc mode (SPLUNK_GATEWAY_AUTH_MODE)'),
+    ({}, _gateway_doc(token_exchange={"client_secret_env": PRIVATE_MARKER}), None,
+     "SPLUNK_GATEWAY_CONFIG_FILE token_exchange.client_secret_env must be SPLUNK_GATEWAY_TOKEN_EXCHANGE_SECRET"),
+    ({}, None, "  \n", "SPLUNK_GATEWAY_CA_FILE is blank"),
+    ({}, None, PRIVATE_MARKER + "\n", _CA_SHAPE),
+    ({}, None, "-----BEGIN CERTIFICATE-----\nQUJDREVGR0g=\n-----END CERTIFICATE-----\n", _CA_SHAPE),
+])
+def test_team_tools_refusals_are_fixed_and_write_nothing(monkeypatch, mapper_env, tmp_path, env, config, ca, message):
+    config_file, ca_file = _splunk_env(monkeypatch, tmp_path, config=config, ca=ca, **env)
+    r, out = mapper_env()
+    assert r.returncode != 0 and not out.exists()
+    assert message in r.stderr
+    # Fixed text: never a supplied value, a path or file content.
+    assert PRIVATE_MARKER not in r.stderr
+    assert str(config_file) not in r.stderr and str(ca_file) not in r.stderr
+    for value in env.values():
+        if value and value not in ("oidc", "false", "true"):
+            assert value not in r.stderr, value
+
+
+def test_team_tools_private_key_as_ca_is_refused_without_echo(monkeypatch, mapper_env, tmp_path):
+    good, key = _real_ca(tmp_path, "splunk-ca")
+    _splunk_env(monkeypatch, tmp_path, ca=good + key)
+    r, out = mapper_env()
+    assert r.returncode != 0 and not out.exists()
+    assert _CA_SHAPE in r.stderr
+    assert "PRIVATE" not in r.stderr and key.splitlines()[1] not in r.stderr
+
+
+# CRLF line endings, a non-ASCII letter, a character outside the BMP (JSON
+# would write a surrogate pair the chart's YAML reader refuses), a DEL and a
+# tab (as JSON whitespace: JSON strings may not hold one raw).
+_EXOTIC_CONFIG = ('{\r\n  "gateway": "splunk",\r\n  "backend": {"ca_file": "' + SPLUNK_CA_MOUNT + '",\r\n'
+                  '\t"base_url": "https://splunk.example.test:8089",\r\n'
+                  '    "description": "café \U0001F600 del\x7f end"}\r\n}\r\n')
+
+
+def test_team_tools_config_and_ca_round_trip_byte_exact(monkeypatch, mapper_env, tmp_path):
+    """The site files reach the values byte-for-byte: no line-ending
+    translation, no lost or rewritten characters; a two-certificate CA keeps
+    its order."""
+    ca_text = _real_ca(tmp_path, "splunk-root")[0] + _real_ca(tmp_path, "splunk-issuing")[0]
+    _splunk_env(monkeypatch, tmp_path, config=_EXOTIC_CONFIG.encode(), ca=ca_text)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    raw = out.read_text(encoding="utf-8")
+    assert raw.isascii(), "the values file is ASCII (JSON-quoted strings)"
+    splunk = load_values(out)["teamTools"]["splunk"]
+    assert splunk["config"] == _EXOTIC_CONFIG
+    assert splunk["caBundle"] == ca_text
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is required for the round-trip")
+def test_team_tools_mapper_to_helm_round_trip(monkeypatch, mapper_env, tmp_path):
+    """Producer to consumer: the files reach the gateway ConfigMap byte-exact
+    and the selection reaches the Deployment's Secret references."""
+    ca_text = _real_ca(tmp_path, "splunk-root")[0]
+    _splunk_env(monkeypatch, tmp_path, config=_EXOTIC_CONFIG.encode(), ca=ca_text, TEAM_TOOLS_GROUP_ID=TEAM_GROUP)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    rendered = subprocess.run(["helm", "template", "app", str(CHART), "-f", str(out), "--namespace", "ns"],
+                              capture_output=True, text=True, cwd=REPO, check=False)
+    assert rendered.returncode == 0, rendered.stderr
+    docs = {(d["kind"], d["metadata"]["name"]): d for d in yaml.safe_load_all(rendered.stdout) if d}
+    data = docs["ConfigMap", "rag-splunk-gateway"]["data"]
+    assert data["config.json"] == _EXOTIC_CONFIG and data["ca-bundle.crt"] == ca_text
+    pod = docs["Deployment", "rag-splunk-gateway"]["spec"]["template"]["spec"]
+    env = {e["name"]: e for e in pod["containers"][0]["env"]}
+    assert env["SPLUNK_MCP_TOKEN"]["valueFrom"]["secretKeyRef"] == {"name": "splunk-gw", "key": "splunk-mcp-token"}
+    assert env["SPLUNK_GATEWAY_BEARER_SECRET"]["valueFrom"]["secretKeyRef"] == {
+        "name": "splunk-gw", "key": "bearer-secret"}
+    assert ("Service", "rag-splunk-gateway") in docs and ("NetworkPolicy", "rag-splunk-gateway") in docs
+
+
+def test_team_tools_sizing_defaults_mirror_the_chart_values():
+    from scripts.airgap.model_config import SIZING_DEFAULTS
+
+    assert SIZING_DEFAULTS["SPLUNK_GATEWAY"] == CHART_VALUES["teamTools"]["splunk"]["resources"]

@@ -2212,3 +2212,126 @@ def test_validate_refuses_invalid_sizing_from_env_and_airgap_env(tree, name, val
     assert r.returncode != 0, r.stdout
     assert name in r.stderr
     assert value not in r.stderr
+
+
+
+# ------------------------------------------- Splunk gateway (#1077, ADR-0015)
+
+SPLUNK_GOOD_BEARER = "Ab0_-" * 7  # 35 characters of the allowed set
+SPLUNK_KUBECTL = """#!/bin/sh
+case "$*" in
+  'api-resources -o name') echo routes.route.openshift.io ;;
+  *'get routes.route.openshift.io '*) echo '{"kind":"List","items":[]}' ;;
+  *'get secret '*'go-template='*)
+    case "$*" in *"\"${MISSING_KEY:-none}\""*) exit 0 ;; esac
+    echo present ;;
+  *'get secret splunk-gw '*'jsonpath='*) printf '%s' "${BEARER_B64:-}" ;;
+  *'get secret splunk-gw'*)
+    case "${SG_SECRET:-ok}" in
+      notfound) echo 'Error from server (NotFound): secrets "splunk-gw" not found' >&2; exit 1 ;;
+      forbidden) echo 'Error from server (Forbidden): secrets is forbidden' >&2; exit 1 ;;
+    esac ;;
+esac
+exit 0
+"""
+
+
+def _splunk_validate(tree, **env):
+    import base64
+    import json
+
+    _openwebui_tree(tree)
+    config = tree / "site-splunk-gateway.json"
+    config.write_text(json.dumps({"gateway": "splunk", "backend": {
+        "ca_file": "/etc/mainframe-rag/splunk-gateway/ca-bundle.crt", "base_url": "https://splunk.example.test"}}))
+    ca = tree / "site-splunk-ca.pem"
+    ca.write_text((REPO / "tests" / "fixtures" / "extension-surface-idp-ca.pem").read_text())
+    write_stub(tree / "bin" / "kubectl", SPLUNK_KUBECTL)
+    selected = {
+        **OWUI_OPERATOR_ENV, "SPLUNK_GATEWAY_ENABLED": "true", "SPLUNK_GATEWAY_AUTH_MODE": "bearer",
+        "SPLUNK_GATEWAY_SECRET": "splunk-gw", "SPLUNK_GATEWAY_CONFIG_FILE": str(config),
+        "SPLUNK_GATEWAY_CA_FILE": str(ca), "SPLUNK_EGRESS_CIDRS": "192.0.2.10/32",
+        "TEAM_MODEL_EGRESS_CIDRS": "198.51.100.0/24", "LLM_MODEL_REASONING": "reasoner",
+        "LLM_BASE_URL": "https://llm.example.test/v1", "GATEWAY_API_KEY_SECRET": "gw-keys",
+        "BEARER_B64": base64.b64encode(SPLUNK_GOOD_BEARER.encode()).decode(), **env,
+    }
+    return _run(tree, selected)
+
+
+def test_validate_reports_the_splunk_gateway_selection(tree):
+    off = _run(tree, {})
+    assert off.returncode == 0, off.stderr
+    assert "Splunk gateway:    off (SPLUNK_GATEWAY_ENABLED=false)" in off.stdout
+    on = _splunk_validate(tree)
+    assert on.returncode == 0, on.stderr
+    assert ("Splunk gateway:    on: Deployment rag-splunk-gateway (1 replica, agent image), bearer mode, "
+            "Secret splunk-gw; reached only from Open WebUI") in on.stdout
+    assert "IDP_EGRESS" not in on.stdout  # bearer mode has no IdP egress
+
+
+@pytest.mark.parametrize(("env", "message"), [
+    ({"OPENWEBUI_ENABLED": "false"}, "SPLUNK_GATEWAY_ENABLED=true requires OPENWEBUI_ENABLED=true"),
+    ({"SPLUNK_GATEWAY_ENABLED": "maybe"}, "SPLUNK_GATEWAY_ENABLED must be true/false"),
+    ({"SPLUNK_GATEWAY_AUTH_MODE": "mtls"}, "SPLUNK_GATEWAY_AUTH_MODE must be oidc or bearer"),
+    ({"SPLUNK_GATEWAY_SECRET": ""}, "required inputs are missing: SPLUNK_GATEWAY_SECRET."),
+    ({"SPLUNK_GATEWAY_AUTH_MODE": "oidc"}, "required inputs are missing: SPLUNK_GATEWAY_IDP_EGRESS_CIDRS."),
+    ({"SPLUNK_GATEWAY_CA_FILE": "/nonexistent/site-ca.pem"}, "SPLUNK_GATEWAY_CA_FILE is unreadable"),
+    ({"TEAM_TOOLS_GROUP_ID": "splunk-team"}, "TEAM_TOOLS_GROUP_ID must be an Open WebUI group id"),
+])
+def test_validate_refuses_an_invalid_splunk_gateway_selection(tree, env, message):
+    """validate.sh runs the mapper's owner (model_config.team_tools_config):
+    the same refusals, fixed text, before any tool or cluster read."""
+    r = _splunk_validate(tree, **env)
+    assert r.returncode != 0
+    assert message in r.stderr
+    for value in env.values():
+        if value not in ("", "oidc", "false"):
+            assert value not in r.stderr
+
+
+def test_validate_live_verifies_the_splunk_gateway_secret(tree):
+    r = _splunk_validate(tree, AIRGAP_DRYRUN="0")
+    assert r.returncode == 0, r.stderr
+    assert "Splunk gateway Secret 'splunk-gw' has the keys bearer mode reads" in r.stdout
+    assert SPLUNK_GOOD_BEARER not in r.stdout + r.stderr
+
+
+def _b64(raw: bytes) -> str:
+    import base64
+
+    return base64.b64encode(raw).decode()
+
+
+@pytest.mark.parametrize(("env", "message"), [
+    ({"SG_SECRET": "notfound"}, "Secret 'splunk-gw' not found"),
+    ({"SG_SECRET": "forbidden"}, "may not read Secret 'splunk-gw'"),
+    ({"MISSING_KEY": "splunk-mcp-token"}, "required Secret key is missing or empty: splunk-mcp-token"),
+    ({"MISSING_KEY": "bearer-secret"}, "required Secret key is missing or empty: bearer-secret"),
+    ({"MISSING_KEY": "openwebui-llm-api-key"}, "required Secret key is missing or empty: openwebui-llm-api-key"),
+    ({"BEARER_B64": _b64(b"short-secret-7731")}, "E_SPLUNK_GATEWAY_BEARER_SECRET"),
+    ({"BEARER_B64": _b64(SPLUNK_GOOD_BEARER.encode() + b"\n")}, "E_SPLUNK_GATEWAY_BEARER_SECRET"),
+    ({"BEARER_B64": _b64(SPLUNK_GOOD_BEARER.encode() + b'"}')}, "E_SPLUNK_GATEWAY_BEARER_SECRET"),
+])
+def test_validate_live_splunk_gateway_secret_problems_fail(tree, env, message):
+    r = _splunk_validate(tree, AIRGAP_DRYRUN="0", **env)
+    assert r.returncode != 0
+    assert message in r.stderr
+    out = r.stdout + r.stderr
+    assert SPLUNK_GOOD_BEARER not in out and "short-secret-7731" not in out
+
+
+def test_validate_live_shared_gateway_key_replaces_the_openwebui_key_name(tree):
+    """GATEWAY_API_KEY_SECRET_KEY (one shared key) is the key Open WebUI's team
+    model connection reads, like every other model leg."""
+    r = _splunk_validate(tree, AIRGAP_DRYRUN="0", GATEWAY_API_KEY_SECRET_KEY="shared-key",
+                         MISSING_KEY="openwebui-llm-api-key")
+    assert r.returncode == 0, r.stderr
+    r = _splunk_validate(tree, AIRGAP_DRYRUN="0", GATEWAY_API_KEY_SECRET_KEY="shared-key", MISSING_KEY="shared-key")
+    assert r.returncode != 0 and "required Secret key is missing or empty: shared-key" in r.stderr
+
+
+def test_validate_live_splunk_gateway_off_reads_no_gateway_secret(tree):
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("splunk-gw", NOT_FOUND))
+    r = _live(tree, SPLUNK_GATEWAY_SECRET="splunk-gw")
+    assert r.returncode == 0, r.stderr
+    assert "Splunk gateway Secret" not in r.stdout

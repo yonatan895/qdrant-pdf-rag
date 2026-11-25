@@ -239,3 +239,138 @@ true
 {{- print "        # checks the Function is an active, surfaced Action; its id is fixed.\n" -}}
 {{- print "        ~^/api/chat/actions/mainframe_rag_rating\\.(up|down)$ 1;\n" -}}
 {{- end -}}
+
+
+{{/*
+Team-tool gateways (ADR-0010, #1075). One helper per gateway decides and
+validates its switch ("true" or nothing, like the helpers above); every
+missing input fails the render with one fixed message naming keys, never
+values. mainframe-rag.teamGateways lists the enabled gateways as JSON specs,
+which the shared templates (team-gateways.yaml, the Open WebUI environment and
+NetworkPolicy) range over, so a later gateway (GitLab, #1078) adds one spec.
+*/}}
+{{- define "mainframe-rag.splunkGatewayConfigPath" -}}/etc/mainframe-rag/splunk-gateway{{- end -}}
+
+{{- define "mainframe-rag.splunkGatewayEnabled" -}}
+{{- $t := .Values.teamTools | default dict -}}
+{{- $s := $t.splunk | default dict -}}
+{{- if $s.enabled -}}
+{{- if not .Values.openwebui.enabled -}}
+{{- fail "teamTools.splunk.enabled=true requires openwebui.enabled=true: the gateway is offered only through an Open WebUI Team model (ADR-0010 TD1)" -}}
+{{- end -}}
+{{- $mode := $s.authMode | default "" -}}
+{{- if not (has $mode (list "oidc" "bearer")) -}}
+{{- fail "teamTools.splunk.authMode must be oidc or bearer" -}}
+{{- end -}}
+{{- $model := $t.model | default dict -}}
+{{- $missing := list -}}
+{{- if not $s.secretName }}{{ $missing = append $missing "teamTools.splunk.secretName" }}{{ end -}}
+{{- if not ($s.config | default "" | trim) }}{{ $missing = append $missing "teamTools.splunk.config" }}{{ end -}}
+{{- if not ($s.caBundle | default "" | trim) }}{{ $missing = append $missing "teamTools.splunk.caBundle" }}{{ end -}}
+{{- if not ($s.splunkEgress | default dict).cidrs }}{{ $missing = append $missing "teamTools.splunk.splunkEgress.cidrs" }}{{ end -}}
+{{- if and (eq $mode "oidc") (not ($s.idpEgress | default dict).cidrs) }}{{ $missing = append $missing "teamTools.splunk.idpEgress.cidrs" }}{{ end -}}
+{{- if not ($model.egress | default dict).cidrs }}{{ $missing = append $missing "teamTools.model.egress.cidrs" }}{{ end -}}
+{{- if not .Values.models.reasoning.baseUrl }}{{ $missing = append $missing "models.reasoning.baseUrl" }}{{ end -}}
+{{- if not .Values.models.reasoning.model }}{{ $missing = append $missing "models.reasoning.model" }}{{ end -}}
+{{- if not .Values.gateway.apiKeySecretName }}{{ $missing = append $missing "gateway.apiKeySecretName" }}{{ end -}}
+{{- if $missing -}}
+{{- fail (printf "teamTools.splunk.enabled=true but required inputs are missing: %s. Set them, or leave the gateway off (SPLUNK_GATEWAY_ENABLED=false in airgap.env)." (join ", " $missing)) -}}
+{{- end -}}
+{{- $shape := list -}}
+{{- if not ($s.splunkEgress | default dict).port }}{{ $shape = append $shape "teamTools.splunk.splunkEgress.port" }}{{ end -}}
+{{- if and (eq $mode "oidc") (not ($s.idpEgress | default dict).port) }}{{ $shape = append $shape "teamTools.splunk.idpEgress.port" }}{{ end -}}
+{{- if not ($model.egress | default dict).port }}{{ $shape = append $shape "teamTools.model.egress.port" }}{{ end -}}
+{{- if not ($model.apiKeySecretKey | default "") }}{{ $shape = append $shape "teamTools.model.apiKeySecretKey" }}{{ end -}}
+{{- if $shape -}}
+{{- fail (printf "Team-tool settings must not be empty or null: %s (a null port would open the egress rule to every TCP port)." (join ", " $shape)) -}}
+{{- end -}}
+{{- if not (regexMatch "^\\s*(-----BEGIN CERTIFICATE-----\\r?\\n[A-Za-z0-9+/=\\r\\n]+-----END CERTIFICATE-----\\s*)+$" (toString $s.caBundle)) -}}
+{{- fail "teamTools.splunk.caBundle must hold only PEM certificates (-----BEGIN CERTIFICATE----- blocks, no key or other text); the value is not shown" -}}
+{{- end -}}
+{{- /* The configuration is the site's file; the chart checks only what ties it
+to this render. The gateway checks the rest at start (exit 2 names the key). */ -}}
+{{- $cfg := fromJson (toString $s.config) -}}
+{{- if or (not (kindIs "map" $cfg)) (hasKey $cfg "Error") -}}
+{{- fail "teamTools.splunk.config must be one JSON object (the gateway configuration file); the value is not shown" -}}
+{{- end -}}
+{{- if ne (toString $cfg.gateway) "splunk" -}}
+{{- fail "teamTools.splunk.config: key gateway must be \"splunk\"" -}}
+{{- end -}}
+{{- $backend := $cfg.backend | default dict -}}
+{{- if not (kindIs "map" $backend) }}{{ $backend = dict }}{{ end -}}
+{{- if ne (toString $backend.ca_file) (printf "%s/ca-bundle.crt" (include "mainframe-rag.splunkGatewayConfigPath" .)) -}}
+{{- fail (printf "teamTools.splunk.config: backend.ca_file must be %s/ca-bundle.crt, where the chart mounts teamTools.splunk.caBundle" (include "mainframe-rag.splunkGatewayConfigPath" .)) -}}
+{{- end -}}
+{{- if and (eq $mode "oidc") (not $cfg.auth) -}}
+{{- fail "teamTools.splunk.config: key auth is required in oidc mode" -}}
+{{- end -}}
+{{- with $cfg.token_exchange -}}
+{{- if ne (toString (. | default dict).client_secret_env) "SPLUNK_GATEWAY_TOKEN_EXCHANGE_SECRET" -}}
+{{- fail "teamTools.splunk.config: token_exchange.client_secret_env must be SPLUNK_GATEWAY_TOKEN_EXCHANGE_SECRET (the chart feeds it from the Secret's token-exchange-client-secret)" -}}
+{{- end -}}
+{{- end -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+Enabled team-tool gateways as a JSON list of specs (see above). Each spec:
+name (object suffix and Open WebUI tool-server id), module, the gateway's
+own environment variable names and Secret data keys, its values and backend
+egress. Empty list ("[]") when every gateway is off.
+*/}}
+{{- define "mainframe-rag.teamGateways" -}}
+{{- $out := list -}}
+{{- if include "mainframe-rag.splunkGatewayEnabled" . -}}
+{{- $s := .Values.teamTools.splunk -}}
+{{- $out = append $out (dict
+  "name" "splunk"
+  "title" "Splunk"
+  "description" "Read-only Splunk searches from site templates (team gateway)"
+  "module" "mainframe_rag.gateways.splunk"
+  "configPath" (include "mainframe-rag.splunkGatewayConfigPath" .)
+  "authMode" $s.authMode
+  "authModeEnv" "SPLUNK_AUTH_MODE"
+  "tokenEnv" "SPLUNK_MCP_TOKEN"
+  "tokenKey" "splunk-mcp-token"
+  "bearerEnv" "SPLUNK_GATEWAY_BEARER_SECRET"
+  "exchangeEnv" "SPLUNK_GATEWAY_TOKEN_EXCHANGE_SECRET"
+  "secretName" $s.secretName
+  "config" $s.config
+  "caBundle" $s.caBundle
+  "backendEgress" $s.splunkEgress
+  "idpEgress" $s.idpEgress
+  "resources" $s.resources) -}}
+{{- end -}}
+{{- toJson $out -}}
+{{- end -}}
+
+{{/*
+Open WebUI's TOOL_SERVER_CONNECTIONS for the enabled gateways (v0.13.4 schema:
+type mcp, tool id server:mcp:<info.id>). bearer mode: Open WebUI sends the
+shared secret, which v0.13.4 reads only inline, so the value is the
+Kubernetes dependent-variable reference $(MFR_<NAME>_GATEWAY_KEY), defined
+just before it from the gateway Secret; the manifest never holds it. oidc
+mode: system_oauth forwards the signed-in user's access token. config is
+always an object (null crashes v0.13.4 at start) and access_grants names the
+team group by id; empty grants are admin-only.
+*/}}
+{{- define "mainframe-rag.teamToolServerConnections" -}}
+{{- $grants := list -}}
+{{- with (.Values.teamTools | default dict).groupId -}}
+{{- $grants = append $grants (dict "principal_type" "group" "principal_id" . "permission" "read") -}}
+{{- end -}}
+{{- $conns := list -}}
+{{- range $g := (include "mainframe-rag.teamGateways" . | fromJsonArray) -}}
+{{- $bearer := eq $g.authMode "bearer" -}}
+{{- $conns = append $conns (dict
+  "type" "mcp"
+  "url" (printf "http://rag-%s-gateway:8080/mcp" $g.name)
+  "path" ""
+  "auth_type" (ternary "bearer" "system_oauth" $bearer)
+  "key" (ternary (printf "$(MFR_%s_GATEWAY_KEY)" (upper $g.name)) "" $bearer)
+  "config" (dict "enable" true "access_grants" $grants)
+  "info" (dict "id" $g.name "name" $g.title "description" $g.description)) -}}
+{{- end -}}
+{{- toJson $conns -}}
+{{- end -}}

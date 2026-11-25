@@ -122,6 +122,8 @@ case "$*" in
     [ "${{DELETE_FAIL:-}}" != 1 ] || exit 1 ;;
   *'admin-api-key'*)
     printf '%s' "${{OWUI_ADMIN_KEY_B64:-}}" ;;
+  *'get secret '*"jsonpath={{.data['bearer-secret']}}"*)
+    printf '%s' "${{SPLUNK_BEARER_B64:-}}" ;;
   *'exec deploy/rag-openwebui '*)
     # The mount check (#1252): runs the deploy's own hash code against a stand-in
     # mount. The first $OWUI_MOUNT_STALE reads see $OWUI_MOUNT_STALE_DIR (the old
@@ -3571,3 +3573,202 @@ def test_ownership_refusal_names_only_a_valid_identity_and_never_values():
     forged = refuse({"apiVersion": "v1", "kind": "ConfigMap",
                      "metadata": {"name": "x\nFAIL: forged line", "namespace": "ns"}})
     assert "v1 ConfigMap/<invalid>" in forged and "forged line" not in forged
+
+
+
+# ------------------------------------------- Splunk gateway (#1077, ADR-0015)
+
+SPLUNK_BEARER = "Zz9_-" * 8  # 40 characters of the allowed set
+SPLUNK_OBJECTS = [
+    ("apps/v1", "Deployment", "rag-splunk-gateway"),
+    ("v1", "Service", "rag-splunk-gateway"),
+    ("v1", "ConfigMap", "rag-splunk-gateway"),
+    ("networking.k8s.io/v1", "NetworkPolicy", "rag-splunk-gateway"),
+]
+
+
+def _splunk_env(tree, *, auth=None, **env):
+    root = tree[0]
+    config = root / "site-splunk-gateway.json"
+    doc = {"gateway": "splunk", "backend": {
+        "ca_file": "/etc/mainframe-rag/splunk-gateway/ca-bundle.crt", "base_url": "https://splunk.example.test:8089",
+        "allowed_indexes": ["main"], "templates": []}}
+    if auth is not None:
+        doc["auth"] = auth
+    config.write_text(json.dumps(doc))
+    ca = root / "site-splunk-ca.pem"
+    ca.write_text((REPO / "tests" / "fixtures" / "extension-surface-idp-ca.pem").read_text())
+    selected = {
+        "SPLUNK_GATEWAY_ENABLED": "true", "SPLUNK_GATEWAY_AUTH_MODE": "bearer", "SPLUNK_GATEWAY_SECRET": "splunk-gw",
+        "SPLUNK_GATEWAY_CONFIG_FILE": str(config), "SPLUNK_GATEWAY_CA_FILE": str(ca),
+        "SPLUNK_EGRESS_CIDRS": "192.0.2.10/32", "TEAM_MODEL_EGRESS_CIDRS": "198.51.100.0/24",
+        "LLM_MODEL_REASONING": "reasoner", "LLM_BASE_URL": "https://llm.example.test/v1",
+        "GATEWAY_API_KEY_SECRET": "gw-keys", "SPLUNK_BEARER_B64": b64(SPLUNK_BEARER), **env,
+    }
+    return tuple(selected.items())
+
+
+def _splunk_deploy(tree, *extra, auth=None, **env):
+    return _owui_deploy(tree, *_splunk_env(tree, auth=auth, **env), *extra)
+
+
+def _assert_bearer_never_shown(tree, r, value=SPLUNK_BEARER):
+    for text in (r.stdout, r.stderr, _helm_log(tree)):
+        assert value not in text
+
+
+def test_splunk_gateway_is_off_by_default_and_the_deploy_is_unchanged(tree):
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    assert "==> Splunk gateway off (SPLUNK_GATEWAY_ENABLED=false)" in r.stdout
+    assert "rag-splunk-gateway" not in (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert "teamTools" not in (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
+    log = _helm_log(tree)
+    assert "rag-splunk-gateway" not in log and "splunk" not in log
+
+
+def test_splunk_gateway_bearer_deploy_checks_secrets_renders_and_waits(tree):
+    r = _splunk_deploy(tree)
+    assert r.returncode == 0, r.stderr
+    assert "==> Splunk gateway on: Deployment rag-splunk-gateway (1 replica, agent image), bearer mode" in r.stdout
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    for _api, kind, name in SPLUNK_OBJECTS:
+        assert re.search(rf"kind: {kind}\nmetadata:\n  name: {name}\n", rendered), kind
+    log = _helm_log(tree)
+    flat = log.replace("\n", " ")
+    # Key presence (go-template) for both keys, Open WebUI's LiteLLM key, then
+    # the bearer secret's shape, all before the release.
+    for key in ("splunk-mcp-token", "bearer-secret"):
+        assert f'get secret splunk-gw -o go-template={{{{if index .data "{key}"}}}}' in flat
+    assert 'get secret gw-keys -o go-template={{if index .data "openwebui-llm-api-key"}}' in flat
+    assert flat.index("jsonpath={.data['bearer-secret']}") < flat.index("upgrade")
+    assert log.index("deploy/rag-splunk-gateway") > log.index("upgrade")
+    _assert_bearer_never_shown(tree, r)
+
+
+def test_splunk_gateway_oidc_mode_reads_no_bearer_secret(tree):
+    r = _splunk_deploy(tree, auth={"allowed_groups": ["splunk-users"]}, SPLUNK_GATEWAY_AUTH_MODE="oidc",
+                       SPLUNK_GATEWAY_IDP_EGRESS_CIDRS="203.0.113.0/28", SPLUNK_BEARER_B64="")
+    assert r.returncode == 0, r.stderr
+    assert "oidc mode" in r.stdout and "SPLUNK_GATEWAY_IDP_EGRESS_CIDRS" in r.stdout
+    log = _helm_log(tree)
+    assert "splunk-mcp-token" in log and "bearer-secret" not in log
+    assert "deploy/rag-splunk-gateway" in log
+
+
+def test_splunk_gateway_oidc_config_without_auth_refuses_before_mutation(tree):
+    r = _splunk_deploy(tree, SPLUNK_GATEWAY_AUTH_MODE="oidc", SPLUNK_GATEWAY_IDP_EGRESS_CIDRS="203.0.113.0/28")
+    assert r.returncode != 0
+    assert 'must have an "auth" object in oidc mode' in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize("key", ["splunk-mcp-token", "bearer-secret", "openwebui-llm-api-key"])
+def test_missing_splunk_gateway_secret_key_blocks_before_mutation(tree, key):
+    r = _splunk_deploy(tree, ("MISSING_KEY", key))
+    assert r.returncode != 0
+    assert f"required Secret key is missing or empty: {key}" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize("raw", [
+    b"short-bearer-7731",
+    SPLUNK_BEARER.encode() + b"\n",
+    SPLUNK_BEARER.encode() + b'","x":"',
+    b"",
+], ids=["short", "trailing-newline", "json-breaking", "unreadable"])
+def test_invalid_bearer_secret_refuses_before_mutation_without_showing_it(tree, raw):
+    r = _splunk_deploy(tree, SPLUNK_BEARER_B64=b64(raw.decode()) if raw else "")
+    assert r.returncode != 0
+    assert ("E_SPLUNK_GATEWAY_BEARER_SECRET: Secret splunk-gw key bearer-secret must be at least 32 characters, "
+            "each A-Z, a-z, 0-9, '_' or '-' (no newline); the value is not shown") in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+    _assert_bearer_never_shown(tree, r)
+    assert "short-bearer-7731" not in r.stdout + r.stderr + _helm_log(tree)
+
+
+@pytest.mark.parametrize(("env", "message"), [
+    ({"OPENWEBUI_ENABLED": "false"}, "SPLUNK_GATEWAY_ENABLED=true requires OPENWEBUI_ENABLED=true"),
+    ({"SPLUNK_GATEWAY_AUTH_MODE": "mtls"}, "SPLUNK_GATEWAY_AUTH_MODE must be oidc or bearer"),
+    ({"SPLUNK_GATEWAY_ENABLED": "maybe"}, "SPLUNK_GATEWAY_ENABLED must be true/false"),
+    ({"SPLUNK_GATEWAY_SECRET": "Splunk_GW"}, "SPLUNK_GATEWAY_SECRET must be a DNS-subdomain name"),
+    ({"SPLUNK_EGRESS_CIDRS": ""}, "required inputs are missing: SPLUNK_EGRESS_CIDRS."),
+])
+def test_invalid_splunk_gateway_selection_fails_before_any_mutation(tree, env, message):
+    r = _splunk_deploy(tree, **env)
+    assert r.returncode != 0
+    assert message in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_next_ordinary_deploy_adopts_every_owned_splunk_gateway_object(tree):
+    """Lifecycle, not first install: the deploy after the one that created the
+    gateway finds its four objects live and must proceed."""
+    inventory = _live_inventory(tree, SPLUNK_OBJECTS, **HELM_OWNED)
+    r = _splunk_deploy(tree, ("OWNERSHIP_FILE", inventory))
+    assert r.returncode == 0, r.stderr
+    assert "ownership preflight refused" not in r.stderr
+    assert "upgrade" in _helm_log(tree)
+
+
+@pytest.mark.parametrize("obj", SPLUNK_OBJECTS, ids=[o[1] for o in SPLUNK_OBJECTS])
+def test_foreign_splunk_gateway_objects_are_refused_before_any_mutation(tree, obj):
+    inventory = _live_inventory(tree, [obj], annotations={"meta.helm.sh/release-name": "other"})
+    r = _splunk_deploy(tree, ("OWNERSHIP_FILE", inventory))
+    assert r.returncode != 0
+    assert "ownership preflight refused" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_disabling_the_splunk_gateway_leaves_removal_to_the_release(tree):
+    """Rollback is SPLUNK_GATEWAY_ENABLED=false: nothing of the gateway renders
+    and nothing joins the disabled-cleanup inventory (Helm prunes the four
+    objects; none holds data)."""
+    r = _run(tree, ("SPLUNK_GATEWAY_ENABLED", "false"))
+    assert r.returncode == 0, r.stderr
+    assert "rag-splunk-gateway" not in (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    cleanup = tree[0] / "dist" / "app-disabled-cleanup.json"
+    assert not cleanup.exists() or "rag-splunk-gateway" not in cleanup.read_text()
+    assert "delete" not in _helm_log(tree).split()
+
+
+
+def _gateway_pods(tree, digest: str) -> None:
+    repo = ROLE_REPOS["agent"]
+    spec = {"containers": [{"name": "gateway", "image": f"{repo}:tag"}]}
+    meta = {"namespace": "ns", "annotations": {"deployment.kubernetes.io/revision": "1"}}
+    (tree[0] / "pods.json").write_text(json.dumps({"items": [
+        {"kind": "Deployment", "metadata": {"name": "rag-splunk-gateway", "uid": "sg", **meta},
+         "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "rag-splunk-gateway"}},
+                  "template": {"spec": spec}}},
+        {"kind": "ReplicaSet", "metadata": {"name": "sg-rs", "uid": "sg-rs", **meta,
+         "ownerReferences": [{"kind": "Deployment", "uid": "sg", "controller": True}]}},
+        {"kind": "Pod", "metadata": {"name": "rag-splunk-gateway-0", "namespace": "ns",
+         "labels": {"app": "rag-splunk-gateway"},
+         "ownerReferences": [{"kind": "ReplicaSet", "uid": "sg-rs", "controller": True}]},
+         "spec": spec, "status": {"phase": "Running", "containerStatuses": [
+             {"name": "gateway", "imageID": f"{repo}@{digest}"}]}},
+    ]}))
+
+
+@pytest.mark.parametrize("running", ["agent", "other"])
+def test_release_running_image_check_binds_the_gateway_to_the_agent_digest(tree, running):
+    """deploy.sh adds the splunk_gateway role after rollout; image_identity.sh
+    maps it to the verified agent digest (the gateway runs the agent image)."""
+    agent, other = "sha256:" + "c" * 64, "sha256:" + "9" * 64
+    _gateway_pods(tree, agent if running == "agent" else other)
+    script = (". scripts/airgap/common.sh; . scripts/airgap/image_identity.sh; MANIFEST=dist/MANIFEST.txt; "
+              f"KC=kubectl; NAMESPACE=ns; QDRANT_RELEASE=qdrant; INTERNAL_REGISTRY=reg.internal; IMAGE_SHA={IMAGE_SHA}; "
+              f"IMAGE_DIGEST_AGENT={agent}; verify_running_images splunk_gateway")
+    # $0 inside the tree: common.sh changes to the tree root it derives from $0.
+    r = subprocess.run(["sh", "-c", script, str(tree[0] / "scripts" / "airgap" / "probe.sh")], cwd=tree[0],
+                       capture_output=True, text=True, check=False,
+                       env={"PATH": system_path(tree[0] / "bin"), "HELM_LOG": str(tree[1]),
+                            "PODS_FILE": str(tree[0] / "pods.json")})
+    if running == "agent":
+        assert r.returncode == 0, r.stderr
+        assert "running images match the verified registry digests (1 roles)" in r.stdout
+    else:
+        assert r.returncode != 0
+        assert f"pod rag-splunk-gateway-0 container gateway runs {other}, expected {agent}" in r.stderr
+

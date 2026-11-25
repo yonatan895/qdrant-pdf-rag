@@ -24,6 +24,13 @@
   searches through the site's Splunk MCP Server with an MCP-only token (TD7's
   credential and go-live input 3), with an off switch for TD5's comment and
   a bearer mode (B2, approved as a named exception).
+  Status note 2026-11-25: the deployment pull request for #1077 (part 2)
+  does T4 registration for the Splunk gateway only, default off
+  ([deploy](../deploy.md#splunk-gateway-deploy)); GitLab registration is
+  pending. Open WebUI v0.13.4 cannot create a model from the environment,
+  so creating the Team model and setting `function_calling: native` is an
+  admin step. Tool-server and model grants name the team group by its Open
+  WebUI group id. The decisions below are unchanged.
 - **Context:**
   - ADR-0007 deferred team tools (Splunk, GitLab, mail) to their own ADR,
     "likely on a separate instance", and fixed the rule "this instance holds

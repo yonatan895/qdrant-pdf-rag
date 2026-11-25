@@ -358,6 +358,10 @@ Compatibility and lifecycle decisions under #448:
   missing, the deploy and the chart render refuse; `OPENWEBUI_ENABLED=false` opts out and
   renders nothing.
 
+- Splunk team-tool gateway (issue #1077, ADR-0015, **default off**): `SPLUNK_GATEWAY_*`,
+  `TEAM_TOOLS_GROUP_ID` and `TEAM_MODEL_EGRESS_*` keys render the gateway objects and the
+  Open WebUI registration described in [Team tools: Splunk gateway](#splunk-gateway-deploy).
+
 <a id="feedback-service"></a>
 - Answer-feedback service (issue #804, ADR-0005, **default off**). With
   `FEEDBACK_ENABLED=true` the application release renders `StatefulSet/rag-feedback`
@@ -529,7 +533,13 @@ Compatibility and lifecycle decisions under #448:
   which at 3 replicas adds one pod and removes none. At the defaults that is
   3 x 2Gi = 6Gi of memory limits (8Gi during a rollout) and 3 x 512Mi = 1.5Gi
   of requests (2Gi during a rollout). With the console Route on, each pod also
-  runs the oauth-proxy sidecar (64Mi request, 128Mi limit).
+  runs the oauth-proxy sidecar (64Mi request, 128Mi limit). Splunk gateway
+  (`teamTools.splunk.resources`, [#1077](#splunk-gateway-deploy)):
+  `SPLUNK_GATEWAY_CPU_REQUEST`, `SPLUNK_GATEWAY_MEMORY_REQUEST`,
+  `SPLUNK_GATEWAY_CPU_LIMIT`, `SPLUNK_GATEWAY_MEMORY_LIMIT`, validated like the
+  agent keys. The defaults (requests 50m/128Mi, limits 500m/512Mi) are not
+  measured yet. Enabling the gateway adds one such pod to the namespace quota,
+  with no surge pod: its Deployment uses `Recreate`.
   Worker count and scratch size are
   `INGEST_WORKERS` and `INGEST_WORK_SIZE`. CPU is whole/decimal cores or
   millicores (`500m`); memory and sizes need a Ki/Mi/Gi/Ti unit. Each value is
@@ -1906,7 +1916,8 @@ Open WebUI is the main docs platform and is **on by default** (maintainer decisi
 ADR-0008); the console stays the frozen fallback. It is a front end for the docs corpus and a
 client of the agent: its only models are the repository docs Pipe's (#1072) answer-depth entries
 over `/v1/chat` (#1255, [answer depth](#owui-answer-depth)). It
-holds no gateway key and no model connection, and it does no retrieval of its own. The image pin
+holds no gateway key and no model connection (unless a team tool is enabled:
+[Splunk gateway](#splunk-gateway-deploy)), and it does no retrieval of its own. The image pin
 is recorded in `images.txt`; the 2026-10-24 Kind trials are interim and partial
 (runs 1-2 of the #1073 qualification, not a clean pass; open residuals are listed
 in the trial records), and every pin import re-runs the ADR-0007 conditions
@@ -2432,6 +2443,255 @@ admin key deploy prints `shared prompts NOT provisioned`.
 **Requirements.** The Route API (OpenShift; deploy refuses the front end without it) and an
 enforcing CNI. The Kind lanes do not enable the front end yet: an e2e run with it enabled needs
 the #1073 test IdP and the #1072 Pipe.
+
+<a id="splunk-gateway-deploy"></a>
+## Team tools: Splunk gateway (ADR-0015, #1077)
+
+The [Splunk gateway](team-tools.md#splunk-gateway) is a read-only team tool
+offered only through a Team model on the Open WebUI instance
+([ADR-0010](adr/0010-team-tools-on-open-webui.md) TD1; the Docs models stay
+tool-free). It is **off by default**: `SPLUNK_GATEWAY_ENABLED` in `airgap.env`
+(strict boolean, `teamTools.splunk.enabled`). With it off, none of the objects
+or settings below render, and every other object is byte-identical to a render
+without them.
+
+**What `SPLUNK_GATEWAY_ENABLED=true` renders.**
+- `ConfigMap/rag-splunk-gateway` with `config.json` (the site's gateway
+  configuration, step 5) and `ca-bundle.crt` (step 2), mounted read-only at
+  `/etc/mainframe-rag/splunk-gateway`. A change to either rolls the pod.
+- `Deployment/rag-splunk-gateway`: `python3 -m mainframe_rag.gateways.splunk` on the
+  agent image (TD2), port 8080, `/healthz` probes, hardened like the agent
+  (`restricted-v2`, read-only root, no service-account token, `/tmp` emptyDir).
+  Environment: `GATEWAY_CONFIG_FILE`, `SPLUNK_AUTH_MODE`, `SPLUNK_MCP_TOKEN` (Secret
+  key `splunk-mcp-token`), and `SPLUNK_GATEWAY_BEARER_SECRET` (`bearer-secret`,
+  bearer mode) or the optional `SPLUNK_GATEWAY_TOKEN_EXCHANGE_SECRET`
+  (`token-exchange-client-secret`, oidc mode). Replicas are fixed at 1 with the
+  `Recreate` strategy: the gateway-wide caps of ADR-0015 D10
+  (`max_concurrent_total` 3, `rate_per_minute_total` 60) and the per-caller limits
+  live in process memory, so a second pod, or a surge pod during a rollout, would
+  double them.
+- `Service/rag-splunk-gateway`: ClusterIP on 8080. No Route.
+- `NetworkPolicy/rag-splunk-gateway`, rendered with the gateway whatever
+  `AGENT_NETWORK_POLICY` says. Ingress only from the Open WebUI pods
+  (`app: rag-openwebui`) on 8080: ADR-0014 D4 guard (a), which ADR-0015 D7 applies
+  to bearer mode B2. Egress only to cluster DNS, `SPLUNK_EGRESS_CIDRS` on
+  `SPLUNK_EGRESS_PORT` (default 8089) and, in oidc mode,
+  `SPLUNK_GATEWAY_IDP_EGRESS_CIDRS` on `SPLUNK_GATEWAY_IDP_EGRESS_PORT` (default
+  443). It needs an enforcing CNI, which the site shows, as for the agent policy.
+- Open WebUI side. This is the only case in which Open WebUI holds a model
+  connection and a tool server (ADR-0010's amendments to ADR-0007 V2):
+  - `ENABLE_OPENAI_API=true` with one LiteLLM connection, `models.reasoning.baseUrl`
+    (`LLM_BASE_URL`, or `GATEWAY_BASE_URL`), limited to `LLM_MODEL_REASONING` with the
+    prefix `team`: the one model id `team.<LLM_MODEL_REASONING>`. A connection model
+    without a database row is visible to admins only (step 9). Its key is Open WebUI's
+    own per-leg key, data key `openwebui-llm-api-key` in the Secret
+    `GATEWAY_API_KEY_SECRET` (TD3). When the shared key `GATEWAY_API_KEY_SECRET_KEY`
+    is set, that key wins, and Open WebUI then uses the shared key.
+  - `ENABLE_TOOL_SERVERS=true` and `TOOL_SERVER_CONNECTIONS` with one MCP entry,
+    `http://rag-splunk-gateway:8080/mcp`, id `splunk` (tool id `server:mcp:splunk`).
+    In bearer mode it sends the bearer secret, which the chart fills in from the
+    Secret through a dependent environment variable (`$(MFR_SPLUNK_GATEWAY_KEY)`), so
+    the rendered manifest holds no secret. In oidc mode it is `system_oauth`: the
+    signed-in user's access token. The entry grants read to the group
+    `TEAM_TOOLS_GROUP_ID` (step 6); empty means admin-only. `ENABLE_TOOLS`
+    (workspace Python tools) stays `false`. In v0.13.4 `ENABLE_TOOL_SERVERS` also
+    turns on Tether; the proxy already refuses `/api/v1/tether`.
+  - `TASK_MODEL` and `TASK_MODEL_EXTERNAL` stay empty and every `ENABLE_*_GENERATION`
+    setting `false` (TD8).
+  - `NetworkPolicy/rag-openwebui` adds egress to the gateway pods on 8080 and to
+    `TEAM_MODEL_EGRESS_CIDRS` on `TEAM_MODEL_EGRESS_PORT` (default 443).
+  - With `ENABLE_PERSISTENT_CONFIG=false`, an admin-UI edit of the connection or the
+    tool server lasts only until the next restart. Model rows (step 9) are kept in
+    the database.
+  - Open WebUI's MCP client first asks for `server/discover`; the gateway answers
+    "method not found" and the client falls back to `initialize` *(source reading of
+    v0.13.4, not yet exercised live)*.
+
+**Refused combinations.** Both layers refuse before any cluster change, with a fixed
+message that names keys and never values:
+- `airgap.env` layer (`validate.sh`, `map_values.py`): `SPLUNK_GATEWAY_ENABLED=true`
+  without `OPENWEBUI_ENABLED=true`, `LLM_BASE_URL` (or `GATEWAY_BASE_URL`),
+  `LLM_MODEL_REASONING`, `GATEWAY_API_KEY_SECRET`, `SPLUNK_GATEWAY_SECRET`,
+  `SPLUNK_GATEWAY_CONFIG_FILE`, `SPLUNK_GATEWAY_CA_FILE`, `SPLUNK_EGRESS_CIDRS` or
+  `TEAM_MODEL_EGRESS_CIDRS`, or in oidc mode without
+  `SPLUNK_GATEWAY_IDP_EGRESS_CIDRS`; an auth mode other than `oidc` or `bearer`; a CA
+  file holding anything but PEM certificates; a configuration file that is not one
+  JSON object, whose `gateway` is not `splunk`, whose `backend.ca_file` is not
+  `/etc/mainframe-rag/splunk-gateway/ca-bundle.crt`, whose `backend.timeout_s` is
+  not in (0, 60) and below `limits.tool_timeout_s`, that has no `auth` section in
+  oidc mode, or whose `token_exchange.client_secret_env` is not
+  `SPLUNK_GATEWAY_TOKEN_EXCHANGE_SECRET`. Before any mutation `deploy.sh` also
+  requires the Secret keys `splunk-mcp-token` (and `bearer-secret` in bearer mode,
+  matching `[A-Za-z0-9_-]{32,}`, never printed) and `openwebui-llm-api-key` (or the
+  `GATEWAY_API_KEY_SECRET_KEY` key) in `GATEWAY_API_KEY_SECRET`.
+- Chart layer (direct `helm template/upgrade`): the same checks on the
+  `teamTools.*` values, `openwebui.enabled`, `models.reasoning.baseUrl`,
+  `models.reasoning.model` and `gateway.apiKeySecretName`, except the timeout rule;
+  an empty or null port or `teamTools.model.apiKeySecretKey` is refused too. The
+  missing-inputs message also names the off switch. The gateway checks the rest of
+  its configuration at start (exit 2, step 7).
+
+**Caller mode (`SPLUNK_GATEWAY_AUTH_MODE`, default `oidc`).**
+- `bearer` (named exception B2, the pilot posture): Open WebUI presents one shared
+  secret ([bearer mode](team-tools.md#service-bearer)). The gateway sees one caller,
+  `service:openwebui`: its limits cover the whole instance, and per-person
+  attribution is only Open WebUI's chat history. Guard (a) is the NetworkPolicy
+  above. Guard (b) is an operator step the chart cannot check (step 9).
+- `oidc`: the gateway verifies each user's own token
+  ([caller verification](team-tools.md#caller-verification)). It needs the #1088
+  identity inputs: single-audience gateway tokens (ADR-0010 TD6) through RFC 8693
+  token exchange (AD FS on-behalf-of would need a `TokenExchanger` addition first),
+  the configuration's `auth` section and the IdP egress. The token-exchange client secret is optional: Secret key
+  `token-exchange-client-secret`, read as `SPLUNK_GATEWAY_TOKEN_EXCHANGE_SECRET`.
+  The IdP CA is not wired for the gateway: its JWKS and token-endpoint calls trust
+  only the agent image's trust store (`OPENWEBUI_IDP_CA_FILE` reaches Open WebUI
+  only). An IdP whose certificate an enterprise CA issued therefore cannot serve
+  oidc mode yet.
+
+**Site procedure.** Steps 1 to 3 need the Splunk owner and the platform team; this
+procedure closes #1077's "site procedure for the service-account role" item.
+1. **Splunk side (Splunk owner).**
+   - Create a dedicated token user for the gateway.
+   - Give it one role that holds exactly the team's indexes, for search only, with
+     no write capabilities, plus the capability `mcp_tool_execute`.
+   - Issue an encrypted MCP token for that user in the Splunk MCP Server app, with an
+     expiry. Rotation: issue a new token, update `splunk-mcp-token` in the Secret
+     (step 4) and restart the gateway (`oc rollout restart deploy/rag-splunk-gateway`).
+     The token is read only at start, and a Secret change does not roll the pod.
+   - Search quota: the role's `srchJobsQuota` (Splunk's default 3) covers every
+     caller together, because every search runs as this one user. The gateway-wide
+     cap `limits.max_concurrent_total` defaults to the same 3. To raise one, raise
+     both together. The cap is per pod, and the chart runs one.
+   - E1 premise: the Splunk owner confirms that every team-group member can search the
+     same indexes with their own account. Record it at the site and re-check it when
+     the team or the indexes change. If it fails, stop: per-user tokens need a new
+     decision (ADR-0015, E1).
+2. **CA bundle.** The PEM certificate(s) of the CA that issued the management port's
+   certificate, as a file named by `SPLUNK_GATEWAY_CA_FILE`. The chart mounts it as
+   `ca-bundle.crt`; verification is always on.
+3. **Egress.** The management port's IPv4 CIDRs and port (8089 by default) go into
+   `SPLUNK_EGRESS_CIDRS` and `SPLUNK_EGRESS_PORT`. LiteLLM's CIDRs and port go into
+   `TEAM_MODEL_EGRESS_CIDRS` and `TEAM_MODEL_EGRESS_PORT`. In oidc mode, the IdP's
+   go into `SPLUNK_GATEWAY_IDP_EGRESS_CIDRS` and `SPLUNK_GATEWAY_IDP_EGRESS_PORT`.
+4. **Secrets.** Create the Secret named by `SPLUNK_GATEWAY_SECRET` with
+   `splunk-mcp-token` (step 1) and, in bearer mode, `bearer-secret` from
+   `openssl rand -hex 32` (it must match `[A-Za-z0-9_-]{32,}`; it is placed inside a
+   JSON string). To rotate the bearer secret, update it and restart both
+   `deploy/rag-splunk-gateway` and `deploy/rag-openwebui`. The platform issues Open
+   WebUI's own LiteLLM per-leg key (ADR-0010 go-live input 2); add it as
+   `openwebui-llm-api-key` to the Secret named by `GATEWAY_API_KEY_SECRET`. No value
+   goes into `airgap.env`.
+5. **Gateway configuration.** Start from
+   [deploy/gateways/splunk-gateway.example.json](../deploy/gateways/splunk-gateway.example.json)
+   and set every section ([backend keys](team-tools.md#splunk-gateway)):
+   - `gateway`: `splunk`.
+   - `auth`: oidc mode only (issuer, audience, JWKS URL, the team group); leave it out
+     in bearer mode. `token_exchange`, when used, names
+     `SPLUNK_GATEWAY_TOKEN_EXCHANGE_SECRET` in `client_secret_env`.
+   - `limits`: a key set here wins over the gateway's defaults. The example's
+     `rate_per_minute` 30 and `max_concurrent_per_user` 1 would apply to the whole
+     instance in bearer mode; leave them out to keep the bearer defaults (3 in
+     flight, 60 a minute), or set them deliberately. `max_concurrent_total` and
+     `rate_per_minute_total` follow step 1.
+   - `backend`: `base_url` (the management port); `ca_file` exactly
+     `/etc/mainframe-rag/splunk-gateway/ca-bundle.crt`, where the chart mounts the CA
+     (any other path is refused); `timeout_s` below `limits.tool_timeout_s`;
+     `tool_name`, `query_argument`, `extra_arguments`, `result_source`,
+     `result_path`, `search_prefix` and `attribution_comment` from the site probe
+     (step 8); `allowed_indexes`; `allowed_macros`, `allow_unverified_macros` and
+     `macro_source`; and the `templates`, each with `indexes`, `index_param` or
+     `index_from_macro`.
+
+   The file is site configuration: keep it at the site and never commit it to this
+   repository. Set `SPLUNK_GATEWAY_CONFIG_FILE` to its path.
+6. **Open WebUI group.** In Admin > Users > Groups, create the team group with the
+   same name as the IdP group claim value, so that OAuth group sync fills it at each
+   sign-in. Copy its id into `TEAM_TOOLS_GROUP_ID`: v0.13.4 matches grants by group
+   id, never by name. Empty leaves the tool server admin-only.
+7. **Enable.** Set `SPLUNK_GATEWAY_ENABLED=true` and `SPLUNK_GATEWAY_AUTH_MODE=bearer`
+   (B2) or `oidc`, then run `sh scripts/tools/run-task.sh airgap:validate` and
+   `sh scripts/tools/run-task.sh airgap:deploy`. The gateway serves only after its
+   start-up backend check passes. Exit 2 (configuration) or 3 (backend refused) makes
+   the pod restart (`CrashLoopBackOff`), and it never becomes Ready. Read the reason
+   in the one log line `{"action": "splunk_gateway_start", "decision": ...}`
+   (`oc logs deploy/rag-splunk-gateway`): exit 2 logs `config_error` with a detail
+   that names keys and template positions, exit 3 a reason from the
+   [start-up check](team-tools.md#splunk-gateway) table.
+8. **Site probe.** In a running pod:
+
+   ```sh
+   oc exec deploy/rag-splunk-gateway -- python3 -m mainframe_rag.gateways.splunk \
+     --site-probe --receipt /tmp/splunk-probe.json
+   ```
+
+   When the pod crash-loops, run it in a debug copy instead. `--keep-labels=true`
+   keeps the pod label, so the gateway NetworkPolicy admits its egress *(not yet run
+   at a site)*:
+
+   ```sh
+   oc debug deploy/rag-splunk-gateway --keep-labels=true -- \
+     python3 -m mainframe_rag.gateways.splunk --site-probe
+   ```
+
+   Each check prints `pass`, `fail` or `inconclusive` with a reason
+   ([site probe](team-tools.md#splunk-gateway)). What to change:
+   - `splunk.initialize` fail: the URL, CA, egress or token (`upstream_*`), or a
+     server outside 2025-06-18 and 2025-03-26 (`protocol_unsupported`; needs a client
+     change).
+   - `splunk.startup_check` fail: `tool_missing` sets `tool_name`,
+     `query_argument_missing` sets `query_argument`, and `extra_argument_missing` or
+     `required_argument_unset` sets `extra_arguments`. The site-private line shows
+     the tool's input schema.
+   - `splunk.macros` fail: fix or drop the named macro, or adjust `macro_source`
+     from the knowledge-object tool's schema on the site-private line.
+     `inconclusive unverified` means the definitions were unreadable and
+     `allow_unverified_macros` is set: the role is then the only bound on macros.
+   - `splunk.result_shape` fail `rows_not_found`: set `result_source` and
+     `result_path` from the result's key shape on the site-private line.
+   - `splunk.comment` fail: the guardrail refused the TD5 comment; set
+     `attribution_comment` to false (attribution is then only the decision log).
+   - `splunk.search_prefix` fail `prefix_mismatch`: flip `search_prefix`.
+     `inconclusive no_events` means the first allowed index had no event in 24 hours;
+     re-run when it has one.
+   - `splunk.composed_search` fail: a composed tool search does not run or its rows
+     are not found; fix the items above first.
+
+   Exit codes: 0 when no check failed (an `inconclusive` check still exits 0, so read
+   every line), 1 when one failed, 2 on a configuration error, 3 on an unexpected
+   error. The last line, `site_private_detail`, can carry site names in schema text:
+   it stays at the site. Repeat steps 5, 7 and 8 until the probe passes.
+9. **Team model (admin UI).** Open WebUI cannot create a model from the environment
+   or a file, so an admin does this once. In Admin > Settings > Models, edit the
+   connection model `team.<LLM_MODEL_REASONING>` itself, which stores an override row:
+   - name, for example "Team – Splunk", and a description;
+   - tools: Splunk (`server:mcp:splunk`);
+   - Advanced Params, Function Calling: Native (TD8);
+   - access: the team group only.
+
+   Do not build a separate custom model on top of it: that would need a read grant
+   on the base model, which lets team users chat with the bare model id. Verify as a
+   team user: the Team model and the Splunk tool are listed, and a tool call answers
+   (whether the chat preselects the tool is a site check; otherwise enable it in the
+   chat's tool menu). Verify as a non-team user: no Team model, and no
+   `server:mcp:splunk` in `/api/v1/tools/`.
+   ADR-0014 D4 guard (b) in bearer mode: either every value of
+   `OPENWEBUI_OIDC_ALLOWED_ROLES` and `OPENWEBUI_OIDC_ADMIN_ROLES` is a team role, or
+   the Team model and the tool-server entry are granted to the team group only
+   (`TEAM_TOOLS_GROUP_ID` and this step). The second is weaker, because an admin can
+   widen either grant; it is the pilot posture. Record which one holds.
+10. **Rollback.** Set `SPLUNK_GATEWAY_ENABLED=false` and re-run `airgap:deploy`. Helm
+    removes the gateway objects, and Open WebUI loses the connection and the tool
+    server. The Team model row stays in the database but cannot answer (no
+    connection); delete it in the admin UI if wanted. The Docs models are unaffected.
+11. **Go-live checklist.** Before team members use it:
+    - ADR-0010 go-live inputs 1 (identity, oidc mode only), 2 (Open WebUI's LiteLLM
+      key and tool-call parsing), 3 as amended by ADR-0015 (steps 1 to 5 and 8), 5
+      (quota and CIDRs, [sizing](#3-render-pipeline)) and 6 (below);
+    - ADR-0015's open site checks 1 to 8, with the probe receipt;
+    - TD8 acceptance: the task settings read back off, the Team model reads back
+      `function_calling: native`, and `/api/v1/tasks/...` gets the proxy's 403;
+    - the security or data owner's confirmation that ADR-0007 S3 covers tool output
+      in chats (go-live item 6).
 
 <a id="configuration-contract"></a>
 ## Operator configuration propagation contract

@@ -128,10 +128,11 @@ verify_running_images() {
     image_identity_enforced || return 0
     _vp_pairs=""
     for _vp_role in "$@"; do
-        # The feedback workload (#804) runs the agent image: it carries the
-        # agent's verified digest, bound to its own StatefulSet.
+        # The feedback workload (#804) and the Splunk gateway (#1077) run the
+        # agent image: each carries the agent's verified digest, bound to its
+        # own workload.
         _vp_src=$_vp_role
-        [ "$_vp_role" != feedback ] || _vp_src=agent
+        case "$_vp_role" in feedback|splunk_gateway) _vp_src=agent ;; esac
         _vp_upper=$(printf '%s' "$_vp_src" | tr 'a-z' 'A-Z')
         eval "_vp_digest=\${IMAGE_DIGEST_${_vp_upper}:-}"
         [ -n "$_vp_digest" ] || die "internal: no verified digest for $_vp_role"

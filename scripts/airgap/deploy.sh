@@ -25,6 +25,7 @@ resolve_agent_route
 resolve_network_policy
 resolve_feedback
 resolve_openwebui
+resolve_splunk_gateway
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
@@ -81,6 +82,10 @@ if [ "$OPENWEBUI_ENABLED" = "true" ]; then
     require_openwebui_pin
 fi
 echo "==> Open WebUI front end $(describe_openwebui)"
+# Issue #1077 (ADR-0015): team tools, the Splunk gateway, default off. It runs
+# the verified agent image; map_values.py refuses missing or invalid inputs
+# (Open WebUI off, files, CIDRs, model connection) before any mutation.
+echo "==> Splunk gateway $(describe_splunk_gateway)"
 
 refuse_nfs_storage
 SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}
@@ -110,9 +115,15 @@ verify_registry_images $DEPLOY_IMAGES
 # own StatefulSet is bound to the verified agent digest after rollout.
 RUNNING_IMAGES=$DEPLOY_IMAGES
 [ "$FEEDBACK_ENABLED" != "true" ] || RUNNING_IMAGES="$RUNNING_IMAGES feedback"
+# So does the Splunk gateway (#1077), bound to its own Deployment.
+[ "$SPLUNK_GATEWAY_ENABLED" != "true" ] || RUNNING_IMAGES="$RUNNING_IMAGES splunk_gateway"
 
 KC=${KC:-$(kc)}
 check_gateway_ca
+# Splunk gateway Secrets (#1077): key presence and the bearer secret's shape,
+# read-only and before the render (a missing key would otherwise surface as
+# CreateContainerConfigError after the release).
+require_splunk_gateway_secrets
 mkdir -p dist
 
 # Public namespace service CA becomes a generated value, never a YAML patch.
@@ -412,6 +423,7 @@ else
     if [ "$OPENWEBUI_ENABLED" = "true" ]; then
         wait_rollout "deploy/rag-openwebui" 660
     fi
+    [ "$SPLUNK_GATEWAY_ENABLED" != "true" ] || wait_rollout "deploy/rag-splunk-gateway" 120
     # Tags can move after the registry read-back: the running pods must report
     # the verified digests (fail closed; legacy cleanup below is skipped).
     # shellcheck disable=SC2086
