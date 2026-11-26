@@ -408,9 +408,14 @@ elif 'events' in a and '--field-selector' in a:
   print(os.environ['EVENT_MESSAGE'])
 elif 'job' in a and any('metadata.uid' in x for x in a):
  print(os.environ['JOB_UID'], end='')
+elif 'pods' in a and 'batch.kubernetes.io/controller-uid=' + os.environ['JOB_UID'] in a:
+ Path('pods-checked').touch()
+ print(os.environ.get('POD_LIST', ''), end='')
 elif 'job' in a and any('status.active' in x for x in a):
  Path('status-checked').touch()
- print(os.environ['JOB_STATUS'], end='')
+ status=os.environ['JOB_STATUS']
+ if not any('uncountedTerminatedPods' in x for x in a): status=status.split('{')[0]
+ print(status, end='')
 elif 'wait' in a:
  Path('wait-pid').write_text(str(os.getpid()))
  deadline=time.monotonic()+float(os.environ['WAIT_SECONDS'])
@@ -430,7 +435,7 @@ QUOTA_EVENT = ('Error creating: pods "ingest-7q2xk" is forbidden: exceeded quota
 
 def _quota_env(**overrides):
     env = {'AIRGAP_DRYRUN': '0', 'INGEST_TIMEOUT': '3600', 'JOB_UID': 'uid-new', 'EVENT_UID': 'uid-new',
-           'JOB_STATUS': '  ', 'WAIT_SECONDS': '60', 'WAIT_FOR': '',
+           'JOB_STATUS': '   {}', 'WAIT_SECONDS': '60', 'WAIT_FOR': '',
            'EVENT_MESSAGE': QUOTA_EVENT.format(requested='limits.cpu=7771,limits.memory=7772Gi')}
     env.update(overrides)
     return tuple(env.items())
@@ -442,6 +447,7 @@ def _quota_env(**overrides):
     pytest.param('requests.cpu=7771', ['INGEST_CPU_REQUEST'], False, id='cpu-request'),
     pytest.param('memory=7772Gi', ['INGEST_MEMORY_REQUEST'], False, id='bare-memory-is-request'),
     pytest.param('pods=7773', [], True, id='unsized-resource'),
+    pytest.param(None, [], True, id='failed-quota-unset-resource'),
 ])
 def test_ingest_quota_refusal_fails_fast_with_fixed_message(ingest_tree, requested, keys, other):
     import time
@@ -450,7 +456,10 @@ def test_ingest_quota_refusal_fails_fast_with_fixed_message(ingest_tree, request
     tree, _ = ingest_tree
     write_stub(tree / "bin/kubectl", QUOTA_STUB)
     started = time.monotonic()
-    result = _run_ingest(ingest_tree, *_quota_env(EVENT_MESSAGE=QUOTA_EVENT.format(requested=requested)))
+    message = (QUOTA_EVENT.format(requested=requested) if requested else
+               'Error creating: pods "ingest-7q2xk" is forbidden: failed quota: sentinel-quota-name: '
+               'must specify requests.ephemeral-storage')
+    result = _run_ingest(ingest_tree, *_quota_env(EVENT_MESSAGE=message))
     elapsed = time.monotonic() - started
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
@@ -477,7 +486,12 @@ def test_ingest_quota_refusal_fails_fast_with_fixed_message(ingest_tree, request
 
 @pytest.mark.parametrize("case", [
     pytest.param({'EVENT_UID': 'uid-old', 'WAIT_FOR': 'events-checked'}, id='stale-event-of-replaced-job'),
-    pytest.param({'JOB_STATUS': '1 ', 'WAIT_FOR': 'status-checked'}, id='pod-created-after-refusal'),
+    pytest.param({'JOB_STATUS': '1   {}', 'WAIT_FOR': 'status-checked'}, id='pod-created-after-refusal'),
+    # The Job's counters lag: a pod exists before .status.active counts it (review F1).
+    pytest.param({'POD_LIST': 'pod/ingest-7q2xk', 'WAIT_FOR': 'pods-checked'}, id='pod-listed-before-counters'),
+    # A finished pod waits in uncountedTerminatedPods before succeeded/failed rise.
+    pytest.param({'JOB_STATUS': '   {"succeeded":["uid-pod"]}', 'WAIT_FOR': 'status-checked'},
+                 id='pod-uncounted-after-finishing'),
     pytest.param({'EVENTS_FAIL': 'true', 'WAIT_FOR': 'events-checked'}, id='events-unreadable'),
 ])
 def test_ingest_quota_check_never_stops_a_progressing_job(ingest_tree, case):

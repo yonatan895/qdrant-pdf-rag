@@ -542,8 +542,10 @@ Compatibility and lifecycle decisions under #448:
   with no surge pod: its Deployment uses `Recreate`.
   The ingest Job adds one pod (`INGEST_*` keys above; defaults requests
   4 CPU/8Gi, limits 16 CPU/32Gi) while `airgap:ingest` runs: corpus
-  additions and maintenance runs (re-ingest, retirement), never the upgrade,
-  since `airgap:deploy` renders the release without the Job. A quota fit
+  additions and maintenance runs (re-ingest, retirement), never during the
+  upgrade's rollout: `airgap:deploy` renders the release without the Job,
+  and the pipeline's optional ingest stage (`CORPUS_PVC` set) starts only
+  after `airgap:deploy` has waited for the rollout. A quota fit
   sized only for the release and its rollout surge therefore refuses the
   Job: the quota must also take the running release plus the ingest pod
   (run an ingest outside a rollout, or size the quota for both). Where the
@@ -1046,8 +1048,9 @@ cannot schedule on one node — proven).
   <a id="ingest-quota-refusal"></a>While it waits, `airgap:ingest` also
   reads the new Job's `FailedCreate` events (#1378), selected by the Job's
   UID because the Job name is reused and older events outlive a deleted Job.
-  When the namespace ResourceQuota refused the pod (`exceeded quota`) and
-  the Job has never had a pod, it stops the wait and exits 1 with a fixed
+  When the namespace ResourceQuota refused the pod (`exceeded quota`, or
+  `failed quota` for a resource the Job does not set) and the Job has never
+  had a pod (none listed for its UID and none counted in its status), it stops the wait and exits 1 with a fixed
   message naming the refused resources (CPU or memory, requests or limits)
   and the `INGEST_*` keys to lower, or a quota resource those keys do not
   set. The event text, with its quota name and figures, is never echoed;

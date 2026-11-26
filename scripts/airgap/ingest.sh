@@ -140,6 +140,7 @@ run $KC apply -f dist/ingest-rendered.yaml
 # no line is a quota refusal.
 ingest_quota_keys() {
     awk '
+        /forbidden: failed quota: / { print "other"; next }
         /exceeded quota/ {
             line = $0
             if (!sub(/.*requested: /, "", line)) { print "other"; next }
@@ -310,17 +311,35 @@ else
                 probe_pid=""
                 refused=$(ingest_quota_keys "$probe_file")
                 if [ -n "$refused" ]; then
-                    $KC -n "$NAMESPACE" get job ingest \
-                        -o jsonpath='{.status.active}{" "}{.status.succeeded}{" "}{.status.failed}' > "$probe_file" 2>/dev/null &
+                    # "Never had a pod" needs both views: the Job's counters
+                    # lag pod creation and finished pods (review F1), and a
+                    # pod list misses pods already removed. Any read failure
+                    # counts as "a pod may exist".
+                    pods_seen=""
+                    $KC -n "$NAMESPACE" get pods -l "batch.kubernetes.io/controller-uid=$INGEST_JOB_UID" \
+                        -o name > "$probe_file" 2>/dev/null &
                     probe_pid=$!
                     [ "$stopping" = false ] || break
                     if wait "$probe_pid"; then
-                        pods_seen=$(tr -d ' 0\n' < "$probe_file")
+                        pods_seen=$(tr -d ' \n' < "$probe_file")
                     else
                         pods_seen=unknown
                     fi
                     [ "$stopping" = false ] || break
                     probe_pid=""
+                    if [ -z "$pods_seen" ]; then
+                        $KC -n "$NAMESPACE" get job ingest \
+                            -o jsonpath='{.status.active}{" "}{.status.succeeded}{" "}{.status.failed}{" "}{.status.uncountedTerminatedPods}' > "$probe_file" 2>/dev/null &
+                        probe_pid=$!
+                        [ "$stopping" = false ] || break
+                        if wait "$probe_pid"; then
+                            pods_seen=$(tr -d ' 0{}\n' < "$probe_file")
+                        else
+                            pods_seen=unknown
+                        fi
+                        [ "$stopping" = false ] || break
+                        probe_pid=""
+                    fi
                     if [ -z "$pods_seen" ]; then
                         printf '%s\n' "$refused" > "$QUOTA_MARKER"
                         kill "$WAIT_PID" 2>/dev/null || true
