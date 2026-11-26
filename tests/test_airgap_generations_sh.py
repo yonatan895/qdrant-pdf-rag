@@ -344,8 +344,10 @@ def test_cancellation_reaps_the_local_observers(gen_tree, cancel_signal, code):
         _, stderr = proc.communicate(timeout=10)
         assert proc.returncode == code
         assert "job/generations in namespace test-ns may still be running" in stderr
-        for child in children:
-            assert not Path(f"/proc/{child}").exists(), f"observer {child} survived"
+        for name, child in zip(("wait-pid", "failed-pid"), children, strict=True):
+            stat = Path(f"/proc/{child}/stat")
+            state = stat.read_text().rsplit(")", 1)[-1].split()[0] if stat.exists() else "gone"
+            assert state == "gone", f"{name} observer {child} survived (state {state})"
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(proc.pid, signal.SIGKILL)

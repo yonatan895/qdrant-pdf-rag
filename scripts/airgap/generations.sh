@@ -84,7 +84,7 @@ if [ "$GEN_COMMAND" = dispose-snapshots ]; then
     if [ "$gen_execute" = true ]; then
         # The audit record names who ran it (maintainer decision 2026-11-26);
         # an unusable login name is left to the module's uid fallback.
-        _operator=${USER:-$(id -un 2>/dev/null || true)}
+        _operator=${USER:-${LOGNAME:-}}
         if printf '%s' "$_operator" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9._@-]{0,63}'; then
             GEN_ARGS="$GEN_ARGS --operator $_operator"
         else

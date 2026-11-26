@@ -184,10 +184,12 @@ watch_one_shot_job() {
             probe_pid=$!
             [ "$stopping" = false ] || exit 0
             if wait "$probe_pid" && [ "$stopping" = false ]; then
-                probe_pid=""
                 : > "$FAILED_MARKER"
                 kill "$WAIT_PID" 2>/dev/null || true
             fi
+            # A TERM interrupts the wait above after its trap killed the
+            # probe: reap it here so it never outlives this observer.
+            wait "$probe_pid" 2>/dev/null || true
             probe_pid=""
         ) &
         FAILED_PID=$!
