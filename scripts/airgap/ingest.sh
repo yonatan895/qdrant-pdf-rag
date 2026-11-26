@@ -133,6 +133,58 @@ else
 fi
 run $KC apply -f dist/ingest-rendered.yaml
 
+# Quota refusal (#1378). The Job controller's FailedCreate event message
+# carries the quota name and its requested/used/limited figures; it is read
+# here and never echoed. Prints the INGEST_* keys the refused resources map
+# to, "other" for a quota resource those keys do not size, and nothing when
+# no line is a quota refusal.
+ingest_quota_keys() {
+    awk '
+        /exceeded quota/ {
+            line = $0
+            if (!sub(/.*requested: /, "", line)) { print "other"; next }
+            sub(/, used: .*/, "", line)
+            n = split(line, parts, ",")
+            for (i = 1; i <= n; i++) {
+                res = parts[i]
+                sub(/=.*/, "", res)
+                gsub(/[ \t]/, "", res)
+                if (res == "requests.cpu" || res == "cpu") print "INGEST_CPU_REQUEST"
+                else if (res == "requests.memory" || res == "memory") print "INGEST_MEMORY_REQUEST"
+                else if (res == "limits.cpu") print "INGEST_CPU_LIMIT"
+                else if (res == "limits.memory") print "INGEST_MEMORY_LIMIT"
+                else print "other"
+            }
+        }' "$1" | LC_ALL=C sort -u
+}
+
+# Fixed operator message for a quota refusal: resource names and keys only,
+# never figures from the cluster.
+report_ingest_quota_refusal() {
+    _keys=""
+    _what=""
+    for _key in INGEST_CPU_REQUEST INGEST_MEMORY_REQUEST INGEST_CPU_LIMIT INGEST_MEMORY_LIMIT; do
+        grep -qx "$_key" "$1" || continue
+        case "$_key" in
+            INGEST_CPU_REQUEST) _label="CPU requests" ;;
+            INGEST_MEMORY_REQUEST) _label="memory requests" ;;
+            INGEST_CPU_LIMIT) _label="CPU limits" ;;
+            INGEST_MEMORY_LIMIT) _label="memory limits" ;;
+        esac
+        _keys="${_keys:+$_keys, }$_key"
+        _what="${_what:+$_what, }$_label"
+    done
+    echo "::error::the namespace ResourceQuota refused the ingest Job's pod (FailedCreate: exceeded quota); the Job never started" >&2
+    if [ -n "$_keys" ]; then
+        echo "::error::refused on $_what: lower $_keys in airgap.env (docs/deploy.md, site sizing keys) or free that quota in namespace $NAMESPACE, then rerun airgap:ingest" >&2
+    fi
+    if grep -qx other "$1"; then
+        echo "::error::refused on a quota resource the INGEST_* sizing keys do not set: free that quota in namespace $NAMESPACE, then rerun airgap:ingest" >&2
+    fi
+    echo "::warning::job/ingest is left in namespace $NAMESPACE and its controller keeps retrying; a rerun replaces it, or remove it with: $KC -n $NAMESPACE delete job ingest" >&2
+    unset _keys _what _key _label
+}
+
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "[dryrun] $KC -n $NAMESPACE wait --for=condition=complete job/ingest --timeout=${INGEST_TIMEOUT}s"
     echo "[dryrun] rendered manifest kept at dist/ingest-rendered.yaml"
@@ -140,20 +192,31 @@ else
     echo "==> Waiting for ingest Job (timeout: ${INGEST_TIMEOUT}s)..."
     LOGS_PID=""
     WAIT_PID=""
+    QUOTA_PID=""
     cancelled=0
+    # Quota fail-fast (#1378): a namespace ResourceQuota that cannot take the
+    # Job's pod leaves the Job controller retrying FailedCreate until the
+    # timeout. The check reads only this run's events: the Job name is reused
+    # and a deleted Job's events outlive it, so it is scoped to the new Job's
+    # UID and stays off when the UID or the events cannot be read (the wait
+    # alone then decides, as before).
+    QUOTA_MARKER=dist/ingest-quota-refused
+    rm -f "$QUOTA_MARKER"
+    INGEST_JOB_UID=$($KC -n "$NAMESPACE" get job ingest -o jsonpath='{.metadata.uid}' 2>/dev/null) || INGEST_JOB_UID=""
     stop_ingest_observers() {
         # Cleanup owns only these local processes, never the cluster Job.
         trap '' TERM INT
-        for observer_pid in "$WAIT_PID" "$LOGS_PID"; do
+        for observer_pid in "$WAIT_PID" "$LOGS_PID" "$QUOTA_PID"; do
             [ -n "$observer_pid" ] || continue
             kill "$observer_pid" 2>/dev/null || true
         done
-        for observer_pid in "$WAIT_PID" "$LOGS_PID"; do
+        for observer_pid in "$WAIT_PID" "$LOGS_PID" "$QUOTA_PID"; do
             [ -n "$observer_pid" ] || continue
             wait "$observer_pid" 2>/dev/null || true
         done
         WAIT_PID=""
         LOGS_PID=""
+        QUOTA_PID=""
     }
     exit_if_cancelled() {
         [ "$cancelled" -ne 0 ] || return 0
@@ -166,7 +229,7 @@ else
     # after the last check but before `wait` would otherwise block until the
     # Job wait ends (up to INGEST_TIMEOUT), losing the operator's Ctrl-C.
     interrupt_ingest_observers() {
-        for observer_pid in "$WAIT_PID" "$LOGS_PID"; do
+        for observer_pid in "$WAIT_PID" "$LOGS_PID" "$QUOTA_PID"; do
             [ -n "$observer_pid" ] || continue
             kill "$observer_pid" 2>/dev/null || true
         done
@@ -224,11 +287,67 @@ else
     $KC -n "$NAMESPACE" wait --for=condition=complete job/ingest --timeout="${INGEST_TIMEOUT}s" &
     WAIT_PID=$!
     exit_if_cancelled
+    if [ -n "$INGEST_JOB_UID" ]; then
+        # Started after WAIT_PID so it can end the wait. It acts only while
+        # the Job has never had a pod: a refusal that a later pod overtook
+        # must not stop a running ingest. Marker first, then the kill, so the
+        # parent can tell this stop from a genuine wait failure.
+        (
+            stopping=false
+            probe_pid=""
+            probe_file=""
+            trap 'stopping=true; if [ -n "$probe_pid" ]; then kill "$probe_pid" 2>/dev/null || true; fi' TERM INT
+            trap 'trap "" TERM INT; if [ -n "$probe_pid" ]; then kill "$probe_pid" 2>/dev/null || true; wait "$probe_pid" 2>/dev/null || true; fi; if [ -n "$probe_file" ]; then rm -f "$probe_file"; fi' 0
+            probe_file=$(mktemp)
+            while [ "$stopping" = false ]; do
+                $KC -n "$NAMESPACE" get events \
+                    --field-selector "involvedObject.uid=$INGEST_JOB_UID,reason=FailedCreate" \
+                    -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' > "$probe_file" 2>/dev/null &
+                probe_pid=$!
+                [ "$stopping" = false ] || break
+                wait "$probe_pid" || : > "$probe_file"
+                [ "$stopping" = false ] || break
+                probe_pid=""
+                refused=$(ingest_quota_keys "$probe_file")
+                if [ -n "$refused" ]; then
+                    $KC -n "$NAMESPACE" get job ingest \
+                        -o jsonpath='{.status.active}{" "}{.status.succeeded}{" "}{.status.failed}' > "$probe_file" 2>/dev/null &
+                    probe_pid=$!
+                    [ "$stopping" = false ] || break
+                    if wait "$probe_pid"; then
+                        pods_seen=$(tr -d ' 0\n' < "$probe_file")
+                    else
+                        pods_seen=unknown
+                    fi
+                    [ "$stopping" = false ] || break
+                    probe_pid=""
+                    if [ -z "$pods_seen" ]; then
+                        printf '%s\n' "$refused" > "$QUOTA_MARKER"
+                        kill "$WAIT_PID" 2>/dev/null || true
+                        break
+                    fi
+                fi
+                sleep 5 &
+                probe_pid=$!
+                [ "$stopping" = false ] || break
+                wait "$probe_pid" || true
+                [ "$stopping" = false ] || break
+                probe_pid=""
+            done
+        ) &
+        QUOTA_PID=$!
+        exit_if_cancelled
+    fi
     wait_result=0
     wait "$WAIT_PID" || wait_result=$?
     exit_if_cancelled
     WAIT_PID=""
     stop_ingest_observers
+    if [ "$wait_result" -ne 0 ] && [ -s "$QUOTA_MARKER" ]; then
+        report_ingest_quota_refusal "$QUOTA_MARKER"
+        rm -f "$QUOTA_MARKER"
+        exit 1
+    fi
     if [ "$wait_result" -ne 0 ]; then
         echo "::error::ingest Job did not complete successfully" >&2
         $KC -n "$NAMESPACE" logs job/ingest --tail=200 || true

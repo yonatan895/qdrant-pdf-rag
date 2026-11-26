@@ -391,6 +391,115 @@ elif 'pods' in a:
             proc.communicate(timeout=5)
 
 
+# --- #1378: a ResourceQuota refusal stops the wait instead of the timeout --
+
+QUOTA_STUB = """#!/usr/bin/env python3
+import os,sys,time
+from pathlib import Path
+a=sys.argv[1:]
+with open('operations', 'a') as f: f.write(' '.join(a)+'\\n')
+if 'pvc' in a:
+ print('persistentvolumeclaim/ingest-work')
+elif 'events' in a and '--field-selector' in a:
+ Path('events-checked').touch()
+ if os.environ.get('EVENTS_FAIL') == 'true': sys.exit(1)
+ selector=a[a.index('--field-selector')+1]
+ if selector == 'involvedObject.uid=' + os.environ['EVENT_UID'] + ',reason=FailedCreate':
+  print(os.environ['EVENT_MESSAGE'])
+elif 'job' in a and any('metadata.uid' in x for x in a):
+ print(os.environ['JOB_UID'], end='')
+elif 'job' in a and any('status.active' in x for x in a):
+ Path('status-checked').touch()
+ print(os.environ['JOB_STATUS'], end='')
+elif 'wait' in a:
+ Path('wait-pid').write_text(str(os.getpid()))
+ deadline=time.monotonic()+float(os.environ['WAIT_SECONDS'])
+ while time.monotonic() < deadline:
+  if os.environ.get('WAIT_FOR') and Path(os.environ['WAIT_FOR']).exists():
+   time.sleep(.3)
+   sys.exit(0)
+  time.sleep(.02)
+ sys.exit(1)
+"""
+
+# Sentinel figures and quota name: the event text must never reach the output.
+QUOTA_EVENT = ('Error creating: pods "ingest-7q2xk" is forbidden: exceeded quota: sentinel-quota-name, '
+               'requested: {requested}, used: limits.cpu=5551,limits.memory=5552Gi, '
+               'limited: limits.cpu=12341,limits.memory=12342Gi')
+
+
+def _quota_env(**overrides):
+    env = {'AIRGAP_DRYRUN': '0', 'INGEST_TIMEOUT': '3600', 'JOB_UID': 'uid-new', 'EVENT_UID': 'uid-new',
+           'JOB_STATUS': '  ', 'WAIT_SECONDS': '60', 'WAIT_FOR': '',
+           'EVENT_MESSAGE': QUOTA_EVENT.format(requested='limits.cpu=7771,limits.memory=7772Gi')}
+    env.update(overrides)
+    return tuple(env.items())
+
+
+@pytest.mark.parametrize(("requested", "keys", "other"), [
+    pytest.param('limits.cpu=7771,limits.memory=7772Gi', ['INGEST_CPU_LIMIT', 'INGEST_MEMORY_LIMIT'], False,
+                 id='limits'),
+    pytest.param('requests.cpu=7771', ['INGEST_CPU_REQUEST'], False, id='cpu-request'),
+    pytest.param('memory=7772Gi', ['INGEST_MEMORY_REQUEST'], False, id='bare-memory-is-request'),
+    pytest.param('pods=7773', [], True, id='unsized-resource'),
+])
+def test_ingest_quota_refusal_fails_fast_with_fixed_message(ingest_tree, requested, keys, other):
+    import time
+    from pathlib import Path
+
+    tree, _ = ingest_tree
+    write_stub(tree / "bin/kubectl", QUOTA_STUB)
+    started = time.monotonic()
+    result = _run_ingest(ingest_tree, *_quota_env(EVENT_MESSAGE=QUOTA_EVENT.format(requested=requested)))
+    elapsed = time.monotonic() - started
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert elapsed < 30, f"quota refusal waited {elapsed:.0f}s"
+    assert "ResourceQuota refused the ingest Job's pod" in result.stderr
+    named = re.findall(r"lower ([A-Z_, ]+) in airgap\.env", result.stderr)
+    assert [k.strip() for k in named[0].split(",")] == keys if keys else not named
+    labels = {'INGEST_CPU_REQUEST': 'CPU requests', 'INGEST_MEMORY_REQUEST': 'memory requests',
+              'INGEST_CPU_LIMIT': 'CPU limits', 'INGEST_MEMORY_LIMIT': 'memory limits'}
+    for key in keys:
+        assert labels[key] in result.stderr
+    assert ("quota resource the INGEST_* sizing keys do not set" in result.stderr) is other
+    assert "job/ingest is left in namespace test-ns" in result.stderr
+    for sentinel in ("sentinel-quota-name", "7771", "7772", "7773", "5551", "12341", "ingest-7q2xk"):
+        assert sentinel not in output
+    assert "did not complete successfully" not in result.stderr
+    operations = (tree / "operations").read_text()
+    assert "--sort-by=.lastTimestamp" not in operations  # no unscoped events dump
+    assert sum("delete job ingest" in line for line in operations.splitlines()) == 1  # pre-apply only
+    pid = int((tree / "wait-pid").read_text())
+    assert not Path(f"/proc/{pid}").exists(), f"owned wait child {pid} survived"
+    assert not (tree / "dist" / "ingest-quota-refused").exists()
+
+
+@pytest.mark.parametrize("case", [
+    pytest.param({'EVENT_UID': 'uid-old', 'WAIT_FOR': 'events-checked'}, id='stale-event-of-replaced-job'),
+    pytest.param({'JOB_STATUS': '1 ', 'WAIT_FOR': 'status-checked'}, id='pod-created-after-refusal'),
+    pytest.param({'EVENTS_FAIL': 'true', 'WAIT_FOR': 'events-checked'}, id='events-unreadable'),
+])
+def test_ingest_quota_check_never_stops_a_progressing_job(ingest_tree, case):
+    """Only a refusal of this run's Job, before any pod, ends the wait."""
+    tree, _ = ingest_tree
+    write_stub(tree / "bin/kubectl", QUOTA_STUB)
+    result = _run_ingest(ingest_tree, *_quota_env(WAIT_SECONDS='15', **case))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ResourceQuota" not in result.stderr
+    assert (tree / case['WAIT_FOR']).exists()
+
+
+def test_ingest_quota_check_is_off_without_the_job_uid(ingest_tree):
+    tree, _ = ingest_tree
+    write_stub(tree / "bin/kubectl", QUOTA_STUB)
+    result = _run_ingest(ingest_tree, *_quota_env(JOB_UID='', WAIT_SECONDS='1'))
+    # The wait alone decides: here it times out and the old failure path runs.
+    assert result.returncode == 1
+    assert "did not complete successfully" in result.stderr
+    assert " events --field-selector" not in (tree / "operations").read_text()
+
+
 @pytest.mark.parametrize("extra_env,exit_code,messages", [
     pytest.param({'EMBED_MODEL_REVISION': '  '}, None, ('EMBED_MODEL_REVISION must be a non-blank',),
                  id='ingest_whitespace_embed_revision_fails_closed'),

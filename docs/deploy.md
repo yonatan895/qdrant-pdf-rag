@@ -540,6 +540,17 @@ Compatibility and lifecycle decisions under #448:
   agent keys. The defaults (requests 50m/128Mi, limits 500m/512Mi) are not
   measured yet. Enabling the gateway adds one such pod to the namespace quota,
   with no surge pod: its Deployment uses `Recreate`.
+  The ingest Job adds one pod (`INGEST_*` keys above; defaults requests
+  4 CPU/8Gi, limits 16 CPU/32Gi) while `airgap:ingest` runs: corpus
+  additions and maintenance runs (re-ingest, retirement), never the upgrade,
+  since `airgap:deploy` renders the release without the Job. A quota fit
+  sized only for the release and its rollout surge therefore refuses the
+  Job: the quota must also take the running release plus the ingest pod
+  (run an ingest outside a rollout, or size the quota for both). Where the
+  quota cannot take the defaults, lower the four resource keys; a lower CPU
+  limit slows the ingest, and `INGEST_WORKERS` is used as given. A refused
+  Job stops `airgap:ingest` early with a fixed message
+  (see [ingest wait](#ingest-quota-refusal)).
   Worker count and scratch size are
   `INGEST_WORKERS` and `INGEST_WORK_SIZE`. CPU is whole/decimal cores or
   millicores (`500m`); memory and sizes need a Ki/Mi/Gi/Ti unit. Each value is
@@ -1032,6 +1043,18 @@ cannot schedule on one node — proven).
   (Jobs are immutable); completion waits up to `INGEST_TIMEOUT` (default
   1h) while a background tailer streams pod logs, dumping logs and events
   on timeout.
+  <a id="ingest-quota-refusal"></a>While it waits, `airgap:ingest` also
+  reads the new Job's `FailedCreate` events (#1378), selected by the Job's
+  UID because the Job name is reused and older events outlive a deleted Job.
+  When the namespace ResourceQuota refused the pod (`exceeded quota`) and
+  the Job has never had a pod, it stops the wait and exits 1 with a fixed
+  message naming the refused resources (CPU or memory, requests or limits)
+  and the `INGEST_*` keys to lower, or a quota resource those keys do not
+  set. The event text, with its quota name and figures, is never echoed;
+  `oc describe job ingest` shows it to the operator. The Job is left in
+  place (the launcher owns only its local observers): its controller keeps
+  retrying, and a rerun replaces it. When the UID or the events cannot be
+  read, the check stays off and the wait alone decides, as before.
 - First-party pods (agent, the oauth-proxy sidecar, the ingest Job, OpenObserve, otelcol)
   declare their own hardening so it does not depend on `restricted-v2`
   alone (issue #585): pod `runAsNonRoot: true` and
