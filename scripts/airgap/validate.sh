@@ -39,6 +39,7 @@ resolve_agent_route
 resolve_network_policy
 resolve_feedback
 resolve_openwebui
+resolve_splunk_gateway
 
 case "${RERANK_ENDPOINT_ORDER:-score_first}" in
     score_first|rerank_first) ;;
@@ -83,6 +84,7 @@ else
 fi
 echo "    NetworkPolicy:     $(describe_network_policy)"
 echo "    Feedback service:  $(describe_feedback)"
+echo "    Splunk gateway:    $(describe_splunk_gateway)"
 
 echo "==> 2. Validating required CLI tools"
 command -v skopeo >/dev/null 2>&1 || die "skopeo is required on the air-gap bastion"
@@ -244,6 +246,26 @@ if [ "$FEEDBACK_ENABLED" = "true" ]; then
                 notfound) die "Secret '$FEEDBACK_SECRET' not found in namespace '$NAMESPACE' — create it before FEEDBACK_ENABLED=true (docs/install_and_ops.md)" ;;
                 forbidden) die "this identity may not read Secret '$FEEDBACK_SECRET' in namespace '$NAMESPACE' (Forbidden); grant namespace-scoped get on secrets, not cluster-admin" ;;
                 *) die "cannot read Secret '$FEEDBACK_SECRET' in namespace '$NAMESPACE' (unexpected client error)" ;;
+            esac
+            ;;
+        *) die "cannot read namespace '$NAMESPACE' (unexpected client error)" ;;
+    esac
+fi
+
+if [ "$SPLUNK_GATEWAY_ENABLED" = "true" ]; then
+    probe $KC get namespace "$NAMESPACE"
+    case "$PROBE" in
+        notfound)
+            echo "    Notice: namespace '$NAMESPACE' does not exist yet — create Secret '$SPLUNK_GATEWAY_SECRET' (key splunk-mcp-token, and bearer-secret in bearer mode) there before 'sh scripts/tools/run-task.sh airgap:deploy'"
+            ;;
+        ok|forbidden)
+            probe $KC -n "$NAMESPACE" get secret "$SPLUNK_GATEWAY_SECRET"
+            case "$PROBE" in
+                ok) require_splunk_gateway_secrets
+                    echo "    Splunk gateway Secret '$SPLUNK_GATEWAY_SECRET' has the keys ${SPLUNK_GATEWAY_AUTH_MODE:-oidc} mode reads" ;;
+                notfound) die "Secret '$SPLUNK_GATEWAY_SECRET' not found in namespace '$NAMESPACE' — create it before SPLUNK_GATEWAY_ENABLED=true (docs/deploy.md#splunk-gateway-deploy)" ;;
+                forbidden) die "this identity may not read Secret '$SPLUNK_GATEWAY_SECRET' in namespace '$NAMESPACE' (Forbidden); grant namespace-scoped get on secrets, not cluster-admin" ;;
+                *) die "cannot read Secret '$SPLUNK_GATEWAY_SECRET' in namespace '$NAMESPACE' (unexpected client error)" ;;
             esac
             ;;
         *) die "cannot read namespace '$NAMESPACE' (unexpected client error)" ;;

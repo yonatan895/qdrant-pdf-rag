@@ -54,9 +54,10 @@ AIRGAP_TASKS = Path("taskfiles/airgap.yml")
 MAP_VALUES = Path("scripts/airgap/map_values.py")
 ROUTE_CA = Path("charts/mainframe-rag/ci/openwebui-route-ca.pem")
 IDP_CA = Path("tests/fixtures/extension-surface-idp-ca.pem")  # A loadable certificate; no key exists.
+SPLUNK_CONFIG = Path("tests/fixtures/extension-surface-splunk-gateway.json")  # Synthetic gateway config (#1077).
 # The files the derivation reads (tests copy exactly these).
 INPUTS = (EXAMPLE, Path("scripts/__init__.py"), Path("scripts/airgap"), Path("Taskfile.yml"),
-          Path("taskfiles"), ADR, IMPORT_SCRIPT, GAP_RELEASE, ROUTE_CA, IDP_CA, RELEASE_NOTES, SNAPSHOT)
+          Path("taskfiles"), ADR, IMPORT_SCRIPT, GAP_RELEASE, ROUTE_CA, IDP_CA, SPLUNK_CONFIG, RELEASE_NOTES, SNAPSHOT)
 CATEGORIES = ("airgap_env_keys", "retired_env_keys", "task_names", "chart_values",
               "script_flags", "gap_paths", "bundle_layout")
 REFRESH = ".venv/bin/python scripts/extension_surface.py --write"
@@ -91,6 +92,11 @@ MAXIMAL_INPUT = {
     "OPENWEBUI_OIDC_CLIENT_ID": "client", "OPENWEBUI_OIDC_ALLOWED_ROLES": "users",
     "OPENWEBUI_OIDC_ADMIN_ROLES": "admins", "OPENWEBUI_IDP_EGRESS_CIDRS": "192.0.2.0/24",
     "OPENWEBUI_RATINGS_ENABLED": "true",
+    "SPLUNK_GATEWAY_ENABLED": "true", "SPLUNK_GATEWAY_AUTH_MODE": "oidc", "SPLUNK_GATEWAY_SECRET": "splunk",
+    "SPLUNK_EGRESS_CIDRS": "192.0.2.10/32", "SPLUNK_EGRESS_PORT": "8089",
+    "SPLUNK_GATEWAY_IDP_EGRESS_CIDRS": "192.0.2.20/32", "SPLUNK_GATEWAY_IDP_EGRESS_PORT": "443",
+    "TEAM_MODEL_EGRESS_CIDRS": "198.51.100.0/24", "TEAM_MODEL_EGRESS_PORT": "443",
+    "TEAM_TOOLS_GROUP_ID": "00000000-0000-4000-8000-000000000000",
     "LLM_BASE_URL": "http://llm.example.invalid/v1", "LLM_MODEL_REASONING": "reasoner",
     "CHAT_CONDENSE_ENABLED": "true", "CHAT_MAX_TURNS": "10", "CHAT_MAX_PRIOR_TURN_CHARS": "1000",
     "CHAT_FOLLOWUP_ANCHOR_ENABLED": "false", "ANSWER_HIT_LIMIT": "8", "RETRIEVE_MAX_CHUNKS_PER_DOC": "3",
@@ -114,7 +120,7 @@ MAXIMAL_INPUT = {
     "QDRANT_REPLICATION_FACTOR": "1", "QDRANT_WRITE_CONSISTENCY_FACTOR": "1",
     "QDRANT_DATA_SIZE": "1Gi", "QDRANT_SNAPSHOT_SIZE": "1Gi",
     **{f"{prefix}_{res}_{kind}": ("1" if res == "CPU" else "1Gi")
-       for prefix in ("QDRANT", "INGEST", "AGENT") for res in ("CPU", "MEMORY") for kind in ("REQUEST", "LIMIT")},
+       for prefix in ("QDRANT", "INGEST", "AGENT", "SPLUNK_GATEWAY") for res in ("CPU", "MEMORY") for kind in ("REQUEST", "LIMIT")},
     **{f"IMAGE_DIGEST_{role}": _DIGEST
        for role in ("AGENT", "INGEST", "OAUTH_PROXY", "OPENWEBUI", "OPENWEBUI_PROXY")},
 }
@@ -256,7 +262,10 @@ def chart_values(root: Path) -> list[str]:
     with tempfile.TemporaryDirectory() as scratch:
         environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONPATH": str(root),
                        "ROUTE_DESTINATION_CA_FILE": str(root / ROUTE_CA),
-                       "OPENWEBUI_IDP_CA_FILE": str(root / IDP_CA)}
+                       "OPENWEBUI_IDP_CA_FILE": str(root / IDP_CA),
+                       # The Splunk gateway's site files (#1077): a synthetic config and a loadable CA.
+                       "SPLUNK_GATEWAY_CONFIG_FILE": str(root / SPLUNK_CONFIG),
+                       "SPLUNK_GATEWAY_CA_FILE": str(root / IDP_CA)}
         # A key the tree retires refuses: leave it out, as an operator would.
         retired = retired_keys(root)
         environment.update({key: value for key, value in MAXIMAL_INPUT.items() if key not in retired})

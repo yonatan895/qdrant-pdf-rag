@@ -136,7 +136,7 @@ claims other than `sub`, headers and request content are never logged.
 
 ```text
 Contract / scope: what every team-tool gateway process does around its tools
-Status: implemented with evidence (runtime only; no gateway, chart or Open WebUI registration yet)
+Status: implemented with evidence (runtime; gateways below; chart and Open WebUI registration for the Splunk gateway only: deploy.md#splunk-gateway-deploy, default off)
 Source of authority: plan in #1075 comment 6548196723 (TD1-TD5); ADR-0010
 Decision owner: src/mainframe_rag/gateways/common.py (create_gateway_app, render_untrusted, UserLimiter, UpstreamClient, load_config)
 Inputs and identities: the verified Principal (caller verification above); GATEWAY_CONFIG_FILE; Secret-fed env vars
@@ -506,7 +506,7 @@ it, read-only would be only a client-side filter.
 
 ```text
 Contract / scope: the read-only Splunk gateway process, templates only, over the site's Splunk MCP Server
-Status: implemented with evidence (process, client, tools and site probe; default-off; no chart, NetworkPolicy or Open WebUI registration yet; site checks pending)
+Status: implemented with evidence (process, client, tools and site probe); chart, NetworkPolicy and Open WebUI registration: deploy.md#splunk-gateway-deploy, default off; site checks pending
 Source of authority: ADR-0010 (TD2, TD3, TD5, TD6, TD7), ADR-0015 (approved by the maintainer 2026-11-25 in session, accepted by merging; bearer mode B2 approved as a named exception)
 Decision owner: src/mainframe_rag/gateways/splunk.py (build_gateway, check_backend, SplunkMcpClient, compose_spl, backend_from_config)
 Inputs and identities: GATEWAY_CONFIG_FILE (backend section below); SPLUNK_MCP_TOKEN; SPLUNK_AUTH_MODE; SPLUNK_GATEWAY_BEARER_SECRET (bearer mode)
@@ -524,6 +524,15 @@ definition). On success it logs the mode, the negotiated protocol, whether a
 session was issued, the template count and `"macros"` (`verified`,
 `unverified`, or null when no template calls one). The token and the bearer secret are never logged.
 `--site-probe` runs the read-only site checks instead of serving (below).
+
+**Deployment.** The chart objects, the Open WebUI registration, the site
+procedure and the rollback are in
+[deploy.md](deploy.md#splunk-gateway-deploy) (`SPLUNK_GATEWAY_ENABLED`, default
+off). The chart mounts the configuration and the CA bundle at
+`/etc/mainframe-rag/splunk-gateway`, so `backend.ca_file` must be
+`/etc/mainframe-rag/splunk-gateway/ca-bundle.crt`. In oidc mode the optional
+token-exchange secret is `SPLUNK_GATEWAY_TOKEN_EXCHANGE_SECRET`, which
+`token_exchange.client_secret_env` must name.
 
 **Caller mode.** `SPLUNK_AUTH_MODE` is `oidc` (default; also when unset) or
 `bearer`, as for GitLab: `oidc` fixes `require_single_audience` on (TD6);
