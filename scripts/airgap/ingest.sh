@@ -366,11 +366,35 @@ else
     if [ "$wait_result" -ne 0 ] && [ -s "$QUOTA_MARKER" ]; then
         report_ingest_quota_refusal "$QUOTA_MARKER"
         rm -f "$QUOTA_MARKER"
-        # Maintainer decision (#1385): a refused Job left behind could start
-        # by itself when quota frees and ingest and publish with nobody
-        # watching, so it is removed. The check found no pod; a pod created
-        # since goes with the Job, and the run still reports failure.
-        if $KC -n "$NAMESPACE" delete job ingest --ignore-not-found --cascade=foreground --wait=true --timeout=300s >/dev/null 2>&1; then
+        # Coordinator decision, pending maintainer confirmation (#1385): a
+        # refused Job left behind could start by itself when quota frees and
+        # ingest and publish with nobody watching, so it is removed. The check
+        # found no pod; a pod created since goes with the Job, and the run
+        # still reports failure.
+        # stop_ingest_observers ignored TERM/INT; the delete must stay
+        # interruptible (review B1). It runs in the background so a trap can
+        # end it at once; --request-timeout bounds each stalled API request
+        # and --timeout the wait for the deletion.
+        DELETE_PID=""
+        interrupt_refused_job_delete() {
+            trap '' TERM INT
+            if [ -n "$DELETE_PID" ]; then
+                kill "$DELETE_PID" 2>/dev/null || true
+                wait "$DELETE_PID" 2>/dev/null || true
+            fi
+            echo "::error::interrupted while removing the refused ingest Job; delete it with: $KC -n $NAMESPACE delete job ingest" >&2
+            exit "$1"
+        }
+        trap 'interrupt_refused_job_delete 143' TERM
+        trap 'interrupt_refused_job_delete 130' INT
+        $KC -n "$NAMESPACE" delete job ingest --ignore-not-found --cascade=foreground --wait=true \
+            --timeout=300s --request-timeout=30s >/dev/null 2>&1 &
+        DELETE_PID=$!
+        delete_result=0
+        wait "$DELETE_PID" || delete_result=$?
+        trap '' TERM INT
+        DELETE_PID=""
+        if [ "$delete_result" -eq 0 ]; then
             echo "::error::the refused ingest Job was removed; rerun airgap:ingest after lowering INGEST_* or freeing quota" >&2
         else
             echo "::error::could not remove the refused ingest Job; delete it with: $KC -n $NAMESPACE delete job ingest" >&2

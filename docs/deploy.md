@@ -1054,12 +1054,14 @@ cannot schedule on one node — proven).
   message naming the refused resources (CPU or memory, requests or limits)
   and the `INGEST_*` keys to lower, or a quota resource those keys do not
   set. The event text, with its quota name and figures, is never echoed;
-  `oc describe job ingest` shows it to the operator. It then deletes the
+  `oc get events --field-selector involvedObject.kind=Job,involvedObject.name=ingest`
+  shows it to the operator (the events outlive the Job). It then deletes the
   refused Job (foreground cascade, as before a replacement), because a Job
   left behind could start by itself when quota frees and ingest and publish
   with nobody watching; a pod created after the check goes with it, and the
-  run still exits 1. If the delete fails, a fixed line names the
-  `delete job ingest` command to run. When the UID or the events cannot be
+  run still exits 1. Each delete request is bounded (`--request-timeout`)
+  and Ctrl-C or TERM still ends the run; if the delete fails or is
+  interrupted, a fixed line names the `delete job ingest` command to run. When the UID or the events cannot be
   read, the check stays off and the wait alone decides, as before. A quota
   refusal of a retry pod, after a first pod failed, is not caught: that run
   waits for the Job's own failure or `INGEST_TIMEOUT`.

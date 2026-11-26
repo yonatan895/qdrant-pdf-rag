@@ -402,7 +402,12 @@ if 'pvc' in a:
  print('persistentvolumeclaim/ingest-work')
 elif 'delete' in a:
  # The pre-apply replacement runs before the wait; only a later delete is the refusal cleanup.
- if Path('wait-pid').exists() and os.environ.get('REFUSAL_DELETE_FAILS') == 'true': sys.exit(1)
+ if Path('wait-pid').exists():
+  if os.environ.get('REFUSAL_DELETE_FAILS') == 'true': sys.exit(1)
+  if os.environ.get('REFUSAL_DELETE_SECONDS'):
+   Path('delete-pid.tmp').write_text(str(os.getpid()))
+   os.replace('delete-pid.tmp', 'delete-pid')
+   time.sleep(float(os.environ['REFUSAL_DELETE_SECONDS']))
 elif 'events' in a and '--field-selector' in a:
  Path('events-checked').touch()
  if os.environ.get('EVENTS_FAIL') == 'true': sys.exit(1)
@@ -484,6 +489,7 @@ def test_ingest_quota_refusal_fails_fast_with_fixed_message(ingest_tree, request
     deletes = [line for line in operations.splitlines() if "delete job ingest" in line]
     assert len(deletes) == 2  # the pre-apply replacement, then the refused Job
     assert "--cascade=foreground" in deletes[1]
+    assert "--request-timeout=30s" in deletes[1]  # a stalled API request is bounded (review B1)
     pid = int((tree / "wait-pid").read_text())
     assert not Path(f"/proc/{pid}").exists(), f"owned wait child {pid} survived"
     assert not (tree / "dist" / "ingest-quota-refused").exists()
@@ -521,6 +527,48 @@ def test_ingest_quota_refusal_delete_failure_still_fails_with_instruction(ingest
     assert "was removed" not in result.stderr
 
 
+@pytest.mark.parametrize(("cancel_signal", "to_group", "exit_code"), [("SIGTERM", False, 143), ("SIGINT", True, 130)])
+def test_ingest_refused_job_delete_stays_interruptible(ingest_tree, cancel_signal, to_group, exit_code):
+    """Review B1: the observers' cleanup ignores TERM/INT; the delete must not."""
+    import os
+    import signal
+    import subprocess
+    import time
+    from pathlib import Path
+
+    tree, _ = ingest_tree
+    write_stub(tree / "bin/kubectl", QUOTA_STUB)
+
+    def start(script, env, cwd):
+        return subprocess.Popen(["sh", str(script)], env=env, cwd=cwd, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, start_new_session=True)
+
+    proc = _run_ingest(ingest_tree, *_quota_env(REFUSAL_DELETE_SECONDS='60'), runner=start)
+    try:
+        deadline = time.monotonic() + 20
+        while not (tree / "delete-pid").exists():
+            if proc.poll() is not None:
+                pytest.fail(f"launcher exited before the delete started: {proc.communicate()}")
+            assert time.monotonic() < deadline, "refused-Job delete did not start"
+            time.sleep(.02)
+        delete_pid = int((tree / "delete-pid").read_text())
+        sent = time.monotonic()
+        if to_group:
+            os.killpg(proc.pid, getattr(signal, cancel_signal))
+        else:
+            proc.send_signal(getattr(signal, cancel_signal))
+        _, stderr = proc.communicate(timeout=10)
+        assert time.monotonic() - sent < 5
+        assert proc.returncode == exit_code, stderr
+        assert "delete it with: kubectl -n test-ns delete job ingest" in stderr
+        assert "was removed" not in stderr
+        assert not Path(f"/proc/{delete_pid}").exists(), f"delete child {delete_pid} survived"
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate(timeout=5)
+
+
 def test_ingest_quota_check_is_off_without_the_job_uid(ingest_tree):
     tree, _ = ingest_tree
     write_stub(tree / "bin/kubectl", QUOTA_STUB)
@@ -528,7 +576,10 @@ def test_ingest_quota_check_is_off_without_the_job_uid(ingest_tree):
     # The wait alone decides: here it times out and the old failure path runs.
     assert result.returncode == 1
     assert "did not complete successfully" in result.stderr
-    assert " events --field-selector" not in (tree / "operations").read_text()
+    operations = (tree / "operations").read_text()
+    assert " events --field-selector" not in operations
+    # A timeout may leave a running ingest: the generic failure path never deletes (review N1).
+    assert sum("delete job ingest" in line for line in operations.splitlines()) == 1
 
 
 @pytest.mark.parametrize("extra_env,exit_code,messages", [
