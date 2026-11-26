@@ -25,6 +25,11 @@
 #   ... operator record    before the K1 rollback: the chats and the claim
 #   ... operator off       after OPENWEBUI_ENABLED=false + airgap:deploy: objects gone, claim kept
 #   ... operator on        after OPENWEBUI_ENABLED=true + airgap:deploy: same claim, chats, Pipe
+#   ... operator copy-out  after record: the copy-out block of the workspace's docs/deploy.md
+#                          (#owui-copy-out), run as written; the copy matches the pod, mode 0600
+#   ... operator copy-later after the next airgap:deploy (B's stand-in): a chat the copy lacks
+#   ... operator restore   the restore block (#owui-restore), run as written; webui.db matches
+#   ... operator restored  after A's airgap:deploy: as `on`, and the copy-later chat is gone
 #   ... operator paced     CI stand-in models only: one marked question on the browser, API-chat
 #                          and API-stream paths at once against the slow-model stand-in
 #                          (scripts/mock_vllm.py MOCK_PACED_*): complete, cited, and timed
@@ -421,6 +426,61 @@ operator_admin() {
     echo "==> admin-api-key added to Secret rag-openwebui; the next airgap:deploy installs the docs Pipe"
 }
 
+# Copy-out and restore (#1376): the operator's own blocks from the workspace's docs/deploy.md,
+# run as written in a separate `sh -e` with kubectl for oc, the lane's namespace as NAMESPACE
+# and a private directory under $STATE as A's workspace (the copy holds chat text; never upload it).
+COPY_DIR="$STATE/owui-copy"
+docs_block() {  # docs_block ANCHOR: the first sh fence after <a id="ANCHOR"></a> in the workspace's deploy.md
+    awk -v a="<a id=\"$1\"></a>" '$0 == a {f = 1; next} f && $0 == "```sh" {p = 1; next} p && $0 == "```" {exit} p' \
+        "$WS/docs/deploy.md"
+}
+
+run_docs_block() {  # run_docs_block ANCHOR: the block's output goes to logs/ANCHOR.log
+    docs_block "$1" > "$STATE/render/$1.block"
+    [ -s "$STATE/render/$1.block" ] || die "no sh block after #$1 in $WS/docs/deploy.md"
+    { echo 'set -eu'; echo 'oc() { "$KUBECTL" --context "kind-$KIND_NAME" "$@"; }'; cat "$STATE/render/$1.block"; } \
+        > "$STATE/render/$1.sh"
+    mkdir -p "$COPY_DIR"
+    chmod 700 "$COPY_DIR"
+    rc=0
+    NAMESPACE=$APP_NS A_WORKSPACE=$COPY_DIR sh "$STATE/render/$1.sh" > "$STATE/logs/$1.log" 2>&1 || rc=$?
+    cat "$STATE/logs/$1.log"
+    [ "$rc" = 0 ] || die "the deploy.md block #$1 failed (exit $rc)"
+}
+
+copy_db_sha() {  # the webui.db sha256 the copy-out read inside the pod
+    sed -n 's/^\([0-9a-f]\{64\}\)  webui\.db$/\1/p' "$COPY_DIR/owui-db-A.sha256.pod"
+}
+
+open_webui_down() {  # $1: the phase; no Open WebUI pod and no helper pod is left
+    [ -z "$(k -n "$APP_NS" get pod -l app=rag-openwebui -o name)" ] || die "$1: an Open WebUI pod still runs"
+    [ -z "$(k -n "$APP_NS" get pod rag-openwebui-copy --ignore-not-found -o name)" ] || die "$1: the helper pod is left"
+}
+
+operator_copy_out() {
+    prepare_state
+    require_workspace
+    run_docs_block owui-copy-out
+    want=$(copy_db_sha)
+    got=$(tar -xOf "$COPY_DIR/owui-data-A.tar" ./webui.db | sha256sum | cut -c1-64)
+    [ -n "$want" ] && [ "$want" = "$got" ] || die "copy-out: the webui.db sha256 in the tar differs from the pod's"
+    [ "$(stat -c %a "$COPY_DIR/owui-data-A.tar")" = 600 ] || die "copy-out: the copy is not mode 0600"
+    open_webui_down copy-out
+    say "copy-out: webui.db sha256 equal in the pod and the copy ($(wc -c < "$COPY_DIR/owui-data-A.tar") bytes, mode 0600); Open WebUI is down"
+}
+
+operator_restore() {
+    prepare_state
+    require_workspace
+    [ -s "$COPY_DIR/owui-data-A.tar" ] || die "restore: no copy in $COPY_DIR (run operator copy-out first)"
+    run_docs_block owui-restore
+    want=$(copy_db_sha)
+    [ -n "$want" ] && grep -qx "$want  webui.db" "$STATE/logs/owui-restore.log" \
+        || die "restore: the restored webui.db differs from the copy"
+    open_webui_down restore
+    say "restore: webui.db sha256 equal to the copy's; Open WebUI is down until the deploy"
+}
+
 operator_run() {
     prepare_state
     require_workspace
@@ -440,6 +500,10 @@ operator() {
         record) prepare_state; require_workspace; start_forwards; phase record ;;
         off) prepare_state; require_workspace; phase rollback-off ;;
         on) prepare_state; require_workspace; admit_route; start_forwards; phase rollback-on ;;
+        copy-out) operator_copy_out ;;
+        copy-later) prepare_state; require_workspace; admit_route; start_forwards; phase copy-later ;;
+        restore) operator_restore ;;
+        restored) prepare_state; require_workspace; admit_route; start_forwards; phase restored ;;
         paced) prepare_state; require_workspace; start_forwards; phase paced ;;
         *) sed -n '2,/^set -eu/p' "$0" | sed '$d' >&2; exit 2 ;;
     esac

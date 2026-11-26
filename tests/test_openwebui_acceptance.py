@@ -502,7 +502,7 @@ def _platform(ns="ns1"):
     return [d for d in yaml.safe_load_all(text) if d]
 
 
-def test_platform_stand_ins_are_the_route_api_and_the_uid_assignment_for_the_front_end_only():
+def test_platform_stand_ins_are_the_route_api_and_the_uid_assignment_for_the_front_end_and_its_copy_pod():
     docs = {d["kind"]: d for d in _platform()}
     assert sorted(docs) == ["CustomResourceDefinition", "MutatingAdmissionPolicy", "MutatingAdmissionPolicyBinding"]
     crd = docs["CustomResourceDefinition"]["spec"]
@@ -515,8 +515,9 @@ def test_platform_stand_ins_are_the_route_api_and_the_uid_assignment_for_the_fro
     assert policy["matchConstraints"]["resourceRules"] == [
         {"apiGroups": [""], "apiVersions": ["v1"], "operations": ["CREATE"], "resources": ["pods"]}]
     assert [c["expression"] for c in policy["matchConditions"]] == [(
-        "has(object.metadata.labels) && 'app' in object.metadata.labels"
-        " && object.metadata.labels['app'] == 'rag-openwebui'")]
+        "(has(object.metadata.labels) && 'app' in object.metadata.labels"
+        " && object.metadata.labels['app'] == 'rag-openwebui')"
+        " || (has(object.metadata.name) && object.metadata.name == 'rag-openwebui-copy')")]
     expr = policy["mutations"][0]["applyConfiguration"]["expression"]
     assert f"runAsUser: {UID}" in expr and "runAsGroup: 0" in expr and f"fsGroup: {UID}" in expr
     assert UID >= checks.UID_RANGE_START
@@ -677,7 +678,7 @@ def test_operator_lane_runs_the_site_commands_behind_the_gate_and_never_applies_
     text = "\n".join(s["run"] for _, s in own)
     assert "acceptance.sh deploy" not in text and "helm " not in text and "kubectl apply" not in text
     assert text.count("sh scripts/tools/run-task.sh airgap:pipeline") == 1
-    assert text.count("sh scripts/tools/run-task.sh airgap:deploy") == 3
+    assert text.count("sh scripts/tools/run-task.sh airgap:deploy") == 5
     order = []
     for i, step in own:
         order += re.findall(r"(?:acceptance\.sh operator|\$OWUI) ([a-z-]+)", step["run"])
@@ -685,7 +686,8 @@ def test_operator_lane_runs_the_site_commands_behind_the_gate_and_never_applies_
             assert i < boundary and "shell" not in step
         else:
             assert i > boundary and step["shell"] == GATED, step["name"]
-    assert order == ["images", "site-env", "prepare", "admin", "run", "paced", "record", "off", "on"]
+    assert order == ["images", "site-env", "prepare", "admin", "run", "paced", "record", "off", "on",
+                     "record", "copy-out", "copy-later", "restore", "restored"]
     pipeline = next(s for _, s in own if "airgap:pipeline" in s["run"])
     assert names.index(pipeline["name"]) > names.index(next(s["name"] for _, s in own if "operator prepare" in s["run"]))
     # The chart-objects lane's deploy never runs in the operator lane, nor does the --skip-load pipeline.
@@ -1003,6 +1005,120 @@ def test_a_forward_that_exits_is_reported_at_once(tmp_path):
     proc = _forward_shell(tmp_path, "exit 1\n", "forward ns a 1 2; sleep 0.5; forwards_alive; echo unreachable")
     assert proc.returncode != 0 and "a port-forward exited" in proc.stderr and "unreachable" not in proc.stdout
 
+
+
+# ------------------------------------------------------------------ copy-out and restore (#1376)
+def test_copy_later_needs_an_answered_chat_the_copy_lacks():
+    assert checks.check_copy_later(["c9"], True).ok
+    assert not checks.check_copy_later([], True).ok  # nothing written after the copy: restored could not fail
+    assert not checks.check_copy_later(["c9"], False).ok
+
+
+def test_restored_needs_the_later_chat_gone():
+    assert checks.check_restored(["c9"], ["a", "b", "n"]).ok
+    assert not checks.check_restored(["c9"], ["a", "b", "c9"]).ok  # the restore left B's data
+    assert not checks.check_restored([], ["a"]).ok
+
+
+_COPY_KUBECTL = r"""#!/bin/sh
+# Fake kubectl for the deploy.md copy-out and restore blocks: /data is the directory $VOL.
+echo "$*" >> "$STUB_LOG"
+[ "$1" = --context ] && shift 2
+[ "$1" = -n ] && shift 2
+verb=$1; shift
+case "$verb" in
+    get)
+        case "$*" in
+            *imagePullSecrets*) printf '%s' "$STUB_PULL" ;;
+            *jsonpath*) printf '%s' example.invalid/owui:v1 ;;
+        esac ;;
+    scale|wait|delete) ;;
+    apply) cp "$2" "$STUB_APPLIED" ;;
+    exec)
+        [ "$1" = -i ] && shift
+        shift 2  # the pod and --
+        case "$*" in *sha256sum*) [ -z "${STUB_BAD_SHA:-}" ] || { echo "$(printf '0%.0s' $(seq 64))  webui.db"; exit 0; } ;; esac
+        n=$#
+        for a; do set -- "$@" "$(printf '%s' "$a" | sed "s|/data|$VOL|g")"; done
+        shift "$n"
+        exec "$@" ;;
+    *) echo "unexpected kubectl $verb" >&2; exit 9 ;;
+esac
+"""
+
+
+def _copy_lane(tmp_path):
+    ws = tmp_path / "ws"
+    (ws / "docs").mkdir(parents=True)
+    shutil.copy(ROOT / "docs" / "deploy.md", ws / "docs" / "deploy.md")
+    pipe = ws / "charts" / "mainframe-rag" / "files" / "openwebui" / "docs_pipe.py"
+    pipe.parent.mkdir(parents=True)
+    pipe.write_text("")
+    vol = tmp_path / "vol"
+    (vol / "uploads").mkdir(parents=True)
+    (vol / "webui.db").write_bytes(os.urandom(4096))
+    (vol / "uploads" / "a.txt").write_text("a")
+    (vol / "lost+found").mkdir()
+    (vol / "lost+found").chmod(0o000)  # root-only on a block volume: unreadable to the pod
+    stub = tmp_path / "kubectl"
+    stub.write_text(_COPY_KUBECTL)
+    stub.chmod(0o755)
+    env = {"KUBECTL": str(stub), "OWUI_WORKSPACE": str(ws), "VOL": str(vol), "STUB_LOG": str(tmp_path / "kubectl.log"),
+           "STUB_APPLIED": str(tmp_path / "applied.yaml"), "STUB_PULL": ""}
+    return vol, env
+
+
+@pytest.mark.parametrize("pull", ["", "internal-registry-pull-secret"])
+def test_deploy_md_copy_out_and_restore_blocks_run_as_written_and_round_trip_the_volume(tmp_path, pull):
+    """The operator's blocks, run by acceptance.sh as the lane runs them, against a fake kubectl whose
+    exec runs the pod's command on a local directory: the helper pod YAML parses with and without a
+    pull secret, the copy skips the unreadable lost+found and is mode 0600, and the restore empties
+    what B wrote and brings back A's exact bytes."""
+    vol, env = _copy_lane(tmp_path)
+    env["STUB_PULL"] = pull
+    original = (vol / "webui.db").read_bytes()
+    try:
+        out = _acceptance(tmp_path, "operator", "copy-out", env=env)
+        assert out.returncode == 0, out.stdout + out.stderr
+        pod = yaml.safe_load((tmp_path / "applied.yaml").read_text())
+        spec = pod["spec"]
+        assert pod["metadata"]["name"] == "rag-openwebui-copy"
+        assert spec["imagePullSecrets"] == ([{"name": pull}] if pull else [])
+        assert spec["containers"][0]["image"] == "example.invalid/owui:v1"
+        assert spec["automountServiceAccountToken"] is False
+        assert spec["containers"][0]["securityContext"]["readOnlyRootFilesystem"] is True
+        assert spec["volumes"] == [{"name": "data", "persistentVolumeClaim": {"claimName": "rag-openwebui-data"}}]
+        copy = tmp_path / "state" / "owui-copy" / "owui-data-A.tar"
+        assert copy.stat().st_mode & 0o777 == 0o600
+        assert "./lost+found" not in subprocess.run(["tar", "-tf", str(copy)], capture_output=True, text=True,
+                                                     check=True).stdout.split()
+        # B starts: it migrates the database and writes files A never had.
+        (vol / "webui.db").write_bytes(b"migrated by B")
+        (vol / "b-only").mkdir()
+        (vol / "b-only" / "x").write_text("x")
+        out = _acceptance(tmp_path, "operator", "restore", env=env)
+        assert out.returncode == 0, out.stdout + out.stderr
+        assert (vol / "webui.db").read_bytes() == original
+        assert not (vol / "b-only").exists()
+        assert (vol / "uploads" / "a.txt").read_text() == "a"
+        assert (vol / "lost+found").is_dir()
+    finally:
+        (vol / "lost+found").chmod(0o700)
+
+
+def test_copy_out_and_restore_refuse_a_hash_that_does_not_match(tmp_path):
+    vol, env = _copy_lane(tmp_path)
+    try:
+        bad = _acceptance(tmp_path, "operator", "copy-out", env={**env, "STUB_BAD_SHA": "1"})
+        assert bad.returncode != 0 and "differs from the pod's" in bad.stderr
+        assert _acceptance(tmp_path, "operator", "copy-out", env=env).returncode == 0
+        (tmp_path / "state" / "owui-copy" / "owui-db-A.sha256.pod").write_text("1" * 64 + "  webui.db\n")
+        bad = _acceptance(tmp_path, "operator", "restore", env=env)
+        assert bad.returncode != 0 and "restored webui.db differs from the copy" in bad.stderr
+        none = tmp_path / "fresh"
+        assert _acceptance(none, "operator", "restore", env=env).returncode != 0  # no copy: refuse before any change
+    finally:
+        (vol / "lost+found").chmod(0o700)
 
 
 # ------------------------------------------------------------------ team tools (#1077, ADR-0010 T4)

@@ -1683,7 +1683,10 @@ sh scripts/tools/run-task.sh airgap:smoke
 - **Before deploy:** take step 1's snapshot (the only protection against a
   forced re-ingest if data is ever damaged), keep A's workspace and
   `airgap.env` for step 4, and confirm A's image tags are still in the
-  registry (registry tag expiry would break step 4).
+  registry (registry tag expiry would break step 4). When B moves Open WebUI
+  to a new pin, its first start migrates the Open WebUI database one way:
+  run the Open WebUI [copy-out](deploy.md#owui-copy-out) right before B's
+  `airgap:deploy`.
 <a id="upgrade-1274-defaults"></a>
 - **Behaviour changes from #1274 (answer-quality defaults on).** No
   re-ingest. Each change is one `airgap.env` line to keep the old behaviour,
@@ -1738,7 +1741,10 @@ bundle A from its own workspace and its own `airgap.env`
 (`airgap:deploy`, same namespace). Application rollback never rolls data back
 and never edits PVCs (`deploy.md` lifecycle notes). Rollback is valid only if
 the data representation A expects is the one the target holds; otherwise use
-step 5. Never combine A's assets with B's checkout.
+step 5. Never combine A's assets with B's checkout. The one manual data step:
+when B's Open WebUI migrated its database, run the Open WebUI
+[restore](deploy.md#owui-restore) before A's `airgap:deploy`; A's Open WebUI
+cannot start on B's database.
 
 **5. Data recovery or rebuild (explicit, downtime recorded).**
 

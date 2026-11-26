@@ -602,6 +602,28 @@ class Acceptance:
         self.add(checks.check_rollback_on(before, after, self.repo_sha(), next_chat.ok))
         return checks.overall(self.verdicts)
 
+    # -------------------------------------------------------------- copy-out and restore (#1376)
+    def copy_later(self) -> bool:
+        """After the copy-out and the next airgap:deploy (B's stand-in): an answered chat the copy
+        does not hold, kept for restored."""
+        before = json.loads(read_text(os.path.join(self.state, "rollback-before.json")))
+        self.wait_ready()
+        self.s.login("docs-user")
+        chat = checks.check_answer(self.ask(self.canary1 + "w"), name="copy-later-chat")
+        later = sorted(set(self.s.chat_ids("docs-user")) - set(before["chat_ids"]))
+        client._private_write(os.path.join(self.state, "copy-later.json"), json.dumps({"chat_ids": later}))
+        self.add(chat)
+        self.add(checks.check_copy_later(later, chat.ok))
+        return checks.overall(self.verdicts)
+
+    def restored(self) -> bool:
+        """After the restore and A's airgap:deploy: what rollback-on proves after K1, and the chat
+        written after the copy-out is gone."""
+        later = json.loads(read_text(os.path.join(self.state, "copy-later.json")))["chat_ids"]
+        self.rollback_on()
+        self.add(checks.check_restored(later, self.s.chat_ids("docs-user")))
+        return checks.overall(self.verdicts)
+
     # -------------------------------------------------------------- slow model (#1118)
     def paced(self) -> bool:
         """The slow-model stand-in: a first token after a long silence, then a long stream.
@@ -638,6 +660,7 @@ def main(argv: list[str]) -> int:
     run = Acceptance(argv[0])
     phases = {"checks": run.run, "first-pass": run.first_pass, "record": run.record,
               "rollback-off": run.rollback_off, "rollback-on": run.rollback_on, "paced": run.paced,
+              "copy-later": run.copy_later, "restored": run.restored,
               "team-tools": run.team_tools}
     phase = argv[1] if len(argv) > 1 else "checks"
     if phase not in phases:
