@@ -540,6 +540,19 @@ Compatibility and lifecycle decisions under #448:
   agent keys. The defaults (requests 50m/128Mi, limits 500m/512Mi) are not
   measured yet. Enabling the gateway adds one such pod to the namespace quota,
   with no surge pod: its Deployment uses `Recreate`.
+  The ingest Job adds one pod (`INGEST_*` keys above; defaults requests
+  4 CPU/8Gi, limits 16 CPU/32Gi) while `airgap:ingest` runs: corpus
+  additions and maintenance runs (re-ingest, retirement), never during the
+  upgrade's rollout: `airgap:deploy` renders the release without the Job,
+  and the pipeline's optional ingest stage (`CORPUS_PVC` set) starts only
+  after `airgap:deploy` has waited for the rollout. A quota fit
+  sized only for the release and its rollout surge therefore refuses the
+  Job: the quota must also take the running release plus the ingest pod
+  (run an ingest outside a rollout, or size the quota for both). Where the
+  quota cannot take the defaults, lower the four resource keys; a lower CPU
+  limit slows the ingest, and `INGEST_WORKERS` is used as given. A refused
+  Job stops `airgap:ingest` early with a fixed message
+  (see [ingest wait](#ingest-quota-refusal)).
   Worker count and scratch size are
   `INGEST_WORKERS` and `INGEST_WORK_SIZE`. CPU is whole/decimal cores or
   millicores (`500m`); memory and sizes need a Ki/Mi/Gi/Ti unit. Each value is
@@ -1032,6 +1045,26 @@ cannot schedule on one node — proven).
   (Jobs are immutable); completion waits up to `INGEST_TIMEOUT` (default
   1h) while a background tailer streams pod logs, dumping logs and events
   on timeout.
+  <a id="ingest-quota-refusal"></a>While it waits, `airgap:ingest` also
+  reads the new Job's `FailedCreate` events (#1378), selected by the Job's
+  UID because the Job name is reused and older events outlive a deleted Job.
+  When the namespace ResourceQuota refused the pod (`exceeded quota`, or
+  `failed quota` for a resource the Job does not set) and the Job has never
+  had a pod (none listed for its UID and none counted in its status), it stops the wait and exits 1 with a fixed
+  message naming the refused resources (CPU or memory, requests or limits)
+  and the `INGEST_*` keys to lower, or a quota resource those keys do not
+  set. The event text, with its quota name and figures, is never echoed;
+  `oc get events --field-selector involvedObject.kind=Job,involvedObject.name=ingest`
+  shows it to the operator (the events outlive the Job). It then deletes the
+  refused Job (foreground cascade, as before a replacement), because a Job
+  left behind could start by itself when quota frees and ingest and publish
+  with nobody watching; a pod created after the check goes with it, and the
+  run still exits 1. Each delete request is bounded (`--request-timeout`)
+  and Ctrl-C or TERM still ends the run; if the delete fails or is
+  interrupted, a fixed line names the `delete job ingest` command to run. When the UID or the events cannot be
+  read, the check stays off and the wait alone decides, as before. A quota
+  refusal of a retry pod, after a first pod failed, is not caught: that run
+  waits for the Job's own failure or `INGEST_TIMEOUT`.
 - First-party pods (agent, the oauth-proxy sidecar, the ingest Job, OpenObserve, otelcol)
   declare their own hardening so it does not depend on `restricted-v2`
   alone (issue #585): pod `runAsNonRoot: true` and
