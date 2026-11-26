@@ -2445,9 +2445,11 @@ restore.
 `set -eu` (it stops at the first failing command, as the stop rules require of the operator),
 with a restricted-v2 UID stand-in for the helper pod as for Open WebUI
 ([acceptance lane](openwebui-dev.md#acceptance-lane)). A chat written after the copy-out is gone
-after the restore, and every chat recorded before it is back. Kind's volumes have no
-`lost+found` and let the pod change the mount root's mode, and B is the same release there, so
-the lane exercises neither the two tar failures nor a migration.
+after the restore, and every chat recorded before it is back. On Kind a plain `-xf` fails on the
+mount root's mode as at a site (2026-11-24 rehearsal), so `--strip-components=1` is exercised.
+Kind's volumes have no `lost+found`
+(`--exclude=./lost+found` is covered only by a stub test with an unreadable `lost+found`).
+B is the same release there, so the lane does not exercise a migration.
 
 **Allow-list proxy (ADR-0007 E1).** Open WebUI disables some features in its UI
 only: `/api/v1/files` stores uploads with uploads off (Kind trial V1), the
