@@ -316,24 +316,26 @@ else
                     # pod list misses pods already removed. Any read failure
                     # counts as "a pod may exist".
                     pods_seen=""
-                    $KC -n "$NAMESPACE" get pods -l "batch.kubernetes.io/controller-uid=$INGEST_JOB_UID" \
-                        -o name > "$probe_file" 2>/dev/null &
+                    $KC -n "$NAMESPACE" get job ingest \
+                        -o jsonpath='{.status.active}{" "}{.status.succeeded}{" "}{.status.failed}{" "}{.status.uncountedTerminatedPods}' > "$probe_file" 2>/dev/null &
                     probe_pid=$!
                     [ "$stopping" = false ] || break
                     if wait "$probe_pid"; then
-                        pods_seen=$(tr -d ' \n' < "$probe_file")
+                        pods_seen=$(tr -d ' 0{}\n' < "$probe_file")
                     else
                         pods_seen=unknown
                     fi
                     [ "$stopping" = false ] || break
                     probe_pid=""
+                    # The pod list is read last: it is the freshest view, so
+                    # only a pod created between it and the kill can be missed.
                     if [ -z "$pods_seen" ]; then
-                        $KC -n "$NAMESPACE" get job ingest \
-                            -o jsonpath='{.status.active}{" "}{.status.succeeded}{" "}{.status.failed}{" "}{.status.uncountedTerminatedPods}' > "$probe_file" 2>/dev/null &
+                        $KC -n "$NAMESPACE" get pods -l "batch.kubernetes.io/controller-uid=$INGEST_JOB_UID" \
+                            -o name > "$probe_file" 2>/dev/null &
                         probe_pid=$!
                         [ "$stopping" = false ] || break
                         if wait "$probe_pid"; then
-                            pods_seen=$(tr -d ' 0{}\n' < "$probe_file")
+                            pods_seen=$(tr -d ' \n' < "$probe_file")
                         else
                             pods_seen=unknown
                         fi
