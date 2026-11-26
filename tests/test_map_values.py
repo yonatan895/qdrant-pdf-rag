@@ -458,6 +458,20 @@ def test_without_ingest_job_mode(monkeypatch, mapper_env):
     assert load_values(out)["ingest"]["enabled"] is False
 
 
+def test_generations_mode_never_enables_the_ingest_job(monkeypatch, mapper_env):
+    """Issue #1373: --generations-arg renders Job generations, never ingest."""
+    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
+    monkeypatch.setenv("QDRANT_PEER_URLS", "http://p0:6333,http://p1:6333")
+    r, out = mapper_env("--generations-arg", "list", "--generations-arg", "--keep", "--generations-arg", "2")
+    assert r.returncode == 0, r.stderr
+    ingest = load_values(out)["ingest"]
+    assert ingest["enabled"] is False and ingest["corpusPVC"] == ""
+    assert ingest["generations"] == {"args": ["list", "--keep", "2"]}
+    assert ingest["peerUrls"] == "http://p0:6333,http://p1:6333"
+    r, _ = mapper_env("--without-ingest-job", "--generations-arg", "list")
+    assert r.returncode == 1 and "exclusive" in r.stderr
+
+
 def test_no_secret_material_leaks(monkeypatch, mapper_env):
     monkeypatch.setenv("LLM_API_KEY", "sk-fake-llm")
     monkeypatch.setenv("EMBED_API_KEY", "sk-fake-embed")

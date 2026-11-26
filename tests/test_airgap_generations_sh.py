@@ -93,7 +93,7 @@ elif 'logs' in a:
 
 @pytest.fixture
 def gen_tree(tmp_path):
-    make_bin_tree(tmp_path, ["common.sh", "generations.sh", "map_values.py"])
+    make_bin_tree(tmp_path, ["common.sh", "generations.sh", "ingest.sh", "map_values.py"])
     for name in ("kubectl", "oc"):
         write_stub(tmp_path / "bin" / name, RECORDER)
     write_stub(tmp_path / "bin" / "helm", STUB_TOOL)
@@ -102,6 +102,12 @@ def gen_tree(tmp_path):
 
 
 def _run(tree, *args, extra=(), runner=None):
+    env = _env(tree, extra)
+    script = tree / "scripts" / "airgap" / "generations.sh"
+    return (runner or _run_with_args)(script, env, tree, args)
+
+
+def _env(tree, extra):
     env = {
         "PATH": system_path(tree / "bin"),
         "KC_LOG": str(tree / "kc-args.log"),
@@ -123,8 +129,7 @@ def _run(tree, *args, extra=(), runner=None):
     }
     env.update(dict(extra))
     connected_checkout(env, {k for k, _ in extra})
-    script = tree / "scripts" / "airgap" / "generations.sh"
-    return (runner or _run_with_args)(script, env, tree, args)
+    return env
 
 
 def _run_with_args(script, env, cwd, args):
@@ -164,6 +169,43 @@ def test_dryrun_renders_the_generations_job_from_the_ingest_template(gen_tree):
     assert "apply" not in _cluster_calls(gen_tree) and "delete" not in _cluster_calls(gen_tree)
 
 
+def _job(rendered):
+    import yaml
+
+    return next(d for d in yaml.safe_load_all(rendered) if d and d.get("kind") == "Job")
+
+
+def test_the_generations_job_differs_from_the_ingest_job_only_where_intended(gen_tree):
+    site = (("CORPUS_PVC", "my-manuals-pvc"), ("INGEST_MEMORY_LIMIT", "48Gi"), ("INGEST_CPU_REQUEST", "3"),
+            ("GATEWAY_CA_CONFIGMAP", "site-ca"), ("PULL_SECRET", "site-pull"))
+    assert _run(gen_tree, "list", extra=site).returncode == 0
+    ingest = _run_with_args(gen_tree / "scripts" / "airgap" / "ingest.sh",
+                            _env(gen_tree, site), gen_tree, ())
+    assert ingest.returncode == 0, ingest.stderr
+    gen_job = _job(_rendered(gen_tree))
+    ing_job = _job((gen_tree / "dist" / "ingest-rendered.yaml").read_text())
+    gen_c, ing_c = gen_job["spec"]["template"]["spec"]["containers"][0], ing_job["spec"]["template"]["spec"]["containers"][0]
+    assert gen_c["resources"]["limits"]["memory"] == "48Gi" and gen_c["resources"] == ing_c["resources"]
+    for job in (gen_job, ing_job):
+        spec = job["spec"]["template"]["spec"]
+        spec["containers"][0].pop("command", None)
+        spec["containers"][0].pop("args")
+        spec["containers"][0]["volumeMounts"] = [m for m in spec["containers"][0]["volumeMounts"]
+                                                 if m["name"] != "corpus"]
+        spec["volumes"] = [v for v in spec["volumes"] if v["name"] != "corpus"]
+        for meta in (job["metadata"], job["spec"]["template"]["metadata"]):
+            meta["labels"].pop("app")
+        job["metadata"].pop("name")
+        job["spec"].pop("backoffLimit")
+    # Ingest-only env (publication flags, contextual model) may differ; the
+    # rest of the pod, including the key reference and hardening, may not.
+    gen_env = {e["name"]: e for e in gen_job["spec"]["template"]["spec"]["containers"][0].pop("env")}
+    ing_env = {e["name"]: e for e in ing_job["spec"]["template"]["spec"]["containers"][0].pop("env")}
+    assert set(gen_env) <= set(ing_env)
+    assert {k: ing_env[k] for k in gen_env} == gen_env
+    assert gen_job == ing_job
+
+
 def test_dryrun_dispose_passes_execute_reference_and_operator(gen_tree):
     result = _run(gen_tree, "dispose-snapshots", "--build-id", BUILD, "--keep", "2", "--allow-below-keep",
                   "--execute", "--recovery-ref", "CHG-1373")
@@ -171,6 +213,13 @@ def test_dryrun_dispose_passes_execute_reference_and_operator(gen_tree):
     assert rendered_container(_rendered(gen_tree), "ingest")["args"] == [
         "dispose-snapshots", "--progress", "/work/inventory.jsonl", "--build-id", BUILD, "--keep", "2",
         "--allow-below-keep", "--execute", "--recovery-ref", "CHG-1373", "--operator", "site-op"]
+
+
+def test_an_unusable_login_name_is_left_to_the_uid_fallback_with_a_warning(gen_tree):
+    result = _run(gen_tree, "dispose-snapshots", "--build-id", BUILD, "--execute", extra=(("USER", "DOMAIN\\op"),))
+    assert result.returncode == 0, result.stderr
+    assert "--operator" not in rendered_container(_rendered(gen_tree), "ingest")["args"]
+    assert "audit record names the pod's uid" in result.stderr
 
 
 def test_dispose_without_execute_is_the_module_dry_run(gen_tree):

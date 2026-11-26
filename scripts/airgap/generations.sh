@@ -87,6 +87,8 @@ if [ "$GEN_COMMAND" = dispose-snapshots ]; then
         _operator=${USER:-$(id -un 2>/dev/null || true)}
         if printf '%s' "$_operator" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9._@-]{0,63}'; then
             GEN_ARGS="$GEN_ARGS --operator $_operator"
+        else
+            echo "::warning::the bastion login name is not usable as an audit name ([A-Za-z0-9._@-]); the audit record names the pod's uid instead" >&2
         fi
         unset _operator
     fi
