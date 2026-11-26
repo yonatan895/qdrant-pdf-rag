@@ -8,7 +8,9 @@ resolved cross-encoder, and writes one JSON record per line shaped for
 ``tests/test_replay.py`` replay (via ``record_to_rows`` below).
 
 Records carry chunk ids, ranks, chunk_type, doc ids, page labels, the
-physical first page, and scores only — never chunk text (log contract).
+physical first page, and scores — never chunk text (log contract). They do
+carry the query text (`query`, each leg's `effective_text`), so a site's
+pools stay inside the gap.
 
 Single source of truth is ``retrieve/query.py``: the live path imports its
 prefetch helpers so a rename fails loudly instead of silently diverging.
