@@ -618,10 +618,7 @@ def test_points_api_clone_reads_vectors_back_bit_identical(qdrant_url, dim):
     rng = random.Random(1372 + dim)
     names = [f"sim-bitstab-{dim}-{tag}-{uuid.uuid4().hex[:8]}" for tag in ("a", "b", "c")]
     settings = Settings(_env_file=None, qdrant_url=qdrant_url, qdrant_collection=names[0],
-                        embed_mode="hash", allow_hash_mode=True,
-                        # 1000 x 4096-dim points per page exceed the server's
-                        # default 32 MB JSON request limit (reported separately).
-                        ingest_scan_page_size=100)
+                        embed_mode="hash", allow_hash_mode=True)
     client = QdrantClient(url=qdrant_url, timeout=60)
     count = 3000 if dim < 4096 else 1500
     try:
