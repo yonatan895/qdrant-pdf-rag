@@ -862,6 +862,7 @@ def test_snapshot_disposal_lists_and_deletes_per_peer_and_refuses_a_missing_peer
 
     with tempfile.TemporaryDirectory() as scratch:
         progress = Path(scratch) / "inventory.jsonl"
+        progress.touch()
         try:
             for pair, build_id, finished in zip(pairs, builds, (100.0, 200.0, 300.0), strict=True):
                 _create_pair(peers[0], pair.corpus, replication_factor=RF)

@@ -1182,8 +1182,9 @@ thread pool.
   build binding are listed as not managed. Without `--progress` the sidecar
   is not read and nothing is reported disposable; with a single entry
   endpoint on a multi-peer cluster the snapshot view is marked incomplete.
-  `dispose-snapshots --progress <inventory> --build-id <uuid>...` is a dry
-  run by default; `--execute --recovery-ref <ticket>` deletes, on each peer,
+  `dispose-snapshots --progress <inventory> --build-id <uuid>...` (the
+  existing ingest inventory file, whose directory holds the publish lock and
+  sidecar; a missing file refuses) is a dry run by default; `--execute --recovery-ref <ticket>` deletes, on each peer,
   the snapshots that peer lists under the named builds' data collections,
   including operator pre-change snapshots of them (maintainer decision
   2026-11-26). It takes the publish lock for the whole run (a held lock

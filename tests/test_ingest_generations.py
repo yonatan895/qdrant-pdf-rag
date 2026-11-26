@@ -195,7 +195,9 @@ def run(store: Store, tmp_path, *argv: str, peer_urls: bool | None = None, api_k
 
 
 def progress(tmp_path):
-    return tmp_path / "inventory.jsonl"
+    path = tmp_path / "inventory.jsonl"
+    path.touch()
+    return path
 
 
 def listing(store, tmp_path, *extra):
@@ -435,7 +437,7 @@ def test_held_publish_lock_refuses_and_disposal_excludes_a_publisher(tmp_path, c
         rc, _ = _execute(store, tmp_path, G1)
     finally:
         release_run_lock(handle)
-    assert rc == gen.EXIT_REFUSED and "E_LOCK_HELD" in capsys.readouterr().err
+    assert rc == gen.EXIT_REFUSED and "E_LOCK_REFUSED" in capsys.readouterr().err
     assert deletes(store) == []
     seen = []
 
@@ -495,6 +497,17 @@ def test_peer_url_with_credentials_is_refused_without_echo(tmp_path, capsys):
     rc = gen.main(["list"], settings=settings, connect=lambda url: Peer(store, 0), out=lambda _l: None)
     err = capsys.readouterr().err
     assert rc == gen.EXIT_REFUSED and "E_PEER_URL" in err and "pw" not in err
+
+
+@pytest.mark.parametrize("command", ["list", "dispose-snapshots"])
+def test_a_missing_inventory_file_refuses(tmp_path, capsys, command):
+    store = three_generations()
+    args = [command, "--progress", str(tmp_path / "elsewhere" / "inventory.jsonl")]
+    if command == "dispose-snapshots":
+        args += ["--build-id", G1, "--execute", "--recovery-ref", "CHG-1"]
+    rc, _ = run(store, tmp_path, *args)
+    assert rc == gen.EXIT_REFUSED and "E_PROGRESS" in capsys.readouterr().err
+    assert deletes(store) == []
 
 
 def test_fake_satisfies_the_admin_port():

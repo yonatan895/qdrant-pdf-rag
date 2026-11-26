@@ -1512,7 +1512,7 @@ on three distinct peers again.
 
 - **Publication** is the one authorized writer path (`ingest.md`
   publication contract, single target-held lock, alias swap only after
-  full verification). Retired generations are kept, and their safety
+  full verification). Superseded generations are kept, and their safety
   snapshots until an operator deletes them with the guarded snapshot-only
   command ([retained generations](ingest.md#retained-generations), named
   builds, publish lock, keep at least one); rollback is alias re-pointing by

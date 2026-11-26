@@ -508,10 +508,14 @@ def disposal_record_path(progress: Path, alias: str) -> Path:
 
 def _record(path: Path, event: dict[str, Any]) -> None:
     line = json.dumps({"at": _iso(datetime.now(UTC).timestamp()), **event}, sort_keys=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(line + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        raise Unreadable("E_STATE_IO: the audit record beside the publish lock could not be "
+                         "written; nothing more deleted") from None
 
 
 def _listed_names(peer: Peer, collection: str) -> set[str]:
@@ -548,7 +552,7 @@ def delete_snapshot_on_peer(peer: Peer, collection: str, name: str) -> None:
         admin.delete_snapshot(collection, name, wait=True)
     if name in _listed_names(peer, collection):
         raise Unreadable(f"E_SNAPSHOT_NOT_DELETED: {name} is still listed on peer {peer.index} "
-                         f"({peer.label}); rerun to retry")
+                         f"({peer.label}); a delete needs the writer key; rerun to retry")
 
 
 @contextmanager
@@ -556,8 +560,12 @@ def _publish_lock(progress: Path, alias: str) -> Iterator[None]:
     try:
         handle: IO[Any] = acquire_publish_lock(progress, alias)
     except RuntimeError:
-        raise Refused(f"E_LOCK_HELD: another publisher holds the publish lock for {alias}; "
-                      "an ingest or disposal is running, nothing deleted") from None
+        raise Refused(f"E_LOCK_REFUSED: the publish lock for {alias} was not taken: an ingest or "
+                      "disposal holds it, or a legacy publish state must be resolved first; "
+                      "nothing deleted") from None
+    except OSError:
+        raise Refused("E_STATE_IO: the publish lock beside the ingest inventory could not be "
+                      "opened; nothing deleted") from None
     try:
         yield
     finally:
@@ -665,8 +673,8 @@ def _parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--keep", type=int, default=DEFAULT_KEEP,
                         help="Newest retained generations whose snapshots are protected (>= 1).")
-    common.add_argument("--format", choices=("text", "json"), default="text")
     listing = sub.add_parser("list", parents=[common], help="Read-only, lock-free listing.")
+    listing.add_argument("--format", choices=("text", "json"), default="text")
     listing.add_argument("--progress", type=Path, default=None,
                          help="Ingest inventory path; its directory holds the publish sidecar.")
     dispose = sub.add_parser("dispose-snapshots", parents=[common],
@@ -697,6 +705,9 @@ def main(
                 settings = Settings()
             except Exception:  # noqa: BLE001 - configuration text may carry values
                 raise Refused("E_CONFIG: the Qdrant settings in the environment are invalid") from None
+        if args.progress is not None and not args.progress.is_file():
+            raise Refused("E_PROGRESS: --progress must name the ingest inventory file that exists; "
+                          "its directory holds the publish lock and sidecar")
         connector = connect or (lambda url: _client(url, settings))
         with ExitStack() as stack:
             made: list[Any] = []
