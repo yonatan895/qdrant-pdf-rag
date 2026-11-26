@@ -1115,7 +1115,11 @@ capacity, not usable logical capacity:
 - Each node-local snapshot of a generation is about `S` on that peer's snapshot
   claim: the retained snapshots (pre-change, pre-upgrade, safety) satisfy
   `retained * S` below 500Gi. Off-cluster copies do not free the claim until the
-  snapshot is deleted.
+  snapshot is deleted. `python -m mainframe_rag.ingest.generations list` shows
+  every peer's snapshots with exact sizes; snapshots of retained generations
+  are deleted only by its guarded snapshot-only disposal
+  ([retained generations](ingest.md#retained-generations)), which frees the
+  snapshot claim and never the data claim.
 - Sizing math, not measurement: measured per-point footprint, headroom, RPO/RTO
   and replica policy belong to #374 and #360. Do not provision at exactly the
   estimate (`.agents/skills/qdrant-sizing`).
