@@ -400,6 +400,9 @@ a=sys.argv[1:]
 with open('operations', 'a') as f: f.write(' '.join(a)+'\\n')
 if 'pvc' in a:
  print('persistentvolumeclaim/ingest-work')
+elif 'delete' in a:
+ # The pre-apply replacement runs before the wait; only a later delete is the refusal cleanup.
+ if Path('wait-pid').exists() and os.environ.get('REFUSAL_DELETE_FAILS') == 'true': sys.exit(1)
 elif 'events' in a and '--field-selector' in a:
  Path('events-checked').touch()
  if os.environ.get('EVENTS_FAIL') == 'true': sys.exit(1)
@@ -472,13 +475,15 @@ def test_ingest_quota_refusal_fails_fast_with_fixed_message(ingest_tree, request
     for key in keys:
         assert labels[key] in result.stderr
     assert ("quota resource the INGEST_* sizing keys do not set" in result.stderr) is other
-    assert "job/ingest is left in namespace test-ns" in result.stderr
+    assert "the refused ingest Job was removed; rerun airgap:ingest" in result.stderr
     for sentinel in ("sentinel-quota-name", "7771", "7772", "7773", "5551", "12341", "ingest-7q2xk"):
         assert sentinel not in output
     assert "did not complete successfully" not in result.stderr
     operations = (tree / "operations").read_text()
     assert "--sort-by=.lastTimestamp" not in operations  # no unscoped events dump
-    assert sum("delete job ingest" in line for line in operations.splitlines()) == 1  # pre-apply only
+    deletes = [line for line in operations.splitlines() if "delete job ingest" in line]
+    assert len(deletes) == 2  # the pre-apply replacement, then the refused Job
+    assert "--cascade=foreground" in deletes[1]
     pid = int((tree / "wait-pid").read_text())
     assert not Path(f"/proc/{pid}").exists(), f"owned wait child {pid} survived"
     assert not (tree / "dist" / "ingest-quota-refused").exists()
@@ -502,6 +507,18 @@ def test_ingest_quota_check_never_stops_a_progressing_job(ingest_tree, case):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ResourceQuota" not in result.stderr
     assert (tree / case['WAIT_FOR']).exists()
+    operations = (tree / "operations").read_text().splitlines()
+    assert sum("delete job ingest" in line for line in operations) == 1  # pre-apply replacement only
+
+
+def test_ingest_quota_refusal_delete_failure_still_fails_with_instruction(ingest_tree):
+    tree, _ = ingest_tree
+    write_stub(tree / "bin/kubectl", QUOTA_STUB)
+    result = _run_ingest(ingest_tree, *_quota_env(REFUSAL_DELETE_FAILS='true'))
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "ResourceQuota refused the ingest Job's pod" in result.stderr
+    assert "could not remove the refused ingest Job; delete it with: kubectl -n test-ns delete job ingest" in result.stderr
+    assert "was removed" not in result.stderr
 
 
 def test_ingest_quota_check_is_off_without_the_job_uid(ingest_tree):

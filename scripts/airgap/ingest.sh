@@ -182,7 +182,6 @@ report_ingest_quota_refusal() {
     if grep -qx other "$1"; then
         echo "::error::refused on a quota resource the INGEST_* sizing keys do not set: free that quota in namespace $NAMESPACE, then rerun airgap:ingest" >&2
     fi
-    echo "::warning::job/ingest is left in namespace $NAMESPACE and its controller keeps retrying; a rerun replaces it, or remove it with: $KC -n $NAMESPACE delete job ingest" >&2
     unset _keys _what _key _label
 }
 
@@ -367,6 +366,15 @@ else
     if [ "$wait_result" -ne 0 ] && [ -s "$QUOTA_MARKER" ]; then
         report_ingest_quota_refusal "$QUOTA_MARKER"
         rm -f "$QUOTA_MARKER"
+        # Maintainer decision (#1385): a refused Job left behind could start
+        # by itself when quota frees and ingest and publish with nobody
+        # watching, so it is removed. The check found no pod; a pod created
+        # since goes with the Job, and the run still reports failure.
+        if $KC -n "$NAMESPACE" delete job ingest --ignore-not-found --cascade=foreground --wait=true --timeout=300s >/dev/null 2>&1; then
+            echo "::error::the refused ingest Job was removed; rerun airgap:ingest after lowering INGEST_* or freeing quota" >&2
+        else
+            echo "::error::could not remove the refused ingest Job; delete it with: $KC -n $NAMESPACE delete job ingest" >&2
+        fi
         exit 1
     fi
     if [ "$wait_result" -ne 0 ]; then

@@ -1054,10 +1054,15 @@ cannot schedule on one node — proven).
   message naming the refused resources (CPU or memory, requests or limits)
   and the `INGEST_*` keys to lower, or a quota resource those keys do not
   set. The event text, with its quota name and figures, is never echoed;
-  `oc describe job ingest` shows it to the operator. The Job is left in
-  place (the launcher owns only its local observers): its controller keeps
-  retrying, and a rerun replaces it. When the UID or the events cannot be
-  read, the check stays off and the wait alone decides, as before.
+  `oc describe job ingest` shows it to the operator. It then deletes the
+  refused Job (foreground cascade, as before a replacement), because a Job
+  left behind could start by itself when quota frees and ingest and publish
+  with nobody watching; a pod created after the check goes with it, and the
+  run still exits 1. If the delete fails, a fixed line names the
+  `delete job ingest` command to run. When the UID or the events cannot be
+  read, the check stays off and the wait alone decides, as before. A quota
+  refusal of a retry pod, after a first pod failed, is not caught: that run
+  waits for the Job's own failure or `INGEST_TIMEOUT`.
 - First-party pods (agent, the oauth-proxy sidecar, the ingest Job, OpenObserve, otelcol)
   declare their own hardening so it does not depend on `restricted-v2`
   alone (issue #585): pod `runAsNonRoot: true` and
