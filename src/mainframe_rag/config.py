@@ -655,6 +655,14 @@ class Settings(BaseSettings):
     # only — correctness comes from paginating to exhaustion, never from
     # the size, so no call site may cap a listing at a fixed count.
     ingest_scan_page_size: int = Field(default=1000, ge=100, le=10000)
+    # Bulk point copies (the staging clone and the completions transfer,
+    # issue #1379) size each upsert request by estimated bytes, never by the
+    # scan page: 1000 points at 4096 dimensions are about 52 MB of JSON,
+    # over Qdrant's default 32 MiB request limit (service.max_request_size_mb).
+    # The default keeps a margin under that limit.
+    ingest_copy_request_bytes: int = Field(
+        default=24 * 1024 * 1024, ge=1024 * 1024, le=32 * 1024 * 1024
+    )
     # Bulk-load mode: disable HNSW builds during the initial corpus load and
     # restore after (see set_bulk_indexing in ingest/qdrant_io.py for the
     # measured caveat) — never for incremental prod runs.
