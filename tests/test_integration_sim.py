@@ -618,10 +618,7 @@ def test_points_api_clone_reads_vectors_back_bit_identical(qdrant_url, dim):
     rng = random.Random(1372 + dim)
     names = [f"sim-bitstab-{dim}-{tag}-{uuid.uuid4().hex[:8]}" for tag in ("a", "b", "c")]
     settings = Settings(_env_file=None, qdrant_url=qdrant_url, qdrant_collection=names[0],
-                        embed_mode="hash", allow_hash_mode=True,
-                        # 1000 x 4096-dim points per page exceed the server's
-                        # default 32 MB JSON request limit (reported separately).
-                        ingest_scan_page_size=100)
+                        embed_mode="hash", allow_hash_mode=True)
     client = QdrantClient(url=qdrant_url, timeout=60)
     count = 3000 if dim < 4096 else 1500
     try:
@@ -1311,6 +1308,73 @@ def test_vllm_shaped_embed_variant(qdrant_url, mock_url, corpus, tmp_path, monke
             # The sim agent leaves RERANK_ENABLED at its default (off).
             "rerank": None,
         }
+
+
+@pytest.mark.parametrize("policy", [{}, {"qdrant_shard_number": 1, "qdrant_replication_factor": 1,
+                                         "qdrant_write_consistency_factor": 1}], ids=["unset", "1/1/1"])
+def test_clone_of_4096_dim_points_fits_the_default_request_limit(qdrant_url, policy):
+    """Issue #1379: at the production 4096 dimensions one 1000-point scan page
+    is about 52 MB of upsert JSON, over the pinned server's default 32 MiB
+    request limit, so the staging clone was rejected. With default settings
+    (scan page 1000, default copy request budget) the clone of more than one
+    page completes, and the copy holds exactly the source's ids, vectors and
+    payloads."""
+    import random
+
+    from qdrant_client import QdrantClient, models
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest.qdrant_io import clone_collection, collection_vector_configs
+
+    dim, count = 4096, 1200
+    rng = random.Random(1379)
+    src, dst = (f"sim-clone-bytes-{tag}-{uuid.uuid4().hex[:8]}" for tag in ("src", "dst"))
+    settings = Settings(_env_file=None, qdrant_url=qdrant_url, qdrant_collection=src,
+                        embed_mode="hash", allow_hash_mode=True, **policy)
+    assert settings.ingest_scan_page_size == 1000  # the default page, not a workaround
+    client = QdrantClient(url=qdrant_url, timeout=120)
+    try:
+        vectors_config, sparse_config = collection_vector_configs(dim)
+        client.create_collection(src, vectors_config=vectors_config,
+                                 sparse_vectors_config=sparse_config, on_disk_payload=True)
+        for start in range(0, count, 100):
+            batch = []
+            for i in range(start, min(start + 100, count)):
+                dense = [rng.gauss(0.0, 1.0) for _ in range(dim)]
+                norm = sum(x * x for x in dense) ** 0.5
+                indices = sorted(rng.sample(range(1, 2**31 - 1), rng.randint(20, 120)))
+                batch.append(models.PointStruct(
+                    id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"clone-bytes|{i}")),
+                    vector={"dense": [x / norm for x in dense], "bm25": models.SparseVector(
+                        indices=indices, values=[rng.uniform(0.01, 9.0) for _ in indices])},
+                    payload={"doc_id": f"d{i % 7}", "text": f"chunk {i} " + "x" * 1500},
+                ))
+            client.upsert(src, points=batch, wait=True)
+
+        clone_collection(client, settings, src, dst)
+
+        assert client.count(dst, exact=True).count == count
+        offset, seen = None, 0
+        while True:
+            page, offset = client.scroll(src, limit=200, offset=offset,
+                                         with_payload=True, with_vectors=True)
+            copies = {p.id: p for p in client.retrieve(dst, [p.id for p in page],
+                                                       with_payload=True, with_vectors=True)}
+            for point in page:
+                copy = copies[point.id]
+                assert copy.vector["dense"] == point.vector["dense"]
+                assert copy.vector["bm25"].indices == point.vector["bm25"].indices
+                assert copy.vector["bm25"].values == point.vector["bm25"].values
+                assert copy.payload == point.payload
+            seen += len(page)
+            if offset is None or not page:
+                break
+        assert seen == count
+    finally:
+        for name in (src, dst):
+            with suppress(Exception):
+                client.delete_collection(name)
+        client.close()
 
 
 def test_361_inplace_snapshot_restore_keeps_coexisting_revisions(qdrant_url, tmp_path, monkeypatch):

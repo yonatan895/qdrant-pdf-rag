@@ -599,6 +599,17 @@ Collection + indexes-before-load + batched idempotent upsert, behind the
   timeouts bound the calls.
 - Pair-length contract (issue #359): `chunks` and `vectors` must align
   exactly — a mismatch raises instead of zip-truncating.
+- Bulk point copies (`clone_collection`: the staging data clone and the
+  completions transfer, including its repair) read pages of
+  `ingest_scan_page_size` but size each upsert request by bytes (issue
+  #1379): 1000 points at 4096 dimensions are about 52 MB of JSON, over
+  Qdrant's default 32 MiB request limit. `estimate_point_bytes` bounds a
+  point from its dense dimensions and sparse entry counts at worst-case
+  number formatting plus its payload's bytes from the client's serializer; `byte_bounded_batches`
+  packs a page, in order, under `ingest_copy_request_bytes` (default
+  24 MiB, bounds 1–32 MiB). A point that cannot fit one request raises
+  `PointTooLargeError` before that page is written, never a skip. The
+  pipelining (#1298) and the exact id-set check are unchanged.
 - Completion records (issues #359 + #361, `ingest/completion.py`): one point
   per published document generation in `<collection>__completions`
   (same dim, dummy vectors, keyword indexes on
