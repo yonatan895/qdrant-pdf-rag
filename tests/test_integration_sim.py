@@ -2320,7 +2320,7 @@ def test_retained_snapshot_disposal_on_real_server(qdrant_url, tmp_path, monkeyp
         assert set(listed) == set(physicals)
         assert [listed[p]["phase"] for p in physicals] == ["retained", "retained", "live"]
         assert listed[p2]["reasons"] == ["KEEP_N"] and listed[p1]["disposable"]
-        assert listed[p1]["finished_at"] < listed[p2]["finished_at"]
+        assert (listed[p2]["rank"], listed[p1]["rank"]) == (1, 2)
         g1 = listed[p1]["build_id"]
         assert sorted(s["name"] for s in listed[p1]["snapshots"]) == before[p1]
         assert all(s["size_bytes"] > 0 and len(s["checksum"]) == 64 for s in listed[p1]["snapshots"])
