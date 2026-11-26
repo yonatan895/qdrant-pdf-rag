@@ -12,9 +12,12 @@ in-memory except where main() needs a real file).
 
 from __future__ import annotations
 
+import time
 from functools import partial
+from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel, Field
 
 from mainframe_rag.ingest.completion import (
     acquire_run_lock,
@@ -647,3 +650,200 @@ def test_verification_snapshot_matches_is_doc_complete_and_fails_closed_on_tampe
         fake, settings, "DOC1", sha256="a" * 64, rules_v=rules_v, source_labels="||", source_rev=rev,
     ) is False
 
+
+
+
+# ------------------------------------------------------------ carry (#1372)
+def _carry_setup():
+    """A staging whose clone carries the live ancestor's marker for DOC1."""
+    from mainframe_rag.ingest.completion import (
+        CompletionSnapshot,
+        completion_record,
+        write_completion,
+    )
+
+    rules_v = extraction_rules_version()
+    live = _settings(qdrant_collection="live_gen1")
+    staging = _settings(qdrant_collection="staging_gen2")
+    fake = PointStore()
+    ensure_completion_collection(fake, staging)
+    rev = _rev()
+    cs = _chunks(n=3, rev=rev)
+    upsert_chunks(fake, staging, _parsed(sha="a" * 64), cs, _vectors(3))
+    from mainframe_rag.ingest.completion import expected_digests
+
+    n, ids_d, content_d = expected_digests(cs)
+    ancestor = completion_record(
+        live, doc_id="DOC1", sha256="a" * 64, rules_v=rules_v, source_labels="||",
+        source_rev=rev, expected_chunks=n, chunk_ids_digest=ids_d, content_digest=content_d,
+    )
+    witness = (ancestor.generation_id, ids_d, content_d)
+
+    def snapshot(*markers):
+        by_doc = {}
+        for m in markers:
+            by_doc.setdefault(m.doc_id, []).append(m)
+        return CompletionSnapshot(control_exists=True, raw_records=[], markers_by_doc=by_doc)
+
+    def carry(snap, witness=witness, ancestor_name="live_gen1"):
+        from mainframe_rag.ingest.completion import carry_marker
+
+        return carry_marker(
+            snap, staging, doc_id="DOC1", source_rev=rev, sha256="a" * 64, rules_v=rules_v,
+            source_labels="||", ancestor=ancestor_name, witness=witness,
+        )
+
+    return SimpleNamespace(fake=fake, staging=staging, ancestor=ancestor, rev=rev, witness=witness,
+                           snapshot=snapshot, carry=carry, write=write_completion, rules_v=rules_v)
+
+
+def test_carry_marker_accepts_only_an_exact_verified_ancestor_record():
+    """Issue #1372 per-document rules 2-5: the live ancestor's marker equal to
+    the record this run would write (target, timestamp and provenance aside)
+    is carried, including one that was itself carried (chained carry), and
+    its cloned points verify against it in the staging."""
+    from mainframe_rag.ingest.completion import prefetch_verification_state
+
+    s = _carry_setup()
+    assert s.carry(s.snapshot(s.ancestor)) == s.ancestor
+    chained = s.ancestor.model_copy(update={"carried_from": "live_gen0", "finished_at": 1.0})
+    assert s.carry(s.snapshot(chained)) == chained
+    snap = prefetch_verification_state(s.fake, s.staging)
+    assert snap.verify_marker(s.fake, s.staging, s.ancestor) is True
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("sha256", "f" * 64),
+        ("rules_v", "0" * 16),
+        ("generation_id", "a" * 64 + "|rp2:0000000000000000|||"),
+        ("manifest_digest", "0" * 16),
+        ("embed_model", "another-model"),
+        ("embed_mode", "vllm"),
+        ("dense_dim", 7),
+        ("source_rev", "v|p|1|" + "c" * 64),
+    ],
+)
+def test_carry_marker_refuses_any_identity_field_difference(field, value):
+    """Each field of the expected record is part of the carry equality: a
+    marker differing in any one of them is never carried."""
+    s = _carry_setup()
+    bad = s.ancestor.model_copy(update={field: value})
+    assert s.carry(s.snapshot(bad)) is None
+
+
+@pytest.mark.parametrize("case", ["third_collection", "two_ancestor_markers", "staging_marker",
+                                  "witness_digest", "witness_missing", "no_marker"])
+def test_carry_marker_refuses_unbound_ambiguous_or_unwitnessed_markers(case):
+    """A marker bound to a third collection (#1039), two ancestor markers for
+    one revision, a staging-bound marker that failed the ordinary skip, or an
+    inventory binding that does not match the marker's digests: no carry."""
+    s = _carry_setup()
+    markers = [s.ancestor]
+    witness = s.witness
+    if case == "third_collection":
+        markers = [s.ancestor.model_copy(update={"target_collection": "other_gen"})]
+    elif case == "two_ancestor_markers":
+        markers = [s.ancestor, s.ancestor.model_copy(update={"finished_at": 2.0})]
+    elif case == "staging_marker":
+        markers = [s.ancestor, s.ancestor.model_copy(update={"target_collection": "staging_gen2"})]
+    elif case == "witness_digest":
+        witness = (s.witness[0], s.witness[1], "0" * 64)
+    elif case == "witness_missing":
+        witness = (s.witness[0], None, s.witness[2])
+    else:
+        markers = []
+    assert s.carry(s.snapshot(*markers), witness=witness) is None
+
+
+@pytest.mark.parametrize("damage", ["text", "missing", "surplus"])
+def test_verify_marker_refuses_tampered_cloned_points(damage):
+    """Rule 6: the staging's own points must match the ancestor marker's
+    count and digests; tampered text, a missing or a surplus point fail."""
+    from mainframe_rag.ingest.completion import prefetch_verification_state
+
+    s = _carry_setup()
+    points = s.fake.collections[s.staging.qdrant_collection]
+    if damage == "text":
+        points[0].payload["text"] = "tampered"
+    elif damage == "missing":
+        points.pop()
+    else:
+        points.append(points[0].model_copy(update={"id": "00000000-0000-4000-8000-000000000999"}))
+    snap = prefetch_verification_state(s.fake, s.staging)
+    assert snap.verify_marker(s.fake, s.staging, s.ancestor) is False
+
+
+def test_carried_marker_write_and_cleanup_keep_sibling_revisions():
+    """The carried marker is bound to the staging with its ancestor named,
+    the ancestor's marker for the same (doc_id, source_rev) is removed by id,
+    and a coexisting revision under the same doc_id keeps its marker. A
+    marker written without carry stores no carried_from key at all."""
+    from mainframe_rag.ingest.completion import completion_point_id, delete_superseded_completions
+
+    s = _carry_setup()
+    controls = completion_collection_name(s.staging)
+    sibling_rev = _rev("b" * 64)
+
+    def put(record):
+        s.fake.upsert(controls, points=[SimpleNamespace(
+            id=completion_point_id(record.target_collection, record.doc_id, record.source_rev,
+                                   record.generation_id),
+            vector=None, payload=record.model_dump(exclude={"carried_from"}))])
+
+    put(s.ancestor)
+    sibling = s.ancestor.model_copy(update={"source_rev": sibling_rev})
+    put(sibling)
+    kwargs = {"doc_id": "DOC1", "sha256": "a" * 64, "rules_v": s.rules_v, "source_labels": "||",
+              "source_rev": s.rev, "expected_chunks": s.ancestor.expected_chunks,
+              "chunk_ids_digest": s.ancestor.chunk_ids_digest,
+              "content_digest": s.ancestor.content_digest}
+    written = s.write(s.fake, s.staging, carried_from="live_gen1", **kwargs)
+    keep = completion_point_id("staging_gen2", "DOC1", s.rev, written.generation_id)
+    delete_superseded_completions(s.fake, s.staging, "DOC1", s.rev, keep_id=keep)
+    remaining = {(p.payload["source_rev"], p.payload["target_collection"], p.payload.get("carried_from"))
+                 for p in s.fake.collections[controls] if p.payload.get("doc_id")}
+    assert remaining == {(s.rev, "staging_gen2", "live_gen1"), (sibling_rev, "live_gen1", None)}
+    plain = s.write(s.fake, s.staging, **kwargs)
+    stored = next(p.payload for p in s.fake.collections[controls] if str(p.id) == keep)
+    assert plain.carried_from is None and "carried_from" not in stored
+
+
+class _PreviousReleaseCompletionRecord(BaseModel):
+    """CompletionRecord exactly as released before #1372 (961bb63e)."""
+
+    doc_id: str
+    sha256: str
+    rules_v: str
+    target_collection: str
+    generation_id: str
+    expected_chunks: int = Field(ge=1)
+    chunk_ids_digest: str
+    content_digest: str
+    embed_mode: str = ""
+    embed_model: str | None = None
+    dense_dim: int | None = None
+    manifest_digest: str
+    source_rev: str
+    finished_at: float = Field(default_factory=time.time)
+
+
+def test_carried_marker_round_trips_between_this_and_the_previous_release():
+    """Persisted-format compatibility (issue #1372): the previous release's
+    reader ignores `carried_from` (pydantic's default extra=ignore) and reads
+    a carried marker as an ordinary marker for its target; this release
+    reads a previous-release marker with carried_from None. Consequence of
+    a rollback: the previous release's forced checkpoint resume would accept
+    a carried marker, as it accepts any verified staging-bound marker."""
+    from mainframe_rag.ingest.completion import CompletionRecord
+
+    s = _carry_setup()
+    carried = s.ancestor.model_copy(update={"target_collection": "staging_gen2",
+                                            "carried_from": "live_gen1"})
+    old_view = _PreviousReleaseCompletionRecord.model_validate(carried.model_dump())
+    assert old_view.model_dump() == carried.model_dump(exclude={"carried_from"})
+    previous_payload = _PreviousReleaseCompletionRecord.model_validate(
+        s.ancestor.model_dump(exclude={"carried_from"})).model_dump()
+    assert "carried_from" not in previous_payload
+    assert CompletionRecord.model_validate(previous_payload) == s.ancestor

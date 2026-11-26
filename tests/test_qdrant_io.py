@@ -290,3 +290,155 @@ def test_completion_code_round_trips_ingest_to_query_filter():
     )
     assert client.upserted_points
     assert all(p.payload["system_codes"] == [] for p in client.upserted_points)
+
+
+# --- bulk copy request sizing (issue #1379) ---------------------------------
+
+# Full-precision, negative and exponent floats: the longest JSON number forms.
+_WORST_FLOATS = (-2.2250738585072014e-308, -1.2345678901234567e-05, -0.12345678901234568, 1.7976931348623157e308)
+# Non-ASCII text: the transport sends UTF-8, the estimate counts ASCII escapes.
+_MIXED_TEXT = "Z" + chr(0xFC) + "rich " + "".join(map(chr, (0x5E9, 0x5DC, 0x5D5, 0x5DD))) + " " + chr(0x1F600) + " "
+
+
+def _worst_point(i: int, dim: int, nnz: int = 64) -> models.PointStruct:
+    dense = [_WORST_FLOATS[(i + k) % len(_WORST_FLOATS)] for k in range(dim)]
+    return models.PointStruct(
+        id=f"00000000-0000-4000-8000-{i:012d}",
+        vector={
+            "dense": dense,
+            "bm25": models.SparseVector(
+                indices=[4294967295 - k for k in range(nnz)], values=[_WORST_FLOATS[1]] * nnz
+            ),
+        },
+        # Floats in 1e-05..1e-04 serialize as 0.00001 (longer than Python's
+        # json module writes them): the payload is sized by the client's encoder.
+        payload={"doc_id": f"D{i}", "text": _MIXED_TEXT * 20, "page_start": i, "f": [1e-05] * 2000},
+    )
+
+
+def _request_bytes(batch: list[models.PointStruct]) -> int:
+    """The client's own REST body for an upsert of batch (qdrant-client's
+    encoder for PointsList), as UTF-8 bytes on the wire."""
+    from qdrant_client.http.api.points_api import jsonable_encoder
+
+    return len(jsonable_encoder(models.PointsList(points=batch)).encode("utf-8"))
+
+
+@pytest.mark.parametrize("dim", [32, 1024, 4096])
+def test_point_estimate_bounds_the_client_request_body(dim):
+    from mainframe_rag.ingest.qdrant_io import estimate_point_bytes
+
+    points = [_worst_point(i, dim) for i in range(3)]
+    for point in points:
+        assert estimate_point_bytes(point) >= _request_bytes([point])
+    assert sum(estimate_point_bytes(p) for p in points) >= _request_bytes(points)
+
+
+@pytest.mark.parametrize("dim", [32, 1024, 4096])
+def test_byte_budget_batches_stay_under_budget_in_order(dim):
+    from mainframe_rag.ingest.qdrant_io import byte_bounded_batches, estimate_point_bytes
+
+    budget = 1024 * 1024
+    points = [_worst_point(i, dim) for i in range(40)]
+    batches = byte_bounded_batches(points, budget)
+    assert [p.id for batch in batches for p in batch] == [p.id for p in points]
+    for index, batch in enumerate(batches):
+        assert _request_bytes(batch) <= budget
+        if index < len(batches) - 1:  # greedy: the next point did not fit
+            nxt = batches[index + 1][0]
+            assert sum(estimate_point_bytes(p) for p in batch) + estimate_point_bytes(nxt) > budget - 1024
+    # At 32 dimensions the whole page is one request; at 1024 and 4096 it splits.
+    assert (len(batches) == 1) == (dim == 32)
+
+
+def test_default_copy_budget_splits_a_4096_dim_scan_page_under_the_server_limit():
+    """The reported failure: one 1000-point scan page at 4096 dimensions is
+    one request of about 52 MB. Under the default budget every request of
+    that page stays below Qdrant's default 32 MiB limit with a margin."""
+    from mainframe_rag.ingest.qdrant_io import byte_bounded_batches, estimate_point_bytes
+
+    settings = _settings(dim=4096)
+    assert settings.ingest_copy_request_bytes == 24 * 1024 * 1024
+    point = _worst_point(0, 4096, nnz=200)
+    assert settings.ingest_scan_page_size * estimate_point_bytes(point) > 32 * 1024 * 1024
+    page = [point] * settings.ingest_scan_page_size
+    batches = byte_bounded_batches(page, settings.ingest_copy_request_bytes)
+    assert sum(len(b) for b in batches) == len(page)
+    assert len(batches) > 1
+    # Every batch of a uniform page is no larger than the first.
+    assert _request_bytes(batches[0]) <= settings.ingest_copy_request_bytes
+
+
+def test_a_point_over_the_copy_budget_fails_closed_before_any_batch():
+    from mainframe_rag.ingest.qdrant_io import PointTooLargeError, byte_bounded_batches
+
+    small = _worst_point(0, 32)
+    huge = models.PointStruct(id="00000000-0000-4000-8000-999999999999", vector={"dense": [0.0] * 32},
+                              payload={"text": "x" * (1024 * 1024)})
+    with pytest.raises(PointTooLargeError, match="copy request budget"):
+        byte_bounded_batches([small, huge], 1024 * 1024)
+
+
+class _CopyClient:
+    """Scroll by offset over src; records every dst upsert (size, wait)."""
+
+    def __init__(self, points, dim, trailing_empty_page=False):
+        self.points = points
+        self.dim = dim
+        self.trailing_empty_page = trailing_empty_page
+        self.dst: dict[str, models.PointStruct] = {}
+        self.upserts: list[tuple[int, int, bool]] = []
+        self.created = False
+
+    def collection_exists(self, name):
+        return name == "src" or (name == "dst" and self.created)
+
+    def get_collection(self, _name):
+        return SimpleNamespace(config=SimpleNamespace(params=SimpleNamespace(
+            vectors={"dense": SimpleNamespace(size=self.dim)})), payload_schema={})
+
+    def create_collection(self, _name, **_kwargs):
+        self.created = True
+
+    def scroll(self, name, *, limit, offset=None, scroll_filter=None, with_payload=True, with_vectors=False):
+        stored = self.points if name == "src" else list(self.dst.values())
+        start = int(offset or 0)
+        page = stored[start:start + limit]
+        if name == "src" and self.trailing_empty_page and page and start + limit == len(stored):
+            return page, str(start + limit)  # a non-None offset at an exact page boundary
+        return page, (str(start + limit) if start + limit < len(stored) else None)
+
+    def upsert(self, _name, *, points, wait=True):
+        self.upserts.append((len(points), _request_bytes(points), wait))
+        self.dst.update({p.id: p for p in points})
+
+
+@pytest.mark.parametrize(("count", "trailing_empty_page"), [(250, False), (200, True)])
+@pytest.mark.parametrize("policy", [(1, 1, 1), (6, 3, 2)])
+def test_clone_sizes_each_request_by_bytes_and_keeps_the_barrier(policy, count, trailing_empty_page):
+    """Pages are read at ingest_scan_page_size and written in byte-bounded
+    requests; 1/1/1 pipelines all but the final barrier (#1298, including a
+    single-point barrier after an empty trailing page), any other policy
+    waits on every request; the id-set check still covers the copy."""
+    from mainframe_rag.ingest.qdrant_io import clone_collection
+
+    dim = 4096
+    points = [
+        models.PointStruct(id=f"00000000-0000-4000-8000-{i:012d}", vector={"dense": [0.0] * dim},
+                           payload={"doc_id": "D"})
+        for i in range(count)
+    ]
+    client = _CopyClient(points, dim, trailing_empty_page)
+    settings = _settings(dim=dim, ingest_scan_page_size=100, ingest_copy_request_bytes=1024 * 1024,
+                         qdrant_shard_number=policy[0], qdrant_replication_factor=policy[1],
+                         qdrant_write_consistency_factor=policy[2])
+    clone_collection(client, settings, "src", "dst")
+
+    assert set(client.dst) == {p.id for p in points}
+    assert all(size <= 1024 * 1024 for _, size, _ in client.upserts)
+    assert len(client.upserts) > 3  # more requests than the scan pages
+    waits = [w for _, _, w in client.upserts]
+    if policy == (1, 1, 1):
+        assert waits[-1] is True and not any(waits[:-1])
+    else:
+        assert all(waits)

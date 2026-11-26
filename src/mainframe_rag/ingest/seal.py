@@ -108,6 +108,18 @@ def _collection_digest(
     return {"count": len(leaves), "sha256": root.hexdigest()}
 
 
+def data_seal(
+    client: QdrantReader, collection: str, *, build_id: str, alias: str, physical: str,
+    gen_fp: str, corpus_fp: str, page_size: int = DEFAULT_SEAL_PAGE_SIZE,
+) -> dict:
+    """The data half of a content seal over `collection`, bound to the named
+    build. With another build's binding it answers whether `collection`
+    holds exactly that build's sealed points, vectors included (issue #1372:
+    a fresh clone against its live source's receipt)."""
+    binding = [build_id, alias, physical, gen_fp, corpus_fp]
+    return _collection_digest(client, collection, binding, "data", None, page_size=page_size)
+
+
 def capture_content_seal(
     client: QdrantReader, *, build_id: str, alias: str, physical: str,
     gen_fp: str, corpus_fp: str, receipt_id: str,
@@ -117,7 +129,8 @@ def capture_content_seal(
     binding = [build_id, alias, physical, gen_fp, corpus_fp]
     return {
         "schema": SEAL_SCHEMA,
-        "data": _collection_digest(client, physical, binding, "data", None, page_size=page_size),
+        "data": data_seal(client, physical, build_id=build_id, alias=alias, physical=physical,
+                          gen_fp=gen_fp, corpus_fp=corpus_fp, page_size=page_size),
         "control": _collection_digest(
             client, physical + "__completions", binding, "control", receipt_id, page_size=page_size,
         ),
