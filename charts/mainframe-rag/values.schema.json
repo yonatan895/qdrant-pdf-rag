@@ -508,6 +508,81 @@
         }
       ]
     },
+    "teamTools": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Team-tool gateways and their Open WebUI registration (ADR-0010, #1075). Every gateway default off; the chart template fails closed with a fixed message while required inputs are missing.",
+      "properties": {
+        "groupId": {
+          "type": "string",
+          "pattern": "^$|^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "description": "Open WebUI group id (UUID) granted read on the team tool servers; empty: admin-only."
+        },
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "apiKeySecretKey": { "type": "string", "pattern": "^[-._a-zA-Z0-9]+$" },
+            "egress": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "LiteLLM endpoint CIDRs and port for Open WebUI egress.",
+          "properties": {
+            "cidrs": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$" }
+            },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        }
+          }
+        },
+        "splunk": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "authMode": { "type": "string", "enum": ["oidc", "bearer"] },
+            "secretName": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$",
+              "description": "Operator-created Secret with splunk-mcp-token (and bearer-secret, token-exchange-client-secret); never key material."
+            },
+            "config": { "type": "string", "description": "The site's gateway configuration JSON (no secrets)." },
+            "caBundle": { "type": "string", "description": "PEM certificates of the CA behind the Splunk management port." },
+            "splunkEgress": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Splunk management-port CIDRs and port.",
+          "properties": {
+            "cidrs": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$" }
+            },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        },
+            "idpEgress": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "IdP JWKS and token endpoint CIDRs and port (oidc mode).",
+          "properties": {
+            "cidrs": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$" }
+            },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        },
+            "resources": { "type": "object", "description": "Kubernetes resource requests/limits for the gateway container." }
+          }
+        }
+      }
+    },
     "storage": {
       "type": "object",
       "additionalProperties": false,

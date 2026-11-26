@@ -14,6 +14,11 @@ missing or mismatched completions re-ingest, never skip. Pre-revision
 (sourceless) markers and points are unsupported: markers fail validation and
 read as absent, and refresh planning refuses documents carrying such points.
 
+A cloned publication staging may carry a walked document from its live
+ancestor (issue #1372): `carry_marker` accepts the ancestor's marker only
+when it equals the record this run would write, and the planner writes a
+staging-bound marker (`carried_from`) only after the cloned points verify.
+
 A refresh deletes before re-upserting inside the staging generation, so a
 crash mid-refresh leaves no completion (safe retry); readers keep the old
 generation through the alias until the verified swap (`ingest/publish.py`).
@@ -172,12 +177,23 @@ class VerificationSnapshot:
             return False
         if required_manifest_digest is not None and scoped.manifest_digest != required_manifest_digest:
             return False
-        if scoped.sha256 != sha256 or scoped.rules_v != rules_v or scoped.expected_chunks < 1:
+        if scoped.sha256 != sha256 or scoped.rules_v != rules_v:
+            return False
+        return self.verify_marker(client, settings, scoped)
+
+    def verify_marker(self, client: QdrantReader, settings: Settings, marker: CompletionRecord) -> bool:
+        """Whether this collection's stored points match one marker's
+        revision, count and digests (the points half of `verify_doc`). The
+        caller chose the marker; this never looks one up, so an ancestor
+        marker (issue #1372 carry) verifies against THIS collection's points."""
+        doc_id, source_rev = marker.doc_id, marker.source_rev
+        sha256, rules_v = marker.sha256, marker.rules_v
+        if marker.expected_chunks < 1:
             return False
         if not self.data_exists:
             return False
         summary = self.doc_points.get((doc_id, source_rev))
-        if summary is None or summary.count != scoped.expected_chunks:
+        if summary is None or summary.count != marker.expected_chunks:
             return False
         if summary.sha256s != {sha256} or summary.rules_vs != {rules_v}:
             return False
@@ -189,9 +205,9 @@ class VerificationSnapshot:
                 sha256=sha256,
                 rules_v=rules_v,
                 source_rev=source_rev,
-                expected_chunks=scoped.expected_chunks,
-                chunk_ids_digest=scoped.chunk_ids_digest,
-                content_digest=scoped.content_digest,
+                expected_chunks=marker.expected_chunks,
+                chunk_ids_digest=marker.chunk_ids_digest,
+                content_digest=marker.content_digest,
             )
         ids: list[str] = []
         texts: dict[str, str] = {}
@@ -199,7 +215,7 @@ class VerificationSnapshot:
             ids.append(pid)
             texts[pid] = text
         ids.sort()
-        return _match_digests(ids, texts, scoped.chunk_ids_digest, scoped.content_digest)
+        return _match_digests(ids, texts, marker.chunk_ids_digest, marker.content_digest)
 
 
 def prefetch_verification_state(
@@ -334,6 +350,19 @@ class CompletionRecord(BaseModel):
     # independently. Required: sourceless markers read as absent.
     source_rev: str
     finished_at: float = Field(default_factory=time.time)
+    # Issue #1372: the live generation this marker was carried from (its
+    # cloned points verified here, nothing re-parsed or re-embedded). None
+    # for a marker this run's own upsert wrote; the key is then omitted from
+    # the stored payload, so ordinary markers keep their pre-#1372 bytes. A
+    # forced checkpoint resume never accepts a carried marker.
+    carried_from: str | None = None
+
+
+# Fields a carry ancestor's marker may differ in from the record this run
+# would write (issue #1372 per-document rule 4): where it lives, when, and
+# its own provenance (a chained carry inherits a carried marker). Every
+# other field, manifest_digest included, must be equal.
+CARRY_IGNORED_FIELDS = frozenset({"target_collection", "finished_at", "carried_from"})
 
 
 def completion_collection_name(settings: Settings) -> str:
@@ -506,6 +535,44 @@ def read_completion(
     return None
 
 
+def completion_record(
+    settings: Settings,
+    *,
+    doc_id: str,
+    sha256: str,
+    rules_v: str,
+    source_labels: str,
+    source_rev: str,
+    expected_chunks: int,
+    chunk_ids_digest: str,
+    content_digest: str,
+    carried_from: str | None = None,
+) -> CompletionRecord:
+    """The marker this run writes for one verified document generation under
+    `settings` (one rule shared by `write_completion` and the carry
+    equality check, issue #1372)."""
+    try:
+        dim = settings.require_dense_dim()
+    except RuntimeError:
+        dim = None
+    return CompletionRecord(
+        doc_id=doc_id,
+        sha256=sha256,
+        rules_v=rules_v,
+        target_collection=settings.qdrant_collection,
+        generation_id=doc_generation_id(settings, sha256, rules_v, source_labels),
+        expected_chunks=expected_chunks,
+        chunk_ids_digest=chunk_ids_digest,
+        content_digest=content_digest,
+        embed_mode=settings.embed_mode,
+        embed_model=settings.embed_model,
+        dense_dim=dim,
+        manifest_digest=manifest_digest(settings, rules_v),
+        source_rev=source_rev,
+        carried_from=carried_from,
+    )
+
+
 def write_completion(
     client: QdrantPoints,
     settings: Settings,
@@ -518,40 +585,144 @@ def write_completion(
     expected_chunks: int,
     chunk_ids_digest: str,
     content_digest: str,
+    carried_from: str | None = None,
 ) -> CompletionRecord:
-    """Persist the completion only after verification (caller verifies first)."""
+    """Persist the completion only after verification (caller verifies first).
+    `carried_from` names the live ancestor of a carried marker (issue #1372)."""
     name = completion_collection_name(settings)
-    generation_id = doc_generation_id(settings, sha256, rules_v, source_labels)
-    try:
-        dim = settings.require_dense_dim()
-    except RuntimeError:
-        dim = None
-    record = CompletionRecord(
+    record = completion_record(
+        settings,
         doc_id=doc_id,
         sha256=sha256,
         rules_v=rules_v,
-        target_collection=settings.qdrant_collection,
-        generation_id=generation_id,
+        source_labels=source_labels,
+        source_rev=source_rev,
         expected_chunks=expected_chunks,
         chunk_ids_digest=chunk_ids_digest,
         content_digest=content_digest,
-        embed_mode=settings.embed_mode,
-        embed_model=settings.embed_model,
-        dense_dim=dim,
-        manifest_digest=manifest_digest(settings, rules_v),
-        source_rev=source_rev,
+        carried_from=carried_from,
     )
-    dummy_dim = dim or 1
+    dummy_dim = record.dense_dim or 1
     point = models.PointStruct(
-        id=completion_point_id(settings.qdrant_collection, doc_id, source_rev, generation_id),
+        id=completion_point_id(settings.qdrant_collection, doc_id, source_rev, record.generation_id),
         vector={
             "dense": [0.0] * dummy_dim,
             "bm25": models.SparseVector(indices=[0], values=[1.0]),
         },
-        payload=record.model_dump(),
+        payload=record.model_dump(exclude={"carried_from"} if carried_from is None else None),
     )
     client.upsert(name, points=[point], wait=True)
     return record
+
+
+def carry_marker(
+    snapshot: CompletionSnapshot,
+    settings: Settings,
+    *,
+    doc_id: str,
+    source_rev: str,
+    sha256: str,
+    rules_v: str,
+    source_labels: str,
+    ancestor: str,
+    witness: tuple[str | None, str | None, str | None],
+) -> CompletionRecord | None:
+    """The live ancestor's marker a cloned staging may carry for one walked
+    document (issue #1372 per-document rules 2-5), else None. Read-only and
+    decided on markers only; the caller still verifies the cloned points
+    against the returned marker (rule 6) before writing anything.
+
+    - no marker bound to this staging exists for (doc_id, source_rev): such
+      a marker failed the ordinary skip, so the document re-ingests;
+    - exactly one marker bound to `ancestor`, for this revision and this
+      run's generation id (sha, rules, label triple, REEMBED fingerprint);
+    - that marker equals the record this run would write, every field but
+      CARRY_IGNORED_FIELDS (embed mode/model, dimension, manifest digest);
+    - `witness`, the inventory binding (generation id, chunk-ids digest,
+      content digest) written when the document was last embedded, equals
+      the marker's: an edited marker cannot vouch for itself."""
+    markers = [m for m in snapshot.markers_by_doc.get(doc_id, ()) if m.source_rev == source_rev]
+    if any(m.target_collection == settings.qdrant_collection for m in markers):
+        return None
+    expected_gen = doc_generation_id(settings, sha256, rules_v, source_labels)
+    bound = [m for m in markers if m.target_collection == ancestor and m.generation_id == expected_gen]
+    if len(bound) != 1:
+        return None
+    marker = bound[0]
+    wanted = completion_record(
+        settings,
+        doc_id=doc_id,
+        sha256=sha256,
+        rules_v=rules_v,
+        source_labels=source_labels,
+        source_rev=source_rev,
+        expected_chunks=marker.expected_chunks,
+        chunk_ids_digest=marker.chunk_ids_digest,
+        content_digest=marker.content_digest,
+    )
+    ignored = set(CARRY_IGNORED_FIELDS)
+    if marker.model_dump(exclude=ignored) != wanted.model_dump(exclude=ignored):
+        return None
+    if None in witness or witness != (marker.generation_id, marker.chunk_ids_digest, marker.content_digest):
+        return None
+    return marker
+
+
+def delete_carried_completions(client: QdrantPoints, settings: Settings) -> int:
+    """Remove every carried marker bound to this staging (issue #1372) and
+    return how many. A build that any attempt ran forced must re-embed what
+    an earlier unforced attempt carried: once removed, those documents have
+    no staging-bound marker, so neither the ordinary skip nor a checkpoint
+    resume can keep their inherited points. Staging controls only."""
+    name = completion_collection_name(settings)
+    if not client.collection_exists(name):
+        return 0
+    points = scroll_all_points(
+        client,
+        name,
+        scroll_filter=None,
+        with_payload=["doc_id", "target_collection", "carried_from"],
+        page_size=settings.ingest_scan_page_size,
+    )
+    ids: list[int | str | uuid.UUID] = [
+        p.id
+        for p in points
+        if (p.payload or {}).get("doc_id")
+        and (p.payload or {}).get("target_collection") == settings.qdrant_collection
+        and (p.payload or {}).get("carried_from")
+    ]
+    if ids:
+        client.delete(name, points_selector=models.PointIdsList(points=ids), wait=True)
+    return len(ids)
+
+
+def delete_superseded_completions(
+    client: QdrantPoints, settings: Settings, doc_id: str, source_rev: str, keep_id: str
+) -> None:
+    """After a carried marker is written (issue #1372), remove every other
+    marker of the same (doc_id, source_rev) from this staging's control
+    collection, by point id: the ancestor's inherited marker would otherwise
+    accumulate one copy per generation. Exact pair only, so a coexisting
+    revision under the same doc_id keeps its marker (#1004)."""
+    name = completion_collection_name(settings)
+    if not client.collection_exists(name):
+        return
+    points = scroll_all_points(
+        client,
+        name,
+        scroll_filter=_doc_id_filter(doc_id),
+        with_payload=["doc_id", "source_rev"],
+        page_size=settings.ingest_scan_page_size,
+    )
+    ids: list[int | str | uuid.UUID] = [
+        p.id
+        for p in points
+        if str(p.id) != keep_id
+        and (p.payload or {}).get("doc_id") == doc_id
+        and (p.payload or {}).get("source_rev") == source_rev
+    ]
+    if ids:
+        client.delete(name, points_selector=models.PointIdsList(points=ids), wait=True)
 
 
 def delete_completion(

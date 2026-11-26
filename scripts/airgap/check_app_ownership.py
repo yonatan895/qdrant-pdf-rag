@@ -65,6 +65,13 @@ ALLOWED = {
     ('v1', 'PersistentVolumeClaim', 'rag-openwebui-data'),
     ('networking.k8s.io/v1', 'NetworkPolicy', 'rag-openwebui'),
     ('route.openshift.io/v1', 'Route', 'rag-openwebui'),
+    # Team tools: the Splunk gateway (#1077, ADR-0015), default off. None is a
+    # disabled-cleanup entry: SPLUNK_GATEWAY_ENABLED=false lets the release
+    # prune all four, and none holds data.
+    ('apps/v1', 'Deployment', 'rag-splunk-gateway'),
+    ('v1', 'Service', 'rag-splunk-gateway'),
+    ('v1', 'ConfigMap', 'rag-splunk-gateway'),
+    ('networking.k8s.io/v1', 'NetworkPolicy', 'rag-splunk-gateway'),
 }
 
 

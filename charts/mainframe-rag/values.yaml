@@ -386,6 +386,61 @@ openwebui:
     cidrs: []
     port: 443
 
+# Team tools (ADR-0010, #1075): read-only gateways offered only through Team
+# models on the Open WebUI instance; the Docs model stays tool-free (TD1).
+# Every gateway is default OFF; with all of them off nothing below renders
+# and every other object is byte-identical to a render without this block.
+# Enabling one also gives Open WebUI one OpenAI-compatible connection to
+# LiteLLM, limited to models.reasoning.model (TD3; id "team.<model>", visible
+# to admins only until an admin grants the Team model, docs/deploy.md), its
+# own per-leg key from gateway.apiKeySecretName (data key model.apiKeySecretKey,
+# always, even when the shared gateway.apiKeySecretKey is set) and the gateway as
+# an MCP tool server (TOOL_SERVER_CONNECTIONS). Task calls stay off (TD8).
+teamTools:
+  # Open WebUI group id (the UUID shown in the admin UI, not the name: v0.13.4
+  # matches tool-server grants by id) granted read on every team tool server.
+  # Empty: the tool servers are admin-only.
+  groupId: ""
+  model:
+    apiKeySecretKey: openwebui-llm-api-key
+    # LiteLLM endpoint for Open WebUI's egress policy. NetworkPolicy cannot
+    # match DNS names: list its CIDRs. Required when a team tool is enabled.
+    egress:
+      cidrs: []
+      port: 443
+  # Splunk gateway (ADR-0015, #1077): python -m mainframe_rag.gateways.splunk on
+  # the agent image, one replica (its D10 caps and per-caller limits are per
+  # pod), ClusterIP Service, NetworkPolicy (ingress from Open WebUI only;
+  # egress DNS, splunkEgress and, in oidc mode, idpEgress). Inputs are site
+  # files and Secret names, never chart defaults:
+  # - config: the gateway config JSON (templates, allowed_indexes, macros);
+  #   its backend.ca_file must be /etc/mainframe-rag/splunk-gateway/ca-bundle.crt;
+  # - caBundle: PEM of the CA behind the Splunk management port;
+  # - secretName: operator Secret with splunk-mcp-token, bearer-secret
+  #   (bearer mode) and optionally token-exchange-client-secret (oidc mode).
+  splunk:
+    enabled: false
+    # oidc (ADR-0010 caller verification) or bearer (named exception B2).
+    authMode: oidc
+    secretName: ""
+    config: ""
+    caBundle: ""
+    # Splunk management port (MCP Server app at /services/mcp).
+    splunkEgress:
+      cidrs: []
+      port: 8089
+    # IdP JWKS and token endpoints; oidc mode only, required there.
+    idpEgress:
+      cidrs: []
+      port: 443
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
 # RWO block storage class for OpenObserve, ingest-work scratch and the
 # feedback store.
 # NFS refusal stays owned by shell preflight; schema additionally rejects

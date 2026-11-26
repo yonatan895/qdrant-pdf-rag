@@ -111,6 +111,7 @@ _SEC_CONSOLE = "Operator console selection (issue #479, default on)"
 _SEC_NETPOL = "Agent ingress NetworkPolicy (issue #373, default ON)"
 _SEC_FEEDBACK = "Answer-feedback service (issue #804, ADR-0005, default OFF)"
 _SEC_OWUI = "Open WebUI docs front end (issue #1074, ADR-0007, default ON)"
+_SEC_TEAM = "Team tools: Splunk gateway (#1077, ADR-0015)"
 _SEC_AGENT_EXTRAS = "Prod agent extras"
 _SEC_INGEST = "Optional ingest (sh scripts/tools/run-task.sh airgap:ingest)"
 _SEC_POLICY = "Collection distribution policy (issue #360)"
@@ -136,6 +137,7 @@ SECTIONS: tuple[str, ...] = (
     _SEC_NETPOL,
     _SEC_FEEDBACK,
     _SEC_OWUI,
+    _SEC_TEAM,
     _SEC_AGENT_EXTRAS,
     _SEC_INGEST,
     _SEC_POLICY,
@@ -756,6 +758,88 @@ OPERATOR_KEYS: tuple[OperatorKey, ...] = (
         "OPENWEBUI_STORAGE_SIZE", _SEC_OWUI, "str", "10Gi",
         "RWO PVC size for rag-openwebui-data (Mi/Gi/Ti).",
         "#1074", _EX_MAP, helm_path="openwebui.storageSize",
+    ),
+
+    # --- Team tools: Splunk gateway (default OFF) ---
+    OperatorKey(
+        "TEAM_TOOLS_GROUP_ID", _SEC_TEAM, "str", "",
+        "Open WebUI group id (lowercase UUID) granted read on every team tool server (empty: admins only).",
+        "#1077", _EX_MAP, helm_path="teamTools.groupId",
+    ),
+    OperatorKey(
+        "TEAM_MODEL_EGRESS_CIDRS", _SEC_TEAM, "str", "",
+        "Comma-separated IPv4 CIDRs of the LiteLLM endpoint for Open WebUI's team model egress (required when enabled).",
+        "#1077", _EX_MAP, helm_path="teamTools.model.egress.cidrs",
+    ),
+    OperatorKey(
+        "TEAM_MODEL_EGRESS_PORT", _SEC_TEAM, "int", 443,
+        "TCP port of the LiteLLM endpoint for Open WebUI's team model egress (1..65535).",
+        "#1077", _EX_MAP, helm_path="teamTools.model.egress.port", min_value=1, max_value=65535,
+    ),
+    OperatorKey(
+        "SPLUNK_GATEWAY_ENABLED", _SEC_TEAM, "bool", False,
+        "Deploy the Splunk gateway as an Open WebUI team tool (requires OPENWEBUI_ENABLED=true).",
+        "#1077", _EX_MAP, helm_path="teamTools.splunk.enabled",
+    ),
+    OperatorKey(
+        "SPLUNK_GATEWAY_AUTH_MODE", _SEC_TEAM, "enum", "oidc",
+        "How Open WebUI callers authenticate to the gateway: oidc (user tokens) or bearer (ADR-0015 B2).",
+        "#1077", _EX_MAP, helm_path="teamTools.splunk.authMode", allowed_values=("oidc", "bearer"),
+    ),
+    OperatorKey(
+        "SPLUNK_GATEWAY_SECRET", _SEC_TEAM, "secret-ref", "",
+        "Operator-created Secret name: splunk-mcp-token, bearer-secret (bearer), token-exchange-client-secret (optional).",
+        "#1077", _EX_MAP, helm_path="teamTools.splunk.secretName",
+    ),
+    OperatorKey(
+        "SPLUNK_GATEWAY_CONFIG_FILE", _SEC_TEAM, "path", "",
+        "Site gateway configuration JSON file (never committed); its content becomes the gateway ConfigMap.",
+        "#1077", _EX_MAP, helm_path="teamTools.splunk.config",
+    ),
+    OperatorKey(
+        "SPLUNK_GATEWAY_CA_FILE", _SEC_TEAM, "path", "",
+        "PEM file of the CA that issued the Splunk management-port certificate (never committed).",
+        "#1077", _EX_MAP, helm_path="teamTools.splunk.caBundle",
+    ),
+    OperatorKey(
+        "SPLUNK_EGRESS_CIDRS", _SEC_TEAM, "str", "",
+        "Comma-separated IPv4 CIDRs of the Splunk management port for the gateway egress (required when enabled).",
+        "#1077", _EX_MAP, helm_path="teamTools.splunk.splunkEgress.cidrs",
+    ),
+    OperatorKey(
+        "SPLUNK_EGRESS_PORT", _SEC_TEAM, "int", 8089,
+        "TCP port of the Splunk management port for the gateway egress (1..65535).",
+        "#1077", _EX_MAP, helm_path="teamTools.splunk.splunkEgress.port", min_value=1, max_value=65535,
+    ),
+    OperatorKey(
+        "SPLUNK_GATEWAY_IDP_EGRESS_CIDRS", _SEC_TEAM, "str", "",
+        "Comma-separated IPv4 CIDRs of the IdP (JWKS, token exchange) for the gateway egress (required in oidc mode).",
+        "#1077", _EX_MAP, helm_path="teamTools.splunk.idpEgress.cidrs",
+    ),
+    OperatorKey(
+        "SPLUNK_GATEWAY_IDP_EGRESS_PORT", _SEC_TEAM, "int", 443,
+        "TCP port of the IdP for the gateway egress in oidc mode (1..65535).",
+        "#1077", _EX_MAP, helm_path="teamTools.splunk.idpEgress.port", min_value=1, max_value=65535,
+    ),
+    OperatorKey(
+        "SPLUNK_GATEWAY_CPU_REQUEST", _SEC_TEAM, "str", "50m",
+        "Site sizing override for the gateway container CPU request.",
+        "#1077", _EX_MAP, helm_path="teamTools.splunk.resources.requests.cpu",
+    ),
+    OperatorKey(
+        "SPLUNK_GATEWAY_MEMORY_REQUEST", _SEC_TEAM, "str", "128Mi",
+        "Site sizing override for the gateway container memory request.",
+        "#1077", _EX_MAP, helm_path="teamTools.splunk.resources.requests.memory",
+    ),
+    OperatorKey(
+        "SPLUNK_GATEWAY_CPU_LIMIT", _SEC_TEAM, "str", "500m",
+        "Site sizing override for the gateway container CPU limit (must be >= request).",
+        "#1077", _EX_MAP, helm_path="teamTools.splunk.resources.limits.cpu",
+    ),
+    OperatorKey(
+        "SPLUNK_GATEWAY_MEMORY_LIMIT", _SEC_TEAM, "str", "512Mi",
+        "Site sizing override for the gateway container memory limit (must be >= request).",
+        "#1077", _EX_MAP, helm_path="teamTools.splunk.resources.limits.memory",
     ),
 
     # --- Prod agent extras ---

@@ -6,6 +6,9 @@
 #   sh scripts/openwebui/acceptance.sh images     before the egress boundary closes
 #   sh scripts/openwebui/acceptance.sh deploy     test IdP, router stand-in, chart objects
 #   sh scripts/openwebui/acceptance.sh run        port-forwards, provision, the checks
+#   sh scripts/openwebui/acceptance.sh team-tools after run: the Splunk gateway (#1077) against a fake
+#                                                 Splunk pod, Open WebUI re-rendered with teamTools, the
+#                                                 ADR-0010 T4 checks (kind-splunk.yaml, docs/deploy.md)
 #
 # Operator-deploy lane (#1118 B3): the chart objects come from the operator's own
 # airgap:pipeline/airgap:deploy of the bootstrapped bundle, never from this script.
@@ -144,6 +147,153 @@ run() {
     python3 -I "$HERE/acceptance.py" "$STATE" > "$STATE/logs/acceptance.json" || rc=$?
     cat "$STATE/logs/acceptance.json"
     exit "${rc:-0}"
+}
+
+# ------------------------------------------------------------------ team tools (#1077)
+# After deploy and run: the chart's Splunk gateway (bearer mode, B2) against a fake Splunk
+# pod, Open WebUI re-rendered with the team-tools values, then acceptance.py team-tools
+# (the gateway start-up check, Open WebUI's MCP handshake and a tool call through the
+# NetworkPolicies, a pod outside Open WebUI refused, and ADR-0010 T4 as far as Kind
+# automates it). Site procedure: docs/deploy.md#splunk-gateway-deploy.
+TEAM_GROUP=internal-team  # team-user's IdP group (client.py USERS)
+
+team_pki() {  # team_pki DIR: the fake Splunk's serving certificate from the run's CA (it admits .svc names)
+    d="$STATE/pki"; name=fake-splunk.owui-splunk.svc
+    printf 'subjectAltName=DNS:%s\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n' \
+        "$name" > "$1/fake-splunk.ext"
+    openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=$name" \
+        -keyout "$1/fake-splunk.key" -out "$1/fake-splunk.csr" 2>/dev/null
+    openssl x509 -req -in "$1/fake-splunk.csr" -CA "$d/ca.crt" -CAkey "$d/ca.key" -CAcreateserial \
+        -days 2 -extfile "$1/fake-splunk.ext" -out "$1/fake-splunk.crt" 2>/dev/null
+    openssl verify -CAfile "$d/ca.crt" -verify_hostname "$name" "$1/fake-splunk.crt" >/dev/null ||
+        die "the fake Splunk certificate does not verify against the run's CA"
+    chmod 600 "$1/fake-splunk.key"
+}
+
+team_inputs() {  # team_inputs DIR: the Secret values (files, mode 600, never argv) and Open WebUI's complete CA bundle
+    ( umask 077
+      $PY -I -c 'import secrets; print(secrets.token_hex(24), end="")' > "$1/splunk-mcp-token"
+      $PY -I -c 'import secrets; print(secrets.token_urlsafe(32), end="")' > "$1/bearer-secret"
+      k -n "$APP_NS" get secret test-gateway-keys -o 'jsonpath={.data.llm-api-key}' | base64 -d > "$1/openwebui-llm-api-key"
+      # Stands in for a shared GATEWAY_API_KEY_SECRET_KEY: no LiteLLM key at all, so a Team model that
+      # read it could not answer (maintainer decision 3 on #1374).
+      printf 'sk-lane-shared-key-not-a-litellm-key' > "$1/api-key"
+      k -n "$APP_NS" get configmap test-gateway-ca -o 'jsonpath={.data.ca-bundle\.crt}' > "$1/ca-bundle.crt" )
+    [ -s "$1/openwebui-llm-api-key" ] || die "Secret test-gateway-keys has no llm-api-key"
+    grep -q 'BEGIN CERTIFICATE' "$1/ca-bundle.crt" || die "ConfigMap test-gateway-ca has no ca-bundle.crt"
+    printf '\n' >> "$1/ca-bundle.crt"
+    cat "$STATE/pki/ca.crt" >> "$1/ca-bundle.crt"
+}
+
+team_values() {  # team_values DIR AGENT_IMAGE GROUP_ID: the teamTools values (JSON is YAML) on top of values.yaml
+    "$PY" -I - "$1" "$2" "$3" "$POD_CIDR" "$REPO/deploy/gateways/splunk-gateway.example.json" "$STATE/pki/ca.crt" <<'PY'
+import json, sys
+team, image, group, pod_cidr, example, ca = sys.argv[1:7]
+with open(example, encoding="utf-8") as fh:
+    config = json.load(fh)
+config.pop("auth")  # bearer mode (B2): the gateway sees one caller, service:openwebui
+config["backend"]["base_url"] = "https://fake-splunk.owui-splunk.svc:8089"
+if "@" in image:
+    repo, digest = image.split("@", 1)
+    agent = {"repository": repo, "digest": digest}
+else:
+    repo, _, tag = image.rpartition(":")
+    agent = {"repository": repo, "tag": tag}
+agent["pullPolicy"] = "IfNotPresent"  # the lane's agent image, already on the node
+with open(ca, encoding="utf-8") as fh:
+    ca_pem = fh.read()
+print(json.dumps({
+    "images": {"agent": agent},
+    "models": {"reasoning": {"baseUrl": "https://test-gateway:4000/v1", "model": "mock-reasoning"}},
+    "gateway": {"apiKeySecretName": "rag-owui-team-llm", "apiKeySecretKey": "api-key",
+                "caConfigMapName": "rag-owui-team-ca"},
+    "teamTools": {
+        "groupId": group,
+        # NetworkPolicy matches the pod address and port after Service translation.
+        "model": {"egress": {"cidrs": [pod_cidr], "port": 4000}},
+        "splunk": {"enabled": True, "authMode": "bearer", "secretName": "rag-splunk-gateway",
+                   "config": json.dumps(config, indent=1), "caBundle": ca_pem,
+                   "splunkEgress": {"cidrs": [pod_cidr], "port": 8089}},
+    },
+}, indent=1))
+PY
+}
+
+check_team_render() {  # check_team_render RENDER_DIR TEAM_DIR AGENT_IMAGE
+    "$PY" -I - "$1" "$2" "$3" <<'PY'
+import json, sys, yaml
+d, team, image = sys.argv[1:4]
+with open(f"{d}/openwebui.yaml", encoding="utf-8") as fh:
+    text = fh.read()
+docs = [x for x in yaml.safe_load_all(text) if x]
+kinds = sorted(f"{x['kind']}/{x['metadata']['name']}" for x in docs)
+want = sorted(["ConfigMap/rag-openwebui-pipe", "ConfigMap/rag-openwebui-proxy", "Deployment/rag-openwebui",
+               "NetworkPolicy/rag-openwebui", "PersistentVolumeClaim/rag-openwebui-data", "Service/rag-openwebui",
+               "ConfigMap/rag-splunk-gateway", "Deployment/rag-splunk-gateway", "NetworkPolicy/rag-splunk-gateway",
+               "Service/rag-splunk-gateway"])
+assert kinds == want, kinds
+for name in ("splunk-mcp-token", "bearer-secret", "openwebui-llm-api-key"):
+    with open(f"{team}/{name}", encoding="utf-8") as fh:
+        assert fh.read().strip() not in text, f"the {name} value is in the render"
+def deployment(name):
+    return next(x for x in docs if x["kind"] == "Deployment" and x["metadata"]["name"] == name)["spec"]["template"]["spec"]
+owui = deployment("rag-openwebui")
+env = {e["name"]: e for e in owui["containers"][0]["env"]}
+assert "ca-trust" not in [c["name"] for c in owui.get("initContainers") or []]
+assert env["SSL_CERT_FILE"]["value"] == "/etc/gateway-ca/ca-bundle.crt"
+assert env["OPENAI_API_KEYS"]["valueFrom"]["secretKeyRef"] == {"name": "rag-owui-team-llm", "key": "openwebui-llm-api-key"}
+(conn,) = json.loads(env["TOOL_SERVER_CONNECTIONS"]["value"])
+assert conn["auth_type"] == "bearer" and conn["key"] == "$(MFR_SPLUNK_GATEWAY_KEY)", "tool server entry"
+assert deployment("rag-splunk-gateway")["containers"][0]["image"] == image
+print(f"team render: {len(docs)} objects ({', '.join(kinds)}); the gateway runs the lane's agent image; "
+      "Open WebUI reads openwebui-llm-api-key beside a shared api-key; no secret value in the render")
+PY
+}
+
+team_tools() {
+    prepare_state
+    team_dir="$STATE/team"
+    mkdir -p "$team_dir"; chmod 700 "$team_dir"
+    k -n "$APP_NS" get deploy rag-openwebui >/dev/null || die "no deploy/rag-openwebui: run 'deploy' and 'run' first"
+    AGENT_IMAGE=$(k -n "$APP_NS" get deploy rag-agent -o 'jsonpath={.spec.template.spec.containers[0].image}')
+    [ -n "$AGENT_IMAGE" ] || die "cannot read the image of deploy/rag-agent"
+    team_pki "$team_dir"
+    team_inputs "$team_dir"
+    set -- $(kind_net)
+    sed -e "s#@APP_NS@#$APP_NS#g" -e "s#@NODE_IP@#$2#g" -e "s#@AGENT_IMAGE@#$AGENT_IMAGE#g" \
+        -e "s#@FAKE_UID@#$(uid_for fake-splunk)#g" -e "s#@INTRUDER_UID@#$(uid_for intruder)#g" \
+        "$HERE/kind-splunk.yaml" > "$STATE/render/splunk.yaml"
+    k apply -f "$STATE/render/splunk.yaml" > "$STATE/logs/apply-splunk.log"
+    k -n owui-splunk create secret tls fake-splunk-tls --cert="$team_dir/fake-splunk.crt" --key="$team_dir/fake-splunk.key" \
+        --dry-run=client -o yaml | k apply -f - >/dev/null
+    k -n owui-splunk create secret generic fake-splunk-token --from-file="$team_dir/splunk-mcp-token" \
+        --dry-run=client -o yaml | k apply -f - >/dev/null
+    k -n owui-splunk create configmap fake-splunk-code --from-file="$REPO/tests/fake_splunk_mcp.py" \
+        --from-file="$REPO/scripts/ci/fake_splunk_mcp_server.py" --dry-run=client -o yaml | k apply -f - >/dev/null
+    # Site procedure step 4: the gateway Secret, and Open WebUI's own LiteLLM key beside a shared one.
+    k -n "$APP_NS" create secret generic rag-splunk-gateway --from-file="$team_dir/splunk-mcp-token" \
+        --from-file="$team_dir/bearer-secret" --dry-run=client -o yaml | k apply -f - >/dev/null
+    k -n "$APP_NS" create secret generic rag-owui-team-llm --from-file="$team_dir/openwebui-llm-api-key" \
+        --from-file="$team_dir/api-key" --dry-run=client -o yaml | k apply -f - >/dev/null
+    k -n "$APP_NS" create configmap rag-owui-team-ca --from-file="$team_dir/ca-bundle.crt" \
+        --dry-run=client -o yaml | k apply -f - >/dev/null
+    k -n owui-splunk rollout status deploy/fake-splunk --timeout=300s
+    k -n "$APP_NS" wait --for=condition=Ready pod/team-tools-intruder --timeout=300s >/dev/null
+    start_forwards
+    # Site procedure step 6: the team group's id (v0.13.4 matches tool-server grants by id only).
+    gid=$($PYH group-id "$STATE" "$TEAM_GROUP") || die "cannot read the id of group $TEAM_GROUP"
+    team_values "$team_dir" "$AGENT_IMAGE" "$gid" > "$team_dir/values.json"
+    TEAM_VALUES="$team_dir/values.json" render_chart "$STATE/render-team"
+    check_team_render "$STATE/render-team" "$team_dir" "$AGENT_IMAGE"
+    # Site procedure step 7 (enable), as the chart renders it.
+    k apply -f "$STATE/render-team/openwebui.yaml" > "$STATE/logs/apply-team.log"
+    k -n "$APP_NS" rollout status deploy/rag-openwebui --timeout=900s
+    if ! k -n "$APP_NS" rollout status deploy/rag-splunk-gateway --timeout=330s; then
+        k -n "$APP_NS" logs deploy/rag-splunk-gateway --tail=20 >&2 || true
+        die "the Splunk gateway is not Ready against the fake Splunk (its splunk_gateway_start line is above)"
+    fi
+    wait_health
+    phase team-tools
 }
 
 # ------------------------------------------------------------------ operator-deploy lane
@@ -299,6 +449,7 @@ case "$CMD" in
     images) images ;;
     deploy) deploy ;;
     run) run ;;
+    team-tools) team_tools ;;
     operator) shift; operator "$@" ;;
     *) sed -n '2,/^set -eu/p' "$0" | sed '$d' >&2; exit 2 ;;
 esac

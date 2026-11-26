@@ -235,7 +235,10 @@ def test_oauth_proxy_requires_its_own_container_status():
     # #804: the feedback pod runs the agent image but is a different workload;
     # the Deployment-shaped agent role must not find the StatefulSet.
     ("feedback", "StatefulSet", "rag-feedback", "feedback", "agent"),
-], ids=["openobserve", "openwebui", "feedback"])
+    # #1077: the Splunk gateway runs the agent image too, as its own Deployment
+    # (the chart's container name "gateway").
+    ("splunk_gateway", "Deployment", "rag-splunk-gateway", "gateway", "agent"),
+], ids=["openobserve", "openwebui", "feedback", "splunk_gateway"])
 def test_role_is_bound_to_its_own_workload_and_container(role, kind, name, container, other_role):
     """ADR-0006/0007/0008: each role is verified through the workload kind, name
     and container the chart declares, by its own digest; a same-image container

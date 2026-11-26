@@ -15,6 +15,10 @@
   #1077's issue body. Accepting it deploys nothing: the gateway ships
   default-off, and its chart and Open WebUI registration are a later pull
   request, as for GitLab ([ADR-0014](0014-gitlab-team-token-gateway.md) D5).
+  Status note 2026-11-25: the deployment pull request (#1077 part 2) adds
+  the default-off chart objects, NetworkPolicy and Open WebUI registration
+  for this gateway ([deploy](../deploy.md#splunk-gateway-deploy)). The
+  decisions above are unchanged.
 - **Context:**
   - #1077 planned a gateway that calls Splunk REST (`/services/search/jobs`)
     with a read-only service token and no Splunk-side install.
