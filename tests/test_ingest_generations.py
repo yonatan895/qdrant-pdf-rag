@@ -466,12 +466,39 @@ def test_alias_change_before_a_delete_stops_the_run(tmp_path, capsys):
     assert len(deletes(store)) == 1
 
 
-def test_execute_requires_a_recovery_reference(tmp_path, capsys):
+def test_recovery_reference_is_optional_and_the_record_names_the_operator(tmp_path, capsys, monkeypatch):
     store = three_generations()
+    monkeypatch.setenv("USER", "op.one")
     rc, _ = run(store, tmp_path, "dispose-snapshots", "--progress", str(progress(tmp_path)),
                 "--build-id", G1, "--execute")
-    assert rc == gen.EXIT_REFUSED and "E_RECOVERY_REF" in capsys.readouterr().err
+    assert rc == 0 and len(deletes(store)) == 2
+    planned = json.loads(gen.disposal_record_path(progress(tmp_path), ALIAS).read_text().splitlines()[0])
+    assert planned["event"] == "planned" and planned["operator"] == "op.one" and planned["at"]
+    assert "recovery_ref" not in planned
+    rc, _ = run(store, tmp_path, "dispose-snapshots", "--progress", str(progress(tmp_path)),
+                "--build-id", G1, "--execute", "--recovery-ref", "CHG-2", "--operator", "bastion-op")
+    assert rc == 0
+    events = [json.loads(line) for line in gen.disposal_record_path(progress(tmp_path), ALIAS).read_text().splitlines()]
+    planned = [e for e in events if e["event"] == "planned"][-1]
+    assert (planned["event"], planned["operator"], planned["recovery_ref"]) == ("planned", "bastion-op", "CHG-2")
+
+
+@pytest.mark.parametrize(("flag", "value", "code"), [
+    ("--recovery-ref", "bad ref", "E_RECOVERY_REF"),
+    ("--operator", "bad;name", "E_OPERATOR"),
+])
+def test_malformed_audit_inputs_refuse_before_any_delete(tmp_path, capsys, flag, value, code):
+    store = three_generations()
+    rc, _ = run(store, tmp_path, "dispose-snapshots", "--progress", str(progress(tmp_path)),
+                "--build-id", G1, "--execute", flag, value)
+    assert rc == gen.EXIT_REFUSED and code in capsys.readouterr().err
     assert deletes(store) == []
+
+
+def test_default_operator_never_needs_a_passwd_entry(monkeypatch):
+    monkeypatch.delenv("USER", raising=False)
+    monkeypatch.delenv("LOGNAME", raising=False)
+    assert gen.default_operator() == f"uid:{__import__('os').getuid()}"
 
 
 @pytest.mark.parametrize("case", ["peer-down", "no-peer-urls", "missing-member"])

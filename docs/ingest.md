@@ -1195,14 +1195,17 @@ thread pool.
   endpoint on a multi-peer cluster the snapshot view is marked incomplete.
   `dispose-snapshots --progress <inventory> --build-id <uuid>...` (the
   existing ingest inventory file, whose directory holds the publish lock and
-  sidecar; a missing file refuses) is a dry run by default; `--execute --recovery-ref <ticket>` deletes, on each peer,
+  sidecar; a missing file refuses) is a dry run by default; `--execute` deletes, on each peer,
   the snapshots that peer lists under the named builds' data collections,
   including operator pre-change snapshots of them (maintainer decision
   2026-11-26). It takes the publish lock for the whole run (a held lock
   refuses, never waits), recomputes the plan under it, re-reads the aliases
   before each delete, decides each delete by listing that peer again (a 404
   also means "not on this peer"), and appends an audit record
-  `snapshot-disposal-<alias>.jsonl` beside the lock. A rerun converges from
+  `snapshot-disposal-<alias>.jsonl` beside the lock: who ran it
+  (`--operator`, else the login name, else the uid) and when, plus
+  `--recovery-ref <ticket>` when given (optional, maintainer decision
+  2026-11-26). A rerun converges from
   the stored state: deleted snapshots are no longer listed. A named build is
   refused, and nothing is deleted, unless it is `retained` (both immutable
   aliases consistent, serving alias elsewhere), no other alias names its
@@ -1220,6 +1223,9 @@ thread pool.
   count, size or age. Deleting a collection orphans its snapshot files on
   v1.19.2 (no longer listed, still on disk, listed again if the name is
   recreated), so later data disposal must delete snapshots first.
+  At the site both commands run through `sh scripts/airgap/generations.sh`
+  ([deploy](deploy.md#generations-job)), which fixes `--progress` to the
+  ingest inventory on the ingest work volume.
 - `should_skip`: exact-sha plus (`upserted` or `skipped` always — `skipped`
   records an earlier already-complete check, issue #1215 — or `dry` only when
   the current run is also dry; a real run never skips prior `dry`).

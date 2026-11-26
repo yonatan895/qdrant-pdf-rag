@@ -87,6 +87,18 @@ KEEP_FLOOR = 1
 DEFAULT_KEEP = 1
 _COMPLETIONS = "__completions"
 _RECOVERY_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#-]{0,127}")
+_OPERATOR = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,63}")
+
+
+def default_operator() -> str:
+    """Who runs the disposal when `--operator` is not given: the login name
+    from the environment, else the numeric uid (an OpenShift pod's arbitrary
+    uid has no passwd entry, so no lookup that can fail is made)."""
+    for name in ("USER", "LOGNAME"):
+        value = os.environ.get(name, "")
+        if _OPERATOR.fullmatch(value):
+            return value
+    return f"uid:{os.getuid()}"
 DATA_SIZE_SOURCE = "not-reported"
 
 
@@ -602,6 +614,7 @@ def dispose_snapshots(
     execute: bool,
     recovery_ref: str | None,
     out: Callable[[str], None],
+    operator: str | None = None,
 ) -> None:
     alias = settings.qdrant_collection
     with ExitStack() as stack:
@@ -625,13 +638,18 @@ def dispose_snapshots(
             total += g.snapshot_bytes
         out(f"PLAN total {sum(len(g.snapshots) for g in targets)} snapshot(s), {total} bytes, keep {keep}")
         if not execute:
-            out("DRY RUN: nothing deleted. Rerun with --execute --recovery-ref <ticket> to delete exactly "
-                "what each peer lists then.")
+            out("DRY RUN: nothing deleted. Rerun with --execute (optionally --recovery-ref <ticket>) to "
+                "delete exactly what each peer lists then.")
             return
         record = disposal_record_path(progress, alias)
-        _record(record, {"event": "planned", "alias": alias, "keep": keep, "recovery_ref": recovery_ref,
-                         "builds": [{"build_id": g.build_id, "physical": g.physical,
-                                     "snapshots": [s.as_json(labels) for s in g.snapshots]} for g in targets]})
+        planned: dict[str, Any] = {
+            "event": "planned", "alias": alias, "keep": keep, "operator": operator or default_operator(),
+            "builds": [{"build_id": g.build_id, "physical": g.physical,
+                        "snapshots": [s.as_json(labels) for s in g.snapshots]} for g in targets],
+        }
+        if recovery_ref is not None:
+            planned["recovery_ref"] = recovery_ref
+        _record(record, planned)
         deleted = 0
         for g in targets:
             for s in g.snapshots:
@@ -685,7 +703,9 @@ def _parser() -> argparse.ArgumentParser:
                          help="Lower the keep guard to the floor of 1 for this run.")
     dispose.add_argument("--execute", action="store_true")
     dispose.add_argument("--recovery-ref", default=None,
-                         help="Ticket or decision id that records the recovery decision (required with --execute).")
+                         help="Optional ticket or decision id recorded in the audit record with --execute.")
+    dispose.add_argument("--operator", default=None,
+                         help="Who runs it, for the audit record (default: the login name, else the uid).")
     return parser
 
 
@@ -735,12 +755,15 @@ def main(
                 if canonical in build_ids:
                     raise Refused(f"E_BUILD_ID: build {canonical} is named twice")
                 build_ids.append(canonical)
-            if args.execute and not (args.recovery_ref and _RECOVERY_REF.fullmatch(args.recovery_ref)):
-                raise Refused("E_RECOVERY_REF: --execute needs --recovery-ref <ticket or decision id> "
+            if args.recovery_ref is not None and not _RECOVERY_REF.fullmatch(args.recovery_ref):
+                raise Refused("E_RECOVERY_REF: --recovery-ref takes a ticket or decision id "
                               "([A-Za-z0-9._:/#-], at most 128 characters)")
+            if args.operator is not None and not _OPERATOR.fullmatch(args.operator):
+                raise Refused("E_OPERATOR: --operator takes a login name ([A-Za-z0-9._@-], at most 64 characters)")
             keep = KEEP_FLOOR if args.allow_below_keep else args.keep
             dispose_snapshots(entry, settings, tracked, progress=args.progress, build_ids=build_ids,
-                              keep=keep, execute=args.execute, recovery_ref=args.recovery_ref, out=out)
+                              keep=keep, execute=args.execute, recovery_ref=args.recovery_ref, out=out,
+                              operator=args.operator)
             return EXIT_OK
     except Refused as exc:
         print(f"FAIL: {exc}", file=sys.stderr)

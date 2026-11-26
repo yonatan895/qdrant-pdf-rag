@@ -1065,6 +1065,35 @@ cannot schedule on one node — proven).
   read, the check stays off and the wait alone decides, as before. A quota
   refusal of a retry pod, after a first pod failed, is not caught: that run
   waits for the Job's own failure or `INGEST_TIMEOUT`.
+- <a id="generations-job"></a>**Retained generations at the site (issue #1373):**
+  `sh scripts/airgap/generations.sh list [--keep N] [--format text|json]`
+  prints every publication generation with each peer's snapshots and sizes;
+  `sh scripts/airgap/generations.sh dispose-snapshots --build-id <uuid>...
+  [--keep N] [--allow-below-keep] [--execute] [--recovery-ref <ticket>]`
+  deletes the snapshots of named retained builds (a dry-run plan unless
+  `--execute`; rules in [retained generations](ingest.md#retained-generations)).
+  It runs the ingest Job's template as Job `generations` (chart value
+  `ingest.generations.args`, rendered by `map_values.py --generations-arg`):
+  the same packed image by digest, Qdrant writer key by Secret reference,
+  `QDRANT_PEER_URLS` and collection policy, pod hardening, and the
+  `ingest-work` volume with `--progress /work/inventory.jsonl` fixed; no
+  corpus volume and `backoffLimit: 0`. Arguments are checked against fixed
+  charsets before anything renders. Before applying, it refuses while
+  `job/ingest` has not finished (no `Complete` or `Failed` condition) or an
+  ingest pod is still running or terminating, while an earlier
+  `job/generations` has not finished, when `ingest-work` does not exist (it
+  never creates it), and on any read failure; a finished earlier
+  `job/generations` is deleted with bounded requests first. It waits with the
+  ingest launcher's watcher (`scripts/airgap/one_shot_job.sh`: the quota
+  fail-fast and the bounded, interruptible removal of a refused Job above,
+  with `airgap:generations` in the messages), ends the wait as soon as the
+  Job fails (a refusal is a normal outcome), and prints the Job's log, which
+  is the listing or plan, once at the end. With `--execute` it passes the
+  bastion login name as `--operator` for the audit record. No reader stop:
+  snapshots are never served. `AIRGAP_DRYRUN=1` only renders and prints the
+  cluster calls; without it, the module's own dry run still runs as a Job.
+  The Job requests the ingest Job's `INGEST_*` resources. The Task entry is
+  pending (`airgap:generations`); run the script directly until then.
 - First-party pods (agent, the oauth-proxy sidecar, the ingest Job, OpenObserve, otelcol)
   declare their own hardening so it does not depend on `restricted-v2`
   alone (issue #585): pod `runAsNonRoot: true` and
