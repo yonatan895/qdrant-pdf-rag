@@ -419,11 +419,12 @@ def test_alias_publish_rekeys_manifest_across_clone(qdrant_url, corpus, tmp_path
     second = _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, local, progress)
     # The progress file is append-only: the second run's records are the tail.
     second_records = second[len(first) :]
-    # Completion markers certify their own target_collection, so the cloned
-    # staging re-embeds the walked corpus (never a cross-generation skip):
-    # all four docs upsert. Before the F5 fix this run aborted instead —
-    # the un-rekeyed manifest read as legacy during the inner preflight.
-    assert sorted(r["status"] for r in second_records) == ["upserted"] * 4
+    # Issue #1372 contract change: the three unchanged documents are
+    # carried from live into the cloned staging, with no parse and no
+    # inventory record, so only the new document upserts. Before the F5 fix
+    # this run aborted instead — the un-rekeyed manifest read as legacy
+    # during the inner preflight.
+    assert [(r["doc_id"], r["status"]) for r in second_records] == [("SA22-8888-02", "upserted")]
 
     settings = Settings(
         _env_file=None,
@@ -450,6 +451,225 @@ def test_alias_publish_rekeys_manifest_across_clone(qdrant_url, corpus, tmp_path
             "widget-guide",
         }
     finally:
+        client.close()
+
+
+CARRY_ALIAS = "sim-carry"
+
+
+def test_alias_publish_carries_unchanged_documents_on_real_server(
+    qdrant_url, mock_url, corpus, tmp_path, monkeypatch
+):
+    """Issue #1372 on the real server with the vLLM-shaped embed path: after
+    a corpus addition, only the new document is embedded. The second run's
+    endpoint returns different vectors under the same declared model and
+    revision (the URL is outside the contract), so a re-embedded old document
+    would show. Old documents keep the retained old physical's exact ids,
+    payloads and vectors; the catalog lists every revision; the seal
+    verifies; the next run is already live; a further addition carries from a
+    carried generation; --reingest re-embeds everything."""
+    from qdrant_client import QdrantClient
+    from scripts.make_synthetic_pdf import build
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest.catalog import read_source_catalog
+    from mainframe_rag.ingest.publish import verify_publication_seal
+    from mainframe_rag.ingest.qdrant_io import resolve_live_collection
+
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
+    cache = _bm25_cache_dir()
+    _drop_publish_fixture(qdrant_url, CARRY_ALIAS)
+    local = tmp_path / "carry-corpus"
+    local.mkdir()
+    for pdf in corpus.iterdir():
+        shutil.copy(pdf, local / pdf.name)
+    progress = tmp_path / "inv.jsonl"
+
+    # A second endpoint: same API and model name, different (negated) vectors.
+    with monkeypatch.context() as patch:
+        patch.setenv("MOCK_DIM", str(MOCK_DIM))
+        other = importlib.util.module_from_spec(MOCK_SPEC)
+        MOCK_SPEC.loader.exec_module(other)
+    original_embed = other._embed
+    other_calls: list[str] = []
+
+    def other_embed(text):
+        other_calls.append(text)
+        return [-x for x in original_embed(text)]
+
+    other._embed = other_embed
+    server = other.ThreadingHTTPServer(("127.0.0.1", 0), other.Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    other_url = f"http://127.0.0.1:{server.server_address[1]}"
+    settings = Settings(_env_file=None, qdrant_url=qdrant_url, qdrant_collection=CARRY_ALIAS,
+                        embed_mode="hash", allow_hash_mode=True)
+    client = QdrantClient(url=qdrant_url, timeout=30)
+
+    def run(url, *extra):
+        return _ingest(monkeypatch, qdrant_url, CARRY_ALIAS, local, progress, embed="vllm",
+                       mock_url=url, bm25_cache=cache, extra=extra)
+
+    def live():
+        physical, _ = resolve_live_collection(client, settings)
+        return physical
+
+    def stored(physical):
+        out = {}
+        offset = None
+        while True:
+            page, offset = client.scroll(physical, limit=256, offset=offset,
+                                         with_payload=True, with_vectors=True)
+            for p in page:
+                out[p.id] = (p.payload, p.vector)
+            if offset is None or not page:
+                return out
+
+    def by_doc(points, doc_ids):
+        return {pid: v for pid, v in points.items() if v[0]["doc_id"] in doc_ids}
+
+    def carried_from(physical):
+        markers = {}
+        offset = None
+        while True:
+            page, offset = client.scroll(physical + "__completions", limit=256, offset=offset,
+                                         with_payload=True)
+            for p in page:
+                if (p.payload or {}).get("doc_id"):
+                    markers.setdefault(p.payload["doc_id"], []).append(
+                        (p.payload["target_collection"], p.payload.get("carried_from")))
+            if offset is None or not page:
+                return markers
+
+    try:
+        first = run(mock_url)
+        assert sorted(r["status"] for r in first) == ["upserted"] * 3
+        gen1 = live()
+        old_docs = {"SA22-0000-00", "SA22-7777-01", "widget-guide"}
+        gen1_points = stored(gen1)
+        assert other_calls == []
+
+        build(local / "SA22-8888-02.pdf", doc_id="SA22-8888-02",
+              title="Synthetic Data Set Utility Reference", message_id="IEC900I")
+        second = run(other_url)[len(first):]
+        assert [(r["doc_id"], r["status"]) for r in second] == [("SA22-8888-02", "upserted")]
+        gen2 = live()
+        assert gen2 != gen1
+        gen2_points = stored(gen2)
+        assert by_doc(gen2_points, old_docs) == by_doc(gen1_points, old_docs)
+        new_points = by_doc(gen2_points, {"SA22-8888-02"})
+        assert new_points and len(other_calls) == second[0]["chunks"] == len(new_points)
+        assert stored(gen1) == gen1_points  # the retained old physical is untouched
+        markers = carried_from(gen2)
+        assert {d: markers[d] for d in old_docs} == {d: [(gen2, gen1)] for d in old_docs}
+        assert markers["SA22-8888-02"] == [(gen2, None)]
+        assert len(read_source_catalog(client, gen2 + "__completions")) == 4
+        assert verify_publication_seal(client, gen2 + "__completions")
+
+        before = len(progress.read_text().splitlines())
+        run(other_url)
+        assert live() == gen2 and len(progress.read_text().splitlines()) == before
+
+        build(local / "SA22-9999-03.pdf", doc_id="SA22-9999-03",
+              title="Synthetic Access Method Reference", message_id="IEC901I")
+        calls_before = len(other_calls)
+        third = run(other_url)[before:]
+        assert [(r["doc_id"], r["status"]) for r in third] == [("SA22-9999-03", "upserted")]
+        gen3 = live()
+        carried = old_docs | {"SA22-8888-02"}
+        assert by_doc(stored(gen3), carried) == by_doc(gen2_points, carried)
+        markers = carried_from(gen3)
+        assert {d: markers[d] for d in carried} == {d: [(gen3, gen2)] for d in carried}
+        assert len(other_calls) - calls_before == third[0]["chunks"]
+        assert verify_publication_seal(client, gen3 + "__completions")
+
+        lines = len(progress.read_text().splitlines())
+        forced = run(other_url, "--reingest")[lines:]
+        assert sorted(r["status"] for r in forced) == ["upserted"] * 5
+        gen4 = live()
+        gen4_points = stored(gen4)
+        assert all(v[1]["dense"] != gen1_points[pid][1]["dense"]
+                   for pid, v in by_doc(gen4_points, old_docs).items())
+        assert all(m[1] is None for ms in carried_from(gen4).values() for m in ms)
+    finally:
+        server.shutdown()
+        server.server_close()
+        client.close()
+        _drop_publish_fixture(qdrant_url, CARRY_ALIAS)
+
+
+@pytest.mark.parametrize("dim", [32, 1024, 4096])
+def test_points_api_clone_reads_vectors_back_bit_identical(qdrant_url, dim):
+    """Issue #1372 premise for the carry seal guard: a COSINE vector that the
+    points API reads back and re-upserts (`clone_collection`) must read back
+    bit-identical, chained over two clones, so a clone's content seal under
+    the source build's binding equals the source's own. Proven for the pinned
+    image on this host's CPU; Qdrant normalises on insert, so a last-bit
+    difference would show here as a digest mismatch."""
+    import random
+
+    from qdrant_client import QdrantClient, models
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest.qdrant_io import clone_collection, collection_vector_configs
+    from mainframe_rag.ingest.seal import data_seal
+
+    rng = random.Random(1372 + dim)
+    names = [f"sim-bitstab-{dim}-{tag}-{uuid.uuid4().hex[:8]}" for tag in ("a", "b", "c")]
+    settings = Settings(_env_file=None, qdrant_url=qdrant_url, qdrant_collection=names[0],
+                        embed_mode="hash", allow_hash_mode=True,
+                        # 1000 x 4096-dim points per page exceed the server's
+                        # default 32 MB JSON request limit (reported separately).
+                        ingest_scan_page_size=100)
+    client = QdrantClient(url=qdrant_url, timeout=60)
+    count = 3000 if dim < 4096 else 1500
+    try:
+        vectors_config, sparse_config = collection_vector_configs(dim)
+        client.create_collection(names[0], vectors_config=vectors_config,
+                                 sparse_vectors_config=sparse_config, on_disk_payload=True)
+        points = []
+        for i in range(count):
+            dense = [rng.gauss(0.0, 1.0) for _ in range(dim)]
+            if i % 2 == 0:  # half pre-normalised (the embedder's output), half raw
+                norm = sum(x * x for x in dense) ** 0.5
+                dense = [x / norm for x in dense]
+            indices = sorted(rng.sample(range(1, 2**31 - 1), rng.randint(1, 40)))
+            points.append(models.PointStruct(
+                id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"bitstab|{dim}|{i}")),
+                vector={"dense": dense, "bm25": models.SparseVector(
+                    indices=indices, values=[rng.uniform(0.01, 9.0) for _ in indices])},
+                payload={"doc_id": f"d{i % 7}", "text": f"chunk {i}"},
+            ))
+        for start in range(0, count, 250):
+            client.upsert(names[0], points=points[start:start + 250], wait=True)
+        clone_collection(client, settings, names[0], names[1])
+        clone_collection(client, settings, names[1], names[2])
+
+        def stored(name):
+            out = {}
+            offset = None
+            while True:
+                page, offset = client.scroll(name, limit=500, offset=offset,
+                                             with_payload=False, with_vectors=True)
+                for p in page:
+                    out[p.id] = (tuple(p.vector["dense"]), tuple(p.vector["bm25"].indices),
+                                 tuple(p.vector["bm25"].values))
+                if offset is None or not page:
+                    return out
+
+        first, second, third = (stored(n) for n in names)
+        assert len(first) == count
+        differing = sum(1 for pid, vec in first.items() if second[pid] != vec or third[pid] != vec)
+        assert differing == 0, f"{differing} of {count} points changed bits across the clone"
+        # The carry guard's own computation: each copy under the source's binding.
+        digests = {data_seal(client, n, build_id="b" * 32, alias="alias", physical=names[0],
+                             gen_fp="g" * 16, corpus_fp="c" * 12)["sha256"] for n in names}
+        assert len(digests) == 1
+    finally:
+        for name in names:
+            with suppress(Exception):
+                client.delete_collection(name)
         client.close()
 
 

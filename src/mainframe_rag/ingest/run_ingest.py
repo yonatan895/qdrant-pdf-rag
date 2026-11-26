@@ -59,12 +59,17 @@ from mainframe_rag.ingest.catalog import (
 from mainframe_rag.ingest.chrome import strip_chrome
 from mainframe_rag.ingest.chunk import Chunk, make_chunks
 from mainframe_rag.ingest.completion import (
+    CompletionRecord,
     VerificationSnapshot,
     acquire_publish_lock,
     acquire_run_lock,
+    carry_marker,
     completion_collection_name,
+    completion_point_id,
+    delete_carried_completions,
     delete_completion,
     delete_revision_completions,
+    delete_superseded_completions,
     doc_generation_id,
     ensure_completion_collection,
     expected_digests,
@@ -127,6 +132,7 @@ from mainframe_rag.ingest.publish import (
     apply_approved_removals,
     catalog_retirement_approvals,
     clear_publish_state,
+    clone_matches_live_seal,
     commit_retired_inventory,
     corpus_fingerprint,
     delete_publication_metadata,
@@ -158,6 +164,7 @@ from mainframe_rag.ingest.qdrant_io import (
 from mainframe_rag.ingest.representation import (
     STATE_COMMITTED,
     STATE_PENDING,
+    StoredManifest,
     begin_manifest,
     build_manifest,
     check_ingest_compatible,
@@ -282,16 +289,27 @@ class ParseTask(NamedTuple):
 
 
 @dataclass(frozen=True)
+class _Carry:
+    """One walked document the planner carries from the live ancestor
+    (issue #1372): its verified ancestor marker, written staging-bound
+    before execution, never parsed or embedded."""
+
+    path: str
+    marker: CompletionRecord
+
+
+@dataclass(frozen=True)
 class _Plan:
     """Planning result: the gated walk, the queued tasks, the per-path
-    lineage map for refresh replacement, and how many files skipped as
-    already ingested (counted as ok)."""
+    lineage map for refresh replacement, how many files skipped as
+    already ingested (counted as ok), and the carried documents."""
 
     walk_entries: list[tuple[str, str]]
     tasks: list[ParseTask]
     lineage_by_path: dict[str, str | None]
     skipped_ok: int
     unreadable: tuple[str, ...] = ()
+    carries: tuple[_Carry, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -301,7 +319,9 @@ class _StagingBuild:
     publish lock and after retirement planning; a real build requires one
     and dry runs have none, so nothing else can carry a pre-hashed walk,
     an approved removal plan or a checkpoint-resume grant. `staging`/`live` are the resolved physical
-    names; `resume_verified` is granted only for reused staging."""
+    names; `resume_verified` is granted only for reused staging.
+    `carry_from` is the live ancestor walked documents may be carried from
+    (issue #1372), None unless every run-level carry condition held."""
 
     staging: str
     live: str | None
@@ -309,6 +329,7 @@ class _StagingBuild:
     pending_removals: frozenset[str]
     retire_plan: dict[str, dict[str, set[str] | bool]]
     resume_verified: bool
+    carry_from: str | None = None
 
 
 EMPTY_DOCUMENT_MESSAGE = "document produced zero chunks; nothing published"
@@ -1072,12 +1093,19 @@ def _plan(
     product: str | None,
     version: str | None,
     cache_path: Path | None,
+    carry_from: str | None = None,
 ) -> _Plan:
     """Planning (issue #583 S2): walk or take the pre-hashed walk, apply the
-    identity gate, and decide per file whether it skips or is queued.
-    Read-only against storage: it reads the inventory and, for bound skips,
-    the target's completion records and points; it never writes. Runs before
-    the representation manifest opens and before any worker spawns."""
+    identity gate, and decide per file whether it skips, is carried, or is
+    queued. Read-only against storage: it reads the inventory and, for bound
+    skips and carries, the target's completion records and points; it never
+    writes. Runs before the representation manifest opens and before any
+    worker spawns.
+
+    Carry (issue #1372): with `carry_from` set (the live ancestor, only when
+    every run-level condition held), a skip candidate that did not pass the
+    ordinary staging-bound skip is carried when `carry_marker` accepts the
+    ancestor's marker and the cloned points verify against it here."""
     if prewalked is None:
         scanned = scan_corpus(src, limit=limit)
         walk_entries, unreadable = scanned.entries, scanned.unreadable
@@ -1120,6 +1148,7 @@ def _plan(
                 skip_candidates[path_str] = (record, sha)
 
     verified_skips: set[str] = set()
+    carries: list[_Carry] = []
     if skip_candidates:
         assert client is not None
         req_digest = manifest_digest(settings, rules_v) if resume_checkpoints else None
@@ -1136,17 +1165,42 @@ def _plan(
             )
             if scoped is None:
                 continue
-            if req_digest is not None and scoped.manifest_digest != req_digest:
+            if req_digest is not None and (
+                scoped.manifest_digest != req_digest or scoped.carried_from is not None
+            ):
+                # A forced checkpoint resume keeps only documents this build
+                # embedded itself, never a carried marker (issue #1372).
                 continue
             if scoped.sha256 != sha or scoped.rules_v != rules_v:
                 continue
             matched.append((path_str, record, sha, scoped))
-        if len(matched) >= 2 and len(matched) * 4 >= len(walk_entries):
+        carry_matched: list[tuple[str, CompletionRecord]] = []
+        if carry_from is not None:
+            matched_paths = {path_str for path_str, _, _, _ in matched}
+            for path_str, (record, sha) in skip_candidates.items():
+                if path_str in matched_paths:
+                    continue
+                assert record.doc_id and record.source_rev
+                ancestor_marker = carry_marker(
+                    comp_snap,
+                    settings,
+                    doc_id=record.doc_id,
+                    source_rev=record.source_rev,
+                    sha256=sha,
+                    rules_v=rules_v,
+                    source_labels=src_labels,
+                    ancestor=carry_from,
+                    witness=(record.generation_id, record.chunk_ids_digest, record.content_digest),
+                )
+                if ancestor_marker is not None:
+                    carry_matched.append((path_str, ancestor_marker))
+        to_verify = len(matched) + len(carry_matched)
+        if to_verify >= 2 and to_verify * 4 >= len(walk_entries):
             target_pairs = {
                 (rec.doc_id, rec.source_rev)
                 for _, rec, _, _ in matched
                 if rec.doc_id and rec.source_rev
-            }
+            } | {(m.doc_id, m.source_rev) for _, m in carry_matched}
             ver_snap = prefetch_verification_state(
                 client,
                 settings,
@@ -1166,6 +1220,9 @@ def _plan(
                     required_manifest_digest=req_digest,
                 ):
                     verified_skips.add(path_str)
+            for path_str, ancestor_marker in carry_matched:
+                if ver_snap.verify_marker(client, settings, ancestor_marker):
+                    carries.append(_Carry(path_str, ancestor_marker))
         else:
             for path_str, record, sha, scoped in matched:
                 assert record.doc_id and record.source_rev
@@ -1181,10 +1238,26 @@ def _plan(
                     content_digest=scoped.content_digest,
                 ):
                     verified_skips.add(path_str)
+            for path_str, ancestor_marker in carry_matched:
+                if verify_doc_points(
+                    client,
+                    settings,
+                    ancestor_marker.doc_id,
+                    sha256=ancestor_marker.sha256,
+                    rules_v=ancestor_marker.rules_v,
+                    source_rev=ancestor_marker.source_rev,
+                    expected_chunks=ancestor_marker.expected_chunks,
+                    chunk_ids_digest=ancestor_marker.chunk_ids_digest,
+                    content_digest=ancestor_marker.content_digest,
+                ):
+                    carries.append(_Carry(path_str, ancestor_marker))
 
+    carried_paths = {c.path for c in carries}
     tasks: list[ParseTask] = []
     skipped_ok = 0
     for path_str, sha in walk_entries:
+        if path_str in carried_paths:
+            continue  # written staging-bound before execution (_write_carries)
         record = inventory.get(path_str)
         if record and should_skip(
             record,
@@ -1245,7 +1318,61 @@ def _plan(
                 str(cache_path) if cache_path is not None else None,
             )
         )
-    return _Plan(walk_entries, tasks, lineage_by_path, skipped_ok, tuple(unreadable))
+    return _Plan(
+        walk_entries, tasks, lineage_by_path, skipped_ok, tuple(unreadable), tuple(carries)
+    )
+
+
+def _write_carries(
+    client: QdrantPoints,
+    settings: Settings,
+    carries: tuple[_Carry, ...],
+    *,
+    ancestor: str,
+    rules_v: str,
+    src_labels: str,
+    stats: _RunStats,
+) -> None:
+    """Issue #1372: give each carried document its staging-bound marker
+    (the ancestor's count and digests, `carried_from` = the ancestor), then
+    remove that revision's other markers from the staging controls. Runs
+    after `begin_manifest` and before any worker, under both locks; the
+    deterministic marker id makes a rerun idempotent, and a crash between
+    the two steps leaves an inert ancestor marker the next carry or refresh
+    of that revision sweeps. Coverage re-verifies every walked document
+    against its staging-bound marker before any cutover. No inventory record
+    is appended (as for a planner skip)."""
+    for carry in carries:
+        marker = carry.marker
+        written = write_completion(
+            client,
+            settings,
+            doc_id=marker.doc_id,
+            sha256=marker.sha256,
+            rules_v=rules_v,
+            source_labels=src_labels,
+            source_rev=marker.source_rev,
+            expected_chunks=marker.expected_chunks,
+            chunk_ids_digest=marker.chunk_ids_digest,
+            content_digest=marker.content_digest,
+            carried_from=ancestor,
+        )
+        delete_superseded_completions(
+            client,
+            settings,
+            marker.doc_id,
+            marker.source_rev,
+            keep_id=completion_point_id(
+                settings.qdrant_collection, marker.doc_id, marker.source_rev, written.generation_id
+            ),
+        )
+        stats.files_ok += 1
+        stats.carried += 1
+        log.info(
+            json.dumps(
+                {"path": carry.path, "sha256": marker.sha256, "action": "carry", "ancestor": ancestor}
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -1709,6 +1836,7 @@ def _run_impl(
     client, run_lock = pre.client, pre.run_lock
     resume_checkpoints, bulk_active = pre.resume_checkpoints, pre.bulk_active
     try:
+        carry_from = _carry_contract_gate(client, settings, staging, rules_v, force_reingest)
         with start_as_current_span(tracer, "ingest.plan") as plan_span:
             plan = _plan(
                 src,
@@ -1726,6 +1854,7 @@ def _run_impl(
                 product=product,
                 version=version,
                 cache_path=cache_path,
+                carry_from=carry_from,
             )
             walk_entries, tasks = plan.walk_entries, plan.tasks
             lineage_by_path = plan.lineage_by_path
@@ -1733,6 +1862,7 @@ def _run_impl(
             _record_unreadable(plan.unreadable, progress, stats)
             plan_span.set_attribute("ingest.pdfs", len(walk_entries))
             plan_span.set_attribute("ingest.todo", len(tasks))
+            plan_span.set_attribute("ingest.carried", len(plan.carries))
             root.set_attribute("ingest.workers", workers)
             root.set_attribute("ingest.pdfs", len(walk_entries))
             root.set_attribute("ingest.todo", len(tasks))
@@ -1772,9 +1902,29 @@ def _run_impl(
                     "upsert_streams": settings.ingest_upsert_streams,
                     "bulk_load": bulk,
                     "resume_checkpoints": resume_checkpoints,
+                    "carried": len(plan.carries),
                 }
             )
         )
+        if plan.carries:
+            # The carry rule was decided against the committed staging
+            # contract read before the build opened (issue #1372); any other
+            # outcome means the contract moved underneath the plan.
+            assert client is not None and carry_from is not None
+            if manifest_mode != "already_current":
+                raise RuntimeError(
+                    f"staging {settings.qdrant_collection!r} contract changed between "
+                    "carry planning and the build opening — nothing carried; rerun."
+                )
+            _write_carries(
+                client,
+                settings,
+                plan.carries,
+                ancestor=carry_from,
+                rules_v=rules_v,
+                src_labels=src_labels,
+                stats=stats,
+            )
         if tasks:
             _execute(
                 tasks,
@@ -1823,6 +1973,79 @@ def _run_impl(
                 )
 
     return _finish_run(root, stats, settings, started, bulk, manifest_mode)
+
+
+def _carry_contract_gate(
+    client: Any,
+    settings: Settings,
+    staging: _StagingBuild | None,
+    rules_v: str,
+    force_reingest: bool,
+) -> str | None:
+    """Run-level carry clause 4 (issue #1372): the staging's stored contract,
+    read before `begin_manifest`, must be exactly this run's contract and
+    committed. Record-only drift, a pending or absent contract, or any
+    forced run carries nothing (strict on the manifest, #1372 maintainer
+    decision 2026-11-25). Returns the ancestor to carry from, or None."""
+    if staging is None or staging.carry_from is None or force_reingest:
+        return None
+    stored = read_manifest_record(client, completion_collection_name(settings))
+    if stored != StoredManifest(build_manifest(settings, rules_v), STATE_COMMITTED):
+        log.info(
+            json.dumps(
+                {
+                    "action": "carry",
+                    "result": "disabled",
+                    "reason": "contract",
+                    "staging": settings.qdrant_collection,
+                }
+            )
+        )
+        return None
+    return staging.carry_from
+
+
+def _carry_ancestor(
+    client: QdrantReader,
+    staging_settings: Settings,
+    *,
+    live: str | None,
+    mode: str,
+    forced: bool,
+) -> str | None:
+    """Run-level carry clauses 1-3 plus the seal guard (issue #1372), decided
+    once per build under the publish lock: never for a build any attempt ran
+    forced, never without a live ancestor or for a fresh or sealed staging,
+    and only when the staging data still equals live's sealed content (the
+    clone's points, payloads and vectors, under live's own build binding).
+    The ancestor is live pinned by the sidecar's `previous`. Retirement-only
+    builds may carry (#1372 maintainer decision 2026-11-25); excluding them would
+    be one more condition here. A resumed staging whose data an earlier
+    attempt already changed fails the guard: its carries were written before
+    that attempt's execution and skip as ordinary staging-bound markers."""
+    if forced or live is None or mode not in ("cloned", "reused", "repaired"):
+        return None
+    staging = staging_settings.qdrant_collection
+    try:
+        matches = clone_matches_live_seal(
+            client, live, staging, page_size=staging_settings.ingest_scan_page_size
+        )
+    except (RuntimeError, ValueError, TypeError):
+        matches = False  # an unreadable live receipt disables carry, never the build
+    if not matches:
+        log.info(
+            json.dumps(
+                {
+                    "action": "carry",
+                    "result": "disabled",
+                    "reason": "seal",
+                    "staging": staging,
+                    "live": live,
+                }
+            )
+        )
+        return None
+    return live
 
 
 def _commit_migration_representation(
@@ -2405,6 +2628,10 @@ def _build_and_cut_over(
             raise RuntimeError("candidate immutable aliases are inconsistent; refusing mutation") from exc
     if state is not None and state["previous"] != live:
         raise RuntimeError("live target no longer matches the recorded build predecessor")
+    # Sticky (issue #1372): once any attempt of this build ran forced, every
+    # retry is treated as forced for carry; a sidecar without the field
+    # (older release) reads as forced.
+    forced = force_reingest or (state is not None and state.get("forced", True) is not False)
     write_publish_state(
         progress,
         alias,
@@ -2415,6 +2642,7 @@ def _build_and_cut_over(
         retire_docs=tuple(retire_docs or ()),
         build_id=build_id,
         previous=state["previous"] if state is not None else live,
+        forced=forced,
     )
     if resumed:
         log.info(json.dumps({"action": "publish_resume", "alias": alias, "staging": staging}))
@@ -2423,6 +2651,14 @@ def _build_and_cut_over(
         raise RuntimeError("candidate build state changed during preparation; refusing mutation")
     verified_state: dict[str, Any] = {}
     if not sealed:
+        if forced:
+            # A forced build re-embeds what an earlier unforced attempt of
+            # it carried (issue #1372): drop those markers before planning,
+            # so no later attempt, forced or not, can skip over them.
+            dropped = delete_carried_completions(client, staging_settings)
+            if dropped:
+                log.info(json.dumps({"action": "carry_revoked", "staging": staging, "markers": dropped}))
+        carry_from = _carry_ancestor(client, staging_settings, live=live, mode=mode, forced=forced)
         log.info(
             json.dumps(
                 {
@@ -2454,6 +2690,7 @@ def _build_and_cut_over(
                 pending_removals=retired,
                 retire_plan=retire_plan,
                 resume_verified=resumed and mode == "reused",
+                carry_from=carry_from,
             ),
             verified_out=verified_state,
         )
@@ -2616,6 +2853,7 @@ class _RunStats:
     files_ok: int = 0
     files_failed: int = 0
     chunks_upserted: int = 0
+    carried: int = 0  # issue #1372: walked documents carried, included in files_ok
     parse_seconds: float = 0.0
     upsert_seconds: float = 0.0
     pages: int = 0
@@ -2635,6 +2873,7 @@ def _finish_run(
     root.set_attribute("ingest.files_ok", stats.files_ok)
     root.set_attribute("ingest.files_failed", stats.files_failed)
     root.set_attribute("ingest.chunks_upserted", stats.chunks_upserted)
+    root.set_attribute("ingest.carried", stats.carried)
     root.set_attribute("ingest.pages", stats.pages)
     if stats.files_failed:
         root.set_status(Status(StatusCode.ERROR, "document failures"))
@@ -2665,6 +2904,7 @@ def _log_summary(started: float, stats: _RunStats, bulk_load: bool) -> None:
         "files_ok": stats.files_ok,
         "files_failed": stats.files_failed,
         "chunks_upserted": stats.chunks_upserted,
+        "carried": stats.carried,
         "parse_s": round(stats.parse_seconds, 1),
         "upsert_s": round(stats.upsert_seconds, 1),
         "pages_per_s": round(stats.pages / wall, 1) if wall > 0 and stats.pages else 0.0,
