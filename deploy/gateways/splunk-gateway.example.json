@@ -15,7 +15,7 @@
   },
   "backend": {
     "base_url": "https://splunk.example.test:8089",
-    "ca_file": "/etc/pki/site-ca/ca-bundle.pem",
+    "ca_file": "/etc/mainframe-rag/splunk-gateway/ca-bundle.crt",
     "timeout_s": 50,
     "mcp_path": "/services/mcp",
     "tool_name": "splunk_run_query",

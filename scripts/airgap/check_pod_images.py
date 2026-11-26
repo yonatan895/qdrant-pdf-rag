@@ -26,6 +26,9 @@ ROLE_TARGETS = {
     # The feedback service runs the agent image (#804): same repository and
     # digest as the "agent" role, its own workload.
     "feedback": ("StatefulSet", "rag-feedback", "feedback"),
+    # The Splunk gateway (#1077) runs the agent image too: agent digest, its
+    # own Deployment and container.
+    "splunk_gateway": ("Deployment", "rag-splunk-gateway", "gateway"),
 }
 REVISION = "deployment.kubernetes.io/revision"
 

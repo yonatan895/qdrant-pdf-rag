@@ -2933,3 +2933,396 @@ def test_openwebui_group_roles_still_refuse_the_wildcard(owui_chart, key, bad):
     values["openwebui"]["oidc"].update({"groupClaim": "groups", "rolesClaim": "groups", key: bad})
     r = _helm_template_with_values(values, chart=owui_chart)
     assert r.returncode != 0 and ROLE_BASELINE_REFUSAL in r.stderr
+
+
+
+# --- Team-tool gateways: the Splunk gateway (#1077, ADR-0015) and its Open WebUI
+# registration (ADR-0010 TD1/TD3/TD8). Synthetic inputs only.
+
+SPLUNK_KEYS = {
+    ("ConfigMap", "rag-splunk-gateway"), ("Deployment", "rag-splunk-gateway"),
+    ("Service", "rag-splunk-gateway"), ("NetworkPolicy", "rag-splunk-gateway"),
+}
+SPLUNK_CA = "-----BEGIN CERTIFICATE-----\nU1BMVU5LLVRFU1QtQ0E=\n-----END CERTIFICATE-----\n"
+SPLUNK_GROUP = "0b6f3c1e-1d2a-4c5b-9e8f-112233445566"
+SPLUNK_MOUNT = "/etc/mainframe-rag/splunk-gateway"
+
+
+def _splunk_config(mode: str = "bearer", **backend) -> str:
+    """A gateway configuration in the documented shape (team-tools.md), synthetic names."""
+    cfg = {
+        "gateway": "splunk",
+        "limits": {"tool_timeout_s": 60},
+        "backend": {
+            "base_url": "https://splunk.example.test:8089",
+            "ca_file": f"{SPLUNK_MOUNT}/ca-bundle.crt",
+            "allowed_indexes": ["app_test"],
+            "templates": [{
+                "name": "errors_by_host", "description": "Errors per host.", "indexes": ["app_test"],
+                "search": 'host="{host}" | stats count by host',
+                "params": {"host": {"type": "identifier"}},
+            }],
+            **backend,
+        },
+    }
+    if mode == "oidc":
+        cfg["auth"] = {
+            "issuer": "https://idp.example.test/adfs", "audience": "urn:team-tools:splunk",
+            "jwks_url": "https://idp.example.test/adfs/keys", "allowed_groups": ["team-example"],
+        }
+    return json.dumps(cfg, indent=2)
+
+
+def _splunk_values(mode: str = "bearer", splunk: dict | None = None, **top) -> dict:
+    values = json.loads(json.dumps(OWUI_ON))
+    values["models"] = {"reasoning": {"baseUrl": "https://litellm.example.invalid/v1", "model": "reasoning-test"}}
+    values["gateway"] = {"apiKeySecretName": "gw-keys"}
+    values["teamTools"] = {
+        "groupId": SPLUNK_GROUP,
+        "model": {"egress": {"cidrs": ["198.51.100.0/24"], "port": 4443}},
+        "splunk": {
+            "enabled": True, "authMode": mode, "secretName": "splunk-gw",
+            "config": _splunk_config(mode), "caBundle": SPLUNK_CA,
+            "splunkEgress": {"cidrs": ["203.0.113.10/32"], "port": 8089},
+            "idpEgress": {"cidrs": ["192.0.2.64/26"], "port": 443},
+            **(splunk or {}),
+        },
+    }
+    for key, val in top.items():
+        values[key] = val
+    return values
+
+
+def _splunk(chart, mode="bearer", splunk=None, **top):
+    return run_new_template(_splunk_values(mode, splunk, **top), chart=chart)
+
+
+def _splunk_render(chart, values):
+    merged = merge_values(base_values(), values)
+    return _helm_template_with_values(merged, chart=chart)
+
+
+def _expand_k8s_env(value: str, env: dict) -> str:
+    """Independent model of kubelet dependent-variable expansion: $(NAME) of a
+    variable defined earlier becomes its value; $$ escapes; unknown stays."""
+    return re.sub(r"\$\$|\$\(([A-Za-z_][A-Za-z0-9_]*)\)",
+                  lambda m: "$" if m.group(0) == "$$" else env.get(m.group(1), m.group(0)), value)
+
+
+def test_team_tools_off_by_default_change_nothing(owui_chart):
+    """Default off: an explicit off render equals the default, Open WebUI keeps its
+    tool servers and model connections off, and nothing names a gateway."""
+    default = _owui(owui_chart)
+    off = _owui(owui_chart, {"teamTools": {"splunk": {"enabled": False}}})
+    assert off == default
+    env = env_map(default["Deployment", "rag-openwebui"], "openwebui")
+    assert env["ENABLE_OPENAI_API"]["value"] == "false"
+    assert env["ENABLE_TOOL_SERVERS"]["value"] == "false"
+    assert env["ENABLE_TOOLS"]["value"] == "false"
+    for name in ("TOOL_SERVER_CONNECTIONS", "OPENAI_API_KEYS", "OPENAI_API_BASE_URLS", "OPENAI_API_CONFIGS"):
+        assert name not in env
+    assert not any("splunk" in name for _, name in default)
+    # The gateway's inputs alone, while it is off, render nothing either.
+    inputs = _splunk_values(splunk={"enabled": False})
+    assert _splunk_render(owui_chart, inputs).stdout == _splunk_render(owui_chart, json.loads(json.dumps({**OWUI_ON, "models": inputs["models"], "gateway": inputs["gateway"]}))).stdout
+
+
+def test_splunk_gateway_enabled_adds_its_objects_and_only_touches_open_webui(owui_chart):
+    on = _splunk(owui_chart)
+    off = run_new_template(merge_values(_splunk_values(splunk={"enabled": False}), {}), chart=owui_chart)
+    assert set(on) - set(off) == SPLUNK_KEYS
+    changed = {key for key, doc in off.items() if on[key] != doc}
+    assert changed == {("Deployment", "rag-openwebui"), ("NetworkPolicy", "rag-openwebui")}
+
+
+def test_splunk_gateway_workload_contract(owui_chart):
+    docs = _splunk(owui_chart)
+    dep = docs["Deployment", "rag-splunk-gateway"]
+    spec = dep["spec"]
+    assert spec["replicas"] == 1 and spec["strategy"] == {"type": "Recreate"}
+    pod = spec["template"]["spec"]
+    assert _hardening_violations(pod) == []
+    assert pod["automountServiceAccountToken"] is False
+    (c,) = pod["containers"]
+    assert c["image"] == docs["Deployment", "rag-agent"]["spec"]["template"]["spec"]["containers"][0]["image"]
+    assert c["command"] == ["python3", "-m", "mainframe_rag.gateways.splunk"]
+    assert c["securityContext"]["readOnlyRootFilesystem"] is True
+    assert c["resources"] == {"requests": {"cpu": "50m", "memory": "128Mi"},
+                              "limits": {"cpu": "500m", "memory": "512Mi"}}
+    for probe in ("readinessProbe", "livenessProbe", "startupProbe"):
+        assert c[probe]["httpGet"] == {"path": "/healthz", "port": "http"}
+    env = env_map(dep, "gateway")
+    assert env["GATEWAY_CONFIG_FILE"]["value"] == f"{SPLUNK_MOUNT}/config.json"
+    assert env["SPLUNK_AUTH_MODE"]["value"] == "bearer"
+    # Secret references only, never values.
+    assert env["SPLUNK_MCP_TOKEN"]["valueFrom"] == {"secretKeyRef": {"name": "splunk-gw", "key": "splunk-mcp-token"}}
+    assert env["SPLUNK_GATEWAY_BEARER_SECRET"]["valueFrom"] == {"secretKeyRef": {"name": "splunk-gw", "key": "bearer-secret"}}
+    assert "SPLUNK_GATEWAY_TOKEN_EXCHANGE_SECRET" not in env
+    assert {k for k, v in env.items() if "value" in v} == {"GATEWAY_CONFIG_FILE", "SPLUNK_AUTH_MODE"}
+    mounts = {m["name"]: m for m in c["volumeMounts"]}
+    assert mounts["config"] == {"name": "config", "mountPath": SPLUNK_MOUNT, "readOnly": True}
+    assert mounts["tmp"]["mountPath"] == "/tmp"
+    _assert_app_read_only_paths(pod, "gateway", {"/tmp"})
+    cm = docs["ConfigMap", "rag-splunk-gateway"]
+    # The site's files reach the pod byte for byte.
+    assert cm["data"] == {"config.json": _splunk_config(), "ca-bundle.crt": SPLUNK_CA}
+    assert json.loads(cm["data"]["config.json"])["backend"]["ca_file"] == f"{SPLUNK_MOUNT}/ca-bundle.crt"
+    svc = docs["Service", "rag-splunk-gateway"]["spec"]
+    assert svc["type"] == "ClusterIP" and svc["selector"] == {"app": "rag-splunk-gateway"}
+    assert [(p["port"], p["targetPort"]) for p in svc["ports"]] == [(8080, "http")]
+
+
+def test_splunk_gateway_config_change_rolls_the_pod(owui_chart):
+    a = _splunk(owui_chart)["Deployment", "rag-splunk-gateway"]
+    b = _splunk(owui_chart, splunk={"config": _splunk_config(timeout_s=40)})["Deployment", "rag-splunk-gateway"]
+    c = _splunk(owui_chart, splunk={"caBundle": SPLUNK_CA + SPLUNK_CA})["Deployment", "rag-splunk-gateway"]
+    sums = {d["spec"]["template"]["metadata"]["annotations"]["checksum/config"] for d in (a, b, c)}
+    assert len(sums) == 3
+
+
+def test_open_webui_registers_the_gateway_for_the_team_model_bearer(owui_chart):
+    """TD1/TD3/TD8 environment: one LiteLLM connection limited to the reasoning
+    model with Open WebUI's own key (ADR-0014 D6), the gateway as an MCP tool
+    server whose bearer key comes from the Secret through kubelet expansion,
+    granted to the team group by id, task model empty, tools off."""
+    docs = _splunk(owui_chart)
+    dep = docs["Deployment", "rag-openwebui"]
+    env = env_map(dep, "openwebui")
+    assert env["ENABLE_OPENAI_API"]["value"] == "true"
+    assert env["ENABLE_TOOL_SERVERS"]["value"] == "true"
+    assert env["ENABLE_TOOLS"]["value"] == "false"
+    assert env["ENABLE_OLLAMA_API"]["value"] == "false"
+    assert env["OPENAI_API_BASE_URLS"]["value"] == "https://litellm.example.invalid/v1"
+    assert env["OPENAI_API_KEYS"]["valueFrom"] == {"secretKeyRef": {"name": "gw-keys", "key": "openwebui-llm-api-key"}}
+    assert json.loads(env["OPENAI_API_CONFIGS"]["value"]) == {
+        "0": {"enable": True, "model_ids": ["reasoning-test"], "prefix_id": "team"}}
+    for name in ("TASK_MODEL", "TASK_MODEL_EXTERNAL"):
+        assert env[name]["value"] == ""
+    for name in ("ENABLE_TITLE_GENERATION", "ENABLE_TAGS_GENERATION", "ENABLE_FOLLOW_UP_GENERATION",
+                 "ENABLE_AUTOCOMPLETE_GENERATION", "ENABLE_SEARCH_QUERY_GENERATION",
+                 "ENABLE_RETRIEVAL_QUERY_GENERATION"):
+        assert env[name]["value"] == "false", name
+    assert env["MFR_SPLUNK_GATEWAY_KEY"]["valueFrom"] == {"secretKeyRef": {"name": "splunk-gw", "key": "bearer-secret"}}
+    order = [e["name"] for e in container_map(dep)["openwebui"]["env"]]
+    # Kubelet expands $(NAME) only for a variable defined earlier in the list.
+    assert order.index("MFR_SPLUNK_GATEWAY_KEY") < order.index("TOOL_SERVER_CONNECTIONS")
+    raw = env["TOOL_SERVER_CONNECTIONS"]["value"]
+    secret = "0123456789abcdef" * 4
+    (conn,) = json.loads(_expand_k8s_env(raw, {"MFR_SPLUNK_GATEWAY_KEY": secret}))
+    assert conn == {
+        "type": "mcp", "url": "http://rag-splunk-gateway:8080/mcp", "path": "",
+        "auth_type": "bearer", "key": secret,
+        "config": {"enable": True, "access_grants": [
+            {"principal_type": "group", "principal_id": SPLUNK_GROUP, "permission": "read"}]},
+        "info": {"id": "splunk", "name": "Splunk",
+                 "description": "Read-only Splunk searches from site templates (team gateway)"},
+    }
+    assert secret not in raw
+    # Only the Open WebUI container gets the credentials; the purge sidecar none.
+    purge = {e["name"] for e in container_map(dep)["chat-purge"].get("env", [])}
+    assert not purge & {"MFR_SPLUNK_GATEWAY_KEY", "OPENAI_API_KEYS", "TOOL_SERVER_CONNECTIONS"}
+
+
+def test_the_team_model_reads_open_webuis_own_key_even_with_a_shared_key(owui_chart):
+    """ADR-0010 TD3, maintainer decision on #1374: the shared key never reaches Open WebUI."""
+    docs = _splunk(owui_chart, gateway={"apiKeySecretName": "gw-keys", "apiKeySecretKey": "api-key"})
+    env = env_map(docs["Deployment", "rag-openwebui"], "openwebui")
+    assert env["OPENAI_API_KEYS"]["valueFrom"] == {"secretKeyRef": {"name": "gw-keys", "key": "openwebui-llm-api-key"}}
+    agent = env_map(docs["Deployment", "rag-agent"], "agent")
+    assert agent["LLM_API_KEY"]["valueFrom"]["secretKeyRef"] == {"name": "gw-keys", "key": "api-key"}
+
+
+@pytest.mark.parametrize(("shared", "own"), [
+    ("api-key", "api-key"),
+    ("", "llm-api-key"),
+    ("", "embed-api-key"),
+    ("", "rerank-api-key"),
+    ("", "context-llm-api-key"),
+])
+def test_the_team_model_key_cannot_name_the_shared_or_another_legs_key(owui_chart, shared, own):
+    values = _splunk_values(gateway={"apiKeySecretName": "gw-keys", "apiKeySecretKey": shared})
+    values["teamTools"]["model"]["apiKeySecretKey"] = own
+    r = _splunk_render(owui_chart, values)
+    assert r.returncode != 0
+    assert ("teamTools.model.apiKeySecretKey must name Open WebUI's own LiteLLM key (ADR-0010 TD3), not the shared "
+            "gateway.apiKeySecretKey or another model leg's key") in r.stderr
+
+
+def test_oidc_mode_forwards_the_user_token_and_reaches_the_idp(owui_chart):
+    docs = _splunk(owui_chart, mode="oidc")
+    owui = env_map(docs["Deployment", "rag-openwebui"], "openwebui")
+    (conn,) = json.loads(owui["TOOL_SERVER_CONNECTIONS"]["value"])
+    assert conn["auth_type"] == "system_oauth" and conn["key"] == ""
+    assert "MFR_SPLUNK_GATEWAY_KEY" not in owui
+    gw = env_map(docs["Deployment", "rag-splunk-gateway"], "gateway")
+    assert gw["SPLUNK_AUTH_MODE"]["value"] == "oidc"
+    assert "SPLUNK_GATEWAY_BEARER_SECRET" not in gw
+    assert gw["SPLUNK_GATEWAY_TOKEN_EXCHANGE_SECRET"]["valueFrom"] == {"secretKeyRef": {
+        "name": "splunk-gw", "key": "token-exchange-client-secret", "optional": True}}
+    policy = docs["NetworkPolicy", "rag-splunk-gateway"]
+    assert _owui_egress_allows(policy, "ns", {}, "192.0.2.70", "TCP", 443)
+    bearer = _splunk(owui_chart)["NetworkPolicy", "rag-splunk-gateway"]
+    assert not _owui_egress_allows(bearer, "ns", {}, "192.0.2.70", "TCP", 443)
+
+
+def test_tool_server_without_a_group_is_admin_only(owui_chart):
+    values = _splunk_values()
+    values["teamTools"]["groupId"] = ""
+    docs = run_new_template(values, chart=owui_chart)
+    env = env_map(docs["Deployment", "rag-openwebui"], "openwebui")
+    (conn,) = json.loads(env["TOOL_SERVER_CONNECTIONS"]["value"])
+    assert conn["config"] == {"enable": True, "access_grants": []}
+
+
+def test_splunk_gateway_policies_admit_open_webui_only_and_reach_splunk_only(owui_chart):
+    docs = _splunk(owui_chart)
+    gw = docs["NetworkPolicy", "rag-splunk-gateway"]
+    assert gw["spec"]["podSelector"] == {"matchLabels": {"app": "rag-splunk-gateway"}}
+    assert set(gw["spec"]["policyTypes"]) == {"Ingress", "Egress"}
+    assert policy_allows(gw, "ns", {}, 8080, {"app": "rag-openwebui"})
+    for labels in ({"app": "rag-agent"}, {"app": "rag-feedback"}, {}):
+        assert not policy_allows(gw, "ns", {}, 8080, labels)
+    assert not policy_allows(gw, "other", {"kubernetes.io/metadata.name": "other"}, 8080, {"app": "rag-openwebui"})
+    assert _owui_egress_allows(gw, "ns", {}, "203.0.113.10", "TCP", 8089)
+    assert not _owui_egress_allows(gw, "ns", {}, "203.0.113.11", "TCP", 8089)
+    assert not _owui_egress_allows(gw, "ns", {}, "203.0.113.10", "TCP", 443)
+    assert not _owui_egress_allows(gw, "ns", {}, "198.51.100.1", "TCP", 4443)
+    owui = docs["NetworkPolicy", "rag-openwebui"]
+    assert _owui_egress_allows(owui, "ns", {"app": "rag-splunk-gateway"}, "10.0.0.9", "TCP", 8080)
+    assert _owui_egress_allows(owui, "ns", {}, "198.51.100.1", "TCP", 4443)
+    assert not _owui_egress_allows(owui, "ns", {}, "203.0.113.10", "TCP", 8089)
+    # Rendered whatever networkPolicy.enabled says: it is the gateway's ingress control.
+    off = _splunk(owui_chart, networkPolicy={"enabled": False, "allowedNamespaces": []})
+    assert ("NetworkPolicy", "rag-splunk-gateway") in off
+
+
+SPLUNK_REQUIRED = [
+    ("teamTools.splunk.secretName", lambda v: v["teamTools"]["splunk"].update(secretName="")),
+    ("teamTools.splunk.config", lambda v: v["teamTools"]["splunk"].update(config="")),
+    ("teamTools.splunk.caBundle", lambda v: v["teamTools"]["splunk"].update(caBundle="")),
+    ("teamTools.splunk.splunkEgress.cidrs", lambda v: v["teamTools"]["splunk"]["splunkEgress"].update(cidrs=[])),
+    ("teamTools.model.egress.cidrs", lambda v: v["teamTools"]["model"]["egress"].update(cidrs=[])),
+    # The schema requires both reasoning fields or neither, so both go together.
+    ("models.reasoning.baseUrl, models.reasoning.model",
+     lambda v: v["models"]["reasoning"].update(baseUrl="", model="")),
+    ("gateway.apiKeySecretName", lambda v: v["gateway"].update(apiKeySecretName="")),
+]
+
+
+@pytest.mark.parametrize("key,mutate", SPLUNK_REQUIRED, ids=[k for k, _ in SPLUNK_REQUIRED])
+def test_splunk_gateway_refuses_missing_inputs_naming_the_key(owui_chart, key, mutate):
+    values = _splunk_values()
+    mutate(values)
+    r = _splunk_render(owui_chart, values)
+    assert r.returncode != 0
+    assert f"required inputs are missing: {key}. Set them, or leave the gateway off" in r.stderr
+    for leaked in ("U1BMVU5LLVRFU1QtQ0E", "splunk.example.test", "app_test", "litellm.example.invalid"):
+        assert leaked not in r.stderr
+
+
+@pytest.mark.parametrize("path,key", [
+    ("teamTools.splunk.splunkEgress.port", "teamTools.splunk.splunkEgress.port"),
+    ("teamTools.model.egress.port", "teamTools.model.egress.port"),
+    ("teamTools.model.apiKeySecretKey", "teamTools.model.apiKeySecretKey"),
+])
+def test_splunk_gateway_refuses_null_ports_and_key_names(owui_chart, path, key):
+    """A null port would open the egress rule to every TCP port."""
+    r = _splunk_render(owui_chart, set_path(_splunk_values(), path, None))
+    assert r.returncode != 0
+    assert "Team-tool settings must not be empty or null" in r.stderr and key in r.stderr
+
+
+def test_splunk_gateway_dns_egress_reaches_cluster_dns_only(owui_chart):
+    gw = _splunk(owui_chart)["NetworkPolicy", "rag-splunk-gateway"]
+    for ns in ("openshift-dns", "kube-system"):
+        assert _owui_egress_allows(gw, ns, {}, "10.0.0.10", "UDP", 53)
+    assert not _owui_egress_allows(gw, "ns", {}, "10.0.0.10", "UDP", 53)
+    assert not _owui_egress_allows(gw, "other", {}, "10.0.0.10", "UDP", 53)
+    assert not _owui_egress_allows(gw, "openshift-dns", {}, "10.0.0.10", "TCP", 8089)
+
+
+def test_open_webui_trusts_the_site_ca_bundle_to_reach_litellm(owui_chart):
+    values = _splunk_values()
+    values["gateway"]["caConfigMapName"] = "site-ca"
+    docs = run_new_template(values, chart=owui_chart)
+    dep = docs["Deployment", "rag-openwebui"]
+    env = env_map(dep, "openwebui")
+    assert env["SSL_CERT_FILE"]["value"] == env["REQUESTS_CA_BUNDLE"]["value"] == "/etc/gateway-ca/ca-bundle.crt"
+    mounts = {m["name"]: m for m in container_map(dep)["openwebui"]["volumeMounts"]}
+    assert mounts["gateway-ca"] == {"name": "gateway-ca", "mountPath": "/etc/gateway-ca", "readOnly": True}
+    vols = {v["name"]: v for v in dep["spec"]["template"]["spec"]["volumes"]}
+    assert vols["gateway-ca"]["configMap"] == {"name": "site-ca", "items": [{"key": "ca-bundle.crt", "path": "ca-bundle.crt"}]}
+    # Off: the docs front end never mounts the gateway CA (unchanged).
+    off = _splunk_values(splunk={"enabled": False})
+    off["gateway"]["caConfigMapName"] = "site-ca"
+    owui = run_new_template(off, chart=owui_chart)["Deployment", "rag-openwebui"]
+    assert "SSL_CERT_FILE" not in env_map(owui, "openwebui")
+    # With the IdP CA too, the render refuses (one trust file per container).
+    values["openwebui"]["oidc"] = {**values["openwebui"]["oidc"], "caBundle": FAKE_CA}
+    r = _splunk_render(owui_chart, values)
+    assert r.returncode != 0 and "put the IdP CA into it and leave openwebui.oidc.caBundle unset" in r.stderr
+
+
+def test_splunk_gateway_oidc_needs_the_idp_egress(owui_chart):
+    values = _splunk_values("oidc")
+    values["teamTools"]["splunk"]["idpEgress"]["cidrs"] = []
+    r = _splunk_render(owui_chart, values)
+    assert r.returncode != 0 and "missing: teamTools.splunk.idpEgress.cidrs" in r.stderr
+
+
+def test_splunk_gateway_needs_open_webui(owui_chart):
+    values = _splunk_values()
+    values["openwebui"] = {"enabled": False}
+    r = _splunk_render(owui_chart, values)
+    assert r.returncode != 0
+    assert "teamTools.splunk.enabled=true requires openwebui.enabled=true" in r.stderr
+
+
+SPLUNK_REFUSED = [
+    ("not-json", {"config": "{not json"}, "teamTools.splunk.config must be one JSON object"),
+    ("a-list", {"config": "[]"}, "teamTools.splunk.config must be one JSON object"),
+    ("other-gateway", {"config": _splunk_config().replace('"splunk"', '"gitlab"', 1)}, "key gateway must be"),
+    ("ca-elsewhere", {"config": _splunk_config(ca_file="/etc/pki/site-ca/ca.pem")}, "backend.ca_file must be /etc/mainframe-rag/splunk-gateway/ca-bundle.crt"),
+    ("ca-not-pem", {"caBundle": "-----BEGIN PRIVATE KEY-----\nU1BMVU5L\n-----END PRIVATE KEY-----\n"}, "caBundle must hold only PEM certificates"),
+]
+
+
+@pytest.mark.parametrize("patch,want", [(p, w) for _, p, w in SPLUNK_REFUSED], ids=[i for i, _, _ in SPLUNK_REFUSED])
+def test_splunk_gateway_refuses_inputs_that_do_not_fit_the_render(owui_chart, patch, want):
+    r = _splunk_render(owui_chart, _splunk_values(splunk=patch))
+    assert r.returncode != 0 and want in r.stderr
+    assert "U1BMVU5L" not in r.stderr and "app_test" not in r.stderr
+
+
+def test_the_shipped_example_configuration_fits_the_chart(owui_chart):
+    """deploy/gateways/splunk-gateway.example.json (the site's starting point,
+    loaded by the gateway in tests/test_gateway_splunk.py) passes the chart's
+    checks unchanged and reaches the ConfigMap byte for byte."""
+    text = (REPO / "deploy" / "gateways" / "splunk-gateway.example.json").read_text(encoding="utf-8")
+    docs = _splunk(owui_chart, "oidc", {"config": text})
+    assert docs["ConfigMap", "rag-splunk-gateway"]["data"]["config.json"] == text
+
+
+def test_splunk_gateway_oidc_config_needs_auth_and_the_fixed_exchange_variable(owui_chart):
+    r = _splunk_render(owui_chart, _splunk_values("oidc", {"config": _splunk_config("bearer")}))
+    assert r.returncode != 0 and "key auth is required in oidc mode" in r.stderr
+    cfg = json.loads(_splunk_config("oidc"))
+    cfg["token_exchange"] = {"token_endpoint": "https://idp.example.test/token", "client_id": "c",
+                             "client_secret_env": "OTHER_ENV", "audience": "urn:team-tools:splunk"}
+    r = _splunk_render(owui_chart, _splunk_values("oidc", {"config": json.dumps(cfg)}))
+    assert r.returncode != 0 and "client_secret_env must be SPLUNK_GATEWAY_TOKEN_EXCHANGE_SECRET" in r.stderr
+    cfg["token_exchange"]["client_secret_env"] = "SPLUNK_GATEWAY_TOKEN_EXCHANGE_SECRET"
+    assert _splunk_render(owui_chart, _splunk_values("oidc", {"config": json.dumps(cfg)})).returncode == 0
+
+
+@pytest.mark.parametrize("path,bad", [
+    ("teamTools.splunk.authMode", "basic"),
+    ("teamTools.groupId", "team-example"),
+    ("teamTools.splunk.splunkEgress.port", 0),
+    ("teamTools.splunk.splunkEgress.cidrs", ["splunk.example.test"]),
+    ("teamTools.splunk.secretName", "Bad_Name"),
+])
+def test_splunk_gateway_schema_refuses_invalid_values(owui_chart, path, bad):
+    values = set_path(_splunk_values(), path, bad)
+    r = _splunk_render(owui_chart, values)
+    assert r.returncode != 0

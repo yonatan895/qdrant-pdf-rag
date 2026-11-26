@@ -112,7 +112,7 @@ OPERATOR_BOOL_KEYS = (
     "INGEST_REINGEST", "INGEST_AUTHORIZE_FROM_CATALOG", "CHAT_CONDENSE_ENABLED", "LLM_STREAM", "AGENT_NETWORK_POLICY",
     "FEEDBACK_ENABLED", "OPENWEBUI_ENABLED", "CHAT_FOLLOWUP_ANCHOR_ENABLED", "ANSWER_CODING_MODE_ENABLED",
     "ANSWER_SPL_MODE_ENABLED", "OPENWEBUI_RATINGS_ENABLED", "CHAT_IMAGES_ENABLED",
-    "ANSWER_SELECT_ENABLED", "ANSWER_EXPAND_ENABLED",
+    "ANSWER_SELECT_ENABLED", "ANSWER_EXPAND_ENABLED", "SPLUNK_GATEWAY_ENABLED",
 )
 
 # Agent ingress NetworkPolicy (issue #373): default ON; the allow-list names
@@ -428,6 +428,160 @@ def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
     }
 
 
+# Team tools (#1077 part 2, ADR-0015): the Splunk gateway behind Open WebUI,
+# default OFF. One validation owner for validate.sh (model_config main),
+# airgap:config check and map_values.py, like openwebui_config. The chart
+# mounts the site's gateway configuration and Splunk CA from one ConfigMap at
+# a fixed path, so the configuration must name that path; the gateway's own
+# start-up checks (timeout ordering, auth in oidc mode, the token-exchange
+# variable) are repeated here so a refusal stops before any cluster change
+# instead of as a crash-looping pod. Diagnostics name keys, never values.
+SPLUNK_GATEWAY_CA_PATH = "/etc/mainframe-rag/splunk-gateway/ca-bundle.crt"
+SPLUNK_TOKEN_EXCHANGE_SECRET_ENV = "SPLUNK_GATEWAY_TOKEN_EXCHANGE_SECRET"
+SPLUNK_AUTH_MODES = ("oidc", "bearer")
+# Gateway defaults (mainframe_rag.gateways.splunk: SplunkBackend.timeout_s and
+# LIMIT_DEFAULTS["tool_timeout_s"]); the bastion cannot import them.
+SPLUNK_BACKEND_TIMEOUT_DEFAULT = 50
+SPLUNK_TOOL_TIMEOUT_DEFAULT = 60
+_GROUP_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def _cidr_list(key: str, raw: str) -> list[str]:
+    cidrs = [part.strip() for part in raw.split(",") if part.strip()]
+    for cidr in cidrs:
+        if _CIDR.fullmatch(cidr) is None or any(int(o) > 255 for o in cidr.split("/")[0].split(".")):
+            raise ValueError(f"{key} must be comma-separated IPv4 CIDRs")
+    if len(set(cidrs)) != len(cidrs):
+        raise ValueError(f"{key} must not repeat a CIDR")
+    return cidrs
+
+
+def _tcp_port(key: str, raw: str, default: int) -> int:
+    raw = raw or str(default)
+    if re.fullmatch(r"[0-9]{1,5}", raw) is None or not 1 <= int(raw) <= 65535:
+        raise ValueError(f"{key} must be a TCP port from 1 to 65535")
+    return int(raw)
+
+
+def _site_text(key: str, path: str) -> str:
+    """A site file's exact text (bytes decoded as UTF-8; line endings kept)."""
+    try:
+        with open(path, "rb") as handle:
+            text = handle.read().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        raise ValueError(f"{key} is unreadable (a UTF-8 text file is required)") from None
+    if not text.strip():
+        raise ValueError(f"{key} is blank")
+    return text
+
+
+def _positive_number(value: object) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value > 0)
+
+
+def _splunk_gateway_config(text: str, mode: str) -> None:
+    """The deploy-relevant rules of the site's gateway configuration."""
+    key = "SPLUNK_GATEWAY_CONFIG_FILE"
+    try:
+        doc = json.loads(text, object_pairs_hook=_unique_json_object, parse_constant=_reject_json_constant)
+    except (ValueError, RecursionError):
+        raise ValueError(f"{key} must hold one JSON object with unique, nonempty keys") from None
+    if not isinstance(doc, dict):
+        raise ValueError(f"{key} must hold one JSON object with unique, nonempty keys")
+    if doc.get("gateway") != "splunk":
+        raise ValueError(f'{key} must set "gateway" to "splunk"')
+    backend = doc.get("backend")
+    if not isinstance(backend, dict) or backend.get("ca_file") != SPLUNK_GATEWAY_CA_PATH:
+        raise ValueError(f"{key} backend.ca_file must be {SPLUNK_GATEWAY_CA_PATH} "
+                         "(where the chart mounts SPLUNK_GATEWAY_CA_FILE)")
+    limits = doc.get("limits")
+    limits = {} if limits is None else limits
+    if not isinstance(limits, dict):
+        raise ValueError(f"{key} limits must be an object")
+    tool_timeout = limits.get("tool_timeout_s", SPLUNK_TOOL_TIMEOUT_DEFAULT)
+    if not _positive_number(tool_timeout):
+        raise ValueError(f"{key} limits.tool_timeout_s must be a positive number")
+    timeout = backend.get("timeout_s", SPLUNK_BACKEND_TIMEOUT_DEFAULT)
+    if not _positive_number(timeout) or not timeout < 60 or not timeout < tool_timeout:
+        raise ValueError(f"{key} backend.timeout_s must be above 0, below 60 and below "
+                         f"limits.tool_timeout_s (defaults {SPLUNK_BACKEND_TIMEOUT_DEFAULT} "
+                         f"and {SPLUNK_TOOL_TIMEOUT_DEFAULT})")
+    if mode == "oidc" and not isinstance(doc.get("auth"), dict):
+        raise ValueError(f'{key} must have an "auth" object in oidc mode (SPLUNK_GATEWAY_AUTH_MODE)')
+    exchange = doc.get("token_exchange")
+    if exchange is not None and (not isinstance(exchange, dict)
+                                 or exchange.get("client_secret_env") != SPLUNK_TOKEN_EXCHANGE_SECRET_ENV):
+        raise ValueError(f"{key} token_exchange.client_secret_env must be {SPLUNK_TOKEN_EXCHANGE_SECRET_ENV} "
+                         "(the only variable the chart sets, from Secret key token-exchange-client-secret)")
+
+
+def team_tools_config(values: Mapping[str, str]) -> dict[str, object] | None:
+    """The chart's `teamTools` values, or None while the Splunk gateway is off.
+
+    Shapes are checked whenever a key is set (a typo must not wait for the day
+    the gateway is enabled); required keys and the site files only when it is
+    enabled. Off writes nothing, so an existing deployment renders what it did."""
+    enabled = parse_strict_bool("SPLUNK_GATEWAY_ENABLED", values.get("SPLUNK_GATEWAY_ENABLED", ""), False)
+    group = values.get("TEAM_TOOLS_GROUP_ID", "")
+    if group and _GROUP_ID.fullmatch(group) is None:
+        raise ValueError("TEAM_TOOLS_GROUP_ID must be an Open WebUI group id (a lowercase UUID)")
+    mode = values.get("SPLUNK_GATEWAY_AUTH_MODE", "") or "oidc"
+    if mode not in SPLUNK_AUTH_MODES:
+        raise ValueError("SPLUNK_GATEWAY_AUTH_MODE must be oidc or bearer")
+    secret = values.get("SPLUNK_GATEWAY_SECRET", "")
+    if secret and (len(secret) > 253 or _DNS_SUBDOMAIN.fullmatch(secret) is None):
+        raise ValueError("SPLUNK_GATEWAY_SECRET must be a DNS-subdomain Secret name")
+    model_cidrs = _cidr_list("TEAM_MODEL_EGRESS_CIDRS", values.get("TEAM_MODEL_EGRESS_CIDRS", ""))
+    model_port = _tcp_port("TEAM_MODEL_EGRESS_PORT", values.get("TEAM_MODEL_EGRESS_PORT", ""), 443)
+    splunk_cidrs = _cidr_list("SPLUNK_EGRESS_CIDRS", values.get("SPLUNK_EGRESS_CIDRS", ""))
+    splunk_port = _tcp_port("SPLUNK_EGRESS_PORT", values.get("SPLUNK_EGRESS_PORT", ""), 8089)
+    idp_cidrs = _cidr_list("SPLUNK_GATEWAY_IDP_EGRESS_CIDRS", values.get("SPLUNK_GATEWAY_IDP_EGRESS_CIDRS", ""))
+    idp_port = _tcp_port("SPLUNK_GATEWAY_IDP_EGRESS_PORT", values.get("SPLUNK_GATEWAY_IDP_EGRESS_PORT", ""), 443)
+    resources = _chart_resources(values, "SPLUNK_GATEWAY")
+    if not enabled:
+        return None
+    if not parse_strict_bool("OPENWEBUI_ENABLED", values.get("OPENWEBUI_ENABLED", ""), True):
+        raise ValueError("SPLUNK_GATEWAY_ENABLED=true requires OPENWEBUI_ENABLED=true: team tools are "
+                         "reached only through Open WebUI")
+    config_file = values.get("SPLUNK_GATEWAY_CONFIG_FILE", "")
+    ca_file = values.get("SPLUNK_GATEWAY_CA_FILE", "")
+    required: dict[str, object] = {
+        "SPLUNK_GATEWAY_SECRET": secret, "SPLUNK_GATEWAY_CONFIG_FILE": config_file,
+        "SPLUNK_GATEWAY_CA_FILE": ca_file, "SPLUNK_EGRESS_CIDRS": splunk_cidrs,
+        "TEAM_MODEL_EGRESS_CIDRS": model_cidrs,
+        "LLM_MODEL_REASONING": values.get("LLM_MODEL_REASONING", ""),
+        "LLM_BASE_URL (or GATEWAY_BASE_URL)": values.get("LLM_BASE_URL", "") or values.get("GATEWAY_BASE_URL", ""),
+        "GATEWAY_API_KEY_SECRET": values.get("GATEWAY_API_KEY_SECRET", ""),
+    }
+    if mode == "oidc":
+        required["SPLUNK_GATEWAY_IDP_EGRESS_CIDRS"] = idp_cidrs
+    missing = [key for key, value in required.items() if not value]
+    if missing:
+        raise ValueError(f"SPLUNK_GATEWAY_ENABLED=true ({mode} mode) but required inputs are missing: "
+                         f"{', '.join(missing)}. Set them, or keep SPLUNK_GATEWAY_ENABLED=false")
+    config = _site_text("SPLUNK_GATEWAY_CONFIG_FILE", config_file)
+    _splunk_gateway_config(config, mode)
+    ca_bundle = _site_text("SPLUNK_GATEWAY_CA_FILE", ca_file)
+    if not pem_certificates(ca_bundle):
+        raise ValueError("SPLUNK_GATEWAY_CA_FILE must hold only PEM certificates that load "
+                         "(-----BEGIN CERTIFICATE----- blocks, no key or other text)")
+    return {
+        "groupId": group,
+        "model": {"egress": {"cidrs": model_cidrs, "port": model_port}},
+        "splunk": {
+            "enabled": True,
+            "authMode": mode,
+            "secretName": secret,
+            "config": config,
+            "caBundle": ca_bundle,
+            "splunkEgress": {"cidrs": splunk_cidrs, "port": splunk_port},
+            "idpEgress": {"cidrs": idp_cidrs, "port": idp_port},
+            "resources": resources,
+        },
+    }
+
+
 def validate_operator_booleans(values: Mapping[str, str]) -> None:
     require_no_retired_keys(values)
     for name in OPERATOR_BOOL_KEYS:
@@ -442,6 +596,22 @@ def require_one_follow_up_mode(values: Mapping[str, str]) -> None:
     if (parse_strict_bool("CHAT_CONDENSE_ENABLED", values.get("CHAT_CONDENSE_ENABLED", ""), False)
             and parse_strict_bool(FOLLOWUP_ANCHOR_KEY, values.get(FOLLOWUP_ANCHOR_KEY, ""), False)):
         raise ValueError(CHAT_FOLLOWUP_MODES_CONFLICT)
+
+
+def yaml_json_string(text: str) -> str:
+    """`text` as a JSON double-quoted string that YAML reads back byte-exact:
+    ASCII only, each surrogate-pair escape in YAML's 8-digit form (the chart's
+    YAML reader refuses JSON's pairs, as JsonObject.flow notes) and DEL
+    escaped (YAML does not accept it raw). Identical to json.dumps otherwise."""
+
+    def pair(match: re.Match[str]) -> str:
+        if match.group(1) is None:
+            return match.group(0)  # an escaped backslash, kept as is
+        high, low = int(match.group(1), 16), int(match.group(2), 16)
+        return f"\\U{0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00):08X}"
+
+    quoted = re.sub(r"\\\\|\\u(d[89ab][0-9a-f]{2})\\u(d[c-f][0-9a-f]{2})", pair, json.dumps(text, ensure_ascii=True))
+    return quoted.replace("\x7f", "\\u007f")
 
 
 class JsonObject(dict):
@@ -639,6 +809,9 @@ SIZING_DEFAULTS = {
     "QDRANT": {"requests": {"cpu": "4", "memory": "16Gi"}, "limits": {"cpu": "8", "memory": "32Gi"}},
     "INGEST": {"requests": {"cpu": "4", "memory": "8Gi"}, "limits": {"cpu": "16", "memory": "32Gi"}},
     "AGENT": {"requests": {"cpu": "250m", "memory": "512Mi"}, "limits": {"cpu": "2", "memory": "2Gi"}},
+    # The Splunk gateway container (#1077, teamTools.splunk.resources): same
+    # rules, applied by team_tools_config only while the gateway is enabled.
+    "SPLUNK_GATEWAY": {"requests": {"cpu": "50m", "memory": "128Mi"}, "limits": {"cpu": "500m", "memory": "512Mi"}},
 }
 SIZING_PREFIXES = ("QDRANT", "INGEST", "AGENT")
 QDRANT_VOLUME_KEYS = {"QDRANT_DATA_SIZE": "persistence.size", "QDRANT_SNAPSHOT_SIZE": "snapshotPersistence.size"}
@@ -751,6 +924,7 @@ def main(argv: list[str] | None = None) -> int:
         network_policy(os.environ)
         feedback_config(os.environ)
         openwebui_config(os.environ)
+        team_tools_config(os.environ)
         validate_model_config(os.environ)
         qdrant_sizing(os.environ)
         ingest_resources(os.environ)

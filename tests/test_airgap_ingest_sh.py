@@ -985,3 +985,14 @@ def test_the_next_ingest_from_a_promoted_gap_workspace_needs_its_identity(ingest
     assert again.returncode == 0, again.stderr
     assert "(recorded at promotion in dist/gap-promotion.txt)" in again.stdout
     assert (tmp_path / "dist" / "ingest-rendered.yaml").exists()
+
+
+def test_ingest_render_opts_out_of_the_splunk_gateway(ingest_tree):
+    """#1077: the gateway needs Open WebUI, which the Job render switches off;
+    the render switches the gateway off too, so an enabled deployment can still
+    ingest (no gateway input is read and nothing of it is rendered)."""
+    r = _run_ingest(ingest_tree, ("SPLUNK_GATEWAY_ENABLED", "true"), ("SPLUNK_GATEWAY_SECRET", "splunk-gw"))
+    assert r.returncode == 0, r.stderr
+    dist = ingest_tree[0] / "dist"
+    assert "teamTools" not in (dist / "mainframe-rag-ingest-values.yaml").read_text()
+    assert "rag-splunk-gateway" not in (dist / "ingest-rendered.yaml").read_text()
