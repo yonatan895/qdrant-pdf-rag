@@ -22,7 +22,6 @@ Invoked by deploy.sh/ingest.sh and the identical dry-run/CI rendering paths.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import sys
@@ -46,7 +45,9 @@ try:
         require_in_place_retired,
         require_no_retired_keys,
         require_one_follow_up_mode,
+        team_tools_config,
         validate_model_config,
+        yaml_json_string,
     )
 except ModuleNotFoundError:
     # Run as a file (python3 -I): the sibling, searched after the standard library.
@@ -67,7 +68,9 @@ except ModuleNotFoundError:
         require_in_place_retired,
         require_no_retired_keys,
         require_one_follow_up_mode,
+        team_tools_config,
         validate_model_config,
+        yaml_json_string,
     )
 
 DEFAULT_OUT = "dist/mainframe-rag-release-values.yaml"
@@ -216,7 +219,7 @@ def emit_scalar(val) -> str:
         return "true" if val else "false"
     if isinstance(val, int):
         return str(val)
-    return json.dumps(val, ensure_ascii=True)
+    return yaml_json_string(val)
 
 
 def build_values(deploy_only: bool = False) -> dict:
@@ -295,6 +298,15 @@ def build_values(deploy_only: bool = False) -> dict:
                 "(-----BEGIN CERTIFICATE----- blocks, no key or other text)")
     if openwebui and idp_ca:
         typing.cast(dict, openwebui["oidc"])["caBundle"] = idp_ca
+
+    # Issue #1077 (ADR-0015): team tools, the Splunk gateway, default off.
+    # Validated by its one owner, which also reads the site's gateway config
+    # and Splunk CA files; nothing is emitted while it is off, so a deployment
+    # that never sets SPLUNK_GATEWAY_ENABLED renders exactly what it did.
+    try:
+        team_tools = team_tools_config(os.environ)
+    except ValueError as exc:
+        die(str(exc))
 
     agent_route = env("AGENT_ROUTE") == "true"
     route_ca = ""
@@ -513,6 +525,7 @@ def build_values(deploy_only: bool = False) -> dict:
         **({"feedback": feedback} if feedback else {}),
         # Default on in the chart: an explicit opt-out must reach the render.
         "openwebui": openwebui if openwebui else {"enabled": False},
+        **({"teamTools": team_tools} if team_tools else {}),
         "route": {
             "enabled": agent_route,
             "timeoutSeconds": 300,

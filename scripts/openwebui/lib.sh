@@ -164,11 +164,17 @@ render_chart() {  # render_chart OUTDIR VALUES_TEMPLATE
         -e "s#@OIDC_PROVIDER_URL@#$DEX_ISSUER/.well-known/openid-configuration#" \
         "$HERE/values.yaml" > "$out/values.yaml"
     set --
-    for t in deployment networkpolicy pipe-configmap proxy-configmap service pvc idp-ca-configmap; do
+    for t in deployment networkpolicy pipe-configmap proxy-configmap service pvc; do
         set -- "$@" --show-only "templates/openwebui-$t.yaml"
     done
-    "$HELM" template rag "$chart" --namespace "$APP_NS" -f "$out/values.yaml" \
-        --set-file openwebui.oidc.caBundle="$STATE/pki/ca.crt" "$@" > "$out/kustomize/chart.yaml"
+    if [ -n "${TEAM_VALUES:-}" ]; then
+        # Team-tools phase (#1077): the gateway objects too, and the IdP CA inside the
+        # complete bundle gateway.caConfigMapName names (decision 5 on #1374), as at a site.
+        set -- "$@" --show-only templates/team-gateways.yaml -f "$TEAM_VALUES"
+    else
+        set -- "$@" --show-only templates/openwebui-idp-ca-configmap.yaml --set-file openwebui.oidc.caBundle="$STATE/pki/ca.crt"
+    fi
+    "$HELM" template rag "$chart" --namespace "$APP_NS" -f "$out/values.yaml" "$@" > "$out/kustomize/chart.yaml"
     uid=$(uid_for openwebui)
     {
         cat <<EOF

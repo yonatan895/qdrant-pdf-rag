@@ -1,0 +1,16 @@
+{
+  "gateway": "splunk",
+  "auth": {
+    "allowed_groups": [
+      "splunk-users"
+    ]
+  },
+  "backend": {
+    "base_url": "https://splunk.example.invalid:8089",
+    "ca_file": "/etc/mainframe-rag/splunk-gateway/ca-bundle.crt",
+    "allowed_indexes": [
+      "main"
+    ],
+    "templates": []
+  }
+}

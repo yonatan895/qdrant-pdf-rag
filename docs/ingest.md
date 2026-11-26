@@ -698,7 +698,10 @@ thread pool.
    collections re-ingest, never skip. Inventory `upserted`/`skipped` lines
    carry the generation binding (`generation_id`, `chunk_ids_digest`,
    `content_digest`) and `source_rev`; lines without them never skip on their
-   own and re-verify in Qdrant.
+   own and re-verify in Qdrant. A cloned publication staging adds a third
+   outcome, **carry** (issue #1372; see the alias-publication item below):
+   the document is neither parsed nor embedded, and its marker is copied
+   to the staging only after the cloned points verify.
   Extraction rules version (`rules_v`) is a 16-hex SHA-256 over the 8 payload-producing
   modules (`regexes.py`, `ingest/ibm_pdf.py`, `ingest/chrome.py`, `ingest/chunk.py`,
   `ingest/classify.py`, `ingest/walk.py` (source labels), `ingest/identity.py`
@@ -761,7 +764,8 @@ thread pool.
   checkpoints: the staging contract must exactly match the requested contract,
   and each skip verifies a revision-scoped completion targeting that staging,
   its exact manifest digest, and the actual stored point count/ID/content
-  digests. Inventory alone and inherited live completions never qualify.
+  digests. Inventory alone, inherited live completions and carried markers
+  (`carried_from` set, issue #1372) never qualify as forced checkpoints.
   Incomplete, missing or corrupt checkpoints are reprocessed. Recovery is at
   document granularity; a document interrupted before its durable checkpoint
   may be replayed. Full-corpus commit and alias-swap verification still run.
@@ -838,7 +842,8 @@ thread pool.
   markers bound to this collection, or to the live generation the staging
   was cloned from, verifies against the stored points (issue #1004). A marker
   bound to any other collection never certifies (#1039). The staging clone
-  carries live's markers, so a
+  carries live's markers (a carry, issue #1372, replaces only the walked
+  revision's own markers), so a
   published sibling that this walk no longer ingests (for example, a
   byte-identical copy elsewhere won the duplicate election) stays in staging
   and the residue audit refuses cutover until an explicit `--retire-doc`
@@ -901,10 +906,50 @@ thread pool.
   collections created with the selected policy and verified by exact id
   set; no node-local snapshot, so distributed generations copy
   shard-complete, issue #360); a
-  marker certifies its own `target_collection`, so the walked corpus
-  re-embeds into the new generation rather than skipping across physicals
-  — the clone preserves the old physical during ordinary distinct-staging
-  preparation; it does not prove full coverage or incremental re-embedding. The manifest is
+  marker certifies its own `target_collection`, and an inherited marker
+  never certifies a skip. **Carry (issue #1372; default on, no setting;
+  maintainer decision 2026-11-25):** an unchanged walked document is carried into
+  the cloned staging instead of re-parsed and re-embedded when every
+  condition holds. Run level, decided once under the publish lock: no
+  attempt of this sidecar-bound build ran `--reingest` (the sidecar's sticky
+  `forced` flag; a sidecar without it reads as forced; a forced attempt
+  first removes the markers an earlier attempt carried, logging
+  `action: carry_revoked`); a live generation
+  exists and the staging is cloned, reused or repaired; the staging's data
+  collection still equals live's sealed content, vectors included
+  (`publish.clone_matches_live_seal`, one full scan with vectors; a live
+  build without a content seal never carries); and the staging contract,
+  read before the build opens, is exactly this run's contract and committed
+  (record-only drift such as a query-prefix change carries nothing).
+  Per document: the inventory skip candidate has no staging-bound marker;
+  exactly one live-bound marker exists for its revision and this run's
+  generation id; that marker equals the record this run would write in
+  every field except target, timestamp and `carried_from` (embed mode,
+  model, dimension and manifest digest included); the inventory binding
+  (generation id and both digests) equals the marker's; and the cloned points
+  verify against it in the staging (count, ids, text digests). The planner
+  stays read-only; after the contract opens (it must still be current) and
+  before any worker starts, each carried document gets a staging-bound marker
+  with the ancestor's count and digests and `carried_from` naming live, then
+  its revision's other markers in the staging controls are removed by id.
+  No inventory record is appended. The run logs `action: carry` per
+  document (path, sha256, ancestor), `carried` in the `start` and `done`
+  lines, and `action: carry, result: disabled` with a reason when a run-level
+  condition fails. Coverage, catalog, seal and swap gates are unchanged.
+  What carry inherits: vectors and non-text payload of carried documents
+  come from live; the seal guard proves they equal what live's publication
+  sealed. A points-API clone reads vectors back bit-identical on the pinned
+  Qdrant (sim lane `test_points_api_clone_reads_vectors_back_bit_identical`,
+  dimensions 32/1024/4096); that is proven for the pin and CPU it ran on, so
+  a different server or host that re-normalises differently disables carry
+  (every document re-embeds) rather than inheriting unequal vectors.
+  `--reingest` remains the full rebuild. Rollback note: the previous
+  release reads a carried marker as an ordinary marker (it ignores
+  `carried_from`), so a forced checkpoint resume run by that release over a
+  staging this release carried into would keep the carried documents; their
+  points still verify against the marker, but their vectors are the
+  inherited ones. Finish or abandon such a build with this release before
+  rolling back. The manifest is
   re-keyed onto the staging id verbatim (`rekey_manifest` — the fixed
   point id embeds the collection name, so a byte copy is unreadable; the
   contract AND its pending/committed state are carried, never recomputed,
@@ -912,7 +957,7 @@ thread pool.
   preflight; the transfer is verified and repaired on reuse, issue #391
   F5); the inner run then enforces the same preflight, so a cloned staging
   under a changed representation fails closed until `--reingest`. With
-  `--reingest` a new build re-embeds every walked document; a changed contract
+  `--reingest` a new build re-embeds every walked document (never carries); a changed contract
   opens `pending` on staging. A retry of that same bound build retains only
   its verified completed documents. The residue proof commits a pending
   contract, and only then does the

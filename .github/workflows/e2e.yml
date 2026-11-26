@@ -858,11 +858,12 @@ jobs:
           kind: NetworkPolicy
           metadata: {name: rehearsal-default-deny-egress}
           spec:
-            # Every pod except the Open WebUI front end (openwebui lane): its egress is governed by
-            # the chart's own NetworkPolicy alone, the policy production ships; a namespace-wide
-            # allow here would be unioned into it. acceptance.py fails if any other policy selects it.
+            # Every pod except the Open WebUI front end and the Splunk gateway (openwebui lane; the
+            # gateway from its team-tools step, #1077): their egress is governed by the chart's own
+            # NetworkPolicies alone, the policies production ships; a namespace-wide allow here would
+            # be unioned into them. acceptance.py fails if any other policy selects Open WebUI.
             podSelector:
-              matchExpressions: [{key: app, operator: NotIn, values: [rag-openwebui]}]
+              matchExpressions: [{key: app, operator: NotIn, values: [rag-openwebui, rag-splunk-gateway]}]
             policyTypes: [Egress]
             egress:
               - to:
@@ -1431,6 +1432,23 @@ jobs:
           sh rehearsal-infra/scripts/openwebui/acceptance.sh deploy
           sh rehearsal-infra/scripts/openwebui/acceptance.sh run
 
+      # Team tools (#1077, ADR-0010 T4): the chart's Splunk gateway in bearer mode against a fake
+      # Splunk pod (tests/fake_splunk_mcp.py on the lane's agent image), Open WebUI re-rendered with
+      # the teamTools values; the MCP handshake, a tool call, the policies and the per-user listings.
+      - name: Team tools acceptance (Splunk gateway, ADR-0010 T4, by execution)
+        if: matrix.lane == 'openwebui'
+        env:
+          KIND_NAME: gapbox
+          APP_NS: ${{ env.NS }}
+          OWUI_STATE: ${{ runner.temp }}/owui-acceptance
+          KIND_BIN: /usr/local/bin/kind
+          KUBECTL: /usr/local/bin/kubectl
+          HELM: /usr/local/bin/helm
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          sh rehearsal-infra/scripts/openwebui/acceptance.sh team-tools
+
       - name: Gateway fault contracts
         if: startsWith(matrix.lane, 'gateway-')
         env:
@@ -1524,6 +1542,14 @@ jobs:
           done
           /usr/local/bin/kubectl -n "$NS" get pods,pvc,svc,networkpolicy -o wide > diagnostics/openwebui/workloads.txt 2>&1 || true
           /usr/local/bin/kubectl -n "$NS" describe deploy/rag-openwebui > diagnostics/openwebui/describe-rag-openwebui.txt 2>&1 || true
+          # Team-tools phase (#1077): its verdicts and the gateway's and fake Splunk's logs (decision lines
+          # and status codes only). Not the re-render: it carries the run's CA certificate.
+          for f in logs/team-tools.json logs/apply-splunk.log logs/apply-team.log; do
+            test ! -f "$OWUI_STATE/$f" || cp "$OWUI_STATE/$f" "diagnostics/openwebui/$(basename "$f")"
+          done
+          /usr/local/bin/kubectl -n "$NS" logs deploy/rag-splunk-gateway --all-containers --tail=200 > diagnostics/openwebui/splunk-gateway.log 2>&1 || true
+          /usr/local/bin/kubectl -n owui-splunk logs deploy/fake-splunk --tail=200 > diagnostics/openwebui/fake-splunk.log 2>&1 || true
+          /usr/local/bin/kubectl -n owui-splunk get pods,svc -o wide > diagnostics/openwebui/owui-splunk.txt 2>&1 || true
 
       - name: Retain sanitized cluster diagnostics
         if: always()

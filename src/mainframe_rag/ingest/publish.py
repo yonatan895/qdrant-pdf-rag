@@ -8,11 +8,17 @@ generation stays complete behind the alias for rollback — and the
 document verifies. The superseded physical is kept (plus a safety snapshot):
 rollback and GC are deliberate operator actions, never automatic.
 
-Completion markers are cloned too, but a marker certifies its own
-`target_collection`: a new staging generation re-embeds the walked corpus
-(never a cross-generation skip), and the alias-steady-state path re-verifies
-read-only instead. The clone's value is that live is untouched until the
-verified swap, not free incremental re-embedding.
+Completion markers are cloned too, and a marker certifies its own
+`target_collection`; the alias-steady-state path re-verifies read-only. A
+walked document is carried into a cloned staging without re-parse or
+re-embed (issue #1372) only under the carry rule in `run_ingest`: an unforced
+build, a staging whose data still equals live's sealed content
+(`clone_matches_live_seal`), an exactly current committed contract, a live
+marker equal to the record this run would write (target, timestamp and
+provenance aside), a matching inventory binding, and cloned points that
+verify in the staging. It then gets its own staging-bound marker
+(`carried_from` = live). Anything else re-embeds; `--reingest` rebuilds
+everything. Live stays untouched until the verified swap.
 
 Staging names derive deterministically from (representation fingerprint,
 CLI source triple, corpus content): identical reruns resume the same
@@ -134,10 +140,13 @@ def write_publish_state(
     *,
     build_id: str | None = None,
     previous: str | None = None,
+    forced: bool = True,
 ) -> None:
     """Record the in-flight build atomically (tmp + rename: a crash never
     leaves a torn sidecar). Overwrites any superseded state with a log at
-    the call site."""
+    the call site. `forced` is sticky across attempts of one build (issue
+    #1372): a build any attempt ran with `--reingest` never carries; the
+    default and an absent field both read as forced (fail closed)."""
     path = publish_state_path(progress, alias)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
@@ -149,6 +158,7 @@ def write_publish_state(
         "staging": staging,
         "gen_fp": gen_fp,
         "corpus_fp": corpus_fp,
+        "forced": bool(forced),
     }
     if retire_docs is not None:
         payload["retire_docs"] = list(retire_docs)
@@ -269,6 +279,11 @@ def read_publish_state(progress: Path, alias: str) -> dict | None:
                 raise ValueError("invalid previous target")
         except (ValueError, TypeError) as exc:
             raise RuntimeError("invalid build identity in publish state; refusing to infer it") from exc
+    if "forced" in state and type(state["forced"]) is not bool:
+        raise RuntimeError(
+            f"invalid forced flag in publish state at {path}: refusing to guess the "
+            "recorded build — remove it explicitly to abandon it, then rerun."
+        )
     try:
         _validate_recorded_retirements(state)
     except (ValueError, TypeError) as exc:
@@ -488,6 +503,29 @@ def verify_publication_seal(
     return True
 
 
+def clone_matches_live_seal(
+    client: QdrantReader, live: str, staging: str, *, page_size: int = DEFAULT_SEAL_PAGE_SIZE
+) -> bool:
+    """Carry guard (issue #1372): True only when the staging data collection
+    holds exactly the points, payloads and vectors live's publication sealed
+    (its data digest recomputed under live's own build binding). False when
+    live has no content seal. Read-only; one full scan with vectors. A points
+    API clone reads vectors back bit-identical on the pinned server (proven
+    by the sim lane), so a fresh clone of an untouched live passes."""
+    from mainframe_rag.ingest.seal import data_seal
+
+    controls = completion_collection_for(live)
+    payload = read_publication_record(client, controls)
+    if payload is None or not isinstance(payload.get("content_seal"), dict):
+        return False
+    binding = decode_build_binding(payload, controls)
+    observed = data_seal(
+        client, staging, build_id=binding.build_id, alias=binding.alias, physical=binding.physical,
+        gen_fp=binding.gen_fp, corpus_fp=binding.corpus_fp, page_size=page_size,
+    )
+    return observed == payload["content_seal"].get("data")
+
+
 def verify_build_catalog(
     client: QdrantReader,
     completions_collection: str,
@@ -699,8 +737,10 @@ def ensure_staging(
     Reuse is safe by construction: the converge pipeline re-verifies every
     document (PR-1 logic), so partial or older staging states heal instead
     of publishing. Cloning carries live's points AND completion markers;
-    markers certify their own target, so walked documents re-embed into the
-    new generation rather than skip across physicals.
+    markers certify their own target, so a walked document either
+    re-embeds into the new generation or, under the carry rule (issue
+    #1372, `run_ingest._plan`), receives its own staging-bound marker after
+    its cloned points verify; an inherited marker never certifies a skip.
 
     Reuse also verifies the metadata half of preparation (issue #391 F5):
     a crash between the data clone and the completions clone/re-key leaves a
