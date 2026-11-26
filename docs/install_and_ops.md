@@ -1738,13 +1738,13 @@ Repeating the same candidate is supported and must leave identical digests.
 
 **4. Rollback (compatible software/config only).** Run the previous approved
 bundle A from its own workspace and its own `airgap.env`
-(`airgap:deploy`, same namespace). Application rollback never rolls data back
+(`airgap:deploy`, same namespace). The deploy itself never rolls data back
 and never edits PVCs (`deploy.md` lifecycle notes). Rollback is valid only if
 the data representation A expects is the one the target holds; otherwise use
-step 5. Never combine A's assets with B's checkout. The one manual data step:
-when B's Open WebUI migrated its database, run the Open WebUI
-[restore](deploy.md#owui-restore) before A's `airgap:deploy`; A's Open WebUI
-cannot start on B's database.
+step 5. Never combine A's assets with B's checkout. The one exception is a
+manual operator step: when B's Open WebUI migrated its database, run the Open
+WebUI [restore](deploy.md#owui-restore) before A's `airgap:deploy`; A's Open
+WebUI cannot start on B's database.
 
 **5. Data recovery or rebuild (explicit, downtime recorded).**
 

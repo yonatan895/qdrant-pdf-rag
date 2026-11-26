@@ -2441,11 +2441,13 @@ Then run A's `airgap:deploy` from A's workspace (upgrade runbook step 4). A's Op
 start cleanly. A "Can't locate revision" exit means the restore is incomplete: repeat the
 restore.
 
-**What the rehearsal covers.** `kind-openwebui-operator` runs both blocks as written, with a
-restricted-v2 UID stand-in for the helper pod as for Open WebUI
+**What the rehearsal covers.** `kind-openwebui-operator` runs both blocks as written, under
+`set -eu` (it stops at the first failing command, as the stop rules require of the operator),
+with a restricted-v2 UID stand-in for the helper pod as for Open WebUI
 ([acceptance lane](openwebui-dev.md#acceptance-lane)). A chat written after the copy-out is gone
 after the restore, and every chat recorded before it is back. Kind's volumes have no
-`lost+found`, and B is the same release there, so the lane does not exercise a migration.
+`lost+found` and let the pod change the mount root's mode, and B is the same release there, so
+the lane exercises neither the two tar failures nor a migration.
 
 **Allow-list proxy (ADR-0007 E1).** Open WebUI disables some features in its UI
 only: `/api/v1/files` stores uploads with uploads off (Kind trial V1), the

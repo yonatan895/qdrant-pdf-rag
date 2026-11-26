@@ -431,7 +431,7 @@ operator_admin() {
 # and a private directory under $STATE as A's workspace (the copy holds chat text; never upload it).
 COPY_DIR="$STATE/owui-copy"
 docs_block() {  # docs_block ANCHOR: the first sh fence after <a id="ANCHOR"></a> in the workspace's deploy.md
-    awk -v a="<a id=\"$1\"></a>" '$0 == a {f = 1; next} f && $0 == "```sh" {p = 1; next} p && $0 == "```" {exit} p' \
+    awk -v a="<a id=\"$1\"></a>" '$0 == a {f = 1; next} f && !p && /^<a id=/ {exit} f && $0 == "```sh" {p = 1; next} p && $0 == "```" {exit} p' \
         "$WS/docs/deploy.md"
 }
 
@@ -452,9 +452,11 @@ copy_db_sha() {  # the webui.db sha256 the copy-out read inside the pod
     sed -n 's/^\([0-9a-f]\{64\}\)  webui\.db$/\1/p' "$COPY_DIR/owui-db-A.sha256.pod"
 }
 
-open_webui_down() {  # $1: the phase; no Open WebUI pod and no helper pod is left
-    [ -z "$(k -n "$APP_NS" get pod -l app=rag-openwebui -o name)" ] || die "$1: an Open WebUI pod still runs"
-    [ -z "$(k -n "$APP_NS" get pod rag-openwebui-copy --ignore-not-found -o name)" ] || die "$1: the helper pod is left"
+open_webui_down() {  # $1: the phase; no Open WebUI pod and no helper pod is left (an unreadable list fails)
+    pods=$(k -n "$APP_NS" get pod -l app=rag-openwebui -o name) || die "$1: cannot list the Open WebUI pods"
+    [ -z "$pods" ] || die "$1: an Open WebUI pod still runs"
+    pods=$(k -n "$APP_NS" get pod rag-openwebui-copy --ignore-not-found -o name) || die "$1: cannot read the helper pod"
+    [ -z "$pods" ] || die "$1: the helper pod is left"
 }
 
 operator_copy_out() {

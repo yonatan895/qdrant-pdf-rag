@@ -1031,6 +1031,8 @@ case "$verb" in
         case "$*" in
             *imagePullSecrets*) printf '%s' "$STUB_PULL" ;;
             *jsonpath*) printf '%s' example.invalid/owui:v1 ;;
+            *rag-openwebui-copy*) [ -z "${STUB_LEFT:-}" ] || echo pod/rag-openwebui-copy ;;
+            *) [ -z "${STUB_GET_FAIL:-}" ] || exit 1 ;;
         esac ;;
     scale|wait|delete) ;;
     apply) cp "$2" "$STUB_APPLIED" ;;
@@ -1115,8 +1117,39 @@ def test_copy_out_and_restore_refuse_a_hash_that_does_not_match(tmp_path):
         (tmp_path / "state" / "owui-copy" / "owui-db-A.sha256.pod").write_text("1" * 64 + "  webui.db\n")
         bad = _acceptance(tmp_path, "operator", "restore", env=env)
         assert bad.returncode != 0 and "restored webui.db differs from the copy" in bad.stderr
+        # No copy: refuse before any change to the volume or the cluster.
         none = tmp_path / "fresh"
-        assert _acceptance(none, "operator", "restore", env=env).returncode != 0  # no copy: refuse before any change
+        (tmp_path / "kubectl.log").write_text("")
+        before = (vol / "webui.db").read_bytes()
+        bad = _acceptance(none, "operator", "restore", env=env)
+        assert bad.returncode != 0 and "no copy in" in bad.stderr
+        assert (vol / "webui.db").read_bytes() == before
+        assert (tmp_path / "kubectl.log").read_text() == ""
+    finally:
+        (vol / "lost+found").chmod(0o700)
+
+
+def test_a_missing_sh_fence_never_runs_the_next_anchors_block(tmp_path):
+    vol, env = _copy_lane(tmp_path)
+    doc = Path(env["OWUI_WORKSPACE"]) / "docs" / "deploy.md"
+    text = doc.read_text()
+    anchor = text.index('<a id="owui-copy-out"></a>')
+    fence = text.index("```sh\n", anchor)
+    doc.write_text(text[:fence] + "```bash\n" + text[fence + len("```sh\n"):])
+    try:
+        bad = _acceptance(tmp_path, "operator", "copy-out", env=env)
+        assert bad.returncode != 0 and "no sh block after #owui-copy-out" in bad.stderr
+        assert not (tmp_path / "kubectl.log").exists()  # the restore block below it did not run
+    finally:
+        (vol / "lost+found").chmod(0o700)
+
+
+@pytest.mark.parametrize("stub", [{"STUB_LEFT": "1"}, {"STUB_GET_FAIL": "1"}])
+def test_copy_out_fails_when_a_pod_is_left_or_the_pod_list_is_unreadable(tmp_path, stub):
+    vol, env = _copy_lane(tmp_path)
+    try:
+        bad = _acceptance(tmp_path, "operator", "copy-out", env={**env, **stub})
+        assert bad.returncode != 0 and ("the helper pod is left" in bad.stderr or "cannot list" in bad.stderr)
     finally:
         (vol / "lost+found").chmod(0o700)
 
