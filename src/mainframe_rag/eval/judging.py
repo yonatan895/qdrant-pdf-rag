@@ -141,7 +141,8 @@ def _expansion_added(
     # is neither an added neighbour nor a chunk the pool holds (a retrieved
     # hit beyond the pool's depth) could be what the answer cited.
     if any(h.get("cite") == cite and not added_by_expansion(h)
-           and h.get("chunk_id") not in pooled for h in hits):
+           and not (isinstance(h.get("chunk_id"), str) and h["chunk_id"] in pooled)
+           for h in hits):
         return []
     added: list[dict[str, Any]] = []
     for item in supplied:
