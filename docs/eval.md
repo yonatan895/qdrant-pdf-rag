@@ -1711,6 +1711,12 @@ release set and writes no baseline.
   already exist, or are named like the holdout or release set; accepted paths
   are created new with mode 0600 through the `gold_candidates` writer. Sets
   without generated rows keep their reports byte-for-byte unchanged.
+  `capture_pool.py` follows the same path rule for its pool, which is not
+  text-free (every record holds the query text): for a set with a generated
+  row in any line, `--out` (or the `--bundle-dir` default) is refused with
+  exit 2 and the same fixed message before the bundle directory or any
+  client is created, and the pool is created new with mode 0600. Such a pool
+  stays in the venue that captured it.
 - **Privacy.** Questions derive from manual text. Outputs of both
   `gold_candidates` and `spot_check` are refused (exit 2, one fixed message,
   before any Qdrant or model call) when the path or its parent resolves inside
@@ -1739,7 +1745,11 @@ release set and writes no baseline.
   drawn in turn, then chunk types inside a document; each point gets the
   eligible target class with the fewest rows so far (`diagnostic` any point,
   `syntax` and `table` their chunk type, `message_id` a point with message
-  ids). Text is fetched for the sampled ids only. The seed fixes the sample;
+  ids). Text is fetched for the sampled ids only. The scan holds one compact
+  record per stored point in the memory of the process that runs it (measured
+  on 600,000 synthetic points: about 180 MiB peak for scan, sample and
+  section gold, plus the interpreter and clients), so check the headroom of
+  the pod it runs in first. The seed fixes the sample;
   the model is called at temperature 0. The draw is a round-robin per
   document, not proportional to size: each turn gives every document that
   still has eligible chunks one sample, so a 3,000-chunk document gets the

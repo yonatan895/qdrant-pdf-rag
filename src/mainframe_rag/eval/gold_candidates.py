@@ -171,9 +171,10 @@ class CandidateModel(Protocol):
     def complete(self, system: str, user: str) -> str: ...
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PointIdentity:
-    """A stored point without its text."""
+    """A stored point without its text. The scan holds one per point of the
+    collection, so it has no per-instance dict."""
 
     chunk_id: str
     doc_id: str
@@ -219,12 +220,17 @@ def resolve_collection(client: QdrantReader, name: str) -> tuple[str | None, str
     return None, name
 
 
+def _shared(values: dict[str, str], value: str) -> str:
+    return values.setdefault(value, value)
+
+
 def scan_identities(
     client: QdrantReader, collection: str, *, page_size: int = 256
 ) -> list[PointIdentity]:
     """Every point's identity fields (never ``text``), sorted by chunk id.
     Points without a document id are not chunks and are skipped."""
     found: list[PointIdentity] = []
+    values: dict[str, str] = {}
     offset: Any = None
     while True:
         page, offset = client.scroll(
@@ -237,16 +243,18 @@ def scan_identities(
             if not isinstance(doc_id, str) or not doc_id:
                 continue
             page_start = payload.get("page_start")
+            # Values that repeat across a revision's or a section's chunks are
+            # kept once: a decoded response has one string object per point.
             found.append(PointIdentity(
                 chunk_id=str(record.id),
-                doc_id=doc_id,
-                source_rev=str(payload.get("source_rev") or ""),
-                heading_path=str(payload.get("heading_path") or ""),
-                chunk_type=str(payload.get("chunk_type") or "narrative"),
+                doc_id=_shared(values, doc_id),
+                source_rev=_shared(values, str(payload.get("source_rev") or "")),
+                heading_path=_shared(values, str(payload.get("heading_path") or "")),
+                chunk_type=_shared(values, str(payload.get("chunk_type") or "narrative")),
                 page_start=page_start if type(page_start) is int and page_start >= 0 else None,
-                page_label=str(payload.get("page_label") or ""),
+                page_label=_shared(values, str(payload.get("page_label") or "")),
                 has_message_ids=bool(payload.get("message_ids")),
-                rules_v=str(payload.get("rules_v") or ""),
+                rules_v=_shared(values, str(payload.get("rules_v") or "")),
             ))
         if offset is None or not page:
             break

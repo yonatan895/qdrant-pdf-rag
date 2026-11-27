@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 import time
 from pathlib import Path
@@ -44,6 +45,7 @@ if str(REPO / "scripts") not in sys.path:
 from mainframe_rag.eval.datasets import (
     DEV_GOLDEN_PATH,
     DatasetError,
+    is_generated_source,
     read_golden_text,
     require_rc_for_collection,
     require_rc_for_golden,
@@ -401,16 +403,30 @@ def capture_query(
     return legs_to_record(query, kind, legs, ce_by_id, meta)
 
 
-def _iter_queries(golden_path: str, max_queries: int | None) -> list[str]:
-    queries = []
+def _read_queries(golden_path: str, max_queries: int | None) -> tuple[list[str], bool]:
+    """The queries to capture, and whether ANY row of the file (not only the
+    first ``max_queries``) is generated gold (#1317)."""
+    queries: list[str] = []
+    generated = False
     for line in read_golden_text(golden_path).splitlines():
         line = line.strip()
         if not line:
             continue
-        queries.append(json.loads(line)["query"])
-        if max_queries is not None and len(queries) >= max_queries:
-            break
-    return queries
+        row = json.loads(line)
+        generated = generated or is_generated_source(row.get("source"))
+        if max_queries is None or len(queries) < max_queries:
+            queries.append(row["query"])
+    return queries, generated
+
+
+def _open_pool(path: str, private: bool) -> Any:
+    """The pool file. A set with generated rows gets a new mode-0600 file,
+    never an overwrite or a symlink target (the path was checked before)."""
+    if not private:
+        return open(path, "w", encoding="utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    os.fchmod(fd, 0o600)
+    return os.fdopen(fd, "w", encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -452,10 +468,20 @@ def main(argv: list[str] | None = None) -> int:
         # collection are RC-only instruments; capture runs where models live.
         require_rc_for_golden([args.golden])
         require_rc_for_collection(settings.qdrant_collection)
-        queries = _iter_queries(args.golden, args.max_queries)
+        queries, generated = _read_queries(args.golden, args.max_queries)
     except DatasetError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2
+    if generated:
+        # A pool holds every query's text, and a generated question derives
+        # from manual text (#1317): the pool follows the rule of the set's
+        # reports. Checked before the bundle directory or any client exists.
+        from mainframe_rag.eval.retrieval import refuse_generated_report_path
+
+        refusal = refuse_generated_report_path(Path(args.out))
+        if refusal is not None:
+            print(refusal, file=sys.stderr)
+            return 2
     if args.bundle_dir is not None:
         # Dataset/venue refusal must not replace a prior capture or start clients.
         # Only the explicitly selected bundle is prepared; arbitrary OUT parents
@@ -470,7 +496,7 @@ def main(argv: list[str] | None = None) -> int:
 
     failures = 0
     started = time.perf_counter()
-    with open(args.out, "w", encoding="utf-8") as fh:
+    with _open_pool(args.out, generated) as fh:
         for query in queries:
             try:
                 record = capture_query(

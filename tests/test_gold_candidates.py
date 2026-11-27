@@ -990,3 +990,26 @@ def test_verify_golden_refuses_a_generated_file(generated, capfd):
 def test_no_tracked_eval_set_holds_a_candidate_row(name):
     lines = (ROOT / "evals" / name).read_text(encoding="utf-8").splitlines()
     assert lines and not any(gc.is_candidate_record(line) for line in lines)
+
+
+def test_scan_holds_one_compact_record_per_point_and_shares_repeated_identity_values():
+    """The scan holds every point of the collection in the memory of the pod
+    it runs in (a site collection has several hundred thousand): a record has
+    no per-instance dict, and values that repeat across the chunks of one
+    revision or section are one object, not one copy per point."""
+
+    def fresh(doc, n):
+        point = _point(doc, n, heading="Part one > Unit shared by every chunk")
+        # A decoded response gives every point its own string objects.
+        point.payload = json.loads(json.dumps(point.payload))
+        return point
+
+    first, second, other = _identities([fresh("A", 0), fresh("A", 1), fresh("B", 0)])
+    assert not hasattr(first, "__dict__")
+    for name in ("doc_id", "source_rev", "heading_path", "chunk_type", "rules_v"):
+        assert getattr(first, name) is getattr(second, name), name
+    assert (first.doc_id, other.doc_id) == ("A", "B") and first.section_key != other.section_key
+    assert first == gc.PointIdentity(
+        chunk_id="A-narrative-00", doc_id="A", source_rev="A@r1",
+        heading_path="Part one > Unit shared by every chunk", chunk_type="narrative",
+        page_start=0, page_label="1", has_message_ids=False, rules_v=RULES)
