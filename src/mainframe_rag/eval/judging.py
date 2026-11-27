@@ -113,6 +113,47 @@ def packed_cited_doc_ids(
     return docs, unmatched
 
 
+def expansion_citation_excerpts(
+    citation: str, hits: list[dict[str, Any]], supplied: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The supplied excerpts behind a validated citation that neighbour
+    expansion added (#1377), for harness L2/L4 on a streamed final. An
+    excerpt counts only with its provenance recorded in that final: its
+    prompt slot `index` is response hit `index` (packing labels the offered
+    hits 1..n), that hit carries the cite line, the excerpt's `doc_id` and a
+    string `neighbour_of`, and `neighbour_of` is the `chunk_id` of a
+    retrieved hit (one without the key) of the same `doc_id` in the same
+    response. A `[n]` prefix naming such a slot selects it alone; otherwise
+    every such excerpt carrying the line (as `packed_citation_hits`). Empty
+    for anything else: a retrieved hit is never grounded here, so the
+    sibling-pool join keeps deciding it."""
+    match = CITE_PREFIX_RE.match(citation)
+    cite = citation[match.end():] if match is not None else citation
+    retrieved = {h["chunk_id"]: h.get("doc_id") for h in hits
+                 if isinstance(h.get("chunk_id"), str) and "neighbour_of" not in h}
+    added: list[dict[str, Any]] = []
+    for item in supplied:
+        index, doc_id = item.get("index"), item.get("doc_id")
+        if item.get("citation") != cite or type(index) is not int or not 1 <= index <= len(hits):
+            continue
+        hit = hits[index - 1]
+        parent = hit.get("neighbour_of")
+        if (
+            isinstance(parent, str)
+            and isinstance(doc_id, str) and doc_id
+            and hit.get("cite") == cite
+            and hit.get("doc_id") == doc_id
+            and retrieved.get(parent) == doc_id
+        ):
+            added.append(item)
+    if match is not None:
+        slot = int(citation[: match.end()].strip().strip("[]"))
+        exact = [item for item in added if item["index"] == slot]
+        if exact:
+            return exact
+    return added
+
+
 def precision_recall(cited: set[str], gold: set[str]) -> tuple[float | None, float | None]:
     """Doc-level citation precision/recall. None denominators (no citations
     / no gold) stay None so abstain rows and zero-hit paths never dilute
@@ -208,9 +249,36 @@ def evidence_for_citations(citations: list[str], hits: list[dict[str, Any]]) -> 
             unmapped.append(c)
         else:
             texts.append(str(hit.get("text") or ""))
+    return _bounded_evidence(texts), unmapped
+
+
+def _bounded_evidence(texts: list[str]) -> str:
     evidence = "\n\n---\n\n".join(texts)
     if len(evidence) > JUDGE_MAX_EVIDENCE_CHARS:
         evidence = evidence[:JUDGE_MAX_EVIDENCE_CHARS] + "\n…[truncated for the judge]"
-    return evidence, unmapped
+    return evidence
+
+
+def evidence_for_expanded_citations(
+    citations: list[str], pool: list[dict[str, Any]],
+    hits: list[dict[str, Any]], supplied: list[dict[str, Any]],
+) -> tuple[str, list[str]]:
+    """`evidence_for_citations` for a row whose streamed final shows
+    neighbour expansion ran (#1377). A citation in the sibling pool reads
+    the pool hit's text, exactly as there; one outside it reads the text
+    its expansion-added excerpts supplied to the prompt
+    (`expansion_citation_excerpts`), and is unmapped when there are none."""
+    texts: list[str] = []
+    unmapped: list[str] = []
+    for c in citations:
+        hit = citation_to_hit(c, pool)
+        if hit is not None:
+            texts.append(str(hit.get("text") or ""))
+            continue
+        excerpts = expansion_citation_excerpts(c, hits, supplied)
+        if not excerpts:
+            unmapped.append(c)
+        texts.extend(str(item.get("text") or "") for item in excerpts)
+    return _bounded_evidence(texts), unmapped
 
 
