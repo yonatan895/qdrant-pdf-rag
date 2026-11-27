@@ -132,6 +132,7 @@ mix (see `testing.md` harness invariants):
 | Paraphrase | `eval_retrieval.py --golden evals/paraphrase.jsonl` | Do semantic changes move non-verbatim queries? | Dedicated collection, manual runbook |
 | Section probes | `eval_retrieval.py --golden evals/sections.jsonl`; record-replay §6.1 | Does retrieval reach the right section of the right manual, not only the right manual? | Real-corpus collections only (no synthetic pages exist for it); dev-only, never part of golden/holdout |
 | Answer eval | `python -m mainframe_rag.eval.answers` | Are answers grounded and abstentions honest? | Live GPU stack, in-process client |
+| Page-image A/B (#1318) | `python -m mainframe_rag.eval.page_image_arm` | Does a rendered page image on a packed table/syntax hit improve the answer? | Running agent + image-capable reasoning model + local corpus copy; stand-in is a relative signal, the site run decides |
 | Layered harness | `harness.py` + `harness_l2/l3/l4.py` (`eval.retrieval` owns L1, `eval.quality` owns L4) | Promote to release candidacy? | Snapshot-pinned live index (RC only) |
 | Bench | `benchmark.py` | Do resources/latencies regress? | CI runner env, mock LLM |
 | Load | `loadtest.py` / `test_load_tier.py` | Do absolute contracts hold under concurrency? | Sim composition + real uvicorn agent |
@@ -1532,6 +1533,70 @@ steps:
 
 The tool applies no decision rule. Any threshold on the counts belongs to
 the run's pre-registration, outside this tool.
+
+### Page-image A/B (#1318, PR-0)
+
+`python -m mainframe_rag.eval.page_image_arm` is a read-only decision aid: does
+attaching the rendered page of a packed gold-document hit to the answer call
+improve answers on `table` and `syntax` rows? It runs before any store, mount
+or agent change is built and changes no agent behaviour.
+
+Per selected row (`--classes`, default `table,syntax`, from one `--golden`
+file; the holdout, the release set and files with candidate or unreviewed
+generated rows are refused) it runs the shared answer core twice. The text arm
+retrieves through the running agent's `/v1/search` (`--agent-url`) and packs,
+prompts and parses with the library. The image arm sends the same hits and
+byte-identical prompt text, plus the page image(s) of the packed gold-document
+hit on the final user message, in the wire shape pasted images use. No label
+line or protocol wording is added, and no image tokens are reserved: a window
+overflow is an `image_error` row. Pages are rendered at 150 dpi, 8-bit grey
+PNG, at most 2 images an answer and 2 pages a hit (`--dpi`, `--max-images`).
+
+A hit's file is found by the `source_sha256` its evidence reference returns,
+in a local corpus copy (`--corpus-dir`) hashed once at start; never by doc id.
+No file or more than one file for that sha256 leaves the row `unresolved_*`,
+counted and not guessed. The run is refused (exit 3) unless
+`scripts/probe_gateway.py --probe-image` passes for the configured reasoning
+model; exit 4 when the probe cannot be run. The probe proves one small image,
+not two page-sized ones.
+
+Each arm passes when no `gold_must_contain` string is missing and no
+`gold_must_not_contain` string is present. Outcome codes are a closed set:
+scored (`both_pass`, `fixed`, `broken`, `broken_must_not`, `both_fail`),
+retrieval and not addressable here (`gold_not_packed_text_pass`,
+`gold_not_packed_text_fail`; #1300 owns them), `unresolved_reference`,
+`unresolved_sha_missing`, `unresolved_sha_ambiguous`, `unresolved_page`,
+excluded without a call (`abstain_row`, `no_gold_strings`) and errors
+(`search_failed`, `no_hits`, `text_error`, `image_error`,
+`prompt_mismatch`). An error is never a text failure or a break.
+
+**Stop rule** (design section 6; printed as `VERDICT stop` with reasons, or
+`VERDICT continue`). Stop when any holds: fewer than 6 text-arm failures among
+the scored rows (`few_text_failures`); the image arm fixes fewer than one third
+of them (`few_fixed`); it breaks more than one text-arm pass, or breaks any by
+a forbidden string (`breaks`); or more text-arm failures are gold-not-packed
+than scored (`mostly_not_packed`). With n this small the verdict is a decision
+aid, not a statistic. If it does not stop, rerun at `--dpi 100`: equal results
+halve a later store.
+
+**Lanes.** The local or Colab stand-in gives a relative signal only, and only
+if its image probe passes. The site run decides. Not measurable off-site: the
+site model's reading of dense pages, its image token cost and per-prompt image
+limit, added latency and the site corpus's page mix.
+
+**Limits of the reproduction.** Packing runs under the tool's own Settings and
+tokenizer, so run it with the agent's environment. Candidate selection runs in
+the tool against the same model; neighbour expansion needs stored-point reads
+and is not reproduced (`params.expansion` is `not_reproduced`).
+
+**What stays in the gap.** `--out` is the private report (answers, doc ids,
+pages; new file, mode 0600, refused inside any git work tree). `--export`
+holds parameters, counts, row ids with outcome codes and the verdict, and
+nothing else; stdout, stderr and logs carry the same. Images and page text
+are held in memory only. A site run's export still names site-authored row
+ids: record its counts and verdict on the issue, keep the files at the site.
+Exit 0 means the run completed with at least one scored row, 1 none scored,
+2 a refusal before any call.
 
 ### Claim-level support (#365)
 
