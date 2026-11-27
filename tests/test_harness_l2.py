@@ -607,11 +607,11 @@ def _response_hit(chunk_id: str, cite: str, doc_id: str, text: str, parent: str 
     return hit if parent is None else {**hit, "neighbour_of": parent}
 
 
-def _run_l2_stub(monkeypatch, pool: list[dict], answer_fields: dict, *, expand_enabled: bool):
-    """run_l2 over a stub app whose /v1/answer serves 'answer_fields' as the
+def _stub_l2_stack(monkeypatch, pool: list[dict], answer_fields: dict, *, expand_enabled: bool):
+    """A stub app for run_l2 whose /v1/answer serves 'answer_fields' as the
     buffered JSON body, or as the SSE 'final' when the request asks to
-    stream. Returns the row, the metrics, the faithfulness judge's prompts
-    and the /v1/answer request bodies."""
+    stream. Returns the faithfulness judge's prompts and the /v1/answer
+    request bodies, filled as the run proceeds."""
     import json
     from types import SimpleNamespace
 
@@ -621,7 +621,6 @@ def _run_l2_stub(monkeypatch, pool: list[dict], answer_fields: dict, *, expand_e
     from mainframe_rag import config
     from mainframe_rag.agent import answer as answer_mod
     from mainframe_rag.agent import app as app_mod
-    from mainframe_rag.eval.answer_tier import run_l2
 
     app = FastAPI()
     prompts: list[str] = []
@@ -651,6 +650,8 @@ def _run_l2_stub(monkeypatch, pool: list[dict], answer_fields: dict, *, expand_e
             pass
 
         def chat(self, messages, *, temperature, reasoning_effort):
+            if not messages[1].content.startswith("EXCERPTS:"):
+                return SimpleNamespace(content='{"label": "relevant"}')
             prompts.append(messages[1].content)
             return SimpleNamespace(content='{"label": "entailed"}')
 
@@ -661,6 +662,16 @@ def _run_l2_stub(monkeypatch, pool: list[dict], answer_fields: dict, *, expand_e
     monkeypatch.setattr(answer_mod, "HttpxLLMClient", Judge)
     monkeypatch.setattr(config, "load_settings",
                         lambda: SimpleNamespace(answer_expand_enabled=expand_enabled))
+    return prompts, requests
+
+
+def _run_l2_stub(monkeypatch, pool: list[dict], answer_fields: dict, *, expand_enabled: bool):
+    """run_l2 over '_stub_l2_stack'. Returns the row, the metrics, the
+    faithfulness judge's prompts and the /v1/answer request bodies."""
+    from mainframe_rag.eval.answer_tier import run_l2
+
+    prompts, requests = _stub_l2_stack(monkeypatch, pool, answer_fields,
+                                       expand_enabled=expand_enabled)
     rows, metrics = run_l2([_entry("EXP-1", gold=["SA23-1380-70"])], None, judge_enabled=True)
     [row] = rows
     return row, metrics, prompts, requests
@@ -975,11 +986,48 @@ def test_expansion_citation_excerpts_follow_the_prompt_slot():
     assert expansion_citation_excerpts(_NEIGHBOUR_CITE, hits, supplied[:1]) == []
 
 
-def test_l2_join_round_trips_the_agent_stream_final(monkeypatch, servable_representation_gate):
+def test_expanded_judge_evidence_reads_the_cited_neighbour_excerpts():
+    """#1342: the judge reads the evidence that was supplied. A bare shared
+    line reads the pool hit and every excerpt expansion added under that
+    line; a [n] prefix naming an added excerpt reads that excerpt alone; a
+    citation neither pooled nor added is unmapped and adds no text."""
+    from mainframe_rag.eval.judging import evidence_for_citations, evidence_for_expanded_citations
+
+    pool = [_hit(_PARENT_CITE, "SA23-1380-70", "STEP1.")]
+    hits = [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
+            _response_hit("c2", _PARENT_CITE, "SA23-1380-70", "STEP2 stored.", parent="c1"),
+            _response_hit("c3", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP3 stored.", parent="c1")]
+    supplied = [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1."),
+                _excerpt(2, _PARENT_CITE, "SA23-1380-70", "STEP2."),
+                _excerpt(3, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP3.")]
+
+    def evidence(*citations):
+        return evidence_for_expanded_citations(list(citations), pool, hits, supplied)
+
+    assert evidence(_PARENT_CITE) == ("STEP1.\n\n---\n\nSTEP2.", [])
+    assert evidence(f"[2] {_PARENT_CITE}") == ("STEP2.", [])
+    assert evidence(f"[1] {_PARENT_CITE}") == ("STEP1.", [])
+    assert evidence(_NEIGHBOUR_CITE, "SX00-0000-00 Absent, p. 1") == (
+        "STEP3.", ["SX00-0000-00 Absent, p. 1"])
+    # With no excerpt added under a line the text is the pool join's.
+    assert evidence_for_expanded_citations([_PARENT_CITE], pool, hits[:1], supplied[:1]) == (
+        evidence_for_citations([_PARENT_CITE], pool))
+
+
+@pytest.mark.parametrize("neighbour_page,grounded_by_expansion,evidence", [
+    pytest.param(4, True, "A#1", id="next-page-neighbour"),
+    pytest.param(3, False, "A#0\n\n---\n\nA#1", id="same-page-neighbour"),
+])
+def test_l2_join_round_trips_the_agent_stream_final(
+    monkeypatch, servable_representation_gate, neighbour_page, grounded_by_expansion, evidence
+):
     """#1377 producer to consumer: the real app's streamed /v1/answer final,
     with neighbour expansion on, carries what the L2 join needs. The model
-    cites only the neighbour on the next page; the sibling /v1/search pool
-    holds the retrieved hit alone."""
+    cites the neighbour's line; the sibling /v1/search pool holds the
+    retrieved hit alone. A next-page neighbour is outside the pool and is
+    grounded by its provenance. A same-page neighbour repeats its parent's
+    line (the app returns bare lines), so the pool grounds the citation and
+    the judge reads the parent and the neighbour excerpt carrying it."""
     from mainframe_rag.agent import app as app_mod
     from mainframe_rag.eval.answer_tier import apply_l2_measurements
     from mainframe_rag.eval.answers import ResponseJoin, run_query
@@ -989,9 +1037,9 @@ def test_l2_join_round_trips_the_agent_stream_final(monkeypatch, servable_repres
     from tests.helpers_agent_local import agent_client
     from tests.test_answer_expand import Corpus
 
-    corpus = Corpus().add([("A", [(3, 3), (4, 4)])])
+    corpus = Corpus().add([("A", [(3, 3), (neighbour_page, neighbour_page)])])
     retrieved, neighbour = corpus.hit("A#0"), corpus.hit("A#1")
-    assert neighbour.cite != retrieved.cite
+    assert (neighbour.cite != retrieved.cite) is grounded_by_expansion
 
     class Model:
         def chat(self, messages, *args, **kwargs):
@@ -1009,10 +1057,12 @@ def test_l2_join_round_trips_the_agent_stream_final(monkeypatch, servable_repres
         join = ResponseJoin()
         row = run_query(client, entry, None, pool, temperature=None, stream=True, response_join=join)
     assert [hit["chunk_id"] for hit in pool] == [retrieved.chunk_id]
-    assert row["citations"] == [neighbour.cite] or row["citations"] == [f"[2] {neighbour.cite}"]
+    assert row["citations"] == [neighbour.cite]
+    assert join.hits is not None and join.supplied is not None
     apply_l2_measurements(row, entry, pool, {}, expansion=join)
     assert row["verdict"] == "pass", row["failures"]
-    assert row["unmatched_citations"] == [] and row["expansion_citations"] == row["citations"]
+    assert row["unmatched_citations"] == []
+    assert row.get("expansion_citations") == ([neighbour.cite] if grounded_by_expansion else None)
     assert row["cited_doc_ids"] == ["SYN-0001-00"]
     assert evidence_for_expanded_citations(
-        row["citations"], pool, join.hits, join.supplied) == ("A#1", [])
+        row["citations"], pool, join.hits, join.supplied) == (evidence, [])

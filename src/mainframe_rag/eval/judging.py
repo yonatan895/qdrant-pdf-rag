@@ -113,22 +113,19 @@ def packed_cited_doc_ids(
     return docs, unmatched
 
 
-def expansion_citation_excerpts(
-    citation: str, hits: list[dict[str, Any]], supplied: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """The supplied excerpts behind a validated citation that neighbour
-    expansion added (#1377), for harness L2/L4 on a streamed final. An
-    excerpt counts only with its provenance recorded in that final: its
-    prompt slot `index` is response hit `index` (packing labels the offered
-    hits 1..n), that hit carries the cite line, the excerpt's `doc_id` and a
-    string `neighbour_of`, and `neighbour_of` is the `chunk_id` of a
-    retrieved hit (one without the key) of the same `doc_id` in the same
-    response. A `[n]` prefix naming such a slot selects it alone; otherwise
-    every such excerpt carrying the line (as `packed_citation_hits`). Empty
-    for anything else: a retrieved hit is never grounded here, so the
-    sibling-pool join keeps deciding it."""
+def _split_citation(citation: str) -> tuple[str, int | None]:
+    """(cite line, `[n]` prompt slot or None) of a validated citation."""
     match = CITE_PREFIX_RE.match(citation)
-    cite = citation[match.end():] if match is not None else citation
+    if match is None:
+        return citation, None
+    return citation[match.end():], int(citation[: match.end()].strip().strip("[]"))
+
+
+def _expansion_added(
+    cite: str, hits: list[dict[str, Any]], supplied: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Supplied excerpts carrying `cite` whose expansion provenance the
+    response records (the rule of `expansion_citation_excerpts`)."""
     retrieved = {h["chunk_id"]: h.get("doc_id") for h in hits
                  if isinstance(h.get("chunk_id"), str) and "neighbour_of" not in h}
     added: list[dict[str, Any]] = []
@@ -146,12 +143,27 @@ def expansion_citation_excerpts(
             and retrieved.get(parent) == doc_id
         ):
             added.append(item)
-    if match is not None:
-        slot = int(citation[: match.end()].strip().strip("[]"))
-        exact = [item for item in added if item["index"] == slot]
-        if exact:
-            return exact
     return added
+
+
+def expansion_citation_excerpts(
+    citation: str, hits: list[dict[str, Any]], supplied: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The supplied excerpts behind a validated citation that neighbour
+    expansion added (#1377), for harness L2/L4 on a streamed final. An
+    excerpt counts only with its provenance recorded in that final: its
+    prompt slot `index` is response hit `index` (packing labels the offered
+    hits 1..n), that hit carries the cite line, the excerpt's `doc_id` and a
+    string `neighbour_of`, and `neighbour_of` is the `chunk_id` of a
+    retrieved hit (one without the key) of the same `doc_id` in the same
+    response. A `[n]` prefix naming such a slot selects it alone; otherwise
+    every such excerpt carrying the line (as `packed_citation_hits`). Empty
+    for anything else: a retrieved hit is never grounded here, so the
+    sibling-pool join keeps deciding it."""
+    cite, slot = _split_citation(citation)
+    added = _expansion_added(cite, hits, supplied)
+    exact = [item for item in added if item["index"] == slot]
+    return exact or added
 
 
 def precision_recall(cited: set[str], gold: set[str]) -> tuple[float | None, float | None]:
@@ -264,21 +276,29 @@ def evidence_for_expanded_citations(
     hits: list[dict[str, Any]], supplied: list[dict[str, Any]],
 ) -> tuple[str, list[str]]:
     """`evidence_for_citations` for a row whose streamed final shows
-    neighbour expansion ran (#1377). A citation in the sibling pool reads
-    the pool hit's text, exactly as there; one outside it reads the text
-    its expansion-added excerpts supplied to the prompt
-    (`expansion_citation_excerpts`), and is unmapped when there are none."""
+    neighbour expansion ran (#1377): the judge reads the evidence that was
+    supplied. Per citation: a `[n]` prefix naming an excerpt expansion
+    added (`expansion_citation_excerpts`' rule) reads that excerpt's
+    supplied text alone. Otherwise a citation in the sibling pool reads the
+    pool hit's text, exactly as there, and a bare one also every added
+    excerpt carrying its line (a same-page neighbour repeats its parent's
+    line, and the agent returns bare lines). A citation outside the pool
+    reads its added excerpts, and is unmapped when there are none."""
     texts: list[str] = []
     unmapped: list[str] = []
     for c in citations:
+        cite, slot = _split_citation(c)
+        added = _expansion_added(cite, hits, supplied)
+        exact = [item for item in added if item["index"] == slot]
         hit = citation_to_hit(c, pool)
-        if hit is not None:
+        if exact:
+            chosen = exact
+        elif hit is not None:
             texts.append(str(hit.get("text") or ""))
-            continue
-        excerpts = expansion_citation_excerpts(c, hits, supplied)
-        if not excerpts:
-            unmapped.append(c)
-        texts.extend(str(item.get("text") or "") for item in excerpts)
+            chosen = added if slot is None else []
+        else:
+            chosen = added
+            if not added:
+                unmapped.append(c)
+        texts.extend(str(item.get("text") or "") for item in chosen)
     return _bounded_evidence(texts), unmapped
-
-

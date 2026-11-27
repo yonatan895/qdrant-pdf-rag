@@ -1213,8 +1213,10 @@ default 16. Candidate selection stays at its deployed value in both arms.
   (a retrieved hit the pool lacks, a neighbour whose parent is missing,
   another document's, or itself a neighbour) is unmapped and fails the row
   with no judge call, as with expansion off. A same-page neighbour repeats
-  its parent's line, so its citation maps to the parent in the pool and the
-  judge reads the parent's text, as for any shared line.
+  its parent's line and the agent returns bare lines, so that citation is
+  grounded by the parent in the pool; the judge then reads the parent's
+  pool text and every added excerpt carrying the line
+  (`judging.evidence_for_expanded_citations`).
   On a row with a neighbour hit, `hit_doc_ids` and `gold_retrieved` read
   the response's hits, as in the answer eval. L2 runs in-process, where the
   client buffers the stream, so `client_first_token_ms` and `decode_tps`
