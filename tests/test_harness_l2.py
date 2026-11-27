@@ -593,3 +593,673 @@ def test_l2_keeps_the_pool_join_when_more_was_packed_than_pooled(monkeypatch):
     assert row["unmatched_citations"] == [deep]
     assert row["hit_doc_ids"] == ["SA23-1380-70"]
     assert prompts == []
+
+
+# ------------------------------- expansion provenance in L2/L4 (#1377, #1342)
+
+_PARENT_CITE = "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 5"
+_NEIGHBOUR_CITE = "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 6"
+_L2_ANSWER = "Open the panel, then verify the status."
+
+
+def _response_hit(chunk_id: str, cite: str, doc_id: str, text: str, parent: str | None = None) -> dict:
+    hit = {"chunk_id": chunk_id, "score": 0.5, **_hit(cite, doc_id, text)}
+    return hit if parent is None else {**hit, "neighbour_of": parent}
+
+
+def _stub_l2_stack(monkeypatch, pool: list[dict], answer_fields: dict, *, expand_enabled: bool):
+    """A stub app for run_l2 whose /v1/answer serves 'answer_fields' as the
+    buffered JSON body, or as the SSE 'final' when the request asks to
+    stream. Returns the faithfulness judge's prompts and the /v1/answer
+    request bodies, filled as the run proceeds."""
+    import json
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.responses import JSONResponse, Response
+
+    from mainframe_rag import config
+    from mainframe_rag.agent import answer as answer_mod
+    from mainframe_rag.agent import app as app_mod
+
+    app = FastAPI()
+    prompts: list[str] = []
+    requests: list[dict] = []
+    # The answer log line reaches the row's signal join at INFO only.
+    monkeypatch.setattr(logging.getLogger("agent"), "level", logging.INFO)
+
+    @app.post("/v1/search")
+    def search(body: dict):
+        return {"hits": pool}
+
+    @app.post("/v1/answer")
+    def answer(body: dict):
+        requests.append(body)
+        logging.getLogger("agent").info(
+            json.dumps({"action": "answer", "request_id": "req-1", "finish_reason": "stop"}))
+        if body.get("stream") is not True:
+            return JSONResponse({k: v for k, v in answer_fields.items() if k != "hits"})
+        final = {"type": "final", **answer_fields, "finish_reason": "stop", "ttft_ms": 5,
+                 "usage": {"prompt_tokens": 9, "completion_tokens": 4, "reasoning_tokens": 0,
+                           "total_tokens": 13}}
+        return Response(f"event: token\ndata: {{\"delta\": \"x\"}}\n\nevent: final\ndata: {json.dumps(final)}\n\n",
+                        media_type="text/event-stream")
+
+    class Judge:
+        def __init__(self, settings):
+            pass
+
+        def chat(self, messages, *, temperature, reasoning_effort):
+            if not messages[1].content.startswith("EXCERPTS:"):
+                return SimpleNamespace(content='{"label": "relevant"}')
+            prompts.append(messages[1].content)
+            return SimpleNamespace(content='{"label": "entailed"}')
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(app_mod, "app", app)
+    monkeypatch.setattr(answer_mod, "HttpxLLMClient", Judge)
+    monkeypatch.setattr(config, "load_settings",
+                        lambda: SimpleNamespace(answer_expand_enabled=expand_enabled))
+    return prompts, requests
+
+
+def _run_l2_stub(monkeypatch, pool: list[dict], answer_fields: dict, *, expand_enabled: bool):
+    """run_l2 over '_stub_l2_stack'. Returns the row, the metrics, the
+    faithfulness judge's prompts and the /v1/answer request bodies."""
+    from mainframe_rag.eval.answer_tier import run_l2
+
+    prompts, requests = _stub_l2_stack(monkeypatch, pool, answer_fields,
+                                       expand_enabled=expand_enabled)
+    rows, metrics = run_l2([_entry("EXP-1", gold=["SA23-1380-70"])], None, judge_enabled=True)
+    [row] = rows
+    return row, metrics, prompts, requests
+
+
+def _answer_fields(citations: list[str], supplied: list[dict], hits: list[dict]) -> dict:
+    return {"request_id": "req-1", "answer": _L2_ANSWER, "citations": citations,
+            "citations_inferred": False, "inferred_indices": [],
+            "verification_state": "accepted", "script": None,
+            "supplied_evidence": supplied, "evidence_omitted": 0, "hits": hits}
+
+
+def test_l2_grounds_a_cited_neighbour_that_expansion_added(monkeypatch):
+    """#1377: with expansion on L2 reads the streamed final. A cited chunk
+    outside the sibling pool is grounded when the final records that
+    expansion added it (its hit carries 'neighbour_of' a retrieved hit of the
+    same document), and the judge sees the text that excerpt supplied."""
+    pool = [_hit(_PARENT_CITE, "SA23-1380-70", "STEP1 open the panel.")]
+    hits = [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1 open the panel."),
+            _response_hit("c2", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 verify the status. Stored tail.",
+                          parent="c1")]
+    supplied = [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1 open the panel."),
+                _excerpt(2, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 verify the status.")]
+    citations = [f"[1] {_PARENT_CITE}", f"[2] {_NEIGHBOUR_CITE}"]
+    row, metrics, prompts, requests = _run_l2_stub(
+        monkeypatch, pool, _answer_fields(citations, supplied, hits), expand_enabled=True)
+    assert requests == [{"query": "q", "temperature": None, "stream": True}]
+    assert row["verdict"] == "pass", row["failures"]
+    assert row["unmatched_citations"] == []
+    assert row["expansion_citations"] == [f"[2] {_NEIGHBOUR_CITE}"]
+    assert row["cited_doc_ids"] == ["SA23-1380-70"]
+    assert (row["citation_precision"], row["citation_recall"]) == (1.0, 1.0)
+    assert prompts == [
+        "EXCERPTS:\nSTEP1 open the panel.\n\n---\n\nSTEP2 verify the status.\n\nANSWER:\n" + _L2_ANSWER]
+    assert row["request_id"] == "req-1" and row["truncated"] is False
+    assert metrics["structural_fails"] == 0 and metrics["unmapped_citations"] == 0
+    assert metrics["faithfulness"]["judged"] == 1
+
+
+@pytest.mark.parametrize("hits,supplied", [
+    pytest.param(
+        [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _response_hit("c2", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2."),
+         _response_hit("c3", "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 7",
+                       "SA23-1380-70", "STEP3.", parent="c1")],
+        [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _excerpt(2, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2.")],
+        id="retrieved-hit-outside-the-pool"),
+    pytest.param(
+        [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _response_hit("c2", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2.", parent="c9")],
+        [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _excerpt(2, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2.")],
+        id="parent-not-in-the-response"),
+    pytest.param(
+        [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _response_hit("c2", _NEIGHBOUR_CITE, "SC34-6428-08", "STEP2.", parent="c1")],
+        [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _excerpt(2, _NEIGHBOUR_CITE, "SC34-6428-08", "STEP2.")],
+        id="neighbour-of-another-document"),
+    pytest.param(
+        [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _response_hit("c2", "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 7",
+                       "SA23-1380-70", "STEP3.", parent="c1"),
+         _response_hit("c3", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2.", parent="c2")],
+        [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _excerpt(3, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2.")],
+        id="parent-is-itself-a-neighbour"),
+    pytest.param(
+        [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _response_hit("c2", "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 7",
+                       "SA23-1380-70", "STEP3.", parent="c1")],
+        [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _excerpt(2, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2.")],
+        id="supplied-slot-is-another-chunk"),
+    pytest.param(
+        [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _response_hit("c2", "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 7",
+                       "SA23-1380-70", "STEP3.", parent="c1")],
+        [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _excerpt(2, "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 7",
+                  "SA23-1380-70", "STEP3.")],
+        id="neither-retrieved-nor-expanded"),
+    pytest.param(
+        # Review B1 (#1389): slot 2 is a retrieved hit the pool lacks; it shares
+        # its line with the neighbour expansion added in slot 3.
+        [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _response_hit("c2", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 retrieved."),
+         _response_hit("c3", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 neighbour.", parent="c1")],
+        [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _excerpt(2, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 retrieved."),
+         _excerpt(3, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 neighbour.")],
+        id="slot-of-a-retrieved-hit-sharing-a-neighbours-line"),
+    pytest.param(
+        # The same line, the retrieved hit trimmed out of the prompt: the
+        # response still shows a retrieved hit under it that the pool lacks.
+        [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _response_hit("c2", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 neighbour.", parent="c1"),
+         _response_hit("c3", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 retrieved.")],
+        [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _excerpt(2, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 neighbour.")],
+        id="omitted-retrieved-hit-sharing-a-neighbours-line"),
+    pytest.param(
+        # The prefix names a slot that is not the added excerpt.
+        [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _response_hit("c2", "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 7",
+                       "SA23-1380-70", "STEP3."),
+         _response_hit("c3", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2.", parent="c1")],
+        [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _excerpt(2, "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 7",
+                  "SA23-1380-70", "STEP3."),
+         _excerpt(3, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2.")],
+        id="prefix-names-another-slot"),
+])
+def test_l2_still_fails_a_citation_expansion_did_not_add(monkeypatch, hits, supplied):
+    """#1377 forbidden outcome: on an expanded row only a recorded neighbour
+    of a retrieved hit of the same document is grounded outside the pool.
+    Every other citation outside the sibling pool fails closed with no judge
+    call, exactly as with expansion off."""
+    pool = [_hit(_PARENT_CITE, "SA23-1380-70", "STEP1.")]
+    citations = [f"[1] {_PARENT_CITE}", f"[2] {_NEIGHBOUR_CITE}"]
+    row, metrics, prompts, requests = _run_l2_stub(
+        monkeypatch, pool, _answer_fields(citations, supplied, hits), expand_enabled=True)
+    assert requests[0]["stream"] is True
+    assert row["verdict"] == "fail"
+    assert row["unmatched_citations"] == [f"[2] {_NEIGHBOUR_CITE}"]
+    assert row["failures"] == [
+        f"1 validated citation(s) not in the fetched hit set: {[f'[2] {_NEIGHBOUR_CITE}']}"]
+    assert "expansion_citations" not in row
+    assert prompts == []
+    assert metrics["structural_fails"] == 1 and metrics["unmapped_citations"] == 1
+
+
+_OFF_POOL = [
+    _hit(_PARENT_CITE, "SA23-1380-70", "STEP1 open the panel."),
+    _hit("SC34-6428-08 CICS Sys Def, p. 55", "SC34-6428-08", "Unrelated chunk."),
+    _hit(_PARENT_CITE, "SA23-1380-70", "STEP2 verify the status."),
+]
+_OFF_SUPPLIED = [
+    _excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1 open the panel."),
+    _excerpt(2, "SC34-6428-08 CICS Sys Def, p. 55", "SC34-6428-08", "Unrelated chunk."),
+    _excerpt(3, _PARENT_CITE, "SA23-1380-70", "STEP2 verify the status."),
+]
+_OFF_CITATIONS = [f"[1] {_PARENT_CITE}", "[2] SC34-6428-08 CICS Sys Def, p. 55"]
+# The row and metrics run_l2 produced for this fixture on origin/main a61f304e
+# (before #1377), 'elapsed_ms' removed: the expand-off output to preserve.
+_OFF_ROW: dict = {'abstention_zeroed': False,
+ 'answer': 'Open the panel, then verify the status.',
+ 'budget_verified': None,
+ 'citation_precision': 0.5,
+ 'citation_recall': 1.0,
+ 'citations': ['[1] SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 5',
+               '[2] SC34-6428-08 CICS Sys Def, p. 55'],
+ 'citations_header_present': None,
+ 'citations_inferred': False,
+ 'cited_doc_ids': ['SA23-1380-70', 'SC34-6428-08'],
+ 'cites_rejected_shape_bad': None,
+ 'cites_rejected_unmapped': None,
+ 'client_first_token_ms': None,
+ 'completion_tokens': None,
+ 'decode_tps': None,
+ 'domain': None,
+ 'evidence_omitted': 0,
+ 'expected_behavior': 'answer',
+ 'expected_doc_ids': ['SA23-1380-70'],
+ 'expected_verification_state': None,
+ 'failures': [],
+ 'final_hits': None,
+ 'finish_reason': 'stop',
+ 'gold_retrieved': True,
+ 'hit_doc_ids': ['SA23-1380-70', 'SC34-6428-08', 'SA23-1380-70'],
+ 'id': 'EXP-1',
+ 'inferred_indices': [],
+ 'inline_bracket_present': None,
+ 'judge_label': 'entailed',
+ 'llm_ms': None,
+ 'path': 'llm',
+ 'prompt_tokens': None,
+ 'query': 'q',
+ 'query_class': 'syntax',
+ 'query_complexity': None,
+ 'reasoning_tokens': None,
+ 'request_id': 'req-1',
+ 'script': None,
+ 'script_review_required': False,
+ 'supplied_doc_n': 2,
+ 'supplied_evidence_meta': [{'cited': False,
+                             'doc_id': 'SA23-1380-70',
+                             'duplicate_citation': False,
+                             'end_char': 21,
+                             'index': 1,
+                             'page_label': '5',
+                             'pdf_page_end': 5,
+                             'pdf_page_start': 5,
+                             'source_chars': 21,
+                             'start_char': 0,
+                             'text_clipped': False,
+                             'text_sha256': 'dd2a0405a8eaf571285794760aca94eacce69f67ac6b611f2de17afcdcfd0a5d',
+                             'truncated_end': False,
+                             'truncated_start': False},
+                            {'cited': False,
+                             'doc_id': 'SC34-6428-08',
+                             'duplicate_citation': False,
+                             'end_char': 16,
+                             'index': 2,
+                             'page_label': '5',
+                             'pdf_page_end': 5,
+                             'pdf_page_start': 5,
+                             'source_chars': 16,
+                             'start_char': 0,
+                             'text_clipped': False,
+                             'text_sha256': '835b369459ab359d29d727a05aceaf296e15ddd75e3cacc08b9147d419824d5f',
+                             'truncated_end': False,
+                             'truncated_start': False},
+                            {'cited': False,
+                             'doc_id': 'SA23-1380-70',
+                             'duplicate_citation': False,
+                             'end_char': 24,
+                             'index': 3,
+                             'page_label': '5',
+                             'pdf_page_end': 5,
+                             'pdf_page_start': 5,
+                             'source_chars': 24,
+                             'start_char': 0,
+                             'text_clipped': False,
+                             'text_sha256': '90123c7d90aebaa66c18fc6f7526f3290e2d62270c0bf9b9b02dff0b0766d7f8',
+                             'truncated_end': False,
+                             'truncated_start': False}],
+ 'supplied_n': 3,
+ 'temperature': None,
+ 'total_tokens': None,
+ 'trap_type': None,
+ 'truncated': False,
+ 'ttft_ms': None,
+ 'units_omitted': None,
+ 'unmatched_citations': [],
+ 'verdict': 'pass',
+ 'verification_state': 'accepted',
+ 'warns': []}
+_OFF_METRICS: dict = {'answer_completeness': 1.0,
+ 'answer_completeness_n': 1,
+ 'answer_llm_n': 1,
+ 'by_class': {'syntax': {'citation_precision': 0.5, 'citation_recall': 1.0, 'n': 1}},
+ 'by_complexity': {'unknown': {'n': 1, 'truncated': 0, 'truncation_rate': 0.0}},
+ 'by_failure': {},
+ 'by_verification_state': {'accepted': 1},
+ 'by_why': {'cited_explicit': 1},
+ 'citation_precision': 0.5,
+ 'citation_recall': 1.0,
+ 'errors': 0,
+ 'faithfulness': {'contradiction': 0.0,
+                  'entailed': 1.0,
+                  'judge_errors': 0,
+                  'judged': 1,
+                  'neutral': 0.0},
+ 'faithfulness_by_class': {'syntax': {'contradiction': 0.0,
+                                      'entailed': 1.0,
+                                      'judged': 1,
+                                      'neutral': 0.0}},
+ 'grounded_rate': 1.0,
+ 'inferred_citations': 0,
+ 'inferred_index_off_gold': 0,
+ 'judged': 1,
+ 'queries': 1,
+ 'relevance': {'irrelevant': None,
+               'judge_errors': 0,
+               'judged': 0,
+               'partial': None,
+               'relevant': None},
+ 'state_mismatches': 0,
+ 'structural_fails': 0,
+ 'syntax_compliance': 0.0,
+ 'syntax_n': 1,
+ 'truncation_rate': 0.0,
+ 'unmapped_citations': 0}
+_OFF_PROMPTS = [
+    "EXCERPTS:\nSTEP1 open the panel.\n\n---\n\nUnrelated chunk.\n\nANSWER:\n" + _L2_ANSWER]
+
+
+def test_l2_expansion_off_keeps_the_buffered_request_and_row(monkeypatch):
+    """#1342: with ANSWER_EXPAND_ENABLED off L2 sends the buffered request it
+    always sent, and the row, the metrics and the judge prompt for a
+    multi-hit fixture equal those observed before #1377."""
+    hits = [_response_hit(f"c{n}", h["cite"], h["doc_id"], h["text"])
+            for n, h in enumerate(_OFF_POOL, 1)]
+    row, metrics, prompts, requests = _run_l2_stub(
+        monkeypatch, _OFF_POOL, _answer_fields(_OFF_CITATIONS, _OFF_SUPPLIED, hits),
+        expand_enabled=False)
+    assert requests == [{"query": "q", "temperature": None}]
+    assert isinstance(row.pop("elapsed_ms"), int)
+    assert row == _OFF_ROW
+    assert metrics == _OFF_METRICS
+    assert prompts == _OFF_PROMPTS
+
+
+def test_l2_streamed_row_without_a_neighbour_keeps_the_pool_join(monkeypatch):
+    """#1377: expansion on that appended nothing shows no 'neighbour_of' hit,
+    so the streamed row joins on the sibling pool like the buffered row: the
+    same join fields and judge prompt for the multi-hit fixture, and pool
+    drift still fails closed."""
+    hits = [_response_hit(f"c{n}", h["cite"], h["doc_id"], h["text"])
+            for n, h in enumerate(_OFF_POOL, 1)]
+    row, metrics, prompts, requests = _run_l2_stub(
+        monkeypatch, _OFF_POOL, _answer_fields(_OFF_CITATIONS, _OFF_SUPPLIED, hits),
+        expand_enabled=True)
+    assert requests == [{"query": "q", "temperature": None, "stream": True}]
+    joined = ("verdict", "failures", "citations", "cited_doc_ids", "unmatched_citations",
+              "citation_precision", "citation_recall", "hit_doc_ids", "gold_retrieved",
+              "judge_label", "truncated", "request_id", "path")
+    assert {key: row[key] for key in joined} == {key: _OFF_ROW[key] for key in joined}
+    assert "expansion_citations" not in row
+    assert prompts == _OFF_PROMPTS
+    # In-process the response is buffered: no first-token time is claimed.
+    assert row["client_first_token_ms"] is None and row["decode_tps"] is None
+
+    drifted = [_hit("SC34-6428-08 CICS Sys Def, p. 55", "SC34-6428-08", "Unrelated chunk.")]
+    row, metrics, prompts, _ = _run_l2_stub(
+        monkeypatch, drifted, _answer_fields([f"[1] {_PARENT_CITE}"], _OFF_SUPPLIED, hits),
+        expand_enabled=True)
+    assert row["verdict"] == "fail" and row["unmatched_citations"] == [f"[1] {_PARENT_CITE}"]
+    assert prompts == [] and metrics["unmapped_citations"] == 1
+
+
+def test_expansion_citation_excerpts_follow_the_prompt_slot():
+    """#1377: the provenance join. A bare citation maps to every supplied
+    excerpt carrying its line, all of which expansion added; a [n] prefix
+    selects the added excerpt in that slot and nothing else. The excerpt,
+    not the stored hit, is returned."""
+    from mainframe_rag.eval.judging import expansion_citation_excerpts
+
+    pool = [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1.")]
+    hits = [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
+            _response_hit("c2", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 stored.", parent="c1"),
+            _response_hit("c3", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP3 stored.", parent="c1")]
+    supplied = [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1."),
+                _excerpt(2, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2."),
+                _excerpt(3, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP3.")]
+
+    def excerpts(citation, hits=hits, supplied=supplied, pool=pool):
+        return expansion_citation_excerpts(citation, hits, supplied, pool)
+
+    assert excerpts(_NEIGHBOUR_CITE) == supplied[1:]
+    assert excerpts(f"[3] {_NEIGHBOUR_CITE}") == [supplied[2]]
+    # A prefix naming any other slot grounds nothing (no fallback to the line).
+    assert excerpts(f"[1] {_NEIGHBOUR_CITE}") == []
+    assert excerpts(f"[3] {_NEIGHBOUR_CITE}", supplied=supplied[:2]) == []
+    # A retrieved hit is never grounded by this join; nor is an omitted excerpt.
+    assert excerpts(f"[1] {_PARENT_CITE}") == []
+    assert excerpts(_PARENT_CITE) == []
+    assert excerpts(_NEIGHBOUR_CITE, supplied=supplied[:1]) == []
+
+
+def test_a_line_shared_with_an_unpooled_retrieved_hit_grounds_nothing():
+    """Review B1 (#1389, coordinator decision: fail closed): a cite line is
+    expansion-grounded only when every response hit and supplied excerpt
+    under it is an expansion-added neighbour or a chunk the sibling pool
+    holds. A retrieved hit the pool lacks under the same line leaves the
+    whole line ungrounded, bare or by slot; the pool holding that chunk
+    restores the neighbour."""
+    from mainframe_rag.eval.judging import expansion_citation_excerpts
+
+    pool = [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1.")]
+    hits = [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
+            _response_hit("c2", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 retrieved."),
+            _response_hit("c3", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 neighbour.", parent="c1")]
+    supplied = [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1."),
+                _excerpt(2, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 retrieved."),
+                _excerpt(3, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 neighbour.")]
+    for citation in (_NEIGHBOUR_CITE, f"[2] {_NEIGHBOUR_CITE}", f"[3] {_NEIGHBOUR_CITE}"):
+        assert expansion_citation_excerpts(citation, hits, supplied, pool) == []
+        # The retrieved hit trimmed out of the prompt changes nothing.
+        assert expansion_citation_excerpts(citation, hits, [supplied[0], supplied[2]], pool) == []
+    pooled = [*pool, hits[1]]
+    assert expansion_citation_excerpts(_NEIGHBOUR_CITE, hits, supplied, pooled) == [supplied[2]]
+    # A pool without chunk ids cannot vouch for a chunk.
+    anonymous = [*pool, _hit(_NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 retrieved.")]
+    assert expansion_citation_excerpts(f"[3] {_NEIGHBOUR_CITE}", hits, supplied, anonymous) == []
+
+
+def test_expanded_judge_evidence_reads_the_cited_neighbour_excerpts():
+    """#1342: the judge reads the evidence that was supplied. A bare shared
+    line reads the pool hit and every excerpt expansion added under that
+    line; a [n] prefix naming an added excerpt reads that excerpt alone; a
+    citation neither pooled nor added is unmapped and adds no text."""
+    from mainframe_rag.eval.judging import evidence_for_citations, evidence_for_expanded_citations
+
+    pool = [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1.")]
+    hits = [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
+            _response_hit("c2", _PARENT_CITE, "SA23-1380-70", "STEP2 stored.", parent="c1"),
+            _response_hit("c3", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP3 stored.", parent="c1")]
+    supplied = [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1."),
+                _excerpt(2, _PARENT_CITE, "SA23-1380-70", "STEP2."),
+                _excerpt(3, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP3.")]
+
+    def evidence(*citations):
+        return evidence_for_expanded_citations(list(citations), pool, hits, supplied)
+
+    assert evidence(_PARENT_CITE) == ("STEP1.\n\n---\n\nSTEP2.", [])
+    assert evidence(f"[2] {_PARENT_CITE}") == ("STEP2.", [])
+    assert evidence(f"[1] {_PARENT_CITE}") == ("STEP1.", [])
+    assert evidence(_NEIGHBOUR_CITE, "SX00-0000-00 Absent, p. 1") == (
+        "STEP3.", ["SX00-0000-00 Absent, p. 1"])
+    assert evidence(f"[1] {_NEIGHBOUR_CITE}") == ("", [f"[1] {_NEIGHBOUR_CITE}"])
+    # With no excerpt added under a line the text is the pool join's.
+    assert evidence_for_expanded_citations([_PARENT_CITE], pool, hits[:1], supplied[:1]) == (
+        evidence_for_citations([_PARENT_CITE], pool))
+
+
+def test_a_pooled_chunk_expansion_added_again_is_judged_once(monkeypatch):
+    """Review N1 (#1389): selection can drop a pooled chunk that expansion
+    then adds back as a neighbour. Its citation is grounded by the pool and
+    its text reaches the judge once, not as the pool hit and again as the
+    added excerpt."""
+    from mainframe_rag.eval.judging import evidence_for_expanded_citations
+
+    pool = [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1 open the panel."),
+            _response_hit("c4", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 verify the status.")]
+    hits = [pool[0], {**pool[1], "neighbour_of": "c1"}]
+    supplied = [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1 open the panel."),
+                _excerpt(2, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 verify the status.")]
+    once = "STEP1 open the panel.\n\n---\n\nSTEP2 verify the status."
+    assert evidence_for_expanded_citations(
+        [_PARENT_CITE, _NEIGHBOUR_CITE], pool, hits, supplied) == (once, [])
+    assert evidence_for_expanded_citations(
+        [f"[1] {_PARENT_CITE}", f"[2] {_NEIGHBOUR_CITE}"], pool, hits, supplied) == (once, [])
+    row, _, prompts, _ = _run_l2_stub(
+        monkeypatch, pool, _answer_fields([_PARENT_CITE, _NEIGHBOUR_CITE], supplied, hits),
+        expand_enabled=True)
+    assert row["verdict"] == "pass", row["failures"]
+    assert "expansion_citations" not in row
+    assert prompts == [f"EXCERPTS:\n{once}\n\nANSWER:\n{_L2_ANSWER}"]
+
+
+def _real_run_l2(monkeypatch, *, expand: str, retrieved: list, cited: str, payloads: dict):
+    """The real run_l2 over the real app lifespan. Doubles: retrieval
+    ('retrieved', cut to the asked limit), the stored-chunk reader, the
+    answering model (cites 'cited') and a recording judge. Candidate
+    selection is off so the retrieved ranks reach packing as given. Returns
+    the row, the metrics and the judge's prompts."""
+    from types import SimpleNamespace
+
+    import fastapi.testclient as testclient_mod
+
+    from mainframe_rag.agent import answer as answer_mod
+    from mainframe_rag.agent import app as app_mod
+    from mainframe_rag.eval.answer_tier import run_l2
+    from mainframe_rag.ports import ChatResult, TokenUsage
+    from tests.fakes import StoredChunksFake
+    from tests.helpers_agent_local import set_agent_env
+
+    set_agent_env(monkeypatch, ANSWER_EXPAND_ENABLED=expand, ANSWER_SELECT_ENABLED="false")
+
+    def search(*_args, **kwargs):
+        return list(retrieved[: kwargs.get("limit") or len(retrieved)]), "nl", {
+            "embed_ms": 1, "qdrant_ms": 2}
+
+    class Model:
+        def chat(self, messages, *args, **kwargs):
+            return ChatResult(content=f"Restart it from the panel.\n\nCitations:\n- {cited}\n",
+                              finish_reason="stop", usage=TokenUsage())
+
+    class Client(testclient_mod.TestClient):
+        def __enter__(self):
+            client = super().__enter__()
+            monkeypatch.setattr(app_mod, "llm", Model())
+            monkeypatch.setattr(app_mod, "qdrant", StoredChunksFake(payloads))
+            return client
+
+    prompts: list[str] = []
+
+    class Judge:
+        def __init__(self, settings):
+            pass
+
+        def chat(self, messages, *, temperature, reasoning_effort):
+            prompts.append(messages[1].content)
+            return SimpleNamespace(content='{"label": "entailed"}')
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(app_mod, "retrieve_search", search)
+    monkeypatch.setattr(testclient_mod, "TestClient", Client)
+    monkeypatch.setattr(answer_mod, "HttpxLLMClient", Judge)
+    entry = {**_entry("EXP-REAL", gold=["SYN-0001-00"]),
+             "query": "How do I restart the widget service?"}
+    rows, metrics = run_l2([entry], None, judge_enabled=True)
+    [row] = rows
+    return row, metrics, prompts
+
+
+@pytest.mark.parametrize("expand", ["false", "true"])
+def test_l2_fails_a_retrieved_hit_outside_the_pool_that_shares_a_neighbours_line(
+    monkeypatch, servable_representation_gate, expand
+):
+    """Review B1 (#1389), real app and real run_l2: the retrieved hit at
+    rank 9 is outside L2's 8-deep pool and shares its cite line with a
+    same-page chunk that expansion adds as a neighbour of the rank-1 hit.
+    The model cites that line. The row fails closed with no judge call, with
+    expansion on as with it off (and as before #1377)."""
+    from mainframe_rag.eval.answer_tier import gate_l2
+    from tests.test_answer_expand import Corpus
+
+    corpus = Corpus().add([("A", [(3, 3), (4, 4), (4, 4)])]
+                          + [(f"S{n}", [(100 * n, 100 * n)]) for n in range(1, 8)])
+    top, neighbour, deep = corpus.hit("A#0", 0.99), corpus.hit("A#1"), corpus.hit("A#2", 0.2)
+    assert neighbour.cite == deep.cite != top.cite
+    retrieved = [top, *(corpus.hit(f"S{n}#0", 0.9 - n / 100) for n in range(1, 8)), deep]
+    row, metrics, prompts = _real_run_l2(
+        monkeypatch, expand=expand, retrieved=retrieved, cited=deep.cite, payloads=corpus.payloads)
+    assert row["citations"] == [deep.cite]
+    # Nine retrieved hits; on, one neighbour more (the other page-4 chunk is the rank-9 hit).
+    assert row["supplied_n"] == (10 if expand == "true" else 9)
+    assert row["verdict"] == "fail"
+    assert row["unmatched_citations"] == [deep.cite]
+    assert row["failures"] == [
+        f"1 validated citation(s) not in the fetched hit set: {[deep.cite]}"]
+    assert "expansion_citations" not in row
+    assert prompts == []
+    assert metrics["structural_fails"] == 1 and metrics["unmapped_citations"] == 1
+    assert gate_l2(metrics) == ("hold", ["1 structural failure(s)"])
+
+
+def test_l2_real_run_grounds_a_next_page_neighbour(monkeypatch, servable_representation_gate):
+    """#1377, real app and real run_l2: the counterpart of the test above.
+    The cited next-page chunk is under a line no retrieved hit carries, so
+    its recorded provenance grounds it and the judge reads its text."""
+    from tests.test_answer_expand import Corpus
+
+    corpus = Corpus().add([("A", [(3, 3), (4, 4)])])
+    top, neighbour = corpus.hit("A#0", 0.99), corpus.hit("A#1")
+    row, metrics, prompts = _real_run_l2(
+        monkeypatch, expand="true", retrieved=[top], cited=neighbour.cite, payloads=corpus.payloads)
+    assert row["verdict"] == "pass", row["failures"]
+    assert row["expansion_citations"] == [neighbour.cite] and row["unmatched_citations"] == []
+    assert prompts == ["EXCERPTS:\nA#1\n\nANSWER:\nRestart it from the panel."]
+    assert metrics["structural_fails"] == 0
+
+
+@pytest.mark.parametrize("neighbour_page,grounded_by_expansion,evidence", [
+    pytest.param(4, True, "A#1", id="next-page-neighbour"),
+    pytest.param(3, False, "A#0\n\n---\n\nA#1", id="same-page-neighbour"),
+])
+def test_l2_join_round_trips_the_agent_stream_final(
+    monkeypatch, servable_representation_gate, neighbour_page, grounded_by_expansion, evidence
+):
+    """#1377 producer to consumer: the real app's streamed /v1/answer final,
+    with neighbour expansion on, carries what the L2 join needs. The model
+    cites the neighbour's line; the sibling /v1/search pool holds the
+    retrieved hit alone. A next-page neighbour is outside the pool and is
+    grounded by its provenance. A same-page neighbour repeats its parent's
+    line (the app returns bare lines), so the pool grounds the citation and
+    the judge reads the parent and the neighbour excerpt carrying it."""
+    from mainframe_rag.agent import app as app_mod
+    from mainframe_rag.eval.answer_tier import apply_l2_measurements
+    from mainframe_rag.eval.answers import ResponseJoin, run_query
+    from mainframe_rag.eval.judging import evidence_for_expanded_citations
+    from mainframe_rag.ports import ChatResult, TokenUsage
+    from tests.fakes import StoredChunksFake
+    from tests.helpers_agent_local import agent_client
+    from tests.test_answer_expand import Corpus
+
+    corpus = Corpus().add([("A", [(3, 3), (neighbour_page, neighbour_page)])])
+    retrieved, neighbour = corpus.hit("A#0"), corpus.hit("A#1")
+    assert (neighbour.cite != retrieved.cite) is grounded_by_expansion
+
+    class Model:
+        def chat(self, messages, *args, **kwargs):
+            return ChatResult(content=f"Restart it from the panel.\n\nCitations:\n- {neighbour.cite}\n",
+                              finish_reason="stop", usage=TokenUsage())
+
+    def search(*_args, **_kwargs):
+        return [retrieved], "nl", {"embed_ms": 1, "qdrant_ms": 2}
+
+    entry = {**_entry("EXP-RT", gold=["SYN-0001-00"]), "query": "How do I restart the widget service?"}
+    with agent_client(monkeypatch, llm=Model(), search=search,
+                      env={"ANSWER_EXPAND_ENABLED": "true"}) as client:
+        monkeypatch.setattr(app_mod, "qdrant", StoredChunksFake(corpus.payloads))
+        pool = client.post("/v1/search", json={"query": entry["query"], "limit": 8}).json()["hits"]
+        join = ResponseJoin()
+        row = run_query(client, entry, None, pool, temperature=None, stream=True, response_join=join)
+    assert [hit["chunk_id"] for hit in pool] == [retrieved.chunk_id]
+    assert row["citations"] == [neighbour.cite]
+    assert join.hits is not None and join.supplied is not None
+    apply_l2_measurements(row, entry, pool, {}, expansion=join)
+    assert row["verdict"] == "pass", row["failures"]
+    assert row["unmatched_citations"] == []
+    assert row.get("expansion_citations") == ([neighbour.cite] if grounded_by_expansion else None)
+    assert row["cited_doc_ids"] == ["SYN-0001-00"]
+    assert evidence_for_expanded_citations(
+        row["citations"], pool, join.hits, join.supplied) == (evidence, [])
