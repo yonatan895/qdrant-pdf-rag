@@ -121,8 +121,8 @@ class AnswerCoreInput:
     # joins the prompt when the read returned any, and its notice opens the
     # answer. None on every other turn, which keeps its exact bytes.
     zos: ZosObservation | None = None
-    # A fixed agent-written line that opens the answer on a turn without a
-    # read of its own (a follow-up in an observation-bearing chat).
+    # A fixed agent-written line that opens the answer of a follow-up in an
+    # observation-bearing chat whose own turn put no read text in the prompt.
     answer_notice: str | None = None
 
 
@@ -765,10 +765,15 @@ def _answer_notice(
     observation facts for the response (ADR-0012 D6): a read's distinct
     citation or its non-`complete` outcome, known only once prompt fitting
     is; else the route's fixed notice; else nothing."""
-    if input_data.zos is not None:
-        omitted = prepared.zos_omitted_chars
-        return input_data.zos.notice(omitted), input_data.zos.fields(omitted)
-    return input_data.answer_notice, None
+    zos = input_data.zos
+    if zos is None:
+        return input_data.answer_notice, None
+    omitted = prepared.zos_omitted_chars
+    notice = zos.notice(omitted)
+    if input_data.answer_notice is not None and not zos.has_content:
+        # A marked chat stays marked when this turn's own read brought no text.
+        notice = f"{input_data.answer_notice}\n\n{notice}"
+    return notice, zos.fields(omitted)
 
 
 def _with_notice(

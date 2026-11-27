@@ -828,6 +828,8 @@ async def _attach_zos_observation(
     if not settings.zowe_mcp_enabled:
         return
     request = owner.request
+    if getattr(request.state, "feedback_suppressed", False):
+        core_input.answer_notice = ZOS_HISTORY_NOTICE
     if core_input.hits:
         tag = request.headers.get(ZOS_AUDIT_TAG_HEADER)
         if tag is not None and not (len(tag) == 64 and set(tag) <= set("0123456789abcdef")):
@@ -839,9 +841,6 @@ async def _attach_zos_observation(
         if observation is not None:
             request.state.feedback_suppressed = True
             core_input.zos = observation
-            return
-    if getattr(request.state, "feedback_suppressed", False):
-        core_input.answer_notice = ZOS_HISTORY_NOTICE
 
 
 def _zos_fields(request: Request, output: AnswerCoreOutput) -> dict:

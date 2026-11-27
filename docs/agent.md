@@ -2429,8 +2429,8 @@ trap queries stay on the manuals path.
   - *Plan:* deterministic, from the user's own text for this turn only (never
     history, Splunk context, the condensed or image-read search text, or
     excerpts). One `dataset_read` when the text names an exact dataset or
-    member with at least two qualifiers (quoted in any case, or bare in upper
-    case; a member right after the name belongs to the target) and retrieval
+    member with at least two qualifiers of the MVS shape (quoted in any case,
+    or bare in upper case; a version such as `V2.5.0` is not one; a member right after the name belongs to the target) and retrieval
     returned excerpts. No such name, a trap query or no excerpts: no call, no
     notice, an ordinary manuals turn. Job ids and USS paths plan nothing. The
     bridge owns the allowlist; the agent holds no copy.
@@ -2469,8 +2469,8 @@ trap queries stay on the manuals path.
     trimmed. The model is told never to cite the observation; a marker line
     it writes under `Citations:` is dropped by citation validation, and
     `citations` holds manual cites only.
-  - *Limits and audit:* one call per turn, `zowe_mcp_timeout_s`, no retry, no
-    polling, no cache (every asking turn is a new read). `zowe_mcp_dry_run`
+  - *Limits and audit:* one call per turn, `zowe_mcp_timeout_s`, no retry beyond
+    the connect phase, no polling, no cache (every asking turn is a new read). `zowe_mcp_dry_run`
     plans, logs and states `dry_run` without calling. The `live_fetch` log
     line carries request id, route, tool, target name, code, byte count and,
     when the caller sent a well-formed `X-Zos-Audit-Tag` (64 hex; the docs

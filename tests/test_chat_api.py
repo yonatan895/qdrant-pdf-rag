@@ -1492,6 +1492,14 @@ def test_zos_chat_stays_marked_and_unrecorded_after_its_first_turns_are_trimmed(
     assert third.startswith("[z/OS observation] An earlier answer")
     assert final["feedback_suppressed"] is True
     assert zos.feedback.records == [] and len(_retrs(zos)) == 1
+    # A read of its own that brings no text keeps the chat marked too.
+    denied, final = _ask(zos, "Explain SYS1.SECRET.DATA(KEYS) to me", True, history=trimmed)
+    assert denied.startswith(
+        "[z/OS observation] An earlier answer in this chat used text read from z/OS.\n\n"
+        "z/OS read of SYS1.SECRET.DATA(KEYS) not used")
+    after_denied = [{"role": "user", "content": "x"}, {"role": "assistant", "content": denied}]
+    _, final = _ask(zos, "What is IEA500I once more?", True, history=after_denied)
+    assert final["feedback_suppressed"] is True and zos.feedback.records == []
 
 
 def test_zos_model_written_marker_is_never_a_citation(zos, monkeypatch):
@@ -1516,7 +1524,7 @@ def test_zos_audit_line_names_the_read_and_carries_no_dataset_text(zos, caplog):
     tag = "ab" * 32
     for header in (tag, "not-a-tag\r\nx: y"[:9], None):
         caplog.clear()
-        with caplog.at_level(logging.INFO):
+        with caplog.at_level(logging.DEBUG):
             res = zos.post("/v1/chat", json={"messages": [{"role": "user", "content": _ZOS_QUESTION}]},
                            headers={"X-Zos-Audit-Tag": header} if header else {})
         assert res.status_code == 200
@@ -1549,3 +1557,36 @@ def test_zos_read_on_the_answer_route(zos, stream):
     assert final["zos_observation"]["outcome"] == "complete" and final["feedback_suppressed"] is True
     assert final["citations"] == [_MANUAL_CITE]
     assert _retrs(zos) == ["RETR 'SYS1.PARMLIB'(IEASYS00)"] and zos.feedback.records == []
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_zos_spans_open_only_when_on_and_never_carry_dataset_text(zos, monkeypatch, stream):
+    """ADR-0012 G4 for traces: off, the turn opens no `live.fetch` span; on,
+    it opens one and no span attribute or event of the whole request holds
+    member text."""
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from mainframe_rag.agent import answer_core, live_state
+
+    provider, exporter = TracerProvider(), InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    for module in (app_mod, answer_core, live_state):
+        monkeypatch.setattr(module, "tracer", provider.get_tracer("test"))
+
+    monkeypatch.setattr(app_mod.settings, "zowe_mcp_enabled", False)
+    _ask(zos, _ZOS_QUESTION, stream)
+    off_names = sorted(s.name for s in exporter.get_finished_spans())
+    assert "live.fetch" not in off_names and "v1.chat" in off_names
+
+    exporter.clear()
+    monkeypatch.setattr(app_mod.settings, "zowe_mcp_enabled", True)
+    text, _ = _ask(zos, _ZOS_QUESTION, stream)
+    assert text.startswith(_ZOS_NOTICE)
+    spans = exporter.get_finished_spans()
+    assert sorted(s.name for s in spans) == sorted([*off_names, "live.fetch"])
+    dumped = json.dumps([[dict(s.attributes or {}), [(e.name, dict(e.attributes or {})) for e in s.events]]
+                         for s in spans], default=str)
+    for leaked in ("LFAREA=(1M", "MAXUSER", "hunter2"):
+        assert leaked not in dumped
