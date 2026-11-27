@@ -561,10 +561,17 @@ def test_capture_of_a_generated_set_refuses_a_pool_path_inside_a_git_work_tree(
     existing = root / "existing.jsonl"
     existing.write_text("earlier\n", encoding="utf-8")
     assert main(["--golden", str(golden), "--out", str(existing)]) == 2
+    # A generated row past --max-queries still makes the set generated; an
+    # unreadable line there is not parsed for its query, as before.
+    mixed = root / "mixed.jsonl"
+    mixed.write_text(
+        json.dumps({"query": "hand-written question"}) + "\n" + golden.read_text(encoding="utf-8")
+        + "not json\n", encoding="utf-8")
+    assert main(["--golden", str(mixed), "--out", str(in_tree), "--max-queries", "1"]) == 2
     monkeypatch.chdir(checkout)
     assert main(["--golden", str(golden), "--bundle-dir", "bundle"]) == 2
     captured = capsys.readouterr()
-    assert captured.err.splitlines() == [GENERATED_REPORT_OUTPUT_REFUSAL] * 3
+    assert captured.err.splitlines() == [GENERATED_REPORT_OUTPUT_REFUSAL] * 4
     assert "first question" not in captured.out + captured.err
     assert not in_tree.exists() and not (checkout / "bundle").exists()
     assert existing.read_text(encoding="utf-8") == "earlier\n"

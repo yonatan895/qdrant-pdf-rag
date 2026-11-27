@@ -408,14 +408,24 @@ def _read_queries(golden_path: str, max_queries: int | None) -> tuple[list[str],
     first ``max_queries``) is generated gold (#1317)."""
     queries: list[str] = []
     generated = False
+    capped = False
     for line in read_golden_text(golden_path).splitlines():
         line = line.strip()
         if not line:
             continue
+        if capped:
+            # Past the cap only the marker is read; the capture never parsed
+            # these lines, so one it cannot read is not an error here.
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            generated = generated or (isinstance(row, dict) and is_generated_source(row.get("source")))
+            continue
         row = json.loads(line)
         generated = generated or is_generated_source(row.get("source"))
-        if max_queries is None or len(queries) < max_queries:
-            queries.append(row["query"])
+        queries.append(row["query"])
+        capped = max_queries is not None and len(queries) >= max_queries
     return queries, generated
 
 
