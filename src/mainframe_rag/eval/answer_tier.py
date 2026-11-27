@@ -442,7 +442,8 @@ def apply_l2_measurements(
     `expansion` (#1377) is the row's `ResponseJoin` when its streamed final
     showed neighbour expansion ran. A citation the pool does not hold is
     then grounded only by `expansion_citation_excerpts` (a recorded
-    neighbour of a retrieved hit of the same document) and listed in
+    neighbour of a retrieved hit of the same document, under a cite line
+    no retrieved hit outside the pool shares) and listed in
     `expansion_citations`; every other citation keeps the rule above.
     """
     rid = row.get("request_id")
@@ -461,7 +462,8 @@ def apply_l2_measurements(
     ):
         added: list[str] = []
         for citation in unmatched:
-            excerpts = expansion_citation_excerpts(citation, expansion.hits, expansion.supplied)
+            excerpts = expansion_citation_excerpts(
+                citation, expansion.hits, expansion.supplied, hits)
             if excerpts:
                 added.append(citation)
                 cited.update(str(item["doc_id"]) for item in excerpts)

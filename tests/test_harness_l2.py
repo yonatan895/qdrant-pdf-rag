@@ -755,6 +755,36 @@ def test_l2_grounds_a_cited_neighbour_that_expansion_added(monkeypatch):
          _excerpt(2, "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 7",
                   "SA23-1380-70", "STEP3.")],
         id="neither-retrieved-nor-expanded"),
+    pytest.param(
+        # Review B1 (#1389): slot 2 is a retrieved hit the pool lacks; it shares
+        # its line with the neighbour expansion added in slot 3.
+        [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _response_hit("c2", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 retrieved."),
+         _response_hit("c3", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 neighbour.", parent="c1")],
+        [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _excerpt(2, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 retrieved."),
+         _excerpt(3, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 neighbour.")],
+        id="slot-of-a-retrieved-hit-sharing-a-neighbours-line"),
+    pytest.param(
+        # The same line, the retrieved hit trimmed out of the prompt: the
+        # response still shows a retrieved hit under it that the pool lacks.
+        [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _response_hit("c2", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 neighbour.", parent="c1"),
+         _response_hit("c3", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 retrieved.")],
+        [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _excerpt(2, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 neighbour.")],
+        id="omitted-retrieved-hit-sharing-a-neighbours-line"),
+    pytest.param(
+        # The prefix names a slot that is not the added excerpt.
+        [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _response_hit("c2", "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 7",
+                       "SA23-1380-70", "STEP3."),
+         _response_hit("c3", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2.", parent="c1")],
+        [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1."),
+         _excerpt(2, "SA23-1380-70 Synthetic Reference, Guide > Procedure, p. 7",
+                  "SA23-1380-70", "STEP3."),
+         _excerpt(3, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2.")],
+        id="prefix-names-another-slot"),
 ])
 def test_l2_still_fails_a_citation_expansion_did_not_add(monkeypatch, hits, supplied):
     """#1377 forbidden outcome: on an expanded row only a recorded neighbour
@@ -967,23 +997,58 @@ def test_l2_streamed_row_without_a_neighbour_keeps_the_pool_join(monkeypatch):
 
 def test_expansion_citation_excerpts_follow_the_prompt_slot():
     """#1377: the provenance join. A bare citation maps to every supplied
-    excerpt carrying its line that expansion added; a [n] prefix naming such
-    a slot selects it alone. The excerpt, not the stored hit, is returned."""
+    excerpt carrying its line, all of which expansion added; a [n] prefix
+    selects the added excerpt in that slot and nothing else. The excerpt,
+    not the stored hit, is returned."""
     from mainframe_rag.eval.judging import expansion_citation_excerpts
 
+    pool = [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1.")]
     hits = [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
             _response_hit("c2", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 stored.", parent="c1"),
             _response_hit("c3", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP3 stored.", parent="c1")]
     supplied = [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1."),
                 _excerpt(2, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2."),
                 _excerpt(3, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP3.")]
-    assert expansion_citation_excerpts(_NEIGHBOUR_CITE, hits, supplied) == supplied[1:]
-    assert expansion_citation_excerpts(f"[3] {_NEIGHBOUR_CITE}", hits, supplied) == [supplied[2]]
-    assert expansion_citation_excerpts(f"[1] {_NEIGHBOUR_CITE}", hits, supplied) == supplied[1:]
+
+    def excerpts(citation, hits=hits, supplied=supplied, pool=pool):
+        return expansion_citation_excerpts(citation, hits, supplied, pool)
+
+    assert excerpts(_NEIGHBOUR_CITE) == supplied[1:]
+    assert excerpts(f"[3] {_NEIGHBOUR_CITE}") == [supplied[2]]
+    # A prefix naming any other slot grounds nothing (no fallback to the line).
+    assert excerpts(f"[1] {_NEIGHBOUR_CITE}") == []
+    assert excerpts(f"[3] {_NEIGHBOUR_CITE}", supplied=supplied[:2]) == []
     # A retrieved hit is never grounded by this join; nor is an omitted excerpt.
-    assert expansion_citation_excerpts(f"[1] {_PARENT_CITE}", hits, supplied) == []
-    assert expansion_citation_excerpts(f"[3] {_NEIGHBOUR_CITE}", hits, supplied[:2]) == [supplied[1]]
-    assert expansion_citation_excerpts(_NEIGHBOUR_CITE, hits, supplied[:1]) == []
+    assert excerpts(f"[1] {_PARENT_CITE}") == []
+    assert excerpts(_PARENT_CITE) == []
+    assert excerpts(_NEIGHBOUR_CITE, supplied=supplied[:1]) == []
+
+
+def test_a_line_shared_with_an_unpooled_retrieved_hit_grounds_nothing():
+    """Review B1 (#1389, coordinator decision: fail closed): a cite line is
+    expansion-grounded only when every response hit and supplied excerpt
+    under it is an expansion-added neighbour or a chunk the sibling pool
+    holds. A retrieved hit the pool lacks under the same line leaves the
+    whole line ungrounded, bare or by slot; the pool holding that chunk
+    restores the neighbour."""
+    from mainframe_rag.eval.judging import expansion_citation_excerpts
+
+    pool = [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1.")]
+    hits = [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
+            _response_hit("c2", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 retrieved."),
+            _response_hit("c3", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 neighbour.", parent="c1")]
+    supplied = [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1."),
+                _excerpt(2, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 retrieved."),
+                _excerpt(3, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 neighbour.")]
+    for citation in (_NEIGHBOUR_CITE, f"[2] {_NEIGHBOUR_CITE}", f"[3] {_NEIGHBOUR_CITE}"):
+        assert expansion_citation_excerpts(citation, hits, supplied, pool) == []
+        # The retrieved hit trimmed out of the prompt changes nothing.
+        assert expansion_citation_excerpts(citation, hits, [supplied[0], supplied[2]], pool) == []
+    pooled = [*pool, hits[1]]
+    assert expansion_citation_excerpts(_NEIGHBOUR_CITE, hits, supplied, pooled) == [supplied[2]]
+    # A pool without chunk ids cannot vouch for a chunk.
+    anonymous = [*pool, _hit(_NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 retrieved.")]
+    assert expansion_citation_excerpts(f"[3] {_NEIGHBOUR_CITE}", hits, supplied, anonymous) == []
 
 
 def test_expanded_judge_evidence_reads_the_cited_neighbour_excerpts():
@@ -993,7 +1058,7 @@ def test_expanded_judge_evidence_reads_the_cited_neighbour_excerpts():
     citation neither pooled nor added is unmapped and adds no text."""
     from mainframe_rag.eval.judging import evidence_for_citations, evidence_for_expanded_citations
 
-    pool = [_hit(_PARENT_CITE, "SA23-1380-70", "STEP1.")]
+    pool = [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1.")]
     hits = [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1."),
             _response_hit("c2", _PARENT_CITE, "SA23-1380-70", "STEP2 stored.", parent="c1"),
             _response_hit("c3", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP3 stored.", parent="c1")]
@@ -1009,9 +1074,141 @@ def test_expanded_judge_evidence_reads_the_cited_neighbour_excerpts():
     assert evidence(f"[1] {_PARENT_CITE}") == ("STEP1.", [])
     assert evidence(_NEIGHBOUR_CITE, "SX00-0000-00 Absent, p. 1") == (
         "STEP3.", ["SX00-0000-00 Absent, p. 1"])
+    assert evidence(f"[1] {_NEIGHBOUR_CITE}") == ("", [f"[1] {_NEIGHBOUR_CITE}"])
     # With no excerpt added under a line the text is the pool join's.
     assert evidence_for_expanded_citations([_PARENT_CITE], pool, hits[:1], supplied[:1]) == (
         evidence_for_citations([_PARENT_CITE], pool))
+
+
+def test_a_pooled_chunk_expansion_added_again_is_judged_once(monkeypatch):
+    """Review N1 (#1389): selection can drop a pooled chunk that expansion
+    then adds back as a neighbour. Its citation is grounded by the pool and
+    its text reaches the judge once, not as the pool hit and again as the
+    added excerpt."""
+    from mainframe_rag.eval.judging import evidence_for_expanded_citations
+
+    pool = [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1 open the panel."),
+            _response_hit("c4", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 verify the status.")]
+    hits = [pool[0], {**pool[1], "neighbour_of": "c1"}]
+    supplied = [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1 open the panel."),
+                _excerpt(2, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 verify the status.")]
+    once = "STEP1 open the panel.\n\n---\n\nSTEP2 verify the status."
+    assert evidence_for_expanded_citations(
+        [_PARENT_CITE, _NEIGHBOUR_CITE], pool, hits, supplied) == (once, [])
+    assert evidence_for_expanded_citations(
+        [f"[1] {_PARENT_CITE}", f"[2] {_NEIGHBOUR_CITE}"], pool, hits, supplied) == (once, [])
+    row, _, prompts, _ = _run_l2_stub(
+        monkeypatch, pool, _answer_fields([_PARENT_CITE, _NEIGHBOUR_CITE], supplied, hits),
+        expand_enabled=True)
+    assert row["verdict"] == "pass", row["failures"]
+    assert "expansion_citations" not in row
+    assert prompts == [f"EXCERPTS:\n{once}\n\nANSWER:\n{_L2_ANSWER}"]
+
+
+def _real_run_l2(monkeypatch, *, expand: str, retrieved: list, cited: str, payloads: dict):
+    """The real run_l2 over the real app lifespan. Doubles: retrieval
+    ('retrieved', cut to the asked limit), the stored-chunk reader, the
+    answering model (cites 'cited') and a recording judge. Candidate
+    selection is off so the retrieved ranks reach packing as given. Returns
+    the row, the metrics and the judge's prompts."""
+    from types import SimpleNamespace
+
+    import fastapi.testclient as testclient_mod
+
+    from mainframe_rag.agent import answer as answer_mod
+    from mainframe_rag.agent import app as app_mod
+    from mainframe_rag.eval.answer_tier import run_l2
+    from mainframe_rag.ports import ChatResult, TokenUsage
+    from tests.fakes import StoredChunksFake
+    from tests.helpers_agent_local import set_agent_env
+
+    set_agent_env(monkeypatch, ANSWER_EXPAND_ENABLED=expand, ANSWER_SELECT_ENABLED="false")
+
+    def search(*_args, **kwargs):
+        return list(retrieved[: kwargs.get("limit") or len(retrieved)]), "nl", {
+            "embed_ms": 1, "qdrant_ms": 2}
+
+    class Model:
+        def chat(self, messages, *args, **kwargs):
+            return ChatResult(content=f"Restart it from the panel.\n\nCitations:\n- {cited}\n",
+                              finish_reason="stop", usage=TokenUsage())
+
+    class Client(testclient_mod.TestClient):
+        def __enter__(self):
+            client = super().__enter__()
+            monkeypatch.setattr(app_mod, "llm", Model())
+            monkeypatch.setattr(app_mod, "qdrant", StoredChunksFake(payloads))
+            return client
+
+    prompts: list[str] = []
+
+    class Judge:
+        def __init__(self, settings):
+            pass
+
+        def chat(self, messages, *, temperature, reasoning_effort):
+            prompts.append(messages[1].content)
+            return SimpleNamespace(content='{"label": "entailed"}')
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(app_mod, "retrieve_search", search)
+    monkeypatch.setattr(testclient_mod, "TestClient", Client)
+    monkeypatch.setattr(answer_mod, "HttpxLLMClient", Judge)
+    entry = {**_entry("EXP-REAL", gold=["SYN-0001-00"]),
+             "query": "How do I restart the widget service?"}
+    rows, metrics = run_l2([entry], None, judge_enabled=True)
+    [row] = rows
+    return row, metrics, prompts
+
+
+@pytest.mark.parametrize("expand", ["false", "true"])
+def test_l2_fails_a_retrieved_hit_outside_the_pool_that_shares_a_neighbours_line(
+    monkeypatch, servable_representation_gate, expand
+):
+    """Review B1 (#1389), real app and real run_l2: the retrieved hit at
+    rank 9 is outside L2's 8-deep pool and shares its cite line with a
+    same-page chunk that expansion adds as a neighbour of the rank-1 hit.
+    The model cites that line. The row fails closed with no judge call, with
+    expansion on as with it off (and as before #1377)."""
+    from mainframe_rag.eval.answer_tier import gate_l2
+    from tests.test_answer_expand import Corpus
+
+    corpus = Corpus().add([("A", [(3, 3), (4, 4), (4, 4)])]
+                          + [(f"S{n}", [(100 * n, 100 * n)]) for n in range(1, 8)])
+    top, neighbour, deep = corpus.hit("A#0", 0.99), corpus.hit("A#1"), corpus.hit("A#2", 0.2)
+    assert neighbour.cite == deep.cite != top.cite
+    retrieved = [top, *(corpus.hit(f"S{n}#0", 0.9 - n / 100) for n in range(1, 8)), deep]
+    row, metrics, prompts = _real_run_l2(
+        monkeypatch, expand=expand, retrieved=retrieved, cited=deep.cite, payloads=corpus.payloads)
+    assert row["citations"] == [deep.cite]
+    # Nine retrieved hits; on, one neighbour more (the other page-4 chunk is the rank-9 hit).
+    assert row["supplied_n"] == (10 if expand == "true" else 9)
+    assert row["verdict"] == "fail"
+    assert row["unmatched_citations"] == [deep.cite]
+    assert row["failures"] == [
+        f"1 validated citation(s) not in the fetched hit set: {[deep.cite]}"]
+    assert "expansion_citations" not in row
+    assert prompts == []
+    assert metrics["structural_fails"] == 1 and metrics["unmapped_citations"] == 1
+    assert gate_l2(metrics) == ("hold", ["1 structural failure(s)"])
+
+
+def test_l2_real_run_grounds_a_next_page_neighbour(monkeypatch, servable_representation_gate):
+    """#1377, real app and real run_l2: the counterpart of the test above.
+    The cited next-page chunk is under a line no retrieved hit carries, so
+    its recorded provenance grounds it and the judge reads its text."""
+    from tests.test_answer_expand import Corpus
+
+    corpus = Corpus().add([("A", [(3, 3), (4, 4)])])
+    top, neighbour = corpus.hit("A#0", 0.99), corpus.hit("A#1")
+    row, metrics, prompts = _real_run_l2(
+        monkeypatch, expand="true", retrieved=[top], cited=neighbour.cite, payloads=corpus.payloads)
+    assert row["verdict"] == "pass", row["failures"]
+    assert row["expansion_citations"] == [neighbour.cite] and row["unmatched_citations"] == []
+    assert prompts == ["EXCERPTS:\nA#1\n\nANSWER:\nRestart it from the panel."]
+    assert metrics["structural_fails"] == 0
 
 
 @pytest.mark.parametrize("neighbour_page,grounded_by_expansion,evidence", [

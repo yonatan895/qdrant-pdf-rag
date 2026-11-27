@@ -1212,15 +1212,34 @@ default 16. Candidate selection stays at its deployed value in both arms.
   excerpts supplied to the prompt. Any other citation outside the pool
   (a retrieved hit the pool lacks, a neighbour whose parent is missing,
   another document's, or itself a neighbour) is unmapped and fails the row
-  with no judge call, as with expansion off. A same-page neighbour repeats
-  its parent's line and the agent returns bare lines, so that citation is
+  with no judge call, as with expansion off.
+- A cite line is decided as a whole and fails closed (#1389 review B1).
+  Two chunks of one page share a line, and the agent returns bare lines,
+  so a line cannot say which chunk was cited. It is expansion-grounded
+  only when every response hit and every supplied excerpt carrying it is
+  an added neighbour by the rule above or a chunk the pool holds (by
+  `chunk_id`). When a retrieved hit the pool lacks shares the line with an
+  added neighbour (the pool is 8 deep, `answer_hit_limit` 16), the row
+  fails as it does with expansion off. A `[n]` prefix grounds only the
+  added excerpt in slot `n`; it never falls back to the line.
+- A same-page neighbour repeats its parent's line, so that citation is
   grounded by the parent in the pool; the judge then reads the parent's
   pool text and every added excerpt carrying the line
-  (`judging.evidence_for_expanded_citations`).
+  (`judging.evidence_for_expanded_citations`). A pooled chunk that
+  expansion adds again (selection dropped it, a neighbour walk returned
+  it) is read once, as the pool hit.
   On a row with a neighbour hit, `hit_doc_ids` and `gold_retrieved` read
   the response's hits, as in the answer eval. L2 runs in-process, where the
   client buffers the stream, so `client_first_token_ms` and `decode_tps`
-  stay null.
+  stay null. A streamed row carries `ttft_ms` and no `llm_ms`; a buffered
+  row the reverse.
+- On this arm the answer request runs under the agent's client-visible
+  `chat_stream` row of the [HTTP and model fallback
+  contract](agent.md#http-model-contract), not the buffered one: one
+  non-streaming second ask is allowed on an empty `stop` or a pre-output
+  stream failure, and `answer_timeout_s` bounds each model read (a stall),
+  not the whole generation as it does for a buffered answer. The
+  2026-09-11 L4 reference was recorded on buffered requests.
 - Not changed by #1377: L2's sibling pool is 8 hits deep while
   `answer_hit_limit` is 16 since #1274, so a cited retrieved hit ranked 9
   to 16 is outside the pool and fails its row, with expansion on or off.

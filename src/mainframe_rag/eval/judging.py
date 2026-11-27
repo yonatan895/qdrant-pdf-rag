@@ -122,32 +122,45 @@ def _split_citation(citation: str) -> tuple[str, int | None]:
 
 
 def _expansion_added(
-    cite: str, hits: list[dict[str, Any]], supplied: list[dict[str, Any]]
+    cite: str, hits: list[dict[str, Any]], supplied: list[dict[str, Any]],
+    pool: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Supplied excerpts carrying `cite` whose expansion provenance the
-    response records (the rule of `expansion_citation_excerpts`)."""
+    """Supplied excerpts under `cite` that neighbour expansion added, or
+    none when the response does not account for the whole line (the rule of
+    `expansion_citation_excerpts`)."""
+    pooled = {h["chunk_id"] for h in pool if isinstance(h.get("chunk_id"), str)}
     retrieved = {h["chunk_id"]: h.get("doc_id") for h in hits
                  if isinstance(h.get("chunk_id"), str) and "neighbour_of" not in h}
+
+    def added_by_expansion(hit: dict[str, Any]) -> bool:
+        parent, doc_id = hit.get("neighbour_of"), hit.get("doc_id")
+        return (isinstance(parent, str) and isinstance(doc_id, str) and bool(doc_id)
+                and retrieved.get(parent) == doc_id)
+
+    # Fail closed on the line (#1389 review B1): a response hit under it that
+    # is neither an added neighbour nor a chunk the pool holds (a retrieved
+    # hit beyond the pool's depth) could be what the answer cited.
+    if any(h.get("cite") == cite and not added_by_expansion(h)
+           and h.get("chunk_id") not in pooled for h in hits):
+        return []
     added: list[dict[str, Any]] = []
     for item in supplied:
-        index, doc_id = item.get("index"), item.get("doc_id")
-        if item.get("citation") != cite or type(index) is not int or not 1 <= index <= len(hits):
+        if item.get("citation") != cite:
             continue
+        index = item.get("index")
+        if type(index) is not int or not 1 <= index <= len(hits):
+            return []
         hit = hits[index - 1]
-        parent = hit.get("neighbour_of")
-        if (
-            isinstance(parent, str)
-            and isinstance(doc_id, str) and doc_id
-            and hit.get("cite") == cite
-            and hit.get("doc_id") == doc_id
-            and retrieved.get(parent) == doc_id
-        ):
+        if hit.get("cite") != cite or hit.get("doc_id") != item.get("doc_id"):
+            return []
+        if added_by_expansion(hit):
             added.append(item)
     return added
 
 
 def expansion_citation_excerpts(
-    citation: str, hits: list[dict[str, Any]], supplied: list[dict[str, Any]]
+    citation: str, hits: list[dict[str, Any]], supplied: list[dict[str, Any]],
+    pool: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """The supplied excerpts behind a validated citation that neighbour
     expansion added (#1377), for harness L2/L4 on a streamed final. An
@@ -156,14 +169,22 @@ def expansion_citation_excerpts(
     hits 1..n), that hit carries the cite line, the excerpt's `doc_id` and a
     string `neighbour_of`, and `neighbour_of` is the `chunk_id` of a
     retrieved hit (one without the key) of the same `doc_id` in the same
-    response. A `[n]` prefix naming such a slot selects it alone; otherwise
-    every such excerpt carrying the line (as `packed_citation_hits`). Empty
-    for anything else: a retrieved hit is never grounded here, so the
+    response.
+
+    The line is decided as a whole and fails closed (#1389 review B1): every
+    response hit and every supplied excerpt carrying it must be such a
+    neighbour or a chunk the sibling `pool` holds (by `chunk_id`). A
+    retrieved hit the pool lacks under the same line (two chunks of one
+    page, one beyond the pool's depth) leaves the line ungrounded, as does
+    a supplied entry under it that does not map to its response hit.
+
+    A bare citation maps to every added excerpt under the line; a `[n]`
+    prefix to the added excerpt in slot `n` and to nothing else. Empty for
+    anything else: a retrieved hit is never grounded here, so the
     sibling-pool join keeps deciding it."""
     cite, slot = _split_citation(citation)
-    added = _expansion_added(cite, hits, supplied)
-    exact = [item for item in added if item["index"] == slot]
-    return exact or added
+    added = _expansion_added(cite, hits, supplied, pool)
+    return added if slot is None else [item for item in added if item["index"] == slot]
 
 
 def precision_recall(cited: set[str], gold: set[str]) -> tuple[float | None, float | None]:
@@ -282,23 +303,29 @@ def evidence_for_expanded_citations(
     supplied text alone. Otherwise a citation in the sibling pool reads the
     pool hit's text, exactly as there, and a bare one also every added
     excerpt carrying its line (a same-page neighbour repeats its parent's
-    line, and the agent returns bare lines). A citation outside the pool
-    reads its added excerpts, and is unmapped when there are none."""
+    line, and the agent returns bare lines), except the excerpt of that
+    pool hit's own chunk: a pooled chunk expansion added again is read once
+    (#1389 review N1). A citation outside the pool reads its added
+    excerpts, and is unmapped when there are none."""
     texts: list[str] = []
     unmapped: list[str] = []
     for c in citations:
         cite, slot = _split_citation(c)
-        added = _expansion_added(cite, hits, supplied)
+        added = _expansion_added(cite, hits, supplied, pool)
         exact = [item for item in added if item["index"] == slot]
         hit = citation_to_hit(c, pool)
         if exact:
             chosen = exact
         elif hit is not None:
             texts.append(str(hit.get("text") or ""))
-            chosen = added if slot is None else []
+            pooled_id = hit.get("chunk_id")
+            chosen = [] if slot is not None else [
+                item for item in added
+                if not isinstance(pooled_id, str) or hits[item["index"] - 1].get("chunk_id") != pooled_id
+            ]
         else:
-            chosen = added
-            if not added:
+            chosen = added if slot is None else []
+            if not chosen:
                 unmapped.append(c)
         texts.extend(str(item.get("text") or "") for item in chosen)
     return _bounded_evidence(texts), unmapped
