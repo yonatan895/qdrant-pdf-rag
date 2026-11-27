@@ -38,7 +38,7 @@ exit 0
 
 # A fake cluster: every call is recorded; behaviour comes from the environment.
 FAKE_KC = """#!/usr/bin/env python3
-import os, sys, time
+import os, signal, sys, time
 from pathlib import Path
 a = sys.argv[1:]
 line = ' '.join(a)
@@ -78,6 +78,9 @@ elif 'wait' in a and '--for=condition=complete' in a:
         time.sleep(.02)
     sys.exit(0 if env('COMPLETE_AFTER') else 1)
 elif 'wait' in a and '--for=condition=failed' in a:
+    if env('PROBE_EXIT_DELAY'):
+        # A probe that takes a while to end after TERM, as a real client can.
+        signal.signal(signal.SIGTERM, lambda *_: (time.sleep(float(env('PROBE_EXIT_DELAY'))), os._exit(143)))
     pid('failed-pid')
     if env('FAIL_AFTER'):
         time.sleep(float(env('FAIL_AFTER')))
@@ -438,3 +441,55 @@ def test_cancellation_reaps_the_local_observers(gen_tree, cancel_signal, code):
         with contextlib.suppress(ProcessLookupError):
             os.killpg(proc.pid, signal.SIGKILL)
         proc.communicate(timeout=5)
+
+
+@pytest.mark.parametrize("shell", [("sh",), ("bash", "--posix")], ids=["sh", "bash-posix"])
+@pytest.mark.parametrize(("cancel_signal", "code"), [("SIGINT", 130), ("SIGTERM", 143)])
+def test_no_probe_outlives_a_cancelled_launcher_whose_output_is_read_slowly(gen_tree, shell, cancel_signal, code):
+    """F1 (#1387): the launcher stops its observers twice, from the signal
+    handler and again from its exit handler. With its warning line blocked on
+    a full stderr pipe the second stop comes late, while the Failed-condition
+    observer is still reaping a probe that is slow to end; the observer must
+    not give up the probe then."""
+    write_stub(gen_tree / "bin" / "kubectl", FAKE_KC)
+    read_end, write_end = os.pipe()
+
+    def start(script, env, cwd, args):
+        return subprocess.Popen([*shell, str(script), *args], env=env, cwd=cwd, stdout=subprocess.DEVNULL,
+                                stderr=write_end, start_new_session=True)
+
+    proc = _run(gen_tree, "list", runner=start, extra=(
+        ("AIRGAP_DRYRUN", "0"), ("JOB_INGEST", ""), ("PODS_INGEST", ""), ("COMPLETE_AFTER", ""),
+        ("PROBE_EXIT_DELAY", "0.6")))
+    try:
+        deadline = time.monotonic() + 20
+        while not all((gen_tree / n).exists() for n in ("wait-pid", "failed-pid")):
+            assert proc.poll() is None, "launcher exited early"
+            assert time.monotonic() < deadline, "observers did not start"
+            time.sleep(.02)
+        children = {n: int((gen_tree / n).read_text()) for n in ("wait-pid", "failed-pid")}
+        os.set_blocking(write_end, False)
+        with contextlib.suppress(BlockingIOError):
+            while True:
+                os.write(write_end, b"\0" * 4096)
+        os.set_blocking(write_end, True)
+        os.close(write_end)
+        write_end = -1
+        proc.send_signal(getattr(signal, cancel_signal))
+        time.sleep(.3)  # the slow reader: the launcher's warning line stays blocked this long
+        with os.fdopen(read_end, "rb") as reader:
+            read_end = -1
+            stderr = reader.read().replace(b"\0", b"").decode()
+        assert proc.wait(timeout=10) == code
+        assert "job/generations in namespace test-ns may still be running" in stderr
+        for name, child in children.items():
+            stat = Path(f"/proc/{child}/stat")
+            state = stat.read_text().rsplit(")", 1)[-1].split()[0] if stat.exists() else "gone"
+            assert state == "gone", f"{name} observer {child} survived (state {state})"
+    finally:
+        for fd in (read_end, write_end):
+            if fd >= 0:
+                os.close(fd)
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=5)

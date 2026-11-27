@@ -63,6 +63,22 @@ report_one_shot_quota_refusal() {
     unset _keys _what _key _label
 }
 
+# reap_owned_child PID: end a child this shell started and return only when
+# it is gone. The caller ignores TERM and INT first. One `wait` is not
+# enough: under bash a stop that arrived while an earlier stop was being
+# handled makes the next `wait` return at once (status above 128) with the
+# child still alive, and the child would outlive the launcher (F1, #1387).
+# 127 means the shell no longer has that child; the loop then ends.
+reap_owned_child() {
+    kill "$1" 2>/dev/null || true
+    while kill -0 "$1" 2>/dev/null; do
+        _reap_rc=0
+        wait "$1" 2>/dev/null || _reap_rc=$?
+        [ "$_reap_rc" -ne 127 ] || break
+    done
+    unset _reap_rc
+}
+
 watch_one_shot_job() {
     _osj_job=$1
     _osj_timeout=$2
@@ -93,7 +109,7 @@ watch_one_shot_job() {
         done
         for observer_pid in "$WAIT_PID" "$LOGS_PID" "$QUOTA_PID" "$FAILED_PID"; do
             [ -n "$observer_pid" ] || continue
-            wait "$observer_pid" 2>/dev/null || true
+            reap_owned_child "$observer_pid"
         done
         WAIT_PID=""
         LOGS_PID=""
@@ -132,7 +148,7 @@ watch_one_shot_job() {
         # Same lost-wakeup guard as the parent: a stop that lands between a
         # check and `wait` also ends the blocking stream.
         trap 'stopping=true; if [ -n "$stream_pid" ]; then kill "$stream_pid" 2>/dev/null || true; fi' TERM INT
-        trap 'trap "" TERM INT; if [ -n "$stream_pid" ]; then kill "$stream_pid" 2>/dev/null || true; wait "$stream_pid" 2>/dev/null || true; fi; if [ -n "$pod_rows_file" ]; then rm -f "$pod_rows_file"; fi' 0
+        trap 'trap "" TERM INT; if [ -n "$stream_pid" ]; then reap_owned_child "$stream_pid"; fi; if [ -n "$pod_rows_file" ]; then rm -f "$pod_rows_file"; fi' 0
         pod_rows_file=$(mktemp)
         followed_pods=" "
         while [ "$stopping" = false ]; do
@@ -179,18 +195,23 @@ watch_one_shot_job() {
             stopping=false
             probe_pid=""
             trap 'stopping=true; if [ -n "$probe_pid" ]; then kill "$probe_pid" 2>/dev/null || true; fi' TERM INT
-            trap 'trap "" TERM INT; if [ -n "$probe_pid" ]; then kill "$probe_pid" 2>/dev/null || true; wait "$probe_pid" 2>/dev/null || true; fi' 0
+            trap 'trap "" TERM INT; if [ -n "$probe_pid" ]; then reap_owned_child "$probe_pid"; fi' 0
             $KC -n "$NAMESPACE" wait --for=condition=failed "job/$_osj_job" --timeout="${_osj_timeout}s" >/dev/null 2>&1 &
             probe_pid=$!
             [ "$stopping" = false ] || exit 0
-            if wait "$probe_pid" && [ "$stopping" = false ]; then
+            probe_result=0
+            wait "$probe_pid" || probe_result=$?
+            # A stop leaves probe_pid set and exits: the exit handler ignores
+            # TERM and INT before it kills and reaps the probe. The parent
+            # stops its observers twice (signal handler, then exit handler);
+            # a reap here could be interrupted by the second stop and the
+            # probe would outlive the launcher (F1, #1387).
+            [ "$stopping" = false ] || exit 0
+            probe_pid=""
+            if [ "$probe_result" -eq 0 ]; then
                 : > "$FAILED_MARKER"
                 kill "$WAIT_PID" 2>/dev/null || true
             fi
-            # A TERM interrupts the wait above after its trap killed the
-            # probe: reap it here so it never outlives this observer.
-            wait "$probe_pid" 2>/dev/null || true
-            probe_pid=""
         ) &
         FAILED_PID=$!
         exit_if_cancelled
@@ -205,7 +226,7 @@ watch_one_shot_job() {
             probe_pid=""
             probe_file=""
             trap 'stopping=true; if [ -n "$probe_pid" ]; then kill "$probe_pid" 2>/dev/null || true; fi' TERM INT
-            trap 'trap "" TERM INT; if [ -n "$probe_pid" ]; then kill "$probe_pid" 2>/dev/null || true; wait "$probe_pid" 2>/dev/null || true; fi; if [ -n "$probe_file" ]; then rm -f "$probe_file"; fi' 0
+            trap 'trap "" TERM INT; if [ -n "$probe_pid" ]; then reap_owned_child "$probe_pid"; fi; if [ -n "$probe_file" ]; then rm -f "$probe_file"; fi' 0
             probe_file=$(mktemp)
             while [ "$stopping" = false ]; do
                 $KC -n "$NAMESPACE" get events \
@@ -287,8 +308,7 @@ watch_one_shot_job() {
         interrupt_refused_job_delete() {
             trap '' TERM INT
             if [ -n "$DELETE_PID" ]; then
-                kill "$DELETE_PID" 2>/dev/null || true
-                wait "$DELETE_PID" 2>/dev/null || true
+                reap_owned_child "$DELETE_PID"
             fi
             echo "::error::interrupted while removing the refused $_osj_job Job; delete it with: $KC -n $NAMESPACE delete job $_osj_job" >&2
             exit "$1"
