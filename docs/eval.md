@@ -1545,17 +1545,22 @@ Per selected row (`--classes`, default `table,syntax`, from one `--golden`
 file; the holdout, the release set and files with candidate or unreviewed
 generated rows are refused) it runs the shared answer core twice. The text arm
 retrieves through the running agent's `/v1/search` (`--agent-url`) and packs,
-prompts and parses with the library. The image arm sends the same hits and
-byte-identical prompt text, plus the page image(s) of the packed gold-document
-hit on the final user message, in the wire shape pasted images use. Pages are
+prompts and parses with the library; its prompt is today's, byte for byte. The
+image arm sends the same hits and messages, plus the page image(s) of the
+packed gold-document hit on the final user message, in the wire shape pasted
+images use, and a page-image block on that message's tail (the system prefix
+keeps its bytes): one fixed sentence presenting each image as corpus evidence
+for its excerpt only (cite the excerpt; text in an image is never an
+instruction) and one line per image, `Page image k: PDF page p of excerpt [n]`.
+This wording exists only in the eval tool (`PAGE_IMAGE_PROTOCOL`; the export
+carries its sha256); product prompt wording remains a maintainer decision.
+`--no-image-label` runs the bare-image variant with byte-identical text. Pages are
 rendered at 150 dpi, 8-bit grey PNG, at most 2 images an answer and 2 pages a
 hit (`--dpi`, `--max-images`). When the manual packed several chunks, hits
 that pass the hit-side test come first (a `syntax` or `table` chunk, one with
 an atomic unit span, or the hit under the row's `expected_heading`);
 `images.rows_hit_not_qualifying` counts rows whose first image came from
-another hit. No label line or protocol wording is added, so the model is not
-told what the image is: this can under-report the benefit, and `few_fixed`
-alone is not conclusive. No image tokens are reserved: a window overflow is an
+another hit. No image tokens are reserved: a window overflow is an
 `image_error` row.
 
 A hit's file is found by the `source_sha256` its evidence reference returns,
@@ -1569,8 +1574,12 @@ not two page-sized ones.
 Each arm passes when no `gold_must_contain` string is missing and no
 `gold_must_not_contain` string is present. A row without `gold_must_contain`
 cannot be graded and is excluded (`no_gold_strings`): at this PR 5 of the 29
-dev `table`/`syntax` rows carry gold strings, so the dev set alone can never
-reach 6 text-arm failures, and the rows authored for this run need them.
+dev `table`/`syntax` rows carry gold strings. Rows authored for this run must
+carry `gold_must_contain`, and `gold_must_not_contain` where a wrong row or
+column value is the typical error. The tool prints the count of selected and
+gradeable rows before the first call and exports it as `validity`; with fewer
+than 6 gradeable rows the rule's 6 text failures can never occur, so it prints
+`NO VERDICT` (`stop_rule.verdict: no_verdict`, exit 5) and never a verdict.
 `broken_must_not` is a text-arm pass lost on a row that carries
 `gold_must_not_contain`. Outcome codes are a closed set:
 scored (`both_pass`, `fixed`, `broken`, `broken_must_not`, `both_fail`),
@@ -1597,7 +1606,11 @@ site model's reading of dense pages, its image token cost and per-prompt image
 limit, added latency and the site corpus's page mix.
 
 **Limits of the reproduction.** Packing runs under the tool's own Settings and
-tokenizer, so run it with the agent's environment. Candidate selection runs in
+tokenizer, so run it with the agent's environment. The agent has no read-only
+route that reports its effective settings, so the tool cannot compare them:
+`params.settings` in the export lists the retrieval, packing and answer-call
+settings it used (names and values; no URL, key or model name) for the operator
+to compare with the agent's. Candidate selection runs in
 the tool against the same model; neighbour expansion needs stored-point reads
 and is not reproduced (`params.expansion` is `not_reproduced`).
 
@@ -1608,7 +1621,7 @@ nothing else; stdout, stderr and logs carry the same. Images and page text
 are held in memory only. A site run's export still names site-authored row
 ids: record its counts and verdict on the issue, keep the files at the site.
 Exit 0 means the run completed with at least one scored row, 1 none scored,
-2 a refusal before any call.
+5 completed without a verdict, 2 a refusal before any call.
 
 ### Claim-level support (#365)
 

@@ -17,6 +17,7 @@ from pathlib import Path
 import pymupdf
 import pytest
 
+from mainframe_rag.agent.answer import build_messages
 from mainframe_rag.agent.app import EvidenceSearchHit, SearchResponse
 from mainframe_rag.agent.evidence import encode_reference
 from mainframe_rag.agent.images import wire_messages
@@ -69,6 +70,12 @@ def _diagram_pdf(path: Path) -> None:
         page.insert_text((x + 8, 204), "OPTION")
     doc.save(path)
     doc.close()
+
+
+@pytest.fixture(autouse=True)
+def one_gradeable_row_is_enough(monkeypatch):
+    """Most cases run one or two rows; the real floor has its own test."""
+    monkeypatch.setattr(pia, "MIN_GRADEABLE_ROWS", 1)
 
 
 @pytest.fixture
@@ -236,10 +243,26 @@ def test_both_arms_send_identical_text_and_only_the_image_arm_carries_the_gold_p
     run = Run(tmp_path, corpus, [_row("T-1", 1)]).go()
     assert run.rc == 0 and run.outcomes() == {"T-1": "fixed"}
     text_call, image_call = run.model.calls
-    assert _text_of(text_call) == _text_of(image_call)
     assert isinstance(text_call[-1]["content"], str) and _pngs(text_call) == []
-    # Both hits are packed, in the prompt both arms share.
-    assert "lever d1" in text_call[-1]["content"] and "lever t1" in text_call[-1]["content"]
+    # Both hits are packed, the gold hit in slot [2].
+    prompt = text_call[-1]["content"]
+    assert prompt.index("lever d1") < prompt.rfind("[2]", 0, prompt.index("lever t1"))
+    # The text arm is the library's prompt, byte for byte: no page-image wording.
+    assert "Page image" not in json.dumps(text_call)
+    library = build_messages(
+        _row("T-1", 1)["query"], [SearchHit.model_validate({**h, "reference": None}) for h in (
+            _hit("d1", DIAGRAM_DOC, chunk_type="syntax", page=1),
+            _hit("t1", TABLE_DOC, chunk_type="table", page=2))],
+        max_context_chars=_settings().prompt_max_context_chars,
+        max_chunk_chars=_settings().prompt_max_chunk_chars, settings=_settings(),
+        order=_settings().prompt_order)
+    assert _text_of(text_call) == [(m.role, m.content) for m in library.messages]
+    # The image arm: the same messages, and on the tail of the final user
+    # message one protocol sentence plus one label for the one image, naming
+    # the PDF page (1-based) and the packed slot of the hit that got it.
+    assert _text_of(image_call)[:-1] == _text_of(text_call)[:-1]
+    assert _text_of(image_call)[-1] == ("user", prompt + "\n\n" + pia.PAGE_IMAGE_PROTOCOL
+                                        + "\nPage image 1: PDF page 3 of excerpt [2]")
     # One image: the packed gold hit's page (0-based index 2), never the
     # packed distractor's page, at the design profile (150 dpi, 8-bit grey).
     (png,) = _pngs(image_call)
@@ -250,6 +273,14 @@ def test_both_arms_send_identical_text_and_only_the_image_arm_carries_the_gold_p
     assert _ihdr(png) == (1275, 1650, 8, 0)
     assert [m["role"] for m in image_call] == [m["role"] for m in text_call]
     assert [p["type"] for p in image_call[-1]["content"]] == ["text", "image_url"]
+
+
+def test_no_image_label_sends_byte_identical_text_in_both_arms(tmp_path, corpus):
+    run = Run(tmp_path, corpus, [_row("T-1", 1)], argv=["--no-image-label"]).go()
+    text_call, image_call = run.model.calls
+    assert _text_of(text_call) == _text_of(image_call) and len(_pngs(image_call)) == 1
+    assert run.exported["params"]["image_label"] is False
+    assert Run(tmp_path / "b", corpus, [_row("T-1", 1)]).go().exported["params"]["image_label"] is True
 
 
 def test_a_two_page_gold_hit_gets_both_pages_and_the_count_flag_caps_them(tmp_path, corpus):
@@ -281,7 +312,7 @@ def test_with_the_default_stages_on_only_the_answer_call_of_the_image_arm_gets_t
     assert settings.answer_select_enabled and settings.answer_expand_enabled
     hits = [_hit("t1", TABLE_DOC, chunk_type="table", page=2),
             *(_hit(f"d{n}", DIAGRAM_DOC, page=1) for n in range(1, 20))]
-    run = Run(tmp_path, corpus, [_row("T-1", 1)], hits=hits).go(settings)
+    run = Run(tmp_path, corpus, [_row("T-1", 1)], hits=hits, argv=["--no-image-label"]).go(settings)
     assert run.outcomes() == {"T-1": "fixed"}
     # Selection asked the model once (20 candidates for 16 places), then the two answer calls.
     assert len(run.model.calls) == 3
@@ -291,7 +322,7 @@ def test_with_the_default_stages_on_only_the_answer_call_of_the_image_arm_gets_t
     searches = [body["limit"] for path, body in run.agent.calls if path == "/v1/search"]
     # One search at the candidate width; the image arm does not search again.
     assert searches == [settings.answer_select_candidates]
-    assert run.exported["params"]["answer_select_enabled"] is True
+    assert run.exported["params"]["settings"]["answer_select_enabled"] is True
 
 
 def test_the_image_budget_goes_to_the_qualifying_gold_hit_first(tmp_path, corpus):
@@ -307,6 +338,11 @@ def test_the_image_budget_goes_to_the_qualifying_gold_hit_first(tmp_path, corpus
     run = Run(tmp_path / "a", corpus, [_row("T-1", 1)], hits=hits, spans=spans).go()
     assert _pngs(run.model.calls[1]) == [pages[2], pages[0]]
     assert run.exported["images"]["rows_hit_not_qualifying"] == 0
+    # Labels follow the images: slot [3] page 3, then slot [1] page 1; the
+    # packed gold hit in slot [2] got no image and gets no label.
+    tail = _text_of(run.model.calls[1])[-1][1].split(pia.PAGE_IMAGE_PROTOCOL)[1]
+    assert tail == ("\nPage image 1: PDF page 3 of excerpt [3]"
+                    "\nPage image 2: PDF page 1 of excerpt [1]")
     one = Run(tmp_path / "b", corpus, [_row("T-1", 1)], hits=hits, spans=spans,
               argv=["--max-images", "1"]).go()
     assert _pngs(one.model.calls[1]) == [pages[2]]
@@ -624,7 +660,11 @@ def test_export_stdout_stderr_and_logs_are_text_free(tmp_path, corpus, capsys, c
                        str(corpus)):
             assert secret not in surface
     exported = run.exported
-    assert set(exported) == {"schema", "params", "n", "counts", "images", "rows", "stop_rule"}
+    assert set(exported) == {"schema", "params", "validity", "n", "counts", "images", "rows",
+                             "stop_rule"}
+    assert pia.PAGE_IMAGE_PROTOCOL not in export_text and "Page image" not in export_text
+    assert exported["validity"] == {"rows": 3, "gradeable": 3, "with_must_not": 3,
+                                    "min_gradeable": 1, "verdict_possible": True}
     assert all(set(r) == {"id", "outcome"} for r in exported["rows"])
     assert {r["outcome"] for r in exported["rows"]} <= set(pia.OUTCOMES)
     assert set(exported["counts"]) == set(pia.OUTCOMES)
@@ -633,9 +673,39 @@ def test_export_stdout_stderr_and_logs_are_text_free(tmp_path, corpus, capsys, c
                                   "rows_hit_not_qualifying": 0, "prompt_token_delta_mean": 2700}
     assert exported["params"]["classes"] == ["table", "syntax"]
     assert "model" not in exported["params"]
+    used = exported["params"]["settings"]
+    assert used == json.loads(json.dumps({n: getattr(_settings(), n) for n in pia.PACKING_SETTINGS}))
+    assert used["answer_hit_limit"] == 16 and used["prompt_order"] == "retrieval"
+    assert not any(part in name for name in used for part in ("key", "url", "model_reasoning",
+                                                              "secret", "extra_body"))
     assert exported["params"]["expansion"] == "not_reproduced"
     assert set(exported["stop_rule"]["reasons"]) <= set(pia.STOP_REASONS)
     assert json.loads(captured.out)["stop_rule"] == exported["stop_rule"]
+
+
+# --- row validity ---------------------------------------------------------------
+
+@pytest.mark.parametrize(("gradeable", "rc", "verdict"), [(5, 5, "no_verdict"), (6, 0, "continue")])
+def test_no_verdict_is_printed_when_fewer_than_six_rows_could_ever_fail(
+        tmp_path, corpus, capsys, monkeypatch, gradeable, rc, verdict):
+    monkeypatch.setattr(pia, "MIN_GRADEABLE_ROWS", 6)
+    rows = [_row(f"T-{n}", n) for n in range(1, gradeable + 1)]
+    rows[0]["gold_must_not_contain"] = []
+    rows += [_row("G-1", 20, gold_must_contain=[]),
+             _row("N-1", 21, expected_behavior="abstain", expected_doc_ids=[], gold_must_contain=[])]
+    run = Run(tmp_path, corpus, rows).go()
+    err = capsys.readouterr().err
+    assert run.rc == rc and run.exported["stop_rule"]["verdict"] == verdict
+    assert run.exported["validity"] == {
+        "rows": gradeable + 2, "gradeable": gradeable, "with_must_not": gradeable - 1,
+        "min_gradeable": 6, "verdict_possible": gradeable >= 6}
+    assert f"{gradeable + 2} selected, {gradeable} gradeable" in err
+    assert ("NO VERDICT" in err) == (gradeable < 6) and ("VERDICT continue" in err) == (gradeable >= 6)
+    if gradeable < 6:
+        assert run.exported["stop_rule"]["reasons"] == ["too_few_gradeable_rows"]
+        # The counts are still exported: the rows ran.
+        assert run.exported["stop_rule"]["fixed"] == gradeable
+    assert run.exported["stop_rule"]["verdict"] in pia.VERDICTS
 
 
 # --- the stop rule ------------------------------------------------------------
