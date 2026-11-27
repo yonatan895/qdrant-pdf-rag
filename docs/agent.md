@@ -1326,7 +1326,7 @@ readers:
 | `acronym_expansion_enabled` / `comparative_split_enabled` / `diagnostic_dualpath_enabled` | `false` / `true` / `false` | rewrite + multipath (see `retrieval.md` §§3b,7) |
 | `ingest_max_pdf_bytes` / `ingest_max_doc_pages` / `ingest_max_doc_chunks` | 0 / 0 / 0 (unbounded) | per-document ingest refusal (`docs/ingest.md` §9, issue #374) |
 | ingest-only (`ingest_workers` = CPU-1, counting the cgroup quota and affinity (#840), `batch_size` 128, `ingest_upsert_streams` 4, `ingest_copy_request_bytes` 24 MiB (#1379), `ingest_bulk_load` false, `bm25_model`, `bm25_cache_dir` unset, `contextual_*` incl. `context_llm_timeout_s` 30.0 / `context_max_chars` 500 / `context_cache_path` unset) | — | ingest; see `docs/ingest.md` §§6–9 |
-| `zowe_mcp_enabled` / `zowe_mcp_base_url` / `zowe_mcp_auth_token` / `zowe_mcp_timeout_s` / `zowe_mcp_max_bytes` / `zowe_mcp_dry_run` | `false` (client not constructed unless enabled) / unset / unset / 15.0 / 262144 / `false` | live-state client (default off; unwired from every endpoint; `zowe_mcp_auth_token` is a Secret reference for bridge bearer auth, never logged; contract: [source observations](#source-observations)) |
+| `zowe_mcp_enabled` / `zowe_mcp_base_url` / `zowe_mcp_auth_token` / `zowe_mcp_timeout_s` / `zowe_mcp_max_bytes` / `zowe_mcp_dry_run` | `false` (client not constructed unless enabled) / unset / unset / 15.0 / 262144 / `false` | live-state client (default off; on, the Docs routes plan one `dataset_read` per turn that names a dataset, and `zowe_mcp_dry_run` plans without calling; `zowe_mcp_auth_token` is a Secret reference for bridge bearer auth, never logged; contract: [source observations](#source-observations)) |
 
 ## 8. Log and trace contract
 
@@ -2243,7 +2243,7 @@ only; the PR lints and types this file directly.
 | Errors | An error envelope's stable `code` selects a fixed message (`invalid_request`, `prompt_budget_exceeded`, `upstream_error`, `model_timeout`, `deadline_exceeded`, `overloaded`, `not_configured`, `representation_unavailable`, `internal`, `unsupported_reasoning_effort`, `unsupported_image`; `not_found`/`method_not_allowed`/`http_error` = configuration). An in-stream error frame uses the same table and the incomplete banner. Unknown codes, non-JSON bodies, transport failures and any internal fault give one fixed "could not be reached" text: the agent's `message`, upstream bodies and exception text are never shown, and the Pipe never raises into Open WebUI (which would display the exception) |
 | Images (#1287) | On only when the Open WebUI pod has `RAG_CHAT_IMAGES=true` (the chart sets it with `models.reasoning.chatImagesEnabled`). Every turn's `<attached_files>` text part is stripped, with images on or off (maintainer decision 2026-11-17, review N2): it appears only when a file is attached, and uploads are off, so with images off requests for messages without attachments are byte-identical to before #1287. Off, a last user turn with any image part gets the fixed `IMAGES_OFF` text and no agent call (it was silently dropped before #1287). On, the last turn's `data:image/` parts are forwarded as content parts (image-only allowed); a non-`data:` image (a saved chat's file reference) gets `IMAGE_UNUSABLE`, and more than `MAX_IMAGES` or one over `MAX_IMAGE_BYTES` (valves pinned to the agent's defaults, checked by base64 length) get fixed texts, all without an agent call. The agent's `image_reads` render as a collapsed `<details>` block ("What Rosetta read from your image", each read in a backtick fence longer than any run in it, `&<>` entity-escaped) before the answer reference line; on the next turn the Pipe moves each block's text back into the preceding user turn as `[Image n, as read by the model]: ...`, removes the block and drops that turn's images; an earlier image with no block is dropped with the status "An earlier image was not re-sent". `image_read_failed` adds a fixed status note; `unsupported_image` has a fixed text. Text-only request bodies are byte-identical with images on or off ([chat images](#chat-images)) |
 | History trim | Open WebUI resends the whole chat each turn, so the Pipe fits the body to the agent's cap before sending, counted as the agent counts it (`chat_body_chars`: message characters plus `product` plus `version`, not JSON bytes). It drops the oldest turns first, then any leading assistant turn (history never starts with an answer to a dropped question); the last user turn is always kept. If that turn alone exceeds the cap, the Pipe returns its fixed too-long text, which states the valve's limit, and makes no agent call. When turns were dropped it emits the fixed status "Earlier messages in this chat were not sent" (no content) and appends it to the final banner. When the agent reports `message_omitted_chars` > 0 the final banner also carries the fixed note "Your message was too long for the model; its middle part was not read" (no count, no text). The agent has no turn-count cap on the request, so the character cap is the only limit. A long last turn under the cap is sent whole and unchanged; the agent answers it ([long messages](#long-messages)) |
-| Answer reference | Only with `RAG_ANSWER_REFERENCE=true` in Open WebUI's environment (the chart sets it whenever ratings are on, #1255; [install](#openwebui-ratings)): a completed answer (finish frame plus `[DONE]`) whose chunk id is the agent's `chatcmpl-<12-hex request id>` ends with the fixed line ``Answer reference: `<id>` `` after the validated list. This is the only message field Open WebUI hands the [rating Action](#openwebui-ratings). A failed or truncated answer gets none. Off (the default), the answer output is unchanged. Whether the switch is on or off, the Pipe removes that exact trailing line from assistant turns when it builds a request, so the agent sees its own answer, including in chats from before ratings were turned off |
+| Answer reference | Only with `RAG_ANSWER_REFERENCE=true` in Open WebUI's environment (the chart sets it whenever ratings are on, #1255; [install](#openwebui-ratings)): a completed answer (finish frame plus `[DONE]`) whose chunk id is the agent's `chatcmpl-<12-hex request id>` ends with the fixed line ``Answer reference: `<id>` `` after the validated list. This is the only message field Open WebUI hands the [rating Action](#openwebui-ratings). A failed or truncated answer gets none, and neither does a turn whose finish chunk carries `feedback_suppressed: true` (a z/OS observation turn, ADR-0012 D6: it has no answer record to rate). Off (the default), the answer output is unchanged. Whether the switch is on or off, the Pipe removes that exact trailing line from assistant turns when it builds a request, so the agent sees its own answer, including in chats from before ratings were turned off |
 | Tasks | Background task calls (title, tags, follow-ups, summaries), detected by `__task__`, `__metadata__["task"]`, or a `task`/`metadata.task` body key, return the fixed text `Docs question` and never call the agent |
 | Allowed calls | One `POST {AGENT_URL}/v1/chat` per question. No tools, no model calls, no other host, `trust_env=False` (no proxy environment), no redirects (a 3xx is the fixed "could not be reached" text), no forwarded identity headers, no logging |
 
@@ -2333,11 +2333,13 @@ through the real `/v1/chat` and `/v1/feedback`.
 <a id="source-observations"></a>
 ## Source observations (live z/OS state)
 
-Decision owner: [ADR-0003](adr/0003-zowe-mcp-read.md). Status: contract
-accepted, **capability off and unwired**. No endpoint calls
-`live_state.fetch_live`, `zowe_mcp_enabled=false` is the default, and the
-manual-only POC makes zero source calls. Search never calls an LLM; routing is
-deterministic and trap queries stay on the manuals path.
+Decision owner: [ADR-0003](adr/0003-zowe-mcp-read.md) as
+[ADR-0012](adr/0012-zos-dataset-read-pilot.md) amends it. Status: **capability
+off by default**; the Docs routes are wired for the dataset-read pilot (#1294
+PR 2) and nothing deploys a bridge yet (PR 3). With `zowe_mcp_enabled=false`
+(the default) no route plans or makes a source call and prompts, responses and
+logs are unchanged. Search never calls an LLM; routing is deterministic and
+trap queries stay on the manuals path.
 
 - **Surface:** the agent HTTP API is query traffic (no PUT/PATCH/DELETE; POST
   only on search/answer/chat and console chat) plus the console rating forward
@@ -2416,20 +2418,66 @@ deterministic and trap queries stay on the manuals path.
   is set, any message in chat history carries `ZOS_OBSERVATION_MARKER`
   (`[z/OS observation]`), or the finalized answer carries that marker, while
   normal manual-only turns continue recording when `FEEDBACK_ENABLED=true`.
-  Omitting the `Answer reference:` footer on observation turns and the
-  `fetch_live`-called trigger land with the PR 2 wiring (nothing sets the marker today).
-- **Observation shape (contract for #1294 PR 2, not yet wired to answer/chat):**
-  exact `target`, `acquired_at` (agent clock), `observed_at` (source time or
-  null), `outcome` in `complete | truncated | partial | not_found | unavailable |
-  no_target | dry_run | denied`, plus `truncated`. Limits: 2 calls,
-  `zowe_mcp_max_bytes`, `zowe_mcp_timeout_s` per call, no polling, no
-  cross-request cache.
-- **Today in code:** `fetch_live` remains unwired from `/v1/answer` and
-  `/v1/chat` (PR 2 scope); `fetch_live` returns `degraded` codes (`dry_run`,
-  `not_configured`, `no_target`, `not_found`, `denied`, `logon_failed`,
-  `tls_error`, `timeout`, `jes_unavailable`, `tool_error`, `upstream_error`).
-  Failures are fixed codes; logs and spans carry ids, tool names and byte
-  counts, never source text.
+  A turn that planned a read sets `feedback_suppressed` whatever its outcome.
+  Such a turn, and a follow-up in a chat whose history carries the marker,
+  report `feedback_suppressed: true` in the final frame, and the docs Pipe
+  then omits its `Answer reference:` line (the feedback store refuses a
+  rating for an id it holds no record of).
+- **Docs-path read (ADR-0012 D1, D6; #1294 PR 2).** Owner:
+  `live_state.observe_docs_question`, called only by `/v1/answer` and
+  `/v1/chat*` (`_attach_zos_observation`), never by the console.
+  - *Plan:* deterministic, from the user's own text for this turn only (never
+    history, Splunk context, the condensed or image-read search text, or
+    excerpts). One `dataset_read` when the text names an exact dataset or
+    member with at least two qualifiers (quoted in any case, or bare in upper
+    case; a member right after the name belongs to the target) and retrieval
+    returned excerpts. No such name, a trap query or no excerpts: no call, no
+    notice, an ordinary manuals turn. Job ids and USS paths plan nothing. The
+    bridge owns the allowlist; the agent holds no copy.
+  - *Observation:* exact `target`, `acquired_at` (agent clock when the bridge
+    replied; null when no call was made), `observed_at` (null: FTP gives
+    none), `outcome`, a stable `code` for every outcome other than
+    `complete`, `truncated` and a byte count, returned as `zos_observation`
+    in the JSON body, the SSE `final` and the chat finish chunk.
+  - *Outcomes:* `complete`; `truncated` (`byte_cap`: the bridge's cap,
+    `zowe_mcp_max_bytes`, or the prompt share below); `not_found`; `denied`
+    (`denied`, `invalid_request`); `dry_run`; `unavailable` (`timeout`,
+    `logon_failed`, `tls_error`, `jes_unavailable`, `not_configured`,
+    `unauthorized`, `tool_error`, `upstream_error`, and any unknown code as
+    `upstream_error`). `partial` and `no_target` are not produced by a
+    single planned read.
+  - *Prompt:* a read that returned text adds the z/OS Observation Protocol to
+    the system prompt and one context block before the question: a header
+    with target, `acquired_at` and outcome, then the text between
+    `--- BEGIN/END UNTRUSTED Z/OS OBSERVATION ---` lines. The agent owns that
+    frame: it drops the bridge's delimiter lines, drops control and bidi
+    characters again (redaction stays the bridge's `screen_zos_text`; the
+    answer core does not import the bridge), neutralizes delimiter and
+    excerpt-tag lookalikes, names only the planned target and always closes
+    the frame. The block gets at most `ZOS_WINDOW_SHARE` (a quarter) of the
+    window left by the fixed content and the previous turn, priced at the
+    estimator's upper bound; a longer text is cut at a line end with a
+    visible marker and reads `truncated`. Every other outcome adds nothing
+    to the prompt.
+  - *Answer:* the agent, not the model, writes the first line of the answer
+    (the first stream token). With text in the prompt it is the distinct
+    citation, `[z/OS observation] <target>: read from z/OS, acquired_at <t>,
+    outcome: <outcome>.`; otherwise `z/OS read of <target> not used ...,
+    outcome: <outcome> (<code>): <fixed text>. This answer uses the manuals
+    only.`, without the marker. A follow-up in a marked chat opens with a
+    fixed marker line, so the chat stays marked when its first turns are
+    trimmed. The model is told never to cite the observation; a marker line
+    it writes under `Citations:` is dropped by citation validation, and
+    `citations` holds manual cites only.
+  - *Limits and audit:* one call per turn, `zowe_mcp_timeout_s`, no retry, no
+    polling, no cache (every asking turn is a new read). `zowe_mcp_dry_run`
+    plans, logs and states `dry_run` without calling. The `live_fetch` log
+    line carries request id, route, tool, target name, code, byte count and,
+    when the caller sent a well-formed `X-Zos-Audit-Tag` (64 hex; the docs
+    Pipe's keyed HMAC, ADR-0012 D3(d), sent by a later slice), that tag. It
+    authorizes nothing. Logs and spans never carry source text.
+  - *Not yet built (each blocks enabling reads at a site):* the Pipe's audit
+    tag, chart and render guards (PR 3), the D8 dry run.
 - **Gate:** enabling needs the named investigation, written source-owner and
   site-security approvals, `EgressIP` RACF terminal-alias binding, and phased
   validation (ADR-0012 D8).
