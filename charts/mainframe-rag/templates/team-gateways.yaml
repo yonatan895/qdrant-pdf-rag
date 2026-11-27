@@ -1,0 +1,217 @@
+{{- /*
+Team-tool gateways (ADR-0010 TD2, #1075; Splunk: ADR-0015, #1077). For each
+enabled gateway (mainframe-rag.teamGateways): its configuration ConfigMap, a
+one-replica Deployment on the agent image running
+`python -m mainframe_rag.gateways.<name>`, a ClusterIP Service and its
+NetworkPolicy. Nothing renders while every gateway is off.
+
+One replica, Recreate: the gateway's limits (per caller, and the Splunk
+gateway's gateway-wide caps, ADR-0015 D10) live in process memory, so they
+hold per pod; a rollout never runs two pods. Hardening as the agent
+(restricted-v2: no fixed IDs). The start-up backend check runs before the
+listener, so a refused check (exit 2 configuration, 3 backend) restarts the
+pod and it never becomes Ready. Secrets are references only.
+
+The NetworkPolicy is rendered whenever the gateway is, independent of
+networkPolicy.enabled: ingress only from the Open WebUI pods (ADR-0014 D4
+guard (a), applied to every gateway); egress only to cluster DNS, the
+gateway's backend CIDRs and port and, in oidc mode, the IdP. Needs an
+enforcing CNI (site evidence).
+*/ -}}
+{{- range $g := (include "mainframe-rag.teamGateways" $ | fromJsonArray) }}
+{{- $name := printf "rag-%s-gateway" $g.name }}
+{{- $oidc := eq $g.authMode "oidc" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app: {{ $name }}
+data:
+  config.json: {{ $g.config | quote }}
+  ca-bundle.crt: {{ $g.caBundle | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app: {{ $name }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: {{ $name }}
+      annotations:
+        # The gateway reads its configuration and CA only at start: a change rolls the pod.
+        checksum/config: {{ printf "%s%s" $g.config $g.caBundle | sha256sum | quote }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if $.Values.pullSecret.name }}
+      imagePullSecrets:
+        - name: {{ $.Values.pullSecret.name }}
+      {{- else }}
+      imagePullSecrets: []
+      {{- end }}
+      containers:
+        - name: gateway
+          image: {{ include "mainframe-rag.image" (dict "name" "agent" "image" $.Values.images.agent) }}
+          imagePullPolicy: {{ $.Values.images.agent.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          command: [python3, -m, {{ $g.module }}]
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: GATEWAY_CONFIG_FILE
+              value: {{ printf "%s/config.json" $g.configPath | quote }}
+            - name: {{ $g.authModeEnv }}
+              value: {{ $g.authMode | quote }}
+            - name: {{ $g.tokenEnv }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $g.secretName }}
+                  key: {{ $g.tokenKey }}
+            {{- if $oidc }}
+            # Optional RFC 8693 exchange secret (#1088 path a); the configuration's
+            # token_exchange.client_secret_env names this variable.
+            - name: {{ $g.exchangeEnv }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $g.secretName }}
+                  key: token-exchange-client-secret
+                  optional: true
+            {{- else }}
+            - name: {{ $g.bearerEnv }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $g.secretName }}
+                  key: bearer-secret
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          # The backend check precedes the listener: allow it the backend's own
+          # deadlines (initialize, tools/list, the macro read) before a restart.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml $g.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: {{ $g.configPath }}
+              readOnly: true
+            # --site-probe --receipt writes here.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $name }}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app: {{ $name }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ $name }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app: {{ $name }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ $name }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: rag-openwebui
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [openshift-dns, kube-system]
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 5353
+        - protocol: TCP
+          port: 5353
+    - to:
+        {{- range $g.backendEgress.cidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ $g.backendEgress.port | int }}
+    {{- if $oidc }}
+    - to:
+        {{- range $g.idpEgress.cidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ $g.idpEgress.port | int }}
+    {{- end }}
+{{- end }}

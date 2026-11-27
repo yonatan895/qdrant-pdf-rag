@@ -363,9 +363,12 @@ def test_the_boundary_step_denies_pod_egress_inside_the_cluster():
     # 39942787786, 39945681590); kindnet enforces this policy in the node.
     policy = boundary_policy()
     assert policy['kind'] == 'NetworkPolicy'
-    # Everything but the Open WebUI front end, whose egress is the chart policy alone (#1070).
+    # Everything but the Open WebUI front end (#1070) and the Splunk gateway (#1077, the openwebui
+    # lane's team-tools step), whose egress is the chart's policies alone: neither allows a public
+    # address (the runner's gate refuses those too), and the team-tools step proves the gateway's
+    # in-cluster blocked targets with real sockets.
     assert policy['spec']['podSelector'] == {
-        'matchExpressions': [{'key': 'app', 'operator': 'NotIn', 'values': ['rag-openwebui']}]}
+        'matchExpressions': [{'key': 'app', 'operator': 'NotIn', 'values': ['rag-openwebui', 'rag-splunk-gateway']}]}
     assert policy['spec']['policyTypes'] == ['Egress']
 
 

@@ -13,6 +13,7 @@ Commands:
   login STATE USER               sign in; print role, groups and visible models
   api-key STATE                  admin: create an API key into STATE/admin-api-key (mode 600)
   access STATE                   admin: create the groups, grant each Rosetta model (answer depth) to them
+  group-id STATE NAME            admin: print the id of group NAME (team tools, #1077)
   smoke STATE                    both users: sign in, models, one docs question, blocked paths
   health STATE                   Open WebUI /health through the router and Dex discovery
 
@@ -474,6 +475,17 @@ def cmd_access(state: str) -> None:
         sys.exit(1)
 
 
+def cmd_group_id(state: str, name: str) -> None:
+    """admin: print one group's id (not a secret; the chart's teamTools.groupId, #1077)."""
+    s = Session(state)
+    if not s.login(ADMIN).get("signed_in"):
+        raise SystemExit("admin sign-in failed")
+    gid = s.group_ids().get(name)
+    if not gid:
+        raise SystemExit(f"no group {name}")
+    print(gid)
+
+
 def cmd_smoke(state: str) -> None:
     s = Session(state)
     report: dict[str, Any] = {"users": [], "ok": True}
@@ -535,7 +547,8 @@ def main(argv: list[str]) -> int:
         return 2
     command, state, rest = argv[0], argv[1], argv[2:]
     handlers: dict[str, Any] = {"secrets": cmd_secrets, "users": cmd_users, "dex-config": cmd_dex_config, "login": cmd_login,
-                "api-key": cmd_api_key,  "access": cmd_access, "smoke": cmd_smoke, "health": cmd_health}
+                "api-key": cmd_api_key,  "access": cmd_access, "group-id": cmd_group_id, "smoke": cmd_smoke,
+                "health": cmd_health}
     if command not in handlers:
         print(__doc__, file=sys.stderr)
         return 2

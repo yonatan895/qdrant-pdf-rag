@@ -1,0 +1,109 @@
+# Kind stand-ins for the team-tools phase of the Open WebUI acceptance lane
+# (#1077, ADR-0015; scripts/openwebui/acceptance.sh team-tools). Never referenced
+# by the production chart or the air-gap manifests. The script renders the
+# @PLACEHOLDERS@ and creates every Secret and ConfigMap at run time; no token,
+# key or certificate is in this file. The images are the agent image the lane
+# already runs (on the node, so nothing is pulled).
+#
+#   owui-splunk  the fake Splunk MCP Server (tests/fake_splunk_mcp.py served by
+#                scripts/ci/fake_splunk_mcp_server.py over HTTPS with the run's
+#                CA): the "Splunk" behind the chart's gateway. Synthetic indexes,
+#                templates and rows only.
+#   @APP_NS@     the kubelet-probe policy for the gateway pod and a pod outside
+#                Open WebUI that must not reach the gateway
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: owui-splunk
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: fake-splunk, namespace: owui-splunk}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: fake-splunk}}
+  template:
+    metadata:
+      labels: {app: fake-splunk}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: @FAKE_UID@
+        runAsGroup: 0
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: fake-splunk
+          image: @AGENT_IMAGE@
+          imagePullPolicy: IfNotPresent
+          command: [python3, /fake/fake_splunk_mcp_server.py, --port, "8089", --cert, /tls/tls.crt, --key, /tls/tls.key]
+          env:
+            - {name: FAKE_SPLUNK_TOKEN_FILE, value: /token/splunk-mcp-token}
+            - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+          ports: [{containerPort: 8089, name: https}]
+          readinessProbe: {tcpSocket: {port: 8089}, periodSeconds: 3}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources: {requests: {cpu: 20m, memory: 64Mi}, limits: {memory: 256Mi}}
+          volumeMounts:
+            - {name: code, mountPath: /fake, readOnly: true}
+            - {name: tls, mountPath: /tls, readOnly: true}
+            - {name: token, mountPath: /token, readOnly: true}
+      volumes:
+        - {name: code, configMap: {name: fake-splunk-code}}
+        - {name: tls, secret: {secretName: fake-splunk-tls}}
+        - {name: token, secret: {secretName: fake-splunk-token}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: fake-splunk, namespace: owui-splunk}
+spec:
+  selector: {app: fake-splunk}
+  ports: [{name: https, port: 8089, targetPort: 8089}]
+---
+# Kind only, as kind-support.yaml does for Open WebUI: kubelet probes come from
+# the node address, which OpenShift's SDN admits without a policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: kind-kubelet-probes-splunk-gateway, namespace: @APP_NS@}
+spec:
+  podSelector: {matchLabels: {app: rag-splunk-gateway}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ipBlock: {cidr: "@NODE_IP@/32"}}]
+      ports: [{protocol: TCP, port: 8080}]
+---
+# A pod in the application namespace that is not Open WebUI: the gateway's
+# NetworkPolicy must refuse it (ADR-0014 D4 guard (a)). The lane's
+# rehearsal-default-deny-egress admits its egress to this namespace's pods, the
+# gateway's included, so a refused connection is the gateway's own policy.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: team-tools-intruder
+  namespace: @APP_NS@
+  labels: {app: team-tools-intruder}
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: @INTRUDER_UID@
+    runAsGroup: 0
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: probe
+      image: @AGENT_IMAGE@
+      imagePullPolicy: IfNotPresent
+      command: [python3, -c, "import time; time.sleep(3600)"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: [ALL]}
+      resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 128Mi}}

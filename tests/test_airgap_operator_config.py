@@ -597,6 +597,45 @@ def test_config_check_refuses_agent_sizing_like_the_deploy_path():
     assert not [e for e in sized if "AGENT_" in e]
 
 
+def test_config_check_mirrors_the_splunk_gateway_refusals(tmp_path):
+    """#1077: airgap:config check refuses what map_values.py refuses (one owner,
+    team_tools_config), with the same fixed text and no value echoed; a valid
+    enabled selection and the default (off) pass."""
+    from scripts.airgap.config_tool import check_config
+
+    config = tmp_path / "splunk-gateway.json"
+    config.write_text(json.dumps({"gateway": "splunk", "backend": {
+        "ca_file": "/etc/mainframe-rag/splunk-gateway/ca-bundle.crt", "base_url": "https://splunk.example.test"}}))
+    ca = tmp_path / "splunk-ca.pem"
+    ca.write_text((REPO / "tests" / "fixtures" / "extension-surface-idp-ca.pem").read_text())
+    enabled = {
+        "SPLUNK_GATEWAY_ENABLED": "true", "SPLUNK_GATEWAY_AUTH_MODE": "bearer", "SPLUNK_GATEWAY_SECRET": "splunk-gw",
+        "SPLUNK_GATEWAY_CONFIG_FILE": str(config), "SPLUNK_GATEWAY_CA_FILE": str(ca),
+        "SPLUNK_EGRESS_CIDRS": "192.0.2.10/32", "TEAM_MODEL_EGRESS_CIDRS": "198.51.100.0/24",
+        "LLM_MODEL_REASONING": "reasoner", "GATEWAY_BASE_URL": "https://llm.example.test/v1",
+        "GATEWAY_API_KEY_SECRET": "gw-keys",
+    }
+
+    def team_errors(values):
+        errors, _ = check_config(values)
+        return [e for e in errors if "SPLUNK" in e or "TEAM_" in e]
+
+    assert team_errors({"OPENWEBUI_ENABLED": "false"}) == []
+    # GATEWAY_BASE_URL stands in for LLM_BASE_URL, as everywhere else.
+    assert team_errors(enabled) == []
+    for chosen, rule in (
+        ({"OPENWEBUI_ENABLED": "false"}, "SPLUNK_GATEWAY_ENABLED=true requires OPENWEBUI_ENABLED=true"),
+        ({"SPLUNK_GATEWAY_SECRET": ""}, "required inputs are missing: SPLUNK_GATEWAY_SECRET."),
+        ({"SPLUNK_GATEWAY_AUTH_MODE": "oidc"}, "required inputs are missing: SPLUNK_GATEWAY_IDP_EGRESS_CIDRS."),
+        ({"SPLUNK_GATEWAY_AUTH_MODE": "mtls"}, "SPLUNK_GATEWAY_AUTH_MODE must be oidc or bearer"),
+        ({"TEAM_TOOLS_GROUP_ID": "splunk-team"}, "TEAM_TOOLS_GROUP_ID must be an Open WebUI group id"),
+        ({"SPLUNK_GATEWAY_CA_FILE": str(config)}, "SPLUNK_GATEWAY_CA_FILE must hold only PEM certificates"),
+    ):
+        errors = team_errors({**enabled, **chosen})
+        assert any(rule in e for e in errors), (chosen, errors)
+        assert not any(v in e for e in errors for v in chosen.values() if v not in ("", "oidc")), errors
+
+
 def test_config_sh_help_and_argument_errors(tmp_path):
     make_bin_tree(tmp_path, ["common.sh", "config.sh"])
     env = {"PATH": system_path(tmp_path / "bin")}
@@ -746,6 +785,10 @@ def test_registry_defaults_match_values_yaml_and_settings(tmp_path):
         "EMBED_MODEL_REVISION",
         "AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES",
         "OPENWEBUI_IDP_EGRESS_CIDRS",
+        # Comma-separated strings in airgap.env, lists in values.yaml (#1077).
+        "TEAM_MODEL_EGRESS_CIDRS",
+        "SPLUNK_EGRESS_CIDRS",
+        "SPLUNK_GATEWAY_IDP_EGRESS_CIDRS",
         "INGEST_RETIRE_DOCS",
         "OPENOBSERVE_RUN_AS_ID",
         "SERVICEMONITOR_ENABLED",

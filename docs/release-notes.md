@@ -193,3 +193,31 @@ within two pages join the prompt. Five new optional `airgap.env` keys
 Confirm the reasoning key's rate limit and quota before the upgrade.
 `CHAT_IMAGES_ENABLED`, `FEEDBACK_ENABLED` and rerank stay off. Nothing is
 removed from the extension surface.
+
+## 2026-11-25 GH#1077 Splunk team-tool gateway in the chart, off by default
+
+The chart can deploy the Splunk gateway (ADR-0015) and register it in Open
+WebUI as a tool server for a Team model. Nothing changes until a site opts in:
+off, the render is unchanged. Enabling it adds one small pod
+(`rag-splunk-gateway`) and gives Open WebUI one LiteLLM connection, limited to
+the reasoning model, and the gateway as a tool server. New optional
+`airgap.env` keys: `SPLUNK_GATEWAY_ENABLED`, `SPLUNK_GATEWAY_AUTH_MODE`,
+`SPLUNK_GATEWAY_SECRET`, `SPLUNK_GATEWAY_CONFIG_FILE`, `SPLUNK_GATEWAY_CA_FILE`,
+`SPLUNK_EGRESS_CIDRS`, `SPLUNK_EGRESS_PORT`, `SPLUNK_GATEWAY_IDP_EGRESS_CIDRS`,
+`SPLUNK_GATEWAY_IDP_EGRESS_PORT`, the four `SPLUNK_GATEWAY_*` sizing keys,
+`TEAM_TOOLS_GROUP_ID`, `TEAM_MODEL_EGRESS_CIDRS` and `TEAM_MODEL_EGRESS_PORT`.
+To turn it on, follow the [site procedure](deploy.md#splunk-gateway-deploy):
+
+1. The Splunk owner creates the token user, its role (the team's indexes,
+   search only, `mcp_tool_execute`) and an encrypted MCP token.
+2. Create the gateway Secret, add Open WebUI's LiteLLM key
+   `openwebui-llm-api-key` to the `GATEWAY_API_KEY_SECRET` Secret (always, also with a
+   shared `GATEWAY_API_KEY_SECRET_KEY`: validate and deploy refuse without it), and write
+   the gateway configuration and the Splunk CA file at the site. Set the
+   Splunk and LiteLLM egress CIDRs (and the IdP's in oidc mode).
+3. Create the team group in Open WebUI and set `TEAM_TOOLS_GROUP_ID` to its id.
+4. Set `SPLUNK_GATEWAY_ENABLED=true` (and `SPLUNK_GATEWAY_AUTH_MODE=bearer` for the
+   pilot; the default stays `oidc`), run `airgap:deploy` and the site probe.
+5. An admin turns the connection model into the Team model in the admin UI.
+
+Nothing is removed from the extension surface.

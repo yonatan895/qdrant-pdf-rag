@@ -25,6 +25,7 @@ resolve_agent_route
 resolve_network_policy
 resolve_feedback
 resolve_openwebui
+resolve_splunk_gateway
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
@@ -81,6 +82,10 @@ if [ "$OPENWEBUI_ENABLED" = "true" ]; then
     require_openwebui_pin
 fi
 echo "==> Open WebUI front end $(describe_openwebui)"
+# Issue #1077 (ADR-0015): team tools, the Splunk gateway, default off. It runs
+# the verified agent image; map_values.py refuses missing or invalid inputs
+# (Open WebUI off, files, CIDRs, model connection) before any mutation.
+echo "==> Splunk gateway $(describe_splunk_gateway)"
 
 refuse_nfs_storage
 SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}
@@ -113,6 +118,10 @@ RUNNING_IMAGES=$DEPLOY_IMAGES
 
 KC=${KC:-$(kc)}
 check_gateway_ca
+# Splunk gateway Secrets (#1077): key presence and the bearer secret's shape,
+# read-only and before the render (a missing key would otherwise surface as
+# CreateContainerConfigError after the release).
+require_splunk_gateway_secrets
 mkdir -p dist
 
 # Public namespace service CA becomes a generated value, never a YAML patch.
@@ -426,6 +435,20 @@ fi
 [ "$OPENWEBUI_ENABLED" != "true" ] || provision_openwebui_pipe
 # #1255: the shared prompt templates (chat `/` commands), repository-owned.
 [ "$OPENWEBUI_ENABLED" != "true" ] || provision_openwebui_prompts
+# #1077: the Splunk gateway is waited for last, after the docs platform is
+# complete: it serves only once its start-up backend check passes (its startup
+# probe allows 300 s), and on a first enable it may restart until the site
+# configuration is right (docs/deploy.md site procedure). A gateway that does
+# not become Ready fails the deploy here, with the docs front end deployed.
+# It runs the agent image: its pod must report the verified agent digest.
+if [ "$SPLUNK_GATEWAY_ENABLED" = "true" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
+    if ! $KC -n "$NAMESPACE" rollout status deploy/rag-splunk-gateway --timeout=330s; then
+        echo "==> Diagnostic: Splunk gateway start-up (the splunk_gateway_start line names the reason)" >&2
+        $KC -n "$NAMESPACE" logs deploy/rag-splunk-gateway --tail=20 2>/dev/null || true
+        die "Splunk gateway rag-splunk-gateway is not Ready within 330s; the rest of the release, the docs front end included, is deployed. Fix the gateway configuration (docs/deploy.md#splunk-gateway-deploy, steps 7-8) and re-run airgap:deploy, or set SPLUNK_GATEWAY_ENABLED=false"
+    fi
+    verify_running_images splunk_gateway
+fi
 if [ "$AGENT_ROUTE" = "true" ]; then
     echo "Route rag-agent -> svc port oauth, reencrypt, timeout 300s"
 fi
