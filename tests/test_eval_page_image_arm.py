@@ -17,12 +17,15 @@ from pathlib import Path
 import pymupdf
 import pytest
 
+from mainframe_rag.agent.app import EvidenceSearchHit, SearchResponse
+from mainframe_rag.agent.evidence import encode_reference
 from mainframe_rag.agent.images import wire_messages
 from mainframe_rag.config import Settings
 from mainframe_rag.eval import page_image_arm as pia
 from mainframe_rag.eval.answers import judge
 from mainframe_rag.ingest.ibm_pdf import sha256_file as ingest_sha256_file
 from mainframe_rag.ports import ChatResult, TokenUsage
+from mainframe_rag.retrieve.query import SearchHit
 from tests.fakes import settings_kw
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -209,9 +212,9 @@ class Run:
         self.probe = probe
         self.rc: int | None = None
 
-    def go(self, settings: Settings | None = None) -> Run:
+    def go(self, settings: Settings | None = None, tokenizer=None) -> Run:
         self.rc = pia.main(self.argv, settings=settings or _settings(), agent=self.agent,
-                           model=self.model, probe=self.probe)
+                           model=self.model, tokenizer=tokenizer, probe=self.probe)
         return self
 
     @property
@@ -276,14 +279,98 @@ def test_with_the_default_stages_on_only_the_answer_call_of_the_image_arm_gets_t
     only. Expansion has no stored-point reader here and falls back."""
     settings = Settings(**settings_kw())
     assert settings.answer_select_enabled and settings.answer_expand_enabled
-    run = Run(tmp_path, corpus, [_row("T-1", 1)]).go(settings)
+    hits = [_hit("t1", TABLE_DOC, chunk_type="table", page=2),
+            *(_hit(f"d{n}", DIAGRAM_DOC, page=1) for n in range(1, 20))]
+    run = Run(tmp_path, corpus, [_row("T-1", 1)], hits=hits).go(settings)
     assert run.outcomes() == {"T-1": "fixed"}
+    # Selection asked the model once (20 candidates for 16 places), then the two answer calls.
+    assert len(run.model.calls) == 3
     with_images = [call for call in run.model.calls if _pngs(call)]
     assert with_images == [run.model.calls[-1]] and len(_pngs(with_images[0])) == 1
     assert _text_of(run.model.calls[-2]) == _text_of(run.model.calls[-1])
     searches = [body["limit"] for path, body in run.agent.calls if path == "/v1/search"]
-    assert len(searches) == 1  # the image arm does not search again
+    # One search at the candidate width; the image arm does not search again.
+    assert searches == [settings.answer_select_candidates]
     assert run.exported["params"]["answer_select_enabled"] is True
+
+
+def test_the_image_budget_goes_to_the_qualifying_gold_hit_first(tmp_path, corpus):
+    """A manual can pack several chunks; the table chunk is packed last here
+    and still gets the first image."""
+    sha = pia.sha256_file(corpus / "table-guide.pdf")
+    spans = {"n1": (sha, 1, 1), "n2": (sha, 2, 2), "t1": (sha, 3, 3)}
+    hits = [_hit("n1", TABLE_DOC, page=0), _hit("n2", TABLE_DOC, page=1),
+            _hit("t1", TABLE_DOC, chunk_type="table", page=2)]
+    with pymupdf.open(corpus / "table-guide.pdf") as doc:
+        pages = [doc[i].get_pixmap(dpi=150, colorspace=pymupdf.csGRAY).tobytes("png")
+                 for i in range(3)]
+    run = Run(tmp_path / "a", corpus, [_row("T-1", 1)], hits=hits, spans=spans).go()
+    assert _pngs(run.model.calls[1]) == [pages[2], pages[0]]
+    assert run.exported["images"]["rows_hit_not_qualifying"] == 0
+    one = Run(tmp_path / "b", corpus, [_row("T-1", 1)], hits=hits, spans=spans,
+              argv=["--max-images", "1"]).go()
+    assert _pngs(one.model.calls[1]) == [pages[2]]
+    # No qualifying hit: packed order, and the export counts the row.
+    plain = Run(tmp_path / "c", corpus, [_row("T-1", 1)], hits=hits[:2], spans=spans).go()
+    assert _pngs(plain.model.calls[1]) == [pages[0], pages[1]]
+    assert plain.exported["images"]["rows_hit_not_qualifying"] == 1
+    # The row's expected heading qualifies a narrative hit (the eval's relevance rule).
+    headed = Run(tmp_path / "d", corpus, [_row("T-1", 1, expected_heading="settings wobblethatch n2")],
+                 hits=hits[:2], spans=spans, argv=["--max-images", "1"]).go()
+    assert _pngs(headed.model.calls[1]) == [pages[1]]
+
+
+def test_a_hit_qualifies_by_type_atomic_unit_or_expected_heading():
+    def hit(**over):
+        return SearchHit.model_validate({**_hit("c", TABLE_DOC), **over})
+
+    assert not pia.qualifies(hit(), None)
+    assert pia.qualifies(hit(chunk_type="table"), None) and pia.qualifies(hit(chunk_type="syntax"), None)
+    assert pia.qualifies(hit(units=[[0, 5, "prose"], [5, 9, "atomic"]]), None)
+    assert not pia.qualifies(hit(units=[[0, 5, "prose"]]), None) and not pia.qualifies(hit(units=[]), None)
+    assert pia.qualifies(hit(), "LEVER SETTINGS") and not pia.qualifies(hit(), "valve")
+
+
+def test_a_diagram_page_is_attached_for_a_syntax_row_whose_span_has_no_end_page(tmp_path, corpus):
+    row = _row("S-1", 1, query_class="syntax", expected_doc_ids=[DIAGRAM_DOC])
+    run = Run(tmp_path, corpus, [row]).go()
+    assert run.outcomes() == {"S-1": "fixed"}
+    with pymupdf.open(corpus / "sub" / "diagram-guide.PDF") as doc:
+        expected = doc[1].get_pixmap(dpi=150, colorspace=pymupdf.csGRAY).tobytes("png")
+        cover = doc[0].get_pixmap(dpi=150, colorspace=pymupdf.csGRAY).tobytes("png")
+    assert _pngs(run.model.calls[1]) == [expected] and expected != cover
+
+
+def test_search_hits_and_references_round_trip_from_the_agents_response_model():
+    build, chunk = "12345678-1234-4234-8234-123456789abc", "87654321-4321-4234-8234-cba987654321"
+    reference = encode_reference(build, chunk, bytes(range(32)))
+    served = EvidenceSearchHit(
+        chunk_id=chunk, score=0.5, cite="c", heading="h", text="t", doc_id=TABLE_DOC, title="T",
+        page_label="iv", chunk_type="table", message_ids=("IEA500I",), product="p", version="v",
+        rerank_score=0.25, units=((0, 1, "atomic"),), page_start=3, page_end=4, reference=reference)
+    payload = SearchResponse(request_id="r", query_kind="prose", hits=[served]).model_dump(mode="json")
+
+    class Agent:
+        def __init__(self):
+            self.paths = []
+
+        def post(self, path, json):
+            return FakeResponse(200, payload)
+
+        def get(self, path):
+            self.paths.append(path)
+            return FakeResponse(200, {"source_sha256": "AB" * 32, "location": {
+                "physical_page_start": 4, "physical_page_end": 5, "printed_label": "iv"}})
+
+    agent = Agent()
+    search = pia.AgentSearch(agent)
+    found = search._search("q", None, None, 16)
+    assert found.hits == [SearchHit(**served.model_dump(exclude={"reference"}))]
+    assert found.kind == "prose" and search.references == {chunk: reference}
+    # The reference reaches the evidence route byte for byte; pages become 0-based.
+    span = pia.read_source_span(agent, search.references[chunk])
+    assert agent.paths == [f"/v1/evidence/{reference}"]
+    assert span == pia.SourceSpan("ab" * 32, (3, 4))
 
 
 def test_dpi_flag_changes_the_rendered_size(tmp_path, corpus):
@@ -347,7 +434,7 @@ def test_outcomes_follow_the_gold_strings_of_each_arm(tmp_path, corpus):
         "lever 1 take": ("unsure", GOLD),                       # fixed
         "lever 2 take": (GOLD, GOLD),                           # both pass
         "lever 3 take": (GOLD, "unsure"),                       # broken
-        "lever 4 take": (GOLD, f"{GOLD}; the {FORBIDDEN} it"),  # broken by a forbidden string
+        "lever 4 take": (GOLD, f"{GOLD}; the {FORBIDDEN} it"),  # broken on a must-not row
         "lever 5 take": ("unsure", "unsure"),                   # both fail
     }
 
@@ -355,6 +442,7 @@ def test_outcomes_follow_the_gold_strings_of_each_arm(tmp_path, corpus):
         return next(v for k, v in replies.items() if k in text)[1 if images else 0]
 
     rows = [_row(f"T-{n}", n) for n in range(1, 6)]
+    rows[2]["gold_must_not_contain"] = []  # T-3 carries no must-not strings
     rows += [
         _row("N-1", 6, expected_behavior="abstain", expected_doc_ids=[], gold_must_contain=[]),
         _row("G-1", 7, gold_must_contain=[]),
@@ -390,6 +478,28 @@ def test_a_model_error_in_either_arm_is_its_own_code_and_never_a_broken_answer(t
     assert run.outcomes() == {"T-1": "image_error", "T-2": "text_error", "T-3": "both_pass"}
     rule = run.exported["stop_rule"]
     assert (rule["errors"], rule["breaks"], rule["text_failures"], rule["scored"]) == (2, 0, 0, 1)
+
+
+def test_a_failure_outside_the_model_call_keeps_the_run_and_prints_no_exception_text(
+        tmp_path, corpus, capsys):
+    class BrokenCounter:
+        def count_tokens(self, text):
+            raise OSError(f"count failed {QUESTION_MARK}")
+
+        def count_messages(self, messages, *, reasoning_effort=None):
+            raise OSError(f"count failed {QUESTION_MARK}")
+
+    run = Run(tmp_path, corpus, [_row("T-1", 1), _row("T-2", 2)]).go(tokenizer=BrokenCounter())
+    assert run.rc == 1 and run.outcomes() == {"T-1": "text_error", "T-2": "text_error"}
+    captured = capsys.readouterr()
+    assert QUESTION_MARK not in captured.err + captured.out and "Traceback" not in captured.err
+
+
+def test_a_broken_row_is_must_not_only_when_the_row_carries_must_not_strings():
+    lost = ((False, False), (True, False))
+    assert pia.scored_outcome(*lost, must_not_row=True) == "broken_must_not"
+    assert pia.scored_outcome(*lost, must_not_row=False) == "broken"
+    assert pia.scored_outcome((False, False), (False, True), must_not_row=False) == "broken"
 
 
 def test_search_failure_and_empty_search_are_their_own_codes(tmp_path, corpus):
@@ -445,14 +555,14 @@ def test_the_probe_is_the_gateway_probe_script_run_for_its_exit_code(tmp_path, m
 def test_private_report_and_export_paths_are_refused_before_any_call(tmp_path, corpus, capsys):
     for target in ("inside_git", "exists", "holdout_name", "same_file"):
         run = Run(tmp_path / target, corpus, [_row("T-1", 1)])
-        out = {"inside_git": ROOT / "dist" / "1318-private-report.jsonl",
+        out = {"inside_git": ROOT / "1318-private-report.jsonl",
                "exists": run.golden, "holdout_name": run.out.with_name("holdout.jsonl"),
                "same_file": run.export}[target]
         run.argv[run.argv.index("--out") + 1] = str(out)
         assert run.go().rc == 2, target
         assert capsys.readouterr().err.strip() == pia.REFUSALS["output"]
         assert run.agent.calls == [] and run.model.calls == []
-        assert not run.export.exists() and not (ROOT / "dist" / "1318-private-report.jsonl").exists()
+        assert not run.export.exists() and not (ROOT / "1318-private-report.jsonl").exists()
     run = Run(tmp_path / "export_in_git", corpus, [_row("T-1", 1)])
     run.argv[run.argv.index("--export") + 1] = str(ROOT / "1318-export.json")
     assert run.go().rc == 2 and run.model.calls == []
@@ -520,8 +630,9 @@ def test_export_stdout_stderr_and_logs_are_text_free(tmp_path, corpus, capsys, c
     assert set(exported["counts"]) == set(pia.OUTCOMES)
     assert sum(exported["counts"].values()) == exported["n"] == 3
     assert exported["images"] == {"rows": 2, "n": 2, "bytes": 2 * len(base64.b64decode(png_b64)),
-                                  "prompt_token_delta_mean": 2700}
+                                  "rows_hit_not_qualifying": 0, "prompt_token_delta_mean": 2700}
     assert exported["params"]["classes"] == ["table", "syntax"]
+    assert "model" not in exported["params"]
     assert exported["params"]["expansion"] == "not_reproduced"
     assert set(exported["stop_rule"]["reasons"]) <= set(pia.STOP_REASONS)
     assert json.loads(captured.out)["stop_rule"] == exported["stop_rule"]

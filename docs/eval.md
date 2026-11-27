@@ -1547,10 +1547,16 @@ generated rows are refused) it runs the shared answer core twice. The text arm
 retrieves through the running agent's `/v1/search` (`--agent-url`) and packs,
 prompts and parses with the library. The image arm sends the same hits and
 byte-identical prompt text, plus the page image(s) of the packed gold-document
-hit on the final user message, in the wire shape pasted images use. No label
-line or protocol wording is added, and no image tokens are reserved: a window
-overflow is an `image_error` row. Pages are rendered at 150 dpi, 8-bit grey
-PNG, at most 2 images an answer and 2 pages a hit (`--dpi`, `--max-images`).
+hit on the final user message, in the wire shape pasted images use. Pages are
+rendered at 150 dpi, 8-bit grey PNG, at most 2 images an answer and 2 pages a
+hit (`--dpi`, `--max-images`). When the manual packed several chunks, hits
+that pass the hit-side test come first (a `syntax` or `table` chunk, one with
+an atomic unit span, or the hit under the row's `expected_heading`);
+`images.rows_hit_not_qualifying` counts rows whose first image came from
+another hit. No label line or protocol wording is added, so the model is not
+told what the image is: this can under-report the benefit, and `few_fixed`
+alone is not conclusive. No image tokens are reserved: a window overflow is an
+`image_error` row.
 
 A hit's file is found by the `source_sha256` its evidence reference returns,
 in a local corpus copy (`--corpus-dir`) hashed once at start; never by doc id.
@@ -1561,7 +1567,12 @@ model; exit 4 when the probe cannot be run. The probe proves one small image,
 not two page-sized ones.
 
 Each arm passes when no `gold_must_contain` string is missing and no
-`gold_must_not_contain` string is present. Outcome codes are a closed set:
+`gold_must_not_contain` string is present. A row without `gold_must_contain`
+cannot be graded and is excluded (`no_gold_strings`): at this PR 5 of the 29
+dev `table`/`syntax` rows carry gold strings, so the dev set alone can never
+reach 6 text-arm failures, and the rows authored for this run need them.
+`broken_must_not` is a text-arm pass lost on a row that carries
+`gold_must_not_contain`. Outcome codes are a closed set:
 scored (`both_pass`, `fixed`, `broken`, `broken_must_not`, `both_fail`),
 retrieval and not addressable here (`gold_not_packed_text_pass`,
 `gold_not_packed_text_fail`; #1300 owns them), `unresolved_reference`,
@@ -1573,8 +1584,9 @@ excluded without a call (`abstain_row`, `no_gold_strings`) and errors
 **Stop rule** (design section 6; printed as `VERDICT stop` with reasons, or
 `VERDICT continue`). Stop when any holds: fewer than 6 text-arm failures among
 the scored rows (`few_text_failures`); the image arm fixes fewer than one third
-of them (`few_fixed`); it breaks more than one text-arm pass, or breaks any by
-a forbidden string (`breaks`); or more text-arm failures are gold-not-packed
+of them (`few_fixed`); it breaks more than one text-arm pass, or any on a row
+that carries must-not strings (`breaks`; abstain rows have no gold document,
+get no image and are excluded); or more text-arm failures are gold-not-packed
 than scored (`mostly_not_packed`). With n this small the verdict is a decision
 aid, not a statistic. If it does not stop, rerun at `--dpi 100`: equal results
 halve a later store.

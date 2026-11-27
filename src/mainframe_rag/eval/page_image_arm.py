@@ -21,7 +21,8 @@ Per selected golden row the tool
    `gold_must_not_contain` strings and gives the row one outcome code.
 
 The image arm adds no label line and no protocol wording: both arms send
-byte-identical text, so the difference is the image alone. It also reserves
+byte-identical text, so the difference is the image alone (and the model is
+not told what the image is, which can under-report the benefit). It also reserves
 no image tokens (`LLM_IMAGE_TOKEN_RESERVE`); a window overflow is an
 `image_error` row, never a broken answer.
 
@@ -285,9 +286,22 @@ def arm_failures(entry: dict[str, Any], answer: str, script: str | None) -> tupl
     return bool(missing_gold(entry, content)), forbidden
 
 
-def scored_outcome(text: tuple[bool, bool], image: tuple[bool, bool]) -> str:
+def qualifies(hit: Any, expected_heading: str | None) -> bool:
+    """The hit-side test for a page image (design section 3.2): a syntax or
+    table chunk, or one holding an atomic unit span; also the hit under the
+    row's expected heading, the answer eval's relevance rule."""
+    heading = (expected_heading or "").lower()
+    return (hit.chunk_type in ("syntax", "table")
+            or any(kind == "atomic" for _start, _end, kind in hit.units or ())
+            or bool(heading and heading in hit.heading.lower()))
+
+
+def scored_outcome(text: tuple[bool, bool], image: tuple[bool, bool],
+                   must_not_row: bool = False) -> str:
     """The outcome of a row both arms answered. An arm passes when no gold
-    string is missing and no forbidden string is present."""
+    string is missing and no forbidden string is present. A text-arm pass the
+    image arm loses is `broken_must_not` on a row that carries
+    `gold_must_not_contain` (the rule allows no such break), else `broken`."""
     text_pass, image_pass = not any(text), not any(image)
     if text_pass and image_pass:
         return "both_pass"
@@ -295,7 +309,7 @@ def scored_outcome(text: tuple[bool, bool], image: tuple[bool, bool]) -> str:
         return "fixed"
     if not text_pass:
         return "both_fail"
-    return "broken_must_not" if image[1] else "broken"
+    return "broken_must_not" if must_not_row else "broken"
 
 
 @dataclass
@@ -356,7 +370,6 @@ class Tool:
 
     async def run_row(self, entry: dict[str, Any]) -> dict[str, Any]:
         """One golden row: its outcome code plus the private detail."""
-        from mainframe_rag.agent.answer import PromptBudgetExceeded
         from mainframe_rag.agent.answer_core import LLMChatError, RetrievalError
 
         row: dict[str, Any] = {"id": entry["id"], "query_class": entry.get("query_class"),
@@ -372,7 +385,7 @@ class Tool:
             text = await self._core(entry["query"], text_model, search)
         except RetrievalError:
             return {**row, "outcome": "search_failed"}
-        except (LLMChatError, PromptBudgetExceeded):
+        except Exception:  # noqa: BLE001 - any other failure of the arm; never its text
             return {**row, "outcome": "text_error"}
         if not text.hits or text_model.sent is None:
             return {**row, "outcome": "no_hits"}
@@ -383,6 +396,13 @@ class Tool:
         gold = [e for e in text.evidence.entries if e.doc_id in expected and e.included_chars > 0]
         if not gold:
             return {**row, "outcome": NOT_PACKED[1] if any(text_fail) else NOT_PACKED[0]}
+        # Qualifying hits first (packed order within each group), so the image
+        # budget goes to the table or diagram chunk when the manual packed several.
+        by_id = {hit.chunk_id: hit for hit in text.hits}
+        qualifying = {e.chunk_id for e in gold if e.chunk_id in by_id
+                      and qualifies(by_id[e.chunk_id], entry.get("expected_heading"))}
+        gold.sort(key=lambda e: e.chunk_id not in qualifying)
+        row["image_hit_qualifies"] = gold[0].chunk_id in qualifying
         code, images = self._images(gold, search)
         if code:
             return {**row, "outcome": code}
@@ -398,14 +418,17 @@ class Tool:
         except LLMChatError as exc:
             mismatch = isinstance(exc.__cause__, _PromptMismatch)
             return {**row, "outcome": "prompt_mismatch" if mismatch else "image_error"}
-        except (_PromptMismatch, PromptBudgetExceeded):
+        except _PromptMismatch:
             return {**row, "outcome": "prompt_mismatch"}
+        except Exception:  # noqa: BLE001 - any other failure of the arm; never its text
+            return {**row, "outcome": "image_error"}
         if image_model.sent is None:
             return {**row, "outcome": "prompt_mismatch"}
         image_fail = arm_failures(entry, image.answer, image.script)
         row.update(image_answer=image.answer, image_missing_gold=image_fail[0],
                    image_forbidden=image_fail[1], image_prompt_tokens=image.usage.prompt_tokens)
-        return {**row, "outcome": scored_outcome(text_fail, image_fail)}
+        return {**row, "outcome": scored_outcome(
+            text_fail, image_fail, bool(entry.get("gold_must_not_contain")))}
 
 
 # --- the stop rule ------------------------------------------------------------
@@ -414,7 +437,7 @@ def stop_rule(counts: dict[str, int]) -> dict[str, Any]:
     """The design's stop rule over outcome counts (section 6), as a decision
     aid. Stop when any holds: fewer than 6 text-arm failures among the scored
     rows; the image arm fixes fewer than one third of them; it breaks more
-    than one text-arm pass, or breaks any by a forbidden (must-not) string;
+    than one text-arm pass, or any on a row that carries must-not strings;
     or more text-arm failures are "gold not packed" than scored."""
     n = {code: int(counts.get(code, 0)) for code in OUTCOMES}
     failures = n["fixed"] + n["both_fail"]
@@ -459,6 +482,8 @@ def build_export(rows: list[dict[str, Any]], params: dict[str, Any]) -> dict[str
         "images": {"rows": sum(1 for r in rows if r["image_n"]),
                    "n": sum(r["image_n"] for r in rows),
                    "bytes": sum(r["image_bytes"] for r in rows),
+                   "rows_hit_not_qualifying": sum(
+                       1 for r in rows if r["image_n"] and not r.get("image_hit_qualifies")),
                    "prompt_token_delta_mean": (round(sum(token_deltas) / len(token_deltas))
                                                if token_deltas else None)},
         "rows": [{"id": row["id"], "outcome": row["outcome"]} for row in rows],
@@ -623,7 +648,6 @@ def main(
         "colorspace": "gray",
         "format": "png",
         "corpus_files": sum(len(paths) for paths in corpus.values()),
-        "model": settings.llm_model_reasoning,
         "answer_hit_limit": settings.answer_hit_limit,
         "answer_select_enabled": bool(settings.answer_select_enabled),
         "answer_expand_enabled": bool(settings.answer_expand_enabled),
