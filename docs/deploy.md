@@ -1077,8 +1077,12 @@ cannot schedule on one node — proven).
   the same packed image by digest, Qdrant writer key by Secret reference,
   `QDRANT_PEER_URLS` and collection policy, pod hardening, and the
   `ingest-work` volume with `--progress /work/inventory.jsonl` fixed; no
-  corpus volume and `backoffLimit: 0`. Arguments are checked against fixed
-  charsets before anything renders. Before applying, it refuses while
+  corpus volume and `backoffLimit: 0`. The read-only `list` runs with the
+  writer key too: both commands are one Job shape, the ingest Job's, and
+  there is no read-only variant of it. Each value is checked whole against
+  a fixed character set before anything renders and reaches the Job as one
+  argument; a value with a newline or any other character outside its set
+  refuses the run. Before applying, it refuses while
   `job/ingest` has not finished (no `Complete` or `Failed` condition) or an
   ingest pod is still running or terminating, while an earlier
   `job/generations` has not finished, when `ingest-work` does not exist (it
@@ -1086,14 +1090,17 @@ cannot schedule on one node — proven).
   `job/generations` is deleted with bounded requests first. It waits with the
   ingest launcher's watcher (`scripts/airgap/one_shot_job.sh`: the quota
   fail-fast and the bounded, interruptible removal of a refused Job above,
-  with `airgap:generations` in the messages), ends the wait as soon as the
+  with `sh scripts/airgap/generations.sh` as the rerun command in the
+  messages), ends the wait as soon as the
   Job fails (a refusal is a normal outcome), and prints the Job's log, which
   is the listing or plan, once at the end. With `--execute` it passes the
-  bastion login name as `--operator` for the audit record. No reader stop:
+  bastion login name as `--operator` for the audit record; a login name
+  with a control character refuses the run, any other unusable name is left
+  out with a warning and the record names the pod's uid. No reader stop:
   snapshots are never served. `AIRGAP_DRYRUN=1` only renders and prints the
   cluster calls; without it, the module's own dry run still runs as a Job.
-  The Job requests the ingest Job's `INGEST_*` resources. The Task entry is
-  pending (`airgap:generations`); run the script directly until then.
+  The Job requests the ingest Job's `INGEST_*` resources. There is no task
+  entry for it; run the script.
 - First-party pods (agent, the oauth-proxy sidecar, the ingest Job, OpenObserve, otelcol)
   declare their own hardening so it does not depend on `restricted-v2`
   alone (issue #585): pod `runAsNonRoot: true` and

@@ -250,6 +250,92 @@ def test_bad_arguments_refuse_before_any_render_or_cluster_call(gen_tree, args, 
     assert _cluster_calls(gen_tree) == ""
 
 
+# Review B1 (#1387): a value is one argument. grep -x matched per line and the
+# argument list was word-split, so a newline inside a value added flags.
+_DISPOSE = ("dispose-snapshots", "--build-id", BUILD)
+
+
+@pytest.mark.parametrize("dryrun", ["1", "0"])
+@pytest.mark.parametrize(("args", "env", "needle"), [
+    pytest.param((*_DISPOSE, "--recovery-ref", "CHG-1\n--execute"), {}, "--recovery-ref takes", id="recovery-ref"),
+    pytest.param(("dispose-snapshots", "--build-id", BUILD + "\n--execute"), {}, "full lowercase build UUID",
+                 id="build-id"),
+    pytest.param((*_DISPOSE, "--keep", "2\n--execute\n--allow-below-keep"), {}, "--keep takes", id="keep"),
+    pytest.param(("list", "--keep", "2\n--format\njson"), {}, "--keep takes", id="keep-on-list"),
+    pytest.param((*_DISPOSE, "--execute"), {"USER": "site-op\n--allow-below-keep"}, "login name",
+                 id="operator-user"),
+    pytest.param((*_DISPOSE, "--execute"), {"USER": "", "LOGNAME": "site-op\n--allow-below-keep"}, "login name",
+                 id="operator-logname"),
+    pytest.param((*_DISPOSE, "--keep", "2\n"), {}, "--keep takes", id="keep-trailing-newline"),
+    pytest.param((*_DISPOSE, "--keep", "\n2"), {}, "--keep takes", id="keep-leading-newline"),
+    pytest.param((*_DISPOSE, "--recovery-ref", "CHG-1\n"), {}, "--recovery-ref takes",
+                 id="recovery-ref-trailing-newline"),
+    pytest.param(("dispose-snapshots", "--build-id", "--execute\n" + BUILD), {}, "full lowercase build UUID",
+                 id="build-id-leading-line"),
+    pytest.param((*_DISPOSE, "--execute"), {"USER": "site-op\r"}, "login name", id="operator-carriage-return"),
+    pytest.param(("list", "--format", "json\n--keep\n2"), {}, "--format takes", id="format-control"),
+])
+def test_a_value_with_a_newline_is_refused_and_never_adds_a_flag(gen_tree, dryrun, args, env, needle):
+    result = _run(gen_tree, *args, extra=(("AIRGAP_DRYRUN", dryrun), *env.items()))
+    rendered = gen_tree / "dist" / "generations-rendered.yaml"
+    assert result.returncode != 0, rendered_container(rendered.read_text(), "ingest")["args"]
+    assert needle in result.stderr
+    assert not rendered.exists()
+    assert not (gen_tree / "dist" / "mainframe-rag-generations-values.yaml").exists()
+    assert _cluster_calls(gen_tree) == ""
+
+
+@pytest.mark.parametrize(("args", "needle"), [
+    pytest.param((*_DISPOSE, "--recovery-ref", "C" * 129), "--recovery-ref takes", id="ref-129-characters"),
+    pytest.param((*_DISPOSE, "--recovery-ref", "-CHG"), "--recovery-ref takes", id="ref-leading-dash"),
+    pytest.param((*_DISPOSE, "--recovery-ref", ""), "--recovery-ref takes", id="ref-empty"),
+    pytest.param((*_DISPOSE, "--recovery-ref", "CHG-\xe9"), "--recovery-ref takes", id="ref-non-ascii-letter"),
+    pytest.param((*_DISPOSE, "--recovery-ref", "CHG\t1"), "--recovery-ref takes", id="ref-tab"),
+    pytest.param((*_DISPOSE, "--keep", "10000"), "--keep takes", id="keep-five-digits"),
+    pytest.param((*_DISPOSE, "--keep", "01"), "--keep takes", id="keep-leading-zero"),
+    pytest.param((*_DISPOSE, "--keep", "-1"), "--keep takes", id="keep-negative"),
+    pytest.param(("dispose-snapshots", "--build-id", "aaaaaaaa0-000-4000-8000-000000000001"),
+                 "full lowercase build UUID", id="uuid-dash-misplaced"),
+    pytest.param(("dispose-snapshots", "--build-id", "aaaaaaaa-0000-4000-8000-00000000000g"),
+                 "full lowercase build UUID", id="uuid-non-hex"),
+    pytest.param(("dispose-snapshots", "--build-id", BUILD + "1"), "full lowercase build UUID", id="uuid-37"),
+    pytest.param(("dispose-snapshots", "--build-id", "-" * 36), "full lowercase build UUID", id="uuid-only-dashes"),
+    pytest.param((*_DISPOSE, "--recovery-ref"), "--recovery-ref needs a value", id="ref-missing"),
+    pytest.param(("dispose-snapshots", "--build-id"), "--build-id needs a value", id="build-id-missing"),
+])
+def test_values_outside_their_allow_list_refuse_before_any_render(gen_tree, args, needle):
+    result = _run(gen_tree, *args, extra=(("AIRGAP_DRYRUN", "0"),))
+    assert result.returncode == 1
+    assert needle in result.stderr
+    assert not (gen_tree / "dist" / "generations-rendered.yaml").exists()
+    assert _cluster_calls(gen_tree) == ""
+
+
+def test_legitimate_values_at_the_limits_reach_the_job_as_single_arguments(gen_tree):
+    ref = "C0._:/#-" * 16  # 128 characters, every allowed punctuation character
+    other = "bbbbbbbb-1111-4222-8333-0123456789ab"
+    operator = ("op.name_x@site-1" * 4)[:64]
+    result = _run(gen_tree, "dispose-snapshots", "--build-id", BUILD, "--build-id", other, "--keep", "9999",
+                  "--recovery-ref", ref, "--execute", extra=(("USER", operator),))
+    assert result.returncode == 0, result.stderr
+    assert rendered_container(_rendered(gen_tree), "ingest")["args"] == [
+        "dispose-snapshots", "--progress", "/work/inventory.jsonl", "--build-id", BUILD, "--build-id", other,
+        "--keep", "9999", "--recovery-ref", ref, "--execute", "--operator", operator]
+    listing = _run(gen_tree, "list", "--keep", "1", "--format", "text")
+    assert listing.returncode == 0, listing.stderr
+    assert rendered_container(_rendered(gen_tree), "ingest")["args"] == [
+        "list", "--progress", "/work/inventory.jsonl", "--keep", "1", "--format", "text"]
+
+
+@pytest.mark.parametrize("name", ["o" * 65, "-op", "op name", "op;id", ""])
+def test_a_single_line_unusable_login_name_never_reaches_the_job(gen_tree, name):
+    result = _run(gen_tree, *_DISPOSE, "--execute", extra=(("USER", name), ("LOGNAME", name)))
+    assert result.returncode == 0, result.stderr
+    args = rendered_container(_rendered(gen_tree), "ingest")["args"]
+    assert args == ["dispose-snapshots", "--progress", "/work/inventory.jsonl", "--build-id", BUILD, "--execute"]
+    assert "audit record names the pod's uid" in result.stderr
+
+
 def _live(gen_tree, *args, **env):
     write_stub(gen_tree / "bin" / "kubectl", FAKE_KC)
     base = {"AIRGAP_DRYRUN": "0", "JOB_INGEST": "ingest|Complete=True,", "PODS_INGEST": "Succeeded|\n",
@@ -316,7 +402,7 @@ def test_quota_refusal_uses_the_shared_fail_fast_and_bounded_removal(gen_tree):
     assert result.returncode == 1, result.stdout + result.stderr
     assert "ResourceQuota refused the generations Job's pod" in result.stderr
     assert "lower INGEST_MEMORY_LIMIT in airgap.env" in result.stderr
-    assert "the refused generations Job was removed; rerun airgap:generations" in result.stderr
+    assert "the refused generations Job was removed; rerun sh scripts/airgap/generations.sh " in result.stderr
     assert "sentinel-q" not in result.stdout + result.stderr and "9991" not in result.stderr
     deletes = [line for line in _operations(gen_tree).splitlines() if "delete job generations" in line]
     assert len(deletes) == 2 and "--request-timeout=30s" in deletes[1]

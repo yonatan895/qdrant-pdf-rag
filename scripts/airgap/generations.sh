@@ -38,61 +38,99 @@ case "$GEN_COMMAND" in
     list|dispose-snapshots) ;;
     *) die "$GENERATIONS_USAGE" ;;
 esac
-# Every token is checked against a fixed charset with no whitespace or
-# pattern characters, so the list below word-splits safely (set -f).
-GEN_ARGS="$GEN_COMMAND --progress /work/inventory.jsonl"
+# A value is one argument and is checked whole: `case` patterns match the
+# entire string (a line-wise grep accepted a multi-line value on one good
+# line, review B1 of #1387), with every allowed character spelled out so no
+# locale range can widen a set. The arguments stay positional parameters to
+# the end and are never word-split.
+_GEN_DIGITS=0123456789
+_GEN_ALNUM=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz$_GEN_DIGITS
+_h='[0123456789abcdef]'
+_GEN_UUID=$_h$_h$_h$_h$_h$_h$_h$_h-$_h$_h$_h$_h-$_h$_h$_h$_h-$_h$_h$_h$_h-$_h$_h$_h$_h$_h$_h$_h$_h$_h$_h$_h$_h
+unset _h
+gen_keep_ok() {
+    case "$1" in
+        ""|0*|*[!"$_GEN_DIGITS"]*) return 1 ;;
+    esac
+    [ "${#1}" -le 4 ]
+}
+gen_build_ok() {
+    # shellcheck disable=SC2254 # the variable is the pattern
+    case "$1" in
+        $_GEN_UUID) return 0 ;;
+    esac
+    return 1
+}
+gen_ref_ok() {
+    case "$1" in
+        ""|[!"$_GEN_ALNUM"]*|*[!"$_GEN_ALNUM"._:/#-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 128 ]
+}
+gen_operator_ok() {
+    case "$1" in
+        ""|[!"$_GEN_ALNUM"]*|*[!"$_GEN_ALNUM"._@-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 64 ]
+}
 gen_builds=0
 gen_execute=false
-while [ $# -gt 0 ]; do
-    _flag=$1
-    shift
-    case "$GEN_COMMAND:$_flag" in
-        *:--keep)
-            [ $# -ge 1 ] || die "--keep needs a value"
-            printf '%s' "$1" | grep -Eqx '[1-9][0-9]{0,3}' || die "--keep takes a whole number from 1 (keeping 0 is not supported)"
-            GEN_ARGS="$GEN_ARGS --keep $1"
-            shift ;;
-        list:--format)
-            [ $# -ge 1 ] || die "--format needs a value"
-            case "$1" in text|json) ;; *) die "--format takes text or json" ;; esac
-            GEN_ARGS="$GEN_ARGS --format $1"
-            shift ;;
-        dispose-snapshots:--build-id)
-            [ $# -ge 1 ] || die "--build-id needs a value"
-            printf '%s' "$1" | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' ||
+_expect=""
+for _arg in "$@"; do
+    case "$_expect" in
+        "") ;;
+        --keep)
+            gen_keep_ok "$_arg" || die "--keep takes a whole number from 1 to 9999 (keeping 0 is not supported)"
+            _expect=""
+            continue ;;
+        --format)
+            case "$_arg" in text|json) ;; *) die "--format takes text or json" ;; esac
+            _expect=""
+            continue ;;
+        --build-id)
+            gen_build_ok "$_arg" ||
                 die "--build-id takes a full lowercase build UUID (see the listing), never a collection name"
-            GEN_ARGS="$GEN_ARGS --build-id $1"
             gen_builds=$((gen_builds + 1))
-            shift ;;
-        dispose-snapshots:--allow-below-keep)
-            GEN_ARGS="$GEN_ARGS --allow-below-keep" ;;
+            _expect=""
+            continue ;;
+        --recovery-ref)
+            gen_ref_ok "$_arg" ||
+                die "--recovery-ref takes a ticket or decision id ([A-Za-z0-9._:/#-], at most 128 characters, one line)"
+            _expect=""
+            continue ;;
+    esac
+    case "$GEN_COMMAND:$_arg" in
+        *:--keep|list:--format|dispose-snapshots:--build-id|dispose-snapshots:--recovery-ref)
+            _expect=$_arg ;;
+        dispose-snapshots:--allow-below-keep) ;;
         dispose-snapshots:--execute)
-            gen_execute=true
-            GEN_ARGS="$GEN_ARGS --execute" ;;
-        dispose-snapshots:--recovery-ref)
-            [ $# -ge 1 ] || die "--recovery-ref needs a value"
-            printf '%s' "$1" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9._:/#-]{0,127}' ||
-                die "--recovery-ref takes a ticket or decision id ([A-Za-z0-9._:/#-], at most 128 characters)"
-            GEN_ARGS="$GEN_ARGS --recovery-ref $1"
-            shift ;;
-        *) die "unknown or misplaced argument for $GEN_COMMAND: $_flag ($GENERATIONS_USAGE)" ;;
+            gen_execute=true ;;
+        *) die "unknown or misplaced argument for $GEN_COMMAND: $_arg ($GENERATIONS_USAGE)" ;;
     esac
 done
-unset _flag
+[ -z "$_expect" ] || die "$_expect needs a value"
+unset _arg _expect
 if [ "$GEN_COMMAND" = dispose-snapshots ]; then
     [ "$gen_builds" -ge 1 ] || die "dispose-snapshots needs at least one --build-id"
     if [ "$gen_execute" = true ]; then
-        # The audit record names who ran it (maintainer decision 2026-11-26);
-        # an unusable login name is left to the module's uid fallback.
+        # The audit record names who ran it (maintainer decision 2026-11-26).
+        # A login name with a control character (a newline above all) refuses
+        # the run; any other unusable name is left to the module's uid
+        # fallback and never reaches the Job.
         _operator=${USER:-${LOGNAME:-}}
-        if printf '%s' "$_operator" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9._@-]{0,63}'; then
-            GEN_ARGS="$GEN_ARGS --operator $_operator"
+        case "$_operator" in
+            *[[:cntrl:]]*) die "the bastion login name (USER or LOGNAME) contains a control character; refusing to run" ;;
+        esac
+        if gen_operator_ok "$_operator"; then
+            set -- "$@" --operator "$_operator"
         else
             echo "::warning::the bastion login name is not usable as an audit name ([A-Za-z0-9._@-]); the audit record names the pod's uid instead" >&2
         fi
         unset _operator
     fi
 fi
+# The Job's argument list, one positional parameter per argument.
+set -- "$GEN_COMMAND" --progress /work/inventory.jsonl "$@"
 
 # --- the same preflight as the ingest launcher, without a corpus ----------
 enforce_product_rules
@@ -121,20 +159,15 @@ validate_collection_policy required
 mkdir -p dist
 
 echo "==> Helm: generations Job ($GEN_COMMAND)"
-set -f
-# shellcheck disable=SC2086 # validated tokens, see above
-set -- $GEN_ARGS
-set +f
-_map_args=""
+# Each argument becomes one --generations-arg pair; quoted throughout.
+_gen_count=$#
 for _arg in "$@"; do
-    _map_args="$_map_args --generations-arg $_arg"
+    set -- "$@" --generations-arg "$_arg"
 done
-set -f
-# shellcheck disable=SC2086
+shift "$_gen_count"
+unset _arg _gen_count
 AGENT_ROUTE=false OPENWEBUI_ENABLED=false SPLUNK_GATEWAY_ENABLED=false \
-    map_app_values --out dist/mainframe-rag-generations-values.yaml $_map_args
-set +f
-unset _arg _map_args
+    map_app_values --out dist/mainframe-rag-generations-values.yaml "$@"
 helm template mainframe-rag charts/mainframe-rag -f dist/mainframe-rag-generations-values.yaml \
     --namespace "$NAMESPACE" --show-only templates/ingest-job.yaml > dist/generations-rendered.yaml
 fail_on_placeholders dist/generations-rendered.yaml generations
@@ -191,4 +224,4 @@ fi
 $KC -n "$NAMESPACE" delete job generations --ignore-not-found --cascade=foreground --wait=true \
     --timeout=300s --request-timeout=30s >/dev/null || die "could not remove the earlier job/generations; delete it with: $KC -n $NAMESPACE delete job generations"
 $KC apply -f dist/generations-rendered.yaml
-watch_one_shot_job generations "$GENERATIONS_TIMEOUT" airgap:generations collect
+watch_one_shot_job generations "$GENERATIONS_TIMEOUT" "sh scripts/airgap/generations.sh" collect

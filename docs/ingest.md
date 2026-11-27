@@ -1225,7 +1225,8 @@ thread pool.
   recreated), so later data disposal must delete snapshots first.
   At the site both commands run through `sh scripts/airgap/generations.sh`
   ([deploy](deploy.md#generations-job)), which fixes `--progress` to the
-  ingest inventory on the ingest work volume.
+  ingest inventory on the ingest work volume. The Job is the ingest Job's
+  shape, so `list` also runs with the writer key although it only reads.
 - `should_skip`: exact-sha plus (`upserted` or `skipped` always — `skipped`
   records an earlier already-complete check, issue #1215 — or `dry` only when
   the current run is also dry; a real run never skips prior `dry`).
