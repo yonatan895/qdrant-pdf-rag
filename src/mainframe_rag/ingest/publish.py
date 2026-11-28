@@ -715,6 +715,13 @@ def resolve_publish_staging(
                 return live, False
             return _fresh_staging_candidate(client, base, live), False
     if client.collection_exists(base) or client.collection_exists(completion_collection_for(base)):
+        from mainframe_rag.ingest.retirement import holds_tombstone
+
+        if holds_tombstone(client, completion_collection_for(base)):
+            # The retained control collection of a retired build (issue
+            # #1373): the name stays reserved and the control is never
+            # "an unfinished build to remove", whatever its manifest reads.
+            return _fresh_staging_candidate(client, base, live), False
         staging_settings = settings.model_copy(update={"qdrant_collection": base})
         from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
 
@@ -803,7 +810,20 @@ def _transfer_staging_metadata(
         return  # unversioned live: refused by the inner preflight, never repaired here
     if client.collection_exists(staging_completions):
         # Staging-only cleanup: live is the source and is never touched, and
-        # the inner run re-creates any marker it needs.
+        # the inner run re-creates any marker it needs. A control collection
+        # that holds its own publication receipt or a retirement tombstone
+        # (issue #1373) is a published or retired build's record, never
+        # staging workspace: judged by those two point ids, so a partial
+        # clone's inherited ancestor receipt still takes the repair path.
+        from mainframe_rag.ingest.retirement import holds_tombstone
+
+        own_receipt = client.retrieve(
+            staging_completions, ids=[publication_metadata_point_id(staging_completions)], with_payload=False)
+        if own_receipt or holds_tombstone(client, staging_completions):
+            raise RuntimeError(
+                f"{staging_completions!r} holds a publication receipt or a retirement tombstone: it is the "
+                "control record of a published or retired build and is never removed or rebuilt as staging."
+            )
         client.delete_collection(staging_completions)
     clone_collection(client, settings, live_completions, staging_completions)
     if not rekey_manifest(client, live_completions, staging_completions):

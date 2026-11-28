@@ -602,6 +602,10 @@ def main(argv: list[str]) -> int:
     if deploy_only and generations_args:
         print("FAIL: --generations-arg and --without-ingest-job are exclusive", file=sys.stderr)
         return 1
+    if generations_args and generations_args[0] not in ("list", "dispose-snapshots"):
+        # Data disposal (`dispose`) has no site path in this release (issue #1373).
+        print("FAIL: the generations Job runs only list or dispose-snapshots", file=sys.stderr)
+        return 1
     values = build_values(deploy_only=deploy_only, generations_args=generations_args or None)
     namespace = values.pop("_meta")["namespace"]
     header = (

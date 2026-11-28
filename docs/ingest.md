@@ -1177,14 +1177,19 @@ thread pool.
   admission stop and drain, explicit platform retention/recovery inputs, and
   persistent tombstones before data deletion while retaining required controls.
   Counts, dimensions or elapsed cache TTL alone authorize neither operation.
-  Guarded administrative rollback/disposal remain separate L1 work; do not
-  delete retained pairs or their controls using the old manual GC recipe.
+  Data disposal of a named superseded build is the guarded command under
+  [data disposal](#data-disposal); it cannot be executed in this release.
+  Guarded administrative rollback remains separate L1 work. Do not delete
+  retained pairs or their controls using the old manual GC recipe: a
+  retained control collection, and every control collection that holds a
+  retirement tombstone, is never deleted.
 - <a id="retained-generations"></a>**Retained generations and their snapshots (issue #1373):**
   `python -m mainframe_rag.ingest.generations list [--progress <inventory>]
   [--format json]` is read-only and lock-free, a point-in-time view. Per
   build of the configured alias it prints the data/control pair, build id,
   aliases, phase (`live`, `retained`, `sealed`, `inconsistent`,
-  `data-missing`), the newest completion-marker `finished_at` and the rank
+  `data-missing`, and from a retirement tombstone, which overrides the
+  alias-derived phase, `retiring`, `retired` or `tombstone-invalid`), the newest completion-marker `finished_at` and the rank
   among retained builds, point counts, whether the publish sidecar names it,
   and every snapshot of the pair on every direct peer (`QDRANT_PEER_URLS`)
   with its exact size. Qdrant reports no collection disk bytes (v1.19.2
@@ -1227,6 +1232,84 @@ thread pool.
   ([deploy](deploy.md#generations-job)), which fixes `--progress` to the
   ingest inventory on the ingest work volume. The Job is the ingest Job's
   shape, so `list` also runs with the writer key although it only reads.
+- <a id="data-disposal"></a>**Data disposal of a superseded build (issue #1373):**
+  `python -m mainframe_rag.ingest.generations dispose --progress <inventory>
+  --build-id <uuid>` removes one build's data unit: its data collection, its
+  data build alias and every snapshot of that collection on every peer. Its
+  `__completions` control collection (markers, manifest, receipt, catalog
+  entries), its control build alias and a retirement tombstone stay, with no
+  purge; the serving alias, the live pair, the sidecar and the inventory are
+  never touched. **Not executable in this release:** `--execute` is refused
+  (`E_READERS_UNAWARE`, before anything is read) until the agent refuses a
+  build that is being retired, which is a code constant
+  (`build.READERS_REFUSE_TOMBSTONED_BUILDS`) set only by that reader change,
+  never by a flag, the environment or a file; `scripts/airgap/generations.sh`,
+  the chart and `map_values.py` refuse the subcommand by name. The dry run
+  works. Contract of the command:
+  - `--progress` must be the inventory the alias was published from, for
+    `dispose` and `dispose-snapshots` alike: the publish lock of the alias
+    (`publish-<alias>.lock`) must already exist beside it and the path must
+    be the regular file itself, not a symlink; otherwise `E_PROGRESS_UNBOUND`
+    before anything is read. The lock and the sidecar are whatever sits
+    beside the given file, so another existing file, a copy in another
+    directory or a symlink would exclude no publisher. A whole work
+    directory copied with its lock file is not detected; the site launcher
+    fixes the path.
+  - One build per run, named by full build UUID. Refused unless the build is
+    `retained`, is not the serving target, has no foreign alias, is not named
+    by a readable sidecar, every peer answered, and it is older than the kept
+    set. The kept set is computed without the target: the newest `--keep`
+    retained builds that carry a content seal (default 1, floor 1,
+    `--allow-below-keep` lowers a larger value to 1); an unsealed schema-1
+    build inside that range is protected but does not count; a missing time
+    or a tie with the oldest protected build refuses. Each kept build must
+    pass `verify_publication_seal`, and a schema-3 build
+    `verify_build_catalog`, in the dry run and again under the lock (one full
+    scan with vectors per kept build).
+  - The dry run prints the plan and `PLAN DIGEST <sha256>` over the alias,
+    the live target, the build, its data point count, each peer's snapshots
+    (name, size, checksum, time), the kept builds, N and the override.
+    `--execute` needs `--plan-digest` (recomputed under the publish lock; a
+    difference refuses) and `--readers-stopped <UTC time>`, the attestation
+    that every reader (the agent, scaled to 0) was confirmed stopped; the
+    tool cannot observe pods and records the attestation, `--recovery-ref`
+    (optional) and the operator in the tombstone. Online disposal is not
+    supported.
+  - Steps under the publish lock, each reading the stored state it would
+    produce before acting: (S1) tombstone `retiring` written into the control
+    collection and read back; (S2) aliases re-read, data build alias deleted;
+    (S3) every snapshot deleted through the peer that stores it, then every
+    peer must list none; (S4) the data collection deleted and confirmed
+    absent through every peer; (S5) tombstone `retired`. Snapshots go before
+    the collection because a collection delete orphans its snapshot files
+    (they are listed again if the name is recreated). Serving target,
+    aliases, sidecar and the stored tombstone are re-read before each delete.
+  - The tombstone (`record_type: retirement-tombstone`, one point at a
+    deterministic id in the control collection) is the only resume evidence.
+    A rerun of the same command after a stop at any point continues and
+    converges; once a `retiring` tombstone exists the rerun is gated only by
+    delete-safety (serving target, foreign alias, sidecar, every peer
+    answering, the lock), never by keep-N or the kept set's seal, so a
+    started disposal can always finish. A resume does check the kept builds
+    the tombstone recorded: when one is no longer a retained build that
+    verifies, the dry run and the run print `WARNING: W_KEPT_UNVERIFIED`
+    and still finish. The `retired` update records the finishing run in
+    the tombstone's `completion` (whether it was a resume, its own
+    `--readers-stopped`, operator and recovery ref, and those unverified
+    kept builds); every executing run also appends a line to the audit
+    record `data-disposal-<alias>.jsonl` beside the lock when it starts or
+    resumes and when it ends. While one build is `retiring` no
+    other build is disposed of. A snapshot made after the plan is not in the
+    tombstone's record: the recorded digest then refuses and the dry run
+    prints a resume digest that names it. A retired build's rerun reports it
+    and writes nothing. The tombstone is inside the build's control seal on
+    purpose: a tombstoned build never passes a seal check and is never a
+    rollback point. It carries ids, names, counts, sizes, times and digests,
+    no per-chunk index (maintainer decision 2026-11-26).
+  - Publication afterwards: a retired control collection reserves its name
+    (a build whose derived name collides is allocated a suffix), and staging
+    preparation refuses to remove a control collection that holds its own
+    receipt or a tombstone. The next ordinary ingest needs no cleanup step.
 - `should_skip`: exact-sha plus (`upserted` or `skipped` always — `skipped`
   records an earlier already-complete check, issue #1215 — or `dry` only when
   the current run is also dry; a real run never skips prior `dry`).

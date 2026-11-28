@@ -22,6 +22,12 @@ scripts/airgap/generations.sh; exclusive with ingest.enabled. */}}
 {{- if and .Values.ingest.enabled $generations }}
 {{- fail "ingest.generations.args renders the generations Job and is exclusive with ingest.enabled" }}
 {{- end }}
+{{- /* Only the read-only listing and the snapshot-only disposal run as this
+Job. The module's data disposal (`dispose`) needs the reader stop and a
+reader-aware agent and has no chart path in this release (issue #1373). */}}
+{{- if and $generations (not (has (first $generations) (list "list" "dispose-snapshots"))) }}
+{{- fail "ingest.generations.args must start with list or dispose-snapshots; data disposal is not available from the chart" }}
+{{- end }}
 {{- if or .Values.ingest.enabled $generations }}
 {{- $jobName := ternary "generations" "ingest" (not (empty $generations)) }}
 apiVersion: batch/v1
