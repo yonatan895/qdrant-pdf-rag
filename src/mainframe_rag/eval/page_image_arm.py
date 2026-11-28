@@ -41,8 +41,12 @@ question, answer, heading, chunk text, doc id, sha256, page number, evidence
 reference or image. Exception text is never printed.
 
 Exit codes: 0 run completed (see the verdict); 1 completed with no scored
-row; 5 completed without a verdict (fewer than 6 gradeable rows); 2 refused (dataset, output path, corpus directory, arguments, model not
-configured); 3 the image probe did not pass; 4 the image probe could not run.
+row; 5 completed without a verdict (fewer than 6 gradeable rows, or rows
+with a text-arm answer and no image-arm answer that could change the
+verdict: see `stop_rule`); 2 refused before any call (dataset, row ids or
+gold fields, output path, corpus directory, arguments, model not configured,
+PyMuPDF not importable); 3 the image probe did not pass; 4 the image probe
+could not run.
 """
 
 from __future__ import annotations
@@ -53,6 +57,7 @@ import base64
 import hashlib
 import inspect
 import json
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -116,16 +121,27 @@ UNRESOLVED = ("unresolved_reference", "unresolved_sha_missing", "unresolved_sha_
 EXCLUDED = ("abstain_row", "no_gold_strings")
 ERRORS = ("search_failed", "no_hits", "text_error", "image_error", "prompt_mismatch")
 OUTCOMES = (*SCORED, *NOT_PACKED, *UNRESOLVED, *EXCLUDED, *ERRORS)
+# Gold-packed rows with a text-arm answer and no image-arm answer.
+INCOMPLETE = (*UNRESOLVED, "image_error", "prompt_mismatch")
 
 STOP_REASONS = ("few_text_failures", "few_fixed", "breaks", "mostly_not_packed")
+NO_VERDICT_REASONS = ("too_few_gradeable_rows", "incomplete_rows")
 VERDICTS = ("stop", "continue", "no_verdict")
 MIN_TEXT_FAILURES = 6
+# Row ids reach stderr and the export: a closed alphabet, so an id cannot
+# carry a line break (a forged VERDICT line) or text.
+ROW_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
 
 REFUSALS = {
     "output": ("refused: --out and --export must be new files in a writable directory "
                "outside any git work tree, not named like the holdout or the release set"),
     "dataset": "refused: the golden file is not a readable dev dataset",
-    "rows": "refused: golden rows need unique string ids",
+    "rows": ("refused: golden rows need unique ids of 1-64 characters from letters, digits "
+             "and . _ : - (starting with a letter or digit)"),
+    "gold": ("refused: gold_must_contain and gold_must_not_contain must be lists of "
+             "non-empty strings"),
+    "renderer": ("refused: PyMuPDF (pymupdf) cannot be imported here, so no page can be "
+                 "rendered; the image arm was not run"),
     "classes": "refused: --classes takes a comma-separated list of query classes",
     "corpus": "refused: --corpus-dir is not a readable directory holding PDF files",
     "agent": "refused: --agent-url is required (the running agent's base URL)",
@@ -135,8 +151,8 @@ REFUSALS = {
     "probe_unavailable": ("refused: the image probe could not be run "
                           "(scripts/probe_gateway.py; see --probe-script)"),
 }
-EXIT = {"output": 2, "dataset": 2, "rows": 2, "classes": 2, "corpus": 2, "agent": 2, "model": 2,
-        "probe_failed": 3, "probe_unavailable": 4}
+EXIT = {"output": 2, "dataset": 2, "rows": 2, "gold": 2, "classes": 2, "corpus": 2, "agent": 2,
+        "model": 2, "renderer": 2, "probe_failed": 3, "probe_unavailable": 4}
 
 
 class Refused(Exception):
@@ -160,10 +176,9 @@ class _PromptMismatch(Exception):
 def render_page_png(path: Path, page_index: int, dpi: int = DEFAULT_DPI) -> bytes:
     """One PDF page (0-based physical index) as an 8-bit grey PNG at `dpi`.
 
-    The only place this module touches PyMuPDF, imported here so that
-    importing the module, selecting rows and scoring never load it."""
-    import pymupdf
-
+    The only place this module touches PyMuPDF (`_pymupdf`), imported on
+    use so that importing the module, selecting rows and scoring never load it."""
+    pymupdf = _pymupdf()
     try:
         with pymupdf.open(path) as doc:
             if not 0 <= page_index < doc.page_count:
@@ -175,6 +190,23 @@ def render_page_png(path: Path, page_index: int, dpi: int = DEFAULT_DPI) -> byte
         raise
     except Exception:  # noqa: BLE001 - library errors carry file text and paths
         raise PageUnavailable from None
+
+
+def _pymupdf() -> Any:
+    """The module's one PyMuPDF import."""
+    import pymupdf
+
+    return pymupdf
+
+
+def renderer_available() -> bool:
+    """True when PyMuPDF imports here: checked before any call, so a missing
+    or broken wheel is a fixed refusal, never a traceback after the text arm."""
+    try:
+        _pymupdf()
+    except Exception:  # noqa: BLE001 - ImportError or a broken native library
+        return False
+    return True
 
 
 # --- corpus index -------------------------------------------------------------
@@ -438,6 +470,7 @@ class Tool:
         text_fail = arm_failures(entry, text.answer, text.script)
         row.update(text_answer=text.answer, text_missing_gold=text_fail[0],
                    text_forbidden=text_fail[1], text_prompt_tokens=text.usage.prompt_tokens,
+                   must_not_row=bool(entry.get("gold_must_not_contain")),
                    packed_doc_ids=[e.doc_id for e in text.evidence.entries])
         gold = [e for e in text.evidence.entries if e.doc_id in expected and e.included_chars > 0]
         if not gold:
@@ -480,31 +513,93 @@ class Tool:
 
 # --- the stop rule ------------------------------------------------------------
 
-def stop_rule(counts: dict[str, int]) -> dict[str, Any]:
-    """The design's stop rule over outcome counts (section 6), as a decision
-    aid. Stop when any holds: fewer than 6 text-arm failures among the scored
-    rows; the image arm fixes fewer than one third of them; it breaks more
-    than one text-arm pass, or any on a row that carries must-not strings;
-    or more text-arm failures are "gold not packed" than scored."""
-    n = {code: int(counts.get(code, 0)) for code in OUTCOMES}
+@dataclass(frozen=True)
+class Incomplete:
+    """The text-arm results of the INCOMPLETE rows (gold packed, text answer,
+    no image answer): text-arm failures, and text-arm passes on rows without
+    and with `gold_must_not_contain`."""
+
+    text_fail: int = 0
+    text_pass: int = 0
+    text_pass_must_not: int = 0
+
+    @property
+    def rows(self) -> int:
+        return self.text_fail + self.text_pass + self.text_pass_must_not
+
+    @classmethod
+    def of(cls, rows: Sequence[dict[str, Any]]) -> Incomplete:
+        """From the private rows (`run_row` records the text arm's result
+        before any image-arm outcome)."""
+        fail = passed = passed_must_not = 0
+        for row in rows:
+            if row["outcome"] not in INCOMPLETE:
+                continue
+            if row["text_missing_gold"] or row["text_forbidden"]:
+                fail += 1
+            elif row["must_not_row"]:
+                passed_must_not += 1
+            else:
+                passed += 1
+        return cls(fail, passed, passed_must_not)
+
+
+def _reasons(n: dict[str, int]) -> list[str]:
+    """The design's stop conditions (section 6) over complete counts."""
     failures = n["fixed"] + n["both_fail"]
-    breaks = n["broken"] + n["broken_must_not"]
     reasons = []
     if failures < MIN_TEXT_FAILURES:
         reasons.append("few_text_failures")
     if 3 * n["fixed"] < failures:
         reasons.append("few_fixed")
-    if breaks > 1 or n["broken_must_not"] > 0:
+    if n["broken"] + n["broken_must_not"] > 1 or n["broken_must_not"] > 0:
         reasons.append("breaks")
     if n["gold_not_packed_text_fail"] > failures:
         reasons.append("mostly_not_packed")
+    return reasons
+
+
+def stop_rule(counts: dict[str, int], incomplete: Incomplete) -> dict[str, Any]:
+    """The design's stop rule (section 6) as a decision aid. Stop when any
+    holds: fewer than 6 text-arm failures among the gold-packed rows (counted
+    whatever the image arm did); the image arm fixes fewer than one third of
+    them; it breaks more than one text-arm pass, or any on a row that carries
+    must-not strings; or more text-arm failures are "gold not packed" than
+    gold-packed.
+
+    Rows with a text-arm answer and no image-arm answer (`incomplete`) are
+    counted at both bounds: the image arm fixing every such failure and
+    breaking no such pass, and fixing none and breaking every pass. Each
+    condition can only hold more often at the second bound, so the first
+    bound's reasons hold in every completion. The verdict is `stop` (with
+    those reasons) or `continue` when both bounds agree, else `no_verdict`
+    (`incomplete_rows`)."""
+    n = {code: int(counts.get(code, 0)) for code in OUTCOMES}
+    if incomplete.rows != sum(n[c] for c in INCOMPLETE) or min(
+            incomplete.text_fail, incomplete.text_pass, incomplete.text_pass_must_not) < 0:
+        raise ValueError("incomplete rows do not match the counts")
+    best = {**n, "fixed": n["fixed"] + incomplete.text_fail,
+            "both_pass": n["both_pass"] + incomplete.text_pass + incomplete.text_pass_must_not}
+    worst = {**n, "both_fail": n["both_fail"] + incomplete.text_fail,
+             "broken": n["broken"] + incomplete.text_pass,
+             "broken_must_not": n["broken_must_not"] + incomplete.text_pass_must_not}
+    best_reasons, worst_reasons = _reasons(best), _reasons(worst)
+    if best_reasons:
+        verdict, reasons = "stop", best_reasons
+    elif not worst_reasons:
+        verdict, reasons = "continue", []
+    else:
+        verdict, reasons = "no_verdict", ["incomplete_rows"]
     return {
-        "verdict": "stop" if reasons else "continue",
+        "verdict": verdict,
         "reasons": reasons,
+        "bounds": {"all_fixed": best_reasons, "none_fixed": worst_reasons},
         "scored": sum(n[c] for c in SCORED),
-        "text_failures": failures,
+        "packed_text_failures": n["fixed"] + n["both_fail"] + incomplete.text_fail,
+        "incomplete_rows": incomplete.rows,
+        "incomplete_text_failures": incomplete.text_fail,
         "fixed": n["fixed"],
-        "breaks": breaks,
+        "breaks": n["broken"] + n["broken_must_not"],
         "breaks_must_not": n["broken_must_not"],
         "not_packed": sum(n[c] for c in NOT_PACKED),
         "not_packed_text_failures": n["gold_not_packed_text_fail"],
@@ -541,14 +636,16 @@ def build_export(rows: list[dict[str, Any]], params: dict[str, Any],
     outcome code, and the verdict (`no_verdict` when the rows cannot carry
     one). Anything else in a row stays in the private report."""
     counts = Counter(row["outcome"] for row in rows)
-    rule = stop_rule(counts)
+    rule = stop_rule(counts, Incomplete.of(rows))
     if not validity["verdict_possible"]:
-        rule = {**rule, "verdict": "no_verdict", "reasons": ["too_few_gradeable_rows"]}
+        reasons = ["too_few_gradeable_rows"] + (
+            ["incomplete_rows"] if rule["verdict"] == "no_verdict" else [])
+        rule = {**rule, "verdict": "no_verdict", "reasons": reasons}
     token_deltas = [row["image_prompt_tokens"] - row["text_prompt_tokens"] for row in rows
                     if row["outcome"] in SCORED and row.get("image_prompt_tokens")
                     and row.get("text_prompt_tokens")]
     return {
-        "schema": "page-image-ab/1",
+        "schema": "page-image-ab/2",
         "params": params,
         "validity": validity,
         "n": len(rows),
@@ -612,8 +709,15 @@ def select_rows(raw: bytes, classes: Sequence[str]) -> list[dict[str, Any]]:
         raise Refused("dataset")
     rows = [r for r in records if r.get("query_class") in classes]
     ids = [r.get("id") for r in rows]
-    if any(not isinstance(i, str) or not i for i in ids) or len(set(ids)) != len(ids):
+    if (any(not isinstance(i, str) or not ROW_ID.fullmatch(i) for i in ids)
+            or len(set(ids)) != len(ids)):
         raise Refused("rows")
+    for row in rows:
+        for name in ("gold_must_contain", "gold_must_not_contain"):
+            value = row.get(name)
+            if value is not None and not (
+                    isinstance(value, list) and all(isinstance(s, str) and s for s in value)):
+                raise Refused("gold")
     return rows
 
 
@@ -677,6 +781,8 @@ def main(
             settings = load_settings()
         if not settings.llm_base_url or not settings.llm_model_reasoning:
             raise Refused("model")
+        if not renderer_available():
+            raise Refused("renderer")
         script = args.probe_script or default_probe_script()
         if not (probe() if probe is not None else run_image_probe(script)):
             raise Refused("probe_failed")
@@ -750,9 +856,15 @@ def main(
     rule = export["stop_rule"]
     print(json.dumps({"counts": {k: v for k, v in export["counts"].items() if v},
                       "stop_rule": rule}, sort_keys=True))
-    if not validity["verdict_possible"]:
-        print(f"NO VERDICT: {validity['gradeable']} gradeable row(s), "
-              f"{MIN_GRADEABLE_ROWS} needed", file=sys.stderr)
+    if rule["verdict"] == "no_verdict":
+        if not validity["verdict_possible"]:
+            print(f"NO VERDICT: {validity['gradeable']} gradeable row(s), "
+                  f"{MIN_GRADEABLE_ROWS} needed", file=sys.stderr)
+        if "incomplete_rows" in rule["reasons"]:
+            print(f"NO VERDICT: {rule['incomplete_rows']} gold-packed row(s) have a text-arm "
+                  "answer and no image-arm answer, and the verdict differs with them counted "
+                  "as all fixed and as none fixed; fix the cause (see the counts) and rerun",
+                  file=sys.stderr)
         return 5
     print(f"VERDICT {rule['verdict']}"
           + (f" ({', '.join(rule['reasons'])})" if rule["reasons"] else "")

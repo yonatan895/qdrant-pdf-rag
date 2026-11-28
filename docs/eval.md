@@ -1588,17 +1588,33 @@ retrieval and not addressable here (`gold_not_packed_text_pass`,
 `unresolved_sha_missing`, `unresolved_sha_ambiguous`, `unresolved_page`,
 excluded without a call (`abstain_row`, `no_gold_strings`) and errors
 (`search_failed`, `no_hits`, `text_error`, `image_error`,
-`prompt_mismatch`). An error is never a text failure or a break.
+`prompt_mismatch`). An image-arm outcome is never a text failure or a break by
+itself; the text arm's result on such a row still counts (stop rule below).
+Row ids must be 1-64 characters from letters, digits and `. _ : -`, starting
+with a letter or digit, and `gold_must_contain`/`gold_must_not_contain`
+must be absent, null or lists of non-empty strings; otherwise the rows file is
+refused (exit 2) before any call. The run is also refused (exit 2) before the
+probe when PyMuPDF cannot be imported.
 
 **Stop rule** (design section 6; printed as `VERDICT stop` with reasons, or
 `VERDICT continue`). Stop when any holds: fewer than 6 text-arm failures among
-the scored rows (`few_text_failures`); the image arm fixes fewer than one third
-of them (`few_fixed`); it breaks more than one text-arm pass, or any on a row
-that carries must-not strings (`breaks`; abstain rows have no gold document,
-get no image and are excluded); or more text-arm failures are gold-not-packed
-than scored (`mostly_not_packed`). With n this small the verdict is a decision
-aid, not a statistic. If it does not stop, rerun at `--dpi 100`: equal results
-halve a later store.
+the gold-packed rows, counted whatever the image arm did
+(`few_text_failures`; exported as `stop_rule.packed_text_failures`); the
+image arm fixes fewer than one third of them (`few_fixed`); it breaks more
+than one text-arm pass, or any on a row that carries must-not strings
+(`breaks`; abstain rows have no gold document, get no image and are
+excluded); or more text-arm failures are gold-not-packed than gold-packed
+(`mostly_not_packed`). A gold-packed row with a text-arm answer and no
+image-arm answer (`unresolved_*`, `image_error`, `prompt_mismatch`;
+exported as `stop_rule.incomplete_rows`) is counted at both bounds: the image
+arm fixing every such failure and breaking no such pass, and fixing none and
+breaking every pass (`stop_rule.bounds`). When the two bounds disagree the
+tool prints `NO VERDICT` (`no_verdict`, reason `incomplete_rows`, exit 5):
+fix the cause the counts name and rerun. A stop at both bounds is printed with
+the reasons that hold at the first. Rows whose text arm gave no answer
+(`search_failed`, `no_hits`, `text_error`) are not counted. With n this
+small the verdict is a decision aid, not a statistic. If it does not stop,
+rerun at `--dpi 100`: equal results halve a later store.
 
 **Lanes.** The local or Colab stand-in gives a relative signal only, and only
 if its image probe passes. The site run decides. Not measurable off-site: the
@@ -1621,7 +1637,9 @@ nothing else; stdout, stderr and logs carry the same. Images and page text
 are held in memory only. A site run's export still names site-authored row
 ids: record its counts and verdict on the issue, keep the files at the site.
 Exit 0 means the run completed with at least one scored row, 1 none scored,
-5 completed without a verdict, 2 a refusal before any call.
+5 completed without a verdict (too few gradeable rows, or incomplete rows that
+could change it), 2 a refusal before any call. The export schema is
+`page-image-ab/2`.
 
 ### Claim-level support (#365)
 

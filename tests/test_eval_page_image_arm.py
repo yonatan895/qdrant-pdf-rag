@@ -72,9 +72,10 @@ def _diagram_pdf(path: Path) -> None:
     doc.close()
 
 
-@pytest.fixture(autouse=True)
-def one_gradeable_row_is_enough(monkeypatch):
-    """Most cases run one or two rows; the real floor has its own test."""
+@pytest.fixture
+def low_floor(monkeypatch):
+    """For cases that need a verdict line from one or two rows; every verdict
+    test runs at the real floor (MIN_GRADEABLE_ROWS, 6)."""
     monkeypatch.setattr(pia, "MIN_GRADEABLE_ROWS", 1)
 
 
@@ -238,6 +239,7 @@ class Run:
 
 # --- the two arms -------------------------------------------------------------
 
+@pytest.mark.usefixtures("low_floor")
 def test_both_arms_send_identical_text_and_only_the_image_arm_carries_the_gold_page(
         tmp_path, corpus):
     run = Run(tmp_path, corpus, [_row("T-1", 1)]).go()
@@ -415,6 +417,7 @@ def test_dpi_flag_changes_the_rendered_size(tmp_path, corpus):
     assert run.exported["params"]["dpi"] == 100
 
 
+@pytest.mark.usefixtures("low_floor")
 def test_gold_not_packed_runs_the_text_arm_only_and_is_not_scored(tmp_path, corpus):
     hits = [_hit("d1", DIAGRAM_DOC, chunk_type="syntax", page=1)]
     rows = [_row("T-1", 1), _row("T-2", 2)]
@@ -472,31 +475,33 @@ def test_outcomes_follow_the_gold_strings_of_each_arm(tmp_path, corpus):
         "lever 3 take": (GOLD, "unsure"),                       # broken
         "lever 4 take": (GOLD, f"{GOLD}; the {FORBIDDEN} it"),  # broken on a must-not row
         "lever 5 take": ("unsure", "unsure"),                   # both fail
+        "lever 6 take": ("unsure", "unsure"),                   # both fail
     }
 
     def answer(text, images):
         return next(v for k, v in replies.items() if k in text)[1 if images else 0]
 
-    rows = [_row(f"T-{n}", n) for n in range(1, 6)]
+    rows = [_row(f"T-{n}", n) for n in range(1, 7)]
     rows[2]["gold_must_not_contain"] = []  # T-3 carries no must-not strings
     rows += [
-        _row("N-1", 6, expected_behavior="abstain", expected_doc_ids=[], gold_must_contain=[]),
-        _row("G-1", 7, gold_must_contain=[]),
-        _row("X-1", 8, query_class="diagnostic"),
+        _row("N-1", 7, expected_behavior="abstain", expected_doc_ids=[], gold_must_contain=[]),
+        _row("G-1", 8, gold_must_contain=[]),
+        _row("X-1", 9, query_class="diagnostic"),
     ]
     run = Run(tmp_path, corpus, rows, answer=answer).go()
     assert run.outcomes() == {
         "T-1": "fixed", "T-2": "both_pass", "T-3": "broken", "T-4": "broken_must_not",
-        "T-5": "both_fail", "N-1": "abstain_row", "G-1": "no_gold_strings"}
+        "T-5": "both_fail", "T-6": "both_fail", "N-1": "abstain_row", "G-1": "no_gold_strings"}
     # The abstain row, the row without gold strings and the other class cost no call.
-    assert len(run.model.calls) == 10
+    assert len(run.model.calls) == 12
     rule = run.exported["stop_rule"]
-    assert (rule["scored"], rule["text_failures"], rule["fixed"], rule["breaks"],
-            rule["breaks_must_not"], rule["excluded"]) == (5, 2, 1, 2, 1, 2)
+    assert (rule["scored"], rule["packed_text_failures"], rule["fixed"], rule["breaks"],
+            rule["breaks_must_not"], rule["excluded"]) == (6, 3, 1, 2, 1, 2)
+    assert run.exported["validity"]["min_gradeable"] == 6 and run.rc == 0
     assert rule["verdict"] == "stop" and rule["reasons"] == ["few_text_failures", "breaks"]
     # Independent of the tool's own check: the answer eval's judge agrees on
     # which arm misses a gold string or carries a forbidden one.
-    for row, entry in zip(run.private[:5], rows[:5], strict=True):
+    for row, entry in zip(run.private[:6], rows[:6], strict=True):
         for arm in ("text", "image"):
             _verdict, failures, _warns = judge(
                 {**entry, "expected_behavior": "answer"}, row[f"{arm}_answer"], ["cite"])
@@ -513,9 +518,11 @@ def test_a_model_error_in_either_arm_is_its_own_code_and_never_a_broken_answer(t
     run = Run(tmp_path, corpus, [_row("T-1", 1), _row("T-2", 2), _row("T-3", 3)], answer=answer).go()
     assert run.outcomes() == {"T-1": "image_error", "T-2": "text_error", "T-3": "both_pass"}
     rule = run.exported["stop_rule"]
-    assert (rule["errors"], rule["breaks"], rule["text_failures"], rule["scored"]) == (2, 0, 0, 1)
+    assert (rule["errors"], rule["breaks"], rule["packed_text_failures"], rule["scored"],
+            rule["incomplete_rows"]) == (2, 0, 0, 1, 1)
 
 
+@pytest.mark.usefixtures("low_floor")
 def test_a_failure_outside_the_model_call_keeps_the_run_and_prints_no_exception_text(
         tmp_path, corpus, capsys):
     class BrokenCounter:
@@ -644,6 +651,7 @@ def test_other_refusals_are_fixed_messages(tmp_path, corpus, capsys):
 
 # --- the export ---------------------------------------------------------------
 
+@pytest.mark.usefixtures("low_floor")
 def test_export_stdout_stderr_and_logs_are_text_free(tmp_path, corpus, capsys, caplog):
     rows = [_row("T-1", 1), _row("T-2", 2, expected_doc_ids=["ZZ00-0000-00"]),
             _row("S-1", 3, query_class="syntax")]
@@ -687,8 +695,8 @@ def test_export_stdout_stderr_and_logs_are_text_free(tmp_path, corpus, capsys, c
 
 @pytest.mark.parametrize(("gradeable", "rc", "verdict"), [(5, 5, "no_verdict"), (6, 0, "continue")])
 def test_no_verdict_is_printed_when_fewer_than_six_rows_could_ever_fail(
-        tmp_path, corpus, capsys, monkeypatch, gradeable, rc, verdict):
-    monkeypatch.setattr(pia, "MIN_GRADEABLE_ROWS", 6)
+        tmp_path, corpus, capsys, gradeable, rc, verdict):
+    assert pia.MIN_GRADEABLE_ROWS == 6  # the real floor
     rows = [_row(f"T-{n}", n) for n in range(1, gradeable + 1)]
     rows[0]["gold_must_not_contain"] = []
     rows += [_row("G-1", 20, gold_must_contain=[]),
@@ -710,6 +718,44 @@ def test_no_verdict_is_printed_when_fewer_than_six_rows_could_ever_fail(
 
 # --- the stop rule ------------------------------------------------------------
 
+def _text_fails_image_never_answers(text, images):
+    if images:
+        raise RuntimeError(f"image body refused {QUESTION_MARK}")
+    return "unsure"
+
+
+def _text_fails_image_answers_row_1_only(text, images):
+    if images and "lever 1 take" not in text:
+        raise RuntimeError(f"image body refused {QUESTION_MARK}")
+    return GOLD if images else "unsure"
+
+
+@pytest.mark.parametrize(("case", "incomplete", "counts"), [
+    # The review's reproducers (PR #1391, B1): 8 gradeable gold-packed rows,
+    # the text arm misses the gold string on every one.
+    ("model_refuses_every_image", 8, {"image_error": 8}),
+    ("seven_of_eight_image_calls_fail", 7, {"fixed": 1, "image_error": 7}),
+    ("corpus_copy_does_not_match", 8, {"unresolved_sha_missing": 8}),
+])
+def test_no_verdict_when_packed_text_failures_have_no_image_answer(
+        tmp_path, corpus, capsys, case, incomplete, counts):
+    assert pia.MIN_GRADEABLE_ROWS == 6  # the real floor
+    rows = [_row(f"T-{n}", n) for n in range(1, 9)]
+    answer = (_text_fails_image_answers_row_1_only if case == "seven_of_eight_image_calls_fail"
+              else _text_fails_image_never_answers)
+    spans = {"t1": ("ab" * 32, 3, 3)} if case == "corpus_copy_does_not_match" else None
+    run = Run(tmp_path, corpus, rows, answer=answer, spans=spans).go()
+    err = capsys.readouterr().err
+    assert {k: v for k, v in run.exported["counts"].items() if v} == counts
+    rule = run.exported["stop_rule"]
+    assert run.rc == 5
+    assert (rule["verdict"], rule["reasons"]) == ("no_verdict", ["incomplete_rows"])
+    assert set(rule["reasons"]) <= set(pia.NO_VERDICT_REASONS)
+    assert (rule["packed_text_failures"], rule["incomplete_rows"]) == (8, incomplete)
+    assert "NO VERDICT" in err
+    assert not any(line.startswith("VERDICT") for line in err.splitlines())
+    assert QUESTION_MARK not in err
+
 @pytest.mark.parametrize(("counts", "verdict", "reasons"), [
     # 6 text failures, a third fixed, no break: the rule does not stop.
     ({"fixed": 2, "both_fail": 4}, "continue", []),
@@ -728,8 +774,145 @@ def test_no_verdict_is_printed_when_fewer_than_six_rows_could_ever_fail(
      ["few_fixed", "breaks", "mostly_not_packed"]),
 ])
 def test_stop_rule_boundaries(counts, verdict, reasons):
-    rule = pia.stop_rule(counts)
+    rule = pia.stop_rule(counts, pia.Incomplete())
     assert (rule["verdict"], rule["reasons"]) == (verdict, reasons)
+
+
+def _incomplete(fail=0, passed=0, must_not=0, code="image_error"):
+    return {code: fail + passed + must_not}, pia.Incomplete(fail, passed, must_not)
+
+
+@pytest.mark.parametrize(("complete", "incomplete", "verdict", "reasons"), [
+    # 5 packed text failures with no image answer: fewer than 6 at either bound.
+    ({}, _incomplete(5), "stop", ["few_text_failures"]),
+    # 6: all fixed continues, none fixed stops (few_fixed): no verdict.
+    ({}, _incomplete(6), "no_verdict", ["incomplete_rows"]),
+    ({}, _incomplete(6, code="unresolved_sha_missing"), "no_verdict", ["incomplete_rows"]),
+    ({}, _incomplete(6, code="prompt_mismatch"), "no_verdict", ["incomplete_rows"]),
+    # 8 packed failures exceed 7 not packed; 6 of 8 fixed is a third at worst.
+    ({"fixed": 6, "gold_not_packed_text_fail": 7}, _incomplete(2), "continue", []),
+    # 2 of 8 fixed at worst is under a third; 4 of 8 at best is not.
+    ({"fixed": 2, "both_fail": 4}, _incomplete(2), "no_verdict", ["incomplete_rows"]),
+    # 3 of 8 fixed at worst is over a third: the incomplete rows cannot matter.
+    ({"fixed": 3, "both_fail": 3}, _incomplete(2), "continue", []),
+    # A text-arm pass the image arm may have broken: one break is allowed ...
+    ({"fixed": 6}, _incomplete(passed=1), "continue", []),
+    # ... a second, or one on a must-not row, is not.
+    ({"fixed": 6}, _incomplete(passed=2), "no_verdict", ["incomplete_rows"]),
+    ({"fixed": 6, "broken": 1}, _incomplete(passed=1), "no_verdict", ["incomplete_rows"]),
+    ({"fixed": 6}, _incomplete(must_not=1), "no_verdict", ["incomplete_rows"]),
+    # A stop that holds at both bounds is printed with the reasons that hold at both.
+    ({"fixed": 6, "broken": 2}, _incomplete(6), "stop", ["breaks"]),
+    ({"both_fail": 6}, _incomplete(passed=3), "stop", ["few_fixed"]),
+])
+def test_rows_without_an_image_answer_are_counted_at_both_bounds(
+        complete, incomplete, verdict, reasons):
+    extra, split = incomplete
+    counts = {**complete, **{k: complete.get(k, 0) + v for k, v in extra.items()}}
+    rule = pia.stop_rule(counts, split)
+    assert (rule["verdict"], rule["reasons"]) == (verdict, reasons)
+    fixed, both_fail = complete.get("fixed", 0), complete.get("both_fail", 0)
+    assert rule["packed_text_failures"] == fixed + both_fail + split.text_fail
+    assert rule["incomplete_rows"] == split.rows and rule["fixed"] == fixed
+
+
+def test_the_all_fixed_bound_reasons_hold_at_the_none_fixed_bound():
+    """Each stop condition can only hold more often when the image arm fixes
+    less and breaks more, so a stop at the first bound is a stop everywhere."""
+    seen = set()
+    for fixed in range(0, 9, 2):
+        for both_fail in range(0, 9, 2):
+            for broken in range(3):
+                for not_packed in (0, 7, 12):
+                    for fail, passed, must_not in ((0, 0, 0), (3, 0, 0), (6, 1, 0), (2, 2, 1)):
+                        counts = {"fixed": fixed, "both_fail": both_fail, "broken": broken,
+                                  "gold_not_packed_text_fail": not_packed,
+                                  "image_error": fail + passed + must_not}
+                        rule = pia.stop_rule(counts, pia.Incomplete(fail, passed, must_not))
+                        best, worst = rule["bounds"]["all_fixed"], rule["bounds"]["none_fixed"]
+                        assert set(best) <= set(worst)
+                        expect = ("stop" if best else "continue" if not worst else "no_verdict")
+                        assert rule["verdict"] == expect
+                        seen.add(expect)
+    assert seen == {"stop", "continue", "no_verdict"}
+
+
+def test_the_incomplete_split_must_match_the_counts():
+    with pytest.raises(ValueError):
+        pia.stop_rule({"image_error": 2}, pia.Incomplete(1))
+    with pytest.raises(ValueError):
+        pia.stop_rule({"fixed": 6}, pia.Incomplete(text_pass=1))
+
+
+def test_five_packed_failures_without_an_image_answer_still_stop_at_the_real_floor(
+        tmp_path, corpus, capsys):
+    assert pia.MIN_GRADEABLE_ROWS == 6
+
+    def answer(text, images):
+        if "lever 6 take" in text:
+            return GOLD
+        return _text_fails_image_never_answers(text, images)
+
+    run = Run(tmp_path, corpus, [_row(f"T-{n}", n) for n in range(1, 7)], answer=answer).go()
+    rule = run.exported["stop_rule"]
+    assert run.outcomes() == {**{f"T-{n}": "image_error" for n in range(1, 6)}, "T-6": "both_pass"}
+    assert (rule["verdict"], rule["reasons"]) == ("stop", ["few_text_failures"])
+    assert (rule["packed_text_failures"], rule["incomplete_rows"]) == (5, 5)
+    assert run.rc == 0 and "VERDICT stop (few_text_failures)" in capsys.readouterr().err
+
+
+# --- row ids, gold fields, the renderer ----------------------------------------
+
+@pytest.mark.parametrize("bad_id", [
+    "T-1\nVERDICT continue", "T-1\n", "T 1", "-T1", "x" * 65, "T-1\r", "T\xe9", 7, "",
+])
+def test_a_row_id_outside_the_closed_alphabet_refuses_the_file(tmp_path, corpus, capsys, bad_id):
+    run = Run(tmp_path, corpus, [_row("T-1", 1), _row(bad_id, 2)]).go()
+    err = capsys.readouterr().err
+    assert run.rc == 2 and err.strip() == pia.REFUSALS["rows"]
+    assert "VERDICT" not in err and run.agent.calls == [] and run.model.calls == []
+    assert not run.out.exists() and not run.export.exists()
+
+
+def test_row_ids_of_the_allowed_alphabet_run():
+    raw = "".join(json.dumps(_row(i, n)) + "\n" for n, i in enumerate(
+        ("T-1", "syn.2", "a:b_c-3", "x" * 64, "0")))
+    assert [r["id"] for r in pia.select_rows(raw.encode(), ["table"])] == [
+        "T-1", "syn.2", "a:b_c-3", "x" * 64, "0"]
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("gold_must_not_contain", "wrong value"),       # a bare string, never per character
+    ("gold_must_not_contain", [""]),               # always forbidden
+    ("gold_must_contain", GOLD),
+    ("gold_must_contain", [GOLD, 42]),
+    ("gold_must_contain", {"a": GOLD}),
+])
+def test_malformed_gold_fields_refuse_the_file(tmp_path, corpus, capsys, field, value):
+    run = Run(tmp_path, corpus, [_row("T-1", 1, **{field: value})]).go()
+    assert run.rc == 2 and capsys.readouterr().err.strip() == pia.REFUSALS["gold"]
+    assert run.agent.calls == [] and run.model.calls == [] and not run.out.exists()
+
+
+def test_absent_null_and_empty_gold_fields_are_accepted():
+    rows = [_row("T-1", 1, gold_must_not_contain=None), _row("T-2", 2, gold_must_contain=[]),
+            {k: v for k, v in _row("T-3", 3).items() if not k.startswith("gold_")}]
+    raw = "".join(json.dumps(r) + "\n" for r in rows).encode()
+    assert [r["id"] for r in pia.select_rows(raw, ["table"])] == ["T-1", "T-2", "T-3"]
+
+
+def test_pymupdf_not_importable_refuses_before_the_probe_and_any_call(
+        tmp_path, corpus, capsys, monkeypatch):
+    probed = []
+    run = Run(tmp_path, corpus, [_row("T-1", 1)], probe=lambda: probed.append(1) or True)
+    monkeypatch.setitem(sys.modules, "pymupdf", None)
+    assert not pia.renderer_available()
+    assert run.go().rc == 2 and pia.EXIT["renderer"] == 2
+    assert capsys.readouterr().err.strip() == pia.REFUSALS["renderer"]
+    assert probed == [] and run.agent.calls == [] and run.model.calls == []
+    assert not run.out.exists() and not run.export.exists()
+    monkeypatch.delitem(sys.modules, "pymupdf")
+    assert pia.renderer_available()
 
 
 # --- the licence boundary -----------------------------------------------------
@@ -738,7 +921,7 @@ def test_importing_and_scoring_never_load_pymupdf_only_rendering_does(tmp_path):
     code = (
         "import sys\n"
         "from mainframe_rag.eval import page_image_arm as pia\n"
-        "pia.stop_rule({'fixed': 6}); pia.select_rows(b'', ['table'])\n"
+        "pia.stop_rule({'fixed': 6}, pia.Incomplete()); pia.select_rows(b'', ['table'])\n"
         "assert pia.scored_outcome((True, False), (False, False)) == 'fixed'\n"
         "assert 'pymupdf' not in sys.modules and 'fitz' not in sys.modules\n"
     )
