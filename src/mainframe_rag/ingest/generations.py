@@ -5,13 +5,17 @@ Every corpus-changing alias publication keeps the superseded data/control
 pair, its two immutable build aliases and a safety snapshot of the old data
 collection (`swap_alias_to`). This module lists those generations with their
 snapshots and sizes, and deletes the snapshots of named retained generations.
-It never deletes a collection or an alias and never writes to Qdrant other
-than a snapshot delete; data disposal (tombstone, reader stop) is later work
-under the same issue.
+The two commands here never delete a collection or an alias and never write
+to Qdrant other than a snapshot delete. Data disposal of one superseded build
+(`dispose`: tombstone, data build alias, snapshots, data collection) is
+`mainframe_rag.ingest.disposal`; this release refuses to execute it. A
+retirement tombstone, when a control collection holds one, decides the
+listed phase (`retiring`, `retired`) whatever the aliases say.
 
   list               read-only and lock-free: a point-in-time view. Without
                      `--progress` the publish sidecar is not read, so no
                      generation is reported disposable.
+  dispose            see `mainframe_rag.ingest.disposal` (dry run only in this release).
   dispose-snapshots  dry run by default. `--execute` takes the publish lock
                      (`publish-<alias>.lock`, the one an ingest holds),
                      recomputes the plan under it, and deletes on each peer

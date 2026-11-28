@@ -2577,6 +2577,8 @@ def test_data_disposal_lifecycle_on_real_server(qdrant_url, tmp_path, monkeypatc
         assert stored_tombstone(c1)["state"] == "retiring"
         assert aliases() == aliases_before and collections() == everything and len(snapshots(p1)) == 2
         assert listed()[p1]["phase"] == "retiring" and listed()[p2]["rank"] == 1
+        with pytest.raises(RuntimeError, match="does not match its seal"):
+            verify_publication_seal(client, c1)  # the tombstone is inside the control seal: no rollback point
         # S2, then death: only the data build alias is gone.
         code, at, log = killed_after("step_alias", *execute)
         assert (code, at) == (86, "step_alias"), log
@@ -2616,8 +2618,8 @@ def test_data_disposal_lifecycle_on_real_server(qdrant_url, tmp_path, monkeypatc
         assert snapshots(p2) == untouched[2][p2] and snapshots(p3) == untouched[2][p3]
         for control in (c2, c3):  # the kept (carried from the disposed build) and the live generation
             assert verify_publication_seal(client, control) and verify_build_catalog(client, control)
-        with pytest.raises(RuntimeError, match="does not match its seal"):
-            verify_publication_seal(client, c1)  # a tombstoned build never passes a seal check again
+        with pytest.raises(Exception, match="Not found"):
+            verify_publication_seal(client, c1)  # a retired build can never pass a seal check: its data is gone
         gens = listed()
         assert gens[p1]["phase"] == "retired" and gens[p1]["tombstone"]["state"] == "retired"
         assert gens[p1]["points"] is None and gens[p1]["snapshots"] == []
