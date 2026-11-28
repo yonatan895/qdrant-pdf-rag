@@ -24,3 +24,20 @@ class SimQdrantScriptTests(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("unapproved image", proc.stderr)
         self.assertFalse(any(c["argv"][0] in ("run", "stop", "pull", "rm") for c in calls))
+
+    def test_kept_volume_with_the_container_name_does_not_block_the_next_up(self):
+        """`dev.sh agent-down` stops the container and keeps its volume under the same name;
+        an untyped `docker inspect` finds that volume, so the next `up` must ask for a container."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = root / "calls.jsonl"
+            env = dict(prepare_simulator(root, log), RECORDER_LOG=str(log), DOCKER_VOLUME_EXISTS="1",
+                       SIM_CONTAINER="owui-sim-qdrant", SIM_QDRANT_VOLUME="owui-sim-qdrant")
+            proc = subprocess.run(["sh", str(root / "scripts/sim_qdrant.sh"), "up"],
+                                  capture_output=True, text=True, env=env, cwd=root, timeout=60, check=False)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        runs = [c["argv"] for c in calls if c["argv"][0] == "run"]
+        self.assertEqual(len(runs), 1)
+        self.assertIn("owui-sim-qdrant:/qdrant/storage", runs[0])
+        self.assertIn("--pull=never", runs[0])

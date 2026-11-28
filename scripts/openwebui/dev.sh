@@ -65,7 +65,7 @@ HEADROOM_MB=${HEADROOM_MB:-1024}
 # embed about 2 GB, gateway + OpenObserve + agent + Qdrant about 2 GB). Each server's
 # own guard checks only itself, so `up` checks the sum before it starts anything.
 REASONING_EST_MB=${REASONING_EST_MB:-5500}
-EMBED_EST_MB=${EMBED_EST_MB:-2000}
+EMBED_EST_MB=${EMBED_EST_MB:-3300}
 STACK_EST_MB=${STACK_EST_MB:-2048}
 LOCAL_AGENT_PORT=${LOCAL_AGENT_PORT:-8080}
 GATEWAY_PORT=${GATEWAY_PORT:-4000}
