@@ -1321,11 +1321,13 @@ thread pool.
     `--readers-stopped`, operator and recovery ref, and those unverified
     kept builds); every executing run also appends a line to the audit
     record `data-disposal-<alias>.jsonl` beside the lock when it starts or
-    resumes and when it ends. While one build is `retiring` no
+    resumes, and the file gets exactly one `retired` line per disposed
+    build (a run stopped after storing the `retired` tombstone leaves it to
+    the next `--execute` rerun, which writes nothing else). While one build is `retiring` no
     other build is disposed of. A snapshot made after the plan is not in the
     tombstone's record: the recorded digest then refuses and the dry run
     prints a resume digest that names it. A retired build's rerun reports it
-    and writes nothing. The tombstone is inside the build's control seal on
+    and writes nothing to Qdrant. The tombstone is inside the build's control seal on
     purpose: a tombstoned build never passes a seal check and is never a
     rollback point. It carries ids, names, counts, sizes, times and digests,
     no per-chunk index (maintainer decision 2026-11-26).

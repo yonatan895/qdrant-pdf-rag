@@ -385,11 +385,34 @@ def step_retired(run: Run) -> None:
 def data_disposal_record_path(progress: Path, alias: str) -> Path:
     """Append-only audit record beside the publish lock: one line when an
     executing run starts or resumes (who, the reader-stop attestation, the
-    digest, any kept build that no longer verifies) and one when it ends.
-    Audit only: a rerun converges from the tombstone, never from this file."""
+    digest, any kept build that no longer verifies) and exactly one `retired`
+    line per disposed build, written by the rerun when the run that finished
+    was stopped first. Audit only: a rerun converges from the tombstone, never from this file."""
     lock = publish_lock_path(progress, alias)
     stem = lock.name.removeprefix("publish-").removesuffix(".lock")
     return lock.with_name(f"data-disposal-{stem}.jsonl")
+
+
+def _record_retired_once(path: Path, build_id: str, physical: str) -> bool:
+    """Append the `retired` audit line for this build unless the file already
+    has one: exactly one per completed disposal, also when the run that
+    stored the `retired` tombstone was stopped before it could write the
+    line (review of #1398). Unparseable lines are not evidence of it.
+    True when a line was written."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    except (OSError, UnicodeDecodeError):
+        raise Unreadable("E_STATE_IO: the audit record beside the publish lock could not be read; "
+                         "nothing more changed") from None
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("event") == "retired" and event.get("build_id") == build_id:
+            return False
+    _record(path, {"event": "retired", "build_id": build_id, "physical": physical})
+    return True
 
 
 def kept_unverified(entry: QdrantSnapshotReader, settings: Settings, registry: Registry,
@@ -482,6 +505,8 @@ def dispose_data(
                               "or data alias is present, or a peer did not answer; nothing changed")
             out(f"ALREADY RETIRED build {g.build_id} physical {g.physical} retired "
                 f"{(g.tombstone or {}).get('retired_at')}; nothing to do")
+            if execute and _record_retired_once(data_disposal_record_path(progress, alias), g.build_id, g.physical):
+                out("AUDIT the retired line a stopped run did not write is recorded now")
             return
         if not registry.snapshots_complete:
             raise Refused(f"E_PEERS_INCOMPLETE: not every Qdrant peer answered "
@@ -568,7 +593,7 @@ def dispose_data(
         step_snapshots(run)
         step_collection(run)
         step_retired(run)
-        _record(record, {"event": "retired", "build_id": g.build_id, "physical": g.physical})
+        _record_retired_once(record, g.build_id, g.physical)
         out(f"DONE build {g.build_id} is retired: {g.physical}, its data build alias and its snapshots are "
             f"gone; {g.control}, its control alias and the tombstone are kept")
 

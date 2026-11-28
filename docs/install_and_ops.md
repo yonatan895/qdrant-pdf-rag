@@ -1763,7 +1763,16 @@ WebUI cannot start on B's database.
 - Alias-published generation intact: re-point the serving alias to the
   retained previous generation (`ingest.md` publication contract); verify with
   exact queries and the agent `/healthz`. Retired generations and safety
-  snapshots stay until the operator accepts.
+  snapshots stay until the operator accepts. First run the read-only
+  [generations listing](ingest.md#retained-generations): **never re-point
+  to a build it shows as `retiring` or `retired`** (a `retiring` build is
+  mid-disposal and its references already read 404; a `retired` one has no
+  data). Pick a `retained` build instead; when a disposal is left
+  `retiring`, finish it by rerunning the same command
+  ([data disposal](ingest.md#data-disposal)) rather than moving the alias,
+  and when no `retained` build is left, rebuild from the protected originals
+  (next item). The agent's serving gate does not check tombstones yet
+  (#1373 PR 4/5).
 - Lost/corrupt storage on one peer: no improvised stop/wipe/start (see above).
   The supported path today is a fresh rebuild from protected originals with
   accepted downtime: provision clean claims, `airgap:pipeline` with

@@ -293,6 +293,42 @@ def test_a_resume_requires_its_own_recovery_reference(tmp_path, monkeypatch, cap
     assert rc == 0 and tombstone(store)["state"] == "retired"
 
 
+def test_a_stop_after_the_retired_upsert_still_ends_with_one_retired_audit_line(tmp_path, monkeypatch, capsys):
+    """Review of #1398 (N3): killed after the S5 upsert, before its readback,
+    the tombstone is complete but the audit file has no `retired` line. The
+    rerun records it, and a further rerun adds none: exactly one per disposal."""
+    store = world()
+    digest = digest_of(dry(store, tmp_path, G1)[1])
+    original = disposal.read_tombstone
+
+    def killed_at_readback(entry, control):
+        stored = original(entry, control)
+        if stored is not None and stored["state"] == "retired":
+            raise KeyboardInterrupt  # the process dies before the readback compares
+        return stored
+
+    with monkeypatch.context() as patched:
+        patched.setattr(disposal, "read_tombstone", killed_at_readback)
+        with pytest.raises(KeyboardInterrupt):
+            execute(store, tmp_path, G1, digest)
+    assert tombstone(store)["state"] == "retired"
+    record = disposal.data_disposal_record_path(progress(tmp_path), ALIAS)
+
+    def retired_lines():
+        return [e for e in map(json.loads, record.read_text().splitlines())
+                if e["event"] == "retired" and e["build_id"] == G1]
+
+    assert retired_lines() == []
+    rc, lines = dry(store, tmp_path, G1)  # a dry run reports and writes nothing
+    assert rc == 0 and retired_lines() == []
+    for _ in range(2):
+        before, written = state(store), len(writes(store))
+        rc, lines = execute(store, tmp_path, G1, digest)
+        assert rc == 0 and any(line.startswith("ALREADY RETIRED") for line in lines)
+        assert state(store) == before and len(writes(store)) == written
+        assert len(retired_lines()) == 1 and retired_lines()[0]["physical"] == P1
+
+
 def test_dry_run_prints_the_plan_and_digest_and_changes_nothing(tmp_path):
     store = world()
     before = state(store)

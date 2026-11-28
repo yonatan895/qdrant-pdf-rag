@@ -785,7 +785,11 @@ class EvidenceService:
         id that is not this build's valid tombstone is storage damage, and
         refuses as well."""
         if not await self._client.collection_exists(control):
-            return
+            # The alias listing has just resolved the control alias to this
+            # collection: an answer that it does not exist is missing controls,
+            # never "no tombstone" (review of #1398). No documented procedure
+            # leaves a build alias on a missing control collection.
+            raise EvidenceFailure("corrupt", "control_missing")
         records = await self._client.retrieve(
             control, ids=[tombstone_point_id(control)], with_payload=True,
         )

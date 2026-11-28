@@ -554,6 +554,73 @@ async def test_a_point_at_the_tombstone_id_that_is_not_this_builds_tombstone_sti
 
 
 @pytest.mark.anyio
+async def test_a_control_collection_reported_missing_once_never_serves_a_retiring_build():
+    """Review of #1398 (N1): the alias listing has just resolved the control
+    alias to this collection, so an answer that it does not exist is missing
+    controls (the 503 the contract uses for them), never "no tombstone". One
+    false answer, then the true one, must not serve a retiring build."""
+    qd, ref_a, ref_b = await _two_builds()
+    _after_s1(qd)
+    real, lied = qd.collection_exists, []
+
+    async def once_false(name):
+        if name == CONTROL_A and not lied:
+            lied.append(name)
+            return False
+        return await real(name)
+
+    qd.collection_exists = once_false
+    reads = _data_reads(qd)
+    refusal = await _refusal(_service(qd).read_evidence(CALLER, ref_a))
+    assert (refusal.kind, refusal.reason) == ("corrupt", "control_missing") and lied == [CONTROL_A]
+    assert PUBLIC_FAILURES[refusal.kind] == (503, "evidence_unavailable", "the requested evidence is not available")
+    assert PHYSICAL_A not in reads
+    assert (await _service(qd).read_evidence(CALLER, ref_b)).text == "successor"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("fault", "kind"), [
+    ("exists-raises", "upstream"), ("exists-hangs", "timeout"),
+    ("retrieve-raises", "upstream"), ("retrieve-hangs", "timeout"),
+])
+async def test_a_failing_tombstone_lookup_refuses_and_never_serves(fault, kind):
+    """Review of #1398 (N2): a fault or a hang while the tombstone is looked
+    up is the fixed storage-fault or deadline outcome, never "no tombstone":
+    the retiring build's data, still stored, is never read."""
+    qd, ref_a, _ = await _two_builds()
+    _after_s1(qd)
+    real, failed = qd.collection_exists, []
+
+    async def fail():
+        failed.append(fault)  # once: a later call by another check answers truly
+        if fault.endswith("hangs"):
+            await asyncio.sleep(5)
+        raise ConnectionError("storage-secret-detail")
+
+    async def exists(name):
+        if name == CONTROL_A and fault.startswith("exists") and not failed:
+            await fail()
+        return await real(name)
+
+    async def before_retrieve(name, ids):
+        if (name == CONTROL_A and ids == [tombstone_point_id(CONTROL_A)] and fault.startswith("retrieve")
+                and not failed):
+            await fail()
+
+    qd.collection_exists = exists
+    reads = _data_reads(qd)
+    qd.before_retrieve = lambda name, ids: _both(reads, name, before_retrieve(name, ids))
+    refusal = await _refusal(_service(qd, evidence_timeout_s=0.05).read_evidence(CALLER, ref_a))
+    assert refusal.kind == kind and "secret" not in str(refusal) and failed == [fault]
+    assert PHYSICAL_A not in reads
+
+
+async def _both(seen, name, then):
+    seen.append(name)
+    await then
+
+
+@pytest.mark.anyio
 async def test_a_missing_data_alias_without_a_tombstone_is_still_storage_damage():
     """Only a tombstone turns the missing data alias into the 404 outcome."""
     qd, ref_a, _ = await _two_builds()
