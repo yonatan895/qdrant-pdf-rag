@@ -2802,7 +2802,7 @@ def test_real_app_expand_off_keeps_the_pool_join_and_expand_on_joins_neighbours(
     for expand in (False, True):
         row, pool, join = run_once(expand, ids[:2], ids[:2], off_text)
         assert row["verdict"] == "pass", row["failures"]
-        assert join.packed is None
+        assert join.packed is None and join.hits is None and join.supplied is None
         assert [h["doc_id"] for h in pool] == row["hit_doc_ids"]
         assert {key: row[key] for key in pool_join} == pool_join
 
@@ -2812,11 +2812,16 @@ def test_real_app_expand_off_keeps_the_pool_join_and_expand_on_joins_neighbours(
     assert len(on_pool) == 1  # /v1/search stays untouched
     assert on_row["verdict"] == "pass", on_row["failures"]
     if not stream:
-        assert on_join.packed is None
+        assert on_join.packed is None and on_join.hits is None and on_join.supplied is None
         assert on_row["hit_doc_ids"] == ["SYN-0001-00"]
         assert on_row["unmatched_citations"] == [next_page_cite]
         return
     assert on_join.packed is not None and len(on_join.packed) == 3
+    # #1377: the same join carries the response's hits and supplied evidence,
+    # which harness L2 reads a neighbour's provenance from.
+    assert on_join.supplied is on_join.packed and [x["index"] for x in on_join.supplied] == [1, 2, 3]
+    assert on_join.hits is not None
+    assert [h.get("neighbour_of") for h in on_join.hits] == [None, ids[0], ids[0]]
     assert on_row["hit_doc_ids"] == ["SYN-0001-00"] * 3
     assert on_row["gold_retrieved"] is True
     assert on_row["unmatched_citations"] == []
