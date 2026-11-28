@@ -311,8 +311,20 @@ Observed facts (source inspection and package metadata, 2 October 2026):
   (`scripts/gate_l1.py`, `scripts/make_synthetic_pdf.py`) and two operator-run
   offline tools: `mainframe_rag/tools/text_to_pdf.py` (#1277) and
   `render_page_png` in `mainframe_rag/eval/page_image_arm.py` (#1318), the only
-  PyMuPDF use in that module. The serving agent is designed not to import it
-  (comment in `ingest/chunk.py`); no test enforces this.
+  PyMuPDF use in that module.
+- Serving processes (28 November 2026, #1396): the long-running serving processes
+  the chart starts from the agent image (the agent app `mainframe_rag.agent.app`,
+  including the console and Open WebUI-facing routes; the feedback service; the
+  team-tool gateways), the MCP adapters, and the operator CLI and feedback
+  export/report/purge tools do not import PyMuPDF when their entry module loads.
+  `tests/test_answer_core.py` checks this in a fresh interpreter for every serving
+  entry module. It also requires every launch target the repository names to be
+  classified as serving or as ingest/offline. Statically, it pins the three
+  function-level PyMuPDF import paths and the ingest-only functions that can reach
+  them, apart from imports and calls resolved by `getattr` or string. The agent
+  image still contains the PyMuPDF wheel and the ingest and operator-run offline
+  tools that load it; running those is within the elected scope (ingest and
+  operator-run offline tools).
 - The project itself is Apache-2.0; the repository records no election and no
   commercial grant.
 
