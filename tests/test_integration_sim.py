@@ -2388,3 +2388,283 @@ def test_retained_snapshot_disposal_on_real_server(qdrant_url, tmp_path, monkeyp
     finally:
         client.close()
         _drop_publish_fixture(qdrant_url)
+
+
+def _publish_env(monkeypatch):
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("DENSE_DIM", "256")
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "")
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
+
+
+@pytest.mark.parametrize("retired", ["newest-marker", "oldest-marker"])
+def test_a_retire_only_publication_ranks_after_its_predecessor(qdrant_url, tmp_path, monkeypatch, retired):
+    """#1373 review N7 on the pinned server. The keep guard orders retained
+    generations by their newest completion-marker time. A staging clone
+    copies live's markers verbatim and a retire-only publication embeds
+    nothing, so it must be shown that such a publication still ranks after
+    its predecessor: also when the retired document held the predecessor's
+    newest marker (an inversion, not only a tie, would otherwise follow)."""
+    from qdrant_client import QdrantClient
+
+    from mainframe_rag.ingest import generations
+    from tests.helpers_publication_lifecycle import TEXTS, _write_source
+
+    _drop_publish_fixture(qdrant_url)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    for name, text in {**TEXTS, "gamma": "The green reactor uses the eastern cooling channel."}.items():
+        _write_source(corpus, name, text)
+    progress = tmp_path / "progress.jsonl"
+    _publish_env(monkeypatch)
+    client = QdrantClient(url=qdrant_url, timeout=30)
+
+    def target():
+        return next(a.collection_name for a in client.get_aliases().aliases if a.alias_name == PUBLISH_ALIAS)
+
+    def markers(physical):
+        points, _ = client.scroll(physical + "__completions", limit=100, with_payload=True)
+        return [p.payload for p in points if "expected_chunks" in (p.payload or {})]
+
+    try:
+        _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, corpus, progress)
+        first = target()
+        before = markers(first)
+        assert len(before) == 3 and len({m["finished_at"] for m in before}) == 3
+        ordered = sorted(before, key=lambda m: m["finished_at"])
+        doc = (ordered[-1] if retired == "newest-marker" else ordered[0])["doc_id"]
+        (corpus / f"{doc}.pdf").unlink()
+        _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, corpus, progress, extra=("--retire-doc", doc))
+        second = target()
+        assert second != first
+        after = markers(second)
+        assert {m["doc_id"] for m in after} == {m["doc_id"] for m in before} - {doc}
+        # Every marker of the retire-only generation is its own, written by this publication.
+        assert all(m["target_collection"] == second for m in after)
+        assert min(m["finished_at"] for m in after) > max(m["finished_at"] for m in before)
+        newest_first, _ = generations._marker_summary(client, first + "__completions", 100)
+        newest_second, _ = generations._marker_summary(client, second + "__completions", 100)
+        assert newest_first == ordered[-1]["finished_at"] and newest_second > newest_first
+    finally:
+        client.close()
+        _drop_publish_fixture(qdrant_url)
+
+
+def test_data_disposal_lifecycle_on_real_server(qdrant_url, tmp_path, monkeypatch, capsys):
+    """#1373 PR 2 on the pinned server. Three published generations; the
+    oldest is disposed of with the process killed after each of the first
+    four steps and rerun. Then stored content is inspected, not metadata:
+    the data collection, its alias and snapshots are gone and stay gone if
+    the name is recreated; the control collection is byte-equal plus a
+    retired tombstone; the kept and live generations are byte-equal and
+    verify against their seals; and the next ordinary operations succeed
+    (a corpus addition, a steady rerun, a republication of the disposed
+    build's corpus, which gets a suffixed name)."""
+    import time
+
+    from qdrant_client import QdrantClient, models
+
+    from mainframe_rag.ingest import build, generations
+    from mainframe_rag.ingest.build import build_aliases
+    from mainframe_rag.ingest.publish import (
+        publication_metadata_point_id,
+        verify_build_catalog,
+        verify_publication_seal,
+    )
+    from mainframe_rag.ingest.retirement import decode_tombstone, tombstone_point_id
+    from tests.helpers_publication_lifecycle import TEXTS, _records, _write_source
+
+    _drop_publish_fixture(qdrant_url)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    for name, text in TEXTS.items():
+        _write_source(corpus, name, text)
+    progress = tmp_path / "progress.jsonl"
+    _publish_env(monkeypatch)
+    client = QdrantClient(url=qdrant_url, timeout=30)
+    stopped = "2026-11-28T10:00:00Z"
+
+    def aliases():
+        return {a.alias_name: a.collection_name for a in client.get_aliases().aliases
+                if a.alias_name.startswith(PUBLISH_ALIAS)}
+
+    def target():
+        return aliases()[PUBLISH_ALIAS]
+
+    def snapshots(physical):
+        return sorted(s.name for s in client.list_snapshots(physical))
+
+    def collections():
+        return {c.name for c in client.get_collections().collections if c.name.startswith(PUBLISH_ALIAS)}
+
+    def cli(*argv):
+        lines: list[str] = []
+        rc = generations.main(list(argv), out=lines.append)
+        return rc, lines
+
+    def listed():
+        rc, lines = cli("list", "--progress", str(progress), "--format", "json")
+        assert rc == 0
+        return {r["generation"]["physical"]: r["generation"] for r in map(json.loads, lines) if "generation" in r}
+
+    def stored_tombstone(control):
+        points = client.retrieve(control, ids=[tombstone_point_id(control)], with_payload=True)
+        return points[0].payload if points else None
+
+    def killed_after(step, *argv):
+        receipt = tmp_path / f"{step}.txt"
+        log = tmp_path / f"{step}.log"
+        with log.open("w") as output:
+            process = subprocess.Popen(
+                [sys.executable, "-m", "tests.helpers_ingest_crash_worker", "disposal-crash", "--step", step,
+                 "--receipt", str(receipt), "--", *argv],
+                cwd=REPO_ROOT, env=_checkout_env(), stdout=output, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            code = process.wait(timeout=180)
+        return code, (receipt.read_text() if receipt.exists() else None), log.read_text()
+
+    try:
+        physicals = []
+        for extra in ("gamma", "delta", None):
+            _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, corpus, progress)
+            physicals.append(target())
+            if extra:
+                _write_source(corpus, extra, f"The {extra} reactor uses the {extra} cooling channel.")
+        p1, p2, p3 = physicals
+        c1, c2, c3 = (p + "__completions" for p in physicals)
+        client.create_snapshot(p3, wait=True)
+        time.sleep(1.2)
+        client.create_snapshot(p1, wait=True)  # an operator's second snapshot of the old generation
+        assert [len(snapshots(p)) for p in physicals] == [2, 1, 1]
+        gens = listed()
+        g1, g2 = gens[p1]["build_id"], gens[p2]["build_id"]
+        data_alias, control_alias = build_aliases(PUBLISH_ALIAS, g1)
+        # The kept generation's unchanged documents were carried from the build being disposed of.
+        carried = [p for p, _ in _records(client, c2).values() if p.get("carried_from")]
+        assert carried and {p["carried_from"] for p in carried} == {p1}
+
+        control_before = _records(client, c1)
+        kept_before = {n: _records(client, n) for n in (p2, c2, p3, c3)}
+        aliases_before = aliases()
+        everything = collections()
+        untouched = (aliases_before, everything, {p: snapshots(p) for p in physicals})
+
+        def nothing_changed():
+            return (aliases(), collections(), {p: snapshots(p) for p in physicals}) == untouched and \
+                _records(client, c1) == control_before
+
+        # Dry run: the plan and its digest; nothing changes. The kept build is refused (keep-N).
+        dispose = ("dispose", "--progress", str(progress), "--build-id", g1)
+        rc, lines = cli(*dispose)
+        assert rc == 0 and any(f"kept and verified: {g2}" in line for line in lines), lines
+        digest = next(line.split()[-1] for line in lines if line.startswith("PLAN DIGEST "))
+        assert sum(line.strip().startswith("DELETE snapshot") for line in lines) == 2
+        rc, _ = cli("dispose", "--progress", str(progress), "--build-id", g2)
+        assert rc == generations.EXIT_REFUSED and "KEEP_N" in capsys.readouterr().err
+        execute = (*dispose, "--execute", "--plan-digest", digest, "--readers-stopped", stopped,
+                   "--recovery-ref", "CHG-SIM", "--operator", "sim-op")
+        # This release cannot execute: the real CLI refuses and nothing changes.
+        assert build.READERS_REFUSE_TOMBSTONED_BUILDS is False
+        rc, _ = cli(*execute)
+        assert rc == generations.EXIT_REFUSED and "E_READERS_UNAWARE" in capsys.readouterr().err
+        assert nothing_changed() and stored_tombstone(c1) is None
+
+        # S1, then death: the tombstone is stored, nothing is deleted yet.
+        code, at, log = killed_after("step_tombstone", *execute)
+        assert (code, at) == (86, "step_tombstone"), log
+        assert stored_tombstone(c1)["state"] == "retiring"
+        assert aliases() == aliases_before and collections() == everything and len(snapshots(p1)) == 2
+        assert listed()[p1]["phase"] == "retiring" and listed()[p2]["rank"] == 1
+        # S2, then death: only the data build alias is gone.
+        code, at, log = killed_after("step_alias", *execute)
+        assert (code, at) == (86, "step_alias"), log
+        assert aliases() == {k: v for k, v in aliases_before.items() if k != data_alias}
+        assert collections() == everything and len(snapshots(p1)) == 2
+        # S3, then death: the snapshots are gone, the collection is still there.
+        code, at, log = killed_after("step_snapshots", *execute)
+        assert (code, at) == (86, "step_snapshots"), log
+        assert snapshots(p1) == [] and collections() == everything
+        # S4, then death: the collection is gone, the tombstone still says retiring.
+        code, at, log = killed_after("step_collection", *execute)
+        assert (code, at) == (86, "step_collection"), log
+        assert collections() == everything - {p1} and stored_tombstone(c1)["state"] == "retiring"
+        assert listed()[p1]["phase"] == "retiring"
+        # The same command again finishes; once more it reports and writes nothing.
+        code, at, log = killed_after("none", *execute)
+        assert code == 0 and at is None and "DONE build" in log, log
+        done = _records(client, c1)
+        code, _, log = killed_after("none", *execute)
+        assert code == 0 and "ALREADY RETIRED" in log and _records(client, c1) == done
+
+        # Stored content after the disposal.
+        assert collections() == everything - {p1}
+        assert aliases() == {k: v for k, v in aliases_before.items() if k != data_alias}
+        assert aliases()[control_alias] == c1 and target() == p3
+        after = dict(done)
+        payload, _vector = after.pop(tombstone_point_id(c1))
+        assert after == control_before  # markers, manifest, receipt, catalog entries: payloads and vectors
+        assert decode_tombstone(payload, c1)["state"] == "retired"
+        assert (payload["build_id"], payload["data_collection"], payload["plan_digest"]) == (g1, p1, digest)
+        assert payload["keep"] == {"n": 1, "kept_build_ids": [g2], "below_keep_override": False}
+        assert (payload["readers_stopped_at"], payload["recovery_ref"], payload["operator"]) == (
+            stopped, "CHG-SIM", "sim-op")
+        assert len(payload["snapshots"]) == 2 and payload["data_points"] == 2
+        assert payload["content_seal"] == control_before[publication_metadata_point_id(c1)][0]["content_seal"]
+        assert {n: _records(client, n) for n in (p2, c2, p3, c3)} == kept_before
+        assert snapshots(p2) == untouched[2][p2] and snapshots(p3) == untouched[2][p3]
+        for control in (c2, c3):  # the kept (carried from the disposed build) and the live generation
+            assert verify_publication_seal(client, control) and verify_build_catalog(client, control)
+        with pytest.raises(RuntimeError, match="does not match its seal"):
+            verify_publication_seal(client, c1)  # a tombstoned build never passes a seal check again
+        gens = listed()
+        assert gens[p1]["phase"] == "retired" and gens[p1]["tombstone"]["state"] == "retired"
+        assert gens[p1]["points"] is None and gens[p1]["snapshots"] == []
+        assert gens[p2]["phase"] == "retained" and gens[p3]["live"]
+        # The layout preflight and the placement verifier read the stored state and pass.
+        env = {**_checkout_env(), "QDRANT_URL": qdrant_url, "QDRANT_COLLECTION": PUBLISH_ALIAS}
+        layout = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts/airgap/legacy_layout.py"), "check", "--collection", PUBLISH_ALIAS],
+            env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60, check=False)
+        assert layout.returncode == 0 and "LAYOUT ok" in layout.stdout, layout.stderr
+        placement = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts/verify_placement.py"), "--expect-single-node",
+             "--peer-url", qdrant_url],
+            env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120, check=False)
+        assert placement.returncode == 0, placement.stdout + placement.stderr
+
+        # The next ordinary operations: a corpus addition publishes, a steady rerun writes nothing.
+        _write_source(corpus, "epsilon", "The epsilon reactor uses the upper cooling channel.")
+        _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, corpus, progress)
+        p4 = target()
+        assert p4 not in physicals
+        published = (_records(client, p4), _records(client, p4 + "__completions"))
+        steady = collections()
+        _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, corpus, progress)
+        assert target() == p4 and collections() == steady
+        assert (_records(client, p4), _records(client, p4 + "__completions")) == published
+        assert _records(client, c1) == done
+        # Republishing the disposed build's corpus derives its old name: the retired control
+        # reserves it, so the build gets a suffixed name and the tombstone is untouched.
+        for name in ("gamma", "delta", "epsilon"):
+            (corpus / f"{name}.pdf").unlink()
+        _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, corpus, progress,
+                extra=("--retire-doc", "gamma", "--retire-doc", "delta", "--retire-doc", "epsilon"))
+        p5 = target()
+        assert p5 == p1 + "_1" and p1 not in collections()
+        assert _records(client, c1) == done
+        assert {p["doc_id"] for p, _ in _records(client, p5).values()} == set(TEXTS)
+        gens = listed()
+        assert gens[p5]["live"] and gens[p1]["phase"] == "retired" and gens[p4]["phase"] == "retained"
+        assert gens[p4]["rank"] == 1 and gens[p3]["rank"] == 2 and gens[p2]["rank"] == 3
+
+        # Q2, directly: were the disposed name recreated, the server would list no snapshot of it.
+        client.create_collection(p1, vectors_config={"dense": models.VectorParams(size=4, distance=models.Distance.COSINE)})
+        try:
+            assert client.list_snapshots(p1) == []
+        finally:
+            client.delete_collection(p1)
+    finally:
+        client.close()
+        _drop_publish_fixture(qdrant_url)

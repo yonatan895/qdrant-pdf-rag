@@ -27,6 +27,8 @@
 . "$(dirname -- "$0")/image_identity.sh"
 . "$(dirname -- "$0")/one_shot_job.sh"
 
+# The module's third subcommand, `dispose` (data disposal), is refused here
+# by name: it has no site path in this release.
 GENERATIONS_USAGE="usage: generations.sh list [--keep N] [--format text|json] | dispose-snapshots --build-id UUID... [--keep N] [--allow-below-keep] [--execute] [--recovery-ref REF]"
 GENERATIONS_TIMEOUT=3600
 

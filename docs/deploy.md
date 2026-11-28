@@ -1100,7 +1100,9 @@ cannot schedule on one node — proven).
   snapshots are never served. `AIRGAP_DRYRUN=1` only renders and prints the
   cluster calls; without it, the module's own dry run still runs as a Job.
   The Job requests the ingest Job's `INGEST_*` resources. There is no task
-  entry for it; run the script.
+  entry for it; run the script. The module's data disposal (`dispose`,
+  [data disposal](ingest.md#data-disposal)) has no site path: the script,
+  the chart template and `map_values.py` each refuse it by name.
 - First-party pods (agent, the oauth-proxy sidecar, the ingest Job, OpenObserve, otelcol)
   declare their own hardening so it does not depend on `restricted-v2`
   alone (issue #585): pod `runAsNonRoot: true` and

@@ -25,7 +25,20 @@ from mainframe_rag.ingest.completion import acquire_publish_lock, release_run_lo
 from mainframe_rag.ingest.publish import publication_metadata_point_id, write_publish_state
 from mainframe_rag.ingest.retirement import InvalidTombstone, decode_tombstone, tombstone_point_id
 from mainframe_rag.ingest.seal import capture_content_seal
-from tests.test_ingest_generations import ALIAS, G1, G2, G3, P1, P2, P3, Peer, Store, _not_found, publish, snap
+from tests.test_ingest_generations import (
+    ALIAS,
+    G1,
+    G2,
+    G3,
+    P1,
+    P2,
+    P3,
+    Peer,
+    Store,
+    _not_found,
+    publish,
+    snap,
+)
 
 C1, C2, C3 = (p + "__completions" for p in (P1, P2, P3))
 G0, P0 = "dddddddd-0000-4000-8000-000000000004", f"{ALIAS}__genddd"
@@ -381,8 +394,7 @@ def test_a_stopped_peer_refuses_before_the_tombstone(tmp_path, capsys, aware):
 
 def test_execute_needs_the_digest_the_attestation_and_a_matching_plan(tmp_path, capsys, aware):
     store = world()
-    rc, lines = dry(store, tmp_path, G1)
-    digest = digest_of(lines)
+    digest = digest_of(dry(store, tmp_path, G1)[1])
     _refused(store, tmp_path, capsys, "E_PLAN_DIGEST", "--execute", "--readers-stopped", STOPPED)
     _refused(store, tmp_path, capsys, "E_READERS_STOPPED", "--execute", "--plan-digest", digest)
     _refused(store, tmp_path, capsys, "E_READERS_STOPPED", "--execute", "--plan-digest", digest,
@@ -457,6 +469,97 @@ def test_a_snapshot_that_is_not_gone_keeps_the_collection(tmp_path, capsys, awar
     assert rc == gen.EXIT_REFUSED and "E_NOT_CONVERGED" in capsys.readouterr().err
     assert P1 in store.collections and ("delete_collection", P1) not in store.calls
     assert tombstone(store)["state"] == "retiring"
+
+
+def test_a_sidecar_that_names_the_collection_after_the_plan_stops_the_deletes(tmp_path, capsys, aware):
+    store = world()
+    digest = digest_of(dry(store, tmp_path, G1)[1])
+
+    def a_build_records_it(*call):
+        if call == ("upsert", C1, "retiring"):
+            write_publish_state(progress(tmp_path), ALIAS, staging=f"{ALIAS}__genzzz", gen_fp="g", corpus_fp="c",
+                                previous=P1)
+
+    store.on_call = a_build_records_it
+    rc, _ = execute(store, tmp_path, G1, digest)
+    assert rc == gen.EXIT_REFUSED and "E_SIDECAR" in capsys.readouterr().err
+    assert [c[0] for c in writes(store)] == ["upsert"] and P1 in store.collections
+
+
+@pytest.mark.parametrize("fault", ["removed", "altered"])
+def test_nothing_is_deleted_without_the_stored_tombstone(tmp_path, capsys, aware, fault):
+    store = world()
+    digest = digest_of(dry(store, tmp_path, G1)[1])
+
+    def interfere(*call):
+        if call == ("upsert", C1, "retiring"):
+            store.on_call = None
+            if fault == "removed":
+                # The write is acknowledged but the point is not there afterwards.
+                store.pending_removal = tombstone_point_id(C1)
+            else:
+                store.pending_change = tombstone_point_id(C1)
+
+    original = AdminPeer.upsert
+
+    def upsert(self, collection_name, *, points, wait=True):
+        result = original(self, collection_name, points=points, wait=wait)
+        if getattr(store, "pending_removal", None):
+            del store.collections[C1][store.pending_removal]
+        if getattr(store, "pending_change", None):
+            store.collections[C1][store.pending_change]["operator"] = "someone-else"
+        return result
+
+    store.on_call = interfere
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(AdminPeer, "upsert", upsert)
+        rc, _ = execute(store, tmp_path, G1, digest)
+    assert rc == gen.EXIT_UNREADABLE and "E_TOMBSTONE_WRITE" in capsys.readouterr().err
+    assert [c[0] for c in writes(store)] == ["upsert"] and P1 in store.collections
+    assert build_aliases(ALIAS, G1)[0] in store.aliases
+
+
+def test_a_tombstone_that_disappears_between_steps_stops_the_deletes(tmp_path, monkeypatch, capsys, aware):
+    store = world()
+    digest = digest_of(dry(store, tmp_path, G1)[1])
+    original = disposal.step_tombstone
+
+    def then_lost(run):
+        original(run)
+        del store.collections[C1][tombstone_point_id(C1)]
+
+    monkeypatch.setattr(disposal, "step_tombstone", then_lost)
+    rc, _ = execute(store, tmp_path, G1, digest)
+    assert rc == gen.EXIT_REFUSED and "E_TOMBSTONE" in capsys.readouterr().err
+    assert [c[0] for c in writes(store)] == ["upsert"] and P1 in store.collections
+
+
+def test_the_core_requires_the_attestation_and_the_digest(tmp_path, aware):
+    store = world()
+    settings = Settings(qdrant_url="http://qdrant:6333", qdrant_collection=ALIAS, _env_file=None)
+    real = digest_of(dry(store, tmp_path, G1)[1])
+    for digest, stopped in ((real, None), (None, STOPPED)):
+        with pytest.raises(gen.Refused, match="E_PLAN_DIGEST"):
+            disposal.dispose_data(AdminPeer(store, 0), settings, lambda url: AdminPeer(store, 0),
+                                  progress=progress(tmp_path), build_id=G1, keep=1, below_keep=False,
+                                  execute=True, plan_digest=digest, readers_stopped=stopped, recovery_ref=None,
+                                  operator=None, out=lambda line: None)
+    assert writes(store) == [] and tombstone(store) is None
+
+
+def test_the_collection_delete_itself_requires_every_peer_to_list_no_snapshot(tmp_path, monkeypatch, capsys, aware):
+    store = world(peers=3)
+    digest = digest_of(dry(store, tmp_path, G1)[1])
+    original = disposal.step_snapshots
+
+    def then_one_more(run):
+        original(run)
+        snap(store, 2, P1, "made-after-the-snapshot-step.snapshot", 3)
+
+    monkeypatch.setattr(disposal, "step_snapshots", then_one_more)
+    rc, _ = execute(store, tmp_path, G1, digest)
+    assert rc == gen.EXIT_REFUSED and "E_NOT_CONVERGED" in capsys.readouterr().err
+    assert P1 in store.collections and ("delete_collection", P1) not in store.calls
 
 
 # --- crash and resume ------------------------------------------------------------
@@ -537,17 +640,23 @@ def _stopped_after(monkeypatch, store, tmp_path, step, digest=None):
     return digest
 
 
-def test_a_started_disposal_finishes_even_when_plan_time_checks_would_now_refuse(tmp_path, monkeypatch, aware):
+@pytest.mark.parametrize("change", ["kept-seal-broken", "newer-publication", "no-kept-build-left"])
+def test_a_started_disposal_finishes_even_when_plan_time_checks_would_now_refuse(tmp_path, monkeypatch, aware, change):
     """Keep-N and the kept seal are plan-time checks. After the tombstone the
     build is no rollback point whatever happens, so the rerun must finish."""
     store = world()
     digest = _stopped_after(monkeypatch, store, tmp_path, "step_alias")
-    next(iter(store.collections[P2].values()))["text"] = "changed"  # the kept build no longer verifies
-    sealed(store, G0, P0, 400.0)  # and the retained set changed
-    store.aliases[ALIAS] = P0
+    if change == "kept-seal-broken":
+        next(iter(store.collections[P2].values()))["text"] = "changed"  # the kept build no longer verifies
+    elif change == "newer-publication":
+        sealed(store, G0, P0, 400.0)
+        store.aliases[ALIAS] = P0
+    else:
+        for name in build_aliases(ALIAS, G2):  # the only kept build is no longer a retained generation
+            del store.aliases[name]
     assert execute(store, tmp_path, G1, digest)[0] == 0
     assert P1 not in store.collections and tombstone(store)["state"] == "retired"
-    assert set(store.collections) >= {C1, P2, C2, P3, C3, P0}
+    assert set(store.collections) >= {C1, P2, C2, P3, C3}
 
 
 @pytest.mark.parametrize("hazard", ["live", "foreign-alias", "sidecar", "peer-down", "lock"])
