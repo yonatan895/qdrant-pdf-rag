@@ -1149,6 +1149,23 @@ def test_networkpolicy_schema_refuses_invalid_selection(mutate):
     assert "networkPolicy" in r.stderr
 
 
+@pytest.mark.parametrize(("mutate", "needle"), [
+    pytest.param({"enabled": True, "corpusPVC": "pvc", "generations": {"args": ["list"]}}, "exclusive",
+                 id="ingest-and-generations"),
+    pytest.param({"generations": {"args": ["list", "a b"]}}, "generations", id="whitespace-arg"),
+    pytest.param({"generations": {"args": ["list", "$(id)"]}}, "generations", id="shell-arg"),
+    pytest.param({"generations": {"args": "list"}}, "generations", id="not-a-list"),
+    pytest.param({"generations": {"args": ["list"], "extra": 1}}, "generations", id="extra-key"),
+])
+def test_generations_mode_refuses_invalid_selection(mutate, needle):
+    """Issue #1373: Job "generations" renders only alone and from checked args."""
+    values = base_values()
+    values["ingest"].update(mutate)
+    r = _helm_template_with_values(values)
+    assert r.returncode != 0
+    assert needle in r.stderr
+
+
 # ------------------------------------------------ feedback service (#804)
 
 FEEDBACK_KEYS = [

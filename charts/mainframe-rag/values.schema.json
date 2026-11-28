@@ -649,6 +649,20 @@
         "contextualEnabled": { "type": "boolean" },
         "contextLlmBaseUrl": { "type": "string" },
         "contextLlmModel": { "type": "string" },
+        "generations": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^(--[a-z][a-z-]*|[A-Za-z0-9/][A-Za-z0-9._:/#@-]{0,127})$"
+              },
+              "description": "Non-empty renders Job generations (python -m mainframe_rag.ingest.generations ARGS) instead of the ingest Job; set only by scripts/airgap/generations.sh (issue #1373)."
+            }
+          }
+        },
         "collectionPolicy": {
           "type": "object",
           "additionalProperties": false,

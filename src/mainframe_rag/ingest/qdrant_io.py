@@ -301,7 +301,8 @@ def resolve_live_collection(client: QdrantReader, settings: Settings) -> tuple[s
 def snapshot_collection(client: QdrantPoints, collection: str) -> str:
     """Server-side snapshot; returns the server-assigned name. Snapshots are
     the preservation mechanism for superseded generations (issue #359 req 5):
-    retained until an operator deletes them, never GC'd by ingest."""
+    retained until an operator deletes them with the guarded snapshot-only
+    disposal (`ingest.generations`, issue #1373), never GC'd by ingest."""
     snap = client.create_snapshot(collection, wait=True)
     if snap is None or not snap.name:
         raise RuntimeError(f"snapshot of {collection!r} returned no name — refusing to proceed.")

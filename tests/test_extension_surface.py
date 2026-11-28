@@ -307,7 +307,7 @@ def test_a_stub_naming_the_replacement_only_in_a_comment_is_refused(tree):
 
 # B1: only an executable refusal counts; comments, docstrings and bare strings do not.
 GATEWAY = '            "caConfigMapName": env("GATEWAY_CA_CONFIGMAP"),\n'
-BUILD = "def build_values(deploy_only: bool = False) -> dict:\n"
+BUILD = "def build_values(deploy_only: bool = False, generations_args: list[str] | None = None) -> dict:\n"
 FIRST = '    internal_registry = env("INTERNAL_REGISTRY")\n'
 MESSAGE = "gateway.caConfigMapName was renamed to gateway.caConfigMap"
 GUARD = '    if env("GATEWAY_CA_CONFIGMAP_NAME"):\n'
