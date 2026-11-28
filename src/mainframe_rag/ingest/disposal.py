@@ -6,11 +6,13 @@ control collection (markers, manifest, receipt, catalog entries), the control
 build alias and a retirement tombstone stay. The serving alias, the live
 pair, the publish sidecar, the lock and the inventory are never touched.
 
-Not usable from this release: `--execute` is refused while
-`build.READERS_REFUSE_TOMBSTONED_BUILDS` is False (set only in code, by the
-change that makes the agent refuse a tombstoned build), and the site
-launcher refuses the subcommand by name. The dry run works and prints the
-plan and its digest.
+`--execute` runs only while `build.READERS_REFUSE_TOMBSTONED_BUILDS` is True
+(set only in code, together with the agent check that refuses a tombstoned
+build), and needs the plan digest, the reader-stop attestation and a
+recovery reference. There is no site path: the site launcher, the chart and
+the values mapper refuse the subcommand by name, so it runs only as this
+module's CLI on a host that mounts the ingest work volume. The deployed
+agent must be a reader-aware release first (docs/ingest.md, data disposal).
 
 Steps, all under the publish lock; the only resume evidence is the tombstone:
 
@@ -103,6 +105,15 @@ def require_reader_awareness() -> None:
     if build.READERS_REFUSE_TOMBSTONED_BUILDS is not True:
         raise Refused("E_READERS_UNAWARE: data disposal cannot be executed by this release: the agent "
                       "does not yet refuse a build that is being retired; nothing read, nothing changed")
+
+
+def require_recovery_ref(recovery_ref: str | None) -> None:
+    """A data disposal cannot be undone from the cluster, so executing one
+    needs the operator's recovery reference (maintainer decision 2026-11-28).
+    It stays optional for the snapshot-only command."""
+    if recovery_ref is None or not recovery_ref.strip():
+        raise Refused("E_RECOVERY_REF_REQUIRED: --execute needs --recovery-ref, the ticket or decision id "
+                      "that says how the deleted data could be recovered; nothing read, nothing changed")
 
 
 def parse_dispose_inputs(execute: bool, plan_digest: str | None, readers_stopped: str | None) -> tuple[
@@ -441,6 +452,7 @@ def dispose_data(
 ) -> None:
     if execute:
         require_reader_awareness()
+        require_recovery_ref(recovery_ref)
         if plan_digest is None or readers_stopped is None:
             raise Refused("E_PLAN_DIGEST: --execute needs --plan-digest and --readers-stopped")
     alias = settings.qdrant_collection
@@ -534,10 +546,10 @@ def dispose_data(
         out(f"PLAN DIGEST {digest}")
         if not execute:
             out("DRY RUN: nothing changed. This release cannot execute a data disposal "
-                "(readers do not yet refuse a build that is being retired)."
+                "(readers do not refuse a build that is being retired)."
                 if build.READERS_REFUSE_TOMBSTONED_BUILDS is not True else
                 "DRY RUN: nothing changed. With every reader stopped, rerun with --execute "
-                "--plan-digest <digest above> --readers-stopped <UTC time>.")
+                "--plan-digest <digest above> --readers-stopped <UTC time> --recovery-ref <ticket>.")
             return
         if plan_digest != digest:
             raise Refused("E_PLAN_CHANGED: --plan-digest does not match the plan recomputed under the lock; "

@@ -8,14 +8,14 @@ snapshots and sizes, and deletes the snapshots of named retained generations.
 The two commands here never delete a collection or an alias and never write
 to Qdrant other than a snapshot delete. Data disposal of one superseded build
 (`dispose`: tombstone, data build alias, snapshots, data collection) is
-`mainframe_rag.ingest.disposal`; this release refuses to execute it. A
+`mainframe_rag.ingest.disposal` (module CLI only; no site launcher). A
 retirement tombstone, when a control collection holds one, decides the
 listed phase (`retiring`, `retired`) whatever the aliases say.
 
   list               read-only and lock-free: a point-in-time view. Without
                      `--progress` the publish sidecar is not read, so no
                      generation is reported disposable.
-  dispose            see `mainframe_rag.ingest.disposal` (dry run only in this release).
+  dispose            see `mainframe_rag.ingest.disposal` (dry run by default).
   dispose-snapshots  dry run by default. `--execute` takes the publish lock
                      (`publish-<alias>.lock`, the one an ingest holds),
                      recomputes the plan under it, and deletes on each peer
@@ -382,7 +382,7 @@ def read_registry(
             phase = "tombstone-invalid"
         if tombstone is not None:
             if tombstone_matches(tombstone, binding):
-                phase = tombstone["state"]
+                phase = build_phase(binding, aliases, tombstone_state=tombstone["state"])
             else:
                 phase, tombstone = "tombstone-invalid", None
         own = set(build_aliases(alias, binding.build_id))
@@ -760,7 +760,7 @@ def _parser() -> argparse.ArgumentParser:
                          help="Who runs it, for the audit record (default: the login name, else the uid).")
     data = sub.add_parser("dispose", parents=[common],
                           help="Dispose of one superseded build's data (dry run by default; "
-                               "--execute is refused until readers refuse tombstoned builds).")
+                               "--execute needs every reader stopped and deletes data for good).")
     data.add_argument("--progress", type=Path, required=True)
     data.add_argument("--build-id", action="append", required=True, dest="build_ids",
                       help="Exactly one full build UUID per run.")
@@ -772,7 +772,9 @@ def _parser() -> argparse.ArgumentParser:
     data.add_argument("--readers-stopped", default=None,
                       help="UTC time (YYYY-MM-DDTHH:MM:SSZ) at which every reader was confirmed stopped; "
                            "required with --execute and recorded in the tombstone.")
-    data.add_argument("--recovery-ref", default=None)
+    data.add_argument("--recovery-ref", default=None,
+                      help="Ticket or decision id that says how the deleted data could be recovered; "
+                           "required with --execute and recorded in the tombstone.")
     data.add_argument("--operator", default=None)
     return parser
 
@@ -787,10 +789,11 @@ def main(
     args = _parser().parse_args(argv)
     try:
         if args.command == "dispose" and args.execute:
-            # Before the settings, any connection and the lock: this release cannot execute.
-            from mainframe_rag.ingest.disposal import require_reader_awareness
+            # Before the settings, any connection and the lock.
+            from mainframe_rag.ingest.disposal import require_reader_awareness, require_recovery_ref
 
             require_reader_awareness()
+            require_recovery_ref(args.recovery_ref)
         if args.keep < KEEP_FLOOR:
             raise Refused(f"E_KEEP_FLOOR: --keep must be at least {KEEP_FLOOR}; keeping 0 is not supported")
         if settings is None:

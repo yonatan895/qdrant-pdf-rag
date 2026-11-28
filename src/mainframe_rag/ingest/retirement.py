@@ -18,13 +18,19 @@ import re
 import uuid
 from typing import Any
 
-from mainframe_rag.ingest.build import BuildBinding, canonical_build_id
+from mainframe_rag.ingest.build import (
+    PHASE_RETIRED,
+    PHASE_RETIRING,
+    BuildBinding,
+    canonical_build_id,
+)
 from mainframe_rag.ports import QdrantReader
 
 TOMBSTONE_RECORD_TYPE = "retirement-tombstone"
 TOMBSTONE_SCHEMA = 1
-STATE_RETIRING = "retiring"
-STATE_RETIRED = "retired"
+# The stored states are the two retirement phases readers refuse (build.py).
+STATE_RETIRING = PHASE_RETIRING
+STATE_RETIRED = PHASE_RETIRED
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _FIELDS = frozenset({
     "record_type", "tombstone_schema", "target_collection", "build_id", "logical_alias",

@@ -114,13 +114,6 @@ def world(peers: int = 1) -> Store:
     return store
 
 
-@pytest.fixture
-def aware(monkeypatch):
-    """Only the reader-awareness change may set this; tests of the execute
-    path stand in for it explicitly."""
-    monkeypatch.setattr(build, "READERS_REFUSE_TOMBSTONED_BUILDS", True)
-
-
 def progress(tmp_path):
     path = tmp_path / "inventory.jsonl"
     path.touch()
@@ -190,14 +183,11 @@ def listing(store, tmp_path):
     return {r["generation"]["build_id"]: r["generation"] for r in map(json.loads, lines) if "generation" in r}
 
 
-# --- the interim refusal -------------------------------------------------------
+# --- what --execute needs before anything is read ---------------------------------
 
 
-def test_this_release_refuses_execute_before_reading_or_writing_anything(tmp_path, capsys, monkeypatch):
-    store = world()
-    before = state(store)
-    monkeypatch.setenv("READERS_REFUSE_TOMBSTONED_BUILDS", "true")  # no environment switch exists
-    assert build.READERS_REFUSE_TOMBSTONED_BUILDS is False
+def _no_contact(store, tmp_path, capsys, *argv):
+    """Run the CLI with a connector that records; return (rc, stderr, connections)."""
     connected: list[str] = []
 
     def connect(url):
@@ -205,26 +195,105 @@ def test_this_release_refuses_execute_before_reading_or_writing_anything(tmp_pat
         return AdminPeer(store, 0)
 
     settings = Settings(qdrant_url="http://qdrant:6333", qdrant_collection=ALIAS, _env_file=None)
-    rc = gen.main(["dispose", "--progress", str(progress(tmp_path)), "--build-id", G1, "--execute",
-                   "--plan-digest", "0" * 64, "--readers-stopped", STOPPED],
+    rc = gen.main(["dispose", "--progress", str(progress(tmp_path)), "--build-id", G1, *argv],
                   settings=settings, connect=connect, out=lambda line: None)
-    assert rc == gen.EXIT_REFUSED and "E_READERS_UNAWARE" in capsys.readouterr().err
+    return rc, capsys.readouterr().err, connected
+
+
+def test_a_release_whose_reader_is_unaware_refuses_execute_before_reading_or_writing_anything(
+        tmp_path, capsys, monkeypatch):
+    """The guard behind `build.READERS_REFUSE_TOMBSTONED_BUILDS`: True in
+    this release (tests/test_evidence_service.py ties it to the reader), and
+    with it not True nothing is contacted. No environment switch exists."""
+    assert build.READERS_REFUSE_TOMBSTONED_BUILDS is True
+    monkeypatch.setattr(build, "READERS_REFUSE_TOMBSTONED_BUILDS", False)
+    monkeypatch.setenv("READERS_REFUSE_TOMBSTONED_BUILDS", "true")
+    store = world()
+    before = state(store)
+    rc, err, connected = _no_contact(store, tmp_path, capsys, "--execute", "--plan-digest", "0" * 64,
+                                     "--readers-stopped", STOPPED, "--recovery-ref", "CHG-1")
+    assert rc == gen.EXIT_REFUSED and "E_READERS_UNAWARE" in err
     assert connected == [] and store.calls == [] and state(store) == before
     assert not disposal.data_disposal_record_path(progress(tmp_path), ALIAS).exists()
+    rc, lines = dry(store, tmp_path, G1)
+    assert rc == 0 and "DRY RUN: nothing changed. This release cannot execute" in "\n".join(lines)
 
 
-def test_the_core_refuses_execute_too_when_called_without_the_cli(tmp_path):
+def test_the_core_refuses_execute_too_when_called_without_the_cli(tmp_path, monkeypatch):
+    monkeypatch.setattr(build, "READERS_REFUSE_TOMBSTONED_BUILDS", False)
     store = world()
     settings = Settings(qdrant_url="http://qdrant:6333", qdrant_collection=ALIAS, _env_file=None)
     with pytest.raises(gen.Refused, match="E_READERS_UNAWARE"):
         disposal.dispose_data(AdminPeer(store, 0), settings, lambda url: AdminPeer(store, 0),
                               progress=progress(tmp_path), build_id=G1, keep=1, below_keep=False, execute=True,
-                              plan_digest="0" * 64, readers_stopped=STOPPED, recovery_ref=None, operator=None,
+                              plan_digest="0" * 64, readers_stopped=STOPPED, recovery_ref="CHG-1", operator=None,
                               out=lambda line: None)
     assert store.calls == []
 
 
-def test_dry_run_prints_the_plan_and_digest_and_changes_nothing_in_this_release(tmp_path):
+def test_execute_requires_a_recovery_reference_before_anything_is_read(tmp_path, capsys):
+    """Maintainer decision 2026-11-28: a data disposal cannot be undone from
+    the cluster, so `dispose --execute` needs `--recovery-ref`. The dry run
+    does not, and the snapshot-only command keeps it optional
+    (tests/test_ingest_generations.py)."""
+    store = world()
+    before = state(store)
+    rc, lines = dry(store, tmp_path, G1)
+    assert rc == 0
+    digest = digest_of(lines)
+    store.calls.clear()
+    rc, err, connected = _no_contact(store, tmp_path, capsys, "--execute", "--plan-digest", digest,
+                                     "--readers-stopped", STOPPED)
+    assert rc == gen.EXIT_REFUSED and err.strip().startswith("FAIL: E_RECOVERY_REF_REQUIRED:")
+    assert connected == [] and store.calls == [] and state(store) == before
+    assert not disposal.data_disposal_record_path(progress(tmp_path), ALIAS).exists()
+    # A malformed one is still its own refusal, and writes nothing either.
+    rc, err, _ = _no_contact(store, tmp_path, capsys, "--execute", "--plan-digest", digest,
+                             "--readers-stopped", STOPPED, "--recovery-ref", "bad ref")
+    assert rc == gen.EXIT_REFUSED and "E_RECOVERY_REF:" in err and writes(store) == []
+    # With one, the same plan executes and the tombstone records it.
+    rc, _ = execute(store, tmp_path, G1, digest)
+    assert rc == 0 and tombstone(store)["recovery_ref"] == "CHG-1373"
+
+
+def test_the_core_requires_the_recovery_reference_too(tmp_path):
+    store = world()
+    settings = Settings(qdrant_url="http://qdrant:6333", qdrant_collection=ALIAS, _env_file=None)
+    real = digest_of(dry(store, tmp_path, G1)[1])
+    store.calls.clear()
+    for ref in (None, "", "  "):
+        with pytest.raises(gen.Refused, match="E_RECOVERY_REF_REQUIRED"):
+            disposal.dispose_data(AdminPeer(store, 0), settings, lambda url: AdminPeer(store, 0),
+                                  progress=progress(tmp_path), build_id=G1, keep=1, below_keep=False,
+                                  execute=True, plan_digest=real, readers_stopped=STOPPED, recovery_ref=ref,
+                                  operator=None, out=lambda line: None)
+    assert store.calls == [] and tombstone(store) is None
+
+
+def test_a_resume_requires_its_own_recovery_reference(tmp_path, monkeypatch, capsys):
+    """The finishing run is recorded with its own reference, so a rerun of a
+    started disposal needs one as well; refusing it leaves the build retiring."""
+    store = world()
+    rc, lines = dry(store, tmp_path, G1)
+    digest = digest_of(lines)
+
+    def stop(run):
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patched:
+        patched.setattr(disposal, "step_alias", stop)
+        with pytest.raises(KeyboardInterrupt):
+            execute(store, tmp_path, G1, digest)
+    assert tombstone(store)["state"] == "retiring"
+    before = state(store)
+    rc, _ = dry(store, tmp_path, G1, "--execute", "--plan-digest", digest, "--readers-stopped", STOPPED)
+    assert rc == gen.EXIT_REFUSED and "E_RECOVERY_REF_REQUIRED" in capsys.readouterr().err
+    assert state(store) == before
+    rc, _ = execute(store, tmp_path, G1, digest)
+    assert rc == 0 and tombstone(store)["state"] == "retired"
+
+
+def test_dry_run_prints_the_plan_and_digest_and_changes_nothing(tmp_path):
     store = world()
     before = state(store)
     rc, lines = dry(store, tmp_path, G1)
@@ -232,7 +301,8 @@ def test_dry_run_prints_the_plan_and_digest_and_changes_nothing_in_this_release(
     assert rc == 0 and digest_of(lines)
     assert f"PLAN dispose build {G1} physical {P1}" in text and f"kept and verified: {G2}" in text
     assert sum(line.strip().startswith("DELETE snapshot") for line in lines) == 2
-    assert "DRY RUN: nothing changed. This release cannot execute" in text
+    assert ("DRY RUN: nothing changed. With every reader stopped, rerun with --execute --plan-digest "
+            "<digest above> --readers-stopped <UTC time> --recovery-ref <ticket>.") in text
     assert writes(store) == [] and state(store) == before
     assert digest_of(dry(store, tmp_path, G1)[1]) == digest_of(lines)  # stable for an unchanged plan
 
@@ -240,7 +310,7 @@ def test_dry_run_prints_the_plan_and_digest_and_changes_nothing_in_this_release(
 # --- the disposal --------------------------------------------------------------
 
 
-def test_disposal_removes_the_data_unit_and_keeps_the_controls(tmp_path, aware):
+def test_disposal_removes_the_data_unit_and_keeps_the_controls(tmp_path):
     store = world(peers=3)
     kept_control = {i: copy.deepcopy(p) for i, p in store.collections[C1].items()}
     others = copy.deepcopy({n: store.collections[n] for n in (P2, C2, P3, C3)})
@@ -291,7 +361,7 @@ def test_disposal_removes_the_data_unit_and_keeps_the_controls(tmp_path, aware):
     assert gens[G2]["phase"] == "retained" and gens[G2]["rank"] == 1 and gens[G3]["live"]
 
 
-def test_a_rerun_of_a_retired_build_reports_it_and_writes_nothing(tmp_path, aware):
+def test_a_rerun_of_a_retired_build_reports_it_and_writes_nothing(tmp_path):
     store = world()
     rc, lines = dry(store, tmp_path, G1)
     digest = digest_of(lines)
@@ -313,12 +383,12 @@ def _refused(store, tmp_path, capsys, code, *argv, build_id=G1):
     return err
 
 
-def test_live_target_is_refused(tmp_path, capsys, aware):
-    _refused(world(), tmp_path, capsys, "LIVE", "--execute", "--plan-digest", "0" * 64,
+def test_live_target_is_refused(tmp_path, capsys):
+    _refused(world(), tmp_path, capsys, "LIVE", "--execute", "--recovery-ref", "CHG-1", "--plan-digest", "0" * 64,
              "--readers-stopped", STOPPED, build_id=G3)
 
 
-def test_keep_n_is_a_guard_computed_without_the_target(tmp_path, capsys, aware):
+def test_keep_n_is_a_guard_computed_without_the_target(tmp_path, capsys):
     store = world()
     # keep 1: the newest retained build is refused, it does not slide out of the kept set.
     _refused(store, tmp_path, capsys, "KEEP_N", build_id=G2)
@@ -328,7 +398,7 @@ def test_keep_n_is_a_guard_computed_without_the_target(tmp_path, capsys, aware):
     assert rc == 0 and "lowered by --allow-below-keep" in "\n".join(lines)
 
 
-def test_an_unsealed_build_does_not_count_as_a_kept_rollback_point(tmp_path, capsys, aware):
+def test_an_unsealed_build_does_not_count_as_a_kept_rollback_point(tmp_path, capsys):
     store = Store()
     sealed(store, G1, P1, 100.0)
     publish(store, G2, P2, 200.0)  # schema 1: bound, no content seal
@@ -341,7 +411,7 @@ def test_an_unsealed_build_does_not_count_as_a_kept_rollback_point(tmp_path, cap
 
 
 @pytest.mark.parametrize("damage", ["data", "control"])
-def test_a_kept_build_that_fails_its_seal_refuses_the_disposal(tmp_path, capsys, aware, damage):
+def test_a_kept_build_that_fails_its_seal_refuses_the_disposal(tmp_path, capsys, damage):
     store = world()
     if damage == "data":
         next(iter(store.collections[P2].values()))["text"] = "changed"
@@ -350,7 +420,7 @@ def test_a_kept_build_that_fails_its_seal_refuses_the_disposal(tmp_path, capsys,
     _refused(store, tmp_path, capsys, "E_KEPT_UNVERIFIED")
 
 
-def test_a_tie_or_a_missing_time_at_the_keep_boundary_is_protected(tmp_path, capsys, aware):
+def test_a_tie_or_a_missing_time_at_the_keep_boundary_is_protected(tmp_path, capsys):
     store = Store()
     sealed(store, G1, P1, 200.0)
     sealed(store, G2, P2, 200.0)
@@ -366,7 +436,7 @@ def test_a_tie_or_a_missing_time_at_the_keep_boundary_is_protected(tmp_path, cap
 
 
 @pytest.mark.parametrize("role", ["staging", "previous"])
-def test_a_collection_the_publish_sidecar_names_is_refused(tmp_path, capsys, aware, role):
+def test_a_collection_the_publish_sidecar_names_is_refused(tmp_path, capsys, role):
     store = world()
     names = {"staging": f"{ALIAS}__genzzz", "previous": P3}
     names[role] = P1
@@ -375,7 +445,7 @@ def test_a_collection_the_publish_sidecar_names_is_refused(tmp_path, capsys, awa
     _refused(store, tmp_path, capsys, f"SIDECAR_{role.upper()}")
 
 
-def test_a_foreign_alias_an_unpublished_build_and_an_unknown_build_are_refused(tmp_path, capsys, aware):
+def test_a_foreign_alias_an_unpublished_build_and_an_unknown_build_are_refused(tmp_path, capsys):
     store = world()
     store.aliases["someone-else"] = P1
     _refused(store, tmp_path, capsys, "FOREIGN_ALIAS")
@@ -385,17 +455,17 @@ def test_a_foreign_alias_an_unpublished_build_and_an_unknown_build_are_refused(t
     _refused(store, tmp_path, capsys, "E_UNKNOWN_BUILD", build_id="eeeeeeee-0000-4000-8000-000000000009")
 
 
-def test_a_collection_name_is_never_accepted_in_place_of_the_build_id(tmp_path, capsys, aware):
+def test_a_collection_name_is_never_accepted_in_place_of_the_build_id(tmp_path, capsys):
     _refused(world(), tmp_path, capsys, "E_BUILD_ID", build_id=P1)
 
 
-def test_one_run_takes_exactly_one_build(tmp_path, capsys, aware):
+def test_one_run_takes_exactly_one_build(tmp_path, capsys):
     store = world()
     sealed(store, G0, P0, 50.0)
     _refused(store, tmp_path, capsys, "E_BUILD_ID", "--build-id", G0)  # a second name never wins silently
 
 
-def test_a_stopped_peer_refuses_before_the_tombstone(tmp_path, capsys, aware):
+def test_a_stopped_peer_refuses_before_the_tombstone(tmp_path, capsys):
     store = world(peers=3)
     rc, lines = dry(store, tmp_path, G1)
     digest = digest_of(lines)
@@ -406,25 +476,25 @@ def test_a_stopped_peer_refuses_before_the_tombstone(tmp_path, capsys, aware):
     assert writes(store) == [] and state(store) == before and tombstone(store) is None
 
 
-def test_execute_needs_the_digest_the_attestation_and_a_matching_plan(tmp_path, capsys, aware):
+def test_execute_needs_the_digest_the_attestation_and_a_matching_plan(tmp_path, capsys):
     store = world()
     digest = digest_of(dry(store, tmp_path, G1)[1])
-    _refused(store, tmp_path, capsys, "E_PLAN_DIGEST", "--execute", "--readers-stopped", STOPPED)
-    _refused(store, tmp_path, capsys, "E_READERS_STOPPED", "--execute", "--plan-digest", digest)
-    _refused(store, tmp_path, capsys, "E_READERS_STOPPED", "--execute", "--plan-digest", digest,
+    _refused(store, tmp_path, capsys, "E_PLAN_DIGEST", "--execute", "--recovery-ref", "CHG-1", "--readers-stopped", STOPPED)
+    _refused(store, tmp_path, capsys, "E_READERS_STOPPED", "--execute", "--recovery-ref", "CHG-1", "--plan-digest", digest)
+    _refused(store, tmp_path, capsys, "E_READERS_STOPPED", "--execute", "--recovery-ref", "CHG-1", "--plan-digest", digest,
              "--readers-stopped", "2999-01-01T00:00:00Z")
-    _refused(store, tmp_path, capsys, "E_READERS_STOPPED", "--execute", "--plan-digest", digest,
+    _refused(store, tmp_path, capsys, "E_READERS_STOPPED", "--execute", "--recovery-ref", "CHG-1", "--plan-digest", digest,
              "--readers-stopped", "yesterday")
-    _refused(store, tmp_path, capsys, "E_PLAN_CHANGED", "--execute", "--plan-digest", "0" * 64,
+    _refused(store, tmp_path, capsys, "E_PLAN_CHANGED", "--execute", "--recovery-ref", "CHG-1", "--plan-digest", "0" * 64,
              "--readers-stopped", STOPPED)
     # The plan changed after it was read: a snapshot nobody was shown.
     snap(store, 0, P1, f"{P1}-p0-late.snapshot", 5)
-    _refused(store, tmp_path, capsys, "E_PLAN_CHANGED", "--execute", "--plan-digest", digest,
+    _refused(store, tmp_path, capsys, "E_PLAN_CHANGED", "--execute", "--recovery-ref", "CHG-1", "--plan-digest", digest,
              "--readers-stopped", STOPPED)
     assert tombstone(store) is None
 
 
-def test_the_plan_digest_binds_the_kept_set_and_the_keep_override(tmp_path, aware):
+def test_the_plan_digest_binds_the_kept_set_and_the_keep_override(tmp_path):
     store = world()
     sealed(store, G0, P0, 50.0)
     plain = digest_of(dry(store, tmp_path, G0)[1])
@@ -432,13 +502,13 @@ def test_the_plan_digest_binds_the_kept_set_and_the_keep_override(tmp_path, awar
     assert digest_of(dry(store, tmp_path, G0, "--keep", "2")[1]) != plain
 
 
-def test_a_held_publish_lock_refuses_and_the_disposal_holds_it_for_the_whole_run(tmp_path, capsys, aware):
+def test_a_held_publish_lock_refuses_and_the_disposal_holds_it_for_the_whole_run(tmp_path, capsys):
     store = world()
     path = progress(tmp_path)
     digest = digest_of(dry(store, tmp_path, G1)[1])
     handle = acquire_publish_lock(path, ALIAS)
     try:
-        _refused(store, tmp_path, capsys, "E_LOCK_REFUSED", "--execute", "--plan-digest", digest,
+        _refused(store, tmp_path, capsys, "E_LOCK_REFUSED", "--execute", "--recovery-ref", "CHG-1", "--plan-digest", digest,
                  "--readers-stopped", STOPPED)
     finally:
         release_run_lock(handle)
@@ -455,7 +525,7 @@ def test_a_held_publish_lock_refuses_and_the_disposal_holds_it_for_the_whole_run
     release_run_lock(acquire_publish_lock(path, ALIAS))  # released afterwards
 
 
-def test_the_serving_alias_is_reread_before_the_first_delete(tmp_path, capsys, aware):
+def test_the_serving_alias_is_reread_before_the_first_delete(tmp_path, capsys):
     store = world()
     digest = digest_of(dry(store, tmp_path, G1)[1])
 
@@ -470,7 +540,7 @@ def test_the_serving_alias_is_reread_before_the_first_delete(tmp_path, capsys, a
     assert build_aliases(ALIAS, G1)[0] in store.aliases and len(store.snapshots[0][P1]) == 2
 
 
-def test_a_snapshot_that_is_not_gone_keeps_the_collection(tmp_path, capsys, aware):
+def test_a_snapshot_that_is_not_gone_keeps_the_collection(tmp_path, capsys):
     store = world(peers=3)
     digest = digest_of(dry(store, tmp_path, G1)[1])
 
@@ -485,7 +555,7 @@ def test_a_snapshot_that_is_not_gone_keeps_the_collection(tmp_path, capsys, awar
     assert tombstone(store)["state"] == "retiring"
 
 
-def test_a_sidecar_that_names_the_collection_after_the_plan_stops_the_deletes(tmp_path, capsys, aware):
+def test_a_sidecar_that_names_the_collection_after_the_plan_stops_the_deletes(tmp_path, capsys):
     store = world()
     digest = digest_of(dry(store, tmp_path, G1)[1])
 
@@ -501,7 +571,7 @@ def test_a_sidecar_that_names_the_collection_after_the_plan_stops_the_deletes(tm
 
 
 @pytest.mark.parametrize("fault", ["removed", "altered"])
-def test_nothing_is_deleted_without_the_stored_tombstone(tmp_path, capsys, aware, fault):
+def test_nothing_is_deleted_without_the_stored_tombstone(tmp_path, capsys, fault):
     store = world()
     digest = digest_of(dry(store, tmp_path, G1)[1])
 
@@ -533,7 +603,7 @@ def test_nothing_is_deleted_without_the_stored_tombstone(tmp_path, capsys, aware
     assert build_aliases(ALIAS, G1)[0] in store.aliases
 
 
-def test_a_tombstone_that_disappears_between_steps_stops_the_deletes(tmp_path, monkeypatch, capsys, aware):
+def test_a_tombstone_that_disappears_between_steps_stops_the_deletes(tmp_path, monkeypatch, capsys):
     store = world()
     digest = digest_of(dry(store, tmp_path, G1)[1])
     original = disposal.step_tombstone
@@ -548,7 +618,7 @@ def test_a_tombstone_that_disappears_between_steps_stops_the_deletes(tmp_path, m
     assert [c[0] for c in writes(store)] == ["upsert"] and P1 in store.collections
 
 
-def test_the_core_requires_the_attestation_and_the_digest(tmp_path, aware):
+def test_the_core_requires_the_attestation_and_the_digest(tmp_path):
     store = world()
     settings = Settings(qdrant_url="http://qdrant:6333", qdrant_collection=ALIAS, _env_file=None)
     real = digest_of(dry(store, tmp_path, G1)[1])
@@ -556,12 +626,12 @@ def test_the_core_requires_the_attestation_and_the_digest(tmp_path, aware):
         with pytest.raises(gen.Refused, match="E_PLAN_DIGEST"):
             disposal.dispose_data(AdminPeer(store, 0), settings, lambda url: AdminPeer(store, 0),
                                   progress=progress(tmp_path), build_id=G1, keep=1, below_keep=False,
-                                  execute=True, plan_digest=digest, readers_stopped=stopped, recovery_ref=None,
+                                  execute=True, plan_digest=digest, readers_stopped=stopped, recovery_ref="CHG-1",
                                   operator=None, out=lambda line: None)
     assert writes(store) == [] and tombstone(store) is None
 
 
-def test_the_collection_delete_itself_requires_every_peer_to_list_no_snapshot(tmp_path, monkeypatch, capsys, aware):
+def test_the_collection_delete_itself_requires_every_peer_to_list_no_snapshot(tmp_path, monkeypatch, capsys):
     store = world(peers=3)
     digest = digest_of(dry(store, tmp_path, G1)[1])
     original = disposal.step_snapshots
@@ -605,7 +675,7 @@ HAZARDS = {"live": "E_LIVE", "foreign-alias": "E_CHANGED", "control-alias-repoin
 
 
 @pytest.mark.parametrize("hazard", sorted(HAZARDS))
-def test_every_snapshot_delete_rechecks_the_target(tmp_path, capsys, aware, hazard):
+def test_every_snapshot_delete_rechecks_the_target(tmp_path, capsys, hazard):
     """After the alias step: the hazard appears while the first snapshot is
     being deleted; the second snapshot and the collection must stay."""
     store = world()
@@ -625,7 +695,7 @@ def test_every_snapshot_delete_rechecks_the_target(tmp_path, capsys, aware, haza
 
 
 @pytest.mark.parametrize("hazard", sorted(HAZARDS))
-def test_the_collection_delete_rechecks_the_target(tmp_path, monkeypatch, capsys, aware, hazard):
+def test_the_collection_delete_rechecks_the_target(tmp_path, monkeypatch, capsys, hazard):
     """Between the snapshot step and the collection delete."""
     store = world()
     digest = digest_of(dry(store, tmp_path, G1)[1])
@@ -643,7 +713,7 @@ def test_the_collection_delete_rechecks_the_target(tmp_path, monkeypatch, capsys
 
 
 @pytest.mark.parametrize("leftover", ["data-collection", "data-alias"])
-def test_a_retired_record_with_the_data_back_is_reported_inconsistent(tmp_path, capsys, aware, leftover):
+def test_a_retired_record_with_the_data_back_is_reported_inconsistent(tmp_path, capsys, leftover):
     store = world()
     digest = digest_of(dry(store, tmp_path, G1)[1])
     assert execute(store, tmp_path, G1, digest)[0] == 0
@@ -662,7 +732,7 @@ def test_a_retired_record_with_the_data_back_is_reported_inconsistent(tmp_path, 
 @pytest.mark.parametrize("command", ["dispose", "dispose-snapshots"])
 @pytest.mark.parametrize("other", ["foreign-file", "copy-elsewhere", "symlink-elsewhere", "symlink-beside"])
 def test_an_inventory_that_is_not_the_one_the_alias_was_published_from_is_refused(
-        tmp_path, capsys, aware, command, other):
+        tmp_path, capsys, command, other):
     """Review N3 of #1393: the lock and the sidecar are whatever sits beside
     --progress. With the real lock held by a publisher and the real sidecar
     naming the build, another existing file must not let a run proceed."""
@@ -685,7 +755,7 @@ def test_an_inventory_that_is_not_the_one_the_alias_was_published_from_is_refuse
     handle = acquire_publish_lock(real, ALIAS)  # an ingest is publishing
     before = state(store)
     try:
-        for extra in ((), ("--execute", "--plan-digest", digest, "--readers-stopped", STOPPED) if command == "dispose"
+        for extra in ((), ("--execute", "--plan-digest", digest, "--readers-stopped", STOPPED, "--recovery-ref", "CHG-1") if command == "dispose"
                       else ("--execute",)):
             rc, _ = drun(store, tmp_path, command, "--progress", str(given), "--build-id", G1, *extra)
             assert rc == gen.EXIT_REFUSED and "E_PROGRESS_UNBOUND" in capsys.readouterr().err
@@ -707,7 +777,7 @@ def _reference(tmp_path, peers):
 @pytest.mark.parametrize("peers", [1, 3])
 @pytest.mark.parametrize("when", ["before", "after"])
 @pytest.mark.parametrize("step", STEPS)
-def test_a_stop_at_any_step_boundary_converges_on_rerun(tmp_path, monkeypatch, aware, step, when, peers):
+def test_a_stop_at_any_step_boundary_converges_on_rerun(tmp_path, monkeypatch, step, when, peers):
     (tmp_path / "ref").mkdir()
     expected = _reference(tmp_path, peers)
     store = world(peers)
@@ -736,7 +806,7 @@ def test_a_stop_at_any_step_boundary_converges_on_rerun(tmp_path, monkeypatch, a
     assert execute(store, tmp_path, G1, digest)[0] == 0 and writes(store) == []
 
 
-def test_a_stop_between_two_snapshot_deletes_converges(tmp_path, aware):
+def test_a_stop_between_two_snapshot_deletes_converges(tmp_path):
     (tmp_path / "ref").mkdir()
     expected = _reference(tmp_path, 3)
     store = world(peers=3)
@@ -774,7 +844,7 @@ def _stopped_after(monkeypatch, store, tmp_path, step, digest=None):
 
 
 @pytest.mark.parametrize("change", ["kept-seal-broken", "newer-publication", "no-kept-build-left"])
-def test_a_started_disposal_finishes_even_when_plan_time_checks_would_now_refuse(tmp_path, monkeypatch, aware, change):
+def test_a_started_disposal_finishes_even_when_plan_time_checks_would_now_refuse(tmp_path, monkeypatch, change):
     """Keep-N and the kept seal are plan-time checks. After the tombstone the
     build is no rollback point whatever happens, so the rerun must finish."""
     store = world()
@@ -811,7 +881,7 @@ def test_a_started_disposal_finishes_even_when_plan_time_checks_would_now_refuse
 
 
 @pytest.mark.parametrize("hazard", ["live", "foreign-alias", "sidecar", "peer-down", "lock"])
-def test_a_resume_is_still_gated_by_delete_safety(tmp_path, monkeypatch, capsys, aware, hazard):
+def test_a_resume_is_still_gated_by_delete_safety(tmp_path, monkeypatch, capsys, hazard):
     store = world(peers=3)
     digest = _stopped_after(monkeypatch, store, tmp_path, "step_tombstone")
     handle = None
@@ -836,7 +906,7 @@ def test_a_resume_is_still_gated_by_delete_safety(tmp_path, monkeypatch, capsys,
     assert writes(store) == [] and state(store) == before
 
 
-def test_no_other_build_is_disposed_while_one_is_retiring(tmp_path, monkeypatch, capsys, aware):
+def test_no_other_build_is_disposed_while_one_is_retiring(tmp_path, monkeypatch, capsys):
     store = world()
     sealed(store, G0, P0, 50.0)
     digest = _stopped_after(monkeypatch, store, tmp_path, "step_tombstone")
@@ -849,7 +919,7 @@ def test_no_other_build_is_disposed_while_one_is_retiring(tmp_path, monkeypatch,
     assert P0 not in store.collections and tombstone(store, P0 + "__completions")["state"] == "retired"
 
 
-def test_a_snapshot_made_after_the_plan_needs_its_own_confirmation_on_resume(tmp_path, monkeypatch, capsys, aware):
+def test_a_snapshot_made_after_the_plan_needs_its_own_confirmation_on_resume(tmp_path, monkeypatch, capsys):
     store = world()
     digest = _stopped_after(monkeypatch, store, tmp_path, "step_alias")
     snap(store, 0, P1, "operator-made.snapshot", 9)
@@ -869,7 +939,7 @@ def test_a_snapshot_made_after_the_plan_needs_its_own_confirmation_on_resume(tmp
 # --- the tombstone and the listing -----------------------------------------------
 
 
-def test_a_retiring_build_is_no_kept_generation_and_no_snapshot_target(tmp_path, monkeypatch, capsys, aware):
+def test_a_retiring_build_is_no_kept_generation_and_no_snapshot_target(tmp_path, monkeypatch, capsys):
     """Between the tombstone and the alias delete both immutable aliases still
     resolve: the tombstone, not the aliases, decides the phase."""
     store = world()
@@ -886,7 +956,7 @@ def test_a_retiring_build_is_no_kept_generation_and_no_snapshot_target(tmp_path,
     assert marker_time == "1970-01-01T00:01:40Z"  # the tombstone is not read as a completion marker
 
 
-def test_a_tombstone_of_another_build_or_a_damaged_one_is_never_resume_evidence(tmp_path, monkeypatch, capsys, aware):
+def test_a_tombstone_of_another_build_or_a_damaged_one_is_never_resume_evidence(tmp_path, monkeypatch, capsys):
     store = world()
     digest = _stopped_after(monkeypatch, store, tmp_path, "step_tombstone")
     record = tombstone(store)
@@ -928,7 +998,9 @@ def _module(tmp_path, *argv):
 
 @pytest.mark.parametrize(("argv", "code"), [
     (("dispose", "--build-id", G1, "--execute", "--plan-digest", "0" * 64, "--readers-stopped", STOPPED),
-     "E_READERS_UNAWARE"),
+     "E_RECOVERY_REF_REQUIRED"),
+    (("dispose", "--build-id", G1, "--execute", "--readers-stopped", STOPPED, "--recovery-ref", "CHG-1"),
+     "E_PLAN_DIGEST"),
     (("dispose", "--build-id", G1, "--plan-digest", "xyz"), "E_PLAN_DIGEST"),
     (("dispose", "--build-id", G1, "--readers-stopped", "yesterday"), "E_READERS_STOPPED"),
     (("dispose", "--build-id", P1), "E_BUILD_ID"),

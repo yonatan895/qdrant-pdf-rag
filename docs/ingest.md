@@ -1178,7 +1178,9 @@ thread pool.
   persistent tombstones before data deletion while retaining required controls.
   Counts, dimensions or elapsed cache TTL alone authorize neither operation.
   Data disposal of a named superseded build is the guarded command under
-  [data disposal](#data-disposal); it cannot be executed in this release.
+  [data disposal](#data-disposal); it runs only as the module CLI on a host
+  with the ingest work volume (no site launcher yet), after the reader-aware
+  agent is deployed.
   Guarded administrative rollback remains separate L1 work. Do not delete
   retained pairs or their controls using the old manual GC recipe: a
   retained control collection, and every control collection that holds a
@@ -1239,13 +1241,30 @@ thread pool.
   `__completions` control collection (markers, manifest, receipt, catalog
   entries), its control build alias and a retirement tombstone stay, with no
   purge; the serving alias, the live pair, the sidecar and the inventory are
-  never touched. **Not executable in this release:** `--execute` is refused
-  (`E_READERS_UNAWARE`, before anything is read) until the agent refuses a
-  build that is being retired, which is a code constant
-  (`build.READERS_REFUSE_TOMBSTONED_BUILDS`) set only by that reader change,
-  never by a flag, the environment or a file; `scripts/airgap/generations.sh`,
-  the chart and `map_values.py` refuse the subcommand by name. The dry run
-  works. Contract of the command:
+  never touched. **Where it runs:** only as this module CLI, on a host that
+  mounts the ingest work volume (the inventory, the publish lock and the
+  sidecar) and holds the Qdrant writer key and every peer URL. There is no
+  site launcher: `scripts/airgap/generations.sh`, the chart and
+  `map_values.py` refuse the subcommand by name, and the launcher that stops
+  the agent, checks its image and runs the Job is separate work (#1373 PR 4).
+  **Reader awareness and deploy order:** the agent refuses a build with a
+  `retiring` or `retired` tombstone (exact reads and source-listing cursors
+  answer 404 unavailable, [error contract](agent.md#2-error-contract)), also
+  while both immutable aliases still resolve. `--execute` runs only in a
+  release whose code says so (`build.READERS_REFUSE_TOMBSTONED_BUILDS`, a
+  code constant set together with that reader, never a flag, the environment
+  or a file; `E_READERS_UNAWARE` otherwise). The constant describes the
+  release that runs the command, not the agent that is deployed, so the
+  order is the operator's: (1) deploy this release's agent on every replica
+  and confirm the rollout is complete, (2) scale the agent to 0 and confirm
+  no pod is left, (3) run the dry run and then `--execute`, (4) scale the
+  agent back. An agent older than this release does not read tombstones
+  (observed 2026-11-28 on the pinned server with the cc6c5aaf agent): it
+  still serves a `retiring` build whose two aliases are present, and answers
+  503 instead of 404 for a `retired` one; search and answers on the live
+  alias are the same in both releases. Older ingest tooling lists a retired
+  build as `data-missing` and publishes normally (review of #1393).
+  Contract of the command:
   - `--progress` must be the inventory the alias was published from, for
     `dispose` and `dispose-snapshots` alike: the publish lock of the alias
     (`publish-<alias>.lock`) must already exist beside it and the path must
@@ -1273,8 +1292,12 @@ thread pool.
     difference refuses) and `--readers-stopped <UTC time>`, the attestation
     that every reader (the agent, scaled to 0) was confirmed stopped; the
     tool cannot observe pods and records the attestation, `--recovery-ref`
-    (optional) and the operator in the tombstone. Online disposal is not
-    supported.
+    and the operator in the tombstone. `--recovery-ref <ticket>` is required
+    with `--execute` (maintainer decision 2026-11-28: the delete cannot be
+    undone from the cluster), also on a resume, which records its own;
+    without it the run refuses with `E_RECOVERY_REF_REQUIRED` before
+    anything is read. It stays optional for `dispose-snapshots`. Online
+    disposal is not supported.
   - Steps under the publish lock, each reading the stored state it would
     produce before acting: (S1) tombstone `retiring` written into the control
     collection and read back; (S2) aliases re-read, data build alias deleted;

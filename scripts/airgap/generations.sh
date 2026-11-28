@@ -41,9 +41,9 @@ case "$GEN_COMMAND" in
     dispose)
         # Data disposal (the module's `dispose`) deletes a served build's
         # collection. It is not reachable from the site in this release: the
-        # agent must first refuse a build that is being retired, and the run
-        # needs the reader-stop launcher. Refused here by name, whatever
-        # else is passed; the module refuses --execute as well.
+        # run needs the reader-stop launcher, which must also check that the
+        # deployed agent refuses a build that is being retired (#1373 PR 4).
+        # Refused here by name, whatever else is passed.
         die "data disposal (dispose) is not available from this launcher in this release; only list and dispose-snapshots are" ;;
     *) die "$GENERATIONS_USAGE" ;;
 esac
