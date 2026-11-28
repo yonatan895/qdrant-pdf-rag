@@ -1340,6 +1340,30 @@ def test_answer_reference_is_the_last_line_when_ratings_are_on(references_on, st
     assert _final_status(events) == "Source-matched · 1 citation"
 
 
+@pytest.mark.parametrize("suppressed", [True, "true", None])
+def test_no_answer_reference_on_a_turn_kept_out_of_the_feedback_store(references_on, suppressed):
+    """ADR-0012 D6 (amends ADR-0007 V2): the agent marks a z/OS observation
+    turn `feedback_suppressed`; such a turn has no answer record, so it gets
+    no reference line. Its agent-written notice is ordinary answer text: it
+    is shown, and it is resent with the chat, so the marker reaches the agent
+    on the next turn. Only the exact `true` omits the reference."""
+    notice = ("[z/OS observation] SYS1.PARMLIB(IEASYS00): read from z/OS, "
+              "acquired_at 2026-11-27T21:00:00Z, outcome: complete.\n\n")
+    chunk_id = f"chatcmpl-{RID}"
+    meta = _final_meta() if suppressed is None else _final_meta(feedback_suppressed=suppressed)
+    frames = [format_openai_chunk(chunk_id, "m", delta_content=d) for d in (notice, "Answer.")]
+    frames += [format_openai_chunk(chunk_id, "m", finish_reason="stop", extra=meta),
+               format_openai_done()]
+    content, _ = run_pipe(FakeAgent(frames))
+    shown = notice + "Answer." + SHOWN_LIST_A
+    assert content == (shown if suppressed is True else shown + REFERENCE)
+
+    follow_up = FakeAgent()
+    run_pipe(follow_up, messages=_messages(("user", QUESTION), ("assistant", content),
+                                           ("user", "And then?")))
+    assert follow_up.bodies()[0]["messages"][1] == {"role": "assistant", "content": shown}
+
+
 def test_no_answer_reference_by_default():
     """Ratings off (the default): the Pipe's output is unchanged."""
     content, _ = run_pipe(FakeAgent(_ref_frames("Answer.")))
