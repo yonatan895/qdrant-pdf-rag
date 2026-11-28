@@ -343,7 +343,7 @@ decision or option B. Not a legal approval.
 
 **Scope restated (2026-11-27, #1318): ingest and operator-run offline tools.** The
 maintainer's owner decision, stated to the coordinating agent on 2026-11-27 and
-to be confirmed by his comment on the #1318 licence-scope follow-up PR (the approval reference becomes that
+to be confirmed by his comment on PR #1394 (the approval reference becomes that
 comment's URL; until then this restatement is not final), extends the scope from the ingest Job to tools
 an operator runs offline from a shell (`tools/text_to_pdf.py`,
 `eval/page_image_arm.py`). Nothing else in the election changes: `AGPL-3.0-only`,

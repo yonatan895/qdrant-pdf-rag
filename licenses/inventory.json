@@ -4370,12 +4370,12 @@
       "wheel": "pyjwt-2.15.1-py3-none-any.whl"
     },
     {
-      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 issuecomment-6427197208; owner decision, explicit exception to legal confirmation; withdrawn if legal confirmation is refused or the use changes; scope restated 2026-11-27: the #1318 licence-scope follow-up PR (maintainer's written confirmation pending on that PR)",
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 issuecomment-6427197208; owner decision, explicit exception to legal confirmation; withdrawn if legal confirmation is refused or the use changes; scope restated 2026-11-27: gh:yonatan895/qdrant-pdf-rag#1394 (maintainer's written confirmation pending on that PR)",
       "binary_wheel": true,
       "class": "network-copyleft",
       "decision": {
         "date": "2026-10-26",
-        "disposition": "owner decision 2026-10-26 (#376): election A, rely on AGPL-3.0, scoped to the ingest Job (unmodified, internal, not offered to users over a network); explicit exception to waiting for qualified legal confirmation. Scope restated by the maintainer on 2026-11-27 (#1318, the #1318 licence-scope follow-up PR): ingest and operator-run offline tools, on the same basis; nothing else in the election changes. Withdrawn, and the item returns to pending, if legal confirmation is refused or the use changes (modification, distribution outside the organisation, network exposure of pymupdf itself); the release then needs a new decision or the Artifex commercial licence.",
+        "disposition": "owner decision 2026-10-26 (#376): election A, rely on AGPL-3.0, scoped to the ingest Job (unmodified, internal, not offered to users over a network); explicit exception to waiting for qualified legal confirmation. Scope restated by the maintainer on 2026-11-27 (#1318, PR #1394): ingest and operator-run offline tools, on the same basis; nothing else in the election changes. Withdrawn, and the item returns to pending, if legal confirmation is refused or the use changes (modification, distribution outside the organisation, network exposure of pymupdf itself); the release then needs a new decision or the Artifex commercial licence.",
         "legal_confirmation": "waived-by-owner-decision",
         "owner": "yonatan895",
         "scope": "ingest and operator-run offline tools"
