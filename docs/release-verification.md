@@ -21,8 +21,8 @@ initialize every result as `NOT RUN`.
 
 | Lane | Required real components and coverage |
 |---|---|
-| Required GitHub jobs | Fresh bootstrap of the published bundle, real application containers, registry, gateway/database and Kubernetes; deterministic computation and the gateway fault contracts (upstream, malformed, dimension, timeout, truncated stream, credentials); Open WebUI on through the operator `airgap:pipeline` with OpenShift and IdP stand-ins (`kind-openwebui-operator`): the 20 checks, the two-pass Pipe install, the K1 rollback, and a [slow-model stand-in](openwebui-dev.md#slow-model) answering with its citation on the browser, API-chat and API-stream paths |
-| Disposable local Kind | The same product images and pipeline, both real GPU models behind the authenticated TLS gateway, Qdrant, ingest, OpenObserve, and Open WebUI on through the same operator stand-ins and scripts as `kind-openwebui-operator` (its 20 checks, two-pass Pipe and K1 rollback, [below](#openwebui-pass)) answered by the real models; citations, follow-up chat, all streams, lifecycle and recovery |
+| Required GitHub jobs | Fresh bootstrap of the published bundle, real application containers, registry, gateway/database and Kubernetes; deterministic computation and the gateway fault contracts (upstream, malformed, dimension, timeout, truncated stream, credentials); Open WebUI on through the operator `airgap:pipeline` with OpenShift and IdP stand-ins (`kind-openwebui-operator`): the 20 checks, the two-pass Pipe install, the K1 rollback, the [copy-out and restore](deploy.md#owui-copy-restore), and a [slow-model stand-in](openwebui-dev.md#slow-model) answering with its citation on the browser, API-chat and API-stream paths |
+| Disposable local Kind | The same product images and pipeline, both real GPU models behind the authenticated TLS gateway, Qdrant, ingest, OpenObserve, and Open WebUI on through the same operator stand-ins and scripts as `kind-openwebui-operator` (its 20 checks, two-pass Pipe, K1 rollback and copy-out/restore, [below](#openwebui-pass)) answered by the real models; citations, follow-up chat, all streams, lifecycle and recovery |
 
 **What each lane proves for Open WebUI.** The GitHub lane proves the wiring and the
 time limits of the user-facing path (router stand-in, allow-list proxy, Open WebUI,
@@ -790,6 +790,26 @@ sh scripts/tools/run-task.sh airgap:deploy 2>&1 | tee "$OWUI_STATE/logs/deploy-o
 $OWUI on
 ```
 
+<a id="openwebui-copy-restore-pass"></a>
+[Copy-out and restore](deploy.md#owui-copy-restore) as the operator runs them, with a deploy of
+the same release standing in for B; a chat written after the copy-out must be gone after the
+restore:
+
+```sh
+$OWUI record
+$OWUI copy-out
+sh scripts/tools/run-task.sh airgap:deploy 2>&1 | tee "$OWUI_STATE/logs/deploy-upgrade.log"
+! grep -q 'docs Pipe NOT installed' "$OWUI_STATE/logs/deploy-upgrade.log"
+$OWUI copy-later
+$OWUI restore
+sh scripts/tools/run-task.sh airgap:deploy 2>&1 | tee "$OWUI_STATE/logs/deploy-restored.log"
+! grep -q 'docs Pipe NOT installed' "$OWUI_STATE/logs/deploy-restored.log"
+$OWUI restored
+```
+
+The copy holds the rehearsal's chat text: delete `$OWUI_STATE/owui-copy` once the results are
+recorded, and never attach it to the record.
+
 Each step prints its verdicts and keeps them in `$OWUI_STATE/logs/*.json` (ids,
 counts and seconds, never text, passwords or keys). Every verdict must be
 `"ok": true`. The CI-only `paced` phase is not run here: it needs the mock model's
@@ -811,7 +831,7 @@ pacing. The real models' timing is read from the answer verdicts instead (see
 | Streams | `/v1/answer`: exactly one successful terminal `final`, no `error`. `/v1/chat` and `/v1/chat/completions`: successful finish chunk plus `[DONE]`, no error frame. `/ui`: terminal completion and cleared busy state. |
 | Tracing | Search and answer/chat traces appear in OpenObserve with retrieval and reasoning children where applicable. |
 | TLS, credentials, long input | The controls below pass from both the agent and ingest images. |
-| Open WebUI (real models) | [The pass above](#openwebui-pass): `first-pass`, `checks` (20 verdicts), `record`, `rollback-off` and `rollback-on` all `ok`. No answer verdict has `end_s` or `done_s` above 240 s, the end of the CI envelope. |
+| Open WebUI (real models) | [The pass above](#openwebui-pass): `first-pass`, `checks` (20 verdicts), `record`, `rollback-off`, `rollback-on`, `copy-later` and `restored` all `ok`, and `copy-out` and `restore` exit 0. No answer verdict has `end_s` or `done_s` above 240 s, the end of the CI envelope. |
 
 For persistence and redeployment run
 `sh scripts/ci/check_lifecycle.sh "$KIND_NAMESPACE"` and then the pipeline again,
