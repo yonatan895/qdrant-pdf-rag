@@ -27,7 +27,14 @@
   "Air-gapped GitLab is a downstream fork". Accepting it changes no product
   default, identity or baseline. The enforcement and tooling it commits to
   are follow-up items for GH#1118 (listed at the end); the section after the
-  Decision says which of them exist today.
+  Decision says which of them exist today. Amended by
+  [ADR-0016](0016-argo-cd-pinned-to-signed-release.md) (proposed): in a namespace deployed
+  through the platform's Argo CD (the pilot first), the apply is pinned to
+  the signed MANIFEST sha and checked after the sync (Decision, §1, §5 steps
+  5 to 7); each cluster's bastion moves to a tools namespace (§2, §8); and
+  `gap/config/` holds one directory per cluster and namespace, with its
+  `airgap.env` and Application manifests (§3, §9). Its Amendments table
+  scopes each row.
 - **Context:**
   - Releases reach the gap as signed bundles, and practically nothing leaves
     it. A single shared history cannot exist, because commits made in the gap
