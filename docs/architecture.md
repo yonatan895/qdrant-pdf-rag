@@ -15,7 +15,7 @@ Build a **citation-first expert mainframe agent** that answers operational quest
 | Layer | System | Job |
 |---|---|---|
 | Live state (caller-supplied) | Splunk (existing) | Events, jobs, messages *now* (context in, not crawl — ADR-0001) |
-| Live state (agent-fetched) | Zowe MCP server, read-only (ADR-0003) | Authorized typed read-only observations; only exact-target `job_status` is approved; a read-only pilot (`dataset_read` default, opt-in `job_status` and DD-scoped `jes_spool_read`) is proposed (ADR-0012); `uss_read` unapproved; bounded, audited, default-off, unwired (see [agent.md](agent.md#source-observations)) |
+| Live state (agent-fetched) | Zowe MCP server, read-only (ADR-0003) | Authorized typed read-only observations; only exact-target `job_status` is approved; a read-only pilot (`dataset_read` default, opt-in `job_status` and DD-scoped `jes_spool_read`) is proposed (ADR-0012); `uss_read` unapproved; bounded, audited, default-off; the Docs routes plan the pilot's `dataset_read` when enabled (see [agent.md](agent.md#source-observations)) |
 | Knowledge | Qdrant (self-hosted) | Manuals, precedent, "what does this mean / how is this supposed to work" |
 | Reasoning | Internal vLLM / LiteLLM (platform team) | Thinking model for citation + solution / script generation |
 | Embeddings | Internal vLLM stack | Dense vectors only; OpenAI-compatible endpoint |
@@ -93,7 +93,7 @@ complete its answer-context integration; see the workload status table below.
 | `qdrant` | StatefulSet (vendored chart) | 3 | Cluster mode, P2P 6335 (TLS off), HTTP 6333, gRPC 6334, `restricted-v2` SCC |
 | `rag-agent` | Deployment | 2 | FastAPI, unprivileged, no GPU |
 | `ingest` | One-Shot Job | 1 | High CPU, worker pool, RWO scratch |
-| `zowe-mcp` | Proposed sidecar (ADR-0003); absent from the current Helm chart | Not deployed | Bridge/client code exists; answer-context integration and deployment wiring remain incomplete. Default-off; enabling requires the ADR-0003 reactivation gate, separate site credentials and written site acceptance |
+| `zowe-mcp` | Proposed sidecar (ADR-0003); absent from the current Helm chart | Not deployed | Bridge, client and Docs-route wiring exist (#1294 PR 1, PR 2); deployment wiring remains (PR 3). Default-off; enabling requires the ADR-0003 reactivation gate, separate site credentials and written site acceptance |
 | `openobserve` | Deployment (default on; `off` sentinel disables; disabling only the backend needs an explicit collector endpoint or `off`) | 1 | OpenObserve, local mode, RWO block PVC, tracing backend |
 | `feedback` | Single-replica StatefulSet `rag-feedback` (ADR-0005, #804), rendered only with `FEEDBACK_ENABLED` (default off; [deploy.md](deploy.md#feedback-service)) | Deployed when enabled | Single SQLite writer for answer-quality records on its own kept RWO block PVC `rag-feedback-data` (never NFS); bearer token from an operator-created Secret; ClusterIP only, ingress limited to agent pods by `rag-feedback-ingress`; purges its own retention window in-process and exports purge outcomes on a bearer-protected `/metrics`; agents send to it best-effort when `FEEDBACK_ENABLED` (default off). Not console session state, which stays in browser `localStorage` (ADR-0004) |
 | `open-webui` | Accepted (ADR-0007, #1070); absent from the current Helm chart | Not deployed | Optional docs front end behind a default-off flag: one replica, OIDC login, chats in SQLite on a kept RWO block PVC (never NFS) with a 30-day retention purge. It reaches the corpus only through a repository-owned Pipe over the agent's `/v1/chat`, with no model connection or gateway key. Its built-in RAG and vector store are off and proven empty, and egress is limited to the agent, DNS and the IdP. The console stays the fallback and HA path |
@@ -293,7 +293,7 @@ src/mainframe_rag/
     tokenizer.py      # vLLM /tokenize counting with estimator fallback
     cites.py          # Citation shape validation & extraction
     metrics.py        # Prometheus counters/gauges (opt-in /metrics)
-    live_state.py     # Zowe live-state routing/fetch layer (ADR-0003, default-off)
+    live_state.py     # Zowe live-state routing/fetch and the Docs-path observation (ADR-0003, ADR-0012, default-off)
     zowe_mcp.py       # Zowe MCP client (read-only tools; mock backend for sim)
     chat_turn.py      # One active-user boundary for chat routes, retrieval and prompts
     user_message.py   # Long messages: derived retrieval query, token-budgeted prompt text (#1192)

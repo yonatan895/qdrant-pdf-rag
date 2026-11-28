@@ -56,6 +56,7 @@ from mainframe_rag.agent.core_ports import (
     StoredChunkReader,
 )
 from mainframe_rag.agent.images import TurnImages, image_count
+from mainframe_rag.agent.live_state import ZosObservation
 from mainframe_rag.agent.user_message import derive_retrieval_query
 from mainframe_rag.config import REASONING_EFFORTS, ReasoningEffort, Settings
 from mainframe_rag.logs import error_type
@@ -116,6 +117,13 @@ class AnswerCoreInput:
     # Per-request research mode opt-in (ADR-0013 / #1325, /v1/chat* only);
     # False on every other turn, which keeps its exact behavior and bytes.
     research_mode: bool = False
+    # This turn's z/OS dataset read (ADR-0012, Docs routes only): its text
+    # joins the prompt when the read returned any, and its notice opens the
+    # answer. None on every other turn, which keeps its exact bytes.
+    zos: ZosObservation | None = None
+    # A fixed agent-written line that opens the answer of a follow-up in an
+    # observation-bearing chat whose own turn put no read text in the prompt.
+    answer_notice: str | None = None
 
 
 @dataclass
@@ -461,6 +469,9 @@ class AnswerCoreOutput:
     # Characters of the user's message left out of the prompt to fit the
     # window (issue #1192); 0 when it was sent whole and on no-hits paths.
     message_omitted_chars: int = 0
+    # The turn's z/OS observation facts (ADR-0012: target, acquired_at,
+    # outcome, counts; never text); None on a turn without a read.
+    zos_observation: dict[str, Any] | None = None
 
 
 class CoreToken(TypedDict):
@@ -586,6 +597,10 @@ async def _build_prepared_prompt(
     # search_query, so every other call keeps its exact keyword set. SPL takes
     # precedence over coding when both match.
     mode_kw: dict[str, Any] = {"spl": True} if spl else ({"coding": True} if coding else {})
+    # A read that returned text only (ADR-0012), so every other call keeps
+    # its exact keyword set.
+    if input_data.zos is not None and input_data.zos.has_content:
+        mode_kw = {**mode_kw, "zos": input_data.zos}
     max_context = (
         settings.prompt_max_context_chars_complex
         if complexity == "complex"
@@ -743,6 +758,34 @@ def _finalize_answer(
     )
 
 
+def _answer_notice(
+    input_data: AnswerCoreInput, prepared: PreparedPrompt
+) -> tuple[str | None, dict[str, Any] | None]:
+    """The agent-written line that opens this turn's answer and the
+    observation facts for the response (ADR-0012 D6): a read's distinct
+    citation or its non-`complete` outcome, known only once prompt fitting
+    is; else the route's fixed notice; else nothing."""
+    zos = input_data.zos
+    if zos is None:
+        return input_data.answer_notice, None
+    omitted = prepared.zos_omitted_chars
+    notice = zos.notice(omitted)
+    if input_data.answer_notice is not None and not zos.has_content:
+        # A marked chat stays marked when this turn's own read brought no text.
+        notice = f"{input_data.answer_notice}\n\n{notice}"
+    return notice, zos.fields(omitted)
+
+
+def _with_notice(
+    output: AnswerCoreOutput, notice: str | None, facts: dict[str, Any] | None
+) -> AnswerCoreOutput:
+    """The finalized output opened by the notice. Added after parsing, so
+    the model's text can neither supply nor remove it."""
+    if notice is None:
+        return output
+    return replace(output, answer=f"{notice}\n\n{output.answer}", zos_observation=facts)
+
+
 async def _retrieve_inputs(
     source: AnswerCoreInput, deps: AnswerCoreDeps, parent_span: trace.Span | None,
 ) -> tuple[AnswerCoreInput, RetrievalResult]:
@@ -831,7 +874,10 @@ async def execute_answer_core(
     complexity = "complex" if (spl or coding) else classify_fn(search_text)
 
     if not hits:
-        return _empty_output(search_text, kind, timings, complexity)
+        # A marked chat stays marked through a no-evidence answer (ADR-0012 D6).
+        return _with_notice(
+            _empty_output(search_text, kind, timings, complexity), input_data.answer_notice, None
+        )
 
     # 3. Prompt building (shared with the streaming executor). The temperature is resolved first:
     # a completion-usage count (#1266) sends the generation's own body.
@@ -876,7 +922,7 @@ async def execute_answer_core(
             raise LLMChatError(exc) from exc
 
     llm_ms = int((time.monotonic() - t0) * 1000)
-    return _finalize_answer(
+    return _with_notice(_finalize_answer(
         chat_res.content,
         prepared,
         hits=hits,
@@ -888,7 +934,7 @@ async def execute_answer_core(
         usage=chat_res.usage,
         llm_ms=llm_ms,
         ttft_ms=chat_res.ttft_ms,
-    )
+    ), *_answer_notice(input_data, prepared))
 
 
 async def execute_answer_core_stream(
@@ -924,7 +970,9 @@ async def execute_answer_core_stream(
     # single `final` (schema parity, review S6) and the chat routes emit the
     # canned text from the final output themselves.
     if not hits:
-        yield {"type": "final", "output": _empty_output(search_text, kind, timings, complexity)}
+        yield {"type": "final", "output": _with_notice(
+            _empty_output(search_text, kind, timings, complexity), input_data.answer_notice, None
+        )}
         return
 
     # 3. Prompt building (shared with the buffered executor). The temperature is resolved first:
@@ -937,6 +985,12 @@ async def execute_answer_core_stream(
         input_data, deps, hits, complexity, effort, root_ctx, temperature, coding, spl
     )
     _require_supplied_evidence(prepared, len(hits))
+
+    # The notice is the stream's first text, so a read's outcome is stated
+    # even when generation then fails.
+    notice, zos_facts = _answer_notice(input_data, prepared)
+    if notice is not None:
+        yield {"type": "token", "delta": f"{notice}\n\n", "ttft_ms": None}
 
     # 4. LLM streaming
     t0 = time.monotonic()
@@ -1020,4 +1074,4 @@ async def execute_answer_core_stream(
         llm_ms=llm_ms,
         ttft_ms=ttft_ms,
     )
-    yield {"type": "final", "output": output}
+    yield {"type": "final", "output": _with_notice(output, notice, zos_facts)}

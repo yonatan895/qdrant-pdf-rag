@@ -31,6 +31,11 @@ from mainframe_rag.agent.images import (
     TurnImages,
     wire_messages,
 )
+from mainframe_rag.agent.live_state import (
+    SYSTEM_PROMPT_ZOS_EXTENSION,
+    ZOS_WINDOW_SHARE,
+    ZosObservation,
+)
 from mainframe_rag.agent.tokenizer import PromptWindowExceededError, estimate_tokens
 from mainframe_rag.agent.user_message import (
     MESSAGE_WINDOW_SHARE,
@@ -1242,6 +1247,9 @@ class PreparedPrompt:
     # Characters of the user's message left out of the prompt to fit the
     # window (issue #1192); 0 when the message was sent whole. A count only.
     message_omitted_chars: int = 0
+    # Characters of a z/OS observation cut to fit the window (ADR-0012 D6);
+    # 0 when it was sent whole and on every turn without one. A count only.
+    zos_omitted_chars: int = 0
 
 
 def _prompt_evidence(packed: list[PackedExcerpt], total_hits: int) -> PromptEvidence:
@@ -1794,6 +1802,7 @@ def build_messages(
     search_query: str | None = None,
     coding: bool = False,
     spl: bool = False,
+    zos: ZosObservation | None = None,
 ) -> PreparedPrompt:
     return _build_prompt(
         query,
@@ -1814,6 +1823,7 @@ def build_messages(
         search_query=search_query,
         coding=coding,
         spl=spl,
+        zos=zos,
     )
 
 
@@ -1874,6 +1884,7 @@ def _build_prompt(
     coding: bool = False,
     spl: bool = False,
     images: TurnImages | None = None,
+    zos: ZosObservation | None = None,
 ) -> PreparedPrompt:
     is_chat = history is not None
     # Retention policy (issue #633), identical for planning and recount: the
@@ -1939,6 +1950,37 @@ def _build_prompt(
         len(image_urls) * settings.llm_image_token_reserve if settings is not None else 0
     )
     resolved_note = resolved_code_note(search_text)
+    # A z/OS observation turn (ADR-0012 D6): the protocol closes the system
+    # prompt and the delimited block joins the context entries, cut to its
+    # share of what the fixed content and the previous turn leave, so the
+    # question and the excerpts keep the rest. Other turns keep their bytes.
+    zos_omitted = 0
+    if zos is not None:
+        system_content += SYSTEM_PROMPT_ZOS_EXTENSION
+        if settings is not None:
+            room = (
+                settings.llm_max_model_len
+                - settings.llm_reserved_output_tokens
+                - (
+                    settings.llm_thinking_reserve_tokens_complex
+                    if complexity == "complex"
+                    else settings.llm_thinking_reserve_tokens_simple
+                )
+                - settings.llm_token_safety_margin
+                - image_tokens
+                - estimate_tokens(
+                    "\n".join(
+                        [system_content, *context_entries, QUESTION_LABEL, resolved_note, transcript]
+                    )
+                )
+                - sum(estimate_tokens(m.content) for m in antecedent)
+            )
+        else:
+            room = max_context_chars // 4
+        zos_block, zos_omitted = zos.prompt_block(
+            int(max(0, room) * ZOS_WINDOW_SHARE), _escape_excerpt
+        )
+        context_entries.append(zos_block)
     message_text = query
     # Tokens the estimator under-prices the fitted message by (0 for a
     # message within `query_max_chars`, which is never fitted or re-counted).
@@ -2212,6 +2254,7 @@ def _build_prompt(
         ),
         prompt_tokens=prompt_tokens,
         message_omitted_chars=message_omitted,
+        zos_omitted_chars=zos_omitted,
     )
 
 
@@ -3111,6 +3154,7 @@ def build_chat_messages(
     coding: bool = False,
     spl: bool = False,
     images: TurnImages | None = None,
+    zos: ZosObservation | None = None,
 ) -> PreparedPrompt:
     """Build multi-turn chat prompt messages + supplied-evidence manifest.
 
@@ -3167,4 +3211,5 @@ def build_chat_messages(
         coding=coding,
         spl=spl,
         images=images,
+        zos=zos,
     )
