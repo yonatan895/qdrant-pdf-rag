@@ -2967,8 +2967,10 @@ repeats the refusals for a direct `helm` render in
   run included. The docs Pipe then adds a keyed, non-authorizing audit tag of
   the Open WebUI user id to every agent call (ADR-0012 D3(d); the Pipe side is
   [#1397](https://github.com/yonatan895/qdrant-pdf-rag/pull/1397)). The key is
-  at least 32 random bytes; the Pipe refuses a shorter key and then answers
-  nothing.
+  printable ASCII only, hex or base64 of at least 32 random bytes (site
+  procedure, step 2). The Pipe refuses a shorter key and then answers nothing;
+  so do raw binary bytes. `RAG_ZOS_AUDIT_TAG` is always the exact string `true`;
+  no value or setting renders it otherwise.
 - The agent gets `ZOWE_MCP_ENABLED=true`,
   `ZOWE_MCP_BASE_URL=http://rag-mcp-ftp:8081`, `ZOWE_MCP_AUTH_TOKEN` (the same
   `bridge-token` reference) and `ZOWE_MCP_DRY_RUN` (`ZOS_READ_DRY_RUN`). It
@@ -3024,8 +3026,10 @@ the day reads are enabled. The ingest and generations renders force
    on TCP 21 and `PASSIVEPORTRANGE`.
 2. Create the Secrets (never in `airgap.env` or git):
    `oc -n <ns> create secret generic zos-read --from-literal=ftp-user=... --from-literal=ftp-password=... --from-literal=bridge-token="$(openssl rand -hex 32)"`
-   and, for the docs Pipe's audit tag,
-   `oc -n <ns> create secret generic zos-audit --from-literal=audit-key="$(openssl rand -hex 32)"`.
+   and, for the docs Pipe's audit tag, a key of printable ASCII only (hex or base64 of at least
+   32 random bytes; raw random bytes make the Pipe fail closed for every Docs answer), created so
+   the value never appears in git, argv or shell history:
+   `openssl rand -hex 32 | oc -n <ns> create secret generic zos-audit --from-file=audit-key=/dev/stdin`.
 3. Set the `ZOS_*` keys (see `airgap.env.example`), with
    `ZOS_READ_DRY_RUN=true` first. Then run `airgap:validate` and `airgap:deploy`.
    `deploy.sh` waits up to 180 s for `deploy/rag-mcp-ftp`. The bridge connects

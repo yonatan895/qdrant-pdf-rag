@@ -929,7 +929,8 @@ reads at it. Before turning it on, the site needs written approvals, an
 binding and firewall rules. Then create the Secret `zos-read` (keys
 `ftp-user`, `ftp-password` and `bridge-token`) and set the `ZOS_*` keys of
 `airgap.env.example`, starting with `ZOS_READ_DRY_RUN=true`. A second Secret
-(`ZOS_READ_AUDIT_SECRET`, key `audit-key`, at least 32 random bytes) holds the docs
+(`ZOS_READ_AUDIT_SECRET`, key `audit-key`: printable ASCII only, e.g.
+`openssl rand -hex 32 | oc -n "$NAMESPACE" create secret generic zos-audit --from-file=audit-key=/dev/stdin`) holds the docs
 Pipe's audit-tag key, which validate and deploy require while Open WebUI is on. Validate and deploy
 refuse unless every Open WebUI sign-in and admin role is in
 `ZOS_READ_APPROVED_ROLES`. They also refuse with `AGENT_ROUTE=true`,

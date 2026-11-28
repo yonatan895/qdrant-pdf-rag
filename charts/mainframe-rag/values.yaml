@@ -463,9 +463,10 @@ zosRead:
   dryRun: false
   secretName: ""
   # The docs Pipe's keyed audit tag (ADR-0012 D3(d)): with reads on, Open
-  # WebUI gets RAG_ZOS_AUDIT_TAG=true and RAG_ZOS_AUDIT_KEY from this
-  # operator-created Secret (at least 32 random bytes; the Pipe refuses a
-  # shorter key and then answers nothing). Required while Open WebUI is on;
+  # WebUI gets RAG_ZOS_AUDIT_TAG=true (always that exact string, no knob) and
+  # RAG_ZOS_AUDIT_KEY from this operator-created Secret (printable ASCII, hex
+  # or base64 of at least 32 random bytes; the Pipe refuses a shorter or
+  # binary key and then answers nothing). Required while Open WebUI is on;
   # never the Secret above, so the Open WebUI pod never names the z/OS ID's.
   auditKey:
     secretName: ""
