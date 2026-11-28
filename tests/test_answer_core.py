@@ -3264,3 +3264,140 @@ def test_selection_order_rule_is_pinned_then_model_order_then_retrieval_fill():
     assert _ids(order_selection(candidates, [3, 0], 4, pinned)) == ["P1", "P2", "C4", "C1"]
     assert _ids(order_selection(candidates, [], 3, pinned)) == ["P1", "P2", "C1"]
     assert _ids(order_selection(candidates, [4], 2, pinned)) == ["P1", "P2"]
+
+
+# --- serving licence boundary (#1318) ------------------------------------------
+# The PyMuPDF (AGPL) election is scoped to ingest and operator-run offline tools:
+# no serving process may load it. These are the modules the agent image's
+# processes import: the uvicorn app (Open WebUI-facing chat, search and evidence
+# routes, plus the console router), the feedback service, the team-tool gateways
+# and the MCP adapters.
+SERVING_ENTRY_MODULES = (
+    "mainframe_rag.agent.app",
+    "mainframe_rag.webui.routes",
+    "mainframe_rag.feedback.service",
+    "mainframe_rag.gateways.splunk",
+    "mainframe_rag.gateways.gitlab",
+    "mainframe_rag.mcp.knowledge",
+    "mainframe_rag.mcp.__main__",
+)
+PDF_LIBRARIES = ("pymupdf", "fitz")
+
+# Function-level imports a serving process can reach that would load PyMuPDF if
+# they ran: (module, function, imported module). Each sits on an ingest-only call
+# path, never on a serving request path; a new entry needs that proof first.
+SERVING_REACHABLE_DEFERRED_PDF_IMPORTS = {
+    ("mainframe_rag.ingest.context", "normalize_context", "mainframe_rag.ingest.payload"),
+    ("mainframe_rag.ingest.identity", "prescan_doc_ids", "mainframe_rag.ingest.ibm_pdf"),
+    ("mainframe_rag.ingest.qdrant_io", "upsert_chunks", "mainframe_rag.ingest.payload"),
+}
+
+
+def _pdf_libraries_after_fresh_import(module):
+    """Import one module in a fresh interpreter; return the PDF libraries it loaded."""
+    import subprocess
+    import sys
+
+    src = Path(__file__).resolve().parents[1] / "src"
+    probe = (
+        "import importlib, json, sys\n"
+        f"importlib.import_module({module!r})\n"
+        f"print(json.dumps([n for n in {PDF_LIBRARIES!r} if n in sys.modules]))\n"
+    )
+    done = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=False,
+                          env={"PYTHONPATH": str(src), "PATH": "/usr/bin:/bin"})
+    assert done.returncode == 0, done.stderr[-800:]
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.parametrize("module", SERVING_ENTRY_MODULES)
+def test_serving_entry_module_never_loads_pymupdf(module):
+    assert _pdf_libraries_after_fresh_import(module) == []
+
+
+def test_ingest_entry_still_loads_pymupdf_so_the_serving_probe_is_not_vacuous():
+    assert "pymupdf" in _pdf_libraries_after_fresh_import("mainframe_rag.ingest.run_ingest")
+
+
+def _import_sites(module):
+    """(enclosing function or None, imported module) for every import the module can
+    execute: None for module and class level (runs at import), the qualified function
+    name for deferred ones. `if TYPE_CHECKING:` bodies never run and are skipped."""
+    import ast
+
+    src = Path(__file__).resolve().parents[1] / "src"
+    path = src.joinpath(*module.split(".")).with_suffix(".py")
+    if not path.is_file():
+        path = src.joinpath(*module.split("."), "__init__.py")
+    if not path.is_file():
+        return []
+    package = module if path.name == "__init__.py" else module.rpartition(".")[0]
+    sites = []
+
+    def handle(node, scope, prefix):
+        qualified = f"{prefix}.{getattr(node, 'name', '')}" if prefix else getattr(node, "name", "")
+        if isinstance(node, ast.If) and "TYPE_CHECKING" in ast.unparse(node.test):
+            for stmt in node.orelse:
+                handle(stmt, scope, prefix)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            visit(node, scope or qualified, qualified)
+        elif isinstance(node, ast.ClassDef):
+            visit(node, scope, qualified)
+        elif isinstance(node, ast.Import):
+            sites.extend((scope, alias.name) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                parts = package.split(".")[: len(package.split(".")) - node.level + 1]
+                base = ".".join([*parts, base] if base else parts)
+            sites.append((scope, base))
+            sites.extend((scope, f"{base}.{alias.name}") for alias in node.names)
+        else:
+            visit(node, scope, prefix)
+
+    def visit(node, scope, prefix):
+        for child in ast.iter_child_nodes(node):
+            handle(child, scope, prefix)
+
+    visit(ast.parse(path.read_text(encoding="utf-8")), None, "")
+    return sites
+
+
+def _with_packages(name):
+    parts = name.split(".")
+    return [".".join(parts[:i]) for i in range(1, len(parts) + 1)]
+
+
+def _loads_pdf_at_import(module, memo):
+    """Whether importing `module` runs an import of PyMuPDF (static, transitive)."""
+    if module.split(".")[0] in PDF_LIBRARIES:
+        return True
+    if not module.startswith("mainframe_rag.") or module in memo:
+        return memo.get(module, False)
+    memo[module] = False  # cycle guard while the module is being resolved
+    memo[module] = any(_loads_pdf_at_import(dep, memo)
+                       for scope, name in _import_sites(module) if scope is None
+                       for dep in _with_packages(name))
+    return memo[module]
+
+
+def test_serving_import_graph_reaches_pymupdf_only_through_pinned_ingest_only_deferred_imports():
+    """Static companion of the fresh-import probe: it also follows function-level
+    imports, so no request path can load PyMuPDF behind an import-time check."""
+    memo = {}
+    at_import, deferred = set(), set()
+    pending, seen = list(SERVING_ENTRY_MODULES), set()
+    while pending:
+        module = pending.pop()
+        if module in seen:
+            continue
+        seen.add(module)
+        for scope, name in _import_sites(module):
+            for dep in _with_packages(name):
+                if _loads_pdf_at_import(dep, memo):
+                    (at_import if scope is None else deferred).add((module, scope, dep))
+                elif dep.startswith("mainframe_rag."):
+                    pending.append(dep)
+    assert at_import == set()
+    assert "mainframe_rag.agent.serving" in seen and "mainframe_rag.ingest.qdrant_io" in seen
+    assert deferred == SERVING_REACHABLE_DEFERRED_PDF_IMPORTS
