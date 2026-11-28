@@ -1413,6 +1413,44 @@ jobs:
           fi
           $OWUI on
 
+      # Copy-out and restore across a database migration (docs/deploy.md#owui-copy-restore, #1376):
+      # the operator's two blocks from the bundle's deploy.md run as written (kubectl for oc). An
+      # airgap:deploy of the same release stands in for B (no migration happens on Kind); a chat
+      # written after the copy-out must be gone after the restore and A's airgap:deploy, every
+      # recorded chat back, and the next ordinary chat answered.
+      - name: Open WebUI copy-out and restore (operator lane, deploy.md procedure)
+        if: matrix.lane == 'openwebui-operator'
+        env:
+          KIND_NAME: gapbox
+          APP_NS: ${{ env.NS }}
+          OWUI_STATE: ${{ runner.temp }}/owui-acceptance
+          OWUI_WORKSPACE: ${{ github.workspace }}/gapbox/qdrant-pdf-rag
+          IMAGE_SHA: ${{ env.SHA }}
+          QDRANT_STORAGE_SIZE: 1Gi
+          KIND_BIN: /usr/local/bin/kind
+          KUBECTL: /usr/local/bin/kubectl
+          HELM: /usr/local/bin/helm
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          set -o pipefail
+          OWUI="sh rehearsal-infra/scripts/openwebui/acceptance.sh operator"
+          $OWUI record
+          $OWUI copy-out
+          (cd gapbox/qdrant-pdf-rag && sh scripts/tools/run-task.sh airgap:deploy) 2>&1 | tee "$OWUI_STATE/logs/deploy-upgrade.log"
+          if grep -q 'docs Pipe NOT installed' "$OWUI_STATE/logs/deploy-upgrade.log"; then
+            echo "::error::airgap:deploy after the copy-out did not install the docs Pipe"
+            exit 1
+          fi
+          $OWUI copy-later
+          $OWUI restore
+          (cd gapbox/qdrant-pdf-rag && sh scripts/tools/run-task.sh airgap:deploy) 2>&1 | tee "$OWUI_STATE/logs/deploy-restored.log"
+          if grep -q 'docs Pipe NOT installed' "$OWUI_STATE/logs/deploy-restored.log"; then
+            echo "::error::airgap:deploy after the restore did not install the docs Pipe"
+            exit 1
+          fi
+          $OWUI restored
+
       # The front end next to the agent this lane just deployed (mock reasoning and
       # embedding models behind the test gateway; no hash mode, no GPU). The chart's
       # Open WebUI objects come from this checkout, with Kind stand-ins for the
@@ -1537,6 +1575,8 @@ jobs:
           for f in logs/acceptance.json logs/checks.json logs/first-pass.json logs/record.json logs/rollback-off.json \
             logs/rollback-on.json logs/paced.json logs/apply-openwebui.log logs/apply-support.log logs/apply-platform.log \
             logs/pipeline-first-pass.log logs/deploy-second-pass.log logs/deploy-off.log logs/deploy-on.log \
+            logs/owui-copy-out.log logs/copy-later.json logs/deploy-upgrade.log logs/owui-restore.log \
+            logs/deploy-restored.log logs/restored.json \
             images.txt node-images.txt render/openwebui.yaml render/platform.yaml render/pipe.sha256; do
             test ! -f "$OWUI_STATE/$f" || cp "$OWUI_STATE/$f" "diagnostics/openwebui/$(basename "$f")"
           done

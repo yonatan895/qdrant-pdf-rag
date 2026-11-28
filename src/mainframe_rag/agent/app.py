@@ -119,6 +119,11 @@ from mainframe_rag.agent.images import (
     span_attributes,
     split_chat_images,
 )
+from mainframe_rag.agent.live_state import (
+    ZOS_HISTORY_NOTICE,
+    ZOS_OBSERVATION_MARKER,
+    observe_docs_question,
+)
 from mainframe_rag.agent.metrics import (
     endpoint_for_path,
     record_admission,
@@ -790,16 +795,79 @@ def _unpublish_feedback() -> None:
     feedback = None
 
 
-# Fixed citation marker for z/OS pilot observations (ADR-0012 D6, Option 7A).
-# Any turn flagged via `request.state.feedback_suppressed`, carrying this
+# `ZOS_OBSERVATION_MARKER` is the fixed citation marker for z/OS pilot
+# observations (ADR-0012 D6, Option 7A; owned by agent/live_state.py). Any
+# turn flagged via `request.state.feedback_suppressed`, carrying this
 # marker in prior chat history, or emitting it in the answer is suppressed from
 # `_record_feedback` so z/OS data never enters the 180-day feedback store or
 # `feedback/exchange.py` exports.
-ZOS_OBSERVATION_MARKER = "[z/OS observation]"
 
 
 def _messages_carry_zos_observation(messages: Sequence[ChatMessage]) -> bool:
     return any(ZOS_OBSERVATION_MARKER in (msg.content or "") for msg in messages)
+
+
+# The docs Pipe's non-authorizing audit field (ADR-0012 D3(d)): a keyed HMAC
+# of the Open WebUI user id, hex SHA-256. Logged with the read, never used.
+ZOS_AUDIT_TAG_HEADER = "x-zos-audit-tag"
+
+
+async def _attach_zos_observation(
+    owner: _RequestSpan, core_input: AnswerCoreInput, question: str
+) -> None:
+    """The Docs routes' z/OS dataset read (ADR-0012 D1, D6; /v1/answer and
+    /v1/chat*, never the console). With ZOWE_MCP_ENABLED off this does
+    nothing. Otherwise a turn that retrieved excerpts and whose own question
+    names an exact dataset gets one read: its observation rides the core
+    input, and the turn is kept out of the feedback store whatever the
+    outcome. A follow-up in an observation-bearing chat carries the marker
+    forward, so the chat stays marked when its first turns are trimmed.
+
+    `question` is the user's own text for this turn: never the searched,
+    condensed or image-read text, Splunk context or history."""
+    if not settings.zowe_mcp_enabled:
+        return
+    request = owner.request
+    if getattr(request.state, "feedback_suppressed", False):
+        core_input.answer_notice = ZOS_HISTORY_NOTICE
+    if core_input.hits:
+        tag = request.headers.get(ZOS_AUDIT_TAG_HEADER)
+        if tag is not None and not (len(tag) == 64 and set(tag) <= set("0123456789abcdef")):
+            tag = None
+        with use_span(owner.span, end_on_exit=False):
+            observation = await asyncio.to_thread(
+                observe_docs_question, settings, zowe_mcp, request.state.request_id, question, tag
+            )
+        if observation is not None:
+            request.state.feedback_suppressed = True
+            core_input.zos = observation
+
+
+def _zos_fields(request: Request, output: AnswerCoreOutput) -> dict:
+    """Response fields of a z/OS observation turn (ADR-0012): the observation
+    facts, and `feedback_suppressed` so the docs Pipe omits its answer
+    reference. Empty on every other turn and whenever ZOWE_MCP_ENABLED is
+    off, so those responses keep their exact bytes."""
+    if not settings.zowe_mcp_enabled:
+        return {}
+    fields: dict = {}
+    if output.zos_observation is not None:
+        fields["zos_observation"] = output.zos_observation
+    if getattr(request.state, "feedback_suppressed", False):
+        fields["feedback_suppressed"] = True
+    return fields
+
+
+def _json_with(response: Response | None, body: BaseModel, extra: dict):
+    """`body` unchanged, or with `extra` merged into its JSON when there is
+    any (the injected response's Server-Timing header is kept)."""
+    if not extra:
+        return body
+    timing = response.headers.get("server-timing") if response is not None else None
+    return JSONResponse(
+        content={**jsonable_encoder(body), **extra},
+        headers={"Server-Timing": timing} if timing else None,
+    )
 
 
 def _record_feedback(
@@ -2442,7 +2510,8 @@ def _answer_final_frames(
     log.info(json_log(request_id, "answer", **fields))
     _record_feedback(owner.request, "answer_stream", output, fields)
 
-    final = output_final_payload(request_id, output, kind)
+    final = {**output_final_payload(request_id, output, kind),
+             **_zos_fields(owner.request, output)}
     root_span.set_attributes(
         _answer_span_attrs(
             kind,
@@ -2530,6 +2599,7 @@ async def _answer_response(req, response, is_stream, owner):
         query_kind=kind,
         timings=timings,
     )
+    await _attach_zos_observation(owner, core_input, req.query)
 
     if not is_stream:
         output = await _execute_core_or_raise(
@@ -2576,11 +2646,11 @@ async def _answer_response(req, response, is_stream, owner):
                 )
             )
         _record_answered(owner, "answer", kind, output, llm_model)
-        return AnswerResponse(
+        return _json_with(response, AnswerResponse(
             request_id=request_id,
             answer=output.answer,
             **_answer_metadata(output),
-        )
+        ), _zos_fields(request, output))
 
     # SSE streaming path
     headers = {
@@ -2743,12 +2813,16 @@ def _with_image_fields(fields: dict, images: TurnImages | None) -> dict:
     return fields
 
 
-def _chat_json(images: TurnImages | None, body: ChatCompletionsResponse):
+def _chat_json(
+    images: TurnImages | None, body: ChatCompletionsResponse, extra: dict | None = None
+):
     """A buffered chat response; an image turn's body adds `image_reads`
-    (#1287) and other turns return the model unchanged."""
+    (#1287), a z/OS observation turn's its fields (ADR-0012), and other
+    turns return the model unchanged."""
     if images is None:
-        return body
-    return JSONResponse(content={**jsonable_encoder(body), **images.final_fields()})
+        return _json_with(None, body, extra or {})
+    return JSONResponse(
+        content={**jsonable_encoder(body), **images.final_fields(), **(extra or {})})
 
 
 def _chat_final_frames(
@@ -2768,7 +2842,7 @@ def _chat_final_frames(
     request_id = owner.request.state.request_id
     if not output.hits:
         yield format_openai_chunk(chat_id, llm_model, delta_content=output.answer)
-        extra_meta = _answer_metadata(output, hits=[])
+        extra_meta = {**_answer_metadata(output, hits=[]), **_zos_fields(owner.request, output)}
         if images is not None:
             extra_meta.update(images.final_fields())
         root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
@@ -2784,7 +2858,8 @@ def _chat_final_frames(
         cites_delta = "\n\n**Citations:**\n" + "\n".join(f"- {c}" for c in output.citations)
         yield format_openai_chunk(chat_id, llm_model, delta_content=cites_delta)
 
-    extra_meta = _answer_metadata(output, hits=[h.model_dump() for h in output.hits])
+    extra_meta = {**_answer_metadata(output, hits=[h.model_dump() for h in output.hits]),
+                  **_zos_fields(owner.request, output)}
     if images is not None:
         extra_meta.update(images.final_fields())
     _record_answered(owner, "chat", kind, output, llm_model)
@@ -2946,6 +3021,7 @@ async def _chat_response(req, response, owner):
     hits, kind, timings = core_input.hits, core_input.query_kind, core_input.timings
     is_stream = req.stream
     images = core_input.images
+    await _attach_zos_observation(owner, core_input, core_input.query)
 
     if not is_stream:
         if any(not math.isfinite(h.score) for h in hits):
@@ -2978,7 +3054,7 @@ async def _chat_response(req, response, owner):
                 usage=TokenUsage(),
                 hits=[],
                 **_answer_metadata(output),
-            ))
+            ), _zos_fields(owner.request, output))
 
         content = output.answer
         # parse_answer moves SCRIPT_LANGS fences into `script`; a buffered
@@ -3011,7 +3087,7 @@ async def _chat_response(req, response, owner):
             usage=output.usage,
             hits=output.hits,
             **_answer_metadata(output),
-        ))
+        ), _zos_fields(owner.request, output))
 
     chat_id = f"chatcmpl-{request_id}"
     return owner.stream(
