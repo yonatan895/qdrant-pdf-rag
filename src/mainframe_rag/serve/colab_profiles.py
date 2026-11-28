@@ -20,7 +20,10 @@ GENERATOR_REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
 REASONING_DEFAULTS = {"model_id": GENERATOR_MODEL, "revision": GENERATOR_REVISION,
                       "max_model_len": 32768, "reasoning_parser": "qwen3"}
 REASONING_WINDOW_BOUNDS = (4096, 131072)
-REASONING_SEQUENCE_BOUNDS = (1, 16)
+# 64 (#1358, #300): a small chat model on the reasoning slot (contextual gists:
+# many short sequences) needs more than the 27B's 2-16 to show where its
+# throughput saturates; KV fit is still vLLM's admission, not this bound.
+REASONING_SEQUENCE_BOUNDS = (1, 64)
 REASONING_PARSER_NONE = "none"
 _MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
 _REVISION = re.compile(r"[0-9a-f]{40}")
