@@ -2961,6 +2961,14 @@ repeats the refusals for a direct `helm` render in
   bearer (D4). Egress goes only to cluster DNS and `ZOS_FTP_HOST_IP`/32 on
   `ZOS_FTP_PORT` (default 21) and `ZOS_FTP_PASSIVE_PORTS`. It needs an
   enforcing CNI.
+- Open WebUI (when on) gets `RAG_ZOS_AUDIT_TAG=true` and `RAG_ZOS_AUDIT_KEY`
+  from `ZOS_READ_AUDIT_SECRET` / `ZOS_READ_AUDIT_SECRET_KEY` (default `audit-key`)
+  by Secret reference. This holds exactly when the agent's reads are on, dry
+  run included. The docs Pipe then adds a keyed, non-authorizing audit tag of
+  the Open WebUI user id to every agent call (ADR-0012 D3(d); the Pipe side is
+  [#1397](https://github.com/yonatan895/qdrant-pdf-rag/pull/1397)). The key is
+  at least 32 random bytes; the Pipe refuses a shorter key and then answers
+  nothing.
 - The agent gets `ZOWE_MCP_ENABLED=true`,
   `ZOWE_MCP_BASE_URL=http://rag-mcp-ftp:8081`, `ZOWE_MCP_AUTH_TOKEN` (the same
   `bridge-token` reference) and `ZOWE_MCP_DRY_RUN` (`ZOS_READ_DRY_RUN`). It
@@ -2980,6 +2988,11 @@ addresses and paths are never shown):
   list to check.
 - D3 guard (c): `AGENT_ROUTE=true`, `AGENT_NETWORK_POLICY=false` or any
   `AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES`.
+- D3(d): no `ZOS_READ_AUDIT_SECRET` while Open WebUI is on, because the Pipe
+  would fail closed for every Docs answer. `ZOS_READ_AUDIT_SECRET` equal to
+  `ZOS_READ_SECRET` is also refused: the Open WebUI pod never references the
+  Secret that holds the z/OS ID. validate and deploy check that the key is
+  present; the Pipe checks its length.
 - D4: no `ZOS_READ_SECRET`. The bridge's NetworkPolicy has no off switch.
   `validate.sh` and `deploy.sh` also check that the Secret has `ftp-user`,
   `ftp-password` and `bridge-token`, and that `bridge-token` is at least 32
@@ -3009,8 +3022,10 @@ the day reads are enabled. The ingest and generations renders force
    `EgressIP` scoped to `app: rag-mcp-ftp`. The site registers its terminal
    alias, binds the READ-only RACF ID to it, and opens the firewall to the LPAR
    on TCP 21 and `PASSIVEPORTRANGE`.
-2. Create the Secret (never in `airgap.env` or git):
-   `oc -n <ns> create secret generic zos-read --from-literal=ftp-user=... --from-literal=ftp-password=... --from-literal=bridge-token="$(openssl rand -hex 32)"`.
+2. Create the Secrets (never in `airgap.env` or git):
+   `oc -n <ns> create secret generic zos-read --from-literal=ftp-user=... --from-literal=ftp-password=... --from-literal=bridge-token="$(openssl rand -hex 32)"`
+   and, for the docs Pipe's audit tag,
+   `oc -n <ns> create secret generic zos-audit --from-literal=audit-key="$(openssl rand -hex 32)"`.
 3. Set the `ZOS_*` keys (see `airgap.env.example`), with
    `ZOS_READ_DRY_RUN=true` first. Then run `airgap:validate` and `airgap:deploy`.
    `deploy.sh` waits up to 180 s for `deploy/rag-mcp-ftp`. The bridge connects
@@ -3026,8 +3041,8 @@ the day reads are enabled. The ingest and generations renders force
    redeploy, and make one live read. Record ids, the outcome and bytes only.
 
 **Rollback.** `ZOS_READ_ENABLED=false` and `airgap:deploy`: the release
-prunes the four objects (none holds data) and the agent's `ZOWE_MCP_*`
-settings. `ZOS_READ_DRY_RUN=true` stops live calls but keeps the bridge running
+prunes the four objects (none holds data), the agent's `ZOWE_MCP_*`
+settings and Open WebUI's `RAG_ZOS_AUDIT_*` settings. `ZOS_READ_DRY_RUN=true` stops live calls but keeps the bridge running
 for the probes.
 
 **Evidence.** Render and refusal tests are in

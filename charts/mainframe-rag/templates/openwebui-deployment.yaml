@@ -275,6 +275,19 @@ spec:
             - name: RAG_ANSWER_REFERENCE
               value: "true"
             {{- end }}
+            {{- if include "mainframe-rag.zosReadEnabled" . }}
+            # z/OS dataset reads on (ADR-0012 D3(d), #1294): the docs Pipe adds a
+            # keyed, non-authorizing audit tag of the Open WebUI user id to every
+            # agent call. Exactly when the agent's reads are on; the key only by
+            # Secret reference (the render refuses reads without one).
+            - name: RAG_ZOS_AUDIT_TAG
+              value: "true"
+            - name: RAG_ZOS_AUDIT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.zosRead.auditKey.secretName }}
+                  key: {{ .Values.zosRead.auditKey.key }}
+            {{- end }}
             {{- if include "mainframe-rag.chatImages" . }}
             # Pasted images in temporary chats (#1287, ADR-0007 V1/V2): the
             # browser sends them inline as data URLs (no upload, nothing stored)

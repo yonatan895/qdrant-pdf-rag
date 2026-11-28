@@ -410,6 +410,16 @@ FEEDBACK_ENABLED=true is not refused (D6, Option 7A).
 {{- fail (printf "zosRead.enabled=true refused with networkPolicy.allowedNamespaces set (AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES): %s" $guard) -}}
 {{- end -}}
 {{- if .Values.openwebui.enabled -}}
+{{- $audit := $z.auditKey | default dict -}}
+{{- if not $audit.secretName -}}
+{{- fail "zosRead.enabled=true refused without zosRead.auditKey.secretName: the docs Pipe tags every agent call with a keyed audit tag (ADR-0012 D3(d)) and answers nothing without its key. Create the Secret and set it, or keep z/OS reads off (ZOS_READ_ENABLED=false in airgap.env)" -}}
+{{- end -}}
+{{- if eq (toString $audit.secretName) (toString $z.secretName) -}}
+{{- fail "zosRead.auditKey.secretName must not be zosRead.secretName: the Open WebUI pod must not reference the Secret that holds the z/OS ID" -}}
+{{- end -}}
+{{- if not $audit.key -}}
+{{- fail "zosRead.auditKey.key must not be empty" -}}
+{{- end -}}
 {{- $approved := $z.approvedRoles | default list -}}
 {{- $oidc := .Values.openwebui.oidc | default dict -}}
 {{- range $raw := concat (splitList "," (toString ($oidc.allowedRoles | default ""))) (splitList "," (toString ($oidc.adminRoles | default ""))) -}}

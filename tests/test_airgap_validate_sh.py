@@ -2375,7 +2375,8 @@ def _zos_validate(tree, **env):
     write_stub(tree / "bin" / "kubectl", ZOS_KUBECTL)
     selected = {
         **OWUI_OPERATOR_ENV, "ZOS_READ_ENABLED": "true", "ZOS_READ_SECRET": "zos-read",
-        "ZOS_READ_APPROVED_ROLES": "staff,docs-admins", "ZOS_READ_DATASET_ALLOWLIST": "SYS1.PARMLIB(IEASYS00)",
+        "ZOS_READ_APPROVED_ROLES": "staff,docs-admins", "ZOS_READ_AUDIT_SECRET": "zos-audit",
+        "ZOS_READ_DATASET_ALLOWLIST": "SYS1.PARMLIB(IEASYS00)",
         "ZOS_FTP_HOST": "192.0.2.44", "ZOS_FTP_PASSIVE_PORTS": "50000-50100", "ZOS_FTP_TRANSPORT_MODE": "plain",
         "ZOS_FTP_PLAIN_ACCEPTED": "true", "TOKEN_B64": _b64(ZOS_GOOD_TOKEN.encode()), **env,
     }
@@ -2405,6 +2406,7 @@ def test_validate_reports_the_zos_read_selection(tree):
     ({"ZOS_FTP_TRANSPORT_MODE": ""}, "ZOS_FTP_TRANSPORT_MODE must be ftps or plain"),
     ({"ZOS_FTP_PLAIN_ACCEPTED": "false"}, "ZOS_FTP_TRANSPORT_MODE=plain requires ZOS_FTP_PLAIN_ACCEPTED=true"),
     ({"ZOS_READ_SECRET": ""}, "required inputs are missing: ZOS_READ_SECRET."),
+    ({"ZOS_READ_AUDIT_SECRET": ""}, "ZOS_READ_ENABLED=true refused without ZOS_READ_AUDIT_SECRET"),
     ({"ZOS_FTP_TRANSPORT_MODE": "ftps", "ZOS_FTP_CA_FILE": "/nonexistent/zq-site-ca.pem"},
      "ZOS_FTP_CA_FILE is unreadable"),
     ({"ZOS_READ_ENABLED_TOOLS": "dataset_read,uss_read"}, "ZOS_READ_ENABLED_TOOLS must be a subset"),
@@ -2431,6 +2433,7 @@ def test_validate_live_verifies_the_zos_read_secret(tree):
     ({"MISSING_KEY": "ftp-user"}, "required Secret key is missing or empty: ftp-user"),
     ({"MISSING_KEY": "ftp-password"}, "required Secret key is missing or empty: ftp-password"),
     ({"MISSING_KEY": "bridge-token"}, "required Secret key is missing or empty: bridge-token"),
+    ({"MISSING_KEY": "audit-key"}, "required Secret key is missing or empty: audit-key"),
     ({"TOKEN_B64": _b64(b"short-token-7731")}, "E_ZOS_BRIDGE_TOKEN"),
     ({"TOKEN_B64": _b64(ZOS_GOOD_TOKEN.encode() + b"\n")}, "E_ZOS_BRIDGE_TOKEN"),
 ])

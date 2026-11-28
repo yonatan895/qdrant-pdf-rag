@@ -861,6 +861,16 @@ OPERATOR_KEYS: tuple[OperatorKey, ...] = (
         "#1294", _EX_MAP, helm_path="zosRead.secretName",
     ),
     OperatorKey(
+        "ZOS_READ_AUDIT_SECRET", _SEC_ZOS, "secret-ref", "",
+        "Operator-created Secret holding the docs Pipe's z/OS audit-tag key (required with Open WebUI on).",
+        "#1294", _EX_MAP, helm_path="zosRead.auditKey.secretName",
+    ),
+    OperatorKey(
+        "ZOS_READ_AUDIT_SECRET_KEY", _SEC_ZOS, "str", "audit-key",
+        "Data key of the audit-tag key in ZOS_READ_AUDIT_SECRET (at least 32 random bytes).",
+        "#1294", _EX_MAP, helm_path="zosRead.auditKey.key",
+    ),
+    OperatorKey(
         "ZOS_READ_APPROVED_ROLES", _SEC_ZOS, "str", "",
         "Comma-separated roles approved for z/OS reads; every Open WebUI sign-in and admin role must be listed.",
         "#1294", _EX_MAP, helm_path="zosRead.approvedRoles",

@@ -462,6 +462,14 @@ zosRead:
   # (ADR-0012 D8 dry run). The bridge still deploys, for the site probe.
   dryRun: false
   secretName: ""
+  # The docs Pipe's keyed audit tag (ADR-0012 D3(d)): with reads on, Open
+  # WebUI gets RAG_ZOS_AUDIT_TAG=true and RAG_ZOS_AUDIT_KEY from this
+  # operator-created Secret (at least 32 random bytes; the Pipe refuses a
+  # shorter key and then answers nothing). Required while Open WebUI is on;
+  # never the Secret above, so the Open WebUI pod never names the z/OS ID's.
+  auditKey:
+    secretName: ""
+    key: audit-key
   # Every Open WebUI sign-in and admin role must be listed (exact names).
   approvedRoles: []
   # Exact dataset or PDS(MEMBER) names, upper case; nothing else is read.

@@ -646,6 +646,7 @@ def test_config_check_mirrors_the_zos_read_refusals():
     enabled = {
         "OPENWEBUI_ENABLED": "true", "OPENWEBUI_OIDC_ALLOWED_ROLES": "staff", "OPENWEBUI_OIDC_ADMIN_ROLES": "docs-admins",
         "ZOS_READ_ENABLED": "true", "ZOS_READ_SECRET": "zos-read", "ZOS_READ_APPROVED_ROLES": "staff,docs-admins",
+        "ZOS_READ_AUDIT_SECRET": "zos-audit",
         "ZOS_READ_DATASET_ALLOWLIST": "SYS1.PARMLIB(IEASYS00)", "ZOS_FTP_HOST": "192.0.2.44",
         "ZOS_FTP_PASSIVE_PORTS": "50000-50100", "ZOS_FTP_TRANSPORT_MODE": "plain", "ZOS_FTP_PLAIN_ACCEPTED": "true",
     }
@@ -663,6 +664,7 @@ def test_config_check_mirrors_the_zos_read_refusals():
         ({"AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES": "zq-tools"}, "refused with AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES"),
         ({"ZOS_FTP_TRANSPORT_MODE": "zq-auto"}, "ZOS_FTP_TRANSPORT_MODE must be ftps or plain"),
         ({"ZOS_READ_ENABLED_TOOLS": "zq_write"}, "ZOS_READ_ENABLED_TOOLS must be a subset"),
+        ({"ZOS_READ_AUDIT_SECRET": ""}, "ZOS_READ_ENABLED=true refused without ZOS_READ_AUDIT_SECRET"),
     ):
         errors = zos_errors({**enabled, **chosen})
         assert any(rule in e for e in errors), (chosen, errors)

@@ -3832,6 +3832,7 @@ def _zos_deploy(tree, *extra, **env):
     """Open WebUI on (roles staff, docs-admins) plus accepted z/OS reads (plain FTP, owner-accepted)."""
     selected = {
         "ZOS_READ_ENABLED": "true", "ZOS_READ_SECRET": "zos-read", "ZOS_READ_APPROVED_ROLES": "staff,docs-admins",
+        "ZOS_READ_AUDIT_SECRET": "zos-audit",
         "ZOS_READ_DATASET_ALLOWLIST": "SYS1.PARMLIB(IEASYS00)", "ZOS_FTP_HOST": "192.0.2.44",
         "ZOS_FTP_PASSIVE_PORTS": "50000-50100", "ZOS_FTP_TRANSPORT_MODE": "plain", "ZOS_FTP_PLAIN_ACCEPTED": "true",
         "ZOS_BRIDGE_TOKEN_B64": b64(ZOS_TOKEN), **env,
@@ -3868,6 +3869,14 @@ def test_zos_reads_deploy_checks_the_secret_renders_and_waits(tree):
     for key in ("ftp-user", "ftp-password", "bridge-token"):
         assert f'get secret zos-read -o go-template={{{{if index .data "{key}"}}}}' in flat
         assert flat.index(f'"{key}"') < flat.index("upgrade")
+    # The docs Pipe's audit key (#1397), in its own Secret, also before the release.
+    assert 'get secret zos-audit -o go-template={{if index .data "audit-key"}}' in flat
+    assert flat.index('"audit-key"') < flat.index("upgrade")
+    owui = next(d for d in yaml.safe_load_all(rendered)
+                if d and d["kind"] == "Deployment" and d["metadata"]["name"] == "rag-openwebui")
+    env = {e["name"]: e for e in owui["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["RAG_ZOS_AUDIT_TAG"]["value"] == "true"
+    assert env["RAG_ZOS_AUDIT_KEY"]["valueFrom"]["secretKeyRef"] == {"name": "zos-audit", "key": "audit-key"}
     assert flat.index("jsonpath={.data['bridge-token']}") < flat.index("upgrade")
     # The bridge is waited for after the release, at most 180 s.
     assert log.index("deploy/rag-mcp-ftp\n--timeout=180s") > log.index("upgrade")
@@ -3882,7 +3891,7 @@ def test_a_bridge_that_is_not_ready_fails_with_the_off_switch_named(tree):
     _assert_token_never_shown(tree, r)
 
 
-@pytest.mark.parametrize("key", ["ftp-user", "ftp-password", "bridge-token"])
+@pytest.mark.parametrize("key", ["ftp-user", "ftp-password", "bridge-token", "audit-key"])
 def test_missing_zos_read_secret_key_blocks_before_mutation(tree, key):
     r = _zos_deploy(tree, ("MISSING_KEY", key))
     assert r.returncode != 0
@@ -3923,6 +3932,8 @@ _ZOS_GUARD_C = "z/OS reads are limited to signed-in team members (ADR-0012 D3 gu
     ({"ZOS_FTP_TRANSPORT_MODE": ""}, "ZOS_FTP_TRANSPORT_MODE must be ftps or plain"),
     ({"ZOS_READ_ENABLED": "maybe"}, "ZOS_READ_ENABLED must be true/false"),
     ({"ZOS_READ_SECRET": "Zos_Read"}, "ZOS_READ_SECRET must be a DNS-subdomain name"),
+    # ADR-0012 D3(d), #1397: the docs Pipe answers nothing without its audit key.
+    ({"ZOS_READ_AUDIT_SECRET": ""}, "ZOS_READ_ENABLED=true refused without ZOS_READ_AUDIT_SECRET"),
 ])
 def test_unsafe_or_invalid_zos_read_selection_fails_before_any_mutation(tree, env, message):
     r = _zos_deploy(tree, **env)

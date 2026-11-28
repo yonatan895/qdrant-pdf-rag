@@ -928,7 +928,9 @@ reads at it. Before turning it on, the site needs written approvals, an
 `EgressIP` that cluster-admin scopes to `app: rag-mcp-ftp`, a RACF terminal
 binding and firewall rules. Then create the Secret `zos-read` (keys
 `ftp-user`, `ftp-password` and `bridge-token`) and set the `ZOS_*` keys of
-`airgap.env.example`, starting with `ZOS_READ_DRY_RUN=true`. Validate and deploy
+`airgap.env.example`, starting with `ZOS_READ_DRY_RUN=true`. A second Secret
+(`ZOS_READ_AUDIT_SECRET`, key `audit-key`, at least 32 random bytes) holds the docs
+Pipe's audit-tag key, which validate and deploy require while Open WebUI is on. Validate and deploy
 refuse unless every Open WebUI sign-in and admin role is in
 `ZOS_READ_APPROVED_ROLES`. They also refuse with `AGENT_ROUTE=true`,
 `AGENT_NETWORK_POLICY=false` or extra agent namespaces, and when the transport is

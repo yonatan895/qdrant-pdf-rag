@@ -47,7 +47,8 @@ TEAM_TOOLS_KEYS = [
     "SPLUNK_GATEWAY_MEMORY_LIMIT", "GATEWAY_BASE_URL",
 ]
 ZOS_KEYS = (
-    "ZOS_READ_ENABLED", "ZOS_READ_DRY_RUN", "ZOS_READ_SECRET", "ZOS_READ_APPROVED_ROLES",
+    "ZOS_READ_ENABLED", "ZOS_READ_DRY_RUN", "ZOS_READ_SECRET", "ZOS_READ_AUDIT_SECRET", "ZOS_READ_AUDIT_SECRET_KEY",
+    "ZOS_READ_APPROVED_ROLES",
     "ZOS_READ_DATASET_ALLOWLIST", "ZOS_READ_ENABLED_TOOLS", "ZOS_READ_JES_JOBNAME_PREFIXES",
     "ZOS_READ_JES_OWNER_PREFIXES", "ZOS_FTP_HOST", "ZOS_FTP_PORT", "ZOS_FTP_HOST_IP", "ZOS_FTP_PASSIVE_PORTS",
     "ZOS_FTP_TRANSPORT_MODE", "ZOS_FTP_PLAIN_ACCEPTED", "ZOS_FTP_CA_FILE", "ZOS_FTP_ENCODING",
@@ -2149,7 +2150,8 @@ def _zos_env(monkeypatch, tmp_path, **env) -> None:
     _owui_env(monkeypatch, tmp_path)
     roles = ",".join([OWUI_ON["OPENWEBUI_OIDC_ALLOWED_ROLES"], OWUI_ON["OPENWEBUI_OIDC_ADMIN_ROLES"]])
     selected = {
-        "ZOS_READ_ENABLED": "true", "ZOS_READ_SECRET": "zos-read", "ZOS_READ_APPROVED_ROLES": roles,
+        "ZOS_READ_ENABLED": "true", "ZOS_READ_SECRET": "zos-read", "ZOS_READ_AUDIT_SECRET": "zos-audit",
+        "ZOS_READ_APPROVED_ROLES": roles,
         "ZOS_READ_DATASET_ALLOWLIST": ZOS_TRICKY_ALLOWLIST, "ZOS_FTP_HOST": "192.0.2.44",
         "ZOS_FTP_PASSIVE_PORTS": "50000-50100", "ZOS_FTP_TRANSPORT_MODE": "plain", "ZOS_FTP_PLAIN_ACCEPTED": "true",
         **env,
@@ -2189,6 +2191,7 @@ def test_zos_reads_plain_selection_emits_the_exact_block(monkeypatch, mapper_env
     values = mapped(mapper_env)
     assert values["zosRead"] == {
         "enabled": True, "dryRun": False, "secretName": "zos-read",
+        "auditKey": {"secretName": "zos-audit", "key": "audit-key"},
         "approvedRoles": [*OWUI_ON["OPENWEBUI_OIDC_ALLOWED_ROLES"].split(","),
                           *OWUI_ON["OPENWEBUI_OIDC_ADMIN_ROLES"].split(",")],
         "datasetAllowlist": ZOS_CANONICAL_ALLOWLIST,
@@ -2273,6 +2276,15 @@ _ZOS_REFUSALS = [
     ({"ZOS_READ_JES_JOBNAME_PREFIXES": "ZQPAY*"}, "ZOS_READ_JES_JOBNAME_PREFIXES must hold exact prefixes"),
     ({"ZOS_READ_DRY_RUN": "maybe"}, "ZOS_READ_DRY_RUN"),
     ({"ZOS_BRIDGE_CPU_REQUEST": "2", "ZOS_BRIDGE_CPU_LIMIT": "1"}, "ZOS_BRIDGE_CPU_LIMIT"),
+    # ADR-0012 D3(d), #1397: the docs Pipe answers nothing without its audit key.
+    ({"ZOS_READ_AUDIT_SECRET": None},
+     ("ZOS_READ_ENABLED=true refused without ZOS_READ_AUDIT_SECRET: the docs Pipe tags every agent call with a "
+      "keyed audit tag (ADR-0012 D3(d)) and answers nothing without its key")),
+    ({"ZOS_READ_AUDIT_SECRET": "zos-read"},
+     ("ZOS_READ_AUDIT_SECRET must not be ZOS_READ_SECRET: the Open WebUI pod must not reference the Secret that "
+      "holds the z/OS ID")),
+    ({"ZOS_READ_AUDIT_SECRET": "Bad_Name"}, "ZOS_READ_AUDIT_SECRET must be a DNS-subdomain Secret name"),
+    ({"ZOS_READ_AUDIT_SECRET_KEY": "zq key"}, "ZOS_READ_AUDIT_SECRET_KEY must be a Secret data key"),
 ]
 
 
@@ -2283,7 +2295,7 @@ def test_zos_reads_refusals_are_fixed_and_write_nothing(monkeypatch, mapper_env,
     assert r.returncode != 0 and not out.exists()
     assert message in r.stderr
     # Fixed text: never a supplied role, name, address or path.
-    for value in ("zq-contractors", "zq-site-admins", "zq-tools", "ZQ1", "ZQPAY", "zq_write", "zq-no-such-codec",
+    for value in ("zq-contractors", "zq-site-admins", "zq-tools", "ZQ1", "ZQPAY", "zq_write", "zq-no-such-codec", "zq key",
                   "192.0.2.300", "Bad_Name", OWUI_ON["OPENWEBUI_OIDC_ALLOWED_ROLES"]):
         assert value not in r.stderr, value
 
@@ -2311,8 +2323,12 @@ def test_zos_reads_shapes_are_checked_while_off(monkeypatch, mapper_env, tmp_pat
 
 def test_zos_reads_without_open_webui_have_no_role_list_to_check(monkeypatch, mapper_env, tmp_path):
     """Mirrors the chart: the guard reads the sign-in lists the front end renders."""
-    _zos_env(monkeypatch, tmp_path, OPENWEBUI_ENABLED="false", ZOS_READ_APPROVED_ROLES=None)
-    assert mapped(mapper_env)["zosRead"]["approvedRoles"] == []
+    _zos_env(monkeypatch, tmp_path, OPENWEBUI_ENABLED="false", ZOS_READ_APPROVED_ROLES=None,
+             ZOS_READ_AUDIT_SECRET=None)
+    zos = mapped(mapper_env)["zosRead"]
+    assert zos["approvedRoles"] == []
+    # No docs Pipe, no audit tag: the key is not required without Open WebUI.
+    assert zos["auditKey"] == {"secretName": "", "key": "audit-key"}
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is required for the round-trip")

@@ -597,6 +597,7 @@ ZOS_DEFAULT_TOOLS = ("dataset_read",)
 ZOS_JES_TOOLS = ("job_status", "jes_spool_read")
 ZOS_TRANSPORT_MODES = ("ftps", "plain")
 ZOS_DEFAULT_ENCODING = "latin-1"
+ZOS_DEFAULT_AUDIT_KEY = "audit-key"
 _ZOS_QUALIFIER = re.compile(r"[A-Z#$@][A-Z0-9#$@-]{0,7}")
 _ZOS_MEMBER = re.compile(r"[A-Z#$@][A-Z0-9#$@]{0,7}")
 _ZOS_FORBIDDEN = frozenset("'\"*?%/\\")
@@ -672,6 +673,12 @@ def zos_read_config(values: Mapping[str, str]) -> dict[str, object] | None:
     secret = values.get("ZOS_READ_SECRET", "")
     if secret and (len(secret) > 253 or _DNS_SUBDOMAIN.fullmatch(secret) is None):
         raise ValueError("ZOS_READ_SECRET must be a DNS-subdomain Secret name")
+    audit_secret = values.get("ZOS_READ_AUDIT_SECRET", "")
+    if audit_secret and (len(audit_secret) > 253 or _DNS_SUBDOMAIN.fullmatch(audit_secret) is None):
+        raise ValueError("ZOS_READ_AUDIT_SECRET must be a DNS-subdomain Secret name")
+    audit_key = values.get("ZOS_READ_AUDIT_SECRET_KEY", "") or ZOS_DEFAULT_AUDIT_KEY
+    if len(audit_key) > 253 or re.fullmatch(r"[-._a-zA-Z0-9]+", audit_key) is None:
+        raise ValueError("ZOS_READ_AUDIT_SECRET_KEY must be a Secret data key (letters, digits, '-', '_', '.')")
     raw_roles = values.get("ZOS_READ_APPROVED_ROLES", "")
     if raw_roles and _NAME_LIST.fullmatch(raw_roles) is None:
         raise ValueError("ZOS_READ_APPROVED_ROLES must be a comma-separated list of role names")
@@ -730,6 +737,15 @@ def zos_read_config(values: Mapping[str, str]) -> dict[str, object] | None:
     # ADR-0012 D3 guard (b): every sign-in and admin role is approved (an admin
     # role alone signs a user in). The lists are the ones Open WebUI renders.
     if parse_strict_bool("OPENWEBUI_ENABLED", values.get("OPENWEBUI_ENABLED", ""), True):
+        # ADR-0012 D3(d), #1397: the docs Pipe tags every agent call with a keyed
+        # audit tag and fails closed (no Docs answer at all) without its key.
+        if not audit_secret:
+            raise ValueError("ZOS_READ_ENABLED=true refused without ZOS_READ_AUDIT_SECRET: the docs Pipe tags every "
+                             "agent call with a keyed audit tag (ADR-0012 D3(d)) and answers nothing without its "
+                             "key. Create the Secret and set it, or keep ZOS_READ_ENABLED=false")
+        if audit_secret == secret:
+            raise ValueError("ZOS_READ_AUDIT_SECRET must not be ZOS_READ_SECRET: the Open WebUI pod must not "
+                             "reference the Secret that holds the z/OS ID")
         signed_in = [role.strip() for key in ("OPENWEBUI_OIDC_ALLOWED_ROLES", "OPENWEBUI_OIDC_ADMIN_ROLES")
                      for role in values.get(key, "").split(",") if role.strip()]
         if any(role not in approved for role in signed_in):
@@ -769,6 +785,7 @@ def zos_read_config(values: Mapping[str, str]) -> dict[str, object] | None:
         "enabled": True,
         "dryRun": dry_run,
         "secretName": secret,
+        "auditKey": {"secretName": audit_secret, "key": audit_key},
         "approvedRoles": approved,
         "datasetAllowlist": allowlist,
         "enabledTools": tools,

@@ -228,6 +228,7 @@ The chart can deploy the read-only z/OS FTP bridge (`rag-mcp-ftp`, ADR-0012) on
 the agent image and point the agent's Docs-path reads at it. Until a site opts
 in, nothing changes and the render stays as it was. New optional
 `airgap.env` keys: `ZOS_READ_ENABLED`, `ZOS_READ_DRY_RUN`, `ZOS_READ_SECRET`,
+`ZOS_READ_AUDIT_SECRET`, `ZOS_READ_AUDIT_SECRET_KEY`,
 `ZOS_READ_APPROVED_ROLES`, `ZOS_READ_DATASET_ALLOWLIST`, `ZOS_READ_ENABLED_TOOLS`,
 `ZOS_READ_JES_JOBNAME_PREFIXES`, `ZOS_READ_JES_OWNER_PREFIXES`, `ZOS_FTP_HOST`,
 `ZOS_FTP_HOST_IP`, `ZOS_FTP_PORT`, `ZOS_FTP_PASSIVE_PORTS`,
@@ -235,7 +236,8 @@ in, nothing changes and the render stays as it was. New optional
 `ZOS_FTP_ENCODING` and the four `ZOS_BRIDGE_*` sizing keys. The new chart
 values are under `zosRead`. Turning it on needs the site prerequisites and
 probes in the [site procedure](deploy.md#zos-read-deploy). Validate and deploy
-refuse unless every Open WebUI sign-in and admin role is approved. They also
+refuse unless every Open WebUI sign-in and admin role is approved, and, with Open
+WebUI on, unless the docs Pipe's audit-tag key Secret is set. They also
 refuse with the console Route on, the agent NetworkPolicy off, or extra agent
 namespaces.
 

@@ -3362,7 +3362,7 @@ ZOS_REFUSED_ROLES = ("zosRead.enabled=true refused: every role in openwebui.oidc
 def _zos_values(zos: dict | None = None, ftp: dict | None = None, **top) -> dict:
     values = json.loads(json.dumps(OWUI_ON))
     values["zosRead"] = {
-        "enabled": True, "secretName": "zos-read",
+        "enabled": True, "secretName": "zos-read", "auditKey": {"secretName": "zos-audit"},
         "approvedRoles": ["staff", "docs-admins", "docs-owners"],
         "datasetAllowlist": list(ZOS_ALLOWLIST),
         "ftp": {"host": "192.0.2.44", "hostIp": "192.0.2.44", "passivePorts": {"first": 50000, "last": 50100},
@@ -3394,6 +3394,7 @@ def test_zos_reads_off_by_default_change_nothing(owui_chart):
     assert _owui(owui_chart, {"zosRead": {"enabled": False}}) == default
     assert not ZOS_OBJECTS & set(default)
     assert not [n for n in env_map(default["Deployment", "rag-agent"]) if n.startswith("ZOWE_MCP_")]
+    assert not [n for n in env_map(default["Deployment", "rag-openwebui"], "openwebui") if n.startswith("RAG_ZOS_")]
     inputs = _zos_values({"enabled": False})
     plain = json.loads(json.dumps(OWUI_ON))
     assert (_helm_template_with_values(merge_values(base_values(), inputs), chart=owui_chart).stdout
@@ -3405,7 +3406,12 @@ def test_zos_reads_enabled_adds_the_bridge_and_only_touches_the_agent(owui_chart
     on = _zos(owui_chart)
     off = run_new_template(_zos_values({"enabled": False}), chart=owui_chart)
     assert set(on) - set(off) == ZOS_OBJECTS and set(off) <= set(on)
-    assert {key for key in off if on[key] != off[key]} == {("Deployment", "rag-agent")}
+    assert {key for key in off if on[key] != off[key]} == {("Deployment", "rag-agent"), ("Deployment", "rag-openwebui")}
+    # Open WebUI changes by exactly the docs Pipe's audit-tag pair (#1397).
+    on_owui = env_map(on["Deployment", "rag-openwebui"], "openwebui")
+    off_owui = env_map(off["Deployment", "rag-openwebui"], "openwebui")
+    assert set(on_owui) - set(off_owui) == {"RAG_ZOS_AUDIT_TAG", "RAG_ZOS_AUDIT_KEY"}
+    assert {n: e for n, e in on_owui.items() if n in off_owui} == off_owui
     # G5: the cluster-admin EgressIP is never a chart object, and nothing is a Route to the bridge.
     assert not [key for key in on if key[0] in ("EgressIP", "Route") and "mcp" in key[1]]
     assert "k8s.ovn.org" not in yaml.safe_dump(list(on.values()))
@@ -3524,6 +3530,43 @@ def test_zos_opt_in_jes_tools_carry_their_prefixes(owui_chart):
     assert env["MCP_JES_OWNER_PREFIXES"]["value"] == "OPSUSR"
 
 
+def test_zos_reads_turn_on_the_docs_pipe_audit_tag_with_its_key_reference(owui_chart):
+    """ADR-0012 D3(d), #1397: the docs Pipe tags every agent call exactly when
+    the agent's dataset reads are on (dry run included), with its key only by
+    Secret reference; never a value in the render."""
+    for dry in (False, True):
+        owui = env_map(_zos(owui_chart, {"dryRun": dry})["Deployment", "rag-openwebui"], "openwebui")
+        assert owui["RAG_ZOS_AUDIT_TAG"] == {"name": "RAG_ZOS_AUDIT_TAG", "value": "true"}
+        assert owui["RAG_ZOS_AUDIT_KEY"] == {"name": "RAG_ZOS_AUDIT_KEY", "valueFrom": {
+            "secretKeyRef": {"name": "zos-audit", "key": "audit-key"}}}
+    custom = _zos(owui_chart, {"auditKey": {"secretName": "site-audit", "key": "hmac"}})
+    custom_env = env_map(custom["Deployment", "rag-openwebui"], "openwebui")
+    assert custom_env["RAG_ZOS_AUDIT_KEY"]["valueFrom"] == {"secretKeyRef": {"name": "site-audit", "key": "hmac"}}
+    # Off (the default, or with every other input set): no audit variable at all.
+    off_docs = run_new_template(_zos_values({"enabled": False}), chart=owui_chart)
+    off = env_map(off_docs["Deployment", "rag-openwebui"], "openwebui")
+    assert not [n for n in off if n.startswith("RAG_ZOS_")]
+
+
+@pytest.mark.parametrize("audit,want", [
+    ({}, ("zosRead.enabled=true refused without zosRead.auditKey.secretName: the docs Pipe tags every agent call "
+          "with a keyed audit tag (ADR-0012 D3(d)) and answers nothing without its key")),
+    ({"secretName": "zos-read"}, ("zosRead.auditKey.secretName must not be zosRead.secretName: the Open WebUI pod "
+                                  "must not reference the Secret that holds the z/OS ID")),
+    ({"secretName": "zos-audit", "key": ""}, "zosRead.auditKey.key must not be empty"),
+], ids=["no-audit-secret", "audit-secret-is-the-zos-secret", "empty-key"])
+def test_zos_reads_refuse_a_missing_or_shared_audit_key_reference(owui_chart, audit, want):
+    assert want in _zos_fail(owui_chart, {"auditKey": audit})
+
+
+def test_zos_reads_without_open_webui_need_no_audit_key():
+    """No Open WebUI, no docs Pipe: nothing to tag and no key to reference."""
+    values = _zos_values({"approvedRoles": [], "auditKey": {}})
+    values["openwebui"] = {"enabled": False}
+    docs = run_new_template(values)
+    assert set(docs) >= ZOS_OBJECTS and ("Deployment", "rag-openwebui") not in docs
+
+
 def test_zos_reads_accept_feedback_and_ratings_on(owui_chart):
     """ADR-0012 D6 (Option 7A): render does not refuse FEEDBACK_ENABLED=true;
     observation turns are suppressed in the agent instead."""
@@ -3624,6 +3667,8 @@ def test_zos_reads_refuse_inputs_that_do_not_fit_the_render(owui_chart, zos, ftp
     ("zosRead.approvedRoles", "staff"),
     ("zosRead.approvedRoles", ["staff ", "docs-admins", "docs-owners"]),
     ("zosRead.mock", "/fixtures"),
+    ("zosRead.auditKey.secretName", "Bad_Name"),
+    ("zosRead.auditKey.key", "bad key"),
 ])
 def test_zos_reads_schema_refuses_invalid_values(owui_chart, path, bad):
     values = set_path(_zos_values(), path, bad)
