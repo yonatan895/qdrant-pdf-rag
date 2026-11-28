@@ -54,13 +54,12 @@ from qdrant_client import models
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest import build
 from mainframe_rag.ingest.build import build_aliases
+from mainframe_rag.ingest.generation_errors import Refused, Unreadable
 from mainframe_rag.ingest.generations import (
     Generation,
     Peer,
-    Refused,
     Registry,
     SnapshotEntry,
-    Unreadable,
     _iso,
     _labels,
     _publish_lock,

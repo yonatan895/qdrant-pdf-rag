@@ -77,16 +77,19 @@ from mainframe_rag.ingest.completion import (
     publish_lock_path,
     release_run_lock,
 )
+from mainframe_rag.ingest.generation_errors import (  # noqa: F401 - the module's public names
+    EXIT_OK,
+    EXIT_REFUSED,
+    EXIT_UNREADABLE,
+    EXIT_USAGE,
+    Refused,
+    Unreadable,
+)
 from mainframe_rag.ingest.placement import member_peer_ids
 from mainframe_rag.ingest.publish import read_publication_record, read_publish_state
 from mainframe_rag.ingest.qdrant_io import resolve_live_collection, scroll_all_points
 from mainframe_rag.ingest.retirement import InvalidTombstone, read_tombstone, tombstone_matches
 from mainframe_rag.ports import QdrantSnapshotAdmin, QdrantSnapshotReader
-
-EXIT_OK = 0
-EXIT_USAGE = 2
-EXIT_UNREADABLE = 3
-EXIT_REFUSED = 4
 
 KEEP_FLOOR = 1
 DEFAULT_KEEP = 1
@@ -105,14 +108,6 @@ def default_operator() -> str:
             return value
     return f"uid:{os.getuid()}"
 DATA_SIZE_SOURCE = "not-reported"
-
-
-class Refused(Exception):
-    """A fixed, operator-facing refusal (exit 4). Nothing further changes."""
-
-
-class Unreadable(Exception):
-    """Qdrant or a peer could not be read (exit 3). Fixed text only."""
 
 
 @dataclass(frozen=True)
@@ -843,4 +838,8 @@ def main(
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Run the importable module's entry, not this `__main__` copy: every
+    # class and function then exists once, whoever imports the module by name.
+    from mainframe_rag.ingest.generations import main as _entry
+
+    sys.exit(_entry())

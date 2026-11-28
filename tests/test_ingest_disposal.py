@@ -753,3 +753,53 @@ def test_a_tombstone_of_another_build_or_a_damaged_one_is_never_resume_evidence(
         assert writes(damaged) == [] and state(damaged) == before
     with pytest.raises(InvalidTombstone):
         decode_tombstone(record, C2)  # bound to its own control collection
+
+
+# --- the real entry point ---------------------------------------------------------
+
+
+def _module(tmp_path, *argv):
+    """`python -m mainframe_rag.ingest.generations`, as the chart and the docs
+    run it. Review B1 of #1393: under -m the module is __main__, and a refusal
+    raised by code that imported a second copy of it missed the handlers."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("QDRANT_", "INGEST_"))}
+    env.update(PYTHONPATH=str(root / "src"), QDRANT_URL="http://127.0.0.1:9", QDRANT_COLLECTION=ALIAS)
+    return subprocess.run([sys.executable, "-m", "mainframe_rag.ingest.generations", *argv], cwd=tmp_path,
+                          env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120,
+                          check=False)
+
+
+@pytest.mark.parametrize(("argv", "code"), [
+    (("dispose", "--build-id", G1, "--execute", "--plan-digest", "0" * 64, "--readers-stopped", STOPPED),
+     "E_READERS_UNAWARE"),
+    (("dispose", "--build-id", G1, "--plan-digest", "xyz"), "E_PLAN_DIGEST"),
+    (("dispose", "--build-id", G1, "--readers-stopped", "yesterday"), "E_READERS_STOPPED"),
+    (("dispose", "--build-id", P1), "E_BUILD_ID"),
+    (("dispose", "--build-id", G1, "--keep", "0"), "E_KEEP_FLOOR"),
+    (("dispose-snapshots", "--build-id", G1, "--keep", "0"), "E_KEEP_FLOOR"),
+    (("dispose-snapshots", "--build-id", P1), "E_BUILD_ID"),
+    (("list", "--keep", "0"), "E_KEEP_FLOOR"),
+])
+def test_the_module_run_with_dash_m_reports_each_refusal_with_its_own_code_and_exit_4(tmp_path, argv, code):
+    path = progress(tmp_path)
+    full = list(argv)
+    if argv[0] != "list":
+        full[1:1] = ["--progress", str(path)]
+    result = _module(tmp_path, *full)
+    assert result.returncode == gen.EXIT_REFUSED, result.stderr
+    assert result.stderr.strip().startswith(f"FAIL: {code}:"), result.stderr
+    assert "E_QDRANT_UNREADABLE" not in result.stderr
+
+
+def test_refusals_and_exit_codes_are_one_set_of_classes_however_the_module_is_loaded():
+    from mainframe_rag.ingest import generation_errors
+
+    assert gen.Refused is generation_errors.Refused is disposal.Refused
+    assert gen.Unreadable is generation_errors.Unreadable is disposal.Unreadable
+    assert (gen.EXIT_REFUSED, gen.EXIT_UNREADABLE) == (generation_errors.EXIT_REFUSED, generation_errors.EXIT_UNREADABLE)
