@@ -874,7 +874,10 @@ async def execute_answer_core(
     complexity = "complex" if (spl or coding) else classify_fn(search_text)
 
     if not hits:
-        return _empty_output(search_text, kind, timings, complexity)
+        # A marked chat stays marked through a no-evidence answer (ADR-0012 D6).
+        return _with_notice(
+            _empty_output(search_text, kind, timings, complexity), input_data.answer_notice, None
+        )
 
     # 3. Prompt building (shared with the streaming executor). The temperature is resolved first:
     # a completion-usage count (#1266) sends the generation's own body.
@@ -967,7 +970,9 @@ async def execute_answer_core_stream(
     # single `final` (schema parity, review S6) and the chat routes emit the
     # canned text from the final output themselves.
     if not hits:
-        yield {"type": "final", "output": _empty_output(search_text, kind, timings, complexity)}
+        yield {"type": "final", "output": _with_notice(
+            _empty_output(search_text, kind, timings, complexity), input_data.answer_notice, None
+        )}
         return
 
     # 3. Prompt building (shared with the buffered executor). The temperature is resolved first:

@@ -2428,12 +2428,24 @@ trap queries stay on the manuals path.
   `/v1/chat*` (`_attach_zos_observation`), never by the console.
   - *Plan:* deterministic, from the user's own text for this turn only (never
     history, Splunk context, the condensed or image-read search text, or
-    excerpts). One `dataset_read` when the text names an exact dataset or
-    member with at least two qualifiers of the MVS shape (quoted in any case,
-    or bare in upper case; a version such as `V2.5.0` is not one; a member right after the name belongs to the target) and retrieval
-    returned excerpts. No such name, a trap query or no excerpts: no call, no
-    notice, an ordinary manuals turn. Job ids and USS paths plan nothing. The
-    bridge owns the allowlist; the agent holds no copy.
+    excerpts), and only when retrieval returned excerpts. The candidate is a
+    whole whitespace-delimited token (`live_state._docs_target`), less only
+    the sentence punctuation around it: leading `( [ { "`; trailing
+    `. , ; : ? ! "` and a closing bracket the token never opened. It is the
+    target only when the whole of it is an ASCII dataset or member name
+    (qualifiers `[A-Z#$@][A-Z0-9#$@-]{0,7}`, name at most 44 characters,
+    member `[A-Z#$@][A-Z0-9#$@]{0,7}`): bare in upper case with three
+    qualifiers or a member, or inside one pair of single quotes in any ASCII
+    case (sent in ASCII upper case) with two or more qualifiers. The bridge
+    argument, the citation line, `zos_observation.target` and the audit line
+    carry that exact string. A token that carries such a name but is not one
+    (a relative GDG or wildcard form, `%`, an over-long member or qualifier,
+    a stray quote or bracket, any non-ASCII character) makes no call: the
+    turn reads `denied` (`invalid_request`) and the stem is never read. The
+    first name or refused token in the text decides. No such token, a trap
+    query or no excerpts: no call, no notice, an ordinary manuals turn. Job
+    ids and USS paths plan nothing. The bridge owns the allowlist; the agent
+    holds no copy.
   - *Observation:* exact `target`, `acquired_at` (agent clock when the bridge
     replied; null when no call was made), `observed_at` (null: FTP gives
     none), `outcome`, a stable `code` for every outcome other than
@@ -2464,7 +2476,7 @@ trap queries stay on the manuals path.
     citation, `[z/OS observation] <target>: read from z/OS, acquired_at <t>,
     outcome: <outcome>.`; otherwise `z/OS read of <target> not used ...,
     outcome: <outcome> (<code>): <fixed text>. This answer uses the manuals
-    only.`, without the marker. A follow-up in a marked chat opens with a
+    only.`, without the marker. A follow-up in a marked chat, its no-evidence answer included, opens with a
     fixed marker line, so the chat stays marked when its first turns are
     trimmed. The model is told never to cite the observation; a marker line
     it writes under `Citations:` is dropped by citation validation, and

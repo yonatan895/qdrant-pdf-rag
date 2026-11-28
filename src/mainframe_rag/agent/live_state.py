@@ -68,15 +68,27 @@ _HYBRID_VERBS = ("failed", "fails", "abend", "dump", "ended", "rejected", "hang"
 # Hard ceiling per fetch plan (ADR-0003: bounded calls).
 MAX_TOOL_CALLS = 2
 
+# The Docs-path target grammar (ADR-0012 D1, D2; the bridge's own qualifier
+# and member rules). Explicit ASCII classes and no IGNORECASE: a Unicode
+# look-alike can never fold into a name.
 _MVS_QUALIFIER = r"[A-Z#$@][A-Z0-9#$@-]{0,7}"
-_MVS_TARGET_RE = re.compile(
-    rf"(?=.{{3,54}}\Z){_MVS_QUALIFIER}(?:\.{_MVS_QUALIFIER})+(?:\([A-Z#$@][A-Z0-9#$@]{{0,7}}\))?"
+_MVS_NAME_RE = re.compile(
+    rf"({_MVS_QUALIFIER}(?:\.{_MVS_QUALIFIER})+)(\([A-Z#$@][A-Z0-9#$@]{{0,7}}\))?"
 )
-
-# What the Docs path may plan (ADR-0012 D1, default bridge registry): one
-# dataset_read. The JES tools are opt-in at the bridge and uss_read is
-# unapproved, so the pilot wiring never plans them.
-PILOT_TOOLS: tuple[str, ...] = ("dataset_read",)
+_MVS_DSN_MAX = 44
+# A token that is not an exact name but carries one: bare, upper-case text
+# with three qualifiers or two and an opening parenthesis; inside or beside a
+# quote, two qualifiers in any case. Such a token is refused, never trimmed.
+_SHAPED_BARE_RE = re.compile(rf"{_MVS_QUALIFIER}\.{_MVS_QUALIFIER}(?:\.{_MVS_QUALIFIER}|\()")
+_ANY_CASE_QUALIFIER = r"[A-Za-z#$@][A-Za-z0-9#$@-]{0,7}"
+_SHAPED_QUOTED_RE = re.compile(rf"{_ANY_CASE_QUALIFIER}\.{_ANY_CASE_QUALIFIER}")
+# What may surround a complete name in a sentence, and nothing else: opening
+# brackets or a double quote before it; after it, sentence punctuation, a
+# closing double quote, and a closing bracket the token itself never opened.
+_TOKEN_LEAD = '([{"'
+_SENTENCE_END = '.,;:?!"'
+_CLOSERS = {")": "(", "]": "[", "}": "{"}
+_REFUSED_SHOWN_MAX = 64
 
 # Fixed citation marker for z/OS pilot observations (ADR-0012 D6, Option 7A).
 # The agent writes it; the model is told never to cite the observation. A chat
@@ -188,14 +200,11 @@ def _truncate(text: str, max_bytes: int) -> tuple[str, bool]:
     return cut + "\n[... truncated: live byte cap ...]", True
 
 
-def _plan_calls(
-    query: str, tools: tuple[str, ...] | None = None
-) -> list[tuple[str, dict[str, str]]]:
+def _plan_calls(query: str) -> list[tuple[str, dict[str, str]]]:
     """Deterministic tool plan (max 2, precedence: status → spool →
     dataset → USS). A job failure without an explicit spool id assumes
     spool file 2 (job log, highest single-file value) and says so in the
-    result notes — never silently. `tools` narrows the plan to those tools
-    before the ceiling applies (None: the closed four)."""
+    result notes — never silently."""
     plan: list[tuple[str, dict[str, str]]] = []
     job_match = _JOB_ID_RE.search(query)
     dataset_match = _DATASET_RE.search(query)
@@ -207,11 +216,6 @@ def _plan_calls(
     uss_match = _USS_PATH_RE.search(query)
     lowered = query.lower()
     wants_spool = "spool" in lowered or bool(job_match)
-    if tools is not None:
-        job_match = job_match if "job_status" in tools else None
-        wants_spool = wants_spool and "jes_spool_read" in tools and job_match is not None
-        dataset_name = dataset_name if "dataset_read" in tools else None
-        uss_match = uss_match if "uss_read" in tools else None
 
     # ADR-0003: job_status needs an exact job id. A bare "JES" mention must
     # never plan an unscoped listing of every job (empty filters mean "*").
@@ -268,18 +272,19 @@ def fetch_live(
     query: str,
     route: str,
     *,
-    tools: tuple[str, ...] | None = None,
+    plan: list[tuple[str, dict[str, str]]] | None = None,
     audit_tag: str | None = None,
 ) -> LiveResult:
     """Execute the fetch plan for a live/hybrid query. Every exit path —
     success, dry-run, tool error, transport error, misconfiguration —
     returns a LiveResult and audit-logs it; nothing here raises. A plan with
     no exact target degrades as "no_target" without any source call.
-    `tools` narrows what may be planned; `audit_tag` is logged, never used."""
+    `plan` is a caller's already validated plan (the Docs path), run as given
+    instead of planning from `query`; `audit_tag` is logged, never used."""
     if route == "manual":
         _audit(request_id, route, [], 0, None, audit_tag=audit_tag)
         return LiveResult(route=route)
-    plan = _plan_calls(query, tools)
+    plan = (_plan_calls(query) if plan is None else plan)[:MAX_TOOL_CALLS]
     planned_names = [name for name, _ in plan]
     targets = _plan_targets(plan)
     if not plan:
@@ -485,6 +490,42 @@ def _observation(target: str, result: LiveResult) -> ZosObservation:
     )
 
 
+def _docs_target(question: str) -> tuple[str | None, str | None]:
+    """(the exact target, None), (None, the refused token) or (None, None).
+
+    The candidate is a whole whitespace-delimited token of the question, less
+    only the sentence punctuation around it (`_TOKEN_LEAD`, `_SENTENCE_END`,
+    an unopened closing bracket), bare or inside one pair of single quotes.
+    It is a target only when the whole of it is an ASCII dataset or member
+    name: bare in upper case with three qualifiers or a member, quoted in any
+    ASCII case (returned in ASCII upper case) with at least two qualifiers.
+    The first token that is not a name but carries one (a GDG or wildcard
+    form, an over-long member, a stray quote or bracket, a non-ASCII
+    character) is refused: the stem inside it is never read."""
+    for raw in question.split():
+        token = raw.lstrip(_TOKEN_LEAD)
+        while token and (
+            token[-1] in _SENTENCE_END
+            or (token[-1] in _CLOSERS and token.count(token[-1]) > token.count(_CLOSERS[token[-1]]))
+        ):
+            token = token[:-1]
+        quoted = len(token) >= 2 and token[0] == token[-1] == "'" and "'" not in token[1:-1]
+        if quoted or "'" in token:
+            name = token[1:-1].upper() if quoted and token.isascii() else ""
+            match = _MVS_NAME_RE.fullmatch(name)
+            shaped = _SHAPED_QUOTED_RE.search(token)
+        else:
+            match = _MVS_NAME_RE.fullmatch(token) if token.isascii() else None
+            if match is not None and match.group(2) is None and match.group(1).count(".") < 2:
+                match = None  # bare A.B: too weak a signal, and not refused either
+            shaped = _SHAPED_BARE_RE.search(token)
+        if match is not None and len(match.group(1)) <= _MVS_DSN_MAX:
+            return match.group(0), None
+        if shaped is not None:
+            return None, token
+    return None, None
+
+
 def observe_docs_question(
     settings: Settings,
     zowe_mcp: ZoweMCP | None,
@@ -492,21 +533,30 @@ def observe_docs_question(
     question: str,
     audit_tag: str | None = None,
 ) -> ZosObservation | None:
-    """The Docs-path read (ADR-0012 D1): plan one dataset_read from the
-    user's own question and run it. None when the question names no exact
-    dataset or is a trap; no call is made then and the turn is an ordinary
-    manuals turn. `question` must be the user's own latest message: never
-    retrieved, condensed, transcribed or model text, and never chat history."""
-    route = classify_live_need(question)
-    if route == "manual":
+    """The Docs-path read (ADR-0012 D1, D2): plan one dataset_read from the
+    user's own question and run it. The target is a whole typed token
+    (`_docs_target`); the bridge call, the citation and the audit line carry
+    that exact string. A token that carries a name but is not one makes no
+    call and reads `denied`. None when the question names no dataset or is a
+    trap: no call, an ordinary manuals turn. `question` must be the user's
+    own latest message: never retrieved, condensed, transcribed or model
+    text, and never chat history."""
+    if screen_query(question) == "trap":
         return None
-    plan = _plan_calls(question, PILOT_TOOLS)
-    # A quoted single word ('IEA500I'), a version (V2.5.0) or a dotted number
-    # is not a dataset name: an exact target has at least two qualifiers, each
-    # of the MVS shape, so such a token costs no call and no notice.
-    if not plan or not _MVS_TARGET_RE.fullmatch(plan[0][1]["dataset"]):
+    target, refused = _docs_target(question)
+    route = "hybrid" if classify_live_need(question) == "hybrid" else "live"
+    if refused is not None:
+        # The refused token is the user's text, not a target: it is shown back
+        # only when short printable ASCII, and never logged.
+        _audit(request_id, route, [], 0, "invalid_request", audit_tag=audit_tag)
+        plain = refused.isascii() and refused.isprintable() and len(refused) <= _REFUSED_SHOWN_MAX
+        return ZosObservation(
+            target=refused if plain else "the named target", outcome="denied", code="invalid_request"
+        )
+    if target is None:
         return None
     result = fetch_live(
-        settings, zowe_mcp, request_id, question, route, tools=PILOT_TOOLS, audit_tag=audit_tag
+        settings, zowe_mcp, request_id, question, route,
+        plan=[("dataset_read", {"dataset": target})], audit_tag=audit_tag,
     )
-    return _observation(plan[0][1]["dataset"], result)
+    return _observation(target, result)
