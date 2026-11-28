@@ -1584,17 +1584,22 @@ def test_zos_pipe_audit_tag_reaches_the_live_fetch_line_and_no_identity_does(zos
     assert key not in caplog.text
 
 
-def test_zos_audit_tag_authorizes_nothing(zos):
+@pytest.mark.parametrize("route", ["/v1/chat", "/v1/answer"])
+def test_zos_audit_tag_authorizes_nothing(zos, route):
     """ADR-0012 D3(d): the tag is logged, never used. A missing, forged,
     malformed or genuine tag gives the same read, the same prompt and the same
-    response, for an allowlisted member and for a refused one."""
+    response, for an allowlisted member and for a refused one, on both Docs
+    routes."""
     def turn(question: str, header: str | None) -> tuple:
         before = len(_retrs(zos))
-        res = zos.post("/v1/chat", json={"messages": [{"role": "user", "content": question}]},
+        body = ({"messages": [{"role": "user", "content": question}]} if route == "/v1/chat"
+                else {"query": question})
+        res = zos.post(route, json=body,
                        headers={} if header is None else {"X-Zos-Audit-Tag": header})
         assert res.status_code == 200, res.text
         data = res.json()
-        data.pop("id"), data.pop("created", None)
+        for volatile in ("id", "created", "request_id"):
+            data.pop(volatile, None)
         prompt = [(m.role, m.content) for m in _final_prompt(zos, False)]
         return json.dumps(data, sort_keys=True), prompt, _retrs(zos)[before:]
 
