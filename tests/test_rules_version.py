@@ -109,6 +109,21 @@ def test_stored_payload_is_owned_by_a_rule_module(monkeypatch) -> None:
     hashed = {p.resolve() for p in rule_module_paths()}
     assert Path(inspect.getfile(point_payload)).resolve() in hashed
     assert Path(inspect.getfile(normalize_context)).resolve() in hashed
+    # context.normalize_context is exactly a call-time delegation to the hashed
+    # recipe (deferred import, #1318): any other statement, argument change or
+    # pre/post-processing would change stored prefixes without moving rules_v.
+    import ast
+    import textwrap
+
+    wrapper = ast.parse(textwrap.dedent(inspect.getsource(context.normalize_context))).body[0]
+    assert isinstance(wrapper, ast.FunctionDef) and ast.get_docstring(wrapper)
+    wrapper.body = wrapper.body[1:]  # the docstring is free text
+    delegation = ast.parse(
+        "def normalize_context(text: str, max_chars: int) -> str:\n"
+        "    from mainframe_rag.ingest import payload\n"
+        "    return payload.normalize_context(text, max_chars)\n"
+    ).body[0]
+    assert ast.dump(wrapper) == ast.dump(delegation)
     client, parsed, chunk = _upsert_one({"c1": "situating gist"})
     # Both contextual call sites normalize through the rule module's recipe at
     # call time (the import is deferred there, #1318), never a local copy.

@@ -3266,22 +3266,47 @@ def test_selection_order_rule_is_pinned_then_model_order_then_retrieval_fill():
     assert _ids(order_selection(candidates, [4], 2, pinned)) == ["P1", "P2"]
 
 
+
 # --- serving licence boundary (#1318) ------------------------------------------
 # The PyMuPDF (AGPL) election is scoped to ingest and operator-run offline tools:
-# no serving process may load it. These are the modules the agent image's
-# processes import: the uvicorn app (Open WebUI-facing chat, search and evidence
-# routes, plus the console router), the feedback service, the team-tool gateways
-# and the MCP adapters.
+# no serving process may load it. Every launch target the repository names (image
+# CMD/ENTRYPOINT, chart commands and uvicorn targets, team-gateway modules, console
+# scripts, documented "python -m" commands) is classified below as either a
+# serving entry (must never load PyMuPDF) or an ingest/offline tool (may).
 SERVING_ENTRY_MODULES = (
-    "mainframe_rag.agent.app",
+    "mainframe_rag.agent.app",  # Open WebUI-facing chat, search, evidence; console router
     "mainframe_rag.webui.routes",
     "mainframe_rag.feedback.service",
+    "mainframe_rag.feedback.exchange",
+    "mainframe_rag.feedback.report",
+    "mainframe_rag.feedback.purge",
     "mainframe_rag.gateways.splunk",
+    "mainframe_rag.gateways.splunk_probe",
     "mainframe_rag.gateways.gitlab",
-    "mainframe_rag.mcp.knowledge",
+    "mainframe_rag.gateways.gitlab_probe",
     "mainframe_rag.mcp.__main__",
+    "mainframe_rag.mcp.knowledge",
+    "mainframe_rag.mcp.site_probe",
+    "mainframe_rag.ops.__main__",
+    "mainframe_rag.ops.cli",
+)
+PDF_SCOPE_ENTRY_MODULES = (  # ingest and operator-run offline tools: may load PyMuPDF
+    "mainframe_rag.ingest.run_ingest",
+    "mainframe_rag.ingest.generations",
+    "mainframe_rag.tools.text_to_pdf",
+    "mainframe_rag.serve.__main__",
+    "mainframe_rag.eval.acceptance",
+    "mainframe_rag.eval.answers",
+    "mainframe_rag.eval.chat",
+    "mainframe_rag.eval.coverage",
+    "mainframe_rag.eval.gold_candidates",
+    "mainframe_rag.eval.miss_triage",
+    "mainframe_rag.eval.page_image_arm",
+    "mainframe_rag.eval.reports",
+    "mainframe_rag.eval.spot_check",
 )
 PDF_LIBRARIES = ("pymupdf", "fitz")
+SRC = Path(__file__).resolve().parents[1] / "src"
 
 # Function-level imports a serving process can reach that would load PyMuPDF if
 # they ran: (module, function, imported module). Each sits on an ingest-only call
@@ -3291,6 +3316,55 @@ SERVING_REACHABLE_DEFERRED_PDF_IMPORTS = {
     ("mainframe_rag.ingest.identity", "prescan_doc_ids", "mainframe_rag.ingest.ibm_pdf"),
     ("mainframe_rag.ingest.qdrant_io", "upsert_chunks", "mainframe_rag.ingest.payload"),
 }
+# Top-level definitions in the serving import closure that can run one of those
+# imports (directly or through each other). Only the ingest writer calls them.
+INGEST_ONLY_CALLABLES = {"normalize_context", "upsert_chunks", "prescan_doc_ids",
+                         "generate_contexts", "ContextLLMClient"}
+
+
+def _runnable(name):
+    """The module a launcher's `name` runs (package -> its __main__), or None."""
+    path = SRC.joinpath(*name.split("."))
+    if path.with_suffix(".py").is_file():
+        return name
+    return f"{name}.__main__" if (path / "__main__.py").is_file() else None
+
+
+def _launch_targets():
+    """Every mainframe_rag module a launcher in the repository names. Names that
+    are not runnable (placeholders such as `mainframe_rag.gateways.<name>`) drop out."""
+    import re
+    import tomllib
+
+    repo = SRC.parent
+    dotted = r"mainframe_rag(?:\.\w+)+"
+    names = set()
+    for containerfile in (repo / "images").glob("Containerfile*"):
+        for line in containerfile.read_text(encoding="utf-8").splitlines():
+            if line.startswith(("CMD", "ENTRYPOINT")):
+                names.update(re.findall(dotted, line))
+    for template in (repo / "charts/mainframe-rag/templates").iterdir():
+        text = template.read_text(encoding="utf-8")
+        names.update(re.findall(rf'"module" "({dotted})"', text))
+        names.update(re.findall(rf'-m"?,\s*"?({dotted})', text))
+        names.update(re.findall(rf'^\s*-\s*"?({dotted}):\w+', text, flags=re.MULTILINE))
+    scripts = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))["project"]["scripts"]
+    names.update(target.partition(":")[0] for target in scripts.values())
+    for doc in [repo / "README.md", *(repo / "docs").rglob("*.md")]:
+        text = doc.read_text(encoding="utf-8")
+        names.update(re.findall(rf"-m ({dotted})", text))
+        names.update(re.findall(rf"uvicorn[^\n\x60]*?\s({dotted}):\w+", text))
+    return {runnable for name in names if (runnable := _runnable(name))}
+
+
+def test_every_launch_target_is_classified_as_serving_or_pdf_scope():
+    """A new serving entry point cannot silently escape the PyMuPDF probe below."""
+    targets = _launch_targets()
+    assert {"mainframe_rag.agent.app", "mainframe_rag.feedback.service", "mainframe_rag.gateways.splunk",
+            "mainframe_rag.ops.cli", "mainframe_rag.ingest.run_ingest",
+            "mainframe_rag.ingest.generations"} <= targets  # each launcher source is read
+    assert targets - set(SERVING_ENTRY_MODULES) - set(PDF_SCOPE_ENTRY_MODULES) == set()
+    assert not set(SERVING_ENTRY_MODULES) & set(PDF_SCOPE_ENTRY_MODULES)
 
 
 def _pdf_libraries_after_fresh_import(module):
@@ -3298,14 +3372,13 @@ def _pdf_libraries_after_fresh_import(module):
     import subprocess
     import sys
 
-    src = Path(__file__).resolve().parents[1] / "src"
     probe = (
         "import importlib, json, sys\n"
         f"importlib.import_module({module!r})\n"
         f"print(json.dumps([n for n in {PDF_LIBRARIES!r} if n in sys.modules]))\n"
     )
     done = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=False,
-                          env={"PYTHONPATH": str(src), "PATH": "/usr/bin:/bin"})
+                          env={"PYTHONPATH": str(SRC), "PATH": "/usr/bin:/bin"})
     assert done.returncode == 0, done.stderr[-800:]
     return json.loads(done.stdout.strip().splitlines()[-1])
 
@@ -3319,48 +3392,73 @@ def test_ingest_entry_still_loads_pymupdf_so_the_serving_probe_is_not_vacuous():
     assert "pymupdf" in _pdf_libraries_after_fresh_import("mainframe_rag.ingest.run_ingest")
 
 
-def _import_sites(module):
-    """(enclosing function or None, imported module) for every import the module can
-    execute: None for module and class level (runs at import), the qualified function
-    name for deferred ones. `if TYPE_CHECKING:` bodies never run and are skipped."""
+def _is_type_checking(test):
     import ast
 
-    src = Path(__file__).resolve().parents[1] / "src"
-    path = src.joinpath(*module.split(".")).with_suffix(".py")
-    if not path.is_file():
-        path = src.joinpath(*module.split("."), "__init__.py")
-    if not path.is_file():
-        return []
-    package = module if path.name == "__init__.py" else module.rpartition(".")[0]
-    sites = []
+    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+        isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+        and isinstance(test.value, ast.Name) and test.value.id == "typing")
 
-    def handle(node, scope, prefix):
-        qualified = f"{prefix}.{getattr(node, 'name', '')}" if prefix else getattr(node, "name", "")
-        if isinstance(node, ast.If) and "TYPE_CHECKING" in ast.unparse(node.test):
+
+def _module_facts(module):
+    """What a module can execute, from its AST:
+    - imports: (scope, imported module), scope None for module/class level (runs at
+      import) or the qualified enclosing function (deferred);
+    - refs: (outermost top-level definition or None, referenced name) for every name,
+      attribute and from-imported name, to find callers by name;
+    - dynamic: import-by-string calls (`__import__`, `import_module`,
+      `spec_from_file_location`), which the import walk cannot follow.
+    Only an exact `if TYPE_CHECKING:` / `if typing.TYPE_CHECKING:` body is skipped
+    (its else branch is kept). Not seen: exec/eval of source text and names
+    reached through getattr or a string; those are what the fresh-import probe and
+    review cover."""
+    import ast
+
+    path = SRC.joinpath(*module.split(".")).with_suffix(".py")
+    if not path.is_file():
+        path = SRC.joinpath(*module.split("."), "__init__.py")
+    facts = {"imports": [], "refs": [], "dynamic": []}
+    if not path.is_file():
+        return facts
+    package = module if path.name == "__init__.py" else module.rpartition(".")[0]
+
+    def handle(node, scope, prefix, outer):
+        name = getattr(node, "name", "")
+        qualified = f"{prefix}.{name}" if prefix else name
+        if isinstance(node, ast.If) and _is_type_checking(node.test):
             for stmt in node.orelse:
-                handle(stmt, scope, prefix)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            visit(node, scope or qualified, qualified)
-        elif isinstance(node, ast.ClassDef):
-            visit(node, scope, qualified)
-        elif isinstance(node, ast.Import):
-            sites.extend((scope, alias.name) for alias in node.names)
+                handle(stmt, scope, prefix, outer)
+            return
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            deferred = scope or (qualified if not isinstance(node, ast.ClassDef) else None)
+            for child in ast.iter_child_nodes(node):
+                handle(child, deferred, qualified, outer or name)
+            return
+        if isinstance(node, ast.Import):
+            facts["imports"].extend((scope, alias.name) for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             base = node.module or ""
             if node.level:
                 parts = package.split(".")[: len(package.split(".")) - node.level + 1]
                 base = ".".join([*parts, base] if base else parts)
-            sites.append((scope, base))
-            sites.extend((scope, f"{base}.{alias.name}") for alias in node.names)
-        else:
-            visit(node, scope, prefix)
-
-    def visit(node, scope, prefix):
+            facts["imports"].append((scope, base))
+            facts["imports"].extend((scope, f"{base}.{alias.name}") for alias in node.names)
+            facts["refs"].extend((outer, alias.name) for alias in node.names)
+        elif isinstance(node, ast.Name):
+            facts["refs"].append((outer, node.id))
+        elif isinstance(node, ast.Attribute):
+            facts["refs"].append((outer, node.attr))
+        if isinstance(node, ast.Call):
+            func = node.func
+            called = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+            if called in ("__import__", "import_module", "spec_from_file_location"):
+                facts["dynamic"].append((scope, ast.unparse(node)))
         for child in ast.iter_child_nodes(node):
-            handle(child, scope, prefix)
+            handle(child, scope, prefix, outer)
 
-    visit(ast.parse(path.read_text(encoding="utf-8")), None, "")
-    return sites
+    for child in ast.iter_child_nodes(ast.parse(path.read_text(encoding="utf-8"))):
+        handle(child, None, "", None)
+    return facts
 
 
 def _with_packages(name):
@@ -3376,14 +3474,14 @@ def _loads_pdf_at_import(module, memo):
         return memo.get(module, False)
     memo[module] = False  # cycle guard while the module is being resolved
     memo[module] = any(_loads_pdf_at_import(dep, memo)
-                       for scope, name in _import_sites(module) if scope is None
+                       for scope, name in _module_facts(module)["imports"] if scope is None
                        for dep in _with_packages(name))
     return memo[module]
 
 
-def test_serving_import_graph_reaches_pymupdf_only_through_pinned_ingest_only_deferred_imports():
-    """Static companion of the fresh-import probe: it also follows function-level
-    imports, so no request path can load PyMuPDF behind an import-time check."""
+def _serving_closure():
+    """Walk every import (module level and deferred) from the serving entries.
+    Returns (closure modules, import-time PDF edges, deferred PDF edges)."""
     memo = {}
     at_import, deferred = set(), set()
     pending, seen = list(SERVING_ENTRY_MODULES), set()
@@ -3392,12 +3490,39 @@ def test_serving_import_graph_reaches_pymupdf_only_through_pinned_ingest_only_de
         if module in seen:
             continue
         seen.add(module)
-        for scope, name in _import_sites(module):
+        for scope, name in _module_facts(module)["imports"]:
             for dep in _with_packages(name):
                 if _loads_pdf_at_import(dep, memo):
                     (at_import if scope is None else deferred).add((module, scope, dep))
                 elif dep.startswith("mainframe_rag."):
                     pending.append(dep)
+    return seen, at_import, deferred
+
+
+def test_serving_import_graph_reaches_pymupdf_only_through_pinned_ingest_only_deferred_imports():
+    """Static companion of the fresh-import probe: it also follows function-level
+    imports, so no request path can load PyMuPDF behind an import-time check."""
+    seen, at_import, deferred = _serving_closure()
     assert at_import == set()
     assert "mainframe_rag.agent.serving" in seen and "mainframe_rag.ingest.qdrant_io" in seen
     assert deferred == SERVING_REACHABLE_DEFERRED_PDF_IMPORTS
+    dynamic = {(module, site) for module in seen for site in _module_facts(module)["dynamic"]}
+    assert dynamic == set()  # an import by string would bypass this walk
+
+
+def test_only_ingest_only_callables_reach_the_deferred_pymupdf_imports():
+    """A new serving caller (a request handler calling `upsert_chunks`, say) would
+    load PyMuPDF at request time with both import checks green. Every top-level
+    definition in the serving closure that references a callable able to run a
+    pinned deferred import, directly or transitively by name, must be one of the
+    pinned ingest-only callables, and no module-level code may reference them."""
+    seen, _, _ = _serving_closure()
+    refs = [(module, outer, name) for module in seen for outer, name in _module_facts(module)["refs"]]
+    reaching = {scope.split(".")[0] for _, scope, _ in SERVING_REACHABLE_DEFERRED_PDF_IMPORTS}
+    while True:
+        grown = reaching | {outer for _, outer, name in refs if name in reaching and outer}
+        if grown == reaching:
+            break
+        reaching = grown
+    assert reaching == INGEST_ONLY_CALLABLES
+    assert [(m, n) for m, outer, n in refs if outer is None and n in reaching] == []
