@@ -415,6 +415,17 @@ def check_rollback_on(before: dict, after: dict, repo_sha256: str, next_chat_ok:
               docs_only=after["models"] == DOCS_MODELS, next_chat_answered=next_chat_ok)
 
 
+def check_copy_later(later: list[str], answered: bool) -> Verdict:
+    """After the copy-out (#1376): an answered chat exists that the copy lacks, so the restore check can fail."""
+    return _v("copy-later", bool(later) and answered, later_chats=len(later), answered=answered)
+
+
+def check_restored(later: list[str], after: list[str]) -> Verdict:
+    """After the restore and A's deploy: no chat written after the copy-out survives."""
+    survived = sorted(set(later) & set(after))
+    return _v("restore-dropped-later", bool(later) and not survived, later_chats=len(later), survived=len(survived))
+
+
 # ------------------------------------------------------------------ team tools (#1077, ADR-0010 T4)
 RATING_ACTION = "mainframe_rag_rating"  # provision_pipe.py ACTION_ID (with ratings on)
 TEAM_TOOL_ID = "server:mcp:splunk"  # the chart's TOOL_SERVER_CONNECTIONS entry (info.id splunk)
