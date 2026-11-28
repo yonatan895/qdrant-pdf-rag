@@ -201,6 +201,30 @@ class QdrantPoints(QdrantReader, Protocol):
 
 
 @runtime_checkable
+class QdrantSnapshotReader(QdrantReader, Protocol):
+    """The read surface plus collection enumeration and the per-peer
+    snapshot listing (issue #1373): what the retained-generation listing
+    reads. A snapshot listing is node-local (Qdrant v1.19.2 lists only the
+    snapshots stored on the peer that answers), so callers hold one client
+    per direct peer endpoint. A read-only key may list."""
+
+    def get_collections(self) -> models.CollectionsResponse: ...
+
+    def list_snapshots(self, collection_name: str) -> list[models.SnapshotDescription]: ...
+
+
+@runtime_checkable
+class QdrantSnapshotAdmin(QdrantSnapshotReader, Protocol):
+    """Snapshot-only disposal (issue #1373): the listing surface plus one
+    snapshot delete, addressed to the peer that stores it. Needs the writer
+    key; nothing here deletes a collection or an alias."""
+
+    def delete_snapshot(
+        self, collection_name: str, snapshot_name: str, *, wait: bool = True
+    ) -> bool | None: ...
+
+
+@runtime_checkable
 class AsyncQdrantReader(Protocol):
     """The async read surface for agent endpoints (issues #77, #369): the
     same reads as `QdrantReader`, plus close. Mirrors
