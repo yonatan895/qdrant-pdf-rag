@@ -1,0 +1,232 @@
+{{- /*
+Read-only z/OS FTP bridge for the Docs chat pilot (ADR-0012, #1294). Rendered
+only when mainframe-rag.zosReadEnabled accepts the values: a one-replica
+Deployment on the agent image running
+`python -m mainframe_rag.mcp --transport http`, a ClusterIP Service and its
+NetworkPolicy (plus the site CA ConfigMap in ftps mode). No Route, and no
+EgressIP: cluster-admin owns that object and scopes it to the label
+app: rag-mcp-ftp (ADR-0012 D4), so the label is part of the site contract.
+
+One replica, Recreate: the logon-failure breaker (D9) is per process and the
+RACF ID is bound to one egress address; a rollout never runs two pods.
+Hardening as the agent (restricted-v2: no fixed IDs). Credentials are Secret
+references only: the READ-only ID and the bearer the agent presents.
+
+The NetworkPolicy is rendered whenever the bridge is: ingress only from agent
+pods; egress only to cluster DNS and the one z/OS address on the control port
+and the passive port range. Needs an enforcing CNI (site evidence).
+*/ -}}
+{{- if include "mainframe-rag.zosReadEnabled" . }}
+{{- $z := .Values.zosRead }}
+{{- $f := $z.ftp }}
+{{- $ftps := eq $f.transportMode "ftps" }}
+{{- $caPath := include "mainframe-rag.zosBridgeCaPath" . }}
+{{- if $ftps }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rag-mcp-ftp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rag-mcp-ftp
+data:
+  ca-bundle.crt: {{ $f.caBundle | quote }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-mcp-ftp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rag-mcp-ftp
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: rag-mcp-ftp
+  template:
+    metadata:
+      labels:
+        app: rag-mcp-ftp
+      {{- if $ftps }}
+      annotations:
+        # The bridge reads the CA when it connects; a change rolls the pod.
+        checksum/ca: {{ $f.caBundle | sha256sum | quote }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if .Values.pullSecret.name }}
+      imagePullSecrets:
+        - name: {{ .Values.pullSecret.name }}
+      {{- else }}
+      imagePullSecrets: []
+      {{- end }}
+      containers:
+        - name: bridge
+          image: {{ include "mainframe-rag.image" (dict "name" "agent" "image" .Values.images.agent) }}
+          imagePullPolicy: {{ .Values.images.agent.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          command: [python3, -m, mainframe_rag.mcp, --transport, http, --host, "0.0.0.0", --port, "8081"]
+          ports:
+            - containerPort: 8081
+              name: http
+          env:
+            - name: MCP_FTP_HOST
+              value: {{ $f.host | quote }}
+            - name: MCP_FTP_PORT
+              value: {{ $f.port | int | toString | quote }}
+            - name: MCP_FTP_TRANSPORT_MODE
+              value: {{ $f.transportMode | quote }}
+            {{- if $ftps }}
+            - name: MCP_FTP_CA_FILE
+              value: {{ printf "%s/ca-bundle.crt" $caPath | quote }}
+            {{- else }}
+            - name: MCP_FTP_PLAIN_ACCEPTED
+              value: "true"
+            {{- end }}
+            - name: MCP_FTP_ENCODING
+              value: {{ $f.encoding | quote }}
+            # Names may carry "$": "$$" is the kubelet escape, so a name such as
+            # A.$(B) is never read as a variable reference.
+            - name: MCP_DATASET_ALLOWLIST
+              value: {{ join "," $z.datasetAllowlist | replace "$" "$$" | quote }}
+            - name: MCP_ENABLED_TOOLS
+              value: {{ join "," $z.enabledTools | quote }}
+            {{- with $z.jesJobnamePrefixes }}
+            - name: MCP_JES_JOBNAME_PREFIXES
+              value: {{ join "," . | replace "$" "$$" | quote }}
+            {{- end }}
+            {{- with $z.jesOwnerPrefixes }}
+            - name: MCP_JES_OWNER_PREFIXES
+              value: {{ join "," . | replace "$" "$$" | quote }}
+            {{- end }}
+            - name: MCP_FTP_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $z.secretName }}
+                  key: ftp-user
+            - name: MCP_FTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $z.secretName }}
+                  key: ftp-password
+            - name: MCP_BRIDGE_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $z.secretName }}
+                  key: bridge-token
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml $z.resources | nindent 12 }}
+          volumeMounts:
+            {{- if $ftps }}
+            - name: ca
+              mountPath: {{ $caPath }}
+              readOnly: true
+            {{- end }}
+            # The site probe's --receipt file (ADR-0012 D8) goes here.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        {{- if $ftps }}
+        - name: ca
+          configMap:
+            name: rag-mcp-ftp
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-mcp-ftp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rag-mcp-ftp
+spec:
+  type: ClusterIP
+  selector:
+    app: rag-mcp-ftp
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rag-mcp-ftp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rag-mcp-ftp
+spec:
+  podSelector:
+    matchLabels:
+      app: rag-mcp-ftp
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: rag-agent
+      ports:
+        - protocol: TCP
+          port: 8081
+  egress:
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [openshift-dns, kube-system]
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 5353
+        - protocol: TCP
+          port: 5353
+    - to:
+        - ipBlock:
+            cidr: {{ printf "%s/32" $f.hostIp | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ $f.port | int }}
+        - protocol: TCP
+          port: {{ $f.passivePorts.first | int }}
+          endPort: {{ $f.passivePorts.last | int }}
+{{- end }}

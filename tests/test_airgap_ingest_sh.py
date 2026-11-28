@@ -1187,3 +1187,16 @@ def test_ingest_render_opts_out_of_the_splunk_gateway(ingest_tree):
     dist = ingest_tree[0] / "dist"
     assert "teamTools" not in (dist / "mainframe-rag-ingest-values.yaml").read_text()
     assert "rag-splunk-gateway" not in (dist / "ingest-rendered.yaml").read_text()
+
+
+def test_ingest_render_opts_out_of_zos_reads(ingest_tree):
+    """#1294: the Job render switches Open WebUI off, which would leave the
+    z/OS role guard no role list to check; it switches z/OS reads off too, so an
+    enabled deployment still ingests (no z/OS input is read, not even the CA
+    file, and nothing of the bridge is rendered)."""
+    r = _run_ingest(ingest_tree, ("ZOS_READ_ENABLED", "true"), ("ZOS_READ_SECRET", "zos-read"),
+                    ("ZOS_FTP_TRANSPORT_MODE", "ftps"), ("ZOS_FTP_CA_FILE", "/nonexistent/zq-site-ca.pem"))
+    assert r.returncode == 0, r.stderr
+    dist = ingest_tree[0] / "dist"
+    assert "zosRead" not in (dist / "mainframe-rag-ingest-values.yaml").read_text()
+    assert "rag-mcp-ftp" not in (dist / "ingest-rendered.yaml").read_text()

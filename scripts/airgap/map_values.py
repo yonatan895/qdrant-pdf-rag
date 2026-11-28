@@ -48,6 +48,7 @@ try:
         team_tools_config,
         validate_model_config,
         yaml_json_string,
+        zos_read_config,
     )
 except ModuleNotFoundError:
     # Run as a file (python3 -I): the sibling, searched after the standard library.
@@ -71,6 +72,7 @@ except ModuleNotFoundError:
         team_tools_config,
         validate_model_config,
         yaml_json_string,
+        zos_read_config,
     )
 
 DEFAULT_OUT = "dist/mainframe-rag-release-values.yaml"
@@ -305,6 +307,15 @@ def build_values(deploy_only: bool = False, generations_args: list[str] | None =
     # that never sets SPLUNK_GATEWAY_ENABLED renders exactly what it did.
     try:
         team_tools = team_tools_config(os.environ)
+    except ValueError as exc:
+        die(str(exc))
+
+    # Issue #1294 (ADR-0012): read-only z/OS dataset reads, default off.
+    # Validated by its one owner, which also owns the ADR's deploy refusals
+    # (roles, console Route, agent policy, extra namespaces) and reads the site
+    # CA in ftps mode; nothing is emitted while it is off.
+    try:
+        zos_read = zos_read_config(os.environ)
     except ValueError as exc:
         die(str(exc))
 
@@ -543,6 +554,7 @@ def build_values(deploy_only: bool = False, generations_args: list[str] | None =
         # Default on in the chart: an explicit opt-out must reach the render.
         "openwebui": openwebui if openwebui else {"enabled": False},
         **({"teamTools": team_tools} if team_tools else {}),
+        **({"zosRead": zos_read} if zos_read else {}),
         "route": {
             "enabled": agent_route,
             "timeoutSeconds": 300,

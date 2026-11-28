@@ -382,3 +382,86 @@ team group by id; empty grants are admin-only.
 {{- end -}}
 {{- toJson $conns -}}
 {{- end -}}
+
+{{/*
+Read-only z/OS dataset reads (ADR-0012, #1294): "true" or nothing, like the
+helpers above. The one owner of the render refusals; every message is fixed
+and names keys, never values. D3 guard (b): every Open WebUI sign-in and admin
+role is an approved role (an admin role alone signs a user in). D3 guard (c):
+no reader outside signed-in team members (console Route, agent policy off,
+extra namespaces). D4: the bridge renders only with its bearer Secret and its
+own NetworkPolicy (zos-bridge.yaml renders both whenever this is true).
+D5: the transport is pinned, no default and no fallback. D7: the tool subset.
+FEEDBACK_ENABLED=true is not refused (D6, Option 7A).
+*/}}
+{{- define "mainframe-rag.zosBridgeCaPath" -}}/etc/mainframe-rag/mcp-ftp{{- end -}}
+
+{{- define "mainframe-rag.zosReadEnabled" -}}
+{{- $z := .Values.zosRead | default dict -}}
+{{- if $z.enabled -}}
+{{- $guard := "z/OS reads are limited to signed-in team members (ADR-0012 D3 guard (c)); change it, or keep z/OS reads off (ZOS_READ_ENABLED=false in airgap.env)" -}}
+{{- if .Values.route.enabled -}}
+{{- fail (printf "zosRead.enabled=true refused with route.enabled=true (AGENT_ROUTE): %s" $guard) -}}
+{{- end -}}
+{{- if not .Values.networkPolicy.enabled -}}
+{{- fail (printf "zosRead.enabled=true refused with networkPolicy.enabled=false (AGENT_NETWORK_POLICY): %s" $guard) -}}
+{{- end -}}
+{{- if .Values.networkPolicy.allowedNamespaces -}}
+{{- fail (printf "zosRead.enabled=true refused with networkPolicy.allowedNamespaces set (AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES): %s" $guard) -}}
+{{- end -}}
+{{- if .Values.openwebui.enabled -}}
+{{- $approved := $z.approvedRoles | default list -}}
+{{- $oidc := .Values.openwebui.oidc | default dict -}}
+{{- range $raw := concat (splitList "," (toString ($oidc.allowedRoles | default ""))) (splitList "," (toString ($oidc.adminRoles | default ""))) -}}
+{{- $role := trim $raw -}}
+{{- if and $role (not (has $role $approved)) -}}
+{{- fail "zosRead.enabled=true refused: every role in openwebui.oidc.allowedRoles and openwebui.oidc.adminRoles must be listed in zosRead.approvedRoles (ADR-0012 D3 guard (b)); role names are not shown. Approve the role after the premise review, or keep z/OS reads off (ZOS_READ_ENABLED=false in airgap.env)" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $f := $z.ftp | default dict -}}
+{{- $pp := $f.passivePorts | default dict -}}
+{{- $mode := $f.transportMode | default "" -}}
+{{- if not (has $mode (list "ftps" "plain")) -}}
+{{- fail "zosRead.ftp.transportMode must be ftps or plain: the operator pins the transport, with no fallback (ADR-0012 D5)" -}}
+{{- end -}}
+{{- $missing := list -}}
+{{- if not $z.secretName }}{{ $missing = append $missing "zosRead.secretName" }}{{ end -}}
+{{- if not $z.datasetAllowlist }}{{ $missing = append $missing "zosRead.datasetAllowlist" }}{{ end -}}
+{{- if not $f.host }}{{ $missing = append $missing "zosRead.ftp.host" }}{{ end -}}
+{{- if not $f.hostIp }}{{ $missing = append $missing "zosRead.ftp.hostIp" }}{{ end -}}
+{{- if or (not $pp.first) (not $pp.last) }}{{ $missing = append $missing "zosRead.ftp.passivePorts" }}{{ end -}}
+{{- if and (eq $mode "ftps") (not ($f.caBundle | default "" | trim)) }}{{ $missing = append $missing "zosRead.ftp.caBundle" }}{{ end -}}
+{{- if $missing -}}
+{{- fail (printf "zosRead.enabled=true but required inputs are missing: %s. Set them, or leave z/OS reads off (ZOS_READ_ENABLED=false in airgap.env)." (join ", " $missing)) -}}
+{{- end -}}
+{{- if or (not $f.port) (not $f.encoding) -}}
+{{- fail "zosRead.ftp.port and zosRead.ftp.encoding must not be empty or null (a null port would open the egress rule to every TCP port)" -}}
+{{- end -}}
+{{- if gt (int $pp.first) (int $pp.last) -}}
+{{- fail "zosRead.ftp.passivePorts.first must not be above zosRead.ftp.passivePorts.last" -}}
+{{- end -}}
+{{- if and (regexMatch "^([0-9]{1,3}\\.){3}[0-9]{1,3}$" (toString $f.host)) (ne (toString $f.host) (toString $f.hostIp)) -}}
+{{- fail "zosRead.ftp.host is an IPv4 address that differs from zosRead.ftp.hostIp: the bridge reaches one z/OS host" -}}
+{{- end -}}
+{{- if and (eq $mode "plain") (not $f.plainAccepted) -}}
+{{- fail "zosRead.ftp.transportMode=plain requires zosRead.ftp.plainAccepted=true: the site security owner's written acceptance of plain FTP (ADR-0012 D5)" -}}
+{{- end -}}
+{{- if and (eq $mode "ftps") (not (regexMatch "^\\s*(-----BEGIN CERTIFICATE-----\\r?\\n[A-Za-z0-9+/=\\r\\n]+-----END CERTIFICATE-----\\s*)+$" (toString $f.caBundle))) -}}
+{{- fail "zosRead.ftp.caBundle must hold only PEM certificates (-----BEGIN CERTIFICATE----- blocks, no key or other text); the value is not shown" -}}
+{{- end -}}
+{{- $tools := $z.enabledTools | default list -}}
+{{- if not $tools -}}
+{{- fail "zosRead.enabledTools must name at least one approved tool (ADR-0012 D7)" -}}
+{{- end -}}
+{{- range $tools -}}
+{{- if not (has . (list "dataset_read" "job_status" "jes_spool_read")) -}}
+{{- fail "zosRead.enabledTools must be a subset of dataset_read, job_status, jes_spool_read (ADR-0012 D7)" -}}
+{{- end -}}
+{{- end -}}
+{{- if and (or (has "job_status" $tools) (has "jes_spool_read" $tools)) (not $z.jesJobnamePrefixes) (not $z.jesOwnerPrefixes) -}}
+{{- fail "zosRead.enabledTools names a JES tool but zosRead.jesJobnamePrefixes and zosRead.jesOwnerPrefixes are both empty: the bridge would deny every job" -}}
+{{- end -}}
+true
+{{- end -}}
+{{- end -}}

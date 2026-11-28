@@ -46,9 +46,17 @@ TEAM_TOOLS_KEYS = [
     "SPLUNK_GATEWAY_CPU_REQUEST", "SPLUNK_GATEWAY_MEMORY_REQUEST", "SPLUNK_GATEWAY_CPU_LIMIT",
     "SPLUNK_GATEWAY_MEMORY_LIMIT", "GATEWAY_BASE_URL",
 ]
+ZOS_KEYS = (
+    "ZOS_READ_ENABLED", "ZOS_READ_DRY_RUN", "ZOS_READ_SECRET", "ZOS_READ_APPROVED_ROLES",
+    "ZOS_READ_DATASET_ALLOWLIST", "ZOS_READ_ENABLED_TOOLS", "ZOS_READ_JES_JOBNAME_PREFIXES",
+    "ZOS_READ_JES_OWNER_PREFIXES", "ZOS_FTP_HOST", "ZOS_FTP_PORT", "ZOS_FTP_HOST_IP", "ZOS_FTP_PASSIVE_PORTS",
+    "ZOS_FTP_TRANSPORT_MODE", "ZOS_FTP_PLAIN_ACCEPTED", "ZOS_FTP_CA_FILE", "ZOS_FTP_ENCODING",
+    "ZOS_BRIDGE_CPU_REQUEST", "ZOS_BRIDGE_MEMORY_REQUEST", "ZOS_BRIDGE_CPU_LIMIT", "ZOS_BRIDGE_MEMORY_LIMIT",
+)
 MAPPER_KEYS = [
     *OPENWEBUI_KEYS,
     *TEAM_TOOLS_KEYS,
+    *ZOS_KEYS,
     "INTERNAL_REGISTRY", "REGISTRY_INTERNAL", "NAMESPACE", "OPENSHIFT_NAMESPACE",
     "QDRANT_RELEASE", "IMAGE_SHA", "EMBED_BASE_URL", "VLLM_BASE_URL",
     "EMBED_MODEL", "DENSE_DIM", "EMBED_MODEL_REVISION",
@@ -2122,3 +2130,268 @@ def test_team_tools_timeout_defaults_are_the_gateways_own():
 
     assert splunk.SplunkBackend.__dataclass_fields__["timeout_s"].default == model_config.SPLUNK_BACKEND_TIMEOUT_DEFAULT
     assert splunk.LIMIT_DEFAULTS["tool_timeout_s"] == model_config.SPLUNK_TOOL_TIMEOUT_DEFAULT
+
+
+# --- z/OS dataset-read pilot (ADR-0012, #1294 PR 3): default off ---
+
+ZOS_TRICKY_ALLOWLIST = "SYS1.PARMLIB(IEASYS00), team.a$b.jcl(#run@1),TEAM.NOTES,X.$(MCP)"
+ZOS_CANONICAL_ALLOWLIST = ["SYS1.PARMLIB(IEASYS00)", "TEAM.A$B.JCL(#RUN@1)", "TEAM.NOTES", "X.$(MCP)"]
+_ZOS_GUARD_C = "z/OS reads are limited to signed-in team members (ADR-0012 D3 guard (c))"
+_ZOS_ROLES = ("ZOS_READ_ENABLED=true refused: every role in OPENWEBUI_OIDC_ALLOWED_ROLES and "
+              "OPENWEBUI_OIDC_ADMIN_ROLES must be listed in ZOS_READ_APPROVED_ROLES (ADR-0012 D3 guard (b)); "
+              "role names are not shown")
+
+
+def _zos_env(monkeypatch, tmp_path, **env) -> None:
+    """Open WebUI on plus accepted z/OS reads (plain FTP, owner-accepted); env overrides (None unsets)."""
+    for key in ZOS_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    _owui_env(monkeypatch, tmp_path)
+    roles = ",".join([OWUI_ON["OPENWEBUI_OIDC_ALLOWED_ROLES"], OWUI_ON["OPENWEBUI_OIDC_ADMIN_ROLES"]])
+    selected = {
+        "ZOS_READ_ENABLED": "true", "ZOS_READ_SECRET": "zos-read", "ZOS_READ_APPROVED_ROLES": roles,
+        "ZOS_READ_DATASET_ALLOWLIST": ZOS_TRICKY_ALLOWLIST, "ZOS_FTP_HOST": "192.0.2.44",
+        "ZOS_FTP_PASSIVE_PORTS": "50000-50100", "ZOS_FTP_TRANSPORT_MODE": "plain", "ZOS_FTP_PLAIN_ACCEPTED": "true",
+        **env,
+    }
+    for key, value in selected.items():
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+
+
+def test_zos_reads_off_emit_nothing_and_write_byte_identical_values(monkeypatch, mapper_env, tmp_path):
+    """Default off: no zosRead block. An explicit false with every other key set
+    (a CA file that does not exist, roles that are not approved) writes the same bytes."""
+    for key in ZOS_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    unset = out.read_bytes()
+    assert b"zosRead" not in unset
+    for key, value in {
+        "ZOS_READ_ENABLED": "false", "ZOS_READ_DRY_RUN": "true", "ZOS_READ_SECRET": "zos-read",
+        "ZOS_READ_APPROVED_ROLES": "nobody", "ZOS_READ_DATASET_ALLOWLIST": ZOS_TRICKY_ALLOWLIST,
+        "ZOS_READ_ENABLED_TOOLS": "dataset_read,job_status", "ZOS_READ_JES_JOBNAME_PREFIXES": "TEAM",
+        "ZOS_FTP_HOST": "zos.example.invalid", "ZOS_FTP_HOST_IP": "192.0.2.44", "ZOS_FTP_PORT": "2121",
+        "ZOS_FTP_PASSIVE_PORTS": "50000-50100", "ZOS_FTP_TRANSPORT_MODE": "ftps",
+        "ZOS_FTP_CA_FILE": str(tmp_path / "absent.pem"), "ZOS_FTP_ENCODING": "utf-8", "ZOS_BRIDGE_CPU_LIMIT": "1",
+    }.items():
+        monkeypatch.setenv(key, value)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert out.read_bytes() == unset
+
+
+def test_zos_reads_plain_selection_emits_the_exact_block(monkeypatch, mapper_env, tmp_path):
+    _zos_env(monkeypatch, tmp_path)
+    values = mapped(mapper_env)
+    assert values["zosRead"] == {
+        "enabled": True, "dryRun": False, "secretName": "zos-read",
+        "approvedRoles": [*OWUI_ON["OPENWEBUI_OIDC_ALLOWED_ROLES"].split(","),
+                          *OWUI_ON["OPENWEBUI_OIDC_ADMIN_ROLES"].split(",")],
+        "datasetAllowlist": ZOS_CANONICAL_ALLOWLIST,
+        "enabledTools": ["dataset_read"], "jesJobnamePrefixes": [], "jesOwnerPrefixes": [],
+        "ftp": {"host": "192.0.2.44", "port": 21, "hostIp": "192.0.2.44",
+                "passivePorts": {"first": 50000, "last": 50100},
+                "transportMode": "plain", "plainAccepted": True, "caBundle": "", "encoding": "latin-1"},
+        "resources": {"requests": {"cpu": "50m", "memory": "128Mi"}, "limits": {"cpu": "500m", "memory": "512Mi"}},
+    }
+
+
+def test_zos_reads_ftps_dry_run_jes_and_sizing_selection(monkeypatch, mapper_env, tmp_path):
+    ca_text = _real_ca(tmp_path, "zos-ca")[0]
+    ca_file = tmp_path / "zos-ca-site.pem"
+    ca_file.write_text(ca_text)
+    _zos_env(monkeypatch, tmp_path, ZOS_FTP_TRANSPORT_MODE="ftps", ZOS_FTP_PLAIN_ACCEPTED=None,
+             ZOS_FTP_CA_FILE=str(ca_file), ZOS_FTP_HOST="zos.example.invalid", ZOS_FTP_HOST_IP="192.0.2.44",
+             ZOS_FTP_PORT="2121", ZOS_FTP_ENCODING="utf-8", ZOS_READ_DRY_RUN="true",
+             ZOS_READ_ENABLED_TOOLS="dataset_read, job_status,jes_spool_read",
+             ZOS_READ_JES_JOBNAME_PREFIXES="team,$ops", ZOS_READ_JES_OWNER_PREFIXES="opsusr",
+             ZOS_BRIDGE_CPU_LIMIT="1", ZOS_BRIDGE_MEMORY_REQUEST="256Mi")
+    zos = mapped(mapper_env)["zosRead"]
+    assert zos["dryRun"] is True
+    assert zos["enabledTools"] == ["dataset_read", "job_status", "jes_spool_read"]
+    assert zos["jesJobnamePrefixes"] == ["TEAM", "$OPS"] and zos["jesOwnerPrefixes"] == ["OPSUSR"]
+    assert zos["ftp"] == {"host": "zos.example.invalid", "port": 2121, "hostIp": "192.0.2.44",
+                          "passivePorts": {"first": 50000, "last": 50100},
+                          "transportMode": "ftps", "plainAccepted": False, "caBundle": ca_text, "encoding": "utf-8"}
+    assert zos["resources"] == {"requests": {"cpu": "50m", "memory": "256Mi"},
+                                "limits": {"cpu": "1", "memory": "512Mi"}}
+
+
+def test_zos_reads_accept_feedback_on(monkeypatch, mapper_env, tmp_path):
+    """ADR-0012 D6 (Option 7A): FEEDBACK_ENABLED=true is not a refusal."""
+    _zos_env(monkeypatch, tmp_path, FEEDBACK_ENABLED="true", FEEDBACK_SECRET="fb-secret")
+    values = mapped(mapper_env)
+    assert values["zosRead"]["enabled"] is True and values["feedback"]["enabled"] is True
+
+
+_ZOS_REFUSALS = [
+    ({"ZOS_READ_APPROVED_ROLES": None}, _ZOS_ROLES),
+    ({"ZOS_READ_APPROVED_ROLES": OWUI_ON["OPENWEBUI_OIDC_ALLOWED_ROLES"]}, _ZOS_ROLES),
+    ({"ZOS_READ_APPROVED_ROLES": OWUI_ON["OPENWEBUI_OIDC_ADMIN_ROLES"]}, _ZOS_ROLES),
+    ({"OPENWEBUI_OIDC_ALLOWED_ROLES": OWUI_ON["OPENWEBUI_OIDC_ALLOWED_ROLES"] + ",zq-contractors"}, _ZOS_ROLES),
+    ({"OPENWEBUI_OIDC_ADMIN_ROLES": OWUI_ON["OPENWEBUI_OIDC_ADMIN_ROLES"] + ",zq-site-admins"}, _ZOS_ROLES),
+    ({"AGENT_ROUTE": "true"}, "ZOS_READ_ENABLED=true refused with AGENT_ROUTE=true: " + _ZOS_GUARD_C),
+    ({"AGENT_NETWORK_POLICY": "false"}, "ZOS_READ_ENABLED=true refused with AGENT_NETWORK_POLICY=false: " + _ZOS_GUARD_C),
+    ({"AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES": "zq-tools"},
+     "ZOS_READ_ENABLED=true refused with AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES set: " + _ZOS_GUARD_C),
+    ({"ZOS_READ_SECRET": None, "ZOS_READ_DATASET_ALLOWLIST": None, "ZOS_FTP_HOST": None, "ZOS_FTP_PASSIVE_PORTS": None},
+     ("ZOS_READ_ENABLED=true but required inputs are missing: ZOS_READ_SECRET, ZOS_READ_DATASET_ALLOWLIST, "
+     "ZOS_FTP_HOST, ZOS_FTP_HOST_IP, ZOS_FTP_PASSIVE_PORTS. Set them, or keep ZOS_READ_ENABLED=false")),
+    ({"ZOS_FTP_HOST": "zos.example.invalid"}, "required inputs are missing: ZOS_FTP_HOST_IP."),
+    ({"ZOS_FTP_TRANSPORT_MODE": None},
+     "ZOS_FTP_TRANSPORT_MODE must be ftps or plain: the operator pins the transport, with no fallback (ADR-0012 D5)"),
+    ({"ZOS_FTP_TRANSPORT_MODE": "auto"}, "ZOS_FTP_TRANSPORT_MODE must be ftps or plain"),
+    ({"ZOS_FTP_PLAIN_ACCEPTED": None},
+     ("ZOS_FTP_TRANSPORT_MODE=plain requires ZOS_FTP_PLAIN_ACCEPTED=true: the site security owner's written "
+     "acceptance of plain FTP (ADR-0012 D5)")),
+    ({"ZOS_FTP_TRANSPORT_MODE": "ftps"}, "required inputs are missing: ZOS_FTP_CA_FILE."),
+    ({"ZOS_FTP_HOST_IP": "192.0.2.45"},
+     "ZOS_FTP_HOST is an IPv4 address that differs from ZOS_FTP_HOST_IP: the bridge reaches one z/OS host"),
+    ({"ZOS_FTP_HOST_IP": "192.0.2.0/24"}, "ZOS_FTP_HOST_IP must be one IPv4 address (no prefix length)"),
+    ({"ZOS_FTP_HOST_IP": "192.0.2.300"}, "ZOS_FTP_HOST_IP must be one IPv4 address (no prefix length)"),
+    ({"ZOS_FTP_HOST": "ftp://192.0.2.44"}, "ZOS_FTP_HOST must be a host name or an IPv4 address (no scheme, port or path)"),
+    ({"ZOS_FTP_PORT": "0"}, "ZOS_FTP_PORT must be a TCP port from 1 to 65535"),
+    ({"ZOS_FTP_PASSIVE_PORTS": "50100-50000"}, "ZOS_FTP_PASSIVE_PORTS must be FIRST-LAST, two TCP ports with FIRST not above LAST"),
+    ({"ZOS_FTP_PASSIVE_PORTS": "50000"}, "ZOS_FTP_PASSIVE_PORTS must be FIRST-LAST"),
+    ({"ZOS_FTP_PASSIVE_PORTS": "0-70000"}, "ZOS_FTP_PASSIVE_PORTS must be FIRST-LAST"),
+    ({"ZOS_FTP_ENCODING": "zq-no-such-codec"}, "ZOS_FTP_ENCODING must be a Python text codec name such as latin-1 or utf-8"),
+    ({"ZOS_READ_SECRET": "Bad_Name"}, "ZOS_READ_SECRET must be a DNS-subdomain Secret name"),
+    ({"ZOS_READ_DATASET_ALLOWLIST": "ZQ1.*"}, "ZOS_READ_DATASET_ALLOWLIST must hold exact dataset or PDS(MEMBER) names"),
+    ({"ZOS_READ_DATASET_ALLOWLIST": "ZQ1.GDG(-1)"}, "ZOS_READ_DATASET_ALLOWLIST must hold exact dataset or PDS(MEMBER) names"),
+    ({"ZOS_READ_DATASET_ALLOWLIST": "'ZQ1.PARMLIB'"}, "ZOS_READ_DATASET_ALLOWLIST must hold exact dataset or PDS(MEMBER) names"),
+    ({"ZOS_READ_ENABLED_TOOLS": "dataset_read,uss_read"},
+     "ZOS_READ_ENABLED_TOOLS must be a subset of dataset_read, job_status, jes_spool_read (ADR-0012 D7)"),
+    ({"ZOS_READ_ENABLED_TOOLS": "zq_write"},
+     "ZOS_READ_ENABLED_TOOLS must be a subset of dataset_read, job_status, jes_spool_read (ADR-0012 D7)"),
+    ({"ZOS_READ_ENABLED_TOOLS": "dataset_read,job_status"},
+     ("ZOS_READ_ENABLED_TOOLS names a JES tool but ZOS_READ_JES_JOBNAME_PREFIXES and ZOS_READ_JES_OWNER_PREFIXES "
+     "are both empty: the bridge would deny every job")),
+    ({"ZOS_READ_JES_JOBNAME_PREFIXES": "ZQPAY*"}, "ZOS_READ_JES_JOBNAME_PREFIXES must hold exact prefixes"),
+    ({"ZOS_READ_DRY_RUN": "maybe"}, "ZOS_READ_DRY_RUN"),
+    ({"ZOS_BRIDGE_CPU_REQUEST": "2", "ZOS_BRIDGE_CPU_LIMIT": "1"}, "ZOS_BRIDGE_CPU_LIMIT"),
+]
+
+
+@pytest.mark.parametrize("env,message", _ZOS_REFUSALS, ids=[str(i) for i in range(len(_ZOS_REFUSALS))])
+def test_zos_reads_refusals_are_fixed_and_write_nothing(monkeypatch, mapper_env, tmp_path, env, message):
+    _zos_env(monkeypatch, tmp_path, **env)
+    r, out = mapper_env()
+    assert r.returncode != 0 and not out.exists()
+    assert message in r.stderr
+    # Fixed text: never a supplied role, name, address or path.
+    for value in ("zq-contractors", "zq-site-admins", "zq-tools", "ZQ1", "ZQPAY", "zq_write", "zq-no-such-codec",
+                  "192.0.2.300", "Bad_Name", OWUI_ON["OPENWEBUI_OIDC_ALLOWED_ROLES"]):
+        assert value not in r.stderr, value
+
+
+def test_zos_reads_ca_refusals_never_echo_the_file(monkeypatch, mapper_env, tmp_path):
+    good, key = _real_ca(tmp_path, "zos-ca")
+    ca_file = tmp_path / "zos-site.pem"
+    for content, message in ((good + key, "ZOS_FTP_CA_FILE must hold only PEM certificates that load"),
+                             ("  \n", "ZOS_FTP_CA_FILE is blank")):
+        ca_file.write_text(content)
+        _zos_env(monkeypatch, tmp_path, ZOS_FTP_TRANSPORT_MODE="ftps", ZOS_FTP_CA_FILE=str(ca_file))
+        r, out = mapper_env()
+        assert r.returncode != 0 and not out.exists()
+        assert message in r.stderr
+        assert "PRIVATE" not in r.stderr and str(ca_file) not in r.stderr
+
+
+def test_zos_reads_shapes_are_checked_while_off(monkeypatch, mapper_env, tmp_path):
+    """A typo must not wait for the day reads are enabled."""
+    _zos_env(monkeypatch, tmp_path, ZOS_READ_ENABLED="false", ZOS_READ_DATASET_ALLOWLIST="ZQ1.*")
+    r, out = mapper_env()
+    assert r.returncode != 0 and not out.exists()
+    assert "ZOS_READ_DATASET_ALLOWLIST must hold exact dataset or PDS(MEMBER) names" in r.stderr
+
+
+def test_zos_reads_without_open_webui_have_no_role_list_to_check(monkeypatch, mapper_env, tmp_path):
+    """Mirrors the chart: the guard reads the sign-in lists the front end renders."""
+    _zos_env(monkeypatch, tmp_path, OPENWEBUI_ENABLED="false", ZOS_READ_APPROVED_ROLES=None)
+    assert mapped(mapper_env)["zosRead"]["approvedRoles"] == []
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is required for the round-trip")
+def test_zos_reads_mapper_to_helm_to_bridge_round_trip(monkeypatch, mapper_env, tmp_path):
+    """Producer to consumer: the operator's allowlist reaches the bridge's own
+    parser exactly (after kubelet $$ unescaping), and the selection reaches the
+    Secret references, the agent wiring and the egress rule."""
+    from mainframe_rag.mcp.bridge import parse_dataset_allowlist, parse_enabled_tools
+
+    _zos_env(monkeypatch, tmp_path)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    rendered = subprocess.run(["helm", "template", "app", str(CHART), "-f", str(out), "--namespace", "ns"],
+                              capture_output=True, text=True, cwd=REPO, check=False)
+    assert rendered.returncode == 0, rendered.stderr
+    docs = {(d["kind"], d["metadata"]["name"]): d for d in yaml.safe_load_all(rendered.stdout) if d}
+    env = {e["name"]: e for e in docs["Deployment", "rag-mcp-ftp"]["spec"]["template"]["spec"]["containers"][0]["env"]}
+    raw = env["MCP_DATASET_ALLOWLIST"]["value"]
+    kubelet = re.sub(r"\$\$|\$\(([A-Za-z_][A-Za-z0-9_]*)\)",
+                     lambda m: "$" if m.group(0) == "$$" else {"MCP": "EXPANDED"}.get(m.group(1), m.group(0)), raw)
+    assert list(parse_dataset_allowlist(kubelet)) == ZOS_CANONICAL_ALLOWLIST
+    assert parse_enabled_tools(env["MCP_ENABLED_TOOLS"]["value"]) == ("dataset_read",)
+    assert env["MCP_FTP_PASSWORD"]["valueFrom"]["secretKeyRef"] == {"name": "zos-read", "key": "ftp-password"}
+    agent = {e["name"]: e for e in docs["Deployment", "rag-agent"]["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert agent["ZOWE_MCP_AUTH_TOKEN"]["valueFrom"] == env["MCP_BRIDGE_AUTH_TOKEN"]["valueFrom"]
+    egress = docs["NetworkPolicy", "rag-mcp-ftp"]["spec"]["egress"][1]
+    assert egress["to"] == [{"ipBlock": {"cidr": "192.0.2.44/32"}}]
+
+
+def test_zos_reads_sizing_defaults_mirror_the_chart_values():
+    from scripts.airgap.model_config import SIZING_DEFAULTS
+
+    assert SIZING_DEFAULTS["ZOS_BRIDGE"] == CHART_VALUES["zosRead"]["resources"]
+    assert CHART_VALUES["zosRead"]["enabled"] is False and CHART_VALUES["zosRead"]["enabledTools"] == ["dataset_read"]
+
+
+_ZOS_NAME_CASES = [
+    "SYS1.PARMLIB", "sys1.parmlib(ieasys00)", "A$.B(C)", "X.$(MCP)", "#A.@B($C)", " TEAM.NOTES ", "A-B.C",
+    "A." + ".".join(["B"] * 21), "A2345678.B2345678.C2345678.D2345678.E2345678",
+    "SYS1.*", "SYS1.GDG(-1)", "SYS1.GDG(0)", "SYS1.GDG(+1)", "'SYS1.PARMLIB'", "SYS1..PARMLIB", ".SYS1", "SYS1.",
+    "SYS1.PARMLIB(A)(B)", "SYS1.PARMLIB()", "SYS1.PARM LIB", "1SYS.PARMLIB", "SYS1.PARMLIB(1A)", "SYS1/PARMLIB",
+    "SYS1.PARMLIB(TOOLONGXX)", "A23456789.B", "A." + ".".join(["B"] * 22), "SYS1.PARM%", "SYS1.PÄRMLIB", "SYS1.A?",
+    "A2345678.B2345678.C2345678.D2345678.E2345678.F", "SYS1.PARMLIB(A-B)", "SYS1\tPARMLIB", "A\\B", 'A"B',
+]
+
+
+@pytest.mark.parametrize("name", _ZOS_NAME_CASES)
+def test_zos_allowlist_rule_is_the_bridges_own(name):
+    """The bastion cannot import the bridge, so model_config repeats its name
+    rule; a difference in either direction must fail here, not drift."""
+    from scripts.airgap import model_config
+
+    from mainframe_rag.mcp import bridge
+
+    try:
+        want = list(bridge.parse_dataset_allowlist(name))
+    except ValueError:
+        want = None
+    try:
+        got = model_config.zos_dataset_allowlist("ZOS_READ_DATASET_ALLOWLIST", name)
+    except ValueError:
+        got = None
+    assert got == want
+
+
+def test_zos_tool_and_prefix_rules_are_the_bridges_own():
+    from scripts.airgap import model_config
+
+    from mainframe_rag.mcp import bridge
+
+    assert model_config.ZOS_APPROVED_TOOLS == bridge.PILOT_APPROVED_TOOLS
+    assert model_config.ZOS_DEFAULT_TOOLS == bridge.DEFAULT_ENABLED_TOOLS
+    for raw in ("TEAM", "team,$ops", "PAY*", "TOOLONGXX", "1A", "A B", ""):
+        try:
+            want = list(bridge.parse_jes_prefixes(raw))
+        except ValueError:
+            want = None
+        try:
+            got = model_config.zos_jes_prefixes("ZOS_READ_JES_JOBNAME_PREFIXES", raw)
+        except ValueError:
+            got = None
+        assert got == want, raw

@@ -26,6 +26,7 @@ resolve_network_policy
 resolve_feedback
 resolve_openwebui
 resolve_splunk_gateway
+resolve_zos_read
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
@@ -86,6 +87,11 @@ echo "==> Open WebUI front end $(describe_openwebui)"
 # the verified agent image; map_values.py refuses missing or invalid inputs
 # (Open WebUI off, files, CIDRs, model connection) before any mutation.
 echo "==> Splunk gateway $(describe_splunk_gateway)"
+# Issue #1294 (ADR-0012): the read-only z/OS FTP bridge, default off. It runs
+# the verified agent image; map_values.py refuses missing or invalid inputs and
+# the ADR's unsafe combinations (roles, Route, policy, namespaces) before any
+# mutation.
+echo "==> z/OS reads $(describe_zos_read)"
 
 refuse_nfs_storage
 SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}
@@ -122,6 +128,9 @@ check_gateway_ca
 # read-only and before the render (a missing key would otherwise surface as
 # CreateContainerConfigError after the release).
 require_splunk_gateway_secrets
+# z/OS bridge Secret (#1294): key presence and the bearer's shape, read-only
+# and before the render.
+require_zos_read_secrets
 mkdir -p dist
 
 # Public namespace service CA becomes a generated value, never a YAML patch.
@@ -448,6 +457,19 @@ if [ "$SPLUNK_GATEWAY_ENABLED" = "true" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; t
         die "Splunk gateway rag-splunk-gateway is not Ready within 330s; the rest of the release, the docs front end included, is deployed. Fix the gateway configuration (docs/deploy.md#splunk-gateway-deploy, steps 7-8) and re-run airgap:deploy, or set SPLUNK_GATEWAY_ENABLED=false"
     fi
     verify_running_images splunk_gateway
+fi
+# #1294: the z/OS bridge serves once its listener is up (it connects to z/OS
+# per call, never at start), so a bridge that is not Ready is a pod or
+# configuration fault (a refused setting exits 2 with a fixed line). The agent
+# probes the bridge's tool list at start and logs zowe_mcp_unreachable when it
+# cannot reach it. It runs the agent image: its pod must report the agent digest.
+if [ "$ZOS_READ_ENABLED" = "true" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
+    if ! $KC -n "$NAMESPACE" rollout status deploy/rag-mcp-ftp --timeout=180s; then
+        echo "==> Diagnostic: z/OS bridge start-up (the 'mcp bridge:' line names the setting)" >&2
+        $KC -n "$NAMESPACE" logs deploy/rag-mcp-ftp --tail=20 2>/dev/null || true
+        die "z/OS bridge rag-mcp-ftp is not Ready within 180s; the rest of the release is deployed. Fix the bridge configuration (docs/deploy.md#zos-read-deploy) and re-run airgap:deploy, or set ZOS_READ_ENABLED=false"
+    fi
+    verify_running_images zos_bridge
 fi
 if [ "$AGENT_ROUTE" = "true" ]; then
     echo "Route rag-agent -> svc port oauth, reencrypt, timeout 300s"

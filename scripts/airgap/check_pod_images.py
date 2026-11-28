@@ -29,6 +29,8 @@ ROLE_TARGETS = {
     # The Splunk gateway (#1077) runs the agent image too: agent digest, its
     # own Deployment and container.
     "splunk_gateway": ("Deployment", "rag-splunk-gateway", "gateway"),
+    # The z/OS FTP bridge (#1294, ADR-0012) runs the agent image too.
+    "zos_bridge": ("Deployment", "rag-mcp-ftp", "bridge"),
 }
 REVISION = "deployment.kubernetes.io/revision"
 

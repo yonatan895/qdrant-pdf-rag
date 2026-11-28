@@ -126,6 +126,8 @@ case "$*" in
     printf '%s' "${{OWUI_ADMIN_KEY_B64:-}}" ;;
   *'get secret '*"jsonpath={{.data['bearer-secret']}}"*)
     printf '%s' "${{SPLUNK_BEARER_B64:-}}" ;;
+  *'get secret '*"jsonpath={{.data['bridge-token']}}"*)
+    printf '%s' "${{ZOS_BRIDGE_TOKEN_B64:-}}" ;;
   *'exec deploy/rag-openwebui '*)
     # The mount check (#1252): runs the deploy's own hash code against a stand-in
     # mount. The first $OWUI_MOUNT_STALE reads see $OWUI_MOUNT_STALE_DIR (the old
@@ -3770,33 +3772,38 @@ def test_disabling_the_splunk_gateway_leaves_removal_to_the_release(tree):
 
 
 
-def _gateway_pods(tree, digest: str) -> None:
+def _gateway_pods(tree, digest: str, name: str = "rag-splunk-gateway", container: str = "gateway") -> None:
     repo = ROLE_REPOS["agent"]
-    spec = {"containers": [{"name": "gateway", "image": f"{repo}:tag"}]}
+    spec = {"containers": [{"name": container, "image": f"{repo}:tag"}]}
     meta = {"namespace": "ns", "annotations": {"deployment.kubernetes.io/revision": "1"}}
     (tree[0] / "pods.json").write_text(json.dumps({"items": [
-        {"kind": "Deployment", "metadata": {"name": "rag-splunk-gateway", "uid": "sg", **meta},
-         "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "rag-splunk-gateway"}},
+        {"kind": "Deployment", "metadata": {"name": name, "uid": "sg", **meta},
+         "spec": {"replicas": 1, "selector": {"matchLabels": {"app": name}},
                   "template": {"spec": spec}}},
         {"kind": "ReplicaSet", "metadata": {"name": "sg-rs", "uid": "sg-rs", **meta,
          "ownerReferences": [{"kind": "Deployment", "uid": "sg", "controller": True}]}},
-        {"kind": "Pod", "metadata": {"name": "rag-splunk-gateway-0", "namespace": "ns",
-         "labels": {"app": "rag-splunk-gateway"},
+        {"kind": "Pod", "metadata": {"name": f"{name}-0", "namespace": "ns",
+         "labels": {"app": name},
          "ownerReferences": [{"kind": "ReplicaSet", "uid": "sg-rs", "controller": True}]},
          "spec": spec, "status": {"phase": "Running", "containerStatuses": [
-             {"name": "gateway", "imageID": f"{repo}@{digest}"}]}},
+             {"name": container, "imageID": f"{repo}@{digest}"}]}},
     ]}))
 
 
+@pytest.mark.parametrize(("role", "name", "container"), [
+    ("splunk_gateway", "rag-splunk-gateway", "gateway"),
+    ("zos_bridge", "rag-mcp-ftp", "bridge"),  # #1294: the z/OS bridge runs the agent image too
+], ids=["splunk_gateway", "zos_bridge"])
 @pytest.mark.parametrize("running", ["agent", "other"])
-def test_release_running_image_check_binds_the_gateway_to_the_agent_digest(tree, running):
-    """deploy.sh adds the splunk_gateway role after rollout; image_identity.sh
-    maps it to the verified agent digest (the gateway runs the agent image)."""
+def test_release_running_image_check_binds_the_gateway_to_the_agent_digest(tree, running, role, name, container):
+    """deploy.sh adds the splunk_gateway (zos_bridge) role after rollout;
+    image_identity.sh maps it to the verified agent digest (the workload runs
+    the agent image)."""
     agent, other = "sha256:" + "c" * 64, "sha256:" + "9" * 64
-    _gateway_pods(tree, agent if running == "agent" else other)
+    _gateway_pods(tree, agent if running == "agent" else other, name, container)
     script = (". scripts/airgap/common.sh; . scripts/airgap/image_identity.sh; MANIFEST=dist/MANIFEST.txt; "
               f"KC=kubectl; NAMESPACE=ns; QDRANT_RELEASE=qdrant; INTERNAL_REGISTRY=reg.internal; IMAGE_SHA={IMAGE_SHA}; "
-              f"IMAGE_DIGEST_AGENT={agent}; verify_running_images splunk_gateway")
+              f"IMAGE_DIGEST_AGENT={agent}; verify_running_images {role}")
     # $0 inside the tree: common.sh changes to the tree root it derives from $0.
     r = subprocess.run(["sh", "-c", script, str(tree[0] / "scripts" / "airgap" / "probe.sh")], cwd=tree[0],
                        capture_output=True, text=True, check=False,
@@ -3807,5 +3814,158 @@ def test_release_running_image_check_binds_the_gateway_to_the_agent_digest(tree,
         assert "running images match the verified registry digests (1 roles)" in r.stdout
     else:
         assert r.returncode != 0
-        assert f"pod rag-splunk-gateway-0 container gateway runs {other}, expected {agent}" in r.stderr
+        assert f"pod {name}-0 container {container} runs {other}, expected {agent}" in r.stderr
 
+
+
+# ------------------------------------------- read-only z/OS bridge (#1294)
+
+ZOS_TOKEN = "Zq7_-" * 8  # 40 characters of the allowed set
+ZOS_OBJECTS = [
+    ("apps/v1", "Deployment", "rag-mcp-ftp"),
+    ("v1", "Service", "rag-mcp-ftp"),
+    ("networking.k8s.io/v1", "NetworkPolicy", "rag-mcp-ftp"),
+]
+
+
+def _zos_deploy(tree, *extra, **env):
+    """Open WebUI on (roles staff, docs-admins) plus accepted z/OS reads (plain FTP, owner-accepted)."""
+    selected = {
+        "ZOS_READ_ENABLED": "true", "ZOS_READ_SECRET": "zos-read", "ZOS_READ_APPROVED_ROLES": "staff,docs-admins",
+        "ZOS_READ_DATASET_ALLOWLIST": "SYS1.PARMLIB(IEASYS00)", "ZOS_FTP_HOST": "192.0.2.44",
+        "ZOS_FTP_PASSIVE_PORTS": "50000-50100", "ZOS_FTP_TRANSPORT_MODE": "plain", "ZOS_FTP_PLAIN_ACCEPTED": "true",
+        "ZOS_BRIDGE_TOKEN_B64": b64(ZOS_TOKEN), **env,
+    }
+    return _owui_deploy(tree, *selected.items(), *extra)
+
+
+def _assert_token_never_shown(tree, r, value=ZOS_TOKEN):
+    for text in (r.stdout, r.stderr, _helm_log(tree)):
+        assert value not in text
+
+
+def test_zos_reads_are_off_by_default_and_the_deploy_is_unchanged(tree):
+    r = _owui_deploy(tree)
+    assert r.returncode == 0, r.stderr
+    assert "==> z/OS reads off (ZOS_READ_ENABLED=false)" in r.stdout
+    assert "rag-mcp-ftp" not in (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert "zosRead" not in (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
+    log = _helm_log(tree)
+    assert "rag-mcp-ftp" not in log and "bridge-token" not in log
+
+
+def test_zos_reads_deploy_checks_the_secret_renders_and_waits(tree):
+    r = _zos_deploy(tree)
+    assert r.returncode == 0, r.stderr
+    assert ("==> z/OS reads on: Deployment rag-mcp-ftp (1 replica, agent image), plain transport, tools "
+            "dataset_read, Secret zos-read; reached only from agent pods") in r.stdout
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    for _api, kind, name in ZOS_OBJECTS:
+        assert re.search(rf"kind: {kind}\nmetadata:\n  name: {name}\n", rendered), kind
+    log = _helm_log(tree)
+    flat = log.replace("\n", " ")
+    # Key presence for the three keys, then the bearer's shape, all before the release.
+    for key in ("ftp-user", "ftp-password", "bridge-token"):
+        assert f'get secret zos-read -o go-template={{{{if index .data "{key}"}}}}' in flat
+        assert flat.index(f'"{key}"') < flat.index("upgrade")
+    assert flat.index("jsonpath={.data['bridge-token']}") < flat.index("upgrade")
+    # The bridge is waited for after the release, at most 180 s.
+    assert log.index("deploy/rag-mcp-ftp\n--timeout=180s") > log.index("upgrade")
+    _assert_token_never_shown(tree, r)
+
+
+def test_a_bridge_that_is_not_ready_fails_with_the_off_switch_named(tree):
+    r = _zos_deploy(tree, ("ROLLOUT_FAIL_TARGET", "deploy/rag-mcp-ftp"))
+    assert r.returncode != 0
+    assert "z/OS bridge rag-mcp-ftp is not Ready within 180s" in r.stderr
+    assert "ZOS_READ_ENABLED=false" in r.stderr
+    _assert_token_never_shown(tree, r)
+
+
+@pytest.mark.parametrize("key", ["ftp-user", "ftp-password", "bridge-token"])
+def test_missing_zos_read_secret_key_blocks_before_mutation(tree, key):
+    r = _zos_deploy(tree, ("MISSING_KEY", key))
+    assert r.returncode != 0
+    assert f"required Secret key is missing or empty: {key}" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize("raw", [
+    b"short-token-7731",
+    ZOS_TOKEN.encode() + b"\n",
+    ZOS_TOKEN.encode() + b" x",
+    b"",
+], ids=["short", "trailing-newline", "blank-inside", "unreadable"])
+def test_invalid_bridge_token_refuses_before_mutation_without_showing_it(tree, raw):
+    r = _zos_deploy(tree, ZOS_BRIDGE_TOKEN_B64=b64(raw.decode()) if raw else "")
+    assert r.returncode != 0
+    assert ("E_ZOS_BRIDGE_TOKEN: Secret zos-read key bridge-token must be at least 32 characters, each A-Z, "
+            "a-z, 0-9, '_' or '-' (no newline); the value is not shown") in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+    _assert_token_never_shown(tree, r)
+    assert "short-token-7731" not in r.stdout + r.stderr + _helm_log(tree)
+
+
+_ZOS_GUARD_C = "z/OS reads are limited to signed-in team members (ADR-0012 D3 guard (c))"
+
+
+@pytest.mark.parametrize(("env", "message"), [
+    # ADR-0012 D3 guard (b): an admin role alone signs a user in.
+    ({"ZOS_READ_APPROVED_ROLES": "staff"},
+     ("ZOS_READ_ENABLED=true refused: every role in OPENWEBUI_OIDC_ALLOWED_ROLES and OPENWEBUI_OIDC_ADMIN_ROLES "
+     "must be listed in ZOS_READ_APPROVED_ROLES (ADR-0012 D3 guard (b)); role names are not shown")),
+    # ADR-0012 D3 guard (c).
+    ({"AGENT_ROUTE": "true"}, "ZOS_READ_ENABLED=true refused with AGENT_ROUTE=true: " + _ZOS_GUARD_C),
+    ({"AGENT_NETWORK_POLICY": "false"}, "ZOS_READ_ENABLED=true refused with AGENT_NETWORK_POLICY=false: " + _ZOS_GUARD_C),
+    ({"AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES": "tools"},
+     "ZOS_READ_ENABLED=true refused with AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES set: " + _ZOS_GUARD_C),
+    # ADR-0012 D5: the transport is pinned.
+    ({"ZOS_FTP_TRANSPORT_MODE": ""}, "ZOS_FTP_TRANSPORT_MODE must be ftps or plain"),
+    ({"ZOS_READ_ENABLED": "maybe"}, "ZOS_READ_ENABLED must be true/false"),
+    ({"ZOS_READ_SECRET": "Zos_Read"}, "ZOS_READ_SECRET must be a DNS-subdomain name"),
+])
+def test_unsafe_or_invalid_zos_read_selection_fails_before_any_mutation(tree, env, message):
+    r = _zos_deploy(tree, **env)
+    assert r.returncode != 0
+    assert message in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+    _assert_token_never_shown(tree, r)
+
+
+def test_the_next_ordinary_deploy_after_a_refused_one_is_accepted(tree):
+    """A refusal leaves nothing behind: the same tree deploys once the unsafe
+    setting is gone."""
+    refused = _zos_deploy(tree, AGENT_ROUTE="true")
+    assert refused.returncode != 0
+    assert "ZOS_READ_ENABLED=true refused with AGENT_ROUTE=true: " + _ZOS_GUARD_C in refused.stderr
+    assert "upgrade" not in _helm_log(tree)
+    r = _zos_deploy(tree)
+    assert r.returncode == 0, r.stderr
+    assert "upgrade" in _helm_log(tree)
+
+
+def test_next_ordinary_deploy_adopts_every_owned_zos_bridge_object(tree):
+    inventory = _live_inventory(tree, ZOS_OBJECTS, **HELM_OWNED)
+    r = _zos_deploy(tree, ("OWNERSHIP_FILE", inventory))
+    assert r.returncode == 0, r.stderr
+    assert "ownership preflight refused" not in r.stderr
+    assert "upgrade" in _helm_log(tree)
+
+
+@pytest.mark.parametrize("obj", [*ZOS_OBJECTS, ("v1", "ConfigMap", "rag-mcp-ftp")],
+                         ids=["Deployment", "Service", "NetworkPolicy", "ConfigMap"])
+def test_foreign_zos_bridge_objects_are_refused_before_any_mutation(tree, obj):
+    inventory = _live_inventory(tree, [obj], annotations={"meta.helm.sh/release-name": "other"})
+    r = _zos_deploy(tree, ("OWNERSHIP_FILE", inventory))
+    assert r.returncode != 0
+    assert "ownership preflight refused" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_disabling_zos_reads_leaves_removal_to_the_release(tree):
+    r = _owui_deploy(tree, ("ZOS_READ_ENABLED", "false"), ("ZOS_READ_SECRET", "zos-read"))
+    assert r.returncode == 0, r.stderr
+    assert "rag-mcp-ftp" not in (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    cleanup = tree[0] / "dist" / "app-disabled-cleanup.json"
+    assert not cleanup.exists() or "rag-mcp-ftp" not in cleanup.read_text()
+    assert "delete" not in _helm_log(tree).split()

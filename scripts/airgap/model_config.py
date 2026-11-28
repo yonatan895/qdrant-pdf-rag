@@ -113,6 +113,7 @@ OPERATOR_BOOL_KEYS = (
     "FEEDBACK_ENABLED", "OPENWEBUI_ENABLED", "CHAT_FOLLOWUP_ANCHOR_ENABLED", "ANSWER_CODING_MODE_ENABLED",
     "ANSWER_SPL_MODE_ENABLED", "OPENWEBUI_RATINGS_ENABLED", "CHAT_IMAGES_ENABLED",
     "ANSWER_SELECT_ENABLED", "ANSWER_EXPAND_ENABLED", "SPLUNK_GATEWAY_ENABLED",
+    "ZOS_READ_ENABLED", "ZOS_READ_DRY_RUN", "ZOS_FTP_PLAIN_ACCEPTED",
 )
 
 # Agent ingress NetworkPolicy (issue #373): default ON; the allow-list names
@@ -582,6 +583,211 @@ def team_tools_config(values: Mapping[str, str]) -> dict[str, object] | None:
     }
 
 
+# Read-only z/OS dataset reads for the Docs chat (pilot; ADR-0012, #1294 PR 3),
+# default OFF. One validation owner for validate.sh (model_config main),
+# airgap:config check and map_values.py, like team_tools_config. It also owns
+# the deploy-side refusals ADR-0012 decides (D3 guards (b) and (c), D5, D7);
+# the chart repeats them for a direct helm render. FEEDBACK_ENABLED=true is
+# not refused (D6, Option 7A: the agent suppresses observation turns instead).
+# The bastion cannot import the bridge, so its name, prefix and tool rules are
+# repeated here and pinned against it in tests/test_map_values.py.
+# Diagnostics name keys, never roles, dataset names, addresses or paths.
+ZOS_APPROVED_TOOLS = ("dataset_read", "job_status", "jes_spool_read")
+ZOS_DEFAULT_TOOLS = ("dataset_read",)
+ZOS_JES_TOOLS = ("job_status", "jes_spool_read")
+ZOS_TRANSPORT_MODES = ("ftps", "plain")
+ZOS_DEFAULT_ENCODING = "latin-1"
+_ZOS_QUALIFIER = re.compile(r"[A-Z#$@][A-Z0-9#$@-]{0,7}")
+_ZOS_MEMBER = re.compile(r"[A-Z#$@][A-Z0-9#$@]{0,7}")
+_ZOS_FORBIDDEN = frozenset("'\"*?%/\\")
+_ZOS_HOST = re.compile(r"[A-Za-z0-9](?:[-A-Za-z0-9.]*[A-Za-z0-9])?")
+_IPV4 = re.compile(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}")
+_ZOS_ENCODING = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,39}")
+_ZOS_GUARD_C = ("z/OS reads are limited to signed-in team members (ADR-0012 D3 guard (c)); change it, "
+                "or keep ZOS_READ_ENABLED=false")
+
+
+def _zos_items(raw: str) -> list[str]:
+    return [item.strip() for item in re.split(r"[,\n]", raw) if item.strip()]
+
+
+def _zos_disallowed(text: str) -> bool:
+    return any(ord(ch) < 32 or ord(ch) >= 127 or ch in _ZOS_FORBIDDEN for ch in text)
+
+
+def zos_dataset_allowlist(key: str, raw: str) -> list[str]:
+    """Exact dataset or PDS(MEMBER) names in the bridge's canonical (upper-case)
+    form, first spelling kept once. The bridge's parse_dataset_allowlist rule."""
+    message = (f"{key} must hold exact dataset or PDS(MEMBER) names, comma-separated (no wildcard, quote, "
+               "relative generation or blank inside a name); names are not shown")
+    names: list[str] = []
+    for item in _zos_items(raw):
+        if _zos_disallowed(item) or " " in item:
+            raise ValueError(message)
+        dsn, member = item, None
+        if "(" in item or ")" in item:
+            if item.count("(") != 1 or item.count(")") != 1 or not item.endswith(")"):
+                raise ValueError(message)
+            dsn, _, rest = item.partition("(")
+            member = rest[:-1].upper()
+            if _ZOS_MEMBER.fullmatch(member) is None:
+                raise ValueError(message)
+        dsn = dsn.upper()
+        qualifiers = dsn.split(".")
+        if (not dsn or len(dsn) > 44 or len(qualifiers) > 22
+                or any(_ZOS_QUALIFIER.fullmatch(part) is None for part in qualifiers)):
+            raise ValueError(message)
+        name = f"{dsn}({member})" if member else dsn
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def zos_jes_prefixes(key: str, raw: str) -> list[str]:
+    """Exact JES jobname or owner prefixes (the bridge's parse_jes_prefixes rule)."""
+    prefixes: list[str] = []
+    for item in _zos_items(raw):
+        upper = item.upper()
+        if _zos_disallowed(item) or " " in item or _ZOS_MEMBER.fullmatch(upper) is None:
+            raise ValueError(f"{key} must hold exact prefixes of 1 to 8 characters, comma-separated "
+                             "(no wildcard); values are not shown")
+        if upper not in prefixes:
+            prefixes.append(upper)
+    return prefixes
+
+
+def _ipv4(text: str) -> bool:
+    return _IPV4.fullmatch(text) is not None and all(int(part) <= 255 for part in text.split("."))
+
+
+def zos_read_config(values: Mapping[str, str]) -> dict[str, object] | None:
+    """The chart's `zosRead` values, or None while z/OS reads are off.
+
+    Shapes are checked whenever a key is set (a typo must not wait for the day
+    reads are enabled); required keys, the refusals and the CA file only when
+    enabled. Off writes nothing, so an existing deployment renders what it did."""
+    enabled = parse_strict_bool("ZOS_READ_ENABLED", values.get("ZOS_READ_ENABLED", ""), False)
+    dry_run = parse_strict_bool("ZOS_READ_DRY_RUN", values.get("ZOS_READ_DRY_RUN", ""), False)
+    plain_accepted = parse_strict_bool("ZOS_FTP_PLAIN_ACCEPTED", values.get("ZOS_FTP_PLAIN_ACCEPTED", ""), False)
+    secret = values.get("ZOS_READ_SECRET", "")
+    if secret and (len(secret) > 253 or _DNS_SUBDOMAIN.fullmatch(secret) is None):
+        raise ValueError("ZOS_READ_SECRET must be a DNS-subdomain Secret name")
+    raw_roles = values.get("ZOS_READ_APPROVED_ROLES", "")
+    if raw_roles and _NAME_LIST.fullmatch(raw_roles) is None:
+        raise ValueError("ZOS_READ_APPROVED_ROLES must be a comma-separated list of role names")
+    approved = list(dict.fromkeys(raw_roles.split(","))) if raw_roles else []
+    allowlist = zos_dataset_allowlist("ZOS_READ_DATASET_ALLOWLIST", values.get("ZOS_READ_DATASET_ALLOWLIST", ""))
+    tools_message = ("ZOS_READ_ENABLED_TOOLS must be a subset of dataset_read, job_status, jes_spool_read "
+                     "(ADR-0012 D7); uss_read and any other tool stay unapproved")
+    raw_tools = values.get("ZOS_READ_ENABLED_TOOLS", "")
+    tools = list(dict.fromkeys(_zos_items(raw_tools))) if raw_tools else list(ZOS_DEFAULT_TOOLS)
+    if not tools or any(tool not in ZOS_APPROVED_TOOLS for tool in tools):
+        raise ValueError(tools_message)
+    job_prefixes = zos_jes_prefixes("ZOS_READ_JES_JOBNAME_PREFIXES", values.get("ZOS_READ_JES_JOBNAME_PREFIXES", ""))
+    owner_prefixes = zos_jes_prefixes("ZOS_READ_JES_OWNER_PREFIXES", values.get("ZOS_READ_JES_OWNER_PREFIXES", ""))
+    host = values.get("ZOS_FTP_HOST", "")
+    if host and (len(host) > 253 or _ZOS_HOST.fullmatch(host) is None):
+        raise ValueError("ZOS_FTP_HOST must be a host name or an IPv4 address (no scheme, port or path)")
+    port = _tcp_port("ZOS_FTP_PORT", values.get("ZOS_FTP_PORT", ""), 21)
+    host_ip = values.get("ZOS_FTP_HOST_IP", "")
+    if host_ip and not _ipv4(host_ip):
+        raise ValueError("ZOS_FTP_HOST_IP must be one IPv4 address (no prefix length)")
+    if not host_ip and _ipv4(host):
+        host_ip = host
+    passive: dict[str, int] = {}
+    raw_passive = values.get("ZOS_FTP_PASSIVE_PORTS", "")
+    if raw_passive:
+        match = re.fullmatch(r"([0-9]{1,5})-([0-9]{1,5})", raw_passive)
+        if match is None or not 1 <= int(match.group(1)) <= int(match.group(2)) <= 65535:
+            raise ValueError("ZOS_FTP_PASSIVE_PORTS must be FIRST-LAST, two TCP ports with FIRST not above LAST "
+                             "(the server's FTP.DATA PASSIVEPORTRANGE)")
+        passive = {"first": int(match.group(1)), "last": int(match.group(2))}
+    mode_message = ("ZOS_FTP_TRANSPORT_MODE must be ftps or plain: the operator pins the transport, with no "
+                    "fallback (ADR-0012 D5)")
+    mode = values.get("ZOS_FTP_TRANSPORT_MODE", "")
+    if mode and mode not in ZOS_TRANSPORT_MODES:
+        raise ValueError(mode_message)
+    encoding = values.get("ZOS_FTP_ENCODING", "") or ZOS_DEFAULT_ENCODING
+    encoding_message = "ZOS_FTP_ENCODING must be a Python text codec name such as latin-1 or utf-8"
+    if _ZOS_ENCODING.fullmatch(encoding) is None:
+        raise ValueError(encoding_message)
+    try:
+        "".encode(encoding)
+    except LookupError:
+        raise ValueError(encoding_message) from None
+    resources = _chart_resources(values, "ZOS_BRIDGE")
+    if not enabled:
+        return None
+    # ADR-0012 D3 guard (c): no reader outside signed-in team members.
+    if parse_strict_bool("AGENT_ROUTE", values.get("AGENT_ROUTE", ""), False):
+        raise ValueError(f"ZOS_READ_ENABLED=true refused with AGENT_ROUTE=true: {_ZOS_GUARD_C}")
+    policy_enabled, policy_namespaces = network_policy(values)
+    if not policy_enabled:
+        raise ValueError(f"ZOS_READ_ENABLED=true refused with AGENT_NETWORK_POLICY=false: {_ZOS_GUARD_C}")
+    if policy_namespaces:
+        raise ValueError("ZOS_READ_ENABLED=true refused with AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES set: "
+                         f"{_ZOS_GUARD_C}")
+    # ADR-0012 D3 guard (b): every sign-in and admin role is approved (an admin
+    # role alone signs a user in). The lists are the ones Open WebUI renders.
+    if parse_strict_bool("OPENWEBUI_ENABLED", values.get("OPENWEBUI_ENABLED", ""), True):
+        signed_in = [role.strip() for key in ("OPENWEBUI_OIDC_ALLOWED_ROLES", "OPENWEBUI_OIDC_ADMIN_ROLES")
+                     for role in values.get(key, "").split(",") if role.strip()]
+        if any(role not in approved for role in signed_in):
+            raise ValueError("ZOS_READ_ENABLED=true refused: every role in OPENWEBUI_OIDC_ALLOWED_ROLES and "
+                             "OPENWEBUI_OIDC_ADMIN_ROLES must be listed in ZOS_READ_APPROVED_ROLES (ADR-0012 D3 "
+                             "guard (b)); role names are not shown. Approve the role after the premise review, "
+                             "or keep ZOS_READ_ENABLED=false")
+    if not mode:
+        raise ValueError(mode_message)
+    ca_file = values.get("ZOS_FTP_CA_FILE", "")
+    required: dict[str, object] = {
+        "ZOS_READ_SECRET": secret, "ZOS_READ_DATASET_ALLOWLIST": allowlist, "ZOS_FTP_HOST": host,
+        "ZOS_FTP_HOST_IP": host_ip, "ZOS_FTP_PASSIVE_PORTS": passive,
+    }
+    if mode == "ftps":
+        required["ZOS_FTP_CA_FILE"] = ca_file
+    missing = [key for key, value in required.items() if not value]
+    if missing:
+        raise ValueError(f"ZOS_READ_ENABLED=true but required inputs are missing: {', '.join(missing)}. "
+                         "Set them, or keep ZOS_READ_ENABLED=false")
+    if _ipv4(host) and host != host_ip:
+        raise ValueError("ZOS_FTP_HOST is an IPv4 address that differs from ZOS_FTP_HOST_IP: the bridge "
+                         "reaches one z/OS host")
+    if mode == "plain" and not plain_accepted:
+        raise ValueError("ZOS_FTP_TRANSPORT_MODE=plain requires ZOS_FTP_PLAIN_ACCEPTED=true: the site security "
+                         "owner's written acceptance of plain FTP (ADR-0012 D5)")
+    ca_bundle = ""
+    if mode == "ftps":
+        ca_bundle = _site_text("ZOS_FTP_CA_FILE", ca_file)
+        if not pem_certificates(ca_bundle):
+            raise ValueError("ZOS_FTP_CA_FILE must hold only PEM certificates that load "
+                             "(-----BEGIN CERTIFICATE----- blocks, no key or other text)")
+    if set(tools) & set(ZOS_JES_TOOLS) and not job_prefixes and not owner_prefixes:
+        raise ValueError("ZOS_READ_ENABLED_TOOLS names a JES tool but ZOS_READ_JES_JOBNAME_PREFIXES and "
+                         "ZOS_READ_JES_OWNER_PREFIXES are both empty: the bridge would deny every job")
+    return {
+        "enabled": True,
+        "dryRun": dry_run,
+        "secretName": secret,
+        "approvedRoles": approved,
+        "datasetAllowlist": allowlist,
+        "enabledTools": tools,
+        "jesJobnamePrefixes": job_prefixes,
+        "jesOwnerPrefixes": owner_prefixes,
+        "ftp": {
+            "host": host,
+            "port": port,
+            "hostIp": host_ip,
+            "passivePorts": passive,
+            "transportMode": mode,
+            "plainAccepted": mode == "plain",
+            "caBundle": ca_bundle,
+            "encoding": encoding,
+        },
+        "resources": resources,
+    }
+
+
 def validate_operator_booleans(values: Mapping[str, str]) -> None:
     require_no_retired_keys(values)
     for name in OPERATOR_BOOL_KEYS:
@@ -812,6 +1018,9 @@ SIZING_DEFAULTS = {
     # The Splunk gateway container (#1077, teamTools.splunk.resources): same
     # rules, applied by team_tools_config only while the gateway is enabled.
     "SPLUNK_GATEWAY": {"requests": {"cpu": "50m", "memory": "128Mi"}, "limits": {"cpu": "500m", "memory": "512Mi"}},
+    # The z/OS FTP bridge container (#1294, zosRead.resources): applied by
+    # zos_read_config only while z/OS reads are enabled.
+    "ZOS_BRIDGE": {"requests": {"cpu": "50m", "memory": "128Mi"}, "limits": {"cpu": "500m", "memory": "512Mi"}},
 }
 SIZING_PREFIXES = ("QDRANT", "INGEST", "AGENT")
 QDRANT_VOLUME_KEYS = {"QDRANT_DATA_SIZE": "persistence.size", "QDRANT_SNAPSHOT_SIZE": "snapshotPersistence.size"}
@@ -925,6 +1134,7 @@ def main(argv: list[str] | None = None) -> int:
         feedback_config(os.environ)
         openwebui_config(os.environ)
         team_tools_config(os.environ)
+        zos_read_config(os.environ)
         validate_model_config(os.environ)
         qdrant_sizing(os.environ)
         ingest_resources(os.environ)

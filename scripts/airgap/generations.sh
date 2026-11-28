@@ -175,7 +175,7 @@ for _arg in "$@"; do
 done
 shift "$_gen_count"
 unset _arg _gen_count
-AGENT_ROUTE=false OPENWEBUI_ENABLED=false SPLUNK_GATEWAY_ENABLED=false \
+AGENT_ROUTE=false OPENWEBUI_ENABLED=false SPLUNK_GATEWAY_ENABLED=false ZOS_READ_ENABLED=false \
     map_app_values --out dist/mainframe-rag-generations-values.yaml "$@"
 helm template mainframe-rag charts/mainframe-rag -f dist/mainframe-rag-generations-values.yaml \
     --namespace "$NAMESPACE" --show-only templates/ingest-job.yaml > dist/generations-rendered.yaml

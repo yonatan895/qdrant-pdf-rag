@@ -112,6 +112,7 @@ _SEC_NETPOL = "Agent ingress NetworkPolicy (issue #373, default ON)"
 _SEC_FEEDBACK = "Answer-feedback service (issue #804, ADR-0005, default OFF)"
 _SEC_OWUI = "Open WebUI docs front end (issue #1074, ADR-0007, default ON)"
 _SEC_TEAM = "Team tools: Splunk gateway (#1077, ADR-0015)"
+_SEC_ZOS = "Read-only z/OS dataset reads for the Docs chat (pilot; #1294, ADR-0012, default OFF)"
 _SEC_AGENT_EXTRAS = "Prod agent extras"
 _SEC_INGEST = "Optional ingest (sh scripts/tools/run-task.sh airgap:ingest)"
 _SEC_POLICY = "Collection distribution policy (issue #360)"
@@ -138,6 +139,7 @@ SECTIONS: tuple[str, ...] = (
     _SEC_FEEDBACK,
     _SEC_OWUI,
     _SEC_TEAM,
+    _SEC_ZOS,
     _SEC_AGENT_EXTRAS,
     _SEC_INGEST,
     _SEC_POLICY,
@@ -840,6 +842,108 @@ OPERATOR_KEYS: tuple[OperatorKey, ...] = (
         "SPLUNK_GATEWAY_MEMORY_LIMIT", _SEC_TEAM, "str", "512Mi",
         "Site sizing override for the gateway container memory limit (must be >= request).",
         "#1077", _EX_MAP, helm_path="teamTools.splunk.resources.limits.memory",
+    ),
+
+    # --- Read-only z/OS dataset reads (pilot, default OFF) ---
+    OperatorKey(
+        "ZOS_READ_ENABLED", _SEC_ZOS, "bool", False,
+        "Deploy the read-only z/OS FTP bridge rag-mcp-ftp and wire the agent's Docs-path reads (ADR-0012).",
+        "#1294", _EX_MAP, helm_path="zosRead.enabled",
+    ),
+    OperatorKey(
+        "ZOS_READ_DRY_RUN", _SEC_ZOS, "bool", False,
+        "The agent plans z/OS reads and logs them but never calls the bridge (ADR-0012 D8 dry run).",
+        "#1294", _EX_MAP, helm_path="zosRead.dryRun",
+    ),
+    OperatorKey(
+        "ZOS_READ_SECRET", _SEC_ZOS, "secret-ref", "",
+        "Operator-created Secret name: ftp-user, ftp-password (the READ-only ID), bridge-token (the agent's bearer).",
+        "#1294", _EX_MAP, helm_path="zosRead.secretName",
+    ),
+    OperatorKey(
+        "ZOS_READ_APPROVED_ROLES", _SEC_ZOS, "str", "",
+        "Comma-separated roles approved for z/OS reads; every Open WebUI sign-in and admin role must be listed.",
+        "#1294", _EX_MAP, helm_path="zosRead.approvedRoles",
+    ),
+    OperatorKey(
+        "ZOS_READ_DATASET_ALLOWLIST", _SEC_ZOS, "str", "",
+        "Comma-separated exact dataset or PDS(MEMBER) names the bridge may read (required when enabled).",
+        "#1294", _EX_MAP, helm_path="zosRead.datasetAllowlist",
+    ),
+    OperatorKey(
+        "ZOS_READ_ENABLED_TOOLS", _SEC_ZOS, "str", "dataset_read",
+        "Bridge tools, a subset of dataset_read, job_status, jes_spool_read (ADR-0012 D7).",
+        "#1294", _EX_MAP, helm_path="zosRead.enabledTools",
+    ),
+    OperatorKey(
+        "ZOS_READ_JES_JOBNAME_PREFIXES", _SEC_ZOS, "str", "",
+        "Comma-separated JES jobname prefixes for the opt-in JES tools.",
+        "#1294", _EX_MAP, helm_path="zosRead.jesJobnamePrefixes",
+    ),
+    OperatorKey(
+        "ZOS_READ_JES_OWNER_PREFIXES", _SEC_ZOS, "str", "",
+        "Comma-separated JES owner prefixes for the opt-in JES tools.",
+        "#1294", _EX_MAP, helm_path="zosRead.jesOwnerPrefixes",
+    ),
+    OperatorKey(
+        "ZOS_FTP_HOST", _SEC_ZOS, "str", "",
+        "z/OS FTP host name or IPv4 address the bridge connects to (required when enabled).",
+        "#1294", _EX_MAP, helm_path="zosRead.ftp.host",
+    ),
+    OperatorKey(
+        "ZOS_FTP_HOST_IP", _SEC_ZOS, "str", "",
+        "The one IPv4 address of the z/OS host for the bridge egress rule (defaults to an IPv4 ZOS_FTP_HOST).",
+        "#1294", _EX_MAP, helm_path="zosRead.ftp.hostIp",
+    ),
+    OperatorKey(
+        "ZOS_FTP_PORT", _SEC_ZOS, "int", 21,
+        "z/OS FTP control port (1..65535).",
+        "#1294", _EX_MAP, helm_path="zosRead.ftp.port", min_value=1, max_value=65535,
+    ),
+    OperatorKey(
+        "ZOS_FTP_PASSIVE_PORTS", _SEC_ZOS, "str", "",
+        "FIRST-LAST, the server's FTP.DATA PASSIVEPORTRANGE for the bridge egress (required when enabled).",
+        "#1294", _EX_MAP, helm_path="zosRead.ftp.passivePorts",
+    ),
+    OperatorKey(
+        "ZOS_FTP_TRANSPORT_MODE", _SEC_ZOS, "enum", "",
+        "Pinned transport, ftps (verified, fail closed) or plain (owner-accepted); no default, no fallback.",
+        "#1294", _EX_MAP, helm_path="zosRead.ftp.transportMode", allowed_values=("ftps", "plain"),
+    ),
+    OperatorKey(
+        "ZOS_FTP_PLAIN_ACCEPTED", _SEC_ZOS, "bool", False,
+        "true records the site security owner's written acceptance of plain FTP (required for plain).",
+        "#1294", _EX_MAP, helm_path="zosRead.ftp.plainAccepted",
+    ),
+    OperatorKey(
+        "ZOS_FTP_CA_FILE", _SEC_ZOS, "path", "",
+        "PEM file of the site CA that verifies the z/OS FTPS server (ftps mode; never committed).",
+        "#1294", _EX_MAP, helm_path="zosRead.ftp.caBundle",
+    ),
+    OperatorKey(
+        "ZOS_FTP_ENCODING", _SEC_ZOS, "str", "latin-1",
+        "Python codec for text-mode FTP output (the server's SBDATACONN network page).",
+        "#1294", _EX_MAP, helm_path="zosRead.ftp.encoding",
+    ),
+    OperatorKey(
+        "ZOS_BRIDGE_CPU_REQUEST", _SEC_ZOS, "str", "50m",
+        "Site sizing override for the bridge container CPU request.",
+        "#1294", _EX_MAP, helm_path="zosRead.resources.requests.cpu",
+    ),
+    OperatorKey(
+        "ZOS_BRIDGE_MEMORY_REQUEST", _SEC_ZOS, "str", "128Mi",
+        "Site sizing override for the bridge container memory request.",
+        "#1294", _EX_MAP, helm_path="zosRead.resources.requests.memory",
+    ),
+    OperatorKey(
+        "ZOS_BRIDGE_CPU_LIMIT", _SEC_ZOS, "str", "500m",
+        "Site sizing override for the bridge container CPU limit (must be >= request).",
+        "#1294", _EX_MAP, helm_path="zosRead.resources.limits.cpu",
+    ),
+    OperatorKey(
+        "ZOS_BRIDGE_MEMORY_LIMIT", _SEC_ZOS, "str", "512Mi",
+        "Site sizing override for the bridge container memory limit (must be >= request).",
+        "#1294", _EX_MAP, helm_path="zosRead.resources.limits.memory",
     ),
 
     # --- Prod agent extras ---

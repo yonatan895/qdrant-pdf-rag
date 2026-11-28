@@ -441,6 +441,62 @@ teamTools:
         cpu: 500m
         memory: 512Mi
 
+# Read-only z/OS dataset reads for the Docs chat (pilot; ADR-0012, #1294).
+# Default OFF; while off nothing below renders and every other object is
+# byte-identical to a render without this block. true deploys the FTP bridge
+# rag-mcp-ftp (the agent image, python -m mainframe_rag.mcp --transport http,
+# one replica: its logon breaker is per process and the site binds one
+# EgressIP to the label app: rag-mcp-ftp, which cluster-admin creates; the
+# chart never renders an EgressIP), a ClusterIP Service and a NetworkPolicy
+# (ingress from agent pods only; egress DNS plus ftp.hostIp on ftp.port and
+# ftp.passivePorts only), and sets ZOWE_MCP_* on the agent.
+# Refused at render (ADR-0012 D3): a role in openwebui.oidc.allowedRoles or
+# adminRoles that is not in approvedRoles; route.enabled=true;
+# networkPolicy.enabled=false; any networkPolicy.allowedNamespaces.
+# secretName: operator-created Secret, never values here: data keys ftp-user
+# and ftp-password (the dedicated READ-only ID) and bridge-token (the bearer
+# the agent presents to the bridge).
+zosRead:
+  enabled: false
+  # true: the agent plans reads and logs them but never calls the bridge
+  # (ADR-0012 D8 dry run). The bridge still deploys, for the site probe.
+  dryRun: false
+  secretName: ""
+  # Every Open WebUI sign-in and admin role must be listed (exact names).
+  approvedRoles: []
+  # Exact dataset or PDS(MEMBER) names, upper case; nothing else is read.
+  datasetAllowlist: []
+  # Subset of dataset_read, job_status, jes_spool_read (ADR-0012 D7); the JES
+  # tools need a prefix list and the site's JESSPOOL/JESJOBS verification.
+  enabledTools: [dataset_read]
+  jesJobnamePrefixes: []
+  jesOwnerPrefixes: []
+  ftp:
+    # Host name or IPv4 address the bridge connects to, and the one IPv4
+    # address behind it for the egress rule (a policy cannot match a name).
+    host: ""
+    port: 21
+    hostIp: ""
+    # The server's FTP.DATA PASSIVEPORTRANGE (inclusive); required.
+    passivePorts:
+      first: 0
+      last: 0
+    # ftps (server verified against caBundle, fail closed) or plain (needs
+    # plainAccepted: the site security owner's written acceptance). Pinned by
+    # the operator: no default and no fallback (ADR-0012 D5).
+    transportMode: ""
+    plainAccepted: false
+    # PEM certificates of the site CA; required in ftps mode.
+    caBundle: ""
+    encoding: latin-1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
 # RWO block storage class for OpenObserve, ingest-work scratch and the
 # feedback store.
 # NFS refusal stays owned by shell preflight; schema additionally rejects
