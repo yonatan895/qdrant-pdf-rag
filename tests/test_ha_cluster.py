@@ -41,7 +41,7 @@ from scripts.qdrant_cluster import (
 from scripts.verify_placement import perform_verification
 
 from mainframe_rag.config import Settings
-from mainframe_rag.ingest.completion import completion_collection_for
+from mainframe_rag.ingest.completion import completion_collection_for, publish_lock_path
 from mainframe_rag.ingest.publish import verify_staging_distribution, verify_staging_placement
 from mainframe_rag.ingest.qdrant_io import collection_vector_configs
 from mainframe_rag.ingest.run_ingest import _placement_clients
@@ -863,6 +863,7 @@ def test_snapshot_disposal_lists_and_deletes_per_peer_and_refuses_a_missing_peer
     with tempfile.TemporaryDirectory() as scratch:
         progress = Path(scratch) / "inventory.jsonl"
         progress.touch()
+        publish_lock_path(progress, logical).touch()  # as left by a publication of this alias
         try:
             for pair, build_id, finished in zip(pairs, builds, (100.0, 200.0, 300.0), strict=True):
                 _create_pair(peers[0], pair.corpus, replication_factor=RF)
@@ -926,5 +927,171 @@ def test_snapshot_disposal_lists_and_deletes_per_peer_and_refuses_a_missing_peer
                                 peer.delete_snapshot(collection, name, wait=True)
                     with contextlib.suppress(Exception):
                         peers[0].delete_collection(collection)
+            for peer in peers:
+                peer.close()
+
+
+def _sealed_generation(client: QdrantClient, pair: SeededPair, logical: str, build_id: str,
+                       finished_at: float) -> None:
+    """A published schema-2 build of `logical` with application (string) ids:
+    data points, one completion marker, a receipt whose content seal is
+    captured from what the cluster stores, and both immutable build aliases."""
+    from mainframe_rag.ingest.build import build_aliases
+    from mainframe_rag.ingest.publish import publication_metadata_point_id
+    from mainframe_rag.ingest.seal import capture_content_seal
+    from tests.test_ingest_generations import _marker
+
+    client.upsert(pair.corpus, points=[
+        models.PointStruct(id=str(uuid.uuid4()), vector={"dense": [float(i + 1)] * DIM},
+                           payload={"point": i, "tag": f"corpus-{i}"})
+        for i in range(24)], wait=True)
+    client.upsert(pair.control, points=[
+        models.PointStruct(id=str(uuid.uuid4()), vector={"dense": [1.0] * DIM},
+                           payload=_marker(pair.control, finished_at))], wait=True)
+    receipt_id = publication_metadata_point_id(pair.control)
+    seal = capture_content_seal(client, build_id=build_id, alias=logical, physical=pair.corpus,
+                                gen_fp="g", corpus_fp="c", receipt_id=receipt_id)
+    client.upsert(pair.control, points=[models.PointStruct(
+        id=receipt_id, vector={"dense": [1.0] * DIM},
+        payload={"record_type": "publication-metadata", "target_collection": pair.control, "build_schema": 2,
+                 "build_id": build_id, "logical_alias": logical, "data_collection": pair.corpus,
+                 "gen_fp": "g", "corpus_fp": "c", "content_seal": seal})], wait=True)
+    data, control = build_aliases(logical, build_id)
+    client.update_collection_aliases([
+        models.CreateAliasOperation(create_alias=models.CreateAlias(collection_name=target, alias_name=name))
+        for name, target in ((data, pair.corpus), (control, pair.control))
+    ])
+
+
+def test_data_disposal_on_three_peers_deletes_every_peers_snapshots_before_the_collection(
+    cluster: QdrantCluster, capsys, monkeypatch
+):
+    """#1373 PR 2 on three real peers: a stopped peer refuses the run before
+    the tombstone with nothing deleted; with every peer up, each peer's
+    snapshots of the disposed collection go through that peer before the
+    collection does, the collection is then absent on every peer, the
+    control collection and its alias stay, and recreating the name lists no
+    snapshot on any peer (a collection delete alone would orphan them)."""
+    import json
+    import tempfile
+
+    from mainframe_rag.ingest import build, generations
+    from mainframe_rag.ingest.build import build_aliases
+    from mainframe_rag.ingest.publish import verify_publication_seal
+    from mainframe_rag.ingest.retirement import tombstone_point_id
+
+    monkeypatch.setattr(build, "READERS_REFUSE_TOMBSTONED_BUILDS", True)  # stand-in for the reader change
+    suffix = uuid.uuid4().hex[:8]
+    logical = f"ha_disp_{suffix}"
+    builds = [str(uuid.uuid4()) for _ in range(3)]
+    pairs = [SeededPair(f"{logical}__gen{i}", f"{logical}__gen{i}__completions") for i in range(3)]
+    peers = [QdrantClient(url=url, timeout=60) for url in cluster.urls]
+    settings = _settings(cluster.urls[0], logical, qdrant_peer_urls=",".join(cluster.urls))
+    old, mid, live = (p.corpus for p in pairs)
+    data_alias, control_alias = build_aliases(logical, builds[0])
+
+    def run(*argv):
+        lines: list[str] = []
+        rc = generations.main(list(argv), settings=settings, out=lines.append)
+        return rc, lines
+
+    def names(peer: int, collection: str) -> list[str]:
+        return sorted(s.name for s in peers[peer].list_snapshots(collection))
+
+    def control_records(peer: int) -> dict:
+        points, _ = peers[peer].scroll(pairs[0].control, limit=100, with_payload=True, with_vectors=True)
+        return {str(p.id): (p.payload, p.vector) for p in points}
+
+    def placed():
+        for pair in pairs:
+            for collection in (pair.corpus, pair.control):
+                if peers[0].collection_exists(collection):
+                    wait_collection_placement(cluster.urls, collection, shard_number=SHARDS, replication_factor=RF)
+
+    with tempfile.TemporaryDirectory() as scratch:
+        progress = Path(scratch) / "inventory.jsonl"
+        progress.touch()
+        publish_lock_path(progress, logical).touch()  # as left by a publication of this alias
+        try:
+            for pair, build_id, finished in zip(pairs, builds, (100.0, 200.0, 300.0), strict=True):
+                _create_pair(peers[0], pair.corpus, replication_factor=RF)
+                placed()
+                _sealed_generation(peers[0], pair, logical, build_id, finished)
+            peers[0].update_collection_aliases([models.CreateAliasOperation(
+                create_alias=models.CreateAlias(collection_name=live, alias_name=logical))])
+            peers[0].create_snapshot(old, wait=True)
+            peers[1].create_snapshot(old, wait=True)
+            peers[2].create_snapshot(mid, wait=True)
+            peers[0].create_snapshot(live, wait=True)
+            assert [len(names(i, old)) for i in range(3)] == [1, 1, 0]
+            kept = {(i, c): names(i, c) for i in range(3) for c in (mid, live)}
+            control_before = control_records(0)
+
+            dispose = ("dispose", "--progress", str(progress), "--build-id", builds[0])
+            rc, lines = run(*dispose)
+            assert rc == 0, (lines, capsys.readouterr().err)
+            assert sum(line.strip().startswith("DELETE snapshot") for line in lines) == 2
+            assert any(f"kept and verified: {builds[1]}" in line for line in lines)
+            digest = next(line.split()[-1] for line in lines if line.startswith("PLAN DIGEST "))
+            execute = (*dispose, "--execute", "--plan-digest", digest,
+                       "--readers-stopped", "2026-11-28T10:00:00Z", "--recovery-ref", "CHG-HA")
+
+            dropped = f"{cluster.prefix}-3"
+            subprocess.run(["docker", "stop", dropped], check=True, capture_output=True, text=True)
+            try:
+                rc, _ = run(*execute)
+                err = capsys.readouterr().err
+                assert rc == generations.EXIT_REFUSED and "PEERS_INCOMPLETE" in err
+                assert peers[0].retrieve(pairs[0].control, ids=[tombstone_point_id(pairs[0].control)]) == []
+                assert peers[0].collection_exists(old)
+                assert names(0, old) and names(1, old)
+                assert data_alias in {a.alias_name for a in peers[0].get_aliases().aliases}
+            finally:
+                subprocess.run(["docker", "start", dropped], check=True, capture_output=True, text=True)
+                wait_cluster_ready(cluster.urls)
+            placed()
+            peers = [QdrantClient(url=url, timeout=60) for url in cluster.urls]
+
+            rc, lines = run(*execute)
+            assert rc == 0, (lines, capsys.readouterr().err)
+            steps = [line.split()[0] for line in lines if line[:2] in ("S1", "S2", "S3", "S4", "S5")]
+            assert steps == ["S1", "S2", "S3", "S3", "S3", "S4", "S5"]
+            assert sorted(line.split()[3] for line in lines if line.startswith("S3 deleted peer")) == ["0", "1"]
+            for i in range(3):
+                assert not peers[i].collection_exists(old)
+                assert peers[i].collection_exists(pairs[0].control)
+                aliases = {a.alias_name: a.collection_name for a in peers[i].get_aliases().aliases}
+                assert data_alias not in aliases and aliases[control_alias] == pairs[0].control
+                assert aliases[logical] == live
+                assert names(i, mid) == kept[(i, mid)] and names(i, live) == kept[(i, live)]
+                after = control_records(i)
+                payload, _vector = after.pop(tombstone_point_id(pairs[0].control))
+                assert payload["state"] == "retired" and payload["build_id"] == builds[0]
+                assert len(payload["snapshots"]) == 2
+                assert after == control_before
+            assert verify_publication_seal(peers[0], pairs[1].control)
+            assert verify_publication_seal(peers[0], pairs[2].control)
+            rc, lines = run("list", "--progress", str(progress), "--format", "json")
+            listed = {r["generation"]["physical"]: r["generation"] for r in map(json.loads, lines)
+                      if "generation" in r}
+            assert listed[old]["phase"] == "retired" and listed[mid]["phase"] == "retained"
+            rc, lines = run(*execute)
+            assert rc == 0 and lines[0].startswith("ALREADY RETIRED")
+
+            # Q2 on three peers: the name recreated, no peer lists a snapshot of it.
+            vectors, sparse = collection_vector_configs(DIM)
+            peers[0].create_collection(old, vectors_config=vectors, sparse_vectors_config=sparse,
+                                       on_disk_payload=True, shard_number=SHARDS, replication_factor=RF,
+                                       write_consistency_factor=2)
+            wait_collection_placement(cluster.urls, old, shard_number=SHARDS, replication_factor=RF)
+            assert [names(i, old) for i in range(3)] == [[], [], []]
+        finally:
+            for collection in [c for pair in pairs for c in (pair.corpus, pair.control)]:
+                with contextlib.suppress(Exception):
+                    for i, peer in enumerate(peers):
+                        for name in names(i, collection):
+                            peer.delete_snapshot(collection, name, wait=True)
+                with contextlib.suppress(Exception):
+                    peers[0].delete_collection(collection)
             for peer in peers:
                 peer.close()

@@ -5,13 +5,17 @@ Every corpus-changing alias publication keeps the superseded data/control
 pair, its two immutable build aliases and a safety snapshot of the old data
 collection (`swap_alias_to`). This module lists those generations with their
 snapshots and sizes, and deletes the snapshots of named retained generations.
-It never deletes a collection or an alias and never writes to Qdrant other
-than a snapshot delete; data disposal (tombstone, reader stop) is later work
-under the same issue.
+The two commands here never delete a collection or an alias and never write
+to Qdrant other than a snapshot delete. Data disposal of one superseded build
+(`dispose`: tombstone, data build alias, snapshots, data collection) is
+`mainframe_rag.ingest.disposal`; this release refuses to execute it. A
+retirement tombstone, when a control collection holds one, decides the
+listed phase (`retiring`, `retired`) whatever the aliases say.
 
   list               read-only and lock-free: a point-in-time view. Without
                      `--progress` the publish sidecar is not read, so no
                      generation is reported disposable.
+  dispose            see `mainframe_rag.ingest.disposal` (dry run only in this release).
   dispose-snapshots  dry run by default. `--execute` takes the publish lock
                      (`publish-<alias>.lock`, the one an ingest holds),
                      recomputes the plan under it, and deletes on each peer
@@ -70,18 +74,23 @@ from mainframe_rag.ingest.completion import (
     CompletionRecord,
     acquire_publish_lock,
     completion_collection_for,
+    legacy_publish_lock_path,
     publish_lock_path,
     release_run_lock,
+)
+from mainframe_rag.ingest.generation_errors import (  # noqa: F401 - the module's public names
+    EXIT_OK,
+    EXIT_REFUSED,
+    EXIT_UNREADABLE,
+    EXIT_USAGE,
+    Refused,
+    Unreadable,
 )
 from mainframe_rag.ingest.placement import member_peer_ids
 from mainframe_rag.ingest.publish import read_publication_record, read_publish_state
 from mainframe_rag.ingest.qdrant_io import resolve_live_collection, scroll_all_points
+from mainframe_rag.ingest.retirement import InvalidTombstone, read_tombstone, tombstone_matches
 from mainframe_rag.ports import QdrantSnapshotAdmin, QdrantSnapshotReader
-
-EXIT_OK = 0
-EXIT_USAGE = 2
-EXIT_UNREADABLE = 3
-EXIT_REFUSED = 4
 
 KEEP_FLOOR = 1
 DEFAULT_KEEP = 1
@@ -100,14 +109,6 @@ def default_operator() -> str:
             return value
     return f"uid:{os.getuid()}"
 DATA_SIZE_SOURCE = "not-reported"
-
-
-class Refused(Exception):
-    """A fixed, operator-facing refusal (exit 4). Nothing further changes."""
-
-
-class Unreadable(Exception):
-    """Qdrant or a peer could not be read (exit 3). Fixed text only."""
 
 
 @dataclass(frozen=True)
@@ -152,7 +153,10 @@ class Generation:
     build_id: str
     physical: str
     control: str
-    phase: str  # live | retained | sealed | inconsistent | data-missing
+    # live | retained | sealed | inconsistent | data-missing, or from the
+    # retirement tombstone, which overrides the alias-derived phase:
+    # retiring | retired | tombstone-invalid
+    phase: str
     live: bool
     build_schema: int | None
     finished_at: float | None
@@ -165,6 +169,9 @@ class Generation:
     control_snapshots: list[SnapshotEntry] = field(default_factory=list)
     rank: int | None = None
     reasons: list[str] = field(default_factory=list)
+    sealed: bool = False
+    data_present: bool = True
+    tombstone: dict[str, Any] | None = None
 
     @property
     def snapshot_bytes(self) -> int:
@@ -365,6 +372,19 @@ def read_registry(
             phase = "live"
         if physical not in names:
             phase = "data-missing"
+        # A tombstone decides the phase whatever the aliases say: between the
+        # tombstone write and the alias delete both immutable aliases still
+        # resolve, and such a build is no rollback point and no kept generation.
+        tombstone: dict[str, Any] | None = None
+        try:
+            tombstone = read_tombstone(entry, control)
+        except InvalidTombstone:
+            phase = "tombstone-invalid"
+        if tombstone is not None:
+            if tombstone_matches(tombstone, binding):
+                phase = tombstone["state"]
+            else:
+                phase, tombstone = "tombstone-invalid", None
         own = set(build_aliases(alias, binding.build_id))
         targeting = tuple(sorted(n for n, t in aliases.items() if t in (physical, control)))
         foreign = tuple(n for n in targeting if n not in own and not (n == alias and is_live))
@@ -375,6 +395,8 @@ def read_registry(
             finished_at=finished_at,
             points=_points(entry, physical) if physical in names else None,
             control_points=control_points, aliases=targeting, foreign_aliases=foreign,
+            sealed=payload is not None and "content_seal" in payload, tombstone=tombstone,
+            data_present=physical in names,
         )
         if physical in names:
             generation.snapshots = _snapshots(registry, physical)
@@ -455,6 +477,10 @@ def generation_json(g: Generation, labels: dict[int, str]) -> dict[str, Any]:
             "control_snapshot_bytes": sum(s.size_bytes or 0 for s in g.control_snapshots),
         },
         "disposable": g.disposable, "reasons": list(g.reasons),
+        "tombstone": None if g.tombstone is None else {
+            key: g.tombstone[key] for key in ("state", "created_at", "retired_at", "plan_digest",
+                                              "recovery_ref", "operator", "readers_stopped_at")
+        },
     }
 
 
@@ -498,6 +524,9 @@ def emit_listing(registry: Registry, keep: int, fmt: str, out: Callable[[str], N
         out(f"{g.phase.upper()} build {g.build_id} physical {g.physical} finished {_iso(g.finished_at)} "
             f"rank {g.rank} points {g.points} control_points {g.control_points} "
             f"snapshots {len(g.snapshots)} ({g.snapshot_bytes} bytes) data bytes not reported; {verdict}")
+        if g.tombstone is not None:
+            out(f"  TOMBSTONE {g.tombstone['state']} created {g.tombstone['created_at']} "
+                f"retired {g.tombstone['retired_at']} plan {g.tombstone['plan_digest']}")
         for s in g.snapshots + g.control_snapshots:
             out(f"  SNAPSHOT peer {s.peer} ({labels.get(s.peer)}) {s.collection} {s.name} "
                 f"{s.size_bytes} bytes created {s.creation_time}")
@@ -567,6 +596,28 @@ def delete_snapshot_on_peer(peer: Peer, collection: str, name: str) -> None:
                          f"({peer.label}); a delete needs the writer key; rerun to retry")
 
 
+def require_bound_inventory(progress: Path, alias: str) -> None:
+    """The inventory named by `--progress` must be the one publication of
+    this alias used: the publish lock a publisher of the alias takes
+    (`publish-<alias>.lock`, or its pre-#1028 name) already exists in the
+    same directory. A disposal takes the lock and reads the sidecar beside
+    the given file, so another existing file, a copy elsewhere or a symlink
+    from elsewhere would exclude nothing and protect nothing (review N3 of
+    #1393: with the real lock held, a different file let the run proceed).
+    Checked before the lock is taken, because taking it creates the file."""
+    refusal = Refused(f"E_PROGRESS_UNBOUND: no publish lock of {alias} exists beside --progress, or it is "
+                      "not a regular file given by its own path: this is not the inventory the alias was "
+                      "published from; nothing read, nothing changed")
+    try:
+        if progress.is_symlink() or not progress.is_file():
+            raise refusal
+        locks = [publish_lock_path(progress, alias), legacy_publish_lock_path(progress, alias)]
+        if not any(lock is not None and lock.is_file() and not lock.is_symlink() for lock in locks):
+            raise refusal
+    except (OSError, RuntimeError):
+        raise refusal from None
+
+
 @contextmanager
 def _publish_lock(progress: Path, alias: str) -> Iterator[None]:
     try:
@@ -617,6 +668,7 @@ def dispose_snapshots(
     operator: str | None = None,
 ) -> None:
     alias = settings.qdrant_collection
+    require_bound_inventory(progress, alias)
     with ExitStack() as stack:
         if execute:
             stack.enter_context(_publish_lock(progress, alias))
@@ -706,6 +758,22 @@ def _parser() -> argparse.ArgumentParser:
                          help="Optional ticket or decision id recorded in the audit record with --execute.")
     dispose.add_argument("--operator", default=None,
                          help="Who runs it, for the audit record (default: the login name, else the uid).")
+    data = sub.add_parser("dispose", parents=[common],
+                          help="Dispose of one superseded build's data (dry run by default; "
+                               "--execute is refused until readers refuse tombstoned builds).")
+    data.add_argument("--progress", type=Path, required=True)
+    data.add_argument("--build-id", action="append", required=True, dest="build_ids",
+                      help="Exactly one full build UUID per run.")
+    data.add_argument("--allow-below-keep", action="store_true",
+                      help="Lower the keep guard to the floor of 1 for this run.")
+    data.add_argument("--execute", action="store_true")
+    data.add_argument("--plan-digest", default=None,
+                      help="The digest the dry run printed; required with --execute.")
+    data.add_argument("--readers-stopped", default=None,
+                      help="UTC time (YYYY-MM-DDTHH:MM:SSZ) at which every reader was confirmed stopped; "
+                           "required with --execute and recorded in the tombstone.")
+    data.add_argument("--recovery-ref", default=None)
+    data.add_argument("--operator", default=None)
     return parser
 
 
@@ -718,6 +786,11 @@ def main(
 ) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.command == "dispose" and args.execute:
+            # Before the settings, any connection and the lock: this release cannot execute.
+            from mainframe_rag.ingest.disposal import require_reader_awareness
+
+            require_reader_awareness()
         if args.keep < KEEP_FLOOR:
             raise Refused(f"E_KEEP_FLOOR: --keep must be at least {KEEP_FLOOR}; keeping 0 is not supported")
         if settings is None:
@@ -747,6 +820,8 @@ def main(
                 emit_listing(registry, args.keep, args.format, out)
                 return EXIT_OK
             build_ids: list[str] = []
+            if args.command == "dispose" and len(args.build_ids) != 1:
+                raise Refused("E_BUILD_ID: a data disposal takes exactly one --build-id per run")
             for value in args.build_ids:
                 try:
                     canonical = canonical_build_id(value)
@@ -761,6 +836,15 @@ def main(
             if args.operator is not None and not _OPERATOR.fullmatch(args.operator):
                 raise Refused("E_OPERATOR: --operator takes a login name ([A-Za-z0-9._@-], at most 64 characters)")
             keep = KEEP_FLOOR if args.allow_below_keep else args.keep
+            if args.command == "dispose":
+                from mainframe_rag.ingest.disposal import dispose_data, parse_dispose_inputs
+
+                digest, stopped = parse_dispose_inputs(args.execute, args.plan_digest, args.readers_stopped)
+                dispose_data(entry, settings, tracked, progress=args.progress, build_id=build_ids[0],
+                             keep=keep, below_keep=args.allow_below_keep, execute=args.execute,
+                             plan_digest=digest, readers_stopped=stopped,
+                             recovery_ref=args.recovery_ref, operator=args.operator, out=out)
+                return EXIT_OK
             dispose_snapshots(entry, settings, tracked, progress=args.progress, build_ids=build_ids,
                               keep=keep, execute=args.execute, recovery_ref=args.recovery_ref, out=out,
                               operator=args.operator)
@@ -778,4 +862,8 @@ def main(
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Run the importable module's entry, not this `__main__` copy: every
+    # class and function then exists once, whoever imports the module by name.
+    from mainframe_rag.ingest.generations import main as _entry
+
+    sys.exit(_entry())

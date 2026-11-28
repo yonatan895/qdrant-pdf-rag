@@ -235,6 +235,11 @@ def test_dispose_without_execute_is_the_module_dry_run(gen_tree):
 @pytest.mark.parametrize(("args", "needle"), [
     ((), "usage"),
     (("purge",), "usage"),
+    # Data disposal is refused by name with a fixed message, whatever follows (#1373 PR 2).
+    (("dispose",), "data disposal (dispose) is not available from this launcher"),
+    (("dispose", "--build-id", BUILD), "data disposal (dispose) is not available from this launcher"),
+    (("dispose", "--build-id", BUILD, "--execute", "--plan-digest", "0" * 64,
+      "--readers-stopped", "2026-11-28T10:00:00Z"), "data disposal (dispose) is not available from this launcher"),
     (("dispose-snapshots",), "at least one --build-id"),
     (("dispose-snapshots", "--build-id", BUILD.upper()), "full lowercase build UUID"),
     (("dispose-snapshots", "--build-id", "mainframe_manuals__genabc"), "full lowercase build UUID"),

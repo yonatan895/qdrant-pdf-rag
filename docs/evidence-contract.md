@@ -131,8 +131,12 @@ reader/writer for newly published builds.
 
 The retained control alias is also the retirement lookup path. A tombstone is
 not evidence content and cannot authorize a caller by itself. Its schema records
-the full build UUID, retired state and per-chunk provenance required by the current
-access policy. If that policy cannot establish access, return the same unavailable
+the full build UUID, the build binding and seal, the retired state, the deleted
+snapshot set, the kept builds and the reader-stop attestation
+([data disposal](ingest.md#data-disposal)). It records no per-chunk provenance
+(maintainer decision 2026-11-26 for the POC, deployed access being
+shared-corpus): a build disposed of under this schema can never answer a
+per-chunk retired outcome later. If the access policy cannot establish access, return the same unavailable
 outcome as an unknown reference. Crash after tombstoning but before physical
 deletion remains retired; cleanup retries never republish it. Do not delete the
 control lookup before the approved tombstone horizon. No such horizon is approved
@@ -159,7 +163,7 @@ remain unsupported; a local file lock and RWO volume are not distributed locks.
 | allocated → building → sealed | Prepare non-live corpus/control pair; write content, completion/coverage and immutable evidence; verify full intended membership, representation and required placement before sealing. | Unknown residue, missing control, incomplete source observation or placement refuses cutover. #391/#360 own real storage/crash tests. |
 | sealed → published | Verify immutable controls and observed prior target; atomically create both build aliases and switch serving alias; finalize inventory/sidecar. | Pre-swap failure preserves old serving target. Post-swap interruption finalizes the same build read-only; never mutates live data on retry. |
 | published → retained | Successor publication changes the ordinary alias, not old content/control/build aliases. | Admitted old readers and old refs remain bound to the old build, subject to current access policy. |
-| retained → retiring → retired | Explicit policy-authorized retirement blocks new admissions first; drain all admitted readers; verify retention/recovery obligations; persist a retired tombstone in the paired control collection before deleting data and its build alias. Retain the control alias and minimal per-chunk revision/digest/location metadata needed to authorize and distinguish retired references. Purging these records requires a separately approved tombstone horizon. | No drain/retention proof: refuse deletion. Tombstones must not disclose existence to unauthorized callers. #391 owns enforcement, #373 disclosure and #360 restore. |
+| retained → retiring → retired | Explicit policy-authorized retirement blocks new admissions first; drain all admitted readers; verify retention/recovery obligations; persist a retired tombstone in the paired control collection before deleting data and its build alias. Retain the control collection (markers, manifest, receipt, catalog entries), the control alias and the tombstone; no per-chunk revision/digest/location index is written (maintainer decision 2026-11-26), so retired references read as unavailable, not as a distinct per-chunk outcome. Purging these records requires a separately approved tombstone horizon. | No drain/retention proof: refuse deletion. Tombstones must not disclose existence to unauthorized callers. #391 owns enforcement, #373 disclosure and #360 restore. |
 | retained → serving rollback | Verify old data/control/schema, compatible executable/model/config and policy; swap ordinary alias under the same writer boundary. | Incompatible/missing artifacts refuse; no fallback to other vectors or regenerated text. |
 
 New build schema-2 receipts retain a versioned content seal over the complete
@@ -178,7 +182,12 @@ No automatic GC is introduced. Retain current, previous and any generation
 needed by an admitted reader or explicit evidence obligation. Deleting a
 retained generation's snapshots ([retained generations](ingest.md#retained-generations))
 is not retirement: its data, control collection and build aliases stay, so it
-remains `retained`. Capacity preflight
+remains `retained`. Retirement of a named superseded build is
+[data disposal](ingest.md#data-disposal): tombstone first, then the data build
+alias, the snapshots on every peer and the data collection, keeping the control
+collection, the control alias and the tombstone; the newest kept builds must
+verify against their seals first. It cannot be executed until the reader
+refuses a tombstoned build. Capacity preflight
 must refuse a new build before destructive work when retention cannot be met.
 A retention duration, tombstone horizon, recovery objective or physical-worker
 claim requires its platform/domain owner; there is no invented default here.
@@ -298,9 +307,13 @@ Public outcomes (the mapping table above, as implemented). Implemented:
 point, malformed stored fields), 413 `evidence_budget_exceeded`. Added:
 504 `evidence_timeout` and 502 `upstream_error` / `evidence read failed` for a
 storage fault (fixed text; the exception type is logged only).
-**Not implemented:** 410 `evidence_retired`. No tombstone writer exists (#391),
-so a retired or removed build is indistinguishable from an unknown one and reads
-as 404; it is never answered with successor text.
+**Not implemented:** 410 `evidence_retired` (decided against for the POC: a
+disposed build will read as 404 unavailable, maintainer decision 2026-11-26).
+A tombstone writer exists ([data disposal](ingest.md#data-disposal)) but cannot
+be executed in this release, because the reader does not consult tombstones
+yet: until that reader change, a build whose data alias is gone reads as 503
+(missing controls), and a build with a `retiring` tombstone and both aliases
+would still be served. No read is ever answered with successor text.
 
 Example (synthetic; the literals are asserted independently in
 `tests/test_evidence_service.py`). A build `00000000-0000-4000-8000-00000000000a`

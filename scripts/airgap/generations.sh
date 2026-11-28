@@ -27,6 +27,8 @@
 . "$(dirname -- "$0")/image_identity.sh"
 . "$(dirname -- "$0")/one_shot_job.sh"
 
+# The module's third subcommand, `dispose` (data disposal), is refused here
+# by name: it has no site path in this release.
 GENERATIONS_USAGE="usage: generations.sh list [--keep N] [--format text|json] | dispose-snapshots --build-id UUID... [--keep N] [--allow-below-keep] [--execute] [--recovery-ref REF]"
 GENERATIONS_TIMEOUT=3600
 
@@ -36,6 +38,13 @@ GEN_COMMAND=$1
 shift
 case "$GEN_COMMAND" in
     list|dispose-snapshots) ;;
+    dispose)
+        # Data disposal (the module's `dispose`) deletes a served build's
+        # collection. It is not reachable from the site in this release: the
+        # agent must first refuse a build that is being retired, and the run
+        # needs the reader-stop launcher. Refused here by name, whatever
+        # else is passed; the module refuses --execute as well.
+        die "data disposal (dispose) is not available from this launcher in this release; only list and dispose-snapshots are" ;;
     *) die "$GENERATIONS_USAGE" ;;
 esac
 # A value is one argument and is checked whole: `case` patterns match the

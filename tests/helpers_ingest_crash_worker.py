@@ -159,7 +159,39 @@ def generations_crash_main(argv):
     return generations.main(args)
 
 
+def disposal_crash_main(argv):
+    """`python -m tests.helpers_ingest_crash_worker disposal-crash --step S --receipt R -- <args>`:
+    the real generations CLI running a data disposal, killed (no cleanup)
+    right after the named step returned (#1373). `--step none` runs to the
+    end. The reader-awareness precondition is set here, as the test stand-in
+    for the reader change that owns it."""
+    from mainframe_rag.ingest import build, disposal, generations
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--step", required=True)
+    parser.add_argument("--receipt", required=True, type=Path)
+    options, args = parser.parse_known_args(argv)
+    if args[:1] == ["--"]:
+        args = args[1:]
+    build.READERS_REFUSE_TOMBSTONED_BUILDS = True
+    if options.step != "none":
+        original = getattr(disposal, options.step)
+
+        def interrupted(run):
+            original(run)
+            with options.receipt.open("w") as receipt:
+                receipt.write(options.step)
+                receipt.flush()
+                os.fsync(receipt.fileno())
+            os._exit(86)
+
+        setattr(disposal, options.step, interrupted)
+    return generations.main(args)
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["disposal-crash"]:
+        raise SystemExit(disposal_crash_main(sys.argv[2:]))
     if sys.argv[1:2] == ["generations-crash"]:
         raise SystemExit(generations_crash_main(sys.argv[2:]))
     if sys.argv[1:2] == ["hang-parse"]:
