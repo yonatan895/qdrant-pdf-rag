@@ -534,6 +534,7 @@ async def test_an_old_build_id_never_resolves_to_data_recreated_under_its_name()
 @pytest.mark.anyio
 @pytest.mark.parametrize("damage", [
     lambda record: record.update(build_id=BUILD_B),  # a valid record of another build
+    lambda record: record.update(logical_alias="another_corpus"),  # of another logical corpus
     lambda record: record.update(state="published"),
     lambda record: record.pop("plan_digest"),
     lambda record: record.clear(),
