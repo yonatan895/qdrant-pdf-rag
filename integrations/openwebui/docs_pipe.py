@@ -878,8 +878,11 @@ class Pipe:
             # replace any pending line ends: they bring their own. The
             # reference line stays last (the rating Action reads it there).
             request_id = final.get(_REQUEST_ID_KEY)
+            # No reference on a turn the agent kept out of the feedback store
+            # (a z/OS observation turn, ADR-0012 D6): it cannot be rated.
             reference = (REFERENCE_LINE.format(request_id=request_id)
                          if os.environ.get(REFERENCE_ENV) == "true" and isinstance(request_id, str)
+                         and final.get("feedback_suppressed") is not True
                          else "")
             reads = _image_reads_block(final) if images_on else ""
             pending = "" if reference or reads else shown.newlines()
