@@ -10,8 +10,10 @@
 #                      stored Route (acceptance.sh operator admit).
 #   restricted-v2 UID  a MutatingAdmissionPolicy that assigns the pod a namespace-
 #                      range UID in group 0 at admission, as the SCC does. Only the
-#                      Open WebUI pod is mutated (the pod the UID check judges);
-#                      the Deployment the chart rendered is never changed.
+#                      Open WebUI pod (the pod the UID check judges) and the copy-out
+#                      and restore helper pod rag-openwebui-copy (docs/deploy.md
+#                      #owui-copy-restore, which reads and writes the same claim) are
+#                      mutated; the Deployment the chart rendered is never changed.
 #
 # The namespace service CA (ConfigMap openshift-service-ca.crt) and the serving
 # certificate Secret (rag-openwebui-tls) hold certificates, so the script
@@ -74,7 +76,7 @@ spec:
         resources: [pods]
   matchConditions:
     - name: open-webui-pod
-      expression: "has(object.metadata.labels) && 'app' in object.metadata.labels && object.metadata.labels['app'] == 'rag-openwebui'"
+      expression: "(has(object.metadata.labels) && 'app' in object.metadata.labels && object.metadata.labels['app'] == 'rag-openwebui') || (has(object.metadata.name) && object.metadata.name == 'rag-openwebui-copy')"
   failurePolicy: Fail
   reinvocationPolicy: Never
   mutations:

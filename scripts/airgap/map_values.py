@@ -222,7 +222,7 @@ def emit_scalar(val) -> str:
     return yaml_json_string(val)
 
 
-def build_values(deploy_only: bool = False) -> dict:
+def build_values(deploy_only: bool = False, generations_args: list[str] | None = None) -> dict:
     internal_registry = env("INTERNAL_REGISTRY")
     if not internal_registry:
         die("INTERNAL_REGISTRY is not set (copy airgap.env.example to airgap.env)")
@@ -334,7 +334,9 @@ def build_values(deploy_only: bool = False) -> dict:
     # The deploy stage never owns the one-shot Job (D3): callers pass
     # --without-ingest-job so steady-state values keep ingest.enabled=false
     # even when CORPUS_PVC is set for a later explicit ingest operation.
-    ingest_enabled = bool(corpus_pvc) and not deploy_only
+    # Generations mode (issue #1373) renders the generations Job instead,
+    # never the ingest Job, whatever CORPUS_PVC says.
+    ingest_enabled = bool(corpus_pvc) and not deploy_only and not generations_args
     try:
         sizing = ingest_resources({name: env(name) for name in SIZING_ENV_KEYS})
     except ValueError as exc:
@@ -392,6 +394,21 @@ def build_values(deploy_only: bool = False) -> dict:
             "peerUrls": env("QDRANT_PEER_URLS"),
             "resources": sizing,
         }
+
+    if generations_args:
+        # The listing needs every direct peer and the selected policy, as the
+        # publication gate does; no corpus, no publication flags.
+        ingest_block["collectionPolicy"] = {
+            "shardNumber": positive_int("QDRANT_SHARD_NUMBER", env("QDRANT_SHARD_NUMBER")),
+            "replicationFactor": positive_int(
+                "QDRANT_REPLICATION_FACTOR", env("QDRANT_REPLICATION_FACTOR")
+            ),
+            "writeConsistencyFactor": positive_int(
+                "QDRANT_WRITE_CONSISTENCY_FACTOR", env("QDRANT_WRITE_CONSISTENCY_FACTOR")
+            ),
+        }
+        ingest_block["peerUrls"] = env("QDRANT_PEER_URLS")
+        ingest_block["generations"] = {"args": list(generations_args)}
 
     reasoning_model = env("LLM_MODEL_REASONING")
     reasoning_base = env("LLM_BASE_URL") if reasoning_model else ""
@@ -557,6 +574,7 @@ def print_bundle_decisions() -> None:
 def main(argv: list[str]) -> int:
     out = DEFAULT_OUT
     deploy_only = False
+    generations_args: list[str] = []
     args = list(argv)
     try:
         require_no_retired_keys(os.environ)
@@ -571,14 +589,20 @@ def main(argv: list[str]) -> int:
             out = args.pop(0)
         elif flag == "--without-ingest-job":
             deploy_only = True
+        elif flag == "--generations-arg" and args:
+            generations_args.append(args.pop(0))
         else:
             print(
                 "FAIL: unknown argument: "
-                f"{flag} (usage: map_values.py [--out PATH] [--without-ingest-job] | --bundle-decisions)",
+                f"{flag} (usage: map_values.py [--out PATH] [--without-ingest-job | --generations-arg ARG...] "
+                "| --bundle-decisions)",
                 file=sys.stderr,
             )
             return 1
-    values = build_values(deploy_only=deploy_only)
+    if deploy_only and generations_args:
+        print("FAIL: --generations-arg and --without-ingest-job are exclusive", file=sys.stderr)
+        return 1
+    values = build_values(deploy_only=deploy_only, generations_args=generations_args or None)
     namespace = values.pop("_meta")["namespace"]
     header = (
         "# Generated release values (issue #448). Deployment input/evidence, "

@@ -1065,6 +1065,42 @@ cannot schedule on one node — proven).
   read, the check stays off and the wait alone decides, as before. A quota
   refusal of a retry pod, after a first pod failed, is not caught: that run
   waits for the Job's own failure or `INGEST_TIMEOUT`.
+- <a id="generations-job"></a>**Retained generations at the site (issue #1373):**
+  `sh scripts/airgap/generations.sh list [--keep N] [--format text|json]`
+  prints every publication generation with each peer's snapshots and sizes;
+  `sh scripts/airgap/generations.sh dispose-snapshots --build-id <uuid>...
+  [--keep N] [--allow-below-keep] [--execute] [--recovery-ref <ticket>]`
+  deletes the snapshots of named retained builds (a dry-run plan unless
+  `--execute`; rules in [retained generations](ingest.md#retained-generations)).
+  It runs the ingest Job's template as Job `generations` (chart value
+  `ingest.generations.args`, rendered by `map_values.py --generations-arg`):
+  the same packed image by digest, Qdrant writer key by Secret reference,
+  `QDRANT_PEER_URLS` and collection policy, pod hardening, and the
+  `ingest-work` volume with `--progress /work/inventory.jsonl` fixed; no
+  corpus volume and `backoffLimit: 0`. The read-only `list` runs with the
+  writer key too: both commands are one Job shape, the ingest Job's, and
+  there is no read-only variant of it. Each value is checked whole against
+  a fixed character set before anything renders and reaches the Job as one
+  argument; a value with a newline or any other character outside its set
+  refuses the run. Before applying, it refuses while
+  `job/ingest` has not finished (no `Complete` or `Failed` condition) or an
+  ingest pod is still running or terminating, while an earlier
+  `job/generations` has not finished, when `ingest-work` does not exist (it
+  never creates it), and on any read failure; a finished earlier
+  `job/generations` is deleted with bounded requests first. It waits with the
+  ingest launcher's watcher (`scripts/airgap/one_shot_job.sh`: the quota
+  fail-fast and the bounded, interruptible removal of a refused Job above,
+  with `sh scripts/airgap/generations.sh` as the rerun command in the
+  messages), ends the wait as soon as the
+  Job fails (a refusal is a normal outcome), and prints the Job's log, which
+  is the listing or plan, once at the end. With `--execute` it passes the
+  bastion login name as `--operator` for the audit record; a login name
+  with a control character refuses the run, any other unusable name is left
+  out with a warning and the record names the pod's uid. No reader stop:
+  snapshots are never served. `AIRGAP_DRYRUN=1` only renders and prints the
+  cluster calls; without it, the module's own dry run still runs as a Job.
+  The Job requests the ingest Job's `INGEST_*` resources. There is no task
+  entry for it; run the script.
 - First-party pods (agent, the oauth-proxy sidecar, the ingest Job, OpenObserve, otelcol)
   declare their own hardening so it does not depend on `restricted-v2`
   alone (issue #585): pod `runAsNonRoot: true` and
@@ -1148,7 +1184,11 @@ capacity, not usable logical capacity:
 - Each node-local snapshot of a generation is about `S` on that peer's snapshot
   claim: the retained snapshots (pre-change, pre-upgrade, safety) satisfy
   `retained * S` below 500Gi. Off-cluster copies do not free the claim until the
-  snapshot is deleted.
+  snapshot is deleted. `python -m mainframe_rag.ingest.generations list` shows
+  every peer's snapshots with exact sizes; snapshots of retained generations
+  are deleted only by its guarded snapshot-only disposal
+  ([retained generations](ingest.md#retained-generations)), which frees the
+  snapshot claim and never the data claim.
 - Sizing math, not measurement: measured per-point footprint, headroom, RPO/RTO
   and replica policy belong to #374 and #360. Do not provision at exactly the
   estimate (`.agents/skills/qdrant-sizing`).
@@ -2372,13 +2412,117 @@ off with the rollback flag below until a qualified import is deployed.
 Deployment, Service, Route, NetworkPolicy and ConfigMap. The claim `rag-openwebui-data` is kept
 (`helm.sh/resource-policy: keep`), and nothing purges it while the front end is off. The agent
 and the console are unchanged. Open WebUI chats cannot move into the console. A database that a
-newer pin has migrated rolls back only through its pre-upgrade snapshot. Open WebUI runs its
-database migrations at start (`ENABLE_DB_MIGRATIONS`, default on): the first v0.13.4 start
-adds tables (comments, notifications, refresh-token sessions, chat view state) and columns, and
-the older image cannot open the result. Snapshot `rag-openwebui-data` before the first start of
-a new pin (#1357). To retire the front end
+newer pin has migrated rolls back only through the copy of the volume taken before the upgrade.
+Open WebUI runs its database migrations at start (`ENABLE_DB_MIGRATIONS`, default on): the
+first v0.13.4 start adds tables (comments, notifications, refresh-token sessions, chat view
+state) and columns, and the older image cannot open the result. Before the first start of a new
+pin (#1357), take that copy with [copy-out](#owui-copy-out); roll back with
+[restore](#owui-restore). To retire the front end
 for good, delete the claim explicitly (`oc delete pvc rag-openwebui-data`); no deploy path does
 that.
+
+<a id="owui-copy-restore"></a>
+**Copy-out and restore across a database migration (#1376).** K1 keeps the claim but cannot undo
+a migration. To roll back across an upgrade that migrates the database, restore a copy of the
+volume taken before the upgrade. The procedure needs only namespace-admin `oc` rights, the Open
+WebUI image the Deployment already runs (it is in the registry), and the bastion's disk. Release
+A is the running release and B the upgrade. Run both blocks on the bastion with `NAMESPACE`
+set as in A's `airgap.env` and `A_WORKSPACE` naming A's workspace, the one the
+[upgrade runbook](install_and_ops.md#upgrade-and-recovery-runbook-issue-272) keeps for rollback.
+
+- **Data handling.** The copy holds chat text. Keep it on the bastion in A's workspace, mode 0600
+  (the blocks set `umask 077`), and never move it out of the enterprise. Delete it when the
+  upgrade is signed off and no rollback is planned, or after `OPENWEBUI_RETENTION_DAYS` (see
+  Retention above) at the latest.
+- **Why not a VolumeSnapshot.** It needs a VolumeSnapshotClass that namespace-admin may use, and a
+  site may not have one. The copy works on any RWO claim.
+
+<a id="owui-copy-out"></a>
+**Copy out** (upgrade runbook step 3, right before B's `airgap:deploy`; Open WebUI stays down
+until B's deploy starts it):
+
+```sh
+umask 077
+cd "$A_WORKSPACE"
+OW_IMG=$(oc -n "$NAMESPACE" get deploy rag-openwebui -o jsonpath='{.spec.template.spec.containers[?(@.name=="openwebui")].image}')
+OW_PULL=$(oc -n "$NAMESPACE" get deploy rag-openwebui -o jsonpath='{.spec.template.spec.imagePullSecrets[0].name}')
+echo "image=$OW_IMG pull=$OW_PULL"          # the image must be non-empty; pull is empty only if the deploy uses no pull secret
+OW_PULL_ITEM=
+[ -z "$OW_PULL" ] || OW_PULL_ITEM="{name: \"$OW_PULL\"}"
+oc -n "$NAMESPACE" scale deploy/rag-openwebui --replicas=0
+oc -n "$NAMESPACE" wait --for=delete pod -l app=rag-openwebui --timeout=180s
+cat > owui-copy-pod.yaml <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rag-openwebui-copy
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  imagePullSecrets: [$OW_PULL_ITEM]
+  securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+  containers:
+    - name: copy
+      image: "$OW_IMG"
+      command: ["sleep", "3600"]
+      securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+      resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 500m, memory: 256Mi}}
+      volumeMounts: [{name: data, mountPath: /data}]
+  volumes:
+    - name: data
+      persistentVolumeClaim: {claimName: rag-openwebui-data}
+EOF
+oc -n "$NAMESPACE" apply -f owui-copy-pod.yaml
+oc -n "$NAMESPACE" wait --for=condition=Ready pod/rag-openwebui-copy --timeout=180s
+oc -n "$NAMESPACE" exec rag-openwebui-copy -- tar -C /data --exclude=./lost+found -cf - . > owui-data-A.tar   # block volumes have a root-only lost+found the pod cannot read
+oc -n "$NAMESPACE" exec rag-openwebui-copy -- sh -c 'cd /data && sha256sum webui.db' > owui-db-A.sha256.pod
+tar -xOf owui-data-A.tar ./webui.db | sha256sum
+cat owui-db-A.sha256.pod                     # the two hashes must be equal
+oc -n "$NAMESPACE" delete pod rag-openwebui-copy --wait=true
+```
+
+- If anything above fails, **stop and resume A**:
+  `oc -n "$NAMESPACE" delete pod rag-openwebui-copy --ignore-not-found`, then
+  `oc -n "$NAMESPACE" scale deploy/rag-openwebui --replicas=1`.
+- B's `airgap:deploy` starts Open WebUI again, with 1 replica. If `rag-openwebui` still shows
+  0/0 after the deploy, run `oc -n "$NAMESPACE" scale deploy/rag-openwebui --replicas=1`. The
+  scale command is only a fallback: in the rehearsals the deploy brought it back to 1/1 by itself.
+
+<a id="owui-restore"></a>
+**Restore** (rollback, upgrade runbook step 4, before A's `airgap:deploy`):
+
+```sh
+umask 077
+cd "$A_WORKSPACE"
+oc -n "$NAMESPACE" scale deploy/rag-openwebui --replicas=0
+oc -n "$NAMESPACE" wait --for=delete pod -l app=rag-openwebui --timeout=180s
+# Reuse owui-copy-pod.yaml from the copy-out (A's image; it has tar).
+oc -n "$NAMESPACE" apply -f owui-copy-pod.yaml
+oc -n "$NAMESPACE" wait --for=condition=Ready pod/rag-openwebui-copy --timeout=180s
+oc -n "$NAMESPACE" exec rag-openwebui-copy -- sh -c 'find /data -mindepth 1 -maxdepth 1 ! -name lost+found -exec rm -rf {} +'
+oc -n "$NAMESPACE" exec -i rag-openwebui-copy -- tar -C /data --strip-components=1 -xf - < owui-data-A.tar   # strip the "./" root entry: the pod cannot change the mount root's mode
+oc -n "$NAMESPACE" exec rag-openwebui-copy -- sh -c 'cd /data && sha256sum webui.db'   # must equal owui-db-A.sha256.pod
+oc -n "$NAMESPACE" delete pod rag-openwebui-copy --wait=true
+```
+
+- **If any step of the restore fails, stop. Do not deploy A**, because A cannot start on a
+  partly restored or migrated database. Repeat the restore from the start; it empties the volume
+  first. Open WebUI stays down meanwhile, and the agent is unaffected.
+
+Then run A's `airgap:deploy` from A's workspace (upgrade runbook step 4). A's Open WebUI must
+start cleanly. A "Can't locate revision" exit means the restore is incomplete: repeat the
+restore.
+
+**What the rehearsal covers.** `kind-openwebui-operator` runs both blocks as written, under
+`set -eu` (it stops at the first failing command, as the stop rules require of the operator),
+with a restricted-v2 UID stand-in for the helper pod as for Open WebUI
+([acceptance lane](openwebui-dev.md#acceptance-lane)). A chat written after the copy-out is gone
+after the restore, and every chat recorded before it is back. On Kind a plain `-xf` fails on the
+mount root's mode as at a site (2026-11-24 rehearsal), so `--strip-components=1` is exercised.
+Kind's volumes have no `lost+found`
+(`--exclude=./lost+found` is covered only by a stub test with an unreadable `lost+found`).
+B is the same release there, so the lane does not exercise a migration.
 
 **Allow-list proxy (ADR-0007 E1).** Open WebUI disables some features in its UI
 only: `/api/v1/files` stores uploads with uploads off (Kind trial V1), the

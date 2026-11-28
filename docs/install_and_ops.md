@@ -1512,10 +1512,12 @@ on three distinct peers again.
 
 - **Publication** is the one authorized writer path (`ingest.md`
   publication contract, single target-held lock, alias swap only after
-  full verification). Retired generations and safety snapshots are kept;
-  rollback is alias re-pointing by the operator — never automatic
-  deletion, retirement, or garbage collection (#391 owns publication
-  integrity).
+  full verification). Superseded generations are kept, and their safety
+  snapshots until an operator deletes them with the guarded snapshot-only
+  command ([retained generations](ingest.md#retained-generations), named
+  builds, publish lock, keep at least one); rollback is alias re-pointing by
+  the operator — never automatic deletion, retirement, or garbage
+  collection (#391 owns publication integrity).
 - **Existing-collection topology changes** are snapshot-gated and explicit:
   same-shard-count replication repair establishes actual copies and waits
   for ACTIVE state; a shard-count change rebuilds a distinct 6/3/2
@@ -1534,9 +1536,10 @@ on three distinct peers again.
 #### Abort, retry, and recovery
 
 - An interrupted clone, transfer, or build is resumed or retried, never
-  repaired by deleting live data. A superseded physical plus its safety
-  snapshot survive every swap until the operator removes them after
-  acceptance.
+  repaired by deleting live data. A superseded physical survives every
+  swap; no data disposal exists yet (#1373). Its safety snapshot survives
+  until the operator deletes it with the guarded snapshot-only command
+  ([retained generations](ingest.md#retained-generations)).
 - **Peer replacement is not stop/wipe/start.** Observed 2026-09-21 against
   the pinned `v1.19.0-unprivileged` image: a fresh container restarted at
   the same URI while the dead peer still holds shards is refused
@@ -1683,7 +1686,10 @@ sh scripts/tools/run-task.sh airgap:smoke
 - **Before deploy:** take step 1's snapshot (the only protection against a
   forced re-ingest if data is ever damaged), keep A's workspace and
   `airgap.env` for step 4, and confirm A's image tags are still in the
-  registry (registry tag expiry would break step 4).
+  registry (registry tag expiry would break step 4). When B moves Open WebUI
+  to a new pin, its first start migrates the Open WebUI database one way:
+  run the Open WebUI [copy-out](deploy.md#owui-copy-out) right before B's
+  `airgap:deploy`.
 <a id="upgrade-1274-defaults"></a>
 - **Behaviour changes from #1274 (answer-quality defaults on).** No
   re-ingest. Each change is one `airgap.env` line to keep the old behaviour,
@@ -1735,10 +1741,13 @@ Repeating the same candidate is supported and must leave identical digests.
 
 **4. Rollback (compatible software/config only).** Run the previous approved
 bundle A from its own workspace and its own `airgap.env`
-(`airgap:deploy`, same namespace). Application rollback never rolls data back
+(`airgap:deploy`, same namespace). The deploy itself never rolls data back
 and never edits PVCs (`deploy.md` lifecycle notes). Rollback is valid only if
 the data representation A expects is the one the target holds; otherwise use
-step 5. Never combine A's assets with B's checkout.
+step 5. Never combine A's assets with B's checkout. The one exception is a
+manual operator step: when B's Open WebUI migrated its database, run the Open
+WebUI [restore](deploy.md#owui-restore) before A's `airgap:deploy`; A's Open
+WebUI cannot start on B's database.
 
 **5. Data recovery or rebuild (explicit, downtime recorded).**
 

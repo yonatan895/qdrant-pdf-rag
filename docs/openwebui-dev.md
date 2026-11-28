@@ -135,6 +135,16 @@ proxy images come from the bundle through `airgap:load`. It follows the
   claim is the same object, and the console answers. Then `OPENWEBUI_ENABLED=true` plus
   `airgap:deploy` (the Pipe is reinstalled from the kept key) is followed by `operator on`: the
   same claim, every recorded chat, the grant, the repository Pipe, and an answered next chat.
+- **Copy-out and restore** (#1376, after K1): `operator record`, then `operator copy-out` runs
+  the [copy-out block](deploy.md#owui-copy-out) of the workspace's `deploy.md` as written
+  (kubectl for `oc`, a private directory under `OWUI_STATE` for A's workspace). The tar's
+  `webui.db` must match the pod's sha256, the copy is mode 0600, and no Open WebUI or helper
+  pod is left. `airgap:deploy` stands in for B's deploy (the same release, so no migration);
+  `operator copy-later` writes an answered chat the copy lacks. `operator restore` runs the
+  [restore block](deploy.md#owui-restore) and requires the restored `webui.db` sha256 to equal
+  the copy's. After A's `airgap:deploy`, `operator restored` proves what `on` proves, and
+  that the copy-later chat is gone. The restricted-v2 UID stand-in also assigns the helper pod
+  (`rag-openwebui-copy`) its UID, as the SCC does on OpenShift.
 - <a id="slow-model"></a>**Slow model** (`acceptance.sh operator paced`, #1118, CI stand-ins only;
   it runs between `run` and `record`): the mock model paces only a question that carries the
   lane's marker (`MOCK_PACED_*` in `scripts/mock_vllm.py`, set on the lane's mock Deployment). It

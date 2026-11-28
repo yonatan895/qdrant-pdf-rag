@@ -2253,3 +2253,138 @@ def test_retained_content_seal_detects_real_stored_content_loss(qdrant_url, tmp_
     finally:
         client.close()
         _drop_publish_fixture(qdrant_url)
+
+
+def test_retained_snapshot_disposal_on_real_server(qdrant_url, tmp_path, monkeypatch):
+    """#1373 PR 1 on the pinned server: three published generations, list them
+    with snapshot sizes, delete the oldest retained generation's snapshots,
+    kill the process after the first delete, rerun, then prove that live and
+    kept snapshots, every collection and control record are unchanged and
+    that an ordinary ingest and publication still succeed."""
+    import time
+
+    from qdrant_client import QdrantClient
+
+    from mainframe_rag.ingest import generations
+    from mainframe_rag.ingest.publish import verify_publication_seal
+    from tests.helpers_publication_lifecycle import TEXTS, _records, _write_source
+
+    _drop_publish_fixture(qdrant_url)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    for name, text in TEXTS.items():
+        _write_source(corpus, name, text)
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("DENSE_DIM", "256")
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "")
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
+    client = QdrantClient(url=qdrant_url, timeout=30)
+
+    def target():
+        return next(a.collection_name for a in client.get_aliases().aliases if a.alias_name == PUBLISH_ALIAS)
+
+    def snapshots(physical):
+        return sorted(s.name for s in client.list_snapshots(physical))
+
+    def collections():
+        return {c.name for c in client.get_collections().collections if c.name.startswith(PUBLISH_ALIAS)}
+
+    def cli(*argv):
+        lines: list[str] = []
+        rc = generations.main(list(argv), out=lines.append)
+        return rc, lines
+
+    try:
+        physicals = []
+        for extra in ("gamma", "delta", None):
+            _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, corpus, progress)
+            physicals.append(target())
+            if extra:
+                _write_source(corpus, extra, f"The {extra} reactor uses the {extra} cooling channel.")
+        p1, p2, p3 = physicals
+        assert len(set(physicals)) == 3
+        # The swap snapshots only the superseded physical: give live one too, and G1 a
+        # second (a distinct name needs a later second) so a mid-run crash is not vacuous.
+        client.create_snapshot(p3, wait=True)
+        time.sleep(1.2)
+        client.create_snapshot(p1, wait=True)
+        before = {p: snapshots(p) for p in physicals}
+        assert [len(before[p]) for p in physicals] == [2, 1, 1]
+
+        rc, lines = cli("list", "--progress", str(progress), "--format", "json")
+        assert rc == 0
+        rows = [json.loads(line) for line in lines]
+        listed = {r["generation"]["physical"]: r["generation"] for r in rows if "generation" in r}
+        assert set(listed) == set(physicals)
+        assert [listed[p]["phase"] for p in physicals] == ["retained", "retained", "live"]
+        assert listed[p2]["reasons"] == ["KEEP_N"] and listed[p1]["disposable"]
+        assert (listed[p2]["rank"], listed[p1]["rank"]) == (1, 2)
+        g1 = listed[p1]["build_id"]
+        assert sorted(s["name"] for s in listed[p1]["snapshots"]) == before[p1]
+        assert all(s["size_bytes"] > 0 and len(s["checksum"]) == 64 for s in listed[p1]["snapshots"])
+        assert listed[p1]["size"]["data_bytes"] is None
+        assert listed[p1]["size"]["snapshot_bytes"] == sum(s["size_bytes"] for s in listed[p1]["snapshots"])
+        assert rows[-1]["summary"]["peers_complete"] is True
+
+        kept = {p: (_records(client, p), _records(client, p + "__completions")) for p in physicals}
+        aliases = {a.alias_name: a.collection_name for a in client.get_aliases().aliases}
+        all_collections = collections()
+
+        rc, lines = cli("dispose-snapshots", "--progress", str(progress), "--build-id", listed[p2]["build_id"],
+                        "--execute", "--recovery-ref", "CHG-SIM")
+        assert rc == generations.EXIT_REFUSED
+        rc, lines = cli("dispose-snapshots", "--progress", str(progress), "--build-id", g1)
+        assert rc == 0 and any(line.startswith("DRY RUN") for line in lines)
+        assert snapshots(p1) == before[p1]
+
+        receipt = tmp_path / "crash.txt"
+        log = tmp_path / "crash.log"
+        with log.open("w") as output:
+            process = subprocess.Popen(
+                [sys.executable, "-m", "tests.helpers_ingest_crash_worker", "generations-crash",
+                 "--receipt", str(receipt), "--", "dispose-snapshots", "--progress", str(progress),
+                 "--build-id", g1, "--execute", "--recovery-ref", "CHG-SIM"],
+                cwd=REPO_ROOT, env=_checkout_env(), stdout=output, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            assert process.wait(timeout=120) == 86, log.read_text()
+        assert receipt.read_text() == "snapshot-delete"
+        assert len(snapshots(p1)) == 1  # one deleted, the run died before the next
+
+        rc, lines = cli("dispose-snapshots", "--progress", str(progress), "--build-id", g1,
+                        "--execute", "--recovery-ref", "CHG-SIM")
+        assert rc == 0, lines
+        assert snapshots(p1) == []
+        assert snapshots(p2) == before[p2] and snapshots(p3) == before[p3]
+        assert collections() == all_collections
+        assert {a.alias_name: a.collection_name for a in client.get_aliases().aliases} == aliases
+        assert {p: (_records(client, p), _records(client, p + "__completions")) for p in physicals} == kept
+        assert verify_publication_seal(client, p1 + "__completions")
+        assert verify_publication_seal(client, p2 + "__completions")
+        rc, lines = cli("dispose-snapshots", "--progress", str(progress), "--build-id", g1,
+                        "--execute", "--recovery-ref", "CHG-SIM")
+        assert rc == 0 and any("DONE deleted 0" in line for line in lines)
+        record = generations.disposal_record_path(progress, PUBLISH_ALIAS).read_text().splitlines()
+        # Audit only: the killed run recorded its intent but not the outcome.
+        assert [json.loads(line)["event"] for line in record] == [
+            "planned", "deleting", "planned", "deleting", "deleted", "done", "planned", "done"]
+
+        # The next ordinary operations: a corpus addition publishes, a steady rerun writes nothing.
+        _write_source(corpus, "epsilon", "The epsilon reactor uses the upper cooling channel.")
+        _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, corpus, progress)
+        p4 = target()
+        assert p4 not in physicals
+        published = (_records(client, p4), _records(client, p4 + "__completions"))
+        steady = collections()
+        _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, corpus, progress)
+        assert target() == p4 and collections() == steady
+        assert (_records(client, p4), _records(client, p4 + "__completions")) == published
+        rc, lines = cli("list", "--progress", str(progress), "--format", "json")
+        after = {r["generation"]["physical"]: r["generation"] for r in map(json.loads, lines) if "generation" in r}
+        assert after[p1]["snapshots"] == [] and after[p1]["phase"] == "retained"
+        assert after[p3]["phase"] == "retained" and after[p4]["live"]
+    finally:
+        client.close()
+        _drop_publish_fixture(qdrant_url)
