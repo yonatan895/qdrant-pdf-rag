@@ -9,6 +9,7 @@ and context pruning.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator
 
 import pytest
@@ -1540,6 +1541,87 @@ def test_zos_audit_line_names_the_read_and_carries_no_dataset_text(zos, caplog):
         assert audit["bytes"] > 0
         for leaked in ("LFAREA=(1M", "MAXUSER", "hunter2", "REDACTED"):
             assert leaked not in caplog.text
+
+
+def test_zos_pipe_audit_tag_reaches_the_live_fetch_line_and_no_identity_does(zos, monkeypatch, caplog):
+    """ADR-0012 D3(d), producer to consumer: the docs Pipe's tag for one Open
+    WebUI user is exactly the audit_tag the agent logs with the read. The
+    expected value is computed here, not by the Pipe. The user's id, name and
+    email never reach the agent's logs."""
+    import hashlib
+    import hmac
+    import logging
+
+    import httpx
+
+    from tests.test_openwebui_docs_pipe import run_pipe
+
+    key, user = "site-audit-key-0123456789abcdefghij", {
+        "id": "3f2b8c1e-7a4d-4e9b-a6c5-0d1e2f3a4b5c", "name": "Dana Sentinel-Name",
+        "email": "dana.sentinel@corp.invalid"}
+    monkeypatch.setenv("RAG_ZOS_AUDIT_TAG", "true")
+    monkeypatch.setenv("RAG_ZOS_AUDIT_KEY", key)
+    seen: list[httpx.Request] = []
+
+    def forward(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        headers = {k: v for k, v in request.headers.items()
+                   if k not in ("host", "content-length", "accept-encoding", "connection")}
+        res = zos.post(request.url.path, content=request.content, headers=headers)
+        return httpx.Response(res.status_code, content=res.content,
+                              headers={"content-type": res.headers["content-type"]})
+
+    with caplog.at_level(logging.DEBUG):
+        content, _ = run_pipe(None, transport=httpx.MockTransport(forward), user=user,
+                              messages=[{"role": "user", "content": _ZOS_QUESTION}])
+    assert content.startswith(_ZOS_NOTICE + "\n\n") and len(seen) == 1
+    (audit,) = [json.loads(r.getMessage()) for r in caplog.records
+                if '"live_fetch"' in r.getMessage()]
+    expected = hmac.new(key.encode(), user["id"].encode(), hashlib.sha256).hexdigest()
+    assert expected == "c826ae5169c6643170d2455138adba002d0d18320f068e029b497e18ab6b475a"
+    assert audit["audit_tag"] == expected and audit["targets"] == [_MEMBER]
+    for identity in user.values():
+        assert identity not in caplog.text
+    assert key not in caplog.text
+
+
+@pytest.mark.parametrize("route", ["/v1/chat", "/v1/answer"])
+def test_zos_audit_tag_authorizes_nothing(zos, route, caplog):
+    """ADR-0012 D3(d): the tag is logged, never used. A missing, forged,
+    malformed or genuine tag gives the same read, the same prompt and the same
+    response, for an allowlisted member and for a refused one, on both Docs
+    routes. The agent logs only lower-case 64 hex (the Pipe's form); any other
+    value, upper case included, is dropped from the audit line."""
+    import logging
+
+    caplog.set_level(logging.INFO)
+
+    def turn(question: str, header: str | None) -> tuple:
+        before, logged = len(_retrs(zos)), len(caplog.records)
+        body = ({"messages": [{"role": "user", "content": question}]} if route == "/v1/chat"
+                else {"query": question})
+        res = zos.post(route, json=body,
+                       headers={} if header is None else {"X-Zos-Audit-Tag": header})
+        assert res.status_code == 200, res.text
+        data = res.json()
+        for volatile in ("id", "created", "request_id"):
+            data.pop(volatile, None)
+        prompt = [(m.role, m.content) for m in _final_prompt(zos, False)]
+        (audit,) = [json.loads(r.getMessage()) for r in caplog.records[logged:]
+                    if '"live_fetch"' in r.getMessage()]
+        expected = header if header is not None and re.fullmatch(r"[0-9a-f]{64}", header) else None
+        assert audit.get("audit_tag") == expected, header
+        return json.dumps(data, sort_keys=True), prompt, _retrs(zos)[before:]
+
+    headers = (None, "ab" * 32, "c826ae5169c6643170d2455138adba002d0d18320f068e029b497e18ab6b475a",
+               "AB" * 32, "ab" * 31, "admin", "", "ab" * 32 + " ")
+    for question, retrs in ((_ZOS_QUESTION, ["RETR 'SYS1.PARMLIB'(IEASYS00)"]),
+                            ("Explain SYS1.SECRET.DATA(KEYS) to me", [])):
+        baseline = turn(question, None)
+        assert baseline[2] == retrs
+        for header in headers:
+            assert turn(question, header) == baseline, header
+    assert zos.feedback.records == []
 
 
 @pytest.mark.parametrize("stream", [False, True])

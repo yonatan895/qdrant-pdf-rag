@@ -95,7 +95,8 @@
     references `fetch_live` (`tests/test_mcp_agent.py`);
     `job_status` is never planned without an exact job id; defaults are off
     (`tests/test_config.py`). Audit records carry request id, route, tool
-    names, byte counts and a fixed degradation code only. The bridge's
+    names, byte counts and a fixed degradation code only (ADR-0012 D3(d) adds
+    the docs Pipe's non-authorizing audit tag, sent since #1294). The bridge's
     `tool_error` text stays inside the agent and never reaches a client.
     Search never calls an LLM; routing is deterministic and trap queries
     always route `manual`.

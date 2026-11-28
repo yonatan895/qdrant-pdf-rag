@@ -98,6 +98,12 @@ Pipe is provisioned and the admin role is limited to the team.
   Function is present, and the Pipe never declares `__oauth_token__`,
   `__request__` or any `__user__`-style parameter it does not use; a test
   inspects its `pipe()` signature. A new parameter is a recorded decision.
+  *(Amended by [ADR-0012](0012-zos-dataset-read-pilot.md) D3(d), built in
+  #1294.)* `__user__` is recorded for one more use: while the Pipe's z/OS
+  audit switch is on (its coupling to dataset reads is pending the maintainer's decision on PR #1397), the
+  Pipe sends a keyed HMAC of the user id as a non-authorizing audit header
+  ([construction](../agent.md#openwebui-docs-pipe)); the id, name, email and
+  tokens never leave it.
   *(Amended, #1255; maintainer decision 2026-11-16.)* With
   ratings on (`openwebui.ratings.enabled`; off by default until #1274, which
   turned it on wherever the feedback store is on, maintainer decision
@@ -197,7 +203,11 @@ Pipe is provisioned and the admin role is limited to the team.
   re-encrypt TLS and a Service CA certificate. The Route-exposure preflight
   refuses any other Route in front of its Service. The agent stays anonymous
   to Open WebUI users (#373), which is safe because the docs corpus is read by
-  everyone. Residual, accepted by the maintainer 2026-11-16 (#1255): v0.12.3 lets an
+  everyone. *(Amended by [ADR-0012](0012-zos-dataset-read-pilot.md) D3(d),
+  built in #1294.)* While the Pipe's z/OS audit switch is on (the chart is to
+  couple it to dataset reads; pending the maintainer's decision on PR #1397), each call carries a
+  pseudonymous audit tag (keyed HMAC of the Open WebUI user id); it authorizes
+  nothing and is safe for z/OS reads only while ADR-0012 E3's premise holds. Residual, accepted by the maintainer 2026-11-16 (#1255): v0.12.3 lets an
   admin grant the no-auth "anyone" read on a chat share link, or turn open
   sharing on for a group in the admin UI (group permissions combine
   most-permissive over the chart's defaults), even with open sharing off.

@@ -111,6 +111,14 @@
      that to the namespace) and leaves "the Pipe declares no
      `__oauth_token__`" intact. This amends ADR-0003's audit-record clause,
      ADR-0007 V2's Pipe parameter rule (`__user__`) and ADR-0007 R3.
+     *(Built, #1294 Pipe slice; the [Pipe contract](../agent.md#openwebui-docs-pipe)
+     owns the construction.)* Four choices of that slice are pending the maintainer's decision on PR #1397, not
+     decided here: (a) a separate Pipe switch, `RAG_ZOS_AUDIT_TAG`, rather
+     than a tag derived from reads being on (the chart is to couple the two
+     and refuse a mismatch; until then agent reads with the switch off are
+     logged without a tag); (b) fail closed (no agent call) with the switch on
+     and no usable key; (c) fail closed with no user id; (d) the header name
+     `X-Zos-Audit-Tag` and its untruncated 64 lower-case hex HMAC-SHA256 form.
 4. **D4, z/OS-enforced read-only, standalone bridge topology, stable egress
    identity and bridge caller auth (decided 2026-11-21, Option A, point 2 and
    Option 4A).**
