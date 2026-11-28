@@ -10,17 +10,20 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from qdrant_client import models
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.chunk import Chunk
-from mainframe_rag.ingest.ibm_pdf import ParsedDoc
-from mainframe_rag.ingest.payload import point_payload
 from mainframe_rag.ingest.rules_version import extraction_rules_version
 from mainframe_rag.ports import QdrantPoints, QdrantReader, SparseVector
+
+if TYPE_CHECKING:
+    # Annotation-only: ibm_pdf imports PyMuPDF, which the serving agent reaches
+    # this module through (publish/completion reads) and must not load (#1318).
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
 
 HNSW_M = 16
 HNSW_EF_CONSTRUCT = 128
@@ -601,6 +604,10 @@ def upsert_chunks(
 
     Pair-length contract (issue #359): chunks and vectors must align exactly;
     a mismatch raises instead of silently truncating via zip."""
+    # Deferred (#1318): the payload rule module imports ibm_pdf, hence PyMuPDF,
+    # at runtime; only the ingest writer reaches this function.
+    from mainframe_rag.ingest.payload import point_payload
+
     collection = settings.qdrant_collection
     rules_v = extraction_rules_version()
     if len(chunks) != len(vectors):

@@ -30,13 +30,23 @@ from typing import TYPE_CHECKING, Any
 import httpx2
 
 from mainframe_rag.config import Settings, bearer_auth_headers, new_http_client
-from mainframe_rag.ingest.payload import normalize_context
 from mainframe_rag.ports import ChatMessage
 
 if TYPE_CHECKING:
     from mainframe_rag.ingest.chunk import Chunk
 
 log = logging.getLogger("ingest")
+
+
+def normalize_context(text: str, max_chars: int) -> str:
+    """The stored-prefix recipe, owned by the payload rule module (hashed into
+    the extraction-rules version) and resolved at call time. Deferred (#1318):
+    payload imports ibm_pdf, hence PyMuPDF, and the serving agent imports this
+    module (for CONTEXT_PROMPT_VERSION) but must not load PyMuPDF."""
+    from mainframe_rag.ingest import payload
+
+    return payload.normalize_context(text, max_chars)
+
 
 # Prompt template version. Bumped ONLY with the template text below; the
 # version rides the cache key, so a template change invalidates every cached

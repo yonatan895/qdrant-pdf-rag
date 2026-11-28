@@ -95,21 +95,58 @@ def test_rule_modules_import_only_rule_modules() -> None:
     assert escapes == [], escapes
 
 
-def test_stored_payload_is_owned_by_a_rule_module() -> None:
+def test_stored_payload_is_owned_by_a_rule_module(monkeypatch) -> None:
     """upsert_chunks stores exactly point_payload's mapping (carrying
     rules_v), and that mapping, like the contextual-prefix normalization
     recipe (review of #701), lives in a hashed module: adding or deriving a
     stored field anywhere else would bypass the version."""
     import inspect
+    from types import SimpleNamespace
 
-    from mainframe_rag.ingest import context
+    from mainframe_rag.ingest import context, payload
     from mainframe_rag.ingest.payload import normalize_context, point_payload
 
     hashed = {p.resolve() for p in rule_module_paths()}
     assert Path(inspect.getfile(point_payload)).resolve() in hashed
     assert Path(inspect.getfile(normalize_context)).resolve() in hashed
-    assert context.normalize_context is normalize_context
+    # context.normalize_context is exactly a call-time delegation to the hashed
+    # recipe (deferred import, #1318): any other statement, argument change or
+    # pre/post-processing would change stored prefixes without moving rules_v.
+    import ast
+    import textwrap
+
+    wrapper = ast.parse(textwrap.dedent(inspect.getsource(context.normalize_context))).body[0]
+    assert isinstance(wrapper, ast.FunctionDef) and ast.get_docstring(wrapper)
+    wrapper.body = wrapper.body[1:]  # the docstring is free text
+    delegation = ast.parse(
+        "def normalize_context(text: str, max_chars: int) -> str:\n"
+        "    from mainframe_rag.ingest import payload\n"
+        "    return payload.normalize_context(text, max_chars)\n"
+    ).body[0]
+    assert ast.dump(wrapper) == ast.dump(delegation)
     client, parsed, chunk = _upsert_one({"c1": "situating gist"})
+    # Both contextual call sites normalize through the rule module's recipe at
+    # call time (the import is deferred there, #1318), never a local copy.
+    seen: list[str] = []
+
+    def recording(text: str, max_chars: int) -> str:
+        seen.append(text)
+        return normalize_context(text, max_chars)
+
+    monkeypatch.setattr(payload, "normalize_context", recording)
+    reply = SimpleNamespace(raise_for_status=lambda: None,
+                            json=lambda: {"choices": [{"message": {"content": " via  client "}}]})
+    http = SimpleNamespace(post=lambda *a, **k: reply)
+    from mainframe_rag.config import Settings
+
+    settings = Settings(_env_file=None, context_llm_base_url="http://ctx.internal/v1", context_llm_model="m")
+    llm = context.ContextLLMClient(settings, client=http)
+    assert llm.complete([]) == "via client"
+    model = SimpleNamespace(model="m", complete=lambda messages: " via  generate ")
+    full, _ = context.generate_contexts([chunk], doc_sha256="a" * 64, product=None, version=None,
+                                        title="t", client=model, cache={}, max_chars=50)
+    assert full == {"c1": "via generate"}
+    assert seen == [" via  client ", " via  generate "]
     assert client.points[0].payload == point_payload(
         parsed, chunk, extraction_rules_version(), "situating gist"
     )
