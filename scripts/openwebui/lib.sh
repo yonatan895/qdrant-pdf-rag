@@ -148,6 +148,14 @@ uid_for() {  # a stable random UID per role, like restricted-v2's namespace rang
 }
 
 # ------------------------------------------------------------------ render
+render_values() {  # render_values OUT: values.yaml with the lane's images, host, pod CIDR and IdP filled in
+    sed -e "s#@OWUI_REPO@#${OWUI_IMAGE%:*}#" -e "s#@OWUI_TAG@#${OWUI_IMAGE##*:}#" \
+        -e "s#@NGINX_REPO@#${NGINX_IMAGE%:*}#" -e "s#@NGINX_TAG@#${NGINX_IMAGE##*:}#" \
+        -e "s#@OWUI_HOST@#$OWUI_HOST#" -e "s#@POD_CIDR@#$POD_CIDR#" \
+        -e "s#@OIDC_PROVIDER_URL@#$DEX_ISSUER/.well-known/openid-configuration#" \
+        "$HERE/values.yaml" > "$1"
+}
+
 render_chart() {  # render_chart OUTDIR VALUES_TEMPLATE
     out=$1
     src="$out/src"
@@ -158,11 +166,7 @@ render_chart() {  # render_chart OUTDIR VALUES_TEMPLATE
     # The Pipe is the working tree's source file, whatever the chart's copy holds.
     cp "$REPO/integrations/openwebui/docs_pipe.py" "$chart/files/openwebui/docs_pipe.py"
     sha256sum "$chart/files/openwebui/docs_pipe.py" | cut -d' ' -f1 > "$out/pipe.sha256"
-    sed -e "s#@OWUI_REPO@#${OWUI_IMAGE%:*}#" -e "s#@OWUI_TAG@#${OWUI_IMAGE##*:}#" \
-        -e "s#@NGINX_REPO@#${NGINX_IMAGE%:*}#" -e "s#@NGINX_TAG@#${NGINX_IMAGE##*:}#" \
-        -e "s#@OWUI_HOST@#$OWUI_HOST#" -e "s#@POD_CIDR@#$POD_CIDR#" \
-        -e "s#@OIDC_PROVIDER_URL@#$DEX_ISSUER/.well-known/openid-configuration#" \
-        "$HERE/values.yaml" > "$out/values.yaml"
+    render_values "$out/values.yaml"
     set --
     for t in deployment networkpolicy pipe-configmap proxy-configmap service pvc; do
         set -- "$@" --show-only "templates/openwebui-$t.yaml"

@@ -1,0 +1,67 @@
+# Kind stand-ins for the zos-read phase of the Open WebUI acceptance lane
+# (#1294, ADR-0012; scripts/openwebui/acceptance.sh zos-read). Never referenced
+# by the production chart or the air-gap manifests. The script renders the
+# @PLACEHOLDERS@ and creates the bridge Secret at run time; no token or
+# password is in this file. The image is the agent image the lane already runs
+# (on the node, so nothing is pulled).
+#
+#   zos-mock-fixtures            the mock z/OS members (original synthetic text,
+#                                never manual text) the lane mounts into the
+#                                chart's bridge in mock mode: OPSNOTE is on the
+#                                rendered allowlist, HIDDEN is not
+#   kind-kubelet-probes-mcp-ftp  kubelet probes come from the node address,
+#                                which OpenShift's SDN admits without a policy
+#   zos-read-client              a pod outside the agent: the Docs-path caller
+#                                (the agent admits this namespace's pods) and
+#                                the pod the bridge's NetworkPolicy must refuse
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: zos-mock-fixtures, namespace: @APP_NS@}
+data:
+  opsnote: |
+    LANE OPERATIONS NOTE 0412
+    SHIFT HANDOVER: BATCH WINDOW CLOSED AT 0615.
+    QUEUE LANEQ7 DRAINED; NO OPERATOR REPLY PENDING.
+    CHECKPOINT MARKER ZOSLANE7Q3
+  hidden: |
+    LANE RESTRICTED NOTE 0977
+    THIS MEMBER IS OUTSIDE THE APPROVED LIST.
+    CHECKPOINT MARKER ZOSLANE9X1
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: kind-kubelet-probes-mcp-ftp, namespace: @APP_NS@}
+spec:
+  podSelector: {matchLabels: {app: rag-mcp-ftp}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ipBlock: {cidr: "@NODE_IP@/32"}}]
+      ports: [{protocol: TCP, port: 8081}]
+---
+# The lane's rehearsal-default-deny-egress admits this pod's egress to the
+# namespace's pods, the bridge's included, so a refused connection is the
+# bridge's own ingress policy.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: zos-read-client
+  namespace: @APP_NS@
+  labels: {app: zos-read-client}
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: @CLIENT_UID@
+    runAsGroup: 0
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: probe
+      image: @AGENT_IMAGE@
+      imagePullPolicy: IfNotPresent
+      command: [python3, -c, "import time; time.sleep(3600)"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: [ALL]}
+      resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 128Mi}}

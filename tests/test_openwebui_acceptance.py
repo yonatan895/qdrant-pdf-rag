@@ -1435,3 +1435,316 @@ prepare_state; pki; team_tools
     assert proc.stdout.rstrip().endswith("PHASE team-tools")
     rendered = (tmp_path / "state" / "render" / "splunk.yaml").read_text()
     assert "@" not in "".join(line for line in rendered.splitlines() if not line.lstrip().startswith("#"))
+
+
+# ------------------------------------------------------------------ z/OS dataset reads (#1294, ADR-0012)
+ZOS_TARGET = "LANEZOS.NOTES(OPSNOTE)"
+ZOS_DENIED = "LANEZOS.NOTES(HIDDEN)"
+ZOS_TAG = "ab" * 32
+
+
+def _zos_notice(target, outcome, code=None, body=""):
+    """The agent's own first line for an observation (the real ZosObservation, not a copy of its wording)."""
+    from mainframe_rag.agent.live_state import ZosObservation
+
+    return ZosObservation(target=target, outcome=outcome, code=code, acquired_at="2026-11-28T10:00:00Z",
+                          body=body, byte_count=len(body.encode())).notice()
+
+
+def _zos_turn(**over):
+    turn = {"status": 200, "done": True, "finish_reason": "stop", "first_line": _zos_notice(ZOS_TARGET, "complete",
+            body="x" * 149), "marker_in_content": True, "fixture_seen": [], "content_chars": 300, "citations": 1,
+            "zos_observation": {"target": ZOS_TARGET, "acquired_at": "2026-11-28T10:00:00Z", "observed_at": None,
+                                "outcome": "complete", "code": None, "truncated": False, "bytes": 149},
+            "feedback_suppressed": True}
+    return {**turn, **over}
+
+
+def _zos_obs(**over):
+    return {**_zos_turn()["zos_observation"], **over}
+
+
+def test_lane_marker_is_the_agents_citation_marker():
+    from mainframe_rag.agent.live_state import ZOS_OBSERVATION_MARKER
+
+    assert checks.ZOS_MARKER == ZOS_OBSERVATION_MARKER
+    assert (DIR / "zos_chat.py").read_text().count(repr(checks.ZOS_MARKER)) == 1
+
+
+def test_an_allowlisted_read_is_complete_cited_and_carries_the_fixtures_bytes():
+    assert checks.check_zos_read(_zos_turn(), ZOS_TARGET, 149).ok
+    for bad in ({"status": 502}, {"done": False}, {"finish_reason": None}, {"citations": 0},
+                {"feedback_suppressed": None},  # the turn would reach the feedback store
+                {"first_line": ""}, {"first_line": _zos_notice(ZOS_DENIED, "complete", body="x")},
+                {"first_line": _zos_notice(ZOS_TARGET, "truncated", "byte_cap", body="x")},
+                {"zos_observation": None}, {"zos_observation": _zos_obs(outcome="truncated", truncated=True)},
+                {"zos_observation": _zos_obs(bytes=0)}, {"zos_observation": _zos_obs(bytes=148)},
+                {"zos_observation": _zos_obs(target=ZOS_DENIED)}, {"zos_observation": _zos_obs(acquired_at=None)},
+                {"zos_observation": _zos_obs(code="byte_cap")}):
+        assert not checks.check_zos_read(_zos_turn(**bad), ZOS_TARGET, 149).ok, bad
+    verdict = checks.check_zos_read(_zos_turn(), ZOS_TARGET, 149)
+    assert verdict.name == "zos-read-complete" and "first_line" not in verdict.detail
+
+
+def _denied(**over):
+    turn = _zos_turn(first_line=_zos_notice(ZOS_DENIED, "denied", "denied"), marker_in_content=False,
+                     zos_observation=_zos_obs(target=ZOS_DENIED, outcome="denied", code="denied", bytes=0))
+    return {**turn, **over}
+
+
+def test_a_target_off_the_allowlist_is_denied_with_no_content_and_says_so():
+    assert checks.check_zos_denied(_denied(), ZOS_DENIED).ok
+    for bad in ({"marker_in_content": True},  # an observation citation on a denied read
+                {"fixture_seen": ["MARKER ZOSLANE9X1"]},  # the member's text reached the answer
+                {"zos_observation": _zos_obs(target=ZOS_DENIED, outcome="complete", bytes=40)},
+                {"zos_observation": _zos_obs(target=ZOS_DENIED, outcome="denied", code="denied", bytes=3)},
+                {"zos_observation": _zos_obs(target=ZOS_DENIED, outcome="unavailable", code="unauthorized", bytes=0)},
+                {"first_line": _zos_notice(ZOS_DENIED, "unavailable", "unauthorized")},
+                {"first_line": _zos_notice(ZOS_DENIED, "not_found", "not_found")},
+                {"first_line": ""}, {"feedback_suppressed": None}, {"status": 500}, {"done": False},
+                {"citations": 0}):
+        assert not checks.check_zos_denied(_denied(**bad), ZOS_DENIED).ok, bad
+
+
+def _ordinary(**over):
+    turn = _zos_turn(first_line="", marker_in_content=False, zos_observation=None, feedback_suppressed=None)
+    return {**turn, **over}
+
+
+def test_the_next_ordinary_request_is_a_plain_cited_manuals_answer():
+    assert checks.check_zos_ordinary(_ordinary()).ok
+    for bad in ({"zos_observation": _zos_obs()}, {"feedback_suppressed": True}, {"marker_in_content": True},
+                {"first_line": _zos_notice(ZOS_DENIED, "denied", "denied")}, {"status": 503}, {"done": False},
+                {"citations": 0}, {"content_chars": 0}, {"finish_reason": None}):
+        assert not checks.check_zos_ordinary(_ordinary(**bad)).ok, bad
+
+
+def _audit_line(**over):
+    record = {"ts": "t", "level": "INFO", "logger": "agent", "request_id": "r1", "action": "live_fetch",
+              "route": "hybrid", "tools": ["dataset_read"], "targets": [ZOS_TARGET], "bytes": 278, "degraded": None,
+              "audit_tag": ZOS_TAG}
+    return json.dumps({**record, **over})
+
+
+def _audit_log(*extra):
+    return "\n".join(["not json", _audit_line(),
+                      _audit_line(tools=[], targets=[ZOS_DENIED], bytes=0, degraded="denied"), *extra])
+
+
+def test_the_agents_audit_lines_name_both_reads_with_their_bytes_and_nothing_else():
+    # The audit counts the bridge's framed reply (278 for a 149-byte member), never less than the member.
+    assert checks.check_zos_audit(_audit_log(), ZOS_TAG, ZOS_TARGET, ZOS_DENIED, 149).ok
+    assert checks.check_zos_audit(_audit_log(), ZOS_TAG, ZOS_TARGET, ZOS_DENIED, 278).ok
+    assert not checks.check_zos_audit(_audit_log(), ZOS_TAG, ZOS_TARGET, ZOS_DENIED, 279).ok
+    other_run = _audit_line(audit_tag="cd" * 32, bytes=7)
+    assert checks.check_zos_audit(_audit_log(other_run), ZOS_TAG, ZOS_TARGET, ZOS_DENIED, 149).ok
+    for log in (_audit_log(_audit_line()),  # a third read in this run (the ordinary request read z/OS)
+                "\n".join([_audit_line(bytes=12), _audit_line(tools=[], targets=[ZOS_DENIED], bytes=0,
+                                                              degraded="denied")]),
+                "\n".join([_audit_line(), _audit_line(tools=["dataset_read"], targets=[ZOS_DENIED], bytes=40,
+                                                       degraded=None)]),
+                _audit_line(), ""):
+        assert not checks.check_zos_audit(log, ZOS_TAG, ZOS_TARGET, ZOS_DENIED, 149).ok
+
+
+def test_the_bridge_answers_the_agents_bearer_only():
+    good = {"healthz": 200, "no-bearer": 401, "wrong-bearer": 401, "agent-bearer": 200}
+    assert checks.check_zos_bridge_auth(good).ok
+    for bad in ({"no-bearer": 200}, {"wrong-bearer": 200}, {"agent-bearer": 401}, {"no-bearer": 0},
+                {"healthz": 0}):
+        assert not checks.check_zos_bridge_auth({**good, **bad}).ok, bad
+    assert not checks.check_zos_bridge_auth({}).ok
+
+
+def _bridge(**over):
+    spec = {"metadata": {"name": "rag-mcp-ftp", "labels": {"app": "rag-mcp-ftp"}},
+            "spec": {"template": {"metadata": {"labels": {"app": "rag-mcp-ftp"}}, "spec": {
+                "containers": [{"name": "bridge", "image": "r/agent:1",
+                                "command": ["python3", "-m", "mainframe_rag.mcp", "--transport", "http"],
+                                "env": [{"name": "MCP_FTP_HOST", "value": "zos.lane.invalid"}],
+                                "volumeMounts": [{"name": "tmp", "mountPath": "/tmp"}]}],
+                "volumes": [{"name": "tmp", "emptyDir": {}}]}}}}
+    for path, value in over.items():
+        node = spec
+        keys = path.split(".")
+        for key in keys[:-1]:
+            node = node[int(key)] if key.isdigit() else node[key]
+        node[keys[-1]] = value
+    return spec
+
+
+def _mocked():
+    live = _bridge()
+    pod = live["spec"]["template"]["spec"]
+    pod["containers"][0]["args"] = ["--mock", checks.ZOS_MOCK_DIR]
+    pod["containers"][0]["volumeMounts"].append({"name": "zos-mock", "mountPath": checks.ZOS_MOCK_DIR,
+                                                 "readOnly": True})
+    pod["volumes"].append({"name": "zos-mock", "configMap": {"name": "zos-mock-fixtures"}})
+    return live
+
+
+def test_the_running_bridge_is_the_charts_with_only_the_lanes_mock_args_and_fixtures():
+    assert checks.check_zos_bridge_mock(_mocked(), _bridge(), True).ok
+    assert not checks.check_zos_bridge_mock(_mocked(), _bridge(), False).ok
+    assert not checks.check_zos_bridge_mock(_bridge(), _bridge(), True).ok  # live mode: no fixture tree
+    for path, value in (("spec.template.spec.containers.0.command", ["python3", "-m", "other"]),
+                        ("spec.template.spec.containers.0.env", [])):
+        live = _mocked()
+        node = live["spec"]["template"]["spec"]["containers"][0]
+        node[path.rsplit(".", 1)[1]] = value
+        assert not checks.check_zos_bridge_mock(live, _bridge(), True).ok, path
+    relabeled = _mocked()
+    relabeled["spec"]["template"]["metadata"]["labels"] = {"app": "rag-mcp-ftp-lane"}  # not the chart's policy
+    assert not checks.check_zos_bridge_mock(relabeled, _bridge(), True).ok
+    extra = _mocked()
+    extra["spec"]["template"]["spec"]["volumes"].append({"name": "more", "emptyDir": {}})
+    assert not checks.check_zos_bridge_mock(extra, _bridge(), True).ok
+
+
+def test_the_agent_carries_the_charts_zowe_entries_and_reached_the_bridge_at_start():
+    rendered = [{"name": "QDRANT_URL", "value": "http://q:6333"}, {"name": "ZOWE_MCP_ENABLED", "value": "true"},
+                {"name": "ZOWE_MCP_BASE_URL", "value": "http://rag-mcp-ftp:8081"},
+                {"name": "ZOWE_MCP_AUTH_TOKEN", "valueFrom": {"secretKeyRef": {"name": "rag-mcp-ftp",
+                                                                              "key": "bridge-token"}}},
+                {"name": "ZOWE_MCP_DRY_RUN", "value": "false"}]
+    live = [{"name": "QDRANT_URL", "value": "http://other:6333"}, *rendered[1:]]
+    assert checks.check_zos_agent_env(live, rendered, 0).ok
+    assert not checks.check_zos_agent_env(live, rendered, 1).ok  # zowe_mcp_unreachable at start-up
+    assert not checks.check_zos_agent_env(live[:-1], rendered, 0).ok
+    dry = [*live[:-1], {"name": "ZOWE_MCP_DRY_RUN", "value": "true"}]
+    assert not checks.check_zos_agent_env(dry, rendered, 0).ok
+    assert not checks.check_zos_agent_env([], [], 0).ok
+
+
+def test_every_zos_network_probe_must_meet_its_expectation():
+    assert checks.check_zos_network({"client->bridge-service:blocked": 0, "agent->bridge:reachable": 0}).ok
+    assert not checks.check_zos_network({"client->bridge-service:blocked": 1}).ok
+    assert not checks.check_zos_network({}).ok
+
+
+def _kind_zos(text=None):
+    text = text or (DIR / "kind-zos.yaml").read_text()
+    for name, value in {"@APP_NS@": "rag-kind-x", "@NODE_IP@": "172.18.0.2", "@AGENT_IMAGE@": "r/agent:1",
+                        "@CLIENT_UID@": "1000712347"}.items():
+        text = text.replace(name, value)
+    return [d for d in yaml.safe_load_all(text) if d]
+
+
+def test_the_kind_zos_stand_ins_render_every_placeholder_and_are_restricted():
+    text = (DIR / "kind-zos.yaml").read_text()
+    script = (DIR / "acceptance.sh").read_text()
+    body = script[script.index("zos_read() {"):]
+    body = body[:body.index("\n}\n")]
+    used = {p for line in text.splitlines() if not line.lstrip().startswith("#") for p in re.findall(r"@[A-Z_]+@", line)}
+    assert sorted(used) == sorted(set(re.findall(r's#(@[A-Z_]+@)#', body)))
+    docs = _kind_zos()
+    kinds = sorted(f"{d['kind']}/{d['metadata']['name']}" for d in docs)
+    assert kinds == ["ConfigMap/zos-mock-fixtures", "NetworkPolicy/kind-kubelet-probes-mcp-ftp", "Pod/zos-read-client"]
+    pod = next(d for d in docs if d["kind"] == "Pod")
+    verdict = checks.check_pod_security(pod)
+    assert verdict.ok, verdict.detail
+    # The Docs-path caller is outside the agent and the bridge: the agent admits it, the bridge must not.
+    assert pod["metadata"]["labels"]["app"] not in ("rag-agent", "rag-mcp-ftp")
+    probe = next(d for d in docs if d["kind"] == "NetworkPolicy")
+    assert probe["spec"]["podSelector"] == {"matchLabels": {"app": "rag-mcp-ftp"}}
+    assert probe["spec"]["policyTypes"] == ["Ingress"]
+    assert probe["spec"]["ingress"] == [{"from": [{"ipBlock": {"cidr": "172.18.0.2/32"}}],
+                                         "ports": [{"protocol": "TCP", "port": 8081}]}]
+
+
+def test_the_lane_fixture_through_the_real_bridge_and_agent_reads_whole_and_denies_the_other_member(tmp_path):
+    """The lane's expected values come from the real code path: the bridge (mock backend, the render's
+    allowlist) frames the allowlisted member, the agent's observation keeps exactly its bytes, and the other
+    member, present in the same tree, is refused before any read."""
+    from mainframe_rag.agent import live_state
+    from mainframe_rag.mcp import bridge, server
+    from mainframe_rag.mcp.mock import mock_session_factory
+
+    fixtures = next(d for d in _kind_zos() if d["kind"] == "ConfigMap")["data"]
+    script = (DIR / "acceptance.sh").read_text()
+    items = json.loads(re.search(r"^ZOS_FIXTURES='(.*)'$", script, re.MULTILINE).group(1))
+    assert sorted(items) == sorted(fixtures)
+    for key, path in items.items():
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text(fixtures[key], encoding="utf-8")
+    allow = json.loads(re.search(r"^ZOS_ALLOWLIST='(.*)'$", script, re.MULTILINE).group(1))
+    assert allow == [ZOS_TARGET]
+    config = bridge.FTPConfig(host="zos.lane.invalid", user="u", password="p", transport_mode="plain",
+                              plain_ftp_accepted=True, dataset_allowlist=bridge.parse_dataset_allowlist(allow),
+                              enabled_tools=bridge.parse_enabled_tools("dataset_read"))
+    connect = mock_session_factory(tmp_path)
+    read = server._run_tool("dataset_read", {"dataset": ZOS_TARGET}, config, connect)
+    assert read["isError"] is False
+    result = live_state.LiveResult(route="live", texts=(read["content"][0]["text"],), tools_used=("dataset_read",),
+                                   targets=(ZOS_TARGET,), acquired_at="t")
+    observation = live_state._observation(ZOS_TARGET, result)
+    assert observation.outcome == "complete"
+    assert observation.byte_count == len(fixtures[checks.zos_fixture_key(items, ZOS_TARGET)].encode())
+    denied = server._run_tool("dataset_read", {"dataset": ZOS_DENIED}, config, connect)
+    assert denied["isError"] is True and denied["content"][0]["text"].startswith("denied:")
+    assert (tmp_path / items[checks.zos_fixture_key(items, ZOS_DENIED)]).is_file()  # the deny is the allowlist
+    # Both questions name their target the way the agent's Docs grammar takes it.
+    acceptance_py = (DIR / "acceptance.py").read_text()
+    for target in (ZOS_TARGET, ZOS_DENIED):
+        assert live_state._docs_target(f"Explain the IEA500I operator message and compare it with {target}.") == (
+            target, None)
+    assert f'ZOS_TARGET = "{ZOS_TARGET}"' in acceptance_py and f'ZOS_DENIED = "{ZOS_DENIED}"' in acceptance_py
+
+
+def test_zos_read_reaches_its_phase_with_the_charts_objects_and_the_lane_patches(tmp_path):
+    """Drive the real zos_read with real render_zos, zos_values and check_zos_render (helm) and the cluster
+    calls stubbed, up to the acceptance phase: the applied bridge objects are the chart's render without mock
+    mode or any secret value, mock mode comes only from the lane's patch, and the agent patch carries the
+    render's ZOWE_MCP_* entries and nothing else."""
+    stub = tmp_path / "kubectl"
+    stub.write_text("#!/bin/sh\nexit 0\n")
+    stub.chmod(0o755)
+    image = "kind-registry:5000/qdrant-pdf-rag-agent:0123456789abcdef0123456789abcdef01234567"
+    script = f"""set -eu
+HERE={DIR}; REPO={ROOT}; STATE={tmp_path}/state; APP_NS=rag-kind-x; POD_CIDR=10.244.0.0/16
+OWUI_HOST=owui.localhost DEX_HOST=dex.localhost OWUI_PORT=8443 DEX_PORT=5556
+OWUI_URL=https://owui.localhost:8443 DEX_ISSUER=https://dex.localhost:5556/dex
+OWUI_IMAGE=example.invalid/owui:v1 NGINX_IMAGE=example.invalid/nginx:v1 HELM=helm PY={sys.executable} KUBECTL={stub}
+say() {{ echo "==> $*"; }}; die() {{ echo "ERROR: $*" >&2; exit 1; }}
+. "$HERE/lib.sh"
+eval "$(sed -n '/^ZOS_[A-Z_]*=/p; /^zos_[a-z_]*() {{/,/^}}$/p; /^render_zos() {{/,/^}}$/p; /^check_zos_render() {{/,/^}}$/p' "$HERE/acceptance.sh")"
+prepare_state() {{ mkdir -p "$STATE/logs" "$STATE/render"; }}
+k() {{
+    case "$*" in
+        *'containers[0].image'*) echo {image} ;;
+        *' patch '*) echo "PATCH $*" >> "$STATE/patches.log"
+                     for a in "$@"; do case "$a" in deploy/*) d=${{a#deploy/}} ;; esac; last=$a; done
+                     cp "$last" "$STATE/patched-$d.json" ;;
+        *'apply -f -'*) cat >> "$STATE/applied-secrets.yaml" ;;
+    esac
+    return 0
+}}
+kind_net() {{ echo "172.18.0.1 172.18.0.2"; }}
+phase() {{ echo "PHASE $1"; }}
+prepare_state; zos_read
+"""
+    proc = subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False, cwd=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert "zos render: 4 objects" in proc.stdout
+    assert proc.stdout.rstrip().endswith("PHASE zos-read")
+    state = tmp_path / "state"
+    bridge_objs = [d for d in yaml.safe_load_all((state / "render-zos" / "bridge.yaml").read_text()) if d]
+    assert sorted(f"{d['kind']}/{d['metadata']['name']}" for d in bridge_objs) == [
+        "Deployment/rag-mcp-ftp", "NetworkPolicy/rag-mcp-ftp", "Service/rag-mcp-ftp"]
+    text = (state / "render-zos" / "bridge.yaml").read_text()
+    assert "--mock" not in text and "MCP_MOCK_DIR" not in text
+    for name in ("bridge-token", "ftp-password", "audit-key"):
+        value = (state / "zos" / name).read_text()
+        assert len(value) >= 32 and value not in text and value not in proc.stdout + proc.stderr
+    mock = json.loads((state / "patched-rag-mcp-ftp.json").read_text())
+    (container,) = mock["spec"]["template"]["spec"]["containers"]
+    assert container["name"] == "bridge" and container["args"] == ["--mock", checks.ZOS_MOCK_DIR]
+    agent = json.loads((state / "patched-rag-agent.json").read_text())
+    (container,) = agent["spec"]["template"]["spec"]["containers"]
+    assert container["name"] == "agent"
+    assert sorted(e["name"] for e in container["env"]) == sorted(checks.ZOS_AGENT_ENV)
+    rendered = json.loads((state / "render-zos" / "agent-env.json").read_text())
+    assert container["env"] == rendered
+    assert "--patch-file" in (state / "patches.log").read_text()
+    rendered_kind = (state / "render" / "zos.yaml").read_text()
+    assert "@" not in "".join(line for line in rendered_kind.splitlines() if not line.lstrip().startswith("#"))
