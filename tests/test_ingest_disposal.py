@@ -944,7 +944,8 @@ def test_the_module_run_with_dash_m_reports_each_refusal_with_its_own_code_and_e
         full[1:1] = ["--progress", str(path)]
     result = _module(tmp_path, *full)
     assert result.returncode == gen.EXIT_REFUSED, result.stderr
-    assert result.stderr.strip().startswith(f"FAIL: {code}:"), result.stderr
+    # The refusal is the last line; a runner may print library warnings before it.
+    assert result.stderr.strip().splitlines()[-1].startswith(f"FAIL: {code}:"), result.stderr
     assert "E_QDRANT_UNREADABLE" not in result.stderr
 
 
