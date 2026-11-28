@@ -39,6 +39,7 @@ from mainframe_rag.config import Settings
 from mainframe_rag.ingest.build import BuildBinding, build_aliases, decode_build_binding
 from mainframe_rag.ingest.chunk import make_chunk_id
 from mainframe_rag.ingest.publish import publication_metadata_point_id
+from mainframe_rag.ingest.retirement import decode_tombstone, tombstone_point_id
 from tests.fakes import settings_kw
 from tests.helpers_agent_local import set_agent_env
 
@@ -412,6 +413,250 @@ async def test_removed_build_is_unavailable_never_the_successor():
     # The next ordinary operation still works against the successor.
     successor = (await _service(qd).mint_references(_generation(qd, "wt405_gen_b"), [CHUNK]))[CHUNK]
     assert (await _service(qd).read_evidence(CALLER, successor)).text == "successor"
+
+
+# ------------------------------------------------- retirement tombstones (#1373)
+
+PHYSICAL_A = "wt405_gen_a"
+CONTROL_A = PHYSICAL_A + "__completions"
+
+
+def _tombstone(state: str, build_id: str = BUILD_A, physical: str = PHYSICAL_A) -> dict:
+    """A stored retirement tombstone, written out by hand (not taken from the
+    disposal writer) and checked against the stored schema's decoder."""
+    retired = state == "retired"
+    record = {
+        "record_type": "retirement-tombstone", "tombstone_schema": 1,
+        "target_collection": physical + "__completions", "build_id": build_id,
+        "logical_alias": LOGICAL, "data_collection": physical,
+        "gen_fp": "0123456789abcdef", "corpus_fp": "c" * 12, "state": state,
+        "content_seal": None, "source_catalog": None, "data_points": 1, "snapshots": [],
+        "keep": {"n": 1, "kept_build_ids": [BUILD_B], "below_keep_override": False},
+        "readers_stopped_at": "2026-11-28T10:00:00Z", "recovery_ref": "CHG-1", "operator": "op",
+        "plan_digest": "0" * 64, "tool_release": None, "created_at": "2026-11-28T10:01:00Z",
+        "retired_at": "2026-11-28T10:02:00Z" if retired else None,
+        "completion": {"resumed": False, "readers_stopped_at": "2026-11-28T10:00:00Z", "operator": "op",
+                       "recovery_ref": "CHG-1", "kept_unverified": []} if retired else None,
+    }
+    assert decode_tombstone(record, physical + "__completions") is record
+    return record
+
+
+# The stored states a data disposal passes through (docs/ingest.md, data
+# disposal S1-S5), as the reader can meet them after a stop at any point.
+def _after_s1(qd):  # tombstone written; both immutable aliases still resolve
+    qd.collections[CONTROL_A][tombstone_point_id(CONTROL_A)] = _tombstone("retiring")
+
+
+def _after_s2(qd):  # data build alias deleted
+    _after_s1(qd)
+    del qd.aliases[build_aliases(LOGICAL, BUILD_A)[0]]
+
+
+def _after_s4(qd):  # data collection deleted
+    _after_s2(qd)
+    del qd.collections[PHYSICAL_A]
+
+
+def _after_s5(qd):  # tombstone says retired
+    _after_s4(qd)
+    qd.collections[CONTROL_A][tombstone_point_id(CONTROL_A)] = _tombstone("retired")
+
+
+def _data_reads(qd) -> list[str]:
+    """Names of the collections `retrieve` is asked for from now on."""
+    seen: list[str] = []
+
+    async def record(name, ids):
+        seen.append(name)
+
+    qd.before_retrieve = record
+    return seen
+
+
+async def _two_builds():
+    """Build A retained with a minted reference, build B serving."""
+    qd = _world(serving=True)
+    ref_a = (await _service(qd).mint_references(_generation(qd, PHYSICAL_A), [CHUNK]))[CHUNK]
+    qd.publish(BUILD_B, "wt405_gen_b", {CHUNK: _payload(text="successor", units=[])}, serving=True)
+    ref_b = (await _service(qd).mint_references(_generation(qd, "wt405_gen_b"), [CHUNK]))[CHUNK]
+    return qd, ref_a, ref_b
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("step", "reason"), [
+    (_after_s1, "retiring_build"), (_after_s2, "retiring_build"),
+    (_after_s4, "retiring_build"), (_after_s5, "retired_build"),
+])
+async def test_a_tombstoned_build_is_unavailable_at_every_step_of_its_disposal(step, reason):
+    """#1373 (maintainer decision 2026-11-26): an exact read naming a build
+    that is being or has been disposed of is the 404 unavailable outcome,
+    never the 503 a missing control would give, and its data is never read.
+    That includes `retiring` with both immutable aliases still present."""
+    qd, ref_a, ref_b = await _two_builds()
+    assert (await _service(qd).read_evidence(CALLER, ref_a)).text == TEXT  # retained: readable
+    step(qd)
+    reads = _data_reads(qd)
+    refusal = await _refusal(_service(qd).read_evidence(CALLER, ref_a))
+    assert (refusal.kind, refusal.reason) == ("unavailable", reason)
+    assert PUBLIC_FAILURES[refusal.kind] == (
+        404, "evidence_unavailable", "the requested evidence is not available")
+    assert PHYSICAL_A not in reads
+    assert set(qd.calls) <= {"get_aliases", "collection_exists", "retrieve"}
+    # The other builds are not affected, before and after.
+    assert (await _service(qd).read_evidence(CALLER, ref_b)).text == "successor"
+
+
+@pytest.mark.anyio
+async def test_an_old_build_id_never_resolves_to_data_recreated_under_its_name():
+    """After a disposal the data collection's name is free on the server. A
+    collection recreated under it, even with the data build alias put back
+    and a stored point whose envelope matches the old reference, is not the
+    retired build: the tombstone in the kept control decides. A real
+    republication gets a suffixed name and a new build id (#1393 review)."""
+    qd, ref_a, _ = await _two_builds()
+    _after_s5(qd)
+    qd.collections[PHYSICAL_A] = {CHUNK: _payload()}  # same bytes as the old build stored
+    qd.aliases[build_aliases(LOGICAL, BUILD_A)[0]] = PHYSICAL_A
+    reads = _data_reads(qd)
+    refusal = await _refusal(_service(qd).read_evidence(CALLER, ref_a))
+    assert (refusal.kind, refusal.reason) == ("unavailable", "retired_build")
+    assert PHYSICAL_A not in reads
+    # The republication of the same corpus: <name>_1, its own build id and aliases.
+    build_c = "00000000-0000-4000-8000-00000000000c"
+    qd.before_retrieve = None
+    qd.publish(build_c, PHYSICAL_A + "_1", {CHUNK: _payload()}, serving=True)
+    ref_c = (await _service(qd).mint_references(_generation(qd, PHYSICAL_A + "_1"), [CHUNK]))[CHUNK]
+    assert ref_c != ref_a and (await _service(qd).read_evidence(CALLER, ref_c)).build_id == build_c
+    assert (await _refusal(_service(qd).read_evidence(CALLER, ref_a))).reason == "retired_build"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("damage", [
+    lambda record: record.update(build_id=BUILD_B),  # a valid record of another build
+    lambda record: record.update(logical_alias="another_corpus"),  # of another logical corpus
+    lambda record: record.update(state="published"),
+    lambda record: record.pop("plan_digest"),
+    lambda record: record.clear(),
+])
+async def test_a_point_at_the_tombstone_id_that_is_not_this_builds_tombstone_still_refuses(damage):
+    """Fail closed: whatever sits at the tombstone id of the build's control
+    marks a build that must not be served. It is storage damage (503), with
+    the same public envelope, and the data is never read."""
+    qd, ref_a, _ = await _two_builds()
+    record = _tombstone("retiring")
+    damage(record)
+    qd.collections[CONTROL_A][tombstone_point_id(CONTROL_A)] = record
+    reads = _data_reads(qd)
+    refusal = await _refusal(_service(qd).read_evidence(CALLER, ref_a))
+    assert (refusal.kind, refusal.reason) == ("corrupt", "tombstone_invalid")
+    assert PHYSICAL_A not in reads
+
+
+@pytest.mark.anyio
+async def test_a_control_collection_reported_missing_once_never_serves_a_retiring_build():
+    """Review of #1398 (N1): the alias listing has just resolved the control
+    alias to this collection, so an answer that it does not exist is missing
+    controls (the 503 the contract uses for them), never "no tombstone". One
+    false answer, then the true one, must not serve a retiring build."""
+    qd, ref_a, ref_b = await _two_builds()
+    _after_s1(qd)
+    real, lied = qd.collection_exists, []
+
+    async def once_false(name):
+        if name == CONTROL_A and not lied:
+            lied.append(name)
+            return False
+        return await real(name)
+
+    qd.collection_exists = once_false
+    reads = _data_reads(qd)
+    refusal = await _refusal(_service(qd).read_evidence(CALLER, ref_a))
+    assert (refusal.kind, refusal.reason) == ("corrupt", "control_missing") and lied == [CONTROL_A]
+    assert PUBLIC_FAILURES[refusal.kind] == (503, "evidence_unavailable", "the requested evidence is not available")
+    assert PHYSICAL_A not in reads
+    assert (await _service(qd).read_evidence(CALLER, ref_b)).text == "successor"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("fault", "kind"), [
+    ("exists-raises", "upstream"), ("exists-hangs", "timeout"),
+    ("retrieve-raises", "upstream"), ("retrieve-hangs", "timeout"),
+])
+async def test_a_failing_tombstone_lookup_refuses_and_never_serves(fault, kind):
+    """Review of #1398 (N2): a fault or a hang while the tombstone is looked
+    up is the fixed storage-fault or deadline outcome, never "no tombstone":
+    the retiring build's data, still stored, is never read."""
+    qd, ref_a, _ = await _two_builds()
+    _after_s1(qd)
+    real, failed = qd.collection_exists, []
+
+    async def fail():
+        failed.append(fault)  # once: a later call by another check answers truly
+        if fault.endswith("hangs"):
+            await asyncio.sleep(5)
+        raise ConnectionError("storage-secret-detail")
+
+    async def exists(name):
+        if name == CONTROL_A and fault.startswith("exists") and not failed:
+            await fail()
+        return await real(name)
+
+    async def before_retrieve(name, ids):
+        if (name == CONTROL_A and ids == [tombstone_point_id(CONTROL_A)] and fault.startswith("retrieve")
+                and not failed):
+            await fail()
+
+    qd.collection_exists = exists
+    reads = _data_reads(qd)
+    qd.before_retrieve = lambda name, ids: _both(reads, name, before_retrieve(name, ids))
+    refusal = await _refusal(_service(qd, evidence_timeout_s=0.05).read_evidence(CALLER, ref_a))
+    assert refusal.kind == kind and "secret" not in str(refusal) and failed == [fault]
+    assert PHYSICAL_A not in reads
+
+
+async def _both(seen, name, then):
+    seen.append(name)
+    await then
+
+
+@pytest.mark.anyio
+async def test_a_missing_data_alias_without_a_tombstone_is_still_storage_damage():
+    """Only a tombstone turns the missing data alias into the 404 outcome."""
+    qd, ref_a, _ = await _two_builds()
+    del qd.aliases[build_aliases(LOGICAL, BUILD_A)[0]]
+    refusal = await _refusal(_service(qd).read_evidence(CALLER, ref_a))
+    assert (refusal.kind, refusal.reason) == ("corrupt", "build_aliases")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("step", [_after_s1, _after_s5])
+async def test_a_sources_cursor_of_a_tombstoned_build_is_unavailable(step):
+    qd = _listing_world(serving=True)
+    first = await _service(qd).list_sources(CALLER, limit=1, served_build=BUILD_A)
+    assert first.next_cursor is not None
+    step(qd)
+    refusal = await _refusal(_service(qd).list_sources(CALLER, limit=1, cursor=first.next_cursor))
+    assert refusal.kind == "unavailable"
+    assert SOURCES_PUBLIC_FAILURES[refusal.kind][:2] == (404, "sources_unavailable")
+
+
+@pytest.mark.anyio
+async def test_data_disposal_is_executable_only_with_a_reader_that_refuses_a_retiring_build():
+    """The tie between `build.READERS_REFUSE_TOMBSTONED_BUILDS` and this
+    reader: while the constant lets `dispose --execute` run, a build left
+    `retiring` with both immutable aliases (the window that was fail-open)
+    must be refused here. Removing the reader check turns this red."""
+    from mainframe_rag.ingest import build
+
+    assert build.READERS_REFUSE_TOMBSTONED_BUILDS is True
+    qd, ref_a, _ = await _two_builds()
+    _after_s1(qd)
+    data_alias, control_alias = build_aliases(LOGICAL, BUILD_A)
+    assert qd.aliases[data_alias] == PHYSICAL_A and qd.aliases[control_alias] == CONTROL_A
+    assert qd.collections[PHYSICAL_A][CHUNK]["text"] == TEXT  # the old text is still stored
+    refusal = await _refusal(_service(qd).read_evidence(CALLER, ref_a))
+    assert refusal.kind == "unavailable"
 
 
 @pytest.mark.anyio
@@ -958,6 +1203,20 @@ def test_http_failure_envelopes_are_fixed_and_leak_nothing(http):
     http.qd.collections["wt405_gen_a"][CHUNK] = _payload(text="changed")
     body = _error(_get(http, ref), 503, "evidence_unavailable")
     assert "digest" not in body["message"] and "changed" not in json.dumps(body)
+
+
+@pytest.mark.parametrize("step", [_after_s1, _after_s5])
+def test_http_exact_read_of_a_tombstoned_build_is_the_fixed_404_envelope(http, step):
+    """#1373: the wire outcome, byte for byte, and no upstream or stored text."""
+    ref = _search(http)["hits"][0]["reference"]
+    assert _get(http, ref).status_code == 200
+    cursor = _sources(http, limit=1).json()["next_cursor"]
+    step(http.qd)
+    r = _get(http, ref)
+    assert r.status_code == 404
+    assert r.content == b'{"code":"evidence_unavailable","message":"the requested evidence is not available"}'
+    _sources_error(_sources(http, cursor=cursor), 404, "sources_unavailable")
+    assert http.llm.calls == 0
 
 
 def test_http_access_outcomes_map_per_contract(http):

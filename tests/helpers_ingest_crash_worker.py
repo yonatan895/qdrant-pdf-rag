@@ -163,9 +163,9 @@ def disposal_crash_main(argv):
     """`python -m tests.helpers_ingest_crash_worker disposal-crash --step S --receipt R -- <args>`:
     the real generations CLI running a data disposal, killed (no cleanup)
     right after the named step returned (#1373). `--step none` runs to the
-    end. The reader-awareness precondition is set here, as the test stand-in
-    for the reader change that owns it."""
-    from mainframe_rag.ingest import build, disposal, generations
+    end. Nothing else is patched: the release's own reader-awareness
+    constant decides whether the disposal may execute."""
+    from mainframe_rag.ingest import disposal, generations
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--step", required=True)
@@ -173,7 +173,6 @@ def disposal_crash_main(argv):
     options, args = parser.parse_known_args(argv)
     if args[:1] == ["--"]:
         args = args[1:]
-    build.READERS_REFUSE_TOMBSTONED_BUILDS = True
     if options.step != "none":
         original = getattr(disposal, options.step)
 

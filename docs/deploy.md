@@ -1104,7 +1104,14 @@ cannot schedule on one node — proven).
   [data disposal](ingest.md#data-disposal)) has no site path: the script
   refuses it by name, and the chart template and `map_values.py` accept
   only `list` or `dispose-snapshots` as the first argument (the word
-  after another subcommand is an argument error in the module).
+  after another subcommand is an argument error in the module). Data
+  disposal therefore runs only as the module CLI on a host that mounts the
+  ingest work volume; its site launcher (agent image check, scale to 0,
+  Job, restore) is #1373 PR 4. Required order when it is used: the agent
+  release that refuses tombstoned builds is deployed on every replica
+  first, then the agent is scaled to 0, then the disposal runs. An older
+  agent keeps serving a build that is being retired and reports a retired
+  one as 503.
 - First-party pods (agent, the oauth-proxy sidecar, the ingest Job, OpenObserve, otelcol)
   declare their own hardening so it does not depend on `restricted-v2`
   alone (issue #585): pod `runAsNonRoot: true` and

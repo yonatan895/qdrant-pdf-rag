@@ -18,7 +18,8 @@ physical serving binding, (#405 E1/MCP1) the
 HTTP route and read-only knowledge MCP adapter, and (#828) the
 [source listing](#sources-profile) over the publish-time catalog (#827). It
 does **not** implement the
-full `e1.` profile (byte-to-page location map), retirement tombstones,
+full `e1.` profile (byte-to-page location map), a distinct retired outcome
+or per-chunk tombstone index (a tombstoned build reads as unavailable),
 a per-source caller-entitlement service, admitted-reader leases or automatic
 safe GC. The remaining mechanisms are implementation obligations for
 #405/#391/#373/#360, not claims of shipped safety.
@@ -186,8 +187,10 @@ remains `retained`. Retirement of a named superseded build is
 [data disposal](ingest.md#data-disposal): tombstone first, then the data build
 alias, the snapshots on every peer and the data collection, keeping the control
 collection, the control alias and the tombstone; the newest kept builds must
-verify against their seals first. It cannot be executed until the reader
-refuses a tombstoned build. Capacity preflight
+verify against their seals first. The exact-read service refuses a tombstoned
+build from the moment the tombstone is stored (below); every deployed agent
+must be such a release before a disposal is executed
+([deploy order](ingest.md#data-disposal)). Capacity preflight
 must refuse a new build before destructive work when retention cannot be met.
 A retention duration, tombstone horizon, recovery objective or physical-worker
 claim requires its platform/domain owner; there is no invented default here.
@@ -295,25 +298,31 @@ UUID5 chunk key or `chunk_type` changes. Decoders reject every other prefix.
 | Atomic spans | Stored `units` are character offsets; the envelope carries the `atomic` ones as UTF-8 **byte** ranges `[start,end)`. The key is `null` when `units` is absent: the writer omits it both for known prose and for capped span lists, so "not recorded" is never presented as "no atomic items". Malformed spans refuse. |
 | Location | The stored chunk page span only (`physical_page_end` is null for points lacking it; `printed_label` is the stored display string, possibly a range, null if empty). There is **no** byte-to-page map and the response does not imply one. |
 | Issuance | Search mints a reference only for hits served from a generation the serving gate validated: its control record decodes to a build binding for the configured logical corpus and its phase is published/retained. Minting reuses that TTL-cached binding and reads only the served hits' payloads; an exact read re-resolves the build through its immutable aliases, so a build retired after validation is refused, never read from a successor. Unbound (pre-build) generations are refused before search; sealed-unpublished builds and payloads that cannot form a complete envelope get `reference: null`; nothing is invented and search never fails because minting failed. |
-| Read | Parse; resolve the build only through its immutable per-build data/control aliases (never the ordinary serving alias, never a name from the request); require the paired control alias, the control record's build UUID/physical/logical corpus to match; retrieve the one point; derive scope; **authorize**; apply optional narrowing `product`/`version`; rebuild the envelope and compare digests; enforce the budget; re-ask the authority's policy version before returning. No content or authorization cache exists. Only `get_aliases`, `collection_exists` and `retrieve` are called, so the read-only serving credential suffices; no model, embed, rerank or approximate search runs. |
+| Read | Parse; resolve the build only through its immutable per-build data/control aliases (never the ordinary serving alias, never a name from the request); when the control alias resolves, read the retirement tombstone id of that control collection first and refuse a tombstoned build before its data is named or read (`retiring` with both aliases present, `retired`, and a collection recreated under the old name alike); require the paired control alias, the control record's build UUID/physical/logical corpus to match; retrieve the one point; derive scope; **authorize**; apply optional narrowing `product`/`version`; rebuild the envelope and compare digests; enforce the budget; re-ask the authority's policy version before returning. No content or authorization cache exists. Only `get_aliases`, `collection_exists` and `retrieve` are called, so the read-only serving credential suffices; no model, embed, rerank or approximate search runs. |
 | Bounds | `max_bytes` (query, 1..1 MiB) is clamped by `EVIDENCE_MAX_BYTES` (default 65536); a whole chunk over the budget is `413`, never a prefix or single span. `EVIDENCE_TIMEOUT_S` (default 10) bounds the read; HTTP exact reads also share the agent's configured admission pool and request deadline with search/answer/chat/UI. Every storage wait is a real async await, so cancellation propagates to the in-flight call; no transport adds another queue. |
 | Access | `EvidenceAccess` is the port (`authorize`, `current_version`). The deployed object is `SharedCorpusAccess`, the explicit shared-corpus mode that matches today's search exposure; #373 replaces it. The trusted caller is built by the transport, never from request fields. A denied caller always gets the unavailable outcome, decided before digest/size/corruption outcomes can be observed. |
 
 Public outcomes (the mapping table above, as implemented). Implemented:
 400 `invalid_evidence_reference`, 401 `authentication_required` and 503
 `access_unavailable` (reachable only through a non-default access object), 404
-`evidence_unavailable` (denied, unknown build, product/version mismatch), 503
+`evidence_unavailable` (denied, unknown build, a build tombstoned by data
+disposal, product/version mismatch), 503
 `evidence_unavailable` (missing/redirected controls, missing or changed stored
-point, malformed stored fields), 413 `evidence_budget_exceeded`. Added:
+point, malformed stored fields, an invalid or foreign record at the tombstone
+id), 413 `evidence_budget_exceeded`. Added:
 504 `evidence_timeout` and 502 `upstream_error` / `evidence read failed` for a
 storage fault (fixed text; the exception type is logged only).
 **Not implemented:** 410 `evidence_retired` (decided against for the POC: a
-disposed build will read as 404 unavailable, maintainer decision 2026-11-26).
-A tombstone writer exists ([data disposal](ingest.md#data-disposal)) but cannot
-be executed in this release, because the reader does not consult tombstones
-yet: until that reader change, a build whose data alias is gone reads as 503
-(missing controls), and a build with a `retiring` tombstone and both aliases
-would still be served. No read is ever answered with successor text.
+disposed build reads as 404 unavailable, maintainer decision 2026-11-26).
+The reader consults the tombstone ([data disposal](ingest.md#data-disposal)
+writes it): a build with a `retiring` or `retired` tombstone is 404 whatever
+its aliases say, so an old build id never resolves to data recreated under
+its collection name (a republication of the same corpus gets a suffixed name
+and a new build id). Without a tombstone, a build whose data alias is gone
+stays 503 (missing controls). An agent release older than this reader does
+not consult tombstones: it serves a `retiring` build whose aliases are both
+present and answers 503 for a `retired` one, which is why the reader release
+is deployed first. No read is ever answered with successor text.
 
 Example (synthetic; the literals are asserted independently in
 `tests/test_evidence_service.py`). A build `00000000-0000-4000-8000-00000000000a`

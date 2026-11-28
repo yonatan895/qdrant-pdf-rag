@@ -14,15 +14,28 @@ from mainframe_rag.ingest.seal import decode_content_seal
 BUILD_SCHEMA = 3
 _SUPPORTED_SCHEMAS = (1, 2, BUILD_SCHEMA)
 
+# Phases a build's retirement tombstone records (issue #1373; the tombstone
+# schema is ingest/retirement.py). A tombstone decides the phase whatever the
+# aliases say: `retiring` is written while both immutable aliases still
+# resolve, `retired` once the data collection is gone. Neither is readable.
+PHASE_RETIRING = "retiring"
+PHASE_RETIRED = "retired"
+RETIREMENT_PHASES = (PHASE_RETIRING, PHASE_RETIRED)
+# The alias-derived phases a reader may serve, absent a tombstone.
+READABLE_PHASES = ("published", "retained")
+
 # Reader awareness of retirement tombstones (issue #1373). Data disposal
-# writes a `retiring` tombstone before it removes the data build alias; until
-# the agent refuses a tombstoned build whose two immutable aliases are both
-# still present, that window is fail-open (an exact read would still serve a
-# build the contract calls retired). False in this release: the data-disposal
-# command refuses `--execute`. Only the change that makes the reader refuse
-# tombstoned builds sets it, in code, together with that reader; it is never
-# read from the environment, a flag or a file.
-READERS_REFUSE_TOMBSTONED_BUILDS = False
+# writes a `retiring` tombstone before it removes the data build alias; a
+# reader that did not refuse a tombstoned build whose two immutable aliases
+# are both still present would leave that window fail-open (an exact read
+# would still serve a build the contract calls retired). True since the agent
+# refuses such a build (agent/evidence.py, `_refuse_tombstoned`); while it is
+# not True the data-disposal command refuses `--execute`. It states what the
+# code of THIS release does, so it is set in code only, together with that
+# reader, and never read from the environment, a flag or a file. It cannot
+# know which release the deployed agent runs: the deploy order in
+# docs/ingest.md (data disposal) owns that.
+READERS_REFUSE_TOMBSTONED_BUILDS = True
 
 
 def canonical_build_id(value: object) -> str:
@@ -103,8 +116,18 @@ def decode_build_binding(payload: dict, control: str) -> BuildBinding:
     )
 
 
-def build_phase(binding: BuildBinding, aliases: Mapping[str, str]) -> str:
-    """Infer sealed/published/retained from the one atomic publication operation."""
+def build_phase(
+    binding: BuildBinding, aliases: Mapping[str, str], *, tombstone_state: str | None = None,
+) -> str:
+    """Infer sealed/published/retained from the one atomic publication operation.
+
+    `tombstone_state` is the state of the build's own valid retirement
+    tombstone, when the caller read one: it decides the phase before any
+    alias is looked at."""
+    if tombstone_state is not None:
+        if tombstone_state not in RETIREMENT_PHASES:
+            raise ValueError("invalid retirement state")
+        return tombstone_state
     data, control = build_aliases(binding.alias, binding.build_id)
     if data not in aliases and control not in aliases:
         if aliases.get(binding.alias) == binding.physical:
@@ -133,5 +156,5 @@ def require_published_binding(
         raise UnboundGenerationError("generation has no build binding: pre-build publications are unsupported")
     if binding.physical != physical or configured not in (binding.alias, physical):
         raise ValueError("build control names another logical or physical corpus")
-    if build_phase(binding, aliases) not in ("published", "retained"):
+    if build_phase(binding, aliases) not in READABLE_PHASES:
         raise ValueError("unpublished build cannot serve")

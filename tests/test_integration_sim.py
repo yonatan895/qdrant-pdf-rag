@@ -2451,8 +2451,14 @@ def test_a_retire_only_publication_ranks_after_its_predecessor(qdrant_url, tmp_p
         _drop_publish_fixture(qdrant_url)
 
 
-def test_data_disposal_lifecycle_on_real_server(qdrant_url, tmp_path, monkeypatch, capsys):
-    """#1373 PR 2 on the pinned server. Three published generations; the
+def test_data_disposal_lifecycle_on_real_server(qdrant_url, mock_url, tmp_path, monkeypatch, capsys):
+    """#1373 on the pinned server, disposal (PR 2) and the reader (PR 3),
+    with nothing patched in the product: the release's own constant lets the
+    module CLI execute. Exact reads go through the real agent app at every
+    stop: a build that is `retiring` (both immutable aliases and its stored
+    text still present) or `retired` is the fixed 404, the kept and live
+    builds read back their stored text, and search and answers on the live
+    alias keep working. Three published generations; the
     oldest is disposed of with the process killed after each of the first
     four steps and rerun. Then stored content is inspected, not metadata:
     the data collection, its alias and snapshots are gone and stay gone if
@@ -2513,6 +2519,27 @@ def test_data_disposal_lifecycle_on_real_server(qdrant_url, tmp_path, monkeypatc
         points = client.retrieve(control, ids=[tombstone_point_id(control)], with_payload=True)
         return points[0].payload if points else None
 
+    unavailable = b'{"code":"evidence_unavailable","message":"the requested evidence is not available"}'
+    question = {"query": "amber reactor northern cooling channel"}
+
+    def minted():
+        """A search on the live alias through a fresh agent: the reference,
+        chunk id and text of its amber-reactor hit, from the wire."""
+        with _agent(monkeypatch, qdrant_url, mock_url, PUBLISH_ALIAS) as http:
+            response = http.post("/v1/search", json=question)
+            assert response.status_code == 200, response.text
+            hit = next(h for h in response.json()["hits"] if "amber" in h["text"])
+        assert hit["reference"]
+        return hit["reference"], hit["chunk_id"], hit["text"]
+
+    def exact(*references):
+        """Exact reads through a fresh agent (a new process would see the same)."""
+        with _agent(monkeypatch, qdrant_url, mock_url, PUBLISH_ALIAS) as http:
+            return [http.get(f"/v1/evidence/{reference}") for reference in references]
+
+    def stored_text(physical, chunk_id):
+        return client.retrieve(physical, [chunk_id], with_payload=True)[0].payload["text"]
+
     def killed_after(step, *argv):
         receipt = tmp_path / f"{step}.txt"
         log = tmp_path / f"{step}.log"
@@ -2528,9 +2555,11 @@ def test_data_disposal_lifecycle_on_real_server(qdrant_url, tmp_path, monkeypatc
 
     try:
         physicals = []
+        refs = []
         for extra in ("gamma", "delta", None):
             _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, corpus, progress)
             physicals.append(target())
+            refs.append(minted())
             if extra:
                 _write_source(corpus, extra, f"The {extra} reactor uses the {extra} cooling channel.")
         p1, p2, p3 = physicals
@@ -2542,6 +2571,21 @@ def test_data_disposal_lifecycle_on_real_server(qdrant_url, tmp_path, monkeypatc
         gens = listed()
         g1, g2 = gens[p1]["build_id"], gens[p2]["build_id"]
         data_alias, control_alias = build_aliases(PUBLISH_ALIAS, g1)
+        # One reference per build, each naming its own build id; all three read back
+        # the text stored in their own generation while G1 and G2 are retained.
+        (ref1, chunk1, text1), (ref2, chunk2, text2), (ref3, chunk3, text3) = refs
+        assert len({ref1, ref2, ref3}) == 3 and "amber reactor" in text1
+        for physical, chunk, text in zip(physicals, (chunk1, chunk2, chunk3), (text1, text2, text3), strict=True):
+            assert stored_text(physical, chunk) == text
+        assert [(r.status_code, r.json().get("build_id"), r.json().get("text")) for r in exact(ref1, ref2, ref3)] == [
+            (200, g1, text1), (200, g2, text2), (200, gens[p3]["build_id"], text3)]
+
+        def others_still_read():
+            return [(r.status_code, r.json().get("text")) for r in exact(ref2, ref3)] == [(200, text2), (200, text3)]
+
+        def g1_refused():
+            (response,) = exact(ref1)
+            return response.status_code == 404 and response.content == unavailable
         # The kept generation's unchanged documents were carried from the build being disposed of.
         carried = [p for p, _ in _records(client, c2).values() if p.get("carried_from")]
         assert carried and {p["carried_from"] for p in carried} == {p1}
@@ -2577,7 +2621,7 @@ def test_data_disposal_lifecycle_on_real_server(qdrant_url, tmp_path, monkeypatc
             (("dispose", "--progress", str(progress), "--build-id", g2), "E_NOT_DISPOSABLE: " + g2 + " (KEEP_N)"),
             (("dispose", "--progress", str(progress), "--build-id", g3), "E_NOT_DISPOSABLE: " + g3 + " (LIVE)"),
             (("dispose", "--progress", str(progress), "--build-id", g1, "--execute", "--plan-digest", digest,
-              "--readers-stopped", stopped), "E_READERS_UNAWARE"),
+              "--readers-stopped", stopped), "E_RECOVERY_REF_REQUIRED"),
             (("dispose", "--progress", str(progress), "--build-id", g1, "--plan-digest", "xyz"), "E_PLAN_DIGEST"),
             (("dispose-snapshots", "--progress", str(progress), "--build-id", g2), "E_NOT_DISPOSABLE: " + g2 + " (KEEP_N)"),
             (("dispose-snapshots", "--progress", str(progress), "--build-id", g3), "E_NOT_DISPOSABLE: " + g3 + " (LIVE)"),
@@ -2597,10 +2641,9 @@ def test_data_disposal_lifecycle_on_real_server(qdrant_url, tmp_path, monkeypatc
         assert [p.name for p in foreign.parent.iterdir()] == ["inventory.jsonl"]
         execute = (*dispose, "--execute", "--plan-digest", digest, "--readers-stopped", stopped,
                    "--recovery-ref", "CHG-SIM", "--operator", "sim-op")
-        # This release cannot execute: the real CLI refuses and nothing changes.
-        assert build.READERS_REFUSE_TOMBSTONED_BUILDS is False
-        rc, _ = cli(*execute)
-        assert rc == generations.EXIT_REFUSED and "E_READERS_UNAWARE" in capsys.readouterr().err
+        # The release's own constant allows the execution (the reader refuses tombstoned
+        # builds); the refusals above changed nothing.
+        assert build.READERS_REFUSE_TOMBSTONED_BUILDS is True
         assert nothing_changed() and stored_tombstone(c1) is None
 
         # S1, then death: the tombstone is stored, nothing is deleted yet.
@@ -2608,6 +2651,10 @@ def test_data_disposal_lifecycle_on_real_server(qdrant_url, tmp_path, monkeypatc
         assert (code, at) == (86, "step_tombstone"), log
         assert stored_tombstone(c1)["state"] == "retiring"
         assert aliases() == aliases_before and collections() == everything and len(snapshots(p1)) == 2
+        # The window that was fail-open: both immutable aliases resolve and the old text is
+        # still stored, yet the agent refuses the retiring build; the others read on.
+        assert aliases()[data_alias] == p1 and stored_text(p1, chunk1) == text1
+        assert g1_refused() and others_still_read()
         assert listed()[p1]["phase"] == "retiring" and listed()[p2]["rank"] == 1
         with pytest.raises(RuntimeError, match="does not match its seal"):
             verify_publication_seal(client, c1)  # the tombstone is inside the control seal: no rollback point
@@ -2616,6 +2663,7 @@ def test_data_disposal_lifecycle_on_real_server(qdrant_url, tmp_path, monkeypatc
         assert (code, at) == (86, "step_alias"), log
         assert aliases() == {k: v for k, v in aliases_before.items() if k != data_alias}
         assert collections() == everything and len(snapshots(p1)) == 2
+        assert stored_text(p1, chunk1) == text1 and g1_refused() and others_still_read()
         # S3, then death: the snapshots are gone, the collection is still there.
         code, at, log = killed_after("step_snapshots", *execute)
         assert (code, at) == (86, "step_snapshots"), log
@@ -2625,12 +2673,21 @@ def test_data_disposal_lifecycle_on_real_server(qdrant_url, tmp_path, monkeypatc
         assert (code, at) == (86, "step_collection"), log
         assert collections() == everything - {p1} and stored_tombstone(c1)["state"] == "retiring"
         assert listed()[p1]["phase"] == "retiring"
-        # The same command again finishes; once more it reports and writes nothing.
-        code, at, log = killed_after("none", *execute)
-        assert code == 0 and at is None and "DONE build" in log, log
+        assert g1_refused() and others_still_read()
+        # The same command again, as documented (`python -m`, nothing patched), finishes;
+        # once more it reports and writes nothing.
+        finished = module(*execute)
+        assert finished.returncode == 0 and "DONE build" in finished.stdout, finished.stderr[-600:]
         done = _records(client, c1)
-        code, _, log = killed_after("none", *execute)
-        assert code == 0 and "ALREADY RETIRED" in log and _records(client, c1) == done
+        again = module(*execute)
+        assert again.returncode == 0 and "ALREADY RETIRED" in again.stdout and _records(client, c1) == done
+        # The decided outcome for the disposed build; the kept and the live build read their
+        # stored text; search and an answer on the live alias work.
+        assert g1_refused() and others_still_read()
+        assert minted() == (ref3, chunk3, text3)
+        with _agent(monkeypatch, qdrant_url, mock_url, PUBLISH_ALIAS) as http:
+            answer = http.post("/v1/answer", json=question)
+            assert answer.status_code == 200 and answer.json()["answer"], answer.text
 
         # Stored content after the disposal.
         assert collections() == everything - {p1}
@@ -2684,6 +2741,7 @@ def test_data_disposal_lifecycle_on_real_server(qdrant_url, tmp_path, monkeypatc
         assert target() == p4 and collections() == steady
         assert (_records(client, p4), _records(client, p4 + "__completions")) == published
         assert _records(client, c1) == done
+        assert g1_refused() and others_still_read()  # G3 is retained now, G2 still kept
         # Republishing the disposed build's corpus derives its old name: the retired control
         # reserves it, so the build gets a suffixed name and the tombstone is untouched.
         for name in ("gamma", "delta", "epsilon"):
@@ -2697,12 +2755,26 @@ def test_data_disposal_lifecycle_on_real_server(qdrant_url, tmp_path, monkeypatc
         gens = listed()
         assert gens[p5]["live"] and gens[p1]["phase"] == "retired" and gens[p4]["phase"] == "retained"
         assert gens[p4]["rank"] == 1 and gens[p3]["rank"] == 2 and gens[p2]["rank"] == 3
+        # The republished corpus is a new build under a new name: its own reference reads its
+        # own stored text, and the old build id still resolves to nothing.
+        ref5, chunk5, text5 = minted()
+        assert ref5 != ref1 and chunk5 == chunk1 and text5 == text1 == stored_text(p5, chunk5)
+        (republished,) = exact(ref5)
+        assert (republished.status_code, republished.json()["build_id"]) == (200, gens[p5]["build_id"])
+        assert gens[p5]["build_id"] != g1 and g1_refused()
 
         # Q2, directly: were the disposed name recreated, the server would list no snapshot of it.
         client.create_collection(p1, vectors_config={"dense": models.VectorParams(size=4, distance=models.Distance.COSINE)})
         try:
             assert client.list_snapshots(p1) == []
+            # The old name recreated and its data build alias put back by hand: the tombstone
+            # in the kept control still decides, the old reference is never read from it.
+            client.update_collection_aliases([models.CreateAliasOperation(
+                create_alias=models.CreateAlias(collection_name=p1, alias_name=data_alias))])
+            assert aliases()[data_alias] == p1 and g1_refused()
         finally:
+            client.update_collection_aliases([models.DeleteAliasOperation(
+                delete_alias=models.DeleteAlias(alias_name=data_alias))])
             client.delete_collection(p1)
     finally:
         client.close()

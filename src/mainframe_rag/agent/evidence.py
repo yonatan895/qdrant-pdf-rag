@@ -18,8 +18,9 @@ from another build.
 
 What it does not do (see the contract's status table): the full `e1.` profile
 needs a byte-to-page location map the ingest path does not retain, so this
-profile reports the stored chunk page span only; and there is no retirement
-tombstone writer yet, so an absent build is "unavailable", never "retired".
+profile reports the stored chunk page span only; and a build that data
+disposal has tombstoned (`retiring` or `retired`, issue #1373) is
+"unavailable" like an unknown build, never a distinct "retired" outcome.
 
 Source listing (#828) reads only the pinned build's catalog entries
 (`ingest/catalog.py`, #827) from its control collection: one filtered,
@@ -47,6 +48,7 @@ from typing import Any, Literal, Protocol, get_args
 from mainframe_rag.agent.serving import ServingGeneration
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.build import (
+    RETIREMENT_PHASES,
     BuildBinding,
     build_aliases,
     decode_build_binding,
@@ -58,6 +60,7 @@ from mainframe_rag.ingest.catalog import (
 )
 from mainframe_rag.ingest.classify import ChunkType
 from mainframe_rag.ingest.publish import publication_metadata_point_id
+from mainframe_rag.ingest.retirement import InvalidTombstone, decode_tombstone, tombstone_point_id
 from mainframe_rag.logs import error_type
 from mainframe_rag.ports import AsyncQdrantReader
 
@@ -84,9 +87,10 @@ FailureKind = Literal[
 ]
 
 # Public mapping, one owner: (HTTP status, stable code, fixed message). The
-# internal reason stays on the exception for logs only. `unavailable` (denied
-# or unknown) and `corrupt` (missing/changed retained bytes or controls) share
-# code and message by design: the status is the only public distinction.
+# internal reason stays on the exception for logs only. `unavailable` (denied,
+# unknown, or a build that data disposal tombstoned) and `corrupt`
+# (missing/changed retained bytes or controls) share code and message by
+# design: the status is the only public distinction.
 PUBLIC_FAILURES: dict[FailureKind, tuple[int, str, str]] = {
     "invalid_reference": (400, "invalid_evidence_reference", "the evidence reference is not valid"),
     "unauthenticated": (401, "authentication_required", "authentication is required"),
@@ -748,6 +752,12 @@ class EvidenceService:
         physical, control = aliases.get(data_alias), aliases.get(control_alias)
         if physical is None and control is None:
             raise EvidenceFailure("unavailable", "unknown_build")
+        if control is not None:
+            # Before anything of the build's data is named or read: data
+            # disposal keeps the control alias for good, so this lookup also
+            # covers a build whose data alias or collection is already gone,
+            # and a collection recreated under the old name.
+            await self._refuse_tombstoned(control, build_id, logical)
         if physical is None or control != _control_of(physical):
             raise EvidenceFailure("corrupt", "build_aliases")
         bound = await self._binding(physical)
@@ -762,6 +772,40 @@ class EvidenceService:
         if require_catalog and not (bound is not None and bound[1]):
             raise EvidenceFailure("corrupt", "no_catalog")
         return binding, physical
+
+    async def _refuse_tombstoned(self, control: str, build_id: str, logical: str) -> None:
+        """Refuse a build that data disposal has tombstoned (issue #1373).
+
+        The tombstone is written into the build's control collection before
+        anything is deleted, while both immutable aliases still resolve, and
+        it is never removed. This check is what
+        `build.READERS_REFUSE_TOMBSTONED_BUILDS` asserts: a `retiring` or
+        `retired` build is the unavailable outcome (maintainer decision
+        2026-11-26: 404, no distinct retired code). A point at the tombstone
+        id that is not this build's valid tombstone is storage damage, and
+        refuses as well."""
+        if not await self._client.collection_exists(control):
+            # The alias listing has just resolved the control alias to this
+            # collection: an answer that it does not exist is missing controls,
+            # never "no tombstone" (review of #1398). No documented procedure
+            # leaves a build alias on a missing control collection.
+            raise EvidenceFailure("corrupt", "control_missing")
+        records = await self._client.retrieve(
+            control, ids=[tombstone_point_id(control)], with_payload=True,
+        )
+        if not records:
+            return
+        try:
+            tombstone = decode_tombstone(records[0].payload or {}, control)
+        except InvalidTombstone as exc:
+            raise EvidenceFailure("corrupt", "tombstone_invalid") from exc
+        if (
+            tombstone["build_id"] != build_id
+            or tombstone["logical_alias"] != logical
+            or tombstone["state"] not in RETIREMENT_PHASES
+        ):
+            raise EvidenceFailure("corrupt", "tombstone_invalid")
+        raise EvidenceFailure("unavailable", f"{tombstone['state']}_build")
 
     async def _authorize(self, caller: TrustedCaller, scope: EvidenceScope) -> AccessGrant:
         try:

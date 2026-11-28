@@ -975,12 +975,11 @@ def test_data_disposal_on_three_peers_deletes_every_peers_snapshots_before_the_c
     import json
     import tempfile
 
-    from mainframe_rag.ingest import build, generations
+    from mainframe_rag.ingest import generations
     from mainframe_rag.ingest.build import build_aliases
     from mainframe_rag.ingest.publish import verify_publication_seal
     from mainframe_rag.ingest.retirement import tombstone_point_id
 
-    monkeypatch.setattr(build, "READERS_REFUSE_TOMBSTONED_BUILDS", True)  # stand-in for the reader change
     suffix = uuid.uuid4().hex[:8]
     logical = f"ha_disp_{suffix}"
     builds = [str(uuid.uuid4()) for _ in range(3)]

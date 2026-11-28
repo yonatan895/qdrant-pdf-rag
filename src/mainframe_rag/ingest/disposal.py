@@ -6,11 +6,13 @@ control collection (markers, manifest, receipt, catalog entries), the control
 build alias and a retirement tombstone stay. The serving alias, the live
 pair, the publish sidecar, the lock and the inventory are never touched.
 
-Not usable from this release: `--execute` is refused while
-`build.READERS_REFUSE_TOMBSTONED_BUILDS` is False (set only in code, by the
-change that makes the agent refuse a tombstoned build), and the site
-launcher refuses the subcommand by name. The dry run works and prints the
-plan and its digest.
+`--execute` runs only while `build.READERS_REFUSE_TOMBSTONED_BUILDS` is True
+(set only in code, together with the agent check that refuses a tombstoned
+build), and needs the plan digest, the reader-stop attestation and a
+recovery reference. There is no site path: the site launcher, the chart and
+the values mapper refuse the subcommand by name, so it runs only as this
+module's CLI on a host that mounts the ingest work volume. The deployed
+agent must be a reader-aware release first (docs/ingest.md, data disposal).
 
 Steps, all under the publish lock; the only resume evidence is the tombstone:
 
@@ -103,6 +105,15 @@ def require_reader_awareness() -> None:
     if build.READERS_REFUSE_TOMBSTONED_BUILDS is not True:
         raise Refused("E_READERS_UNAWARE: data disposal cannot be executed by this release: the agent "
                       "does not yet refuse a build that is being retired; nothing read, nothing changed")
+
+
+def require_recovery_ref(recovery_ref: str | None) -> None:
+    """A data disposal cannot be undone from the cluster, so executing one
+    needs the operator's recovery reference (maintainer decision 2026-11-28).
+    It stays optional for the snapshot-only command."""
+    if recovery_ref is None or not recovery_ref.strip():
+        raise Refused("E_RECOVERY_REF_REQUIRED: --execute needs --recovery-ref, the ticket or decision id "
+                      "that says how the deleted data could be recovered; nothing read, nothing changed")
 
 
 def parse_dispose_inputs(execute: bool, plan_digest: str | None, readers_stopped: str | None) -> tuple[
@@ -374,11 +385,34 @@ def step_retired(run: Run) -> None:
 def data_disposal_record_path(progress: Path, alias: str) -> Path:
     """Append-only audit record beside the publish lock: one line when an
     executing run starts or resumes (who, the reader-stop attestation, the
-    digest, any kept build that no longer verifies) and one when it ends.
-    Audit only: a rerun converges from the tombstone, never from this file."""
+    digest, any kept build that no longer verifies) and exactly one `retired`
+    line per disposed build, written by the rerun when the run that finished
+    was stopped first. Audit only: a rerun converges from the tombstone, never from this file."""
     lock = publish_lock_path(progress, alias)
     stem = lock.name.removeprefix("publish-").removesuffix(".lock")
     return lock.with_name(f"data-disposal-{stem}.jsonl")
+
+
+def _record_retired_once(path: Path, build_id: str, physical: str) -> bool:
+    """Append the `retired` audit line for this build unless the file already
+    has one: exactly one per completed disposal, also when the run that
+    stored the `retired` tombstone was stopped before it could write the
+    line (review of #1398). Unparseable lines are not evidence of it.
+    True when a line was written."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    except (OSError, UnicodeDecodeError):
+        raise Unreadable("E_STATE_IO: the audit record beside the publish lock could not be read; "
+                         "nothing more changed") from None
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("event") == "retired" and event.get("build_id") == build_id:
+            return False
+    _record(path, {"event": "retired", "build_id": build_id, "physical": physical})
+    return True
 
 
 def kept_unverified(entry: QdrantSnapshotReader, settings: Settings, registry: Registry,
@@ -441,6 +475,7 @@ def dispose_data(
 ) -> None:
     if execute:
         require_reader_awareness()
+        require_recovery_ref(recovery_ref)
         if plan_digest is None or readers_stopped is None:
             raise Refused("E_PLAN_DIGEST: --execute needs --plan-digest and --readers-stopped")
     alias = settings.qdrant_collection
@@ -470,6 +505,8 @@ def dispose_data(
                               "or data alias is present, or a peer did not answer; nothing changed")
             out(f"ALREADY RETIRED build {g.build_id} physical {g.physical} retired "
                 f"{(g.tombstone or {}).get('retired_at')}; nothing to do")
+            if execute and _record_retired_once(data_disposal_record_path(progress, alias), g.build_id, g.physical):
+                out("AUDIT the retired line a stopped run did not write is recorded now")
             return
         if not registry.snapshots_complete:
             raise Refused(f"E_PEERS_INCOMPLETE: not every Qdrant peer answered "
@@ -534,10 +571,10 @@ def dispose_data(
         out(f"PLAN DIGEST {digest}")
         if not execute:
             out("DRY RUN: nothing changed. This release cannot execute a data disposal "
-                "(readers do not yet refuse a build that is being retired)."
+                "(readers do not refuse a build that is being retired)."
                 if build.READERS_REFUSE_TOMBSTONED_BUILDS is not True else
                 "DRY RUN: nothing changed. With every reader stopped, rerun with --execute "
-                "--plan-digest <digest above> --readers-stopped <UTC time>.")
+                "--plan-digest <digest above> --readers-stopped <UTC time> --recovery-ref <ticket>.")
             return
         if plan_digest != digest:
             raise Refused("E_PLAN_CHANGED: --plan-digest does not match the plan recomputed under the lock; "
@@ -556,7 +593,7 @@ def dispose_data(
         step_snapshots(run)
         step_collection(run)
         step_retired(run)
-        _record(record, {"event": "retired", "build_id": g.build_id, "physical": g.physical})
+        _record_retired_once(record, g.build_id, g.physical)
         out(f"DONE build {g.build_id} is retired: {g.physical}, its data build alias and its snapshots are "
             f"gone; {g.control}, its control alias and the tombstone are kept")
 

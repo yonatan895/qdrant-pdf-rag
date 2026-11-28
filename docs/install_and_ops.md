@@ -1520,8 +1520,10 @@ on three distinct peers again.
   collection (#391 owns publication integrity). The only path that deletes
   a superseded data collection or a build alias is the guarded
   [data disposal](ingest.md#data-disposal) command (one named build, publish
-  lock, readers stopped, tombstone first, control collection kept); it has
-  no site launcher and refuses to execute in this release. Nothing else,
+  lock, readers stopped, tombstone first, control collection kept, recovery
+  reference required); it has no site launcher and runs only as the module
+  CLI on a host with the ingest work volume, after the agent release that
+  refuses tombstoned builds is deployed on every replica. Nothing else,
   and no manual recipe, deletes a generation or any control collection.
 - **Existing-collection topology changes** are snapshot-gated and explicit:
   same-shard-count replication repair establishes actual copies and waits
@@ -1542,9 +1544,9 @@ on three distinct peers again.
 
 - An interrupted clone, transfer, or build is resumed or retried, never
   repaired by deleting live data. A superseded physical survives every
-  swap; data disposal is not executable in this release
-  ([data disposal](ingest.md#data-disposal)); once it is, an interrupted
-  disposal is finished by rerunning the same command, never by hand. Its safety snapshot survives
+  swap; an interrupted [data disposal](ingest.md#data-disposal) is
+  finished by rerunning the same command, never by hand, and the agent
+  refuses the build from the first stored step on. A safety snapshot survives
   until the operator deletes it with the guarded snapshot-only command
   ([retained generations](ingest.md#retained-generations)).
 - **Peer replacement is not stop/wipe/start.** Observed 2026-09-21 against
@@ -1761,7 +1763,16 @@ WebUI cannot start on B's database.
 - Alias-published generation intact: re-point the serving alias to the
   retained previous generation (`ingest.md` publication contract); verify with
   exact queries and the agent `/healthz`. Retired generations and safety
-  snapshots stay until the operator accepts.
+  snapshots stay until the operator accepts. First run the read-only
+  [generations listing](ingest.md#retained-generations): **never re-point
+  to a build it shows as `retiring` or `retired`** (a `retiring` build is
+  mid-disposal and its references already read 404; a `retired` one has no
+  data). Pick a `retained` build instead; when a disposal is left
+  `retiring`, finish it by rerunning the same command
+  ([data disposal](ingest.md#data-disposal)) rather than moving the alias,
+  and when no `retained` build is left, rebuild from the protected originals
+  (next item). The agent's serving gate does not check tombstones yet
+  (#1373 PR 4/5).
 - Lost/corrupt storage on one peer: no improvised stop/wipe/start (see above).
   The supported path today is a fresh rebuild from protected originals with
   accepted downtime: provision clean claims, `airgap:pipeline` with
