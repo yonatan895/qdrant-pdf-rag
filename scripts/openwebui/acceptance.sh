@@ -9,6 +9,9 @@
 #   sh scripts/openwebui/acceptance.sh team-tools after run: the Splunk gateway (#1077) against a fake
 #                                                 Splunk pod, Open WebUI re-rendered with teamTools, the
 #                                                 ADR-0010 T4 checks (kind-splunk.yaml, docs/deploy.md)
+#   sh scripts/openwebui/acceptance.sh zos-read   after run: the chart's z/OS FTP bridge (#1294) in mock mode
+#                                                 lane-side, the agent's ZOWE_MCP_* as rendered, the ADR-0012
+#                                                 read, denial, next-request and bridge checks (kind-zos.yaml)
 #
 # Operator-deploy lane (#1118 B3): the chart objects come from the operator's own
 # airgap:pipeline/airgap:deploy of the bootstrapped bundle, never from this script.
@@ -301,6 +304,135 @@ team_tools() {
     phase team-tools
 }
 
+# ------------------------------------------------------------------ z/OS dataset reads (#1294)
+# After run: the chart's read-only FTP bridge (ADR-0012) rendered from this working tree with
+# zosRead on (plain FTP accepted, a documentation-range z/OS address), in mock mode lane-side (the
+# chart never renders it: the chart's command plus --mock and a fixture volume, label unchanged), and
+# the agent's ZOWE_MCP_* entries exactly as the chart renders them; then acceptance.py zos-read (an
+# allowlisted read, a denied read, the next ordinary request, the bearer and the policies, through
+# the deployed agent on the Docs path). Site procedure: docs/deploy.md.
+ZOS_ALLOWLIST='["LANEZOS.NOTES(OPSNOTE)"]'
+ZOS_FIXTURES='{"opsnote": "datasets/LANEZOS.NOTES/OPSNOTE", "hidden": "datasets/LANEZOS.NOTES/HIDDEN"}'
+ZOS_MOCK_DIR=/etc/mainframe-rag/zos-mock
+
+zos_values() {  # zos_values AGENT_IMAGE: the zosRead values (JSON is YAML) on top of values.yaml
+    "$PY" -I - "$1" "$ZOS_ALLOWLIST" <<'PY'
+import json, sys
+image, allowlist = sys.argv[1], json.loads(sys.argv[2])
+if "@" in image:
+    repo, digest = image.split("@", 1)
+    agent = {"repository": repo, "digest": digest}
+else:
+    repo, _, tag = image.rpartition(":")
+    agent = {"repository": repo, "tag": tag}
+agent["pullPolicy"] = "IfNotPresent"  # the lane's agent image, already on the node
+print(json.dumps({
+    "images": {"agent": agent},
+    "zosRead": {
+        "enabled": True, "dryRun": False, "secretName": "rag-mcp-ftp",
+        # The docs Pipe's audit-tag key (a Secret of its own; this phase calls the agent directly).
+        "auditKey": {"secretName": "rag-zos-audit", "key": "audit-key"},
+        # values.yaml's openwebui.oidc allowedRoles and adminRoles, approved (ADR-0012 D3 guard (b)).
+        "approvedRoles": ["internal-team", "docs-readers", "owui-admins"],
+        "datasetAllowlist": allowlist, "enabledTools": ["dataset_read"],
+        # 192.0.2.0/24 is documentation-only: the egress rule renders, nothing answers there.
+        "ftp": {"host": "zos.lane.invalid", "hostIp": "192.0.2.21", "port": 21,
+                "passivePorts": {"first": 50000, "last": 50009},
+                "transportMode": "plain", "plainAccepted": True},
+    },
+}, indent=1))
+PY
+}
+
+render_zos() {  # render_zos OUTDIR VALUES: the bridge and the agent Deployment from the working tree's chart
+    mkdir -p "$1"
+    render_values "$1/values.yaml"
+    "$HELM" template rag "$REPO/charts/mainframe-rag" --namespace "$APP_NS" -f "$1/values.yaml" -f "$2" \
+        --show-only templates/zos-bridge.yaml --show-only templates/agent-deployment.yaml > "$1/chart.yaml"
+}
+
+check_zos_render() {  # check_zos_render RENDER_DIR ZOS_DIR AGENT_IMAGE: assert, then write the apply and patch files
+    "$PY" -I - "$1" "$2" "$3" "$ZOS_MOCK_DIR" "$ZOS_FIXTURES" <<'PY'
+import json, sys, yaml
+d, zos, image, mock_dir, fixtures = sys.argv[1:6]
+with open(f"{d}/chart.yaml", encoding="utf-8") as fh:
+    text = fh.read()
+docs = [x for x in yaml.safe_load_all(text) if x]
+kinds = sorted(f"{x['kind']}/{x['metadata']['name']}" for x in docs)
+assert kinds == ["Deployment/rag-agent", "Deployment/rag-mcp-ftp", "NetworkPolicy/rag-mcp-ftp", "Service/rag-mcp-ftp"], kinds
+for name in ("bridge-token", "ftp-password", "audit-key"):
+    with open(f"{zos}/{name}", encoding="utf-8") as fh:
+        assert fh.read().strip() not in text, f"the {name} value is in the render"
+assert "--mock" not in text and "MCP_MOCK_DIR" not in text, "the chart rendered mock mode"
+def find(kind, name):
+    return next(x for x in docs if x["kind"] == kind and x["metadata"]["name"] == name)
+bridge = find("Deployment", "rag-mcp-ftp")
+(container,) = bridge["spec"]["template"]["spec"]["containers"]
+assert container["name"] == "bridge" and container["image"] == image, "the bridge does not run the lane's agent image"
+assert bridge["spec"]["template"]["metadata"]["labels"] == {"app": "rag-mcp-ftp"}
+policy = find("NetworkPolicy", "rag-mcp-ftp")["spec"]
+assert policy["ingress"] == [{"from": [{"podSelector": {"matchLabels": {"app": "rag-agent"}}}],
+                              "ports": [{"protocol": "TCP", "port": 8081}]}], "bridge ingress"
+agent = next(c for c in find("Deployment", "rag-agent")["spec"]["template"]["spec"]["containers"] if c["name"] == "agent")
+zowe = [e for e in agent["env"] if e["name"].startswith("ZOWE_MCP_")]
+assert sorted(e["name"] for e in zowe) == sorted(["ZOWE_MCP_ENABLED", "ZOWE_MCP_BASE_URL", "ZOWE_MCP_AUTH_TOKEN",
+                                                   "ZOWE_MCP_DRY_RUN"]), "agent ZOWE_MCP_* entries"
+def dump(name, value):
+    with open(f"{d}/{name}", "w", encoding="utf-8") as fh:
+        fh.write(value)
+dump("bridge.yaml", yaml.safe_dump_all([x for x in docs if x["metadata"]["name"] == "rag-mcp-ftp"], sort_keys=False))
+dump("bridge-deployment.json", json.dumps(bridge))
+dump("agent-env.json", json.dumps(zowe))
+dump("agent-patch.json", json.dumps({"spec": {"template": {"spec": {"containers": [{"name": "agent", "env": zowe}]}}}}))
+# Lane-only mock mode (strategic merge: args replaced, the volume and mount merged by name, so a rerun converges).
+items = [{"key": key, "path": path} for key, path in json.loads(fixtures).items()]
+dump("mock-patch.json", json.dumps({"spec": {"template": {"spec": {
+    "containers": [{"name": "bridge", "args": ["--mock", mock_dir],
+                    "volumeMounts": [{"name": "zos-mock", "mountPath": mock_dir, "readOnly": True}]}],
+    "volumes": [{"name": "zos-mock", "configMap": {"name": "zos-mock-fixtures", "items": items}}]}}}}))
+print(f"zos render: {len(docs)} objects ({', '.join(kinds)}); the bridge runs the lane's agent image; "
+      f"agent ZOWE_MCP_* {len(zowe)}; no secret value and no mock mode in the render")
+PY
+}
+
+zos_read() {
+    prepare_state
+    zos_dir="$STATE/zos"
+    mkdir -p "$zos_dir"; chmod 700 "$zos_dir"
+    k -n "$APP_NS" rollout status deploy/rag-agent --timeout=300s
+    AGENT_IMAGE=$(k -n "$APP_NS" get deploy rag-agent -o 'jsonpath={.spec.template.spec.containers[0].image}')
+    [ -n "$AGENT_IMAGE" ] || die "cannot read the image of deploy/rag-agent"
+    # Site procedure: the operator Secret (files, mode 600, never argv). Mock mode never logs on. A rerun
+    # keeps the values: the running pods read them only at start, so a new value would not reach them.
+    ( umask 077
+      for f in bridge-token ftp-password audit-key; do
+          [ -s "$zos_dir/$f" ] || $PY -I -c 'import secrets; print(secrets.token_urlsafe(32), end="")' > "$zos_dir/$f"
+      done
+      printf 'LANEUSR' > "$zos_dir/ftp-user" )
+    zos_values "$AGENT_IMAGE" > "$zos_dir/values.json"
+    render_zos "$STATE/render-zos" "$zos_dir/values.json"
+    check_zos_render "$STATE/render-zos" "$zos_dir" "$AGENT_IMAGE"
+    set -- $(kind_net)
+    sed -e "s#@APP_NS@#$APP_NS#g" -e "s#@NODE_IP@#$2#g" -e "s#@AGENT_IMAGE@#$AGENT_IMAGE#g" \
+        -e "s#@CLIENT_UID@#$(uid_for zos-client)#g" "$HERE/kind-zos.yaml" > "$STATE/render/zos.yaml"
+    k apply -f "$STATE/render/zos.yaml" > "$STATE/logs/apply-zos.log"
+    k -n "$APP_NS" create secret generic rag-mcp-ftp --from-file="$zos_dir/ftp-user" \
+        --from-file="$zos_dir/ftp-password" --from-file="$zos_dir/bridge-token" --dry-run=client -o yaml | k apply -f - >/dev/null
+    k -n "$APP_NS" create secret generic rag-zos-audit --from-file="$zos_dir/audit-key" \
+        --dry-run=client -o yaml | k apply -f - >/dev/null
+    k apply -f "$STATE/render-zos/bridge.yaml" > "$STATE/logs/apply-zos-bridge.log"
+    k -n "$APP_NS" patch deploy/rag-mcp-ftp --type strategic --patch-file "$STATE/render-zos/mock-patch.json" >/dev/null
+    if ! k -n "$APP_NS" rollout status deploy/rag-mcp-ftp --timeout=300s; then
+        k -n "$APP_NS" logs deploy/rag-mcp-ftp --tail=20 >&2 || true
+        die "the z/OS bridge is not Ready in mock mode"
+    fi
+    # The agent's ZOWE_MCP_* entries as rendered (strategic merge by name; the rest of the agent is the lane's).
+    k -n "$APP_NS" patch deploy/rag-agent --type strategic --patch-file "$STATE/render-zos/agent-patch.json" >/dev/null
+    k -n "$APP_NS" rollout status deploy/rag-agent --timeout=300s
+    k -n "$APP_NS" wait --for=condition=Ready pod/zos-read-client --timeout=300s >/dev/null
+    phase zos-read
+}
+
 # ------------------------------------------------------------------ operator-deploy lane
 require_workspace() {
     WS=${OWUI_WORKSPACE:?set OWUI_WORKSPACE to the bootstrapped operator workspace}
@@ -516,6 +648,7 @@ case "$CMD" in
     deploy) deploy ;;
     run) run ;;
     team-tools) team_tools ;;
+    zos-read) zos_read ;;
     operator) shift; operator "$@" ;;
     *) sed -n '2,/^set -eu/p' "$0" | sed '$d' >&2; exit 2 ;;
 esac

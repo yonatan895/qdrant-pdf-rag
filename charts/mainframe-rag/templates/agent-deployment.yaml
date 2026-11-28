@@ -176,6 +176,22 @@ spec:
                   key: service-token
                   name: {{ .Values.feedback.secretName }}
             {{- end }}
+            {{- if include "mainframe-rag.zosReadEnabled" . }}
+            # Read-only z/OS dataset reads (ADR-0012, #1294): emitted only when
+            # the bridge renders, so the default render has no ZOWE_MCP_* at
+            # all. The agent holds the bearer only, never the z/OS ID.
+            - name: ZOWE_MCP_ENABLED
+              value: "true"
+            - name: ZOWE_MCP_BASE_URL
+              value: http://rag-mcp-ftp:8081
+            - name: ZOWE_MCP_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: bridge-token
+                  name: {{ .Values.zosRead.secretName }}
+            - name: ZOWE_MCP_DRY_RUN
+              value: {{ .Values.zosRead.dryRun | default false | toString | quote }}
+            {{- end }}
             {{- if .Values.gateway.caConfigMapName }}
             - name: SSL_CERT_FILE
               value: /etc/gateway-ca/ca-bundle.crt

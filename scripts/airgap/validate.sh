@@ -40,6 +40,7 @@ resolve_network_policy
 resolve_feedback
 resolve_openwebui
 resolve_splunk_gateway
+resolve_zos_read
 
 case "${RERANK_ENDPOINT_ORDER:-score_first}" in
     score_first|rerank_first) ;;
@@ -85,6 +86,7 @@ fi
 echo "    NetworkPolicy:     $(describe_network_policy)"
 echo "    Feedback service:  $(describe_feedback)"
 echo "    Splunk gateway:    $(describe_splunk_gateway)"
+echo "    z/OS reads:        $(describe_zos_read)"
 
 echo "==> 2. Validating required CLI tools"
 command -v skopeo >/dev/null 2>&1 || die "skopeo is required on the air-gap bastion"
@@ -266,6 +268,26 @@ if [ "$SPLUNK_GATEWAY_ENABLED" = "true" ]; then
                 notfound) die "Secret '$SPLUNK_GATEWAY_SECRET' not found in namespace '$NAMESPACE' — create it before SPLUNK_GATEWAY_ENABLED=true (docs/deploy.md#splunk-gateway-deploy)" ;;
                 forbidden) die "this identity may not read Secret '$SPLUNK_GATEWAY_SECRET' in namespace '$NAMESPACE' (Forbidden); grant namespace-scoped get on secrets, not cluster-admin" ;;
                 *) die "cannot read Secret '$SPLUNK_GATEWAY_SECRET' in namespace '$NAMESPACE' (unexpected client error)" ;;
+            esac
+            ;;
+        *) die "cannot read namespace '$NAMESPACE' (unexpected client error)" ;;
+    esac
+fi
+
+if [ "$ZOS_READ_ENABLED" = "true" ]; then
+    probe $KC get namespace "$NAMESPACE"
+    case "$PROBE" in
+        notfound)
+            echo "    Notice: namespace '$NAMESPACE' does not exist yet — create Secret '$ZOS_READ_SECRET' (keys ftp-user, ftp-password, bridge-token) there before 'sh scripts/tools/run-task.sh airgap:deploy'"
+            ;;
+        ok|forbidden)
+            probe $KC -n "$NAMESPACE" get secret "$ZOS_READ_SECRET"
+            case "$PROBE" in
+                ok) require_zos_read_secrets
+                    echo "    z/OS read Secret '$ZOS_READ_SECRET' has the keys the bridge and the agent read" ;;
+                notfound) die "Secret '$ZOS_READ_SECRET' not found in namespace '$NAMESPACE' — create it before ZOS_READ_ENABLED=true (docs/deploy.md#zos-read-deploy)" ;;
+                forbidden) die "this identity may not read Secret '$ZOS_READ_SECRET' in namespace '$NAMESPACE' (Forbidden); grant namespace-scoped get on secrets, not cluster-admin" ;;
+                *) die "cannot read Secret '$ZOS_READ_SECRET' in namespace '$NAMESPACE' (unexpected client error)" ;;
             esac
             ;;
         *) die "cannot read namespace '$NAMESPACE' (unexpected client error)" ;;

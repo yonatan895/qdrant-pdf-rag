@@ -561,5 +561,151 @@ def check_team_network(probes: dict[str, int]) -> Verdict:
     return _v("team-network", bool(probes) and not failed, probes=len(probes), failed=failed)
 
 
+# ------------------------------------------------------------------ z/OS dataset reads (#1294, ADR-0012)
+ZOS_MARKER = "[z/OS observation]"  # live_state.ZOS_OBSERVATION_MARKER (pinned equal by test)
+ZOS_MOCK_DIR = "/etc/mainframe-rag/zos-mock"  # acceptance.sh's lane-only fixture mount
+ZOS_AGENT_ENV = ("ZOWE_MCP_ENABLED", "ZOWE_MCP_BASE_URL", "ZOWE_MCP_AUTH_TOKEN", "ZOWE_MCP_DRY_RUN")
+ZOS_DENIED_TEXT = "the target is not on the approved list. This answer uses the manuals only."
+
+
+def zos_fixture_key(items: dict[str, str], target: str) -> str:
+    """The fixture ConfigMap key mounted as TARGET's member (datasets/<DSN>/<MEMBER>)."""
+    dsn, _, member = target.rstrip(")").partition("(")
+    want = f"datasets/{dsn}/{member}"
+    return next(key for key, path in items.items() if path == want)
+
+
+def _zos_turn_ok(turn: dict) -> bool:
+    return (turn.get("status") == 200 and turn.get("done") is True and bool(turn.get("finish_reason"))
+            and int(turn.get("citations") or 0) >= 1)
+
+
+def _zos_turn_detail(turn: dict) -> dict:
+    obs = turn.get("zos_observation") or {}
+    return {"status": turn.get("status"), "done": turn.get("done"), "finish_reason": turn.get("finish_reason"),
+            "citations": turn.get("citations"), "outcome": obs.get("outcome"), "code": obs.get("code"),
+            "bytes": obs.get("bytes"), "feedback_suppressed": turn.get("feedback_suppressed"),
+            "marker_in_content": turn.get("marker_in_content")}
+
+
+def check_zos_read(turn: dict, target: str, fixture_bytes: int) -> Verdict:
+    """An allowlisted member read through the deployed agent on the Docs path: the agent's own first line
+    cites it with the fixed marker and outcome complete, the response's observation carries exactly the
+    fixture's bytes (its text reached the prompt whole), the turn stays out of feedback, and the manuals
+    answer is cited."""
+    obs = turn.get("zos_observation") or {}
+    first = str(turn.get("first_line") or "")
+    notice_ok = (first.startswith(f"{ZOS_MARKER} {target}: read from z/OS, acquired_at ")
+                 and first.endswith(", outcome: complete."))
+    ok = (_zos_turn_ok(turn) and notice_ok and turn.get("marker_in_content") is True
+          and obs.get("target") == target and obs.get("outcome") == "complete" and obs.get("code") is None
+          and obs.get("truncated") is False and bool(obs.get("acquired_at")) and obs.get("bytes") == fixture_bytes
+          and turn.get("feedback_suppressed") is True)
+    return _v("zos-read-complete", ok, notice_ok=notice_ok, expected_bytes=fixture_bytes, **_zos_turn_detail(turn))
+
+
+def check_zos_denied(turn: dict, target: str) -> Verdict:
+    """A member outside the allowlist (present in the same fixture tree): no content, outcome denied stated
+    in the agent's fixed line, no observation citation, none of the member's text in the answer, and the
+    manuals answer still served."""
+    obs = turn.get("zos_observation") or {}
+    first = str(turn.get("first_line") or "")
+    notice_ok = (first.startswith(f"z/OS read of {target} not used")
+                 and first.endswith(f", outcome: denied (denied): {ZOS_DENIED_TEXT}"))
+    ok = (_zos_turn_ok(turn) and notice_ok and turn.get("marker_in_content") is False
+          and not turn.get("fixture_seen") and obs.get("target") == target and obs.get("outcome") == "denied"
+          and obs.get("code") == "denied" and obs.get("bytes") == 0 and turn.get("feedback_suppressed") is True)
+    return _v("zos-read-denied", ok, notice_ok=notice_ok, fixture_seen=len(turn.get("fixture_seen") or []),
+              **_zos_turn_detail(turn))
+
+
+def check_zos_ordinary(turn: dict) -> Verdict:
+    """The next ordinary (manuals-only) request after the denied read: a normal cited answer with no z/OS
+    line, observation or feedback suppression."""
+    ok = (_zos_turn_ok(turn) and int(turn.get("content_chars") or 0) > 0 and not turn.get("first_line")
+          and turn.get("zos_observation") is None and turn.get("feedback_suppressed") is None
+          and turn.get("marker_in_content") is False)
+    return _v("zos-next-ordinary", ok, content_chars=turn.get("content_chars"), **_zos_turn_detail(turn))
+
+
+def check_zos_audit(log_text: str, tag: str, read_target: str, denied_target: str, read_bytes: int) -> Verdict:
+    """The agent's live_fetch audit lines carrying this run's audit tag (ADR-0012 D3(d)): exactly the read
+    (dataset_read; its bytes are the bridge's framed reply, so at least the member's) and the denied read
+    (no tool used, 0 bytes, denied); the ordinary request made none."""
+    records = []
+    for line in log_text.splitlines():
+        try:
+            doc = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(doc, dict) and doc.get("action") == "live_fetch" and doc.get("audit_tag") == tag:
+            records.append(doc)
+    by_target = {tuple(r.get("targets") or []): r for r in records}
+    read = by_target.get((read_target,), {})
+    denied = by_target.get((denied_target,), {})
+    read_ok = (read.get("tools") == ["dataset_read"] and isinstance(read.get("bytes"), int)
+               and read["bytes"] >= read_bytes > 0 and read.get("degraded") is None)
+    denied_ok = denied.get("tools") == [] and denied.get("bytes") == 0 and denied.get("degraded") == "denied"
+    ok = len(records) == 2 and read_ok and denied_ok
+    return _v("zos-audit", ok, records=len(records), read_bytes=read.get("bytes"), member_bytes=read_bytes,
+              read_degraded=read.get("degraded"),
+              denied_bytes=denied.get("bytes"), denied_degraded=denied.get("degraded"))
+
+
+ZOS_AUTH_EXPECTED = {"healthz": 200, "no-bearer": 401, "wrong-bearer": 401, "agent-bearer": 200}
+
+
+def check_zos_bridge_auth(statuses: dict[str, int]) -> Verdict:
+    """HTTP statuses from inside the agent pod (the one pod the bridge's policy admits): /mcp refuses a caller
+    without the bearer and with a wrong one (401), answers the agent's own bearer; /healthz stays open."""
+    return _v("zos-bridge-auth", statuses == ZOS_AUTH_EXPECTED, statuses=statuses)
+
+
+def _pod_spec(deploy: dict) -> dict:
+    return ((deploy.get("spec") or {}).get("template") or {}).get("spec") or {}
+
+
+def _pod_labels(deploy: dict) -> dict:
+    return (((deploy.get("spec") or {}).get("template") or {}).get("metadata") or {}).get("labels") or {}
+
+
+def check_zos_bridge_mock(live: dict, rendered: dict, ready: bool) -> Verdict:
+    """The running bridge is the chart's Deployment (labels, image, command, env, volumes) with only the
+    lane's mock mode added: --mock ZOS_MOCK_DIR as args and one fixture volume. The label stays
+    app: rag-mcp-ftp, so the chart's own Service and NetworkPolicy are what the lane proves."""
+    live_pod, render_pod = _pod_spec(live), _pod_spec(rendered)
+    live_c, render_c = live_pod.get("containers") or [], render_pod.get("containers") or []
+    same = len(live_c) == len(render_c) == 1 and all(
+        live_c[0].get(key) == render_c[0].get(key) for key in ("name", "image", "command", "env"))
+    mounts = [m for m in (live_c[0].get("volumeMounts") or []) if m not in (render_c[0].get("volumeMounts") or [])] \
+        if same else []
+    volumes = [v for v in live_pod.get("volumes") or [] if v not in (render_pod.get("volumes") or [])]
+    mock_ok = (same and live_c[0].get("args") == ["--mock", ZOS_MOCK_DIR]
+               and [m.get("mountPath") for m in mounts] == [ZOS_MOCK_DIR]
+               and [(v.get("configMap") or {}).get("name") for v in volumes] == ["zos-mock-fixtures"])
+    labels_ok = _pod_labels(live) == _pod_labels(rendered) == {"app": "rag-mcp-ftp"}
+    return _v("zos-bridge-mock", bool(ready and same and mock_ok and labels_ok), ready=ready, chart_container=same,
+              mock_args=mock_ok, labels=labels_ok, extra_volumes=len(volumes))
+
+
+def check_zos_agent_env(live_env: list[dict], rendered_env: list[dict], unreachable_lines: int) -> Verdict:
+    """The live agent's ZOWE_MCP_* entries are exactly the chart's render (names, values, Secret refs), and
+    its start-up probe reached the bridge (no zowe_mcp_unreachable line from the new pod)."""
+    def zowe(env: list[dict]) -> list[dict]:
+        return [e for e in env if str(e.get("name", "")).startswith("ZOWE_MCP_")]
+    live, render = zowe(live_env), zowe(rendered_env)
+    names = sorted(e["name"] for e in render)
+    ok = bool(render) and live == render and names == sorted(ZOS_AGENT_ENV) and unreachable_lines == 0
+    return _v("zos-agent-env", ok, names=names, equal_to_render=live == render, unreachable=unreachable_lines)
+
+
+def check_zos_network(probes: dict[str, int]) -> Verdict:
+    """Real sockets (scripts/ci/egress_probe.py exit codes, 0 = expectation met): a pod outside the agent
+    reaches the agent (control) but not the bridge, by pod address or Service; the agent reaches the
+    bridge; the bridge reaches neither the agent nor the API server (its own egress policy alone)."""
+    failed = sorted(name for name, rc in probes.items() if rc != 0)
+    return _v("zos-network", bool(probes) and not failed, probes=len(probes), failed=failed)
+
+
 def overall(verdicts: list[Verdict]) -> bool:
     return bool(verdicts) and all(v.ok for v in verdicts)

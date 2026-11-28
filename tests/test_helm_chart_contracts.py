@@ -3347,3 +3347,336 @@ def test_splunk_gateway_schema_refuses_invalid_values(owui_chart, path, bad):
     values = set_path(_splunk_values(), path, bad)
     r = _splunk_render(owui_chart, values)
     assert r.returncode != 0
+
+
+# --- z/OS dataset-read pilot (ADR-0012, #1294 PR 3): default off ---
+
+ZOS_OBJECTS = {("Deployment", "rag-mcp-ftp"), ("Service", "rag-mcp-ftp"), ("NetworkPolicy", "rag-mcp-ftp")}
+ZOS_CA = "-----BEGIN CERTIFICATE-----\nWk9TLVRFU1QtQ0E=\n-----END CERTIFICATE-----\n"
+ZOS_ALLOWLIST = ["SYS1.PARMLIB(IEASYS00)", "TEAM.A$B.JCL(#RUN@1)", "TEAM.NOTES"]
+ZOS_REFUSED_ROLES = ("zosRead.enabled=true refused: every role in openwebui.oidc.allowedRoles and "
+                     "openwebui.oidc.adminRoles must be listed in zosRead.approvedRoles (ADR-0012 D3 guard (b)); "
+                     "role names are not shown")
+
+
+def _zos_values(zos: dict | None = None, ftp: dict | None = None, **top) -> dict:
+    values = json.loads(json.dumps(OWUI_ON))
+    values["zosRead"] = {
+        "enabled": True, "secretName": "zos-read", "auditKey": {"secretName": "zos-audit"},
+        "approvedRoles": ["staff", "docs-admins", "docs-owners"],
+        "datasetAllowlist": list(ZOS_ALLOWLIST),
+        "ftp": {"host": "192.0.2.44", "hostIp": "192.0.2.44", "passivePorts": {"first": 50000, "last": 50100},
+                "transportMode": "plain", "plainAccepted": True, **(ftp or {})},
+        **(zos or {}),
+    }
+    for key, val in top.items():
+        if isinstance(val, dict) and isinstance(values.get(key), dict):
+            values[key] = merge_values(values[key], val)
+        else:
+            values[key] = val
+    return values
+
+
+def _zos(chart, zos=None, ftp=None, **top):
+    return run_new_template(_zos_values(zos, ftp, **top), chart=chart)
+
+
+def _zos_fail(chart, zos=None, ftp=None, **top):
+    r = _helm_template_with_values(merge_values(base_values(), _zos_values(zos, ftp, **top)), chart=chart)
+    assert r.returncode != 0, "render was accepted"
+    return r.stderr
+
+
+def test_zos_reads_off_by_default_change_nothing(owui_chart):
+    """Default off: an explicit off equals the default, the inputs alone render
+    nothing, and no object or agent variable names the bridge."""
+    default = _owui(owui_chart)
+    assert _owui(owui_chart, {"zosRead": {"enabled": False}}) == default
+    assert not ZOS_OBJECTS & set(default)
+    assert not [n for n in env_map(default["Deployment", "rag-agent"]) if n.startswith("ZOWE_MCP_")]
+    assert not [n for n in env_map(default["Deployment", "rag-openwebui"], "openwebui") if n.startswith("RAG_ZOS_")]
+    inputs = _zos_values({"enabled": False})
+    plain = json.loads(json.dumps(OWUI_ON))
+    assert (_helm_template_with_values(merge_values(base_values(), inputs), chart=owui_chart).stdout
+            == _helm_template_with_values(merge_values(base_values(), plain), chart=owui_chart).stdout)
+    assert "rag-mcp-ftp" not in yaml.safe_dump(run_new_template({}))
+
+
+def test_zos_reads_enabled_adds_the_bridge_and_only_touches_the_agent(owui_chart):
+    on = _zos(owui_chart)
+    off = run_new_template(_zos_values({"enabled": False}), chart=owui_chart)
+    assert set(on) - set(off) == ZOS_OBJECTS and set(off) <= set(on)
+    assert {key for key in off if on[key] != off[key]} == {("Deployment", "rag-agent"), ("Deployment", "rag-openwebui")}
+    # Open WebUI changes by exactly the docs Pipe's audit-tag pair (#1397).
+    on_owui = env_map(on["Deployment", "rag-openwebui"], "openwebui")
+    off_owui = env_map(off["Deployment", "rag-openwebui"], "openwebui")
+    assert set(on_owui) - set(off_owui) == {"RAG_ZOS_AUDIT_TAG", "RAG_ZOS_AUDIT_KEY"}
+    assert {n: e for n, e in on_owui.items() if n in off_owui} == off_owui
+    # G5: the cluster-admin EgressIP is never a chart object, and nothing is a Route to the bridge.
+    assert not [key for key in on if key[0] in ("EgressIP", "Route") and "mcp" in key[1]]
+    assert "k8s.ovn.org" not in yaml.safe_dump(list(on.values()))
+
+
+def test_zos_bridge_workload_contract(owui_chart):
+    docs = _zos(owui_chart, images={"agent": {"repository": "reg.internal/agent", "tag": IMAGE_SHA}})
+    dep = docs["Deployment", "rag-mcp-ftp"]
+    assert dep["spec"]["replicas"] == 1 and dep["spec"]["strategy"] == {"type": "Recreate"}
+    # ADR-0012 D4: the cluster-admin EgressIP selects exactly this label.
+    assert dep["spec"]["selector"] == {"matchLabels": {"app": "rag-mcp-ftp"}}
+    assert dep["spec"]["template"]["metadata"]["labels"] == {"app": "rag-mcp-ftp"}
+    pod = dep["spec"]["template"]["spec"]
+    assert _hardening_violations(pod) == []
+    assert pod["automountServiceAccountToken"] is False and pod["enableServiceLinks"] is False
+    (c,) = pod["containers"]
+    assert c["name"] == "bridge"
+    assert c["image"] == container_map(docs["Deployment", "rag-agent"])["agent"]["image"]
+    assert c["securityContext"]["readOnlyRootFilesystem"] is True
+    assert c["command"] == ["python3", "-m", "mainframe_rag.mcp", "--transport", "http",
+                            "--host", "0.0.0.0", "--port", "8081"]
+    assert "--mock" not in yaml.safe_dump(dep) and "MCP_MOCK_DIR" not in yaml.safe_dump(dep)
+    assert c["ports"] == [{"containerPort": 8081, "name": "http"}]
+    for probe in ("readinessProbe", "livenessProbe"):
+        assert c[probe]["httpGet"] == {"path": "/healthz", "port": "http"}
+    assert c["resources"] == {"requests": {"cpu": "50m", "memory": "128Mi"},
+                              "limits": {"cpu": "500m", "memory": "512Mi"}}
+    env = env_map(dep, "bridge")
+    assert {n: e["value"] for n, e in env.items() if "value" in e} == {
+        "MCP_FTP_HOST": "192.0.2.44", "MCP_FTP_PORT": "21", "MCP_FTP_TRANSPORT_MODE": "plain",
+        "MCP_FTP_PLAIN_ACCEPTED": "true", "MCP_FTP_ENCODING": "latin-1",
+        "MCP_DATASET_ALLOWLIST": "SYS1.PARMLIB(IEASYS00),TEAM.A$$B.JCL(#RUN@1),TEAM.NOTES",
+        "MCP_ENABLED_TOOLS": "dataset_read",
+    }
+    # Credentials are references only: the READ-only ID and the caller bearer.
+    assert {n: e["valueFrom"] for n, e in env.items() if "valueFrom" in e} == {
+        "MCP_FTP_USER": {"secretKeyRef": {"name": "zos-read", "key": "ftp-user"}},
+        "MCP_FTP_PASSWORD": {"secretKeyRef": {"name": "zos-read", "key": "ftp-password"}},
+        "MCP_BRIDGE_AUTH_TOKEN": {"secretKeyRef": {"name": "zos-read", "key": "bridge-token"}},
+    }
+    svc = docs["Service", "rag-mcp-ftp"]
+    assert svc["spec"]["type"] == "ClusterIP" and svc["spec"]["selector"] == {"app": "rag-mcp-ftp"}
+    assert svc["spec"]["ports"] == [{"name": "http", "port": 8081, "targetPort": "http", "protocol": "TCP"}]
+
+
+def test_zos_allowlist_reaches_the_bridge_parser_exactly_through_kubelet_expansion(owui_chart):
+    """Names carry $ # @ ( ): the rendered value, after kubelet $(VAR)/$$ expansion
+    with every earlier variable defined, parses to exactly the operator's list."""
+    from mainframe_rag.mcp.bridge import parse_dataset_allowlist
+
+    tricky = ["A$.B(C)", "X.$(MCP)", "TEAM.A$$B", "#A.@B($C)"]
+    docs = _zos(owui_chart, {"datasetAllowlist": tricky})
+    container = container_map(docs["Deployment", "rag-mcp-ftp"])["bridge"]
+    earlier = {e["name"]: e.get("value", "secret") for e in container["env"]}
+    earlier["MCP"] = "EXPANDED"  # a hostile earlier variable must not be substituted
+    raw = env_map(docs["Deployment", "rag-mcp-ftp"], "bridge")["MCP_DATASET_ALLOWLIST"]["value"]
+    assert parse_dataset_allowlist(_expand_k8s_env(raw, earlier)) == tuple(tricky)
+
+
+def test_zos_agent_wiring_references_only_the_bearer(owui_chart):
+    docs = _zos(owui_chart)
+    env = env_map(docs["Deployment", "rag-agent"])
+    assert env["ZOWE_MCP_ENABLED"]["value"] == "true"
+    assert env["ZOWE_MCP_BASE_URL"]["value"] == "http://rag-mcp-ftp:8081"
+    assert env["ZOWE_MCP_DRY_RUN"]["value"] == "false"
+    bridge = env_map(docs["Deployment", "rag-mcp-ftp"], "bridge")
+    assert env["ZOWE_MCP_AUTH_TOKEN"]["valueFrom"] == bridge["MCP_BRIDGE_AUTH_TOKEN"]["valueFrom"]
+    agent_yaml = yaml.safe_dump(docs["Deployment", "rag-agent"])
+    assert "ftp-user" not in agent_yaml and "ftp-password" not in agent_yaml
+    # Hash mode and every other agent variable stay as they were.
+    off = env_map(run_new_template(_zos_values({"enabled": False}), chart=owui_chart)["Deployment", "rag-agent"])
+    assert {n: e for n, e in env.items() if not n.startswith("ZOWE_MCP_")} == off
+    assert "EMBED_MODE" not in env and "ALLOW_HASH_MODE" not in env
+    dry = env_map(_zos(owui_chart, {"dryRun": True})["Deployment", "rag-agent"])
+    assert dry["ZOWE_MCP_DRY_RUN"]["value"] == "true"
+
+
+def test_zos_bridge_network_policy_admits_agent_pods_and_reaches_one_host(owui_chart):
+    policy = _zos(owui_chart, ftp={"port": 2121})["NetworkPolicy", "rag-mcp-ftp"]["spec"]
+    assert policy["podSelector"] == {"matchLabels": {"app": "rag-mcp-ftp"}}
+    assert sorted(policy["policyTypes"]) == ["Egress", "Ingress"]
+    assert policy["ingress"] == [{"from": [{"podSelector": {"matchLabels": {"app": "rag-agent"}}}],
+                                  "ports": [{"protocol": "TCP", "port": 8081}]}]
+    dns, zos = policy["egress"]
+    assert dns["to"] == [{"namespaceSelector": {"matchExpressions": [
+        {"key": "kubernetes.io/metadata.name", "operator": "In", "values": ["openshift-dns", "kube-system"]}]}}]
+    assert {(p["protocol"], p["port"]) for p in dns["ports"]} == {("UDP", 53), ("TCP", 53), ("UDP", 5353), ("TCP", 5353)}
+    assert zos == {"to": [{"ipBlock": {"cidr": "192.0.2.44/32"}}],
+                   "ports": [{"protocol": "TCP", "port": 2121},
+                             {"protocol": "TCP", "port": 50000, "endPort": 50100}]}
+
+
+def test_zos_ftps_mode_mounts_the_site_ca_and_never_marks_plain_accepted(owui_chart):
+    docs = _zos(owui_chart, ftp={"transportMode": "ftps", "plainAccepted": False, "caBundle": ZOS_CA,
+                                 "host": "zos.example.invalid"})
+    assert docs["ConfigMap", "rag-mcp-ftp"]["data"] == {"ca-bundle.crt": ZOS_CA}
+    dep = docs["Deployment", "rag-mcp-ftp"]
+    env = env_map(dep, "bridge")
+    assert env["MCP_FTP_TRANSPORT_MODE"]["value"] == "ftps"
+    assert env["MCP_FTP_CA_FILE"]["value"] == "/etc/mainframe-rag/mcp-ftp/ca-bundle.crt"
+    assert "MCP_FTP_PLAIN_ACCEPTED" not in env
+    mounts = {m["name"]: m for m in container_map(dep)["bridge"]["volumeMounts"]}
+    assert mounts["ca"] == {"name": "ca", "mountPath": "/etc/mainframe-rag/mcp-ftp", "readOnly": True}
+    # Plain mode renders no CA object and no CA variable.
+    plain = _zos(owui_chart)
+    assert ("ConfigMap", "rag-mcp-ftp") not in plain
+    assert "MCP_FTP_CA_FILE" not in env_map(plain["Deployment", "rag-mcp-ftp"], "bridge")
+
+
+def test_zos_opt_in_jes_tools_carry_their_prefixes(owui_chart):
+    docs = _zos(owui_chart, {"enabledTools": ["dataset_read", "job_status", "jes_spool_read"],
+                             "jesJobnamePrefixes": ["TEAM", "$OPS"], "jesOwnerPrefixes": ["OPSUSR"]})
+    env = env_map(docs["Deployment", "rag-mcp-ftp"], "bridge")
+    assert env["MCP_ENABLED_TOOLS"]["value"] == "dataset_read,job_status,jes_spool_read"
+    assert env["MCP_JES_JOBNAME_PREFIXES"]["value"] == "TEAM,$$OPS"
+    assert env["MCP_JES_OWNER_PREFIXES"]["value"] == "OPSUSR"
+
+
+def test_zos_reads_turn_on_the_docs_pipe_audit_tag_with_its_key_reference(owui_chart):
+    """ADR-0012 D3(d), #1397: the docs Pipe tags every agent call exactly when
+    the agent's dataset reads are on (dry run included), with its key only by
+    Secret reference; never a value in the render."""
+    for dry in (False, True):
+        owui = env_map(_zos(owui_chart, {"dryRun": dry})["Deployment", "rag-openwebui"], "openwebui")
+        assert owui["RAG_ZOS_AUDIT_TAG"] == {"name": "RAG_ZOS_AUDIT_TAG", "value": "true"}
+        assert owui["RAG_ZOS_AUDIT_KEY"] == {"name": "RAG_ZOS_AUDIT_KEY", "valueFrom": {
+            "secretKeyRef": {"name": "zos-audit", "key": "audit-key"}}}
+    custom = _zos(owui_chart, {"auditKey": {"secretName": "site-audit", "key": "hmac"}})
+    custom_env = env_map(custom["Deployment", "rag-openwebui"], "openwebui")
+    assert custom_env["RAG_ZOS_AUDIT_KEY"]["valueFrom"] == {"secretKeyRef": {"name": "site-audit", "key": "hmac"}}
+    # Off (the default, or with every other input set): no audit variable at all.
+    off_docs = run_new_template(_zos_values({"enabled": False}), chart=owui_chart)
+    off = env_map(off_docs["Deployment", "rag-openwebui"], "openwebui")
+    assert not [n for n in off if n.startswith("RAG_ZOS_")]
+
+
+@pytest.mark.parametrize("audit,want", [
+    ({}, ("zosRead.enabled=true refused without zosRead.auditKey.secretName: the docs Pipe tags every agent call "
+          "with a keyed audit tag (ADR-0012 D3(d)) and answers nothing without its key")),
+    ({"secretName": "zos-read"}, ("zosRead.auditKey.secretName must not be zosRead.secretName: the Open WebUI pod "
+                                  "must not reference the Secret that holds the z/OS ID")),
+    ({"secretName": "zos-audit", "key": ""}, "zosRead.auditKey.key must not be empty"),
+], ids=["no-audit-secret", "audit-secret-is-the-zos-secret", "empty-key"])
+def test_zos_reads_refuse_a_missing_or_shared_audit_key_reference(owui_chart, audit, want):
+    assert want in _zos_fail(owui_chart, {"auditKey": audit})
+
+
+def test_zos_reads_without_open_webui_need_no_audit_key():
+    """No Open WebUI, no docs Pipe: nothing to tag and no key to reference."""
+    values = _zos_values({"approvedRoles": [], "auditKey": {}})
+    values["openwebui"] = {"enabled": False}
+    docs = run_new_template(values)
+    assert set(docs) >= ZOS_OBJECTS and ("Deployment", "rag-openwebui") not in docs
+
+
+def test_zos_reads_accept_feedback_and_ratings_on(owui_chart):
+    """ADR-0012 D6 (Option 7A): render does not refuse FEEDBACK_ENABLED=true;
+    observation turns are suppressed in the agent instead."""
+    docs = _zos(owui_chart, **FEEDBACK_ON)
+    assert set(docs) >= ZOS_OBJECTS and ("StatefulSet", "rag-feedback") in docs
+
+
+def test_zos_reads_without_open_webui_have_no_role_list_to_check():
+    """The role guard reads the rendered sign-in lists; with the front end off
+    there is none (recorded as a maintainer decision in the PR)."""
+    values = _zos_values({"approvedRoles": []})
+    values["openwebui"] = {"enabled": False}
+    docs = run_new_template(values)
+    assert set(docs) >= ZOS_OBJECTS
+
+
+@pytest.mark.parametrize("allowed,admins,approved", [
+    ("staff,contractors", "docs-admins", ["staff", "docs-admins"]),
+    ("staff", "docs-admins,site-admins", ["staff", "docs-admins"]),
+    ("staff", "docs-admins", ["staff"]),
+    ("staff", "docs-admins", []),
+    ("staff", "docs-admins", ["STAFF", "docs-admins"]),
+], ids=["extra-sign-in-role", "extra-admin-role", "admin-role-not-approved", "nothing-approved", "case"])
+def test_zos_reads_refuse_a_sign_in_or_admin_role_outside_the_approved_roles(owui_chart, allowed, admins, approved):
+    err = _zos_fail(owui_chart, {"approvedRoles": approved},
+                    openwebui={"oidc": {"allowedRoles": allowed, "adminRoles": admins}})
+    assert ZOS_REFUSED_ROLES in err
+    for name in ("contractors", "site-admins"):
+        assert name not in err
+
+
+def test_zos_reads_accept_approved_roles_that_cover_both_lists(owui_chart):
+    docs = _zos(owui_chart, {"approvedRoles": ["docs-owners", "extra-approved", "staff", "docs-admins"]})
+    assert set(docs) >= ZOS_OBJECTS
+
+
+@pytest.mark.parametrize("top,want", [
+    ({"route": {"enabled": True}},
+     ("zosRead.enabled=true refused with route.enabled=true (AGENT_ROUTE): z/OS reads are limited to signed-in "
+     "team members (ADR-0012 D3 guard (c))")),
+    ({"networkPolicy": {"enabled": False}},
+     ("zosRead.enabled=true refused with networkPolicy.enabled=false (AGENT_NETWORK_POLICY): z/OS reads are limited "
+     "to signed-in team members (ADR-0012 D3 guard (c))")),
+    ({"networkPolicy": {"enabled": True, "allowedNamespaces": ["tools"]}},
+     ("zosRead.enabled=true refused with networkPolicy.allowedNamespaces set (AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES): "
+     "z/OS reads are limited to signed-in team members (ADR-0012 D3 guard (c))")),
+], ids=["agent-route", "network-policy-off", "extra-namespaces"])
+def test_zos_reads_refuse_readers_outside_signed_in_team_members(owui_chart, top, want):
+    assert want in _zos_fail(owui_chart, **top)
+
+
+ZOS_REFUSED = [
+    ("no-secret", {"secretName": ""}, {}, "required inputs are missing: zosRead.secretName."),
+    ("no-allowlist", {"datasetAllowlist": []}, {}, "required inputs are missing: zosRead.datasetAllowlist."),
+    ("no-host-ip-ports", {}, {"host": "", "hostIp": "", "passivePorts": {"first": 0, "last": 0}},
+     "required inputs are missing: zosRead.ftp.host, zosRead.ftp.hostIp, zosRead.ftp.passivePorts."),
+    ("mode-unset", {}, {"transportMode": ""},
+     "zosRead.ftp.transportMode must be ftps or plain: the operator pins the transport, with no fallback (ADR-0012 D5)"),
+    ("plain-not-accepted", {}, {"plainAccepted": False},
+     ("zosRead.ftp.transportMode=plain requires zosRead.ftp.plainAccepted=true: the site security owner's written "
+     "acceptance of plain FTP (ADR-0012 D5)")),
+    ("ftps-no-ca", {}, {"transportMode": "ftps"}, "required inputs are missing: zosRead.ftp.caBundle."),
+    ("ftps-ca-not-pem", {}, {"transportMode": "ftps", "caBundle": "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n"},
+     "zosRead.ftp.caBundle must hold only PEM certificates"),
+    ("passive-reversed", {}, {"passivePorts": {"first": 50100, "last": 50000}},
+     "zosRead.ftp.passivePorts.first must not be above zosRead.ftp.passivePorts.last"),
+    ("ip-host-differs", {}, {"host": "192.0.2.45"},
+     "zosRead.ftp.host is an IPv4 address that differs from zosRead.ftp.hostIp: the bridge reaches one z/OS host"),
+    ("uss-read", {"enabledTools": ["dataset_read", "uss_read"]}, {}, "at '/zosRead/enabledTools/1'"),
+    ("no-tools", {"enabledTools": []}, {}, "zosRead.enabledTools must name at least one approved tool (ADR-0012 D7)"),
+    ("jes-without-prefix", {"enabledTools": ["dataset_read", "job_status"]}, {},
+     ("zosRead.enabledTools names a JES tool but zosRead.jesJobnamePrefixes and zosRead.jesOwnerPrefixes are both "
+     "empty: the bridge would deny every job")),
+]
+
+
+@pytest.mark.parametrize("zos,ftp,want", [(z, f, w) for _, z, f, w in ZOS_REFUSED], ids=[i for i, _, _, _ in ZOS_REFUSED])
+def test_zos_reads_refuse_inputs_that_do_not_fit_the_render(owui_chart, zos, ftp, want):
+    err = _zos_fail(owui_chart, zos, ftp)
+    assert want in err
+    assert "AAAA" not in err
+
+
+@pytest.mark.parametrize("path,bad", [
+    ("zosRead.datasetAllowlist", ["sys1.parmlib"]),
+    ("zosRead.datasetAllowlist", ["SYS1.*"]),
+    ("zosRead.datasetAllowlist", ["SYS1.GDG(-1)"]),
+    ("zosRead.datasetAllowlist", ["'SYS1.PARMLIB'"]),
+    ("zosRead.datasetAllowlist", ["SYS1.PARMLIB,SYS1.PROCLIB"]),
+    ("zosRead.enabledTools", ["write_dataset"]),
+    ("zosRead.jesJobnamePrefixes", ["PAY*"]),
+    ("zosRead.ftp.hostIp", "192.0.2.0/24"),
+    ("zosRead.ftp.hostIp", "zos.example.invalid"),
+    ("zosRead.ftp.transportMode", "auto"),
+    ("zosRead.ftp.port", 0),
+    ("zosRead.ftp.host", "ftp://192.0.2.44"),
+    ("zosRead.secretName", "Bad_Name"),
+    ("zosRead.approvedRoles", "staff"),
+    ("zosRead.approvedRoles", ["staff ", "docs-admins", "docs-owners"]),
+    ("zosRead.mock", "/fixtures"),
+    ("zosRead.auditKey.secretName", "Bad_Name"),
+    ("zosRead.auditKey.key", "bad key"),
+])
+def test_zos_reads_schema_refuses_invalid_values(owui_chart, path, bad):
+    values = set_path(_zos_values(), path, bad)
+    r = _helm_template_with_values(merge_values(base_values(), values), chart=owui_chart)
+    assert r.returncode != 0
+    # The schema names the offending path (a chart without zosRead would refuse
+    # the whole block instead, so this cannot pass for the wrong reason).
+    parent, _, leaf = path.rpartition(".")
+    where = f"at '/{path.replace('.', '/')}" if leaf != "mock" else f"at '/{parent.replace('.', '/')}'"
+    assert where in r.stderr, r.stderr
+    assert leaf != "mock" or "'mock'" in r.stderr

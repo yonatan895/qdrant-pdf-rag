@@ -91,8 +91,9 @@ echo "==> Helm: explicit ingest Job (corpus PVC: $CORPUS_PVC)"
 # Route configuration belongs to deployment, not this one-shot operation; so
 # does the Open WebUI front end (its Route needs the service CA that only
 # deploy fetches) and its team tools (#1077: the Splunk gateway needs Open
-# WebUI), so the Job render opts out of them explicitly.
-AGENT_ROUTE=false OPENWEBUI_ENABLED=false SPLUNK_GATEWAY_ENABLED=false map_app_values --out dist/mainframe-rag-ingest-values.yaml
+# WebUI), so the Job render opts out of them explicitly; so does the z/OS
+# bridge (#1294: with Open WebUI off its role guard would read no role list).
+AGENT_ROUTE=false OPENWEBUI_ENABLED=false SPLUNK_GATEWAY_ENABLED=false ZOS_READ_ENABLED=false map_app_values --out dist/mainframe-rag-ingest-values.yaml
 helm template mainframe-rag charts/mainframe-rag -f dist/mainframe-rag-ingest-values.yaml \
     --namespace "$NAMESPACE" --show-only templates/ingest-job.yaml > dist/ingest-rendered.yaml
 helm template mainframe-rag charts/mainframe-rag -f dist/mainframe-rag-ingest-values.yaml \

@@ -72,6 +72,13 @@ ALLOWED = {
     ('v1', 'Service', 'rag-splunk-gateway'),
     ('v1', 'ConfigMap', 'rag-splunk-gateway'),
     ('networking.k8s.io/v1', 'NetworkPolicy', 'rag-splunk-gateway'),
+    # The read-only z/OS FTP bridge (#1294, ADR-0012), default off: a
+    # disabled-cleanup entry; ZOS_READ_ENABLED=false lets the release prune
+    # all four (the ConfigMap exists in ftps mode only), and none holds data.
+    ('apps/v1', 'Deployment', 'rag-mcp-ftp'),
+    ('v1', 'Service', 'rag-mcp-ftp'),
+    ('v1', 'ConfigMap', 'rag-mcp-ftp'),
+    ('networking.k8s.io/v1', 'NetworkPolicy', 'rag-mcp-ftp'),
 }
 
 

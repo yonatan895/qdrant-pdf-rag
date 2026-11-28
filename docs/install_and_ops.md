@@ -920,6 +920,24 @@ upload it.
   after restart (about 30 s).
 - Stdout of import is counts only. Delete the file and any copy afterwards.
 
+### 4.4.4 Read-only z/OS dataset reads (optional, default off, ADR-0012)
+
+`ZOS_READ_ENABLED=true` deploys the read-only FTP bridge `rag-mcp-ftp`, which
+runs on the agent image (no new image or pin), and points the agent's Docs-path
+reads at it. Before turning it on, the site needs written approvals, an
+`EgressIP` that cluster-admin scopes to `app: rag-mcp-ftp`, a RACF terminal
+binding and firewall rules. Then create the Secret `zos-read` (keys
+`ftp-user`, `ftp-password` and `bridge-token`) and set the `ZOS_*` keys of
+`airgap.env.example`, starting with `ZOS_READ_DRY_RUN=true`. A second Secret
+(`ZOS_READ_AUDIT_SECRET`, key `audit-key`: printable ASCII only, e.g.
+`openssl rand -hex 32 | oc -n "$NAMESPACE" create secret generic zos-audit --from-file=audit-key=/dev/stdin`) holds the docs
+Pipe's audit-tag key, which validate and deploy require while Open WebUI is on. Validate and deploy
+refuse unless every Open WebUI sign-in and admin role is in
+`ZOS_READ_APPROVED_ROLES`. They also refuse with `AGENT_ROUTE=true`,
+`AGENT_NETWORK_POLICY=false` or extra agent namespaces, and when the transport is
+not pinned. The procedure, the probes, the refusals and the rollback
+(`ZOS_READ_ENABLED=false`) are in [deploy: z/OS reads](deploy.md#zos-read-deploy).
+
 ### 4.5 Corpus Ingestion
 
 #### Gateway readiness probe
@@ -1174,6 +1192,7 @@ beyond the namespace record the platform team's evidence and owner instead.
 | OAuth Route | A fresh unauthenticated `GET /ui` may show the provider chooser (403); `/oauth/start` redirects to OpenShift OAuth; login returns to `/ui`; a fresh session still requires authentication. No direct public API, Jaeger or Qdrant Route. |
 | Certificates | Browser and CLI verify the Route hostname and ingress chain without bypass. The Route is `reencrypt`, targets OAuth 8443 and trusts the Service CA; the serving Secret matches its service identity. |
 | Agent ingress | `oc -n "$NAMESPACE" get networkpolicy rag-agent-ingress` exists (or `AGENT_NETWORK_POLICY=false` is a recorded site decision). Pods stay Ready after it is applied (probes). From a pod in a **different, unlisted** namespace, `rag-agent:8080` and the pod IP `:8080` fail while the same call from this namespace succeeds; the Route login still works (router to 8443) and a UWM scrape of `/metrics` succeeds when metrics are on. Record that the router and monitoring namespaces carry the `network.openshift.io/policy-group` labels (cluster-scoped read: platform evidence) and that no site allow-all policy selects the agent pods (policies are additive and would void the restriction). Repository tests prove the rendered rules only, not enforcement. |
+| z/OS bridge (only with `ZOS_READ_ENABLED`) | `oc -n "$NAMESPACE" get networkpolicy rag-mcp-ftp` exists and no `Route` names `rag-mcp-ftp`. From an agent pod, `rag-mcp-ftp:8081/healthz` answers and an `/mcp` request without the bearer is 401. From a debug pod in the namespace, `rag-mcp-ftp:8081` fails. The bridge pod runs the agent digest. Record the cluster-admin `EgressIP` (its `podSelector` is `app: rag-mcp-ftp` only) and the D8 probe receipts with ids, codes and counts only ([deploy](deploy.md#zos-read-deploy)). Repository tests prove the rendered rules, not their enforcement. |
 | Feedback ingress (only with `FEEDBACK_ENABLED`) | `oc -n "$NAMESPACE" get networkpolicy rag-feedback-ingress` exists. From an agent pod, `rag-feedback:8080/healthz` answers; from the ingest Job pod, a debug pod and a pod in another namespace, `rag-feedback:8080` and the pod IP fail; an unauthenticated request to an agent-reachable data route is 401. The claim `rag-feedback-data` is Bound on the intended block class and the pod writes it under `restricted-v2`. Record that no site allow-all policy selects the feedback pod (policies are additive) and, for a default-deny egress site, that agent to feedback is allowed. Repository tests prove the rendered rules only, not enforcement. |
 | Egress | Prove a public TCP destination is reachable from each application policy context first; after the namespace default-deny egress policy with narrow DNS, Qdrant, OpenObserve, OAuth/API and gateway allows, a bounded direct-IP connection to that address fails while DNS and gateway calls succeed. Repeat ingest, gateway streaming probe, retrieval, tracing, OAuth login, cited answers and stream endings under the policy. An unresolved name or invalid certificate is not evidence of blocking. |
 | Node pulls | An uncached public image pull fails and an uncached internal-registry pull succeeds, recorded with digests and events. A cached image proves neither; NetworkPolicy success does not imply node isolation. |

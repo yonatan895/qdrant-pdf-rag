@@ -636,6 +636,41 @@ def test_config_check_mirrors_the_splunk_gateway_refusals(tmp_path):
         assert not any(v in e for e in errors for v in chosen.values() if v not in ("", "oidc")), errors
 
 
+def test_config_check_mirrors_the_zos_read_refusals():
+    """#1294: airgap:config check refuses what map_values.py refuses (one owner,
+    zos_read_config), ADR-0012's unsafe combinations included, with the same
+    fixed text and no value echoed; a valid enabled selection and the default
+    (off) pass."""
+    from scripts.airgap.config_tool import check_config
+
+    enabled = {
+        "OPENWEBUI_ENABLED": "true", "OPENWEBUI_OIDC_ALLOWED_ROLES": "staff", "OPENWEBUI_OIDC_ADMIN_ROLES": "docs-admins",
+        "ZOS_READ_ENABLED": "true", "ZOS_READ_SECRET": "zos-read", "ZOS_READ_APPROVED_ROLES": "staff,docs-admins",
+        "ZOS_READ_AUDIT_SECRET": "zos-audit",
+        "ZOS_READ_DATASET_ALLOWLIST": "SYS1.PARMLIB(IEASYS00)", "ZOS_FTP_HOST": "192.0.2.44",
+        "ZOS_FTP_PASSIVE_PORTS": "50000-50100", "ZOS_FTP_TRANSPORT_MODE": "plain", "ZOS_FTP_PLAIN_ACCEPTED": "true",
+    }
+
+    def zos_errors(values):
+        errors, _ = check_config(values)
+        return [e for e in errors if "ZOS_" in e]
+
+    assert zos_errors({}) == []
+    assert zos_errors(enabled) == []
+    for chosen, rule in (
+        ({"OPENWEBUI_OIDC_ADMIN_ROLES": "zq-site-admins"}, "must be listed in ZOS_READ_APPROVED_ROLES"),
+        ({"AGENT_ROUTE": "true"}, "ZOS_READ_ENABLED=true refused with AGENT_ROUTE=true"),
+        ({"AGENT_NETWORK_POLICY": "false"}, "ZOS_READ_ENABLED=true refused with AGENT_NETWORK_POLICY=false"),
+        ({"AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES": "zq-tools"}, "refused with AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES"),
+        ({"ZOS_FTP_TRANSPORT_MODE": "zq-auto"}, "ZOS_FTP_TRANSPORT_MODE must be ftps or plain"),
+        ({"ZOS_READ_ENABLED_TOOLS": "zq_write"}, "ZOS_READ_ENABLED_TOOLS must be a subset"),
+        ({"ZOS_READ_AUDIT_SECRET": ""}, "ZOS_READ_ENABLED=true refused without ZOS_READ_AUDIT_SECRET"),
+    ):
+        errors = zos_errors({**enabled, **chosen})
+        assert any(rule in e for e in errors), (chosen, errors)
+        assert not any(v in e for e in errors for v in chosen.values() if v not in ("", "true", "false")), errors
+
+
 def test_config_sh_help_and_argument_errors(tmp_path):
     make_bin_tree(tmp_path, ["common.sh", "config.sh"])
     env = {"PATH": system_path(tmp_path / "bin")}
@@ -789,6 +824,13 @@ def test_registry_defaults_match_values_yaml_and_settings(tmp_path):
         "TEAM_MODEL_EGRESS_CIDRS",
         "SPLUNK_EGRESS_CIDRS",
         "SPLUNK_GATEWAY_IDP_EGRESS_CIDRS",
+        # Comma-separated strings in airgap.env, lists or a FIRST-LAST object in values.yaml (#1294).
+        "ZOS_READ_APPROVED_ROLES",
+        "ZOS_READ_DATASET_ALLOWLIST",
+        "ZOS_READ_ENABLED_TOOLS",
+        "ZOS_READ_JES_JOBNAME_PREFIXES",
+        "ZOS_READ_JES_OWNER_PREFIXES",
+        "ZOS_FTP_PASSIVE_PORTS",
         "INGEST_RETIRE_DOCS",
         "OPENOBSERVE_RUN_AS_ID",
         "SERVICEMONITOR_ENABLED",

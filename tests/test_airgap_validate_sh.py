@@ -2346,3 +2346,100 @@ def test_validate_live_splunk_gateway_off_reads_no_gateway_secret(tree):
     r = _live(tree, SPLUNK_GATEWAY_SECRET="splunk-gw")
     assert r.returncode == 0, r.stderr
     assert "Splunk gateway Secret" not in r.stdout
+
+
+
+# ------------------------------------------- read-only z/OS bridge (#1294, ADR-0012)
+
+ZOS_GOOD_TOKEN = "Zq7_-" * 7  # 35 characters of the allowed set
+ZOS_KUBECTL = """#!/bin/sh
+case "$*" in
+  'api-resources -o name') echo routes.route.openshift.io ;;
+  *'get routes.route.openshift.io '*) echo '{"kind":"List","items":[]}' ;;
+  *'get secret '*'go-template='*)
+    case "$*" in *"\"${MISSING_KEY:-none}\""*) exit 0 ;; esac
+    echo present ;;
+  *'get secret zos-read '*'jsonpath='*) printf '%s' "${TOKEN_B64:-}" ;;
+  *'get secret zos-read'*)
+    case "${ZR_SECRET:-ok}" in
+      notfound) echo 'Error from server (NotFound): secrets "zos-read" not found' >&2; exit 1 ;;
+      forbidden) echo 'Error from server (Forbidden): secrets is forbidden' >&2; exit 1 ;;
+    esac ;;
+esac
+exit 0
+"""
+
+
+def _zos_validate(tree, **env):
+    _openwebui_tree(tree)
+    write_stub(tree / "bin" / "kubectl", ZOS_KUBECTL)
+    selected = {
+        **OWUI_OPERATOR_ENV, "ZOS_READ_ENABLED": "true", "ZOS_READ_SECRET": "zos-read",
+        "ZOS_READ_APPROVED_ROLES": "staff,docs-admins", "ZOS_READ_AUDIT_SECRET": "zos-audit",
+        "ZOS_READ_DATASET_ALLOWLIST": "SYS1.PARMLIB(IEASYS00)",
+        "ZOS_FTP_HOST": "192.0.2.44", "ZOS_FTP_PASSIVE_PORTS": "50000-50100", "ZOS_FTP_TRANSPORT_MODE": "plain",
+        "ZOS_FTP_PLAIN_ACCEPTED": "true", "TOKEN_B64": _b64(ZOS_GOOD_TOKEN.encode()), **env,
+    }
+    return _run(tree, selected)
+
+
+def test_validate_reports_the_zos_read_selection(tree):
+    off = _run(tree, {})
+    assert off.returncode == 0, off.stderr
+    assert "z/OS reads:        off (ZOS_READ_ENABLED=false)" in off.stdout
+    on = _zos_validate(tree)
+    assert on.returncode == 0, on.stderr
+    assert ("z/OS reads:        on: Deployment rag-mcp-ftp (1 replica, agent image), plain transport, tools "
+            "dataset_read, Secret zos-read; reached only from agent pods") in on.stdout
+    dry = _zos_validate(tree, ZOS_READ_DRY_RUN="true")
+    assert dry.returncode == 0, dry.stderr
+    assert "DRY RUN (the agent plans reads, never calls)" in dry.stdout
+
+
+@pytest.mark.parametrize(("env", "message"), [
+    ({"ZOS_READ_APPROVED_ROLES": "staff"}, "must be listed in ZOS_READ_APPROVED_ROLES (ADR-0012 D3 guard (b))"),
+    ({"AGENT_ROUTE": "true"}, "ZOS_READ_ENABLED=true refused with AGENT_ROUTE=true"),
+    ({"AGENT_NETWORK_POLICY": "false"}, "ZOS_READ_ENABLED=true refused with AGENT_NETWORK_POLICY=false"),
+    ({"AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES": "zq-tools"},
+     "ZOS_READ_ENABLED=true refused with AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES set"),
+    ({"ZOS_READ_ENABLED": "maybe"}, "ZOS_READ_ENABLED must be true/false"),
+    ({"ZOS_FTP_TRANSPORT_MODE": ""}, "ZOS_FTP_TRANSPORT_MODE must be ftps or plain"),
+    ({"ZOS_FTP_PLAIN_ACCEPTED": "false"}, "ZOS_FTP_TRANSPORT_MODE=plain requires ZOS_FTP_PLAIN_ACCEPTED=true"),
+    ({"ZOS_READ_SECRET": ""}, "required inputs are missing: ZOS_READ_SECRET."),
+    ({"ZOS_READ_AUDIT_SECRET": ""}, "ZOS_READ_ENABLED=true refused without ZOS_READ_AUDIT_SECRET"),
+    ({"ZOS_FTP_TRANSPORT_MODE": "ftps", "ZOS_FTP_CA_FILE": "/nonexistent/zq-site-ca.pem"},
+     "ZOS_FTP_CA_FILE is unreadable"),
+    ({"ZOS_READ_ENABLED_TOOLS": "dataset_read,uss_read"}, "ZOS_READ_ENABLED_TOOLS must be a subset"),
+])
+def test_validate_refuses_an_invalid_or_unsafe_zos_read_selection(tree, env, message):
+    """validate.sh runs the mapper's owner (model_config.zos_read_config): the
+    same refusals, fixed text, before any tool or cluster read."""
+    r = _zos_validate(tree, **env)
+    assert r.returncode != 0
+    assert message in r.stderr
+    assert "zq-tools" not in r.stderr and "zq-site-ca" not in r.stderr
+
+
+def test_validate_live_verifies_the_zos_read_secret(tree):
+    r = _zos_validate(tree, AIRGAP_DRYRUN="0")
+    assert r.returncode == 0, r.stderr
+    assert "z/OS read Secret 'zos-read' has the keys the bridge and the agent read" in r.stdout
+    assert ZOS_GOOD_TOKEN not in r.stdout + r.stderr
+
+
+@pytest.mark.parametrize(("env", "message"), [
+    ({"ZR_SECRET": "notfound"}, "Secret 'zos-read' not found"),
+    ({"ZR_SECRET": "forbidden"}, "may not read Secret 'zos-read'"),
+    ({"MISSING_KEY": "ftp-user"}, "required Secret key is missing or empty: ftp-user"),
+    ({"MISSING_KEY": "ftp-password"}, "required Secret key is missing or empty: ftp-password"),
+    ({"MISSING_KEY": "bridge-token"}, "required Secret key is missing or empty: bridge-token"),
+    ({"MISSING_KEY": "audit-key"}, "required Secret key is missing or empty: audit-key"),
+    ({"TOKEN_B64": _b64(b"short-token-7731")}, "E_ZOS_BRIDGE_TOKEN"),
+    ({"TOKEN_B64": _b64(ZOS_GOOD_TOKEN.encode() + b"\n")}, "E_ZOS_BRIDGE_TOKEN"),
+])
+def test_validate_live_zos_read_secret_problems_fail(tree, env, message):
+    r = _zos_validate(tree, AIRGAP_DRYRUN="0", **env)
+    assert r.returncode != 0
+    assert message in r.stderr
+    out = r.stdout + r.stderr
+    assert ZOS_GOOD_TOKEN not in out and "short-token-7731" not in out

@@ -583,6 +583,77 @@
         }
       }
     },
+    "zosRead": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Read-only z/OS dataset reads for the Docs chat (ADR-0012, #1294); default off.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "dryRun": { "type": "boolean" },
+        "secretName": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$",
+          "description": "Operator-created Secret with ftp-user, ftp-password and bridge-token; never key material."
+        },
+        "auditKey": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The docs Pipe's z/OS audit-tag key (ADR-0012 D3(d)): an operator-created Secret, never its value.",
+          "properties": {
+            "secretName": { "type": "string", "maxLength": 253, "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" },
+            "key": { "type": "string", "maxLength": 253, "pattern": "^$|^[-._a-zA-Z0-9]+$" }
+          }
+        },
+        "approvedRoles": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[^,\\s]+$" }
+        },
+        "datasetAllowlist": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "maxLength": 54, "pattern": "^[A-Z#$@][A-Z0-9#$@-]{0,7}(\\.[A-Z#$@][A-Z0-9#$@-]{0,7}){0,21}(\\([A-Z#$@][A-Z0-9#$@]{0,7}\\))?$" }
+        },
+        "enabledTools": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["dataset_read", "job_status", "jes_spool_read"] }
+        },
+        "jesJobnamePrefixes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Z#$@][A-Z0-9#$@]{0,7}$" }
+        },
+        "jesOwnerPrefixes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Z#$@][A-Z0-9#$@]{0,7}$" }
+        },
+        "ftp": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "host": { "type": "string", "maxLength": 253, "pattern": "^$|^[A-Za-z0-9]([-A-Za-z0-9.]*[A-Za-z0-9])?$" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "hostIp": { "type": "string", "pattern": "^$|^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])$" },
+            "passivePorts": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "first": { "type": "integer", "minimum": 0, "maximum": 65535 },
+                "last": { "type": "integer", "minimum": 0, "maximum": 65535 }
+              }
+            },
+            "transportMode": { "type": "string", "enum": ["", "ftps", "plain"] },
+            "plainAccepted": { "type": "boolean" },
+            "caBundle": { "type": "string", "description": "PEM certificates of the site CA (ftps mode)." },
+            "encoding": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$" }
+          }
+        },
+        "resources": { "type": "object", "description": "Kubernetes resource requests/limits for the bridge container." }
+      }
+    },
     "storage": {
       "type": "object",
       "additionalProperties": false,

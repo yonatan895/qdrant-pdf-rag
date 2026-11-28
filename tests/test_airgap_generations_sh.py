@@ -172,6 +172,18 @@ def test_dryrun_renders_the_generations_job_from_the_ingest_template(gen_tree):
     assert "apply" not in _cluster_calls(gen_tree) and "delete" not in _cluster_calls(gen_tree)
 
 
+def test_the_generations_render_opts_out_of_zos_reads(gen_tree):
+    """#1294: like the ingest Job render, the generations render switches z/OS
+    reads off, so an enabled deployment still runs it (no z/OS input is read,
+    not even the CA file, and nothing of the bridge is rendered)."""
+    result = _run(gen_tree, "list", "--format", "json", extra=(
+        ("CORPUS_PVC", "my-manuals-pvc"), ("ZOS_READ_ENABLED", "true"), ("ZOS_READ_SECRET", "zos-read"),
+        ("ZOS_FTP_TRANSPORT_MODE", "ftps"), ("ZOS_FTP_CA_FILE", "/nonexistent/zq-site-ca.pem")))
+    assert result.returncode == 0, result.stderr
+    assert "zosRead" not in (gen_tree / "dist" / "mainframe-rag-generations-values.yaml").read_text()
+    assert "rag-mcp-ftp" not in _rendered(gen_tree)
+
+
 def _job(rendered):
     import yaml
 

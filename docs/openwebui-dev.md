@@ -105,6 +105,20 @@ gateway pod as it excludes Open WebUI. Step 9's admin step is done through the a
 | network | a pod outside Open WebUI cannot reach the gateway (pod IP and Service) but reaches LiteLLM (control); Open WebUI reaches the gateway and LiteLLM, not Splunk; the gateway reaches Splunk, not LiteLLM, the agent or the API server (a public address is the runner gate's) |
 | log canary | no MCP token, bearer secret or own key value in the gateway, fake Splunk or Open WebUI logs |
 
+<a id="zos-read-lane"></a>
+**z/OS dataset reads** (#1294, ADR-0012, same lane, after team tools:
+`acceptance.sh zos-read`, `acceptance.py zos-read`). The chart's bridge is rendered from the
+working tree with `zosRead` on (plain FTP accepted, a documentation-range z/OS address). The lane
+patches the deployed Deployment into `--mock` mode with the synthetic fixtures in
+`kind-zos.yaml`, keeping its label, so the chart's own Service and NetworkPolicy are what the
+lane proves; the chart never renders mock mode. The agent gets its `ZOWE_MCP_*` entries exactly as
+rendered. A client pod calls the agent's `/v1/chat` in the Pipe's request shape, so the docs
+Pipe and its audit tag are not exercised here (#1397). The lane's default-deny egress policy
+excludes the bridge pod. Checks: an allowlisted read (outcome `complete`, byte count equal to the
+fixture), an off-list read (`denied`, no fixture text), the next ordinary request (a cited answer
+with no z/OS fields), the bridge's 401 without the bearer or with a wrong one, and both
+NetworkPolicy directions.
+
 Not automated (site checks, [deploy.md step 9](deploy.md#splunk-gateway-deploy)): the admin UI
 path of the admin step, a tool call the model itself makes in a chat (the stand-in model emits
 no tool calls), whether the chat preselects the tool, and oidc mode.

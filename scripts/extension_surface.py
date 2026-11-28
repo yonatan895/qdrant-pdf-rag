@@ -126,6 +126,22 @@ MAXIMAL_INPUT = {
 }
 
 
+# z/OS dataset reads (#1294, ADR-0012) refuse AGENT_ROUTE=true and extra agent
+# namespaces, which MAXIMAL_INPUT selects: a second input, the maximal one with
+# those two turned off and every z/OS block selected, adds the zosRead paths.
+ZOS_INPUT = {
+    "AGENT_ROUTE": "false", "AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES": "",
+    "ZOS_READ_ENABLED": "true", "ZOS_READ_DRY_RUN": "true", "ZOS_READ_SECRET": "zos",
+    "ZOS_READ_AUDIT_SECRET": "zos-audit", "ZOS_READ_AUDIT_SECRET_KEY": "audit-key",
+    "ZOS_READ_APPROVED_ROLES": "users,admins", "ZOS_READ_DATASET_ALLOWLIST": "SYS1.PARMLIB(IEASYS00)",
+    "ZOS_READ_ENABLED_TOOLS": "dataset_read,job_status,jes_spool_read", "ZOS_READ_JES_JOBNAME_PREFIXES": "TEAM",
+    "ZOS_READ_JES_OWNER_PREFIXES": "TEAM", "ZOS_FTP_HOST": "zos.example.invalid", "ZOS_FTP_HOST_IP": "192.0.2.30",
+    "ZOS_FTP_PORT": "21", "ZOS_FTP_PASSIVE_PORTS": "50000-50100", "ZOS_FTP_TRANSPORT_MODE": "ftps",
+    "ZOS_FTP_ENCODING": "latin-1",
+    **{f"ZOS_BRIDGE_{res}_{kind}": ("1" if res == "CPU" else "1Gi") for res in ("CPU", "MEMORY") for kind in ("REQUEST", "LIMIT")},
+}
+
+
 def retired_keys(root: Path) -> dict[str, str]:
     """RETIRED_KEYS of the tree at `root` ({key: migration text}), read without importing it."""
     tree = ast.parse((root / MODEL_CONFIG).read_text(encoding="utf-8"))
@@ -265,21 +281,24 @@ def chart_values(root: Path) -> list[str]:
                        "OPENWEBUI_IDP_CA_FILE": str(root / IDP_CA),
                        # The Splunk gateway's site files (#1077): a synthetic config and a loadable CA.
                        "SPLUNK_GATEWAY_CONFIG_FILE": str(root / SPLUNK_CONFIG),
-                       "SPLUNK_GATEWAY_CA_FILE": str(root / IDP_CA)}
+                       "SPLUNK_GATEWAY_CA_FILE": str(root / IDP_CA),
+                       # The z/OS bridge's site CA (#1294): the same loadable certificate.
+                       "ZOS_FTP_CA_FILE": str(root / IDP_CA)}
         # A key the tree retires refuses: leave it out, as an operator would.
         retired = retired_keys(root)
         environment.update({key: value for key, value in MAXIMAL_INPUT.items() if key not in retired})
-        out = Path(scratch) / "values.yaml"
-        mapped = subprocess.run([sys.executable, "-m", "scripts.airgap.map_values", "--out", str(out)],
-                                cwd=root, env=environment, capture_output=True, text=True, check=False)
-        if mapped.returncode != 0:
-            raise ValueError("map_values.py refused the maximal input: " + mapped.stderr.strip()[-400:])
-        values = yaml.safe_load(out.read_text(encoding="utf-8"))
+        app: set[str] = set()
+        for label, selected in (("maximal", environment), ("z/OS", {**environment, **ZOS_INPUT})):
+            out = Path(scratch) / "values.yaml"
+            mapped = subprocess.run([sys.executable, "-m", "scripts.airgap.map_values", "--out", str(out)],
+                                    cwd=root, env=selected, capture_output=True, text=True, check=False)
+            if mapped.returncode != 0:
+                raise ValueError(f"map_values.py refused the {label} input: " + mapped.stderr.strip()[-400:])
+            app |= {path[1:] for path in _leaf_paths(yaml.safe_load(out.read_text(encoding="utf-8")), "")}
         sizing = subprocess.run([sys.executable, "-m", "scripts.airgap.model_config", "--qdrant-sizing"],
                                 cwd=root, env=environment, capture_output=True, text=True, check=False)
         if sizing.returncode != 0:
             raise ValueError("model_config.py --qdrant-sizing refused the maximal input")
-    app = [path[1:] for path in _leaf_paths(values, "")]
     deploy = (root / DEPLOY).read_text(encoding="utf-8")
     # --set and --set-string, with list indices (imagePullSecrets[0].name) and null forms.
     qdrant = set(re.findall(r'--set(?:-string)? "?([A-Za-z][A-Za-z0-9_.\[\]]*)=', deploy))

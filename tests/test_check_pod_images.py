@@ -238,7 +238,9 @@ def test_oauth_proxy_requires_its_own_container_status():
     # #1077: the Splunk gateway runs the agent image too, as its own Deployment
     # (the chart's container name "gateway").
     ("splunk_gateway", "Deployment", "rag-splunk-gateway", "gateway", "agent"),
-], ids=["openobserve", "openwebui", "feedback", "splunk_gateway"])
+    # #1294: the z/OS FTP bridge runs the agent image too (container "bridge").
+    ("zos_bridge", "Deployment", "rag-mcp-ftp", "bridge", "agent"),
+], ids=["openobserve", "openwebui", "feedback", "splunk_gateway", "zos_bridge"])
 def test_role_is_bound_to_its_own_workload_and_container(role, kind, name, container, other_role):
     """ADR-0006/0007/0008: each role is verified through the workload kind, name
     and container the chart declares, by its own digest; a same-image container

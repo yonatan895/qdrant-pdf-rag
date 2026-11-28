@@ -3,7 +3,8 @@
     python3 -I acceptance.py STATE_DIR [PHASE]   (via acceptance.sh run, or acceptance.sh operator ...)
 
 PHASE is `checks` (default: the full check list), `team-tools` (after acceptance.sh team-tools,
-#1077: the Splunk gateway and ADR-0010 T4) or, in the operator-deploy lane (#1118 B3),
+#1077: the Splunk gateway and ADR-0010 T4), `zos-read` (after acceptance.sh zos-read, #1294: the
+z/OS bridge and ADR-0012 reads on the Docs path) or, in the operator-deploy lane (#1118 B3),
 `first-pass` (before the admin API key), `record`, `rollback-off` and `rollback-on` (K1), and
 `paced`: one question on the three Open WebUI paths at once against the slow-model stand-in
 (scripts/mock_vllm.py MOCK_PACED_*; CI stand-in models only).
@@ -55,6 +56,34 @@ TEAM_TEMPLATES = ["errors_by_host", "job_runs"]
 TEAM_PROXY_CLOSED = ("/api/v1/configs/tool_servers", "/api/v1/configs/tool_servers/verify", "/openai/config/update",
                      "/api/v1/tasks/config/update", "/api/v1/tools/id/server:mcp:splunk/specs",
                      "/api/v1/tools/id/server:mcp:splunk/mcp/app/rpc", "/api/v1/tools/create")
+# z/OS dataset reads (#1294, ADR-0012): acceptance.sh zos-read renders the bridge with this allowlist
+# (ZOS_ALLOWLIST) and mounts kind-zos.yaml's fixtures; ZOS_DENIED is in the tree but not on the list.
+ZOS_TARGET = "LANEZOS.NOTES(OPSNOTE)"
+ZOS_DENIED = "LANEZOS.NOTES(HIDDEN)"
+ZOS_FIXTURE_KEYS = {ZOS_TARGET: "opsnote", ZOS_DENIED: "hidden"}
+ZOS_CHAT = os.path.join(HERE, "zos_chat.py")
+ZOS_CLIENT = "pod/zos-read-client"
+# Inside the agent pod (the one pod the bridge admits): the bearer is read from the agent's own env.
+ZOS_AUTH_CODE = (
+    "import json, os, urllib.error, urllib.request\n"
+    "base = os.environ['ZOWE_MCP_BASE_URL'].rstrip('/')\n"
+    "token = os.environ['ZOWE_MCP_AUTH_TOKEN']\n"
+    "body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list', 'params': {}}).encode()\n"
+    "def call(path, auth=None, data=None):\n"
+    "    headers = {'Content-Type': 'application/json'}\n"
+    "    if auth is not None:\n"
+    "        headers['Authorization'] = auth\n"
+    "    req = urllib.request.Request(base + path, data=data, headers=headers, method='POST' if data else 'GET')\n"
+    "    try:\n"
+    "        with urllib.request.urlopen(req, timeout=15) as r:\n"
+    "            return r.status\n"
+    "    except urllib.error.HTTPError as e:\n"
+    "        return e.code\n"
+    "    except OSError:\n"
+    "        return 0\n"
+    "print(json.dumps({'healthz': call('/healthz'), 'no-bearer': call('/mcp', None, body),\n"
+    "                  'wrong-bearer': call('/mcp', 'Bearer ' + 'x' * 43, body),\n"
+    "                  'agent-bearer': call('/mcp', 'Bearer ' + token, body)}))\n")
 SPECS_CODE = (
     "import json, sys, urllib.error, urllib.request\n"
     "token = sys.stdin.read().strip()\n"
@@ -149,6 +178,21 @@ def agent_deadline_s() -> float:
     return 0.0
 
 
+def current_pods(deploy: str, label: str, timeout_s: float = 180) -> list[str]:
+    """The pods of DEPLOY once its rollout's older pods have gone (as many as its replicas, none
+    terminating): logs and exec on a Deployment may otherwise pick a pod a rollout is still ending.
+    The lane's agent runs the chart's replica count (map_values: 3), so callers read every pod."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        want = int(json.loads(kc_out("get", "deploy", deploy, "-o", "json"))["spec"].get("replicas", 1))
+        items = json.loads(kc_out("get", "pod", "-l", label, "-o", "json"))["items"]
+        if len(items) == want and not any(p["metadata"].get("deletionTimestamp") for p in items):
+            return sorted("pod/" + p["metadata"]["name"] for p in items)
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"expected {want} {label} pods, found {len(items)}")
+        time.sleep(3)
+
+
 def logs_of(*target: str, ns: str | None = NS) -> str:
     proc = kc("logs", *target, "--all-containers", "--tail=-1", ns=ns)
     return proc.stdout.decode("utf-8", "replace") + proc.stderr.decode("utf-8", "replace")
@@ -158,13 +202,21 @@ def logs_of(*target: str, ns: str | None = NS) -> str:
 class Acceptance:
     def __init__(self, state: str) -> None:
         self.state = state
-        self.s = client.Session(state)
+        self._session: client.Session | None = None
+        self.zos_pods: dict[str, str] = {}
         self.verdicts: list[checks.Verdict] = []
         self.canary1 = "ZQ" + secrets.token_hex(6)
         self.canary2 = "ZQ" + secrets.token_hex(6)
         self.logs: dict[str, str] = {}
         self.dns_names: set[str] = set()
         self.dns_queries = 0
+
+    @property
+    def s(self) -> client.Session:
+        """The Open WebUI session, opened on first use (the zos-read phase never signs in)."""
+        if self._session is None:
+            self._session = client.Session(self.state)
+        return self._session
 
     def add(self, verdict: checks.Verdict) -> None:
         self.verdicts.append(verdict)
@@ -552,6 +604,105 @@ class Acceptance:
         verdict.name = "team-log-canary"
         return verdict
 
+    # -------------------------------------------------------------- z/OS dataset reads (#1294, ADR-0012)
+    def zos_read(self) -> bool:
+        """After acceptance.sh zos-read: the chart's bridge in mock mode and the agent with the chart's
+        ZOWE_MCP_*. Three Docs-path turns through the deployed agent from a pod outside it (an allowlisted
+        read, a denied read, the next ordinary request), the agent's audit lines, the bridge's bearer and
+        both NetworkPolicy directions, and no secret or fixture text in any log."""
+        render = os.path.join(self.state, "render-zos")
+        rendered = json.loads(read_text(os.path.join(render, "bridge-deployment.json")))
+        ready = kc("rollout", "status", "deploy/rag-mcp-ftp", "--timeout=60s").returncode == 0
+        live = json.loads(kc_out("get", "deploy", "rag-mcp-ftp", "-o", "json"))
+        agents = current_pods("rag-agent", "app=rag-agent")
+        self.zos_pods = {"agent": agents[0], "bridge": current_pods("rag-mcp-ftp", "app=rag-mcp-ftp")[0]}
+
+        def agent_logs() -> str:  # every agent replica: a Docs turn may land on any of them
+            return "\n".join(logs_of(pod) for pod in agents)
+        self.add(checks.check_zos_bridge_mock(live, rendered, ready))
+        agent = json.loads(kc_out("get", "deploy", "rag-agent", "-o", "json"))
+        env = next(c for c in agent["spec"]["template"]["spec"]["containers"] if c["name"] == "agent").get("env") or []
+        unreachable = sum('"zowe_mcp_unreachable"' in line for line in agent_logs().splitlines())
+        self.add(checks.check_zos_agent_env(env, json.loads(read_text(os.path.join(render, "agent-env.json"))),
+                                            unreachable))
+        fixtures = json.loads(kc_out("get", "configmap", "zos-mock-fixtures", "-o", "json"))["data"]
+        markers = [fixtures[key].strip().splitlines()[-1] for key in sorted(fixtures)]
+        fixture_bytes = len(fixtures[ZOS_FIXTURE_KEYS[ZOS_TARGET]].encode("utf-8"))
+        tag = secrets.token_hex(32)
+        ask = f"{QUESTION[:-1]} and compare it with {{}}."
+        self.add(checks.check_zos_read(self.zos_chat(ask.format(ZOS_TARGET), tag, markers), ZOS_TARGET, fixture_bytes))
+        self.add(checks.check_zos_denied(self.zos_chat(ask.format(ZOS_DENIED), tag, markers), ZOS_DENIED))
+        self.add(checks.check_zos_ordinary(self.zos_chat(QUESTION, tag, markers)))
+        self.add(checks.check_zos_audit(agent_logs(), tag, ZOS_TARGET, ZOS_DENIED, fixture_bytes))
+        self.add(checks.check_zos_bridge_auth(self.zos_auth()))
+        self.add(checks.check_zos_network(self.zos_probes()))
+        labels = live["spec"]["template"]["metadata"].get("labels", {})
+        policy = checks.check_policies_selecting(labels, json.loads(kc_out("get", "networkpolicy", "-o", "json"))["items"],
+                                                 chart_policy="rag-mcp-ftp")
+        policy.name = "zos-bridge-egress-policy-owner"
+        self.add(policy)
+        self.add(self.zos_log_scan(markers))
+        return checks.overall(self.verdicts)
+
+    def zos_chat(self, question: str, tag: str, markers: list[str]) -> dict:
+        args = json.dumps({"question": question, "tag": tag, "markers": markers})
+        proc = kc("exec", "-i", ZOS_CLIENT, "--", "python3", "-", args, stdin=read_bytes(ZOS_CHAT))
+        for line in proc.stdout.decode("utf-8", "replace").splitlines():
+            if line.startswith("ZOS_CHAT "):
+                try:
+                    return json.loads(line.removeprefix("ZOS_CHAT "))
+                except ValueError:
+                    break
+        return {"error": f"no result line (rc {proc.returncode})"}
+
+    def zos_auth(self) -> dict:
+        proc = kc("exec", "-i", self.zos_pods["agent"], "-c", "agent", "--", "python3", "-", stdin=ZOS_AUTH_CODE.encode())
+        try:
+            return json.loads(proc.stdout.decode().strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            return {"rc": proc.returncode}
+
+    def zos_probes(self) -> dict[str, int]:
+        """egress_probe.py from the client pod, the agent and the bridge; one target per probe."""
+        probe = read_bytes(PROBE)
+        bridge_ip = kc_out("get", "pod", "-l", "app=rag-mcp-ftp", "-o", "jsonpath={.items[0].status.podIP}").strip()
+
+        def run(target: list[str], mode: str, dest: str) -> int:
+            return kc("exec", "-i", *target, "--", "python3", "-", mode, dest, stdin=probe).returncode
+
+        client_pod = [ZOS_CLIENT]
+        agent, bridge = [self.zos_pods["agent"], "-c", "agent"], [self.zos_pods["bridge"], "-c", "bridge"]
+        return {
+            # Control: the agent admits this namespace's pods, so the client is a real Docs-path caller.
+            "client->agent:reachable (control)": run(client_pod, "reachable", "rag-agent:8080"),
+            "client->bridge-pod-ip:blocked": run(client_pod, "blocked", f"{bridge_ip}:8081") if bridge_ip else 1,
+            "client->bridge-service:blocked": run(client_pod, "blocked", "rag-mcp-ftp:8081"),
+            "agent->bridge:reachable": run(agent, "reachable", "rag-mcp-ftp:8081"),
+            # The lane's default-deny egress does not select the bridge: its own policy must hold.
+            "bridge->agent:blocked": run(bridge, "blocked", "rag-agent:8080"),
+            "bridge->kubernetes-api:blocked": run(bridge, "blocked", "kubernetes.default.svc:443"),
+        }
+
+    def zos_log_scan(self, markers: list[str]) -> checks.Verdict:
+        """No bridge token, FTP password or audit key, and no fixture text, in the agent, bridge or client logs."""
+        zos = os.path.join(self.state, "zos")
+        canaries = {name: read_text(os.path.join(zos, name)).strip()
+                    for name in ("bridge-token", "ftp-password", "audit-key")}
+        canaries.update({f"fixture-{i}": marker for i, marker in enumerate(markers)})
+        logs, unread = {}, []
+        targets = [(f"agent-{i}", pod) for i, pod in enumerate(current_pods("rag-agent", "app=rag-agent"))]
+        for label, target in (*targets, ("bridge", self.zos_pods["bridge"]), ("client", ZOS_CLIENT)):
+            proc = kc("logs", target, "--all-containers", "--tail=-1")
+            if proc.returncode != 0:
+                unread.append(label)
+            logs[label] = proc.stdout.decode("utf-8", "replace")
+        verdict = checks.scan_logs(logs, canaries)
+        if unread:
+            verdict.ok = False
+            verdict.detail["unreadable"] = unread
+        verdict.name = "zos-log-canary"
+        return verdict
+
     # -------------------------------------------------------------- operator lane (#1118 B3)
     def repo_sha(self) -> str:
         return read_text(os.path.join(self.state, "render", "pipe.sha256")).strip()
@@ -661,7 +812,7 @@ def main(argv: list[str]) -> int:
     phases = {"checks": run.run, "first-pass": run.first_pass, "record": run.record,
               "rollback-off": run.rollback_off, "rollback-on": run.rollback_on, "paced": run.paced,
               "copy-later": run.copy_later, "restored": run.restored,
-              "team-tools": run.team_tools}
+              "team-tools": run.team_tools, "zos-read": run.zos_read}
     phase = argv[1] if len(argv) > 1 else "checks"
     if phase not in phases:
         print(f"unknown phase {phase!r}; one of {', '.join(phases)}", file=sys.stderr)

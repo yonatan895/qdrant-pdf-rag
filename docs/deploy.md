@@ -2922,6 +2922,141 @@ procedure closes #1077's "site procedure for the service-account role" item.
       in chats (go-live item 6).
 
 <a id="configuration-contract"></a>
+<a id="zos-read-deploy"></a>
+## Read-only z/OS dataset reads: the FTP bridge (ADR-0012, #1294)
+
+The read-only FTP bridge serves the Docs-path z/OS reads that
+[ADR-0012](adr/0012-zos-dataset-read-pilot.md) approves for the pilot. The
+agent plans those reads and the Docs models stay tool-free
+([agent: source observations](agent.md#source-observations)). It is **off by
+default**: `ZOS_READ_ENABLED` in `airgap.env` (strict boolean,
+`zosRead.enabled`). With it off, none of the objects or settings below
+render, and every other object is byte-identical to a render without them.
+One owner validates the keys and refusals for `validate.sh`, `airgap:config
+check` and `map_values.py`: `model_config.zos_read_config`. The chart
+repeats the refusals for a direct `helm` render in
+`mainframe-rag.zosReadEnabled` (`_helpers.tpl`).
+
+**What `ZOS_READ_ENABLED=true` renders** (`templates/zos-bridge.yaml`).
+- `Deployment/rag-mcp-ftp` (label `app: rag-mcp-ftp`, container `bridge`). It runs
+  `python3 -m mainframe_rag.mcp --transport http --host 0.0.0.0 --port 8081`
+  on the **agent image**, so it adds no image and no pin, and `deploy.sh` checks
+  that its pod runs the verified agent digest (role `zos_bridge`). It has
+  `/healthz` probes and is hardened like the agent (`restricted-v2`, read-only
+  root, no service-account token, `/tmp` emptyDir). Replicas are fixed at 1
+  with `Recreate`, because the logon-failure breaker (D9) is per process and
+  the RACF ID is bound to one egress address. Environment: `MCP_FTP_HOST`,
+  `MCP_FTP_PORT`, `MCP_FTP_TRANSPORT_MODE`, `MCP_FTP_PLAIN_ACCEPTED` (plain
+  only) or `MCP_FTP_CA_FILE` (ftps only), `MCP_FTP_ENCODING`,
+  `MCP_DATASET_ALLOWLIST`, `MCP_ENABLED_TOOLS` and the optional JES prefix
+  lists. The credentials are Secret references only: `MCP_FTP_USER` and
+  `MCP_FTP_PASSWORD` (keys `ftp-user` and `ftp-password`, the dedicated
+  READ-only ID) and `MCP_BRIDGE_AUTH_TOKEN` (key `bridge-token`). The chart
+  never renders `--mock` or `MCP_MOCK_DIR`.
+- `ConfigMap/rag-mcp-ftp` (ftps only): the site CA (`ZOS_FTP_CA_FILE`'s
+  content), mounted read-only at `/etc/mainframe-rag/mcp-ftp`. A change rolls the pod.
+- `Service/rag-mcp-ftp`: ClusterIP on 8081. There is no Route.
+- `NetworkPolicy/rag-mcp-ftp`, rendered whenever the bridge is. Ingress comes
+  only from agent pods (`app: rag-agent`) on 8081, and callers also present the
+  bearer (D4). Egress goes only to cluster DNS and `ZOS_FTP_HOST_IP`/32 on
+  `ZOS_FTP_PORT` (default 21) and `ZOS_FTP_PASSIVE_PORTS`. It needs an
+  enforcing CNI.
+- Open WebUI (when on) gets `RAG_ZOS_AUDIT_TAG=true` and `RAG_ZOS_AUDIT_KEY`
+  from `ZOS_READ_AUDIT_SECRET` / `ZOS_READ_AUDIT_SECRET_KEY` (default `audit-key`)
+  by Secret reference. This holds exactly when the agent's reads are on, dry
+  run included. The docs Pipe then adds a keyed, non-authorizing audit tag of
+  the Open WebUI user id to every agent call (ADR-0012 D3(d); the Pipe side is
+  [#1397](https://github.com/yonatan895/qdrant-pdf-rag/pull/1397)). The key is
+  printable ASCII only, hex or base64 of at least 32 random bytes (site
+  procedure, step 2). The Pipe refuses a shorter key and then answers nothing;
+  so do raw binary bytes. `RAG_ZOS_AUDIT_TAG` is always the exact string `true`;
+  no value or setting renders it otherwise.
+- The agent gets `ZOWE_MCP_ENABLED=true`,
+  `ZOWE_MCP_BASE_URL=http://rag-mcp-ftp:8081`, `ZOWE_MCP_AUTH_TOKEN` (the same
+  `bridge-token` reference) and `ZOWE_MCP_DRY_RUN` (`ZOS_READ_DRY_RUN`). It
+  never holds the z/OS ID.
+- The chart does **not** render the `EgressIP` (`k8s.ovn.org/v1`, cluster
+  scoped). Cluster-admin creates exactly one, with its `podSelector` scoped to
+  `app: rag-mcp-ftp`, and the site binds the RACF ID to its terminal alias
+  (D4, D8(b)). The label is part of that site contract.
+
+**Refused combinations.** Both layers refuse before any cluster change, with a
+fixed message that names keys and never values (roles, dataset names,
+addresses and paths are never shown):
+- D3 guard (b): a value of `OPENWEBUI_OIDC_ALLOWED_ROLES` or
+  `OPENWEBUI_OIDC_ADMIN_ROLES` that is missing from `ZOS_READ_APPROVED_ROLES`.
+  Matching is exact and case-sensitive. An admin role alone signs a user in, so
+  admin roles are checked too. With `OPENWEBUI_ENABLED=false` there is no sign-in
+  list to check.
+- D3 guard (c): `AGENT_ROUTE=true`, `AGENT_NETWORK_POLICY=false` or any
+  `AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES`.
+- D3(d): no `ZOS_READ_AUDIT_SECRET` while Open WebUI is on, because the Pipe
+  would fail closed for every Docs answer. `ZOS_READ_AUDIT_SECRET` equal to
+  `ZOS_READ_SECRET` is also refused: the Open WebUI pod never references the
+  Secret that holds the z/OS ID. validate and deploy check that the key is
+  present; the Pipe checks its length.
+- D4: no `ZOS_READ_SECRET`. The bridge's NetworkPolicy has no off switch.
+  `validate.sh` and `deploy.sh` also check that the Secret has `ftp-user`,
+  `ftp-password` and `bridge-token`, and that `bridge-token` is at least 32
+  characters of `A-Z a-z 0-9 _ -` (`E_ZOS_BRIDGE_TOKEN`).
+- D5: `ZOS_FTP_TRANSPORT_MODE` unset or other than `ftps`/`plain`, so there is
+  no default and no fallback. `plain` without `ZOS_FTP_PLAIN_ACCEPTED=true`
+  (the site security owner's written acceptance) is refused, and so is `ftps`
+  without a `ZOS_FTP_CA_FILE` that holds only loadable PEM certificates.
+- D2 and D7: a dataset name that is not exact (wildcard, quote, relative
+  generation), `ZOS_READ_ENABLED_TOOLS` outside `dataset_read`, `job_status`
+  and `jes_spool_read` (`uss_read` stays unapproved), and JES tools without a
+  jobname or owner prefix. The name, prefix and tool rules are the bridge's
+  own, pinned against `mainframe_rag.mcp.bridge` in `tests/test_map_values.py`.
+- Missing `ZOS_READ_DATASET_ALLOWLIST`, `ZOS_FTP_HOST`, `ZOS_FTP_HOST_IP` (it
+  defaults to an IPv4 `ZOS_FTP_HOST`) or `ZOS_FTP_PASSIVE_PORTS`. An IPv4 host
+  that differs from `ZOS_FTP_HOST_IP` is refused: the bridge reaches one host.
+- `FEEDBACK_ENABLED=true` is **not** refused (D6, Option 7A): the agent
+  suppresses the answer record on observation-bearing turns instead.
+
+Shapes are checked even while the switch is off, so a typo does not wait for
+the day reads are enabled. The ingest and generations renders force
+`ZOS_READ_ENABLED=false`, as they do for Open WebUI and the Splunk gateway.
+
+**Site procedure** (ADR-0012 D8; nothing here contacts z/OS before step 5).
+1. Get the written approvals from the source owner and the security owner,
+   and record which transport is accepted. Cluster-admin creates the
+   `EgressIP` scoped to `app: rag-mcp-ftp`. The site registers its terminal
+   alias, binds the READ-only RACF ID to it, and opens the firewall to the LPAR
+   on TCP 21 and `PASSIVEPORTRANGE`.
+2. Create the Secrets (never in `airgap.env` or git):
+   `oc -n <ns> create secret generic zos-read --from-literal=ftp-user=... --from-literal=ftp-password=... --from-literal=bridge-token="$(openssl rand -hex 32)"`
+   and, for the docs Pipe's audit tag, a key of printable ASCII only (hex or base64 of at least
+   32 random bytes; raw random bytes make the Pipe fail closed for every Docs answer), created so
+   the value never appears in git, argv or shell history:
+   `openssl rand -hex 32 | oc -n <ns> create secret generic zos-audit --from-file=audit-key=/dev/stdin`.
+3. Set the `ZOS_*` keys (see `airgap.env.example`), with
+   `ZOS_READ_DRY_RUN=true` first. Then run `airgap:validate` and `airgap:deploy`.
+   `deploy.sh` waits up to 180 s for `deploy/rag-mcp-ftp`. The bridge connects
+   to z/OS per call, never at start, so a bridge that is not Ready is a pod or
+   setting fault (its `mcp bridge:` log line names the setting).
+4. In the bridge pod, run the logon-free transport probe
+   (`python -m mainframe_rag.mcp --probe`), then the read-only site probe
+   (`--site-probe --dataset <allowlisted member> --receipt /tmp/receipt.jsonl`).
+   The site probe makes one logon per run. Record the receipt (ids, codes and
+   counts only) and set `ZOS_FTP_ENCODING` from `zos.stat_sbdataconn`.
+5. With the dry run still on, ask one Docs question that names the member, and
+   check that the agent logs a planned read. Then set `ZOS_READ_DRY_RUN=false`,
+   redeploy, and make one live read. Record ids, the outcome and bytes only.
+
+**Rollback.** `ZOS_READ_ENABLED=false` and `airgap:deploy`: the release
+prunes the four objects (none holds data), the agent's `ZOWE_MCP_*`
+settings and Open WebUI's `RAG_ZOS_AUDIT_*` settings. `ZOS_READ_DRY_RUN=true` stops live calls but keeps the bridge running
+for the probes.
+
+**Evidence.** Render and refusal tests are in
+`tests/test_helm_chart_contracts.py` (`test_zos_*`) and
+`tests/test_map_values.py` (`test_zos_*`, including the mapper-to-helm-to-bridge
+round trip). Stage-script tests are in `tests/test_airgap_deploy_sh.py` and
+`tests/test_airgap_validate_sh.py`. The Kind lane runs the bridge in `--mock`
+mode, injected lane-side and never by the chart
+([#1294](https://github.com/yonatan895/qdrant-pdf-rag/issues/1294) PR 3).
+
 ## Operator configuration propagation contract
 
 **Status:** implemented paths with shell/runtime test evidence; live deployment

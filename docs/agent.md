@@ -2336,7 +2336,9 @@ through the real `/v1/chat` and `/v1/feedback`.
 Decision owner: [ADR-0003](adr/0003-zowe-mcp-read.md) as
 [ADR-0012](adr/0012-zos-dataset-read-pilot.md) amends it. Status: **capability
 off by default**; the Docs routes are wired for the dataset-read pilot (#1294
-PR 2) and nothing deploys a bridge yet (PR 3). With `zowe_mcp_enabled=false`
+PR 2) and the chart deploys the bridge only with `ZOS_READ_ENABLED=true` (PR 3;
+[deploy: z/OS reads](deploy.md#zos-read-deploy), which owns the bridge
+deployment, its NetworkPolicy and the render refusals). With `zowe_mcp_enabled=false`
 (the default) no route plans or makes a source call and prompts, responses and
 logs are unchanged. Search never calls an LLM; routing is deterministic and
 trap queries stay on the manuals path.
