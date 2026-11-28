@@ -470,6 +470,9 @@ def test_generations_mode_never_enables_the_ingest_job(monkeypatch, mapper_env):
     assert ingest["peerUrls"] == "http://p0:6333,http://p1:6333"
     r, _ = mapper_env("--without-ingest-job", "--generations-arg", "list")
     assert r.returncode == 1 and "exclusive" in r.stderr
+    # Data disposal has no site path in this release (#1373 PR 2).
+    r, out = mapper_env("--generations-arg", "dispose", "--generations-arg", "--execute")
+    assert r.returncode == 1 and "only list or dispose-snapshots" in r.stderr
 
 
 def test_no_secret_material_leaks(monkeypatch, mapper_env):

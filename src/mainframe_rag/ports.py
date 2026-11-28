@@ -413,3 +413,28 @@ class LLMClient(Protocol):
         reasoning_effort: str | None = None,
         temperature: float | None = None,
     ) -> ChatResult | Awaitable[ChatResult]: ...
+
+
+@runtime_checkable
+class QdrantGenerationAdmin(QdrantSnapshotAdmin, Protocol):
+    """What data disposal of a superseded generation adds (issue #1373): the
+    tombstone write into the retained control collection, the delete of the
+    data build alias, and the delete of the data collection. Writer key
+    only; every call is made under the publish lock."""
+
+    def upsert(
+        self,
+        collection_name: str,
+        *,
+        points: list[models.PointStruct],
+        wait: bool = True,
+    ) -> models.UpdateResult: ...
+
+    def update_collection_aliases(
+        self,
+        change_aliases_operations: list[
+            models.CreateAliasOperation | models.DeleteAliasOperation
+        ],
+    ) -> bool: ...
+
+    def delete_collection(self, collection_name: str) -> bool: ...

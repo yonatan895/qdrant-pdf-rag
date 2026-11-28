@@ -14,6 +14,16 @@ from mainframe_rag.ingest.seal import decode_content_seal
 BUILD_SCHEMA = 3
 _SUPPORTED_SCHEMAS = (1, 2, BUILD_SCHEMA)
 
+# Reader awareness of retirement tombstones (issue #1373). Data disposal
+# writes a `retiring` tombstone before it removes the data build alias; until
+# the agent refuses a tombstoned build whose two immutable aliases are both
+# still present, that window is fail-open (an exact read would still serve a
+# build the contract calls retired). False in this release: the data-disposal
+# command refuses `--execute`. Only the change that makes the reader refuse
+# tombstoned builds sets it, in code, together with that reader; it is never
+# read from the environment, a flag or a file.
+READERS_REFUSE_TOMBSTONED_BUILDS = False
+
 
 def canonical_build_id(value: object) -> str:
     if not isinstance(value, str):

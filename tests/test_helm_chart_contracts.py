@@ -1156,6 +1156,10 @@ def test_networkpolicy_schema_refuses_invalid_selection(mutate):
     pytest.param({"generations": {"args": ["list", "$(id)"]}}, "generations", id="shell-arg"),
     pytest.param({"generations": {"args": "list"}}, "generations", id="not-a-list"),
     pytest.param({"generations": {"args": ["list"], "extra": 1}}, "generations", id="extra-key"),
+    pytest.param({"generations": {"args": ["dispose", "--progress", "/work/inventory.jsonl"]}},
+                 "data disposal is not available from the chart", id="data-disposal"),
+    pytest.param({"generations": {"args": ["--execute", "dispose"]}},
+                 "must start with list or dispose-snapshots", id="flag-first"),
 ])
 def test_generations_mode_refuses_invalid_selection(mutate, needle):
     """Issue #1373: Job "generations" renders only alone and from checked args."""

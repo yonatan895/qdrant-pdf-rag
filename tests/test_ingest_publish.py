@@ -3257,6 +3257,56 @@ def test_new_allocation_never_reuses_orphan_controls():
 
 
 
+def test_a_retired_control_reserves_its_name_and_is_never_called_unfinished():
+    """Issue #1373: after data disposal only the control collection and its
+    tombstone remain under the name. A build whose derived name collides gets
+    a suffix; the 'remove it explicitly' refusal must never point at it."""
+    from copy import deepcopy
+
+    from mainframe_rag.ingest.publish import resolve_publish_staging
+    from mainframe_rag.ingest.retirement import tombstone_point_id
+
+    fake = PublishFake()
+    settings = Settings(_env_file=None, qdrant_collection=ALIAS, embed_mode="hash")
+    base = staging_name_for(ALIAS, "recipe", "corpus")
+    control = base + "__completions"
+    # No readable manifest on purpose: the tombstone alone decides.
+    fake.collections[control] = [SimpleNamespace(id=tombstone_point_id(control), payload={"state": "retired"})]
+    before = deepcopy(fake.collections)
+    assert resolve_publish_staging(fake, settings, gen_fp="recipe", corpus_fp="corpus",
+                                   live=None, force_reingest=False, state=None) == (base + "_1", False)
+    assert fake.collections == before
+
+
+@pytest.mark.parametrize("record", ["tombstone", "own-receipt"])
+def test_staging_preparation_never_removes_a_published_or_retired_control(record):
+    """Issue #1373: the one delete of a control collection in publication
+    refuses a control that holds its own receipt or a retirement tombstone."""
+    from copy import deepcopy
+
+    from mainframe_rag.ingest.publish import (
+        _transfer_staging_metadata,
+        completion_collection_for,
+        publication_metadata_point_id,
+    )
+    from mainframe_rag.ingest.representation import commit_manifest
+    from mainframe_rag.ingest.retirement import tombstone_point_id
+
+    fake = PublishFake()
+    settings = Settings(qdrant_url="http://localhost:6333", qdrant_collection="col1")
+    live, target = "col1__gen1", "col1__gen2"
+    fake.collections[live] = []
+    fake.collections[completion_collection_for(live)] = []
+    commit_manifest(fake, completion_collection_for(live), settings, "rules-1")
+    control = completion_collection_for(target)
+    point_id = tombstone_point_id(control) if record == "tombstone" else publication_metadata_point_id(control)
+    fake.collections[control] = [SimpleNamespace(id=point_id, payload={"record_type": "x"})]
+    before = deepcopy(fake.collections)
+    with pytest.raises(RuntimeError, match="never removed or rebuilt as staging"):
+        _transfer_staging_metadata(fake, settings, settings.model_copy(update={"qdrant_collection": target}), live)
+    assert fake.collections == before
+
+
 def _exercise_retained_content_seal(tmp_path, monkeypatch, client, alias, damage):
 
     from mainframe_rag.ingest import run_ingest
