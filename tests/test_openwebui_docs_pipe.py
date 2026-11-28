@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import hmac
 import json
 import logging
 import re
@@ -2252,11 +2254,14 @@ def test_audit_on_without_a_user_id_makes_no_agent_call(audit_on, user):
     assert fake.requests == []
 
 
-def test_a_32_byte_key_is_used(audit_on, monkeypatch):
-    monkeypatch.setenv("RAG_ZOS_AUDIT_KEY", "k" * 32)
+# The minimum counts UTF-8 bytes, not characters: 16 "é" are 32 bytes.
+@pytest.mark.parametrize("key", ["k" * 32, "\N{LATIN SMALL LETTER E WITH ACUTE}" * 16])
+def test_a_32_byte_key_is_used(audit_on, monkeypatch, key):
+    monkeypatch.setenv("RAG_ZOS_AUDIT_KEY", key)
     fake = FakeAgent()
     run_pipe(fake, user=AUDIT_USER)
-    assert re.fullmatch(r"[0-9a-f]{64}", fake.requests[0].headers["x-zos-audit-tag"])
+    expected = hmac.new(key.encode("utf-8"), USER_ID.encode("utf-8"), hashlib.sha256).hexdigest()
+    assert fake.requests[0].headers["x-zos-audit-tag"] == expected
 
 
 def test_task_and_fixed_text_turns_stay_fixed_with_the_audit_key_missing(monkeypatch):

@@ -213,8 +213,10 @@ _ATTACHED_FILES = re.compile(r"<attached_files>\n.*?\n</attached_files>\n\n", re
 
 
 # z/OS dataset-read audit tag (ADR-0012 D3(d), #1294). On only when the chart
-# sets RAG_ZOS_AUDIT_TAG=true, which it does exactly when dataset reads are
-# enabled for the deployment (read per call, like REFERENCE_ENV); default off,
+# sets RAG_ZOS_AUDIT_TAG=true, meant to be exactly when dataset reads are
+# enabled (read per call, like REFERENCE_ENV; this switch, the header form and
+# both fail-closed cases are pending the maintainer's decision on PR #1397);
+# default off,
 # and off the request is byte-identical to before #1294. On, every agent call
 # carries X-Zos-Audit-Tag: HMAC-SHA256 with the site key (RAG_ZOS_AUDIT_KEY, a
 # Secret reference in the pod environment: never a valve, a default or git;

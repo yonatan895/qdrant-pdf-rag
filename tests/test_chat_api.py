@@ -9,6 +9,7 @@ and context pruning.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator
 
 import pytest
@@ -1585,13 +1586,18 @@ def test_zos_pipe_audit_tag_reaches_the_live_fetch_line_and_no_identity_does(zos
 
 
 @pytest.mark.parametrize("route", ["/v1/chat", "/v1/answer"])
-def test_zos_audit_tag_authorizes_nothing(zos, route):
+def test_zos_audit_tag_authorizes_nothing(zos, route, caplog):
     """ADR-0012 D3(d): the tag is logged, never used. A missing, forged,
     malformed or genuine tag gives the same read, the same prompt and the same
     response, for an allowlisted member and for a refused one, on both Docs
-    routes."""
+    routes. The agent logs only lower-case 64 hex (the Pipe's form); any other
+    value, upper case included, is dropped from the audit line."""
+    import logging
+
+    caplog.set_level(logging.INFO)
+
     def turn(question: str, header: str | None) -> tuple:
-        before = len(_retrs(zos))
+        before, logged = len(_retrs(zos)), len(caplog.records)
         body = ({"messages": [{"role": "user", "content": question}]} if route == "/v1/chat"
                 else {"query": question})
         res = zos.post(route, json=body,
@@ -1601,6 +1607,10 @@ def test_zos_audit_tag_authorizes_nothing(zos, route):
         for volatile in ("id", "created", "request_id"):
             data.pop(volatile, None)
         prompt = [(m.role, m.content) for m in _final_prompt(zos, False)]
+        (audit,) = [json.loads(r.getMessage()) for r in caplog.records[logged:]
+                    if '"live_fetch"' in r.getMessage()]
+        expected = header if header is not None and re.fullmatch(r"[0-9a-f]{64}", header) else None
+        assert audit.get("audit_tag") == expected, header
         return json.dumps(data, sort_keys=True), prompt, _retrs(zos)[before:]
 
     headers = (None, "ab" * 32, "c826ae5169c6643170d2455138adba002d0d18320f068e029b497e18ab6b475a",
