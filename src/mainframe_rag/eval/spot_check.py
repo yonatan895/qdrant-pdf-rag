@@ -425,6 +425,13 @@ def stratified_spot_sample(
     return picked
 
 
+def batch_overlap_bands(candidates: Sequence[dict[str, Any]]) -> dict[str, int]:
+    """Rows of the whole candidate batch per lexical-overlap band (every band
+    listed; rows without an overlap value are not counted)."""
+    counts = Counter(overlap_band(row.get("lexical_overlap")) for row in candidates)
+    return {band: counts[band] for band in OVERLAP_BANDS}
+
+
 def build_review_records(
     candidates: Sequence[dict[str, Any]],
     *,
@@ -459,6 +466,7 @@ def build_review_records(
             "gold_chunk_ids": list(row["gold_chunk_ids"]),
             "gold_chunk_ids_truncated": bool(row.get("gold_chunk_ids_truncated", False)),
             "lexical_overlap": row.get("lexical_overlap"),
+            "overlap_band": overlap_band(row.get("lexical_overlap")),
             "text_sha256": expected_sha,
             "verdict": None,
             "reviewer": None,
@@ -621,6 +629,7 @@ def evaluate_spot_check(
         "reviewers": reviewers,
         "by_class": by_class,
         "by_overlap_band": by_overlap_band,
+        "candidates_by_overlap_band": batch_overlap_bands(candidates),
         "accepted_ids": accepted_ids,
         "rejected_ids": rejected_ids,
         "unreviewed_ids": unreviewed_ids,
@@ -816,6 +825,7 @@ def main(
                 "total_candidates": header["total_candidates"],
                 "sample_n": header["sample_n"],
                 "seed": header["seed"],
+                "candidates_by_overlap_band": batch_overlap_bands(candidates),
                 "by_class": dict(sorted(Counter(it["query_class"] for it in items).items())),
                 "by_overlap_band": dict(
                     sorted(Counter(overlap_band(it.get("lexical_overlap")) or "unknown" for it in items).items())

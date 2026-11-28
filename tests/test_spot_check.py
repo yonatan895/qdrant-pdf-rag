@@ -453,3 +453,44 @@ def test_export_with_passages_refuses_real_corpus_collection_and_alias_outside_r
         ) == 2
         assert sc.REFUSALS["venue"] in capsys.readouterr().err
         assert not out.exists()
+
+
+def test_export_and_report_show_the_band_of_each_row_and_of_the_whole_batch(tmp_path, capsys):
+    """A reviewer and a reader of the report see how close to its passage each
+    question is, and whether the batch is one band only (#1317)."""
+    cands, _ = _make_candidates(tmp_path)
+    rows = [json.loads(line) for line in cands.read_text(encoding="utf-8").splitlines()]
+    expected = {band: 0 for band in ret.OVERLAP_BANDS}
+    for row in rows:
+        expected[ret.overlap_band(row["lexical_overlap"])] += 1
+    review = tmp_path / "review.jsonl"
+    capsys.readouterr()
+    assert sc.main(["export", "--candidates", str(cands), "--out", str(review),
+                    "--sample", "4", "--seed", "3"]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["candidates_by_overlap_band"] == expected
+    by_id = {row["id"]: row for row in rows}
+    items = [json.loads(line) for line in review.read_text(encoding="utf-8").splitlines()][1:]
+    assert [it["overlap_band"] for it in items] == [
+        ret.overlap_band(by_id[it["id"]]["lexical_overlap"]) for it in items]
+    assert sc.main(["report", "--candidates", str(cands), "--review", str(review)]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["candidates_by_overlap_band"] == expected
+    assert sum(block["n"] for block in report["by_overlap_band"].values()) == 4
+    # A sheet exported before the field existed still loads and reports.
+    lines = review.read_text(encoding="utf-8").splitlines()
+    old = [lines[0], *(json.dumps({k: v for k, v in json.loads(line).items() if k != "overlap_band"})
+                       for line in lines[1:])]
+    legacy = tmp_path / "legacy.jsonl"
+    legacy.write_text("\n".join(old) + "\n", encoding="utf-8")
+    assert sc.main(["report", "--candidates", str(cands), "--review", str(legacy)]) == 1
+    assert json.loads(capsys.readouterr().out)["verdict"] == "incomplete"
+
+
+def test_export_samples_across_overlap_bands_inside_a_class():
+    rows = [
+        {"id": f"R{i}", "query_class": "diagnostic", "lexical_overlap": value}
+        for i, value in enumerate([0.1, 0.1, 0.1, 0.1, 0.4, 0.4, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9])
+    ]
+    picked = sc.stratified_spot_sample(rows, sample=3, seed=5)
+    assert sorted(ret.overlap_band(r["lexical_overlap"]) for r in picked) == ["high", "low", "medium"]

@@ -451,10 +451,11 @@ def test_every_sampled_point_is_kept_or_dropped_under_exactly_one_code():
                                  classes=["diagnostic"], seed=11, model_label="fake")
     assert manifest["counts"] == {
         "scanned": 10, "sampled": 10, "kept": 1, "gold_truncated": 0,
+        "overlap_bands": {"low": 0, "medium": 1, "high": 0},
         "dropped": {
             "text_unavailable": 1, "model_error": 1, "malformed_question": 1, "too_short": 1,
             "too_long": 0, "heading_copy": 1, "identifier_only": 1, "duplicate": 1,
-            "not_answerable": 2,
+            "high_overlap": 0, "not_answerable": 2,
         },
         "classes": {"diagnostic": {"requested": 10, "eligible": 10, "sampled": 10, "kept": 1}},
     }
@@ -528,6 +529,7 @@ def test_a_row_is_a_candidate_with_chunk_gold_overlap_and_provenance():
         # Content tokens (no stopwords): often quibblefrost lever 0 turned first;
         # the passage holds two of the six: lever, turned.
         "lexical_overlap": round(2 / 6, 4),
+        "content_overlap": round(2 / 6, 4),
         "provenance": {
             "text_sha256": hashlib.sha256(point.payload["text"].encode()).hexdigest(),
             "question_prompt_sha256": hashlib.sha256(
@@ -537,6 +539,8 @@ def test_a_row_is_a_candidate_with_chunk_gold_overlap_and_provenance():
                 gc.ANSWERABILITY_PROMPT.encode()).hexdigest(),
             "model": "fake-model",
             "seed": 9,
+            "reasoning_effort": None,
+            "effort_transport": None,
         },
     }
     assert manifest["collection_alias"] == "current" and manifest["collection"] == "physical_1"
@@ -1048,3 +1052,163 @@ def test_scan_holds_one_compact_record_per_point_and_shares_repeated_identity_va
         chunk_id="A-narrative-00", doc_id="A", source_rev="A@r1",
         heading_path="Part one > Unit shared by every chunk", chunk_type="narrative",
         page_start=0, page_label="1", has_message_ids=False, rules_v=RULES)
+
+
+# ------------------------------------- request provenance and difficulty (#1317)
+def _cli_run(tmp_path, monkeypatch, name, **setting_overrides):
+    """The CLI with its own model over a recording client double; returns
+    (manifest, rows, efforts passed to the client)."""
+    from mainframe_rag import config
+    from mainframe_rag.agent import answer
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatResult
+
+    settings = Settings(embed_mode="hash", qdrant_collection="synthetic", _env_file=None,
+                        llm_reasoning_efforts="low,medium,high", **setting_overrides)
+    monkeypatch.delenv("VENUE", raising=False)
+    monkeypatch.setattr(config, "load_settings", lambda: settings)
+    efforts: list[object] = []
+
+    class Client:
+        def __init__(self, given):
+            assert given is settings
+
+        def chat(self, messages, reasoning_effort=None, temperature=None):
+            efforts.append(reasoning_effort)
+            if messages[0].content == gc.ANSWERABILITY_PROMPT:
+                return ChatResult(content="YES")
+            return ChatResult(content=f"How often is {QUESTION_MARK} lever {len(efforts)} turned first?")
+
+    monkeypatch.setattr(answer, "HttpxLLMClient", Client)
+    out = tmp_path / f"{name}.jsonl"
+    assert gc.main(["--out", str(out), "--count", "2", "--seed", "1", "--model-label", "fake",
+                    "--classes", "diagnostic"], client=ReaderDouble(_grid())) == 0
+    manifest = json.loads(gc.manifest_path(out).read_text(encoding="utf-8"))
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    return manifest, rows, efforts
+
+
+def test_two_runs_that_differ_only_in_effort_or_transport_have_different_manifests(
+        tmp_path, monkeypatch, capsys):
+    """The effort shapes every question and verdict and comes from ambient
+    settings, so the manifest and each row state what was SENT (review B1)."""
+    low, low_rows, _ = _cli_run(tmp_path, monkeypatch, "low", llm_reasoning_effort_simple="low")
+    high, high_rows, _ = _cli_run(tmp_path, monkeypatch, "high", llm_reasoning_effort_simple="high")
+    template, _, _ = _cli_run(tmp_path, monkeypatch, "template", llm_reasoning_effort_simple="low",
+                              llm_effort_transport="chat_template")
+    unsent, unsent_rows, _ = _cli_run(
+        tmp_path, monkeypatch, "none", llm_reasoning_effort_simple="low", llm_effort_transport="none",
+        llm_extra_body='{"chat_template_kwargs": {"reasoning_effort": "high"}}')
+    requests = [m["model_request"] for m in (low, high, template, unsent)]
+    assert [(r["reasoning_effort"], r["effort_transport"]) for r in requests] == [
+        ("low", "top_level"), ("high", "top_level"), ("low", "chat_template"), (None, "none")]
+    assert len({json.dumps(r, sort_keys=True) for r in requests}) == 4
+    empty_body = hashlib.sha256(b"{}").hexdigest()
+    assert requests[0]["extra_body_sha256"] == empty_body != requests[3]["extra_body_sha256"]
+    # Nothing else differs between the two efforts: same sample, same rows.
+    strip = lambda m: {k: v for k, v in m.items() if k not in ("model_request", "rows_sha256")}
+    assert strip(low) == strip(high)
+    assert [r["provenance"]["reasoning_effort"] for r in low_rows + high_rows + unsent_rows] == [
+        "low", "low", "high", "high", None, None]
+    assert {r["provenance"]["effort_transport"] for r in unsent_rows} == {"none"}
+    # No endpoint configured here: the served id is unknown, not claimed.
+    assert requests[0]["configured_model"] is None
+    assert requests[0]["endpoint_lists_configured_model"] is None
+    assert "model_request" not in capsys.readouterr().out
+
+
+def test_an_injected_model_records_no_request_claim():
+    rows, manifest = gc.generate(ReaderDouble(_grid()), ModelDouble(), collection="c", count=2,
+                                 classes=["diagnostic"], seed=1, model_label="m")
+    assert manifest["model_request"] is None
+    assert {(r["provenance"]["reasoning_effort"], r["provenance"]["effort_transport"])
+            for r in rows} == {(None, None)}
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        ({"data": [{"id": "other"}, {"id": "served-model"}]}, True),
+        ({"data": [{"id": "other"}]}, False),
+        ({"unexpected": 1}, None),
+        (OSError("down"), None),
+    ],
+)
+def test_the_served_model_id_is_what_the_endpoint_lists_and_a_failed_listing_is_unknown(
+        monkeypatch, reply, expected):
+    import httpx2
+
+    from mainframe_rag.config import Settings
+
+    calls: list[tuple] = []
+
+    def fake_get(url, *, headers, timeout):
+        calls.append((url, headers))
+        if isinstance(reply, Exception):
+            raise reply
+        return SimpleNamespace(status_code=200, json=lambda: reply, raise_for_status=lambda: None)
+
+    monkeypatch.setattr(httpx2, "get", fake_get)
+    settings = Settings(embed_mode="hash", _env_file=None, llm_base_url="http://gw.invalid/v1/",
+                        llm_model_reasoning="served-model", llm_api_key="sk-test")
+    described = gc.describe_model_request(settings)
+    assert described["configured_model"] == "served-model"
+    assert described["endpoint_lists_configured_model"] is expected
+    assert calls == [("http://gw.invalid/v1/models", {"Authorization": "Bearer sk-test"})]
+
+
+def test_the_answerability_prompt_is_unchanged_and_the_question_prompt_asks_for_the_users_own_words():
+    assert hashlib.sha256(gc.ANSWERABILITY_PROMPT.encode()).hexdigest() == ANSWERABILITY_SHA256
+    prompt = gc.question_prompt("diagnostic")
+    for phrase in ("has not seen the passage", "own words", "identifiers"):
+        assert phrase in prompt
+
+
+ANSWERABILITY_SHA256 = "0be13bac06dbf47797c0ffed32f8772d9496e64778cc1ce106c43a546bb62f17"
+COPIED = f"Must the {PASSAGE_MARK} lever be turned twice before the valve opens?"
+OWN_WORDS = f"Why does my {QUESTION_MARK} gate stay shut after I start the pump?"
+
+
+def test_content_overlap_ignores_identifiers_and_stopwords():
+    passage = "Message ABC123I: the zorblatt lever must be turned twice before the valve opens."
+    assert gc.content_overlap("What does ABC123I say about the pump gasket?", passage) == 0.0
+    assert gc.content_overlap("ABC123I zorblatt lever?", passage) == 1.0
+    assert gc.content_overlap("Is the zorblatt pump broken?", passage) == round(1 / 3, 4)
+    # Only identifiers and stopwords: nothing to measure, the class rule decides.
+    assert gc.content_overlap("What is ABC123I?", passage) == 0.0
+    assert gc.lexical_overlap("What does ABC123I say about the pump gasket?", passage) == 0.2
+
+
+def test_a_question_written_from_the_passage_wording_is_dropped_as_high_overlap_and_counted():
+    model = ModelDouble(questions={0: COPIED, 1: OWN_WORDS})
+    rows, manifest = gc.generate(ReaderDouble(_grid()), model, collection="c", count=2,
+                                 classes=["diagnostic"], seed=1, model_label="m")
+    assert [r["query"] for r in rows] == [OWN_WORDS]
+    assert manifest["counts"]["dropped"]["high_overlap"] == 1 and manifest["counts"]["kept"] == 1
+    assert manifest["max_overlap"] == gc.DEFAULT_MAX_OVERLAP == 0.6
+    assert rows[0]["content_overlap"] <= 0.6
+    assert manifest["counts"]["overlap_bands"] == {"low": 1, "medium": 0, "high": 0}
+    # The cheap text filter runs before the second model pass: one check only.
+    assert sum(1 for system, _ in model.calls if system == gc.ANSWERABILITY_PROMPT) == 1
+    assert gc.DROP_CODES.index("high_overlap") < gc.DROP_CODES.index("not_answerable")
+
+
+def test_the_overlap_cap_is_a_flag_and_one_disables_the_filter(tmp_path, capsys):
+    def run(name, *extra):
+        out = tmp_path / f"{name}.jsonl"
+        rc = gc.main(["--out", str(out), "--count", "2", "--seed", "1", "--model-label", "m",
+                      "--classes", "diagnostic", "--collection", "c", *extra],
+                     client=ReaderDouble(_grid()), model=ModelDouble(questions={0: COPIED, 1: OWN_WORDS}))
+        return rc, json.loads(gc.manifest_path(out).read_text(encoding="utf-8"))
+
+    rc, capped = run("capped")
+    rc_open, uncapped = run("open", "--max-overlap", "1.0")
+    assert (rc, rc_open) == (0, 0)
+    assert (capped["counts"]["kept"], uncapped["counts"]["kept"]) == (1, 2)
+    assert uncapped["max_overlap"] == 1.0 and uncapped["counts"]["dropped"]["high_overlap"] == 0
+    assert uncapped["counts"]["overlap_bands"]["high"] == 1
+    with pytest.raises(SystemExit):
+        gc.main(["--out", str(tmp_path / "bad.jsonl"), "--count", "2", "--seed", "1",
+                 "--model-label", "m", "--max-overlap", "0"], client=ReaderDouble(_grid()),
+                model=ModelDouble())
+    capsys.readouterr()
