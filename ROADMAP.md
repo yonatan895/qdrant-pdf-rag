@@ -209,8 +209,9 @@ Decision evidence and reopening conditions: [docs/retrieval.md](docs/retrieval.m
 > **Status: PARTIAL — ADR proposed (`docs/adr/0003-zowe-mcp-read.md`) and a
 > read-only Zowe bridge + agent wiring + mock backend shipped behind
 > `zowe_mcp_enabled=false` (PRs #228–#231: `src/mainframe_rag/mcp/`,
-> routing/fetch orchestration, sim-tier mock).** Tool-result prompt wiring
-> and any Splunk-connector work remain open.
+> routing/fetch orchestration, sim-tier mock).** Prompt wiring for the
+> ADR-0012 dataset-read pilot is in (#1294 PR 2, default off); its deployment
+> (#1294 PR 3) and any Splunk-connector work remain open.
 - **Why:** ADR 0001 decided "Splunk: context in, not crawl" and `/v1/answer` already
   accepts caller-supplied `splunk_context`. Letting the AGENT fetch live state
   supersedes ADR 0001 → per repo policy this REQUIRES a new ADR + `architecture.md`

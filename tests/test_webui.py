@@ -191,6 +191,27 @@ def test_ui_chat_hostile_history_degrades_to_empty_history(ui_client, raw):
     assert "Reissue the command after initialization." in resp.text
 
 
+def test_console_chat_never_plans_a_zos_read(ui_client, monkeypatch):
+    """ADR-0012 D1: dataset reads run on the Docs routes only. With reads
+    enabled, a console turn naming a dataset plans nothing and shows no z/OS
+    notice, while the same question on /v1/answer reaches the planner."""
+    question = "What does LFAREA in SYS1.PARMLIB(IEASYS00) mean?"
+    planned: list[str] = []
+    monkeypatch.setattr(app_mod.settings, "zowe_mcp_enabled", True)
+    monkeypatch.setattr(
+        app_mod, "observe_docs_question",
+        lambda _settings, _client, _request_id, asked, _tag=None: planned.append(asked))
+    stream = ui_client.post(
+        "/ui/chat/stream", json={"messages": [{"role": "user", "content": question}]})
+    form = ui_client.post("/ui/chat", data={"message": question, "messages": "[]"})
+    assert stream.status_code == form.status_code == 200
+    assert planned == []
+    for body in (stream.text, form.text):
+        assert "z/OS read" not in body and "[z/OS observation]" not in body
+    assert ui_client.post("/v1/answer", json={"query": question}).status_code == 200
+    assert planned == [question]
+
+
 def test_ui_chat_stream_final_matches_answer_stream_final(ui_client):
     """The console stream and the /v1/answer stream share one final-frame
     mapping: for the same retrieved hits and model output they stream with the
