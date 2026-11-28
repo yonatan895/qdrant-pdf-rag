@@ -237,7 +237,7 @@ owner: these are maintainer dispositions, not legal approvals.
 
 | Component | Recorded state |
 |---|---|
-| `pymupdf` 1.28.2 | `elected: AGPL-3.0-only`, scoped to ingest. `approved` by the maintainer's owner decision of 2026-10-26 (#376), an **explicit exception** to waiting for qualified legal confirmation: unmodified, internal, not offered to users over a network. **Withdrawn** (back to `pending-owner-decision`) if legal confirmation is refused, or the use changes (modification, distribution outside the organisation, network exposure of pymupdf itself); the release then needs a new decision or the Artifex commercial licence. Not a legal approval; the AGPL obligations below stand. |
+| `pymupdf` 1.28.2 | `elected: AGPL-3.0-only`, scoped to ingest and operator-run offline tools (scope restated by the maintainer on 2026-11-27, #1318; was "ingest"). `approved` by the maintainer's owner decision of 2026-10-26 (#376), an **explicit exception** to waiting for qualified legal confirmation: unmodified, internal, not offered to users over a network. **Withdrawn** (back to `pending-owner-decision`) if legal confirmation is refused, or the use changes (modification, distribution outside the organisation, network exposure of pymupdf itself); the release then needs a new decision or the Artifex commercial licence. Not a legal approval; the AGPL obligations below stand. |
 | `flatbuffers`, `loguru`, `onnxruntime`, `tokenizers` | `approved`. Upstream license texts (locked version's tag, source URLs in the inventory) are in `licenses/texts/` and rendered into `THIRD-PARTY-NOTICES.txt`. |
 | Qdrant image | `approved` on the upstream Apache-2.0 license. Layer inventory is follow-up #371. |
 | OpenObserve OSS v1.1.2 image | `approved` (ADR-0006, #956): AGPL-3.0 (`network-copyleft`) accepted for the unmodified upstream binary run as a separate service; it is transferred unchanged with the source reference upstream v1.1.2, and any modification or Enterprise-feature change needs a new decision. Layer inventory is follow-up #371. |
@@ -283,7 +283,7 @@ These are legal or maintainer calls. Nothing here is decided by the repository.
 
 | # | Decision | Who | Options | What each implies for the bundle |
 |---|---|---|---|---|
-| 1 | PyMuPDF: AGPL-3.0 or Artifex commercial (see the record below) | Qualified legal owner; maintainer recorded A, scoped to ingest, as an owner decision on 2026-10-26 (legal confirmation waived as an explicit exception; withdrawal conditions in the record below) | A: AGPL. B: commercial. C: replace the parser. D: exclude the ingest path. | A: add the AGPL-3.0 text to the notices, and a source mechanism that works offline (a hash-pinned source archive of the exact PyMuPDF and MuPDF version in the bundle, or a written offer the enterprise accepts); the owner decides which means and whether the project's own code is covered. B: no AGPL text or source; record an approval reference, change `elected`, no contract or key in git. C and D: separate approved issues. |
+| 1 | PyMuPDF: AGPL-3.0 or Artifex commercial (see the record below) | Qualified legal owner; maintainer recorded A, scoped to ingest and operator-run offline tools (scope restated 2026-11-27), as an owner decision on 2026-10-26 (legal confirmation waived as an explicit exception; withdrawal conditions in the record below) | A: AGPL. B: commercial. C: replace the parser. D: exclude the ingest path. | A: add the AGPL-3.0 text to the notices, and a source mechanism that works offline (a hash-pinned source archive of the exact PyMuPDF and MuPDF version in the bundle, or a written offer the enterprise accepts); the owner decides which means and whether the project's own code is covered. B: no AGPL text or source; record an approval reference, change `elected`, no contract or key in git. C and D: separate approved issues. |
 | 2 | Does transferring the images or bundle to the enterprise count as distribution or conveying, and does the enterprise's own operation count as network use? | Qualified legal owner | Internal use only, conveyed to a separate legal entity, or something else | If conveying: source duties of the table apply to PyMuPDF, MPL wheels and the GPL/LGPL base-layer RPMs. If not: notices only. |
 | 3 | Source offer for base-layer GPL/LGPL RPMs and MPL-2.0 wheels | Qualified legal owner; packaging is a separate approved change | Carry sources or an offer; rely on the base image provider's offer; conclude no duty | Carrying sources makes the bundle larger and adds hashed members to `SHA256SUMS`; relying on a provider needs that provider's terms recorded. |
 | 4 | Combination with Apache-2.0 project code | Qualified legal owner | Accept the combination under the elected license; keep ingest as a separate program boundary | No code change; the answer only sets what the notices and any offer say. |
@@ -306,9 +306,13 @@ Observed facts (source inspection and package metadata, 2 October 2026):
   License". The wheel's only license file is that one line; it contains no AGPL or
   commercial text and does not say AGPL "only" or "or later". Artifex's own terms
   were not fetched (no network) and are the authority to read.
-- Imported only under `mainframe_rag/ingest/` (`ibm_pdf.py`, `run_ingest.py`) and
-  in `scripts/gate_l1.py` and `scripts/make_synthetic_pdf.py`. The serving agent is
-  designed not to import it (comment in `ingest/chunk.py`); no test enforces this.
+- Import sites (re-inspected 27 November 2026): the ingest path
+  (`mainframe_rag/ingest/ibm_pdf.py`, `ingest/run_ingest.py`), two scripts
+  (`scripts/gate_l1.py`, `scripts/make_synthetic_pdf.py`) and two operator-run
+  offline tools: `mainframe_rag/tools/text_to_pdf.py` (#1277) and
+  `render_page_png` in `mainframe_rag/eval/page_image_arm.py` (#1318), the only
+  PyMuPDF use in that module. The serving agent is designed not to import it
+  (comment in `ingest/chunk.py`); no test enforces this.
 - The project itself is Apache-2.0; the repository records no election and no
   commercial grant.
 
@@ -336,6 +340,17 @@ missing key, fails `check`. `check --release` refuses any entry whose value is
 confirmation is refused, or the use changes (modification, distribution outside the
 organisation, network exposure of pymupdf itself); the release then needs a new
 decision or option B. Not a legal approval.
+
+**Scope restated (2026-11-27, #1318): ingest and operator-run offline tools.** The
+maintainer's owner decision, stated to the coordinating agent on 2026-11-27 and
+to be confirmed by his comment on the #1318 licence-scope follow-up PR (the approval reference becomes that
+comment's URL; until then this restatement is not final), extends the scope from the ingest Job to tools
+an operator runs offline from a shell (`tools/text_to_pdf.py`,
+`eval/page_image_arm.py`). Nothing else in the election changes: `AGPL-3.0-only`,
+the basis (unmodified, internal, not offered to users over a network), the
+legal-confirmation exception and the withdrawal conditions stand. A serving process
+that imports PyMuPDF, or a network-reachable renderer, is outside this scope and
+needs a new decision (`decision.scope` in the inventory).
 
 ## What a release must satisfy
 

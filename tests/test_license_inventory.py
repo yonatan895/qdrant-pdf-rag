@@ -81,7 +81,10 @@ def test_pymupdf_election_is_recorded_as_an_owner_decision_exception_to_legal_co
     inventory = real_inventory()
     entry = next(e for e in inventory["python"] if e["name"] == "pymupdf")
     assert entry["decision"]["owner"] == "yonatan895" and entry["decision"]["date"] == "2026-10-26"
-    assert entry["decision"]["scope"] == "ingest" and entry["elected"] == "AGPL-3.0-only"
+    # Scope restated 2026-11-27 (#1318): the election itself is unchanged.
+    assert entry["decision"]["scope"] == "ingest and operator-run offline tools"
+    assert entry["elected"] == "AGPL-3.0-only"
+    assert "scope restated 2026-11-27" in entry["approval_ref"]
     assert entry["decision"]["legal_confirmation"] == "waived-by-owner-decision"
     assert entry["status"] == "approved"
     assert "issuecomment-6427197208" in entry["approval_ref"]
