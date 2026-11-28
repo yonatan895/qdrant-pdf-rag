@@ -30,8 +30,9 @@ _FIELDS = frozenset({
     "record_type", "tombstone_schema", "target_collection", "build_id", "logical_alias",
     "data_collection", "gen_fp", "corpus_fp", "state", "content_seal", "source_catalog",
     "data_points", "snapshots", "keep", "readers_stopped_at", "recovery_ref", "operator",
-    "plan_digest", "tool_release", "created_at", "retired_at",
+    "plan_digest", "tool_release", "created_at", "retired_at", "completion",
 })
+_COMPLETION_FIELDS = frozenset({"resumed", "readers_stopped_at", "operator", "recovery_ref", "kept_unverified"})
 _SNAPSHOT_FIELDS = frozenset({"peer", "name", "size", "checksum", "creation_time"})
 
 
@@ -85,6 +86,22 @@ def decode_tombstone(payload: object, control: str) -> dict[str, Any]:
             raise ValueError("keep")
         for kept in keep["kept_build_ids"]:
             canonical_build_id(kept)
+        # Written with the `retired` update only: the run that finished, its
+        # own reader-stop attestation, and any kept build that no longer
+        # verified when a resumed run finished.
+        completion = payload["completion"]
+        if (payload["state"] == STATE_RETIRED) != isinstance(completion, dict):
+            raise ValueError("completion")
+        if isinstance(completion, dict):
+            if (set(completion) != _COMPLETION_FIELDS or type(completion["resumed"]) is not bool
+                    or not isinstance(completion["readers_stopped_at"], str)
+                    or not isinstance(completion["operator"], str)
+                    or not isinstance(completion["kept_unverified"], list)
+                    or (completion["recovery_ref"] is not None
+                        and not isinstance(completion["recovery_ref"], str))):
+                raise ValueError("completion")
+            for kept in completion["kept_unverified"]:
+                canonical_build_id(kept)
     except (ValueError, TypeError, KeyError):
         raise InvalidTombstone("invalid retirement tombstone") from None
     return payload

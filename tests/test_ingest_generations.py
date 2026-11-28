@@ -195,8 +195,13 @@ def run(store: Store, tmp_path, *argv: str, peer_urls: bool | None = None, api_k
 
 
 def progress(tmp_path):
+    """The ingest inventory, with the publish lock a publication of the alias
+    left beside it (the disposal commands refuse an inventory without it)."""
+    from mainframe_rag.ingest.completion import publish_lock_path
+
     path = tmp_path / "inventory.jsonl"
     path.touch()
+    publish_lock_path(path, ALIAS).touch()
     return path
 
 

@@ -41,7 +41,7 @@ from scripts.qdrant_cluster import (
 from scripts.verify_placement import perform_verification
 
 from mainframe_rag.config import Settings
-from mainframe_rag.ingest.completion import completion_collection_for
+from mainframe_rag.ingest.completion import completion_collection_for, publish_lock_path
 from mainframe_rag.ingest.publish import verify_staging_distribution, verify_staging_placement
 from mainframe_rag.ingest.qdrant_io import collection_vector_configs
 from mainframe_rag.ingest.run_ingest import _placement_clients
@@ -863,6 +863,7 @@ def test_snapshot_disposal_lists_and_deletes_per_peer_and_refuses_a_missing_peer
     with tempfile.TemporaryDirectory() as scratch:
         progress = Path(scratch) / "inventory.jsonl"
         progress.touch()
+        publish_lock_path(progress, logical).touch()  # as left by a publication of this alias
         try:
             for pair, build_id, finished in zip(pairs, builds, (100.0, 200.0, 300.0), strict=True):
                 _create_pair(peers[0], pair.corpus, replication_factor=RF)
@@ -1010,6 +1011,7 @@ def test_data_disposal_on_three_peers_deletes_every_peers_snapshots_before_the_c
     with tempfile.TemporaryDirectory() as scratch:
         progress = Path(scratch) / "inventory.jsonl"
         progress.touch()
+        publish_lock_path(progress, logical).touch()  # as left by a publication of this alias
         try:
             for pair, build_id, finished in zip(pairs, builds, (100.0, 200.0, 300.0), strict=True):
                 _create_pair(peers[0], pair.corpus, replication_factor=RF)

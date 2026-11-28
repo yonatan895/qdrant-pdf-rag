@@ -63,12 +63,15 @@ from mainframe_rag.ingest.generations import (
     _iso,
     _labels,
     _publish_lock,
+    _record,
     assess,
     default_operator,
     delete_snapshot_on_peer,
+    publish_lock_path,
     read_peer_view,
     read_registry,
     read_sidecar,
+    require_bound_inventory,
 )
 from mainframe_rag.ingest.publish import (
     publication_metadata_point_id,
@@ -212,6 +215,7 @@ class Run:
     snapshots: list[SnapshotEntry]
     tombstone: dict[str, Any]
     out: Callable[[str], None]
+    completion: dict[str, Any]
 
     @property
     def peers(self) -> tuple[Peer, ...]:
@@ -362,8 +366,42 @@ def step_retired(run: Run) -> None:
         raise Refused(f"E_TOMBSTONE: no tombstone of build {run.target.build_id} is stored")
     if stored["state"] == STATE_RETIRED:
         return
-    _put_tombstone(run, {**stored, "state": STATE_RETIRED, "retired_at": _iso(datetime.now(UTC).timestamp())})
+    _put_tombstone(run, {**stored, "state": STATE_RETIRED, "retired_at": _iso(datetime.now(UTC).timestamp()),
+                         "completion": run.completion})
     run.out(f"S5 tombstone retired written to {run.target.control} and read back")
+
+
+def data_disposal_record_path(progress: Path, alias: str) -> Path:
+    """Append-only audit record beside the publish lock: one line when an
+    executing run starts or resumes (who, the reader-stop attestation, the
+    digest, any kept build that no longer verifies) and one when it ends.
+    Audit only: a rerun converges from the tombstone, never from this file."""
+    lock = publish_lock_path(progress, alias)
+    stem = lock.name.removeprefix("publish-").removesuffix(".lock")
+    return lock.with_name(f"data-disposal-{stem}.jsonl")
+
+
+def kept_unverified(entry: QdrantSnapshotReader, settings: Settings, registry: Registry,
+                    tombstone: dict[str, Any]) -> list[str]:
+    """The kept builds the tombstone recorded at plan time that are no longer
+    retained generations verifying against their seal and catalog. A resume
+    finishes regardless (the tombstoned build is no rollback point either
+    way); this is what it warns about and records."""
+    failed: list[str] = []
+    by_id = {g.build_id: g for g in registry.generations}
+    for build_id in tombstone["keep"]["kept_build_ids"]:
+        g = by_id.get(build_id)
+        ok = g is not None and g.phase == "retained"
+        if ok and g is not None:
+            try:
+                ok = verify_publication_seal(entry, g.control, page_size=settings.ingest_scan_page_size) and (
+                    (g.build_schema or 0) < 3
+                    or verify_build_catalog(entry, g.control, page_size=settings.ingest_scan_page_size))
+            except Exception:  # noqa: BLE001 - reported with fixed text
+                ok = False
+        if not ok:
+            failed.append(build_id)
+    return failed
 
 
 def _resume_digest(tombstone: dict[str, Any], unrecorded: list[dict[str, Any]]) -> str:
@@ -406,6 +444,7 @@ def dispose_data(
         if plan_digest is None or readers_stopped is None:
             raise Refused("E_PLAN_DIGEST: --execute needs --plan-digest and --readers-stopped")
     alias = settings.qdrant_collection
+    require_bound_inventory(progress, alias)
     with ExitStack() as stack:
         if execute:
             stack.enter_context(_publish_lock(progress, alias))
@@ -414,6 +453,8 @@ def dispose_data(
                                  sidecar_state, sidecar)
         assess(registry, keep)
         g = _find(registry, build_id)
+        unverified: list[str] = []
+        resumed = False
         labels = _labels(registry)
         pending = [o.build_id for o in registry.generations if o.phase == STATE_RETIRING and o is not g]
         if pending:
@@ -445,6 +486,12 @@ def dispose_data(
             out(f"RESUME build {g.build_id} physical {g.physical}: tombstone retiring since "
                 f"{tombstone['created_at']}; data collection {'present' if g.data_present else 'absent'}; "
                 f"{len(g.snapshots)} snapshot(s) still listed")
+            resumed = True
+            unverified = kept_unverified(entry, settings, registry, tombstone)
+            for failed in unverified:
+                out(f"WARNING: W_KEPT_UNVERIFIED: kept build {failed}, recorded when this disposal was planned, "
+                    "is no longer a retained build that verifies against its seal; the disposal still "
+                    "finishes (a tombstoned build is no rollback point), check the remaining rollback points")
             for r in unrecorded:
                 out(f"  UNRECORDED snapshot peer {r['peer']} {r['name']} {r['size']} bytes created "
                     f"{r['creation_time']} (made after the plan; deleted only under the digest below)")
@@ -471,9 +518,9 @@ def dispose_data(
                 "source_catalog": receipt.get("source_catalog"), "data_points": g.points,
                 "snapshots": plan["snapshots"], "keep": plan["keep"],
                 "readers_stopped_at": readers_stopped, "recovery_ref": recovery_ref,
-                "operator": operator or default_operator(), "plan_digest": digest,
+                "operator": operator or default_operator(), "plan_digest": digest,  # who planned and started it
                 "tool_release": os.environ.get("IMAGE_SHA", "").strip() or None,
-                "created_at": _iso(datetime.now(UTC).timestamp()), "retired_at": None,
+                "created_at": _iso(datetime.now(UTC).timestamp()), "retired_at": None, "completion": None,
             }
             out(f"PLAN dispose build {g.build_id} physical {g.physical} finished {_iso(g.finished_at)} "
                 f"rank {g.rank} points {g.points}: delete data build alias, {len(g.snapshots)} snapshot(s) "
@@ -497,12 +544,19 @@ def dispose_data(
                           "nothing changed by this run, read the dry run again")
         if not isinstance(entry, QdrantGenerationAdmin):
             raise Refused("E_NO_WRITER: this client cannot write the tombstone or delete")
-        run = Run(entry, alias, progress, registry, g, list(g.snapshots), tombstone, out)
+        who = operator or default_operator()
+        completion = {"resumed": resumed, "readers_stopped_at": readers_stopped, "operator": who,
+                      "recovery_ref": recovery_ref, "kept_unverified": unverified}
+        record = data_disposal_record_path(progress, alias)
+        _record(record, {"event": "resumed" if resumed else "started", "alias": alias, "build_id": g.build_id,
+                         "physical": g.physical, "plan_digest": digest, **completion})
+        run = Run(entry, alias, progress, registry, g, list(g.snapshots), tombstone, out, completion)
         step_tombstone(run)
         step_alias(run)
         step_snapshots(run)
         step_collection(run)
         step_retired(run)
+        _record(record, {"event": "retired", "build_id": g.build_id, "physical": g.physical})
         out(f"DONE build {g.build_id} is retired: {g.physical}, its data build alias and its snapshots are "
             f"gone; {g.control}, its control alias and the tombstone are kept")
 

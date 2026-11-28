@@ -74,6 +74,7 @@ from mainframe_rag.ingest.completion import (
     CompletionRecord,
     acquire_publish_lock,
     completion_collection_for,
+    legacy_publish_lock_path,
     publish_lock_path,
     release_run_lock,
 )
@@ -595,6 +596,28 @@ def delete_snapshot_on_peer(peer: Peer, collection: str, name: str) -> None:
                          f"({peer.label}); a delete needs the writer key; rerun to retry")
 
 
+def require_bound_inventory(progress: Path, alias: str) -> None:
+    """The inventory named by `--progress` must be the one publication of
+    this alias used: the publish lock a publisher of the alias takes
+    (`publish-<alias>.lock`, or its pre-#1028 name) already exists in the
+    same directory. A disposal takes the lock and reads the sidecar beside
+    the given file, so another existing file, a copy elsewhere or a symlink
+    from elsewhere would exclude nothing and protect nothing (review N3 of
+    #1393: with the real lock held, a different file let the run proceed).
+    Checked before the lock is taken, because taking it creates the file."""
+    refusal = Refused(f"E_PROGRESS_UNBOUND: no publish lock of {alias} exists beside --progress, or it is "
+                      "not a regular file given by its own path: this is not the inventory the alias was "
+                      "published from; nothing read, nothing changed")
+    try:
+        if progress.is_symlink() or not progress.is_file():
+            raise refusal
+        locks = [publish_lock_path(progress, alias), legacy_publish_lock_path(progress, alias)]
+        if not any(lock is not None and lock.is_file() and not lock.is_symlink() for lock in locks):
+            raise refusal
+    except (OSError, RuntimeError):
+        raise refusal from None
+
+
 @contextmanager
 def _publish_lock(progress: Path, alias: str) -> Iterator[None]:
     try:
@@ -645,6 +668,7 @@ def dispose_snapshots(
     operator: str | None = None,
 ) -> None:
     alias = settings.qdrant_collection
+    require_bound_inventory(progress, alias)
     with ExitStack() as stack:
         if execute:
             stack.enter_context(_publish_lock(progress, alias))

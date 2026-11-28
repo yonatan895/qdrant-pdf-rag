@@ -21,7 +21,11 @@ from mainframe_rag.config import Settings
 from mainframe_rag.ingest import build, disposal
 from mainframe_rag.ingest import generations as gen
 from mainframe_rag.ingest.build import build_aliases
-from mainframe_rag.ingest.completion import acquire_publish_lock, release_run_lock
+from mainframe_rag.ingest.completion import (
+    acquire_publish_lock,
+    publish_lock_path,
+    release_run_lock,
+)
 from mainframe_rag.ingest.publish import publication_metadata_point_id, write_publish_state
 from mainframe_rag.ingest.retirement import InvalidTombstone, decode_tombstone, tombstone_point_id
 from mainframe_rag.ingest.seal import capture_content_seal
@@ -120,6 +124,7 @@ def aware(monkeypatch):
 def progress(tmp_path):
     path = tmp_path / "inventory.jsonl"
     path.touch()
+    publish_lock_path(path, ALIAS).touch()  # as left by a publication of this alias
     return path
 
 
@@ -161,13 +166,16 @@ def writes(store):
 
 
 def state(store):
-    """Everything stored, with the tombstone's two clock values normalised."""
+    """Everything stored, with the tombstone's two clock values and whether
+    the finishing run was a resume normalised."""
     collections = copy.deepcopy(store.collections)
     for points in collections.values():
         for payload in points.values():
             if payload.get("record_type") == "retirement-tombstone":
                 payload["created_at"] = "T"
                 payload["retired_at"] = payload["retired_at"] and "T"
+                if payload["completion"]:
+                    payload["completion"]["resumed"] = None
     listed = [{k: sorted(s.name for s in v) for k, v in peer.items() if v} for peer in store.snapshots]
     return dict(store.aliases), collections, listed
 
@@ -202,7 +210,7 @@ def test_this_release_refuses_execute_before_reading_or_writing_anything(tmp_pat
                   settings=settings, connect=connect, out=lambda line: None)
     assert rc == gen.EXIT_REFUSED and "E_READERS_UNAWARE" in capsys.readouterr().err
     assert connected == [] and store.calls == [] and state(store) == before
-    assert not list(tmp_path.glob("publish-*.lock"))
+    assert not disposal.data_disposal_record_path(progress(tmp_path), ALIAS).exists()
 
 
 def test_the_core_refuses_execute_too_when_called_without_the_cli(tmp_path):
@@ -262,6 +270,12 @@ def test_disposal_removes_the_data_unit_and_keeps_the_controls(tmp_path, aware):
     assert (record["state"], record["build_id"], record["data_collection"]) == ("retired", G1, P1)
     assert record["keep"] == {"n": 1, "kept_build_ids": [G2], "below_keep_override": False}
     assert (record["readers_stopped_at"], record["recovery_ref"], record["operator"]) == (STOPPED, "CHG-1373", "site-op")
+    assert record["completion"] == {"resumed": False, "readers_stopped_at": STOPPED, "operator": "site-op",
+                                    "recovery_ref": "CHG-1373", "kept_unverified": []}
+    audit = [json.loads(line) for line in
+             disposal.data_disposal_record_path(progress(tmp_path), ALIAS).read_text().splitlines()]
+    assert [e["event"] for e in audit] == ["started", "retired"]
+    assert (audit[0]["build_id"], audit[0]["readers_stopped_at"], audit[0]["operator"]) == (G1, STOPPED, "site-op")
     assert sorted(s["name"] for s in record["snapshots"]) == sorted(c[3] for c in calls[2:6])
     assert record["content_seal"] == kept_control[publication_metadata_point_id(C1)]["content_seal"]
     assert "doc_id" not in record and "secret manual text" not in json.dumps(record)
@@ -562,6 +576,125 @@ def test_the_collection_delete_itself_requires_every_peer_to_list_no_snapshot(tm
     assert P1 in store.collections and ("delete_collection", P1) not in store.calls
 
 
+def _hazard(store, tmp_path, name):
+    """Something that makes the next delete unsafe, appearing mid-run."""
+    control_alias = build_aliases(ALIAS, G1)[1]
+    record = tombstone(store)
+    if name == "live":
+        store.aliases[ALIAS] = P1
+    elif name == "foreign-alias":
+        store.aliases["someone-else"] = P1
+    elif name == "control-alias-repointed":
+        store.aliases[control_alias] = C2
+    elif name == "sidecar":
+        write_publish_state(progress(tmp_path), ALIAS, staging=f"{ALIAS}__genzzz", gen_fp="g", corpus_fp="c",
+                            previous=P1)
+    elif name == "tombstone-already-retired":
+        store.collections[C1][tombstone_point_id(C1)] = {
+            **record, "state": "retired", "retired_at": "2026-11-28T10:30:00Z",
+            "completion": {"resumed": False, "readers_stopped_at": STOPPED, "operator": "x", "recovery_ref": None,
+                           "kept_unverified": []}}
+    else:
+        assert name == "tombstone-of-another-build"
+        store.collections[C1][tombstone_point_id(C1)] = {**record, "build_id": G2}
+
+
+HAZARDS = {"live": "E_LIVE", "foreign-alias": "E_CHANGED", "control-alias-repointed": "E_CHANGED",
+           "sidecar": "E_SIDECAR", "tombstone-already-retired": "E_TOMBSTONE",
+           "tombstone-of-another-build": "E_TOMBSTONE"}
+
+
+@pytest.mark.parametrize("hazard", sorted(HAZARDS))
+def test_every_snapshot_delete_rechecks_the_target(tmp_path, capsys, aware, hazard):
+    """After the alias step: the hazard appears while the first snapshot is
+    being deleted; the second snapshot and the collection must stay."""
+    store = world()
+    digest = digest_of(dry(store, tmp_path, G1)[1])
+    seen: list[str] = []
+
+    def during_first_delete(peer, collection, name):
+        seen.append(name)
+        if len(seen) == 1:
+            _hazard(store, tmp_path, hazard)
+
+    store.on_delete = during_first_delete
+    rc, _ = execute(store, tmp_path, G1, digest)
+    assert rc == gen.EXIT_REFUSED and HAZARDS[hazard] in capsys.readouterr().err
+    assert [c[0] for c in writes(store)] == ["upsert", "delete_alias", "delete_snapshot"]
+    assert P1 in store.collections and len(store.snapshots[0][P1]) == 1
+
+
+@pytest.mark.parametrize("hazard", sorted(HAZARDS))
+def test_the_collection_delete_rechecks_the_target(tmp_path, monkeypatch, capsys, aware, hazard):
+    """Between the snapshot step and the collection delete."""
+    store = world()
+    digest = digest_of(dry(store, tmp_path, G1)[1])
+    original = disposal.step_snapshots
+
+    def then_hazard(run):
+        original(run)
+        _hazard(store, tmp_path, hazard)
+
+    monkeypatch.setattr(disposal, "step_snapshots", then_hazard)
+    rc, _ = execute(store, tmp_path, G1, digest)
+    assert rc == gen.EXIT_REFUSED and HAZARDS[hazard] in capsys.readouterr().err
+    assert P1 in store.collections and ("delete_collection", P1) not in store.calls
+    assert [c[0] for c in writes(store)] == ["upsert", "delete_alias", "delete_snapshot", "delete_snapshot"]
+
+
+@pytest.mark.parametrize("leftover", ["data-collection", "data-alias"])
+def test_a_retired_record_with_the_data_back_is_reported_inconsistent(tmp_path, capsys, aware, leftover):
+    store = world()
+    digest = digest_of(dry(store, tmp_path, G1)[1])
+    assert execute(store, tmp_path, G1, digest)[0] == 0
+    store.collections[P1] = {}
+    if leftover == "data-alias":
+        store.aliases[build_aliases(ALIAS, G1)[0]] = P1
+    store.calls.clear()
+    rc, _ = execute(store, tmp_path, G1, digest)
+    assert rc == gen.EXIT_REFUSED and "E_INCONSISTENT" in capsys.readouterr().err
+    assert writes(store) == [] and P1 in store.collections
+
+
+# --- the inventory must be the alias's own ---------------------------------------
+
+
+@pytest.mark.parametrize("command", ["dispose", "dispose-snapshots"])
+@pytest.mark.parametrize("other", ["foreign-file", "copy-elsewhere", "symlink-elsewhere", "symlink-beside"])
+def test_an_inventory_that_is_not_the_one_the_alias_was_published_from_is_refused(
+        tmp_path, capsys, aware, command, other):
+    """Review N3 of #1393: the lock and the sidecar are whatever sits beside
+    --progress. With the real lock held by a publisher and the real sidecar
+    naming the build, another existing file must not let a run proceed."""
+    import shutil
+
+    store = world()
+    real = progress(tmp_path)
+    real.write_text('{"path": "a.pdf", "sha256": "0"}\n')
+    digest = digest_of(dry(store, tmp_path, G1)[1])
+    write_publish_state(real, ALIAS, staging=f"{ALIAS}__genzzz", gen_fp="g", corpus_fp="c", previous=P1)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    given = (tmp_path if other == "symlink-beside" else elsewhere) / "other.jsonl"
+    if other == "foreign-file":
+        given.write_text("{}\n")
+    elif other == "copy-elsewhere":
+        shutil.copy(real, given)
+    else:
+        given.symlink_to(real)
+    handle = acquire_publish_lock(real, ALIAS)  # an ingest is publishing
+    before = state(store)
+    try:
+        for extra in ((), ("--execute", "--plan-digest", digest, "--readers-stopped", STOPPED) if command == "dispose"
+                      else ("--execute",)):
+            rc, _ = drun(store, tmp_path, command, "--progress", str(given), "--build-id", G1, *extra)
+            assert rc == gen.EXIT_REFUSED and "E_PROGRESS_UNBOUND" in capsys.readouterr().err
+    finally:
+        release_run_lock(handle)
+    assert store.calls == [] and state(store) == before  # nothing was even read
+    assert sorted(p.name for p in elsewhere.iterdir()) == ([] if other == "symlink-beside" else ["other.jsonl"])
+
+
 # --- crash and resume ------------------------------------------------------------
 
 
@@ -654,9 +787,27 @@ def test_a_started_disposal_finishes_even_when_plan_time_checks_would_now_refuse
     else:
         for name in build_aliases(ALIAS, G2):  # the only kept build is no longer a retained generation
             del store.aliases[name]
-    assert execute(store, tmp_path, G1, digest)[0] == 0
+    later = "2026-11-28T11:30:00Z"
+    resume = ("dispose", "--progress", str(progress(tmp_path)), "--build-id", G1)
+    rc, plan = drun(store, tmp_path, *resume)
+    rc, lines = drun(store, tmp_path, *resume, "--execute", "--plan-digest", digest, "--readers-stopped", later,
+                     "--operator", "second-op", "--recovery-ref", "CHG-2")
+    assert rc == 0, lines
     assert P1 not in store.collections and tombstone(store)["state"] == "retired"
     assert set(store.collections) >= {C1, P2, C2, P3, C3}
+    # The resume says so and records it: its own attestation, and a kept build that no longer verifies.
+    unverified = [] if change == "newer-publication" else [G2]
+    for output in (plan, lines):
+        assert [line.split()[4].rstrip(",") for line in output if line.startswith("WARNING: W_KEPT_UNVERIFIED")] == unverified
+    record = tombstone(store)
+    assert record["completion"] == {"resumed": True, "readers_stopped_at": later, "operator": "second-op",
+                                    "recovery_ref": "CHG-2", "kept_unverified": unverified}
+    assert (record["readers_stopped_at"], record["operator"]) == (STOPPED, "site-op")  # the plan's, unchanged
+    audit = [json.loads(line) for line in
+             disposal.data_disposal_record_path(progress(tmp_path), ALIAS).read_text().splitlines()]
+    assert [e["event"] for e in audit] == ["started", "resumed", "retired"]
+    assert (audit[1]["readers_stopped_at"], audit[1]["operator"], audit[1]["kept_unverified"]) == (
+        later, "second-op", unverified)
 
 
 @pytest.mark.parametrize("hazard", ["live", "foreign-alias", "sidecar", "peer-down", "lock"])

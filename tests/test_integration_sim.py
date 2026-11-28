@@ -2467,6 +2467,7 @@ def test_data_disposal_lifecycle_on_real_server(qdrant_url, tmp_path, monkeypatc
 
     from mainframe_rag.ingest import build, generations
     from mainframe_rag.ingest.build import build_aliases
+    from mainframe_rag.ingest.disposal import data_disposal_record_path as disposal_record
     from mainframe_rag.ingest.publish import (
         publication_metadata_point_id,
         verify_build_catalog,
@@ -2563,6 +2564,37 @@ def test_data_disposal_lifecycle_on_real_server(qdrant_url, tmp_path, monkeypatc
         assert sum(line.strip().startswith("DELETE snapshot") for line in lines) == 2
         rc, _ = cli("dispose", "--progress", str(progress), "--build-id", g2)
         assert rc == generations.EXIT_REFUSED and "KEEP_N" in capsys.readouterr().err
+
+        # The documented command, `python -m`: each refusal keeps its own code and exit 4
+        # (review B1 of #1393), for the data disposal and for the two earlier commands.
+        def module(*argv):
+            return subprocess.run([sys.executable, "-m", "mainframe_rag.ingest.generations", *argv],
+                                  cwd=REPO_ROOT, env=_checkout_env(), capture_output=True, text=True,
+                                  stdin=subprocess.DEVNULL, timeout=180, check=False)
+
+        g3 = gens[p3]["build_id"]
+        for argv, code in (
+            (("dispose", "--progress", str(progress), "--build-id", g2), "E_NOT_DISPOSABLE: " + g2 + " (KEEP_N)"),
+            (("dispose", "--progress", str(progress), "--build-id", g3), "E_NOT_DISPOSABLE: " + g3 + " (LIVE)"),
+            (("dispose", "--progress", str(progress), "--build-id", g1, "--execute", "--plan-digest", digest,
+              "--readers-stopped", stopped), "E_READERS_UNAWARE"),
+            (("dispose", "--progress", str(progress), "--build-id", g1, "--plan-digest", "xyz"), "E_PLAN_DIGEST"),
+            (("dispose-snapshots", "--progress", str(progress), "--build-id", g2), "E_NOT_DISPOSABLE: " + g2 + " (KEEP_N)"),
+            (("dispose-snapshots", "--progress", str(progress), "--build-id", g3), "E_NOT_DISPOSABLE: " + g3 + " (LIVE)"),
+        ):
+            refused = module(*argv)
+            assert refused.returncode == generations.EXIT_REFUSED, (argv, refused.stderr[-400:])
+            assert f"FAIL: {code}" in refused.stderr, (argv, refused.stderr[-400:])
+        via_module = module("dispose", "--progress", str(progress), "--build-id", g1)
+        assert via_module.returncode == 0 and f"PLAN DIGEST {digest}" in via_module.stdout
+        assert module("list", "--progress", str(progress)).returncode == 0
+        # Another existing inventory elsewhere is not the alias's own (review N3).
+        foreign = tmp_path / "elsewhere" / "inventory.jsonl"
+        foreign.parent.mkdir()
+        foreign.write_text(progress.read_text())
+        unbound = module("dispose", "--progress", str(foreign), "--build-id", g1)
+        assert unbound.returncode == generations.EXIT_REFUSED and "E_PROGRESS_UNBOUND" in unbound.stderr
+        assert [p.name for p in foreign.parent.iterdir()] == ["inventory.jsonl"]
         execute = (*dispose, "--execute", "--plan-digest", digest, "--readers-stopped", stopped,
                    "--recovery-ref", "CHG-SIM", "--operator", "sim-op")
         # This release cannot execute: the real CLI refuses and nothing changes.
@@ -2613,6 +2645,11 @@ def test_data_disposal_lifecycle_on_real_server(qdrant_url, tmp_path, monkeypatc
         assert (payload["readers_stopped_at"], payload["recovery_ref"], payload["operator"]) == (
             stopped, "CHG-SIM", "sim-op")
         assert len(payload["snapshots"]) == 2 and payload["data_points"] == 2
+        assert payload["completion"] == {"resumed": True, "readers_stopped_at": stopped, "operator": "sim-op",
+                                         "recovery_ref": "CHG-SIM", "kept_unverified": []}
+        audit = [json.loads(line)["event"] for line in
+                 disposal_record(progress, PUBLISH_ALIAS).read_text().splitlines()]
+        assert audit == ["started", "resumed", "resumed", "resumed", "resumed", "retired"]
         assert payload["content_seal"] == control_before[publication_metadata_point_id(c1)][0]["content_seal"]
         assert {n: _records(client, n) for n in (p2, c2, p3, c3)} == kept_before
         assert snapshots(p2) == untouched[2][p2] and snapshots(p3) == untouched[2][p3]

@@ -1246,6 +1246,15 @@ thread pool.
   never by a flag, the environment or a file; `scripts/airgap/generations.sh`,
   the chart and `map_values.py` refuse the subcommand by name. The dry run
   works. Contract of the command:
+  - `--progress` must be the inventory the alias was published from, for
+    `dispose` and `dispose-snapshots` alike: the publish lock of the alias
+    (`publish-<alias>.lock`) must already exist beside it and the path must
+    be the regular file itself, not a symlink; otherwise `E_PROGRESS_UNBOUND`
+    before anything is read. The lock and the sidecar are whatever sits
+    beside the given file, so another existing file, a copy in another
+    directory or a symlink would exclude no publisher. A whole work
+    directory copied with its lock file is not detected; the site launcher
+    fixes the path.
   - One build per run, named by full build UUID. Refused unless the build is
     `retained`, is not the serving target, has no foreign alias, is not named
     by a readable sidecar, every peer answered, and it is older than the kept
@@ -1281,7 +1290,15 @@ thread pool.
     converges; once a `retiring` tombstone exists the rerun is gated only by
     delete-safety (serving target, foreign alias, sidecar, every peer
     answering, the lock), never by keep-N or the kept set's seal, so a
-    started disposal can always finish. While one build is `retiring` no
+    started disposal can always finish. A resume does check the kept builds
+    the tombstone recorded: when one is no longer a retained build that
+    verifies, the dry run and the run print `WARNING: W_KEPT_UNVERIFIED`
+    and still finish. The `retired` update records the finishing run in
+    the tombstone's `completion` (whether it was a resume, its own
+    `--readers-stopped`, operator and recovery ref, and those unverified
+    kept builds); every executing run also appends a line to the audit
+    record `data-disposal-<alias>.jsonl` beside the lock when it starts or
+    resumes and when it ends. While one build is `retiring` no
     other build is disposed of. A snapshot made after the plan is not in the
     tombstone's record: the recorded digest then refuses and the dry run
     prints a resume digest that names it. A retired build's rerun reports it
