@@ -648,8 +648,11 @@ def write_private(path: Path, data: bytes) -> None:
 class _LLMModel:
     """``CandidateModel`` over the configured reasoning-model client."""
 
-    def __init__(self, client: Any) -> None:
+    def __init__(self, client: Any, reasoning_effort: str | None = None) -> None:
         self._client = client
+        # None leaves the effort to the server. Some served models then write
+        # their reasoning into the reply, and no reply is one question line.
+        self._effort = reasoning_effort
 
     def complete(self, system: str, user: str) -> str:
         import httpx2
@@ -660,6 +663,7 @@ class _LLMModel:
             result = self._client.chat(
                 [ChatMessage(role="system", content=system),
                  ChatMessage(role="user", content=user)],
+                reasoning_effort=self._effort,
                 temperature=0.0,
             )
         except (httpx2.HTTPError, OSError, RuntimeError, TypeError, ValueError):
@@ -729,7 +733,7 @@ def main(
         if model is None:
             from mainframe_rag.agent.answer import HttpxLLMClient
 
-            model = _LLMModel(HttpxLLMClient(settings))
+            model = _LLMModel(HttpxLLMClient(settings), settings.llm_reasoning_effort_simple)
         try:
             rows, manifest = generate(
                 client, model, collection=collection, count=args.count, classes=classes,

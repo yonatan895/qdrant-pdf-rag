@@ -381,6 +381,41 @@ def test_the_reasoning_client_adapter_sends_system_then_user_at_temperature_zero
     assert chat.calls == [([("system", "sys"), ("user", "usr")], None, 0.0)]
 
 
+def test_the_cli_model_asks_at_the_configured_simple_effort_like_the_answer_path(tmp_path, monkeypatch):
+    """Without an effort the served reasoning model writes its reasoning into
+    the reply (measured on the local 8 GB lane: 8 of 8 questions dropped as
+    malformed_question). The CLI's own model sends the configured simple
+    effort, the value the answer path sends for a simple question."""
+    from mainframe_rag import config
+    from mainframe_rag.agent import answer
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatResult
+
+    settings = Settings(embed_mode="hash", qdrant_collection="synthetic", _env_file=None,
+                        llm_reasoning_effort_simple="low", llm_reasoning_effort_complex="high",
+                        llm_reasoning_efforts="low,medium,high")
+    monkeypatch.delenv("VENUE", raising=False)
+    monkeypatch.setattr(config, "load_settings", lambda: settings)
+    efforts: list[object] = []
+
+    class Client:
+        def __init__(self, given):
+            assert given is settings
+
+        def chat(self, messages, reasoning_effort=None, temperature=None):
+            efforts.append(reasoning_effort)
+            if messages[0].content == gc.ANSWERABILITY_PROMPT:
+                return ChatResult(content="YES")
+            return ChatResult(content=f"How often is {QUESTION_MARK} lever {len(efforts)} turned first?")
+
+    monkeypatch.setattr(answer, "HttpxLLMClient", Client)
+    out = tmp_path / "candidates.jsonl"
+    rc = gc.main(["--out", str(out), "--count", "2", "--seed", "1", "--model-label", "fake",
+                  "--classes", "diagnostic"], client=ReaderDouble(_grid()))
+    assert rc == 0 and len(out.read_text(encoding="utf-8").splitlines()) == 2
+    assert efforts == ["low"] * 4
+
+
 @pytest.mark.parametrize(
     "reply", [RuntimeError("upstream said: secret"), OSError("down"), "a bare string", None])
 def test_the_adapter_turns_any_failed_or_unstructured_completion_into_a_model_error(reply):

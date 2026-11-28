@@ -1750,7 +1750,10 @@ release set and writes no baseline.
   on 600,000 synthetic points: about 180 MiB peak for scan, sample and
   section gold, plus the interpreter and clients), so check the headroom of
   the pod it runs in first. The seed fixes the sample;
-  the model is called at temperature 0. The draw is a round-robin per
+  the model is called at temperature 0 and at the configured simple effort
+  (`LLM_REASONING_EFFORT_SIMPLE`, as the answer path sends for a simple
+  question; without an effort a served model may write its reasoning into
+  the reply, and every row is then dropped as `malformed_question`). The draw is a round-robin per
   document, not proportional to size: each turn gives every document that
   still has eligible chunks one sample, so a 3,000-chunk document gets the
   same share as a one-chunk document, and with more documents than `--count`
