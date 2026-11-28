@@ -573,3 +573,37 @@ def test_replay_sweep_cli_attribute_mode_is_text_free_and_honors_exit_codes(tmp_
     parsed = json.loads(raw_json)
     assert [r["label"] for r in parsed] == ["16/5", "8/3", "32/5"]
     assert parsed[0]["counts"]["a"] == 1 and parsed[0]["row_ids"]["a"] == ["GEN-77"]
+
+
+def test_replay_sweep_refuses_a_generated_set_json_path_inside_a_git_work_tree(tmp_path, monkeypatch, capsys):
+    """The --json refusal named as uncovered in #1330: checked before any
+    replay, one fixed message, no file, for the sweep and for --attribute."""
+    from mainframe_rag.eval.datasets import GENERATED_REPORT_OUTPUT_REFUSAL
+
+    monkeypatch.delenv("VENUE", raising=False)
+    monkeypatch.setattr("mainframe_rag.config.load_settings", lambda: _settings())
+    query = "How does secret_quibble_lever_99 open the valve?"
+    pools = tmp_path / "pools.jsonl"
+    rec = legs_to_record(
+        query, "nl",
+        [{"effective_text": query, "dense": [_cp("c0", "D1", "1", page_start=1)], "sparse": []}],
+        {}, {"depth": 40},
+    )
+    pools.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+    golden = tmp_path / "adjudicated.jsonl"
+    golden.write_text(
+        json.dumps(_passage_entry("GEN-77", query, "D1", ["c0", "c1"]).model_dump()) + "\n", encoding="utf-8")
+    checkout = tmp_path / "checkout"
+    (checkout / ".git").mkdir(parents=True)
+    out = checkout / "attr.json"
+    replayed: list[object] = []
+    monkeypatch.setattr(replay_sweep, "attribute_config", lambda *a, **k: replayed.append(a))
+    monkeypatch.setattr(replay_sweep, "run_config", lambda *a, **k: replayed.append(a))
+
+    base = ["--pools", str(pools), "--golden", str(golden), "--json", str(out)]
+    assert replay_sweep.main([*base, "--attribute"]) == 2
+    assert replay_sweep.main(base) == 2
+    captured = capsys.readouterr()
+    assert captured.err.count(GENERATED_REPORT_OUTPUT_REFUSAL) == 2
+    assert "secret_quibble_lever_99" not in captured.out + captured.err
+    assert not out.exists() and replayed == []

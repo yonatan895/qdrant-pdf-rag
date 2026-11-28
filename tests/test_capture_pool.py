@@ -527,3 +527,77 @@ def test_current_behaviour_capture_truncates_previous_pool_on_open(in_process_ca
         "second question",
         "third question",
     }, "the aborted run still replaces the pool with its own rows"
+
+
+# ---------------------------------------------- generated sets (#1317)
+def _generated_golden(path):
+    """A promoted (reviewed) generated row: readable as gold, question derived from manual text."""
+    path.write_text(json.dumps({
+        "id": "GEN-1", "query": "first question", "expected_doc_ids": ["D1"],
+        "query_class": "diagnostic", "source": "Generated", "status": "adjudicated",
+        "reviewers": ["alice"], "reviewed_by": "alice", "reviewed_at": "2026-11-27",
+        "gold_chunk_ids": ["p1"],
+    }) + "\n", encoding="utf-8")
+    return path
+
+
+def test_capture_of_a_generated_set_refuses_a_pool_path_inside_a_git_work_tree(
+        in_process_capture, monkeypatch, capsys):
+    """Pools hold every query's text. For a set with generated rows the pool
+    is a private file by construction, like the set's reports: refused inside
+    a work tree before any client starts, and never an overwrite."""
+    import qdrant_client
+
+    from mainframe_rag.eval.datasets import GENERATED_REPORT_OUTPUT_REFUSAL
+
+    root, _ = in_process_capture
+    golden = _generated_golden(root / "promoted.jsonl")
+    started: list[dict] = []
+    monkeypatch.setattr(qdrant_client, "QdrantClient", lambda **kw: started.append(kw))
+    checkout = root / "checkout"
+    (checkout / ".git").mkdir(parents=True)
+    in_tree = checkout / "pools.jsonl"
+    assert main(["--golden", str(golden), "--out", str(in_tree)]) == 2
+    existing = root / "existing.jsonl"
+    existing.write_text("earlier\n", encoding="utf-8")
+    assert main(["--golden", str(golden), "--out", str(existing)]) == 2
+    # A generated row past --max-queries still makes the set generated; an
+    # unreadable line there is not parsed for its query, as before.
+    mixed = root / "mixed.jsonl"
+    mixed.write_text(
+        json.dumps({"query": "hand-written question"}) + "\n" + golden.read_text(encoding="utf-8")
+        + "not json\n", encoding="utf-8")
+    assert main(["--golden", str(mixed), "--out", str(in_tree), "--max-queries", "1"]) == 2
+    monkeypatch.chdir(checkout)
+    assert main(["--golden", str(golden), "--bundle-dir", "bundle"]) == 2
+    captured = capsys.readouterr()
+    assert captured.err.splitlines() == [GENERATED_REPORT_OUTPUT_REFUSAL] * 4
+    assert "first question" not in captured.out + captured.err
+    assert not in_tree.exists() and not (checkout / "bundle").exists()
+    assert existing.read_text(encoding="utf-8") == "earlier\n"
+    assert started == []
+
+
+def test_capture_of_a_generated_set_writes_a_new_private_pool_and_hand_written_sets_are_unchanged(
+        in_process_capture, capsys):
+    import os
+    import stat
+
+    root, hand_written = in_process_capture
+    golden = _generated_golden(root / "promoted.jsonl")
+    out = root / "pools-generated.jsonl"
+    previous = os.umask(0o022)
+    try:
+        assert main(["--golden", str(golden), "--out", str(out)]) == 0
+        plain = root / "pools-plain.jsonl"
+        plain.write_text("earlier\n", encoding="utf-8")
+        assert main(["--golden", str(hand_written), "--out", str(plain)]) == 0
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+    records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert [r["query"] for r in records] == ["first question"] and "legs" in records[0]
+    # A hand-written set keeps its path rules: overwrite allowed, default mode.
+    assert len(plain.read_text(encoding="utf-8").splitlines()) == 3
+    assert stat.S_IMODE(plain.stat().st_mode) == 0o644
+    capsys.readouterr()

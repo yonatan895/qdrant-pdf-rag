@@ -1856,6 +1856,12 @@ release set and writes no baseline.
   already exist, or are named like the holdout or release set; accepted paths
   are created new with mode 0600 through the `gold_candidates` writer. Sets
   without generated rows keep their reports byte-for-byte unchanged.
+  `capture_pool.py` follows the same path rule for its pool, which is not
+  text-free (every record holds the query text): for a set with a generated
+  row in any line, `--out` (or the `--bundle-dir` default) is refused with
+  exit 2 and the same fixed message before the bundle directory or any
+  client is created, and the pool is created new with mode 0600. Such a pool
+  stays in the venue that captured it.
 - **Privacy.** Questions derive from manual text. Outputs of both
   `gold_candidates` and `spot_check` are refused (exit 2, one fixed message,
   before any Qdrant or model call) when the path or its parent resolves inside
@@ -1876,16 +1882,27 @@ release set and writes no baseline.
   `section_chunk_count` (the size of that section) and
   `gold_chunk_ids_truncated` (true when the section is larger than the list:
   such a row's gold is incomplete at section level), `chunk_type`, `physical_page` (1-based), `lexical_overlap` (share of
-  the question's non-stopword tokens found in the passage) and `provenance`
+  the question's non-stopword tokens found in the passage), `content_overlap`
+  (the same without identifier tokens; the overlap cap reads it) and `provenance`
   (`text_sha256` of the stored text, both prompt sha256s, the model label, the
-  seed). Report any result by overlap band: a question written from its
+  seed, the reasoning effort as sent and its transport). Report any result by overlap band: a question written from its
   passage favours the lexical leg.
 - **Sampling.** Identity fields are scrolled without text; documents are
   drawn in turn, then chunk types inside a document; each point gets the
   eligible target class with the fewest rows so far (`diagnostic` any point,
   `syntax` and `table` their chunk type, `message_id` a point with message
-  ids). Text is fetched for the sampled ids only. The seed fixes the sample;
-  the model is called at temperature 0. The draw is a round-robin per
+  ids). Text is fetched for the sampled ids only. The scan holds one compact
+  record per stored point in the memory of the process that runs it (measured
+  on 600,000 synthetic points: about 180 MiB peak for scan, sample and
+  section gold, plus the interpreter and clients), so check the headroom of
+  the pod it runs in first. The seed fixes the sample;
+  the model is called at temperature 0 and at the configured simple effort
+  (`LLM_REASONING_EFFORT_SIMPLE`, as the answer path sends for a simple
+  question; without an effort a served model may write its reasoning into
+  the reply, and every row is then dropped as `malformed_question`). The
+  effort travels as `LLM_EFFORT_TRANSPORT` says, as on the answer path: for a
+  model that rejects the argument (every row `model_error`, exit 1, no file)
+  set `LLM_EFFORT_TRANSPORT=none`, as the agent is configured for it. The draw is a round-robin per
   document, not proportional to size: each turn gives every document that
   still has eligible chunks one sample, so a 3,000-chunk document gets the
   same share as a one-chunk document, and with more documents than `--count`
@@ -1903,12 +1920,26 @@ release set and writes no baseline.
   `model_error`, `malformed_question` (not exactly one line), `too_short`,
   `too_long`, `heading_copy` (a heading element of three or more words
   verbatim), `identifier_only` (an identifier and fewer than two content
-  words, unless the class is `message_id`), `duplicate`, then the second model
-  pass: `not_answerable`.
+  words, unless the class is `message_id`), `duplicate`, `high_overlap`
+  (`content_overlap` above `--max-overlap`, default 0.6; 1.0 disables it),
+  then the second model pass: `not_answerable`. `content_overlap` is
+  `lexical_overlap` without the question's identifier tokens (message ids,
+  document numbers, member names, system codes): users type those, so they
+  do not count as the passage's wording, and an identifier-only question
+  stays the class rule's business. The question prompt asks for the question
+  of a practitioner who has not seen the passage, in their own words,
+  keeping identifiers: a question written from the passage's wording is
+  found again by a lexical match and ranks nothing (the first real batch had
+  37 of 43 rows in the high band).
 - **Manifest** (`PATH.manifest.json`): alias and resolved collection, the
   stored `rules_v` (a collection mixing versions is refused), seed, model
-  label, classes, `max_section_siblings`, prompt sha256s, the hash rule,
-  `rows_sha256`, and counts scanned, sampled, kept, `gold_truncated` (kept
+  label, `model_request` (for the CLI's own model: the reasoning effort as
+  sent, or null under transport `none`; the effort transport; a sha256 of the
+  configured extra body; the configured model id and whether the endpoint's
+  model listing names it, null when the listing fails; null as a whole for
+  an injected model), `max_overlap`, classes, `max_section_siblings`, prompt
+  sha256s, the hash rule, `rows_sha256`, and counts scanned, sampled, kept,
+  `overlap_bands` (kept rows per lexical-overlap band), `gold_truncated` (kept
   rows with a truncated gold list), dropped per code (sampled = kept +
   dropped) and per class `requested` (the even share of `--count`, the
   remainder to the classes named first), `eligible` (scanned points that can
@@ -1923,7 +1954,9 @@ release set and writes no baseline.
      verifies the candidate file (and adjacent `.manifest.json` `rows_sha256`
      when present), draws a deterministic sample stratified across
      `query_class` and lexical-overlap band, and writes a private mode-0600
-     `gold-spot-check-review` JSONL bound to `candidates_sha256`. With
+     `gold-spot-check-review` JSONL bound to `candidates_sha256`. Each item
+     carries its `overlap_band`; the stdout summary and the report carry
+     `candidates_by_overlap_band`, the band counts of the whole batch. With
      `--with-passages`, fetches source-chunk text through `QdrantReader` and
      refuses (exit 2) if any passage's SHA-256 disagrees with `text_sha256`.
   2. `record --review REVIEW --id ROW_ID --verdict accept|reject --reviewer NAME --reviewed-at YYYY-MM-DD [--reason TEXT] [--overwrite]`:
@@ -1933,11 +1966,17 @@ release set and writes no baseline.
      verifies exact `candidates_sha256`, row count, row ids, `query_class` and
      `text_sha256` binding, and outputs a text-free JSON report (overall,
      `by_class`, `by_overlap_band`, and sorted id lists). Default pass policy:
-     zero unreviewed rows, `reviewed_n >= min(min_sample, total_candidates)`
-     (default `min_sample = 20`), and `accept_rate >= 0.85`. Verdict is
-     `passed` (exit 0), `incomplete` or `failed` (exit 1); refusal exits 2.
+     zero unreviewed rows, `reviewed_n >= min_sample` (default 20), and
+     `accept_rate >= 0.85`. A batch with fewer rows than `min_sample` is
+     `too_small` whatever its reviews say and never passes: the floor is not
+     capped at the batch size (it was before; the overlap cap makes small
+     batches normal, and a 1-row batch passed at 1 of 1). Generate a larger
+     batch; a lower `--min-sample` is the only way to accept a smaller one,
+     and the report records it. Verdict is `passed` (exit 0), `incomplete`,
+     `failed` or `too_small` (exit 1); refusal exits 2.
   4. `promote --candidates PATH --review REVIEW --out EVAL [--mode adjudicated|spot-checked] [--min-accept-rate 0.85] [--min-sample 20]`:
-     writes nothing and exits 1 unless the spot-check verdict is `passed`.
+     writes nothing and exits 1 unless the spot-check verdict is `passed`
+     (a `too_small` batch is refused with a fixed message, exit 2).
      Default `--mode adjudicated` (#806 strict per-row review) emits only
      individually accepted rows with `status: "adjudicated"`, `reviewed_by`,
      `reviewed_at` and `reviewers`. Explicit `--mode spot-checked` emits
