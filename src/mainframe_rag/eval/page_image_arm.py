@@ -42,8 +42,7 @@ reference or image. Exception text is never printed.
 
 Exit codes: 0 run completed (see the verdict); 1 completed with no scored
 row; 5 completed without a verdict (fewer than 6 gradeable rows, or rows
-with a text-arm answer and no image-arm answer that could change the
-verdict: see `stop_rule`); 2 refused before any call (dataset, row ids or
+missing an arm's answer that could change the verdict: see `stop_rule`); 2 refused before any call (dataset, row ids or
 gold fields, output path, corpus directory, arguments, model not configured,
 PyMuPDF not importable); 3 the image probe did not pass; 4 the image probe
 could not run.
@@ -123,6 +122,8 @@ ERRORS = ("search_failed", "no_hits", "text_error", "image_error", "prompt_misma
 OUTCOMES = (*SCORED, *NOT_PACKED, *UNRESOLVED, *EXCLUDED, *ERRORS)
 # Gold-packed rows with a text-arm answer and no image-arm answer.
 INCOMPLETE = (*UNRESOLVED, "image_error", "prompt_mismatch")
+# Rows with no text-arm answer; whether the gold was packed is unknown.
+UNANSWERED = ("search_failed", "text_error")
 
 STOP_REASONS = ("few_text_failures", "few_fixed", "breaks", "mostly_not_packed")
 NO_VERDICT_REASONS = ("too_few_gradeable_rows", "incomplete_rows")
@@ -451,7 +452,8 @@ class Tool:
         from mainframe_rag.agent.answer_core import LLMChatError, RetrievalError
 
         row: dict[str, Any] = {"id": entry["id"], "query_class": entry.get("query_class"),
-                               "outcome": None, "image_n": 0, "image_bytes": 0}
+                               "outcome": None, "image_n": 0, "image_bytes": 0,
+                               "must_not_row": bool(entry.get("gold_must_not_contain"))}
         expected = set(entry.get("expected_doc_ids") or [])
         if entry.get("expected_behavior", "answer") != "answer" or not expected:
             return {**row, "outcome": "abstain_row"}
@@ -470,7 +472,6 @@ class Tool:
         text_fail = arm_failures(entry, text.answer, text.script)
         row.update(text_answer=text.answer, text_missing_gold=text_fail[0],
                    text_forbidden=text_fail[1], text_prompt_tokens=text.usage.prompt_tokens,
-                   must_not_row=bool(entry.get("gold_must_not_contain")),
                    packed_doc_ids=[e.doc_id for e in text.evidence.entries])
         gold = [e for e in text.evidence.entries if e.doc_id in expected and e.included_chars > 0]
         if not gold:
@@ -515,33 +516,44 @@ class Tool:
 
 @dataclass(frozen=True)
 class Incomplete:
-    """The text-arm results of the INCOMPLETE rows (gold packed, text answer,
-    no image answer): text-arm failures, and text-arm passes on rows without
-    and with `gold_must_not_contain`."""
+    """Rows the stop rule cannot place from their outcome code alone.
+
+    INCOMPLETE rows (gold packed, text answer, no image answer) by the text
+    arm's result: failures, and passes on rows without and with
+    `gold_must_not_contain`. UNANSWERED rows (`search_failed`,
+    `text_error`: no text answer, packing unknown) on rows without and with
+    `gold_must_not_contain`. `no_hits` rows are read from the counts."""
 
     text_fail: int = 0
     text_pass: int = 0
     text_pass_must_not: int = 0
+    unanswered: int = 0
+    unanswered_must_not: int = 0
 
     @property
     def rows(self) -> int:
         return self.text_fail + self.text_pass + self.text_pass_must_not
 
+    @property
+    def unanswered_rows(self) -> int:
+        return self.unanswered + self.unanswered_must_not
+
     @classmethod
     def of(cls, rows: Sequence[dict[str, Any]]) -> Incomplete:
         """From the private rows (`run_row` records the text arm's result
-        before any image-arm outcome)."""
-        fail = passed = passed_must_not = 0
+        before any image-arm outcome, and every row's must-not flag)."""
+        split: Counter[str] = Counter()
         for row in rows:
-            if row["outcome"] not in INCOMPLETE:
-                continue
-            if row["text_missing_gold"] or row["text_forbidden"]:
-                fail += 1
-            elif row["must_not_row"]:
-                passed_must_not += 1
-            else:
-                passed += 1
-        return cls(fail, passed, passed_must_not)
+            if row["outcome"] in UNANSWERED:
+                split["unanswered_must_not" if row["must_not_row"] else "unanswered"] += 1
+            elif row["outcome"] in INCOMPLETE:
+                if row["text_missing_gold"] or row["text_forbidden"]:
+                    split["text_fail"] += 1
+                elif row["must_not_row"]:
+                    split["text_pass_must_not"] += 1
+                else:
+                    split["text_pass"] += 1
+        return cls(**split)
 
 
 def _reasons(n: dict[str, int]) -> list[str]:
@@ -559,6 +571,10 @@ def _reasons(n: dict[str, int]) -> list[str]:
     return reasons
 
 
+def _add(n: dict[str, int], **more: int) -> dict[str, int]:
+    return {**n, **{code: n[code] + k for code, k in more.items()}}
+
+
 def stop_rule(counts: dict[str, int], incomplete: Incomplete) -> dict[str, Any]:
     """The design's stop rule (section 6) as a decision aid. Stop when any
     holds: fewer than 6 text-arm failures among the gold-packed rows (counted
@@ -567,37 +583,53 @@ def stop_rule(counts: dict[str, int], incomplete: Incomplete) -> dict[str, Any]:
     must-not strings; or more text-arm failures are "gold not packed" than
     gold-packed.
 
-    Rows with a text-arm answer and no image-arm answer (`incomplete`) are
-    counted at both bounds: the image arm fixing every such failure and
-    breaking no such pass, and fixing none and breaking every pass. Each
-    condition can only hold more often at the second bound, so the first
-    bound's reasons hold in every completion. The verdict is `stop` (with
-    those reasons) or `continue` when both bounds agree, else `no_verdict`
-    (`incomplete_rows`)."""
+    Rows the codes cannot place (`incomplete`; `no_hits`) are completed
+    every way they could have ended: an INCOMPLETE row as either image-arm
+    result for its known text result; an UNANSWERED row as any outcome a
+    row can have (scored, or gold not packed, text pass or fail); a
+    `no_hits` row as gold not packed, text pass or fail. "fixed" (no_hits:
+    not packed, text pass) makes each condition least likely at once, so the
+    reasons holding there hold in every completion. Each condition is most
+    likely at its own extreme: `few_text_failures` with no unknown row a
+    packed failure; `few_fixed` with every unknown row a packed failure the
+    image arm did not fix; `breaks` with every unknown pass broken (on a
+    must-not row, a must-not break); `mostly_not_packed` with every unknown
+    row a not-packed failure. Verdict: `stop` with the reasons that hold in
+    every completion; `continue` when no condition holds in any; else
+    `no_verdict` (`incomplete_rows`)."""
     n = {code: int(counts.get(code, 0)) for code in OUTCOMES}
-    if incomplete.rows != sum(n[c] for c in INCOMPLETE) or min(
-            incomplete.text_fail, incomplete.text_pass, incomplete.text_pass_must_not) < 0:
+    parts = (incomplete.text_fail, incomplete.text_pass, incomplete.text_pass_must_not,
+             incomplete.unanswered, incomplete.unanswered_must_not)
+    if (incomplete.rows != sum(n[c] for c in INCOMPLETE)
+            or incomplete.unanswered_rows != sum(n[c] for c in UNANSWERED) or min(parts) < 0):
         raise ValueError("incomplete rows do not match the counts")
-    best = {**n, "fixed": n["fixed"] + incomplete.text_fail,
-            "both_pass": n["both_pass"] + incomplete.text_pass + incomplete.text_pass_must_not}
-    worst = {**n, "both_fail": n["both_fail"] + incomplete.text_fail,
-             "broken": n["broken"] + incomplete.text_pass,
-             "broken_must_not": n["broken_must_not"] + incomplete.text_pass_must_not}
-    best_reasons, worst_reasons = _reasons(best), _reasons(worst)
-    if best_reasons:
-        verdict, reasons = "stop", best_reasons
-    elif not worst_reasons:
+    fail, unknown = incomplete.text_fail, incomplete.unanswered_rows
+    every = _reasons(_add(n, fixed=fail + unknown,
+                          both_pass=incomplete.text_pass + incomplete.text_pass_must_not,
+                          gold_not_packed_text_pass=n["no_hits"]))
+    # Each condition at the completion that makes it most likely.
+    few = _add(n, both_fail=fail, both_pass=unknown)
+    unfixed = _add(n, both_fail=fail + unknown)
+    broken = _add(n, both_fail=fail, broken=incomplete.text_pass + incomplete.unanswered,
+                  broken_must_not=incomplete.text_pass_must_not + incomplete.unanswered_must_not)
+    not_packed = _add(n, both_fail=fail, gold_not_packed_text_fail=unknown + n["no_hits"])
+    some = [reason for reason, worst in zip(
+        STOP_REASONS, (few, unfixed, broken, not_packed), strict=True) if reason in _reasons(worst)]
+    if every:
+        verdict, reasons = "stop", every
+    elif not some:
         verdict, reasons = "continue", []
     else:
         verdict, reasons = "no_verdict", ["incomplete_rows"]
     return {
         "verdict": verdict,
         "reasons": reasons,
-        "bounds": {"all_fixed": best_reasons, "none_fixed": worst_reasons},
+        "bounds": {"in_every_completion": every, "in_some_completion": some},
         "scored": sum(n[c] for c in SCORED),
-        "packed_text_failures": n["fixed"] + n["both_fail"] + incomplete.text_fail,
+        "packed_text_failures": n["fixed"] + n["both_fail"] + fail,
         "incomplete_rows": incomplete.rows,
-        "incomplete_text_failures": incomplete.text_fail,
+        "incomplete_text_failures": fail,
+        "unanswered_rows": unknown + n["no_hits"],
         "fixed": n["fixed"],
         "breaks": n["broken"] + n["broken_must_not"],
         "breaks_must_not": n["broken_must_not"],
@@ -861,10 +893,10 @@ def main(
             print(f"NO VERDICT: {validity['gradeable']} gradeable row(s), "
                   f"{MIN_GRADEABLE_ROWS} needed", file=sys.stderr)
         if "incomplete_rows" in rule["reasons"]:
-            print(f"NO VERDICT: {rule['incomplete_rows']} gold-packed row(s) have a text-arm "
-                  "answer and no image-arm answer, and the verdict differs with them counted "
-                  "as all fixed and as none fixed; fix the cause (see the counts) and rerun",
-                  file=sys.stderr)
+            print(f"NO VERDICT: {rule['incomplete_rows']} gold-packed row(s) have no image-arm "
+                  f"answer and {rule['unanswered_rows']} row(s) no text-arm answer, and the "
+                  "verdict depends on how they would have ended; fix the cause (see the "
+                  "counts) and rerun", file=sys.stderr)
         return 5
     print(f"VERDICT {rule['verdict']}"
           + (f" ({', '.join(rule['reasons'])})" if rule["reasons"] else "")

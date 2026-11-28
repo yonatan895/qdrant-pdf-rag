@@ -5,13 +5,16 @@ reasoning model. No corpus, network, GPU or real model."""
 from __future__ import annotations
 
 import base64
+import itertools
 import json
 import logging
+import random
 import stat
 import struct
 import subprocess
 import sys
 import zlib
+from collections import Counter
 from pathlib import Path
 
 import pymupdf
@@ -816,25 +819,104 @@ def test_rows_without_an_image_answer_are_counted_at_both_bounds(
     assert rule["incomplete_rows"] == split.rows and rule["fixed"] == fixed
 
 
-def test_the_all_fixed_bound_reasons_hold_at_the_none_fixed_bound():
-    """Each stop condition can only hold more often when the image arm fixes
-    less and breaks more, so a stop at the first bound is a stop everywhere."""
+def _design_reasons(outcomes):
+    """Independent oracle: the four stop conditions of design section 6 over
+    one complete list of row outcomes."""
+    count = Counter(outcomes)
+    failures = count["fixed"] + count["both_fail"]
+    breaks = count["broken"] + count["broken_must_not"]
+    return {reason for reason, holds in (
+        ("few_text_failures", failures < 6),
+        ("few_fixed", count["fixed"] < failures / 3),
+        ("breaks", breaks > 1 or count["broken_must_not"] > 0),
+        ("mostly_not_packed", count["gold_not_packed_text_fail"] > failures),
+    ) if holds}
+
+
+# Every way an unplaced row could have ended (the oracle enumerates them).
+_ENDINGS = {
+    "fail": ("fixed", "both_fail"),
+    "pass": ("both_pass", "broken"),
+    "pass_must_not": ("both_pass", "broken_must_not"),
+    "unanswered": ("fixed", "both_fail", "both_pass", "broken", "gold_not_packed_text_fail",
+                   "gold_not_packed_text_pass"),
+    "unanswered_must_not": ("fixed", "both_fail", "both_pass", "broken_must_not",
+                            "gold_not_packed_text_fail", "gold_not_packed_text_pass"),
+    "no_hits": ("gold_not_packed_text_fail", "gold_not_packed_text_pass"),
+}
+
+
+def _completions(known, unplaced):
+    pools = [itertools.combinations_with_replacement(_ENDINGS[kind], k)
+             for kind, k in unplaced.items() if k]
+    for parts in itertools.product(*pools):
+        yield [*known, *itertools.chain.from_iterable(parts)]
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_the_verdict_matches_every_completion_of_the_unplaced_rows(seed):
+    """Against the oracle over all completions: stop iff every completion
+    stops (reasons: those holding in every one), continue iff none does."""
+    rng = random.Random(seed)
     seen = set()
-    for fixed in range(0, 9, 2):
-        for both_fail in range(0, 9, 2):
-            for broken in range(3):
-                for not_packed in (0, 7, 12):
-                    for fail, passed, must_not in ((0, 0, 0), (3, 0, 0), (6, 1, 0), (2, 2, 1)):
-                        counts = {"fixed": fixed, "both_fail": both_fail, "broken": broken,
-                                  "gold_not_packed_text_fail": not_packed,
-                                  "image_error": fail + passed + must_not}
-                        rule = pia.stop_rule(counts, pia.Incomplete(fail, passed, must_not))
-                        best, worst = rule["bounds"]["all_fixed"], rule["bounds"]["none_fixed"]
-                        assert set(best) <= set(worst)
-                        expect = ("stop" if best else "continue" if not worst else "no_verdict")
-                        assert rule["verdict"] == expect
-                        seen.add(expect)
+    for _ in range(150):
+        known = (["fixed"] * rng.randrange(10) + ["both_fail"] * rng.randrange(9)
+                 + ["broken"] * rng.choice((0, 0, 1, 2))
+                 + ["broken_must_not"] * (rng.random() < 0.15)
+                 + ["gold_not_packed_text_fail"] * rng.choice((0, 0, 5, 7, 12)))
+        unplaced = {kind: rng.choice((0, 0, 0, 1, 2)) for kind in _ENDINGS}
+        sets = [_design_reasons(c) for c in _completions(known, unplaced)]
+        counts = Counter(known)
+        counts["image_error"] = unplaced["fail"] + unplaced["pass"] + unplaced["pass_must_not"]
+        counts["text_error"] = unplaced["unanswered"]
+        counts["search_failed"] = unplaced["unanswered_must_not"]
+        counts["no_hits"] = unplaced["no_hits"]
+        rule = pia.stop_rule(counts, pia.Incomplete(
+            unplaced["fail"], unplaced["pass"], unplaced["pass_must_not"],
+            unplaced["unanswered"], unplaced["unanswered_must_not"]))
+        every, some = set.intersection(*sets), set.union(*sets)
+        assert set(rule["bounds"]["in_every_completion"]) == every
+        assert set(rule["bounds"]["in_some_completion"]) == some
+        expect = "stop" if all(sets) else "continue" if not any(sets) else "no_verdict"
+        assert rule["verdict"] == expect
+        assert set(rule["reasons"]) == (every if expect == "stop" else
+                                        set() if expect == "continue" else {"incomplete_rows"})
+        seen.add(expect)
     assert seen == {"stop", "continue", "no_verdict"}
+
+
+@pytest.mark.parametrize(("complete", "unanswered", "verdict", "reasons"), [
+    # few_text_failures: 5 known packed failures; the unanswered row may be a sixth.
+    ({"fixed": 5}, {"text_error": 1}, "no_verdict", ["incomplete_rows"]),
+    ({"fixed": 6}, {"text_error": 1}, "continue", []),
+    ({"fixed": 4}, {"text_error": 1}, "stop", ["few_text_failures"]),  # 5 even if fixed
+    # few_fixed: 2 of 6 fixed is a third; one more unfixed failure is not.
+    ({"fixed": 2, "both_fail": 4}, {"text_error": 1}, "no_verdict", ["incomplete_rows"]),
+    ({"fixed": 3, "both_fail": 3}, {"text_error": 1}, "continue", []),  # 3 of 7
+    # breaks: one known break plus an unanswered row that may have been a second.
+    ({"fixed": 6, "broken": 1}, {"text_error": 1}, "no_verdict", ["incomplete_rows"]),
+    ({"fixed": 6}, {"search_failed": 1}, "continue", []),  # one break is allowed
+    ({"fixed": 6}, {"search_failed": 1, "must_not": True}, "no_verdict", ["incomplete_rows"]),
+    # mostly_not_packed: 6 not packed against 6 packed; one more not packed tips it.
+    ({"fixed": 6, "gold_not_packed_text_fail": 6}, {"text_error": 1}, "no_verdict",
+     ["incomplete_rows"]),
+    ({"fixed": 6, "gold_not_packed_text_fail": 5}, {"text_error": 1}, "continue", []),
+    ({"fixed": 6, "gold_not_packed_text_fail": 6}, {"no_hits": 1}, "no_verdict",
+     ["incomplete_rows"]),
+    ({"fixed": 6, "gold_not_packed_text_fail": 5}, {"no_hits": 1}, "continue", []),
+    ({"fixed": 6, "broken": 1}, {"no_hits": 3}, "continue", []),  # no_hits is never a break
+    # A stop that holds in every completion keeps its reasons.
+    ({"fixed": 6, "broken": 2}, {"text_error": 4}, "stop", ["breaks"]),
+])
+def test_rows_without_a_text_answer_are_completed_every_way(complete, unanswered, verdict, reasons):
+    must_not = unanswered.pop("must_not", False)
+    counts = {**complete, **unanswered}
+    rows = unanswered.get("text_error", 0) + unanswered.get("search_failed", 0)
+    split = pia.Incomplete(unanswered_must_not=rows) if must_not else pia.Incomplete(unanswered=rows)
+    rule = pia.stop_rule(counts, split)
+    assert (rule["verdict"], rule["reasons"]) == (verdict, reasons)
+    assert rule["unanswered_rows"] == rows + unanswered.get("no_hits", 0)
+    assert rule["packed_text_failures"] == complete.get("fixed", 0) + complete.get("both_fail", 0)
 
 
 def test_the_incomplete_split_must_match_the_counts():
@@ -842,6 +924,34 @@ def test_the_incomplete_split_must_match_the_counts():
         pia.stop_rule({"image_error": 2}, pia.Incomplete(1))
     with pytest.raises(ValueError):
         pia.stop_rule({"fixed": 6}, pia.Incomplete(text_pass=1))
+    with pytest.raises(ValueError):
+        pia.stop_rule({"text_error": 2}, pia.Incomplete(unanswered=1))
+    with pytest.raises(ValueError):
+        pia.stop_rule({"fixed": 6}, pia.Incomplete(unanswered_must_not=1))
+
+
+@pytest.mark.parametrize("code", ["text_error", "search_failed"])
+def test_no_verdict_when_the_text_arm_never_answered(tmp_path, corpus, capsys, code):
+    """The same defect as B1 on the other arm: an experiment that did not run
+    must not print a stop."""
+    assert pia.MIN_GRADEABLE_ROWS == 6
+
+    def answer(text, images):
+        raise RuntimeError(f"upstream down {QUESTION_MARK}")
+
+    rows = [_row(f"T-{n}", n) for n in range(1, 9)]
+    run = Run(tmp_path, corpus, rows, answer=answer)
+    if code == "search_failed":
+        run.agent.search_status = 503
+    run.go()
+    err = capsys.readouterr().err
+    rule = run.exported["stop_rule"]
+    assert {k: v for k, v in run.exported["counts"].items() if v} == {code: 8}
+    assert run.rc == 5
+    assert (rule["verdict"], rule["reasons"]) == ("no_verdict", ["incomplete_rows"])
+    assert (rule["unanswered_rows"], rule["packed_text_failures"]) == (8, 0)
+    assert "NO VERDICT" in err and not any(line.startswith("VERDICT") for line in err.splitlines())
+    assert QUESTION_MARK not in err
 
 
 def test_five_packed_failures_without_an_image_answer_still_stop_at_the_real_floor(

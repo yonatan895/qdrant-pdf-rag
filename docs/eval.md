@@ -1588,8 +1588,9 @@ retrieval and not addressable here (`gold_not_packed_text_pass`,
 `unresolved_sha_missing`, `unresolved_sha_ambiguous`, `unresolved_page`,
 excluded without a call (`abstain_row`, `no_gold_strings`) and errors
 (`search_failed`, `no_hits`, `text_error`, `image_error`,
-`prompt_mismatch`). An image-arm outcome is never a text failure or a break by
-itself; the text arm's result on such a row still counts (stop rule below).
+`prompt_mismatch`). An error is never a text failure or a break by itself; the
+text arm's result on an image-arm error still counts, and rows without an
+arm's answer can withhold the verdict (stop rule below).
 Row ids must be 1-64 characters from letters, digits and `. _ : -`, starting
 with a letter or digit, and `gold_must_contain`/`gold_must_not_contain`
 must be absent, null or lists of non-empty strings; otherwise the rows file is
@@ -1604,17 +1605,22 @@ image arm fixes fewer than one third of them (`few_fixed`); it breaks more
 than one text-arm pass, or any on a row that carries must-not strings
 (`breaks`; abstain rows have no gold document, get no image and are
 excluded); or more text-arm failures are gold-not-packed than gold-packed
-(`mostly_not_packed`). A gold-packed row with a text-arm answer and no
+(`mostly_not_packed`). Rows an arm did not answer are completed every way
+they could have ended: a gold-packed row with a text-arm answer and no
 image-arm answer (`unresolved_*`, `image_error`, `prompt_mismatch`;
-exported as `stop_rule.incomplete_rows`) is counted at both bounds: the image
-arm fixing every such failure and breaking no such pass, and fixing none and
-breaking every pass (`stop_rule.bounds`). When the two bounds disagree the
-tool prints `NO VERDICT` (`no_verdict`, reason `incomplete_rows`, exit 5):
-fix the cause the counts name and rerun. A stop at both bounds is printed with
-the reasons that hold at the first. Rows whose text arm gave no answer
-(`search_failed`, `no_hits`, `text_error`) are not counted. With n this
-small the verdict is a decision aid, not a statistic. If it does not stop,
-rerun at `--dpi 100`: equal results halve a later store.
+`stop_rule.incomplete_rows`, of which `incomplete_text_failures` failed the
+text arm) as either image-arm result; a row with no text-arm answer
+(`search_failed`, `text_error`; packing unknown) as any outcome; a `no_hits`
+row as gold not packed, text pass or fail (these two together:
+`stop_rule.unanswered_rows`). The tool prints `VERDICT stop` only with the
+reasons that hold in every completion (`stop_rule.bounds.in_every_completion`,
+reached with each such row fixed, `no_hits` as a text pass) and
+`VERDICT continue` only when no reason holds in any
+(`stop_rule.bounds.in_some_completion`, each condition checked at its own
+extreme); otherwise `NO VERDICT` (`no_verdict`, reason `incomplete_rows`,
+exit 5): fix the cause the counts name and rerun. With n this small the
+verdict is a decision aid, not a statistic. If it does not stop, rerun at
+`--dpi 100`: equal results halve a later store.
 
 **Lanes.** The local or Colab stand-in gives a relative signal only, and only
 if its image probe passes. The site run decides. Not measurable off-site: the
@@ -1637,8 +1643,8 @@ nothing else; stdout, stderr and logs carry the same. Images and page text
 are held in memory only. A site run's export still names site-authored row
 ids: record its counts and verdict on the issue, keep the files at the site.
 Exit 0 means the run completed with at least one scored row, 1 none scored,
-5 completed without a verdict (too few gradeable rows, or incomplete rows that
-could change it), 2 a refusal before any call. The export schema is
+5 completed without a verdict (too few gradeable rows, or rows without an
+arm's answer that could change it), 2 a refusal before any call. The export schema is
 `page-image-ab/2`.
 
 ### Claim-level support (#365)
