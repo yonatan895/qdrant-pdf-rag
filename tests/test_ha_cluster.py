@@ -806,3 +806,125 @@ def test_operator_job_publishes_exact_corpus_on_three_peers(cluster, ingest_tree
         finally:
             for client in clients:
                 client.close()
+
+
+def _as_generation(client: QdrantClient, pair: SeededPair, logical: str, build_id: str, finished_at: float) -> None:
+    """Bind a seeded pair as a published build of `logical` (schema-1 receipt,
+    one completion marker, both immutable build aliases)."""
+    from mainframe_rag.ingest.build import build_aliases
+    from mainframe_rag.ingest.publish import publication_metadata_point_id
+    from tests.test_ingest_generations import _marker
+
+    receipt = {
+        "record_type": "publication-metadata", "target_collection": pair.control, "build_schema": 1,
+        "build_id": build_id, "logical_alias": logical, "data_collection": pair.corpus,
+        "gen_fp": "g", "corpus_fp": "c",
+    }
+    client.upsert(pair.control, points=[
+        models.PointStruct(id=publication_metadata_point_id(pair.control),
+                           vector={"dense": [1.0] * DIM}, payload=receipt),
+        models.PointStruct(id=str(uuid.uuid4()), vector={"dense": [1.0] * DIM},
+                           payload=_marker(pair.control, finished_at)),
+    ], wait=True)
+    data, control = build_aliases(logical, build_id)
+    client.update_collection_aliases([
+        models.CreateAliasOperation(create_alias=models.CreateAlias(collection_name=target, alias_name=name))
+        for name, target in ((data, pair.corpus), (control, pair.control))
+    ])
+
+
+def test_snapshot_disposal_lists_and_deletes_per_peer_and_refuses_a_missing_peer(
+    cluster: QdrantCluster, capsys
+):
+    """#1373 PR 1 on three real peers: snapshots are node-local, the listing
+    reads every direct peer, a delete goes through the peer that stores it,
+    and one stopped peer refuses the disposal before any delete."""
+    import json
+
+    from mainframe_rag.ingest import generations
+
+    suffix = uuid.uuid4().hex[:8]
+    logical = f"ha_gen_{suffix}"
+    builds = [str(uuid.uuid4()) for _ in range(3)]
+    pairs = [SeededPair(f"{logical}__gen{i}", f"{logical}__gen{i}__completions") for i in range(3)]
+    peers = [QdrantClient(url=url, timeout=60) for url in cluster.urls]
+    settings = _settings(cluster.urls[0], logical, qdrant_peer_urls=",".join(cluster.urls))
+
+    def run(*argv):
+        lines: list[str] = []
+        rc = generations.main(list(argv), settings=settings, out=lines.append)
+        return rc, lines
+
+    def names(peer: int, collection: str) -> list[str]:
+        return sorted(s.name for s in peers[peer].list_snapshots(collection))
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as scratch:
+        progress = Path(scratch) / "inventory.jsonl"
+        progress.touch()
+        try:
+            for pair, build_id, finished in zip(pairs, builds, (100.0, 200.0, 300.0), strict=True):
+                _create_pair(peers[0], pair.corpus, replication_factor=RF)
+                _seed(peers[0], pair.corpus, CORPUS_POINTS)
+                _seed(peers[0], pair.control, CONTROL_POINTS)
+                for collection in (pair.corpus, pair.control):
+                    wait_collection_placement(cluster.urls, collection, shard_number=SHARDS,
+                                              replication_factor=RF)
+                _as_generation(peers[0], pair, logical, build_id, finished)
+            peers[0].update_collection_aliases([models.CreateAliasOperation(
+                create_alias=models.CreateAlias(collection_name=pairs[2].corpus, alias_name=logical))])
+            old, mid, live = (p.corpus for p in pairs)
+            peers[0].create_snapshot(old, wait=True)
+            peers[1].create_snapshot(old, wait=True)
+            peers[2].create_snapshot(mid, wait=True)
+            peers[0].create_snapshot(live, wait=True)
+            # Node-local: each peer lists only what it stores.
+            assert [len(names(i, old)) for i in range(3)] == [1, 1, 0]
+            before = {(i, c): names(i, c) for i in range(3) for c in (old, mid, live)}
+
+            rc, lines = run("list", "--progress", str(progress), "--format", "json")
+            assert rc == 0
+            rows = [json.loads(line) for line in lines]
+            listed = {r["generation"]["physical"]: r["generation"] for r in rows if "generation" in r}
+            assert rows[-1]["summary"]["peers_complete"] is True
+            assert sorted((s["peer"], s["name"]) for s in listed[old]["snapshots"]) == sorted(
+                [(0, before[(0, old)][0]), (1, before[(1, old)][0])])
+            assert listed[old]["disposable"] and listed[mid]["reasons"] == ["KEEP_N"]
+            assert listed[live]["reasons"] == ["LIVE"]
+
+            dropped = f"{cluster.prefix}-3"
+            subprocess.run(["docker", "stop", dropped], check=True, capture_output=True, text=True)
+            try:
+                rc, _ = run("dispose-snapshots", "--progress", str(progress), "--build-id", builds[0],
+                            "--execute", "--recovery-ref", "CHG-HA")
+                err = capsys.readouterr().err
+                assert rc == generations.EXIT_REFUSED and "PEERS_INCOMPLETE" in err
+                assert names(0, old) == before[(0, old)] and names(1, old) == before[(1, old)]
+            finally:
+                subprocess.run(["docker", "start", dropped], check=True, capture_output=True, text=True)
+                wait_cluster_ready(cluster.urls)
+            for pair in pairs:
+                for collection in (pair.corpus, pair.control):
+                    wait_collection_placement(cluster.urls, collection, shard_number=SHARDS,
+                                              replication_factor=RF)
+            peers = [QdrantClient(url=url, timeout=60) for url in cluster.urls]
+
+            rc, lines = run("dispose-snapshots", "--progress", str(progress), "--build-id", builds[0],
+                            "--execute", "--recovery-ref", "CHG-HA")
+            assert rc == 0, (lines, capsys.readouterr().err)
+            assert sum(line.startswith("DELETED peer") for line in lines) == 2
+            assert [names(i, old) for i in range(3)] == [[], [], []]
+            for i in range(3):
+                assert names(i, mid) == before[(i, mid)] and names(i, live) == before[(i, live)]
+        finally:
+            for pair in pairs:
+                for collection in (pair.corpus, pair.control):
+                    with contextlib.suppress(Exception):
+                        for i, peer in enumerate(peers):
+                            for name in names(i, collection):
+                                peer.delete_snapshot(collection, name, wait=True)
+                    with contextlib.suppress(Exception):
+                        peers[0].delete_collection(collection)
+            for peer in peers:
+                peer.close()

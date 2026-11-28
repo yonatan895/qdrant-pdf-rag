@@ -471,6 +471,11 @@ ingest:
   # published and committed when the inventory lost them. Renders
   # --authorize-from-catalog; refused without retireDocs.
   authorizeFromCatalog: false
+  # Set only by scripts/airgap/generations.sh (issue #1373): a non-empty
+  # args list renders Job "generations" (retained-generation listing or
+  # snapshot-only disposal) from this template instead of the ingest Job.
+  generations:
+    args: []
   contextualEnabled: false
   contextLlmBaseUrl: ""
   contextLlmModel: ""
