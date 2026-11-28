@@ -1306,9 +1306,13 @@ def test_open_webui_pin_and_install_header():
     assert fields["title"] == "Rosetta"
     assert "requirements" not in fields
     imports = set(re.findall(r"^(?:from|import) (\w+)", source, flags=re.MULTILINE))
-    # `os` reads only the chart's RAG_ANSWER_REFERENCE switch (#1255).
-    assert imports <= {"__future__", "collections", "json", "os", "re", "typing", "httpx",
-                       "pydantic"}
+    # `os` reads only the chart's switches (RAG_ANSWER_REFERENCE #1255,
+    # RAG_CHAT_IMAGES #1287, RAG_ZOS_AUDIT_TAG and its key #1294); `hashlib`
+    # and `hmac` (standard library) compute the z/OS audit tag (#1294).
+    assert imports <= {"__future__", "collections", "hashlib", "hmac", "json", "os", "re",
+                       "typing", "httpx", "pydantic"}
+    assert set(re.findall(r"os\.environ\.get\((\w+)", source)) == {
+        "REFERENCE_ENV", "IMAGES_ENV", "ZOS_AUDIT_ENV", "ZOS_AUDIT_KEY_ENV"}
 
 
 # --- Answer reference for Open WebUI ratings (#1255) -------------------------
@@ -2112,3 +2116,187 @@ def test_round_trip_an_image_turn_reads_at_the_lowest_effort_and_answers_at_the_
     assert content.startswith(f"Reissue the command.\n\n**Citations:**\n- {CITE_A}\n\n<details>")
     assert "<summary>What Rosetta read from your image</summary>" in content
     assert len(searches) == 1 and "IEA500I" in searches[0]["query"]
+
+
+# --- z/OS audit tag and observation banner (ADR-0012 D3(d), #1294) -----------
+
+AUDIT_KEY = "site-audit-key-0123456789abcdefghij"
+USER_ID = "3f2b8c1e-7a4d-4e9b-a6c5-0d1e2f3a4b5c"
+# printf '%s' "$USER_ID" | openssl dgst -sha256 -hmac "$AUDIT_KEY"
+USER_TAG = "c826ae5169c6643170d2455138adba002d0d18320f068e029b497e18ab6b475a"
+AUDIT_USER = {"id": USER_ID, "name": "Dana Sentinel-Name", "email": "dana.sentinel@corp.invalid",
+              "role": "user"}
+AUDIT_UNAVAILABLE = ("Rosetta cannot answer in this deployment: its z/OS audit setup is "
+                     "incomplete. Contact the operators.")
+ZOS_NOTE = "Includes a z/OS observation — live text, not a manual citation"
+# The Pipe's request for QUESTION as recorded on cc6c5aaf, before the audit
+# tag existed. Only the two values httpx itself owns are read from httpx.
+RECORDED_BODY = (b'{"messages":[{"role":"user","content":"How do I recover from IEA500I?"}],'
+                 b'"stream":true}')
+
+
+def _recorded_headers() -> list[tuple[bytes, bytes]]:
+    with httpx.Client() as client:
+        library = client.headers
+    return [(b"Host", b"rag-agent:8080"),
+            (b"Accept-Encoding", library["accept-encoding"].encode()),
+            (b"Connection", b"keep-alive"),
+            (b"User-Agent", library["user-agent"].encode()),
+            (b"accept", b"text/event-stream"),
+            (b"Content-Length", b"87"),
+            (b"Content-Type", b"application/json")]
+
+
+@pytest.fixture
+def audit_on(monkeypatch):
+    monkeypatch.setenv("RAG_ZOS_AUDIT_TAG", "true")
+    monkeypatch.setenv("RAG_ZOS_AUDIT_KEY", AUDIT_KEY)
+
+
+@pytest.mark.parametrize("switch", [None, "", "false", "1", "True", "TRUE ", " true"])
+@pytest.mark.parametrize("key", [None, AUDIT_KEY])
+def test_requests_are_byte_identical_while_the_audit_switch_is_off(monkeypatch, switch, key):
+    """Dataset reads off (the default): the request is the one recorded before
+    the audit tag existed, header for header and byte for byte, also with the
+    key present. Only the exact value true turns the tag on."""
+    for name, value in (("RAG_ZOS_AUDIT_TAG", switch), ("RAG_ZOS_AUDIT_KEY", key)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    fake = FakeAgent()
+    run_pipe(fake, user=AUDIT_USER)
+    (request,) = fake.requests
+    assert (request.method, str(request.url)) == ("POST", "http://rag-agent:8080/v1/chat")
+    assert request.headers.raw == _recorded_headers()
+    assert request.content == RECORDED_BODY
+
+
+@pytest.mark.parametrize(("key", "message", "expected"), [
+    # RFC 4231 test case 2.
+    ("Jefe", "what do ya want for nothing?",
+     "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"),
+    # openssl dgst -sha256 -hmac, as the operator recomputes a tag.
+    (AUDIT_KEY, USER_ID, USER_TAG),
+    # A non-ASCII id is hashed as its UTF-8 bytes.
+    (AUDIT_KEY, "użytkownik-Ω-7",
+     "cf1354b770b6e48322eebfe3f87b8ac286afa507ccbf0e987847571a255f09cb"),
+])
+def test_audit_tag_is_hmac_sha256_of_the_utf8_user_id_as_64_lower_hex(key, message, expected):
+    assert docs_pipe.audit_tag(key.encode("utf-8"), message) == expected
+    assert re.fullmatch(r"[0-9a-f]{64}", expected)
+
+
+@pytest.mark.parametrize("key", [AUDIT_KEY, f"  {AUDIT_KEY}\n"])
+def test_audit_on_adds_only_the_tag_header_and_no_identity(audit_on, monkeypatch, caplog, key):
+    """Reads on: the one new thing on the wire is the X-Zos-Audit-Tag header.
+    The body is the recorded one, and the user's id, name and email appear
+    nowhere in the request or the logs. Whitespace around the Secret's value
+    (a trailing newline in the Secret) is not part of the key."""
+    monkeypatch.setenv("RAG_ZOS_AUDIT_KEY", key)
+    caplog.set_level(logging.DEBUG)
+    fake = FakeAgent()
+    content, events = run_pipe(fake, user=AUDIT_USER)
+    (request,) = fake.requests
+    recorded = _recorded_headers()
+    assert request.headers.raw == [
+        *recorded[:5], (b"X-Zos-Audit-Tag", USER_TAG.encode()), *recorded[5:]]
+    assert request.content == RECORDED_BODY
+    wire = (str(request.url).encode() + b"\n" + request.content + b"\n"
+            + b"\n".join(name + b": " + value for name, value in request.headers.raw))
+    shown = content + json.dumps(events) + "\n".join(r.getMessage() for r in caplog.records)
+    for secret in (USER_ID, AUDIT_USER["name"], AUDIT_USER["email"], AUDIT_KEY):
+        assert secret.encode() not in wire
+        assert secret not in shown
+    assert USER_TAG not in shown
+
+
+def test_audit_tag_differs_per_user_and_per_key(audit_on, monkeypatch):
+    def tag(user_id: str) -> str:
+        fake = FakeAgent()
+        run_pipe(fake, user={"id": user_id})
+        return fake.requests[0].headers["x-zos-audit-tag"]
+
+    first = tag(USER_ID)
+    assert first == USER_TAG and tag(USER_ID) == first and tag(USER_ID + "x") != first
+    monkeypatch.setenv("RAG_ZOS_AUDIT_KEY", AUDIT_KEY + "x")
+    assert tag(USER_ID) != first
+
+
+@pytest.mark.parametrize("key", [None, "", "   ", "k" * 31, "\N{LATIN SMALL LETTER E WITH ACUTE}" * 15])
+@pytest.mark.parametrize("stream", [True, False])
+def test_audit_on_without_a_usable_key_makes_no_agent_call(audit_on, monkeypatch, key, stream):
+    """Reads on but no key of at least 32 bytes: a fixed text and zero agent
+    calls, so no read can happen without attribution."""
+    if key is None:
+        monkeypatch.delenv("RAG_ZOS_AUDIT_KEY")
+    else:
+        monkeypatch.setenv("RAG_ZOS_AUDIT_KEY", key)
+    fake = FakeAgent()
+    content, _ = run_pipe(fake, user=AUDIT_USER, stream=stream)
+    assert content == AUDIT_UNAVAILABLE
+    assert fake.requests == []
+
+
+@pytest.mark.parametrize("user", [
+    {"name": "Dana Sentinel-Name"}, {"id": ""}, {"id": None}, {"id": 7}, {"id": ["x"]},
+    {"id": "\ud800"},
+])
+def test_audit_on_without_a_user_id_makes_no_agent_call(audit_on, user):
+    fake = FakeAgent()
+    pipe = docs_pipe.Pipe()
+    pipe._transport = httpx.MockTransport(fake.handler)
+    body = {"model": "docs", "stream": True, "messages": _messages(("user", QUESTION))}
+    for given in (user, None):
+        assert asyncio.run(pipe.pipe(body, __user__=given)) == AUDIT_UNAVAILABLE
+    assert fake.requests == []
+
+
+def test_a_32_byte_key_is_used(audit_on, monkeypatch):
+    monkeypatch.setenv("RAG_ZOS_AUDIT_KEY", "k" * 32)
+    fake = FakeAgent()
+    run_pipe(fake, user=AUDIT_USER)
+    assert re.fullmatch(r"[0-9a-f]{64}", fake.requests[0].headers["x-zos-audit-tag"])
+
+
+def test_task_and_fixed_text_turns_stay_fixed_with_the_audit_key_missing(monkeypatch):
+    """A call that never reaches the agent needs no tag: its fixed text is
+    unchanged when reads are on and the key is missing."""
+    monkeypatch.setenv("RAG_ZOS_AUDIT_TAG", "true")
+    monkeypatch.delenv("RAG_ZOS_AUDIT_KEY", raising=False)
+    fake = FakeAgent()
+    assert run_pipe(fake, task="title_generation")[0] == "Docs question"
+    assert run_pipe(fake, messages=_messages(("assistant", "x")))[0] == (
+        "Ask a question in plain text; attachments and images are not supported.")
+    assert fake.requests == []
+
+
+def _zos(outcome: object, **extra: Any) -> dict[str, Any]:
+    return {"target": "SYS1.PARMLIB(IEASYS00)", "acquired_at": "2026-11-27T21:00:00Z",
+            "observed_at": None, "outcome": outcome, "code": None,
+            "truncated": outcome == "truncated", "bytes": 53, **extra}
+
+
+@pytest.mark.parametrize(("meta", "expected"), [
+    ({"zos_observation": _zos("complete")}, f"Source-matched · 1 citation · {ZOS_NOTE}"),
+    ({"zos_observation": _zos("truncated")}, f"Source-matched · 1 citation · {ZOS_NOTE}"),
+    ({"zos_observation": _zos("complete"), "verification_state": "unverified_draft",
+      "citations": []}, f"Unverified draft — no eligible citation · {ZOS_NOTE}"),
+    ({"zos_observation": _zos("complete"), "script_review_required": True},
+     (f"Source-matched · 1 citation · {ZOS_NOTE} · "
+      "Human review required — draft script, not certified executable")),
+    # A read that brought no text: the answer uses the manuals only.
+    ({"zos_observation": _zos("denied", code="denied")}, "Source-matched · 1 citation"),
+    ({"zos_observation": _zos("unavailable", code="timeout")}, "Source-matched · 1 citation"),
+    ({"zos_observation": _zos("dry_run", code="dry_run")}, "Source-matched · 1 citation"),
+    # Anything but the agent's object with a text-bearing outcome adds nothing.
+    ({"zos_observation": "complete"}, "Source-matched · 1 citation"),
+    ({"zos_observation": {"outcome": ["complete"]}}, "Source-matched · 1 citation"),
+    ({"zos_observation": None, "feedback_suppressed": True}, "Source-matched · 1 citation"),
+])
+def test_an_observation_answer_is_never_shown_as_only_source_matched(meta, expected):
+    """#1392 decision 7: an answer whose prompt held text read from z/OS says
+    so in the banner, in every verification state; the manual citations it
+    counts are still only the validated ones."""
+    _, events = run_pipe(FakeAgent(_frames("Answer.", meta=_final_meta(**meta))))
+    assert _final_status(events) == expected

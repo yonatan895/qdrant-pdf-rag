@@ -9,14 +9,19 @@ description: The documentation corpus through the agent's /v1/chat, with its val
 
 # Open WebUI Pipe (issue #1072): a stateless translator between Open WebUI and
 # the agent's streaming POST /v1/chat. No tools, no model calls, no network
-# call other than the configured agent URL, no logging. The header above is
-# Open WebUI's function frontmatter; it deliberately has no `requirements:`
-# line, because that would make Open WebUI pip-install packages at load time.
-# Only httpx and pydantic are imported; both ship with Open WebUI.
+# call other than the configured agent URL, no logging. No identity leaves it:
+# with z/OS dataset reads on, one keyed hash of the user id does (ZOS_AUDIT_ENV).
+# The header above is Open WebUI's function frontmatter; it deliberately has no
+# `requirements:` line, because that would make Open WebUI pip-install packages
+# at load time.
+# Outside the standard library only httpx and pydantic are imported; both ship
+# with Open WebUI.
 # Contract and install procedure: docs/agent.md#openwebui-docs-pipe.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -205,6 +210,50 @@ _ESCAPES = (("&", "&amp;"), ("<", "&lt;"), (">", "&gt;"))
 # Open WebUI's add_file_context (utils/middleware.py) block: a whole text
 # part, or the prefix of string content. Only that exact shape is removed.
 _ATTACHED_FILES = re.compile(r"<attached_files>\n.*?\n</attached_files>\n\n", re.DOTALL)
+
+
+# z/OS dataset-read audit tag (ADR-0012 D3(d), #1294). On only when the chart
+# sets RAG_ZOS_AUDIT_TAG=true, which it does exactly when dataset reads are
+# enabled for the deployment (read per call, like REFERENCE_ENV); default off,
+# and off the request is byte-identical to before #1294. On, every agent call
+# carries X-Zos-Audit-Tag: HMAC-SHA256 with the site key (RAG_ZOS_AUDIT_KEY, a
+# Secret reference in the pod environment: never a valve, a default or git;
+# surrounding whitespace is not part of it) over the UTF-8 bytes of the Open
+# WebUI user id exactly as given, as 64 lower-case hex. The agent logs the tag
+# with a read and never uses it: it authorizes nothing. The id itself, the
+# user's name and email never leave the Pipe. On without a key of at least
+# ZOS_AUDIT_KEY_MIN_BYTES bytes, or without a user id, the Pipe makes no agent
+# call (a read would have no attribution) and shows AUDIT_UNAVAILABLE.
+ZOS_AUDIT_ENV = "RAG_ZOS_AUDIT_TAG"
+ZOS_AUDIT_KEY_ENV = "RAG_ZOS_AUDIT_KEY"
+ZOS_AUDIT_HEADER = "X-Zos-Audit-Tag"
+ZOS_AUDIT_KEY_MIN_BYTES = 32
+AUDIT_UNAVAILABLE = ("Rosetta cannot answer in this deployment: its z/OS audit setup is "
+                     "incomplete. Contact the operators.")
+# The banner part of an answer whose prompt held text read from z/OS (the
+# final frame's `zos_observation` with a text-bearing outcome).
+ZOS_OBSERVATION_NOTE = "Includes a z/OS observation — live text, not a manual citation"
+_ZOS_TEXT_OUTCOMES = ("complete", "truncated")
+
+
+def audit_tag(key: bytes, user_id: str) -> str:
+    """HMAC-SHA256 of the user id's UTF-8 bytes, as 64 lower-case hex."""
+    return hmac.new(key, user_id.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _audit_headers(user: object) -> dict[str, str] | None:
+    """The extra request headers: none with the switch off, the tag with it
+    on, or None when it is on and no tag can be computed (no agent call)."""
+    if os.environ.get(ZOS_AUDIT_ENV) != "true":
+        return {}
+    user_id = user.get("id") if isinstance(user, dict) else None
+    try:
+        key = os.environ.get(ZOS_AUDIT_KEY_ENV, "").strip().encode("utf-8")
+        if len(key) < ZOS_AUDIT_KEY_MIN_BYTES or not isinstance(user_id, str) or not user_id:
+            return None
+        return {ZOS_AUDIT_HEADER: audit_tag(key, user_id)}
+    except ValueError:  # an id or key that is not encodable text
+        return None
 
 
 class _Failure(Exception):
@@ -539,6 +588,9 @@ def _status_text(final: dict[str, Any]) -> str:
     else:
         parts = [STATE_LABELS.get(state, UNKNOWN_STATE) if isinstance(state, str)
                  else UNKNOWN_STATE]
+    observation = final.get("zos_observation")
+    if isinstance(observation, dict) and observation.get("outcome") in _ZOS_TEXT_OUTCOMES:
+        parts.append(ZOS_OBSERVATION_NOTE)
     if final.get("citations_inferred") is True:
         parts.append(INFERRED)
     if final.get("script_review_required") is True:
@@ -824,15 +876,19 @@ class Pipe:
         request, trimmed = fit_request(request, self.valves.MAX_BODY_CHARS)
         if request is None:
             return TOO_LONG.format(limit=self.valves.MAX_BODY_CHARS)
+        audit = _audit_headers(__user__)
+        if audit is None:
+            return AUDIT_UNAVAILABLE
         answer = self._answer(request, __event_emitter__, trimmed,
-                              earlier_dropped=earlier_dropped, images_on=images_on)
+                              earlier_dropped=earlier_dropped, images_on=images_on, audit=audit)
         if body.get("stream") is True:
             return _chunks(answer)
         return "".join([text async for text in answer])
 
     async def _answer(self, request: dict[str, Any], emit: Emitter | None,
                       trimmed: bool = False, *, earlier_dropped: bool = False,
-                      images_on: bool = False) -> AsyncIterator[str]:
+                      images_on: bool = False,
+                      audit: dict[str, str] | None = None) -> AsyncIterator[str]:
         async def event(payload: dict[str, Any]) -> None:
             if emit is None:
                 return
@@ -859,7 +915,8 @@ class Pipe:
                     transport=self._transport, trust_env=False, follow_redirects=False,
                 ) as client,
                 client.stream("POST", CHAT_PATH, json=request,
-                              headers={"accept": "text/event-stream"}) as response,
+                              headers={"accept": "text/event-stream", **(audit or {})},
+                              ) as response,
             ):
                 if response.status_code != 200:
                     raw = b""
