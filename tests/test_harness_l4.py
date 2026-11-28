@@ -253,6 +253,45 @@ def test_l4_repeats_preserve_sample_and_judge_legs(monkeypatch):
     assert result == [{"rows": [{"repeat": n}], "metrics": {"queries": 1}} for n in (1, 2, 3)]
 
 
+def test_l4_judge_reads_a_cited_neighbour_that_expansion_added(monkeypatch):
+    """#1377: L4 runs the L2 runner, so on the shipped defaults (expansion
+    on) each repeat reads the streamed final, grounds a cited neighbour by
+    its recorded provenance and hands its supplied text to the faithfulness
+    judge; the relevance leg still runs."""
+    from scripts import harness_l4
+
+    from tests.test_harness_l2 import (
+        _NEIGHBOUR_CITE,
+        _PARENT_CITE,
+        _answer_fields,
+        _entry,
+        _excerpt,
+        _hit,
+        _response_hit,
+        _stub_l2_stack,
+    )
+
+    pool = [_hit(_PARENT_CITE, "SA23-1380-70", "STEP1 open the panel.")]
+    hits = [_response_hit("c1", _PARENT_CITE, "SA23-1380-70", "STEP1 open the panel."),
+            _response_hit("c2", _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 verify the status.", parent="c1")]
+    supplied = [_excerpt(1, _PARENT_CITE, "SA23-1380-70", "STEP1 open the panel."),
+                _excerpt(2, _NEIGHBOUR_CITE, "SA23-1380-70", "STEP2 verify the status.")]
+    prompts, requests = _stub_l2_stack(
+        monkeypatch, pool, _answer_fields([_PARENT_CITE, _NEIGHBOUR_CITE], supplied, hits),
+        expand_enabled=True)
+    runs = harness_l4.run_l4([_entry("EXP-1", gold=["SA23-1380-70"])], None, 2)
+    assert requests == [{"query": "q", "temperature": None, "stream": True}] * 2
+    prompt = ("EXCERPTS:\nSTEP1 open the panel.\n\n---\n\nSTEP2 verify the status.\n\n"
+              "ANSWER:\nOpen the panel, then verify the status.")
+    assert prompts == [prompt, prompt]
+    for run in runs:
+        [row] = run["rows"]
+        assert row["verdict"] == "pass", row["failures"]
+        assert row["expansion_citations"] == [_NEIGHBOUR_CITE]
+        assert (row["judge_label"], row["relevance_label"]) == ("entailed", "relevant")
+        assert run["metrics"]["structural_fails"] == 0 and run["metrics"]["unmapped_citations"] == 0
+
+
 def test_classify_max_direction_has_a_borderline_band_before_fail():
     """A lower-is-better metric slightly over its reference is borderline (a
     reviewer's call), clearly over is fail, at or under is pass."""

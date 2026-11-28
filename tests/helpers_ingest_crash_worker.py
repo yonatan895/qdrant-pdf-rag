@@ -134,7 +134,34 @@ def hang_parse_main(ingest_args):
     return run_ingest.main(ingest_args)
 
 
+def generations_crash_main(argv):
+    """`python -m tests.helpers_ingest_crash_worker generations-crash --receipt R -- <args>`:
+    the real generations CLI, killed (no cleanup) right after its first
+    acknowledged snapshot delete (#1373)."""
+    from mainframe_rag.ingest import generations
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--receipt", required=True, type=Path)
+    options, args = parser.parse_known_args(argv)
+    if args[:1] == ["--"]:
+        args = args[1:]
+    original = generations.delete_snapshot_on_peer
+
+    def interrupted(*a, **k):
+        original(*a, **k)
+        with options.receipt.open("w") as receipt:
+            receipt.write("snapshot-delete")
+            receipt.flush()
+            os.fsync(receipt.fileno())
+        os._exit(86)
+
+    generations.delete_snapshot_on_peer = interrupted
+    return generations.main(args)
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["generations-crash"]:
+        raise SystemExit(generations_crash_main(sys.argv[2:]))
     if sys.argv[1:2] == ["hang-parse"]:
         raise SystemExit(hang_parse_main(sys.argv[2:]))
     raise SystemExit(main())

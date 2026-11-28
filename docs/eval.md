@@ -357,7 +357,10 @@ verdict.
   in the content channel on long answers and the JSON label never appeared,
   failing rows as judge infra errors. Only structural fails gate; rates are
   trend data. The L1-pinned-collection rule is operator discipline
-  (unenforced in code). The summary also carries the issue #365 acceptance
+  (unenforced in code). With neighbour expansion on, L2 and L4 read the
+  streamed `final` and ground a cited neighbour by its recorded provenance
+  ([expand arm](#expand-arm), #1377); with it off the buffered request and
+  rows are unchanged. The summary also carries the issue #365 acceptance
   shape: `by_verification_state` (served state per judged row; `unknown`
   means a pre-state response, never a fabricated state), `state_mismatches`
   (rows whose entry opted into `expected_verification_state`), and
@@ -1191,11 +1194,63 @@ default 16. Candidate selection stays at its deployed value in both arms.
   neighbours repeat it), a `[n]` prefix to slot `n`. Every other row
   (expansion off, on with nothing appended, the buffered body, which has no
   `hits`, and `--image-arm`) keeps the sibling `/v1/search` join exactly
-  as before #1314. Harness L2/L4 call the buffered `/v1/answer`, so they
-  keep that join on `expand-on` too, where a cited cross-page neighbour is
-  unmapped and fails the row: do not run L2/L4 on this arm. Since #1368
-  every default deployment is this arm; how the release gate runs L2/L4
-  against it is a pending maintainer decision (#1368).
+  as before #1314.
+- Harness L2/L4 run on this arm (#1377, #1342). With
+  `answer_expand_enabled` on, `run_l2` requests the streamed `/v1/answer`
+  and reads its `final`; off, it sends the buffered request and produces
+  the row it always did. The agent response contract is unchanged: the
+  buffered body still has no `hits`. L2 is stricter than the answer eval
+  above and decides each citation on its own. A citation found in the
+  sibling `/v1/search` pool joins there as before. One outside the pool is
+  grounded only when the `final` records that expansion added it: a
+  `supplied_evidence` entry carries its line, the response hit at that
+  entry's `index` carries the same line and `doc_id` and a `neighbour_of`,
+  and `neighbour_of` is the `chunk_id` of a retrieved hit (no
+  `neighbour_of` key) of the same `doc_id` in that response
+  (`judging.expansion_citation_excerpts`). The row lists such citations in
+  `expansion_citations`, and the faithfulness judge reads the text those
+  excerpts supplied to the prompt. Any other citation outside the pool
+  (a retrieved hit the pool lacks, a neighbour whose parent is missing,
+  another document's, or itself a neighbour) is unmapped and fails the row
+  with no judge call, as with expansion off.
+- A cite line is decided as a whole and fails closed (#1389 review B1).
+  Two chunks of one page share a line, and the agent returns bare lines,
+  so a line cannot say which chunk was cited. It is expansion-grounded
+  only when every response hit and every supplied excerpt carrying it is
+  an added neighbour by the rule above or a chunk the pool holds (by
+  `chunk_id`). When a retrieved hit the pool lacks shares the line with an
+  added neighbour (the pool is 8 deep, `answer_hit_limit` 16), the row
+  fails as it does with expansion off. A `[n]` prefix grounds only the
+  added excerpt in slot `n`; it never falls back to the line.
+- A same-page neighbour repeats its parent's line, so that citation is
+  grounded by the parent in the pool; the judge then reads the parent's
+  pool text and every added excerpt carrying the line
+  (`judging.evidence_for_expanded_citations`). A pooled chunk that
+  expansion adds again (selection dropped it, a neighbour walk returned
+  it) is read once, as the pool hit.
+  On a row with a neighbour hit, `hit_doc_ids` and `gold_retrieved` read
+  the response's hits, as in the answer eval. L2 runs in-process, where the
+  client buffers the stream, so `client_first_token_ms` and `decode_tps`
+  stay null. A streamed row carries `ttft_ms` and no `llm_ms`; a buffered
+  row the reverse.
+- On this arm the answer request runs under the agent's client-visible
+  `chat_stream` row of the [HTTP and model fallback
+  contract](agent.md#http-model-contract), not the buffered one: one
+  non-streaming second ask is allowed on an empty `stop` or a pre-output
+  stream failure, and `answer_timeout_s` bounds each model read (a stall),
+  not the whole generation as it does for a buffered answer. The
+  2026-09-11 L4 reference was recorded on buffered requests.
+- Not changed by #1377: L2's sibling pool is 8 hits deep while
+  `answer_hit_limit` is 16 since #1274, so a cited retrieved hit ranked 9
+  to 16 is outside the pool and fails its row, with expansion on or off.
+  Widening the pool changes expansion-off rows and is a separate maintainer
+  decision. `evals/harness-l4-thresholds.json` (2026-09-11) and the L3
+  baselines were recorded with selection and expansion off; the L4 tier
+  check compares venue, embed mode and reasoning model only, so it does not
+  refuse that reference on a defaults-on run. Until
+  `eval:harness:l4-record` and `eval:harness:l3-baseline` are re-run under
+  the shipped defaults (dedicated PR, maintainer approval), read an L4
+  verdict against it as a comparison with the stages-off build.
 - Run `expand-on` with `--stream` and `--hit-limit N` (the sibling pool depth) and
   the control with `--stream` and `--hit-limit N+B`.
 - Before reading results, confirm from the stand-in's traces that rows carry

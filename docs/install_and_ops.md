@@ -1512,10 +1512,12 @@ on three distinct peers again.
 
 - **Publication** is the one authorized writer path (`ingest.md`
   publication contract, single target-held lock, alias swap only after
-  full verification). Retired generations and safety snapshots are kept;
-  rollback is alias re-pointing by the operator — never automatic
-  deletion, retirement, or garbage collection (#391 owns publication
-  integrity).
+  full verification). Superseded generations are kept, and their safety
+  snapshots until an operator deletes them with the guarded snapshot-only
+  command ([retained generations](ingest.md#retained-generations), named
+  builds, publish lock, keep at least one); rollback is alias re-pointing by
+  the operator — never automatic deletion, retirement, or garbage
+  collection (#391 owns publication integrity).
 - **Existing-collection topology changes** are snapshot-gated and explicit:
   same-shard-count replication repair establishes actual copies and waits
   for ACTIVE state; a shard-count change rebuilds a distinct 6/3/2
@@ -1534,9 +1536,10 @@ on three distinct peers again.
 #### Abort, retry, and recovery
 
 - An interrupted clone, transfer, or build is resumed or retried, never
-  repaired by deleting live data. A superseded physical plus its safety
-  snapshot survive every swap until the operator removes them after
-  acceptance.
+  repaired by deleting live data. A superseded physical survives every
+  swap; no data disposal exists yet (#1373). Its safety snapshot survives
+  until the operator deletes it with the guarded snapshot-only command
+  ([retained generations](ingest.md#retained-generations)).
 - **Peer replacement is not stop/wipe/start.** Observed 2026-09-21 against
   the pinned `v1.19.0-unprivileged` image: a fresh container restarted at
   the same URI while the dead peer still holds shards is refused

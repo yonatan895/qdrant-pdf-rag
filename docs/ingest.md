@@ -1168,8 +1168,9 @@ thread pool.
   metadata** (`<old>__completions`), so an alias rollback selects matching
   metadata, not the new contract.
 - **Rollback / disposal (operator actions, never automatic):** superseded
-  data/control pairs, immutable build aliases and safety snapshots remain
-  retained. Direct alias repointing is not a verified administrative rollback:
+  data/control pairs and immutable build aliases remain retained; safety
+  snapshots remain until an operator deletes them with the guarded
+  snapshot-only command below. Direct alias repointing is not a verified administrative rollback:
   the accepted [lifecycle contract](evidence-contract.md) requires target schema,
   content, executable/config compatibility and policy checks under writer
   serialization. Retained disposal additionally requires maintenance-wide
@@ -1178,6 +1179,54 @@ thread pool.
   Counts, dimensions or elapsed cache TTL alone authorize neither operation.
   Guarded administrative rollback/disposal remain separate L1 work; do not
   delete retained pairs or their controls using the old manual GC recipe.
+- <a id="retained-generations"></a>**Retained generations and their snapshots (issue #1373):**
+  `python -m mainframe_rag.ingest.generations list [--progress <inventory>]
+  [--format json]` is read-only and lock-free, a point-in-time view. Per
+  build of the configured alias it prints the data/control pair, build id,
+  aliases, phase (`live`, `retained`, `sealed`, `inconsistent`,
+  `data-missing`), the newest completion-marker `finished_at` and the rank
+  among retained builds, point counts, whether the publish sidecar names it,
+  and every snapshot of the pair on every direct peer (`QDRANT_PEER_URLS`)
+  with its exact size. Qdrant reports no collection disk bytes (v1.19.2
+  telemetry returns `disk_usage_bytes` 0 for populated segments), so data
+  size is printed as not reported. Collections with the alias prefix but no
+  build binding are listed as not managed. Without `--progress` the sidecar
+  is not read and nothing is reported disposable; with a single entry
+  endpoint on a multi-peer cluster the snapshot view is marked incomplete.
+  `dispose-snapshots --progress <inventory> --build-id <uuid>...` (the
+  existing ingest inventory file, whose directory holds the publish lock and
+  sidecar; a missing file refuses) is a dry run by default; `--execute` deletes, on each peer,
+  the snapshots that peer lists under the named builds' data collections,
+  including operator pre-change snapshots of them (maintainer decision
+  2026-11-26). It takes the publish lock for the whole run (a held lock
+  refuses, never waits), recomputes the plan under it, re-reads the aliases
+  before each delete, decides each delete by listing that peer again (a 404
+  also means "not on this peer"), and appends an audit record
+  `snapshot-disposal-<alias>.jsonl` beside the lock: who ran it
+  (`--operator`, else the login name, else the uid) and when, plus
+  `--recovery-ref <ticket>` when given (optional, maintainer decision
+  2026-11-26). A rerun converges from
+  the stored state: deleted snapshots are no longer listed. A named build is
+  refused, and nothing is deleted, unless it is `retained` (both immutable
+  aliases consistent, serving alias elsewhere), no other alias names its
+  pair, the sidecar is readable and does not name it as staging or
+  previous, every peer listing was read, and it is outside the newest
+  `--keep` retained builds ordered by newest marker `finished_at` (default
+  1; `--allow-below-keep` lowers a larger site value to the floor 1, never
+  0; a missing time or a tie at the boundary is protected). Targets are
+  named by full build UUID only. Snapshots are never served, so no reader
+  stop is needed; what is given up is the second on-cluster copy of that
+  generation (on a distributed source the safety snapshot is node-local and
+  was never a restore point, [deploy](deploy.md#distributed-recovery)); the
+  retained collection stays the rollback point. Still forbidden: deleting a
+  data or control collection or any alias, and selecting by name, pattern,
+  count, size or age. Deleting a collection orphans its snapshot files on
+  v1.19.2 (no longer listed, still on disk, listed again if the name is
+  recreated), so later data disposal must delete snapshots first.
+  At the site both commands run through `sh scripts/airgap/generations.sh`
+  ([deploy](deploy.md#generations-job)), which fixes `--progress` to the
+  ingest inventory on the ingest work volume. The Job is the ingest Job's
+  shape, so `list` also runs with the writer key although it only reads.
 - `should_skip`: exact-sha plus (`upserted` or `skipped` always — `skipped`
   records an earlier already-complete check, issue #1215 — or `dry` only when
   the current run is also dry; a real run never skips prior `dry`).
