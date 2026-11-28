@@ -1,5 +1,6 @@
 # One-shot production ingest Job (issues #15, #360, #391).
-# Rendered ONLY when ingest.enabled is true, and applied deliberately via an
+# Rendered ONLY when ingest.enabled is true (or as Job "generations", below),
+# and applied deliberately via an
 # explicit operation -- never installed automatically on helm upgrade, never
 # a Helm hook (D3). Example:
 # helm template <release> charts/mainframe-rag --namespace <ns>
@@ -11,21 +12,32 @@
 # The Job shares image/config/Secret/volume templates with the
 # rest of the deployment. Writer lock, publication modes and maintenance
 # authorization stay outside Helm (#391).
-{{- if .Values.ingest.enabled }}
+{{- /* Generations mode (issue #1373): the same Job shape runs the
+retained-generation listing or snapshot-only disposal instead of an ingest,
+as Job "generations", with no corpus volume and no retry (a refusal is a
+final answer). It shares the image, writer key, work volume (sidecar and
+publish lock), peer URLs and security context. Launched only by
+scripts/airgap/generations.sh; exclusive with ingest.enabled. */}}
+{{- $generations := ((.Values.ingest.generations | default dict).args | default list) }}
+{{- if and .Values.ingest.enabled $generations }}
+{{- fail "ingest.generations.args renders the generations Job and is exclusive with ingest.enabled" }}
+{{- end }}
+{{- if or .Values.ingest.enabled $generations }}
+{{- $jobName := ternary "generations" "ingest" (not (empty $generations)) }}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: ingest
+  name: {{ $jobName }}
   namespace: {{ .Release.Namespace }}
   labels:
-    app: ingest
+    app: {{ $jobName }}
 spec:
-  backoffLimit: 1
+  backoffLimit: {{ ternary 0 1 (not (empty $generations)) }}
   activeDeadlineSeconds: 86400
   template:
     metadata:
       labels:
-        app: ingest
+        app: {{ $jobName }}
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false
@@ -48,6 +60,13 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
+          {{- if $generations }}
+          command: ["python3", "-m", "mainframe_rag.ingest.generations"]
+          args:
+            {{- range $generations }}
+            - {{ . | quote }}
+            {{- end }}
+          {{- else }}
           args:
             - --src
             - /corpus
@@ -66,6 +85,7 @@ spec:
             {{- end }}
             - --authorize-from-catalog
             {{- end }}
+          {{- end }}
           env:
             - name: QDRANT_URL
               value: {{ include "mainframe-rag.qdrantUrl" . | quote }}
@@ -142,9 +162,11 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if not $generations }}
             - name: corpus
               mountPath: /corpus
               readOnly: true
+            {{- end }}
             - name: work
               mountPath: /work
             {{- if .Values.gateway.caConfigMapName }}
@@ -155,10 +177,12 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if not $generations }}
         - name: corpus
           persistentVolumeClaim:
             claimName: {{ required "ingest.corpusPVC is required when ingest.enabled is true" .Values.ingest.corpusPVC }}
             readOnly: true
+        {{- end }}
         - name: work
           persistentVolumeClaim:
             claimName: ingest-work

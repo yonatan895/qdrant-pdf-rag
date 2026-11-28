@@ -1171,9 +1171,13 @@ class ResponseJoin:
     else those hits. Every other response (expansion off, expansion that
     appended nothing, the buffered `/v1/answer` body, which has no `hits`)
     leaves it None, and the row keeps the sibling `/v1/search` pool join
-    unchanged."""
+    unchanged. `hits` and `supplied` (#1377) are that response's hits and
+    its valid `supplied_evidence` (None when malformed), set with `packed`:
+    harness L2 reads a neighbour's provenance from them per citation."""
 
     packed: list[dict[str, Any]] | None = None
+    hits: list[dict[str, Any]] | None = None
+    supplied: list[dict[str, Any]] | None = None
 
 
 def expanded_response_hits(data: dict[str, Any]) -> list[dict[str, Any]] | None:
@@ -1325,7 +1329,7 @@ def run_query(
     citation join. Without it, or on any response without a neighbour hit,
     the row joins on `hits` (the sibling pool) as before."""
     if response_join is not None:
-        response_join.packed = None
+        response_join.packed = response_join.hits = response_join.supplied = None
     t0 = time.monotonic()
     row = _base_row(entry, temperature)
     body: dict[str, Any] = {"query": entry["query"], "temperature": temperature}
@@ -1543,7 +1547,9 @@ def _judge_response(
     expanded = expanded_response_hits(data) if response_join is not None else None
     retrieval_hits = hits if expanded is None else expanded
     if response_join is not None and expanded is not None:
-        response_join.packed = _valid_supplied_evidence(data.get("supplied_evidence")) or expanded
+        response_join.hits = expanded
+        response_join.supplied = _valid_supplied_evidence(data.get("supplied_evidence"))
+        response_join.packed = response_join.supplied or expanded
     hit_ids = (
         None
         if retrieval_hits is None

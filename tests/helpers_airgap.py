@@ -99,7 +99,7 @@ def make_bin_tree(tmp_path: Path, scripts: list[str]) -> Path:
     """Create bin/ + scripts/airgap/ and copy the named scripts from the repo."""
     (tmp_path / "bin").mkdir(exist_ok=True)
     (tmp_path / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
-    if any(name in scripts for name in ("deploy.sh", "ingest.sh", "validate.sh")):
+    if any(name in scripts for name in ("deploy.sh", "ingest.sh", "validate.sh", "generations.sh")):
         shutil.copytree(REPO / "charts/mainframe-rag", tmp_path / "charts/mainframe-rag", dirs_exist_ok=True)
     if "deploy.sh" in scripts or "validate.sh" in scripts:
         # legacy_layout.py: the stored-layout preflight (#1070) runs from both.
@@ -110,14 +110,16 @@ def make_bin_tree(tmp_path: Path, scripts: list[str]) -> Path:
         scripts = [*scripts, "model_config.py", "map_values.py", "operator_keys.py", "config_tool.py"]
     if "pack.sh" in scripts:
         scripts = [*scripts, "reference_docs.py"]
-    if any(name in scripts for name in ("pack.sh", "load.sh", "deploy.sh", "ingest.sh")):
+    if any(name in scripts for name in ("pack.sh", "load.sh", "deploy.sh", "ingest.sh", "generations.sh")):
         scripts = [*scripts, "image_identity.sh", "image_manifest.py"]
-    if any(name in scripts for name in ("deploy.sh", "ingest.sh")):
+    if any(name in scripts for name in ("deploy.sh", "ingest.sh", "generations.sh")):
         scripts = [*scripts, "check_pod_images.py"]
     if "deploy.sh" in scripts:
         scripts = [*scripts, "check_qdrant_render.py", "check_qdrant_volumes.py"]
     if "ingest.sh" in scripts:
         scripts = [*scripts, "check_ingest_patch.py"]
+    if any(name in scripts for name in ("ingest.sh", "generations.sh")):
+        scripts = [*scripts, "one_shot_job.sh"]
     for f in scripts:
         shutil.copy(REPO / "scripts" / "airgap" / f, tmp_path / "scripts" / "airgap" / f)
     return tmp_path

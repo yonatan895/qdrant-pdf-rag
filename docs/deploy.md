@@ -1068,6 +1068,42 @@ cannot schedule on one node — proven).
   read, the check stays off and the wait alone decides, as before. A quota
   refusal of a retry pod, after a first pod failed, is not caught: that run
   waits for the Job's own failure or `INGEST_TIMEOUT`.
+- <a id="generations-job"></a>**Retained generations at the site (issue #1373):**
+  `sh scripts/airgap/generations.sh list [--keep N] [--format text|json]`
+  prints every publication generation with each peer's snapshots and sizes;
+  `sh scripts/airgap/generations.sh dispose-snapshots --build-id <uuid>...
+  [--keep N] [--allow-below-keep] [--execute] [--recovery-ref <ticket>]`
+  deletes the snapshots of named retained builds (a dry-run plan unless
+  `--execute`; rules in [retained generations](ingest.md#retained-generations)).
+  It runs the ingest Job's template as Job `generations` (chart value
+  `ingest.generations.args`, rendered by `map_values.py --generations-arg`):
+  the same packed image by digest, Qdrant writer key by Secret reference,
+  `QDRANT_PEER_URLS` and collection policy, pod hardening, and the
+  `ingest-work` volume with `--progress /work/inventory.jsonl` fixed; no
+  corpus volume and `backoffLimit: 0`. The read-only `list` runs with the
+  writer key too: both commands are one Job shape, the ingest Job's, and
+  there is no read-only variant of it. Each value is checked whole against
+  a fixed character set before anything renders and reaches the Job as one
+  argument; a value with a newline or any other character outside its set
+  refuses the run. Before applying, it refuses while
+  `job/ingest` has not finished (no `Complete` or `Failed` condition) or an
+  ingest pod is still running or terminating, while an earlier
+  `job/generations` has not finished, when `ingest-work` does not exist (it
+  never creates it), and on any read failure; a finished earlier
+  `job/generations` is deleted with bounded requests first. It waits with the
+  ingest launcher's watcher (`scripts/airgap/one_shot_job.sh`: the quota
+  fail-fast and the bounded, interruptible removal of a refused Job above,
+  with `sh scripts/airgap/generations.sh` as the rerun command in the
+  messages), ends the wait as soon as the
+  Job fails (a refusal is a normal outcome), and prints the Job's log, which
+  is the listing or plan, once at the end. With `--execute` it passes the
+  bastion login name as `--operator` for the audit record; a login name
+  with a control character refuses the run, any other unusable name is left
+  out with a warning and the record names the pod's uid. No reader stop:
+  snapshots are never served. `AIRGAP_DRYRUN=1` only renders and prints the
+  cluster calls; without it, the module's own dry run still runs as a Job.
+  The Job requests the ingest Job's `INGEST_*` resources. There is no task
+  entry for it; run the script.
 - First-party pods (agent, the oauth-proxy sidecar, the ingest Job, OpenObserve, otelcol)
   declare their own hardening so it does not depend on `restricted-v2`
   alone (issue #585): pod `runAsNonRoot: true` and
@@ -1151,7 +1187,11 @@ capacity, not usable logical capacity:
 - Each node-local snapshot of a generation is about `S` on that peer's snapshot
   claim: the retained snapshots (pre-change, pre-upgrade, safety) satisfy
   `retained * S` below 500Gi. Off-cluster copies do not free the claim until the
-  snapshot is deleted.
+  snapshot is deleted. `python -m mainframe_rag.ingest.generations list` shows
+  every peer's snapshots with exact sizes; snapshots of retained generations
+  are deleted only by its guarded snapshot-only disposal
+  ([retained generations](ingest.md#retained-generations)), which frees the
+  snapshot claim and never the data claim.
 - Sizing math, not measurement: measured per-point footprint, headroom, RPO/RTO
   and replica policy belong to #374 and #360. Do not provision at exactly the
   estimate (`.agents/skills/qdrant-sizing`).

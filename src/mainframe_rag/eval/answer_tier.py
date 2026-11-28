@@ -29,11 +29,16 @@ Judging contract (inherits the answer-tier eval's rules)
         filters, deterministic index), each citation maps back to its hit
         by exact cite-string match — no doc-number regex guessing. L2
         fetches that pool with a sibling /v1/search request rather than
-        seeing the answer request's internal retrieval (the response
-        contract deliberately does not expose it), so it must run on the
+        seeing the answer request's internal retrieval (the buffered
+        response deliberately does not expose it), so it must run on the
         L1-pinned collection; any citation that does not map back to the
         fetched pool FAILS the row — P/R computed over a silently-wrong
-        join would be worse than no measurement.
+        join would be worse than no measurement. One exception (#1377):
+        with neighbour expansion on, L2 reads the streamed final, and a
+        citation outside the pool is grounded when that final records it
+        as a neighbour expansion added to a retrieved hit of the same
+        document (judging.expansion_citation_excerpts). Nothing else
+        outside the pool is.
     faithfulness (temp-0 NLI judge)
         The same local reasoning model judges, per grounded answer, whether
         the ANSWER is entailed by / contradicted by / unsupported-by the
@@ -89,6 +94,7 @@ from typing import Any
 
 from mainframe_rag.eval.answers import (
     AnswerCapture,
+    ResponseJoin,
     answer_completeness,
     failure_bucket,
     inferred_index_off_gold,
@@ -102,6 +108,8 @@ from mainframe_rag.eval.judging import (
     JudgeError,
     cited_doc_ids,
     evidence_for_citations,
+    evidence_for_expanded_citations,
+    expansion_citation_excerpts,
     judge_chat,
     judge_messages,
     parse_judge_label,
@@ -415,6 +423,7 @@ def apply_l2_measurements(
     entry: dict[str, Any],
     hits: list[dict[str, Any]],
     alerts: dict[str, str],
+    expansion: ResponseJoin | None = None,
 ) -> None:
     """Attach the L2 measurements to one answer-tier row and fail closed on
     anything that would make a rate silently wrong. Pure function (no stack
@@ -429,6 +438,13 @@ def apply_l2_measurements(
         on real drift);
       - a missing request_id on an LLM-path row — truncation would read
         false by construction instead of being measured.
+
+    `expansion` (#1377) is the row's `ResponseJoin` when its streamed final
+    showed neighbour expansion ran. A citation the pool does not hold is
+    then grounded only by `expansion_citation_excerpts` (a recorded
+    neighbour of a retrieved hit of the same document, under a cite line
+    no retrieved hit outside the pool shares) and listed in
+    `expansion_citations`; every other citation keeps the rule above.
     """
     rid = row.get("request_id")
     if row.get("path") == "llm":
@@ -440,6 +456,20 @@ def apply_l2_measurements(
             row["truncated"] = str(rid) in alerts
 
     cited, unmatched = cited_doc_ids(row.get("citations") or [], hits)
+    if (
+        unmatched and expansion is not None
+        and expansion.hits is not None and expansion.supplied is not None
+    ):
+        added: list[str] = []
+        for citation in unmatched:
+            excerpts = expansion_citation_excerpts(
+                citation, expansion.hits, expansion.supplied, hits)
+            if excerpts:
+                added.append(citation)
+                cited.update(str(item["doc_id"]) for item in excerpts)
+        if added:
+            unmatched = [c for c in unmatched if c not in added]
+            row["expansion_citations"] = added
     row["cited_doc_ids"] = sorted(cited)
     row["unmatched_citations"] = unmatched
     gold = set(entry.get("expected_doc_ids") or [])
@@ -507,6 +537,10 @@ def run_l2(
     from mainframe_rag.config import load_settings
 
     settings = load_settings()
+    # Neighbour expansion on (the default since #1368): read the streamed
+    # final, the only answer response that records which hits expansion added
+    # (#1377). Off, the buffered request and row are what they always were.
+    stream = getattr(settings, "answer_expand_enabled", False) is True
     sample = entries if max_queries is None else select_sample(entries, max_queries)
     print(f"[*] harness L2: {len(sample)} of {len(entries)} entries", file=sys.stderr)
 
@@ -542,8 +576,14 @@ def run_l2(
                 # Sampling temperature (issue #596): L2/L4 stay on the server
                 # default (None) — their thresholds were recorded under it,
                 # so moving them to 0 needs its own threshold re-record PR.
-                row = run_query(client, entry, answers.signals, hits, temperature=None)
-                apply_l2_measurements(row, entry, hits, capture.alerts)
+                join = ResponseJoin() if stream else None
+                row = run_query(client, entry, answers.signals, hits, temperature=None,
+                                stream=stream, response_join=join)
+                if stream and "client_first_token_ms" in row:
+                    # The in-process client buffers the stream: its first-token
+                    # time is the total time, so neither field is a measurement.
+                    row["client_first_token_ms"] = row["decode_tps"] = None
+                apply_l2_measurements(row, entry, hits, capture.alerts, join)
 
                 # Faithfulness judge: grounded, non-refused model text.
                 if (
@@ -553,7 +593,11 @@ def run_l2(
                     and row.get("citations")
                     and not row.get("failures")
                 ):
-                    evidence, _unmapped = evidence_for_citations(row["citations"], hits)
+                    if join is not None and join.hits is not None and join.supplied is not None:
+                        evidence, _unmapped = evidence_for_expanded_citations(
+                            row["citations"], hits, join.hits, join.supplied)
+                    else:
+                        evidence, _unmapped = evidence_for_citations(row["citations"], hits)
                     try:
                         chat = judge_chat(judge_client, judge_messages(row["answer"], evidence))
                         row["judge_label"] = parse_judge_label(chat.content)

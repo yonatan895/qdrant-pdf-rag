@@ -175,7 +175,10 @@ checks above. The seal alone is not a rollback or disposal operation, an access
 grant, or proof of backup/recovery obligations.
 
 No automatic GC is introduced. Retain current, previous and any generation
-needed by an admitted reader or explicit evidence obligation. Capacity preflight
+needed by an admitted reader or explicit evidence obligation. Deleting a
+retained generation's snapshots ([retained generations](ingest.md#retained-generations))
+is not retirement: its data, control collection and build aliases stay, so it
+remains `retained`. Capacity preflight
 must refuse a new build before destructive work when retention cannot be met.
 A retention duration, tombstone horizon, recovery objective or physical-worker
 claim requires its platform/domain owner; there is no invented default here.
