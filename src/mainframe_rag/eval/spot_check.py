@@ -15,8 +15,9 @@ privacy and baseline boundaries:
   private review sheet.
 - ``report``: verify candidate/review binding, compute the accept rate
   overall, per class and per overlap band, and deliver a text-free verdict
-  (``passed`` / ``incomplete`` / ``failed``) against the minimum sample size
-  (default 20, capped at the batch size) and minimum accept rate (default 0.85).
+  (``passed`` / ``incomplete`` / ``failed`` / ``too_small``) against the minimum
+  sample size (default 20) and minimum accept rate (default 0.85). A batch with
+  fewer rows than the minimum sample is ``too_small`` and can never pass.
 - ``promote``: write a private eval JSONL + manifest (mode 0600, outside git)
   ONLY when the spot-check report passes. Default ``--mode adjudicated``
   (#806) emits only individually reviewed-and-accepted rows
@@ -114,6 +115,10 @@ REFUSALS: dict[str, str] = {
     ),
     "venue": gc.REFUSALS["venue"],
     "no_accepted": "refused: no accepted rows to emit",
+    "too_small": (
+        "refused: the candidate batch has fewer rows than --min-sample; "
+        "a batch that small is never promoted (generate a larger batch)"
+    ),
 }
 
 
@@ -591,9 +596,13 @@ def evaluate_spot_check(
     accepted = len(accepted_ids)
     rejected = len(rejected_ids)
     accept_rate = round(accepted / reviewed_n, 4) if reviewed_n else None
-    required_sample = min(min_sample, len(candidates))
+    # The floor is not capped at the batch size: a batch smaller than it can
+    # never rest on enough reviewed rows, however it is reviewed.
+    required_sample = min_sample
 
-    if unreviewed_n > 0 or reviewed_n < required_sample or reviewed_n == 0:
+    if len(candidates) < min_sample:
+        verdict = "too_small"
+    elif unreviewed_n > 0 or reviewed_n < required_sample or reviewed_n == 0:
         verdict = "incomplete"
     elif accept_rate is not None and accept_rate >= min_accept_rate:
         verdict = "passed"
@@ -886,6 +895,8 @@ def main(
                 min_sample=args.min_sample,
             )
             if promoted is None:
+                if report["verdict"] == "too_small":
+                    raise Refused("too_small")
                 print(json.dumps(report, sort_keys=True))
                 return 1
             data = "".join(

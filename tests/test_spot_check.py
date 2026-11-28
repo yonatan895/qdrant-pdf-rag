@@ -270,10 +270,14 @@ def test_too_small_sample_is_incomplete_even_at_100_percent_accept(tmp_path, cap
     assert sc.main(["export", "--candidates", str(candidates), "--out", str(review), "--sample", "2", "--seed", "3"]) == 0
     _review_all(review, {})
     capsys.readouterr()
-    # Default min_sample is 20 -> required_sample = min(20, 8) = 8; 2 reviewed is incomplete!
-    assert sc.main(["report", "--candidates", str(candidates), "--review", str(review)]) == 1
+    # With the floor stated as 8 (the batch size), 2 reviewed rows are incomplete.
+    assert sc.main(["report", "--candidates", str(candidates), "--review", str(review),
+                    "--min-sample", "8"]) == 1
     rep = json.loads(capsys.readouterr().out)
     assert rep["verdict"] == "incomplete" and rep["required_sample"] == 8 and rep["reviewed_n"] == 2
+    # At the default floor of 20 the same 8-row batch is too small, whatever was reviewed.
+    assert sc.main(["report", "--candidates", str(candidates), "--review", str(review)]) == 1
+    assert json.loads(capsys.readouterr().out)["verdict"] == "too_small"
 
 
 # ----------------------------------- integrity, privacy & refusal edge cases
@@ -483,7 +487,8 @@ def test_export_and_report_show_the_band_of_each_row_and_of_the_whole_batch(tmp_
                        for line in lines[1:])]
     legacy = tmp_path / "legacy.jsonl"
     legacy.write_text("\n".join(old) + "\n", encoding="utf-8")
-    assert sc.main(["report", "--candidates", str(cands), "--review", str(legacy)]) == 1
+    assert sc.main(["report", "--candidates", str(cands), "--review", str(legacy),
+                    "--min-sample", "8"]) == 1
     assert json.loads(capsys.readouterr().out)["verdict"] == "incomplete"
 
 
@@ -494,3 +499,56 @@ def test_export_samples_across_overlap_bands_inside_a_class():
     ]
     picked = sc.stratified_spot_sample(rows, sample=3, seed=5)
     assert sorted(ret.overlap_band(r["lexical_overlap"]) for r in picked) == ["high", "low", "medium"]
+
+
+def _batch(tmp_path: Path, rows: int) -> Path:
+    points = [_point(f"DOC-{i:02d}", 0, "narrative", heading=f"Part {i} > Valves") for i in range(rows)]
+    out = tmp_path / f"batch-{rows}.jsonl"
+    assert gc.main(["--out", str(out), "--collection", "synthetic", "--count", str(rows), "--seed", "4",
+                    "--classes", "diagnostic", "--model-label", "fake-model"],
+                   client=ReaderDouble(points), model=ModelDouble()) == 0
+    assert len(out.read_text(encoding="utf-8").splitlines()) == rows
+    return out
+
+
+@pytest.mark.parametrize(("rows", "verdict", "report_rc", "promote_rc"),
+                         [(1, "too_small", 1, 2), (19, "too_small", 1, 2), (20, "passed", 0, 0)])
+def test_a_batch_smaller_than_the_minimum_sample_never_passes_however_it_is_reviewed(
+        tmp_path, capsys, rows, verdict, report_rc, promote_rc):
+    """The overlap cap makes small batches normal: a set must not be trusted
+    on fewer reviewed rows than --min-sample, so a smaller batch is too_small
+    even with every row accepted, and promote refuses it."""
+    cands = _batch(tmp_path, rows)
+    review = tmp_path / "review.jsonl"
+    assert sc.main(["export", "--candidates", str(cands), "--out", str(review),
+                    "--sample", "20", "--seed", "2"]) == 0
+    _review_all(review, {})
+    capsys.readouterr()
+    assert sc.main(["report", "--candidates", str(cands), "--review", str(review)]) == report_rc
+    report = json.loads(capsys.readouterr().out)
+    assert (report["verdict"], report["reviewed_n"], report["unreviewed_n"], report["accept_rate"]) == (
+        verdict, rows, 0, 1.0)
+    assert report["required_sample"] == 20 and report["min_sample"] == 20
+    out = tmp_path / "eval.jsonl"
+    assert sc.main(["promote", "--candidates", str(cands), "--review", str(review), "--out", str(out),
+                    "--mode", "spot-checked"]) == promote_rc
+    captured = capsys.readouterr()
+    assert out.exists() is (promote_rc == 0) and gc.manifest_path(out).exists() is (promote_rc == 0)
+    if promote_rc:
+        assert captured.err.strip() == sc.REFUSALS["too_small"] and captured.out == ""
+        assert PASSAGE_MARK not in captured.err and QUESTION_MARK not in captured.err
+
+
+def test_a_smaller_batch_needs_the_reviewer_to_lower_the_minimum_on_the_record(tmp_path, capsys):
+    """--min-sample is the stated floor: a 19-row batch reviewed whole passes
+    only when the command says 19, and the report records that number."""
+    cands = _batch(tmp_path, 19)
+    review = tmp_path / "review.jsonl"
+    assert sc.main(["export", "--candidates", str(cands), "--out", str(review),
+                    "--sample", "19", "--seed", "2"]) == 0
+    _review_all(review, {})
+    capsys.readouterr()
+    assert sc.main(["report", "--candidates", str(cands), "--review", str(review),
+                    "--min-sample", "19"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert (report["verdict"], report["min_sample"], report["required_sample"]) == ("passed", 19, 19)

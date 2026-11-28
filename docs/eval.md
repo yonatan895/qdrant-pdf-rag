@@ -1876,11 +1876,17 @@ release set and writes no baseline.
      verifies exact `candidates_sha256`, row count, row ids, `query_class` and
      `text_sha256` binding, and outputs a text-free JSON report (overall,
      `by_class`, `by_overlap_band`, and sorted id lists). Default pass policy:
-     zero unreviewed rows, `reviewed_n >= min(min_sample, total_candidates)`
-     (default `min_sample = 20`), and `accept_rate >= 0.85`. Verdict is
-     `passed` (exit 0), `incomplete` or `failed` (exit 1); refusal exits 2.
+     zero unreviewed rows, `reviewed_n >= min_sample` (default 20), and
+     `accept_rate >= 0.85`. A batch with fewer rows than `min_sample` is
+     `too_small` whatever its reviews say and never passes: the floor is not
+     capped at the batch size (it was before; the overlap cap makes small
+     batches normal, and a 1-row batch passed at 1 of 1). Generate a larger
+     batch; a lower `--min-sample` is the only way to accept a smaller one,
+     and the report records it. Verdict is `passed` (exit 0), `incomplete`,
+     `failed` or `too_small` (exit 1); refusal exits 2.
   4. `promote --candidates PATH --review REVIEW --out EVAL [--mode adjudicated|spot-checked] [--min-accept-rate 0.85] [--min-sample 20]`:
-     writes nothing and exits 1 unless the spot-check verdict is `passed`.
+     writes nothing and exits 1 unless the spot-check verdict is `passed`
+     (a `too_small` batch is refused with a fixed message, exit 2).
      Default `--mode adjudicated` (#806 strict per-row review) emits only
      individually accepted rows with `status: "adjudicated"`, `reviewed_by`,
      `reviewed_at` and `reviewers`. Explicit `--mode spot-checked` emits
