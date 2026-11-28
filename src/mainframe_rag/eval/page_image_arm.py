@@ -40,11 +40,12 @@ ids, outcome codes, counts, parameters and the verdict only: never a
 question, answer, heading, chunk text, doc id, sha256, page number, evidence
 reference or image. Exception text is never printed.
 
-Exit codes: 0 run completed (see the verdict); 1 completed with no scored
-row; 5 completed without a verdict (fewer than 6 gradeable rows, or rows
-missing an arm's answer that could change the verdict: see `stop_rule`); 2 refused before any call (dataset, row ids or
-gold fields, output path, corpus directory, arguments, model not configured,
-PyMuPDF not importable); 3 the image probe did not pass; 4 the image probe
+Exit codes: 0 a verdict was printed; 5 completed without a verdict (fewer
+than 6 gradeable rows, no row scored in both arms, or rows missing an arm's
+answer that could change the verdict: see `stop_rule`); 2 refused before
+any model call (dataset, row ids or gold fields, output path, corpus
+directory, arguments, model not configured, PyMuPDF not importable, search
+returned no hits for any row); 3 the image probe did not pass; 4 the image probe
 could not run.
 """
 
@@ -114,11 +115,12 @@ def packing_settings(settings: Any) -> dict[str, Any]:
 
 # The closed set of per-row outcome codes (export vocabulary).
 SCORED = ("both_pass", "fixed", "broken", "broken_must_not", "both_fail")
-NOT_PACKED = ("gold_not_packed_text_pass", "gold_not_packed_text_fail")
+# `no_hits`: search returned nothing, so nothing was packed.
+NOT_PACKED = ("gold_not_packed_text_pass", "gold_not_packed_text_fail", "no_hits")
 UNRESOLVED = ("unresolved_reference", "unresolved_sha_missing", "unresolved_sha_ambiguous",
               "unresolved_page")
 EXCLUDED = ("abstain_row", "no_gold_strings")
-ERRORS = ("search_failed", "no_hits", "text_error", "image_error", "prompt_mismatch")
+ERRORS = ("search_failed", "text_error", "image_error", "prompt_mismatch")
 OUTCOMES = (*SCORED, *NOT_PACKED, *UNRESOLVED, *EXCLUDED, *ERRORS)
 # Gold-packed rows with a text-arm answer and no image-arm answer.
 INCOMPLETE = (*UNRESOLVED, "image_error", "prompt_mismatch")
@@ -126,11 +128,12 @@ INCOMPLETE = (*UNRESOLVED, "image_error", "prompt_mismatch")
 UNANSWERED = ("search_failed", "text_error")
 
 STOP_REASONS = ("few_text_failures", "few_fixed", "breaks", "mostly_not_packed")
-NO_VERDICT_REASONS = ("too_few_gradeable_rows", "incomplete_rows")
+NO_VERDICT_REASONS = ("too_few_gradeable_rows", "nothing_scored", "incomplete_rows")
 VERDICTS = ("stop", "continue", "no_verdict")
 MIN_TEXT_FAILURES = 6
 # Row ids reach stderr and the export: a closed alphabet, so an id cannot
-# carry a line break (a forged VERDICT line) or text.
+# carry a line break (a forged VERDICT line) or text, and never the word
+# VERDICT (a grep for the verdict line must not match a row line).
 ROW_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
 
 REFUSALS = {
@@ -138,11 +141,13 @@ REFUSALS = {
                "outside any git work tree, not named like the holdout or the release set"),
     "dataset": "refused: the golden file is not a readable dev dataset",
     "rows": ("refused: golden rows need unique ids of 1-64 characters from letters, digits "
-             "and . _ : - (starting with a letter or digit)"),
+             "and . _ : - (starting with a letter or digit, never containing the word "
+             "'verdict' in any case)"),
     "gold": ("refused: gold_must_contain and gold_must_not_contain must be lists of "
              "non-empty strings"),
     "renderer": ("refused: PyMuPDF (pymupdf) cannot be imported here, so no page can be "
                  "rendered; the image arm was not run"),
+    "no_hits": "refused: search returned no hits for any row: check the collection and alias",
     "classes": "refused: --classes takes a comma-separated list of query classes",
     "corpus": "refused: --corpus-dir is not a readable directory holding PDF files",
     "agent": "refused: --agent-url is required (the running agent's base URL)",
@@ -153,7 +158,7 @@ REFUSALS = {
                           "(scripts/probe_gateway.py; see --probe-script)"),
 }
 EXIT = {"output": 2, "dataset": 2, "rows": 2, "gold": 2, "classes": 2, "corpus": 2, "agent": 2,
-        "model": 2, "renderer": 2, "probe_failed": 3, "probe_unavailable": 4}
+        "model": 2, "renderer": 2, "no_hits": 2, "probe_failed": 3, "probe_unavailable": 4}
 
 
 class Refused(Exception):
@@ -468,7 +473,11 @@ class Tool:
         except Exception:  # noqa: BLE001 - any other failure of the arm; never its text
             return {**row, "outcome": "text_error"}
         if not text.hits or text_model.sent is None:
-            return {**row, "outcome": "no_hits"}
+            # Nothing was packed: a real "gold not packed" row. The core's
+            # no-evidence answer is graded like any text-arm answer.
+            miss, forbidden = arm_failures(entry, text.answer, text.script)
+            return {**row, "outcome": "no_hits", "text_missing_gold": miss,
+                    "text_forbidden": forbidden}
         text_fail = arm_failures(entry, text.answer, text.script)
         row.update(text_answer=text.answer, text_missing_gold=text_fail[0],
                    text_forbidden=text_fail[1], text_prompt_tokens=text.usage.prompt_tokens,
@@ -522,13 +531,15 @@ class Incomplete:
     arm's result: failures, and passes on rows without and with
     `gold_must_not_contain`. UNANSWERED rows (`search_failed`,
     `text_error`: no text answer, packing unknown) on rows without and with
-    `gold_must_not_contain`. `no_hits` rows are read from the counts."""
+    `gold_must_not_contain`. `no_hits` rows (nothing packed) whose
+    no-evidence answer failed the text arm; the rest passed it."""
 
     text_fail: int = 0
     text_pass: int = 0
     text_pass_must_not: int = 0
     unanswered: int = 0
     unanswered_must_not: int = 0
+    no_hits_text_fail: int = 0
 
     @property
     def rows(self) -> int:
@@ -544,7 +555,10 @@ class Incomplete:
         before any image-arm outcome, and every row's must-not flag)."""
         split: Counter[str] = Counter()
         for row in rows:
-            if row["outcome"] in UNANSWERED:
+            if row["outcome"] == "no_hits":
+                if row["text_missing_gold"] or row["text_forbidden"]:
+                    split["no_hits_text_fail"] += 1
+            elif row["outcome"] in UNANSWERED:
                 split["unanswered_must_not" if row["must_not_row"] else "unanswered"] += 1
             elif row["outcome"] in INCOMPLETE:
                 if row["text_missing_gold"] or row["text_forbidden"]:
@@ -581,41 +595,49 @@ def stop_rule(counts: dict[str, int], incomplete: Incomplete) -> dict[str, Any]:
     whatever the image arm did); the image arm fixes fewer than one third of
     them; it breaks more than one text-arm pass, or any on a row that carries
     must-not strings; or more text-arm failures are "gold not packed" than
-    gold-packed.
+    gold-packed. A `no_hits` row is a gold-not-packed row (text pass or
+    fail by its graded no-evidence answer).
 
-    Rows the codes cannot place (`incomplete`; `no_hits`) are completed
-    every way they could have ended: an INCOMPLETE row as either image-arm
-    result for its known text result; an UNANSWERED row as any outcome a
-    row can have (scored, or gold not packed, text pass or fail); a
-    `no_hits` row as gold not packed, text pass or fail. "fixed" (no_hits:
-    not packed, text pass) makes each condition least likely at once, so the
-    reasons holding there hold in every completion. Each condition is most
-    likely at its own extreme: `few_text_failures` with no unknown row a
-    packed failure; `few_fixed` with every unknown row a packed failure the
-    image arm did not fix; `breaks` with every unknown pass broken (on a
+    No verdict (`nothing_scored`) when no gold-packed row was answered by
+    both arms: the run compared nothing. Otherwise rows the codes cannot
+    place (`incomplete`) are completed every way they could have ended: an
+    INCOMPLETE row as either image-arm result for its known text result; an
+    UNANSWERED row as any outcome a row can have (scored, or gold not packed,
+    text pass or fail). "fixed" makes each condition least likely at once,
+    so the reasons holding there hold in every completion. Each condition is
+    most likely at its own extreme: `few_text_failures` with no unknown row
+    a packed failure; `few_fixed` with every unknown row a packed failure
+    the image arm did not fix; `breaks` with every unknown pass broken (on a
     must-not row, a must-not break); `mostly_not_packed` with every unknown
     row a not-packed failure. Verdict: `stop` with the reasons that hold in
     every completion; `continue` when no condition holds in any; else
     `no_verdict` (`incomplete_rows`)."""
     n = {code: int(counts.get(code, 0)) for code in OUTCOMES}
     parts = (incomplete.text_fail, incomplete.text_pass, incomplete.text_pass_must_not,
-             incomplete.unanswered, incomplete.unanswered_must_not)
+             incomplete.unanswered, incomplete.unanswered_must_not, incomplete.no_hits_text_fail)
     if (incomplete.rows != sum(n[c] for c in INCOMPLETE)
-            or incomplete.unanswered_rows != sum(n[c] for c in UNANSWERED) or min(parts) < 0):
+            or incomplete.unanswered_rows != sum(n[c] for c in UNANSWERED)
+            or incomplete.no_hits_text_fail > n["no_hits"] or min(parts) < 0):
         raise ValueError("incomplete rows do not match the counts")
+    observed = n
+    # Zero-hit rows are observed not-packed rows.
+    n = _add(n, gold_not_packed_text_fail=incomplete.no_hits_text_fail,
+             gold_not_packed_text_pass=n["no_hits"] - incomplete.no_hits_text_fail)
     fail, unknown = incomplete.text_fail, incomplete.unanswered_rows
     every = _reasons(_add(n, fixed=fail + unknown,
-                          both_pass=incomplete.text_pass + incomplete.text_pass_must_not,
-                          gold_not_packed_text_pass=n["no_hits"]))
+                          both_pass=incomplete.text_pass + incomplete.text_pass_must_not))
     # Each condition at the completion that makes it most likely.
     few = _add(n, both_fail=fail, both_pass=unknown)
     unfixed = _add(n, both_fail=fail + unknown)
     broken = _add(n, both_fail=fail, broken=incomplete.text_pass + incomplete.unanswered,
                   broken_must_not=incomplete.text_pass_must_not + incomplete.unanswered_must_not)
-    not_packed = _add(n, both_fail=fail, gold_not_packed_text_fail=unknown + n["no_hits"])
+    not_packed = _add(n, both_fail=fail, gold_not_packed_text_fail=unknown)
     some = [reason for reason, worst in zip(
         STOP_REASONS, (few, unfixed, broken, not_packed), strict=True) if reason in _reasons(worst)]
-    if every:
+    scored = sum(n[c] for c in SCORED)
+    if not scored:
+        verdict, reasons = "no_verdict", ["nothing_scored"]
+    elif every:
         verdict, reasons = "stop", every
     elif not some:
         verdict, reasons = "continue", []
@@ -625,20 +647,41 @@ def stop_rule(counts: dict[str, int], incomplete: Incomplete) -> dict[str, Any]:
         "verdict": verdict,
         "reasons": reasons,
         "bounds": {"in_every_completion": every, "in_some_completion": some},
-        "scored": sum(n[c] for c in SCORED),
+        "scored": scored,
         "packed_text_failures": n["fixed"] + n["both_fail"] + fail,
         "incomplete_rows": incomplete.rows,
         "incomplete_text_failures": fail,
-        "unanswered_rows": unknown + n["no_hits"],
+        "unanswered_rows": unknown,
         "fixed": n["fixed"],
         "breaks": n["broken"] + n["broken_must_not"],
         "breaks_must_not": n["broken_must_not"],
-        "not_packed": sum(n[c] for c in NOT_PACKED),
+        "not_packed": sum(observed[c] for c in NOT_PACKED),
         "not_packed_text_failures": n["gold_not_packed_text_fail"],
-        "unresolved": sum(n[c] for c in UNRESOLVED),
-        "errors": sum(n[c] for c in ERRORS),
-        "excluded": sum(n[c] for c in EXCLUDED),
+        "no_hits": observed["no_hits"],
+        "unresolved": sum(observed[c] for c in UNRESOLVED),
+        "errors": sum(observed[c] for c in ERRORS),
+        "excluded": sum(observed[c] for c in EXCLUDED),
     }
+
+
+def any_row_has_hits(agent: Any, rows: Sequence[dict[str, Any]]) -> bool:
+    """False only when `/v1/search` answered every gradeable row with zero
+    hits: a wrong collection or alias, refused before any model call. One
+    unfiltered search a row (limit 1); stops at the first hit. A failed
+    search is not evidence of an empty collection (the run counts it as
+    `search_failed`)."""
+    searched = False
+    for entry in rows:
+        if not gradeable(entry):
+            continue
+        try:
+            resp = agent.post("/v1/search", json={"query": entry["query"], "limit": 1})
+            if resp.status_code != 200 or resp.json()["hits"]:
+                return True
+        except Exception:  # noqa: BLE001 - not an observation of zero hits
+            return True
+        searched = True
+    return not searched
 
 
 def gradeable(entry: dict[str, Any]) -> bool:
@@ -671,7 +714,7 @@ def build_export(rows: list[dict[str, Any]], params: dict[str, Any],
     rule = stop_rule(counts, Incomplete.of(rows))
     if not validity["verdict_possible"]:
         reasons = ["too_few_gradeable_rows"] + (
-            ["incomplete_rows"] if rule["verdict"] == "no_verdict" else [])
+            rule["reasons"] if rule["verdict"] == "no_verdict" else [])
         rule = {**rule, "verdict": "no_verdict", "reasons": reasons}
     token_deltas = [row["image_prompt_tokens"] - row["text_prompt_tokens"] for row in rows
                     if row["outcome"] in SCORED and row.get("image_prompt_tokens")
@@ -741,7 +784,8 @@ def select_rows(raw: bytes, classes: Sequence[str]) -> list[dict[str, Any]]:
         raise Refused("dataset")
     rows = [r for r in records if r.get("query_class") in classes]
     ids = [r.get("id") for r in rows]
-    if (any(not isinstance(i, str) or not ROW_ID.fullmatch(i) for i in ids)
+    if (any(not isinstance(i, str) or not ROW_ID.fullmatch(i) or "verdict" in i.lower()
+            for i in ids)
             or len(set(ids)) != len(ids)):
         raise Refused("rows")
     for row in rows:
@@ -751,6 +795,13 @@ def select_rows(raw: bytes, classes: Sequence[str]) -> list[dict[str, Any]]:
                     isinstance(value, list) and all(isinstance(s, str) and s for s in value)):
                 raise Refused("gold")
     return rows
+
+
+def _agent_client(args: argparse.Namespace) -> Any:
+    import httpx2
+
+    return httpx2.Client(base_url=args.agent_url.rstrip("/"), follow_redirects=False,
+                         timeout=args.request_timeout, trust_env=False)
 
 
 def _write(path: Path, data: bytes) -> None:
@@ -815,6 +866,13 @@ def main(
             raise Refused("model")
         if not renderer_available():
             raise Refused("renderer")
+        searcher = agent if agent is not None else _agent_client(args)
+        try:
+            if not any_row_has_hits(searcher, rows):
+                raise Refused("no_hits")
+        finally:
+            if searcher is not agent:
+                searcher.close()
         script = args.probe_script or default_probe_script()
         if not (probe() if probe is not None else run_image_probe(script)):
             raise Refused("probe_failed")
@@ -833,10 +891,7 @@ def main(
     close: list[Any] = []
     try:
         if agent is None:
-            import httpx2
-
-            agent = httpx2.Client(base_url=args.agent_url.rstrip("/"), follow_redirects=False,
-                                  timeout=args.request_timeout, trust_env=False)
+            agent = _agent_client(args)
             close.append(agent)
         if model is None:
             from mainframe_rag.agent.answer import HttpxLLMClient
@@ -892,6 +947,9 @@ def main(
         if not validity["verdict_possible"]:
             print(f"NO VERDICT: {validity['gradeable']} gradeable row(s), "
                   f"{MIN_GRADEABLE_ROWS} needed", file=sys.stderr)
+        if "nothing_scored" in rule["reasons"]:
+            print("NO VERDICT: no gold-packed row was answered by both arms, so the run "
+                  "compared nothing; fix the cause (see the counts) and rerun", file=sys.stderr)
         if "incomplete_rows" in rule["reasons"]:
             print(f"NO VERDICT: {rule['incomplete_rows']} gold-packed row(s) have no image-arm "
                   f"answer and {rule['unanswered_rows']} row(s) no text-arm answer, and the "
@@ -901,7 +959,7 @@ def main(
     print(f"VERDICT {rule['verdict']}"
           + (f" ({', '.join(rule['reasons'])})" if rule["reasons"] else "")
           + ": a decision aid over a small sample, not a statistic", file=sys.stderr)
-    return 0 if rule["scored"] else 1
+    return 0
 
 
 if __name__ == "__main__":

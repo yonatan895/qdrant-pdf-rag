@@ -1584,18 +1584,23 @@ than 6 gradeable rows the rule's 6 text failures can never occur, so it prints
 `gold_must_not_contain`. Outcome codes are a closed set:
 scored (`both_pass`, `fixed`, `broken`, `broken_must_not`, `both_fail`),
 retrieval and not addressable here (`gold_not_packed_text_pass`,
-`gold_not_packed_text_fail`; #1300 owns them), `unresolved_reference`,
+`gold_not_packed_text_fail`, and `no_hits`: search returned nothing, graded
+by the library's no-evidence answer; #1300 owns them), `unresolved_reference`,
 `unresolved_sha_missing`, `unresolved_sha_ambiguous`, `unresolved_page`,
 excluded without a call (`abstain_row`, `no_gold_strings`) and errors
-(`search_failed`, `no_hits`, `text_error`, `image_error`,
-`prompt_mismatch`). An error is never a text failure or a break by itself; the
+(`search_failed`, `text_error`, `image_error`, `prompt_mismatch`). An error is never a text failure or a break by itself; the
 text arm's result on an image-arm error still counts, and rows without an
 arm's answer can withhold the verdict (stop rule below).
 Row ids must be 1-64 characters from letters, digits and `. _ : -`, starting
-with a letter or digit, and `gold_must_contain`/`gold_must_not_contain`
+with a letter or digit and never containing the word `verdict` in any case
+(a grep for the verdict line must not match a row line), and `gold_must_contain`/`gold_must_not_contain`
 must be absent, null or lists of non-empty strings; otherwise the rows file is
 refused (exit 2) before any call. The run is also refused (exit 2) before the
-probe when PyMuPDF cannot be imported.
+probe when PyMuPDF cannot be imported, and when `/v1/search` answers every
+gradeable row with zero hits (one unfiltered search a row, limit 1, before the
+probe and any model call): that is a wrong collection or alias, not a result
+("search returned no hits for any row: check the collection and alias"). A
+failed search does not count as zero hits.
 
 **Stop rule** (design section 6; printed as `VERDICT stop` with reasons, or
 `VERDICT continue`). Stop when any holds: fewer than 6 text-arm failures among
@@ -1605,20 +1610,26 @@ image arm fixes fewer than one third of them (`few_fixed`); it breaks more
 than one text-arm pass, or any on a row that carries must-not strings
 (`breaks`; abstain rows have no gold document, get no image and are
 excluded); or more text-arm failures are gold-not-packed than gold-packed
-(`mostly_not_packed`). Rows an arm did not answer are completed every way
-they could have ended: a gold-packed row with a text-arm answer and no
-image-arm answer (`unresolved_*`, `image_error`, `prompt_mismatch`;
+(`mostly_not_packed`). A `no_hits` row in a run where other rows have hits
+is an observed gold-not-packed row: it keeps the verdict of the rule as
+written and shows in `stop_rule.not_packed`, `not_packed_text_failures` and
+`no_hits` (for example 2 fixed, 3 `both_fail` and 1 `no_hits` is
+`stop (few_text_failures)`). When no gold-packed row was scored in both arms
+(`stop_rule.scored` 0) the tool prints `NO VERDICT` (reason
+`nothing_scored`, exit 5) whatever the other counts are: the run compared
+nothing. Otherwise rows an arm did not answer are completed every way they
+could have ended: a gold-packed row with a text-arm answer and no image-arm
+answer (`unresolved_*`, `image_error`, `prompt_mismatch`;
 `stop_rule.incomplete_rows`, of which `incomplete_text_failures` failed the
 text arm) as either image-arm result; a row with no text-arm answer
-(`search_failed`, `text_error`; packing unknown) as any outcome; a `no_hits`
-row as gold not packed, text pass or fail (these two together:
-`stop_rule.unanswered_rows`). The tool prints `VERDICT stop` only with the
-reasons that hold in every completion (`stop_rule.bounds.in_every_completion`,
-reached with each such row fixed, `no_hits` as a text pass) and
-`VERDICT continue` only when no reason holds in any
+(`search_failed`, `text_error`; packing unknown;
+`stop_rule.unanswered_rows`) as any outcome. The tool prints `VERDICT stop`
+only with the reasons that hold in every completion
+(`stop_rule.bounds.in_every_completion`, reached with each such row fixed)
+and `VERDICT continue` only when no reason holds in any
 (`stop_rule.bounds.in_some_completion`, each condition checked at its own
-extreme); otherwise `NO VERDICT` (`no_verdict`, reason `incomplete_rows`,
-exit 5): fix the cause the counts name and rerun. With n this small the
+extreme); otherwise `NO VERDICT` (reason `incomplete_rows`, exit 5): fix the
+cause the counts name and rerun. With n this small the
 verdict is a decision aid, not a statistic. If it does not stop, rerun at
 `--dpi 100`: equal results halve a later store.
 
@@ -1642,9 +1653,10 @@ holds parameters, counts, row ids with outcome codes and the verdict, and
 nothing else; stdout, stderr and logs carry the same. Images and page text
 are held in memory only. A site run's export still names site-authored row
 ids: record its counts and verdict on the issue, keep the files at the site.
-Exit 0 means the run completed with at least one scored row, 1 none scored,
-5 completed without a verdict (too few gradeable rows, or rows without an
-arm's answer that could change it), 2 a refusal before any call. The export schema is
+Exit 0 means a verdict was printed; 5 completed without a verdict (too few
+gradeable rows, nothing scored in both arms, or rows without an arm's answer
+that could change it); 2 a refusal before any model call; 3 and 4 the image
+probe. Exit 1 is no longer returned. The export schema is
 `page-image-ab/2`.
 
 ### Claim-level support (#365)
